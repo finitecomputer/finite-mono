@@ -35,7 +35,7 @@ use crate::{
     RequestRuntimeRecoverKnownGoodChatInput, RequestRuntimeRestartInput, RequestRuntimeStopInput,
     ReserveFinitePrivateUsageInput, ResetFinitePrivateUsageWindowInput,
     RetiredRuntimeOffboardReceipt, RetryRuntimeControlRequestInput, RevokeFinitePrivateApiKeyInput,
-    RevokeFinitePrivateGrantInput, RotateFinitePrivateApiKeyInput, RuntimeArtifact,
+    RevokeFinitePrivateGrantInput, RotateFinitePrivateApiKeyInput, RunnerClass, RuntimeArtifact,
     RuntimeBootIntent, RuntimeCapabilitiesEnvelope, RuntimeControlCompletion,
     RuntimeControlExpectedBinding, RuntimeControlKind, RuntimeControlLease, RuntimeControlRequest,
     RuntimeControlRequestStatus, RuntimeHealthReportAck, RuntimeLifecycleStage, RuntimePlacement,
@@ -1092,9 +1092,18 @@ where
     {
         return Err(CoreError::HostingTierNotAuthorized);
     }
+    // Fail-closed placement for the confidential lane: no deployed runner can
+    // advertise `phala`, so no new AgentCreationRequest may carry a Phala
+    // placement — not from the tier on the Launch Code/billing account, and
+    // not from an operator-configured `FC_CORE_AGENT_CREATION_PLACEMENT_JSON`.
+    // This rejects before any row is written, so a pre-existing unredeemed
+    // confidential code is left untouched for the lane's eventual return.
+    // Legacy confidential rows keep parsing; they just cannot mint new work.
     let placement = configuration
         .placement
-        .unwrap_or_else(|| RuntimePlacement::for_hosting_tier(hosting_tier));
+        .or_else(|| RuntimePlacement::for_hosting_tier(hosting_tier))
+        .filter(|placement| placement.runner_class != RunnerClass::Phala)
+        .ok_or(CoreError::HostingTierUnavailable)?;
     if client
         .query_opt(
             "SELECT id FROM users WHERE workos_user_id = $1 AND normalized_email <> $2",
@@ -1377,46 +1386,6 @@ where
     {
         return Ok(None);
     }
-    let in_flight_capacity = input
-        .runner_capacity
-        .as_ref()
-        .map(crate::in_flight_capacity_bounds)
-        .transpose()?
-        .flatten();
-    let core_in_flight_before = if let Some(capacity) = in_flight_capacity {
-        // Serialize the provider-capacity count and the request lease across
-        // Core replicas. Row-level SKIP LOCKED alone can admit two different
-        // requests after they both observe the same pre-provider count.
-        client
-            .query_one(
-                "SELECT runner_class
-                 FROM runner_capacity_fences
-                 WHERE runner_class = $1
-                 FOR UPDATE",
-                &[&capacity.runner_class.as_str()],
-            )
-            .await
-            .map_err(store_error)?;
-        let row = client
-            .query_one(
-                "SELECT COUNT(*)::bigint AS count
-                 FROM agent_creation_requests
-                 WHERE status = 'launching' AND runner_class = $1",
-                &[&capacity.runner_class.as_str()],
-            )
-            .await
-            .map_err(store_error)?;
-        u32::try_from(row.get::<_, i64>("count"))
-            .map_err(|_| CoreError::InvalidInFlightCapacityReservation)?
-    } else {
-        0
-    };
-    let may_reserve_new = in_flight_capacity.is_none_or(|capacity| {
-        capacity
-            .provider_inventory_count
-            .saturating_add(core_in_flight_before)
-            < capacity.max_sandbox_count
-    });
     // Partition the claim by source host: a runner declaring a host leases only
     // requests routable to it (`target_source_host_id` NULL = any runner, else
     // must match). This replaces the global claim across all rows; the
@@ -1441,7 +1410,7 @@ where
                 SELECT id
                 FROM agent_creation_requests
                 WHERE (
-                        (status = 'requested' AND $7::bool)
+                        (status = 'requested' AND TRUE)
                         OR (
                           status = 'launching'
                           AND (lease_expires_at IS NULL OR lease_expires_at <= $4::text::timestamptz)
@@ -1490,7 +1459,6 @@ where
                 &now,
                 &source_host_id,
                 &runner_classes,
-                &may_reserve_new,
             ],
         )
         .await
@@ -1594,32 +1562,10 @@ where
         request.runtime_spec = Some(runtime_spec);
     }
     let provider_operation = select_provider_operation(client, &request.id).await?;
-    let in_flight_capacity_reservation = if let Some(capacity) = in_flight_capacity {
-        let row = client
-            .query_one(
-                "SELECT COUNT(*)::bigint AS count
-                 FROM agent_creation_requests
-                 WHERE status = 'launching' AND runner_class = $1",
-                &[&capacity.runner_class.as_str()],
-            )
-            .await
-            .map_err(store_error)?;
-        let core_in_flight_count = u32::try_from(row.get::<_, i64>("count"))
-            .map_err(|_| CoreError::InvalidInFlightCapacityReservation)?;
-        Some(crate::in_flight_capacity_reservation(
-            &request,
-            placement,
-            capacity,
-            core_in_flight_count,
-        )?)
-    } else {
-        None
-    };
     Ok(Some(AgentCreationLease {
         project,
         request,
         provider_operation,
-        in_flight_capacity_reservation,
     }))
 }
 
@@ -1755,7 +1701,6 @@ where
             project,
             request,
             provider_operation,
-            in_flight_capacity_reservation: None,
         });
     }
     let existing_runtime = match runtime_by_source {
@@ -1824,7 +1769,6 @@ where
         project,
         request,
         provider_operation: provider_operation_ack,
-        in_flight_capacity_reservation: None,
     })
 }
 
@@ -2010,7 +1954,6 @@ where
         project,
         request,
         provider_operation: provider_operation_ack,
-        in_flight_capacity_reservation: None,
     })
 }
 
@@ -8321,32 +8264,6 @@ mod tests {
             .clone()
     }
 
-    async fn issue_confidential_test_launch_code(store: &CoreStore) -> String {
-        store
-            .issue_launch_code_batch(IssueLaunchCodeBatchInput {
-                name: "Postgres confidential test batch".to_string(),
-                code_count: 1,
-                expires_in_hours: Some(crate::launch_codes::MAX_LAUNCH_CODE_BATCH_HOURS),
-                hosting_tier: Some(HostingTier::Confidential),
-                created_by_workos_user_id: "workos-test-operator".to_string(),
-                now: None,
-            })
-            .await
-            .unwrap()
-            .codes[0]
-            .code
-            .clone()
-    }
-
-    fn phala_runner_capacity(provider_inventory_count: u32) -> RunnerLeaseCapacity {
-        RunnerLeaseCapacity {
-            runner_classes: vec![RunnerClass::Phala],
-            max_sandbox_count: Some(1),
-            active_sandbox_count: Some(provider_inventory_count),
-            ..RunnerLeaseCapacity::default()
-        }
-    }
-
     fn postgres_method_body(source: &str, method_name: &str) -> String {
         let signature = format!("    pub async fn {method_name}");
         let start = source
@@ -9964,9 +9881,7 @@ mod tests {
                         now: None,
                     },
                     AgentCreationConfiguration {
-                        placement: Some(RuntimePlacement::for_hosting_tier(
-                            HostingTier::Standard,
-                        )),
+                        placement: RuntimePlacement::for_hosting_tier(HostingTier::Standard),
                         requested_hosting_tier: None,
                         profile_picture_url: None,
                         owner_chat_account_id: None,
@@ -10327,7 +10242,7 @@ mod tests {
                         now: None,
                     },
                     AgentCreationConfiguration {
-                        placement: Some(RuntimePlacement::for_hosting_tier(HostingTier::Standard)),
+                        placement: RuntimePlacement::for_hosting_tier(HostingTier::Standard),
                         requested_hosting_tier: None,
                         profile_picture_url: None,
                         owner_chat_account_id: None,
@@ -10490,81 +10405,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn postgres_phala_capacity_reservation_counts_provider_and_core_in_flight() {
-        with_isolated_postgres(|store| async move {
-            let mut request_ids = Vec::new();
-            for index in 0..2 {
-                let launch_code = issue_confidential_test_launch_code(&store).await;
-                let created = store
-                    .request_agent_creation(RequestAgentCreationInput {
-                        verified_email: format!("postgres-phala-{index}@finite.vip"),
-                        workos_user_id: format!("workos_postgres_phala_{index}"),
-                        display_name: format!("Postgres Phala {index}"),
-                        launch_code,
-                        idempotency_key: format!("postgres-phala-submit-{index}"),
-                        now: Some("2026-07-23T12:00:00Z".to_string()),
-                    })
-                    .await
-                    .unwrap();
-                request_ids.push(created.request.id);
-            }
-
-            let first = store
-                .lease_agent_creation_request(LeaseAgentCreationRequestInput {
-                    runner_id: "postgres-phala-runner-a".to_string(),
-                    source_host_id: Some("phala-host".to_string()),
-                    lease_token: "postgres-phala-lease-a".to_string(),
-                    lease_seconds: Some(300),
-                    runner_capacity: Some(phala_runner_capacity(0)),
-                    now: Some("2026-07-23T12:01:00Z".to_string()),
-                })
-                .await
-                .unwrap()
-                .unwrap();
-            assert!(request_ids.contains(&first.request.id));
-            let reservation = first.in_flight_capacity_reservation.as_ref().unwrap().v1();
-            assert_eq!(reservation.provider_inventory_count, 0);
-            assert_eq!(reservation.core_in_flight_count, 1);
-            assert_eq!(reservation.max_sandbox_count, 1);
-
-            let second = store
-                .lease_agent_creation_request(LeaseAgentCreationRequestInput {
-                    runner_id: "postgres-phala-runner-b".to_string(),
-                    source_host_id: Some("phala-host".to_string()),
-                    lease_token: "postgres-phala-lease-b".to_string(),
-                    lease_seconds: Some(300),
-                    runner_capacity: Some(phala_runner_capacity(0)),
-                    now: Some("2026-07-23T12:01:00Z".to_string()),
-                })
-                .await
-                .unwrap();
-            assert!(second.is_none());
-
-            let resumed = store
-                .lease_agent_creation_request(LeaseAgentCreationRequestInput {
-                    runner_id: "postgres-phala-runner-c".to_string(),
-                    source_host_id: Some("phala-host".to_string()),
-                    lease_token: "postgres-phala-lease-c".to_string(),
-                    lease_seconds: Some(300),
-                    runner_capacity: Some(phala_runner_capacity(1)),
-                    now: Some("2026-07-23T13:00:00Z".to_string()),
-                })
-                .await
-                .unwrap()
-                .unwrap();
-            assert_eq!(resumed.request.id, first.request.id);
-            let reservation = resumed
-                .in_flight_capacity_reservation
-                .as_ref()
-                .unwrap()
-                .v1();
-            assert_eq!(reservation.provider_inventory_count, 1);
-            assert_eq!(reservation.core_in_flight_count, 1);
-        })
-        .await;
-    }
-
-    #[tokio::test]
     async fn postgres_provider_operation_ledger_replays_and_crosses_runtime_boundaries() {
         with_isolated_postgres(|store| async move {
             let launch_code = issue_test_launch_code(&store, "unused").await;
@@ -10592,7 +10432,8 @@ mod tests {
                 .await
                 .unwrap()
                 .unwrap();
-            let placement = RuntimePlacement::for_hosting_tier(HostingTier::Standard);
+            let placement = RuntimePlacement::for_hosting_tier(HostingTier::Standard)
+                .expect("standard tier placement");
             let input = |runner: &str,
                          token: &str,
                          correlation: &str,
@@ -13382,7 +13223,7 @@ mod tests {
                         now: None,
                     },
                     AgentCreationConfiguration {
-                        placement: Some(RuntimePlacement::for_hosting_tier(HostingTier::Standard)),
+                        placement: RuntimePlacement::for_hosting_tier(HostingTier::Standard),
                         requested_hosting_tier: None,
                         profile_picture_url: None,
                         owner_chat_account_id: None,

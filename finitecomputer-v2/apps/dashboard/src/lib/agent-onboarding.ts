@@ -9,10 +9,14 @@ const AGENT_CREATION_ENTITLEMENT_EXHAUSTED = "agent creation entitlement is exha
 const AGENT_CREATION_BILLING_REQUIRED = "billing is required before creating an agent";
 const AGENT_CREATION_HOSTING_TIER_NOT_AUTHORIZED =
   "selected hosting tier is not authorized by this account or launch code";
+const AGENT_CREATION_HOSTING_TIER_UNAVAILABLE =
+  "confidential hosting is not currently available";
 const AGENT_CREATION_BILLING_REQUIRED_MESSAGE =
   "Choose payment or enter a Launch Code to continue.";
 const AGENT_CREATION_HOSTING_TIER_MESSAGE =
   "This account or Launch Code does not match the selected hosting option. Choose the matching option or use a different Launch Code.";
+const AGENT_CREATION_HOSTING_TIER_UNAVAILABLE_MESSAGE =
+  "Confidential hosting is not currently available. Choose Standard hosting, or check back when the confidential lane returns.";
 
 export type AgentCreationRecovery = "access" | null;
 
@@ -96,6 +100,9 @@ export function agentCreationErrorMessage(error: unknown): string {
   }
   if (message.toLowerCase().includes(AGENT_CREATION_HOSTING_TIER_NOT_AUTHORIZED)) {
     return AGENT_CREATION_HOSTING_TIER_MESSAGE;
+  }
+  if (message.toLowerCase().includes(AGENT_CREATION_HOSTING_TIER_UNAVAILABLE)) {
+    return AGENT_CREATION_HOSTING_TIER_UNAVAILABLE_MESSAGE;
   }
   return message;
 }

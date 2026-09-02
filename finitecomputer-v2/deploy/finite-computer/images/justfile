@@ -4,7 +4,8 @@ set shell := ["../../../../scripts/dev-shell", "-cu"]
 default:
     just --list
 
-# Static contract: Docker, Kata, and Phala share one Runtime image/build lane.
+# Static contract: the canonical Runtime image/build lane stays unique (one
+# Dockerfile, one publisher; every launcher consumes the same digest).
 runtime-image-contract:
     cd ../../../.. && python3 finitecomputer-v2/deploy/finite-computer/images/scripts/check_runtime_image_contract.py
     cd ../../../.. && python3 -m unittest discover -s finitecomputer-v2/deploy/finite-computer/images/tests -p 'test_runtime_image_contract.py'

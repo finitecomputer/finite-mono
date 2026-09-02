@@ -85,19 +85,6 @@ JS
 }
 
 runtime_container_id() {
-  if [[ "$runtime_driver" == docker ]]; then
-    docker ps --format '{{json .}}' --filter "label=computer.finite.v2.project_id=$project_id" \
-      | node -e '
-        let body = "";
-        process.stdin.on("data", (chunk) => body += chunk);
-        process.stdin.on("end", () => {
-          const rows = body.trim().split(/\n+/).filter(Boolean).map(JSON.parse);
-          if (rows.length !== 1 || !rows[0].ID) process.exit(1);
-          process.stdout.write(rows[0].ID);
-        });
-      '
-    return
-  fi
   container list --format json | node -e '
     const projectId = process.argv[1];
     let body = "";
@@ -114,11 +101,7 @@ runtime_container_id() {
 }
 
 runtime_exec() {
-  if [[ "$runtime_driver" == docker ]]; then
-    docker exec "$@"
-  else
-    container exec "$@"
-  fi
+  container exec "$@"
 }
 
 wait_for_runtime() {
@@ -624,10 +607,6 @@ restart_process() {
 }
 
 container_started_at() {
-  if [[ "$runtime_driver" == docker ]]; then
-    docker inspect --format '{{.State.StartedAt}}' "$container_machine_id" 2>/dev/null || true
-    return
-  fi
   container inspect "$container_machine_id" 2>/dev/null | node -e '
     let body = "";
     process.stdin.on("data", (chunk) => body += chunk);
@@ -978,15 +957,10 @@ need process-compose
 
 case "${DEVFINITY_PROFILE:-}" in
   apple-saas)
-    runtime_driver=apple
     need container
     ;;
-  docker-saas)
-    runtime_driver=docker
-    need docker
-    ;;
   *)
-    echo "devfinity SaaS smoke requires the apple-saas or docker-saas profile" >&2
+    echo "devfinity SaaS smoke requires the apple-saas profile" >&2
     exit 64
     ;;
 esac

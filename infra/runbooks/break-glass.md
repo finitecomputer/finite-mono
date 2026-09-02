@@ -34,8 +34,7 @@ closure. There is currently no accepted bare-metal rebuild procedure.
   - `journalctl -u finite-saas-sites` — finitesitesd (127.0.0.1:8787)
   - `journalctl -u finite-postgres-backup` — the 6-hourly dump timer
   - `journalctl -u finite-saas-runner` — Kata agent-creation runner; its Nix
-    timer is enabled, but live canary readiness must be verified. Phala remains
-    a separate fast-follow adapter.
+    timer is enabled, but live canary readiness must be verified.
 - **Restart:**
   - `sudo systemctl restart caddy`
   - `sudo systemctl restart finite-saas-core` / `finite-saas-sites` /

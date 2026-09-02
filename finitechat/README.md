@@ -287,8 +287,8 @@ needs the model provider key used by the Hermes profile.
 The runner loads `.env` when present, or set
 `FINITECHAT_HERMES_ENV_FILE=/path/to/provider.env`.
 
-The product-shaped Hermes runtime ladder for local Apple Container, Kata, and
-Phala belongs to
+The product-shaped Hermes runtime ladder for local Apple Container and
+Kata belongs to
 `../finitecomputer-v2/docs/hermes-runtime-test-matrix.md`. Finite Chat's local
 loop proves the app/protocol/plugin contract; v2 proves the hosted-agent
 runtime image and provider deploy shapes.

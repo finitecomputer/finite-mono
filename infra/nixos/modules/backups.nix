@@ -62,7 +62,6 @@ in
         sites_was_active=0
         kata_was_active=0
         kata_timer_was_active=0
-        phala_was_active=0
 
         remove_tree() {
           local tree=$1
@@ -81,7 +80,6 @@ in
           if [ "$brain_was_active" = 1 ]; then systemctl start finite-brain-app.service || cleanup_status=1; fi
           if [ "$hosted_was_active" = 1 ]; then systemctl start finitechat-hosted-device.service || cleanup_status=1; fi
           if [ "$kata_was_active" = 1 ]; then systemctl start finite-saas-runner.service || cleanup_status=1; fi
-          if [ "$phala_was_active" = 1 ]; then systemctl start finite-saas-runner-phala.service || cleanup_status=1; fi
           if [ "$kata_timer_was_active" = 1 ]; then systemctl start finite-saas-runner.timer || cleanup_status=1; fi
           return "$cleanup_status"
         }
@@ -103,11 +101,9 @@ in
         systemctl is-active --quiet finite-saas-sites.service && sites_was_active=1 || true
         systemctl is-active --quiet finite-saas-runner.service && kata_was_active=1 || true
         systemctl is-active --quiet finite-saas-runner.timer && kata_timer_was_active=1 || true
-        systemctl is-active --quiet finite-saas-runner-phala.service && phala_was_active=1 || true
 
         if [ "$kata_timer_was_active" = 1 ]; then systemctl stop finite-saas-runner.timer; fi
         if [ "$kata_was_active" = 1 ]; then systemctl stop finite-saas-runner.service; fi
-        if [ "$phala_was_active" = 1 ]; then systemctl stop finite-saas-runner-phala.service; fi
         if [ "$core_was_active" = 1 ]; then systemctl stop finite-saas-core.service; fi
         if [ "$brain_was_active" = 1 ]; then systemctl stop finite-brain-app.service; fi
         if [ "$hosted_was_active" = 1 ]; then systemctl stop finitechat-hosted-device.service; fi

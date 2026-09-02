@@ -11,8 +11,8 @@ execution, never reconstruct afterward.
   the live DB copies, scratch restore of the coordinated snapshot).
 - The banked secret set covers every file in
   `infra/nixos/hosts/finite-lat-1/secret-bootstrap-contract.json`
-  EXCEPT `/etc/finite/runner.env` and `/etc/finite/phala-runner.env`
-  (runner lane, belongs to the future runner host).
+  EXCEPT `/etc/finite/runner.env` (runner lane, belongs to the future
+  runner host).
 - `scripts/finite-status` state accepted (lat1 down = red; lat3 runner
   unreachable = expected until Gate E).
 - The `Lat2 NixOS Closure` workflow exists (this PR) and CI is green.
@@ -83,7 +83,7 @@ fresh empty cluster.
 ### Gate D — import lat1's state
 
 Place secrets (file-to-file from the banked pull; names/modes per
-`secret-bootstrap-contract.json`; skip `runner.env` / `phala-runner.env`;
+`secret-bootstrap-contract.json`; skip `runner.env`;
 install the staged lat2 WireGuard private key at
 `/etc/finite/wireguard-private-key` 0600; the monitoring-write env files
 and `litestream-latitude.env` from escrow):

@@ -53,7 +53,6 @@ not been exercised yet are marked `TODO:` with what must be learned.
 | [runtime-cold-relocation.md](runtime-cold-relocation.md) | Operator-only stopped Kata Runtime move between exact hosts, with state-manifest and Agent Principal fencing |
 | [legacy-hermes-box1-to-lat3.md](legacy-hermes-box1-to-lat3.md) | Versioned, identity-fenced migration of one box1 Hermes bot into a new lat3 Runtime; Austin is the first canary |
 | [finite-private-limiter-mono-switch.md](finite-private-limiter-mono-switch.md) | Planned-downtime switch from the legacy limiter image to a mono-built limiter plus upstream GLM 5.2 v0.0.17 |
-| [phala-confidential-runner.md](phala-confidential-runner.md) | Dark, separately fenced Phala worker and API-only preflight/lifecycle/recovery/inventory/cost procedures; no CLI or delete path |
 | [break-glass.md](break-glass.md) | Getting on each box, logs, restarts (lat1 NixOS, lat2 decommission target, smoke rollback source, clawland legacy) |
 
 ## Release checklist discipline
@@ -76,18 +75,15 @@ Two rules apply to **every** release and promotion, no exceptions:
    2026-08-21 and `just runbook-facts-contract` fails any runbook that
    reinstates it.
 
-2. **Rung-ladder: local proof → Docker proof → Kata → Phala/Tinfoil.**
-   Nothing is promoted to a confidential-compute lane without a recorded
-   proof at the rung below it. `.github/workflows/runtime-image.yml` builds the
+2. **Rung-ladder: local proof → Kata.** Nothing is promoted to a new
+   compute lane without a recorded proof at the rung below it. `.github/workflows/runtime-image.yml` builds the
    canonical image once, smokes that immutable local image ID, then publishes
    those exact bytes. The separate `.github/workflows/hermes-runtime-smoke.yml`
    rebuild is optional source preflight, never publication or exact-image
    promotion evidence. Concretely:
    - local: devfinity / `cargo test` / local smoke scripts pass;
-   - Docker: the relevant Docker smoke lane passes and its report artifact
-     is kept;
-   - only then: publish once and promote the digest to Kata/Phala or
-     hand off to a Tinfoil satellite repo (`infra/tinfoil/README.md`).
+   - only then: publish once and promote the digest to Kata or hand off to
+     a satellite repo (`infra/tinfoil/README.md`).
 
 ## Standing rules
 

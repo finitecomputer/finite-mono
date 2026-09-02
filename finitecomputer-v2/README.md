@@ -148,10 +148,9 @@ rename deployment paths from `finite-computer` to v2.
 
 ## SaaS Runner
 
-Docker is the local preflight backend. Kata is the first production Runner;
-Phala is the confidential fast-follow candidate. Core assigns placement from
-product policy, persists it with the Project, and does not expose provider
-selection in onboarding. Workers advertise exactly one supported adapter class:
+Kata is the production Runner. Core assigns placement from product policy,
+persists it with the Project, and does not expose provider selection in
+onboarding. Workers advertise exactly one supported adapter class:
 
 ```text
 RuntimeSpec.runner_class = "kata"
@@ -161,16 +160,9 @@ Production uses `FC_RUNNER_CLASS=kata`; local development uses
 `FC_RUNNER_CLASS=apple_container`. This is worker identity, not a product
 feature switch: Core only leases requests whose `RuntimeSpec.runner_class`
 matches the worker's advertised capacity. Kata implements the same narrow
-Runner Contract as Apple Container, Docker, Phala, and Enclavia.
-
-Enclavia can be selected for a single pre-created enclave evaluation target:
-
-```text
-FC_RUNNER_CLASS=enclavia
-FC_RUNNER_ENCLAVIA_ENCLAVE_ID=<enclave-uuid>
-```
+Runner Contract as Apple Container.
 
 See [docs/runner-contract-v1.md](docs/runner-contract-v1.md),
 [docs/runtime-control-contract.md](docs/runtime-control-contract.md), and
-[../infra/hosts/lat1/systemd/runner.env.example](../infra/hosts/lat1/systemd/runner.env.example)
+[../infra/nixos/README.md](../infra/nixos/README.md)
 for the live runner env, provider prerequisites, and acceptance criteria.

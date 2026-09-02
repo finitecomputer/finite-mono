@@ -2,17 +2,14 @@
 
 `ghcr.io/finitecomputer/agent-runtime` (mono-owned; the legacy
 `finite-agent-runtime` package is frozen with the deployed pins) — the image
-the Kata runners on lat3 and lat4 launch into. Phala is
-a fast follow and must consume the same artifact contract and image digest.
-Image
+the Kata runners on lat3 and lat4 launch into. Image
 definitions map: `infra/images/README.md`. Rung-ladder discipline: see
-[README.md](README.md) — no Kata/Phala/Tinfoil promotion without a Docker proof.
+[README.md](README.md) — no Kata/Tinfoil promotion without a Docker proof.
 
 > **Runner status:** finite-saas-runner runs as a NixOS systemd timer on the
 > active Kata hosts lat3 and lat4 (`modules/finite-saas-runner.nix`) and
 > advertises the Kata adapter. lat1 is retired/leftover-inactive; its runner
-> cannot lease work. Phala is a fast follow and must consume the same
-> artifact contract and image digest.
+> cannot lease work.
 
 ## PRECONDITIONS
 

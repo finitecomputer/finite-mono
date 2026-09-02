@@ -11,7 +11,6 @@ in
     ../../modules/finite-saas-core.nix
     ../../modules/finite-saas-runner.nix
     ../../modules/kata-runner-host.nix
-    ../../modules/finite-saas-phala-runner.nix
     ../../modules/finite-identity.nix
     ../../modules/finitechat-server.nix
     ../../modules/finitechat-hosted-device.nix

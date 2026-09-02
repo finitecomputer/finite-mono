@@ -306,22 +306,18 @@ test("dashboard agent creation browser states", { timeout: 300_000 }, async () =
         "Profile must not submit agent creation before the customer chooses Access"
       );
       await page.getByRole("button", { name: "Back" }).click();
-      await page.getByRole("radio", { name: /Confidential/u }).waitFor({
-        state: "visible",
-      });
-      await page.getByRole("radio", { name: /Confidential/u }).check();
-      await clickAgentCreationContinue(page);
-      await expectVisibleText(
-        page,
-        "Enter a Confidential Launch Code. Standard subscriptions do not unlock this option yet."
-      );
+      // Confidential hosting is fail-closed while no runner can satisfy it
+      // (PR: launcher deletion + Core rejection). The onboarding radio must
+      // be absent, not merely unchecked — offering the tier would dead-end
+      // the customer at a launch-code redeem Core now rejects.
       assert.equal(
-        await page.getByRole("button", { name: "Continue to secure payment" }).count(),
+        await page.getByRole("radio", { name: /Confidential/u }).count(),
         0,
-        "Confidential early access must not send a Standard customer to checkout"
+        "confidential tier must not be offered while no runner can satisfy it"
       );
+      await clickAgentCreationContinue(page);
       await page
-        .getByRole("textbox", { name: "Confidential Launch Code" })
+        .getByRole("button", { name: "Continue to secure payment" })
         .waitFor({ state: "visible" });
     });
 

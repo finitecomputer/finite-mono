@@ -9,8 +9,7 @@ runs from the nix-built binary (the `finite-saas-core` package), NOT the
 container image — the core image below is retained for provenance / other
 contexts. The dashboard runs as a digest-pinned oci-container (podman) on
 lat1. `private-limiter` is the Tinfoil surface; the one Agent Runtime image
-targets Kata first and Phala next. See `infra/nixos/` for what lat1 actually
-runs.
+targets Kata. See `infra/nixos/` for what lat1 actually runs.
 
 | Image (ghcr.io/finitecomputer/…) | Definition | Built by | Deployed to |
 |---|---|---|---|
@@ -18,13 +17,13 @@ runs.
 | `finite-saas-dashboard` | `dashboard.Dockerfile` (context: repo root; includes the shared Finite Chat UI package) | `service-images.yml` | lat1 (podman oci-container, digest-pinned in `modules/dashboard.nix`) |
 | `private-limiter` | `private-limiter.Dockerfile` (context: repo root) | `service-images.yml` | Finite Private Tinfoil CVM (digest pinned in confidential-finite-private) |
 | `glm-5-3-flash-sglang` | `glm-5.3-flash-sglang.Dockerfile` (context: repo root; wraps the exact upstream amd64 manifest with source labels and fail-closed internal auth) | `glm-5.3-flash-sglang-image.yml` | Live Finite Private GLM-5.3-Flash Tinfoil container |
-| `agent-runtime` | `finitecomputer-v2/deploy/finite-computer/images/runtime.Dockerfile` via `finitecomputer-v2/scripts/build_runtime_image.py` (one staged monorepo + root lockfile) | `runtime-image.yml`, whose build-once smoke proves the exact local image ID before push; `hermes-runtime-smoke.yml` is optional source preflight | local Docker, Kata, Phala, and agent canary lanes |
+| `agent-runtime` | `finitecomputer-v2/deploy/finite-computer/images/runtime.Dockerfile` via `finitecomputer-v2/scripts/build_runtime_image.py` (one staged monorepo + root lockfile) | `runtime-image.yml`, whose build-once smoke proves the exact local image ID before push; `hermes-runtime-smoke.yml` is optional source preflight | local development lane (Apple Container) and the Kata fleet |
 
 Legacy package names (`finite-private-limiter`, `finite-agent-runtime`,
 `finite-chat-hermes-runtime`) are write-locked to the archived repos that
 created them. Decision (Paul, 2026-07-09): no cross-grants — those packages
-are FROZEN, kept public so already-deployed pins keep pulling (live Phala
-CVMs, the deployed Tinfoil limiter). Mono publishes under the mono-owned
+are FROZEN, kept public so already-deployed pins keep pulling (historical
+Phala CVM pins, the deployed Tinfoil limiter). Mono publishes under the mono-owned
 names above; consumers repoint at their next natural roll. Never delete the
 frozen packages while any deployed digest references them.
 

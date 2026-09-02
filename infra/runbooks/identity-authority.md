@@ -102,11 +102,8 @@ Inspect names and state, never environment values:
 ```sh
 systemctl is-active finite-identity.service
 systemctl is-active finite-saas-core.service
-systemctl is-active finite-saas-runner-phala.service
 systemctl is-active finite-saas-runner.timer
 systemctl show finite-saas-runner.service \
-  --property=After --property=Requires --property=EnvironmentFiles
-systemctl show finite-saas-runner-phala.service \
   --property=After --property=Requires --property=EnvironmentFiles
 curl --fail --silent http://127.0.0.1:8790/health
 curl --fail --silent https://identity.finite.vip/health

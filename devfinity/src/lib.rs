@@ -115,44 +115,30 @@ impl ManagedProcess {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum StackProfile {
     AppleSaas,
-    DockerSaas,
     ServicesOnly,
     TestInfrastructure,
 }
 
 impl StackProfile {
     fn includes_runtime(self) -> bool {
-        matches!(self, Self::AppleSaas | Self::DockerSaas)
+        matches!(self, Self::AppleSaas)
     }
 
     fn runner_class(self) -> &'static str {
-        match self {
-            Self::AppleSaas => "apple_container",
-            Self::DockerSaas => "local_docker",
-            Self::ServicesOnly | Self::TestInfrastructure => "apple_container",
-        }
+        "apple_container"
     }
 
     fn runner_id(self) -> &'static str {
-        match self {
-            Self::DockerSaas => "devfinity-docker-runner",
-            Self::AppleSaas | Self::ServicesOnly | Self::TestInfrastructure => {
-                "devfinity-apple-runner"
-            }
-        }
+        "devfinity-apple-runner"
     }
 
     fn source_host_id(self) -> &'static str {
-        match self {
-            Self::DockerSaas => "devfinity-docker",
-            Self::AppleSaas | Self::ServicesOnly | Self::TestInfrastructure => "devfinity-apple",
-        }
+        "devfinity-apple"
     }
 
     fn as_str(self) -> &'static str {
         match self {
             Self::AppleSaas => "apple-saas",
-            Self::DockerSaas => "docker-saas",
             Self::ServicesOnly => "services-only",
             Self::TestInfrastructure => "test-infrastructure",
         }
@@ -218,35 +204,6 @@ impl InferenceMode {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum DockerRuntimeImageEngine {
-    Docker,
-    Depot,
-}
-
-impl DockerRuntimeImageEngine {
-    fn parse(value: Option<&str>) -> Result<Self> {
-        match value.map(str::trim).filter(|value| !value.is_empty()) {
-            None | Some("docker") => Ok(Self::Docker),
-            Some("depot") => Ok(Self::Depot),
-            Some(value) => bail!(
-                "{DEVFINITY_DOCKER_RUNTIME_IMAGE_ENGINE_ENV} must be docker or depot, got {value}"
-            ),
-        }
-    }
-
-    fn from_environment() -> Result<Self> {
-        Self::parse(nonempty_env_value(DEVFINITY_DOCKER_RUNTIME_IMAGE_ENGINE_ENV).as_deref())
-    }
-
-    fn as_str(self) -> &'static str {
-        match self {
-            Self::Docker => "docker",
-            Self::Depot => "depot",
-        }
-    }
-}
-
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct AppleHostAccess {
     runtime_host: String,
@@ -272,7 +229,6 @@ const DEVFINITY_RUNNER_TOKEN: &str = "devfinity-runner-route-token";
 const DEVFINITY_USAGE_TOKEN: &str = "devfinity-finite-private-usage-token";
 const MACOS_UNIX_SOCKET_PATH_MAX: usize = 103;
 const CACHED_INFERENCE_KEY_FILE: &str = "finite-private-upstream.key";
-const DEVFINITY_DOCKER_RUNTIME_IMAGE_ENGINE_ENV: &str = "DEVFINITY_DOCKER_RUNTIME_IMAGE_ENGINE";
 const WORKOS_STAGING_API_KEY_ENV: &str = "WORKOS_STAGING_API_KEY";
 const WORKOS_STAGING_CLIENT_ID_ENV: &str = "WORKOS_STAGING_CLIENT_ID";
 const WORKOS_STAGING_OPERATOR_ORG_ID_ENV: &str = "WORKOS_STAGING_OPERATOR_ORG_ID";
@@ -380,7 +336,6 @@ pub struct Stack {
     profile: StackProfile,
     fresh_services_state: bool,
     inference_mode: InferenceMode,
-    docker_runtime_image_engine: DockerRuntimeImageEngine,
     workos_mode: WorkosMode,
     apple_host_access: AppleHostAccess,
     apple_container_name_prefix: String,
@@ -462,7 +417,6 @@ impl Stack {
             profile: StackProfile::AppleSaas,
             fresh_services_state: false,
             inference_mode,
-            docker_runtime_image_engine: DockerRuntimeImageEngine::from_environment()?,
             workos_mode: WorkosMode::Fixture,
             apple_host_access: AppleHostAccess::default(),
             apple_container_name_prefix,
@@ -525,46 +479,30 @@ impl Stack {
         if self.fresh_services_state {
             bail!("--fresh is limited to the isolated services-only smoke profile");
         }
-        if self.profile == StackProfile::DockerSaas {
-            let status = Command::new("docker")
-                .args(["info", "--format", "{{.ServerVersion}}"])
-                .stdout(Stdio::null())
-                .stderr(Stdio::null())
-                .status()
-                .context("failed to run Docker; install/start Docker for --docker-runtime")?;
-            if !status.success() {
-                bail!("Docker is not ready; --docker-runtime requires a reachable Docker daemon");
-            }
-            self.apple_host_access = AppleHostAccess {
-                runtime_host: "host.docker.internal".to_string(),
-                bind_host: "0.0.0.0".to_string(),
-                source: "Docker host-gateway alias",
-            };
-        } else if std::env::consts::OS != "macos" || std::env::consts::ARCH != "aarch64" {
+        if std::env::consts::OS != "macos" || std::env::consts::ARCH != "aarch64" {
             bail!(
                 "the default devfinity SaaS profile requires Apple silicon and macOS 26; use --services-only for the portable service profile"
             );
-        } else {
-            ensure_apple_container_cli()?;
-            if dry_run {
-                if !apple_container_system_running()? {
-                    bail!(
-                        "Apple Container services are stopped; run `container system start` before --dry-run (devfinity starts them automatically for a real run)"
-                    );
-                }
-            } else {
-                run_required(
-                    Command::new("container").args(["system", "start"]),
-                    "start Apple Container services",
-                )?;
-                if !apple_container_system_running()? {
-                    bail!(
-                        "Apple Container services did not report running after `container system start`"
-                    );
-                }
-            }
-            self.apple_host_access = detect_apple_host_access()?;
         }
+        ensure_apple_container_cli()?;
+        if dry_run {
+            if !apple_container_system_running()? {
+                bail!(
+                    "Apple Container services are stopped; run `container system start` before --dry-run (devfinity starts them automatically for a real run)"
+                );
+            }
+        } else {
+            run_required(
+                Command::new("container").args(["system", "start"]),
+                "start Apple Container services",
+            )?;
+            if !apple_container_system_running()? {
+                bail!(
+                    "Apple Container services did not report running after `container system start`"
+                );
+            }
+        }
+        self.apple_host_access = detect_apple_host_access()?;
 
         if !dry_run {
             if self.inference_mode == InferenceMode::Missing {
@@ -572,16 +510,14 @@ impl Stack {
                     "chat-capable local SaaS requires a Finite Private key. Run `just dev inference-key` once, or set FC_LOCAL_FINITE_PRIVATE_UPSTREAM_KEY (preferred) or FC_RUNNER_FINITE_PRIVATE_API_KEY_OVERRIDE"
                 );
             }
-            if self.profile == StackProfile::AppleSaas {
-                // Apple Container 1.1 reports `builder is not running` with exit 0,
-                // while `builder start` itself is idempotent. Invoke the operation
-                // directly instead of inferring state from the exit code.
-                run_required(
-                    Command::new("container")
-                        .args(["builder", "start", "--cpus", "8", "--memory", "8G"]),
-                    "start the Apple Container image builder",
-                )?;
-            }
+            // Apple Container 1.1 reports `builder is not running` with exit 0,
+            // while `builder start` itself is idempotent. Invoke the operation
+            // directly instead of inferring state from the exit code.
+            run_required(
+                Command::new("container")
+                    .args(["builder", "start", "--cpus", "8", "--memory", "8G"]),
+                "start the Apple Container image builder",
+            )?;
         }
         Ok(())
     }
@@ -1787,11 +1723,7 @@ wait "$postgres_pid"
     }
 
     fn runtime_image_engine(&self) -> &'static str {
-        if self.profile == StackProfile::DockerSaas {
-            self.docker_runtime_image_engine.as_str()
-        } else {
-            "apple-container"
-        }
+        "apple-container"
     }
 
     fn write_runtime_image(&self, yaml: &mut String) {
@@ -1905,33 +1837,16 @@ wait "$postgres_pid"
         let probe_script = format!(
             "for attempt in $(seq 1 120); do ({probe_once}) && exit 0; sleep 1; done; exit 1"
         );
-        let (cleanup, command) = if self.profile == StackProfile::DockerSaas {
-            (
-                format!(
-                    "docker rm --force {} >/dev/null 2>&1 || true",
-                    shell_quote(&probe_container_name)
-                ),
-                format!(
-                    "exec docker run --rm --add-host host.docker.internal:host-gateway --name {} --entrypoint /bin/bash {} -lc {}",
-                    shell_quote(&probe_container_name),
-                    shell_quote(&self.runtime_image_ref),
-                    shell_quote(&probe_script),
-                ),
-            )
-        } else {
-            (
-                format!(
-                    "container delete --force {} >/dev/null 2>&1 || true",
-                    shell_quote(&probe_container_name)
-                ),
-                format!(
-                    "exec container run --rm --name {} --entrypoint /bin/bash {} -lc {}",
-                    shell_quote(&probe_container_name),
-                    shell_quote(&self.runtime_image_ref),
-                    shell_quote(&probe_script),
-                ),
-            )
-        };
+        let cleanup = format!(
+            "container delete --force {} >/dev/null 2>&1 || true",
+            shell_quote(&probe_container_name)
+        );
+        let command = format!(
+            "exec container run --rm --name {} --entrypoint /bin/bash {} -lc {}",
+            shell_quote(&probe_container_name),
+            shell_quote(&self.runtime_image_ref),
+            shell_quote(&probe_script),
+        );
         let _ = writeln!(yaml, "  {process}:");
         self.write_process_header(
             yaml,
@@ -2108,12 +2023,6 @@ wait "$postgres_pid"
                     "FC_RUNNER_APPLE_CONTAINER_CONTAINER_PORT",
                     "8080".to_string(),
                 ),
-                (
-                    "FC_RUNNER_DOCKER_HOST_PORT",
-                    self.ports.runtime_agent.to_string(),
-                ),
-                ("FC_RUNNER_DOCKER_CONTAINER_PORT", "8080".to_string()),
-                ("FC_RUNNER_DOCKER_PULL_POLICY", "never".to_string()),
                 ("FC_RUNNER_MAX_SANDBOXES", "1".to_string()),
                 ("FC_RUNNER_IDLE_INTERVAL_MS", "1000".to_string()),
                 (
@@ -2859,11 +2768,7 @@ wait "$postgres_pid"
                         String::from("finite-private-limiter-up"),
                     ],
                     ManagedProcess::AppleNetworkProbe => vec![
-                        String::from(if self.profile == StackProfile::DockerSaas {
-                            "docker"
-                        } else {
-                            "container"
-                        }),
+                        String::from("container"),
                         self.apple_network_probe_container_name(),
                     ],
                     ManagedProcess::RuntimeArtifact => vec![
@@ -4734,37 +4639,6 @@ fn yaml_string(value: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn docker_runtime_image_engine_override_accepts_only_supported_engines() {
-        assert_eq!(
-            DockerRuntimeImageEngine::parse(None).unwrap(),
-            DockerRuntimeImageEngine::Docker
-        );
-        assert_eq!(
-            DockerRuntimeImageEngine::parse(Some("docker")).unwrap(),
-            DockerRuntimeImageEngine::Docker
-        );
-        assert_eq!(
-            DockerRuntimeImageEngine::parse(Some("depot")).unwrap(),
-            DockerRuntimeImageEngine::Depot
-        );
-        assert!(DockerRuntimeImageEngine::parse(Some("apple-container")).is_err());
-    }
-
-    #[test]
-    fn docker_saas_runtime_image_can_use_depot_engine() {
-        let mut stack = Stack::new(PathBuf::from(".local-state/devfinity-test"))
-            .unwrap()
-            .with_profile(StackProfile::DockerSaas);
-        stack.docker_runtime_image_engine = DockerRuntimeImageEngine::Depot;
-
-        let yaml = stack.process_compose_yaml();
-
-        assert!(yaml.contains("runtime-image:"));
-        assert!(yaml.contains("--engine depot"));
-        assert!(!yaml.contains("--engine docker"));
-    }
 
     #[test]
     fn runner_credential_metadata_matches_local_runner_identity() {

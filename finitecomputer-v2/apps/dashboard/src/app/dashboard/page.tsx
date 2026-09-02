@@ -294,7 +294,10 @@ export default async function DashboardPage({
                 <BillingCheckoutCancelledNotice />
               ) : null}
               <CoreAgentCreationPanel
-                allowConfidentialHosting={viewer.isAdmin}
+                // Confidential returns with the rented-compute lane; Core
+                // fails closed on confidential placements until then, so the
+                // option stays hidden for everyone (admins included).
+                allowConfidentialHosting={false}
                 error={agentCreationError}
                 draft={draft}
                 immersive={isNewAgentFlow}

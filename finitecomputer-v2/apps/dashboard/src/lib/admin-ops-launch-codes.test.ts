@@ -5,9 +5,10 @@ import {
   launchCodeBatchFormInput,
   launchCodeDownloadFilename,
   launchCodeDownloadText,
+  launchCodeHostingTierLabel,
 } from "@/lib/admin-ops";
 
-test("Launch Code form defaults to Standard and accepts an explicit Confidential batch", () => {
+test("Launch Code form defaults to Standard and fails closed on Confidential", () => {
   const canary = new FormData();
   canary.set("name", "Paul canary");
   canary.set("codeCount", "1");
@@ -19,17 +20,23 @@ test("Launch Code form defaults to Standard and accepts an explicit Confidential
     hostingTier: "standard",
   });
 
+  // No deployed runner can satisfy confidential hosting, so issuance fails
+  // closed in the UI exactly as Core rejects it server-side.
   const training = new FormData();
   training.set("name", "July training");
   training.set("codeCount", "12");
   training.set("expiresInHours", "168");
   training.set("hostingTier", "confidential");
-  assert.deepEqual(launchCodeBatchFormInput(training), {
-    name: "July training",
-    codeCount: 12,
-    expiresInHours: 168,
-    hostingTier: "confidential",
-  });
+  assert.throws(
+    () => launchCodeBatchFormInput(training),
+    /Confidential hosting is not currently available/u
+  );
+});
+
+test("Legacy Confidential batch rows keep parsing for listing", () => {
+  assert.equal(launchCodeHostingTierLabel("confidential"), "Confidential");
+  assert.equal(launchCodeHostingTierLabel("standard"), "Standard");
+  assert.equal(launchCodeHostingTierLabel(null), "Standard");
 });
 
 test("Launch Code form refuses indefinite or oversized issuance", () => {

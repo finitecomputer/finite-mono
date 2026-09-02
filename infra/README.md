@@ -144,8 +144,7 @@ capacity. The one accepted next candidate and its hard gates live in
 **No secret values in this repo, ever.** This repo is public. Secrets live
 where they run: on each production host, root-owned `/etc/finite/*.env` and
 `/etc/finite-saas/` files (bootstrap checklist in `infra/nixos/README.md`);
-Tinfoil sealed secrets; Phala sealed env; the legacy fleet's k8s Secrets on
-smoke/clawland. Each host README documents which secrets each service needs —
+Tinfoil sealed secrets; the legacy fleet's k8s Secrets on smoke/clawland. Each host README documents which secrets each service needs —
 variable **names** and where the value lives, never the value. If you find a
 secret value committed here, rotate it first, then delete it.
 

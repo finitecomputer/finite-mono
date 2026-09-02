@@ -114,6 +114,10 @@ test("other agent creation errors remain useful", () => {
     ),
     "This account or Launch Code does not match the selected hosting option. Choose the matching option or use a different Launch Code."
   );
+  assert.equal(
+    agentCreationErrorMessage(new Error("confidential hosting is not currently available")),
+    "Confidential hosting is not currently available. Choose Standard hosting, or check back when the confidential lane returns."
+  );
   assert.equal(agentCreationErrorMessage(null), "Could not create agent.");
 });
 
