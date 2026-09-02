@@ -4876,6 +4876,17 @@ impl SqliteClientStore {
         self.currency_verified_rooms.insert(room_id.to_owned());
     }
 
+    /// Every persisted device state row in this store, across accounts.
+    /// Zero means the store has never held a device: the only condition
+    /// under which a runtime may mint one without an explicit init.
+    pub fn device_state_count(&self) -> Result<u64, ClientStoreError> {
+        Ok(self
+            .conn
+            .query_row("SELECT COUNT(*) FROM client_device_states", [], |row| {
+                row.get::<_, u64>(0)
+            })?)
+    }
+
     pub fn load_device_ids_for_account(
         &self,
         account_id: &str,

@@ -175,6 +175,19 @@ pub enum FiniteChatCoreError {
         "room {room_id} currency is unverified: no sync tick has completed for it since the store was opened"
     )]
     CurrencyUnverified { room_id: String },
+    /// The client store already holds device state, but none for the
+    /// requested device id. Minting a fresh device under that id would put
+    /// a generation-0 MLS sender behind a device the server already knows
+    /// (the same rewind a stale file copy causes), so this fails closed.
+    #[error(
+        "client store {db_path} has no state for device '{requested_device_id}' but already holds {stored_device_states} device state row(s) (this account's stored devices: {stored_device_ids:?}); refusing to mint a fresh device under that id — it would rewind the device to MLS generation 0. Reuse a stored device id, or initialize a new store in an empty data dir (`finitechat hermes init` for an agent home)"
+    )]
+    DeviceStateMissing {
+        db_path: String,
+        requested_device_id: String,
+        stored_device_ids: Vec<String>,
+        stored_device_states: u64,
+    },
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, uniffi::Record)]
@@ -8508,8 +8521,14 @@ fn recover_or_create_device_state(
     let stored_device_ids = requested_store
         .load_device_ids_for_account(&account_id)
         .map_err(store_error)?;
+    let stored_device_states = requested_store.device_state_count().map_err(store_error)?;
 
-    if stored_device_ids.is_empty() || explicit_account_secret {
+    // Mint only into a store that has never held a device. A populated
+    // store whose rows do not include the requested id is either a
+    // mis-addressed open (wrong device id, wrong identity) or a stale
+    // copy — never silently answered with a fresh generation-0 device.
+    if stored_device_states == 0 {
+        debug_assert!(stored_device_ids.is_empty());
         let device = FiniteChatDevice::new(requested_config.clone()).map_err(client_error)?;
         requested_store
             .save_device_state(&device)
@@ -8517,6 +8536,21 @@ fn recover_or_create_device_state(
         return Ok((requested_store, requested_config));
     }
 
+    let missing = || FiniteChatCoreError::DeviceStateMissing {
+        db_path: db_path.display().to_string(),
+        requested_device_id: requested_config.device_id.clone(),
+        stored_device_ids: stored_device_ids.clone(),
+        stored_device_states,
+    };
+
+    // An explicit identity named an explicit device id; the store
+    // disagrees. Fail closed rather than guess.
+    if explicit_account_secret {
+        return Err(missing());
+    }
+
+    // Shared-identity single-device recovery: the store holds exactly one
+    // device for this account, so adopt it under its stored id.
     if stored_device_ids.len() == 1 {
         let mut recovered_config = requested_config;
         recovered_config.device_id = stored_device_ids[0].clone();
@@ -8532,13 +8566,7 @@ fn recover_or_create_device_state(
         return Ok((recovered_store, recovered_config));
     }
 
-    Err(FiniteChatCoreError::Client {
-        reason: format!(
-            "device state not found for requested device '{}'; stored devices for this account are: {}",
-            requested_config.device_id,
-            stored_device_ids.join(", ")
-        ),
-    })
+    Err(missing())
 }
 
 impl CoreState {
@@ -22993,6 +23021,73 @@ mod tests {
             now_unix_seconds: Some(NOW),
         })
         .unwrap()
+    }
+
+    /// T6 — no silent re-mint. A populated store opened with an explicit
+    /// identity and a device id it does not hold must fail closed with the
+    /// typed error, and must not write a new device row (a fresh device
+    /// under a known id is a generation-0 rewind).
+    #[test]
+    fn missing_device_row_in_populated_store_fails_closed_instead_of_minting() {
+        let dir = tempfile::tempdir().unwrap();
+        let server_url = spawn_live_http_server(dir.path().join("server.sqlite3"));
+        let data_dir = dir.path().join("agent");
+        let seed = "no-silent-mint";
+        let first = open_test_core_with_account(&data_dir, &server_url, "agent-a", seed);
+        let account_id = first.device.device_ref().account_id.clone();
+        drop(first);
+
+        let refused = match CoreState::open(OpenOptions {
+            data_dir: data_dir.to_string_lossy().into_owned(),
+            server_url: server_url.clone(),
+            device_id: "agent-b".to_owned(),
+            account_secret_hex: Some(test_account_secret_hex(seed)),
+            now_unix_seconds: Some(NOW),
+        }) {
+            Ok(_) => panic!("a populated store must not mint a second device id"),
+            Err(error) => error,
+        };
+        match &refused {
+            FiniteChatCoreError::DeviceStateMissing {
+                requested_device_id,
+                stored_device_ids,
+                stored_device_states,
+                db_path,
+            } => {
+                assert_eq!(requested_device_id, "agent-b");
+                assert_eq!(stored_device_ids, &["agent-a".to_owned()]);
+                assert_eq!(*stored_device_states, 1);
+                assert!(db_path.ends_with(CLIENT_STORE_FILE), "{db_path}");
+            }
+            other => panic!("expected DeviceStateMissing, got {other:?}"),
+        }
+        assert!(
+            refused.to_string().contains("finitechat hermes init"),
+            "the error names the explicit init path: {refused}"
+        );
+
+        // No row was written for the refused id.
+        let secret = parse_account_secret_hex(&test_account_secret_hex(seed)).unwrap();
+        let store = SqliteClientStore::open_read_only(
+            data_dir.join(CLIENT_STORE_FILE),
+            SqliteClientStoreOptions::from_nostr_secret(&secret, "agent-b").unwrap(),
+        )
+        .unwrap();
+        assert_eq!(
+            store.load_device_ids_for_account(&account_id).unwrap(),
+            vec!["agent-a".to_owned()]
+        );
+        assert_eq!(store.device_state_count().unwrap(), 1);
+        drop(store);
+
+        // The stored device still opens, and a genuinely empty store still
+        // mints.
+        let reopened = open_test_core_with_account(&data_dir, &server_url, "agent-a", seed);
+        assert_eq!(reopened.device.device_ref().device_id, "agent-a");
+        drop(reopened);
+        let fresh =
+            open_test_core_with_account(dir.path().join("fresh"), &server_url, "agent-b", seed);
+        assert_eq!(fresh.device.device_ref().device_id, "agent-b");
     }
 
     #[test]
