@@ -71,13 +71,6 @@ struct ApiError {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct ClaimImportsRequest {
-    pub selected_candidate_ids: Vec<String>,
-    pub now: Option<String>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct CreateAgentRequest {
     pub display_name: String,

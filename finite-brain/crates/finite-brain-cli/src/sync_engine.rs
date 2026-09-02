@@ -3609,10 +3609,7 @@ pub(crate) struct CliFolderKeyGrantPlaintext {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use finite_brain_core::portability::{
-        BrainDirectoryBrainSummary, BrainDirectoryManifest, BrainDirectoryPath,
-        BrainDirectoryPortability, BrainWorkingTreeStateManifest, WorkingTreeSyncState,
-    };
+    use finite_brain_core::portability::{BrainWorkingTreeStateManifest, WorkingTreeSyncState};
     use finite_brain_core::{DisplayName, validate_revision_event};
     use tempfile::TempDir;
 
@@ -5304,30 +5301,5 @@ mod tests {
             fs::read_to_string(root.join("home/notes/persisted.md")).unwrap(),
             persisted_plaintext
         );
-    }
-
-    #[allow(dead_code)]
-    fn _directory_manifest() -> BrainDirectoryManifest {
-        BrainDirectoryManifest {
-            version: "finite-brain-directory-v1".to_owned(),
-            brain: BrainDirectoryBrainSummary {
-                id: "brain".to_owned(),
-                kind: "personal".to_owned(),
-                name: "Brain".to_owned(),
-                owner_npub: Some("npub-owner".to_owned()),
-            },
-            working_tree: BrainDirectoryPath {
-                path: ".".to_owned(),
-            },
-            encrypted_sync: BrainDirectoryPath {
-                path: ".finitebrain/encrypted-sync".to_owned(),
-            },
-            portability: BrainDirectoryPortability {
-                owned_by_agent_runtime: true,
-                owned_by_app_surface: false,
-            },
-            created_at: "2026-06-26T23:30:00Z".to_owned(),
-            updated_at: "2026-06-26T23:30:00Z".to_owned(),
-        }
     }
 }

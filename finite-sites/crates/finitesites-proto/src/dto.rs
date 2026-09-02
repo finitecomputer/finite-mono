@@ -165,11 +165,6 @@ pub struct NativeViewerSessionExchangeResponse {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct SiteListResponse {
-    pub sites: Vec<SiteSummary>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ProjectInitRequest {
     pub config: ProjectConfig,
     /// True means validate and return the exact operations without mutating

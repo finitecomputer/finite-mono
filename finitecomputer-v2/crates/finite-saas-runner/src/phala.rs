@@ -1088,30 +1088,6 @@ impl Default for PhalaApiConfig {
 }
 
 impl PhalaApiConfig {
-    pub fn with_timeouts(
-        mut self,
-        connect_timeout: Duration,
-        read_timeout: Duration,
-        write_timeout: Duration,
-    ) -> Result<Self, PhalaApiError> {
-        for timeout in [connect_timeout, read_timeout, write_timeout] {
-            if timeout.is_zero() || timeout > Duration::from_secs(60) {
-                return Err(PhalaApiError::Configuration(
-                    "Phala HTTP timeouts must be between 1ns and 60 seconds",
-                ));
-            }
-        }
-        self.connect_timeout = connect_timeout;
-        self.read_timeout = read_timeout;
-        self.write_timeout = write_timeout;
-        Ok(self)
-    }
-
-    pub fn with_retry_policy(mut self, retry_policy: RetryPolicy) -> Self {
-        self.retry_policy = retry_policy;
-        self
-    }
-
     #[cfg(test)]
     fn for_fake_server(base_url: String) -> Self {
         Self {
@@ -1746,15 +1722,6 @@ pub enum PhalaApiError {
 }
 
 impl PhalaApiError {
-    pub fn status_details(&self) -> Option<(u16, &StatusDetails)> {
-        match self {
-            Self::Status {
-                status, details, ..
-            } => Some((*status, details)),
-            _ => None,
-        }
-    }
-
     fn is_retryable(&self) -> bool {
         match self {
             Self::Status {
@@ -2230,20 +2197,6 @@ impl ProvisionCvmRequest {
             listed: false,
             region: None,
         })
-    }
-
-    pub fn with_region(mut self, region: impl Into<String>) -> Result<Self, PhalaApiError> {
-        let region = region.into();
-        if region.is_empty()
-            || region.len() > 64
-            || !region
-                .bytes()
-                .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_'))
-        {
-            return Err(PhalaApiError::Contract("invalid Phala region"));
-        }
-        self.region = Some(region);
-        Ok(self)
     }
 }
 

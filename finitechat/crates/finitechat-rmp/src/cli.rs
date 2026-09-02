@@ -391,12 +391,6 @@ impl CliError {
     }
 
     #[allow(dead_code)]
-    pub fn with_choices(mut self, choices: Vec<JsonChoice>) -> Self {
-        self.choices = choices;
-        self
-    }
-
-    #[allow(dead_code)]
     pub fn with_detail(mut self, k: &str, v: serde_json::Value) -> Self {
         self.details.insert(k.to_string(), v);
         self

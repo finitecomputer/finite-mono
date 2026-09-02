@@ -1795,40 +1795,6 @@ pub fn validate_admin_access_change_event(
     Ok(payload)
 }
 
-/// Issue one canonical Brain admin access-change event from its typed validation contract.
-pub fn issue_admin_access_change_event(
-    admin_keys: &Keys,
-    input: &AdminAccessChangeValidation,
-    created_at_unix_seconds: u64,
-) -> Result<Event, CryptoRecordError> {
-    let signer_npub = NostrPublicKey::from_protocol(admin_keys.public_key())
-        .to_npub()
-        .map_err(|error| CryptoRecordError::EventMismatch {
-            reason: error.to_string(),
-        })?;
-    if signer_npub != input.admin_npub {
-        return brain_identity_provider_error(
-            "access-change signer does not match the named Brain admin",
-        );
-    }
-    let payload = AdminAccessChangePayload::new(input);
-    let tags = admin_access_change_tags(input)?
-        .into_iter()
-        .map(|parts| {
-            Tag::parse(parts).map_err(|error| CryptoRecordError::EventMismatch {
-                reason: error.to_string(),
-            })
-        })
-        .collect::<Result<Vec<_>, _>>()?;
-    EventBuilder::new(Kind::ApplicationSpecificData, payload.canonical_json())
-        .tags(tags)
-        .custom_created_at(Timestamp::from_secs(created_at_unix_seconds))
-        .finalize(admin_keys)
-        .map_err(|error| CryptoRecordError::EventMismatch {
-            reason: format!("access-change event could not be signed: {error}"),
-        })
-}
-
 /// Decoded view of a sync record's `payload_json`.
 ///
 /// `payload_json` is at once the persisted `brain_record_index` column, the

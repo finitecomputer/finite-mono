@@ -216,40 +216,6 @@ impl BrainStore {
         Ok(ids)
     }
 
-    /// Read the ADR-0046 Provenance stamped on one stored Folder Key Grant.
-    pub fn grant_provenance(
-        &self,
-        brain_id: &BrainId,
-        grant_id: &str,
-    ) -> Result<Option<GrantProvenance>, StoreError> {
-        self.conn
-            .query_row(
-                r#"
-                SELECT delegated_by_npub, origin_kind, origin_ref, roster_revision
-                FROM folder_key_grants
-                WHERE brain_id = ?1 AND id = ?2
-                "#,
-                params![brain_id.as_str(), grant_id],
-                |row| {
-                    let delegated_by = row
-                        .get::<_, Option<String>>(0)?
-                        .map(UserId::new)
-                        .transpose()
-                        .map_err(to_from_sql_error(0, rusqlite::types::Type::Text))?;
-                    let origin_kind = row.get::<_, String>(1)?;
-                    Ok(GrantProvenance {
-                        delegated_by_npub: delegated_by,
-                        origin_kind: ProvenanceOriginKind::try_from(origin_kind.as_str())
-                            .map_err(to_store_from_sql_error(1, rusqlite::types::Type::Text))?,
-                        origin_ref: row.get(2)?,
-                        roster_revision: row.get(3)?,
-                    })
-                },
-            )
-            .optional()
-            .map_err(StoreError::from)
-    }
-
     /// Read the ADR-0046 Provenance stamped on one Brain Membership row.
     pub fn member_provenance(
         &self,
