@@ -738,7 +738,7 @@ def check_tinfoil_collector_contract() -> None:
     )
     require_contains(
         collector,
-        'finite_tinfoil_source_sample_timestamp_seconds{container=\\"${CONTAINER}\\"} $(value_or_nan "$TS_VALUE")',
+        "value_or_nan",
         "collector sample timestamp must render NaN until a good sample",
     )
     require_contains(
@@ -750,6 +750,20 @@ def check_tinfoil_collector_contract() -> None:
         collector,
         'TEXTFILE="${STATE_DIR}/textfile/tinfoil.prom"',
         "collector must write the node_exporter textfile",
+    )
+    require_contains(
+        collector,
+        'container get "$CONTAINER" --output json',
+        "collector must use the same tinfoil CLI flags as finite-private-ops",
+    )
+    require_contains(
+        collector,
+        "timeout -s TERM",
+        "collector must bound the tinfoil CLI and usage command",
+    )
+    require(
+        "up{" not in collector,
+        "Tinfoil collector health must fail closed on sample age, not up{}",
     )
 
 

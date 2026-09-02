@@ -47,19 +47,6 @@ scrape_configs:
     relabel_configs: *blackbox_relabel
     metric_relabel_configs: *probe_metrics
 
-  # node_exporter in textfile-only mode exposing the Tinfoil usage
-  # collector's finite_tinfoil_* exposition (see infra/monitoring/tinfoil/).
-  - job_name: finite-tinfoil-collector
-    scrape_interval: 1m
-    static_configs:
-      - targets: [127.0.0.1:9100]
-        labels:
-          probe: finite-monitoring
-    metric_relabel_configs:
-      - source_labels: [__name__]
-        regex: finite_tinfoil_.*
-        action: keep
-
   - job_name: finitechat-native-mockup.finite.chat
     metrics_path: /probe
     params:
@@ -81,3 +68,16 @@ scrape_configs:
           probe: finite-monitoring
     relabel_configs: *blackbox_relabel
     metric_relabel_configs: *probe_metrics
+
+  # node_exporter in textfile-only mode exposing the Tinfoil usage
+  # collector's finite_tinfoil_* exposition.
+  - job_name: finite-tinfoil-collector
+    scrape_interval: 1m
+    static_configs:
+      - targets: [127.0.0.1:9100]
+        labels:
+          probe: finite-monitoring
+    metric_relabel_configs:
+      - source_labels: [__name__]
+        regex: finite_tinfoil_.*
+        action: keep

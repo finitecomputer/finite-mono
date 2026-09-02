@@ -26,6 +26,9 @@ EXPECTED_FILES = [
     "systemd/finite-monitoring-loki.service",
     "systemd/finite-monitoring-grafana.service",
     "systemd/finite-monitoring-caddy.service",
+    "systemd/finite-monitoring-node-exporter.service",
+    "systemd/finite-monitoring-tinfoil-collector.service",
+    "systemd/finite-monitoring-tinfoil-collector.timer",
 ]
 
 EXPECTED_VERSION_KEYS = {
@@ -39,6 +42,10 @@ EXPECTED_VERSION_KEYS = {
     "CADDY_SHA512": r"[0-9a-f]{128}",
     "LOKI_VERSION": "3.5.8",
     "LOKI_SHA256": r"[0-9a-f]{64}",
+    "NODE_EXPORTER_VERSION": "1.9.1",
+    "NODE_EXPORTER_SHA256": r"[0-9a-f]{64}",
+    "JQ_VERSION": "1.8.1",
+    "JQ_SHA256": r"[0-9a-f]{64}",
 }
 
 
@@ -86,6 +93,8 @@ def check_versions() -> None:
         "BLACKBOX_EXPORTER_URL",
         "CADDY_URL",
         "LOKI_URL",
+        "NODE_EXPORTER_URL",
+        "JQ_URL",
     ]:
         require(key in versions, f"versions.env missing {key}")
         require(versions[key].startswith("https://"), f"{key} must use https")
@@ -126,8 +135,13 @@ def check_prometheus() -> None:
         "brain.finite.computer",
         "finitechat-native-mockup.finite.chat",
         "uptime-probe.docs.finite.chat",
+        "finite-tinfoil-collector",
     ]:
         require_contains(prometheus, f"job_name: {job}", "Prometheus public probes")
+    require_contains(
+        prometheus, "targets: [127.0.0.1:9100]", "Tinfoil textfile scrape target"
+    )
+    require_contains(prometheus, "regex: finite_tinfoil_.*", "Tinfoil scrape keep-list")
     require_contains(
         prometheus, "replacement: 127.0.0.1:9115", "Prometheus blackbox target"
     )
@@ -228,20 +242,24 @@ def check_systemd() -> None:
             "ExecStart=/opt/finite-monitoring/bin/node_exporter --web.listen-address=127.0.0.1:9100",
             "--collector.disable-defaults",
             "--collector.textfile",
+            "--collector.textfile.directory=/var/lib/finite-monitoring/tinfoil/textfile",
         ],
         "finite-monitoring-tinfoil-collector.service": [
             "User=finite-monitoring",
+            "Environment=PATH=/opt/finite-monitoring/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin",
             "EnvironmentFile=/etc/finite/monitoring/tinfoil.env",
             "ExecStart=/opt/finite-monitoring/bin/tinfoil-usage-collector",
+            "TimeoutStartSec=90",
         ],
         "finite-monitoring-tinfoil-collector.timer": [
             "OnUnitActiveSec=60s",
             "Unit=finite-monitoring-tinfoil-collector.service",
         ],
     }
+    oneshot_units = {"finite-monitoring-tinfoil-collector.service"}
     for unit_name, needles in expected_units.items():
         unit = read(UBUNTU / "systemd" / unit_name)
-        if unit_name == "finite-monitoring-tinfoil-collector.service":
+        if unit_name in oneshot_units:
             # Type=oneshot rejects Restart=; the timer owns the cadence.
             require_contains(unit, "Type=oneshot", unit_name)
             require(
@@ -292,6 +310,11 @@ def check_deploy_script() -> None:
         deploy,
         "finite-monitoring-tinfoil-collector.timer",
         "deploy script Tinfoil timer",
+    )
+    require_contains(
+        deploy,
+        "tinfoil/textfile/tinfoil.prom",
+        "deploy script must require a textfile after the first cycle",
     )
 
 

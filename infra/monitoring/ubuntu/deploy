@@ -242,7 +242,7 @@ install -m 0755 "${staging}/infra/monitoring/tinfoil/tinfoil-usage-collector" \
 # Operator-provisioned credential for the Tinfoil organization key.
 # Created empty (mode 0600) if absent; documented by NAME only — never a value.
 if [[ ! -e /etc/finite/monitoring/tinfoil.env ]]; then
-  install -m 0600 /dev/null /etc/finite/monitoring/tinfoil.env
+  install -m 0640 -o root -g finite-monitoring /dev/null /etc/finite/monitoring/tinfoil.env
 fi
 chown root:finite-monitoring /etc/finite/monitoring/tinfoil.env
 chmod 0640 /etc/finite/monitoring/tinfoil.env
@@ -289,9 +289,10 @@ systemctl restart \
   finite-monitoring-caddy.service \
   finite-monitoring-node-exporter.service
 # One collector cycle now (as the service user), so the textfile exists
-# before Prometheus scrapes. Fails closed when the tinfoil CLI or key is
-# not yet provisioned; the timer retries every minute.
-systemctl start finite-monitoring-tinfoil-collector.service || true
+# before Prometheus scrapes. The oneshot itself is fail-closed: a missing
+# tinfoil CLI or key still writes NaN/zero series and exits 0.
+systemctl start finite-monitoring-tinfoil-collector.service
+test -s /var/lib/finite-monitoring/tinfoil/textfile/tinfoil.prom
 
 for unit in \
   finite-monitoring-blackbox-exporter.service \
