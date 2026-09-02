@@ -40,6 +40,8 @@ use finitesites_store::{
 };
 
 const VIEWER_SESSION_SERVICE_TOKEN_ENV: &str = "FINITE_SITES_VIEWER_SESSION_TOKEN";
+const AUTH_GATE_URL_ENV: &str = "FINITE_SITES_AUTH_GATE_URL";
+const AUTH_GATE_PUBKEY_ENV: &str = "FINITE_SITES_AUTH_GATE_PUBKEY";
 
 pub struct ServeOptions {
     pub data_dir: PathBuf,
@@ -48,9 +50,19 @@ pub struct ServeOptions {
     pub document_base_domain: String,
     pub api_url: String,
     pub git_base_url: String,
-    /// Dedicated account-boundary credential for the internal viewer-session
-    /// exchange. It comes from the environment, never argv.
+    /// Dedicated account-boundary credential for the internal
+    /// hosted-requester-assertion exchange. It comes from the environment,
+    /// never argv.
     pub viewer_session_service_token: Option<String>,
+    /// Base URL of the Finite Auth Gate (e.g. https://auth.finite.computer).
+    /// When set, a browser needing viewer auth is redirected there instead
+    /// of receiving a 401 login page. Environment name:
+    /// FINITE_SITES_AUTH_GATE_URL.
+    pub auth_gate_url: Option<String>,
+    /// The gate's pinned vouch-signing public key (64 lowercase hex chars),
+    /// the counterpart of the gate's FINITE_GATE_SIGNING_KEY. Environment
+    /// name: FINITE_SITES_AUTH_GATE_PUBKEY.
+    pub auth_gate_pubkey: Option<String>,
     pub git_hook_helper_path: PathBuf,
     pub git_auto_reconcile: bool,
     pub site_url_scheme: String,
@@ -250,6 +262,33 @@ fn parse_serve_options(args: &[String]) -> Result<ServeOptions, String> {
         .map(|value| value.trim().to_string())
         .filter(|value| !value.is_empty());
     validate_viewer_session_service_token(viewer_session_service_token.as_deref())?;
+    let auth_gate_url = std::env::var(AUTH_GATE_URL_ENV)
+        .ok()
+        .map(|value| value.trim().trim_end_matches('/').to_string())
+        .filter(|value| !value.is_empty());
+    if let Some(url) = &auth_gate_url
+        && (!url.starts_with("http://") && !url.starts_with("https://") || url.len() > 2048)
+    {
+        return Err(format!("{AUTH_GATE_URL_ENV} must be an http(s) origin"));
+    }
+    let auth_gate_pubkey = std::env::var(AUTH_GATE_PUBKEY_ENV)
+        .ok()
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty());
+    if let Some(pubkey) = &auth_gate_pubkey
+        && !hex::is_hex32(pubkey)
+    {
+        return Err(format!(
+            "{AUTH_GATE_PUBKEY_ENV} must be exactly 64 lowercase hex characters"
+        ));
+    }
+    // The gate URL and its pinned key configure one capability: redirecting
+    // unauthenticated viewers to the gate. Half a gate is never useful.
+    if auth_gate_url.is_some() != auth_gate_pubkey.is_some() {
+        return Err(format!(
+            "{AUTH_GATE_URL_ENV} and {AUTH_GATE_PUBKEY_ENV} must be set together"
+        ));
+    }
     let git_hook_helper_path = match flag_value(&flags, "git-hook-helper") {
         Some(raw) => PathBuf::from(raw),
         None => std::env::current_exe()
@@ -293,6 +332,8 @@ fn parse_serve_options(args: &[String]) -> Result<ServeOptions, String> {
         api_url,
         git_base_url,
         viewer_session_service_token,
+        auth_gate_url,
+        auth_gate_pubkey,
         git_hook_helper_path,
         git_auto_reconcile,
         site_url_scheme,
@@ -750,6 +791,48 @@ mod tests {
         assert_eq!(
             std::fs::read_to_string(dir.path().join("cookie-secret")).unwrap(),
             "secret"
+        );
+    }
+
+    #[test]
+    fn auth_gate_configuration_must_arrive_complete_and_wellformed() {
+        // Helper mirroring parse_serve_options' gate validation.
+        fn check(url: Option<&str>, pubkey: Option<&str>) -> Result<(), String> {
+            let auth_gate_url = url.map(str::to_string).filter(|value| !value.is_empty());
+            if let Some(url) = &auth_gate_url
+                && (!url.starts_with("http://") && !url.starts_with("https://") || url.len() > 2048)
+            {
+                return Err("url".to_string());
+            }
+            let auth_gate_pubkey = pubkey.map(str::to_string).filter(|value| !value.is_empty());
+            if let Some(pubkey) = &auth_gate_pubkey
+                && !hex::is_hex32(pubkey)
+            {
+                return Err("pubkey".to_string());
+            }
+            if auth_gate_url.is_some() != auth_gate_pubkey.is_some() {
+                return Err("pair".to_string());
+            }
+            Ok(())
+        }
+
+        assert!(check(None, None).is_ok());
+        assert!(
+            check(
+                Some("http://auth.sites.localhost:8792"),
+                Some("0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef")
+            )
+            .is_ok()
+        );
+        assert_eq!(check(Some("http://gate"), None).unwrap_err(), "pair");
+        assert_eq!(check(None, Some(&"ab".repeat(32))).unwrap_err(), "pair");
+        assert_eq!(
+            check(Some("ftp://gate"), Some(&"ab".repeat(32))).unwrap_err(),
+            "url"
+        );
+        assert_eq!(
+            check(Some("http://gate"), Some("not-hex")).unwrap_err(),
+            "pubkey"
         );
     }
 

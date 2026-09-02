@@ -44,6 +44,14 @@ in
       reverse_proxy 127.0.0.1:3015
     '';
 
+    # The Finite Auth Gate (finite-gated). Viewers gate here: private Finite
+    # Site outputs redirect unauthenticated browsers to this origin, and the
+    # gate's own session cookie lives on this hostname only. The edge is
+    # dumb: the daemon owns its whole public route surface in code.
+    virtualHosts."auth.finite.computer".extraConfig = ''
+      reverse_proxy 127.0.0.1:8792
+    '';
+
     # Canonical Finite Identity signing/API origin. The edge is dumb on
     # purpose: it proxies the service's public listener verbatim and keeps no
     # route list. Finite Identity owns its public surface in code

@@ -1,0 +1,28 @@
+[package]
+name = "finite-gated"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[[bin]]
+name = "finite-gated"
+path = "src/main.rs"
+
+[dependencies]
+anyhow = { workspace = true }
+axum = { workspace = true }
+base64 = { workspace = true }
+finite-authn = { path = "../finite-authn" }
+getrandom = { workspace = true }
+hmac = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+sha2 = { workspace = true }
+tokio = { workspace = true }
+url = "2"
+workos = { workspace = true }
+
+[dev-dependencies]
+tower = { workspace = true, features = ["util"] }

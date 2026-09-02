@@ -18,7 +18,6 @@ finitechat-hermes = { path = "../finitechat-hermes" }
 finitechat-http = { path = "../finitechat-http" }
 finitechat-mls = { path = "../finitechat-mls" }
 finitechat-proto = { path = "../finitechat-proto" }
-base64.workspace = true
 getrandom.workspace = true
 hex.workspace = true
 hkdf.workspace = true

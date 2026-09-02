@@ -25,7 +25,7 @@ use finitesites_proto::dto::{
 use finitesites_proto::limits::{
     LOGIN_TOKEN_TTL_SECONDS, MAX_APP_BUNDLE_BYTES, MAX_EMAIL_KEYS_PER_EMAIL,
     MAX_EMAILS_PER_SHARING_REQUEST, MAX_FILE_BYTES, MAX_SHARES_PER_SITE, MAX_SITES_PER_OWNER,
-    NIP98_MAX_SKEW_SECONDS, VIEWER_COOKIE_TTL_SECONDS,
+    VIEWER_COOKIE_TTL_SECONDS,
 };
 use finitesites_proto::manifest::APP_BUNDLE_PATH;
 use finitesites_proto::project_config::ProjectOutputKind;
@@ -185,20 +185,8 @@ pub struct FoundFile {
 pub enum ViewAccess {
     /// Viewer may see the site content.
     Allowed,
-    /// Viewer must authenticate via magic link (or never can, for private).
+    /// Viewer must authenticate via the Auth Gate (or never can, for private).
     NeedsLogin,
-}
-
-#[derive(Debug)]
-pub struct LoginLink {
-    pub site_name: String,
-    pub email: String,
-    pub url: String,
-}
-
-#[derive(Debug)]
-pub struct NativeViewerLink {
-    pub url: String,
 }
 
 #[derive(Debug, Clone)]
@@ -1857,215 +1845,26 @@ impl Engine {
         }))
     }
 
-    // ---- native viewer auth -------------------------------------------------
+    // ---- viewer sessions -----------------------------------------------------
 
-    pub fn native_viewer_session(
-        &mut self,
+    /// Mint the host-scoped viewer cookie for an email the caller has
+    /// already verified out-of-band (the Auth Gate vouch — see
+    /// `finite-authn`). This is the one viewer-cookie minting path for
+    /// browser flows; share-table authority is still re-checked on every
+    /// content request by `view_access`.
+    pub fn mint_email_viewer_cookie(
+        &self,
         site: &SiteRecord,
-        signer_pubkey: &str,
-        nonce: &str,
+        email: &str,
         now: u64,
     ) -> Result<String, EngineError> {
-        let principal_id = self.authorize_native_viewer(site, signer_pubkey, nonce, now)?;
+        let normalized = validate_email(email)?;
         Ok(ViewerCookie {
             site_id: site.id.clone(),
-            subject: ViewerCookieSubject::PrincipalId(principal_id),
+            subject: ViewerCookieSubject::ExternalEmail(normalized),
             expires_at: now + VIEWER_COOKIE_TTL_SECONDS,
         }
         .sign(&self.cookie_secret))
-    }
-
-    pub fn request_native_viewer_link(
-        &mut self,
-        site: &SiteRecord,
-        signer_pubkey: &str,
-        nonce: &str,
-        now: u64,
-    ) -> Result<NativeViewerLink, EngineError> {
-        let principal_id = self.authorize_native_viewer(site, signer_pubkey, nonce, now)?;
-        let token = hex::encode(&ids::random_32());
-        let token_hash = hex::encode(&Sha256::digest(token.as_bytes()));
-        self.store.create_native_viewer_token(
-            &token_hash,
-            &site.id,
-            &principal_id,
-            now + LOGIN_TOKEN_TTL_SECONDS,
-            now,
-        )?;
-        Ok(NativeViewerLink {
-            url: format!(
-                "{}_finite/auth?native_token={token}",
-                self.output_url_for_site(site)
-            ),
-        })
-    }
-
-    fn authorize_native_viewer(
-        &mut self,
-        site: &SiteRecord,
-        signer_pubkey: &str,
-        nonce: &str,
-        now: u64,
-    ) -> Result<String, EngineError> {
-        if !hex::is_hex32(signer_pubkey)
-            || site.status != SiteStatus::Published
-            || site.visibility == Visibility::Public
-        {
-            return Err(EngineError::NotAuthorized);
-        }
-        let principal = self
-            .store
-            .principal_by_pubkey(signer_pubkey)?
-            .ok_or(EngineError::NotAuthorized)?;
-        if !self.store.is_principal_shared(&site.id, &principal.id)?
-            && !self
-                .store
-                .is_principal_authorized_publisher(&site.id, &principal.id)?
-        {
-            return Err(EngineError::NotAuthorized);
-        }
-        self.store
-            .record_native_viewer_nonce(
-                &site.id,
-                signer_pubkey,
-                nonce,
-                now + NIP98_MAX_SKEW_SECONDS,
-                now,
-            )
-            .map_err(|error| match error {
-                StoreError::Conflict("native viewer nonce replay") => {
-                    EngineError::Conflict("native viewer nonce replay")
-                }
-                other => EngineError::Store(other),
-            })?;
-        Ok(principal.id)
-    }
-
-    pub fn redeem_native_viewer_link(
-        &mut self,
-        token: &str,
-        now: u64,
-    ) -> Result<(SiteRecord, String), EngineError> {
-        if !hex::is_hex32(token) {
-            return Err(EngineError::Validation("malformed token"));
-        }
-        let token_hash = hex::encode(&Sha256::digest(token.as_bytes()));
-        let (site_id, principal_id) = self
-            .store
-            .redeem_native_viewer_token(&token_hash, now)
-            .map_err(|error| match error {
-                StoreError::NotFound(_) | StoreError::Conflict(_) => {
-                    EngineError::Validation("unknown or expired link")
-                }
-                other => EngineError::Store(other),
-            })?;
-        let site = self
-            .store
-            .site_by_id(&site_id)?
-            .ok_or(StoreError::CorruptState(
-                "native viewer token references missing site",
-            ))?;
-        let cookie = ViewerCookie {
-            site_id,
-            subject: ViewerCookieSubject::PrincipalId(principal_id),
-            expires_at: now + VIEWER_COOKIE_TTL_SECONDS,
-        }
-        .sign(&self.cookie_secret);
-        Ok((site, cookie))
-    }
-
-    // ---- magic-link login --------------------------------------------------------
-
-    /// Issue a mailbox-verification token without revealing share status.
-    pub fn request_login(
-        &mut self,
-        name: &str,
-        email: &str,
-        now: u64,
-    ) -> Result<Option<LoginLink>, EngineError> {
-        let Some(site) = self.store.site_by_name(name)? else {
-            return Ok(None);
-        };
-        self.request_login_for_site(&site, email, now)
-    }
-
-    pub fn request_login_for_site(
-        &mut self,
-        site: &SiteRecord,
-        email: &str,
-        now: u64,
-    ) -> Result<Option<LoginLink>, EngineError> {
-        let normalized = match validate_email(email) {
-            Ok(normalized) => normalized,
-            Err(_) => return Ok(None),
-        };
-        if !matches!(site.visibility, Visibility::Shared | Visibility::Private) {
-            return Ok(None);
-        }
-
-        let token = hex::encode(&ids::random_32());
-        let token_hash = hex::encode(&Sha256::digest(token.as_bytes()));
-        self.store.create_login_token(
-            &token_hash,
-            &site.id,
-            &normalized,
-            now + LOGIN_TOKEN_TTL_SECONDS,
-            now,
-        )?;
-        let url = format!(
-            "{}_finite/auth?token={token}",
-            self.config
-                .output_url(site.kind.as_output_kind(), &site.name)
-        );
-        Ok(Some(LoginLink {
-            site_name: site.name.clone(),
-            email: normalized,
-            url,
-        }))
-    }
-
-    /// Redeem a magic-link token; returns the site and a viewer cookie value.
-    pub fn redeem_login(
-        &mut self,
-        token: &str,
-        now: u64,
-    ) -> Result<(SiteRecord, String), EngineError> {
-        self.redeem_login_with_email(token, now)
-            .map(|(site, cookie, _email)| (site, cookie))
-    }
-
-    pub fn redeem_login_with_email(
-        &mut self,
-        token: &str,
-        now: u64,
-    ) -> Result<(SiteRecord, String, String), EngineError> {
-        if !hex::is_hex32(token) {
-            return Err(EngineError::Validation("malformed token"));
-        }
-        let token_hash = hex::encode(&Sha256::digest(token.as_bytes()));
-        let (site_id, email) = match self.store.redeem_login_token(&token_hash, now) {
-            Ok(redeemed) => redeemed,
-            Err(StoreError::NotFound(_)) => {
-                return Err(EngineError::Validation("unknown or expired link"));
-            }
-            Err(StoreError::Conflict(_)) => {
-                return Err(EngineError::Validation("unknown or expired link"));
-            }
-            Err(other) => return Err(other.into()),
-        };
-        let site = self
-            .store
-            .site_by_id(&site_id)?
-            .ok_or(StoreError::CorruptState(
-                "login token references missing site",
-            ))?;
-        let cookie = ViewerCookie {
-            site_id,
-            subject: ViewerCookieSubject::ExternalEmail(email.clone()),
-            expires_at: now + VIEWER_COOKIE_TTL_SECONDS,
-        }
-        .sign(&self.cookie_secret);
-        Ok((site, cookie, email))
     }
 
     pub fn request_site_access(

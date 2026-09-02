@@ -109,9 +109,14 @@ in
       #   RESEND_API_KEY
       # FINITE_SITES_VIEWER_SESSION_TOKEN in the second file must be exactly
       # 64 lowercase hex characters (`openssl rand -hex 32`).
+      # FINITE_SITES_AUTH_GATE_URL + FINITE_SITES_AUTH_GATE_PUBKEY in the
+      # third file configure viewer redirects to the Auth Gate; the pubkey is
+      # the counterpart of finite-gated's FINITE_GATE_SIGNING_KEY (the gate
+      # logs it at startup) and must be set together with the URL.
       EnvironmentFile = [
         "/etc/finite-saas/sites.env"
         "/etc/finite/sites-viewer-session.env"
+        "/etc/finite/sites-auth-gate.env"
       ];
       Restart = "on-failure";
       RestartSec = 2;

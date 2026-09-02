@@ -1,29 +1,27 @@
 //! The site-serving plane: everything under `{name}.{base_domain}`.
 //!
 //! Visibility gate first, then path lookup in the active version, then the
-//! blob. Magic-link auth lives here too, on the site's own host, so the
-//! viewer cookie is naturally host-scoped.
+//! blob. Viewer auth lives here too: a browser without a session is
+//! redirected (top-level) to the deployment's Auth Gate, which returns with
+//! a signed vouch that this handler verifies offline and exchanges for the
+//! host-scoped viewer cookie.
 
 use std::collections::HashMap;
 use std::sync::Arc;
 
 use axum::Router;
-use axum::body::{Body, Bytes};
+use axum::body::Body;
 use axum::extract::{Form, Query, State};
 use axum::http::header::{
-    AUTHORIZATION, CACHE_CONTROL, CONTENT_TYPE, COOKIE, ETAG, HOST, IF_NONE_MATCH, LOCATION,
-    SET_COOKIE,
+    CACHE_CONTROL, CONTENT_TYPE, COOKIE, ETAG, HOST, IF_NONE_MATCH, LOCATION, SET_COOKIE,
 };
-use axum::http::{HeaderMap, HeaderValue, Method, StatusCode, Uri};
+use axum::http::{HeaderMap, HeaderValue, Method, StatusCode};
 use axum::response::{Html, IntoResponse, Response};
 use axum::routing::{get, post};
-use serde::Deserialize;
 
 use finitesites_blob::BlobStore;
 use finitesites_engine::{EngineError, ViewAccess};
-use finitesites_proto::dto::NativeViewerSessionRequest;
-use finitesites_proto::limits::{MAX_NATIVE_VIEWER_AUTH_BODY_BYTES, VIEWER_COOKIE_TTL_SECONDS};
-use finitesites_proto::nip98;
+use finitesites_proto::limits::VIEWER_COOKIE_TTL_SECONDS;
 use finitesites_store::{SiteKind, SiteRecord, SiteStatus};
 
 use crate::content_type::content_type_for_path;
@@ -34,23 +32,9 @@ use crate::server::{AppState, now_unix, site_label};
 const VIEWER_COOKIE_NAME: &str = "finite_site_auth";
 const PARTITIONED_VIEWER_COOKIE_NAME: &str = "__Host-finite_site_auth_partitioned";
 
-enum RedeemedViewer {
-    Email {
-        site: SiteRecord,
-        cookie_value: String,
-        email: String,
-    },
-    Native {
-        site: SiteRecord,
-        cookie_value: String,
-    },
-}
-
 pub fn router(state: Arc<AppState>) -> Router {
     Router::new()
-        .route("/_finite/auth", get(redeem_link))
-        .route("/_finite/auth/native-session", post(native_session))
-        .route("/_finite/request-link", post(request_link))
+        .route("/_finite/auth", get(redeem_gate_code))
         .route("/_finite/request-access", post(request_access))
         .route(
             "/_finite/approve-access",
@@ -73,7 +57,7 @@ async fn request_access(State(state): State<Arc<AppState>>, headers: HeaderMap) 
         }
     };
     let Some(cookie_value) = viewer_cookie_value(&headers) else {
-        return html_response(StatusCode::UNAUTHORIZED, pages::login(&site.name));
+        return html_response(StatusCode::UNAUTHORIZED, pages::private_site());
     };
     let request = {
         let mut engine = state.engine.lock().expect("engine mutex never poisoned");
@@ -109,7 +93,7 @@ async fn request_access(State(state): State<Arc<AppState>>, headers: HeaderMap) 
             response
         }
         Err(EngineError::NotAuthorized) => {
-            html_response(StatusCode::UNAUTHORIZED, pages::login(&site.name))
+            html_response(StatusCode::UNAUTHORIZED, pages::private_site())
         }
         Err(error) => {
             eprintln!("finitesitesd request-access error: {error}");
@@ -347,7 +331,7 @@ async fn serve_path(
     match access {
         Ok(Ok(ViewAccess::Allowed)) => {}
         Ok(Ok(ViewAccess::NeedsLogin)) => {
-            return html_response(StatusCode::UNAUTHORIZED, pages::login(&site.name));
+            return auth_needed_response(&state, &headers, &method, uri.path_and_query());
         }
         Ok(Err(error)) => {
             eprintln!("finitesitesd access error: {error}");
@@ -613,91 +597,82 @@ fn hex_nibble(byte: u8) -> Option<u8> {
     }
 }
 
-// ---- magic-link auth -------------------------------------------------------------
+// ---- gate auth -------------------------------------------------------------------
 
-#[derive(Deserialize)]
-struct RequestLinkForm {
-    email: String,
+/// The canonical origin of this request's output host, spelled exactly the
+/// way the Auth Gate spells vouch audiences (`scheme://host[:port]`). The
+/// Host header carries the port whenever it is non-default, matching the
+/// gate's origin canonicalization; a Host that redundantly spells a default
+/// port would mismatch the gate's canonical form and fail closed.
+fn request_output_origin(state: &AppState, headers: &HeaderMap) -> Option<String> {
+    let host = headers.get(HOST)?.to_str().ok()?;
+    let is_output_host = site_label(host, &state.base_domain).is_some()
+        || site_label(host, &state.document_base_domain).is_some();
+    if !is_output_host || host.len() > 255 {
+        return None;
+    }
+    Some(format!("{}://{host}", state.site_url_scheme))
 }
 
-/// Best-effort client identity for rate limiting. CF-Connecting-IP is
-/// trustworthy when Cloudflare proxies the wildcard (the deploy doc pins
-/// this); X-Forwarded-For covers a local reverse proxy. A spoofable header
-/// only weakens the per-IP budget — the per-email budget binds regardless.
-fn client_key(headers: &HeaderMap) -> String {
-    let from_header = headers
-        .get("cf-connecting-ip")
-        .or_else(|| headers.get("x-forwarded-for"))
-        .and_then(|value| value.to_str().ok())
-        .and_then(|value| value.split(',').next())
-        .map(str::trim)
-        .filter(|value| !value.is_empty() && value.len() <= 64);
-    from_header.unwrap_or("direct").to_string()
+fn encode_query_component(value: &str) -> String {
+    let mut encoded = String::with_capacity(value.len());
+    for byte in value.bytes() {
+        if byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'.' | b'_' | b'~') {
+            encoded.push(char::from(byte));
+        } else {
+            use std::fmt::Write as _;
+            write!(&mut encoded, "%{byte:02X}").expect("writing to String cannot fail");
+        }
+    }
+    encoded
 }
 
-async fn request_link(
-    State(state): State<Arc<AppState>>,
-    headers: HeaderMap,
-    Form(form): Form<RequestLinkForm>,
+/// The auth-needed response: a top-level redirect to the Auth Gate carrying
+/// this output's canonical origin and a bounded same-origin return path.
+/// The gate never sets the viewer cookie; it comes back with a vouch and
+/// `redeem_gate_code` mints the session here. Non-navigation methods and
+/// unconfigured deployments keep a plain 401 page.
+fn auth_needed_response(
+    state: &AppState,
+    headers: &HeaderMap,
+    method: &Method,
+    path_and_query: Option<&axum::http::uri::PathAndQuery>,
 ) -> Response {
-    let site = match resolve_request_site(&state, &headers).await {
-        Ok(Some(site)) => site,
-        Ok(None) => return html_response(StatusCode::NOT_FOUND, pages::unknown_site()),
-        Err(error) => {
-            eprintln!("finitesitesd request-link error: {error}");
-            return internal_page();
-        }
+    let navigation = method == Method::GET || method == Method::HEAD;
+    let Some(gate) = state.auth_gate.as_ref() else {
+        return html_response(StatusCode::UNAUTHORIZED, pages::private_site());
     };
-
-    // Rate limits render the same generic page as success so the limiter
-    // cannot be used to probe the share list.
-    let now = now_unix();
-    let ip_key = format!("ip:{}", client_key(&headers));
-    let email_key = format!(
-        "email:{}:{}",
-        site.id,
-        form.email.trim().to_ascii_lowercase()
+    if !navigation {
+        return html_response(StatusCode::UNAUTHORIZED, pages::private_site());
+    }
+    let Some(origin) = request_output_origin(state, headers) else {
+        return html_response(StatusCode::UNAUTHORIZED, pages::private_site());
+    };
+    let raw_return = path_and_query
+        .map(|value| value.as_str())
+        .filter(|value| crate::api::valid_return_to(value))
+        .unwrap_or("/");
+    let location = format!(
+        "{}/authorize?output={}&return_to={}",
+        gate.url,
+        encode_query_component(&origin),
+        encode_query_component(raw_return)
     );
-    let ip_allowed =
-        state
-            .login_limiter
-            .check_and_record(&ip_key, crate::limiter::MAX_LINKS_PER_IP, now);
-    let email_allowed =
-        state
-            .login_limiter
-            .check_and_record(&email_key, crate::limiter::MAX_LINKS_PER_EMAIL, now);
-    if !ip_allowed || !email_allowed {
-        return html_response(StatusCode::OK, pages::link_sent());
-    }
-
-    let link = {
-        let mut engine = state.engine.lock().expect("engine mutex never poisoned");
-        engine.request_login_for_site(&site, &form.email, now_unix())
-    };
-    match link {
-        Ok(Some(link)) => {
-            if let Err(error) =
-                state
-                    .mailer
-                    .send_login_link(&link.email, &link.site_name, &link.url)
-            {
-                eprintln!("finitesitesd mail error: {error}");
-                return internal_page();
-            }
-        }
-        Ok(None) => {
-            // Same response whether or not the email has access: no
-            // share-list enumeration through this endpoint.
-        }
-        Err(error) => {
-            eprintln!("finitesitesd login error: {error}");
-            return internal_page();
-        }
-    }
-    html_response(StatusCode::OK, pages::link_sent())
+    Response::builder()
+        .status(StatusCode::SEE_OTHER)
+        .header(LOCATION, location)
+        .header(CACHE_CONTROL, "no-store")
+        .body(Body::empty())
+        .expect("static response builds")
 }
 
-async fn redeem_link(
+/// Verify a gate vouch offline (pinned public key, exact origin audience,
+/// single-use nonce) and, when the vouched email may view the site, set the
+/// existing host-scoped viewer cookie and continue to the return path. An
+/// email that is not shared gets the not-shared page (and a cookie that
+/// grants nothing — share rows are re-checked on every request — but keeps
+/// the request-access flow usable), exactly like the pre-gate ceremony.
+async fn redeem_gate_code(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
     Query(params): Query<HashMap<String, String>>,
@@ -706,196 +681,92 @@ async fn redeem_link(
         Ok(Some(site)) => site,
         Ok(None) => return html_response(StatusCode::NOT_FOUND, pages::unknown_site()),
         Err(error) => {
-            eprintln!("finitesitesd redeem error: {error}");
+            eprintln!("finitesitesd vouch redeem error: {error}");
             return internal_page();
         }
     };
-    let email_token = params.get("token");
-    let native_token = params.get("native_token");
-    if email_token.is_some() == native_token.is_some() {
-        return html_response(StatusCode::BAD_REQUEST, pages::link_invalid());
-    }
+    let Some(gate) = state.auth_gate.as_ref() else {
+        return bad_request_page();
+    };
+    let Some(code) = params.get("gate_code").filter(|code| !code.is_empty()) else {
+        return bad_request_page();
+    };
     let return_to = match params.get("return_to") {
         Some(path) if crate::api::valid_return_to(path) => path.as_str(),
-        Some(_) => return html_response(StatusCode::BAD_REQUEST, pages::link_invalid()),
+        Some(_) => return bad_request_page(),
         None => "/",
     };
-
-    let redeemed = {
-        let mut engine = state.engine.lock().expect("engine mutex never poisoned");
-        match (email_token, native_token) {
-            (Some(token), None) => engine.redeem_login_with_email(token, now_unix()).map(
-                |(site, cookie_value, email)| RedeemedViewer::Email {
-                    site,
-                    cookie_value,
-                    email,
-                },
-            ),
-            (None, Some(token)) => engine
-                .redeem_native_viewer_link(token, now_unix())
-                .map(|(site, cookie_value)| RedeemedViewer::Native { site, cookie_value }),
-            _ => unreachable!("token shape validated above"),
-        }
-    };
-    match redeemed {
-        Ok(redeemed) => {
-            let (token_site, cookie_value, verified_email) = match redeemed {
-                RedeemedViewer::Email {
-                    site,
-                    cookie_value,
-                    email,
-                } => (site, cookie_value, Some(email)),
-                RedeemedViewer::Native { site, cookie_value } => (site, cookie_value, None),
-            };
-            // A link minted for one site must not set a cookie on another.
-            if token_site.id != site.id {
-                return html_response(StatusCode::BAD_REQUEST, pages::link_invalid());
-            }
-            let email_has_access = match verified_email.as_deref() {
-                Some(email) => {
-                    let engine = state.engine.lock().expect("engine mutex never poisoned");
-                    match engine.email_can_view_site(&site, email) {
-                        Ok(allowed) => allowed,
-                        Err(error) => {
-                            eprintln!("finitesitesd email access error: {error}");
-                            return internal_page();
-                        }
-                    }
-                }
-                None => true,
-            };
-            let mut response = if email_has_access {
-                Response::builder()
-                    .status(StatusCode::SEE_OTHER)
-                    .header(LOCATION, return_to)
-                    .body(Body::empty())
-                    .expect("static response builds")
-            } else {
-                html_response(
-                    StatusCode::FORBIDDEN,
-                    pages::not_shared(verified_email.as_deref().expect("email redemption")),
-                )
-            };
-            for cookie in viewer_cookie_headers(
-                &cookie_value,
-                VIEWER_COOKIE_TTL_SECONDS,
-                &state.api_url,
-                &state.base_domain,
-            ) {
-                response.headers_mut().append(
-                    SET_COOKIE,
-                    HeaderValue::from_str(&cookie).expect("generated cookie is a valid header"),
-                );
-            }
-            response
-        }
-        Err(EngineError::Validation(_)) => {
-            html_response(StatusCode::BAD_REQUEST, pages::link_invalid())
-        }
-        Err(error) => {
-            eprintln!("finitesitesd redeem error: {error}");
-            internal_page()
-        }
-    }
-}
-
-async fn native_session(
-    State(state): State<Arc<AppState>>,
-    headers: HeaderMap,
-    uri: Uri,
-    body: Bytes,
-) -> Response {
-    if body.len() as u64 > MAX_NATIVE_VIEWER_AUTH_BODY_BYTES {
+    let Some(audience) = request_output_origin(&state, &headers) else {
         return bad_request_page();
-    }
-    let site = match resolve_request_site(&state, &headers).await {
-        Ok(Some(site)) => site,
-        Ok(None) => return html_response(StatusCode::NOT_FOUND, pages::unknown_site()),
-        Err(error) => {
-            eprintln!("finitesitesd native auth site error: {error}");
-            return internal_page();
-        }
-    };
-    let Some(expected_url) = absolute_output_request_url(&state, &headers, &uri) else {
-        return bad_request_page();
-    };
-    let Some(auth_header) = headers
-        .get(AUTHORIZATION)
-        .and_then(|value| value.to_str().ok())
-    else {
-        return html_response(StatusCode::UNAUTHORIZED, pages::link_invalid());
     };
     let now = now_unix();
-    let signer_pubkey =
-        match nip98::verify_auth_header(auth_header, &expected_url, "POST", Some(&body), now) {
-            Ok(pubkey) => pubkey,
-            Err(_) => return html_response(StatusCode::UNAUTHORIZED, pages::link_invalid()),
-        };
-    let request: NativeViewerSessionRequest = match serde_json::from_slice(&body) {
-        Ok(request) => request,
-        Err(_) => return bad_request_page(),
+    // Verified fully offline: signature against the pinned gate key,
+    // version/issuer, exact origin binding, TTL window. The gate is never
+    // called at runtime.
+    let claims = match finite_authn::verify_vouch(
+        code,
+        &gate.pubkey,
+        &audience,
+        now,
+        &finite_authn::AuthPolicy::default(),
+    ) {
+        Ok(claims) => claims,
+        Err(error) => {
+            eprintln!("finitesitesd vouch rejected: {error}");
+            return bad_request_page();
+        }
     };
-    if !crate::api::valid_native_viewer_session_request(&request) {
+    if !gate.replay.check_and_record(&claims.jti, now) {
+        // Single use: a replayed vouch (or an abused nonce table) fails closed.
         return bad_request_page();
     }
-    let limiter_key = format!("native-viewer-ip:{}", client_key(&headers));
-    if !state
-        .login_limiter
-        .check_and_record(&limiter_key, crate::limiter::MAX_LINKS_PER_IP, now)
-    {
-        return html_response(StatusCode::TOO_MANY_REQUESTS, pages::link_invalid());
-    }
-    let result = {
-        let mut engine = state.engine.lock().expect("engine mutex never poisoned");
-        engine.native_viewer_session(&site, &signer_pubkey, &request.nonce, now)
-    };
-    match result {
-        Ok(cookie_value) => {
-            let mut response = Response::builder()
-                .status(StatusCode::SEE_OTHER)
-                .header(LOCATION, request.return_to)
-                .body(Body::empty())
-                .expect("static response builds");
-            for cookie in viewer_cookie_headers(
-                &cookie_value,
-                VIEWER_COOKIE_TTL_SECONDS,
-                &state.api_url,
-                &state.base_domain,
-            ) {
-                response.headers_mut().append(
-                    SET_COOKIE,
-                    HeaderValue::from_str(&cookie).expect("generated cookie is a valid header"),
-                );
-            }
-            response
-        }
-        Err(EngineError::NotAuthorized) => {
-            html_response(StatusCode::UNAUTHORIZED, pages::link_invalid())
-        }
-        Err(EngineError::Conflict("native viewer nonce replay"))
-        | Err(EngineError::Validation(_)) => bad_request_page(),
-        Err(error) => {
-            eprintln!("finitesitesd native auth error: {error}");
-            internal_page()
-        }
-    }
-}
 
-fn absolute_output_request_url(state: &AppState, headers: &HeaderMap, uri: &Uri) -> Option<String> {
-    let host = headers.get(HOST)?.to_str().ok()?;
-    let is_output_host = site_label(host, &state.base_domain).is_some()
-        || site_label(host, &state.document_base_domain).is_some();
-    if !is_output_host {
-        return None;
-    }
-    let scheme = {
+    let email = claims.email.as_str();
+    let (email_has_access, cookie_value) = {
         let engine = state.engine.lock().expect("engine mutex never poisoned");
-        engine.config().site_url_scheme.clone()
+        let has_access = match engine.email_can_view_site(&site, email) {
+            Ok(value) => value,
+            Err(EngineError::Validation(_)) => {
+                // The vouched email is not a shape this registry accepts.
+                return bad_request_page();
+            }
+            Err(error) => {
+                eprintln!("finitesitesd vouch redeem error: {error}");
+                return internal_page();
+            }
+        };
+        let cookie_value = match engine.mint_email_viewer_cookie(&site, email, now) {
+            Ok(value) => value,
+            Err(EngineError::Validation(_)) => return bad_request_page(),
+            Err(error) => {
+                eprintln!("finitesitesd vouch redeem error: {error}");
+                return internal_page();
+            }
+        };
+        (has_access, cookie_value)
     };
-    Some(format!(
-        "{scheme}://{host}{}",
-        uri.path_and_query()?.as_str()
-    ))
+    let mut response = if email_has_access {
+        Response::builder()
+            .status(StatusCode::SEE_OTHER)
+            .header(LOCATION, return_to)
+            .header(CACHE_CONTROL, "no-store")
+            .body(Body::empty())
+            .expect("static response builds")
+    } else {
+        html_response(StatusCode::FORBIDDEN, pages::not_shared(email))
+    };
+    for cookie in viewer_cookie_headers(
+        &cookie_value,
+        VIEWER_COOKIE_TTL_SECONDS,
+        &state.api_url,
+        &state.base_domain,
+    ) {
+        response.headers_mut().append(
+            SET_COOKIE,
+            HeaderValue::from_str(&cookie).expect("generated cookie is a valid header"),
+        );
+    }
+    response
 }
 
 async fn logout(State(state): State<Arc<AppState>>) -> Response {

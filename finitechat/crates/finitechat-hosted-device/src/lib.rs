@@ -35,7 +35,6 @@ use finitechat_core::{
     AppAction, AppProfileChatBootstrapInput, AppProfileChatBootstrapPreparedCommit, AppState,
     AppTopicSummary, ChatMediaAttachment, ChatMediaKind, FiniteChatCoreError, FiniteChatRuntime,
     OpenOptions, OutboundAttachment, account_id_from_npub,
-    finite_sites_native_viewer_session_proof,
 };
 use finitechat_http::{
     ExpirePairingSessionRequest, ExpirePairingSessionResponse, GetPairingSessionRequest,
@@ -97,9 +96,6 @@ const AGENT_BINDING_NONCE_BYTES: usize = 12;
 const MAX_AGENT_BINDING_REQUEST_BYTES: usize = 8 * 1024;
 const MAX_BRAIN_IDENTITY_PROVIDER_REQUEST_BYTES: usize = 1024 * 1024;
 const BRAIN_PUBLIC_ORIGIN_HEADER: &str = "x-finite-brain-public-origin";
-const SITES_IDENTITY_PROVIDER_VERSION: &str = "finite-sites-identity-provider-v1";
-const MAX_SITES_IDENTITY_PROVIDER_REQUEST_BYTES: usize = 8 * 1024;
-const SITES_PUBLIC_ORIGIN_HEADER: &str = "x-finite-sites-public-origin";
 // A prepared one-member MLS commit can contain a Welcome, ratchet tree, and
 // envelope near their protocol ceilings. The sealed JSON v1 representation
 // encodes byte vectors as integer arrays, so its bounded disk form needs more
@@ -263,10 +259,6 @@ pub enum HostedDeviceError {
     BrainIdentitySetupRequired,
     #[error("invalid Brain Identity Provider request: {0}")]
     InvalidBrainIdentityProvider(String),
-    #[error("Finite Chat Hosted Device setup is required before opening Sites")]
-    SitesIdentitySetupRequired,
-    #[error("invalid Sites Identity Provider request: {0}")]
-    InvalidSitesIdentityProvider(String),
     #[error("new chat must stay in the canonical Agent conversation: {0}")]
     CanonicalChatConflict(String),
     #[error("hosted chat state could not be inspected: {0}")]
@@ -297,14 +289,11 @@ impl HostedDeviceError {
     fn status_code(&self) -> StatusCode {
         match self {
             Self::Unauthorized => StatusCode::UNAUTHORIZED,
-            Self::MissingUser
-            | Self::InvalidUser
-            | Self::InvalidMultipart(_)
-            | Self::InvalidBrainIdentityProvider(_)
-            | Self::InvalidSitesIdentityProvider(_) => StatusCode::BAD_REQUEST,
-            Self::BrainIdentitySetupRequired | Self::SitesIdentitySetupRequired => {
-                StatusCode::PRECONDITION_REQUIRED
+            Self::MissingUser | Self::InvalidUser | Self::InvalidMultipart(_) => {
+                StatusCode::BAD_REQUEST
             }
+            Self::InvalidBrainIdentityProvider(_) => StatusCode::BAD_REQUEST,
+            Self::BrainIdentitySetupRequired => StatusCode::PRECONDITION_REQUIRED,
             Self::PayloadTooLarge(_) => StatusCode::PAYLOAD_TOO_LARGE,
             Self::AttachmentNotFound | Self::DeviceLinkNotFound | Self::AgentBindingNotFound => {
                 StatusCode::NOT_FOUND
@@ -350,8 +339,6 @@ impl HostedDeviceError {
             Self::AgentBindingInvalid(_) => "agent_binding_invalid",
             Self::BrainIdentitySetupRequired => "brain_identity_setup_required",
             Self::InvalidBrainIdentityProvider(_) => "invalid_brain_identity_provider",
-            Self::SitesIdentitySetupRequired => "sites_identity_setup_required",
-            Self::InvalidSitesIdentityProvider(_) => "invalid_sites_identity_provider",
             Self::CanonicalChatConflict(_) => "canonical_chat_conflict",
             Self::Io(_) => "io",
             Self::Task(_) => "task",
@@ -472,12 +459,6 @@ fn app_with_test_options(
             "/v1/brain/identity-provider",
             post(execute_brain_identity_provider_operation).layer(DefaultBodyLimit::max(
                 MAX_BRAIN_IDENTITY_PROVIDER_REQUEST_BYTES,
-            )),
-        )
-        .route(
-            "/v1/sites/identity-provider",
-            post(execute_sites_identity_provider_operation).layer(DefaultBodyLimit::max(
-                MAX_SITES_IDENTITY_PROVIDER_REQUEST_BYTES,
             )),
         )
         .route(
@@ -2201,26 +2182,6 @@ struct BrainIdentityProviderRequest {
 
 #[derive(Clone, Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
-#[serde(deny_unknown_fields)]
-struct SitesIdentityProviderRequest {
-    version: String,
-    operation: String,
-    #[serde(default)]
-    input: Value,
-}
-
-#[derive(Clone, Debug, Deserialize)]
-#[serde(rename_all = "camelCase")]
-#[serde(deny_unknown_fields)]
-struct AuthorizeSitesViewerSessionInput {
-    url: String,
-    return_to: String,
-    client: String,
-    nonce: String,
-}
-
-#[derive(Clone, Debug, Deserialize)]
-#[serde(rename_all = "camelCase")]
 struct OpenBrainGrantPayloadInput {
     #[serde(flatten)]
     grant: BrainGrantIntent,
@@ -2525,81 +2486,6 @@ async fn execute_brain_identity_provider_operation(
     .await
     .map_err(|error| HostedDeviceError::Task(error.to_string()))??;
     Ok(Json(response))
-}
-
-async fn execute_sites_identity_provider_operation(
-    State(state): State<HostedDeviceState>,
-    headers: HeaderMap,
-    Json(request): Json<SitesIdentityProviderRequest>,
-) -> Result<Json<Value>, HostedDeviceError> {
-    let user_id = authorized_user(&state, &headers)?;
-    let official_origin = headers
-        .get(SITES_PUBLIC_ORIGIN_HEADER)
-        .and_then(|value| value.to_str().ok())
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-        .ok_or_else(|| {
-            HostedDeviceError::InvalidSitesIdentityProvider(
-                "trusted Sites origin is required".to_owned(),
-            )
-        })?
-        .to_owned();
-    if request.version != SITES_IDENTITY_PROVIDER_VERSION
-        || request.operation != "authorizeViewerSession"
-    {
-        return Err(HostedDeviceError::InvalidSitesIdentityProvider(
-            "unsupported Sites Identity Provider operation".to_owned(),
-        ));
-    }
-    let input: AuthorizeSitesViewerSessionInput = serde_json::from_value(request.input)
-        .map_err(|error| HostedDeviceError::InvalidSitesIdentityProvider(error.to_string()))?;
-    let url = reqwest::Url::parse(&input.url).map_err(|_| {
-        HostedDeviceError::InvalidSitesIdentityProvider(
-            "native viewer session URL is invalid".to_owned(),
-        )
-    })?;
-    if url.origin().ascii_serialization() != official_origin {
-        return Err(HostedDeviceError::InvalidSitesIdentityProvider(
-            "native viewer session URL is outside the trusted Sites origin".to_owned(),
-        ));
-    }
-    let response = tokio::task::spawn_blocking(move || -> Result<_, HostedDeviceError> {
-        let account_secret_hex = sites_user_secret_if_setup(&state, &user_id)?;
-        let now = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .map_err(|error| HostedDeviceError::Task(format!("system clock is invalid: {error}")))?
-            .as_secs();
-        let proof = finite_sites_native_viewer_session_proof(
-            account_secret_hex,
-            input.url,
-            input.return_to,
-            input.client,
-            input.nonce,
-            now,
-        )?;
-        serde_json::to_value(proof).map_err(HostedDeviceError::from)
-    })
-    .await
-    .map_err(|error| HostedDeviceError::Task(error.to_string()))??;
-    Ok(Json(response))
-}
-
-fn sites_user_secret_if_setup(
-    state: &HostedDeviceState,
-    user_id: &str,
-) -> Result<String, HostedDeviceError> {
-    let user_root = state.user_root(user_id);
-    let identity_paths = IdentityPaths::with_finite_home(user_root.join("finite-home"));
-    let identity_exists = path_exists(&identity_paths.identity_file())?;
-    let store_exists = path_exists(&user_root.join("chat/client.sqlite3"))?;
-    if !identity_exists && !store_exists {
-        return Err(HostedDeviceError::SitesIdentitySetupRequired);
-    }
-    if identity_exists != store_exists {
-        return Err(HostedDeviceError::IncompleteUserState);
-    }
-    let identity = FiniteIdentity::load(&identity_paths)?;
-    Ok(hex::encode(identity.expose_secret_bytes()))
 }
 
 fn brain_user_keys_if_setup(

@@ -310,28 +310,6 @@ CREATE TABLE IF NOT EXISTS native_shares (
   PRIMARY KEY (site_id, principal_id)
 );
 
-CREATE TABLE IF NOT EXISTS native_viewer_nonces (
-  site_id TEXT NOT NULL REFERENCES sites(id),
-  pubkey TEXT NOT NULL CHECK (length(pubkey) = 64),
-  nonce TEXT NOT NULL,
-  created_at INTEGER NOT NULL,
-  expires_at INTEGER NOT NULL,
-  PRIMARY KEY (site_id, pubkey, nonce),
-  CHECK (expires_at > created_at)
-);
-
-CREATE TABLE IF NOT EXISTS native_viewer_tokens (
-  token_hash TEXT PRIMARY KEY CHECK (length(token_hash) = 64),
-  site_id TEXT NOT NULL REFERENCES sites(id),
-  principal_id TEXT NOT NULL REFERENCES principals(id),
-  expires_at INTEGER NOT NULL,
-  used_at INTEGER,
-  created_at INTEGER NOT NULL
-);
-
-CREATE INDEX IF NOT EXISTS native_viewer_tokens_subject
-  ON native_viewer_tokens(site_id, principal_id, created_at);
-
 CREATE TABLE IF NOT EXISTS email_keys (
   email TEXT NOT NULL,
   pubkey TEXT NOT NULL CHECK (length(pubkey) = 64),
@@ -366,22 +344,6 @@ CREATE TABLE IF NOT EXISTS email_login_tokens (
   used_at INTEGER,
   created_at INTEGER NOT NULL
 );
-
-CREATE TABLE IF NOT EXISTS login_tokens (
-  token_hash TEXT PRIMARY KEY CHECK (length(token_hash) = 64),
-  site_id TEXT NOT NULL REFERENCES sites(id),
-  email TEXT NOT NULL,
-  expires_at INTEGER NOT NULL,
-  used_at INTEGER,
-  created_at INTEGER NOT NULL
-);
-
-CREATE INDEX IF NOT EXISTS login_tokens_expiry_used
-  ON login_tokens(expires_at, used_at);
-
-CREATE INDEX IF NOT EXISTS login_tokens_site_email_active
-  ON login_tokens(site_id, email, created_at, token_hash)
-  WHERE used_at IS NULL;
 
 CREATE TABLE IF NOT EXISTS site_access_requests (
   id TEXT PRIMARY KEY,

@@ -47,7 +47,7 @@ fsite project init --config finite.toml --output json
 fsite project grant PROJECT --npub AGENT_NPUB --output json
 fsite project grant PROJECT --nip05 AGENT_NIP05 --output json
 fsite project grant PROJECT --email editor@example.com --send-invite --output json
-fsite project share PROJECT OUTPUT --shared --add-email viewer@example.com --send-invite --output json
+fsite project share PROJECT OUTPUT --shared --add-email viewer@example.com --output json
 fsite auth login editor@example.com
 fsite auth redeem editor@example.com TOKEN_FROM_EMAIL
 fsite auth git PROJECT --email editor@example.com --store --output json
