@@ -12723,6 +12723,66 @@ mod tests {
             assert_eq!(health.status, crate::RuntimeHealthStatus::Stale);
             assert_eq!(health.report_interval_seconds, Some(60));
 
+            // Existing state written by the previous Core: a row latched
+            // `pending_first_report` alongside a fresh ready report from the
+            // incarnation before the control. Migration 0024 rewrites it to
+            // the current representation in one statement — `online` with
+            // the report cleared — so the derived status is `unknown` until
+            // the poller reports, never `online` off the old report. The
+            // pin stays (same runtime, same principal).
+            let (raw, connection) = tokio_postgres::connect(&store.url, NoTls).await.unwrap();
+            let raw_handle = tokio::spawn(async move {
+                let _ = connection.await;
+            });
+            raw.execute(
+                "UPDATE agent_runtimes
+                 SET host_facts = jsonb_set(host_facts, '{runtime_status}',
+                                            to_jsonb('pending_first_report'::text)),
+                     health_reported_at = now(),
+                     health_observed_at = now(),
+                     health_ready = TRUE,
+                     health_reason = NULL,
+                     health_report_interval_seconds = 60
+                 WHERE id = $1",
+                &[&runtime_id],
+            )
+            .await
+            .unwrap();
+            raw.batch_execute(include_str!(
+                "../migrations/0024_runtime_status_pending_first_report_remap.sql"
+            ))
+            .await
+            .unwrap();
+            // Reapplying (every Core startup does) is a no-op.
+            raw.batch_execute(include_str!(
+                "../migrations/0024_runtime_status_pending_first_report_remap.sql"
+            ))
+            .await
+            .unwrap();
+            drop(raw);
+            raw_handle.abort();
+            let migrated = store
+                .admin_runtime_overviews()
+                .await
+                .unwrap()
+                .into_iter()
+                .find(|overview| overview.agent_runtime_id == runtime_id)
+                .unwrap();
+            assert_eq!(migrated.lifecycle_status, RuntimeSummaryStatus::Online);
+            assert_eq!(migrated.runtime_status, RuntimeSummaryStatus::Unknown);
+            assert_eq!(
+                migrated.runtime_health,
+                crate::RuntimeHealthProjection {
+                    agent_npub: Some(format!("npub1{}", "q".repeat(58))),
+                    ..crate::RuntimeHealthProjection::unreported()
+                }
+            );
+            assert!(
+                CORE_SCHEMA_SQL
+                    .contains("WHERE host_facts->>'runtime_status' = 'pending_first_report'"),
+                "the remap must ship in the startup schema concat"
+            );
+
             // Scope: the credential's host guards the write. Another host's
             // runtime id and an unknown id both fail closed as not-found.
             let wrong_host = RecordRuntimeHealthReportInput {

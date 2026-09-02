@@ -263,11 +263,18 @@ HEALTH_MIN_INTERVAL_SECONDS = 5
 HEALTH_MAX_INTERVAL_SECONDS = 3600
 HEALTH_STALE_MULTIPLIER = 3
 HEALTH_STATES = ("ready", "not_ready", "stale", "unknown")
-# Lifecycle latches for which standing reports carry a readiness claim.
-HEALTH_SILENT_LIFECYCLE_STATUSES = ("offline",)
+# Lifecycle latches for which standing reports carry no readiness claim.
+# `pending_first_report` is a legacy value only: the first cut of
+# health-derived status latched it after an up-bound control, and Core's
+# migration 0024_runtime_status_pending_first_report_remap.sql rewrites such
+# rows to `online` with the stored report cleared. A row still carrying it
+# (read before that Core starts) must project `unknown` regardless of the
+# stored report, exactly as the old latch suppressed it.
+HEALTH_SILENT_LIFECYCLE_STATUSES = ("offline", "pending_first_report")
 # Lifecycle latches under which a runtime is expected to be reporting and is
-# therefore counted against its host's readiness.
-HEALTH_TRACKED_LIFECYCLE_STATUSES = ("online",)
+# therefore counted against its host's readiness (the legacy latch counts:
+# such a runtime is up and awaiting its first report).
+HEALTH_TRACKED_LIFECYCLE_STATUSES = ("online", "pending_first_report")
 
 SYSTEMD_PROPERTIES = (
     "LoadState",
