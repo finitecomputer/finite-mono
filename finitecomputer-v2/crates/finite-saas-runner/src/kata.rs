@@ -37,8 +37,12 @@ const DURABLE_STATE_ROOT_MIGRATION_SCHEMA: &str = "finite.durable_state_root_mig
 /// inside a container or a Kata VM is visible from the host.
 pub const DURABLE_TREE_WRITER_LEASE: &str = "agent/client.sqlite3.writer-lease";
 /// Observation window between the two change-manifest samples of
-/// [`durable_tree_is_quiescent`].
-pub const DEFAULT_DURABLE_TREE_QUIESCENCE_WINDOW: Duration = Duration::from_secs(2);
+/// [`durable_tree_is_quiescent`]. Long on purpose: the lease check only
+/// sees a lock the VM's shared filesystem forwards to the host, so the
+/// manifest is the fallback, and the slowest known writer in an orphaned
+/// agent (hermes housekeeping) touches the tree about once a minute. The
+/// check runs only on the rare migration and relocation paths.
+pub const DEFAULT_DURABLE_TREE_QUIESCENCE_WINDOW: Duration = Duration::from_secs(90);
 const DURABLE_TREE_CHANGE_MANIFEST_DEPTH: usize = 3;
 const MAX_DURABLE_TREE_CHANGE_MANIFEST_ENTRIES: usize = 8192;
 const MAX_KATA_HTTP_RESPONSE_BYTES: u64 = 64 * 1024;
