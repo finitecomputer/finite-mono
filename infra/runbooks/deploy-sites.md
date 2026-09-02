@@ -1,12 +1,12 @@
-# Deploying finite-sites (finitesitesd) to lat1
+# Deploying finite-sites (finitesitesd) to lat2
 
-Since the 2026-07-09 cutover, finitesitesd runs on finite-lat-1
-(64.34.82.77), NOT lat2. Config: `infra/nixos/modules/finitesitesd.nix`
-(host `finite-lat-1`). It serves `*.finite.chat` / `*.docs.finite.chat` /
+Since the 2026-08-29 ADR 0007 cutover, finitesitesd runs on finite-lat-2
+(64.34.80.19). Config: `infra/nixos/modules/finitesitesd.nix`
+(host `finite-lat-2`). It serves `*.finite.chat` / `*.docs.finite.chat` /
 `api.finite.chat` as systemd unit `finite-saas-sites.service`
 (finitesitesd on 127.0.0.1:8787), fronted by the one host Caddy with the
-Cloudflare Origin CA cert. Data `/var/lib/finite-sites` (16 published sites,
-npubs intact, restored from lat2 at cutover). Topology:
+Cloudflare Origin CA cert. Data `/var/lib/finite-sites` was imported during
+the ADR 0007 cutover. Topology:
 `infra/nixos/README.md`. The historical
 [2026-07-09 bare-metal transcript](lat1-nixos-reinstall.md) is not current box-
 rebuild authority.
@@ -25,7 +25,7 @@ exact Nix-store `nerdctl` executable supplied on its command line.
 ## Deploy flow — prebuilt immutable mono rev
 
 `fsite/v*` releases still ship the `fsite` CLI + `finitesitesd` linux binary
-([release-cli.md](release-cli.md)), but on lat1 the *daemon* is deployed by
+([release-cli.md](release-cli.md)), but on lat2 the *daemon* is deployed by
 nixos-rebuild (the flake builds `finitesitesd` from the pinned mono rev), not
 by copying a release tarball onto the box.
 
@@ -33,8 +33,8 @@ by copying a release tarball onto the box.
 
 - The finitesitesd source change is merged to `main` (you deploy a committed
   rev).
-- The reviewed revision has a successful `Lat1 NixOS Closure` workflow artifact
-  and the deploy operator can SSH to `root@64.34.82.77`. Do not evaluate or
+- The reviewed revision has a successful `Lat2 NixOS Closure` workflow artifact
+  and the deploy operator can SSH to `root@64.34.80.19`. Do not evaluate or
   build the production closure on the Mac, clawland, lat1, or lat2.
 - A fresh v3 coordinated recovery snapshot exists and its Borg archive has
   passed the empty-target drill in
@@ -46,14 +46,14 @@ by copying a release tarball onto the box.
   after the deploy. Record the pre-switch active-output inventory and host
   memory headroom. Do not use identifier or display order to choose a canary;
   name an operator-owned disposable App Output explicitly.
-- On lat1, prove `containerd.service` is active and the
+- On lat2, prove `containerd.service` is active and the
   `containerd-shim-kata-clh-v2` executable is present before switching. The
   closure installs `/etc/kata-containers/configuration-clh.toml`; its
   `default_vcpus` and `default_memory` must be `1` and `512` respectively.
 
 ### STEPS
 
-1. Build and download the reviewed revision's `lat1-nixos-closure-REV`
+1. Build and download the reviewed revision's `lat2-nixos-closure-REV`
    artifact with the shared procedure in
    [deploy-core.md](deploy-core.md#steps). `REV` must be the exact lowercase
    40-hex commit on `origin/main`, not a tag, branch, short hash, or dirty
@@ -62,13 +62,17 @@ by copying a release tarball onto the box.
 2. Deploy that artifact with:
 
    ```sh
-   just deploy-lat1-closure "$ARTIFACT_DIR"
+   just deploy-lat2-closure "$ARTIFACT_DIR" --prepare
+   scripts/finite-status
+   just deploy-lat2-closure "$ARTIFACT_DIR" --activate
    ```
 
-   The script validates the manifest, copies the prebuilt file binary cache to
-   lat1, activates it in a transient systemd unit, and proves
-   `/run/current-system` equals the artifact's exact `SYSTEM` path. It does not
-   evaluate or build on lat1 or lat2.
+   The prepare step validates the manifest, copies the prebuilt file binary
+   cache to lat2, runs dry activation, and refuses unexpected app-plane unit
+   changes. Activate only after reviewing that output and fresh
+   `scripts/finite-status` evidence. The helper proves `/run/current-system`
+   equals the artifact's exact `SYSTEM` path and does not evaluate or build on
+   lat1 or lat2.
 
 3. Config-only changes (listen flags, `--app-runner`, sites.env references,
    Caddy vhosts) all live in `infra/nixos/modules/` — never edit units on the
@@ -79,7 +83,7 @@ by copying a release tarball onto the box.
 
 ### VERIFY
 
-1. `ssh root@64.34.82.77 'systemctl status finite-saas-sites'` — active.
+1. `ssh root@64.34.80.19 'systemctl status finite-saas-sites'` — active.
 2. `curl -fsS https://api.finite.chat/api/v1/healthz`.
 3. Confirm the unit command contains `--app-runner kata`, the exact Nix-store
    nerdctl and CNI plugin paths, and `/run/wrappers/bin/sudo`. Confirm the
@@ -126,13 +130,13 @@ by copying a release tarball onto the box.
 ### ROLLBACK
 
 ```sh
-ssh root@64.34.82.77 nixos-rebuild switch --rollback
+ssh root@64.34.80.19 nixos-rebuild switch --rollback
 ```
 
 reverts to the previous generation (finitesitesd binary + config together);
-or build/download/deploy the previous known-good rev's exact closure artifact.
+or build/download/deploy the previous known-good rev's exact lat2 closure
+artifact.
 Verify `/run/current-system` against the selected rollback path, then re-run
-VERIFY and reconcile git within a day (break-glass rule). The previous
-generation uses the disabled runner, so rollback stops serving App Outputs but
-does not delete `/var/lib/finite-sites/apps` or any other Sites durable state.
-Do not remove app directories or containers as part of this rollback.
+VERIFY and reconcile git within a day (break-glass rule). Do not remove app
+directories, containers, or any other Sites durable state as part of this
+rollback.

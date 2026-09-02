@@ -1,7 +1,7 @@
 # Platform rollout — the manual cross-component wave
 
 This page orchestrates a **manual platform rollout**: the coordinated wave that
-carries saas-runner upgrades, a saas-core migration generation, the lat1 NixOS
+carries saas-runner upgrades, a saas-core migration generation, the lat2 NixOS
 closure (Core, chat server, Hosted Web Device, Sites, Brain, Identity,
 Caddy), the dashboard digest, and an agent-runtime image pin through the fleet
 in one sitting. Component-level procedures remain the authority for their own
@@ -9,8 +9,8 @@ mechanics — this page supplies the ORDER, the GATES between them, and the
 verification ritual. Record every completed wave in
 [`infra/deployment-changelog.md`](../deployment-changelog.md) (record, never
 authority), keep `scripts/finite-status` evidence before and after (standing
-rule), and update the `production` branch record per
-[ADR 0006](../../docs/adr/0006-production-deploys-use-a-protected-production-branch.md).
+rule). There is currently no protected production-branch CD record; record the
+actual deployed system path and verification evidence in the changelog.
 
 **The one invariant everything else serves: runners roll BEFORE Core
 restarts.** An upgraded Core writes a control-request vocabulary and runs
@@ -30,7 +30,7 @@ this page commits the rules, not the incident narratives (public repo).
 | What runs where, roles | [`infra/README.md`](../README.md) |
 | Per-service deploy mechanics | [`deploy-core.md`](deploy-core.md), [`deploy-finitechat-server.md`](deploy-finitechat-server.md), [`deploy-brain.md`](deploy-brain.md), [`deploy-sites.md`](deploy-sites.md) |
 | Runtime image build/promotion + serial agent upgrade | [`runtime-image.md`](runtime-image.md) |
-| Rollback closure artifacts | `infra/deployments/production.toml` (`rollback_policy`), the `Lat1 NixOS Closure` workflow artifact |
+| Rollback closure artifacts | The current app-plane closure artifact and the previous known-good closure named in the changelog |
 | Why-a-version-shipped record | [`infra/deployment-changelog.md`](../deployment-changelog.md) |
 | Fleet truth at any moment | `scripts/finite-status` (read-only; exits 0/1/2 per README standing rules) |
 | Control-plane preflight | `scripts/rollout_preflight.py` |
@@ -59,13 +59,13 @@ the 2026-08-18 wave proved unexercised lanes fail serially on deploy night.
 - **Rollback targets recorded before touching anything:**
   - `readlink -f /run/current-system` on every touched NixOS host, copied
     somewhere off-host;
-  - the previous `lat1-nixos-closure-<SHA>` artifact confirmed still
+  - the previous app-plane closure artifact confirmed still
     downloadable (14-day retention — re-plan the wave if it ages out mid-day);
   - the previous runtime-artifact digest and dashboard `@sha256:` from the
     pins their authorities name (changelog map above).
 - **Runner generation staged first (both Kata hosts):** new runner binaries
   applied and `FC_RUNNER_RUNTIME_ARTIFACT_ID` present EXPLICITLY in
-  `/etc/finite/runner.env` on lat1 **and** lat3. There is no implicit default
+  `/etc/finite/runner.env` on lat3 **and** lat4. There is no implicit default
   anymore; `scripts/finite-status` renders a missing pin as RED/absent — treat
   that as a halt condition. Never hand-edit `runtime_artifact_id` records or
   bypass the promotion path in [`runtime-image.md`](runtime-image.md).
@@ -108,7 +108,7 @@ not reconstructed later.
 
 ### STEP 1 — Stage and apply runners (both hosts) — BEFORE Core
 
-Apply the staged runner generation on lat1 and lat3 (runner.env pin included).
+Apply the staged runner generation on lat3 and lat4 (runner.env pin included).
 Runners-under-old-Core is the tolerated direction; the reverse wedges
 stop/restart/upgrade operations fleet-wide. Confirm via finite-status: both
 hosts show pin matched/green, service active, and the standing-readiness
@@ -128,7 +128,7 @@ is the progress authority. Stopped agents' ports get squatted while down —
 if an identity-bound guard refuses a step, it is protecting you; do not
 override it manually.
 
-### STEP 3 — lat1 NixOS closure switch (Core + chat + dashboard + edge)
+### STEP 3 — lat2 NixOS closure switch (Core + chat + dashboard + edge)
 
 Follow [`deploy-core.md`](deploy-core.md) and
 [`deploy-finitechat-server.md`](deploy-finitechat-server.md) mechanics against
@@ -214,7 +214,7 @@ access → [`break-glass.md`](break-glass.md).
 Freeze further rolling first. Classify what broke using VERIFY's artifacts
 before choosing a lever; multiple levers below compose in this order.
 
-- **R1 — Services/closures (lat1):** redeploy the previous closure artifact
+- **R1 — Services/closures (lat2 app plane):** redeploy the previous closure artifact
   (or `nixos-rebuild` to the recorded generation path) per
   [`deploy-core.md`](deploy-core.md)/[`deploy-finitechat-server.md`](deploy-finitechat-server.md).
   Chat delivery is deliberately bidirectional-format-compatible across this

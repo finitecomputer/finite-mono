@@ -2,10 +2,10 @@
 
 ## Where it runs
 
-**finite-lat-1 (64.34.82.77), NixOS.** Since the 2026-07-09 cutover
-`chat.finite.computer` DNS points at lat1; the server is systemd unit
+**finite-lat-2 (64.34.80.19), NixOS.** Since the 2026-08-29 ADR 0007 cutover
+`chat.finite.computer` DNS points at lat2; the server is systemd unit
 `finitechat-server.service` binding **`127.0.0.1:8788`** (moved off 8787,
-which finitesitesd owns on this consolidated box — the public URL is
+which finitesitesd owns on this consolidated app-plane host — the public URL is
 unchanged), DynamicUser with SQLite at the real path
 `/var/lib/private/finite-chat/data/server.sqlite3`, fronted by the one host
 Caddy (`chat.finite.computer` → 127.0.0.1:8788, Let's Encrypt cert via ACME
@@ -16,10 +16,11 @@ facts only and is not current rebuild/recovery authority.
 
 The migration from clawland is **DONE**: `finitechat-server` on clawland is
 `systemctl disable`d (single-writer doctrine below), and the SQLite was
-carried to lat1 per that discipline. Deploys now use a prebuilt immutable mono
-rev. Production evaluation/build happens in the `Lat1 NixOS Closure` workflow
+carried onto the app-plane host per that discipline. Deploys now use a
+prebuilt immutable mono rev. Production evaluation/build happens in the
+`Lat2 NixOS Closure` workflow
 on a Depot-managed x86_64 Linux runner; the deploy script copies that exact
-artifact to lat1 and switches it directly. The flake builds
+artifact to lat2 and switches it only after the explicit activation step. The flake builds
 `finitechat-server` from that pinned rev.
 
 ## The contract gate (applies to EVERY server deploy)
@@ -35,13 +36,13 @@ must report `server_contract_version`, `server_version`, the Nix-derived
   `cargo test -p finitechat-server` suites pass.
 - You know the expected post-deploy `/health` payload (contract version,
   automatically derived Chat source fingerprint).
-- The reviewed revision has a successful `Lat1 NixOS Closure` workflow artifact
-  and the deploy operator can SSH to `root@64.34.82.77`. Do not evaluate or
+- The reviewed revision has a successful `Lat2 NixOS Closure` workflow artifact
+  and the deploy operator can SSH to `root@64.34.80.19`. Do not evaluate or
   build the production closure on the Mac, clawland, lat1, or lat2.
 
 ### STEPS
 
-1. Build and download the reviewed revision's `lat1-nixos-closure-REV`
+1. Build and download the reviewed revision's `lat2-nixos-closure-REV`
    artifact with the shared procedure in
    [deploy-core.md](deploy-core.md#steps). `REV` must be the exact lowercase
    40-hex commit on `origin/main`, not a tag, branch, short hash, or dirty
@@ -50,20 +51,21 @@ must report `server_contract_version`, `server_version`, the Nix-derived
 2. Deploy that artifact with:
 
    ```sh
-   just deploy-lat1-closure "$ARTIFACT_DIR"
+   just deploy-lat2-closure "$ARTIFACT_DIR" --prepare
+   scripts/finite-status
+   just deploy-lat2-closure "$ARTIFACT_DIR" --activate
    ```
 
    This is a routine in-place server update, not a host move — no data
    migration. A host MOVE follows the single-writer doctrine below. The deploy
    script validates the manifest, copies the prebuilt file binary cache to
-   lat1, activates it in a transient systemd unit, and proves
-   `/run/current-system` equals the artifact's exact `SYSTEM` path. It does not
-   evaluate or build on lat1 or lat2. On lat2 the activation
-   (`scripts/deploy-lat2-closure-cache --activate`) holds the monitoring
-   timers across the switch, warns instead of failing on a monitoring-only
-   unit failure, and never rolls back automatically: a failed activation
-   leaves the new generation current and prints the operator revert recipe,
-   legal only under the `rollback-check` condition in ROLLBACK below.
+   lat2, dry-activates during `--prepare`, and proves `/run/current-system`
+   equals the artifact's exact `SYSTEM` path after `--activate`. It does not
+   evaluate or build on lat1 or lat2. Activation holds the monitoring timers
+   across the switch, warns instead of failing on a monitoring-only unit
+   failure, and never rolls back automatically: a failed activation leaves the
+   new generation current and prints the operator revert recipe, legal only
+   under the `rollback-check` condition in ROLLBACK below.
 
 3. After the deploy, run the gate from a mono checkout at the release commit.
    This evaluation reads package metadata and does not rebuild the closure:
@@ -144,8 +146,8 @@ unrecoverable. Concretely, any migration follows this exact order:
 
 ## Host MOVES — SEPARATELY SCHEDULED, NOT ROUTINE
 
-The clawland → lat1 move is DONE. Any FUTURE host move (e.g. lat1 → a
-successor box, or splitting chat back onto dedicated hardware) is a
+The clawland → lat1 and lat1 → lat2 moves are DONE. Any FUTURE host move (for
+example splitting chat back onto dedicated hardware) is a
 deliberate cutover, NOT a routine deploy, and follows the single-writer
 doctrine above exactly: disable the old writer FIRST, WAL-checkpoint, carry
 the quiesced SQLite, start + verify the new writer via direct IP, and only
