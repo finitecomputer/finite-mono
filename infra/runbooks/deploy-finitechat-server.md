@@ -60,10 +60,10 @@ must report `server_contract_version`, `server_version`, the Nix-derived
    `/run/current-system` equals the artifact's exact `SYSTEM` path. It does not
    evaluate or build on lat1 or lat2. On lat2 the activation
    (`scripts/deploy-lat2-closure-cache --activate`) holds the monitoring
-   timers across the switch, does not roll back on a monitoring-only unit
-   failure, and never reverts the binary once `finitechat-server
-   rollback-check` reports `fold_complete: true` / `rollback_allowed: false`
-   (the folded database has post-fold writes: roll forward only).
+   timers across the switch, warns instead of failing on a monitoring-only
+   unit failure, and never rolls back automatically: a failed activation
+   leaves the new generation current and prints the operator revert recipe,
+   legal only under the `rollback-check` condition in ROLLBACK below.
 
 3. After the deploy, run the gate from a mono checkout at the release commit.
    This evaluation reads package metadata and does not rebuild the closure:
@@ -99,11 +99,16 @@ must report `server_contract_version`, `server_version`, the Nix-derived
 
 ### ROLLBACK
 
-`ssh root@64.34.82.77 nixos-rebuild switch --rollback` (or
+No deploy script reverts automatically. Reverting the server generation is
+legal ONLY if `finitechat-server rollback-check --sqlite
+/var/lib/finite-chat/data/server.sqlite3` exits 0 AND the pre-fold backup is
+restored first (stop the server, restore, then switch generation — the
+single-writer order below); otherwise roll forward with a newer closure. An
+older binary must never serve the folded database. Under that condition,
+select the previous generation (`nixos-rebuild switch --rollback`, or
 build/download/deploy the previous known-good rev's exact closure artifact),
-then verify `/run/current-system` against the selected rollback path and re-run
-the gate. The additive `http_readiness_probe` table is ignored by older server
-binaries and needs no data rollback. If the selected server predates
+then verify `/run/current-system` against the selected path and re-run the
+gate. If the selected server predates
 `/readyz`, roll the dedicated monitoring receiver back to its `/health` target
 as well so monitoring-version skew does not masquerade as a Chat outage.
 Data rollback (SQLite) comes from the coordinated Hosted Web Chat recovery

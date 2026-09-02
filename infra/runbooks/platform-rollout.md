@@ -139,10 +139,12 @@ the prebuilt closure from the exact rev (dashboard digest bump lands via
   anything (a monitoring-only failure is not a rollback trigger; a failed
   core/chat unit is). `scripts/deploy-lat2-closure-cache --activate` encodes
   this: it stops the monitoring timers across the switch and re-arms them on
-  exit, treats a nonzero switch whose only failed units are monitoring-only
-  as a warning, and refuses to revert the chat binary once `finitechat-server
-  rollback-check` reports `fold_complete: true` / `rollback_allowed: false`
-  (roll forward only).
+  every exit, treats a nonzero switch whose only failed units are
+  monitoring-only as a warning, and performs NO automatic rollback — on
+  failure it leaves the new generation in place and prints the operator
+  revert recipe, which is legal only if `finitechat-server rollback-check
+  --sqlite <path>` exits 0 AND the pre-fold backup is restored first;
+  otherwise roll forward.
 - **Boot-loop signature to kill the wave on sight:** a gateway process
   SIGKILLed roughly every ~41 seconds, healthcheck red, while control
   requests report success. Bridge/readiness budgets: cold starts can take

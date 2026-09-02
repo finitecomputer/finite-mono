@@ -192,7 +192,7 @@ class Lat2ClosureArtifactTests(unittest.TestCase):
         exec_start_lines = [
             line for line in source.splitlines() if "ExecStart" in line
         ]
-        self.assertEqual(exec_start_lines, ['  exec_start="$(sed -n \'s/^ExecStart=//p\' "$chat_unit_file" | head -n 1)"'])
+        self.assertEqual(exec_start_lines, ['  chat_exec_start="$(sed -n \'s/^ExecStart=//p\' "$chat_unit_file" | head -n 1)"'])
         # The absence guard is the only runner reference allowed: a live
         # runner on the host, or any runner unit in the candidate closure,
         # refuses; an inert husk in the outgoing closure is crossable
@@ -226,13 +226,12 @@ class Lat2ClosureArtifactTests(unittest.TestCase):
         self.assertIn("--allow-unit", source)
         self.assertIn("approved_extra_units", source)
 
-    def test_activation_is_fenced_and_rolls_back_the_profile(self) -> None:
+    def test_activation_is_fenced_and_never_reverts_on_its_own(self) -> None:
         source = DEPLOY.read_text(encoding="utf-8")
         mutation = source.index('echo "==> mutation boundary:')
         self.assertLess(source.index("dry-activate"), mutation)
         self.assertIn("previous_system", source)
         self.assertIn("switch-to-configuration\" switch", source)
-        self.assertIn("rollback", source)
         self.assertIn(
             "refusing: finite-saas-runner.service is active on the app-plane host",
             source,
@@ -240,7 +239,26 @@ class Lat2ClosureArtifactTests(unittest.TestCase):
         self.assertIn(
             "refusing: candidate closure contains finite-saas-runner.service", source
         )
-
+        # Owner decision after the 2026-09-02 mixed-version window: the
+        # script performs NO automatic revert. Every revert-shaped command
+        # that appears is PRINTED as the operator recipe, never executed.
+        self.assertNotIn("trap rollback ERR", source)
+        self.assertNotIn("rollback() {", source)
+        self.assertNotIn("abort() {", source)
+        self.assertNotIn('"$previous_system/bin/switch-to-configuration"', source)
+        self.assertNotIn('--set "$previous_system"', source)
+        self.assertNotRegex(source, r"\ntrap [^\n]* ERR\n")
+        for needle in ("--rollback", "nixos-rebuild", "--switch-generation", "previous generation"):
+            for line in source.splitlines():
+                if needle in line:
+                    self.assertRegex(
+                        line.lstrip(), r"^(#|echo )", f"{needle!r} must only be printed: {line!r}"
+                    )
+        nix_env_invocations = [
+            line for line in source.splitlines() if line.lstrip().startswith("nix-env ")
+        ]
+        self.assertEqual(len(nix_env_invocations), 1, nix_env_invocations)
+        self.assertIn('--set "$system"', nix_env_invocations[0])
     def test_prepare_without_allow_unit_runs_the_fence(self) -> None:
         # 2026-09-02 (#799): with zero --allow-unit flags the fence's
         # approved-extra loop expanded an empty array under `set -u` and
@@ -326,81 +344,71 @@ class Lat2ClosureArtifactTests(unittest.TestCase):
         # roll-forward refusal restore the timers as well as success.
         self.assertIn("systemctl start \"$timer\"", source)
         self.assertIn("systemctl stop \"$timer\"", source)
+        failed = source.index("activation_failed() {")
+        self.assertIn("start_monitoring_timers", source[failed : source.index("# --- activation helpers (end)")])
 
-    def test_trap_ignores_monitoring_only_unit_failures(self) -> None:
+    def test_switch_and_verification_failures_route_through_activation_failed(self) -> None:
         source = DEPLOY.read_text(encoding="utf-8")
         switch = source.index('"$system/bin/switch-to-configuration" switch || switch_status=$?')
-        decision = source.index('failed_outside="$(failed_units_outside_monitoring)"')
-        self.assertLess(switch, decision)
-        self.assertIn("(exit \"$switch_status\")", source)
+        self.assertLess(source.index("\nstop_monitoring_timers\n"), switch)
+        tail = source[switch:]
+        self.assertIn('switch_result_acceptable "$switch_status"', tail)
+        # Every post-boundary failure goes through the single non-mutating
+        # failure path; no bare exit that would skip the recipe or the
+        # timer re-arm survives after the switch.
+        self.assertGreaterEqual(tail.count("|| activation_failed "), 10)
+        self.assertNotRegex(tail, r"\n\s*exit 1\b")
+        # A nonzero exit with NO failed unit at all is still a failure.
+        self.assertIn('[[ -n "$failed_outside" || -z "$failed_all" ]]', source)
+        self.assertIn("this is NOT a", source)
+        self.assertIn("continuing post-switch verification", source)
         # The remote heredoc is terminated exactly once, at the end of the
         # file: a stray terminator line would run as a local command after
         # a successful deploy.
         self.assertEqual(source.count("\nLAT2\n"), 1)
         self.assertTrue(source.endswith('echo "==> DEPLOYED system=$system"\nLAT2\n'))
-        self.assertIn("monitoring-only allow-list", source)
-        self.assertIn("this is NOT a", source)
-        self.assertIn("rollback trigger", source)
-        self.assertIn("continuing post-switch verification", source)
-        # A nonzero exit with NO failed unit at all is still a rollback.
-        self.assertIn('[[ -n "$failed_outside" || -z "$failed_all" ]]', source)
-        # Post-switch verification failures reach the trap via `abort`,
-        # never a bare `exit 1` that would skip the rollback.
-        tail = source[switch:]
-        self.assertNotIn("exit 1", tail)
-        self.assertIn('|| abort "$unit was active before and is down after a steady-state switch"', tail)
-        self.assertIn('|| abort "$unit is not active after go-live activation"', tail)
-
-    def test_trap_refuses_to_revert_a_folded_chat_database(self) -> None:
+    def test_pre_boundary_fold_verdict_is_informational_only(self) -> None:
         source = DEPLOY.read_text(encoding="utf-8")
-        self.assertIn('timeout 60 "$binary" rollback-check --sqlite "$sqlite"', source)
-        # Fail closed: only a POSITIVE verdict (exit 0 + rollback_allowed:true)
-        # permits the revert; the guard never keys on a negative shape.
-        self.assertIn("""'"rollback_allowed":true'""", source)
-        self.assertNotIn("""'"rollback_allowed":false'""", source)
-        self.assertIn('|| check_status=$?', source)
-        self.assertIn("gave no positive safe verdict", source)
-        self.assertIn("guard not applicable", source)
-        rollback = source.index("rollback() {")
-        self.assertIn("if chat_fold_forbids_rollback; then", source[rollback:])
-        self.assertIn("REFUSING to revert to $previous_system", source)
-        self.assertIn("An older binary must never serve a chat database whose fold state is not proven safe", source)
-        self.assertIn("ROLL FORWARD ONLY", source)
-        # The binary and database come from the candidate closure's own
-        # unit file, not from a hard-coded store path.
+        self.assertIn('timeout 60 "$chat_binary" rollback-check --sqlite "$chat_sqlite"', source)
+        self.assertIn("informational only: a failed activation never reverts automatically", source)
+        mutation = source.index('echo "==> mutation boundary:')
+        self.assertLess(source.index("\nlog_chat_fold_verdict\n"), mutation)
+        # The script never decides anything on the verdict shape.
+        self.assertNotIn('"rollback_allowed":true', source)
+        self.assertNotIn('"rollback_allowed":false', source)
+        self.assertNotIn("fold_complete", source)
+        # Binary and database come from the candidate closure's own unit
+        # file; the recipe names them.
         self.assertIn('chat_unit_file="$system/etc/systemd/system/finitechat-server.service"', source)
         self.assertIn("sed -n 's/^ExecStart=//p' \"$chat_unit_file\"", source)
-
-    def test_activation_helpers_classify_failures_and_fold_verdicts(self) -> None:
-        # Behavior contract for the helpers the trap relies on, run under a
-        # fake systemctl and a fake finitechat-server so the decision logic
-        # is exercised rather than merely grepped.
+        self.assertIn("${chat_binary:-finitechat-server} rollback-check --sqlite", source)
+    def test_failure_path_never_mutates_and_prints_the_operator_recipe(self) -> None:
+        # Behavior contract, run under fake systemctl / nix-env /
+        # nixos-rebuild shims that record every invocation: the failure
+        # path exits with the given status, invokes no revert of any kind,
+        # re-arms the monitoring timers, and prints the conditioned recipe.
         helpers = remote_activation_helpers()
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
             shims = root / "bin"
             shims.mkdir()
-            write_shim(
-                shims,
-                "systemctl",
-                'if [[ "$1" == "--failed" ]]; then printf \'%s\' "${FAKE_FAILED-}"; fi\n'
-                "exit 0\n",
-            )
-            write_shim(
-                shims,
-                "finitechat-server",
-                'if [[ "$1" != "rollback-check" ]]; then echo unknown >&2; exit 2; fi\n'
-                '[[ -z "${FAKE_VERDICT-}" ]] || printf \'%s\\n\' "$FAKE_VERDICT"\n'
-                '[[ -z "${FAKE_EXIT-}" ]] || exit "$FAKE_EXIT"\n'
-                '[[ -n "${FAKE_VERDICT-}" ]] || exit 1\n'
-                '[[ "$FAKE_VERDICT" == *\'"rollback_allowed":true\'* ]]\n',
-            )
+            log = root / "invocations.log"
+            for tool in ("systemctl", "nix-env", "nixos-rebuild", "switch-to-configuration"):
+                write_shim(
+                    shims,
+                    tool,
+                    f'printf \'{tool} %s\\n\' "$*" >> "{log}"\n'
+                    'if [[ "$1" == "--failed" ]]; then printf \'%s\' "${FAKE_FAILED-}"; fi\n'
+                    "exit 0\n",
+                )
+            units = root / "units"
+            units.mkdir()
+            (units / "finite-healthcheck.timer").write_text("", encoding="utf-8")
+            (units / "finite-runtime-metrics.timer").write_text("", encoding="utf-8")
             system = root / "system"
-            units = system / "etc/systemd/system"
-            units.mkdir(parents=True)
+            (system / "etc/systemd/system").mkdir(parents=True)
             sqlite = root / "server.sqlite3"
-            sqlite.write_bytes(b"")
-            (units / "finitechat-server.service").write_text(
+            (system / "etc/systemd/system/finitechat-server.service").write_text(
                 "[Service]\n"
                 f"ExecStart={shims}/finitechat-server serve 127.0.0.1:8788 --sqlite {sqlite}\n",
                 encoding="utf-8",
@@ -409,98 +417,69 @@ class Lat2ClosureArtifactTests(unittest.TestCase):
             probe.write_text(
                 "set -euo pipefail\n"
                 f'system="{system}"\n'
+                f'previous_system="{root}/previous"\n'
                 + helpers
-                + "failed_units_outside_monitoring\n"
-                "echo ---\n"
-                "if chat_fold_forbids_rollback; then echo FORBID; else echo ALLOW; fi\n"
-                'echo "reason=$chat_fold_reason"\n',
+                + f'systemd_units_dir="{units}"\n'
+                'echo "mode=$1"\n'
+                'case "$1" in\n'
+                "  fail) activation_failed 4 \"switch-to-configuration exited 4\" ;;\n"
+                '  judge) switch_result_acceptable "$2" ;;\n'
+                "esac\n",
                 encoding="utf-8",
             )
 
-            def run(failed: str, verdict: str | None, exit_status: int | None = None) -> str:
-                env = {
-                    **os.environ,
-                    "PATH": f"{shims}{os.pathsep}{os.environ['PATH']}",
-                    "FAKE_FAILED": failed,
-                }
-                if verdict is not None:
-                    env["FAKE_VERDICT"] = verdict
-                if exit_status is not None:
-                    env["FAKE_EXIT"] = str(exit_status)
-                result = subprocess.run(
-                    ["bash", str(probe)],
-                    env=env,
+            def run(*args: str, failed: str = "") -> subprocess.CompletedProcess[str]:
+                if log.exists():
+                    log.unlink()
+                return subprocess.run(
+                    ["bash", str(probe), *args],
+                    env={
+                        **os.environ,
+                        "PATH": f"{shims}{os.pathsep}{os.environ['PATH']}",
+                        "FAKE_FAILED": failed,
+                    },
                     text=True,
                     capture_output=True,
                     check=False,
                 )
-                self.assertEqual(result.returncode, 0, result.stderr)
-                return result.stdout
+
+            result = run("fail")
+            self.assertEqual(result.returncode, 4, result.stderr)
+            self.assertIn("ACTIVATION FAILED (exit 4): switch-to-configuration exited 4", result.stderr)
+            self.assertIn("NO automatic revert", result.stderr)
+            self.assertIn(f"{shims}/finitechat-server rollback-check --sqlite {sqlite}", result.stderr)
+            self.assertIn("must exit 0. If it does not: ROLL FORWARD", result.stderr)
+            self.assertIn("restore the pre-fold chat backup FIRST", result.stderr)
+            self.assertIn("nixos-rebuild switch --rollback", result.stderr)
+            invocations = log.read_text(encoding="utf-8").splitlines()
+            self.assertIn("systemctl start finite-healthcheck.timer", invocations)
+            self.assertIn("systemctl start finite-runtime-metrics.timer", invocations)
+            self.assertFalse(
+                [line for line in invocations if not line.startswith("systemctl start ")],
+                invocations,
+            )
 
             monitoring_only = (
                 "finite-healthcheck.service loaded failed failed Aggregate health\n"
                 "finite-runtime-metrics.timer loaded failed failed Metrics\n"
             )
-            forbid = json.dumps(
-                {
-                    "fold_complete": True,
-                    "pre_fold_head": 10,
-                    "current_head": 12,
-                    "rollback_allowed": False,
-                    "reason": "post-fold writes exist: roll forward instead",
-                },
-                separators=(",", ":"),
-            )
-            # Decision table (candidate closure ships finitechat-server):
-            #   exit 1 + rollback_allowed:false   -> FORBID (reason relayed)
-            #   exit 0 + rollback_allowed:true    -> ALLOW
-            #   no output, nonzero exit           -> FORBID
-            #   rollback_allowed:true, exit 1     -> FORBID (exit status wins)
-            #   exit 0, unparseable output        -> FORBID
-            #   database path missing             -> FORBID
-            #   no chat unit in the closure       -> guard not applicable
-            out = run(monitoring_only, forbid)
-            head, _, verdict = out.partition("---\n")
-            self.assertEqual(head.strip(), "")
-            self.assertIn("FORBID\n", verdict)
-            self.assertIn("rollback-check exited 1 (post-fold writes exist: roll forward instead)", verdict)
+            result = run("judge", "4", failed=monitoring_only)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertIn("WARNING: switch-to-configuration exited 4", result.stderr)
+            self.assertIn("continuing post-switch verification", result.stderr)
 
             core_down = monitoring_only + "finitechat-server.service loaded failed failed Chat\n"
-            allow = forbid.replace('"rollback_allowed":false', '"rollback_allowed":true')
-            out = run(core_down, allow)
-            head, _, verdict = out.partition("---\n")
-            self.assertEqual(head.split(), ["finitechat-server.service"])
-            self.assertIn("ALLOW\n", verdict)
-            self.assertIn("reason=rollback-check exit 0, rollback_allowed:true", verdict)
+            result = run("judge", "4", failed=core_down)
+            self.assertEqual(result.returncode, 1)
+            self.assertIn("finitechat-server.service", result.stderr)
+            self.assertNotIn("WARNING", result.stderr)
 
-            # A candidate binary that prints no verdict (e.g. lacks the
-            # subcommand) leaves the fold state unknown: forbid.
-            out = run("", None)
-            self.assertIn("FORBID\n", out)
-            self.assertIn("reason=rollback-check exited 1 (no verdict printed)", out)
+            result = run("judge", "4", failed="")
+            self.assertEqual(result.returncode, 1)
+            self.assertIn("none listed", result.stderr)
 
-            # Exit status wins over reassuring text.
-            out = run("", allow, exit_status=1)
-            self.assertIn("FORBID\n", out)
-            self.assertIn("reason=rollback-check exited 1 (", out)
-
-            # Exit 0 without a parseable positive verdict is not positive.
-            out = run("", "not a verdict", exit_status=0)
-            self.assertIn("FORBID\n", out)
-            self.assertIn("without a parseable rollback_allowed:true verdict", out)
-
-            # Missing database path: unknown fold state, forbid.
-            sqlite.unlink()
-            out = run("", allow)
-            self.assertIn("FORBID\n", out)
-            self.assertIn("rollback-check unavailable", out)
-
-            # A closure without the chat server: the guard does not apply.
-            (units / "finitechat-server.service").unlink()
-            out = run("", forbid)
-            self.assertIn("ALLOW\n", out)
-            self.assertIn("guard not applicable", out)
-
+            result = run("judge", "0", failed=core_down)
+            self.assertEqual(result.returncode, 0)
     def test_go_live_requires_product_health_after_the_switch(self) -> None:
         source = DEPLOY.read_text(encoding="utf-8")
         for unit in (
