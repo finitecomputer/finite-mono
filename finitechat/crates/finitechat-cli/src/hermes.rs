@@ -2867,8 +2867,10 @@ fn cmd_edit<W: Write>(home_dir: &Path, request: Value, output: &mut W) -> Result
 /// Operator rekey: run the core rekey action through a writer-lease runtime
 /// (the same open/dispatch shape as `recover`) and print its report. The
 /// action itself refuses to run unless the local epoch matches the server's
-/// and there is no pending Commit; it never advances a frozen cursor past a
-/// quarantined entry — that stays with `finitechat repair skip-entry`.
+/// and there is no pending Commit. A frozen cursor is completed with an
+/// audited skip only when everything below the Commit is another device's
+/// application entry; otherwise the report carries `skip_refused` and
+/// `finitechat repair skip-entry` is the follow-up.
 fn cmd_rekey<W: Write>(
     home_dir: &Path,
     args: HermesRekeyArgs,
@@ -2890,7 +2892,36 @@ fn cmd_rekey<W: Write>(
             report.commit_seq,
             report.message_id,
         )
-        .map_err(CliError::Output)
+        .map_err(CliError::Output)?;
+        writeln!(
+            output,
+            "  cursor {} -> {}; skipped {} entries below the commit{}",
+            report.cursor_before,
+            report.cursor_after,
+            report.skipped.len(),
+            if report.skipped.is_empty() {
+                String::new()
+            } else {
+                format!(
+                    " (seqs {})",
+                    report
+                        .skipped
+                        .iter()
+                        .map(|entry| entry.seq.to_string())
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                )
+            },
+        )
+        .map_err(CliError::Output)?;
+        if let Some(reason) = &report.skip_refused {
+            writeln!(
+                output,
+                "  skip refused: {reason}; complete the heal with `finitechat repair skip-entry`",
+            )
+            .map_err(CliError::Output)?;
+        }
+        Ok(())
     }
 }
 

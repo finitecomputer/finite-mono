@@ -42,20 +42,34 @@ is rewound.
 
 ## Remediation, per room
 
-1. **Epoch-advancing commit from the owner side.** The only commit
-   vehicle in the product today is add-member: the owner admits a fresh
-   device key package (e.g. links a second own device) through the
-   normal hosted-web bootstrap, whose add-member commit bumps the room's
-   epoch and re-derives everyone's secret trees at generation 0. The
-   commit is not secret-tree generation bound, so a still-rewound owner
-   device can drive it. Do NOT mint/replace the healthy party's device.
-2. **Skip-repair the wedged receiver's cursor — MANDATORY.** The frozen
-   tick aborts on the first quarantined entry and can never reach the
-   commit behind it (proven in the CI test: the receiver stays wedged
-   after the epoch bump until its cursor is advanced). Advance the
-   receiver's room cursor past the quarantined backlog, up to the commit
-   seq (recovery.md §4a surgery), then let normal sync apply the commit
-   and everything after it.
+1. **Epoch-advancing commit.** Preferred: `finitechat hermes rekey
+   --room <room> --json` from the wedged receiver's agent home — an
+   ordinary self-update Commit that bumps the room's epoch and
+   re-derives everyone's secret trees at generation 0. It does not need
+   the receiver's cursor at the server head (only unapplied Commits
+   matter, and it refuses unless the local epoch matches the server's).
+   Alternative when the receiver cannot commit: an owner-side add-member
+   commit (the owner links a second own device through the normal
+   hosted-web bootstrap); commits are not secret-tree generation bound,
+   so a still-rewound owner device can drive it. Do NOT mint/replace the
+   healthy party's device.
+2. **Cursor skip — performed by the rekey, audited in its report.** The
+   frozen tick aborts on the first quarantined entry and can never reach
+   the commit behind it on its own. The rekey classifies the window
+   strictly between the frozen cursor and its commit and moves the
+   cursor to `commit_seq` only when every entry in it is an application
+   entry from another device (the rewound sender's poison); the report
+   lists them under `skipped` (seq, sender account/device, message id)
+   and `cursor_after == commit_seq`. If the window holds a Commit, a
+   Proposal, or one of the receiver's own application entries, the rekey
+   still succeeds but leaves the cursor in place and reports
+   `skip_refused` naming the first offending seq. Only then run
+   `finitechat repair skip-entry` (recovery.md §4a; canonical container
+   stopped) — its rehearsal replay treats the rekey's own already-merged
+   commit as a no-op advance, derives the poison-only skip list, and the
+   restarted device crosses the commit on its next sync. A cursor that
+   was already current at rekey time reports `skipped: []` with no
+   refusal.
 3. **Verify both directions:** owner decrypts the agent's next send;
    agent decrypts the owner's next send (the epoch-2 trees make the
    rewound sender's position moot); receiver cursor tracks the room head;
@@ -80,9 +94,10 @@ Concrete room/runtime identifiers live in the incident handoff notes
 1. `scripts/finite-status` run and archived (before-state).
 2. Evidence copies of both stores (sender and receiver) taken within the
    last 24 h; retake if older.
-3. The receiver-side skip tooling is the already-proven recovery.md §4a
-   procedure; rehearse on the dev stack once for the owner-driven
-   re-admission flow before the first production room.
+3. The receiver-side skip tooling (`repair skip-entry`, needed only on
+   `skip_refused`) is the already-proven recovery.md §4a procedure;
+   rehearse on the dev stack once for the owner-driven re-admission flow
+   before the first production room.
 
 ## Rollback
 

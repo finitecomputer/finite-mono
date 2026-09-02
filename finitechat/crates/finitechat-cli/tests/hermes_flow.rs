@@ -377,6 +377,10 @@ fn hermes_cli_uses_mls_add_welcome_and_round_trips_messages() {
             .as_str()
             .is_some_and(|message_id| !message_id.is_empty())
     );
+    // Committed from a current cursor: nothing to skip, nothing refused.
+    assert_eq!(rekeyed["cursor_after"], rekeyed["commit_seq"]);
+    assert_eq!(rekeyed["skipped"].as_array().map(Vec::len), Some(0));
+    assert!(rekeyed.get("skip_refused").is_none());
     let rekey_error = finitechat_cli::run(
         [
             "hermes".to_owned(),

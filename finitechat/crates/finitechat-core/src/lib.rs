@@ -869,13 +869,34 @@ pub struct AppSentMessage {
 
 /// Outcome of [`FiniteChatRuntime::rekey_room_and_wait`]: one accepted
 /// self-update Commit that moved the room from `previous_epoch` to
-/// `new_epoch` at server log position `commit_seq`.
+/// `new_epoch` at server log position `commit_seq`, plus what happened to
+/// the room cursor: `skipped` lists the other-device application entries
+/// an audited skip moved a frozen cursor across to land on `commit_seq`;
+/// `skip_refused` names the first offending seq when the window held
+/// anything else and the cursor was left in place.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AppRekeyRoomReport {
     pub room_id: String,
     pub previous_epoch: u64,
     pub new_epoch: u64,
     pub commit_seq: u64,
+    pub message_id: String,
+    #[serde(default)]
+    pub cursor_before: u64,
+    #[serde(default)]
+    pub cursor_after: u64,
+    #[serde(default)]
+    pub skipped: Vec<AppRekeySkippedEntry>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub skip_refused: Option<String>,
+}
+
+/// One entry the rekey's audited skip moved a frozen cursor across.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AppRekeySkippedEntry {
+    pub seq: u64,
+    pub sender_account_id: String,
+    pub sender_device_id: String,
     pub message_id: String,
 }
 
@@ -8662,13 +8683,52 @@ impl CoreState {
             idempotency_key,
         );
         match result {
-            Ok(report) => Ok(AppRekeyRoomReport {
-                room_id: report.room_id,
-                previous_epoch: report.previous_epoch,
-                new_epoch: report.new_epoch,
-                commit_seq: report.commit_seq,
-                message_id: report.message_id,
-            }),
+            Ok(report) => {
+                // The client store has no durable audit surface; the skip
+                // decision is recorded in the report (printed by the
+                // operator CLI) and on the runtime's log.
+                if !report.skipped.is_empty() {
+                    eprintln!(
+                        "finitechat rekey audit: room {} cursor {} -> {} skipped {} entries below commit seq {}: {:?}",
+                        report.room_id,
+                        report.cursor_before,
+                        report.cursor_after,
+                        report.skipped.len(),
+                        report.commit_seq,
+                        report
+                            .skipped
+                            .iter()
+                            .map(|entry| entry.seq)
+                            .collect::<Vec<_>>(),
+                    );
+                }
+                if let Some(reason) = &report.skip_refused {
+                    eprintln!(
+                        "finitechat rekey audit: room {} frozen cursor {} left below commit seq {}: {reason}",
+                        report.room_id, report.cursor_before, report.commit_seq,
+                    );
+                }
+                Ok(AppRekeyRoomReport {
+                    room_id: report.room_id,
+                    previous_epoch: report.previous_epoch,
+                    new_epoch: report.new_epoch,
+                    commit_seq: report.commit_seq,
+                    message_id: report.message_id,
+                    cursor_before: report.cursor_before,
+                    cursor_after: report.cursor_after,
+                    skipped: report
+                        .skipped
+                        .into_iter()
+                        .map(|entry| AppRekeySkippedEntry {
+                            seq: entry.seq,
+                            sender_account_id: entry.sender_account_id,
+                            sender_device_id: entry.sender_device_id,
+                            message_id: entry.message_id,
+                        })
+                        .collect(),
+                    skip_refused: report.skip_refused,
+                })
+            }
             Err(error) => {
                 self.reload_persisted_device()?;
                 Err(match error {

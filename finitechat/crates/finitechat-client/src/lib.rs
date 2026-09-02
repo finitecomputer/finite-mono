@@ -6303,6 +6303,104 @@ pub struct RuntimeRekeyRoomReport {
     pub new_epoch: u64,
     pub commit_seq: u64,
     pub message_id: MessageId,
+    /// The room's sync cursor before the rekey.
+    #[serde(default)]
+    pub cursor_before: u64,
+    /// The room's sync cursor after the rekey: `commit_seq` when the cursor
+    /// was current or the audited skip completed the heal, otherwise
+    /// unchanged (see `skip_refused`).
+    #[serde(default)]
+    pub cursor_after: u64,
+    /// The entries a frozen cursor was moved across to land on
+    /// `commit_seq`: only application entries from other devices, in log
+    /// order. Empty when the cursor was current or the skip was refused.
+    #[serde(default)]
+    pub skipped: Vec<RuntimeRekeySkippedEntry>,
+    /// Why a frozen cursor was left in place, naming the first offending
+    /// seq. The rekey itself still succeeded; `finitechat repair
+    /// skip-entry` is the sanctioned follow-up.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub skip_refused: Option<String>,
+}
+
+/// One application entry the rekey's audited skip moved a frozen cursor
+/// across: an entry below the accepted Commit from a device other than
+/// this one.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RuntimeRekeySkippedEntry {
+    pub seq: u64,
+    pub sender_account_id: String,
+    pub sender_device_id: String,
+    pub message_id: MessageId,
+}
+
+/// Pages read while classifying a frozen cursor's skip window, matching the
+/// bounded replay tick. A window that does not fit is refused, not
+/// truncated.
+const MAX_REKEY_SKIP_WINDOW_PAGES: u32 = 64;
+
+/// Classify the entries strictly between a frozen cursor (`after_seq`) and
+/// the accepted rekey Commit (`commit_seq`). The skip is allowed only when
+/// EVERY entry in the window is an application entry whose sender device is
+/// not this device (any account): those are the poison sends the epoch bump
+/// made irrelevant. A Commit, a Proposal, or an application entry from this
+/// device anywhere in the window refuses the whole skip, naming the first
+/// offending seq. Read-only: no cursor or state change.
+fn classify_rekey_skip_window<D: RuntimeDelivery>(
+    delivery: &mut D,
+    own_device: &DeviceRef,
+    room_id: &str,
+    after_seq: u64,
+    commit_seq: u64,
+) -> Result<Result<Vec<RuntimeRekeySkippedEntry>, String>, D::Error> {
+    let mut skipped = Vec::new();
+    let mut after = after_seq;
+    for _ in 0..MAX_REKEY_SKIP_WINDOW_PAGES {
+        let page = delivery.sync_events(room_id, own_device, after)?;
+        for entry in &page.entries {
+            if entry.seq <= after_seq {
+                continue;
+            }
+            if entry.seq >= commit_seq {
+                return Ok(Ok(skipped));
+            }
+            let kind = match entry.kind {
+                LogEntryKind::Application => None,
+                LogEntryKind::Commit => Some("commit"),
+                LogEntryKind::Proposal => Some("proposal"),
+            };
+            if let Some(kind) = kind {
+                return Ok(Err(format!(
+                    "seq {}: {kind} entry inside the skip window",
+                    entry.seq
+                )));
+            }
+            if entry.sender.device_id == own_device.device_id
+                || entry.envelope.sender.device_id == own_device.device_id
+            {
+                return Ok(Err(format!(
+                    "seq {}: application entry from this device inside the skip window",
+                    entry.seq
+                )));
+            }
+            skipped.push(RuntimeRekeySkippedEntry {
+                seq: entry.seq,
+                sender_account_id: entry.sender.account_id.clone(),
+                sender_device_id: entry.sender.device_id.clone(),
+                message_id: entry.message_id.clone(),
+            });
+        }
+        if !page.has_more || page.next_after_seq <= after {
+            return Ok(Err(format!(
+                "skip window did not reach commit seq {commit_seq} (last page ended at seq {})",
+                page.next_after_seq
+            )));
+        }
+        after = page.next_after_seq;
+    }
+    Ok(Err(format!(
+        "skip window exceeds {MAX_REKEY_SKIP_WINDOW_PAGES} pages before commit seq {commit_seq}"
+    )))
 }
 
 /// Directory pages scanned while looking up one room's server epoch.
@@ -6354,9 +6452,16 @@ fn server_room_epoch<D: RuntimeDelivery>(
 /// sync cursor is deliberately NOT required to be at the server head: a
 /// receiver quarantined behind undecryptable application entries can still
 /// commit, because only unapplied Commits matter and the epoch check rules
-/// those out. The cursor advances across the accepted Commit only when it
-/// is the very next entry; a frozen cursor stays where it is and the
-/// operator's sanctioned skip repair moves it to `commit_seq`.
+/// those out. The cursor advances across the accepted Commit when it is the
+/// very next entry. A frozen cursor completes the heal with an audited
+/// skip: the window strictly between the cursor and the Commit is paged and
+/// classified, and the cursor moves to `commit_seq` only when every entry
+/// in it is an application entry from another device (the poison sends the
+/// epoch bump made irrelevant); those entries are listed in the report. A
+/// Commit, a Proposal, or an own application entry anywhere in the window
+/// refuses the skip (`skip_refused` names the first offending seq), the
+/// cursor stays put, and `finitechat repair skip-entry` remains the
+/// sanctioned follow-up.
 ///
 /// Durability order mirrors the add-member flow: the pending Commit is
 /// saved before submit (so a crash after acceptance is merged by the next
@@ -6414,9 +6519,38 @@ pub fn run_runtime_rekey_room<D: RuntimeDelivery>(
         .map_err(RuntimeWorkerError::Delivery)?;
     device.merge_pending_commit_from_log(room_id, &page.entries, &message_id)?;
     let new_epoch = device.group_epoch(room_id)?;
-    if device.last_applied_seq(room_id)?.saturating_add(1) == accepted.seq {
+    let cursor_before = device.last_applied_seq(room_id)?;
+    let mut skipped = Vec::new();
+    let mut skip_refused = None;
+    if cursor_before.saturating_add(1) == accepted.seq {
+        // Committed from the server head: nothing lies between the cursor
+        // and the Commit.
         device.set_last_applied_seq(room_id, accepted.seq)?;
+    } else if cursor_before < accepted.seq {
+        // Frozen cursor: the merged Commit is durable before the window is
+        // classified, so a paging failure below costs only the skip.
+        store.save_device_state(device)?;
+        match classify_rekey_skip_window(
+            delivery,
+            device.device_ref(),
+            room_id,
+            cursor_before,
+            accepted.seq,
+        ) {
+            Ok(Ok(entries)) => {
+                device.set_last_applied_seq(room_id, accepted.seq)?;
+                skipped = entries;
+            }
+            Ok(Err(reason)) => skip_refused = Some(reason),
+            Err(_) => {
+                skip_refused = Some(format!(
+                    "skip window below commit seq {} could not be paged from the server",
+                    accepted.seq
+                ));
+            }
+        }
     }
+    let cursor_after = device.last_applied_seq(room_id)?;
     store.save_device_state(device)?;
 
     Ok(RuntimeRekeyRoomReport {
@@ -6425,6 +6559,10 @@ pub fn run_runtime_rekey_room<D: RuntimeDelivery>(
         new_epoch,
         commit_seq: accepted.seq,
         message_id,
+        cursor_before,
+        cursor_after,
+        skipped,
+        skip_refused,
     })
 }
 
