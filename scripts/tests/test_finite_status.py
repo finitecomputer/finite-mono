@@ -773,25 +773,6 @@ class FiniteStatusTests(unittest.TestCase):
         output = finite_status.render_human(report)
         self.assertIn("no fresh report (never reported)", output)
 
-    def test_pending_first_report_runtime_is_tracked_but_silent(self) -> None:
-        # An up-bound control just completed: the runtime is expected to
-        # report (so it counts against the host as unknown) but a report
-        # stored before the control speaks for the previous incarnation.
-        report = self.report_with_health_group(
-            {
-                "runtime_status": "pending_first_report",
-                "health_reported_at": "2026-08-01T13:59:30Z",
-                "health_ready": True,
-            }
-        )
-        host = self.lat9(report)
-        self.assertEqual(host["status"], "unknown")
-        self.assertEqual(host["health_tracked_count"], 1)
-        entry = host["health_unknown"][0]
-        self.assertEqual(entry["health"]["status"], "unknown")
-        output = finite_status.render_human(report)
-        self.assertIn("HEALTH-UNKNOWN Health Agent 01 [health-agent-01]", output)
-
     def test_offline_runtime_health_is_displayed_but_not_tracked(self) -> None:
         # An intentionally stopped runtime carries no standing readiness claim:
         # even a fresh-looking last report projects unknown and is not counted

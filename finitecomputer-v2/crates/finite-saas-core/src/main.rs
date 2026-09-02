@@ -11,7 +11,7 @@ use finite_saas_core::{
     ResetFinitePrivateUsageWindowInput, RevokeFinitePrivateApiKeyInput,
     RevokeFinitePrivateGrantInput, RotateFinitePrivateApiKeyInput, RuntimeArtifact,
     RuntimeArtifactKind, RuntimeControlRequest, RuntimeControlRequestStatus, RuntimePlacement,
-    UpsertRuntimeArtifactInput,
+    RuntimeSummaryStatus, UpsertRuntimeArtifactInput,
 };
 use serde::Serialize;
 use std::collections::{BTreeMap, BTreeSet};
@@ -897,7 +897,7 @@ fn plan_runtime_artifact_rollout(
                     && overview.source_host_id == source_host_id
                     && overview.runtime_link_active
                     && overview.runtime_artifact_id.as_deref() == Some(target_artifact_id)
-                    && overview.lifecycle_status.is_launched()
+                    && overview.lifecycle_status == RuntimeSummaryStatus::Online
             });
             (!canary_is_planned && !canary_is_already_ready).then(|| {
                 format!(
@@ -1163,10 +1163,9 @@ async fn runtime_artifact_rollout<S: RuntimeArtifactRolloutStore>(
                 && overview.source_machine_id == entry.source_machine_id
                 && overview.runtime_artifact_id.as_deref()
                     == Some(input.target_artifact_id.as_str())
-                // Completion latches `pending_first_report` until the standing
-                // poller confirms the upgraded runtime; that is still a
-                // successful up-bound lifecycle outcome on the target artifact.
-                && overview.lifecycle_status.is_launched()
+                // The lifecycle latch, not the health-derived status: right
+                // after completion the standing poller has not reported yet.
+                && overview.lifecycle_status == RuntimeSummaryStatus::Online
         });
         if !postcondition_met {
             let detail = format!(

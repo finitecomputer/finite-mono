@@ -201,46 +201,23 @@ wire_enum! {
 wire_enum! {
 /// A Runtime's lifecycle-latched summary. `Online`/`Offline` are the last
 /// successful up-/down-bound lifecycle outcomes, `Stale` is a failed control,
-/// `Unknown` is registered-but-unconfirmed, and `PendingFirstReport` is an
-/// up-bound control that completed but whose runtime has not yet been seen
-/// by the runner's standing health poller. The user-facing status is never
-/// this latch verbatim: see `derive_runtime_summary_status`.
+/// and `Unknown` is registered-but-unconfirmed. Every completion that brings
+/// compute up latches `Online` and clears the stored health report, so the
+/// user-facing status (never this latch verbatim: see
+/// `derive_runtime_summary_status`) reads `unknown` until the runner's
+/// standing poller first reports on the new incarnation.
 ///
 /// Parsing is forward-tolerant: an unrecognised string reads as `Unknown`
 /// (registered-but-unconfirmed), so a reader one release behind survives a
-/// newly added variant. Runner-facing payloads additionally go through
-/// `for_runner_wire`.
+/// newly added variant.
     RuntimeSummaryStatus {
     Online => "online",
     Offline => "offline",
     Stale => "stale",
     Unknown => "unknown",
-    PendingFirstReport => "pending_first_report",
     }
     parse: parse_runtime_summary_status
     fallback: Unknown
-}
-
-impl RuntimeSummaryStatus {
-    /// True when the lifecycle machine last recorded a successful up-bound
-    /// operation (launch, restart, recovery, upgrade), whether or not the
-    /// standing health poller has confirmed the runtime since.
-    pub fn is_launched(self) -> bool {
-        matches!(self, Self::Online | Self::PendingFirstReport)
-    }
-
-    /// The latch as a runner may see it. Runners only ever act on the
-    /// lifecycle facts they are handed (a lease, the health-target listing),
-    /// never on this latch, and an N-1 runner parses the wire strictly, so
-    /// `pending_first_report` is sent as its documented approximation
-    /// `unknown`. Core keeps the precise variant in the database and on
-    /// operator and dashboard surfaces. Additive-only wire policy.
-    pub fn for_runner_wire(self) -> Self {
-        match self {
-            Self::PendingFirstReport => Self::Unknown,
-            Self::Online | Self::Offline | Self::Stale | Self::Unknown => self,
-        }
-    }
 }
 
 wire_enum! {
@@ -765,6 +742,8 @@ pub enum CoreError {
     MissingAgentRuntimeId,
     #[error("runtime health report is invalid or out of bounds")]
     InvalidRuntimeHealthReport,
+    #[error("runtime health report presents a different Agent Principal than the one on record")]
+    RuntimeHealthReportPrincipalMismatch,
     #[error("provider runtime handle does not match the persisted placement")]
     ProviderRuntimeHandlePlacementMismatch,
     #[error("provider operation correlation id is required or invalid")]
@@ -1120,12 +1099,11 @@ impl RuntimeHealthProjection {
 }
 
 /// Project standing readiness from the latest stored report. Reports do not
-/// speak for a runtime that is intentionally `offline`, nor for one whose
-/// up-bound control just completed (`pending_first_report`): any stored
-/// report predates that lifecycle change and is evidence about the previous
-/// incarnation. Freshness is measured from `reported_at` (Core's receive
-/// clock), never the runner's `observed_at`, so runner clock skew cannot
-/// extend freshness. A report older than
+/// speak for a runtime that is intentionally `offline`. Every completion that
+/// brings compute up clears the stored report, so a report never speaks for
+/// a previous incarnation. Freshness is measured from `reported_at` (Core's
+/// receive clock), never the runner's `observed_at`, so runner clock skew
+/// cannot extend freshness. A report older than
 /// `RUNTIME_HEALTH_REPORT_STALE_MULTIPLIER` intervals is the named `stale`
 /// state; no report at all is `unknown`.
 pub fn project_runtime_health(
@@ -1139,10 +1117,7 @@ pub fn project_runtime_health(
             RUNTIME_HEALTH_REPORT_MAX_INTERVAL_SECONDS,
         )
     });
-    let reports_speak = !matches!(
-        runtime_status,
-        RuntimeSummaryStatus::Offline | RuntimeSummaryStatus::PendingFirstReport
-    );
+    let reports_speak = runtime_status != RuntimeSummaryStatus::Offline;
     let status = if !reports_speak {
         RuntimeHealthStatus::Unknown
     } else if let (Some(ready), Some(reported_at)) = (health.ready, health.reported_at.as_deref()) {
@@ -1174,11 +1149,10 @@ pub fn project_runtime_health(
 /// from report freshness, never from the last lifecycle outcome alone.
 ///
 /// - an intentionally stopped runtime (`offline` latch) stays `offline`;
-/// - a runtime awaiting its first post-control report is `unknown`;
 /// - otherwise a fresh `ready` report is `online`, a fresh not-ready report
 ///   is `offline` (nobody answers, or the guest says it is not ready), a
 ///   report past the freshness deadline is `stale`, and a runtime that has
-///   never been reported on is `unknown`.
+///   not been reported on since its compute last came up is `unknown`.
 ///
 /// The latched lifecycle fact stays visible to operators under its own
 /// field; this value is what the summary status wire fields carry.
@@ -1188,7 +1162,6 @@ pub fn derive_runtime_summary_status(
 ) -> RuntimeSummaryStatus {
     match lifecycle_status {
         RuntimeSummaryStatus::Offline => RuntimeSummaryStatus::Offline,
-        RuntimeSummaryStatus::PendingFirstReport => RuntimeSummaryStatus::Unknown,
         RuntimeSummaryStatus::Online
         | RuntimeSummaryStatus::Stale
         | RuntimeSummaryStatus::Unknown => match health.status {
@@ -1212,8 +1185,11 @@ pub struct RuntimeHealthTarget {
     /// The contact endpoint Core holds for the runtime; `None` for rows that
     /// never recorded one (the runner cannot poll those).
     pub contact_endpoint: Option<String>,
-    /// The Agent Principal npub last observed for the runtime, if any: the
-    /// runner pins it so a reallocated port cannot wear this runtime's name.
+    /// The Agent Principal npub Core holds for the runtime, if any — seeded
+    /// from the launch-verified principal when its compute last came up, or
+    /// from its first report. The runner attributes answers to it only when
+    /// they present this principal, and Core rejects reports that carry
+    /// another, so a reallocated port cannot wear this runtime's name.
     #[serde(default)]
     pub agent_npub: Option<String>,
     pub lifecycle_status: RuntimeSummaryStatus,
@@ -2628,6 +2604,11 @@ pub struct CompleteAgentCreationRequestInput {
     pub active_inference_profile: Option<String>,
     pub hermes_available: Option<bool>,
     pub published_app_urls: Vec<String>,
+    /// The Agent Principal npub the launch path verified at `/contact`, when
+    /// it did. Seeds the standing-health attribution pin. Additive: an N-1
+    /// runner omits it and the pin is then taken from the first report.
+    #[serde(default)]
+    pub agent_npub: Option<String>,
     pub now: Option<String>,
 }
 
@@ -4071,21 +4052,15 @@ mod tests {
     }
 
     #[test]
-    fn runtime_health_projection_is_silent_for_offline_and_pending_runtimes() {
+    fn runtime_health_projection_is_silent_for_offline_runtimes() {
         let now = "2026-08-24T12:00:00Z";
         let fresh = stored_health(true, "2026-08-24T11:59:30Z", 60);
-        for status in [
-            RuntimeSummaryStatus::Offline,
-            RuntimeSummaryStatus::PendingFirstReport,
-        ] {
-            let projected = project_runtime_health(status, &fresh, now).unwrap();
-            assert_eq!(
-                projected.status,
-                RuntimeHealthStatus::Unknown,
-                "a stopped runtime carries no standing readiness claim, and a report stored \
-                 before an up-bound control completed speaks for the previous incarnation"
-            );
-        }
+        let projected = project_runtime_health(RuntimeSummaryStatus::Offline, &fresh, now).unwrap();
+        assert_eq!(
+            projected.status,
+            RuntimeHealthStatus::Unknown,
+            "a stopped runtime carries no standing readiness claim"
+        );
         // A failed control (`stale` latch) or an unconfirmed registration
         // does not silence a fresh report: freshness is the truth.
         for status in [RuntimeSummaryStatus::Stale, RuntimeSummaryStatus::Unknown] {
@@ -4150,18 +4125,6 @@ mod tests {
                 &fresh_ready,
                 RuntimeSummaryStatus::Online,
             ),
-            // Completed up-bound control, nothing reported since: unknown,
-            // even though an older report is still stored.
-            (
-                RuntimeSummaryStatus::PendingFirstReport,
-                &fresh_ready,
-                RuntimeSummaryStatus::Unknown,
-            ),
-            (
-                RuntimeSummaryStatus::PendingFirstReport,
-                &never,
-                RuntimeSummaryStatus::Unknown,
-            ),
             // Deliberately stopped stays offline whatever the last report said.
             (
                 RuntimeSummaryStatus::Offline,
@@ -4181,28 +4144,24 @@ mod tests {
                 "{lifecycle:?} / {health:?}"
             );
         }
-        assert!(RuntimeSummaryStatus::Online.is_launched());
-        assert!(RuntimeSummaryStatus::PendingFirstReport.is_launched());
-        assert!(!RuntimeSummaryStatus::Stale.is_launched());
-        assert!(!RuntimeSummaryStatus::Offline.is_launched());
     }
 
-    /// The additive-only wire policy for runners: the precise latch never
-    /// leaves Core on a runner-facing surface, and a reader one release
-    /// behind survives the next variant anyway.
+    /// No summary status value exists that a runner one release behind does
+    /// not already parse, and a reader one release behind survives the next
+    /// added variant anyway.
     #[test]
-    fn runtime_summary_status_is_forward_tolerant_and_runner_wire_safe() {
-        assert_eq!(
-            RuntimeSummaryStatus::PendingFirstReport.for_runner_wire(),
-            RuntimeSummaryStatus::Unknown
-        );
+    fn runtime_summary_status_wire_is_n_minus_one_safe_and_forward_tolerant() {
+        const N_MINUS_ONE_KNOWN: [&str; 4] = ["online", "offline", "stale", "unknown"];
         for status in [
             RuntimeSummaryStatus::Online,
             RuntimeSummaryStatus::Offline,
             RuntimeSummaryStatus::Stale,
             RuntimeSummaryStatus::Unknown,
         ] {
-            assert_eq!(status.for_runner_wire(), status);
+            assert!(
+                N_MINUS_ONE_KNOWN.contains(&status.as_str()),
+                "{status:?} would not parse on an N-1 runner"
+            );
         }
         // An unrecognised string parses as `unknown`, via both surfaces.
         assert_eq!(
@@ -4215,12 +4174,12 @@ mod tests {
         );
         // Known strings still parse precisely, and the wire shape is unchanged.
         assert_eq!(
-            serde_json::from_str::<RuntimeSummaryStatus>("\"pending_first_report\"").unwrap(),
-            RuntimeSummaryStatus::PendingFirstReport
+            serde_json::from_str::<RuntimeSummaryStatus>("\"stale\"").unwrap(),
+            RuntimeSummaryStatus::Stale
         );
         assert_eq!(
-            serde_json::to_string(&RuntimeSummaryStatus::PendingFirstReport).unwrap(),
-            "\"pending_first_report\""
+            serde_json::to_string(&RuntimeSummaryStatus::Stale).unwrap(),
+            "\"stale\""
         );
         assert!(serde_json::from_str::<RuntimeSummaryStatus>("7").is_err());
         // Enums without a safe fallback stay strict.
@@ -4270,7 +4229,6 @@ mod tests {
             RuntimeSummaryStatus::Offline,
             RuntimeSummaryStatus::Stale,
             RuntimeSummaryStatus::Unknown,
-            RuntimeSummaryStatus::PendingFirstReport,
         );
 
         assert_wire_encodings_agree!(
@@ -5955,6 +5913,7 @@ mod tests {
                     active_inference_profile: None,
                     hermes_available: Some(true),
                     published_app_urls: Vec::new(),
+                    agent_npub: None,
                     now: Some("2098-01-01T00:02:00Z".to_string()),
                 })
                 .await
@@ -6143,6 +6102,7 @@ mod tests {
                     active_inference_profile: Some("finite-private".to_string()),
                     hermes_available: Some(true),
                     published_app_urls: Vec::new(),
+                    agent_npub: None,
                     now: Some("2026-05-25T13:02:00Z".to_string()),
                 }).await
                 .unwrap();
@@ -6484,6 +6444,7 @@ mod tests {
                 active_inference_profile: Some("finite-private".to_string()),
                 hermes_available: Some(true),
                 published_app_urls: Vec::new(),
+                agent_npub: None,
                 now: Some("2026-05-25T13:02:00Z".to_string()),
             };
             let mut mismatched_completion = completion_input.clone();
@@ -6643,15 +6604,13 @@ mod tests {
 
             assert_eq!(completed.status, RuntimeControlRequestStatus::Succeeded);
             assert!(completed.lease_token.is_none());
-            // The restart succeeded; the standing poller has not confirmed
-            // the restarted runtime yet.
             assert_eq!(
                 db.agent_runtime(&runtime_id)
                     .await
                     .unwrap()
                     .host_facts
                     .runtime_status,
-                RuntimeSummaryStatus::PendingFirstReport
+                RuntimeSummaryStatus::Online
             );
             assert!(
                 db.lease_runtime_control_request(LeaseRuntimeControlRequestInput {
@@ -7498,6 +7457,7 @@ mod tests {
                     active_inference_profile: None,
                     hermes_available: None,
                     published_app_urls: Vec::new(),
+                    agent_npub: None,
                     now: Some("2026-05-25T13:03:00Z".to_string()),
                 })
                 .await
@@ -7916,6 +7876,7 @@ mod tests {
                     active_inference_profile: Some("finite-private".to_string()),
                     hermes_available: Some(true),
                     published_app_urls: vec!["https://paid-agent.example.com/contact".to_string()],
+                    agent_npub: None,
                     now: Some("2026-05-25T13:03:00Z".to_string()),
                 })
                 .await
@@ -10048,6 +10009,7 @@ mod tests {
                     active_inference_profile: Some("finite-private".to_string()),
                     hermes_available: Some(true),
                     published_app_urls: Vec::new(),
+                    agent_npub: None,
                     now: Some("2026-08-12T14:05:00Z".to_string()),
                 })
                 .await
@@ -10595,6 +10557,7 @@ mod tests {
                     active_inference_profile: Some("finite-private".to_string()),
                     hermes_available: Some(true),
                     published_app_urls: vec!["http://127.0.0.1:41001/contact".to_string()],
+                    agent_npub: None,
                     now: Some("2026-05-25T13:02:00Z".to_string()),
                 }).await
                 .unwrap();
@@ -11103,6 +11066,7 @@ mod tests {
                 active_inference_profile: Some("finite-private".to_string()),
                 hermes_available: Some(true),
                 published_app_urls: Vec::new(),
+                agent_npub: None,
                 now: Some(now.to_string()),
             })
             .await
