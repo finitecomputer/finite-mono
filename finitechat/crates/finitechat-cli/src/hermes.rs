@@ -671,23 +671,13 @@ fn room_cursors_summary_json(cursors: &[AppRoomSyncCursor]) -> Value {
         "rooms": cursors
             .iter()
             .take(READYZ_ROOM_CURSOR_LIMIT)
-            .map(|cursor| json!({
-                "room_id": cursor.room_id,
-                "last_applied_seq": cursor.last_applied_seq,
-                // Currency gate (rewound-store guard): the durable own-send
-                // mark, whether this process has verified the room since
-                // opening the store, and sticky behind-server evidence.
-                "own_send_high_water_seq": cursor.own_send_high_water_seq,
-                "currency_initialized": cursor.currency_initialized,
-                "currency_verified": cursor.currency_verified,
-                "behind_server": cursor.behind_server.as_ref().map(|evidence| json!({
-                    "local_mark": evidence.local_mark,
-                    "observed_seq": evidence.observed_seq,
-                    "message_id": evidence.message_id,
-                    "observed_at": evidence.observed_at,
-                    "evidence_epoch": evidence.evidence_epoch,
-                })),
-            }))
+            // The core's cursor record is passed through as-is (it owns the
+            // field set: durable cursor, own-send mark, currency state,
+            // behind-server evidence); this bridge does not interpret it.
+            .map(|cursor| {
+                serde_json::to_value(cursor)
+                    .unwrap_or_else(|_| json!({ "room_id": cursor.room_id }))
+            })
             .collect::<Vec<_>>(),
         "total": total,
         "truncated": total > READYZ_ROOM_CURSOR_LIMIT,
