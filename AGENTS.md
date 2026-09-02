@@ -83,6 +83,13 @@ lint/test/build, the finitechat Hermes bridge suite, and skills/search static
 checks. Release and image workflows are described in `infra/images/README.md`
 and the workflow files themselves.
 
+## Code review
+
+Automated pull request reviews should follow
+`docs/agents/finite-automated-pr-review.md`. Use it to evaluate the PR's goal,
+implementation fit, regression risk, complexity budget, and pass/fail outcome
+without reviewer-specific scoping.
+
 ## Agent skills
 
 - **Issue tracker:** GitHub. See `docs/agents/issue-tracker.md`.
