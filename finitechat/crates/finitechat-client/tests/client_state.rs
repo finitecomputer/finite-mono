@@ -2638,6 +2638,236 @@ fn runtime_link_fanout_reprepares_after_http_same_epoch_loss() {
     assert_eq!(alice_phone.group_epoch(room_id).unwrap(), 3);
 }
 
+/// The sender-rewind incident class, end to end: a sender whose durable MLS
+/// state was restored from an older snapshot keeps having messages ACCEPTED
+/// by the server while the receiver quarantines every entry and freezes its
+/// room cursor. The receiver's frozen tick aborts on the first undecryptable
+/// entry and can never reach a later commit, so the heal requires the exact
+/// order proven here: fresh device mint (NEW device id) → owner re-admission
+/// commit (epoch bump re-derives everyone's secret trees at generation 0) →
+/// receiver cursor skip past the quarantined pre-commit backlog.
+#[test]
+fn rewound_sender_wedges_receiver_and_heals_via_readdmission_epoch_bump() {
+    let dir = tempfile::tempdir().unwrap();
+    let server_db = dir.path().join("finitechat-http-rewind-heal.sqlite3");
+
+    // Owner (alice) and agent (bob), both with durable stores.
+    let alice_config = test_config(ALICE_ACCOUNT_SECRET_BYTES, "alice_http_rewind_heal");
+    let mut alice_store =
+        sqlite_client_store(dir.path().join("rewind_alice.sqlite3"), &alice_config);
+    let mut alice = FiniteChatDevice::new(alice_config.clone()).unwrap();
+    let bob_config = test_config(BOB_ACCOUNT_SECRET_BYTES, "bob_http_rewind_heal");
+    let bob_db = dir.path().join("rewind_bob.sqlite3");
+    let mut bob_store = sqlite_client_store(bob_db.clone(), &bob_config);
+    let mut bob = FiniteChatDevice::new(bob_config.clone()).unwrap();
+    let options = RuntimeSyncOptions {
+        key_package_target_available: 0,
+        max_sync_pages_per_room: 8,
+    };
+
+    let mut delivery = HttpRuntimeDelivery::from_sqlite_path(&server_db);
+    let add_seq = create_group_room_with_member(
+        &mut delivery,
+        &mut alice,
+        &mut bob,
+        GroupMemberSetup {
+            room_id: ROOM_ID,
+            mls_group_id: MLS_GROUP_ID,
+            key_package_id: "kp_http_rewind_bob",
+            welcome_id: "welcome_http_rewind_bob",
+            idempotency_key: "commit_http_rewind_bob",
+        },
+    );
+    // create_group_room_with_member already claimed and activated bob's
+    // welcome (bob's group is at epoch 1); mirror alice's cursor advance so
+    // both devices start even.
+    bob_store.save_device_state(&bob).unwrap();
+    bob_store
+        .advance_room_cursor_and_save(&mut bob, ROOM_ID, add_seq)
+        .unwrap();
+    assert_eq!(bob.group_epoch(ROOM_ID).unwrap(), 1);
+    alice_store
+        .advance_room_cursor_and_save(&mut alice, ROOM_ID, add_seq)
+        .unwrap();
+
+    // Healthy traffic: bob sends, alice receives and decrypts.
+    let healthy_plaintext =
+        br#"{"type":"finitecomputer.command.v1","body":{"text":"rewind healthy"}}"#;
+    let healthy = bob
+        .create_application_request(ROOM_ID, healthy_plaintext, "app_rewind_healthy")
+        .unwrap();
+    let healthy = delivery
+        .append_event(&healthy, DurableAppEventKind::ChatMessage.delivery_policy())
+        .unwrap();
+    let healthy_report =
+        run_runtime_sync_tick(&mut alice_store, &mut alice, &mut delivery, &options).unwrap();
+    assert_eq!(healthy_report.applied_entries.len(), 1);
+    assert_eq!(alice.last_applied_seq(ROOM_ID).unwrap(), healthy.seq);
+
+    // Rewind: persist bob's durable state (T1), let the ratchet advance across
+    // several sends the receiver consumes, then restore the T1 store files —
+    // the file-level restore is the production mechanism.
+    bob_store.save_device_state(&bob).unwrap();
+    let t1_db = dir.path().join("rewind_bob_t1.sqlite3");
+    let t1_wal = dir.path().join("rewind_bob_t1.sqlite3-wal");
+    std::fs::copy(&bob_db, &t1_db).unwrap();
+    if bob_db
+        .parent()
+        .unwrap()
+        .join("rewind_bob.sqlite3-wal")
+        .exists()
+    {
+        std::fs::copy(
+            bob_db.parent().unwrap().join("rewind_bob.sqlite3-wal"),
+            &t1_wal,
+        )
+        .unwrap();
+    }
+    let advanced_seqs: Vec<u64> = (0..4)
+        .map(|i| {
+            let plaintext = format!(
+                "{{\"type\":\"finitecomputer.command.v1\",\"body\":{{\"text\":\"advance {i}\"}}}}"
+            )
+            .into_bytes();
+            let request = bob
+                .create_application_request(ROOM_ID, &plaintext, format!("app_rewind_advance_{i}"))
+                .unwrap();
+            delivery
+                .append_event(&request, DurableAppEventKind::ChatMessage.delivery_policy())
+                .unwrap()
+                .seq
+        })
+        .collect();
+    let advanced_report =
+        run_runtime_sync_tick(&mut alice_store, &mut alice, &mut delivery, &options).unwrap();
+    assert_eq!(advanced_report.applied_entries.len(), 4);
+    let frozen_cursor = alice.last_applied_seq(ROOM_ID).unwrap();
+    assert_eq!(frozen_cursor, *advanced_seqs.last().unwrap());
+
+    drop(bob_store);
+    std::fs::copy(&t1_db, &bob_db).unwrap();
+    if t1_wal.exists() {
+        std::fs::copy(
+            &t1_wal,
+            bob_db.parent().unwrap().join("rewind_bob.sqlite3-wal"),
+        )
+        .unwrap();
+    } else {
+        let _ = std::fs::remove_file(bob_db.parent().unwrap().join("rewind_bob.sqlite3-wal"));
+    }
+    let _ = std::fs::remove_file(bob_db.parent().unwrap().join("rewind_bob.sqlite3-shm"));
+    let bob_store = sqlite_client_store(bob_db.clone(), &bob_config);
+    let mut bob = bob_store.load_device(bob_config.clone()).unwrap();
+
+    // Wedge: the rewound sender's message is accepted by the server (shape and
+    // membership checks only — the server cannot see secret-tree generations)
+    // but the receiver's tick aborts on it and the cursor stays frozen.
+    let poison_plaintext =
+        br#"{"type":"finitecomputer.command.v1","body":{"text":"rewind poison"}}"#;
+    let poison = bob
+        .create_application_request(ROOM_ID, poison_plaintext, "app_rewind_poison")
+        .unwrap();
+    let poison = delivery
+        .append_event(&poison, DurableAppEventKind::ChatMessage.delivery_policy())
+        .unwrap();
+    assert!(poison.seq > frozen_cursor);
+    let wedge = run_runtime_sync_tick(&mut alice_store, &mut alice, &mut delivery, &options);
+    let wedge_error = format!("{:?}", wedge.unwrap_err());
+    assert!(
+        wedge_error.contains("TooDistantInThePast")
+            || wedge_error.contains("SecretTree")
+            || wedge_error.contains("SecretReuse")
+            || wedge_error.contains("UnableToDecrypt"),
+        "unexpected wedge error class: {wedge_error}"
+    );
+    assert_eq!(alice.last_applied_seq(ROOM_ID).unwrap(), frozen_cursor);
+
+    // Heal 1 — fresh mint with a NEW device id (a fresh device reusing the old
+    // DeviceRef would be served the room's full history by the membership
+    // projection and re-wedge on entries it cannot decrypt), then owner
+    // re-admission: the add-member commit bumps the epoch and re-derives
+    // everyone's secret trees at generation 0.
+    let fresh_config = test_config(BOB_ACCOUNT_SECRET_BYTES, "bob_http_rewind_heal_r2");
+    let mut fresh_store =
+        sqlite_client_store(dir.path().join("rewind_bob_fresh.sqlite3"), &fresh_config);
+    let mut fresh_bob = FiniteChatDevice::new(fresh_config.clone()).unwrap();
+    fresh_store.save_device_state(&fresh_bob).unwrap();
+    fresh_store
+        .set_welcome_admission_policy(fresh_bob.device_ref(), WelcomeAdmissionPolicy::Allowlist)
+        .unwrap();
+    fresh_store
+        .add_welcome_allowed_senders(
+            fresh_bob.device_ref(),
+            [alice.device_ref().account_id.clone()],
+        )
+        .unwrap();
+    delivery
+        .upload_key_package(
+            fresh_bob
+                .upload_key_package_request("kp_http_rewind_bob_r2")
+                .unwrap(),
+        )
+        .unwrap();
+    let claimed = delivery
+        .claim_key_package_for_device(fresh_bob.device_ref())
+        .unwrap()
+        .expect("fresh bob key package");
+    let prepared = alice
+        .prepare_add_member_commit(
+            ROOM_ID,
+            &claimed,
+            "welcome_http_rewind_bob_r2",
+            "commit_http_rewind_bob_r2",
+        )
+        .unwrap();
+    let commit_accepted = delivery.submit_commit(prepared.request).unwrap();
+    let owner_page = delivery
+        .sync_events(ROOM_ID, alice.device_ref(), 0)
+        .unwrap();
+    alice
+        .merge_pending_commit_from_log(ROOM_ID, &owner_page.entries, &prepared.message_id)
+        .unwrap();
+    assert_eq!(alice.group_epoch(ROOM_ID).unwrap(), 2);
+
+    // Heal 2 — the fresh device joins at the new epoch and, thanks to the
+    // per-device membership projection, never sees the poison backlog at all.
+    let fresh_join =
+        run_runtime_sync_tick(&mut fresh_store, &mut fresh_bob, &mut delivery, &options).unwrap();
+    assert_eq!(fresh_join.activated_welcome_acks_sent, 1);
+    assert_eq!(fresh_bob.group_epoch(ROOM_ID).unwrap(), 2);
+    assert!(fresh_bob.last_applied_seq(ROOM_ID).unwrap() >= commit_accepted.seq);
+
+    // Heal 3 — the fresh sender's message is decryptable, but ONLY once the
+    // receiver's cursor has been repaired past the quarantined pre-commit
+    // backlog: the frozen tick still aborts on the poison entry first.
+    let healed_plaintext =
+        br#"{"type":"finitecomputer.command.v1","body":{"text":"rewind healed"}}"#;
+    let healed = fresh_bob
+        .create_application_request(ROOM_ID, healed_plaintext, "app_rewind_healed")
+        .unwrap();
+    let healed = delivery
+        .append_event(&healed, DurableAppEventKind::ChatMessage.delivery_policy())
+        .unwrap();
+    assert!(run_runtime_sync_tick(&mut alice_store, &mut alice, &mut delivery, &options).is_err());
+    alice_store
+        .advance_room_cursor_and_save(&mut alice, ROOM_ID, commit_accepted.seq)
+        .unwrap();
+    let healed_report =
+        run_runtime_sync_tick(&mut alice_store, &mut alice, &mut delivery, &options).unwrap();
+    assert_eq!(alice.group_epoch(ROOM_ID).unwrap(), 2);
+    assert_eq!(alice.last_applied_seq(ROOM_ID).unwrap(), healed.seq);
+    assert_eq!(
+        healed_report
+            .applied_entries
+            .last()
+            .map(|entry| &entry.entry),
+        Some(&AppliedLogEntry::Application {
+            plaintext: healed_plaintext.to_vec(),
+            sender: fresh_bob.device_ref().clone(),
+        })
+    );
+}
+
 fn test_device(
     account_secret_bytes: [u8; NOSTR_SECRET_KEY_BYTES],
     device_id: &str,
