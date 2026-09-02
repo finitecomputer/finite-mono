@@ -1910,12 +1910,40 @@ impl FiniteChatDevice {
         self.clear_behind_server_if_healed(room_id)
     }
 
+    /// True when `entry` is this device's own Commit whose effects are
+    /// already merged: the group epoch has reached
+    /// `post_commit_epoch(entry.epoch)` and no Commit is pending. Re-paging
+    /// such an entry (a frozen cursor completing a rekey heal, an older
+    /// durable cursor restored from backup) is a no-op advance, not an
+    /// epoch error. Every other Commit shape keeps its existing rule: a
+    /// foreign Commit at an unexpected epoch, an own Commit whose epoch
+    /// has not moved, or an own Commit with a newer pending Commit all
+    /// still fail closed.
+    fn own_commit_already_merged(
+        &self,
+        room_id: &str,
+        entry: &RoomLogEntry,
+    ) -> Result<bool, ClientError> {
+        if entry.kind != LogEntryKind::Commit
+            || entry.sender != self.device_ref
+            || entry.envelope.sender != self.device_ref
+        {
+            return Ok(false);
+        }
+        let group = self.group(room_id)?;
+        Ok(group.epoch().as_u64() >= post_commit_epoch(entry.epoch)?
+            && group.pending_commit().is_none())
+    }
+
     fn apply_commit_entry_inner(
         &mut self,
         room_id: &str,
         entry: &RoomLogEntry,
     ) -> Result<(), ClientError> {
         validate_log_entry_shape(room_id, entry, LogEntryKind::Commit)?;
+        if self.own_commit_already_merged(room_id, entry)? {
+            return Ok(());
+        }
         let post_commit_epoch = post_commit_epoch(entry.epoch)?;
         let own_device_ref = self.device_ref.clone();
         let now_unix_seconds = self.now_unix_seconds;
@@ -2077,6 +2105,18 @@ impl FiniteChatDevice {
         if let Some(entry) = self.rooms.get_mut(room_id) {
             entry.currency_verified = true;
             entry.behind_server = None;
+        }
+    }
+
+    /// Test-only: move a room's sync cursor backwards, simulating an older
+    /// durable cursor (a restored backup) that re-pages entries the group
+    /// already merged. The production cursor path is monotonic. Never
+    /// compiled into production builds.
+    #[cfg(feature = "test-support")]
+    #[doc(hidden)]
+    pub fn rewind_room_cursor_for_tests(&mut self, room_id: &str, seq: u64) {
+        if let Some(entry) = self.rooms.get_mut(room_id) {
+            entry.last_applied_seq = seq;
         }
     }
 
@@ -5098,6 +5138,14 @@ fn apply_log_entry_in_memory(
                 Err(error) => Err(error.into()),
             };
         }
+        return Ok(None);
+    }
+    // An own Commit whose effects are already merged (rekey heal on a
+    // frozen cursor, older cursor restored from backup) is satisfied: the
+    // cursor advances across it without re-applying or re-reporting it.
+    if device.own_commit_already_merged(room_id, entry)? {
+        validate_log_entry_shape(room_id, entry, LogEntryKind::Commit)?;
+        device.set_last_applied_seq(room_id, entry.seq)?;
         return Ok(None);
     }
     // Own application messages cannot be decrypted by their sender (MLS);
