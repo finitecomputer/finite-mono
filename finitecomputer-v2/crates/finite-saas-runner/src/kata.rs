@@ -31,6 +31,16 @@ const RECOVERY_STATE_ROOT: &str = "/data";
 /// pre-runtime-id-era machine-named path by `reconcile_legacy_state_root`.
 const DURABLE_STATE_ROOT_MIGRATION_MARKER: &str = ".finite-durable-state-root-migration.json";
 const DURABLE_STATE_ROOT_MIGRATION_SCHEMA: &str = "finite.durable_state_root_migration.v1";
+/// The chat store's advisory single-writer lease, relative to a durable state
+/// root. `finitechat-client` holds `flock(LOCK_EX)` on it for as long as the
+/// store is open for writing; the bind mount shares the inode, so a holder
+/// inside a container or a Kata VM is visible from the host.
+pub const DURABLE_TREE_WRITER_LEASE: &str = "agent/client.sqlite3.writer-lease";
+/// Observation window between the two change-manifest samples of
+/// [`durable_tree_is_quiescent`].
+pub const DEFAULT_DURABLE_TREE_QUIESCENCE_WINDOW: Duration = Duration::from_secs(2);
+const DURABLE_TREE_CHANGE_MANIFEST_DEPTH: usize = 3;
+const MAX_DURABLE_TREE_CHANGE_MANIFEST_ENTRIES: usize = 8192;
 const MAX_KATA_HTTP_RESPONSE_BYTES: u64 = 64 * 1024;
 const MAX_KATA_CONTAINER_LIST_BYTES: usize = 64 * 1024;
 const MAX_KATA_RECOVERY_FENCE_OPERATIONS: usize = 32;
@@ -124,6 +134,9 @@ pub struct KataConfig {
     pub readiness_timeout: Duration,
     pub readiness_interval: Duration,
     pub stop_timeout_secs: u64,
+    /// Window over which a durable tree must stay unchanged before the
+    /// Runner treats it as having no live writer.
+    pub durable_tree_quiescence_window: Duration,
     pub retirement: Option<KataRetirementConfig>,
 }
 
@@ -159,6 +172,7 @@ impl Default for KataConfig {
             // below that escalates to a force-kill mid-shutdown, which
             // produced the rollout's ttrpc:closed false failures.
             stop_timeout_secs: 180,
+            durable_tree_quiescence_window: DEFAULT_DURABLE_TREE_QUIESCENCE_WINDOW,
             retirement: None,
         }
     }
@@ -323,7 +337,11 @@ impl KataLauncher {
     /// - the machine-named root for THIS plan's container exists, and
     /// - no provider-known container binds it at `/data`. Any such container,
     ///   running or not, could be started against the old path afterwards,
-    ///   so it has to be removed before the data can move.
+    ///   so it has to be removed before the data can move; and
+    /// - nothing is writing into it. Provider records are not processes: an
+    ///   orphaned Kata VM whose containerd record is gone keeps writing
+    ///   through its bind mount, so the writer itself is tested with
+    ///   [`durable_tree_is_quiescent`] before the rename.
     ///
     /// Both roots existing is an operator decision, not a Runner guess. A
     /// machine-named root belonging to any other container is never touched:
@@ -363,6 +381,20 @@ impl KataLauncher {
                     machine_named_root,
                 });
             }
+        }
+        // Zero records above is not zero writers. Renaming a directory under
+        // an orphaned VM would leave it writing into the old inode while the
+        // next container binds the same tree: two writers.
+        if let Some(evidence) = durable_tree_is_quiescent_within(
+            &machine_named_root,
+            self.config.durable_tree_quiescence_window,
+        )?
+        .evidence()
+        {
+            return Err(RunnerError::DurableStateRootLive {
+                state_root: machine_named_root,
+                evidence,
+            });
         }
         if let Err(error) = std::fs::rename(&machine_named_root, &plan.state_root) {
             // A concurrent operation on the same runtime may have completed
@@ -2920,30 +2952,260 @@ impl KataLauncher {
                 "cold relocation binding did not match the target Runner plan".to_string(),
             ));
         }
-        let metadata = std::fs::symlink_metadata(&plan.state_root).map_err(|error| {
-            RunnerError::RuntimeLaunch(format!(
-                "staged cold relocation state {} is unavailable: {error}",
-                plan.state_root.display()
-            ))
-        })?;
-        let identity_metadata = staged_agent_identity_metadata(&plan.state_root)?;
-        if !metadata.file_type().is_dir()
-            || !identity_metadata.file_type().is_file()
-            || self.inspect(&plan.container_name)?.is_some()
-        {
+        if self.inspect(&plan.container_name)?.is_some() {
             return Err(RunnerError::RuntimeLaunch(
                 "cold relocation requires staged state with identity and no target compute"
                     .to_string(),
             ));
         }
-        let observed = durable_state_manifest_sha256(&plan.state_root)?;
-        if observed != relocation.durable_state_manifest_sha256 {
-            return Err(RunnerError::RuntimeLaunch(
-                "staged cold relocation state manifest did not match Core".to_string(),
+        verify_relocation_staged_tree(
+            &plan.state_root,
+            relocation,
+            self.config.durable_tree_quiescence_window,
+        )
+    }
+}
+
+/// Target-side checks on a staged cold-relocation tree. The caller has
+/// already established that the provider has no record of the target
+/// container; that is not proof nothing writes into the staged tree (an
+/// orphaned VM has no record either), so the writer itself is tested before
+/// the content proof. With the operator's `source_compute_absent`
+/// attestation the same rule applies: the attestation was made from records,
+/// and a live writer refutes it.
+fn verify_relocation_staged_tree(
+    state_root: &Path,
+    relocation: &finite_saas_core::RuntimeRelocationV1,
+    quiescence_window: Duration,
+) -> Result<(), RunnerError> {
+    let metadata = std::fs::symlink_metadata(state_root).map_err(|error| {
+        RunnerError::RuntimeLaunch(format!(
+            "staged cold relocation state {} is unavailable: {error}",
+            state_root.display()
+        ))
+    })?;
+    let identity_metadata = staged_agent_identity_metadata(state_root)?;
+    if !metadata.file_type().is_dir() || !identity_metadata.file_type().is_file() {
+        return Err(RunnerError::RuntimeLaunch(
+            "cold relocation requires staged state with identity and no target compute".to_string(),
+        ));
+    }
+    if let Some(evidence) =
+        durable_tree_is_quiescent_within(state_root, quiescence_window)?.evidence()
+    {
+        let evidence = if relocation.source_compute_absent {
+            format!(
+                "{evidence}; the operator's source_compute_absent attestation is refused because it rests on provider records alone"
+            )
+        } else {
+            evidence
+        };
+        return Err(RunnerError::DurableStateRootLive {
+            state_root: state_root.to_path_buf(),
+            evidence,
+        });
+    }
+    let observed = durable_state_manifest_sha256(state_root)?;
+    if observed != relocation.durable_state_manifest_sha256 {
+        return Err(RunnerError::RuntimeLaunch(
+            "staged cold relocation state manifest did not match Core".to_string(),
+        ));
+    }
+    Ok(())
+}
+
+/// What testing a durable tree for a live writer found.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Quiescence {
+    /// No process holds the single-writer lease and the tree's change
+    /// manifest was identical across the observation window.
+    Quiet,
+    /// Some process — in a container, in a Kata VM sharing the bind mount, or
+    /// on the host — holds the chat store's single-writer lease.
+    LiveWriter { path: PathBuf },
+    /// The tree's change manifest differed between the two samples; `path`
+    /// is the first entry that changed.
+    Changing { path: PathBuf },
+}
+
+impl Quiescence {
+    /// `None` when quiet; otherwise a one-line description of the writer.
+    pub fn evidence(&self) -> Option<String> {
+        match self {
+            Self::Quiet => None,
+            Self::LiveWriter { path } => Some(format!(
+                "the single-writer lease {} is held by a live process",
+                path.display()
+            )),
+            Self::Changing { path } => Some(format!(
+                "{} changed during the quiescence observation window",
+                path.display()
+            )),
+        }
+    }
+}
+
+/// Test whether anything is still writing into a durable state root, by
+/// testing the writer rather than provider records.
+///
+/// 1. A non-blocking `flock(LOCK_EX | LOCK_NB)` on the chat store's writer
+///    lease (released immediately). The lease file is opened read-only and
+///    never created. flock is per open file description and shared across
+///    bind mounts, so a holder inside an orphaned VM shows as held — provided
+///    the VM's shared filesystem forwards locks to the host.
+/// 2. A cheap change manifest (size and mtime of the store, its WAL/SHM, and
+///    the agent home to a bounded depth) sampled twice, two seconds apart by
+///    default. Writers that do not take the lease — housekeeping in the agent
+///    home, a store opened by an older runtime — show up here. Neither signal
+///    can prove absence of a writer that is idle for the whole window; both
+///    are refusals, not a green light to skip the record checks.
+pub fn durable_tree_is_quiescent(state_root: &Path) -> Result<Quiescence, RunnerError> {
+    durable_tree_is_quiescent_within(state_root, DEFAULT_DURABLE_TREE_QUIESCENCE_WINDOW)
+}
+
+pub fn durable_tree_is_quiescent_within(
+    state_root: &Path,
+    window: Duration,
+) -> Result<Quiescence, RunnerError> {
+    if let Some(path) = durable_tree_writer_lease_held(state_root)? {
+        return Ok(Quiescence::LiveWriter { path });
+    }
+    let before = durable_tree_change_manifest(state_root)?;
+    std::thread::sleep(window);
+    let after = durable_tree_change_manifest(state_root)?;
+    Ok(match first_manifest_change(&before, &after) {
+        Some(path) => Quiescence::Changing { path },
+        None => Quiescence::Quiet,
+    })
+}
+
+fn durable_tree_probe_error(state_root: &Path, message: String) -> RunnerError {
+    RunnerError::RuntimeLaunch(format!(
+        "cannot test durable state root {} for a live writer: {message}",
+        state_root.display()
+    ))
+}
+
+fn durable_tree_writer_lease_held(state_root: &Path) -> Result<Option<PathBuf>, RunnerError> {
+    let path = state_root.join(DURABLE_TREE_WRITER_LEASE);
+    let metadata = match path.symlink_metadata() {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => {
+            return Err(durable_tree_probe_error(
+                state_root,
+                format!("{}: {error}", path.display()),
             ));
         }
-        Ok(())
+    };
+    if !metadata.file_type().is_file() {
+        return Err(durable_tree_probe_error(
+            state_root,
+            format!("{} is not a regular file", path.display()),
+        ));
     }
+    let file = std::fs::File::open(&path).map_err(|error| {
+        durable_tree_probe_error(state_root, format!("{}: {error}", path.display()))
+    })?;
+    match file.try_lock() {
+        Ok(()) => {
+            file.unlock().map_err(|error| {
+                durable_tree_probe_error(
+                    state_root,
+                    format!(
+                        "{}: could not release the probe lock: {error}",
+                        path.display()
+                    ),
+                )
+            })?;
+            Ok(None)
+        }
+        Err(std::fs::TryLockError::WouldBlock) => Ok(Some(path)),
+        Err(std::fs::TryLockError::Error(error)) => Err(durable_tree_probe_error(
+            state_root,
+            format!("{}: {error}", path.display()),
+        )),
+    }
+}
+
+type DurableTreeChangeManifest = BTreeMap<PathBuf, (u64, Option<std::time::SystemTime>)>;
+
+fn durable_tree_change_manifest(
+    state_root: &Path,
+) -> Result<DurableTreeChangeManifest, RunnerError> {
+    let mut manifest = DurableTreeChangeManifest::new();
+    let mut record = |path: &Path| -> Result<(), RunnerError> {
+        match path.symlink_metadata() {
+            Ok(metadata) => {
+                manifest.insert(
+                    path.to_path_buf(),
+                    (metadata.len(), metadata.modified().ok()),
+                );
+                Ok(())
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+            Err(error) => Err(durable_tree_probe_error(
+                state_root,
+                format!("{}: {error}", path.display()),
+            )),
+        }
+    };
+    record(state_root)?;
+    for name in [
+        "agent/client.sqlite3",
+        "agent/client.sqlite3-wal",
+        "agent/client.sqlite3-shm",
+    ] {
+        record(&state_root.join(name))?;
+    }
+    let agent_home = state_root.join("agent");
+    if agent_home
+        .symlink_metadata()
+        .is_ok_and(|metadata| metadata.file_type().is_dir())
+    {
+        for (seen, entry) in WalkDir::new(&agent_home)
+            .min_depth(1)
+            .max_depth(DURABLE_TREE_CHANGE_MANIFEST_DEPTH)
+            .follow_links(false)
+            .into_iter()
+            .enumerate()
+        {
+            if seen >= MAX_DURABLE_TREE_CHANGE_MANIFEST_ENTRIES {
+                break;
+            }
+            let entry = match entry {
+                Ok(entry) => entry,
+                Err(error)
+                    if error
+                        .io_error()
+                        .is_some_and(|io| io.kind() == std::io::ErrorKind::NotFound) =>
+                {
+                    continue;
+                }
+                Err(error) => {
+                    return Err(durable_tree_probe_error(state_root, error.to_string()));
+                }
+            };
+            record(entry.path())?;
+        }
+    }
+    Ok(manifest)
+}
+
+fn first_manifest_change(
+    before: &DurableTreeChangeManifest,
+    after: &DurableTreeChangeManifest,
+) -> Option<PathBuf> {
+    before
+        .iter()
+        .find(|(path, entry)| after.get(*path) != Some(entry))
+        .map(|(path, _)| path.clone())
+        .or_else(|| {
+            after
+                .keys()
+                .find(|path| !before.contains_key(*path))
+                .cloned()
+        })
 }
 
 fn staged_agent_identity_metadata(state_root: &Path) -> Result<std::fs::Metadata, RunnerError> {
@@ -4661,6 +4923,7 @@ esac
             // stay stable across the default's changes; tests that exercise
             // the fleet default set their own value.
             stop_timeout_secs: 30,
+            durable_tree_quiescence_window: Duration::from_millis(50),
             ..KataConfig::default()
         };
         let launcher = KataLauncher::new(config);
@@ -7049,5 +7312,223 @@ esac
                 .unwrap(),
             "running"
         );
+    }
+
+    /// Hold the chat store's writer lease through a second open file
+    /// description. flock conflicts between descriptions, not processes, so
+    /// this is exactly what a store open inside a container or a VM sharing
+    /// the bind mount looks like from the host.
+    fn hold_writer_lease(state_root: &Path) -> std::fs::File {
+        let lease = state_root.join(DURABLE_TREE_WRITER_LEASE);
+        std::fs::create_dir_all(lease.parent().unwrap()).unwrap();
+        let holder = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .open(&lease)
+            .unwrap();
+        holder.lock().unwrap();
+        holder
+    }
+
+    /// A writer that never takes the lease: it just keeps appending.
+    struct BackgroundWriter {
+        stop: Arc<AtomicBool>,
+        thread: Option<std::thread::JoinHandle<()>>,
+    }
+
+    impl BackgroundWriter {
+        fn start(path: PathBuf) -> Self {
+            std::fs::write(&path, b"").unwrap();
+            let stop = Arc::new(AtomicBool::new(false));
+            let flag = stop.clone();
+            let thread = std::thread::spawn(move || {
+                while !flag.load(Ordering::SeqCst) {
+                    let mut file = std::fs::OpenOptions::new()
+                        .append(true)
+                        .open(&path)
+                        .unwrap();
+                    file.write_all(b"x").unwrap();
+                    std::thread::sleep(Duration::from_millis(2));
+                }
+            });
+            Self {
+                stop,
+                thread: Some(thread),
+            }
+        }
+
+        fn stop(mut self) {
+            self.stop.store(true, Ordering::SeqCst);
+            self.thread.take().unwrap().join().unwrap();
+        }
+    }
+
+    #[test]
+    fn durable_tree_quiescence_tests_the_writer_lease_then_the_tree() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("state");
+        std::fs::create_dir_all(root.join("agent/hermes-home/logs")).unwrap();
+        std::fs::write(root.join("agent/client.sqlite3"), b"db").unwrap();
+        let window = Duration::from_millis(20);
+
+        assert_eq!(
+            durable_tree_is_quiescent_within(&root, window).unwrap(),
+            Quiescence::Quiet
+        );
+
+        let holder = hold_writer_lease(&root);
+        assert_eq!(
+            durable_tree_is_quiescent_within(&root, window).unwrap(),
+            Quiescence::LiveWriter {
+                path: root.join(DURABLE_TREE_WRITER_LEASE)
+            }
+        );
+        drop(holder);
+        // The lease file stays behind by design; free, it proves nothing.
+        assert_eq!(
+            durable_tree_is_quiescent_within(&root, window).unwrap(),
+            Quiescence::Quiet
+        );
+
+        let wal = root.join("agent/client.sqlite3-wal");
+        let writer = BackgroundWriter::start(wal.clone());
+        assert_eq!(
+            durable_tree_is_quiescent_within(&root, window).unwrap(),
+            Quiescence::Changing { path: wal }
+        );
+        writer.stop();
+
+        // Housekeeping deep in the agent home is a writer without a lease.
+        let log = root.join("agent/hermes-home/logs/housekeeping.log");
+        let writer = BackgroundWriter::start(log.clone());
+        assert_eq!(
+            durable_tree_is_quiescent_within(&root, window).unwrap(),
+            Quiescence::Changing { path: log }
+        );
+        writer.stop();
+        assert_eq!(
+            durable_tree_is_quiescent_within(&root, window).unwrap(),
+            Quiescence::Quiet
+        );
+    }
+
+    #[test]
+    fn legacy_root_with_a_live_writer_is_not_migrated_despite_zero_records() {
+        let temp = tempfile::tempdir().unwrap();
+        let (launcher, plan, _fake_state) = test_launcher(&temp, 41305);
+        let legacy = legacy_layout(&launcher, &plan);
+        let lease = upgrade_lease("runtime_ctl_live_writer");
+        assert!(launcher.container_names().unwrap().is_empty());
+
+        // An orphaned VM: no provider record, but the lease is held.
+        let holder = hold_writer_lease(&legacy);
+        let error = launcher.plan_for_control(&lease).unwrap_err();
+        match &error {
+            RunnerError::DurableStateRootLive {
+                state_root,
+                evidence,
+            } => {
+                assert_eq!(state_root, &legacy);
+                assert!(evidence.contains("writer-lease"), "{evidence}");
+            }
+            other => panic!("expected DurableStateRootLive, got {other}"),
+        }
+        assert!(error.to_string().contains("no such object"));
+        assert!(legacy.join("workspace/note").exists());
+        assert!(!plan.state_root.exists());
+        drop(holder);
+
+        // A free lease with a tree that keeps changing is a writer too.
+        let writer = BackgroundWriter::start(legacy.join("agent/client.sqlite3-wal"));
+        let error = launcher.plan_for_control(&lease).unwrap_err();
+        assert!(
+            matches!(
+                &error,
+                RunnerError::DurableStateRootLive { state_root, evidence }
+                    if state_root == &legacy && evidence.contains("changed")
+            ),
+            "{error}"
+        );
+        writer.stop();
+        assert!(legacy.join("workspace/note").exists());
+        assert!(!plan.state_root.exists());
+
+        // Lease free and a stable tree: the same records now let it migrate.
+        launcher.plan_for_control(&lease).unwrap();
+        assert!(!legacy.exists());
+        assert_eq!(
+            std::fs::read_to_string(plan.state_root.join("workspace/note")).unwrap(),
+            "the agent's whole life"
+        );
+    }
+
+    #[test]
+    fn relocation_staged_tree_with_a_live_writer_refuses_the_absent_source_attestation() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("staged");
+        std::fs::create_dir_all(root.join("agent/identity")).unwrap();
+        std::fs::write(
+            root.join("agent/identity/identity.json"),
+            b"{\"npub\":\"npub1same\"}\n",
+        )
+        .unwrap();
+        std::fs::write(root.join("agent/client.sqlite3"), b"db").unwrap();
+        let window = Duration::from_millis(20);
+        let relocation =
+            |manifest: String, source_compute_absent: bool| finite_saas_core::RuntimeRelocationV1 {
+                source_host_id: "finite-lat-1".to_string(),
+                source_machine_id: TEST_CONTAINER_NAME.to_string(),
+                target_source_host_id: "finite-lat-3".to_string(),
+                expected_agent_npub: "npub1same".to_string(),
+                durable_state_manifest_sha256: manifest,
+                source_compute_absent,
+            };
+
+        let holder = hold_writer_lease(&root);
+        let manifest = durable_state_manifest_sha256(&root).unwrap();
+        let error =
+            verify_relocation_staged_tree(&root, &relocation(manifest.clone(), true), window)
+                .unwrap_err();
+        match &error {
+            RunnerError::DurableStateRootLive {
+                state_root,
+                evidence,
+            } => {
+                assert_eq!(state_root, &root);
+                assert!(evidence.contains("writer-lease"), "{evidence}");
+                assert!(evidence.contains("source_compute_absent"), "{evidence}");
+            }
+            other => panic!("expected DurableStateRootLive, got {other}"),
+        }
+        assert!(error.to_string().contains("no such object"));
+        // Without the attestation the refusal stands on its own.
+        let error =
+            verify_relocation_staged_tree(&root, &relocation(manifest.clone(), false), window)
+                .unwrap_err();
+        assert!(
+            matches!(&error, RunnerError::DurableStateRootLive { evidence, .. }
+                if !evidence.contains("source_compute_absent")),
+            "{error}"
+        );
+        drop(holder);
+
+        let writer = BackgroundWriter::start(root.join("agent/client.sqlite3-wal"));
+        let error =
+            verify_relocation_staged_tree(&root, &relocation(manifest, true), window).unwrap_err();
+        assert!(
+            matches!(&error, RunnerError::DurableStateRootLive { evidence, .. }
+                if evidence.contains("changed") && evidence.contains("source_compute_absent")),
+            "{error}"
+        );
+        writer.stop();
+
+        // Quiet again: the content proof is what decides.
+        let manifest = durable_state_manifest_sha256(&root).unwrap();
+        verify_relocation_staged_tree(&root, &relocation(manifest, true), window).unwrap();
+        let error = verify_relocation_staged_tree(&root, &relocation("0".repeat(64), true), window)
+            .unwrap_err();
+        assert!(error.to_string().contains("manifest did not match"));
     }
 }

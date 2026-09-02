@@ -67,6 +67,7 @@ timeout 15 ctr -n finite tasks list | grep -c '<SOURCE_MACHINE_ID>'
 Absence is a stronger single-writer guarantee than a stop receipt — no
 compute exists to resume writing — but only when genuinely proven: a probe
 that times out or errors proves nothing and the flag must not be used.
+A clean "no such object" is still only a record, not the process: the Runner additionally tests the writer itself (a non-blocking `flock` on `agent/client.sqlite3.writer-lease` plus a two-instant change manifest of the tree) and refuses the attestation with `DurableStateRootLive` if anything holds the lease or the tree keeps changing — an orphaned Kata VM (`containerd-shim-kata`, `qemu`, `virtiofsd` still alive with no record) must be found and stopped first.
 
 **Recovery boundary for this variant.** The full-host quiesced Borg archive
 precondition may be replaced by a SCOPED boundary, because the only state at

@@ -6,11 +6,12 @@ use finite_saas_runner::lifecycle_probe::{
 use finite_saas_runner::phala::PhalaApiClient;
 use finite_saas_runner::{
     AgentCreationRunner, AgentIdentityAuthorityConfig, AppleContainerConfig,
-    AppleContainerLauncher, CoreHttpAgentCreationQueue, DEFAULT_FINITE_AGENT_PICTURE_URL,
-    DEFAULT_FINITE_PRIVATE_BASE_URL, DEFAULT_FINITE_PRIVATE_MODEL, DEFAULT_FINITECHAT_SERVER_URL,
-    DockerConfig, DockerLauncher, EnclaviaConfig, EnclaviaLauncher, FinitePrivateRuntimeDefaults,
-    KataConfig, KataLauncher, KataRetirementConfig, PhalaConfig, PhalaLauncher,
-    RandomLeaseTokenSource, RunOnceOutcome, RuntimeLauncher, durable_state_manifest_sha256,
+    AppleContainerLauncher, CoreHttpAgentCreationQueue, DEFAULT_DURABLE_TREE_QUIESCENCE_WINDOW,
+    DEFAULT_FINITE_AGENT_PICTURE_URL, DEFAULT_FINITE_PRIVATE_BASE_URL,
+    DEFAULT_FINITE_PRIVATE_MODEL, DEFAULT_FINITECHAT_SERVER_URL, DockerConfig, DockerLauncher,
+    EnclaviaConfig, EnclaviaLauncher, FinitePrivateRuntimeDefaults, KataConfig, KataLauncher,
+    KataRetirementConfig, PhalaConfig, PhalaLauncher, RandomLeaseTokenSource, RunOnceOutcome,
+    RuntimeLauncher, durable_state_manifest_sha256,
 };
 use std::collections::BTreeMap;
 use std::env;
@@ -353,6 +354,7 @@ fn run_cycle() -> Result<RunOnceOutcome> {
                 readiness_timeout: runtime_ready_timeout,
                 readiness_interval: runtime_ready_interval,
                 stop_timeout_secs: optional_u64("FC_RUNNER_KATA_STOP_TIMEOUT_SECS", 180)?,
+                durable_tree_quiescence_window: DEFAULT_DURABLE_TREE_QUIESCENCE_WINDOW,
                 retirement: optional_kata_retirement_config()?,
             });
             run_once_with_launcher(

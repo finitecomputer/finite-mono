@@ -39,7 +39,9 @@ pub mod retirement;
 pub use apple_container::{AppleContainerConfig, AppleContainerLaunchPlan, AppleContainerLauncher};
 pub use health_reports::HealthReportConfig;
 pub use kata::{
-    KataConfig, KataLaunchPlan, KataLauncher, KataRetirementConfig, durable_state_manifest_sha256,
+    DEFAULT_DURABLE_TREE_QUIESCENCE_WINDOW, DURABLE_TREE_WRITER_LEASE, KataConfig, KataLaunchPlan,
+    KataLauncher, KataRetirementConfig, Quiescence, durable_state_manifest_sha256,
+    durable_tree_is_quiescent, durable_tree_is_quiescent_within,
 };
 pub use lifecycle_probe::{
     LIFECYCLE_PROBE_SCHEMA, LifecycleProbeConfig, LifecycleProbeReport, LifecycleProbeRequest,
@@ -294,6 +296,19 @@ pub enum RunnerError {
         machine_named_root: PathBuf,
         runtime_id_root: PathBuf,
         message: String,
+    },
+    /// A durable state root still has a live writer. This is decided by
+    /// testing the writer itself (the chat store's single-writer lease, then
+    /// the tree's change manifest), not by provider records: an orphaned Kata
+    /// VM keeps writing through its bind mount long after containerd has
+    /// forgotten the container.
+    #[error(
+        "durable state root {} still has a live writer ({evidence}); a missing provider record (nerdctl \"no such object\", or an inspect that times out) is not proof the compute is absent — find and stop the orphaned VM (containerd-shim-kata, qemu, virtiofsd) before migrating or relocating this tree",
+        .state_root.display()
+    )]
+    DurableStateRootLive {
+        state_root: PathBuf,
+        evidence: String,
     },
     /// The post-compute readiness wait expired. Core records this as a
     /// `readiness`-stage lifecycle failure, distinct from compute faults: a
