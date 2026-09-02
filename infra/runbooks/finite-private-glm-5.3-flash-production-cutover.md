@@ -284,8 +284,10 @@ that cannot go green:
    completion; the upgrade path's `refresh_target_endpoint` is a no-op without
    an existing registry entry, `finite-saas-runner/src/health_reports.rs`).
    The entire fleet was upgraded in place, so no current Runtime can report
-   until it next launches. Carry this exception only while all of the
-   following hold in every `scripts/finite-status --json` run:
+   until it next launches. (Closed after this window: the on-disk registry was
+   removed and the Runner now polls Core's host-scoped target listing every
+   cycle, so every live Runtime reports.) Carry this exception only while all
+   of the following hold in every `scripts/finite-status --json` run:
    - the set of `health_unknown` runtime IDs is exactly the set in the
      retained before report;
    - `health_not_ready` is empty on every host;

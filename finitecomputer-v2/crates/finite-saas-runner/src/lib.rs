@@ -8,9 +8,9 @@ use finite_saas_core::{
     RetryRuntimeControlRequestInput, RunnerClass, RunnerLeaseCapacity, RuntimeArtifact,
     RuntimeArtifactKind, RuntimeBootIntent, RuntimeCapabilitiesEnvelope, RuntimeCapabilitiesV1,
     RuntimeControlKind, RuntimeControlLease, RuntimeControlRequest, RuntimeHealthReportAck,
-    RuntimeHealthReportRequest, RuntimeLifecycleStage, RuntimePlacement, RuntimeResourceClass,
-    RuntimeRetirementSnapshotReceipt, RuntimeSpecEnvelope, RuntimeSpecV1, RuntimeSummaryStatus,
-    api::RecordProviderOperationTransitionRequest,
+    RuntimeHealthReportRequest, RuntimeHealthTargetList, RuntimeLifecycleStage, RuntimePlacement,
+    RuntimeResourceClass, RuntimeRetirementSnapshotReceipt, RuntimeSpecEnvelope, RuntimeSpecV1,
+    RuntimeSummaryStatus, api::RecordProviderOperationTransitionRequest,
 };
 #[cfg(test)]
 use finite_saas_core::{FinitePrivateApiKey, RuntimeEndpointContractV1};
@@ -37,7 +37,7 @@ mod phala_inventory;
 pub mod retirement;
 
 pub use apple_container::{AppleContainerConfig, AppleContainerLaunchPlan, AppleContainerLauncher};
-pub use health_reports::HealthReportConfig;
+pub use health_reports::{HealthReportConfig, HealthReportState};
 pub use kata::{
     DEFAULT_DURABLE_TREE_QUIESCENCE_WINDOW, DURABLE_TREE_WRITER_LEASE, KataConfig, KataLaunchPlan,
     KataLauncher, KataRetirementConfig, Quiescence, durable_state_manifest_sha256,
@@ -562,11 +562,15 @@ where
         // Best-effort, throttled per runtime: standing health telemetry must
         // never fail or slow the lease cycle beyond its own bounded HTTP
         // timeouts.
+        let source_host_id = self.launcher.source_host_id().map(str::to_string);
         if let Some(config) = self.health_reports.clone() {
-            health_reports::forward_due_reports(&mut self.queue, &config);
+            health_reports::forward_due_reports(
+                &mut self.queue,
+                &config,
+                source_host_id.as_deref(),
+            );
         }
         let lease_token = self.lease_tokens.next_lease_token()?;
-        let source_host_id = self.launcher.source_host_id().map(str::to_string);
         let runtime_capabilities = self.launcher.runtime_capabilities();
         let mut runner_capacity = self.launcher.runner_capacity();
         runner_capacity.runtime_capabilities = Some(runtime_capabilities.clone());
@@ -662,67 +666,48 @@ where
                     },
                 );
                 let launch_result = match launch_result {
-                    Ok(_) => match if let Some(relocation) = lease.request.relocation.as_ref() {
+                    Ok(_) => match if lease.request.relocation.is_some() {
                         // The relocation launch already proved that the
                         // restored state exposes the existing Agent
                         // Principal. Rebinding it after Core switches the
                         // Runtime host would add a fallible post-commit
-                        // step to the relocation boundary. The retained
-                        // principal still pins standing health reports.
-                        Ok(Some(relocation.v1().expected_agent_npub.clone()))
+                        // step to the relocation boundary.
+                        Ok(())
                     } else {
-                        self.bind_agent_identity(&lease, &facts)
+                        self.bind_agent_identity(&lease, &facts).map(|_| ())
                     } {
-                        Ok(launch_verified_npub) => self
-                            .queue
-                            .complete_agent_creation(
-                                &request_id,
-                                CompleteAgentCreationRequestInput {
-                                    request_id: request_id.clone(),
-                                    runner_id: self.runner_id.clone(),
-                                    lease_token: lease_token.clone(),
-                                    source_host_id: facts.source_host_id.clone(),
-                                    source_machine_id: facts.source_machine_id.clone(),
-                                    runtime_artifact_id: facts.runtime_artifact_id.clone(),
-                                    state_schema_version: facts.state_schema_version.clone(),
-                                    provider_runtime_handle: facts.provider_runtime_handle.clone(),
-                                    contact_endpoint: facts.contact_endpoint.clone(),
-                                    display_name: facts.display_name.clone(),
-                                    hostname: facts.hostname.clone(),
-                                    runtime_host: facts.runtime_host.clone(),
-                                    runtime_status: Some(RuntimeSummaryStatus::Online),
-                                    active_inference_profile: facts
-                                        .active_inference_profile
-                                        .clone(),
-                                    hermes_available: facts.hermes_available,
-                                    published_app_urls: facts.published_app_urls.clone(),
-                                    runtime_capabilities: Some(runtime_capabilities),
-                                    now: None,
-                                },
-                            )
-                            .map(|completed| (completed, launch_verified_npub)),
+                        Ok(()) => self.queue.complete_agent_creation(
+                            &request_id,
+                            CompleteAgentCreationRequestInput {
+                                request_id: request_id.clone(),
+                                runner_id: self.runner_id.clone(),
+                                lease_token: lease_token.clone(),
+                                source_host_id: facts.source_host_id.clone(),
+                                source_machine_id: facts.source_machine_id.clone(),
+                                runtime_artifact_id: facts.runtime_artifact_id.clone(),
+                                state_schema_version: facts.state_schema_version.clone(),
+                                provider_runtime_handle: facts.provider_runtime_handle.clone(),
+                                contact_endpoint: facts.contact_endpoint.clone(),
+                                display_name: facts.display_name.clone(),
+                                hostname: facts.hostname.clone(),
+                                runtime_host: facts.runtime_host.clone(),
+                                runtime_status: Some(RuntimeSummaryStatus::Online),
+                                active_inference_profile: facts.active_inference_profile.clone(),
+                                hermes_available: facts.hermes_available,
+                                published_app_urls: facts.published_app_urls.clone(),
+                                runtime_capabilities: Some(runtime_capabilities),
+                                now: None,
+                            },
+                        ),
                         Err(error) => Err(error),
                     },
                     Err(error) => Err(error),
                 };
                 match launch_result {
-                    Ok((completed, launch_verified_npub)) => {
-                        if let Some(config) = &self.health_reports
-                            && let Some(runtime_id) = completed.request.agent_runtime_id.as_deref()
-                        {
-                            health_reports::record_target(
-                                config,
-                                runtime_id,
-                                &facts.source_machine_id,
-                                facts.contact_endpoint.as_deref(),
-                                launch_verified_npub.as_deref(),
-                            );
-                        }
-                        Ok(RunOnceOutcome::Launched {
-                            request_id,
-                            runtime_id: completed.request.agent_runtime_id,
-                        })
-                    }
+                    Ok(completed) => Ok(RunOnceOutcome::Launched {
+                        request_id,
+                        runtime_id: completed.request.agent_runtime_id,
+                    }),
                     Err(error) => {
                         let failure_message = error.to_string();
                         let cleanup_error = self.launcher.cleanup_failed_launch(&facts).err();
@@ -1005,35 +990,6 @@ where
                         now: None,
                     },
                 )?;
-                // Keep the standing-health registry aligned with the lifecycle
-                // outcome: a deliberately offline runtime is deregistered, and
-                // an upgrade moves the entry to the new contact endpoint
-                // (restart and recover preserve it — Kata asserts the
-                // persisted endpoint is unchanged and Phala restarts the same
-                // CVM).
-                if let Some(config) = &self.health_reports {
-                    match kind {
-                        RuntimeControlKind::Stop | RuntimeControlKind::Destroy => {
-                            health_reports::remove_target(config, &completed.agent_runtime_id);
-                        }
-                        RuntimeControlKind::Upgrade => {
-                            if let Some(facts) = upgrade_facts.as_ref()
-                                && let Some(contact_endpoint) = facts
-                                    .published_app_urls
-                                    .iter()
-                                    .find(|url| url.ends_with("/contact"))
-                            {
-                                health_reports::refresh_target_endpoint(
-                                    config,
-                                    &completed.agent_runtime_id,
-                                    contact_endpoint,
-                                );
-                            }
-                        }
-                        RuntimeControlKind::Restart
-                        | RuntimeControlKind::RecoverKnownGoodChatRuntime => {}
-                    }
-                }
                 Ok(runtime_control_success_outcome(
                     kind,
                     request_id,
@@ -1254,6 +1210,16 @@ pub trait AgentCreationQueue {
         &mut self,
         input: RuntimeHealthReportRequest,
     ) -> Result<RuntimeHealthReportAck, RunnerError>;
+
+    /// Core's host-scoped list of the runtimes this runner should be
+    /// reporting on, for the startup registry reconcile. `Ok(None)` means the
+    /// queue cannot list (an older Core, or a test double), which leaves the
+    /// registry as it is.
+    fn list_runtime_health_targets(
+        &mut self,
+    ) -> Result<Option<RuntimeHealthTargetList>, RunnerError> {
+        Ok(None)
+    }
 }
 
 pub trait ProviderOperationJournal {
@@ -2286,6 +2252,22 @@ impl AgentCreationQueue for CoreHttpAgentCreationQueue {
         input: RuntimeHealthReportRequest,
     ) -> Result<RuntimeHealthReportAck, RunnerError> {
         self.post_json("/api/core/v1/runtime-health-reports", &input)
+    }
+
+    fn list_runtime_health_targets(
+        &mut self,
+    ) -> Result<Option<RuntimeHealthTargetList>, RunnerError> {
+        let url = format!("{}/api/core/v1/runtime-health-targets", self.base_url);
+        let response = ureq::get(&url)
+            .set("authorization", &format!("Bearer {}", self.api_token))
+            .call();
+        match decode_core_response(response) {
+            Ok(listing) => Ok(Some(listing)),
+            // A Core without the listing route (N-1) is not an error: the
+            // reconcile is skipped and per-completion registration carries.
+            Err(RunnerError::CoreStatus { status: 404, .. }) => Ok(None),
+            Err(error) => Err(error),
+        }
     }
 }
 
@@ -4552,82 +4534,6 @@ mod tests {
             Some("http://oslo-host-1/contact")
         );
         assert!(runner.queue.failed.is_empty());
-    }
-
-    #[test]
-    fn run_once_registers_a_standing_health_report_target_after_launch() {
-        let registry = tempfile::tempdir().unwrap();
-        let mut runner = AgentCreationRunner::new(
-            FakeQueue::with_lease(sample_lease("agent_request_123")),
-            FakeLauncher::ready(RuntimeLaunchFacts::sample()),
-            FixedLeaseTokens::new(["lease-1"]),
-            "runner-1",
-            300,
-        )
-        .unwrap()
-        .with_health_reports(Some(HealthReportConfig {
-            registry_dir: registry.path().to_path_buf(),
-            interval: Duration::from_secs(60),
-            http_timeout: Duration::from_millis(250),
-        }));
-
-        let outcome = runner.run_once().unwrap();
-
-        assert!(matches!(outcome, RunOnceOutcome::Launched { .. }));
-        // The email-less sample agent verifies no principal at launch, so the
-        // entry pins on the first contact answer (documented legacy fallback).
-        let entry: health_reports::HealthReportTarget = serde_json::from_slice(
-            &std::fs::read(registry.path().join("runtime-from-core.json")).unwrap(),
-        )
-        .unwrap();
-        assert_eq!(entry.contact_endpoint, "http://oslo-host-1/contact");
-        assert_eq!(entry.source_machine_id, "finite-agent_123");
-        assert_eq!(entry.agent_npub, None);
-    }
-
-    #[test]
-    fn run_once_deregisters_the_health_target_when_stop_completes() {
-        let registry = tempfile::tempdir().unwrap();
-        let config = HealthReportConfig {
-            registry_dir: registry.path().to_path_buf(),
-            interval: Duration::from_secs(60),
-            http_timeout: Duration::from_millis(250),
-        };
-        health_reports::record_target(
-            &config,
-            "runtime_123",
-            "oslo-agent-001",
-            // Nothing listens here; the pre-stop poll reports unreachable and
-            // the completion still deregisters the target.
-            Some("http://127.0.0.1:9/contact"),
-            None,
-        );
-        assert!(registry.path().join("runtime_123.json").exists());
-        let runtime_control =
-            sample_runtime_control_lease_with_kind("runtime_ctl_123", RuntimeControlKind::Stop);
-        let mut runner = AgentCreationRunner::new(
-            FakeQueue::with_runtime_control_lease(runtime_control.clone()),
-            FakeLauncher::ready(RuntimeLaunchFacts::sample()),
-            FixedLeaseTokens::new(["lease-1"]),
-            "runner-1",
-            300,
-        )
-        .unwrap()
-        .with_health_reports(Some(config));
-
-        let outcome = runner.run_once().unwrap();
-
-        assert_eq!(
-            outcome,
-            RunOnceOutcome::RuntimeStopped {
-                request_id: runtime_control.request.id.clone(),
-                runtime_id: runtime_control.runtime.id.clone(),
-            }
-        );
-        assert!(
-            !registry.path().join("runtime_123.json").exists(),
-            "a deliberately offline runtime must not be polled forever"
-        );
     }
 
     #[test]
