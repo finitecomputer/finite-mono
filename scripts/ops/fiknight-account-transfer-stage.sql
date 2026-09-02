@@ -92,7 +92,7 @@ BEGIN
       AND runtime.id = 'runtime_d8ceb9b4f4e9bacb85b0'
       AND runtime.source_host_id = 'finite-lat-3'
       AND runtime.source_machine_id = 'finite-kata-9edb9d1d2e2ce1c9073f'
-      AND runtime.runtime_artifact_id = 'finite-agent-runtime-2026-08-29.5'
+      AND runtime.runtime_artifact_id = 'finite-agent-runtime-2026-09-02.1'
       AND runtime.state_schema_version = 'runtime-state-v1'
   ) THEN
     RAISE EXCEPTION 'Exact active Runtime binding changed';
