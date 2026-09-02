@@ -23,7 +23,7 @@ durability, and membership bookkeeping over bytes it cannot read.**
 
 ```
 ┌────────────────────────────────────────────────────────────────────┐
-│ Devices (CLI / Electron / iOS — one FiniteChatDevice each)         │
+│ Devices (CLI / Electron — one FiniteChatDevice each)                │
 │  OpenMLS group state · encrypted SQLite snapshot store             │
 │  sync worker · link-fanout worker                                  │
 └───────────────▲────────────────────────────────────────────────────┘
@@ -74,8 +74,7 @@ client), `finitechat-transport` (shared transport value types), and
   secret; `finitechat auth status`/`auth import` are the CLI surface); the
   secret is never copied into finitechat's own stores — the legacy
   `account-secret.hex` / `identity.env` / `agent.nsec` locations are
-  hard-cut and never read. iOS keeps its keychain identity and passes the
-  secret explicitly (the shared file does not apply inside an app sandbox).
+  hard-cut and never read.
 - Everything the client needs at rest is **derived** from that account
   secret at runtime via HKDF domain separation
   (`NostrSecretKey::derive_secret_32`), e.g. the client-store encryption key

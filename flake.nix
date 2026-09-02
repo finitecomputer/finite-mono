@@ -278,14 +278,8 @@
           # rustup on dev hosts, the CI workflows, and these Nix shells).
           # Cached Cargo artifacts stay reusable between clippy, Nix-shell
           # test commands, and image builds because they all read the same
-          # file. The iOS std targets below are local-Darwin extras layered
-          # on top; the file itself stays platform-neutral.
-          rustToolchain = (pkgs.rust-bin.fromRustupToolchainFile ./rust-toolchain.toml).override {
-            targets = pkgs.lib.optionals pkgs.stdenv.isDarwin [
-              "aarch64-apple-ios"
-              "aarch64-apple-ios-sim"
-            ];
-          };
+          # file.
+          rustToolchain = pkgs.rust-bin.fromRustupToolchainFile ./rust-toolchain.toml;
           rustCiToolchain = pkgs.rust-bin.fromRustupToolchainFile ./rust-toolchain.toml;
           rustBasePackages = with pkgs; [
             curl
@@ -332,9 +326,8 @@
                     sqlite
                     xxd
                     rustToolchain
-                  ])
-                  ++ pkgs.lib.optionals pkgs.stdenv.isDarwin [ pkgs.xcodegen ]
-                  ++ pkgs.lib.optionals pkgs.stdenv.isLinux [ pkgs.chromium ];
+                ])
+                ++ pkgs.lib.optionals pkgs.stdenv.isLinux [ pkgs.chromium ];
 
                 RUST_SRC_PATH = "${rustToolchain}/lib/rustlib/src/rust/library";
               };

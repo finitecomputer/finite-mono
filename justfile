@@ -111,9 +111,6 @@ identity-conformance:
 identity-edge-contract:
     just identity identity-edge-contract
 
-ios-cloud-preflight:
-    just chat ios-cloud-preflight
-
 lat1-healthcheck-contract:
     just nixos lat1-healthcheck-contract
 

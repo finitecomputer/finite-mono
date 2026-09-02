@@ -618,7 +618,6 @@ jobs:
             ".#packages.x86_64-linux.fsite"
             ".#packages.x86_64-linux.fbrain"
             ".#packages.x86_64-linux.finitechat"
-            ".#packages.x86_64-linux.finitechat-rmp"
           )
 
           cargo_artifacts=()

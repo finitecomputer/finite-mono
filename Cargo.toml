@@ -26,10 +26,8 @@ members = [
     "finitechat/crates/finitechat-http",
     "finitechat/crates/finitechat-mls",
     "finitechat/crates/finitechat-proto",
-    "finitechat/crates/finitechat-rmp",
     "finitechat/crates/finitechat-server",
     "finitechat/crates/finitechat-transport",
-    "finitechat/uniffi-bindgen",
     "finite-sites/crates/finitesites-blob",
     "finite-sites/crates/finitesites-engine",
     "finite-sites/crates/finitesites-proto",
@@ -97,7 +95,6 @@ tower = { version = "0.5", features = ["util"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 tar = "0.4"
-uniffi = "0.31"
 ureq = { version = "2.10", features = ["json"] }
 walkdir = "2"
 workos = "=3.0.0"

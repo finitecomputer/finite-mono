@@ -65,7 +65,3 @@ chat-electron-package:
     cd .. && cargo build --locked --release -p finitechat-daemon
     cd apps/electron-chat && pnpm install --frozen-lockfile && FINITECHAT_DAEMON_BINARY="$PWD/../../../target/release/finitechatd" pnpm run package:mac
 
-# Regenerate the native iOS bridge/project and prove the unsigned Release
-# configuration Xcode Cloud will archive.
-ios-cloud-preflight:
-    cd .. && finitechat/scripts/ios-xcode-cloud-preflight.sh

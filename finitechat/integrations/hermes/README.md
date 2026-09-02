@@ -263,15 +263,6 @@ The canonical real-gateway acceptance is the monorepo
 `just dev saas-smoke` path. It packages the flake-pinned Nix Hermes runtime and
 this plugin in the one Runtime image and requires model-backed replies across independent
 chat-server, Hosted Web Device, and Runtime restarts.
-The iOS Simulator E2E writes
-`target/ios-hermes-agent-media-e2e/report.json`, drives the native app through
-the product harness, and proves that the app's encrypted local store contains
-the adapter text and image replies. It is still echo-handler transport coverage
-and requires a booted simulator or `IOS_SIMULATOR_UDID`.
-The physical-device variant is `scripts/ios-device-hermes-agent-media-e2e.sh`;
-it writes `target/ios-device-hermes-agent-media-e2e/report.json` after pulling
-the app's store from an installed, unlocked phone.
-
 For the canonical durable Docker packaging smoke used by the manual workflow:
 
 ```bash

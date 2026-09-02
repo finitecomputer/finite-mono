@@ -65,8 +65,6 @@ use sha2::{Digest, Sha256};
 use thiserror::Error;
 use time::{OffsetDateTime, UtcOffset};
 
-pub mod native_authkit;
-pub mod native_device_link;
 pub mod nip_ab;
 
 const CLIENT_STORE_FILE: &str = "client.sqlite3";
@@ -134,9 +132,7 @@ const _: () = {
     assert!(MIN_POLL_OPTIONS <= MAX_POLL_OPTIONS as usize);
 };
 
-uniffi::setup_scaffolding!();
-
-#[derive(Debug, Error, uniffi::Error)]
+#[derive(Debug, Error)]
 pub enum FiniteChatCoreError {
     #[error("filesystem error: {reason}")]
     Filesystem { reason: String },
@@ -430,7 +426,7 @@ mod error_classification_tests {
     }
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize, uniffi::Record)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct OpenOptions {
     pub data_dir: String,
     pub server_url: String,
@@ -443,14 +439,14 @@ pub struct OpenOptions {
     pub now_unix_seconds: Option<u64>,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, uniffi::Record)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Identity {
     pub account_id: String,
     pub device_id: String,
     pub account_secret_hex: String,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, uniffi::Record)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct NostrIdentityMaterial {
     pub account_secret_hex: String,
     pub account_id: String,
@@ -458,7 +454,7 @@ pub struct NostrIdentityMaterial {
     pub nsec: String,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, uniffi::Record)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct FiniteSitesNativeSessionProof {
     pub body_json: String,
     pub authorization_header: String,
@@ -483,27 +479,27 @@ struct NostrHttpAuthEvent {
     sig: String,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, uniffi::Record)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct BootstrapRoomResult {
     pub room_id: String,
     pub mls_group_id: String,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, uniffi::Record)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ChatReactionSummary {
     pub emoji: String,
     pub count: u32,
     pub reacted_by_me: bool,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, uniffi::Record)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ChatReadReceiptSummary {
     pub delivered_count: u32,
     pub read_count: u32,
     pub display_text: String,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, uniffi::Record)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ChatPollOption {
     pub option_id: String,
     pub text: String,
@@ -511,7 +507,7 @@ pub struct ChatPollOption {
     pub voted_by_me: bool,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, uniffi::Record)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ChatPoll {
     pub question: String,
     pub options: Vec<ChatPollOption>,
@@ -519,7 +515,7 @@ pub struct ChatPoll {
     pub my_vote_option_id: Option<String>,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, uniffi::Enum)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ChatMediaKind {
     Image,
     VoiceNote,
@@ -527,7 +523,7 @@ pub enum ChatMediaKind {
     File,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, uniffi::Record)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ChatMediaAttachment {
     pub attachment_id: String,
     pub url: Option<String>,
@@ -546,13 +542,13 @@ pub struct ChatMediaAttachment {
     pub download_progress_per_mille: Option<u32>,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, uniffi::Record)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ChatMediaGalleryState {
     pub room_id: String,
     pub items: Vec<ChatMediaGalleryItem>,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, uniffi::Record)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ChatMediaGalleryItem {
     pub item_id: String,
     pub room_id: String,
@@ -565,7 +561,7 @@ pub struct ChatMediaGalleryItem {
     pub display_timestamp: String,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, uniffi::Record)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct OutboundAttachment {
     pub filename: String,
     pub mime_type: String,
@@ -573,14 +569,14 @@ pub struct OutboundAttachment {
     pub bytes: Vec<u8>,
 }
 
-#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize, uniffi::Enum)]
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub enum OutboundLocalSendState {
     Sending,
     #[default]
     Sent,
 }
 
-#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize, uniffi::Enum)]
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub enum OutboundServerDeliveryState {
     #[default]
     Undelivered,
@@ -590,7 +586,7 @@ pub enum OutboundServerDeliveryState {
     },
 }
 
-#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize, uniffi::Record)]
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct OutboundDelivery {
     pub local_send: OutboundLocalSendState,
     pub server_delivery: OutboundServerDeliveryState,
@@ -632,7 +628,7 @@ pub struct AppBehindServerEvidence {
     pub evidence_epoch: u64,
 }
 
-#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize, uniffi::Enum)]
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ChatMessageKind {
     #[default]
@@ -642,7 +638,7 @@ pub enum ChatMessageKind {
     Media,
 }
 
-#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize, uniffi::Enum)]
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ChatMessageStatus {
     Running,
@@ -658,7 +654,7 @@ struct OutboundChatText {
     metadata_json: Option<String>,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, uniffi::Record)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ChatMessage {
     pub room_id: String,
     pub seq: u64,
@@ -717,7 +713,7 @@ pub struct ChatMessage {
     pub display_timestamp: String,
 }
 
-#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize, uniffi::Record)]
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SyncResult {
     pub uploaded_key_packages: u32,
     pub claimed_welcomes: u32,
@@ -728,7 +724,7 @@ pub struct SyncResult {
     pub messages: Vec<ChatMessage>,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, uniffi::Enum)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum AppRoomState {
     Connected,
     WaitingForApproval,
@@ -736,7 +732,7 @@ pub enum AppRoomState {
     UnavailableOnDevice,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, uniffi::Record)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AppRoomSummary {
     pub room_id: String,
     pub display_name: String,
@@ -750,7 +746,7 @@ pub struct AppRoomSummary {
     pub is_agent_chat: bool,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, uniffi::Record)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AppChatSummary {
     pub chat_id: String,
     pub title: String,
@@ -764,7 +760,7 @@ pub struct AppChatSummary {
     pub archived: bool,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, uniffi::Record)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AppTopicSummary {
     pub room_id: String,
     pub topic_id: String,
@@ -780,13 +776,13 @@ pub struct AppTopicSummary {
     pub chats: Vec<AppChatSummary>,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, uniffi::Record)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AppPairedAgent {
     pub agent_account_id: String,
     pub canonical_room_id: String,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, uniffi::Record)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AppRoomDetailsState {
     pub room_id: String,
     pub display_name: String,
@@ -799,7 +795,7 @@ pub struct AppRoomDetailsState {
     pub devices: Vec<AppDeviceSummary>,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, uniffi::Record)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AppRoomMemberSummary {
     pub account_id: String,
     pub device_id: String,
@@ -809,7 +805,7 @@ pub struct AppRoomMemberSummary {
     pub current_device: bool,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, uniffi::Record)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AppProfileSummary {
     pub account_id: String,
     pub npub: String,
@@ -820,7 +816,7 @@ pub struct AppProfileSummary {
     pub is_agent: bool,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, uniffi::Record)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AppDeviceSummary {
     pub account_id: String,
     pub device_id: String,
@@ -830,7 +826,7 @@ pub struct AppDeviceSummary {
     pub room_count: u32,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, uniffi::Record)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AppTypingMember {
     pub room_id: String,
     #[serde(default)]
@@ -845,7 +841,7 @@ pub struct AppTypingMember {
     pub activity_kind: String,
 }
 
-#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize, uniffi::Enum)]
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub enum AppScanTargetOutcome {
     #[default]
     None,
@@ -853,7 +849,7 @@ pub enum AppScanTargetOutcome {
     Unavailable,
 }
 
-#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize, uniffi::Record)]
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AppFlowState {
     pub notice_text: Option<String>,
     pub notice_busy: bool,
@@ -948,14 +944,14 @@ pub struct DeviceLinkFanoutReport {
     pub bootstrap_manifests: Vec<LinkBootstrapManifestReceipt>,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, uniffi::Record)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AppDeviceLinkBootstrapReceipt {
     pub bootstrap_id: String,
     pub room_id: String,
     pub manifest_sha256: String,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, uniffi::Record)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AppState {
     pub rev: u64,
     pub identity: Identity,
@@ -1002,7 +998,7 @@ pub struct AppProfileChatBootstrapInput {
     pub persisted_prepared_commit: Option<AppProfileChatBootstrapPreparedCommit>,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, uniffi::Enum)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum AppAction {
     StartRuntime,
     StopRuntime,
@@ -1281,12 +1277,10 @@ impl AppAction {
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, uniffi::Enum)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum AppUpdate {
     FullState(AppState),
 }
-
-#[uniffi::export(callback_interface)]
 pub trait AppReconciler: Send + Sync + 'static {
     fn reconcile(&self, update: AppUpdate);
 }
@@ -1308,8 +1302,6 @@ struct CoreState {
     /// app projection never misses what the gate applied.
     deferred_projection: CoreSyncProjection,
 }
-
-#[derive(uniffi::Object)]
 pub struct FiniteChatRuntime {
     command_tx: mpsc::Sender<AppRuntimeCommand>,
     shared_state: Arc<Mutex<AppState>>,
@@ -1680,14 +1672,10 @@ struct ChatTitleProjectionEntry {
     accepted_seq: u64,
     title: String,
 }
-
-#[uniffi::export]
 pub fn create_nostr_identity() -> Result<NostrIdentityMaterial, FiniteChatCoreError> {
     let secret = generate_account_secret().map_err(client_error)?;
     nostr_identity_from_secret(secret)
 }
-
-#[uniffi::export]
 pub fn nostr_identity_from_nsec(
     nsec: String,
 ) -> Result<NostrIdentityMaterial, FiniteChatCoreError> {
@@ -1699,21 +1687,15 @@ pub fn nostr_identity_from_nsec(
     let secret = parse_account_secret_hex(&secret_hex)?;
     nostr_identity_from_secret(secret)
 }
-
-#[uniffi::export]
 pub fn nostr_identity_from_account_secret_hex(
     account_secret_hex: String,
 ) -> Result<NostrIdentityMaterial, FiniteChatCoreError> {
     let secret = parse_account_secret_hex(account_secret_hex.trim())?;
     nostr_identity_from_secret(secret)
 }
-
-#[uniffi::export]
 pub fn npub_from_account_id(account_id: String) -> Result<String, FiniteChatCoreError> {
     npub_encode(account_id.trim()).map_err(profile_error)
 }
-
-#[uniffi::export]
 pub fn account_id_from_npub(npub: String) -> Result<String, FiniteChatCoreError> {
     let trimmed = npub.trim();
     let normalized = strip_ascii_prefix(trimmed, "nostr:").unwrap_or(trimmed);
@@ -1807,8 +1789,6 @@ fn starts_with_ascii_case_insensitive(value: &str, prefix: &str) -> bool {
         .get(..prefix.len())
         .is_some_and(|candidate| candidate.eq_ignore_ascii_case(prefix))
 }
-
-#[uniffi::export]
 pub fn finite_sites_native_viewer_session_proof(
     account_secret_hex: String,
     url: String,
@@ -1845,10 +1825,7 @@ pub fn finite_sites_native_viewer_session_proof(
         authorization_header,
     })
 }
-
-#[uniffi::export]
 impl FiniteChatRuntime {
-    #[uniffi::constructor]
     pub fn open(options: OpenOptions) -> Result<Arc<Self>, FiniteChatCoreError> {
         Self::open_with_mode(options, false)
     }
@@ -1856,7 +1833,6 @@ impl FiniteChatRuntime {
     /// Open a diagnostics-only runtime: holds no writer lease on the client
     /// store, never mutates it, and rejects every dispatched action. Safe to
     /// run alongside a resident service that owns the store.
-    #[uniffi::constructor]
     pub fn open_read_only(options: OpenOptions) -> Result<Arc<Self>, FiniteChatCoreError> {
         Self::open_with_mode(options, true)
     }
@@ -1905,8 +1881,6 @@ impl FiniteChatRuntime {
         }))
     }
 }
-
-#[uniffi::export]
 impl FiniteChatRuntime {
     pub fn state(&self) -> Result<AppState, FiniteChatCoreError> {
         let state = self
