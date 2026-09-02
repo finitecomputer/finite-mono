@@ -26,7 +26,7 @@ use finitechat_client::{
     StoredOutboundLocalState, StoredOutboundMessage, StoredOutboundServerDeliveryState,
     StoredPairedAgent, StoredPendingDeviceLinkBootstrap, device_link_bootstrap_chunk_sha256,
     generate_account_secret, run_link_fanout_tick, run_room_server_sync_setup_tick,
-    run_room_sync_tick, run_runtime_sync_setup_tick,
+    run_room_sync_tick, run_runtime_rekey_room, run_runtime_sync_setup_tick,
 };
 use finitechat_hermes::{
     HermesAttachmentKindV1, HermesAttachmentV1, HermesMessagePayloadV1, HermesMessageStatusV1,
@@ -588,6 +588,18 @@ pub struct AppSentMessage {
     pub seq: Option<u64>,
 }
 
+/// Outcome of [`FiniteChatRuntime::rekey_room_and_wait`]: one accepted
+/// self-update Commit that moved the room from `previous_epoch` to
+/// `new_epoch` at server log position `commit_seq`.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AppRekeyRoomReport {
+    pub room_id: String,
+    pub previous_epoch: u64,
+    pub new_epoch: u64,
+    pub commit_seq: u64,
+    pub message_id: String,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AppAcceptedActivity {
     pub route_key: String,
@@ -1056,6 +1068,10 @@ enum AppRuntimeCommand {
         fanout_id: String,
         target_device_id: String,
         response: mpsc::SyncSender<Result<DeviceLinkFanoutReport, FiniteChatCoreError>>,
+    },
+    RekeyRoom {
+        room_id: String,
+        response: mpsc::SyncSender<Result<AppRekeyRoomReport, FiniteChatCoreError>>,
     },
     ProfileChatRooms {
         account_id: String,
@@ -1868,6 +1884,33 @@ impl FiniteChatRuntime {
             })?
     }
 
+    /// Operator-driven MLS rekey: advance one room's epoch with an ordinary
+    /// self-update Commit from this device, so a counterpart whose send
+    /// ratchet was rewound starts fresh at generation 0 in the new epoch.
+    /// Fails closed (no durable change) when the room is unknown locally, a
+    /// Commit is already pending, the local epoch does not match the
+    /// server's current epoch, or the server rejects the Commit. The room's
+    /// sync cursor is not required to be at the server head.
+    pub fn rekey_room_and_wait(
+        &self,
+        room_id: String,
+    ) -> Result<AppRekeyRoomReport, FiniteChatCoreError> {
+        let (response_tx, response_rx) = mpsc::sync_channel(1);
+        self.command_tx
+            .send(AppRuntimeCommand::RekeyRoom {
+                room_id,
+                response: response_tx,
+            })
+            .map_err(|_| FiniteChatCoreError::Client {
+                reason: "runtime actor is stopped".to_owned(),
+            })?;
+        response_rx
+            .recv()
+            .map_err(|_| FiniteChatCoreError::Client {
+                reason: "runtime actor stopped before rekeying the room".to_owned(),
+            })?
+    }
+
     fn wait_plan(&self, timeout_millis: u64) -> Result<AppRuntimeWaitPlan, FiniteChatCoreError> {
         let (response_tx, response_rx) = mpsc::sync_channel(1);
         self.command_tx
@@ -2392,6 +2435,15 @@ fn spawn_app_runtime_worker(
                     response,
                 } => {
                     let result = state.link_device(fanout_id, target_device_id);
+                    if result.is_ok() {
+                        state.bump_rev();
+                        let snapshot = state.app.clone();
+                        publish_app_update(&snapshot, &shared_state, &reconciler);
+                    }
+                    let _ = response.send(result);
+                }
+                AppRuntimeCommand::RekeyRoom { room_id, response } => {
+                    let result = state.rekey_room(room_id);
                     if result.is_ok() {
                         state.bump_rev();
                         let snapshot = state.app.clone();
@@ -6183,6 +6235,30 @@ impl AppRuntimeState {
         Ok(())
     }
 
+    fn rekey_room(&mut self, room_id: String) -> Result<AppRekeyRoomReport, FiniteChatCoreError> {
+        if self.core.read_only {
+            return Err(FiniteChatCoreError::ReadOnly);
+        }
+        self.core.refresh_device_clock()?;
+        if !self.core.has_room(&room_id) {
+            return Err(FiniteChatCoreError::Client {
+                reason: format!("room '{room_id}' is not available on this device"),
+            });
+        }
+        // Best-effort targeted sync so a healthy room commits from the
+        // server head. A quarantined room keeps its frozen cursor (the
+        // failure is folded into the usual quarantine bookkeeping) and still
+        // commits: only unapplied Commits matter, and the worker's epoch
+        // check rules those out.
+        let synced = self.core.sync_room_with_projection(&room_id)?;
+        self.apply_targeted_sync_projection(&room_id, synced)?;
+        let idempotency_key = self.core.generate_object_id("rekey")?;
+        let report = self.core.rekey_room(&room_id, idempotency_key)?;
+        self.app.status = "room rekeyed".to_owned();
+        self.app.toast = None;
+        Ok(report)
+    }
+
     fn link_device(
         &mut self,
         fanout_id: String,
@@ -8535,6 +8611,46 @@ impl CoreState {
 
     fn has_room(&self, room_id: &str) -> bool {
         self.device.room_mls_group_id(room_id).is_ok()
+    }
+
+    /// Run the client rekey worker against the room's own server (ADR 0005)
+    /// and map its typed failures. Any failure reloads the durable Device so
+    /// the in-memory state never drifts from what the worker persisted.
+    fn rekey_room(
+        &mut self,
+        room_id: &str,
+        idempotency_key: String,
+    ) -> Result<AppRekeyRoomReport, FiniteChatCoreError> {
+        let server_url = self
+            .device
+            .room_server_url(room_id)
+            .map(str::to_owned)
+            .unwrap_or_else(|| self.server_url.clone());
+        let mut delivery = self.delivery_for(&server_url);
+        let result = run_runtime_rekey_room(
+            &mut self.store,
+            &mut self.device,
+            &mut delivery,
+            room_id,
+            idempotency_key,
+        );
+        match result {
+            Ok(report) => Ok(AppRekeyRoomReport {
+                room_id: report.room_id,
+                previous_epoch: report.previous_epoch,
+                new_epoch: report.new_epoch,
+                commit_seq: report.commit_seq,
+                message_id: report.message_id,
+            }),
+            Err(error) => {
+                self.reload_persisted_device()?;
+                Err(match error {
+                    RuntimeWorkerError::Delivery(error) => send_delivery_error(error),
+                    RuntimeWorkerError::Client(error) => client_error(error),
+                    RuntimeWorkerError::ClientStore(error) => store_error(error),
+                })
+            }
+        }
     }
 
     fn bootstrap_room(

@@ -6,16 +6,18 @@ use finitechat_client::{
     HttpRuntimeDelivery, HttpRuntimeDeliveryError, HttpRuntimeTransport, LinkFanoutRoomStatus,
     ReqwestHttpRuntimeTransport, ReqwestHttpRuntimeTransportError, RuntimeDelivery,
     RuntimeLinkFanoutOptions, RuntimeSyncOptions, RuntimeWorkerError, SqliteClientStore,
-    SqliteClientStoreOptions, WelcomeAdmissionPolicy, run_link_fanout_tick, run_runtime_sync_tick,
+    SqliteClientStoreOptions, WelcomeAdmissionPolicy, run_link_fanout_tick, run_runtime_rekey_room,
+    run_runtime_sync_tick,
 };
 use finitechat_delivery::MAX_HTTP_SYNC_PAGE_ENTRIES;
 use finitechat_http::{SyncHintEvent, SyncStreamRequest, SyncWaitRoom};
 use finitechat_mls::{NOSTR_SECRET_KEY_BYTES, NostrSecretKey};
 use finitechat_proto::LogEntryKind;
 use finitechat_proto::{
-    AppendEventRequest, CreateRoomRequest, DurableAppEventKind, EventAccepted,
-    ListAccountRoomsRequest, RoomProtocol, RoomSyncProjection, WelcomeRecord, envelope,
-    lease_token_for,
+    AppendEventRequest, ClaimKeyPackageResult, CommitAccepted, CreateRoomRequest, DeviceRef,
+    DurableAppEventKind, EventAccepted, KeyPackageInventory, ListAccountRoomsPage,
+    ListAccountRoomsRequest, RoomProtocol, RoomSyncProjection, SubmitCommitRequest, SyncEventsPage,
+    UploadKeyPackageRequest, WelcomeRecord, envelope, lease_token_for,
 };
 use finitechat_server::{HttpServerState, http_router};
 use rusqlite::{Connection, params};
@@ -2868,6 +2870,306 @@ fn rewound_sender_wedges_receiver_and_heals_via_readdmission_epoch_bump() {
     );
 }
 
+/// Operator rekey (self-update Commit) heals the receiver of a rewound
+/// sender without minting a new device: the epoch bump restarts every
+/// leaf's secret tree at generation 0. The receiver commits while its cursor
+/// is still frozen behind the quarantined entry; the runbook's mandatory
+/// skip to the commit seq then lets normal sync carry on in both directions.
+#[test]
+fn rekey_room_heals_receiver_wedged_by_rewound_sender() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut pair = RekeyPair::new(&dir, "heal");
+    let options = pair.options();
+
+    // Healthy traffic: device-b sends, device-a receives and decrypts.
+    let healthy = pair.send_from_b(b"rekey healthy", "app_rekey_healthy");
+    let healthy_report = pair.sync_a(&options).unwrap();
+    assert_eq!(healthy_report.applied_entries.len(), 1);
+    assert_eq!(pair.a.last_applied_seq(ROOM_ID).unwrap(), healthy.seq);
+
+    // Rewind device-b: persist (T1), advance its ratchet across sends the
+    // receiver consumes, then restore the T1 store files.
+    pair.b_store.save_device_state(&pair.b).unwrap();
+    let t1 = StoreFileSnapshot::take(&dir, &pair.b_db, "b_t1");
+    for i in 0..4 {
+        pair.send_from_b(
+            format!("rekey advance {i}").as_bytes(),
+            &format!("app_rekey_advance_{i}"),
+        );
+    }
+    assert_eq!(pair.sync_a(&options).unwrap().applied_entries.len(), 4);
+    let frozen_cursor = pair.a.last_applied_seq(ROOM_ID).unwrap();
+    pair.restore_b(&t1);
+
+    // Wedge: the rewound sender's entry is accepted by the server but the
+    // receiver's tick aborts on it and the cursor stays frozen.
+    let poison = pair.send_from_b(b"rekey poison", "app_rekey_poison");
+    assert!(poison.seq > frozen_cursor);
+    assert!(pair.sync_a(&options).is_err());
+    assert_eq!(pair.a.last_applied_seq(ROOM_ID).unwrap(), frozen_cursor);
+
+    // Rekey from the wedged receiver: the commit does not need the cursor at
+    // the server head, and it leaves the frozen cursor alone.
+    let report = run_runtime_rekey_room(
+        &mut pair.a_store,
+        &mut pair.a,
+        &mut pair.delivery,
+        ROOM_ID,
+        "rekey_http_heal",
+    )
+    .unwrap();
+    assert_eq!(report.room_id, ROOM_ID);
+    assert_eq!(report.previous_epoch, 1);
+    assert_eq!(report.new_epoch, 2);
+    assert!(report.commit_seq > poison.seq);
+    assert_eq!(pair.a.group_epoch(ROOM_ID).unwrap(), 2);
+    assert!(!pair.a.has_pending_commit(ROOM_ID).unwrap());
+    assert_eq!(pair.a.last_applied_seq(ROOM_ID).unwrap(), frozen_cursor);
+    let durable_a = pair.a_store.load_device(pair.a_config.clone()).unwrap();
+    assert_eq!(durable_a.group_epoch(ROOM_ID).unwrap(), 2);
+    assert!(!durable_a.has_pending_commit(ROOM_ID).unwrap());
+    let commit_page = pair
+        .delivery
+        .sync_events(ROOM_ID, pair.a.device_ref(), report.commit_seq - 1)
+        .unwrap();
+    assert_eq!(commit_page.entries.len(), 1);
+    assert_eq!(commit_page.entries[0].message_id, report.message_id);
+    assert_eq!(commit_page.entries[0].kind, LogEntryKind::Commit);
+
+    // The rewound sender applies the commit on its next sync.
+    let b_report = pair.sync_b(&options).unwrap();
+    assert_eq!(pair.b.group_epoch(ROOM_ID).unwrap(), 2);
+    assert!(b_report.applied_entries.iter().any(|entry| {
+        entry.seq == report.commit_seq
+            && matches!(entry.entry, AppliedLogEntry::Commit { epoch: 2, .. })
+    }));
+
+    // Its next send decrypts at the receiver once the operator's mandatory
+    // cursor skip moves the frozen cursor to the commit seq; the frozen tick
+    // still aborts on the poison entry before that.
+    let healed_plaintext = b"rekey healed";
+    let healed = pair.send_from_b(healed_plaintext, "app_rekey_healed");
+    assert!(pair.sync_a(&options).is_err());
+    assert_eq!(pair.a.last_applied_seq(ROOM_ID).unwrap(), frozen_cursor);
+    pair.a_store
+        .advance_room_cursor_and_save(&mut pair.a, ROOM_ID, report.commit_seq)
+        .unwrap();
+    let healed_report = pair.sync_a(&options).unwrap();
+    assert_eq!(pair.a.last_applied_seq(ROOM_ID).unwrap(), healed.seq);
+    assert_eq!(
+        healed_report
+            .applied_entries
+            .last()
+            .map(|entry| &entry.entry),
+        Some(&AppliedLogEntry::Application {
+            plaintext: healed_plaintext.to_vec(),
+            sender: pair.b.device_ref().clone(),
+        })
+    );
+
+    // And the receiver's send decrypts at the rewound sender.
+    let reply_plaintext = b"rekey reply";
+    let reply = pair
+        .a
+        .create_application_request(ROOM_ID, reply_plaintext, "app_rekey_reply")
+        .unwrap();
+    let reply = pair
+        .delivery
+        .append_event(&reply, DurableAppEventKind::ChatMessage.delivery_policy())
+        .unwrap();
+    let reply_report = pair.sync_b(&options).unwrap();
+    assert_eq!(pair.b.last_applied_seq(ROOM_ID).unwrap(), reply.seq);
+    assert_eq!(
+        reply_report
+            .applied_entries
+            .last()
+            .map(|entry| &entry.entry),
+        Some(&AppliedLogEntry::Application {
+            plaintext: reply_plaintext.to_vec(),
+            sender: pair.a.device_ref().clone(),
+        })
+    );
+}
+
+/// Local preconditions fail closed before any server call: a pending Commit
+/// or an unknown room is rejected with a typed error and no state change.
+#[test]
+fn rekey_room_refuses_pending_commit_without_calling_server() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut pair = RekeyPair::new(&dir, "pending");
+    let cursor = pair.a.last_applied_seq(ROOM_ID).unwrap();
+    pair.a
+        .prepare_self_update_commit(ROOM_ID, "commit_http_rekey_pending_local")
+        .unwrap();
+    assert!(pair.a.has_pending_commit(ROOM_ID).unwrap());
+
+    let mut never = NeverCalledDelivery;
+    let error = run_runtime_rekey_room(
+        &mut pair.a_store,
+        &mut pair.a,
+        &mut never,
+        ROOM_ID,
+        "rekey_http_pending",
+    )
+    .unwrap_err();
+    assert!(
+        matches!(
+            &error,
+            RuntimeWorkerError::Client(ClientError::PendingCommitExists(room_id))
+                if room_id == ROOM_ID
+        ),
+        "unexpected error: {error}"
+    );
+    assert_eq!(pair.a.group_epoch(ROOM_ID).unwrap(), 1);
+    assert!(pair.a.has_pending_commit(ROOM_ID).unwrap());
+    assert_eq!(pair.a.last_applied_seq(ROOM_ID).unwrap(), cursor);
+
+    let error = run_runtime_rekey_room(
+        &mut pair.a_store,
+        &mut pair.a,
+        &mut never,
+        "room_rekey_unknown",
+        "rekey_http_unknown",
+    )
+    .unwrap_err();
+    assert!(
+        matches!(
+            &error,
+            RuntimeWorkerError::Client(ClientError::GroupNotFound(room_id))
+                if room_id == "room_rekey_unknown"
+        ),
+        "unexpected error: {error}"
+    );
+}
+
+/// A device whose epoch is behind the server (another member committed
+/// first) is refused with a typed error and no local change; after it syncs
+/// the newer Commit the rekey succeeds and the other member applies it.
+#[test]
+fn rekey_room_refuses_when_local_epoch_is_behind_server() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut pair = RekeyPair::new(&dir, "behind");
+    let options = pair.options();
+
+    let b_prepared = pair
+        .b
+        .prepare_self_update_commit(ROOM_ID, "commit_http_rekey_b_first")
+        .unwrap();
+    let b_accepted = pair.delivery.submit_commit(b_prepared.request).unwrap();
+    let b_page = pair
+        .delivery
+        .sync_events(ROOM_ID, pair.b.device_ref(), b_accepted.seq - 1)
+        .unwrap();
+    pair.b
+        .merge_pending_commit_from_log(ROOM_ID, &b_page.entries, &b_prepared.message_id)
+        .unwrap();
+    pair.b_store
+        .advance_room_cursor_and_save(&mut pair.b, ROOM_ID, b_accepted.seq)
+        .unwrap();
+    assert_eq!(pair.b.group_epoch(ROOM_ID).unwrap(), 2);
+
+    let cursor = pair.a.last_applied_seq(ROOM_ID).unwrap();
+    let error = run_runtime_rekey_room(
+        &mut pair.a_store,
+        &mut pair.a,
+        &mut pair.delivery,
+        ROOM_ID,
+        "rekey_http_behind",
+    )
+    .unwrap_err();
+    assert!(
+        matches!(
+            &error,
+            RuntimeWorkerError::Client(ClientError::RekeyEpochMismatch {
+                room_id,
+                local_epoch: 1,
+                server_epoch: 2,
+            }) if room_id == ROOM_ID
+        ),
+        "unexpected error: {error}"
+    );
+    assert_eq!(pair.a.group_epoch(ROOM_ID).unwrap(), 1);
+    assert!(!pair.a.has_pending_commit(ROOM_ID).unwrap());
+    assert_eq!(pair.a.last_applied_seq(ROOM_ID).unwrap(), cursor);
+    let durable_a = pair.a_store.load_device(pair.a_config.clone()).unwrap();
+    assert_eq!(durable_a.group_epoch(ROOM_ID).unwrap(), 1);
+    assert!(!durable_a.has_pending_commit(ROOM_ID).unwrap());
+    let head = pair
+        .delivery
+        .sync_events(ROOM_ID, pair.a.device_ref(), b_accepted.seq)
+        .unwrap();
+    assert!(head.entries.is_empty(), "refused rekey must not append");
+
+    pair.sync_a(&options).unwrap();
+    assert_eq!(pair.a.group_epoch(ROOM_ID).unwrap(), 2);
+    let report = run_runtime_rekey_room(
+        &mut pair.a_store,
+        &mut pair.a,
+        &mut pair.delivery,
+        ROOM_ID,
+        "rekey_http_after_sync",
+    )
+    .unwrap();
+    assert_eq!(report.previous_epoch, 2);
+    assert_eq!(report.new_epoch, 3);
+    assert_eq!(report.commit_seq, b_accepted.seq + 1);
+    // Committed from the server head: the cursor advances across the
+    // device's own Commit, so the next sync does not re-apply it.
+    assert_eq!(pair.a.last_applied_seq(ROOM_ID).unwrap(), report.commit_seq);
+    assert!(pair.sync_a(&options).unwrap().applied_entries.is_empty());
+    pair.sync_b(&options).unwrap();
+    assert_eq!(pair.b.group_epoch(ROOM_ID).unwrap(), 3);
+}
+
+/// A submit that never reaches acceptance leaves no pending Commit behind:
+/// the pre-rekey state is restored in memory and on disk, and a later rekey
+/// through a healthy transport succeeds.
+#[test]
+fn rekey_room_restores_state_when_submit_fails() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut pair = RekeyPair::new(&dir, "submit_fail");
+    let options = pair.options();
+    let cursor = pair.a.last_applied_seq(ROOM_ID).unwrap();
+
+    pair.delivery.transport_mut().fail_next_submit_before_accept = true;
+    let error = run_runtime_rekey_room(
+        &mut pair.a_store,
+        &mut pair.a,
+        &mut pair.delivery,
+        ROOM_ID,
+        "rekey_http_submit_fail",
+    )
+    .unwrap_err();
+    assert!(
+        matches!(&error, RuntimeWorkerError::Delivery(_)),
+        "unexpected error: {error}"
+    );
+    assert_eq!(pair.a.group_epoch(ROOM_ID).unwrap(), 1);
+    assert!(!pair.a.has_pending_commit(ROOM_ID).unwrap());
+    assert_eq!(pair.a.last_applied_seq(ROOM_ID).unwrap(), cursor);
+    let durable_a = pair.a_store.load_device(pair.a_config.clone()).unwrap();
+    assert_eq!(durable_a.group_epoch(ROOM_ID).unwrap(), 1);
+    assert!(!durable_a.has_pending_commit(ROOM_ID).unwrap());
+    let head = pair
+        .delivery
+        .sync_events(ROOM_ID, pair.a.device_ref(), pair.add_seq)
+        .unwrap();
+    assert!(head.entries.is_empty(), "failed submit must not append");
+
+    let report = run_runtime_rekey_room(
+        &mut pair.a_store,
+        &mut pair.a,
+        &mut pair.delivery,
+        ROOM_ID,
+        "rekey_http_after_submit_fail",
+    )
+    .unwrap();
+    assert_eq!(report.previous_epoch, 1);
+    assert_eq!(report.new_epoch, 2);
+    pair.sync_b(&options).unwrap();
+    assert_eq!(pair.b.group_epoch(ROOM_ID).unwrap(), 2);
+}
+
 fn test_device(
     account_secret_bytes: [u8; NOSTR_SECRET_KEY_BYTES],
     device_id: &str,
@@ -3173,6 +3475,212 @@ impl std::fmt::Display for InProcessHttpTransportError {
 }
 
 type TestHttpRuntimeDelivery = HttpRuntimeDelivery<InProcessHttpTransport>;
+
+/// Two durable devices (device-a owns the room, device-b was admitted by an
+/// add-member Commit) sharing one in-process server, both at epoch 1 with
+/// their cursors at the add Commit — the starting point of every rekey test.
+struct RekeyPair {
+    a: FiniteChatDevice,
+    a_store: SqliteClientStore,
+    a_config: FiniteChatDeviceConfig,
+    b: FiniteChatDevice,
+    b_store: SqliteClientStore,
+    b_config: FiniteChatDeviceConfig,
+    b_db: std::path::PathBuf,
+    delivery: TestHttpRuntimeDelivery,
+    add_seq: u64,
+}
+
+impl RekeyPair {
+    fn new(dir: &tempfile::TempDir, tag: &str) -> Self {
+        let server_db = dir
+            .path()
+            .join(format!("finitechat-http-rekey-{tag}.sqlite3"));
+        let a_config = test_config(ALICE_ACCOUNT_SECRET_BYTES, &format!("device_a_rekey_{tag}"));
+        let mut a_store =
+            sqlite_client_store(dir.path().join(format!("rekey_{tag}_a.sqlite3")), &a_config);
+        let mut a = FiniteChatDevice::new(a_config.clone()).unwrap();
+        let b_config = test_config(BOB_ACCOUNT_SECRET_BYTES, &format!("device_b_rekey_{tag}"));
+        let b_db = dir.path().join(format!("rekey_{tag}_b.sqlite3"));
+        let mut b_store = sqlite_client_store(b_db.clone(), &b_config);
+        let mut b = FiniteChatDevice::new(b_config.clone()).unwrap();
+        let mut delivery = HttpRuntimeDelivery::from_sqlite_path(&server_db);
+        let add_seq = create_group_room_with_member(
+            &mut delivery,
+            &mut a,
+            &mut b,
+            GroupMemberSetup {
+                room_id: ROOM_ID,
+                mls_group_id: MLS_GROUP_ID,
+                key_package_id: "kp_http_rekey_b",
+                welcome_id: "welcome_http_rekey_b",
+                idempotency_key: "commit_http_rekey_b",
+            },
+        );
+        b_store.save_device_state(&b).unwrap();
+        b_store
+            .advance_room_cursor_and_save(&mut b, ROOM_ID, add_seq)
+            .unwrap();
+        a_store.save_device_state(&a).unwrap();
+        a_store
+            .advance_room_cursor_and_save(&mut a, ROOM_ID, add_seq)
+            .unwrap();
+        Self {
+            a,
+            a_store,
+            a_config,
+            b,
+            b_store,
+            b_config,
+            b_db,
+            delivery,
+            add_seq,
+        }
+    }
+
+    fn options(&self) -> RuntimeSyncOptions {
+        RuntimeSyncOptions {
+            key_package_target_available: 0,
+            max_sync_pages_per_room: 8,
+        }
+    }
+
+    fn send_from_b(&mut self, plaintext: &[u8], idempotency_key: &str) -> EventAccepted {
+        let request = self
+            .b
+            .create_application_request(ROOM_ID, plaintext, idempotency_key)
+            .unwrap();
+        self.delivery
+            .append_event(&request, DurableAppEventKind::ChatMessage.delivery_policy())
+            .unwrap()
+    }
+
+    fn sync_a(
+        &mut self,
+        options: &RuntimeSyncOptions,
+    ) -> Result<
+        finitechat_client::RuntimeSyncReport,
+        RuntimeWorkerError<HttpRuntimeDeliveryError<InProcessHttpTransportError>>,
+    > {
+        run_runtime_sync_tick(&mut self.a_store, &mut self.a, &mut self.delivery, options)
+    }
+
+    fn sync_b(
+        &mut self,
+        options: &RuntimeSyncOptions,
+    ) -> Result<
+        finitechat_client::RuntimeSyncReport,
+        RuntimeWorkerError<HttpRuntimeDeliveryError<InProcessHttpTransportError>>,
+    > {
+        run_runtime_sync_tick(&mut self.b_store, &mut self.b, &mut self.delivery, options)
+    }
+
+    /// File-level restore of device-b's store (the production rewind
+    /// mechanism), then reload the device from the rewound files.
+    fn restore_b(&mut self, snapshot: &StoreFileSnapshot) {
+        let placeholder = sqlite_client_store(
+            self.b_db
+                .parent()
+                .unwrap()
+                .join("rekey_placeholder.sqlite3"),
+            &self.b_config,
+        );
+        let previous = std::mem::replace(&mut self.b_store, placeholder);
+        drop(previous);
+        snapshot.restore(&self.b_db);
+        self.b_store = sqlite_client_store(self.b_db.clone(), &self.b_config);
+        self.b = self.b_store.load_device(self.b_config.clone()).unwrap();
+    }
+}
+
+/// Copies of a SQLite store's main file and, when present, its WAL sidecar.
+struct StoreFileSnapshot {
+    db: std::path::PathBuf,
+    wal: std::path::PathBuf,
+}
+
+impl StoreFileSnapshot {
+    fn take(dir: &tempfile::TempDir, db: &std::path::Path, tag: &str) -> Self {
+        let snapshot = Self {
+            db: dir.path().join(format!("{tag}.sqlite3")),
+            wal: dir.path().join(format!("{tag}.sqlite3-wal")),
+        };
+        std::fs::copy(db, &snapshot.db).unwrap();
+        let wal = wal_path(db);
+        if wal.exists() {
+            std::fs::copy(&wal, &snapshot.wal).unwrap();
+        }
+        snapshot
+    }
+
+    fn restore(&self, db: &std::path::Path) {
+        std::fs::copy(&self.db, db).unwrap();
+        let wal = wal_path(db);
+        if self.wal.exists() {
+            std::fs::copy(&self.wal, &wal).unwrap();
+        } else {
+            let _ = std::fs::remove_file(&wal);
+        }
+        let _ = std::fs::remove_file(db.with_extension("sqlite3-shm"));
+    }
+}
+
+fn wal_path(db: &std::path::Path) -> std::path::PathBuf {
+    db.with_extension("sqlite3-wal")
+}
+
+/// A delivery that fails the test on any call: proves a refused rekey never
+/// reaches the server.
+struct NeverCalledDelivery;
+
+impl RuntimeDelivery for NeverCalledDelivery {
+    type Error = String;
+
+    fn key_package_inventory(&mut self, _: &DeviceRef) -> Result<KeyPackageInventory, String> {
+        panic!("refused rekey must not call key_package_inventory");
+    }
+
+    fn upload_key_package(&mut self, _: UploadKeyPackageRequest) -> Result<(), String> {
+        panic!("refused rekey must not call upload_key_package");
+    }
+
+    fn claim_key_package_for_device(
+        &mut self,
+        _: &DeviceRef,
+    ) -> Result<Option<ClaimKeyPackageResult>, String> {
+        panic!("refused rekey must not call claim_key_package_for_device");
+    }
+
+    fn claim_key_package_for_account(
+        &mut self,
+        _: &str,
+    ) -> Result<Option<ClaimKeyPackageResult>, String> {
+        panic!("refused rekey must not call claim_key_package_for_account");
+    }
+
+    fn submit_commit(&mut self, _: SubmitCommitRequest) -> Result<CommitAccepted, String> {
+        panic!("refused rekey must not call submit_commit");
+    }
+
+    fn list_account_rooms(
+        &mut self,
+        _: ListAccountRoomsRequest,
+    ) -> Result<ListAccountRoomsPage, String> {
+        panic!("refused rekey must not call list_account_rooms");
+    }
+
+    fn claim_welcomes(&mut self, _: &DeviceRef) -> Result<Vec<WelcomeRecord>, String> {
+        panic!("refused rekey must not call claim_welcomes");
+    }
+
+    fn ack_welcome(&mut self, _: &str) -> Result<(), String> {
+        panic!("refused rekey must not call ack_welcome");
+    }
+
+    fn sync_events(&mut self, _: &str, _: &DeviceRef, _: u64) -> Result<SyncEventsPage, String> {
+        panic!("refused rekey must not call sync_events");
+    }
+}
 
 fn spawn_live_http_server(path: &std::path::Path) -> String {
     spawn_live_http_server_with_state(HttpServerState::from_sqlite_path(path).unwrap())

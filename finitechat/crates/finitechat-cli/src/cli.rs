@@ -761,6 +761,12 @@ pub(crate) enum HermesCommand {
     /// Report one room's connection/pairing status.
     RoomStatus(HermesRoomStatusArgs),
 
+    /// Advance one room's MLS epoch with a self-update Commit so a
+    /// counterpart whose send ratchet was rewound starts fresh at
+    /// generation 0. Refuses to run unless the local epoch matches the
+    /// server's; the room cursor is not required to be at the server head.
+    Rekey(HermesRekeyArgs),
+
     /// Poll inbound Hermes events ({room_id?, limit?, timeout_millis?}).
     Poll,
 
@@ -855,6 +861,13 @@ pub(crate) struct HermesRoomStatusArgs {
     /// Room to report on.
     #[arg(long, allow_hyphen_values = true)]
     pub(crate) room_id: String,
+}
+
+#[derive(Debug, Args)]
+pub(crate) struct HermesRekeyArgs {
+    /// Room to rekey.
+    #[arg(long, allow_hyphen_values = true)]
+    pub(crate) room: String,
 }
 
 #[derive(Debug, Subcommand)]
@@ -1068,6 +1081,22 @@ mod tests {
             panic!("expected room-status");
         };
         assert_eq!(status.room_id, "room");
+
+        // Operator rekey of one wedged room (runbook: epoch bump + skip).
+        let args = hermes(&[
+            "hermes",
+            "--agent-home",
+            "/home/node/.finitechat/agent",
+            "rekey",
+            "--room",
+            "room-1",
+            "--json",
+        ]);
+        assert!(args.json);
+        let HermesCommand::Rekey(rekey) = args.command else {
+            panic!("expected rekey");
+        };
+        assert_eq!(rekey.room, "room-1");
     }
 
     #[test]
