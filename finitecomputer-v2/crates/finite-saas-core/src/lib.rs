@@ -1200,11 +1200,10 @@ pub fn derive_runtime_summary_status(
     }
 }
 
-/// One runtime the runner should keep in its standing-health registry, as
-/// listed by Core for the runner credential's host. The runner reconciles
-/// its on-disk registry against this at startup so runtimes it did not
-/// launch in this process (upgraded in place, relocated in, or launched by a
-/// pre-registry runner) are still reported on.
+/// One runtime the runner's standing-health poller should poll, as listed by
+/// Core for the runner credential's host each cycle: every live runtime on
+/// that host whose lifecycle latch is not `offline`. Core is the only source
+/// of the target set; the runner keeps no registry.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct RuntimeHealthTarget {
@@ -1218,6 +1217,9 @@ pub struct RuntimeHealthTarget {
     #[serde(default)]
     pub agent_npub: Option<String>,
     pub lifecycle_status: RuntimeSummaryStatus,
+    /// The cadence the latest stored report declared, if any.
+    #[serde(default)]
+    pub report_interval_seconds: Option<i64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]

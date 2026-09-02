@@ -3109,6 +3109,7 @@ mod tests {
                 contact_endpoint: Some("http://127.0.0.1:41001/contact".to_string()),
                 agent_npub: None,
                 lifecycle_status: RuntimeSummaryStatus::PendingFirstReport,
+                report_interval_seconds: None,
             }],
         });
         let wire = serde_json::to_value(&listing).unwrap();
@@ -3342,6 +3343,7 @@ mod tests {
             assert_eq!(target["contactEndpoint"], "http://127.0.0.1:41002/contact");
             assert_eq!(target["agentNpub"], format!("npub1{}", "q".repeat(58)));
             assert_eq!(target["lifecycleStatus"], "online");
+            assert_eq!(target["reportIntervalSeconds"], 60);
 
             // Out-of-shape bodies fail closed.
             let (status, _) = send_json(

@@ -6461,9 +6461,9 @@ fn stored_runtime_health_from_row(row: &Row) -> StoredRuntimeHealth {
     }
 }
 
-/// The runtimes a host's runner should keep in its standing-health registry:
-/// every live (not offboarding) runtime on that host whose lifecycle latch is
-/// not `offline`. Scoped by the runner credential's host, like reports.
+/// The runtimes a host's runner polls for standing health each cycle: every
+/// live (not offboarding) runtime on that host whose lifecycle latch is not
+/// `offline`. Scoped by the runner credential's host, like reports.
 async fn postgres_runtime_health_targets_for_host<C>(
     client: &C,
     source_host_id: &str,
@@ -6476,7 +6476,7 @@ where
     let rows = client
         .query(
             "SELECT id AS agent_runtime_id, source_machine_id, contact_endpoint, host_facts,
-                    health_reporting_npub
+                    health_reporting_npub, health_report_interval_seconds
              FROM agent_runtimes
              WHERE source_host_id = $1
                AND offboarding_phase IS NULL
@@ -6508,6 +6508,9 @@ where
                 contact_endpoint,
                 agent_npub: row.get("health_reporting_npub"),
                 lifecycle_status: host_facts.runtime_status,
+                report_interval_seconds: row
+                    .get::<_, Option<i32>>("health_report_interval_seconds")
+                    .map(i64::from),
             })
         })
         .collect::<CoreResult<Vec<_>>>()?;
