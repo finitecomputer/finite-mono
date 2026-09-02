@@ -170,6 +170,7 @@ fn finding_severity(finding: &str) -> Severity {
         | "cni_inventory_unreadable"
         | "vmm_process_unreadable"
         | "vmm_pid_unavailable"
+        | "runtime_id_missing"
         | "probe_deadline_exceeded" => Severity::Unknown,
         _ => Severity::Degraded,
     }
@@ -350,18 +351,22 @@ impl Probe<'_> {
         // and its ownership labels and durable /data bind match Core's
         // durable record (the request identity). Core sets the RuntimeSpec's
         // durable_state_id to the agent runtime id, so the durable state root
-        // is named by the runtime id, never by the container/machine name
-        // (kata_launch_plan_for_source_machine derives it the same way).
+        // is named by the runtime id and by nothing else
+        // (kata_launch_plan_for_source_machine derives it the same way and
+        // refuses to plan without one). A request without a runtime id
+        // therefore has no state root to check, not a machine-named one.
         let durable_state_id = sanitize_sandbox_name(&request.agent_runtime_id);
-        let state_root = self
-            .config
-            .work_root
-            .join("kata")
-            .join(if durable_state_id.is_empty() {
-                container_name.to_string()
-            } else {
-                durable_state_id
-            });
+        if durable_state_id.is_empty() {
+            checks.push(LifecycleProbeCheck::fail(
+                "canonical_handle",
+                "runtime_id_missing",
+                "the probe request names no agent runtime id; the durable state root is derived from it alone, never from the container name",
+                serde_json::json!({"container_name": container_name}),
+            ));
+            skip_handle_dependent_checks(&mut checks);
+            return checks;
+        }
+        let state_root = self.config.work_root.join("kata").join(durable_state_id);
         // Every canonical-handle failure leaves no trustworthy handle, so all
         // dependent reads are gated on it.
         let canonical = match self.check_canonical_handle(request, container_name, &state_root) {
@@ -371,18 +376,7 @@ impl Probe<'_> {
             }
             Err(check) => {
                 checks.push(check);
-                for name in [
-                    "containerd_task",
-                    "sandbox_state",
-                    "duplicate_writers",
-                    "cni_namespace",
-                    "vmm_process",
-                ] {
-                    checks.push(LifecycleProbeCheck::skip(
-                        name,
-                        "canonical provider handle is not established",
-                    ));
-                }
+                skip_handle_dependent_checks(&mut checks);
                 return checks;
             }
         };
@@ -476,25 +470,17 @@ impl Probe<'_> {
         // carried downstream is the provider-observed mount: the duplicate
         // writer scan compares against what is actually mounted.
         //
-        // Pre-runtime-id-era runtimes (one live case remains in the fleet)
-        // keep their durable root named by the source machine id: same-volume
-        // upgrades deliberately preserve the existing host bind, so no number
-        // of upgrades ever renames it, and recreating the container would
-        // mount an EMPTY runtime-id root instead. Accept the container's OWN
-        // machine-named root — only when the runtime-id root does not exist,
-        // so the legacy path stops being valid the moment the data migrates —
-        // and carry the acceptance loudly in the evidence. A machine-named
-        // root belonging to any OTHER container is still a mismatch.
-        let legacy_state_root = self.config.work_root.join("kata").join(container_name);
-        let legacy_root_acceptable = !state_root.exists() && legacy_state_root != *state_root;
+        // The durable root has exactly one name, the runtime id. A container
+        // bound to a machine-named root — its own or anyone else's — is a
+        // mismatch whether or not the runtime-id root exists yet: the Runner
+        // moves a pre-runtime-id-era root to its runtime-id path in place
+        // (one rename, once) and until that has happened this reads
+        // inoperable rather than accepting a second name for the same data.
         let durable_bind = inspected.mounts.iter().find(|mount| {
             mount.destination == Path::new("/data")
                 && mount.read_write
-                && (mount.source == state_root
-                    || (legacy_root_acceptable && mount.source == legacy_state_root))
+                && mount.source == state_root
         });
-        let legacy_machine_named_root =
-            durable_bind.is_some_and(|mount| mount.source != *state_root);
         if !mismatched.is_empty() || durable_bind.is_none() {
             return Err(LifecycleProbeCheck::fail(
                 "canonical_handle",
@@ -538,7 +524,6 @@ impl Probe<'_> {
                     "status": inspected.state.status,
                     "image": inspected.config.image,
                     "state_root": observed_state_root,
-                    "legacy_machine_named_root": legacy_machine_named_root,
                 }),
             ),
             CanonicalHandle {
@@ -1191,6 +1176,23 @@ impl Probe<'_> {
     }
 }
 
+/// Without a trustworthy canonical handle none of the dependent reads can
+/// say anything about this runtime; they are recorded as skipped, not absent.
+fn skip_handle_dependent_checks(checks: &mut Vec<LifecycleProbeCheck>) {
+    for name in [
+        "containerd_task",
+        "sandbox_state",
+        "duplicate_writers",
+        "cni_namespace",
+        "vmm_process",
+    ] {
+        checks.push(LifecycleProbeCheck::skip(
+            name,
+            "canonical provider handle is not established",
+        ));
+    }
+}
+
 #[derive(Debug)]
 enum ReadError {
     Absent,
@@ -1256,6 +1258,7 @@ mod tests {
             Severity::Unknown
         );
         assert_eq!(finding_severity("vmm_pid_unavailable"), Severity::Unknown);
+        assert_eq!(finding_severity("runtime_id_missing"), Severity::Unknown);
         assert_eq!(
             finding_severity("probe_deadline_exceeded"),
             Severity::Unknown

@@ -27,6 +27,10 @@ const RECOVERY_REQUEST_ID_LABEL: &str = "computer.finite.v2.recovery_request_id"
 const RECOVERY_BOOT_INTENT_ENV: &str = "FINITE_AGENT_BOOT_INTENT_JSON";
 const RECOVERY_STATE_ROOT_ENV: &str = "FINITE_AGENT_STATE_ROOT";
 const RECOVERY_STATE_ROOT: &str = "/data";
+/// Marker written inside a durable root that was renamed from its
+/// pre-runtime-id-era machine-named path by `reconcile_legacy_state_root`.
+const DURABLE_STATE_ROOT_MIGRATION_MARKER: &str = ".finite-durable-state-root-migration.json";
+const DURABLE_STATE_ROOT_MIGRATION_SCHEMA: &str = "finite.durable_state_root_migration.v1";
 const MAX_KATA_HTTP_RESPONSE_BYTES: u64 = 64 * 1024;
 const MAX_KATA_CONTAINER_LIST_BYTES: usize = 64 * 1024;
 const MAX_KATA_RECOVERY_FENCE_OPERATIONS: usize = 32;
@@ -273,8 +277,10 @@ impl KataLauncher {
         Self { config }
     }
 
-    pub fn plan_launch(&self, lease: &AgentCreationLease) -> KataLaunchPlan {
-        kata_launch_plan(&self.config, lease)
+    pub fn plan_launch(&self, lease: &AgentCreationLease) -> Result<KataLaunchPlan, RunnerError> {
+        let plan = kata_launch_plan(&self.config, lease)?;
+        self.reconcile_legacy_state_root(&plan)?;
+        Ok(plan)
     }
 
     fn config_for_creation(&self, lease: &AgentCreationLease) -> Result<KataConfig, RunnerError> {
@@ -294,13 +300,115 @@ impl KataLauncher {
 
     fn plan_for_control(&self, lease: &RuntimeControlLease) -> Result<KataLaunchPlan, RunnerError> {
         let spec = control_runtime_spec(lease, RunnerClass::Kata)?;
-        Ok(kata_launch_plan_for_source_machine(
+        let plan = kata_launch_plan_for_source_machine(
             &self.config,
             &lease.request.source_machine_id,
             spec.map(|spec| spec.durable_state_id.as_str()),
             spec.map(|spec| spec.endpoints.service_port)
                 .unwrap_or(self.config.container_port),
-        ))
+        )?;
+        self.reconcile_legacy_state_root(&plan)?;
+        Ok(plan)
+    }
+
+    /// One-time, in-place migration of a pre-runtime-id-era durable root.
+    ///
+    /// Exactly one durable root exists per runtime, derived from its
+    /// `durable_state_id`. A root still named by the container (the source
+    /// machine id) is moved to the runtime-id path by a single
+    /// same-filesystem `rename` — never copied, never left beside a second
+    /// root — when and only when:
+    ///
+    /// - the runtime-id root does not exist,
+    /// - the machine-named root for THIS plan's container exists, and
+    /// - no provider-known container binds it at `/data`. Any such container,
+    ///   running or not, could be started against the old path afterwards,
+    ///   so it has to be removed before the data can move.
+    ///
+    /// Both roots existing is an operator decision, not a Runner guess. A
+    /// machine-named root belonging to any other container is never touched:
+    /// the only candidate is `work_root/kata/<this plan's container>`.
+    fn reconcile_legacy_state_root(&self, plan: &KataLaunchPlan) -> Result<(), RunnerError> {
+        let machine_named_root = kata_legacy_machine_named_root(&self.config, &plan.container_name);
+        if machine_named_root == plan.state_root {
+            return Ok(());
+        }
+        let Ok(legacy_metadata) = machine_named_root.symlink_metadata() else {
+            return Ok(());
+        };
+        if plan.state_root.symlink_metadata().is_ok() {
+            return Err(RunnerError::AmbiguousDurableStateRoots {
+                source_machine_id: plan.container_name.clone(),
+                runtime_id_root: plan.state_root.clone(),
+                machine_named_root,
+            });
+        }
+        if !legacy_metadata.file_type().is_dir() {
+            return Err(durable_state_root_migration_error(
+                &machine_named_root,
+                &plan.state_root,
+                "the machine-named root is not a directory".to_string(),
+            ));
+        }
+        for container_name in self.container_names()? {
+            let Some(inspected) = self.inspect(&container_name)? else {
+                continue;
+            };
+            if inspected.mounts.iter().any(|mount| {
+                mount.destination == Path::new("/data") && mount.source == machine_named_root
+            }) {
+                return Err(RunnerError::LegacyDurableStateRootBound {
+                    container_name,
+                    status: inspected.state.status,
+                    machine_named_root,
+                });
+            }
+        }
+        if let Err(error) = std::fs::rename(&machine_named_root, &plan.state_root) {
+            // A concurrent operation on the same runtime may have completed
+            // this exact rename first; that is the outcome we wanted.
+            if plan.state_root.is_dir() && machine_named_root.symlink_metadata().is_err() {
+                return Ok(());
+            }
+            return Err(durable_state_root_migration_error(
+                &machine_named_root,
+                &plan.state_root,
+                error.to_string(),
+            ));
+        }
+        let migrated_at = OffsetDateTime::now_utc()
+            .format(&Rfc3339)
+            .map_err(|error| {
+                durable_state_root_migration_error(
+                    &machine_named_root,
+                    &plan.state_root,
+                    error.to_string(),
+                )
+            })?;
+        let marker = serde_json::json!({
+            "schema": DURABLE_STATE_ROOT_MIGRATION_SCHEMA,
+            "migrated_from": plan.container_name,
+            "previous_path": machine_named_root.display().to_string(),
+            "migrated_at": migrated_at,
+        });
+        std::fs::write(
+            plan.state_root.join(DURABLE_STATE_ROOT_MIGRATION_MARKER),
+            format!("{marker}\n"),
+        )
+        .map_err(|error| {
+            durable_state_root_migration_error(
+                &machine_named_root,
+                &plan.state_root,
+                format!("renamed, but the migration marker could not be written: {error}"),
+            )
+        })?;
+        eprintln!(
+            "warning: migrated legacy durable state root {} to {} for container {}; the machine-named root no longer exists",
+            machine_named_root.display(),
+            plan.state_root.display(),
+            plan.container_name
+        );
+        Ok(())
     }
 
     fn command(&self, args: Vec<OsString>) -> PlannedCommand {
@@ -1775,10 +1883,9 @@ impl RuntimeLauncher for KataLauncher {
     }
 
     fn planned_source(&self, lease: &AgentCreationLease) -> Option<RuntimeSourceIdentity> {
-        let plan = self.plan_launch(lease);
         Some(RuntimeSourceIdentity {
             source_host_id: self.config.source_host_id.clone(),
-            source_machine_id: plan.container_name,
+            source_machine_id: kata_container_name(&self.config, lease),
         })
     }
 
@@ -2703,7 +2810,7 @@ impl RuntimeLauncher for KataLauncher {
     ) -> Result<RuntimeLaunchFacts, RunnerError> {
         let launcher = KataLauncher::new(self.config_for_creation(lease)?);
         launcher.validate_ready()?;
-        let plan = launcher.plan_launch(lease);
+        let plan = launcher.plan_launch(lease)?;
         let _relocation_operation_lock = if lease.request.relocation.is_some() {
             Some(launcher.acquire_runtime_operation_lock(&plan)?)
         } else {
@@ -2752,8 +2859,11 @@ impl RuntimeLauncher for KataLauncher {
     }
 }
 
-pub(crate) fn kata_launch_plan(config: &KataConfig, lease: &AgentCreationLease) -> KataLaunchPlan {
-    let container_name = if let Some(relocation) = lease.request.relocation.as_ref() {
+/// The container (source machine) name for a creation lease. It names the
+/// compute handle and the host-only metadata directory, never the durable
+/// state root.
+pub(crate) fn kata_container_name(config: &KataConfig, lease: &AgentCreationLease) -> String {
+    if let Some(relocation) = lease.request.relocation.as_ref() {
         sanitize_sandbox_name(&relocation.v1().source_machine_id).to_ascii_lowercase()
     } else {
         let request_suffix = lease
@@ -2763,7 +2873,14 @@ pub(crate) fn kata_launch_plan(config: &KataConfig, lease: &AgentCreationLease) 
             .unwrap_or(&lease.request.id);
         sanitize_sandbox_name(&format!("{}-{request_suffix}", config.name_prefix.trim()))
             .to_ascii_lowercase()
-    };
+    }
+}
+
+pub(crate) fn kata_launch_plan(
+    config: &KataConfig,
+    lease: &AgentCreationLease,
+) -> Result<KataLaunchPlan, RunnerError> {
+    let container_name = kata_container_name(config, lease);
     let spec = lease.request.runtime_spec.as_ref().map(runtime_spec_v1);
     kata_launch_plan_for_source_machine(
         config,
@@ -2917,22 +3034,29 @@ pub fn durable_state_manifest_sha256(root: &Path) -> Result<String, RunnerError>
     Ok(hex::encode(manifest.finalize()))
 }
 
+/// Derive the plan for a source machine. The durable state root is
+/// `work_root/kata/<durable_state_id>` and nothing else: a plan without a
+/// Core-bound durable state id is a typed error, never a machine-named
+/// fallback, so no launch path can mount a different copy of the agent's
+/// life than every other path mounts.
 fn kata_launch_plan_for_source_machine(
     config: &KataConfig,
     source_machine_id: &str,
     durable_state_id: Option<&str>,
     container_port: u16,
-) -> KataLaunchPlan {
+) -> Result<KataLaunchPlan, RunnerError> {
     let container_name = sanitize_sandbox_name(source_machine_id).to_ascii_lowercase();
     let durable_state_id = durable_state_id
         .map(sanitize_sandbox_name)
         .filter(|value| !value.is_empty())
-        .unwrap_or_else(|| container_name.clone());
+        .ok_or_else(|| RunnerError::MissingDurableStateId {
+            source_machine_id: source_machine_id.to_string(),
+        })?;
     let metadata_root = config
         .work_root
         .join(KATA_METADATA_DIR)
         .join(&container_name);
-    KataLaunchPlan {
+    Ok(KataLaunchPlan {
         state_root: config
             .work_root
             .join(KATA_PROVIDER_DIR)
@@ -2942,6 +3066,28 @@ fn kata_launch_plan_for_source_machine(
         host_address: config.host_address,
         container_port,
         container_name,
+    })
+}
+
+/// The pre-runtime-id-era durable root, named by the container. Only the
+/// one-time migration in `reconcile_legacy_state_root` derives it, and only
+/// to move it.
+fn kata_legacy_machine_named_root(config: &KataConfig, container_name: &str) -> PathBuf {
+    config
+        .work_root
+        .join(KATA_PROVIDER_DIR)
+        .join(container_name)
+}
+
+fn durable_state_root_migration_error(
+    machine_named_root: &Path,
+    runtime_id_root: &Path,
+    message: String,
+) -> RunnerError {
+    RunnerError::DurableStateRootMigration {
+        machine_named_root: machine_named_root.to_path_buf(),
+        runtime_id_root: runtime_id_root.to_path_buf(),
+        message,
     }
 }
 
@@ -4326,8 +4472,47 @@ esac
         }
     }
 
+    /// Every control fixture names its container by the source machine id
+    /// and its durable root by the runtime id; the two never coincide.
+    const TEST_CONTAINER_NAME: &str = "finite-kata-upgrade-agent";
+    const TEST_DURABLE_STATE_ID: &str = "runtime-1";
+
+    fn kata_placement() -> RuntimePlacement {
+        RuntimePlacement {
+            runner_class: RunnerClass::Kata,
+            runtime_resource_class: RuntimeResourceClass::Vcpu4Memory8Gib,
+        }
+    }
+
+    /// The Core-bound spec an upgrade lease carries: it binds the target
+    /// artifact and names the durable root by the runtime id.
+    fn kata_upgrade_spec(lease: &RuntimeControlLease) -> RuntimeSpecEnvelope {
+        let target = target_artifact();
+        RuntimeSpecEnvelope::V1(RuntimeSpecV1 {
+            operation_id: lease.request.id.clone(),
+            project_id: lease.runtime.project_id.clone(),
+            agent_runtime_id: lease.runtime.id.clone(),
+            placement: kata_placement(),
+            runtime_artifact_id: target.id.clone(),
+            runtime_image_digest: target.reference.clone(),
+            state_schema_version: target.state_schema_version.clone(),
+            durable_state_id: lease.runtime.id.clone(),
+            endpoints: RuntimeEndpointContractV1 {
+                service_port: DEFAULT_DOCKER_CONTAINER_PORT,
+                health_path: "/healthz".to_string(),
+                contact_path: "/contact".to_string(),
+            },
+            boot_intent: RuntimeBootIntent::Normal,
+            environment: BTreeMap::from([(
+                "FINITE_SITES_API".to_string(),
+                "https://sites.example".to_string(),
+            )]),
+            secret_references: vec!["FINITE_PRIVATE_API_KEY".to_string()],
+        })
+    }
+
     fn upgrade_lease(request_id: &str) -> RuntimeControlLease {
-        RuntimeControlLease {
+        let mut lease = RuntimeControlLease {
             request: RuntimeControlRequest {
                 id: request_id.to_string(),
                 project_id: "project-1".to_string(),
@@ -4374,14 +4559,14 @@ esac
             },
             runtime_spec: None,
             target_runtime_artifact: Some(target_artifact()),
-        }
+        };
+        lease.runtime.placement = Some(kata_placement());
+        lease.runtime_spec = Some(kata_upgrade_spec(&lease));
+        lease
     }
 
     fn recovery_lease(request_id: &str, image: &str, canonical_port: u16) -> RuntimeControlLease {
-        let placement = RuntimePlacement {
-            runner_class: RunnerClass::Kata,
-            runtime_resource_class: RuntimeResourceClass::Vcpu4Memory8Gib,
-        };
+        let placement = kata_placement();
         let mut lease = upgrade_lease(request_id);
         lease.request.kind = RuntimeControlKind::RecoverKnownGoodChatRuntime;
         lease.request.target_runtime_artifact_id = None;
@@ -4397,7 +4582,7 @@ esac
             runtime_artifact_id: "artifact-v1".to_string(),
             runtime_image_digest: image.to_string(),
             state_schema_version: "state-v1".to_string(),
-            durable_state_id: lease.runtime.source_machine_id.clone(),
+            durable_state_id: lease.runtime.id.clone(),
             endpoints: RuntimeEndpointContractV1 {
                 service_port: DEFAULT_DOCKER_CONTAINER_PORT,
                 health_path: "/healthz".to_string(),
@@ -4481,10 +4666,11 @@ esac
         let launcher = KataLauncher::new(config);
         let plan = kata_launch_plan_for_source_machine(
             &launcher.config,
-            "finite-kata-upgrade-agent",
-            None,
+            TEST_CONTAINER_NAME,
+            Some(TEST_DURABLE_STATE_ID),
             launcher.config.container_port,
-        );
+        )
+        .unwrap();
         std::fs::create_dir_all(&plan.state_root).unwrap();
         std::fs::create_dir_all(&plan.metadata_root).unwrap();
         std::fs::write(plan.state_root.join("identity-marker"), "same-agent").unwrap();
@@ -6245,6 +6431,210 @@ esac
     }
 
     #[test]
+    fn kata_plan_without_a_durable_state_id_is_a_typed_error() {
+        // There is no machine-named fallback: a plan without a Core-bound
+        // durable state id is a typed refusal on every derivation path.
+        let config = KataConfig {
+            source_host_id: "finite-lat-1".to_string(),
+            work_root: PathBuf::from("/var/lib/finite-saas-runner"),
+            ..KataConfig::default()
+        };
+        for missing in [None, Some(""), Some("---")] {
+            let error = kata_launch_plan_for_source_machine(
+                &config,
+                "finite-kata-agent",
+                missing,
+                config.container_port,
+            )
+            .unwrap_err();
+            assert!(
+                matches!(
+                    &error,
+                    RunnerError::MissingDurableStateId { source_machine_id }
+                        if source_machine_id == "finite-kata-agent"
+                ),
+                "{missing:?}: {error}"
+            );
+        }
+
+        let temp = tempfile::tempdir().unwrap();
+        let (launcher, plan, _fake_state) = test_launcher(&temp, 41300);
+        let mut lease = upgrade_lease("runtime_ctl_no_spec");
+        lease.runtime_spec = None;
+        let error = launcher.plan_for_control(&lease).unwrap_err();
+        assert!(
+            matches!(
+                &error,
+                RunnerError::MissingDurableStateId { source_machine_id }
+                    if source_machine_id == TEST_CONTAINER_NAME
+            ),
+            "{error}"
+        );
+        assert!(
+            !kata_legacy_machine_named_root(&launcher.config, &plan.container_name).exists(),
+            "a refused plan must not conjure a machine-named root"
+        );
+    }
+
+    /// `test_launcher` creates the runtime-id root; these scenarios start
+    /// from the pre-runtime-id-era layout instead: only the machine-named
+    /// root exists and it holds the agent's data.
+    fn legacy_layout(launcher: &KataLauncher, plan: &KataLaunchPlan) -> PathBuf {
+        std::fs::remove_dir_all(&plan.state_root).unwrap();
+        let legacy = kata_legacy_machine_named_root(&launcher.config, &plan.container_name);
+        std::fs::create_dir_all(legacy.join("workspace")).unwrap();
+        std::fs::write(legacy.join("workspace/note"), "the agent's whole life").unwrap();
+        legacy
+    }
+
+    #[test]
+    fn legacy_machine_named_root_is_renamed_to_the_runtime_id_root_once() {
+        let temp = tempfile::tempdir().unwrap();
+        let (launcher, plan, _fake_state) = test_launcher(&temp, 41301);
+        let legacy = legacy_layout(&launcher, &plan);
+        let lease = upgrade_lease("runtime_ctl_migrate");
+
+        let migrated = launcher.plan_for_control(&lease).unwrap();
+        assert_eq!(migrated.state_root, plan.state_root);
+        assert!(!legacy.exists(), "the machine-named root must not survive");
+        assert_eq!(
+            std::fs::read_to_string(plan.state_root.join("workspace/note")).unwrap(),
+            "the agent's whole life"
+        );
+        let marker: serde_json::Value = serde_json::from_str(
+            &std::fs::read_to_string(plan.state_root.join(DURABLE_STATE_ROOT_MIGRATION_MARKER))
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(marker["schema"], DURABLE_STATE_ROOT_MIGRATION_SCHEMA);
+        assert_eq!(marker["migrated_from"], plan.container_name.as_str());
+        assert_eq!(marker["previous_path"], legacy.display().to_string());
+        assert!(marker["migrated_at"].as_str().unwrap().ends_with('Z'));
+
+        // Idempotent: an already-migrated root is left exactly as it is.
+        launcher.plan_for_control(&lease).unwrap();
+        assert!(!legacy.exists());
+        assert!(plan.state_root.join("workspace/note").exists());
+    }
+
+    #[test]
+    fn both_durable_state_roots_existing_fails_closed() {
+        let temp = tempfile::tempdir().unwrap();
+        let (launcher, plan, _fake_state) = test_launcher(&temp, 41302);
+        let legacy = kata_legacy_machine_named_root(&launcher.config, &plan.container_name);
+        std::fs::create_dir_all(&legacy).unwrap();
+        std::fs::write(legacy.join("older-copy"), "which one is real?").unwrap();
+
+        let error = launcher
+            .plan_for_control(&upgrade_lease("runtime_ctl_ambiguous"))
+            .unwrap_err();
+        match error {
+            RunnerError::AmbiguousDurableStateRoots {
+                source_machine_id,
+                runtime_id_root,
+                machine_named_root,
+            } => {
+                assert_eq!(source_machine_id, plan.container_name);
+                assert_eq!(runtime_id_root, plan.state_root);
+                assert_eq!(machine_named_root, legacy);
+            }
+            other => panic!("expected AmbiguousDurableStateRoots, got {other}"),
+        }
+        // Neither root was touched: the operator decides.
+        assert!(legacy.join("older-copy").exists());
+        assert!(plan.state_root.join("identity-marker").exists());
+    }
+
+    #[test]
+    fn legacy_root_bound_by_a_provider_known_container_is_not_migrated() {
+        let temp = tempfile::tempdir().unwrap();
+        let (launcher, plan, fake_state) = test_launcher(&temp, 41303);
+        let legacy = legacy_layout(&launcher, &plan);
+        let lease = upgrade_lease("runtime_ctl_bound");
+        write_fake_container(
+            &fake_state,
+            &plan.container_name,
+            "runtime:v1",
+            "artifact-v1",
+            "",
+            41303,
+            &legacy,
+        );
+        // Running or merely present: any container that could be started
+        // against the old path keeps the data where that container binds it.
+        for status in ["running", "exited"] {
+            std::fs::write(
+                fake_state.join(format!("{}.status", plan.container_name)),
+                status,
+            )
+            .unwrap();
+            let error = launcher.plan_for_control(&lease).unwrap_err();
+            assert!(
+                matches!(
+                    &error,
+                    RunnerError::LegacyDurableStateRootBound {
+                        container_name,
+                        status: observed,
+                        machine_named_root,
+                    } if container_name == &plan.container_name
+                        && observed == status
+                        && machine_named_root == &legacy
+                ),
+                "{status}: {error}"
+            );
+            assert!(legacy.join("workspace/note").exists());
+            assert!(!plan.state_root.exists());
+        }
+
+        // A foreign container binding the root is a writer all the same.
+        std::fs::remove_file(fake_state.join(format!("{}.image", plan.container_name))).unwrap();
+        write_fake_container(
+            &fake_state,
+            "finite-kata-somebody-else",
+            "runtime:v1",
+            "artifact-v1",
+            "",
+            41303,
+            &legacy,
+        );
+        let error = launcher.plan_for_control(&lease).unwrap_err();
+        assert!(
+            matches!(
+                &error,
+                RunnerError::LegacyDurableStateRootBound { container_name, .. }
+                    if container_name == "finite-kata-somebody-else"
+            ),
+            "{error}"
+        );
+        assert!(legacy.join("workspace/note").exists());
+
+        // Once nothing binds it, the very next plan migrates it.
+        std::fs::remove_file(fake_state.join("finite-kata-somebody-else.image")).unwrap();
+        launcher.plan_for_control(&lease).unwrap();
+        assert!(!legacy.exists());
+        assert!(plan.state_root.join("workspace/note").exists());
+    }
+
+    #[test]
+    fn a_foreign_machine_named_root_is_never_touched() {
+        let temp = tempfile::tempdir().unwrap();
+        let (launcher, plan, _fake_state) = test_launcher(&temp, 41304);
+        std::fs::remove_dir_all(&plan.state_root).unwrap();
+        let foreign = kata_legacy_machine_named_root(&launcher.config, "finite-kata-somebody-else");
+        std::fs::create_dir_all(&foreign).unwrap();
+        std::fs::write(foreign.join("note"), "not yours").unwrap();
+
+        // Nothing to migrate for this runtime: the plan derives, the foreign
+        // root stays where it is, and no runtime-id root is conjured up.
+        let derived = launcher
+            .plan_for_control(&upgrade_lease("runtime_ctl_foreign"))
+            .unwrap();
+        assert_eq!(derived.state_root, plan.state_root);
+        assert!(foreign.join("note").exists());
+        assert!(!plan.state_root.exists());
+    }
+
+    #[test]
     fn kata_upgrade_plan_uses_same_data_and_never_places_secrets_in_argv() {
         let config = KataConfig {
             source_host_id: "finite-lat-1".to_string(),
@@ -6254,9 +6644,10 @@ esac
         let canonical = kata_launch_plan_for_source_machine(
             &config,
             "finite-kata-agent",
-            None,
+            Some("runtime-agent"),
             config.container_port,
-        );
+        )
+        .unwrap();
         let helper = kata_upgrade_plan(
             &canonical,
             kata_upgrade_helper_name("finite-kata-agent", "candidate", "runtime_ctl_123"),
@@ -6332,7 +6723,7 @@ esac
         assert!(args.windows(2).any(|pair| {
             pair == [
                 "--volume",
-                "/var/lib/finite-saas-runner/kata/finite-kata-agent:/data",
+                "/var/lib/finite-saas-runner/kata/runtime-agent:/data",
             ]
         }));
         assert!(args.windows(2).any(|pair| pair == ["--pull", "never"]));

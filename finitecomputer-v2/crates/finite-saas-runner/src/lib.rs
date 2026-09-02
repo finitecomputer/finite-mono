@@ -253,6 +253,48 @@ pub enum RunnerError {
     CoreJson(String),
     #[error("runtime launch failed: {0}")]
     RuntimeLaunch(String),
+    /// A Kata plan was requested for a runtime whose lease carries no
+    /// Core-bound `durable_state_id`. The durable state root is derived from
+    /// that id only; a machine-named root is never derived as a fallback.
+    #[error(
+        "runtime {source_machine_id} has no durable_state_id; refusing to derive a machine-named durable state root"
+    )]
+    MissingDurableStateId { source_machine_id: String },
+    /// Both a runtime-id durable root and a pre-runtime-id-era machine-named
+    /// root exist for the same runtime. The Runner never guesses which one
+    /// is the agent's life; an operator reconciles them.
+    #[error(
+        "durable state roots {} (runtime id) and {} (machine-named) both exist for {source_machine_id}; an operator must reconcile them",
+        .runtime_id_root.display(),
+        .machine_named_root.display()
+    )]
+    AmbiguousDurableStateRoots {
+        source_machine_id: String,
+        runtime_id_root: PathBuf,
+        machine_named_root: PathBuf,
+    },
+    /// A machine-named durable root is still bound at `/data` by a
+    /// provider-known container. Renaming it would leave that container
+    /// pointing at a path that no longer exists, or at a fresh empty one.
+    #[error(
+        "legacy durable state root {} is still bound by container {container_name} ({status}); remove that compute before it can migrate",
+        .machine_named_root.display()
+    )]
+    LegacyDurableStateRootBound {
+        container_name: String,
+        status: String,
+        machine_named_root: PathBuf,
+    },
+    #[error(
+        "failed to migrate legacy durable state root {} to {}: {message}",
+        .machine_named_root.display(),
+        .runtime_id_root.display()
+    )]
+    DurableStateRootMigration {
+        machine_named_root: PathBuf,
+        runtime_id_root: PathBuf,
+        message: String,
+    },
     /// The post-compute readiness wait expired. Core records this as a
     /// `readiness`-stage lifecycle failure, distinct from compute faults: a
     /// restart whose runtime never proves ready must surface as exactly that.
@@ -5493,7 +5535,13 @@ mod tests {
             ..KataConfig::default()
         };
         config.validate().unwrap();
-        let lease = sample_lease("agent_request_ABC.123");
+        let mut lease = sample_lease("agent_request_ABC.123");
+        lease.request.runtime_spec = Some(sample_runtime_spec(
+            "agent_request_ABC.123",
+            RunnerClass::Kata,
+            BTreeMap::new(),
+            Vec::new(),
+        ));
         let options = RuntimeLaunchOptions {
             finite_private: Some(FinitePrivateLaunchKey {
                 api_key_id: "fp_key_prod".to_string(),
@@ -5512,11 +5560,13 @@ mod tests {
                 "fal_must_never_reach_argv".to_string(),
             )]),
         };
-        let plan = kata::kata_launch_plan(&config, &lease);
+        let plan = kata::kata_launch_plan(&config, &lease).unwrap();
         assert_eq!(plan.container_name, "finite-kata-abc-123");
+        // The durable root is named by the durable state id (the runtime
+        // id), never by the container.
         assert_eq!(
             plan.state_root,
-            PathBuf::from("/var/lib/finite-saas-runner/kata/finite-kata-abc-123")
+            PathBuf::from("/var/lib/finite-saas-runner/kata/runtime_123")
         );
         assert_eq!(
             plan.env_file,
@@ -5543,7 +5593,7 @@ mod tests {
         assert!(args.windows(2).any(|pair| {
             pair == [
                 "--volume",
-                "/var/lib/finite-saas-runner/kata/finite-kata-abc-123:/data",
+                "/var/lib/finite-saas-runner/kata/runtime_123:/data",
             ]
         }));
         assert!(args.windows(2).any(|pair| {
@@ -5585,6 +5635,29 @@ mod tests {
                 .unwrap()
                 .contains("FINITE_PRIVATE_API_KEY=fpk_must_never_reach_argv")
         );
+    }
+
+    #[test]
+    fn kata_plan_without_a_durable_state_id_is_a_typed_error() {
+        // No Core-bound RuntimeSpec means no durable_state_id, and there is
+        // no machine-named fallback to derive a root from: a loud, typed
+        // refusal, not a plan that mounts a second copy of the agent's life.
+        let config = KataConfig {
+            source_host_id: "finite-lat-1".to_string(),
+            work_root: PathBuf::from("/var/lib/finite-saas-runner"),
+            ..KataConfig::default()
+        };
+        let error =
+            kata::kata_launch_plan(&config, &sample_lease("agent_request_ABC.123")).unwrap_err();
+        assert!(
+            matches!(
+                &error,
+                RunnerError::MissingDurableStateId { source_machine_id }
+                    if source_machine_id == "finite-kata-abc-123"
+            ),
+            "unexpected error: {error}"
+        );
+        assert!(error.to_string().contains("machine-named"));
     }
 
     #[test]
