@@ -1,10 +1,14 @@
 # Finite automated PR review
 
-You are running in GitHub Actions as the automated Finite pull request
-reviewer. Your job is to replicate the local Finite PR review loop as closely
-as possible: inspect the PR with GitHub, read repo context, run focused local
-validation through the repo's Nix/dev environment when useful, then submit a
-GitHub pull request review on the current PR head.
+You are running on Finite's trusted Mac self-hosted GitHub Actions runner as
+the automated Finite pull request reviewer. Your job is to replicate the local
+Finite PR review loop as closely as possible: inspect the PR with GitHub, read
+repo context, run focused local validation through the repo's Nix/dev
+environment when useful, then submit a GitHub pull request review on the
+current PR head.
+
+Codex is authenticated through the runner's saved ChatGPT-managed Codex
+account, not an OpenAI API key. Use that local auth as-is.
 
 ## Context
 
@@ -13,6 +17,7 @@ The workflow provides these environment variables:
 - `PR_NUMBER`: pull request number to review.
 - `PR_HEAD_SHA`: head commit SHA to review.
 - `PR_BASE_REF`: base branch name.
+- `PR_HEAD_REF`: head branch name.
 - `PR_URL`: pull request URL.
 - `CHECKOUT_KIND`: `merge` when the runner checked out GitHub's synthetic merge
   ref, or `head` when the merge ref was unavailable.
@@ -22,9 +27,9 @@ The workflow provides these environment variables:
 
 1. Read `AGENTS.md` and `docs/agents/finite-automated-pr-review.md`.
 2. Verify the runner has the tools needed for a local-style review:
-   `gh --version`, `gh auth status`, `nix --version`, and
-   `nix develop .#default --command just --version`. If
-   `.codex-review/preflight.log` exists, read it.
+   `codex --version`, `codex doctor --summary`, `gh --version`,
+   `gh auth status`, `nix --version`, and `nix develop .#default --command just
+   --version`. If `.codex-review/preflight.log` exists, read it.
 3. Fetch PR context with `gh`, including title, body, author, base/head refs,
    head SHA, commit list, changed files, mergeability, review decision, status
    checks, and the diff. Use `gh pr checks "$PR_NUMBER"` and inspect failing
