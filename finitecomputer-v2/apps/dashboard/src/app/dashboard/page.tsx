@@ -55,7 +55,7 @@ import {
   type CoreMeResult,
   type CoreVisibleProject,
 } from "@/lib/core-client";
-import { runtimeHealthSentence, runtimePrismState } from "@/lib/runtime-presentation";
+import { runtimeHealthAnnotation, runtimePrismState } from "@/lib/runtime-presentation";
 import {
   BILLING_SYNC_MAX_POLL_INTERVAL_MS,
   BILLING_SYNC_POLL_INTERVAL_MS,
@@ -872,13 +872,14 @@ function CoreProjectCard({
     : statusLabel === "Online"
       ? "Your agent is online."
       : statusLabel || coreProjectLocationLabel(project, request);
-  // The status rests on the runner's standing checks; say how fresh they are.
-  const healthSentence =
-    project.runtime && request?.status !== "failed"
-      ? runtimeHealthSentence(runtimeStatus, project.runtime.runtime_health)
+  // Core's status wording stands as sent; when Core also sent the health
+  // evidence it rests on, annotate with how fresh that evidence is.
+  const healthAnnotation =
+    request?.status !== "failed"
+      ? runtimeHealthAnnotation(project.runtime?.runtime_health)
       : "";
-  const description = healthSentence
-    ? `${statusDescription} ${healthSentence}`
+  const description = healthAnnotation
+    ? `${statusDescription} ${healthAnnotation}`
     : statusDescription;
 
   return (

@@ -39,8 +39,8 @@ export function formatAgeSeconds(seconds: number): string {
 
 /**
  * "last checked 45s ago" / "not yet checked" — the age of the standing
- * health evidence the derived runtime status rests on. Lower-case so callers
- * can embed it in a sentence.
+ * health evidence Core's derived status rests on. Lower-case so callers can
+ * embed it in a sentence.
  */
 export function runtimeHealthAgeLabel(
   health: RuntimeHealthAgeSource | null | undefined,
@@ -51,20 +51,17 @@ export function runtimeHealthAgeLabel(
 }
 
 /**
- * One sentence to append to a status description: the check age for every
- * status that rests on report freshness, and the not-ready reason when the
- * runtime is offline because its last check said so.
+ * A sentence to append to Core's status wording, purely as an annotation:
+ * Core derives `runtime_status` server-side and the dashboard never
+ * re-derives it. When Core sends no `runtime_health` (an older Core, or a
+ * mock without it) there is nothing to annotate and the wording is
+ * unchanged.
  */
-export function runtimeHealthSentence(
-  status: CoreRuntimeStatus,
-  health: CoreRuntimeHealth | null | undefined,
+export function runtimeHealthAnnotation(
+  health: RuntimeHealthAgeSource | null | undefined,
   nowMs: number = Date.now()
 ): string {
-  if (status === "offline") {
-    if (health?.status !== "not_ready") return "";
-    const reason = health.reason === "unreachable" ? "not reachable" : health.reason;
-    return reason ? `Last check: ${reason}.` : "Last check found it not ready.";
-  }
+  if (!health) return "";
   const label = runtimeHealthAgeLabel(health, nowMs);
   return `${label.charAt(0).toUpperCase()}${label.slice(1)}.`;
 }

@@ -36,7 +36,7 @@ import {
   type CoreFinitePrivateUsageResult,
   type CoreRuntimeStatus,
 } from "@/lib/core-client";
-import { runtimeHealthSentence, runtimePrismState } from "@/lib/runtime-presentation";
+import { runtimeHealthAnnotation, runtimePrismState } from "@/lib/runtime-presentation";
 
 type RelayOverviewState = {
   state: "connected" | "stale" | "missing" | "unavailable";
@@ -109,7 +109,7 @@ async function ImportedMachineOverview({
       }
     : coreRuntimeOverview(
         runtimeStatus,
-        runtimeHealthSentence(runtimeStatus, access.coreProject.runtime?.runtime_health)
+        runtimeHealthAnnotation(access.coreProject.runtime?.runtime_health)
       );
   const prismState = activeRetirement ? "working" : runtimePrismState(runtimeStatus);
   const canRestartRuntime = coreProjectSupportsHostedRestart(access.coreProject);
@@ -268,12 +268,14 @@ function firstSearchParam(value: string | string[] | undefined) {
   return Array.isArray(value) ? (value[0] ?? null) : (value ?? null);
 }
 
+// Core derives `status` server-side; this only chooses the wording for it
+// and appends Core's health annotation when there is one.
 function coreRuntimeOverview(
   status: CoreRuntimeStatus,
-  healthSentence: string
+  healthAnnotation: string
 ): RelayOverviewState {
   const withHealth = (description: string) =>
-    healthSentence ? `${description} ${healthSentence}` : description;
+    healthAnnotation ? `${description} ${healthAnnotation}` : description;
   if (status === "online") {
     return {
       state: "connected",
@@ -283,7 +285,7 @@ function coreRuntimeOverview(
   if (status === "stale") {
     return {
       state: "stale",
-      description: withHealth("Your agent needs attention: no fresh health report."),
+      description: withHealth("Your agent needs attention."),
     };
   }
   if (status === "offline") {
@@ -294,6 +296,6 @@ function coreRuntimeOverview(
   }
   return {
     state: "unavailable",
-    description: withHealth("Your agent's status is unknown."),
+    description: withHealth("Your agent is starting."),
   };
 }

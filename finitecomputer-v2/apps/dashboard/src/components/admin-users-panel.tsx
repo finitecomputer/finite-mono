@@ -309,8 +309,12 @@ function ProvisionedRuntimeRow({
             artifact {runtime.runtime_artifact_version_label ?? runtime.runtime_artifact_id ?? "none"}
           </span>
           <span>
-            health {runtimeHealthLabel(runtime)}
-            {" · "}
+            {runtime.runtime_health ? (
+              <>
+                health {runtimeHealthLabel(runtime)}
+                {" · "}
+              </>
+            ) : null}
             hermes {runtime.hermes_available == null ? "unknown" : runtime.hermes_available ? "yes" : "no"}
             {" · "}
             {runtime.active_finite_private_key_count} active FP key
@@ -533,9 +537,10 @@ function runtimeStatusPillClass(status: CoreRuntimeStatus) {
 }
 
 /**
- * The evidence behind the derived status pill: the latest health report's
- * state and when the runner observed it (absolute, like every other admin
- * timestamp), plus the raw lifecycle latch whenever it differs.
+ * The evidence behind Core's derived status pill, shown only when Core sent
+ * it: the latest health report's state and when the runner observed it
+ * (absolute, like every other admin timestamp), plus the raw lifecycle latch
+ * whenever it differs.
  */
 function runtimeHealthLabel(runtime: CoreAdminRuntimeOverview) {
   const health = runtime.runtime_health;

@@ -6,7 +6,7 @@ import {
   runtimeCanPresentActivity,
   runtimeHealthAgeLabel,
   runtimeHealthAgeSeconds,
-  runtimeHealthSentence,
+  runtimeHealthAnnotation,
   runtimePrismState,
 } from "@/lib/runtime-presentation";
 
@@ -48,41 +48,19 @@ test("ages read as seconds, minutes, hours, then days", () => {
   assert.equal(formatAgeSeconds(172_800), "2d");
 });
 
-test("status sentences carry the check age and name never-reported truthfully", () => {
-  const fresh = { status: "ready" as const, observed_at: "2026-08-24T11:59:15Z" };
+test("health annotations carry the check age and stay silent without Core evidence", () => {
+  const fresh = { observed_at: "2026-08-24T11:59:15Z" };
   assert.equal(runtimeHealthAgeLabel(fresh, now), "last checked 45s ago");
-  assert.equal(runtimeHealthAgeLabel(null, now), "not yet checked");
-  assert.equal(runtimeHealthSentence("online", fresh, now), "Last checked 45s ago.");
+  assert.equal(runtimeHealthAgeLabel({}, now), "not yet checked");
+  assert.equal(runtimeHealthAnnotation(fresh, now), "Last checked 45s ago.");
   assert.equal(
-    runtimeHealthSentence("stale", { status: "stale", reported_at: "2026-08-24T11:48:00Z" }, now),
+    runtimeHealthAnnotation({ reported_at: "2026-08-24T11:48:00Z" }, now),
     "Last checked 12m ago."
   );
-  assert.equal(runtimeHealthSentence("unknown", null, now), "Not yet checked.");
-  assert.equal(runtimeHealthSentence("unknown", undefined, now), "Not yet checked.");
-});
-
-test("offline sentences explain a not-ready check and stay silent for a stop", () => {
-  assert.equal(
-    runtimeHealthSentence(
-      "offline",
-      { status: "not_ready", reason: "unreachable", observed_at: "2026-08-24T11:59:15Z" },
-      now
-    ),
-    "Last check: not reachable."
-  );
-  assert.equal(
-    runtimeHealthSentence(
-      "offline",
-      { status: "not_ready", reason: "model endpoint 503", observed_at: "2026-08-24T11:59:15Z" },
-      now
-    ),
-    "Last check: model endpoint 503."
-  );
-  assert.equal(
-    runtimeHealthSentence("offline", { status: "not_ready", reason: null }, now),
-    "Last check found it not ready."
-  );
-  // A deliberately stopped runtime carries no readiness claim: no sentence.
-  assert.equal(runtimeHealthSentence("offline", { status: "unknown" }, now), "");
-  assert.equal(runtimeHealthSentence("offline", null, now), "");
+  // Core sent the health field but no report has landed yet.
+  assert.equal(runtimeHealthAnnotation({ observed_at: null, reported_at: null }, now), "Not yet checked.");
+  // Core derives the status; without its health field there is nothing to
+  // annotate and the status wording must stand exactly as sent.
+  assert.equal(runtimeHealthAnnotation(null, now), "");
+  assert.equal(runtimeHealthAnnotation(undefined, now), "");
 });
