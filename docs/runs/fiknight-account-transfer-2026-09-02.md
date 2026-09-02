@@ -1,5 +1,10 @@
 # FiKnight account transfer — 2026-09-02
 
+> **BLOCKED — do not execute stage or finalize.** The Core-only transfer does
+> not transfer cryptographic Chat Room membership or retained history. The first
+> attempt was rolled back after FiKnight received a new empty Room. See
+> [the cross-account Chat handoff investigation](fiknight-chat-handoff-investigation-2026-09-02.md).
+
 This is the operator ledger for moving the existing `Austin Finite` Project to
 the dedicated `fiknight@finite.vip` account. The operation is run from this
 unmerged draft branch. No application code, image, or NixOS generation is
@@ -41,6 +46,11 @@ the typed `--nip05 fiknight@finite.vip` form for Agent grants rather than the
 typed `--email` form.
 
 ## Recovery and ordering
+
+The ordering below is retained as the original reviewed proposal and is not an
+executable runbook. Steps 3–4 demonstrated the missing cross-account Chat
+handoff and must not be repeated until the linked investigation's replacement
+design is implemented and rehearsed.
 
 1. Require a fresh successful `finite-hosted-web-chat-snapshot.service` run.
    Record its directory and verify its manifest. This is the pre-change
@@ -92,8 +102,10 @@ typed `--email` form.
 Before the new NIP-05 is bound, run
 `scripts/ops/fiknight-account-transfer-rollback.sql` to return Project control,
 the creation request, the scoped inference key, and active Chat membership to
-Austin. The retained FiKnight user, personal organization, inactive membership,
-and unused grant are harmless audit state.
+Austin. The retained FiKnight user, personal organization, inactive Core
+membership, and unused grant are audit state. A completed hosted Chat bootstrap
+is separate durable state: the first attempt left FiKnight with a new empty
+Room and sealed binding, which the Core rollback does not remove.
 
 If the same-artifact replacement already completed, first restore the Core
 state with the rollback SQL and then run the same exact replacement again so

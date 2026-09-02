@@ -1,0 +1,55 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+usage() {
+  echo "usage: $0 MANIFESTED_SNAPSHOT_ROOT" >&2
+  exit 64
+}
+
+[ "$#" -eq 1 ] || usage
+snapshot_root=$1
+
+austin_store=fba78e0c854eea5bc7a78c4357eab07ede2df207c87e65a8664dd230ae2844b2
+fiknight_store=ab4b8016cd6b52feefe4d0bac0b1204591e28229fcb99713a5ec25f2b67bdfcc
+canonical_room=room-c9289c5d35f365f3
+
+austin_db="$snapshot_root/hosted-device/users/$austin_store/chat/client.sqlite3"
+fiknight_db="$snapshot_root/hosted-device/users/$fiknight_store/chat/client.sqlite3"
+
+query() {
+  local database=$1
+  local sql=$2
+  scripts/snapshot-sqlite query "$database" "$sql"
+}
+
+scripts/snapshot-sqlite integrity-check "$austin_db" >/dev/null
+scripts/snapshot-sqlite integrity-check "$fiknight_db" >/dev/null
+
+austin_room=$(query "$austin_db" \
+  "SELECT count(*) FROM client_app_rooms WHERE room_id = '$canonical_room';")
+austin_messages=$(query "$austin_db" \
+  "SELECT count(*) FROM client_app_messages WHERE room_id = '$canonical_room';")
+fiknight_room=$(query "$fiknight_db" \
+  "SELECT count(*) FROM client_app_rooms WHERE room_id = '$canonical_room';")
+fiknight_messages=$(query "$fiknight_db" \
+  "SELECT count(*) FROM client_app_messages WHERE room_id = '$canonical_room';")
+fiknight_other_rooms=$(query "$fiknight_db" \
+  "SELECT group_concat(room_id, ',') FROM client_app_rooms WHERE room_id <> '$canonical_room';")
+
+printf 'Austin canonical Room:   present=%s messages=%s\n' \
+  "$austin_room" "$austin_messages"
+printf 'FiKnight canonical Room: present=%s messages=%s\n' \
+  "$fiknight_room" "$fiknight_messages"
+printf 'FiKnight other Rooms:    %s\n' "${fiknight_other_rooms:-none}"
+
+if [ "$austin_room" -ne 1 ] || [ "$austin_messages" -eq 0 ]; then
+  echo "invalid fixture: Austin's authoritative FiKnight Room is missing or empty" >&2
+  exit 65
+fi
+
+if [ "$fiknight_room" -ne 1 ] || [ "$fiknight_messages" -ne "$austin_messages" ]; then
+  echo "FAIL: FiKnight does not have the existing canonical Room and its message history" >&2
+  exit 1
+fi
+
+echo "PASS: FiKnight has the existing canonical Room and its message history"

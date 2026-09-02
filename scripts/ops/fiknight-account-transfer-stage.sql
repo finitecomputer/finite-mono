@@ -1,5 +1,16 @@
 \set ON_ERROR_STOP on
 
+\if :{?fiknight_cross_account_handoff_ready}
+\else
+\set fiknight_cross_account_handoff_ready false
+\endif
+
+\if :fiknight_cross_account_handoff_ready
+\else
+\echo 'BLOCKED: cross-account canonical Room membership and complete-history handoff is not implemented or rehearsed; see docs/runs/fiknight-chat-handoff-investigation-2026-09-02.md'
+SELECT CAST('blocked_cross_account_handoff_not_ready' AS integer);
+\endif
+
 -- One-time, exact production operation for 2026-09-02.
 -- Run from the operator workstation; do not install this file on a host.
 -- This stage is additive for Chat access: Austin remains a room member until

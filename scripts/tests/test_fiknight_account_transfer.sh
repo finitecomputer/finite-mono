@@ -190,8 +190,13 @@ stage="$repo_root/scripts/ops/fiknight-account-transfer-stage.sql"
 finalize="$repo_root/scripts/ops/fiknight-account-transfer-finalize.sql"
 rollback="$repo_root/scripts/ops/fiknight-account-transfer-rollback.sql"
 
-psql -v ON_ERROR_STOP=1 -f "$stage" >/dev/null
-psql -v ON_ERROR_STOP=1 -f "$stage" >/dev/null
+if psql -v ON_ERROR_STOP=1 -f "$stage" >/dev/null 2>&1; then
+  echo "stage unexpectedly ran without the cross-account handoff readiness gate" >&2
+  exit 1
+fi
+
+psql -v ON_ERROR_STOP=1 -v fiknight_cross_account_handoff_ready=1 -f "$stage" >/dev/null
+psql -v ON_ERROR_STOP=1 -v fiknight_cross_account_handoff_ready=1 -f "$stage" >/dev/null
 
 test "$(psql -Atc "SELECT owner_user_id || '|' || display_name || '|' || agent_email FROM projects WHERE id='project_b7e3a5beaf06095c6465'")" = \
   'user_b9540ab702bd98195b98|FiKnight|fiknight@finite.vip'
@@ -205,7 +210,7 @@ test "$(psql -Atc "SELECT owner_user_id || '|' || display_name || '|' || agent_e
 test "$(psql -Atc "SELECT grant_id FROM finite_private_api_keys WHERE id='fp_key_deb646d119995d3bd52a'")" = \
   'fp_grant_d0b9190a14c836b00ffc'
 
-psql -v ON_ERROR_STOP=1 -f "$stage" >/dev/null
+psql -v ON_ERROR_STOP=1 -v fiknight_cross_account_handoff_ready=1 -f "$stage" >/dev/null
 psql -v ON_ERROR_STOP=1 -f "$finalize" >/dev/null
 psql -v ON_ERROR_STOP=1 -f "$finalize" >/dev/null
 
