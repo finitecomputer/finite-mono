@@ -21,10 +21,9 @@ export type CoreRuntimeStatus = "online" | "offline" | "stale" | "unknown";
 
 /**
  * The raw lifecycle latch Core keeps alongside the derived status, for
- * operators: `pending_first_report` is an up-bound control that completed
- * but whose runtime has not been seen by the standing poller since.
+ * operators (the last control outcome; never a health-derived value).
  */
-export type CoreRuntimeLatchedStatus = CoreRuntimeStatus | "pending_first_report";
+export type CoreRuntimeLatchedStatus = CoreRuntimeStatus;
 
 /**
  * Runner-ferried standing readiness, projected by Core at read time. Additive:

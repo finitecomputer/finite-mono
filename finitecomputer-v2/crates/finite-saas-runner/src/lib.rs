@@ -666,17 +666,19 @@ where
                     },
                 );
                 let launch_result = match launch_result {
-                    Ok(_) => match if lease.request.relocation.is_some() {
+                    Ok(_) => match if let Some(relocation) = lease.request.relocation.as_ref() {
                         // The relocation launch already proved that the
                         // restored state exposes the existing Agent
                         // Principal. Rebinding it after Core switches the
                         // Runtime host would add a fallible post-commit
                         // step to the relocation boundary.
-                        Ok(())
+                        Ok(Some(relocation.v1().expected_agent_npub.clone()))
                     } else {
-                        self.bind_agent_identity(&lease, &facts).map(|_| ())
+                        self.bind_agent_identity(&lease, &facts)
                     } {
-                        Ok(()) => self.queue.complete_agent_creation(
+                        // The verified principal seeds Core's standing-health
+                        // attribution pin for the new incarnation.
+                        Ok(launch_verified_npub) => self.queue.complete_agent_creation(
                             &request_id,
                             CompleteAgentCreationRequestInput {
                                 request_id: request_id.clone(),
@@ -696,6 +698,7 @@ where
                                 hermes_available: facts.hermes_available,
                                 published_app_urls: facts.published_app_urls.clone(),
                                 runtime_capabilities: Some(runtime_capabilities),
+                                agent_npub: launch_verified_npub,
                                 now: None,
                             },
                         ),
@@ -1211,10 +1214,10 @@ pub trait AgentCreationQueue {
         input: RuntimeHealthReportRequest,
     ) -> Result<RuntimeHealthReportAck, RunnerError>;
 
-    /// Core's host-scoped list of the runtimes this runner should be
-    /// reporting on, for the startup registry reconcile. `Ok(None)` means the
-    /// queue cannot list (an older Core, or a test double), which leaves the
-    /// registry as it is.
+    /// Core's host-scoped list of the runtimes this runner polls for standing
+    /// health, fetched every cycle. `Ok(None)` means the queue cannot list
+    /// (an older Core, or a test double), which turns reporting off for the
+    /// cycle.
     fn list_runtime_health_targets(
         &mut self,
     ) -> Result<Option<RuntimeHealthTargetList>, RunnerError> {
@@ -2264,7 +2267,7 @@ impl AgentCreationQueue for CoreHttpAgentCreationQueue {
         match decode_core_response(response) {
             Ok(listing) => Ok(Some(listing)),
             // A Core without the listing route (N-1) is not an error: the
-            // reconcile is skipped and per-completion registration carries.
+            // poller has nothing to poll and reports nothing this cycle.
             Err(RunnerError::CoreStatus { status: 404, .. }) => Ok(None),
             Err(error) => Err(error),
         }

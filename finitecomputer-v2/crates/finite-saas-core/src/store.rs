@@ -1991,6 +1991,17 @@ where
         provider_operation.clone()
     };
     upsert_agent_runtime_row(client, &runtime).await?;
+    // Compute came up (a fresh launch, or the relocated incarnation on its
+    // new host): whatever report is stored spoke for the previous one. The
+    // pin is the principal this completion knows — the relocation's expected
+    // principal, else the one the launch path verified.
+    let seed_npub = request
+        .relocation
+        .as_ref()
+        .map(|relocation| relocation.v1().expected_agent_npub.clone())
+        .or_else(|| trim_to_option(input.agent_npub.as_deref()))
+        .filter(|npub| valid_agent_npub(npub));
+    reset_runtime_health(client, &runtime.id, HealthPin::Seed(seed_npub)).await?;
     if let Some(relocation) = request
         .relocation
         .as_ref()
@@ -5704,7 +5715,57 @@ where
         }
         runtime.updated_at = now.to_string();
         upsert_agent_runtime_row(client, &runtime).await?;
+        if status == RuntimeSummaryStatus::Online {
+            // Compute came up again: the stored report spoke for the previous
+            // incarnation. The principal is the same runtime's, so the
+            // attribution pin stays.
+            reset_runtime_health(client, agent_runtime_id, HealthPin::Keep).await?;
+        }
     }
+    Ok(())
+}
+
+/// What happens to the standing-health attribution pin when a completion
+/// brings compute up.
+enum HealthPin {
+    /// Same runtime, same principal (restart, recovery, upgrade).
+    Keep,
+    /// A new incarnation whose principal the completion knows (a launch that
+    /// verified it, or a relocation's expected principal); `None` when the
+    /// completing runner did not say, in which case the first report pins.
+    Seed(Option<String>),
+}
+
+/// Clear the stored health report so the derived status reads `unknown`
+/// until the runner's standing poller first reports on the incarnation that
+/// just came up, and seed or keep the attribution pin. Runs in the same
+/// transaction as the completion it follows.
+async fn reset_runtime_health<C>(
+    client: &C,
+    agent_runtime_id: &str,
+    pin: HealthPin,
+) -> CoreResult<()>
+where
+    C: GenericClient + Sync,
+{
+    let (keep_pin, seed) = match pin {
+        HealthPin::Keep => (true, None),
+        HealthPin::Seed(seed) => (false, seed),
+    };
+    client
+        .execute(
+            "UPDATE agent_runtimes
+             SET health_reported_at = NULL,
+                 health_observed_at = NULL,
+                 health_ready = NULL,
+                 health_reason = NULL,
+                 health_report_interval_seconds = NULL,
+                 health_reporting_npub = CASE WHEN $2 THEN health_reporting_npub ELSE $3 END
+             WHERE id = $1",
+            &[&agent_runtime_id, &keep_pin, &seed],
+        )
+        .await
+        .map_err(store_error)?;
     Ok(())
 }
 
@@ -5956,14 +6017,10 @@ where
         .await
         .map_err(store_error)?;
     let request = runtime_control_request_from_row(&row)?;
-    // An up-bound completion is the runner's bounded readiness wait, not a
-    // standing observation: latch `pending_first_report` and let the first
-    // accepted health report move the runtime to `online`. The user-facing
-    // status derives from report freshness either way.
     let completed_status = match request.kind {
         RuntimeControlKind::Restart
         | RuntimeControlKind::RecoverKnownGoodChatRuntime
-        | RuntimeControlKind::Upgrade => RuntimeSummaryStatus::PendingFirstReport,
+        | RuntimeControlKind::Upgrade => RuntimeSummaryStatus::Online,
         RuntimeControlKind::Stop | RuntimeControlKind::Destroy => RuntimeSummaryStatus::Offline,
     };
     let destroy = request.kind == RuntimeControlKind::Destroy;
@@ -6735,6 +6792,31 @@ where
         .map(i32::try_from)
         .transpose()
         .map_err(|_| CoreError::InvalidRuntimeHealthReport)?;
+    // The attribution pin: a report speaks for the runtime only when it
+    // presents the principal on record (seeded at completion from the
+    // launch-verified principal, or by the first report when the completing
+    // runner did not say). Anything else is a reallocated port wearing this
+    // runtime's name, and is refused rather than recorded.
+    let pinned = client
+        .query_opt(
+            "SELECT health_reporting_npub FROM agent_runtimes
+             WHERE id = $1 AND source_host_id = $2",
+            &[&agent_runtime_id, &source_host_id],
+        )
+        .await
+        .map_err(store_error)?
+        .ok_or(CoreError::ProjectRuntimeNotFound)?
+        .get::<_, Option<String>>("health_reporting_npub");
+    if let Some(pinned) = pinned.as_deref()
+        && agent_npub.as_deref() != Some(pinned)
+    {
+        eprintln!(
+            "warning: rejecting health report for runtime {agent_runtime_id} on host \
+             {source_host_id}: it presents {} but the Agent Principal on record is {pinned}",
+            agent_npub.as_deref().unwrap_or("no principal")
+        );
+        return Err(CoreError::RuntimeHealthReportPrincipalMismatch);
+    }
     let row = client
         .query_opt(
             "UPDATE agent_runtimes
@@ -6743,12 +6825,7 @@ where
                  health_ready = $5,
                  health_reason = $6,
                  health_report_interval_seconds = $7,
-                 health_reporting_npub = $8,
-                 host_facts = CASE
-                   WHEN host_facts->>'runtime_status' = $9
-                     THEN jsonb_set(host_facts, '{runtime_status}', to_jsonb($10::text))
-                   ELSE host_facts
-                 END
+                 health_reporting_npub = COALESCE(health_reporting_npub, $8)
              WHERE id = $1 AND source_host_id = $2
              RETURNING id",
             &[
@@ -6760,10 +6837,6 @@ where
                 &reason,
                 &interval_seconds,
                 &agent_npub,
-                // The first accepted report after an up-bound control moves
-                // the lifecycle latch off `pending_first_report`.
-                &RuntimeSummaryStatus::PendingFirstReport.as_str(),
-                &RuntimeSummaryStatus::Online.as_str(),
             ],
         )
         .await
@@ -10205,6 +10278,7 @@ mod tests {
                     active_inference_profile: Some("finite-private".to_string()),
                     hermes_available: Some(true),
                     published_app_urls: Vec::new(),
+                    agent_npub: None,
                     now: None,
                 })
                 .await
@@ -10424,6 +10498,7 @@ mod tests {
                     active_inference_profile: Some("finite-private".to_string()),
                     hermes_available: Some(true),
                     published_app_urls: Vec::new(),
+                    agent_npub: None,
                     now: None,
                 })
                 .await
@@ -10567,6 +10642,7 @@ mod tests {
                     active_inference_profile: Some("finite-private".to_string()),
                     hermes_available: Some(true),
                     published_app_urls: Vec::new(),
+                    agent_npub: None,
                     now: None,
                 })
                 .await
@@ -10710,6 +10786,7 @@ mod tests {
                     active_inference_profile: Some("finite-private".to_string()),
                     hermes_available: Some(true),
                     published_app_urls: Vec::new(),
+                    agent_npub: None,
                     now: None,
                 })
                 .await
@@ -10821,10 +10898,44 @@ mod tests {
                     active_inference_profile: Some("finite-private".to_string()),
                     hermes_available: Some(true),
                     published_app_urls: Vec::new(),
+                    agent_npub: None,
                     now: None,
                 })
                 .await
                 .unwrap();
+            // The relocated incarnation latches `online` with no standing
+            // report of its own (the old host's last report must not project
+            // as its status) and its attribution pin is the relocation's
+            // expected principal, so the first report must present it.
+            let relocated = store
+                .admin_runtime_overviews()
+                .await
+                .unwrap()
+                .into_iter()
+                .find(|overview| overview.agent_runtime_id == runtime_id)
+                .unwrap();
+            assert_eq!(relocated.lifecycle_status, RuntimeSummaryStatus::Online);
+            assert_eq!(relocated.runtime_status, RuntimeSummaryStatus::Unknown);
+            assert_eq!(
+                relocated.runtime_health,
+                crate::RuntimeHealthProjection {
+                    agent_npub: Some(format!("npub1{}", "q".repeat(58))),
+                    ..crate::RuntimeHealthProjection::unreported()
+                },
+                "no report survives the relocation; the pin is the expected principal"
+            );
+            let relocated_target = store
+                .runtime_health_targets_for_host(host)
+                .await
+                .unwrap()
+                .targets
+                .into_iter()
+                .find(|target| target.agent_runtime_id == runtime_id)
+                .unwrap();
+            assert_eq!(
+                relocated_target.agent_npub.as_deref(),
+                Some(format!("npub1{}", "q".repeat(58)).as_str())
+            );
             assert_eq!(
                 completed.request.status,
                 AgentCreationRequestStatus::Running
@@ -10938,6 +11049,7 @@ mod tests {
                     active_inference_profile: Some("finite-private".to_string()),
                     hermes_available: Some(true),
                     published_app_urls: Vec::new(),
+                    agent_npub: None,
                     now: None,
                 })
                 .await
@@ -11482,6 +11594,7 @@ mod tests {
                     active_inference_profile: None,
                     hermes_available: Some(true),
                     published_app_urls: Vec::new(),
+                    agent_npub: None,
                     now: None,
                 })
                 .await
@@ -11817,6 +11930,7 @@ mod tests {
                     active_inference_profile: Some("finite-private".to_string()),
                     hermes_available: Some(true),
                     published_app_urls: Vec::new(),
+                    agent_npub: None,
                     now: Some("2026-05-28T12:03:00Z".to_string()),
                 })
                 .await
@@ -12153,6 +12267,7 @@ mod tests {
                     active_inference_profile: Some("finite-private".to_string()),
                     hermes_available: Some(true),
                     published_app_urls: Vec::new(),
+                    agent_npub: None,
                     now: None,
                 })
                 .await
@@ -12527,6 +12642,7 @@ mod tests {
                     active_inference_profile: None,
                     hermes_available: Some(true),
                     published_app_urls: Vec::new(),
+                    agent_npub: None,
                     now: None,
                 })
                 .await
@@ -12606,6 +12722,66 @@ mod tests {
             let health = overview_health(&store, &runtime_id).await;
             assert_eq!(health.status, crate::RuntimeHealthStatus::Stale);
             assert_eq!(health.report_interval_seconds, Some(60));
+
+            // Existing state written by the previous Core: a row latched
+            // `pending_first_report` alongside a fresh ready report from the
+            // incarnation before the control. Migration 0024 rewrites it to
+            // the current representation in one statement — `online` with
+            // the report cleared — so the derived status is `unknown` until
+            // the poller reports, never `online` off the old report. The
+            // pin stays (same runtime, same principal).
+            let (raw, connection) = tokio_postgres::connect(&store.url, NoTls).await.unwrap();
+            let raw_handle = tokio::spawn(async move {
+                let _ = connection.await;
+            });
+            raw.execute(
+                "UPDATE agent_runtimes
+                 SET host_facts = jsonb_set(host_facts, '{runtime_status}',
+                                            to_jsonb('pending_first_report'::text)),
+                     health_reported_at = now(),
+                     health_observed_at = now(),
+                     health_ready = TRUE,
+                     health_reason = NULL,
+                     health_report_interval_seconds = 60
+                 WHERE id = $1",
+                &[&runtime_id],
+            )
+            .await
+            .unwrap();
+            raw.batch_execute(include_str!(
+                "../migrations/0024_runtime_status_pending_first_report_remap.sql"
+            ))
+            .await
+            .unwrap();
+            // Reapplying (every Core startup does) is a no-op.
+            raw.batch_execute(include_str!(
+                "../migrations/0024_runtime_status_pending_first_report_remap.sql"
+            ))
+            .await
+            .unwrap();
+            drop(raw);
+            raw_handle.abort();
+            let migrated = store
+                .admin_runtime_overviews()
+                .await
+                .unwrap()
+                .into_iter()
+                .find(|overview| overview.agent_runtime_id == runtime_id)
+                .unwrap();
+            assert_eq!(migrated.lifecycle_status, RuntimeSummaryStatus::Online);
+            assert_eq!(migrated.runtime_status, RuntimeSummaryStatus::Unknown);
+            assert_eq!(
+                migrated.runtime_health,
+                crate::RuntimeHealthProjection {
+                    agent_npub: Some(format!("npub1{}", "q".repeat(58))),
+                    ..crate::RuntimeHealthProjection::unreported()
+                }
+            );
+            assert!(
+                CORE_SCHEMA_SQL
+                    .contains("WHERE host_facts->>'runtime_status' = 'pending_first_report'"),
+                "the remap must ship in the startup schema concat"
+            );
 
             // Scope: the credential's host guards the write. Another host's
             // runtime id and an unknown id both fail closed as not-found.
@@ -12778,6 +12954,7 @@ mod tests {
                     active_inference_profile: Some("finite-private".to_string()),
                     hermes_available: Some(true),
                     published_app_urls: vec!["http://127.0.0.1:41002/contact".to_string()],
+                    agent_npub: None,
                     now: None,
                 })
                 .await
@@ -13081,6 +13258,7 @@ mod tests {
                 active_inference_profile: Some("finite-private".to_string()),
                 hermes_available: Some(true),
                 published_app_urls: vec!["http://127.0.0.1:41004/contact".to_string()],
+                agent_npub: None,
                 now: None,
             })
             .await
@@ -13522,6 +13700,7 @@ mod tests {
                     active_inference_profile: Some("finite-private".to_string()),
                     hermes_available: Some(true),
                     published_app_urls: Vec::new(),
+                    agent_npub: None,
                     now: None,
                 })
                 .await
@@ -13646,6 +13825,7 @@ mod tests {
                     active_inference_profile: Some("finite-private".to_string()),
                     hermes_available: Some(true),
                     published_app_urls: vec!["http://127.0.0.1:41006/contact".to_string()],
+                    agent_npub: None,
                     now: None,
                 })
                 .await
@@ -13779,6 +13959,7 @@ mod tests {
                     active_inference_profile: Some("finite-private".to_string()),
                     hermes_available: Some(true),
                     published_app_urls: vec!["http://127.0.0.1:41003/contact".to_string()],
+                    agent_npub: None,
                     now: None,
                 })
                 .await
@@ -14074,6 +14255,7 @@ mod tests {
                     active_inference_profile: None,
                     hermes_available: Some(true),
                     published_app_urls: vec!["http://127.0.0.1:41001/contact".to_string()],
+                    agent_npub: None,
                     now: None,
                 })
                 .await
@@ -14244,6 +14426,33 @@ mod tests {
                 .unwrap()
                 .expect("draining host runner should still lease its own control request");
             assert_eq!(control_lease.request.id, restart.id);
+            // The running incarnation reports ready before the restart; the
+            // completion below must clear that report (it spoke for the
+            // previous incarnation) while keeping the principal it pinned.
+            store
+                .record_runtime_health_report(RecordRuntimeHealthReportInput {
+                    source_host_id: host.to_string(),
+                    agent_runtime_id: runtime_id.clone(),
+                    ready: true,
+                    reason: None,
+                    observed_at: current_time_iso().unwrap(),
+                    agent_npub: Some(format!("npub1{}", "q".repeat(58))),
+                    report_interval_seconds: Some(60),
+                    now: None,
+                })
+                .await
+                .unwrap();
+            assert_eq!(
+                store
+                    .admin_runtime_overviews()
+                    .await
+                    .unwrap()
+                    .into_iter()
+                    .find(|o| o.agent_runtime_id == runtime_id)
+                    .unwrap()
+                    .runtime_status,
+                RuntimeSummaryStatus::Online
+            );
             store
                 .complete_runtime_control_request(CompleteRuntimeControlRequestInput {
                     request_id: restart.id.clone(),
@@ -14268,11 +14477,16 @@ mod tests {
                 .unwrap();
             // Completion is the runner's bounded readiness wait, not a
             // standing observation: the lifecycle latch says the restart
-            // succeeded and awaits the poller's first report, and the
-            // user-facing status stays the named unknown state until then.
+            // succeeded, the stored report is cleared, and the user-facing
+            // status stays the named unknown state until the poller reports.
+            assert_eq!(overview_online.lifecycle_status, RuntimeSummaryStatus::Online);
             assert_eq!(
-                overview_online.lifecycle_status,
-                RuntimeSummaryStatus::PendingFirstReport
+                overview_online.runtime_health,
+                crate::RuntimeHealthProjection {
+                    agent_npub: Some(format!("npub1{}", "q".repeat(58))),
+                    ..crate::RuntimeHealthProjection::unreported()
+                },
+                "the pre-restart report is cleared; the pinned principal is kept"
             );
             assert_eq!(
                 overview_online.lifecycle_status,
@@ -14295,9 +14509,11 @@ mod tests {
                 .find(|target| target.agent_runtime_id == runtime_id)
                 .expect("restarted runtime should be a health target");
             assert_eq!(target.source_machine_id, machine);
+            assert_eq!(target.lifecycle_status, RuntimeSummaryStatus::Online);
             assert_eq!(
-                target.lifecycle_status,
-                RuntimeSummaryStatus::PendingFirstReport
+                target.agent_npub.as_deref(),
+                Some(format!("npub1{}", "q".repeat(58)).as_str()),
+                "the attribution pin survives a restart of the same runtime"
             );
             assert!(
                 store
@@ -14307,8 +14523,24 @@ mod tests {
                     .targets
                     .is_empty()
             );
-            // The first accepted health report moves the latch to `online`,
-            // and a fresh ready report is what makes the derived status online.
+            // A report presenting another principal is refused, not recorded:
+            // a reallocated port never wears this runtime's name.
+            assert!(matches!(
+                store
+                    .record_runtime_health_report(RecordRuntimeHealthReportInput {
+                        source_host_id: host.to_string(),
+                        agent_runtime_id: runtime_id.clone(),
+                        ready: true,
+                        reason: None,
+                        observed_at: current_time_iso().unwrap(),
+                        agent_npub: Some(format!("npub1{}", "z".repeat(58))),
+                        report_interval_seconds: Some(60),
+                        now: None,
+                    })
+                    .await,
+                Err(CoreError::RuntimeHealthReportPrincipalMismatch)
+            ));
+            // A fresh ready report is what makes the derived status online.
             store
                 .record_runtime_health_report(RecordRuntimeHealthReportInput {
                     source_host_id: host.to_string(),
@@ -14316,7 +14548,7 @@ mod tests {
                     ready: true,
                     reason: None,
                     observed_at: current_time_iso().unwrap(),
-                    agent_npub: None,
+                    agent_npub: Some(format!("npub1{}", "q".repeat(58))),
                     report_interval_seconds: Some(60),
                     now: None,
                 })
@@ -14585,6 +14817,41 @@ mod tests {
                 })
                 .await
                 .unwrap();
+            // The upgrade latched `online` (health cleared, nothing reported
+            // yet). A runtime that dies in exactly this state is today's
+            // recovery shape: it must be relocatable under the operator's
+            // compute-absent attestation, and only under it.
+            let relocate = |attested: bool| AdminRuntimeRelocateExactInput {
+                admin_verified_email: format!("admin-{run}@finite.vip"),
+                admin_workos_user_id: format!("admin-workos-{run}"),
+                project_id: project_id.clone(),
+                expected_agent_runtime_id: runtime_id.clone(),
+                expected_source_host_id: host.to_string(),
+                expected_source_machine_id: machine.to_string(),
+                target_source_host_id: format!("{host}-target"),
+                expected_agent_npub: format!("npub1{}", "q".repeat(58)),
+                durable_state_manifest_sha256: "b".repeat(64),
+                operator_observed_compute_absent: attested,
+                now: None,
+            };
+            assert!(matches!(
+                store.admin_request_runtime_relocate_exact(relocate(false)).await,
+                Err(CoreError::RuntimeControlUnsupported)
+            ));
+            let relocation = store
+                .admin_request_runtime_relocate_exact(relocate(true))
+                .await
+                .expect("a dead just-upgraded runtime relocates under attestation");
+            assert_eq!(relocation.status, AgentCreationRequestStatus::Requested);
+            // Withdraw it again: the rest of this test exercises the runtime
+            // in place.
+            store
+                .cancel_agent_creation_request(CancelAgentCreationRequestInput {
+                    request_id: relocation.id,
+                    now: None,
+                })
+                .await
+                .unwrap();
             let refreshed_capabilities: Value = raw
                 .query_one(
                     "SELECT runtime_capabilities FROM agent_runtimes WHERE id = $1",
@@ -14609,10 +14876,11 @@ mod tests {
                 refreshed_contact_endpoint.as_deref(),
                 Some("http://127.0.0.1:41002/contact")
             );
+            // The creation request (not the cancelled relocation above).
             let upgraded_spec: Value = raw
                 .query_one(
                     "SELECT runtime_spec FROM agent_creation_requests
-                     WHERE agent_runtime_id = $1",
+                     WHERE agent_runtime_id = $1 AND relocation_spec IS NULL",
                     &[&runtime_id],
                 )
                 .await
@@ -15275,6 +15543,7 @@ mod tests {
                     active_inference_profile: Some("finite-private".to_string()),
                     hermes_available: Some(true),
                     published_app_urls: Vec::new(),
+                    agent_npub: None,
                     now: None,
                 })
                 .await
