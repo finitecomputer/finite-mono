@@ -81,9 +81,7 @@ the sources above cannot carry lands here.
   waves). Canaries first (runtime_354cb67 lat3, runtime_60a635 lat4): exact
   digest, `/contact` principal unchanged, rekey subcommand present, bridges
   connected. Fleet: lat4 20/20 + canary skip; lat3 28/28 + canary skip
-  (runtime_ea5586fb excluded `provider_compute_absent` — dark since the
-  2026-08-29 roll behind an unreadable Kata task; compute reconstruction
-  escalated separately).
+  (runtime_ea5586fb excluded `provider_compute_absent` — see below).
 - **Six rooms rekeyed** (agent-driven MLS self-update commits, epoch 1→2;
   every rehearsal replayed clean with zero skips and cursors at
   `commit_seq`): room-5c6e775b3525f2ca@15896, room-d77d6dd515c3877f@1823,
@@ -92,6 +90,16 @@ the sources above cannot carry lands here.
   heals the 2026-08-28 hosted-web restore rewind class ahead of the
   client-side currency-gate roll.
 
+- **runtime_ea5586fb recovered same day** (dark since the 2026-08-29 roll):
+  the `.5` upgrade's Kata task record was unreadable while the VM itself
+  kept running orphaned; after the dead records were cleared the
+  state-manifest guard refused the first staging (source still changing),
+  the orphaned sandbox was torn down, and the runbook's absent-compute
+  cold-relocation variant rebinded the exact Runtime (same Runtime ID,
+  machine name, artifact, and Agent Principal, manifest `e09fc8bb…`) from
+  lat3 to lat4 (`agent_request_c70951c2…`), after which it was upgraded to
+  `2026-09-02.1` like the rest of the fleet. Core now records 51/51 active
+  Runtimes on `2026-09-02.1` (29 lat3 + 22 lat4).
 ### 2026-08-29 — Chat-server unfreeze (#770) deployed; Agent Runtime `2026-08-29.4` promoted; lat4 rolled
 
 - Chat-authz stack merged 21:28Z (#710, #711, #712; NIP-98 auth included but off).
