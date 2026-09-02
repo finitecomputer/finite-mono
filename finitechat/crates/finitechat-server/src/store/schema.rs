@@ -98,3 +98,12 @@ pub(crate) fn migrate_schema(conn: &Connection) -> rusqlite::Result<()> {
 /// tables (`http_delivery_ops`, `http_state_snapshots_v2`,
 /// `http_room_memberships`, `http_account_rooms`) are frozen migration input.
 pub(crate) const FOLD_COMPLETE_KEY: &str = "op_log_fold_complete";
+
+/// `server_meta` key written in the same transaction as [`FOLD_COMPLETE_KEY`]:
+/// the normalized delivery head (`SUM(delivery_routes.last_seq)`) the
+/// instant the fold committed, i.e. the frontier of every seq any client
+/// could have received before the cutover. `finitechat-server
+/// rollback-check` compares the live head against it to decide whether
+/// restoring the pre-fold backup can still rewind nobody (see
+/// `crate::cutover::rollback_check`).
+pub(crate) const FOLD_HEAD_KEY: &str = "op_log_fold_head";

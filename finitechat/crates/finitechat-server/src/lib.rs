@@ -92,6 +92,7 @@ mod state;
 mod store;
 mod validate;
 
+pub use cutover::{RollbackCheck, rollback_check};
 pub use routes::http_router;
 pub use state::{
     DEFAULT_RATE_LIMIT_PER_WINDOW, DEFAULT_RATE_LIMIT_WINDOW_SECONDS, HttpServerState,
@@ -114,8 +115,11 @@ pub fn print_engine_rollout_banner() {
          The normalized delivery engine is the only engine; the first boot\n\
          on a pre-cutover database runs the one-time op-log fold. There is\n\
          no engine flag: rolling the deploy back does NOT un-fold — restore\n\
-         the pre-fold backup instead. The legacy reader and fold code are\n\
-         deleted by cleanup/chat-store-delete-old before 2026-09-25."
+         the pre-fold backup only if `finitechat-server rollback-check\n\
+         --sqlite PATH` passes; otherwise roll forward (the restore is\n\
+         refused once any post-fold write exists). The legacy reader and\n\
+         fold code are deleted by cleanup/chat-store-delete-old before\n\
+         2026-09-25."
     );
 }
 

@@ -43,7 +43,7 @@ use finitechat_delivery::{
 use finitechat_proto::{DeviceMembership, DeviceRef, LogEntryKind, WelcomeRecord};
 use finitechat_transport::transport::TransportMessage;
 use finitechat_transport::{MemberId, MessageId};
-use rusqlite::{Connection, OptionalExtension, params};
+use rusqlite::{Connection, OpenFlags, OptionalExtension, params};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
@@ -60,7 +60,10 @@ use crate::state::{
 };
 use crate::store::Store;
 use crate::store::delivery::insert_entry;
-use crate::store::room_state::{RoomStateCheckpoint, mark_fold_complete, save_checkpoint};
+use crate::store::room_state::{
+    RoomStateCheckpoint, delivery_head, load_fold_head, mark_fold_complete, record_fold_head,
+    save_checkpoint,
+};
 use crate::store::{db_to_u64, u64_to_db};
 
 /// Date recorded in the fold marker for the rollback-window banner and
@@ -843,6 +846,16 @@ fn fold_seed_in_one_transaction(
 
             assert_fold(tx, &mut report, seed)?;
 
+            // The pre-fold head, recorded next to the marker in the same
+            // transaction. It is the NORMALIZED head read back right after
+            // the transplant, not the legacy op-log `MAX(seq)`: the op-log
+            // seq is a server-internal operation counter no client ever
+            // saw, whereas client cursors are per-route delivery seqs, and
+            // the fold assigns exactly the legacy queue heads (asserted
+            // above). So the sum of route heads at this instant is exactly
+            // the frontier of what any client could have received before
+            // the cutover — the value `rollback_check` compares against.
+            record_fold_head(tx, delivery_head(tx)?)?;
             mark_fold_complete(tx, CHAT_ENGINE_CUTOVER_DATE)?;
             Ok(Some(report))
         })
@@ -1036,6 +1049,125 @@ fn sample_indexes(len: usize, cap: usize) -> Vec<usize> {
 
 fn digest_of(queued: &finitechat_delivery::HttpQueuedDelivery) -> [u8; 32] {
     finitechat_delivery::digest_transport_message(&queued.message)
+}
+
+/// Verdict of `finitechat-server rollback-check --sqlite PATH` (chat store
+/// swap PR 1; deleted with this module by PR 2).
+///
+/// Restoring the pre-fold backup is a plain file swap, and nothing else
+/// checks that the restored file is not BEHIND what clients have already
+/// received. A server rewound below any client's cursor is the mirror image
+/// of the sender-rewind incident (every room at once; clients hit
+/// `RuntimeSyncCursorRegression`). This verdict makes the restore legal
+/// only while the normalized delivery head still equals the head recorded
+/// at fold time — the deploy window before traffic — and forward-only after
+/// the first accepted publish.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+pub struct RollbackCheck {
+    /// `server_meta.op_log_fold_complete` is set.
+    pub fold_complete: bool,
+    /// The head recorded at fold time (`server_meta.op_log_fold_head`);
+    /// `None` when the marker predates the key or the value is unreadable.
+    pub pre_fold_head: Option<HttpSequence>,
+    /// The live normalized delivery head (`SUM(delivery_routes.last_seq)`).
+    pub current_head: HttpSequence,
+    /// `true` only when the fold ran, its head is known, and no delivery
+    /// write has landed since.
+    pub rollback_allowed: bool,
+    /// One-line human explanation of the verdict.
+    pub reason: String,
+}
+
+/// Decide whether restoring the pre-fold backup over the database at `path`
+/// can still rewind no client. Opens the file READ-ONLY (the server may be
+/// stopped or live); every failure to open or read refuses. Allowed iff the
+/// fold marker is set, the recorded pre-fold head is present and parseable,
+/// and the current delivery head equals it exactly. Non-delivery writes
+/// (KeyPackage publishes, directory saves, boot-time housekeeping) do not
+/// move the head: they are not cursor-bearing, so a restore inside the
+/// deploy window stays legal after a plain boot.
+pub fn rollback_check(path: &Path) -> Result<RollbackCheck, DurableStoreError> {
+    let conn = Connection::open_with_flags(
+        path,
+        OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
+    )?;
+    let table_exists = |name: &str| -> Result<bool, DurableStoreError> {
+        let exists: i64 = conn.query_row(
+            "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?1)",
+            params![name],
+            |row| row.get(0),
+        )?;
+        Ok(exists == 1)
+    };
+    if !table_exists("server_meta")? || !table_exists("delivery_routes")? {
+        return Ok(RollbackCheck {
+            fold_complete: false,
+            pre_fold_head: None,
+            current_head: 0,
+            rollback_allowed: false,
+            reason: "no fold: the normalized tables do not exist (this build never booted \
+                     this database); there is no pre-fold backup to restore"
+                .to_owned(),
+        });
+    }
+    let fold_complete = crate::store::room_state::fold_complete(&conn)?;
+    let current_head = delivery_head(&conn)?;
+    if !fold_complete {
+        return Ok(RollbackCheck {
+            fold_complete,
+            pre_fold_head: None,
+            current_head,
+            rollback_allowed: false,
+            reason: "no fold: server_meta.op_log_fold_complete is not set, so this database \
+                     was never folded and there is no pre-fold backup to restore"
+                .to_owned(),
+        });
+    }
+    let pre_fold_head = load_fold_head(&conn)?.and_then(|value| value.parse::<u64>().ok());
+    let Some(pre_fold_head) = pre_fold_head else {
+        return Ok(RollbackCheck {
+            fold_complete,
+            pre_fold_head: None,
+            current_head,
+            rollback_allowed: false,
+            reason: "unknown pre-fold head: the fold marker is set but \
+                     server_meta.op_log_fold_head is missing or unreadable (folded by a \
+                     build that did not record it); refusing the pre-fold restore"
+                .to_owned(),
+        });
+    };
+    let (rollback_allowed, reason) = match current_head.cmp(&pre_fold_head) {
+        std::cmp::Ordering::Equal => (
+            true,
+            format!(
+                "no post-fold delivery writes: current head {current_head} equals the \
+                 recorded pre-fold head; restoring the pre-fold backup rewinds no client cursor"
+            ),
+        ),
+        std::cmp::Ordering::Greater => (
+            false,
+            format!(
+                "post-fold writes exist: current head {current_head} is above the recorded \
+                 pre-fold head {pre_fold_head}; restoring the pre-fold backup would rewind \
+                 clients below their cursors — roll forward instead"
+            ),
+        ),
+        std::cmp::Ordering::Less => (
+            false,
+            format!(
+                "current head {current_head} is below the recorded pre-fold head \
+                 {pre_fold_head}: this file is not the database the fold marker describes; \
+                 refusing the pre-fold restore"
+            ),
+        ),
+    };
+    Ok(RollbackCheck {
+        fold_complete,
+        pre_fold_head: Some(pre_fold_head),
+        current_head,
+        rollback_allowed,
+        reason,
+    })
 }
 
 /// Widen the folded-transaction error so a fold failure names itself in logs

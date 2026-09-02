@@ -24,7 +24,7 @@ use crate::projections::HttpRoomMembershipProjection;
 use crate::state::AccountRoomDirectoryMutation;
 use crate::{DurableStoreError, SNAPSHOT_ZSTD_LEVEL};
 
-use super::schema::FOLD_COMPLETE_KEY;
+use super::schema::{FOLD_COMPLETE_KEY, FOLD_HEAD_KEY};
 
 /// The single durable room-state structure: every room projection, each
 /// carrying the `last_seq` watermark of the delivery entries it reflects.
@@ -57,6 +57,49 @@ pub(crate) fn mark_fold_complete(
         params![FOLD_COMPLETE_KEY, iso_date],
     )?;
     Ok(())
+}
+
+/// The normalized delivery head: the total number of sequenced delivery
+/// entries across every route (`SUM(last_seq)`). Route heads only ever
+/// advance and routes are never deleted, so this scalar is strictly
+/// monotone in the set of `(route, seq)` pairs a client can hold a cursor
+/// for: two databases with the same head (one derived from the other) have
+/// the same cursor frontier.
+pub(crate) fn delivery_head(conn: &Connection) -> Result<HttpSequence, DurableStoreError> {
+    let head: i64 = conn.query_row(
+        "SELECT COALESCE(SUM(last_seq), 0) FROM delivery_routes",
+        [],
+        |row| row.get(0),
+    )?;
+    Ok(super::db_to_u64(head)?)
+}
+
+/// Record the pre-fold head inside the fold transaction (see
+/// [`FOLD_HEAD_KEY`]).
+pub(crate) fn record_fold_head(
+    tx: &rusqlite::Transaction<'_>,
+    head: HttpSequence,
+) -> Result<(), DurableStoreError> {
+    tx.execute(
+        "INSERT INTO server_meta (key, value) VALUES (?1, ?2)
+         ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+        params![FOLD_HEAD_KEY, head.to_string()],
+    )?;
+    Ok(())
+}
+
+/// Read the recorded pre-fold head verbatim (`None` when the fold ran under
+/// a build that did not record it; callers fail closed on that and on an
+/// unparseable value).
+pub(crate) fn load_fold_head(conn: &Connection) -> Result<Option<String>, DurableStoreError> {
+    let value: Option<String> = conn
+        .query_row(
+            "SELECT value FROM server_meta WHERE key = ?1",
+            params![FOLD_HEAD_KEY],
+            |row| row.get(0),
+        )
+        .optional()?;
+    Ok(value)
 }
 
 pub(crate) fn load_checkpoint(

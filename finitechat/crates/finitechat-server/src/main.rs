@@ -34,12 +34,29 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             println!("finitechat-server: state snapshot written to {path}");
             Ok(())
         }
+        Some("rollback-check") => {
+            let options = ServeOptions::parse(&args[1..])?;
+            let Some(path) = options.sqlite_path else {
+                return Err("rollback-check requires --sqlite PATH".into());
+            };
+            // Read-only verdict on whether restoring the pre-fold backup
+            // over this database can still rewind no client (chat store
+            // swap rollback window). Exit 0 only when it can.
+            let check = finitechat_server::rollback_check(Path::new(&path))?;
+            println!("{}", serde_json::to_string(&check)?);
+            if check.rollback_allowed {
+                Ok(())
+            } else {
+                eprintln!("finitechat-server: rollback refused: {}", check.reason);
+                std::process::exit(1)
+            }
+        }
         Some("smoke") | None => {
             smoke();
             Ok(())
         }
         Some(command) => Err(format!(
-            "unknown command '{command}'; expected 'serve [addr] [--sqlite PATH] [--public-url URL]', 'snapshot --sqlite PATH', 'push-drain [options]', or 'smoke'"
+            "unknown command '{command}'; expected 'serve [addr] [--sqlite PATH] [--public-url URL]', 'snapshot --sqlite PATH', 'rollback-check --sqlite PATH', 'push-drain [options]', or 'smoke'"
         )
         .into()),
     }

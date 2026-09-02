@@ -10849,3 +10849,172 @@ async fn chat_store_swap_replay_diff_fold_is_the_identity_on_the_legacy_shape() 
         assert_eq!(coverage.inventory_owners, 495, "inventory owners");
     }
 }
+
+/// Legacy era → fabricated pre-cutover shape → cutover boot (the fold). The
+/// shared setup for the `rollback-check` guard tests below; returns the
+/// number of group entries the legacy era wrote.
+async fn fold_rollback_fixture(db_path: &std::path::Path) -> usize {
+    let alice = DeviceRef::new("alice", "alice-laptop");
+    let room_id = "room-rollback-check".to_owned();
+    let mls_group_id = "mls-rollback-check".to_owned();
+    let state = persistent_state(db_path);
+    let app = http_router(state.clone());
+    bootstrap_room(&app, &room_id, &mls_group_id, &alice).await;
+    for index in 0..3 {
+        let request = append_application_request(
+            &room_id,
+            &mls_group_id,
+            &alice,
+            0,
+            format!("rollback-check message {index}").as_bytes(),
+            &format!("rollback-check-msg-{index}"),
+        );
+        let response = post_json(app.clone(), "/events", &typed_event_request(&request)).await;
+        assert_eq!(response.status(), StatusCode::OK);
+    }
+    let entries = sync_all_group_entries(&app, &room_id).await.len();
+    drop(app);
+    drop(state);
+    let total_ops = defold_into_legacy_shape(db_path, Some(2));
+    assert!(total_ops > 2, "the fixture must have a post-snapshot tail");
+    // Cutover boot: the fold runs here and records the pre-fold head.
+    drop(persistent_state(db_path));
+    entries
+}
+
+fn run_rollback_check_binary(db_path: &std::path::Path) -> (bool, serde_json::Value) {
+    let output = std::process::Command::new(env!("CARGO_BIN_EXE_finitechat-server"))
+        .args(["rollback-check", "--sqlite"])
+        .arg(db_path)
+        .output()
+        .expect("run finitechat-server rollback-check");
+    let stdout = String::from_utf8(output.stdout).expect("utf8 stdout");
+    let verdict: serde_json::Value =
+        serde_json::from_str(stdout.trim()).expect("rollback-check prints one JSON line");
+    (output.status.success(), verdict)
+}
+
+/// (a) Fold, then no writes: the deploy window. Restoring the pre-fold
+/// backup rewinds no client, so the guard passes — from the library and
+/// from the CLI (exit 0, JSON verdict).
+#[tokio::test]
+async fn rollback_check_passes_right_after_the_fold_with_no_writes() {
+    let temp = TempDir::new().expect("tempdir");
+    let db_path = temp.path().join("server.sqlite3");
+    let entries = fold_rollback_fixture(&db_path).await;
+
+    let check = finitechat_server::rollback_check(&db_path).expect("rollback check");
+    assert!(check.fold_complete);
+    assert!(check.rollback_allowed, "{}", check.reason);
+    assert_eq!(check.pre_fold_head, Some(check.current_head));
+    assert!(
+        check.current_head >= entries as u64,
+        "the head covers every folded group entry (plus inbox welcomes)"
+    );
+    assert!(check.reason.contains("no post-fold delivery writes"));
+
+    // A plain steady-state boot (housekeeping writes, no delivery writes)
+    // keeps the window open.
+    drop(persistent_state(&db_path));
+    let check = finitechat_server::rollback_check(&db_path).expect("rollback check");
+    assert!(check.rollback_allowed, "{}", check.reason);
+
+    let (ok, verdict) = run_rollback_check_binary(&db_path);
+    assert!(ok, "the CLI exits 0 inside the window: {verdict}");
+    assert_eq!(verdict["fold_complete"], true);
+    assert_eq!(verdict["rollback_allowed"], true);
+    assert_eq!(verdict["pre_fold_head"], verdict["current_head"]);
+}
+
+/// (b) Fold, then ONE accepted publish: a client may hold a cursor above the
+/// pre-fold head, so the restore is refused (exit non-zero).
+#[tokio::test]
+async fn rollback_check_refuses_after_one_post_fold_publish() {
+    let temp = TempDir::new().expect("tempdir");
+    let db_path = temp.path().join("server.sqlite3");
+    fold_rollback_fixture(&db_path).await;
+    let before = finitechat_server::rollback_check(&db_path).expect("rollback check");
+    assert!(before.rollback_allowed, "{}", before.reason);
+
+    let alice = DeviceRef::new("alice", "alice-laptop");
+    let state = persistent_state(&db_path);
+    let app = http_router(state.clone());
+    let request = append_application_request(
+        "room-rollback-check",
+        "mls-rollback-check",
+        &alice,
+        0,
+        b"post-fold message",
+        "rollback-check-post-fold",
+    );
+    let response = post_json(app.clone(), "/events", &typed_event_request(&request)).await;
+    assert_eq!(response.status(), StatusCode::OK);
+    drop(app);
+    drop(state);
+
+    let check = finitechat_server::rollback_check(&db_path).expect("rollback check");
+    assert!(check.fold_complete);
+    assert!(!check.rollback_allowed);
+    assert_eq!(check.pre_fold_head, before.pre_fold_head);
+    assert_eq!(check.current_head, before.current_head + 1);
+    assert!(
+        check.reason.contains("post-fold writes exist"),
+        "{}",
+        check.reason
+    );
+
+    let (ok, verdict) = run_rollback_check_binary(&db_path);
+    assert!(!ok, "the CLI exits non-zero once a post-fold write exists");
+    assert_eq!(verdict["rollback_allowed"], false);
+    assert_eq!(verdict["fold_complete"], true);
+}
+
+/// (c) Marker set but the head key missing (a database folded by a build
+/// that did not record it): the pre-fold head is unknown, so fail closed.
+#[tokio::test]
+async fn rollback_check_refuses_when_the_pre_fold_head_is_unknown() {
+    let temp = TempDir::new().expect("tempdir");
+    let db_path = temp.path().join("server.sqlite3");
+    fold_rollback_fixture(&db_path).await;
+    {
+        let conn = Connection::open(&db_path).expect("open raw");
+        let deleted = conn
+            .execute("DELETE FROM server_meta WHERE key = 'op_log_fold_head'", [])
+            .expect("delete head key");
+        assert_eq!(deleted, 1, "the fold recorded the head key");
+    }
+
+    let check = finitechat_server::rollback_check(&db_path).expect("rollback check");
+    assert!(check.fold_complete);
+    assert_eq!(check.pre_fold_head, None);
+    assert!(!check.rollback_allowed);
+    assert!(
+        check.reason.contains("unknown pre-fold head"),
+        "{}",
+        check.reason
+    );
+
+    let (ok, verdict) = run_rollback_check_binary(&db_path);
+    assert!(!ok);
+    assert_eq!(verdict["pre_fold_head"], serde_json::Value::Null);
+}
+
+/// (d) A fresh database that never folded: there is no pre-fold backup, so
+/// the restore is refused with the "no fold" reason.
+#[tokio::test]
+async fn rollback_check_refuses_an_unfolded_fresh_database() {
+    let temp = TempDir::new().expect("tempdir");
+    let db_path = temp.path().join("server.sqlite3");
+    drop(persistent_state(&db_path));
+
+    let check = finitechat_server::rollback_check(&db_path).expect("rollback check");
+    assert!(!check.fold_complete);
+    assert_eq!(check.pre_fold_head, None);
+    assert!(!check.rollback_allowed);
+    assert!(check.reason.starts_with("no fold"), "{}", check.reason);
+
+    let (ok, verdict) = run_rollback_check_binary(&db_path);
+    assert!(!ok);
+    assert_eq!(verdict["fold_complete"], false);
+    assert_eq!(verdict["rollback_allowed"], false);
+}

@@ -1571,7 +1571,9 @@ def build_report(raw: dict[str, Any], now: datetime) -> dict[str, Any]:
             "note": (
                 "normalized chat engine is the only engine; the first boot folds "
                 "pre-cutover databases; there is no engine flag, so rollback means "
-                "restoring the pre-fold backup and reverting the deploy"
+                "restoring the pre-fold backup and reverting the deploy, and only "
+                "if `finitechat-server rollback-check --sqlite PATH` passes; "
+                "otherwise roll forward"
             ),
         },
     }
@@ -1604,7 +1606,8 @@ def render_human(report: dict[str, Any]) -> str:
         f"Overall {badge(report['overall_status'])}; exit {report['exit_code']}",
         f"[AMBER] chat engine rollback window open "
         f"(since {CHAT_ENGINE_ROLLOUT_WINDOW_SINCE}); rollback = restore pre-fold "
-        f"backup + revert deploy; reader/fold deletion PR due by "
+        f"backup + revert deploy only if `finitechat-server rollback-check` passes, "
+        f"otherwise roll forward; reader/fold deletion PR due by "
         f"{CHAT_ENGINE_ROLLOUT_DELETION_DEADLINE}",
         "",
     ]
