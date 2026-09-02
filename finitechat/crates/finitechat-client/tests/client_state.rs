@@ -2907,6 +2907,10 @@ fn rekey_room_heals_receiver_wedged_by_rewound_sender() {
     assert_eq!(pair.sync_a(&options).unwrap().applied_entries.len(), 4);
     let frozen_cursor = pair.a.last_applied_seq(ROOM_ID).unwrap();
     pair.restore_b(&t1);
+    // The currency gate would refuse this rewound sender (pinned by the
+    // currency-gate tests); this test pins the receiver's wedge and the
+    // rekey heal, so step around the gate deliberately.
+    pair.b.bypass_currency_gate_for_tests(ROOM_ID);
 
     // Wedge: the rewound sender's entry is accepted by the server but the
     // receiver's tick aborts on it and the cursor stays frozen.
@@ -2943,7 +2947,20 @@ fn rekey_room_heals_receiver_wedged_by_rewound_sender() {
     assert_eq!(commit_page.entries[0].message_id, report.message_id);
     assert_eq!(commit_page.entries[0].kind, LogEntryKind::Commit);
 
-    // The rewound sender applies the commit on its next sync.
+    // The rewound sender's first sync re-pages its own pre-rewind entry and
+    // the currency gate records the rewind evidence (the tick fails); the
+    // next tick advances past own entries, applies the healing commit, and
+    // the epoch bump clears the evidence.
+    let behind = pair.sync_b(&options).unwrap_err();
+    assert!(
+        matches!(
+            behind,
+            RuntimeWorkerError::ClientStore(ClientStoreError::Client(
+                ClientError::DeviceStateBehindServer { .. }
+            ))
+        ),
+        "expected the currency gate to record the rewind, got {behind:?}"
+    );
     let b_report = pair.sync_b(&options).unwrap();
     assert_eq!(pair.b.group_epoch(ROOM_ID).unwrap(), 2);
     assert!(b_report.applied_entries.iter().any(|entry| {
