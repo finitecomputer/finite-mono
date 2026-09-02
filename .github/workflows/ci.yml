@@ -20,6 +20,12 @@ permissions:
 
 env:
   CACHIX_CACHE_NAME: finite
+  # Authenticate Nix `github:` flake fetches so shared runner egress does not
+  # burn the unauthenticated GitHub API quota. Hermes itself is pinned to a
+  # direct archive URL below, but the rest of the flake graph still contains
+  # normal GitHub inputs such as nixpkgs, crane, disko, and flake-utils.
+  NIX_CONFIG: |
+    access-tokens = github.com=${{ github.token }}
 
 jobs:
   changes:
