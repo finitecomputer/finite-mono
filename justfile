@@ -59,12 +59,6 @@ brain-product-matrix:
 chat-device-parity:
     just chat chat-device-parity
 
-chat-electron-check:
-    just chat chat-electron-check
-
-chat-electron-package:
-    just chat chat-electron-package
-
 chat-history-stress:
     just chat chat-history-stress
 
@@ -110,9 +104,6 @@ identity-conformance:
 
 identity-edge-contract:
     just identity identity-edge-contract
-
-ios-cloud-preflight:
-    just chat ios-cloud-preflight
 
 lat1-healthcheck-contract:
     just nixos lat1-healthcheck-contract

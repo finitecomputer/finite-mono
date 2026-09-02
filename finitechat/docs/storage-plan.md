@@ -5,7 +5,7 @@
 Use three storage profiles:
 
 - Client/device: encrypted local SQLite for MLS client state, pending outbound
-  work, inbound event cache, and device-linking state.
+  work, and inbound event cache.
 - Local/dev, first server proof, and self-hosted single-node production: SQLite.
 - Hosted multi-node room server: Postgres.
 
@@ -218,7 +218,6 @@ Postgres shape:
 - `room_membership_intervals`
 - `key_packages`
 - `welcomes`
-- `link_sessions`
 - `idempotency_records`
 
 The store still uses SQLite for local/dev and first-server proof, but the
@@ -288,9 +287,7 @@ The Postgres schema should keep this same model:
 - `key_packages`
 - `welcomes`
 - `idempotency_records`
-- `link_sessions`
 - `repair_reports`
-- `push_outbox`
 
 The critical transaction remains the same:
 
@@ -303,8 +300,7 @@ The critical transaction remains the same:
 7. update membership interval cache;
 8. consume KeyPackages;
 9. release Welcomes with opaque Welcome and ratchet-tree bytes;
-10. persist idempotency response;
-11. enqueue opaque push wakes.
+10. persist idempotency response.
 
 The mutation path must not reconstruct the full room log. Full log validation is
 for read/replay paths; append and Commit validation use the indexed room head,

@@ -5,7 +5,6 @@ import {
   HostedDeviceRequestError,
   hostedDeviceAuthorizeAgentBinding,
   hostedDeviceAction,
-  hostedDeviceApproveLink,
   hostedDeviceAttachments,
   hostedDeviceBrainIdentityProvider,
   hostedDeviceConfig,
@@ -13,8 +12,6 @@ import {
   hostedDeviceHeaders,
   hostedDeviceOwnerChatAccountId,
   hostedDeviceProfileImage,
-  hostedDeviceLinkStatus,
-  hostedDeviceReconcileDevice,
   hostedDeviceRuntimeCommand,
   hostedDeviceSitesIdentityProvider,
   hostedDeviceState,
@@ -148,10 +145,6 @@ test("hosted-device diagnostic paths never expose resource identifiers", () => {
       "/v1/app/attachments/private-room/private-message/private-attachment"
     ),
     "/v1/app/attachments/:room/:message/:attachment"
-  );
-  assert.equal(
-    hostedDeviceDiagnosticPath("/v1/device-links/private-operation?secret=value"),
-    "/v1/device-links/:operation"
   );
   assert.equal(hostedDeviceDiagnosticPath("/v1/app/state/private-value"), "/unknown");
   assert.equal(hostedDeviceDiagnosticPath("/private/account/path"), "/unknown");
@@ -449,210 +442,6 @@ test("owner claim replay is an explicit narrow request", async (context) => {
 
   assert.match(observedBody, /"command":"agent\.owner\.claim"/u);
   assert.match(observedBody, /"reuse_succeeded_owner_claim":true/u);
-});
-
-test("device linking stays server-side and projects only public progress", async (context) => {
-  const originalFetch = global.fetch;
-  context.after(() => {
-    global.fetch = originalFetch;
-  });
-  const observed: Array<{ url: string; headers: Headers; body: string }> = [];
-  global.fetch = (async (input, init) => {
-    observed.push({
-      url: String(input),
-      headers: new Headers(init?.headers),
-      body: String(init?.body),
-    });
-    return Response.json({
-      pairing_session_id: "pairing-alpha",
-      target_device_id: "electron-alpha",
-      status: observed.length === 1 ? "awaiting_offer" : "ready",
-      expires_at_unix_seconds: 1_800_000_600,
-      room_count: 2,
-      active_room_count: observed.length === 1 ? 0 : 2,
-      bootstrap_manifests:
-        observed.length === 1
-          ? []
-          : [
-              {
-                bootstrap_id: "pairing-alpha",
-                room_id: "room-one",
-                manifest_sha256: "11".repeat(32),
-              },
-              {
-                bootstrap_id: "pairing-alpha",
-                room_id: "room-two",
-                manifest_sha256: "22".repeat(32),
-              },
-            ],
-      ...(observed.length === 1
-        ? {
-            source_descriptor: {
-              version: 1,
-              source_public_key: "a".repeat(64),
-              session_secret_hex: "b".repeat(64),
-              expires_at_unix_seconds: 1_800_000_120,
-            },
-          }
-        : {}),
-      account_secret_hex: "must-never-cross-the-dashboard-boundary",
-      encrypted_payload: [1, 2, 3],
-    });
-  }) as typeof fetch;
-
-  const input = {
-    pairing_session_id: "pairing-alpha",
-    target_device_id: "electron-alpha",
-  };
-  const approved = await hostedDeviceApproveLink(
-    { baseUrl: "https://device.internal", apiToken: "internal-token" },
-    verifiedAccount,
-    input
-  );
-  const ready = await hostedDeviceLinkStatus(
-    { baseUrl: "https://device.internal", apiToken: "internal-token" },
-    verifiedAccount,
-    input
-  );
-
-  assert.deepEqual(approved, {
-    ...input,
-    status: "awaiting_offer",
-    expires_at_unix_seconds: 1_800_000_600,
-    room_count: 2,
-    active_room_count: 0,
-    bootstrap_manifests: [],
-    source_descriptor: {
-      version: 1,
-      source_public_key: "a".repeat(64),
-      session_secret_hex: "b".repeat(64),
-      expires_at_unix_seconds: 1_800_000_120,
-    },
-  });
-  assert.equal(ready.status, "ready");
-  assert.deepEqual(
-    observed.map(({ url }) => url),
-    [
-      "https://device.internal/v1/device-links/approve",
-      "https://device.internal/v1/device-links/status",
-    ]
-  );
-  for (const request of observed) {
-    assert.equal(request.headers.get("x-finite-workos-user-id"), "user_paul");
-    assert.deepEqual(JSON.parse(request.body), input);
-  }
-  assert.equal("account_secret_hex" in approved, false);
-  assert.equal("encrypted_payload" in approved, false);
-
-  const duplicateManifest = {
-    bootstrap_id: "pairing-alpha",
-    room_id: "room-one",
-    manifest_sha256: "11".repeat(32),
-  };
-  global.fetch = (async () =>
-    Response.json({
-      ...input,
-      status: "ready",
-      expires_at_unix_seconds: 1_800_000_600,
-      room_count: 2,
-      active_room_count: 2,
-      bootstrap_manifests: [duplicateManifest, duplicateManifest],
-    })) as typeof fetch;
-  await assert.rejects(
-    hostedDeviceLinkStatus(
-      { baseUrl: "https://device.internal", apiToken: "internal-token" },
-      verifiedAccount,
-      input
-    ),
-    /invalid response/u
-  );
-});
-
-test("Device reconciliation is project-bound and projects only public progress", async (context) => {
-  const originalFetch = global.fetch;
-  context.after(() => {
-    global.fetch = originalFetch;
-  });
-  let observedUrl = "";
-  let observedInit: RequestInit | undefined;
-  global.fetch = (async (input, init) => {
-    observedUrl = String(input);
-    observedInit = init;
-    return Response.json({
-      project_id: "project-alpha",
-      target_device_id: "electron-alpha",
-      status: "joining_rooms",
-      room_count: 4,
-      active_room_count: 2,
-      account_secret_hex: "must-never-cross-the-dashboard-boundary",
-      recovery_bundle: { ciphertext: "also-private" },
-    });
-  }) as typeof fetch;
-
-  const result = await hostedDeviceReconcileDevice(
-    { baseUrl: "https://device.internal", apiToken: "internal-token" },
-    verifiedAccount,
-    {
-      project_id: "project-alpha",
-      target_device_id: "electron-alpha",
-    }
-  );
-
-  assert.equal(observedUrl, "https://device.internal/v1/device-links/reconcile");
-  assert.equal(observedInit?.method, "POST");
-  assert.equal(observedInit?.cache, "no-store");
-  const headers = new Headers(observedInit?.headers);
-  assert.equal(headers.get("authorization"), "Bearer internal-token");
-  assert.equal(headers.get("x-finite-workos-user-id"), "user_paul");
-  assert.deepEqual(JSON.parse(String(observedInit?.body)), {
-    project_id: "project-alpha",
-    target_device_id: "electron-alpha",
-  });
-  assert.deepEqual(result, {
-    project_id: "project-alpha",
-    target_device_id: "electron-alpha",
-    status: "joining_rooms",
-    room_count: 4,
-    active_room_count: 2,
-  });
-  assert.equal("account_secret_hex" in result, false);
-  assert.equal("recovery_bundle" in result, false);
-});
-
-test("Device reconciliation rejects mismatched or malformed service progress", async (context) => {
-  const originalFetch = global.fetch;
-  context.after(() => {
-    global.fetch = originalFetch;
-  });
-  const valid = {
-    project_id: "project-alpha",
-    target_device_id: "electron-alpha",
-    status: "ready",
-    room_count: 4,
-    active_room_count: 4,
-  };
-  const invalid = [
-    { ...valid, project_id: "project-other" },
-    { ...valid, target_device_id: "electron-other" },
-    { ...valid, status: "awaiting_claim" },
-    { ...valid, room_count: -1 },
-    { ...valid, active_room_count: 5 },
-  ];
-
-  for (const response of invalid) {
-    global.fetch = (async () => Response.json(response)) as typeof fetch;
-    await assert.rejects(
-      hostedDeviceReconcileDevice(
-        { baseUrl: "https://device.internal", apiToken: "internal-token" },
-        verifiedAccount,
-        {
-          project_id: "project-alpha",
-          target_device_id: "electron-alpha",
-        }
-      ),
-      /Device reconciliation service returned an invalid response/u
-    );
-  }
 });
 
 test("a hosted-device core error envelope is kept on the request error", async (context) => {

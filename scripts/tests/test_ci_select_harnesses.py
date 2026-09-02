@@ -104,7 +104,6 @@ class CiHarnessSelectionTests(unittest.TestCase):
     def test_nix_consuming_ci_jobs_configure_cachix_read_only(self) -> None:
         for job_id in (
             "rust",
-            "electron-alpha",
             "skills-check",
             "monitoring-nixos-contract",
             "finite-status-contract",
@@ -228,10 +227,7 @@ class CiHarnessSelectionTests(unittest.TestCase):
         values = selection_for(".github/workflows/ci.yml")
 
         for key, value in values.items():
-            if key == "run_electron_alpha":
-                self.assertEqual(value, "false")
-            else:
-                self.assertEqual(value, "true", key)
+            self.assertEqual(value, "true", key)
 
     def test_non_ci_workflow_selects_nix_checks(self) -> None:
         self.assertEqual(
@@ -243,19 +239,13 @@ class CiHarnessSelectionTests(unittest.TestCase):
         values = selection_for("pnpm-workspace.yaml")
 
         for key, value in values.items():
-            if key == "run_electron_alpha":
-                self.assertEqual(value, "false")
-            else:
-                self.assertEqual(value, "true", key)
+            self.assertEqual(value, "true", key)
 
     def test_unknown_root_script_selects_every_active_harness(self) -> None:
         values = selection_for("scripts/new_domain_helper.py")
 
         for key, value in values.items():
-            if key == "run_electron_alpha":
-                self.assertEqual(value, "false")
-            else:
-                self.assertEqual(value, "true", key)
+            self.assertEqual(value, "true", key)
 
     def test_dashboard_lib_change_skips_browser_e2e(self) -> None:
         self.assertEqual(
@@ -395,10 +385,7 @@ class CiHarnessSelectionTests(unittest.TestCase):
         values = selection.values()
 
         for key, value in values.items():
-            if key == "run_electron_alpha":
-                self.assertEqual(value, "false")
-            else:
-                self.assertEqual(value, "true", key)
+            self.assertEqual(value, "true", key)
 
     def test_changed_file_workflow_path_selects_nix_checks(self) -> None:
         args = argparse.Namespace(

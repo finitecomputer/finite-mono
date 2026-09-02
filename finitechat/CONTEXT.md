@@ -218,8 +218,7 @@ _Avoid_: Unit fixture, row-level cleanup, transient diagnostics
   **Direct Agent Principal**.
 - A **Direct Agent Principal** is appropriate for bots or shared agents that
   should appear as their own participant or resource principal.
-- A **Hosted Web Device** is one revocable **Device**; Electron enrolls a
-  separate Device whose key and store remain local.
+- A **Hosted Web Device** is one revocable **Device**.
 - A **Hosted Web Device** may decrypt its Rooms by design, so SaaS web chat is
   not described as browser E2EE even though the room server stores ciphertext.
 - The **Hosted Web Device** is also the hosted custody location for the human's
@@ -319,20 +318,6 @@ _Avoid_: Unit fixture, row-level cleanup, transient diagnostics
   filenames, or plaintext media metadata unless a future debug-only export flow
   is designed with explicit user confirmation. Before first release, export is
   local copy/share only; the app does not automatically upload debug logs.
-- The **Product-State Harness** toggles server availability while preserving
-  the same scenario account, device identity, server URL, config path, and
-  client store. Cleanup happens only through one documented whole-store reset
-  command between scenario runs.
-- The **Product-State Harness** treats physical phone proof as the same product
-  matrix after simulator success, not as a separate looser smoke test. The
-  phone gate requires a phone hardware UDID or CoreDevice identifier, a signing
-  team from `--ios-development-team` or `RMP_IOS_DEVELOPMENT_TEAM`, and valid
-  local Xcode account/provisioning setup for the chosen development team.
-- The **Product-State Harness** covers ordinary product flows; corrupted local
-  state belongs to explicitly named repair tests.
-- Pre-release app-support stores such as `FiniteChat/<device>` are reset-only
-  state. Normal iOS startup does not recover or migrate them into product
-  state.
 - Pre-release app-message JSON files and legacy SQL app projection schemas are
   also reset-only. Runtime startup does not import `app-messages.json`, and
   client store open rejects old `client_app_messages`/`client_app_events`
@@ -358,9 +343,6 @@ _Avoid_: Unit fixture, row-level cleanup, transient diagnostics
 
 > **Dev:** "If Hermes is broken, is chat broken?"
 > **Domain expert:** "No. The Finite Chat Daemon still owns sync, Runtime State, and recovery commands while the host is online."
-
-> **Dev:** "Does Electron reuse the Hosted Web Device?"
-> **Domain expert:** "No. The same account enrolls Electron as another Device, and Electron keeps that Device's key and store locally."
 
 > **Dev:** "After scanning an invite and entering the PIN, does the inviter need to tap Accept?"
 > **Domain expert:** "No. The correct PIN is the approval ceremony; valid Room Admission is automatic."

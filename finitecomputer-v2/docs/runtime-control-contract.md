@@ -21,8 +21,7 @@ skills. They do not become Runtime Management Pipe commands or status fields.
 - A user can create a hosted agent from the dashboard.
 - Core records the provider runtime handle, image/runtime artifact, and Finite
   Private grant/key state.
-- Dashboard web chat uses a Hosted Web Device; Electron and native clients can
-  enroll as additional independent Finite Chat Devices.
+- Dashboard web chat uses a Hosted Web Device.
 - Dashboard-owned runtime controls are limited to the exact operations in
   Core's persisted Runtime capability envelope. Missing capabilities expose no
   controls. Purge User Data is a separate retention/export workflow, not a

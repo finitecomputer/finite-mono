@@ -63,56 +63,8 @@ pub struct HttpApplicationDeliveryEffect {
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ApplicationEffectCountsResponse {
-    pub push_outbox: u32,
     pub unread: u32,
     pub command_inbox: u32,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub struct PushWakePayload {
-    pub room_id: String,
-    pub seq: HttpSequence,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub struct PushWakeDelivery {
-    pub wake_id: String,
-    pub payload: PushWakePayload,
-    pub tokens: Vec<PushTokenRecord>,
-    pub attempt: u32,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub struct ClaimPushWakesRequest {
-    pub now_ms: u64,
-    pub lease_ms: u64,
-    pub limit: usize,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub struct ClaimPushWakesResponse {
-    pub wakes: Vec<PushWakeDelivery>,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub struct AckPushWakeRequest {
-    pub wake_id: String,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub struct AckPushWakeResponse {
-    pub acked: bool,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub struct FailPushWakeRequest {
-    pub wake_id: String,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub struct FailPushWakeResponse {
-    pub retry: bool,
-    pub dropped: bool,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -364,85 +316,6 @@ pub struct HttpKeyPackageClaim {
     pub claimed: Option<HttpClaimedKeyPackage>,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub struct CreatePairingSessionRequest {
-    pub version: u16,
-    pub pairing_session_id: String,
-    pub target_device_id: String,
-    pub target_public_key: String,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub struct HttpNipAbSourceDescriptorV1 {
-    pub version: u16,
-    pub source_public_key: String,
-    pub session_secret_hex: String,
-    pub expires_at_unix_seconds: u64,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub struct GetPairingSessionRequest {
-    pub pairing_session_id: String,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub struct PublishPairingOfferRequest {
-    pub pairing_session_id: String,
-    pub offer_event: Vec<u8>,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub struct PublishPairingResponseRequest {
-    pub pairing_session_id: String,
-    pub source_confirmation_event: Vec<u8>,
-    pub payload_event: Vec<u8>,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub struct PublishPairingCompleteRequest {
-    pub pairing_session_id: String,
-    pub complete_event: Vec<u8>,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub struct ExpirePairingSessionRequest {
-    pub pairing_session_id: String,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub struct ExpirePairingSessionResponse {
-    pub expired: bool,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub struct HttpPairingSessionRecord {
-    pub version: u16,
-    pub pairing_session_id: String,
-    pub target_device_id: String,
-    pub target_public_key: String,
-    pub issued_at_unix_seconds: u64,
-    pub expires_at_unix_seconds: u64,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub source_public_key: Option<String>,
-    pub events: Vec<HttpPairingEventRecord>,
-    pub state: HttpPairingSessionState,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub struct HttpPairingEventRecord {
-    pub seq: u16,
-    pub event: Vec<u8>,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub enum HttpPairingSessionState {
-    Created,
-    OfferPublished,
-    ResponsePublished,
-    Completed,
-    Expired,
-}
-
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct SaveAccountRoomRequest {
     pub account_id: String,
@@ -505,44 +378,6 @@ pub struct AckWelcomeRequest {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AckWelcomeResponse {
     pub acked: bool,
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum PushPlatform {
-    Apns,
-    Fcm,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub struct RegisterPushTokenRequest {
-    pub device: DeviceRef,
-    pub platform: PushPlatform,
-    pub token: String,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub struct RegisterPushTokenResponse {
-    pub registered: bool,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub struct RemovePushTokenRequest {
-    pub device: DeviceRef,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub token: Option<String>,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub struct RemovePushTokenResponse {
-    pub removed: bool,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub struct PushTokenRecord {
-    pub device: DeviceRef,
-    pub platform: PushPlatform,
-    pub token: String,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -665,18 +500,6 @@ impl AccountScopedRequest for SaveAccountRoomRequest {
 impl AccountScopedRequest for ListAccountRoomDirectoryRequest {
     fn signer_account_id(&self) -> &str {
         &self.account_id
-    }
-}
-
-impl AccountScopedRequest for RegisterPushTokenRequest {
-    fn signer_account_id(&self) -> &str {
-        &self.device.account_id
-    }
-}
-
-impl AccountScopedRequest for RemovePushTokenRequest {
-    fn signer_account_id(&self) -> &str {
-        &self.device.account_id
     }
 }
 

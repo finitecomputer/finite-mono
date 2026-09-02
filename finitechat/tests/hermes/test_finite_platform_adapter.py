@@ -509,9 +509,6 @@ class FinitePlatformAdapterTests(unittest.TestCase):
         self.assertEqual(observed, ["a1" * 32, None])
         self.assertIsNone(module._AUTHENTICATED_FINITE_TURN_USER.get())
 
-    def test_adapter_disables_edit_streaming_for_ios_rendering_compatibility(self):
-        self.assertFalse(self.module.FiniteChatAdapter.SUPPORTS_MESSAGE_EDITING)
-
     def test_clarification_uses_hermes_prompt_on_exact_ordinary_message_route(self):
         adapter = self.adapter()
         calls = []

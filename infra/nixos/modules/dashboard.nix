@@ -21,7 +21,6 @@
       HOSTNAME = "127.0.0.1"; # Next.js bind address (loopback-only)
       PORT = "3000";
       FC_WORKOS_AUTH_ENABLED = "true";
-      FC_WORKOS_IOS_CLIENT_ID = "client_01KYA32JRWEE23J7QW1F882DVA";
       FC_DASHBOARD_RUNTIME_MODE = "customer";
       FC_DASHBOARD_DEFAULT_RUNNER_CLASS = "kata";
       FC_DASHBOARD_RUNNER_CLASSES = "kata";

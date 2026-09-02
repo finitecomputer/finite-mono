@@ -11,7 +11,6 @@ import {
   workosLogoutReturnTo,
   workosProtectedPath,
   workosProxyBypassPath,
-  workosProxyBypassRequest,
   workosSessionCookieName,
 } from "./workos-auth";
 
@@ -94,52 +93,11 @@ test("WorkOS proxy bypasses auth endpoints and unauthenticated runtime callbacks
   assert.equal(workosProxyBypassPath("/signup"), true);
   assert.equal(workosProxyBypassPath("/callback"), true);
   assert.equal(workosProxyBypassPath("/logout"), true);
-  assert.equal(workosProxyBypassPath("/api/device-links/approve"), false);
-  assert.equal(workosProxyBypassPath("/api/device-links/status"), false);
-  assert.equal(workosProxyBypassPath("/api/device-links/enroll"), true);
-  assert.equal(workosProxyBypassPath("/api/device-links/account-binding"), false);
-  assert.equal(workosProxyBypassPath("/api/device-links/approve/other"), false);
   assert.equal(workosProxyBypassPath("/health"), true);
   assert.equal(workosProxyBypassPath("/_admin"), false);
   assert.equal(workosProxyBypassPath("/_admin/brains"), false);
   assert.equal(workosProxyBypassPath("/api/finite/v1/heartbeat"), false);
   assert.equal(workosProxyBypassPath("/api/stripe/webhook"), true);
-});
-
-test("WorkOS proxy bypasses native device links only for bearer requests", () => {
-  assert.equal(
-    workosProxyBypassRequest(
-      "/api/device-links/approve",
-      new Headers({ authorization: "Bearer aaa.bbb.ccc" })
-    ),
-    true
-  );
-  assert.equal(
-    workosProxyBypassRequest(
-      "/api/device-links/status",
-      new Headers({ authorization: "Bearer invalid" })
-    ),
-    true
-  );
-  assert.equal(
-    workosProxyBypassRequest("/api/device-links/approve", new Headers()),
-    false
-  );
-  assert.equal(
-    workosProxyBypassRequest(
-      "/api/device-links/approve",
-      new Headers({ authorization: "Basic credential" })
-    ),
-    false
-  );
-  assert.equal(
-    workosProxyBypassRequest(
-      "/api/device-links/approve/other",
-      new Headers({ authorization: "Bearer aaa.bbb.ccc" })
-    ),
-    false
-  );
-  assert.equal(workosProxyBypassRequest("/login", new Headers()), true);
 });
 
 test("WorkOS auth redirects only for interactive browser navigations", () => {

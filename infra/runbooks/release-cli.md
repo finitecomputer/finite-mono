@@ -17,8 +17,7 @@ alias rather than GitHub's repository-wide `releases/latest` pointer:
 The release workflows publish CLI archives for linux-x86_64, macos-aarch64,
 and macos-x86_64, each with a `.sha256` sibling. `fsite` also publishes
 `finitesitesd` for linux-x86_64; `fbrain` also publishes `finite-brain` for
-linux-x86_64. The Electron experiment is on hold and is not part of the CLI CD
-release path.
+linux-x86_64.
 
 Install URL shape:
 
@@ -33,7 +32,6 @@ Install URL shape:
   it unset for shadow runs so disposable tags cannot publish.
 - The version is newer than `git tag -l '<component>/v*'`, and the matching
   release-repository tag does not already identify different metadata.
-- The release does not depend on Electron packaging.
 
 ## Release-host backfill
 
@@ -44,7 +42,7 @@ with:
 python3 scripts/backfill_releases.py
 ```
 
-The script copies versioned non-Electron assets first, then refreshes each
+The script copies versioned assets first, then refreshes each
 rolling alias once to the newest copied version. Use `--dry-run` before a
 mutation and repeated `--tag <component>/vX.Y.Z` arguments for a targeted
 repair.

@@ -165,14 +165,6 @@ CI runs both sides of the boundary:
   Chat adapter, and asserts transport/media round trips. It installs an echo
   `set_message_handler` callback, so it is adapter transport coverage, not real
   Hermes model behavior.
-- `scripts/ios-hermes-agent-media-e2e.sh` repeats that adapter transport/media
-  round trip through the iOS Simulator app. It also uses an echo callback and
-  must not be cited as proof that the real Hermes gateway answered.
-- `scripts/ios-device-hermes-agent-media-e2e.sh` is the physical-phone version
-  of the same echo-handler transport test. It requires an already installed
-  `computer.finite.finitechat` build, an unlocked/awake paired iPhone, and a
-  Mac LAN server URL so the phone talks to the same configured server instead
-  of Mac loopback.
 - `scripts/hermes-real-gateway-demo.sh` is the repo-local real Hermes runner:
   it starts a local Finite Chat server, initializes a Hermes agent home, loads
   the finitechat plugin into a prepared Hermes checkout, and runs

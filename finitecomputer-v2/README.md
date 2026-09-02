@@ -14,7 +14,7 @@ This repo is for the product we are building now:
    preserved provider-durable state. Full Recovery Snapshot, key-backup, and
    empty-target restore support is an explicit post-MVP TODO, not a launch gate.
 6. A Finite Chat Hosted Web Device gives the dashboard the proven web-chat
-   experience; Electron and native apps can enroll later as additional Devices.
+   experience.
 7. Product features ship through their owning services, UI, stable CLIs, and
    skills. They do not expand Runtime Management into a feature control plane.
 8. The agent uses Finite Sites, Finite Brain, `finite-skills`, and Finite
