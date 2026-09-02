@@ -1324,6 +1324,32 @@ fn decode_key_package_owner(owner_json: &str) -> Result<Option<DecodedKeyPackage
     }))
 }
 
+/// Count rows in `table` (optionally filtered) when the table exists in
+/// this database; zero when it does not.
+fn count_table_rows(conn: &Connection, table: &str, filter: Option<&str>) -> Result<i64, CliError> {
+    let exists: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = ?1",
+            [table],
+            |row| row.get(0),
+        )
+        .map_err(|error| {
+            CliError::operational(format!(
+                "failed to inspect server sqlite for {table}: {error}"
+            ))
+        })?;
+    if exists == 0 {
+        return Ok(0);
+    }
+    let sql = match filter {
+        Some(filter) => format!("SELECT COUNT(*) FROM {table} WHERE {filter}"),
+        None => format!("SELECT COUNT(*) FROM {table}"),
+    };
+    conn.query_row(&sql, [], |row| row.get(0)).map_err(|error| {
+        CliError::operational(format!("failed to count {table} in server sqlite: {error}"))
+    })
+}
+
 fn read_server_delivery_snapshot(sqlite_path: &Path) -> Result<ServerDeliverySnapshot, CliError> {
     let conn = Connection::open(sqlite_path).map_err(|error| {
         CliError::operational(format!(
@@ -1331,10 +1357,14 @@ fn read_server_delivery_snapshot(sqlite_path: &Path) -> Result<ServerDeliverySna
             sqlite_path.display()
         ))
     })?;
-    let publish_messages = query_i64(
-        &conn,
-        "SELECT COUNT(*) FROM http_delivery_ops WHERE kind = 'publish_message'",
-    )?;
+    // Chat store swap: the normalized engine appends to delivery_entries;
+    // pre-cutover binaries wrote http_delivery_ops. Count both when present
+    // so the harness asserts against either generation of server binary
+    // (folded databases keep their frozen op tail, so the sum only ever
+    // over-counts, and the assertion is a lower bound).
+    let publish_messages =
+        count_table_rows(&conn, "http_delivery_ops", Some("kind = 'publish_message'"))?
+            + count_table_rows(&conn, "delivery_entries", None)?;
     let application_delivery_effects = query_i64(
         &conn,
         "SELECT COUNT(*) FROM http_application_delivery_effects",

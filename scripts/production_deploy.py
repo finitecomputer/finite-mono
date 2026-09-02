@@ -87,8 +87,8 @@ RISKY_RULES = (
         directory=True,
     ),
     RiskyRule(
-        "finitechat/crates/finitechat-server/src/legacy_store.rs",
-        "chat-server-legacy-store",
+        "finitechat/crates/finitechat-server/src/cutover.rs",
+        "chat-server-legacy-fold",
     ),
     RiskyRule("infra/nixos/modules/postgres.nix", "lat1-postgres-module"),
     RiskyRule("infra/nixos/modules/finite-saas-core.nix", "lat1-core-module"),

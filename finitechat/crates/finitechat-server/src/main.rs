@@ -24,8 +24,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             let Some(path) = options.sqlite_path else {
                 return Err("snapshot requires --sqlite PATH".into());
             };
-            // Boot (snapshot + op-log tail replay) and write a fresh durable
-            // snapshot, so an operator can compact a stopped server's store
+            // Boot and write a fresh room-state checkpoint, so an operator
+            // can compact a stopped server's boot tail.
             // without waiting for the op-interval trigger.
             let state = finitechat_server::HttpServerState::from_sqlite_path(&path)?;
             state
@@ -34,12 +34,29 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             println!("finitechat-server: state snapshot written to {path}");
             Ok(())
         }
+        Some("rollback-check") => {
+            let options = ServeOptions::parse(&args[1..])?;
+            let Some(path) = options.sqlite_path else {
+                return Err("rollback-check requires --sqlite PATH".into());
+            };
+            // Read-only verdict on whether restoring the pre-fold backup
+            // over this database can still rewind no client (chat store
+            // swap rollback window). Exit 0 only when it can.
+            let check = finitechat_server::rollback_check(Path::new(&path))?;
+            println!("{}", serde_json::to_string(&check)?);
+            if check.rollback_allowed {
+                Ok(())
+            } else {
+                eprintln!("finitechat-server: rollback refused: {}", check.reason);
+                std::process::exit(1)
+            }
+        }
         Some("smoke") | None => {
             smoke();
             Ok(())
         }
         Some(command) => Err(format!(
-            "unknown command '{command}'; expected 'serve [addr] [--sqlite PATH] [--public-url URL]', 'snapshot --sqlite PATH', 'push-drain [options]', or 'smoke'"
+            "unknown command '{command}'; expected 'serve [addr] [--sqlite PATH] [--public-url URL]', 'snapshot --sqlite PATH', 'rollback-check --sqlite PATH', 'push-drain [options]', or 'smoke'"
         )
         .into()),
     }
@@ -57,7 +74,12 @@ async fn serve(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
             create_sqlite_parent_dir(&path)?;
             HttpServerState::from_sqlite_path(path)?
         }
-        None => HttpServerState::default(),
+        None => {
+            // In-memory servers have no durable state to roll back, but the
+            // banner keeps the transitional window visible on every boot.
+            finitechat_server::print_engine_rollout_banner();
+            HttpServerState::new()
+        }
     };
     if let Some(public_url) = public_url {
         state = state.with_public_url(public_url)?;

@@ -78,22 +78,50 @@ pub fn finite_delivery_limits() -> HttpDeliveryLimits {
 }
 
 mod auth;
-mod legacy_store;
+/// One-time op-log fold of a pre-cutover database onto the normalized
+/// engine, plus the minimal legacy READER that feeds it. Transitional:
+/// PR 2 (`cleanup/chat-store-delete-old`) deletes this module wholesale
+/// before 2026-09-25.
+mod cutover;
 mod projections;
 mod routes;
-mod state; // The normalized SQLite delivery engine (storage rewrite, Core PR 3). Nothing
-// is routed to it yet: the server still runs the legacy op-log engine, and the
-// engine is proven by the upstream conformance suite in its unit tests. The
-// `allow(dead_code)` comes off when the server switches engines.
-#[allow(dead_code)]
+mod state;
+// The normalized SQLite delivery engine — the only engine. There is no
+// runtime flag and no second engine: a durable boot either folds a
+// pre-cutover database (marker-gated, see `cutover`) or starts fresh.
 mod store;
 mod validate;
 
+pub use cutover::{RollbackCheck, rollback_check};
 pub use routes::http_router;
 pub use state::{
     DEFAULT_RATE_LIMIT_PER_WINDOW, DEFAULT_RATE_LIMIT_WINDOW_SECONDS, HttpServerState,
     WelcomeClaimState,
 };
+
+/// Date the chat store swap cutover (PR 1) opened the rollback window. The
+/// boot banner, `scripts/finite-status`'s amber line, and the dated
+/// deletion-deadline test all key off dates in this module; PR 2 deletes
+/// all of them.
+pub const CHAT_ENGINE_ROLLOUT_SINCE: &str = "2026-08-31";
+
+/// Print the transitional rollback-window banner on stderr. Every durable
+/// server boot prints this while the legacy reader/fold code is still
+/// compiled, so an operator ssh-ing onto a host cannot miss that the
+/// database shape is mid-swap and the deletion PR is pending.
+pub fn print_engine_rollout_banner() {
+    eprintln!(
+        "FINITECHAT SERVER — ROLLBACK WINDOW OPEN (since {CHAT_ENGINE_ROLLOUT_SINCE})\n\
+         The normalized delivery engine is the only engine; the first boot\n\
+         on a pre-cutover database runs the one-time op-log fold. There is\n\
+         no engine flag: rolling the deploy back does NOT un-fold — restore\n\
+         the pre-fold backup only if `finitechat-server rollback-check\n\
+         --sqlite PATH` passes; otherwise roll forward (the restore is\n\
+         refused once any post-fold write exists). The legacy reader and\n\
+         fold code are deleted by cleanup/chat-store-delete-old before\n\
+         2026-09-25."
+    );
+}
 
 #[derive(Debug, Error)]
 pub enum HttpServerConfigurationError {
@@ -120,6 +148,18 @@ pub enum DurableStoreError {
          mint a successor snapshot, or restore from backup."
     )]
     LegacySnapshotWithoutV2Successor { last_op_seq: i64 },
+    #[error(
+        "op-log fold assertion failed, nothing was committed: {details}. The fold rolled back; \
+         boot refuses to switch engines on state it could not verify. Recovery: fix the \
+         underlying store (restore from backup) or keep the legacy engine."
+    )]
+    FoldAssertionFailed { details: String },
+    #[error(
+        "room-state checkpoint diverges from the delivery entries: {details}. Boot refuses to \
+         serve a projection it cannot re-derive. Recovery: restore the checkpoint from backup, \
+         or re-derive room state from full history (ADR 0003) on a scratch copy."
+    )]
+    CheckpointDivergence { details: String },
 }
 
 #[derive(Debug)]
@@ -653,5 +693,76 @@ fn kind_for_error(error: &HttpServerError) -> &'static str {
         HttpServerError::InvalidPageLimit { .. } => "invalid_page_limit",
         HttpServerError::ConflictingKeyPackage { .. } => "conflicting_key_package",
         HttpServerError::KeyPackageInventoryFull { .. } => "key_package_inventory_full",
+    }
+}
+
+#[cfg(test)]
+mod engine_cutover_tripwires {
+    use std::path::PathBuf;
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    /// PR 2 (`cleanup/chat-store-delete-old`) must land before this date.
+    /// After it, this test fails CI until the transitional reader/fold
+    /// module (`src/cutover.rs`) is deleted. Postponing the deletion means
+    /// consciously editing this constant in review — that is the point.
+    const LEGACY_READER_DELETION_DEADLINE: (i64, u32, u32) = (2026, 9, 25);
+
+    fn deadline_unix_seconds() -> i64 {
+        let (year, month, day) = LEGACY_READER_DELETION_DEADLINE;
+        // Days since 1970-01-01 for the (year, month, day) Gregorian date
+        // (Howard Hinnant's days_from_civil).
+        let years = year - if month <= 2 { 1 } else { 0 };
+        let era = if years >= 0 { years } else { years - 399 } / 400;
+        let year_of_era = years - era * 400;
+        let day_of_year = (153 * (if month > 2 { month - 3 } else { month + 9 }) + 2) / 5 + day - 1;
+        let day_of_era =
+            year_of_era * 365 + year_of_era / 4 - year_of_era / 100 + day_of_year as i64;
+        let days = era * 146_097 + day_of_era - 719_468;
+        days * 86_400
+    }
+
+    #[test]
+    fn legacy_reader_module_is_deleted_by_the_cutover_deadline() {
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("wall clock after the unix epoch")
+            .as_secs() as i64;
+        if now < deadline_unix_seconds() {
+            // Window still open: the transitional reader/fold is allowed to
+            // exist.
+            return;
+        }
+        let source = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("src")
+            .join("cutover.rs");
+        assert!(
+            !source.exists(),
+            "the chat store swap deletion deadline ({:?}) has passed and \
+             src/cutover.rs (the transitional legacy reader + fold) still exists: \
+             land PR 2 (cleanup/chat-store-delete-old) or consciously move \
+             LEGACY_READER_DELETION_DEADLINE in this test",
+            LEGACY_READER_DELETION_DEADLINE
+        );
+    }
+
+    #[test]
+    fn legacy_engine_is_gone_from_the_source_tree() {
+        // Single-deploy rework: the legacy SERVING engine was deleted in
+        // PR 1 itself. This tripwire keeps it deleted.
+        let manifest = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+        assert!(
+            !manifest.join("src").join("legacy_store.rs").exists(),
+            "src/legacy_store.rs must not come back: the legacy serving engine \
+             was deleted with the single-deploy cutover"
+        );
+    }
+
+    #[test]
+    fn rollback_window_dates_agree_across_the_tripwires() {
+        // The boot banner, the fold marker, and finite-status's amber line
+        // must all name the same window-open date or the operators stop
+        // trusting any of them.
+        assert_eq!(super::CHAT_ENGINE_ROLLOUT_SINCE, "2026-08-31");
+        assert_eq!(super::cutover::CHAT_ENGINE_CUTOVER_DATE, "2026-08-31");
     }
 }

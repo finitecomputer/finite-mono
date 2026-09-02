@@ -8,7 +8,11 @@
 //! head under the write lock.
 
 pub(crate) mod delivery;
+pub(crate) mod metadata;
+pub(crate) mod room_state;
 pub(crate) mod schema;
+
+pub(crate) use delivery::SqlDelivery;
 
 use std::path::Path;
 use std::sync::Mutex;
@@ -34,13 +38,17 @@ const SYNCHRONOUS_ENV: &str = "FINITECHAT_SQLITE_SYNCHRONOUS";
 /// Error produced inside a [`Store::write`] or [`Store::read`] closure.
 ///
 /// `Sqlite` is an infrastructure failure; `Domain` is a delivery-contract
-/// rejection. Either aborts the surrounding transaction (the write path rolls
-/// back), but they must stay distinct so the server layer can turn `Domain`
-/// into its existing HTTP error mapping while `Sqlite` surfaces as a 500.
+/// rejection; `Store` widens a durable-store failure (e.g. room-state
+/// checkpoint divergence surfaced during boot derivation). Any of them
+/// aborts the surrounding transaction (the write path rolls back), but they
+/// must stay distinct so the server layer can turn `Domain` into its
+/// existing HTTP error mapping while the others surface as a 500 or a
+/// refused boot.
 #[derive(Debug)]
 pub(crate) enum StoreTxError {
     Sqlite(rusqlite::Error),
     Domain(HttpServerError),
+    Store(DurableStoreError),
 }
 
 impl From<rusqlite::Error> for StoreTxError {
@@ -52,6 +60,12 @@ impl From<rusqlite::Error> for StoreTxError {
 impl From<HttpServerError> for StoreTxError {
     fn from(error: HttpServerError) -> Self {
         Self::Domain(error)
+    }
+}
+
+impl From<DurableStoreError> for StoreTxError {
+    fn from(error: DurableStoreError) -> Self {
+        Self::Store(error)
     }
 }
 
@@ -82,6 +96,7 @@ impl From<StoreTxError> for StoreWriteError {
         match error {
             StoreTxError::Sqlite(error) => Self::Store(DurableStoreError::Sqlite(error)),
             StoreTxError::Domain(error) => Self::Domain(error),
+            StoreTxError::Store(error) => Self::Store(error),
         }
     }
 }
@@ -137,6 +152,9 @@ impl Store {
     /// The read pool stays empty; [`Store::read`] falls back to the writer
     /// connection (see the type-level docs for why). WAL and `synchronous`
     /// are meaningless without a file, so only the common PRAGMAs apply.
+    /// `HttpServerState::new` (volatile tests/dev servers) and the
+    /// in-memory conformance harness use this; durable servers always open
+    /// a file.
     pub(crate) fn open_in_memory() -> Result<Store, DurableStoreError> {
         let writer = Connection::open_in_memory()?;
         configure_common(&writer)?;

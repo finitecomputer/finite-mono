@@ -64,40 +64,42 @@ async fn readyz_exercises_the_durable_write_path() {
     assert_eq!(body["checks"]["durable_store"]["status"], "ok");
 
     let database = rusqlite::Connection::open(&database).expect("inspect readiness evidence");
-    let first_checked_at_ms: i64 = database
+    let first_probe: String = database
         .query_row(
-            "SELECT checked_at_ms FROM http_readiness_probe WHERE id = 1",
+            "SELECT value FROM server_meta WHERE key = 'readiness_probe_ms'",
             [],
             |row| row.get(0),
         )
-        .expect("readiness timestamp");
+        .expect("readiness stamp");
     tokio::time::sleep(Duration::from_millis(20)).await;
     let cached_response = get(app, "/readyz").await;
     assert_eq!(cached_response.status(), StatusCode::OK);
-    let second_checked_at_ms: i64 = database
+    let second_probe: String = database
         .query_row(
-            "SELECT checked_at_ms FROM http_readiness_probe WHERE id = 1",
+            "SELECT value FROM server_meta WHERE key = 'readiness_probe_ms'",
             [],
             |row| row.get(0),
         )
-        .expect("cached readiness timestamp");
-    let readiness_rows: u64 = database
-        .query_row("SELECT count(*) FROM http_readiness_probe", [], |row| {
-            row.get(0)
-        })
+        .expect("cached readiness stamp");
+    let probe_rows: u64 = database
+        .query_row(
+            "SELECT count(*) FROM server_meta WHERE key = 'readiness_probe_ms'",
+            [],
+            |row| row.get(0),
+        )
         .expect("readiness row count");
-    let delivery_operations: u64 = database
-        .query_row("SELECT count(*) FROM http_delivery_ops", [], |row| {
+    let delivery_entries: u64 = database
+        .query_row("SELECT count(*) FROM delivery_entries", [], |row| {
             row.get(0)
         })
-        .expect("delivery operation count");
+        .expect("delivery entry count");
     assert_eq!(
-        second_checked_at_ms, first_checked_at_ms,
+        second_probe, first_probe,
         "fresh readiness results must be cached instead of committing again"
     );
-    assert_eq!(readiness_rows, 1, "the readiness table stays a singleton");
+    assert_eq!(probe_rows, 1, "the readiness stamp stays a singleton");
     assert_eq!(
-        delivery_operations, 0,
+        delivery_entries, 0,
         "readiness must not create user delivery history"
     );
 }
@@ -118,37 +120,34 @@ async fn readyz_adds_health_evidence_without_changing_existing_delivery_state() 
         .expect("persist existing delivery state");
     drop(state);
 
-    let legacy = rusqlite::Connection::open(&database).expect("legacy database");
-    let operations_before: u64 = legacy
-        .query_row("SELECT count(*) FROM http_delivery_ops", [], |row| {
+    let existing = rusqlite::Connection::open(&database).expect("existing database");
+    let entries_before: u64 = existing
+        .query_row("SELECT count(*) FROM delivery_entries", [], |row| {
             row.get(0)
         })
-        .expect("existing operation count");
-    assert_eq!(operations_before, 1);
-    legacy
-        .execute("DROP TABLE http_readiness_probe", [])
-        .expect("simulate the pre-readiness schema");
-    drop(legacy);
+        .expect("existing entry count");
+    assert_eq!(entries_before, 0);
+    let payloads_before: u64 = existing
+        .query_row("SELECT count(*) FROM sql_key_packages", [], |row| {
+            row.get(0)
+        })
+        .expect("existing KeyPackage count");
+    assert_eq!(payloads_before, 1);
+    drop(existing);
 
-    let state = HttpServerState::from_sqlite_path(&database).expect("upgrade existing state");
+    let state = HttpServerState::from_sqlite_path(&database).expect("reopen existing state");
     let app = http_router(state);
     let response = get(app.clone(), "/readyz").await;
     assert_eq!(response.status(), StatusCode::OK);
 
-    let upgraded = rusqlite::Connection::open(&database).expect("upgraded database");
-    let operations_after_readiness: u64 = upgraded
-        .query_row("SELECT count(*) FROM http_delivery_ops", [], |row| {
+    let probed = rusqlite::Connection::open(&database).expect("probed database");
+    let entries_after_readiness: u64 = probed
+        .query_row("SELECT count(*) FROM delivery_entries", [], |row| {
             row.get(0)
         })
-        .expect("operation count after readiness");
-    let readiness_rows: u64 = upgraded
-        .query_row("SELECT count(*) FROM http_readiness_probe", [], |row| {
-            row.get(0)
-        })
-        .expect("readiness row count");
-    assert_eq!(operations_after_readiness, operations_before);
-    assert_eq!(readiness_rows, 1);
-    drop(upgraded);
+        .expect("entry count after readiness");
+    assert_eq!(entries_after_readiness, entries_before);
+    drop(probed);
 
     let response = post_json(
         app,
@@ -160,17 +159,14 @@ async fn readyz_adds_health_evidence_without_changing_existing_delivery_state() 
     .await;
     assert_eq!(response.status(), StatusCode::OK);
     let claimed: Option<finitechat_delivery::HttpClaimedKeyPackage> = read_json(response).await;
-    let claimed = claimed.expect("existing KeyPackage survives schema addition and replay");
+    let claimed = claimed.expect("the existing KeyPackage survives the restart");
     assert_eq!(claimed.key_package_id, key_package_id);
     assert_eq!(claimed.owner, owner);
-
-    let after_claim = rusqlite::Connection::open(&database).expect("database after claim");
-    let operations_after_claim: u64 = after_claim
-        .query_row("SELECT count(*) FROM http_delivery_ops", [], |row| {
-            row.get(0)
-        })
-        .expect("operation count after claim");
-    assert_eq!(operations_after_claim, operations_before + 1);
+    assert_eq!(
+        claimed.key_package.bytes,
+        b"existing-key-package-bytes".to_vec(),
+        "the durable payload home must serve claim bytes across a restart"
+    );
 }
 
 #[tokio::test]
