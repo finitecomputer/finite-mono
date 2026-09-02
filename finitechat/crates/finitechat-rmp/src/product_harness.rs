@@ -1293,6 +1293,7 @@ fn assert_server_snapshot_contains_message(
     Ok(())
 }
 
+#[cfg(test)]
 fn assert_server_snapshot_excludes_message(
     snapshot: &ServerDeliverySnapshot,
     message_id: &str,
