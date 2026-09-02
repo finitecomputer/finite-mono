@@ -219,7 +219,7 @@ while IFS= read -r unit; do
     fi
   done
   if [[ "$approved" == 0 ]]; then
-    for approved_unit in "${approved_extra_units[@]}"; do
+    for approved_unit in ${approved_extra_units[@]+"${approved_extra_units[@]}"}; do
       if [[ "$unit" == "$approved_unit" ]]; then
         approved=1
         break
@@ -300,9 +300,124 @@ fi
 containerd_pid="$(systemctl show containerd.service --property=MainPID --value)"
 networkd_pid="$(systemctl show systemd-networkd.service --property=MainPID --value)"
 
+# --- activation helpers (begin) ---------------------------------------------
+# Monitoring-only units: read-only probes and metric publishers. Per
+# infra/runbooks/platform-rollout.md a monitoring-only failure is NOT a
+# rollback trigger; a failed core/chat unit is. 2026-09-02 (#799):
+# finite-healthcheck.timer fired while app-plane units were mid-restart, its
+# oneshot failed, switch-to-configuration exited nonzero, and the ERR trap
+# reverted a chat binary whose one-time op-log fold had already completed —
+# the forbidden old-binary/folded-database edge. So the timers are held
+# across the boundary and the trap judges the failed unit set instead of
+# the exit status alone.
+monitoring_only_timers=(
+  finite-healthcheck.timer
+  finite-litestream-health.timer
+  finite-hosted-web-chat-snapshot-health.timer
+  finite-identity-backup-health.timer
+  finite-hosted-web-chat-offsite-health.timer
+  finite-runtime-metrics.timer
+  finite-storage-health.timer
+)
+is_monitoring_only_unit() {
+  local unit="$1" timer
+  for timer in "${monitoring_only_timers[@]}"; do
+    if [[ "$unit" == "$timer" || "$unit" == "${timer%.timer}.service" ]]; then
+      return 0
+    fi
+  done
+  return 1
+}
+failed_units() {
+  systemctl --failed --plain --no-legend --no-pager | awk 'NF { print $1 }'
+}
+# Failed units that are NOT monitoring-only, one per line.
+failed_units_outside_monitoring() {
+  local unit
+  while IFS= read -r unit; do
+    is_monitoring_only_unit "$unit" || printf '%s\n' "$unit"
+  done < <(failed_units)
+}
+# `systemctl mask` refuses store-symlinked units; stop suffices. Only timers
+# present in the running closure are touched (/etc/systemd/system resolves
+# into it), so a timer the candidate adds or drops is never an error.
+stop_monitoring_timers() {
+  local timer
+  for timer in "${monitoring_only_timers[@]}"; do
+    [[ -e "/etc/systemd/system/$timer" ]] || continue
+    systemctl stop "$timer" || echo "warning: could not stop $timer before the boundary" >&2
+  done
+}
+start_monitoring_timers() {
+  local timer
+  echo "==> re-arming monitoring timers on $(readlink -f /run/current-system)"
+  for timer in "${monitoring_only_timers[@]}"; do
+    [[ -e "/etc/systemd/system/$timer" ]] || continue
+    systemctl start "$timer" || echo "warning: could not re-arm $timer after activation" >&2
+  done
+}
+# Chat fold guard. The candidate closure's own unit file names the binary
+# and the SQLite path; that binary's read-only `rollback-check` says whether
+# the pre-fold restore is still legal. fold_complete=true with
+# rollback_allowed=false means the folded database already has post-fold
+# writes: an older binary must never serve it, so the trap may only roll
+# forward. Returns 0 exactly when reverting the binary is forbidden.
+chat_unit_file="$system/etc/systemd/system/finitechat-server.service"
+chat_fold_reason=""
+chat_fold_forbids_rollback() {
+  local exec_start binary sqlite verdict
+  [[ -e "$chat_unit_file" ]] || return 1
+  exec_start="$(sed -n 's/^ExecStart=//p' "$chat_unit_file" | head -n 1)"
+  binary="${exec_start%% *}"
+  sqlite="$(printf '%s\n' "$exec_start" | sed -n 's/.*--sqlite \([^ ]*\).*/\1/p')"
+  if [[ ! -x "$binary" || -z "$sqlite" || ! -e "$sqlite" ]]; then
+    chat_fold_reason="rollback-check unavailable (binary=${binary:-?} sqlite=${sqlite:-?})"
+    return 1
+  fi
+  verdict="$("$binary" rollback-check --sqlite "$sqlite" 2>/dev/null || true)"
+  chat_fold_reason="$(printf '%s\n' "$verdict" | sed -n 's/.*"reason":"\([^"]*\)".*/\1/p')"
+  [[ -n "$chat_fold_reason" ]] || chat_fold_reason="rollback-check produced no verdict"
+  [[ "$verdict" == *'"fold_complete":true'* && "$verdict" == *'"rollback_allowed":false'* ]]
+}
+# A post-switch verification failure must reach the ERR trap (a bare `exit 1`
+# inside `|| { ...; }` never did): the failing command after the final `||`
+# fires it.
+abort() {
+  echo "$*" >&2
+  return 1
+}
+# --- activation helpers (end) -----------------------------------------------
+
+# Pre-boundary: a non-monitoring unit that is ALREADY failed would be
+# indistinguishable, after the switch, from one this activation broke.
+pre_failed="$(failed_units_outside_monitoring)"
+if [[ -n "$pre_failed" ]]; then
+  echo "refusing: non-monitoring units are already failed before the mutation boundary" >&2
+  echo "(investigate, then systemctl reset-failed):" >&2
+  printf '%s\n' "$pre_failed" >&2
+  exit 1
+fi
+
+if [[ -e "$chat_unit_file" ]]; then
+  if chat_fold_forbids_rollback; then
+    echo "==> chat fold guard: rollback-check FORBIDS reverting the binary ($chat_fold_reason);"
+    echo "    a failed activation will ROLL FORWARD ONLY"
+  else
+    echo "==> chat fold guard: rollback-check permits a revert for now ($chat_fold_reason);"
+    echo "    re-checked at rollback time, because the switch itself may fold the database"
+  fi
+fi
+
 rollback() {
   status=$?
   trap - ERR
+  if chat_fold_forbids_rollback; then
+    echo "activation failed (exit $status) but REFUSING to revert to $previous_system:" >&2
+    echo "finitechat-server rollback-check reports fold_complete=true rollback_allowed=false" >&2
+    echo "($chat_fold_reason). An older binary must never serve the folded chat database;" >&2
+    echo "ROLL FORWARD ONLY: $system stays in place — fix and activate a newer closure." >&2
+    exit "$status"
+  fi
   echo "activation failed; rolling back to $previous_system" >&2
   nix-env --option builders '' --profile /nix/var/nix/profiles/system --set "$previous_system" || true
   "$previous_system/bin/switch-to-configuration" switch || true
@@ -311,8 +426,26 @@ rollback() {
 trap rollback ERR
 
 echo "==> mutation boundary: switching finite-lat-2 to $system"
+echo "==> holding monitoring timers across the boundary: ${monitoring_only_timers[*]}"
+stop_monitoring_timers
+# Re-armed on EVERY exit: success, the ERR-trap rollback, and the
+# roll-forward refusal (each runs after the profile is where it will stay).
+trap start_monitoring_timers EXIT
 nix-env --option builders '' --profile /nix/var/nix/profiles/system --set "$system"
-"$system/bin/switch-to-configuration" switch
+switch_status=0
+"$system/bin/switch-to-configuration" switch || switch_status=$?
+if [[ "$switch_status" != 0 ]]; then
+  failed_outside="$(failed_units_outside_monitoring)"
+  failed_all="$(failed_units | tr '\n' ' ')"
+  if [[ -n "$failed_outside" || -z "$failed_all" ]]; then
+    echo "switch-to-configuration exited $switch_status; failed units outside the monitoring-only allow-list:" >&2
+    printf '%s\n' "${failed_outside:-(none listed: the failure is not a unit failure)}" >&2
+    (exit "$switch_status") # fires the ERR trap: rollback (or roll-forward refusal)
+  fi
+  echo "WARNING: switch-to-configuration exited $switch_status but the only failed units are" >&2
+  echo "WARNING: monitoring-only (${failed_all% }); per platform-rollout.md this is NOT a" >&2
+  echo "WARNING: rollback trigger — continuing post-switch verification" >&2
+fi
 test "$(readlink -f /run/current-system)" = "$system"
 test "$(readlink -f /nix/var/nix/profiles/system)" = "$system"
 
@@ -339,27 +472,21 @@ systemctl is-active --quiet systemd-networkd.service
 if [[ "$expect_startup" == "1" ]]; then
   # Go-live: every core product unit must be up after the switch.
   for unit in finite-saas-core.service finitechat-server.service caddy.service postgresql.service; do
-    systemctl is-active --quiet "$unit" || {
-      echo "$unit is not active after go-live activation" >&2
-      exit 1
-    }
+    systemctl is-active --quiet "$unit" \
+      || abort "$unit is not active after go-live activation"
   done
 else
   # Steady state: the units the pre-mutation gate required active must
   # still be active after the switch.
   for unit in finite-saas-core.service finitechat-server.service caddy.service postgresql.service; do
-    systemctl is-active --quiet "$unit" || {
-      echo "$unit was active before and is down after a steady-state switch" >&2
-      exit 1
-    }
+    systemctl is-active --quiet "$unit" \
+      || abort "$unit was active before and is down after a steady-state switch"
   done
 fi
 
 runner_check="$(systemctl cat finite-saas-runner.service >/dev/null 2>&1 && echo present || echo absent)"
-[[ "$runner_check" == "absent" ]] || {
-  echo "a runner unit appeared during activation; rolling back" >&2
-  exit 1
-}
+[[ "$runner_check" == "absent" ]] \
+  || abort "a runner unit appeared during activation; rolling back"
 trap - ERR
 echo "==> DEPLOYED system=$system"
 LAT2

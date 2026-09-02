@@ -58,7 +58,12 @@ must report `server_contract_version`, `server_version`, the Nix-derived
    script validates the manifest, copies the prebuilt file binary cache to
    lat1, activates it in a transient systemd unit, and proves
    `/run/current-system` equals the artifact's exact `SYSTEM` path. It does not
-   evaluate or build on lat1 or lat2.
+   evaluate or build on lat1 or lat2. On lat2 the activation
+   (`scripts/deploy-lat2-closure-cache --activate`) holds the monitoring
+   timers across the switch, does not roll back on a monitoring-only unit
+   failure, and never reverts the binary once `finitechat-server
+   rollback-check` reports `fold_complete: true` / `rollback_allowed: false`
+   (the folded database has post-fold writes: roll forward only).
 
 3. After the deploy, run the gate from a mono checkout at the release commit.
    This evaluation reads package metadata and does not rebuild the closure:
