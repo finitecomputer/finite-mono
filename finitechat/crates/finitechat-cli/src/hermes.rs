@@ -66,8 +66,8 @@ use serde_json::{Value, json};
 use crate::CliError;
 use crate::cli::{
     HermesAdmissionCommand, HermesArgs, HermesCommand, HermesHomeChannelCommand,
-    HermesHomeChannelSetArgs, HermesInitArgs, HermesInstallArgs, HermesRoomStatusArgs,
-    HermesServeArgs,
+    HermesHomeChannelSetArgs, HermesInitArgs, HermesInstallArgs, HermesRekeyArgs,
+    HermesRoomStatusArgs, HermesServeArgs,
 };
 
 const CONFIG_FILE: &str = "config.json";
@@ -204,6 +204,9 @@ pub(crate) fn run<W: Write>(args: HermesArgs, output: &mut W) -> Result<(), CliE
         HermesCommand::HomeChannel { command } => cmd_home_channel(&home_dir, command, output),
         HermesCommand::Admission { command } => cmd_admission(&home_dir, command, output),
         HermesCommand::RoomStatus(args) => cmd_room_status(&home_dir, args, json_mode, output),
+        HermesCommand::Rekey(args) => with_backup_activity(&home_dir, "rekey", || {
+            cmd_rekey(&home_dir, args, json_mode, output)
+        }),
         HermesCommand::Poll => with_backup_activity(&home_dir, "poll", || {
             cmd_poll(&home_dir, read_request(request_json)?, output)
         }),
@@ -3039,6 +3042,38 @@ fn cmd_edit<W: Write>(home_dir: &Path, request: Value, output: &mut W) -> Result
     let sent = edit_hermes_request_with_runtime(&runtime, &request)?;
     update_running_after_edit(home_dir, &request)?;
     write_sent_message(output, &sent)
+}
+
+/// Operator rekey: run the core rekey action through a writer-lease runtime
+/// (the same open/dispatch shape as `recover`) and print its report. The
+/// action itself refuses to run unless the local epoch matches the server's
+/// and there is no pending Commit; it never advances a frozen cursor past a
+/// quarantined entry — that stays with `finitechat repair skip-entry`.
+fn cmd_rekey<W: Write>(
+    home_dir: &Path,
+    args: HermesRekeyArgs,
+    json_mode: bool,
+    output: &mut W,
+) -> Result<(), CliError> {
+    let home = load_home(home_dir)?;
+    let runtime = open_agent_runtime(&home)?;
+    let report = runtime
+        .rekey_room_and_wait(args.room)
+        .map_err(map_core_hermes_error)?;
+    if json_mode {
+        crate::write_pretty_json(output, &report)
+    } else {
+        writeln!(
+            output,
+            "Room {}: rekeyed epoch {} -> {} (commit seq {}, message {})",
+            report.room_id,
+            report.previous_epoch,
+            report.new_epoch,
+            report.commit_seq,
+            report.message_id,
+        )
+        .map_err(CliError::Output)
+    }
 }
 
 fn cmd_recover<W: Write>(home_dir: &Path, _request: Value, output: &mut W) -> Result<(), CliError> {

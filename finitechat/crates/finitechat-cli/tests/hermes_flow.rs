@@ -355,6 +355,77 @@ fn hermes_cli_uses_mls_add_welcome_and_round_trips_messages() {
     ]);
     assert_eq!(status["connected"], true);
     assert_eq!(status["paired"], true);
+
+    // Operator rekey through the agent home: an ordinary self-update Commit
+    // bumps the room epoch (create 0 -> add 1 -> rekey 2) and the user's
+    // runtime applies it on its next sync, so traffic keeps flowing.
+    let rekeyed = cli_json(&[
+        "hermes",
+        "--agent-home",
+        &agent_home,
+        "rekey",
+        "--room",
+        &room_id,
+        "--json",
+    ]);
+    assert_eq!(rekeyed["room_id"], room_id);
+    assert_eq!(rekeyed["previous_epoch"], 1);
+    assert_eq!(rekeyed["new_epoch"], 2);
+    assert!(rekeyed["commit_seq"].as_u64().is_some_and(|seq| seq > 0));
+    assert!(
+        rekeyed["message_id"]
+            .as_str()
+            .is_some_and(|message_id| !message_id.is_empty())
+    );
+    let rekey_error = finitechat_cli::run(
+        [
+            "hermes".to_owned(),
+            "--agent-home".to_owned(),
+            agent_home.clone(),
+            "rekey".to_owned(),
+            "--room".to_owned(),
+            "room-1-unknown".to_owned(),
+            "--json".to_owned(),
+        ],
+        &mut Vec::new(),
+    )
+    .expect_err("rekey of an unknown room must fail closed");
+    assert!(
+        rekey_error
+            .to_string()
+            .contains("not available on this device")
+    );
+
+    cli_json(&[
+        "hermes",
+        "--agent-home",
+        &agent_home,
+        "send",
+        "--request-json",
+        &json!({
+            "room_id": room_id,
+            "conversation_id": null,
+            "text": "hello after rekey",
+            "kind": "message",
+            "status": "complete",
+            "reply_to_message_id": null,
+            "metadata": {},
+        })
+        .to_string(),
+    ]);
+    user.dispatch_and_wait(AppAction::StartRuntime)
+        .expect("user applies the rekey Commit and the message after it");
+    let after_rekey = user
+        .dispatch_and_wait(AppAction::OpenRoom {
+            room_id: room_id.clone(),
+        })
+        .expect("user opens room after rekey");
+    assert!(
+        after_rekey
+            .messages
+            .iter()
+            .any(|message| message.text == "hello after rekey")
+    );
 }
 
 /// Ownership audit O1, end to end against `hermes poll`/`ack`/`release`: an

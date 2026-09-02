@@ -2912,6 +2912,27 @@ impl FiniteChatDevice {
         Ok(self.group(room_id)?.pending_commit().is_some())
     }
 
+    /// Drop a prepared-but-unaccepted Commit so the group returns to the
+    /// state it had before `prepare_*_commit`. Returns whether anything was
+    /// pending. Never call this for a Commit the server may have accepted:
+    /// that Commit must be merged from the ordered log instead.
+    pub fn discard_pending_commit(&mut self, room_id: &str) -> Result<bool, ClientError> {
+        let provider = &self.provider;
+        let group = &mut self
+            .rooms
+            .get_mut(room_id)
+            .ok_or_else(|| ClientError::GroupNotFound(room_id.to_string()))?
+            .group;
+        if group.pending_commit().is_none() {
+            return Ok(false);
+        }
+        group
+            .clear_pending_commit(provider.storage())
+            .map_err(|_| ClientError::ClearPendingCommit)?;
+        debug_assert!(group.pending_commit().is_none());
+        Ok(true)
+    }
+
     fn verify_member_in_group(
         &self,
         group: &MlsGroup,
@@ -6055,6 +6076,139 @@ pub fn run_room_sync_tick<D: RuntimeDelivery>(
     Ok(report)
 }
 
+/// Outcome of one accepted rekey Commit (see [`run_runtime_rekey_room`]).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RuntimeRekeyRoomReport {
+    pub room_id: RoomId,
+    pub previous_epoch: u64,
+    pub new_epoch: u64,
+    pub commit_seq: u64,
+    pub message_id: MessageId,
+}
+
+/// Directory pages scanned while looking up one room's server epoch.
+const MAX_REKEY_DIRECTORY_PAGES: u32 = 64;
+/// Page size for that lookup: the server's account-room list ceiling, as
+/// used by the other directory readers.
+const REKEY_DIRECTORY_PAGE_LIMIT: u32 = 100;
+
+/// Read the server's current epoch for one room from the account room
+/// directory. Read-only: no cursor, Welcome, or KeyPackage state changes.
+fn server_room_epoch<D: RuntimeDelivery>(
+    delivery: &mut D,
+    account_id: &str,
+    room_id: &str,
+) -> Result<Option<u64>, D::Error> {
+    let mut after_room_id = None;
+    for _ in 0..MAX_REKEY_DIRECTORY_PAGES {
+        let page = delivery.list_account_rooms(ListAccountRoomsRequest {
+            account_id: account_id.to_owned(),
+            after_room_id: after_room_id.clone(),
+            limit: REKEY_DIRECTORY_PAGE_LIMIT,
+        })?;
+        if let Some(room) = page.rooms.iter().find(|room| room.room_id == room_id) {
+            return Ok(Some(room.current_epoch));
+        }
+        if !page.has_more {
+            break;
+        }
+        let Some(next) = page.next_after_room_id else {
+            break;
+        };
+        if after_room_id.as_ref() == Some(&next) {
+            break;
+        }
+        after_room_id = Some(next);
+    }
+    Ok(None)
+}
+
+/// Advance one room's MLS epoch with an ordinary self-update Commit from
+/// this device. Every epoch transition re-derives every leaf's secret tree
+/// at generation 0, which is the durable heal for a counterpart whose send
+/// ratchet was rewound (its stale generations become irrelevant without
+/// replacing any device).
+///
+/// Fails closed, with no durable change, unless the room exists locally,
+/// no Commit is pending, and the local epoch equals the server's current
+/// epoch for the room (read from the account room directory). The room's
+/// sync cursor is deliberately NOT required to be at the server head: a
+/// receiver quarantined behind undecryptable application entries can still
+/// commit, because only unapplied Commits matter and the epoch check rules
+/// those out. The cursor advances across the accepted Commit only when it
+/// is the very next entry; a frozen cursor stays where it is and the
+/// operator's sanctioned skip repair moves it to `commit_seq`.
+///
+/// Durability order mirrors the add-member flow: the pending Commit is
+/// saved before submit (so a crash after acceptance is merged by the next
+/// sync), a server rejection restores the pre-rekey state, and acceptance
+/// is merged from the ordered log before the final save.
+pub fn run_runtime_rekey_room<D: RuntimeDelivery>(
+    store: &mut SqliteClientStore,
+    device: &mut FiniteChatDevice,
+    delivery: &mut D,
+    room_id: &str,
+    idempotency_key: impl Into<String>,
+) -> Result<RuntimeRekeyRoomReport, RuntimeWorkerError<D::Error>> {
+    validate_room_id(room_id).map_err(ClientError::from)?;
+    let previous_epoch = device.group_epoch(room_id)?;
+    if device.has_pending_commit(room_id)? {
+        return Err(ClientError::PendingCommitExists(room_id.to_string()).into());
+    }
+    let account_id = device.device_ref().account_id.clone();
+    let server_epoch = server_room_epoch(delivery, &account_id, room_id)
+        .map_err(RuntimeWorkerError::Delivery)?
+        .ok_or_else(|| ClientError::RekeyRoomNotOnServer(room_id.to_string()))?;
+    if server_epoch != previous_epoch {
+        return Err(ClientError::RekeyEpochMismatch {
+            room_id: room_id.to_string(),
+            local_epoch: previous_epoch,
+            server_epoch,
+        }
+        .into());
+    }
+
+    let PreparedCommit {
+        request,
+        message_id,
+    } = device.prepare_self_update_commit(room_id, idempotency_key)?;
+    store.save_device_state(device)?;
+    let accepted = match delivery.submit_commit(request) {
+        Ok(accepted) => accepted,
+        Err(error) => {
+            device.discard_pending_commit(room_id)?;
+            store.save_device_state(device)?;
+            return Err(RuntimeWorkerError::Delivery(error));
+        }
+    };
+    if accepted.message_id != message_id {
+        return Err(ClientError::RekeyPreparedCommitMismatch {
+            room_id: room_id.to_string(),
+            expected: message_id,
+            actual: accepted.message_id,
+        }
+        .into());
+    }
+
+    let page = delivery
+        .sync_events(room_id, device.device_ref(), accepted.seq.saturating_sub(1))
+        .map_err(RuntimeWorkerError::Delivery)?;
+    device.merge_pending_commit_from_log(room_id, &page.entries, &message_id)?;
+    let new_epoch = device.group_epoch(room_id)?;
+    if device.last_applied_seq(room_id)?.saturating_add(1) == accepted.seq {
+        device.set_last_applied_seq(room_id, accepted.seq)?;
+    }
+    store.save_device_state(device)?;
+
+    Ok(RuntimeRekeyRoomReport {
+        room_id: room_id.to_string(),
+        previous_epoch,
+        new_epoch,
+        commit_seq: accepted.seq,
+        message_id,
+    })
+}
+
 /// Decide whether a claimed Welcome may be stored and activated.
 ///
 /// Trust anchor: `WelcomeRecord.sender` is server-asserted from the commit
@@ -6890,6 +7044,22 @@ pub enum ClientError {
     },
     #[error("link fanout prepared Commit mismatch: expected {expected}, actual {actual}")]
     LinkFanoutPreparedCommitMismatch { expected: String, actual: String },
+    #[error(
+        "rekey refused for {room_id}: local epoch {local_epoch} does not match server epoch {server_epoch}; sync the room first"
+    )]
+    RekeyEpochMismatch {
+        room_id: RoomId,
+        local_epoch: u64,
+        server_epoch: u64,
+    },
+    #[error("rekey refused for {0}: the server directory does not list this room")]
+    RekeyRoomNotOnServer(RoomId),
+    #[error("rekey Commit acceptance mismatch for {room_id}: expected {expected}, actual {actual}")]
+    RekeyPreparedCommitMismatch {
+        room_id: RoomId,
+        expected: String,
+        actual: String,
+    },
     #[error("member credential missing or duplicated: {0:?}")]
     MemberCredentialMissing(DeviceRef),
     #[error("persisted client state account does not match config")]
