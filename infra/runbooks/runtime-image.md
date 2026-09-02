@@ -266,7 +266,7 @@ both `GET /api/core/v1/finite-private/usage` and
 `POST /api/core/v1/finite-private/usage/reset` must reach Core and return 401,
 not an edge 404. After completion, inspect the one canonical Runtime and any
 operation-scoped helper containers: exactly one running container may mount
-that Runtime's `/data`, the old rollback helper must be stopped, `/contact`
+that Runtime's `/data` and no `Created`-state candidate may remain bound to it (upgrade completion and interrupted-upgrade reconcile now sweep never-started candidates from any request id; a running one is left in place and reported), the old rollback helper must be stopped, `/contact`
 must report the unchanged Agent Principal, and the runtime must successfully
 reach the status control route after a successful turn. Exact notice routing
 at synthetic 25%/10% thresholds is a Core/adapter integration-test gate; do not

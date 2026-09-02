@@ -1264,6 +1264,108 @@ impl KataLauncher {
         ))
     }
 
+    /// Every provider-known upgrade candidate of this Runtime, whatever
+    /// request created it. Helper names are scoped by request id, so a
+    /// candidate left by an earlier attempt (for example one whose
+    /// `nerdctl run` was cut off after create and before start, leaving it
+    /// `Created`) is invisible to this request's name-based lookups; it is
+    /// found by its upgrade label and confirmed by its name and `/data` bind.
+    /// Rollback handles are never candidates: an adopted candidate keeps its
+    /// upgrade label when a later operation renames it to `rollback`, and its
+    /// name says so.
+    fn upgrade_candidates(
+        &self,
+        canonical_plan: &KataLaunchPlan,
+        project_id: &str,
+    ) -> Result<Vec<KataUpgradeCandidate>, RunnerError> {
+        let canonical_name = canonical_plan.container_name.as_str();
+        let mut candidates = Vec::new();
+        for container_name in self.container_names()? {
+            if container_name == canonical_name {
+                continue;
+            }
+            let Some(inspected) = self.inspect(&container_name)? else {
+                continue;
+            };
+            let Some(request_id) = inspected
+                .config
+                .labels
+                .get("computer.finite.v2.upgrade_request_id")
+                .map(|value| value.trim())
+                .filter(|value| !value.is_empty())
+            else {
+                continue;
+            };
+            if inspected
+                .config
+                .labels
+                .get("computer.finite.v2.source_machine_id")
+                .map(String::as_str)
+                != Some(canonical_name)
+                || kata_upgrade_helper_name(canonical_name, "candidate", request_id)
+                    != container_name
+            {
+                continue;
+            }
+            self.validate_upgrade_auxiliary(&inspected, project_id, canonical_name, request_id)?;
+            self.validate_upgrade_data_mount(&inspected, canonical_plan)?;
+            candidates.push(KataUpgradeCandidate {
+                container_name,
+                request_id: request_id.to_string(),
+                inspected,
+            });
+        }
+        Ok(candidates)
+    }
+
+    /// Remove every upgrade candidate binding this Runtime's `/data` that is
+    /// not running, except the one belonging to `keep_request_id` (the
+    /// operation in flight handles its own). The canonical handle is never a
+    /// candidate, and a running candidate is never removed here: its names
+    /// are returned so the caller can refuse or report the topology.
+    fn sweep_stale_upgrade_candidates(
+        &self,
+        canonical_plan: &KataLaunchPlan,
+        project_id: &str,
+        keep_request_id: Option<&str>,
+    ) -> Result<Vec<String>, RunnerError> {
+        let mut running = Vec::new();
+        for candidate in self.upgrade_candidates(canonical_plan, project_id)? {
+            if keep_request_id == Some(candidate.request_id.as_str()) {
+                continue;
+            }
+            if candidate.inspected.state.status == "running" {
+                running.push(candidate.container_name);
+                continue;
+            }
+            eprintln!(
+                "warning: removing stale Kata upgrade candidate {} ({}) left by operation {}",
+                candidate.container_name, candidate.inspected.state.status, candidate.request_id
+            );
+            self.remove_compute(&candidate.container_name)?;
+        }
+        Ok(running)
+    }
+
+    /// Completion of a verified upgrade: the adopted canonical is healthy, so
+    /// availability wins over cleanup. Any candidate still binding `/data`
+    /// is removed if it is not running, and reported if it is.
+    fn finish_upgrade_cleanup(&self, canonical_plan: &KataLaunchPlan, project_id: &str) {
+        match self.sweep_stale_upgrade_candidates(canonical_plan, project_id, None) {
+            Ok(running) => {
+                for container_name in running {
+                    eprintln!(
+                        "warning: Kata runtime upgrade succeeded but running upgrade candidate {container_name} still binds {}; it was left in place and needs an operator",
+                        canonical_plan.state_root.display()
+                    );
+                }
+            }
+            Err(error) => eprintln!(
+                "warning: Kata runtime upgrade succeeded but candidate cleanup failed: {error}"
+            ),
+        }
+    }
+
     /// Reconcile only operation-scoped provider handles before requiring the
     /// canonical name. A process can die after either rename syscall, so the
     /// absence of the canonical handle is a recoverable state when the stopped
@@ -1293,6 +1395,18 @@ impl KataLauncher {
             // The old canonical keeps its original ownership labels across a
             // rename; it deliberately does not gain an upgrade-request label.
             self.validate_owned(canonical_plan, project_id, rollback)?;
+        }
+        // Candidates from other operations are never adopted or restored;
+        // a never-started or stopped one is removed before anything here can
+        // start compute against the same /data, and a running one is a
+        // second writer this operation refuses to reason about.
+        let running_foreign_candidates =
+            self.sweep_stale_upgrade_candidates(canonical_plan, project_id, Some(request_id))?;
+        if !running_foreign_candidates.is_empty() {
+            return Err(RunnerError::RuntimeLaunch(format!(
+                "refusing an ambiguous Kata upgrade topology: running upgrade candidate {} from another operation binds this Runtime's /data",
+                running_foreign_candidates.join(", ")
+            )));
         }
 
         let operation_has_helper_state = candidate.is_some() || rollback.is_some();
@@ -2392,6 +2506,7 @@ impl RuntimeLauncher for KataLauncher {
                 self.remove_compute(&rollback_name)?;
                 remove_kata_upgrade_expected_npub(&canonical_plan, &lease.request.id);
             }
+            self.finish_upgrade_cleanup(&canonical_plan, &lease.runtime.project_id);
             return Ok(RuntimeUpgradeFacts {
                 runtime_artifact_id: target.id.clone(),
                 state_schema_version: target.state_schema_version.clone(),
@@ -2607,6 +2722,7 @@ impl RuntimeLauncher for KataLauncher {
         } else {
             remove_kata_upgrade_expected_npub(&canonical_plan, &lease.request.id);
         }
+        self.finish_upgrade_cleanup(&canonical_plan, &lease.runtime.project_id);
 
         Ok(RuntimeUpgradeFacts {
             runtime_artifact_id: target.id.clone(),
@@ -4319,6 +4435,12 @@ struct KataRecoveryFence {
     operation_ids: Vec<String>,
 }
 
+struct KataUpgradeCandidate {
+    container_name: String,
+    request_id: String,
+    inspected: KataInspect,
+}
+
 struct KataRecoveryHelper {
     container_name: String,
     request_id: String,
@@ -4666,6 +4788,18 @@ case "$cmd" in
     write_field "$name" secret "$secret"; cp "$env_file" "$root/$name.env-file"
     cp "$env_file" "$root/last-run.env-file"
     write_field "$name" port "$(cat "$root/candidate-port")"
+    if [ -f "$root/also-create" ]; then
+      # A second create that never started: the same image and /data bind,
+      # labelled for the request named in also-create.request.
+      stale="$(cat "$root/also-create")"
+      for suffix in image artifact schema project source mount public secret env-file port; do
+        cp "$root/$name.$suffix" "$root/$stale.$suffix"
+      done
+      write_field "$stale" request "$(cat "$root/also-create.request")"
+      write_field "$stale" recovery ""
+      write_field "$stale" status created
+      rm -f "$root/also-create" "$root/also-create.request"
+    fi
     ;;
   *) echo "unsupported fake command: $cmd" >&2; exit 2 ;;
 esac
@@ -7365,6 +7499,44 @@ esac
         }
     }
 
+    fn stale_created_candidate(
+        fake_state: &Path,
+        plan: &KataLaunchPlan,
+        request_id: &str,
+        port: u16,
+    ) -> String {
+        let name = kata_upgrade_helper_name(&plan.container_name, "candidate", request_id);
+        write_fake_container(
+            fake_state,
+            &name,
+            &target_artifact().reference,
+            "artifact-v2",
+            request_id,
+            port,
+            &plan.state_root,
+        );
+        std::fs::write(fake_state.join(format!("{name}.status")), "created").unwrap();
+        name
+    }
+
+    fn assert_canonical_untouched(fake_state: &Path, plan: &KataLaunchPlan, image: &str) {
+        assert_eq!(
+            std::fs::read_to_string(fake_state.join(format!("{}.image", plan.container_name)))
+                .unwrap(),
+            image
+        );
+        assert_eq!(
+            std::fs::read_to_string(fake_state.join(format!("{}.status", plan.container_name)))
+                .unwrap(),
+            "running"
+        );
+        let commands = std::fs::read_to_string(fake_state.join("commands.log")).unwrap();
+        assert!(
+            !commands.contains(&format!("rm --force {}\n", plan.container_name)),
+            "the canonical handle is never removed:\n{commands}"
+        );
+    }
+
     #[test]
     fn durable_tree_quiescence_tests_the_writer_lease_then_the_tree() {
         let temp = tempfile::tempdir().unwrap();
@@ -7530,5 +7702,160 @@ esac
         let error = verify_relocation_staged_tree(&root, &relocation("0".repeat(64), true), window)
             .unwrap_err();
         assert!(error.to_string().contains("manifest did not match"));
+    }
+
+    #[test]
+    fn kata_upgrade_removes_a_never_started_candidate_from_an_earlier_attempt() {
+        let old_server = TestHttpServer::start("npub1sameagent");
+        let candidate_server = TestHttpServer::start("npub1sameagent");
+        let temp = tempfile::tempdir().unwrap();
+        let (mut launcher, plan, fake_state) = test_launcher(&temp, candidate_server.port);
+        write_fake_container(
+            &fake_state,
+            &plan.container_name,
+            "ghcr.io/finitecomputer/agent-runtime:v1@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "artifact-v1",
+            "",
+            old_server.port,
+            &plan.state_root,
+        );
+        // The canary window's attempt: created against the same /data with
+        // the new digest, never started, scoped to a request id this
+        // operation does not know.
+        let stale = stale_created_candidate(
+            &fake_state,
+            &plan,
+            "runtime_ctl_canary_window",
+            candidate_server.port,
+        );
+        let lease = upgrade_lease("runtime_ctl_upgrade_after_canary");
+
+        let facts = launcher
+            .upgrade_runtime(&lease, &RuntimeRestartOptions::default())
+            .unwrap();
+        assert_eq!(facts.runtime_artifact_id, "artifact-v2");
+        assert!(!fake_state.join(format!("{stale}.image")).exists());
+        let commands = std::fs::read_to_string(fake_state.join("commands.log")).unwrap();
+        let remove_stale = commands.find(&format!("rm --force {stale}\n")).unwrap();
+        let stop_old = commands
+            .find(&format!("stop --time 30 {}", plan.container_name))
+            .unwrap();
+        assert!(
+            remove_stale < stop_old,
+            "the stale candidate is gone before this operation touches compute"
+        );
+        assert_canonical_untouched(&fake_state, &plan, &target_artifact().reference);
+    }
+
+    #[test]
+    fn kata_upgrade_completion_removes_a_candidate_created_during_the_operation() {
+        let old_server = TestHttpServer::start("npub1sameagent");
+        let candidate_server = TestHttpServer::start("npub1sameagent");
+        let temp = tempfile::tempdir().unwrap();
+        let (mut launcher, plan, fake_state) = test_launcher(&temp, candidate_server.port);
+        write_fake_container(
+            &fake_state,
+            &plan.container_name,
+            "ghcr.io/finitecomputer/agent-runtime:v1@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "artifact-v1",
+            "",
+            old_server.port,
+            &plan.state_root,
+        );
+        // Appears only once this operation's candidate is created, so the
+        // pre-flight reconcile cannot have seen it: only completion can.
+        let stale = kata_upgrade_helper_name(
+            &plan.container_name,
+            "candidate",
+            "runtime_ctl_canary_window",
+        );
+        std::fs::write(fake_state.join("also-create"), &stale).unwrap();
+        std::fs::write(
+            fake_state.join("also-create.request"),
+            "runtime_ctl_canary_window",
+        )
+        .unwrap();
+        let lease = upgrade_lease("runtime_ctl_upgrade_completion");
+
+        launcher
+            .upgrade_runtime(&lease, &RuntimeRestartOptions::default())
+            .unwrap();
+        assert!(!fake_state.join(format!("{stale}.image")).exists());
+        let commands = std::fs::read_to_string(fake_state.join("commands.log")).unwrap();
+        let candidate_name =
+            kata_upgrade_helper_name(&plan.container_name, "candidate", &lease.request.id);
+        let adopt = commands
+            .find(&format!("rename {candidate_name} {}", plan.container_name))
+            .unwrap();
+        let remove_stale = commands.find(&format!("rm --force {stale}\n")).unwrap();
+        assert!(
+            adopt < remove_stale,
+            "completion sweeps after the verified adoption"
+        );
+        assert_canonical_untouched(&fake_state, &plan, &target_artifact().reference);
+    }
+
+    #[test]
+    fn reconcile_interrupted_upgrade_sweeps_created_candidates_and_refuses_running_ones() {
+        let temp = tempfile::tempdir().unwrap();
+        let (launcher, plan, fake_state) = test_launcher(&temp, 41306);
+        let old_image = "ghcr.io/finitecomputer/agent-runtime:v1@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+        write_fake_container(
+            &fake_state,
+            &plan.container_name,
+            old_image,
+            "artifact-v1",
+            "",
+            41306,
+            &plan.state_root,
+        );
+        let lease = upgrade_lease("runtime_ctl_reconcile_sweep");
+        let reconcile = |launcher: &KataLauncher| {
+            launcher.reconcile_interrupted_upgrade(
+                &plan,
+                "project-1",
+                &lease.request.id,
+                &target_artifact(),
+            )
+        };
+
+        // A never-started candidate binding /data from another request.
+        let created =
+            stale_created_candidate(&fake_state, &plan, "runtime_ctl_canary_window", 41306);
+        // A rollback handle that kept an adopted candidate's label is not a
+        // candidate and stays where it is.
+        let rollback =
+            kata_upgrade_helper_name(&plan.container_name, "rollback", "runtime_ctl_older");
+        write_fake_container(
+            &fake_state,
+            &rollback,
+            old_image,
+            "artifact-v1",
+            "runtime_ctl_even_older",
+            41306,
+            &plan.state_root,
+        );
+        std::fs::write(fake_state.join(format!("{rollback}.status")), "exited").unwrap();
+
+        assert!(!reconcile(&launcher).unwrap());
+        assert!(!fake_state.join(format!("{created}.image")).exists());
+        assert!(fake_state.join(format!("{rollback}.image")).exists());
+        assert_canonical_untouched(&fake_state, &plan, old_image);
+
+        // A running candidate from another request is a second writer this
+        // operation refuses; it is never removed.
+        let running =
+            stale_created_candidate(&fake_state, &plan, "runtime_ctl_still_running", 41306);
+        std::fs::write(fake_state.join(format!("{running}.status")), "running").unwrap();
+        let error = reconcile(&launcher).unwrap_err();
+        assert!(error.to_string().contains(&running), "{error}");
+        assert!(fake_state.join(format!("{running}.image")).exists());
+        assert_canonical_untouched(&fake_state, &plan, old_image);
+
+        // This operation's own candidate is left to the upgrade lane.
+        std::fs::remove_file(fake_state.join(format!("{running}.image"))).unwrap();
+        let own = stale_created_candidate(&fake_state, &plan, &lease.request.id, 41306);
+        assert!(reconcile(&launcher).unwrap());
+        assert!(fake_state.join(format!("{own}.image")).exists());
     }
 }
