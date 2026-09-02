@@ -1,0 +1,160 @@
+name: Finite automated PR review
+
+on:
+  pull_request:
+    branches:
+      - main
+    types:
+      - opened
+      - synchronize
+      - reopened
+      - ready_for_review
+  workflow_dispatch:
+    inputs:
+      pr_number:
+        description: Pull request number to review
+        required: true
+        type: number
+
+concurrency:
+  group: finite-automated-pr-review-${{ github.event_name == 'workflow_dispatch' && inputs.pr_number || github.event.pull_request.number }}
+  cancel-in-progress: true
+
+permissions:
+  actions: read
+  checks: read
+  contents: read
+  issues: write
+  pull-requests: write
+
+env:
+  CACHIX_CACHE_NAME: finite
+  NIX_CONFIG: |
+    accept-flake-config = true
+    access-tokens = github.com=${{ github.token }}
+
+jobs:
+  review:
+    name: Review PR with Codex
+    if: >-
+      ${{
+        github.event_name == 'workflow_dispatch' ||
+        (
+          github.event.pull_request.draft == false &&
+          github.event.pull_request.head.repo.full_name == github.repository
+        )
+      }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 120
+    env:
+      GH_TOKEN: ${{ github.token }}
+      GITHUB_TOKEN: ${{ github.token }}
+      PR_NUMBER: ${{ github.event_name == 'workflow_dispatch' && inputs.pr_number || github.event.pull_request.number }}
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Resolve PR metadata
+        id: pr
+        run: |
+          set -euo pipefail
+
+          pr_json="$(gh pr view "$PR_NUMBER" \
+            --json number,url,baseRefName,headRefName,headRefOid,isDraft)"
+
+          echo "url=$(jq -r '.url' <<<"$pr_json")" >> "$GITHUB_OUTPUT"
+          echo "base_ref=$(jq -r '.baseRefName' <<<"$pr_json")" >> "$GITHUB_OUTPUT"
+          echo "head_ref=$(jq -r '.headRefName' <<<"$pr_json")" >> "$GITHUB_OUTPUT"
+          echo "head_sha=$(jq -r '.headRefOid' <<<"$pr_json")" >> "$GITHUB_OUTPUT"
+          echo "is_draft=$(jq -r '.isDraft' <<<"$pr_json")" >> "$GITHUB_OUTPUT"
+
+      - name: Check out PR merge ref when available
+        run: |
+          set -euo pipefail
+
+          merge_ref="refs/remotes/pull/${PR_NUMBER}/merge"
+          head_ref="refs/remotes/pull/${PR_NUMBER}/head"
+
+          if git fetch --no-tags origin "pull/${PR_NUMBER}/merge:$merge_ref"; then
+            git checkout --detach "$merge_ref"
+            echo "CHECKOUT_KIND=merge" >> "$GITHUB_ENV"
+          else
+            git fetch --no-tags origin "pull/${PR_NUMBER}/head:$head_ref"
+            git checkout --detach "$head_ref"
+            echo "CHECKOUT_KIND=head" >> "$GITHUB_ENV"
+          fi
+
+      - uses: DeterminateSystems/nix-installer-action@v16
+
+      - name: Configure Cachix read-only cache
+        uses: cachix/cachix-action@v17
+        with:
+          name: ${{ env.CACHIX_CACHE_NAME }}
+          skipPush: true
+
+      - name: Verify OpenAI API key secret
+        env:
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+        run: |
+          set -euo pipefail
+
+          if [[ -z "$OPENAI_API_KEY" ]]; then
+            echo "::error::OPENAI_API_KEY secret is required for finite automated PR review"
+            exit 1
+          fi
+
+      - name: Capture review runtime preflight
+        continue-on-error: true
+        run: |
+          set -o pipefail
+          mkdir -p .codex-review
+          {
+            echo "== gh =="
+            gh --version
+            gh auth status
+            echo
+            echo "== nix =="
+            nix --version
+            nix config show \
+              | sed -n \
+                  -e '/^accept-flake-config/p' \
+                  -e '/^substituters/p' \
+                  -e '/^trusted-public-keys/p'
+            echo
+            echo "== just via dev shell =="
+            nix develop .#default --command just --version
+            echo
+            echo "== dev shell =="
+            nix develop .#default --command true
+          } 2>&1 | tee .codex-review/preflight.log
+
+      - name: Run Codex review
+        id: codex
+        uses: openai/codex-action@v1
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GITHUB_TOKEN: ${{ github.token }}
+          PR_NUMBER: ${{ env.PR_NUMBER }}
+          PR_HEAD_SHA: ${{ steps.pr.outputs.head_sha }}
+          PR_BASE_REF: ${{ steps.pr.outputs.base_ref }}
+          PR_HEAD_REF: ${{ steps.pr.outputs.head_ref }}
+          PR_URL: ${{ steps.pr.outputs.url }}
+          CHECKOUT_KIND: ${{ env.CHECKOUT_KIND }}
+          NIX_CONFIG: ${{ env.NIX_CONFIG }}
+        with:
+          openai-api-key: ${{ secrets.OPENAI_API_KEY }}
+          prompt-file: .github/codex/prompts/finite-automated-pr-review.md
+          output-file: .codex-review/final-message.md
+          sandbox: danger-full-access
+          codex-args: '["--ask-for-approval", "never"]'
+
+      - name: Upload Codex review artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: finite-automated-pr-review-${{ env.PR_NUMBER }}
+          path: .codex-review/
+          if-no-files-found: ignore
