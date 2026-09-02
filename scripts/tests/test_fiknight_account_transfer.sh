@@ -20,7 +20,17 @@ export PGHOST="$scratch/socket"
 export PGUSER=postgres
 export PGDATABASE=postgres
 
-psql -v ON_ERROR_STOP=1 >/dev/null <<'SQL'
+fixture_kind=synthetic
+if [[ -n "${FIKNIGHT_PRODUCTION_DUMP_RSYNC:-}" ]]; then
+  fixture_kind=production-snapshot
+  test -n "${FIKNIGHT_PRODUCTION_DUMP_SHA256:-}"
+  rsync --archive --quiet --rsync-path='sudo rsync' \
+    "$FIKNIGHT_PRODUCTION_DUMP_RSYNC" "$scratch/finite_core.dump"
+  test "$(shasum -a 256 "$scratch/finite_core.dump" | awk '{print $1}')" = \
+    "$FIKNIGHT_PRODUCTION_DUMP_SHA256"
+  pg_restore --no-owner --no-acl -d postgres "$scratch/finite_core.dump"
+else
+  psql -v ON_ERROR_STOP=1 >/dev/null <<'SQL'
 CREATE TABLE users (
   id text PRIMARY KEY,
   normalized_email text UNIQUE NOT NULL,
@@ -174,6 +184,7 @@ INSERT INTO finite_private_api_keys VALUES (
   'project_b7e3a5beaf06095c6465', NULL, 'active', now()
 );
 SQL
+fi
 
 stage="$repo_root/scripts/ops/fiknight-account-transfer-stage.sql"
 finalize="$repo_root/scripts/ops/fiknight-account-transfer-finalize.sql"
@@ -201,4 +212,5 @@ psql -v ON_ERROR_STOP=1 -f "$finalize" >/dev/null
 test "$(psql -Atc "SELECT count(*) FROM project_room_memberships m JOIN chat_identities i ON i.id=m.chat_identity_id WHERE m.project_id='project_b7e3a5beaf06095c6465' AND i.user_id='user_b9540ab702bd98195b98' AND m.archived_at IS NULL")" = 1
 test "$(psql -Atc "SELECT count(*) FROM project_room_memberships m JOIN chat_identities i ON i.id=m.chat_identity_id WHERE m.project_id='project_b7e3a5beaf06095c6465' AND i.user_id='user_85d05606925d474442d7' AND m.archived_at IS NOT NULL")" = 1
 
-printf 'fiknight account transfer SQL: synthetic stage/replay/rollback/finalize passed\n'
+printf 'fiknight account transfer SQL: %s stage/replay/rollback/finalize passed\n' \
+  "$fixture_kind"

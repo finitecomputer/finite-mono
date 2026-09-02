@@ -23,6 +23,18 @@ Finite`. Core linked it as `user_b9540ab702bd98195b98` with personal
 organization `org_696a800e548d65b8be93`. No credential value belongs in this
 ledger or branch.
 
+The fresh pre-change coordinated Recovery Snapshot is
+`/data/recovery-snapshots/hosted-web-chat/20260902T142826Z`. Its manifest
+passed in full. SHA-256 evidence:
+
+- manifest: `053512249efce2f0001d41717977b1200f027f831a0229dfd2528b01f66132cd`
+- Core dump: `529248577465112bad76a1a4fd1c15d3ecf3846a75d83d52eb33d7209f1357db`
+- Finite Identity database: `546f32284902cc0e6502bdb8a28eafc9bb09f798ab3993460d0330ee66dd1f6a`
+
+The exact Core dump was restored into an isolated local PostgreSQL instance.
+The production rows passed stage, exact replay, rollback, a second stage, and
+finalization without modifying production.
+
 `fiknight@finite.vip` is intentionally both a deliverable Google mailbox and a
 Managed Agent NIP-05. Gmail remains deliverable. Finite Sites callers must use
 the typed `--nip05 fiknight@finite.vip` form for Agent grants rather than the
