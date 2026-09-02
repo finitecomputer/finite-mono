@@ -26,8 +26,8 @@ pub const MAX_SITES_PER_OWNER: u32 = 100;
 /// Google-Doc-shaped (a few collaborators), not a mailing list.
 pub const MAX_SHARES_PER_SITE: u32 = 50;
 
-/// One site may have this many email-keyed editors. This matches the
-/// document-collaboration shape and keeps per-publish editor checks cheap.
+/// One site may have this many email-keyed editors. This keeps per-publish
+/// editor checks cheap without making shared projects brittle.
 pub const MAX_EDITORS_PER_SITE: u32 = 50;
 
 /// One verified email may keep a handful of active local keys, enough for a
@@ -73,9 +73,9 @@ pub const MAX_NATIVE_VIEWER_CLIENT_BYTES: u32 = 64;
 pub const MIN_NATIVE_VIEWER_NONCE_BYTES: u32 = 16;
 pub const MAX_NATIVE_VIEWER_NONCE_BYTES: u32 = 128;
 
-/// Canonical output URLs are one origin plus `/`; this leaves ample room for
+/// Canonical site URLs are one origin plus `/`; this leaves ample room for
 /// local ports while preventing an internal caller from sending huge values.
-pub const MAX_OUTPUT_URL_BYTES: u32 = 2 * 1024;
+pub const MAX_SITE_URL_BYTES: u32 = 2 * 1024;
 
 /// Post-redeem navigation stays on the output origin and is intentionally
 /// bounded independently of the request body.
@@ -101,23 +101,9 @@ pub const MAX_EMAILS_PER_SHARING_REQUEST: u32 = 20;
 /// A claim or auth header is rejected above this size before any parsing.
 pub const MAX_AUTH_HEADER_BYTES: u32 = 8 * 1024;
 
-/// App bundles (tier 2) ship as one tar.gz blob, so they get their own
-/// ceiling instead of MAX_FILE_BYTES. 256 MiB fits a Next.js standalone
-/// output with room to spare.
-pub const MAX_APP_BUNDLE_BYTES: u64 = 256 * 1024 * 1024;
-
-/// App bundles are generated from a committed tree and later extracted by the
-/// app runner. This matches the extraction cap so archive creation is bounded
-/// before the runner sees it.
-pub const MAX_APP_BUNDLE_FILES: u32 = 100_000;
-
-/// Maximum total uncompressed file bytes allowed in one app bundle. The app
-/// runner enforces the same cap while extracting.
-pub const MAX_APP_BUNDLE_UNPACKED_BYTES: u64 = 2 * 1024 * 1024 * 1024;
-
 /// Source snapshots are optional editor-handoff archives, not dependency
-/// mirrors. Excluding vendor/build output keeps this comfortably under app
-/// bundle size while allowing real project source.
+/// mirrors. Excluding vendor/build output keeps this small while allowing
+/// real project source.
 pub const MAX_SOURCE_SNAPSHOT_BYTES: u64 = 64 * 1024 * 1024;
 
 /// Source snapshots may include larger project trees than static manifests,
@@ -127,16 +113,8 @@ pub const MAX_SOURCE_SNAPSHOT_FILES: u32 = 5_000;
 /// Empty/generated directory trees should not make source walking unbounded.
 pub const MAX_SOURCE_SNAPSHOT_DIRECTORIES: u32 = 5_000;
 
-/// Start commands are one shell line, not scripts.
-pub const MAX_START_COMMAND_BYTES: u32 = 1024;
-
-/// App listen ports are allocated from this range, one per app site.
-pub const APP_PORT_RANGE_START: u16 = 21000;
-pub const APP_PORT_RANGE_END: u16 = 29999;
-
-/// One Project Config can describe multiple outputs later, but milestone 1
-/// stays small enough that validation, deploy reconciliation, and agent error
-/// messages remain inspectable.
+/// Deprecated legacy output maps are accepted only when they describe one
+/// static site. Keep the bound explicit while that input compatibility exists.
 pub const MAX_PROJECT_OUTPUTS: u32 = 16;
 
 /// Project collaboration follows the same Google-Doc-shaped expectation as
@@ -148,8 +126,9 @@ pub const MAX_PROJECT_COLLABORATORS: u32 = 50;
 /// unsurprising and avoids path escaping questions.
 pub const MAX_PROJECT_SLUG_BYTES: u32 = 63;
 
-/// Project Output IDs are table keys inside `finite.toml`, not public DNS
-/// labels. They still stay short so status and workflow JSON are bounded.
+/// Legacy Project Output IDs are input-only table keys inside old
+/// `finite.toml` files. They stay short while deprecated input compatibility
+/// exists.
 pub const MAX_PROJECT_OUTPUT_ID_BYTES: u32 = 64;
 
 /// Git branch names accepted by Project Config are intentionally narrower
@@ -157,6 +136,6 @@ pub const MAX_PROJECT_OUTPUT_ID_BYTES: u32 = 64;
 /// `feature/site`, and the server avoids control/path edge cases.
 pub const MAX_PROJECT_BRANCH_BYTES: u32 = 128;
 
-/// Output paths select committed deploy bytes. They are directory paths, not
+/// Site paths select committed deploy bytes. They are directory paths, not
 /// arbitrary pathspecs, and remain small enough for logs and audit rows.
 pub const MAX_PROJECT_OUTPUT_PATH_BYTES: u32 = 256;

@@ -13,7 +13,7 @@
 use std::path::PathBuf;
 
 use finite_mail::{MailTransport, ResendMailer, TextEmail};
-use finitesites_proto::dto::ProjectOutputSummary;
+use finitesites_proto::dto::ProjectSiteSummary;
 
 pub use finite_mail::MailError as MailerError;
 pub use finite_mail::RESEND_API_KEY_ENV_VAR;
@@ -69,7 +69,7 @@ pub struct ProjectCollaboratorInvite<'a> {
     pub api_url: &'a str,
     pub git_remote_url: &'a str,
     pub email_login_token: &'a str,
-    pub outputs: &'a [ProjectOutputSummary],
+    pub site: Option<&'a ProjectSiteSummary>,
 }
 
 pub struct SiteAccessRequestEmail<'a> {
@@ -125,7 +125,7 @@ fn viewer_invite_text(invite: &ViewerInvite<'_>) -> String {
         site_name = invite.site_name,
         login_url = invite.login_url,
         site_url = invite.site_url,
-        llms_url = output_url(invite.site_url, "/llms.txt"),
+        llms_url = site_url_with_path(invite.site_url, "/llms.txt"),
         email = invite.email,
     )
 }
@@ -163,14 +163,9 @@ fn project_collaborator_invite_text(invite: &ProjectCollaboratorInvite<'_>) -> S
         api_prefix = api_prefix,
         git_remote_url = invite.git_remote_url,
     );
-    if !invite.outputs.is_empty() {
-        text.push_str("Project outputs:\n");
-        for output in invite.outputs {
-            text.push_str(&format!(
-                "- {} ({}) -> {}\n",
-                output.output_id, output.kind, output.site_url
-            ));
-        }
+    if let Some(site) = invite.site {
+        text.push_str("Project site:\n");
+        text.push_str(&format!("- {} -> {}\n", site.name, site.url));
     }
     text
 }
@@ -203,12 +198,12 @@ fn first_publication_text(site_url: &str) -> String {
     )
 }
 
-fn output_url(base_url: &str, path: &str) -> String {
+fn site_url_with_path(base_url: &str, path: &str) -> String {
     format!("{}{}", base_url.trim_end_matches('/'), path)
 }
 
 fn api_prefix(api_url: &str) -> String {
-    if api_url == "https://api.finite.chat" {
+    if api_url == "https://v2.finite.chat" {
         String::new()
     } else {
         format!("FINITE_SITES_API={api_url} ")
@@ -400,7 +395,7 @@ impl Mailer for HttpMailer {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use finitesites_proto::dto::ProjectOutputSummary;
+    use finitesites_proto::dto::ProjectSiteSummary;
 
     #[test]
     fn mailer_kind_parsing_and_env_vars() {
@@ -461,34 +456,27 @@ https://hello.finite.chat/llms.txt\n"
         assert!(viewer.contains("ask it to read this email"));
         assert!(viewer.contains("https://hello.finite.chat/llms.txt"));
 
-        let outputs = vec![ProjectOutputSummary {
-            output_id: "mockup".to_string(),
-            kind: "site".to_string(),
-            output_name: "finitechat-native-mockup".to_string(),
-            output_url: "https://finitechat-native-mockup.finite.chat/".to_string(),
-            site_name: "finitechat-native-mockup".to_string(),
-            document_name: None,
+        let site = ProjectSiteSummary {
+            name: "finitechat-native-mockup".to_string(),
+            url: "https://finitechat-native-mockup.finite.chat/".to_string(),
             site_id: Some("site_1".to_string()),
-            site_url: "https://finitechat-native-mockup.finite.chat/".to_string(),
             status: "claimed_unpublished".to_string(),
             visibility: "private".to_string(),
             active_version: None,
             branch: "main".to_string(),
             path: ".".to_string(),
-            entry: None,
-            start: None,
             spa: false,
             created: false,
             requesting_user_shared: false,
-        }];
+        };
         let project = project_collaborator_invite_text(&ProjectCollaboratorInvite {
             email: "skyler@example.com",
             project_slug: "finitechat-native",
             role: "editor",
-            api_url: "https://api.finite.chat",
-            git_remote_url: "https://git.finite.chat/finitechat-native.git",
+            api_url: "https://v2.finite.chat",
+            git_remote_url: "https://v2.finite.chat/finitechat-native.git",
             email_login_token: "token123",
-            outputs: &outputs,
+            site: Some(&site),
         });
         assert!(project.starts_with(
             "You have been invited to collaborate on finitechat-native as editor.\n\n\
@@ -507,7 +495,12 @@ For your agent\n\n"
         assert!(project.contains(
             "fsite auth git finitechat-native --email skyler@example.com --store --output json"
         ));
-        assert!(project.contains("git clone https://git.finite.chat/finitechat-native.git"));
-        assert!(project.contains("mockup (site)"));
+        assert!(project.contains("git clone https://v2.finite.chat/finitechat-native.git"));
+        assert!(project.contains("Project site:"));
+        assert!(
+            project.contains(
+                "finitechat-native-mockup -> https://finitechat-native-mockup.finite.chat/"
+            )
+        );
     }
 }

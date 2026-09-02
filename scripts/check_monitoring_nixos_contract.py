@@ -819,6 +819,8 @@ def main() -> int:
             "brain.finite.computer",
             "finitechat-native-mockup.finite.chat",
             "uptime-probe.docs.finite.chat",
+            "v2.finite.chat",
+            "uptime-probe.v2.finite.chat",
         ],
         "public probe job set drifted",
     )

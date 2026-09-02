@@ -1,13 +1,11 @@
 # Backups on finite-lat-2
 
-> **HISTORICAL 2026-07-08 SITES CAPTURE — DO NOT RUN.** Sites moved to
-> `finite-lat-1` on 2026-07-09, and lat2 is now a decommission target with
-> historical service captures.
-> Do not move old Sites files, install or enable these timers, or use `/data`
-> as a Finite recovery target. Current backup and restore procedures live under
-> [`infra/runbooks/`](../../runbooks/). To remove historical data from the
-> machine before repurpose, use
-> [`decommission-lat2.md`](../../runbooks/decommission-lat2.md).
+> **HISTORICAL 2026-07-08 SITES CAPTURE — DO NOT RUN.** ADR 0007 moved the
+> live app-plane stack back onto `finite-lat-2` on 2026-08-29, but this file is
+> still only evidence of the old pre-NixOS Sites backup gap. Current backup and
+> restore procedures live under [`infra/runbooks/`](../../runbooks/) and the
+> NixOS host modules. Do not move old Sites files, install or enable these
+> timers, or use `/data` as a recovery target from this document.
 
 ## Current reality (captured 2026-07-08) — GAP
 

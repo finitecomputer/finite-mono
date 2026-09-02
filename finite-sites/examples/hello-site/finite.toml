@@ -1,10 +1,8 @@
 [project]
 slug = "finite-hello-site"
 
-[outputs.site]
-kind = "site"
-site_name = "finite-hello-site"
+[site]
+name = "finite-hello-site"
 branch = "main"
 path = "."
 spa = false
-

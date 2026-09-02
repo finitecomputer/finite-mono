@@ -3,13 +3,12 @@
 //! Requests whose Host matches the API host go to the control-plane API.
 //! Requests whose Host is `{label}.{base_domain}` go to the site-serving
 //! plane. Everything else (the bare listen address, a load balancer health
-//! check) goes to the API. The API check runs first because in production
-//! the API host (`api.finite.chat`) itself matches `*.finite.chat`; `api`
-//! is also a reserved site name, so the two planes can never both claim a
-//! host. The split is decided in one place, by host, before any route
-//! matching.
+//! check) goes to the API. The API check runs first because a labeled API
+//! host can itself match a wildcard site domain; configured control hosts are
+//! always checked before wildcard site labels, so the two planes can never
+//! both claim a host. The split is decided in one place, by host, before any
+//! route matching.
 
-use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -23,7 +22,6 @@ use tower::util::ServiceExt as _;
 use finitesites_blob::BlobStore;
 use finitesites_engine::Engine;
 
-use crate::apps::Supervisor;
 use crate::limiter::{RateLimiter, WINDOW_SECONDS};
 use crate::mailer::Mailer;
 use crate::{ServeOptions, api, git, sites};
@@ -43,17 +41,13 @@ pub struct AppState {
     /// bytes across active versions.
     pub blobs: BlobStore,
     pub mailer: Box<dyn Mailer>,
-    /// Owns app isolation (the runner) plus the density policy: wake on
-    /// request, stop when idle.
-    pub apps: Supervisor,
     pub login_limiter: RateLimiter,
     pub api_url: String,
     pub git_base_url: String,
     pub viewer_session_service_token: Option<String>,
     pub base_domain: String,
-    pub document_base_domain: String,
-    pub data_dir: PathBuf,
-    pub git_hook_helper_path: PathBuf,
+    pub data_dir: std::path::PathBuf,
+    pub git_hook_helper_path: std::path::PathBuf,
     pub git_auto_reconcile: bool,
 }
 
@@ -140,9 +134,8 @@ struct Dispatcher {
     git: Router,
     sites: Router,
     base_domain: String,
-    document_base_domain: String,
     /// Port-stripped host of the configured `--api-url`, checked before the
-    /// wildcard so `api.finite.chat` never falls into the sites plane.
+    /// wildcard so the control origin never falls into the sites plane.
     api_host: String,
     git_host: String,
 }
@@ -153,7 +146,6 @@ pub fn build_app(state: Arc<AppState>) -> Router {
         git: git::router(state.clone()),
         sites: sites::router(state.clone()),
         base_domain: state.base_domain.clone(),
-        document_base_domain: state.document_base_domain.clone(),
         api_host: host_of_url(&state.api_url),
         git_host: host_of_url(&state.git_base_url),
     };
@@ -168,13 +160,7 @@ pub enum Plane {
 }
 
 /// The one routing decision: which plane serves this Host header.
-pub fn plane_for_host(
-    host: &str,
-    api_host: &str,
-    git_host: &str,
-    base_domain: &str,
-    document_base_domain: &str,
-) -> Plane {
+pub fn plane_for_host(host: &str, api_host: &str, git_host: &str, base_domain: &str) -> Plane {
     if strip_port(host).eq_ignore_ascii_case(api_host) {
         return Plane::Api;
     }
@@ -182,9 +168,6 @@ pub fn plane_for_host(
         return Plane::Git;
     }
     if site_label(host, base_domain).is_some() {
-        return Plane::Sites;
-    }
-    if site_label(host, document_base_domain).is_some() {
         return Plane::Sites;
     }
     Plane::Api
@@ -200,7 +183,6 @@ pub fn plane_for_request(
     api_host: &str,
     git_host: &str,
     base_domain: &str,
-    document_base_domain: &str,
 ) -> Plane {
     let request_host = strip_port(host);
     if api_host.eq_ignore_ascii_case(git_host)
@@ -209,7 +191,7 @@ pub fn plane_for_request(
     {
         return Plane::Git;
     }
-    plane_for_host(host, api_host, git_host, base_domain, document_base_domain)
+    plane_for_host(host, api_host, git_host, base_domain)
 }
 
 async fn dispatch(State(dispatcher): State<Dispatcher>, request: Request<Body>) -> Response {
@@ -224,7 +206,6 @@ async fn dispatch(State(dispatcher): State<Dispatcher>, request: Request<Body>) 
         &dispatcher.api_host,
         &dispatcher.git_host,
         &dispatcher.base_domain,
-        &dispatcher.document_base_domain,
     ) {
         Plane::Sites => dispatcher.sites.clone(),
         Plane::Git => dispatcher.git.clone(),
@@ -236,7 +217,7 @@ async fn dispatch(State(dispatcher): State<Dispatcher>, request: Request<Body>) 
     }
 }
 
-/// Host (no port) of a URL like `https://api.finite.chat` or
+/// Host (no port) of a URL like `https://v2.finite.chat` or
 /// `http://127.0.0.1:8787`.
 pub fn host_of_url(url: &str) -> String {
     let after_scheme = url.split_once("://").map(|(_, rest)| rest).unwrap_or(url);
@@ -281,13 +262,12 @@ pub fn site_label(host: &str, base_domain: &str) -> Option<String> {
 pub async fn serve(
     engine: Engine,
     mailer: Box<dyn Mailer>,
-    apps: Supervisor,
     options: ServeOptions,
 ) -> Result<(), String> {
     let listener = tokio::net::TcpListener::bind(options.listen)
         .await
         .map_err(|error| format!("cannot bind {}: {error}", options.listen))?;
-    serve_on(listener, engine, mailer, apps, options).await
+    serve_on(listener, engine, mailer, options).await
 }
 
 /// Serve on an already-bound listener. Split from `serve` so tests can bind
@@ -296,7 +276,6 @@ pub async fn serve_on(
     listener: tokio::net::TcpListener,
     engine: Engine,
     mailer: Box<dyn Mailer>,
-    apps: Supervisor,
     options: ServeOptions,
 ) -> Result<(), String> {
     crate::validate_viewer_session_service_token(options.viewer_session_service_token.as_deref())?;
@@ -313,21 +292,17 @@ pub async fn serve_on(
         serving_engines,
         blobs,
         mailer,
-        apps,
         login_limiter: RateLimiter::new(WINDOW_SECONDS),
         api_url: options.api_url.clone(),
         git_base_url: options.git_base_url.clone(),
         viewer_session_service_token: options.viewer_session_service_token.clone(),
         base_domain: options.base_domain.clone(),
-        document_base_domain: options.document_base_domain.clone(),
         data_dir: options.data_dir.clone(),
         git_hook_helper_path: options.git_hook_helper_path.clone(),
         git_auto_reconcile: options.git_auto_reconcile,
     });
-    reconcile_apps(&state);
     reconcile_git_projects(&state);
     deliver_pending_site_notifications(&state);
-    spawn_idle_reaper(state.clone());
     spawn_site_notification_reaper(state.clone());
     let app = build_app(state);
     eprintln!(
@@ -345,49 +320,12 @@ fn reconcile_git_projects(state: &Arc<AppState>) {
         return;
     }
     let mut engine = state.engine.lock().expect("engine mutex never poisoned");
-    match git::reconcile_pending_events_with_apps(
-        &mut engine,
-        &state.data_dir,
-        None,
-        now_unix(),
-        Some(&state.apps),
-    ) {
+    match git::reconcile_pending_events(&mut engine, &state.data_dir, None, now_unix()) {
         Ok(processed) if processed > 0 => {
             eprintln!("git reconcile: {processed} pending event(s) processed");
         }
         Ok(_) => {}
         Err(error) => eprintln!("git reconcile failed: {error}"),
-    }
-}
-
-/// Bring every app site with an active version back up after a daemon
-/// restart. Failures are logged, not fatal: one broken app must not stop
-/// the platform from serving.
-fn reconcile_apps(state: &Arc<AppState>) {
-    let mut engine = state.engine.lock().expect("engine mutex never poisoned");
-    let deploys = match engine.app_deploys() {
-        Ok(deploys) => deploys,
-        Err(error) => {
-            eprintln!("app reconcile: cannot list app sites: {error}");
-            return;
-        }
-    };
-    // Bounded by the app port range.
-    for deploy in &deploys {
-        let bundle_path = engine.blob_file_path(&deploy.bundle_sha256);
-        if let Err(error) = state.apps.deploy(deploy, &bundle_path, now_unix()) {
-            eprintln!("app reconcile: {} failed: {error}", deploy.site_id);
-        } else if let Err(error) =
-            engine.mark_first_publication_notification_ready(&deploy.site_id, now_unix())
-        {
-            eprintln!(
-                "app reconcile: cannot ready first-publication notification for {}: {error}",
-                deploy.site_id
-            );
-        }
-    }
-    if !deploys.is_empty() {
-        eprintln!("app reconcile: {} app site(s) processed", deploys.len());
     }
 }
 
@@ -415,7 +353,7 @@ fn deliver_pending_site_notifications(state: &Arc<AppState>) {
                         return None;
                     }
                 };
-                let url = engine.output_url_for_site(&site);
+                let url = engine.site_url_for_site(&site);
                 Some((notification, url))
             })
             .collect::<Vec<_>>()
@@ -463,40 +401,6 @@ fn spawn_site_notification_reaper(state: Arc<AppState>) {
     });
 }
 
-/// Periodically stop apps that have been idle past the timeout. This is the
-/// density mechanism: idle tenants cost ~0 memory and wake on the next
-/// request. The check runs every minute; reaping itself is bounded by the
-/// app count.
-fn spawn_idle_reaper(state: Arc<AppState>) {
-    tokio::spawn(async move {
-        let mut tick = tokio::time::interval(std::time::Duration::from_secs(60));
-        loop {
-            tick.tick().await;
-            let state = state.clone();
-            // Runner calls (systemctl/ctr) are blocking; keep them off the
-            // async reactor.
-            let _ = tokio::task::spawn_blocking(move || {
-                let deploys = {
-                    let engine = state.engine.lock().expect("engine mutex");
-                    engine.app_deploys()
-                };
-                let deploys = match deploys {
-                    Ok(deploys) => deploys,
-                    Err(error) => {
-                        eprintln!("idle reaper: cannot list apps: {error}");
-                        return;
-                    }
-                };
-                let stopped = state.apps.reap_idle(&deploys, now_unix());
-                if !stopped.is_empty() {
-                    eprintln!("idle reaper: stopped {} idle app(s)", stopped.len());
-                }
-            })
-            .await;
-        }
-    });
-}
-
 async fn shutdown_signal() {
     let _ = tokio::signal::ctrl_c().await;
     eprintln!("finitesitesd shutting down");
@@ -519,7 +423,6 @@ mod tests {
             [7; 32],
             finitesites_engine::EngineConfig {
                 base_domain: "sites.test".to_string(),
-                document_base_domain: "docs.sites.test".to_string(),
                 site_url_scheme: "https".to_string(),
                 site_url_port: None,
             },
@@ -562,7 +465,6 @@ mod tests {
             [7; 32],
             finitesites_engine::EngineConfig {
                 base_domain: "sites.test".to_string(),
-                document_base_domain: "docs.sites.test".to_string(),
                 site_url_scheme: "https".to_string(),
                 site_url_port: None,
             },
@@ -607,79 +509,60 @@ mod tests {
 
     #[test]
     fn host_of_url_extraction() {
-        assert_eq!(host_of_url("https://api.finite.chat"), "api.finite.chat");
+        assert_eq!(host_of_url("https://v2.finite.chat"), "v2.finite.chat");
         assert_eq!(host_of_url("http://127.0.0.1:8787"), "127.0.0.1");
         assert_eq!(
-            host_of_url("https://API.Finite.Chat/path?q=1"),
-            "api.finite.chat"
+            host_of_url("https://V2.Finite.Chat/path?q=1"),
+            "v2.finite.chat"
         );
     }
 
     #[test]
     fn strip_port_handles_ipv6() {
-        assert_eq!(strip_port("api.finite.chat:443"), "api.finite.chat");
-        assert_eq!(strip_port("api.finite.chat"), "api.finite.chat");
+        assert_eq!(strip_port("v2.finite.chat:443"), "v2.finite.chat");
+        assert_eq!(strip_port("v2.finite.chat"), "v2.finite.chat");
         assert_eq!(strip_port("[::1]:8787"), "[::1]");
         assert_eq!(strip_port("[::1]"), "[::1]");
     }
 
-    // The production-shaped regression: api.finite.chat matches the
-    // *.finite.chat wildcard but must classify as the API host.
+    // Labeled API/Git hosts match a one-label wildcard deployment but must
+    // still classify as configured control hosts.
     #[test]
     fn api_host_wins_over_wildcard() {
         use super::{Plane, plane_for_host};
-        let base = "finite.chat";
-        let document_base = "docs.finite.chat";
-        let api_host = host_of_url("https://api.finite.chat");
-        let git_host = host_of_url("https://git.finite.chat");
+        let base = "v2.finite.chat";
+        let api_host = host_of_url("https://api.v2.finite.chat");
+        let git_host = host_of_url("https://git.v2.finite.chat");
         assert_eq!(
-            plane_for_host("api.finite.chat", &api_host, &git_host, base, document_base),
+            plane_for_host("api.v2.finite.chat", &api_host, &git_host, base),
             Plane::Api
         );
         assert_eq!(
-            plane_for_host(
-                "api.finite.chat:443",
-                &api_host,
-                &git_host,
-                base,
-                document_base
-            ),
+            plane_for_host("api.v2.finite.chat:443", &api_host, &git_host, base),
             Plane::Api
         );
         assert_eq!(
-            plane_for_host("API.finite.chat", &api_host, &git_host, base, document_base),
+            plane_for_host("API.v2.finite.chat", &api_host, &git_host, base),
             Plane::Api
         );
         assert_eq!(
-            plane_for_host("git.finite.chat", &api_host, &git_host, base, document_base),
+            plane_for_host("git.v2.finite.chat", &api_host, &git_host, base),
             Plane::Git
         );
         assert_eq!(
-            plane_for_host(
-                "hello.finite.chat",
-                &api_host,
-                &git_host,
-                base,
-                document_base
-            ),
+            plane_for_host("hello.v2.finite.chat", &api_host, &git_host, base),
             Plane::Sites
         );
         assert_eq!(
-            plane_for_host(
-                "hello.docs.finite.chat",
-                &api_host,
-                &git_host,
-                base,
-                document_base
-            ),
-            Plane::Sites
-        );
-        assert_eq!(
-            plane_for_host("finite.chat", &api_host, &git_host, base, document_base),
+            plane_for_host("hello.extra.v2.finite.chat", &api_host, &git_host, base),
             Plane::Api
         );
         assert_eq!(
-            plane_for_host("127.0.0.1:8787", &api_host, &git_host, base, document_base),
+            plane_for_host("v2.finite.chat", &api_host, &git_host, base),
+            Plane::Api
+        );
+        assert_eq!(
+            plane_for_host("127.0.0.1:8787", &api_host, &git_host, base),
             Plane::Api
         );
     }
@@ -696,18 +579,16 @@ mod tests {
                 &host,
                 &host,
                 "sites.localhost",
-                "docs.sites.localhost",
             ),
             Plane::Git
         );
         assert_eq!(
             plane_for_request(
                 "192.168.64.1:8787",
-                "/api/v1/projects",
+                "/api/v2/projects",
                 &host,
                 &host,
                 "sites.localhost",
-                "docs.sites.localhost",
             ),
             Plane::Api
         );
@@ -718,7 +599,6 @@ mod tests {
                 &host,
                 &host,
                 "sites.localhost",
-                "docs.sites.localhost",
             ),
             Plane::Api
         );
@@ -730,12 +610,11 @@ mod tests {
 
         assert_eq!(
             plane_for_request(
-                "api.finite.chat",
+                "v2.finite.chat",
                 "/demo.git/info/refs",
-                "api.finite.chat",
-                "git.finite.chat",
-                "finite.chat",
-                "docs.finite.chat",
+                "v2.finite.chat",
+                "git.v2.finite.chat",
+                "v2.finite.chat",
             ),
             Plane::Api
         );

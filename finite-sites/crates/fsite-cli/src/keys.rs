@@ -319,7 +319,7 @@ mod tests {
         let identity = load_or_generate_identity(&paths).unwrap();
         let key = user_key_for(&identity).unwrap();
 
-        let url = "http://127.0.0.1:8787/api/v1/projects/init";
+        let url = "http://127.0.0.1:8787/api/v2/projects/init";
         let now: u64 = 1_750_000_000;
         let body = br#"{"hello":"world"}"#;
         let header = nip98::build_auth_header(&key.secret, url, "POST", Some(body), now).unwrap();
