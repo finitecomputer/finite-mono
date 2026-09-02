@@ -833,26 +833,11 @@ fn error_event(error: impl ToString) -> Event {
 
 impl IntoResponse for DaemonError {
     fn into_response(self) -> Response {
-        let status = match self {
-            Self::Core(FiniteChatCoreError::Client { .. }) => StatusCode::BAD_REQUEST,
-            Self::Core(FiniteChatCoreError::Profile { .. }) => StatusCode::BAD_REQUEST,
-            Self::Core(FiniteChatCoreError::ServerRejected { .. }) => StatusCode::BAD_GATEWAY,
-            Self::Core(FiniteChatCoreError::IdempotencyConflict { .. }) => StatusCode::BAD_GATEWAY,
-            Self::Core(FiniteChatCoreError::Delivery { .. }) => StatusCode::BAD_GATEWAY,
-            // Currency gate: the store is behind the server (needs a rekey) or
-            // has no state for the requested device; the request is well-formed
-            // but the device state refuses it.
-            Self::Core(FiniteChatCoreError::DeviceStateBehindServer { .. }) => StatusCode::CONFLICT,
-            Self::Core(FiniteChatCoreError::DeviceStateMissing { .. }) => StatusCode::CONFLICT,
-            // Not yet verified against the server since open: retry after a sync.
-            Self::Core(FiniteChatCoreError::CurrencyUnverified { .. }) => {
-                StatusCode::SERVICE_UNAVAILABLE
-            }
-            Self::Core(FiniteChatCoreError::Filesystem { .. }) => StatusCode::INTERNAL_SERVER_ERROR,
-            Self::Core(FiniteChatCoreError::Store { .. }) => StatusCode::INTERNAL_SERVER_ERROR,
-            Self::Core(FiniteChatCoreError::InvalidAccountSecret) => StatusCode::BAD_REQUEST,
-            Self::Core(FiniteChatCoreError::LockPoisoned) => StatusCode::INTERNAL_SERVER_ERROR,
-            Self::Core(FiniteChatCoreError::ReadOnly) => StatusCode::INTERNAL_SERVER_ERROR,
+        let status = match &self {
+            // One mapping for every Core failure: the class decided in Core
+            // (shared with the Hermes service) chooses the status.
+            Self::Core(error) => StatusCode::from_u16(error.classification().http_status())
+                .unwrap_or(StatusCode::INTERNAL_SERVER_ERROR),
             Self::MissingOption(_)
             | Self::NonLoopbackBind
             | Self::InvalidStartupSecrets
@@ -878,6 +863,37 @@ impl IntoResponse for DaemonError {
 mod tests {
     use super::*;
     use axum::body::Body;
+
+    #[test]
+    fn core_error_status_is_the_core_classification() {
+        let status = |error: FiniteChatCoreError| DaemonError::Core(error).into_response().status();
+        assert_eq!(
+            status(FiniteChatCoreError::Delivery {
+                reason: "offline".into()
+            }),
+            StatusCode::SERVICE_UNAVAILABLE
+        );
+        assert_eq!(
+            status(FiniteChatCoreError::ServerRejected {
+                reason: "no".into()
+            }),
+            StatusCode::BAD_GATEWAY
+        );
+        assert_eq!(
+            status(FiniteChatCoreError::DeviceStateBehindServer {
+                room_id: "room".into(),
+                local_mark: 1,
+                observed_seq: 2,
+            }),
+            StatusCode::CONFLICT
+        );
+        assert_eq!(
+            status(FiniteChatCoreError::Client {
+                reason: "bad".into()
+            }),
+            StatusCode::BAD_REQUEST
+        );
+    }
 
     const TOKEN: &str = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
 
