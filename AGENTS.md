@@ -25,6 +25,7 @@ Old component repositories are provenance; never sync changes back.
   [.agents/skills/finite-safety/SKILL.md](.agents/skills/finite-safety/SKILL.md).
 - Development setup, checks, workspace/import/release work, or documentation
   routing: read [.agents/skills/finite-repo/SKILL.md](.agents/skills/finite-repo/SKILL.md).
+- Automated PR reviews: follow [the review guide](docs/agents/finite-automated-pr-review.md).
 - Component changes: follow the component's `AGENTS.md` and consult retained
   contracts for affected compatibility, security and recovery boundaries.
 - Organization Brain or knowledge outside git: use the `orgbrain` skill and
