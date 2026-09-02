@@ -61,25 +61,45 @@ class CiHarnessSelectionTests(unittest.TestCase):
             workflow,
         )
 
-    def test_hermes_flake_input_avoids_github_api_tarball_fetcher(self) -> None:
+    def test_hermes_flake_input_avoids_github_archive_fetchers(self) -> None:
+        # Both the `github:` scheme (api.github.com/.../tarball/<rev>) and the
+        # codeload archive URL (github.com/.../archive/<rev>.tar.gz) hit the
+        # same archive service behind GitHub's per-IP secondary rate limit,
+        # which shared CI runner egress trips (HTTP 429). The git smart-HTTP
+        # fetch is not behind that limit, so the pin must stay `git+https`.
         flake_nix = (ROOT / "flake.nix").read_text(encoding="utf-8")
         flake_lock = json.loads((ROOT / "flake.lock").read_text(encoding="utf-8"))
         hermes_agent = flake_lock["nodes"]["hermes-agent"]
         locked = hermes_agent["locked"]
         original = hermes_agent["original"]
 
-        self.assertEqual(locked["type"], "tarball")
-        self.assertRegex(
-            locked["url"],
-            r"^https://github\.com/NousResearch/hermes-agent/archive/[0-9a-f]{40}\.tar\.gz$",
+        self.assertEqual(locked["type"], "git")
+        self.assertEqual(locked["url"], "https://github.com/NousResearch/hermes-agent")
+        self.assertRegex(locked["rev"], r"^[0-9a-f]{40}$")
+        # shallow=1 keeps the fresh-runner clone to the pinned commit instead
+        # of full upstream history; it locks to the same rev and narHash.
+        self.assertIs(locked["shallow"], True)
+        self.assertEqual(
+            original,
+            {
+                "type": "git",
+                "url": locked["url"],
+                "rev": locked["rev"],
+                "shallow": True,
+            },
         )
-        self.assertEqual(original, {"type": "tarball", "url": locked["url"]})
+        self.assertIn(
+            f'hermes-agent.url = "git+{locked["url"]}?rev={locked["rev"]}&shallow=1";',
+            flake_nix,
+        )
         self.assertNotIn("github:NousResearch/hermes-agent", flake_nix)
         self.assertNotIn("github:NousResearch/hermes-agent", ci_workflow_text())
         self.assertNotIn(
             "api.github.com/repos/NousResearch/hermes-agent/tarball",
             flake_nix + ci_workflow_text(),
         )
+        self.assertNotIn("NousResearch/hermes-agent/archive/", flake_nix)
+        self.assertNotIn("NousResearch/hermes-agent/archive/", ci_workflow_text())
 
     def test_nix_consuming_ci_jobs_configure_cachix_read_only(self) -> None:
         for job_id in (
