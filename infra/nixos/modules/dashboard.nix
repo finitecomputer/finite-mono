@@ -7,7 +7,7 @@
     # 2026-08-20.1, pinned 2026-08-19 (stop-button confirmation, #583).
     # This line is the dashboard's deployment record; there is no ledger to
     # update alongside it (infra/deployment-changelog.md holds narrative only).
-    image = "ghcr.io/finitecomputer/finite-saas-dashboard@sha256:2089a3d7aa2e1a590b430d4ebec0405e1854aaa5b75e4ad5c4627a5779b0bd64";
+    image = "ghcr.io/finitecomputer/finite-saas-dashboard@sha256:d71e3a565055a4a03bf7ebe4c0a039905ed96ee9f9d2321a142ecbca46a7538a";
 
     # Host networking: the dashboard must reach core on the HOST loopback
     # (127.0.0.1:4200) and itself bind 127.0.0.1:3000 (HOSTNAME below). With
