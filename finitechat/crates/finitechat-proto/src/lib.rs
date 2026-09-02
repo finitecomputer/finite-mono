@@ -259,6 +259,9 @@ pub struct FiniteEnvelope {
     pub payload: Vec<u8>,
 }
 
+/// Retained only for compatibility with persisted application-delivery
+/// effects written by earlier builds; no runtime code distinguishes its
+/// values since the push-wake path was removed.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum PushPolicy {
@@ -311,10 +314,6 @@ impl ApplicationDeliveryPolicy {
         unread: UnreadPolicy::Never,
         command_inbox: CommandInboxPolicy::Never,
     };
-
-    pub fn creates_push(self) -> bool {
-        self.push == PushPolicy::Default
-    }
 
     pub fn creates_unread(self) -> bool {
         self.unread == UnreadPolicy::Default
@@ -3556,11 +3555,6 @@ mod tests {
         assert!(
             DurableAppEventKind::ChatMessage
                 .delivery_policy()
-                .creates_push()
-        );
-        assert!(
-            DurableAppEventKind::ChatMessage
-                .delivery_policy()
                 .creates_unread()
         );
         assert!(
@@ -3572,11 +3566,6 @@ mod tests {
             !DurableAppEventKind::RuntimeStateSnapshot
                 .delivery_policy()
                 .creates_command_inbox_work()
-        );
-        assert!(
-            !DurableAppEventKind::RuntimeCommandResult
-                .delivery_policy()
-                .creates_push()
         );
     }
 
@@ -3636,7 +3625,6 @@ mod tests {
             kind.delivery_policy(),
             ApplicationDeliveryPolicy::NON_NOTIFYING
         );
-        assert!(!kind.delivery_policy().creates_push());
         assert!(!kind.delivery_policy().creates_unread());
 
         let empty = ChatRenameV1 {
@@ -3675,7 +3663,6 @@ mod tests {
             kind.delivery_policy(),
             ApplicationDeliveryPolicy::NON_NOTIFYING
         );
-        assert!(!kind.delivery_policy().creates_push());
         assert!(!kind.delivery_policy().creates_unread());
 
         let empty_topic = ChatArchiveV1 {

@@ -112,10 +112,6 @@ pub struct ApplicationDeliveryEffect {
 }
 
 impl ApplicationDeliveryEffect {
-    pub fn creates_push(&self) -> bool {
-        self.delivery_policy.creates_push()
-    }
-
     pub fn creates_unread(&self) -> bool {
         self.delivery_policy.creates_unread()
     }

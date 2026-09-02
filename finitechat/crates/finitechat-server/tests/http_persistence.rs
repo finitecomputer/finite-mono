@@ -8,13 +8,12 @@ use finitechat_delivery::{
     MAX_HTTP_SYNC_PAGE_ENTRIES,
 };
 use finitechat_http::{
-    AckPushWakeRequest, AckPushWakeResponse, AckWelcomeRequest, AckWelcomeResponse,
+    AckWelcomeRequest, AckWelcomeResponse,
     ApplicationEffectCountsResponse, ApplicationEffectRequest, BootstrapAccountRoomRequest,
     BootstrapAccountRoomResponse, ClaimKeyPackageForAccountRequest, ClaimKeyPackageRequest,
-    ClaimKeyPackagesRequest, ClaimPushWakesRequest, ClaimPushWakesResponse, ClaimWelcomesRequest,
+    ClaimKeyPackagesRequest, ClaimWelcomesRequest,
     CreatePairingSessionRequest, DeviceLivenessRecord, ErrorResponse, ExpireKeyPackageLeaseRequest,
-    ExpireKeyPackageLeaseResponse, FailPushWakeRequest, FailPushWakeResponse,
-    FiniteAccountRoomCommitProjection, GetDeviceLivenessRequest, GetDeviceLivenessResponse,
+    ExpireKeyPackageLeaseResponse, FiniteAccountRoomCommitProjection, GetDeviceLivenessRequest, GetDeviceLivenessResponse,
     GetEphemeralActivitiesRequest, GetEphemeralActivitiesResponse,
     GetKeyPackageAvailabilityRequest, GetKeyPackageAvailabilityResponse, GetNostrProfilesRequest,
     GetNostrProfilesResponse, GetPairingSessionRequest, GroupSyncRequest,
@@ -24,8 +23,7 @@ use finitechat_http::{
     ListAccountRoomDirectoryRequest, ListAccountRoomDirectoryResponse, NostrProfileRecord,
     ObserveDeviceLivenessRequest, PublishKeyPackageResponse, PublishMessageRequest,
     PublishPairingCompleteRequest, PublishPairingOfferRequest, PublishPairingResponseRequest,
-    PushPlatform, PutNostrProfileRequest, RegisterPushTokenRequest, RemovePushTokenRequest,
-    RemovePushTokenResponse, ReportInvalidCommitRequest, ReportInvalidCommitResponse,
+    PutNostrProfileRequest, ReportInvalidCommitRequest, ReportInvalidCommitResponse,
     RevokeDeviceRequest, SaveAccountRoomRequest, SaveAccountRoomResponse, SyncHintEvent,
     SyncStreamRequest, SyncWaitInbox, SyncWaitRequest, SyncWaitResponse, SyncWaitRoom,
     UpdateRoomAdminsRequest, UpdateRoomAdminsResponse,
@@ -3842,7 +3840,6 @@ async fn sqlite_application_delivery_effects_survive_restart_over_http() {
 
     let app = persistent_app(&db_path);
     let counts = application_effect_counts(&app).await;
-    assert_eq!(counts.push_outbox, 2);
     assert_eq!(counts.unread, 1);
     assert_eq!(counts.command_inbox, 1);
 
@@ -3851,21 +3848,18 @@ async fn sqlite_application_delivery_effects_survive_restart_over_http() {
         .expect("chat effect");
     assert_eq!(chat_effect.seq, 1);
     assert_eq!(chat_effect.sender, alice);
-    assert!(chat_effect.delivery_policy.creates_push());
     assert!(chat_effect.delivery_policy.creates_unread());
     assert!(!chat_effect.delivery_policy.creates_command_inbox_work());
 
     let command_effect = application_effect(&app, &accepted_command.message_id)
         .await
         .expect("command effect");
-    assert!(command_effect.delivery_policy.creates_push());
     assert!(!command_effect.delivery_policy.creates_unread());
     assert!(command_effect.delivery_policy.creates_command_inbox_work());
 
     let receipt_effect = application_effect(&app, &accepted_receipt.message_id)
         .await
         .expect("receipt effect");
-    assert!(!receipt_effect.delivery_policy.creates_push());
     assert!(!receipt_effect.delivery_policy.creates_unread());
     assert!(!receipt_effect.delivery_policy.creates_command_inbox_work());
 
@@ -3944,7 +3938,6 @@ async fn sqlite_application_delivery_policy_matrix_survives_restart_over_http() 
     assert_eq!(
         application_effect_counts(&app).await,
         ApplicationEffectCountsResponse {
-            push_outbox: 0,
             unread: 0,
             command_inbox: 0,
         }
@@ -3972,7 +3965,6 @@ async fn sqlite_application_delivery_policy_matrix_survives_restart_over_http() 
         let effect = application_effect(&app, &message_id)
             .await
             .expect("policy effect");
-        assert!(!effect.delivery_policy.creates_push());
         assert!(!effect.delivery_policy.creates_unread());
         assert!(!effect.delivery_policy.creates_command_inbox_work());
     }
@@ -4034,7 +4026,6 @@ async fn sqlite_runtime_state_snapshot_projects_from_http_log_after_restart() {
     assert_eq!(
         application_effect_counts(&app).await,
         ApplicationEffectCountsResponse {
-            push_outbox: 0,
             unread: 0,
             command_inbox: 0,
         }
@@ -4042,7 +4033,6 @@ async fn sqlite_runtime_state_snapshot_projects_from_http_log_after_restart() {
     let effect = application_effect(&app, &accepted.message_id)
         .await
         .expect("runtime state effect");
-    assert!(!effect.delivery_policy.creates_push());
     assert!(!effect.delivery_policy.creates_unread());
     assert!(!effect.delivery_policy.creates_command_inbox_work());
 
@@ -4240,7 +4230,6 @@ async fn sqlite_runtime_command_policy_and_opaque_request_ids_survive_restart_ov
     assert_eq!(
         application_effect_counts(&app).await,
         ApplicationEffectCountsResponse {
-            push_outbox: 2,
             unread: 0,
             command_inbox: 3,
         }
@@ -4248,7 +4237,6 @@ async fn sqlite_runtime_command_policy_and_opaque_request_ids_survive_restart_ov
     let status_effect = application_effect(&app, &status_refresh.message_id)
         .await
         .expect("status refresh effect");
-    assert!(!status_effect.delivery_policy.creates_push());
     assert!(!status_effect.delivery_policy.creates_unread());
     assert!(status_effect.delivery_policy.creates_command_inbox_work());
 
@@ -4259,7 +4247,6 @@ async fn sqlite_runtime_command_policy_and_opaque_request_ids_survive_restart_ov
         let effect = application_effect(&app, &message_id)
             .await
             .expect("runtime command effect");
-        assert!(effect.delivery_policy.creates_push());
         assert!(!effect.delivery_policy.creates_unread());
         assert!(effect.delivery_policy.creates_command_inbox_work());
     }
@@ -5362,7 +5349,6 @@ async fn sqlite_device_liveness_is_volatile_and_does_not_advance_room_state() {
     assert_eq!(
         application_effect_counts(&app).await,
         ApplicationEffectCountsResponse {
-            push_outbox: 0,
             unread: 0,
             command_inbox: 0,
         }
@@ -5526,7 +5512,6 @@ async fn sqlite_device_liveness_rejects_bad_observations_without_room_side_effec
     assert_eq!(
         application_effect_counts(&app).await,
         ApplicationEffectCountsResponse {
-            push_outbox: 0,
             unread: 0,
             command_inbox: 0,
         }
@@ -6220,7 +6205,6 @@ async fn run_mixed_http_operation_fuzz(seed: u64) {
     assert_eq!(page.entries.len(), last_seq as usize);
 
     let counts = application_effect_counts(&app).await;
-    assert_eq!(counts.push_outbox, effectful_events);
     assert_eq!(counts.unread, effectful_events);
     assert_eq!(counts.command_inbox, 0);
 
@@ -6426,7 +6410,6 @@ async fn assert_application_event_rolled_back(app: &Router, room_id: &str, messa
     assert_eq!(
         application_effect_counts(app).await,
         ApplicationEffectCountsResponse {
-            push_outbox: 0,
             unread: 0,
             command_inbox: 0,
         }
@@ -6454,7 +6437,6 @@ async fn assert_application_event_converged(app: &Router, room_id: &str, message
     assert_eq!(
         application_effect_counts(app).await,
         ApplicationEffectCountsResponse {
-            push_outbox: 1,
             unread: 1,
             command_inbox: 0,
         }
@@ -6462,7 +6444,6 @@ async fn assert_application_event_converged(app: &Router, room_id: &str, message
     let effect = application_effect(app, message_id).await.expect("effect");
     assert_eq!(effect.seq, 1);
     assert_eq!(effect.message_id, message_id);
-    assert!(effect.delivery_policy.creates_push());
     assert!(effect.delivery_policy.creates_unread());
     assert!(!effect.delivery_policy.creates_command_inbox_work());
 }
@@ -7101,339 +7082,7 @@ async fn sqlite_stale_legacy_snapshot_row_is_inert_when_v2_exists() {
     assert_eq!(legacy_rows, 1);
 }
 
-#[tokio::test]
-async fn sqlite_push_tokens_register_survive_restart_and_drop_on_revocation() {
-    let temp = TempDir::new().expect("tempdir");
-    let db_path = temp.path().join("delivery.sqlite3");
-    let alice = DeviceRef::new("alice", "alice-phone");
-    let bob = DeviceRef::new("bob", "bob-phone");
 
-    let app = persistent_app(&db_path);
-    let response = post_json(
-        app.clone(),
-        "/push-tokens",
-        &RegisterPushTokenRequest {
-            device: alice.clone(),
-            platform: PushPlatform::Apns,
-            token: "apns-token-alice".to_owned(),
-        },
-    )
-    .await;
-    assert_eq!(response.status(), StatusCode::OK);
-    let response = post_json(
-        app.clone(),
-        "/push-tokens",
-        &RegisterPushTokenRequest {
-            device: bob.clone(),
-            platform: PushPlatform::Fcm,
-            token: "fcm-token-bob".to_owned(),
-        },
-    )
-    .await;
-    assert_eq!(response.status(), StatusCode::OK);
-
-    // Replacement is an upsert; removal is idempotent; both survive restart.
-    let response = post_json(
-        app.clone(),
-        "/push-tokens",
-        &RegisterPushTokenRequest {
-            device: alice.clone(),
-            platform: PushPlatform::Apns,
-            token: "apns-token-alice-2".to_owned(),
-        },
-    )
-    .await;
-    assert_eq!(response.status(), StatusCode::OK);
-
-    let app = persistent_app(&db_path);
-    let response = post_json(
-        app.clone(),
-        "/push-tokens/remove",
-        &RemovePushTokenRequest {
-            device: alice.clone(),
-            token: Some("apns-token-alice".to_owned()),
-        },
-    )
-    .await;
-    assert_eq!(response.status(), StatusCode::OK);
-    let removed: RemovePushTokenResponse = read_json(response).await;
-    assert!(
-        !removed.removed,
-        "stale token guard must not remove a rotated push token"
-    );
-    let response = post_json(
-        app.clone(),
-        "/push-tokens/remove",
-        &RemovePushTokenRequest {
-            device: alice.clone(),
-            token: None,
-        },
-    )
-    .await;
-    assert_eq!(response.status(), StatusCode::OK);
-    let removed: RemovePushTokenResponse = read_json(response).await;
-    assert!(removed.removed);
-    let response = post_json(
-        app.clone(),
-        "/push-tokens/remove",
-        &RemovePushTokenRequest {
-            device: alice.clone(),
-            token: None,
-        },
-    )
-    .await;
-    assert_eq!(response.status(), StatusCode::OK);
-    let removed: RemovePushTokenResponse = read_json(response).await;
-    assert!(!removed.removed);
-
-    // Revoking a device drops its token, and a revoked device cannot
-    // re-register.
-    let response = post_json(
-        app.clone(),
-        "/devices/revoke",
-        &RevokeDeviceRequest {
-            device: bob.clone(),
-        },
-    )
-    .await;
-    assert_eq!(response.status(), StatusCode::OK);
-    let app = persistent_app(&db_path);
-    let response = post_json(
-        app.clone(),
-        "/push-tokens/remove",
-        &RemovePushTokenRequest {
-            device: bob.clone(),
-            token: None,
-        },
-    )
-    .await;
-    assert_eq!(response.status(), StatusCode::OK);
-    let removed: RemovePushTokenResponse = read_json(response).await;
-    assert!(!removed.removed, "revocation already dropped bob's token");
-    let response = post_json(
-        app.clone(),
-        "/push-tokens",
-        &RegisterPushTokenRequest {
-            device: bob,
-            platform: PushPlatform::Fcm,
-            token: "fcm-token-bob-again".to_owned(),
-        },
-    )
-    .await;
-    assert_eq!(response.status(), StatusCode::FORBIDDEN);
-}
-
-#[tokio::test]
-async fn sqlite_push_wakes_claim_opaque_payload_and_ack() {
-    let temp = TempDir::new().expect("tempdir");
-    let db_path = temp.path().join("delivery.sqlite3");
-    let alice = DeviceRef::new("alice", "alice-phone");
-    let bob = DeviceRef::new("bob", "bob-phone");
-    let room_id = "room-push-wake-claim".to_owned();
-    let mls_group_id = "mls-push-wake-claim".to_owned();
-    let secret_text = "plaintext message body must not enter push payload";
-
-    let app = persistent_app(&db_path);
-    bootstrap_room(&app, &room_id, &mls_group_id, &alice).await;
-    add_device_to_room(
-        &app,
-        &room_id,
-        &mls_group_id,
-        &alice,
-        &bob,
-        "welcome-push-wake-bob",
-        "commit-push-wake-bob",
-    )
-    .await;
-    register_push_token(&app, &alice, PushPlatform::Apns, "apns-token-alice").await;
-    register_push_token(&app, &bob, PushPlatform::Apns, "apns-token-bob").await;
-
-    let message = append_application_request(
-        &room_id,
-        &mls_group_id,
-        &alice,
-        1,
-        secret_text.as_bytes(),
-        "push-wake-message",
-    );
-    let response = post_json(app.clone(), "/events", &typed_event_request(&message)).await;
-    assert_eq!(response.status(), StatusCode::OK);
-    let accepted: EventAccepted = read_json(response).await;
-
-    let app = persistent_app(&db_path);
-    let response = post_json(
-        app.clone(),
-        "/push-wakes/claim",
-        &ClaimPushWakesRequest {
-            now_ms: 1_000,
-            lease_ms: 30_000,
-            limit: 10,
-        },
-    )
-    .await;
-    assert_eq!(response.status(), StatusCode::OK);
-    let claimed: ClaimPushWakesResponse = read_json(response).await;
-    assert_eq!(claimed.wakes.len(), 1);
-    let wake = &claimed.wakes[0];
-    assert_eq!(wake.payload.room_id, room_id);
-    assert_eq!(wake.payload.seq, accepted.seq);
-    assert_eq!(wake.attempt, 1);
-    assert_eq!(wake.tokens.len(), 1);
-    assert_eq!(wake.tokens[0].device, bob);
-    assert_eq!(wake.tokens[0].token, "apns-token-bob");
-    let claim_json = serde_json::to_string(&claimed).expect("claim json");
-    assert!(!claim_json.contains(secret_text));
-    assert!(!claim_json.contains("sender"));
-    assert!(!claim_json.contains("attachment"));
-
-    let response = post_json(
-        app.clone(),
-        "/push-wakes/ack",
-        &AckPushWakeRequest {
-            wake_id: wake.wake_id.clone(),
-        },
-    )
-    .await;
-    assert_eq!(response.status(), StatusCode::OK);
-    let ack: AckPushWakeResponse = read_json(response).await;
-    assert!(ack.acked);
-
-    let app = persistent_app(&db_path);
-    let response = post_json(
-        app.clone(),
-        "/push-wakes/claim",
-        &ClaimPushWakesRequest {
-            now_ms: 2_000,
-            lease_ms: 30_000,
-            limit: 10,
-        },
-    )
-    .await;
-    assert_eq!(response.status(), StatusCode::OK);
-    let claimed: ClaimPushWakesResponse = read_json(response).await;
-    assert!(claimed.wakes.is_empty());
-
-    let response = post_json(app.clone(), "/events", &typed_event_request(&message)).await;
-    assert_eq!(response.status(), StatusCode::OK);
-    let replayed: EventAccepted = read_json(response).await;
-    assert_eq!(replayed, accepted);
-    let response = post_json(
-        app,
-        "/push-wakes/claim",
-        &ClaimPushWakesRequest {
-            now_ms: 3_000,
-            lease_ms: 30_000,
-            limit: 10,
-        },
-    )
-    .await;
-    assert_eq!(response.status(), StatusCode::OK);
-    let claimed: ClaimPushWakesResponse = read_json(response).await;
-    assert!(
-        claimed.wakes.is_empty(),
-        "idempotent event replay must not recreate an acked wake"
-    );
-}
-
-#[tokio::test]
-async fn sqlite_push_wake_fail_retries_then_drops_after_attempt_bound() {
-    let temp = TempDir::new().expect("tempdir");
-    let db_path = temp.path().join("delivery.sqlite3");
-    let alice = DeviceRef::new("alice", "alice-phone");
-    let bob = DeviceRef::new("bob", "bob-phone");
-    let room_id = "room-push-wake-fail".to_owned();
-    let mls_group_id = "mls-push-wake-fail".to_owned();
-
-    let app = persistent_app(&db_path);
-    bootstrap_room(&app, &room_id, &mls_group_id, &alice).await;
-    add_device_to_room(
-        &app,
-        &room_id,
-        &mls_group_id,
-        &alice,
-        &bob,
-        "welcome-push-wake-fail-bob",
-        "commit-push-wake-fail-bob",
-    )
-    .await;
-    register_push_token(&app, &bob, PushPlatform::Apns, "apns-token-bob").await;
-    let message = append_application_request(
-        &room_id,
-        &mls_group_id,
-        &alice,
-        1,
-        b"retry-bounded-push-wake",
-        "push-wake-fail-message",
-    );
-    let response = post_json(app.clone(), "/events", &typed_event_request(&message)).await;
-    assert_eq!(response.status(), StatusCode::OK);
-
-    let mut wake_id = None;
-    for attempt in 1..=5 {
-        let app = persistent_app(&db_path);
-        let response = post_json(
-            app.clone(),
-            "/push-wakes/claim",
-            &ClaimPushWakesRequest {
-                now_ms: 1_000 + u64::from(attempt),
-                lease_ms: 30_000,
-                limit: 10,
-            },
-        )
-        .await;
-        assert_eq!(response.status(), StatusCode::OK);
-        let claimed: ClaimPushWakesResponse = read_json(response).await;
-        assert_eq!(claimed.wakes.len(), 1, "attempt {attempt}");
-        let wake = &claimed.wakes[0];
-        assert_eq!(wake.attempt, attempt);
-        wake_id = Some(wake.wake_id.clone());
-
-        let response = post_json(
-            app,
-            "/push-wakes/fail",
-            &FailPushWakeRequest {
-                wake_id: wake.wake_id.clone(),
-            },
-        )
-        .await;
-        assert_eq!(response.status(), StatusCode::OK);
-        let failed: FailPushWakeResponse = read_json(response).await;
-        if attempt < 5 {
-            assert!(failed.retry, "attempt {attempt}");
-            assert!(!failed.dropped, "attempt {attempt}");
-        } else {
-            assert!(!failed.retry);
-            assert!(failed.dropped);
-        }
-    }
-
-    let app = persistent_app(&db_path);
-    let response = post_json(
-        app.clone(),
-        "/push-wakes/claim",
-        &ClaimPushWakesRequest {
-            now_ms: 10_000,
-            lease_ms: 30_000,
-            limit: 10,
-        },
-    )
-    .await;
-    assert_eq!(response.status(), StatusCode::OK);
-    let claimed: ClaimPushWakesResponse = read_json(response).await;
-    assert!(claimed.wakes.is_empty());
-
-    let response = post_json(
-        app,
-        "/push-wakes/ack",
-        &AckPushWakeRequest {
-            wake_id: wake_id.expect("wake id"),
-        },
-    )
-    .await;
-    assert_eq!(response.status(), StatusCode::OK);
-    let ack: AckPushWakeResponse = read_json(response).await;
-    assert!(!ack.acked, "dropped wake is already gone");
-}
 
 async fn bootstrap_room(app: &Router, room_id: &str, mls_group_id: &str, creator: &DeviceRef) {
     let response = post_json(
@@ -7496,25 +7145,6 @@ async fn add_device_to_room(
     let ack: AckWelcomeResponse = read_json(response).await;
     assert!(ack.acked);
     accepted
-}
-
-async fn register_push_token(
-    app: &Router,
-    device: &DeviceRef,
-    platform: PushPlatform,
-    token: &str,
-) {
-    let response = post_json(
-        app.clone(),
-        "/push-tokens",
-        &RegisterPushTokenRequest {
-            device: device.clone(),
-            platform,
-            token: token.to_owned(),
-        },
-    )
-    .await;
-    assert_eq!(response.status(), StatusCode::OK);
 }
 
 fn submit_add_device_request(

@@ -5,13 +5,13 @@ use finitechat_delivery::{
     HttpDeliveryLimits, HttpKeyPackageId, HttpSequence, HttpServerError, MAX_HTTP_SYNC_PAGE_ENTRIES,
 };
 pub use finitechat_http::{
-    AckPushWakeRequest, AckPushWakeResponse, AckWelcomeRequest, AckWelcomeResponse,
+    AckWelcomeRequest, AckWelcomeResponse,
     ApplicationEffectCountsResponse, ApplicationEffectRequest, BootstrapAccountRoomRequest,
     BootstrapAccountRoomResponse, ClaimKeyPackageForAccountRequest, ClaimKeyPackageRequest,
-    ClaimKeyPackagesRequest, ClaimPushWakesRequest, ClaimPushWakesResponse, ClaimWelcomesRequest,
+    ClaimKeyPackagesRequest, ClaimWelcomesRequest,
     CreatePairingSessionRequest, DeviceLivenessRecord, ErrorResponse, ExpireKeyPackageLeaseRequest,
     ExpireKeyPackageLeaseResponse, ExpirePairingSessionRequest, ExpirePairingSessionResponse,
-    FINITECHAT_SERVER_CONTRACT_VERSION, FailPushWakeRequest, FailPushWakeResponse,
+    FINITECHAT_SERVER_CONTRACT_VERSION,
     FiniteAccountRoomCommitProjection, GetDeviceLivenessRequest, GetDeviceLivenessResponse,
     GetEphemeralActivitiesRequest, GetEphemeralActivitiesResponse,
     GetKeyPackageAvailabilityRequest, GetKeyPackageAvailabilityResponse, GetNostrProfilesRequest,
@@ -23,9 +23,7 @@ pub use finitechat_http::{
     ListAccountRoomDirectoryRequest, ListAccountRoomDirectoryResponse, NostrProfileCacheEntry,
     NostrProfileRecord, ObserveDeviceLivenessRequest, PublishKeyPackageResponse,
     PublishMessageRequest, PublishPairingCompleteRequest, PublishPairingOfferRequest,
-    PublishPairingResponseRequest, PushTokenRecord, PushWakeDelivery, PushWakePayload,
-    PutNostrProfileRequest, PutNostrProfileResponse, RegisterPushTokenRequest,
-    RegisterPushTokenResponse, RemovePushTokenRequest, RemovePushTokenResponse,
+    PublishPairingResponseRequest, PutNostrProfileRequest, PutNostrProfileResponse,
     ReportInvalidCommitRequest, ReportInvalidCommitResponse, RevokeDeviceRequest,
     RevokeDeviceResponse, SaveAccountRoomRequest, SaveAccountRoomResponse, SyncHintEvent,
     SyncStreamRequest, SyncWaitRequest, SyncWaitResponse, UpdateRoomAdminsRequest,
@@ -49,9 +47,6 @@ pub(crate) const MAX_NOSTR_PROFILE_ABOUT_BYTES: usize = 4 * 1024;
 pub(crate) const MAX_NOSTR_PROFILE_PICTURE_BYTES: usize = 2 * 1024;
 pub(crate) const MAX_NOSTR_PROFILE_METADATA_JSON_BYTES: usize = 16 * 1024;
 pub(crate) const MAX_PUBLIC_IMAGE_BLOB_BYTES: usize = 8 * 1024 * 1024;
-pub(crate) const MAX_PUSH_WAKE_CLAIM_BATCH: usize = 100;
-pub(crate) const MAX_PUSH_WAKE_LEASE_MS: u64 = 5 * 60 * 1_000;
-pub(crate) const MAX_PUSH_WAKE_ATTEMPTS: u32 = 5;
 
 /// Capacity limits for the durable finite chat server.
 ///

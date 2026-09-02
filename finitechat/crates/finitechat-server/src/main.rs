@@ -7,18 +7,11 @@ use finitechat_server::{
     DEFAULT_RATE_LIMIT_PER_WINDOW, DEFAULT_RATE_LIMIT_WINDOW_SECONDS, HttpServerState, http_router,
 };
 
-mod push;
-
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let args = env::args().skip(1).collect::<Vec<_>>();
     match args.first().map(String::as_str) {
         Some("serve") => serve(&args[1..]).await,
-        Some("push-drain") => {
-            let command = push::parse_push_drain_command(&args[1..])?;
-            push::run_push_drain(command)?;
-            Ok(())
-        }
         Some("snapshot") => {
             let options = ServeOptions::parse(&args[1..])?;
             let Some(path) = options.sqlite_path else {
@@ -56,7 +49,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             Ok(())
         }
         Some(command) => Err(format!(
-            "unknown command '{command}'; expected 'serve [addr] [--sqlite PATH] [--public-url URL]', 'snapshot --sqlite PATH', 'rollback-check --sqlite PATH', 'push-drain [options]', or 'smoke'"
+            "unknown command '{command}'; expected 'serve [addr] [--sqlite PATH] [--public-url URL]', 'snapshot --sqlite PATH', 'rollback-check --sqlite PATH', or 'smoke'"
         )
         .into()),
     }

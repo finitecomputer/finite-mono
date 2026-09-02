@@ -290,7 +290,6 @@ The Postgres schema should keep this same model:
 - `idempotency_records`
 - `link_sessions`
 - `repair_reports`
-- `push_outbox`
 
 The critical transaction remains the same:
 
@@ -303,8 +302,7 @@ The critical transaction remains the same:
 7. update membership interval cache;
 8. consume KeyPackages;
 9. release Welcomes with opaque Welcome and ratchet-tree bytes;
-10. persist idempotency response;
-11. enqueue opaque push wakes.
+10. persist idempotency response.
 
 The mutation path must not reconstruct the full room log. Full log validation is
 for read/replay paths; append and Commit validation use the indexed room head,

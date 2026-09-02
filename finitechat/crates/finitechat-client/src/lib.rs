@@ -8,9 +8,8 @@ use finitechat_http::{
     GetEphemeralActivitiesResponse, GetNostrProfilesRequest, GetNostrProfilesResponse,
     GroupSyncRequest, HttpClaimedWelcome, HttpKeyPackageInventory, KeyPackageInventoryRequest,
     ListAccountRoomDirectoryRequest, ListAccountRoomDirectoryResponse, NostrProfileRecord,
-    PublishKeyPackageResponse, PushPlatform, PutNostrProfileRequest, PutNostrProfileResponse,
-    RegisterPushTokenRequest, RegisterPushTokenResponse, RemovePushTokenRequest,
-    RemovePushTokenResponse, RevokeDeviceRequest, RevokeDeviceResponse, SaveAccountRoomRequest,
+    PublishKeyPackageResponse, PutNostrProfileRequest, PutNostrProfileResponse,
+    RevokeDeviceRequest, RevokeDeviceResponse, SaveAccountRoomRequest,
     SaveAccountRoomResponse, SyncHintEvent, SyncStreamRequest, SyncWaitRequest, SyncWaitResponse,
 };
 use finitechat_mls::{
@@ -5680,35 +5679,6 @@ impl<T: HttpRuntimeTransport> HttpRuntimeDelivery<T> {
             "/devices/revoke",
             &RevokeDeviceRequest {
                 device: device.clone(),
-            },
-        )
-    }
-
-    pub fn register_push_token(
-        &mut self,
-        device: &DeviceRef,
-        platform: PushPlatform,
-        token: String,
-    ) -> Result<RegisterPushTokenResponse, HttpRuntimeDeliveryError<T::Error>> {
-        self.post_json(
-            "/push-tokens",
-            &RegisterPushTokenRequest {
-                device: device.clone(),
-                platform,
-                token,
-            },
-        )
-    }
-
-    pub fn remove_push_token(
-        &mut self,
-        device: &DeviceRef,
-    ) -> Result<RemovePushTokenResponse, HttpRuntimeDeliveryError<T::Error>> {
-        self.post_json(
-            "/push-tokens/remove",
-            &RemovePushTokenRequest {
-                device: device.clone(),
-                token: None,
             },
         )
     }
