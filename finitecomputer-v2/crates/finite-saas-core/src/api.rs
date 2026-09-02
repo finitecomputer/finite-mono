@@ -25,11 +25,13 @@ use crate::{
     RequestRuntimeRestartInput, ReserveFinitePrivateUsageInput, ResetFinitePrivateUsageWindowInput,
     RetryRuntimeControlRequestInput, RevokeFinitePrivateApiKeyInput, RevokeFinitePrivateGrantInput,
     RotateFinitePrivateApiKeyInput, RunnerLeaseCapacity, RuntimeArtifact, RuntimeArtifactKind,
-    RuntimeCapabilitiesEnvelope, RuntimeCapabilitiesV1, RuntimeHealthReportAck,
-    RuntimeHealthReportRequest, RuntimePlacement, RuntimeSummaryStatus,
+    RuntimeCapabilitiesEnvelope, RuntimeCapabilitiesV1, RuntimeHealthProjection,
+    RuntimeHealthReportAck, RuntimeHealthReportRequest, RuntimeHealthStatus,
+    RuntimeHealthTargetList, RuntimePlacement, RuntimeSummaryStatus,
     SettleFinitePrivateReservationInput, SettleFinitePrivateReservationResult,
     SyncStripeSubscriptionInput, SyncStripeSubscriptionRequest, UpsertRuntimeArtifactInput,
-    normalize_owner_email, normalize_runtime_contact_endpoint, normalize_source_host_id,
+    derive_runtime_summary_status, normalize_owner_email, normalize_runtime_contact_endpoint,
+    normalize_source_host_id,
 };
 use axum::extract::{Path, State};
 use axum::http::{HeaderMap, HeaderValue, StatusCode};
@@ -474,12 +476,52 @@ impl From<&RuntimeCapabilitiesEnvelope> for PublicRuntimeCapabilities {
     }
 }
 
+/// The runtime's standing readiness as projected by Core at read time. The
+/// raw report fields ride along as evidence; `status` is the derived fact.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct PublicRuntimeHealth {
+    pub status: RuntimeHealthStatus,
+    #[serde(default)]
+    pub reason: Option<String>,
+    /// When Core recorded the latest report (freshness is measured from this).
+    #[serde(default)]
+    pub reported_at: Option<String>,
+    /// When the runner last read the runtime (runner clock; evidence only).
+    #[serde(default)]
+    pub observed_at: Option<String>,
+    /// The reporter's cadence; staleness is declared after three intervals.
+    #[serde(default)]
+    pub report_interval_seconds: Option<i64>,
+}
+
+impl From<&RuntimeHealthProjection> for PublicRuntimeHealth {
+    fn from(health: &RuntimeHealthProjection) -> Self {
+        Self {
+            status: health.status,
+            reason: health.reason.clone(),
+            reported_at: health.reported_at.clone(),
+            observed_at: health.observed_at.clone(),
+            report_interval_seconds: health.report_interval_seconds,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct PublicAgentRuntime {
     pub id: String,
     pub project_id: String,
     pub contact_endpoint: Option<String>,
+    /// Derived at read time from `runtime_health` freshness: `online` only
+    /// while a fresh report says ready, `stale` once reports lapse, `unknown`
+    /// until the runtime has been reported on. Never a frozen lifecycle
+    /// outcome. Older readers keep consuming this field unchanged.
     pub runtime_status: RuntimeSummaryStatus,
+    /// The raw lifecycle-latched fact (last control outcome), for operators.
+    #[serde(default = "PublicAgentRuntime::default_lifecycle_status")]
+    pub lifecycle_status: RuntimeSummaryStatus,
+    /// Additive: the standing readiness `runtime_status` derives from.
+    #[serde(default)]
+    pub runtime_health: Option<PublicRuntimeHealth>,
     pub hermes_available: Option<bool>,
     /// Populated only from Core's persisted, versioned Runtime capability
     /// record. N-1 rows remain absent and Dashboard fails closed.
@@ -489,18 +531,27 @@ pub struct PublicAgentRuntime {
     pub updated_at: String,
 }
 
-impl From<AgentRuntime> for PublicAgentRuntime {
-    fn from(runtime: AgentRuntime) -> Self {
+impl PublicAgentRuntime {
+    fn default_lifecycle_status() -> RuntimeSummaryStatus {
+        RuntimeSummaryStatus::Unknown
+    }
+
+    /// Project the user-facing runtime from the stored row plus its
+    /// read-time health projection. `runtime_status` is derived here, once.
+    pub fn project(runtime: AgentRuntime, health: &RuntimeHealthProjection) -> Self {
         let contact_endpoint = public_runtime_contact_endpoint(&runtime);
         let runtime_capabilities = runtime
             .runtime_capabilities
             .as_ref()
             .map(PublicRuntimeCapabilities::from);
+        let lifecycle_status = runtime.host_facts.runtime_status;
         Self {
             id: runtime.id,
             project_id: runtime.project_id,
             contact_endpoint,
-            runtime_status: runtime.host_facts.runtime_status,
+            runtime_status: derive_runtime_summary_status(lifecycle_status, health),
+            lifecycle_status,
+            runtime_health: Some(PublicRuntimeHealth::from(health)),
             hermes_available: runtime.host_facts.hermes_available,
             runtime_capabilities,
             created_at: runtime.created_at,
@@ -543,9 +594,14 @@ impl From<VisibleProject> for PublicVisibleProject {
                     created_at: request.created_at,
                     updated_at: request.updated_at,
                 });
+        let runtime_health = project
+            .runtime_health
+            .unwrap_or_else(RuntimeHealthProjection::unreported);
         Self {
             project: project.project.into(),
-            runtime: project.runtime.map(PublicAgentRuntime::from),
+            runtime: project
+                .runtime
+                .map(|runtime| PublicAgentRuntime::project(runtime, &runtime_health)),
             active_runtime_control,
         }
     }
@@ -706,6 +762,10 @@ fn router_with_runtime_upgrades_and_agent_creation_placement(
         .route(
             "/api/core/v1/runtime-health-reports",
             post(report_runtime_health),
+        )
+        .route(
+            "/api/core/v1/runtime-health-targets",
+            get(runtime_health_targets),
         )
         .route(
             "/api/core/v1/finite-private/grants",
@@ -946,6 +1006,22 @@ async fn report_runtime_health(
                 report_interval_seconds: input.report_interval_seconds,
                 now: input.now,
             })
+            .await?,
+    ))
+}
+
+/// The runner's startup registry reconcile: every runtime this runner should
+/// be reporting on. Host-scoped by the credential, like reports, so a runner
+/// only ever learns about (and polls) its own host's runtimes.
+async fn runtime_health_targets(
+    State(state): State<CoreApiState>,
+    headers: HeaderMap,
+) -> Result<Json<RuntimeHealthTargetList>, ApiError> {
+    let credential = require_runner_auth(&state, &headers)?;
+    Ok(Json(
+        state
+            .store
+            .runtime_health_targets_for_host(&credential.source_host_id)
             .await?,
     ))
 }
@@ -2887,19 +2963,62 @@ mod tests {
             Some("https://legacy.example.test/contact")
         );
 
-        let public_legacy = PublicAgentRuntime::from(legacy_runtime.clone());
+        let unreported = RuntimeHealthProjection::unreported();
+        let public_legacy = PublicAgentRuntime::project(legacy_runtime.clone(), &unreported);
         assert!(public_legacy.runtime_capabilities.is_none());
-        assert!(
-            serde_json::to_value(public_legacy)
-                .unwrap()
-                .get("runtime_capabilities")
-                .is_none()
+        // The lifecycle latch says online, but nothing has reported: the
+        // derived status is the named unknown state and the latch stays
+        // visible under its own name, with the health evidence alongside.
+        assert_eq!(public_legacy.runtime_status, RuntimeSummaryStatus::Unknown);
+        assert_eq!(public_legacy.lifecycle_status, RuntimeSummaryStatus::Online);
+        let public_legacy_json = serde_json::to_value(&public_legacy).unwrap();
+        assert!(public_legacy_json.get("runtime_capabilities").is_none());
+        assert_eq!(public_legacy_json["runtime_status"], "unknown");
+        assert_eq!(public_legacy_json["lifecycle_status"], "online");
+        assert_eq!(public_legacy_json["runtime_health"]["status"], "unknown");
+        // Older readers parse the new document (the added fields are
+        // additive), and this reader parses a pre-health document.
+        let pre_health: PublicAgentRuntime = serde_json::from_value(serde_json::json!({
+            "id": "runtime-public-contact",
+            "project_id": "project-public-contact",
+            "contact_endpoint": null,
+            "runtime_status": "online",
+            "hermes_available": true,
+            "created_at": "2026-07-11T12:00:00Z",
+            "updated_at": "2026-07-11T12:00:00Z"
+        }))
+        .unwrap();
+        assert_eq!(pre_health.runtime_status, RuntimeSummaryStatus::Online);
+        assert_eq!(pre_health.runtime_health, None);
+
+        let fresh_ready = RuntimeHealthProjection {
+            status: RuntimeHealthStatus::Ready,
+            reason: None,
+            reported_at: Some("2026-07-11T12:00:00Z".to_string()),
+            observed_at: Some("2026-07-11T11:59:59Z".to_string()),
+            agent_npub: None,
+            report_interval_seconds: Some(60),
+        };
+        let public_reported = PublicAgentRuntime::project(legacy_runtime.clone(), &fresh_ready);
+        assert_eq!(public_reported.runtime_status, RuntimeSummaryStatus::Online);
+        assert_eq!(
+            public_reported.runtime_health,
+            Some(PublicRuntimeHealth {
+                status: RuntimeHealthStatus::Ready,
+                reason: None,
+                reported_at: Some("2026-07-11T12:00:00Z".to_string()),
+                observed_at: Some("2026-07-11T11:59:59Z".to_string()),
+                report_interval_seconds: Some(60),
+            })
         );
 
-        let public_current = PublicAgentRuntime::from(AgentRuntime {
-            runtime_capabilities: Some(legacy_kata_runtime_capabilities()),
-            ..legacy_runtime
-        });
+        let public_current = PublicAgentRuntime::project(
+            AgentRuntime {
+                runtime_capabilities: Some(legacy_kata_runtime_capabilities()),
+                ..legacy_runtime
+            },
+            &unreported,
+        );
         assert_eq!(
             public_current.runtime_capabilities,
             Some(PublicRuntimeCapabilities {
@@ -3093,6 +3212,52 @@ mod tests {
             .await;
             assert_eq!(status, StatusCode::OK);
             assert_eq!(ack["agentRuntimeId"], runtime_id);
+
+            // The registry reconcile listing is runner-authed and scoped to
+            // the credential's host the same way.
+            let (status, _) = send_json(
+                &app,
+                "GET",
+                "/api/core/v1/runtime-health-targets",
+                &[],
+                None,
+            )
+            .await;
+            assert_eq!(status, StatusCode::UNAUTHORIZED);
+            let (status, targets) = send_json(
+                &app,
+                "GET",
+                "/api/core/v1/runtime-health-targets",
+                &[(
+                    "authorization".to_string(),
+                    "Bearer runner-health-a-token".to_string(),
+                )],
+                None,
+            )
+            .await;
+            assert_eq!(status, StatusCode::OK);
+            assert_eq!(targets["sourceHostId"], "health-host-a");
+            assert_eq!(targets["targets"], serde_json::json!([]));
+            let (status, targets) = send_json(
+                &app,
+                "GET",
+                "/api/core/v1/runtime-health-targets",
+                &runner_b(),
+                None,
+            )
+            .await;
+            assert_eq!(status, StatusCode::OK);
+            assert_eq!(targets["sourceHostId"], "health-host-b");
+            let target = targets["targets"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|target| target["agentRuntimeId"] == runtime_id)
+                .expect("the reporting host's runtime is listed");
+            assert_eq!(target["sourceMachineId"], "health-api-agent-001");
+            assert_eq!(target["contactEndpoint"], "http://127.0.0.1:41002/contact");
+            assert_eq!(target["agentNpub"], format!("npub1{}", "q".repeat(58)));
+            assert_eq!(target["lifecycleStatus"], "online");
 
             // Out-of-shape bodies fail closed.
             let (status, _) = send_json(
@@ -4489,9 +4654,25 @@ mod tests {
             );
             let projects: Vec<PublicVisibleProject> = serde_json::from_slice(&body).unwrap();
             assert_eq!(projects.len(), 1);
+            // Launched but never reported on: the derived status is unknown
+            // while the lifecycle latch stays visible under its own name.
             assert_eq!(
                 projects[0].runtime.as_ref().unwrap().runtime_status,
+                RuntimeSummaryStatus::Unknown
+            );
+            assert_eq!(
+                projects[0].runtime.as_ref().unwrap().lifecycle_status,
                 RuntimeSummaryStatus::Online
+            );
+            assert_eq!(
+                projects[0]
+                    .runtime
+                    .as_ref()
+                    .unwrap()
+                    .runtime_health
+                    .as_ref()
+                    .map(|health| health.status),
+                Some(RuntimeHealthStatus::Unknown)
             );
             assert_eq!(
                 projects[0]
@@ -5955,7 +6136,9 @@ mod tests {
             assert_eq!(overview["owner_email"], "owner@finite.vip");
             assert_eq!(overview["source_host_id"], "oslo-host-1");
             assert_eq!(overview["runtime_artifact_version_label"], "v1");
-            assert_eq!(overview["runtime_status"], "online");
+            assert_eq!(overview["runtime_status"], "unknown");
+            assert_eq!(overview["lifecycle_status"], "online");
+            assert_eq!(overview["runtime_health"]["status"], "unknown");
             assert_eq!(overview["runtime_capabilities"]["restart"], true);
             assert_eq!(
                 overview["runtime_capabilities"]["recover_known_good_chat"],

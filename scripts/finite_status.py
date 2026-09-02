@@ -249,14 +249,24 @@ LIFECYCLE_VERDICTS = ("operable", "degraded", "inoperable", "unknown")
 # Runner-ferried standing readiness (2026-08 audit synthesis, H1 slice 3).
 # These constants mirror Core's project_runtime_health exactly: a runtime is
 # "ready" only while a fresh report says ready; a fresh ready=false report is
-# "not_ready" with its reason; no report or a report older than 3x the poll
-# cadence is the named "unknown" state, so a runtime that died overnight never
-# displays a frozen last-known ready. Do not drift from the Core projection.
+# "not_ready" with its reason; a report older than 3x the poll cadence is the
+# named "stale" state and no report at all is "unknown", so a runtime that died
+# overnight never displays a frozen last-known ready. Reports do not speak for
+# a runtime whose lifecycle latch is `offline` (deliberately stopped) or
+# `pending_first_report` (an up-bound control completed and the poller has not
+# confirmed the new incarnation yet). Do not drift from the Core projection;
+# this script only has psql access to Core's rows, not to its read-time
+# projection, which is why the rule is mirrored rather than read.
 HEALTH_DEFAULT_INTERVAL_SECONDS = 60
 HEALTH_MIN_INTERVAL_SECONDS = 5
 HEALTH_MAX_INTERVAL_SECONDS = 3600
 HEALTH_STALE_MULTIPLIER = 3
-HEALTH_STATES = ("ready", "not_ready", "unknown")
+HEALTH_STATES = ("ready", "not_ready", "stale", "unknown")
+# Lifecycle latches for which standing reports carry a readiness claim.
+HEALTH_SILENT_LIFECYCLE_STATUSES = ("offline", "pending_first_report")
+# Lifecycle latches under which a runtime is expected to be reporting and is
+# therefore counted against its host's readiness.
+HEALTH_TRACKED_LIFECYCLE_STATUSES = ("online", "pending_first_report")
 
 SYSTEMD_PROPERTIES = (
     "LoadState",
@@ -1348,11 +1358,12 @@ def health_ready_value(raw: Any) -> bool | None:
 def project_runtime_health(row: dict[str, Any], now: datetime) -> dict[str, Any]:
     """Project one runtime's standing readiness from the latest stored report.
 
-    Mirrors Core's `project_runtime_health` (finite-saas-core): reports only
-    speak for runtimes Core considers online, freshness is measured from the
-    report's Core-recorded time, and the deadline is 3x the reporter's poll
-    cadence. Keep the named states (`ready`/`not_ready`/`unknown`) aligned;
-    the fixture tests pin both surfaces agreeing.
+    Mirrors Core's `project_runtime_health` (finite-saas-core): reports do not
+    speak for a deliberately offline runtime or one awaiting its first
+    post-control report, freshness is measured from the report's Core-recorded
+    time, and the deadline is 3x the reporter's poll cadence. Keep the named
+    states (`ready`/`not_ready`/`stale`/`unknown`) aligned; the fixture tests
+    pin both surfaces agreeing.
     """
     reported_at = parse_time(row.get("health_reported_at"))
     ready = health_ready_value(row.get("health_ready"))
@@ -1361,7 +1372,7 @@ def project_runtime_health(row: dict[str, Any], now: datetime) -> dict[str, Any]
     )
     status = "unknown"
     if (
-        row.get("runtime_status") == "online"
+        row.get("runtime_status") not in HEALTH_SILENT_LIFECYCLE_STATUSES
         and reported_at is not None
         and ready is not None
     ):
@@ -1380,6 +1391,8 @@ def project_runtime_health(row: dict[str, Any], now: datetime) -> dict[str, Any]
             and age_seconds <= interval * HEALTH_STALE_MULTIPLIER
         ):
             status = "ready" if ready else "not_ready"
+        else:
+            status = "stale"
     return {
         "status": status,
         "reason": row.get("health_reason") or None,
@@ -1448,12 +1461,16 @@ def build_fleet(
         stragglers = [row for row in active if row["version_label"] != target_version]
         on_target = len(active) - len(stragglers)
         # Standing readiness rolls up only over runtimes expected to report
-        # (Core-recorded online, active link): an intentionally offline agent
-        # is displayed with its projected state but never counted against the
-        # host. A fresh not_ready report turns the host red; stale or missing
-        # reports read unknown.
+        # (lifecycle latch online or awaiting its first post-control report,
+        # active link): an intentionally offline agent is displayed with its
+        # projected state but never counted against the host. A fresh
+        # not_ready report turns the host red; stale or missing reports read
+        # unknown (both are listed under `health_unknown`, distinguished by
+        # their projected state).
         health_tracked = [
-            row for row in active if row.get("runtime_status") == "online"
+            row
+            for row in active
+            if row.get("runtime_status") in HEALTH_TRACKED_LIFECYCLE_STATUSES
         ]
         health_ready = [
             row for row in health_tracked if row["health"]["status"] == "ready"
@@ -1462,7 +1479,9 @@ def build_fleet(
             row for row in health_tracked if row["health"]["status"] == "not_ready"
         ]
         health_unknown = [
-            row for row in health_tracked if row["health"]["status"] == "unknown"
+            row
+            for row in health_tracked
+            if row["health"]["status"] in ("stale", "unknown")
         ]
         status = (
             "red"
@@ -2197,8 +2216,11 @@ def render_human(report: dict[str, Any]) -> str:
                     if health.get("age_seconds") is not None
                     else "never reported"
                 )
+                label = (
+                    "HEALTH-STALE" if health["status"] == "stale" else "HEALTH-UNKNOWN"
+                )
                 lines.append(
-                    f"    HEALTH-UNKNOWN {runtime['agent_name']} "
+                    f"    {label} {runtime['agent_name']} "
                     f"[{runtime['agent_runtime_id']}]: no fresh report ({last})"
                 )
     else:

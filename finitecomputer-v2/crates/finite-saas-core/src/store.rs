@@ -38,7 +38,8 @@ use crate::{
     RevokeFinitePrivateGrantInput, RotateFinitePrivateApiKeyInput, RuntimeArtifact,
     RuntimeBootIntent, RuntimeCapabilitiesEnvelope, RuntimeControlCompletion,
     RuntimeControlExpectedBinding, RuntimeControlKind, RuntimeControlLease, RuntimeControlRequest,
-    RuntimeControlRequestStatus, RuntimeHealthReportAck, RuntimeLifecycleStage, RuntimePlacement,
+    RuntimeControlRequestStatus, RuntimeHealthProjection, RuntimeHealthReportAck,
+    RuntimeHealthTarget, RuntimeHealthTargetList, RuntimeLifecycleStage, RuntimePlacement,
     RuntimeRelocationEnvelope, RuntimeRelocationV1, RuntimeRetirementSnapshot,
     RuntimeRetirementSnapshotReceipt, RuntimeSpecEnvelope, RuntimeSpecIdentity,
     RuntimeSummaryStatus, SettleFinitePrivateReservationInput,
@@ -46,27 +47,28 @@ use crate::{
     SyncStripeSubscriptionInput, UnrecoverableRuntimeArchiveReceipt, UpsertRuntimeArtifactInput,
     agent_creation_entitlement_id_for, append_provider_operation_transition,
     bound_runtime_capabilities_to_artifact, build_runtime_spec_v1, canonical_agent_email,
-    chat_identity_id_for_user, current_time_iso, finite_private_api_key_id_for,
-    finite_private_grant_id_for_user, generate_finite_private_api_key, hash_finite_private_api_key,
-    merge_provider_runtime_handle, merge_runtime_capabilities, new_agent_creation_request_id,
-    new_agent_runtime_id, new_customer_org_id, new_self_service_project_id, new_user_id,
-    normalize_id_part, normalize_idempotency_key, normalize_owner_chat_account_id,
-    normalize_owner_email, normalize_profile_picture_url, normalize_runtime_contact_endpoint,
-    normalize_source_host_id, parse_agent_creation_request_status, parse_billing_class,
-    parse_finite_private_api_key_status, parse_finite_private_grant_status,
-    parse_finite_private_reservation_status, parse_hosting_tier, parse_offboarding_phase,
-    parse_runner_class, parse_runtime_artifact_kind, parse_runtime_control_kind,
-    parse_runtime_control_request_status, parse_runtime_lifecycle_stage,
-    parse_runtime_resource_class, parse_time, parse_user_link_status,
-    project_room_membership_id_for, project_runtime_health, project_runtime_link_id_for,
-    provider_operation_allows_generic_failure, provider_operation_at_runtime_boundary,
-    runtime_artifact_material_matches, runtime_artifact_reference_is_immutable_oci,
-    runtime_lifecycle, runtime_operation_spec_v1, runtime_spec_secret_references, runtime_spec_v1,
-    runtime_upgrade_contact_endpoint, runtime_upgrade_prelease_rejection_is_terminal,
-    source_import_key, trim_to_option, valid_agent_npub, valid_sha256_hex,
-    validate_runtime_capabilities_artifact_policy, validate_runtime_capabilities_policy,
-    validate_runtime_relocation_registration, validate_runtime_retirement_snapshot_receipt,
-    validate_runtime_spec_binding, validate_runtime_spec_environment,
+    chat_identity_id_for_user, current_time_iso, derive_runtime_summary_status,
+    finite_private_api_key_id_for, finite_private_grant_id_for_user,
+    generate_finite_private_api_key, hash_finite_private_api_key, merge_provider_runtime_handle,
+    merge_runtime_capabilities, new_agent_creation_request_id, new_agent_runtime_id,
+    new_customer_org_id, new_self_service_project_id, new_user_id, normalize_id_part,
+    normalize_idempotency_key, normalize_owner_chat_account_id, normalize_owner_email,
+    normalize_profile_picture_url, normalize_runtime_contact_endpoint, normalize_source_host_id,
+    parse_agent_creation_request_status, parse_billing_class, parse_finite_private_api_key_status,
+    parse_finite_private_grant_status, parse_finite_private_reservation_status, parse_hosting_tier,
+    parse_offboarding_phase, parse_runner_class, parse_runtime_artifact_kind,
+    parse_runtime_control_kind, parse_runtime_control_request_status,
+    parse_runtime_lifecycle_stage, parse_runtime_resource_class, parse_time,
+    parse_user_link_status, project_room_membership_id_for, project_runtime_health,
+    project_runtime_link_id_for, provider_operation_allows_generic_failure,
+    provider_operation_at_runtime_boundary, runtime_artifact_material_matches,
+    runtime_artifact_reference_is_immutable_oci, runtime_lifecycle, runtime_operation_spec_v1,
+    runtime_spec_secret_references, runtime_spec_v1, runtime_upgrade_contact_endpoint,
+    runtime_upgrade_prelease_rejection_is_terminal, source_import_key, trim_to_option,
+    valid_agent_npub, valid_sha256_hex, validate_runtime_capabilities_artifact_policy,
+    validate_runtime_capabilities_policy, validate_runtime_relocation_registration,
+    validate_runtime_retirement_snapshot_receipt, validate_runtime_spec_binding,
+    validate_runtime_spec_environment,
 };
 use deadpool_postgres::{Manager, ManagerConfig, Object, Pool, RecyclingMethod, Transaction};
 use serde::de::DeserializeOwned;
@@ -112,6 +114,10 @@ struct FinitePrivateAdminAuditInsert<'a> {
 pub struct VisibleProject {
     pub project: Project,
     pub runtime: Option<AgentRuntime>,
+    /// The runtime's standing readiness projected at read time; present
+    /// exactly when `runtime` is.
+    #[serde(default)]
+    pub runtime_health: Option<RuntimeHealthProjection>,
     pub active_runtime_control: Option<RuntimeControlRequest>,
 }
 
@@ -729,6 +735,16 @@ impl CoreStore {
     pub async fn admin_runtime_overviews(&self) -> CoreResult<Vec<AdminRuntimeOverview>> {
         let client = self.connection().await?;
         postgres_admin_runtime_overviews(&**client).await
+    }
+
+    /// The standing-health poll targets for one host, for the runner's
+    /// startup registry reconcile.
+    pub async fn runtime_health_targets_for_host(
+        &self,
+        source_host_id: &str,
+    ) -> CoreResult<RuntimeHealthTargetList> {
+        let client = self.connection().await?;
+        postgres_runtime_health_targets_for_host(&**client, source_host_id).await
     }
 
     pub async fn record_runtime_health_report(
@@ -2330,6 +2346,7 @@ async fn postgres_visible_projects_for_user<C>(
 where
     C: GenericClient + Sync,
 {
+    let now = current_time_iso()?;
     let rows = client
         .query(
             "SELECT project.id AS project_id, project.customer_org_id, project.owner_user_id,
@@ -2347,6 +2364,10 @@ where
                     runtime.contact_endpoint, runtime.runtime_capabilities,
                     runtime.host_facts, core_rfc3339(runtime.created_at) AS runtime_created_at,
                     core_rfc3339(runtime.updated_at) AS runtime_updated_at,
+                    core_rfc3339(runtime.health_reported_at) AS health_reported_at,
+                    core_rfc3339(runtime.health_observed_at) AS health_observed_at,
+                    runtime.health_ready, runtime.health_reason,
+                    runtime.health_report_interval_seconds, runtime.health_reporting_npub,
                     control.id AS control_id, control.project_id AS control_project_id,
                     control.agent_runtime_id AS control_agent_runtime_id,
                     control.source_host_id AS control_source_host_id,
@@ -2450,6 +2471,16 @@ where
                     })
                 })
                 .transpose()?;
+            let runtime_health = runtime
+                .as_ref()
+                .map(|runtime| {
+                    project_runtime_health(
+                        runtime.host_facts.runtime_status,
+                        &stored_runtime_health_from_row(&row),
+                        &now,
+                    )
+                })
+                .transpose()?;
             let active_runtime_control = row
                 .get::<_, Option<String>>("control_id")
                 .map(|id| {
@@ -2496,6 +2527,7 @@ where
             Ok(VisibleProject {
                 project,
                 runtime,
+                runtime_health,
                 active_runtime_control,
             })
         })
@@ -5849,10 +5881,14 @@ where
         .await
         .map_err(store_error)?;
     let request = runtime_control_request_from_row(&row)?;
+    // An up-bound completion is the runner's bounded readiness wait, not a
+    // standing observation: latch `pending_first_report` and let the first
+    // accepted health report move the runtime to `online`. The user-facing
+    // status derives from report freshness either way.
     let completed_status = match request.kind {
         RuntimeControlKind::Restart
         | RuntimeControlKind::RecoverKnownGoodChatRuntime
-        | RuntimeControlKind::Upgrade => RuntimeSummaryStatus::Online,
+        | RuntimeControlKind::Upgrade => RuntimeSummaryStatus::PendingFirstReport,
         RuntimeControlKind::Stop | RuntimeControlKind::Destroy => RuntimeSummaryStatus::Offline,
     };
     let destroy = request.kind == RuntimeControlKind::Destroy;
@@ -6409,6 +6445,78 @@ where
     runtime_artifact_from_row(&row)
 }
 
+/// Read the latest stored health report columns off a runtime row that
+/// selected them (`health_*`, with the timestamps passed through
+/// `core_rfc3339`).
+fn stored_runtime_health_from_row(row: &Row) -> StoredRuntimeHealth {
+    StoredRuntimeHealth {
+        reported_at: row.get("health_reported_at"),
+        observed_at: row.get("health_observed_at"),
+        ready: row.get("health_ready"),
+        reason: row.get("health_reason"),
+        report_interval_seconds: row
+            .get::<_, Option<i32>>("health_report_interval_seconds")
+            .map(i64::from),
+        reporting_npub: row.get("health_reporting_npub"),
+    }
+}
+
+/// The runtimes a host's runner should keep in its standing-health registry:
+/// every live (not offboarding) runtime on that host whose lifecycle latch is
+/// not `offline`. Scoped by the runner credential's host, like reports.
+async fn postgres_runtime_health_targets_for_host<C>(
+    client: &C,
+    source_host_id: &str,
+) -> CoreResult<RuntimeHealthTargetList>
+where
+    C: GenericClient + Sync,
+{
+    let source_host_id =
+        trim_to_option(Some(source_host_id)).ok_or(CoreError::MissingSourceHostId)?;
+    let rows = client
+        .query(
+            "SELECT id AS agent_runtime_id, source_machine_id, contact_endpoint, host_facts,
+                    health_reporting_npub
+             FROM agent_runtimes
+             WHERE source_host_id = $1
+               AND offboarding_phase IS NULL
+               AND COALESCE(host_facts->>'runtime_status', '') <> $2
+             ORDER BY id",
+            &[&source_host_id, &RuntimeSummaryStatus::Offline.as_str()],
+        )
+        .await
+        .map_err(store_error)?;
+    let targets = rows
+        .iter()
+        .map(|row| {
+            let host_facts: HostOwnedRuntimeFacts = json_column(row, "host_facts")?;
+            let contact_endpoint = normalize_runtime_contact_endpoint(
+                row.get::<_, Option<String>>("contact_endpoint").as_deref(),
+            )
+            .ok()
+            .flatten()
+            .or_else(|| {
+                host_facts
+                    .published_app_urls
+                    .iter()
+                    .find(|url| url.ends_with("/contact"))
+                    .cloned()
+            });
+            Ok(RuntimeHealthTarget {
+                agent_runtime_id: row.get("agent_runtime_id"),
+                source_machine_id: row.get("source_machine_id"),
+                contact_endpoint,
+                agent_npub: row.get("health_reporting_npub"),
+                lifecycle_status: host_facts.runtime_status,
+            })
+        })
+        .collect::<CoreResult<Vec<_>>>()?;
+    Ok(RuntimeHealthTargetList {
+        source_host_id,
+        targets,
+    })
+}
+
 async fn postgres_admin_runtime_overviews<C>(client: &C) -> CoreResult<Vec<AdminRuntimeOverview>>
 where
     C: GenericClient + Sync,
@@ -6468,16 +6576,7 @@ where
             let project_display_name: Option<String> = row.get("project_display_name");
             let runtime_health = project_runtime_health(
                 host_facts.runtime_status,
-                &StoredRuntimeHealth {
-                    reported_at: row.get("health_reported_at"),
-                    observed_at: row.get("health_observed_at"),
-                    ready: row.get("health_ready"),
-                    reason: row.get("health_reason"),
-                    report_interval_seconds: row
-                        .get::<_, Option<i32>>("health_report_interval_seconds")
-                        .map(i64::from),
-                    reporting_npub: row.get("health_reporting_npub"),
-                },
+                &stored_runtime_health_from_row(row),
                 &now,
             )?;
             Ok(AdminRuntimeOverview {
@@ -6490,7 +6589,11 @@ where
                 source_machine_id: row.get("source_machine_id"),
                 runtime_artifact_id: row.get("runtime_artifact_id"),
                 runtime_artifact_version_label: row.get("runtime_artifact_version_label"),
-                runtime_status: host_facts.runtime_status,
+                runtime_status: derive_runtime_summary_status(
+                    host_facts.runtime_status,
+                    &runtime_health,
+                ),
+                lifecycle_status: host_facts.runtime_status,
                 // runtime_status_snapshots has no writer; the wire fields stay
                 // serialized as null for dashboard compatibility until the
                 // gated table drop and wire-type change land together.
@@ -6562,7 +6665,12 @@ where
                  health_ready = $5,
                  health_reason = $6,
                  health_report_interval_seconds = $7,
-                 health_reporting_npub = $8
+                 health_reporting_npub = $8,
+                 host_facts = CASE
+                   WHEN host_facts->>'runtime_status' = $9
+                     THEN jsonb_set(host_facts, '{runtime_status}', to_jsonb($10::text))
+                   ELSE host_facts
+                 END
              WHERE id = $1 AND source_host_id = $2
              RETURNING id",
             &[
@@ -6574,6 +6682,10 @@ where
                 &reason,
                 &interval_seconds,
                 &agent_npub,
+                // The first accepted report after an up-bound control moves
+                // the lifecycle latch off `pending_first_report`.
+                &RuntimeSummaryStatus::PendingFirstReport.as_str(),
+                &RuntimeSummaryStatus::Online.as_str(),
             ],
         )
         .await
@@ -11960,7 +12072,7 @@ mod tests {
             assert_eq!(health.reason.as_deref(), Some("model endpoint 503"));
 
             // A report recorded long ago (runner stopped reporting) crosses
-            // the 3x cadence deadline and projects unknown again.
+            // the 3x cadence deadline and projects the named stale state.
             store
                 .record_runtime_health_report(report(
                     true,
@@ -11971,7 +12083,8 @@ mod tests {
                 .await
                 .unwrap();
             let health = overview_health(&store, &runtime_id).await;
-            assert_eq!(health.status, crate::RuntimeHealthStatus::Unknown);
+            assert_eq!(health.status, crate::RuntimeHealthStatus::Stale);
+            assert_eq!(health.report_interval_seconds, Some(60));
 
             // Scope: the credential's host guards the write. Another host's
             // runtime id and an unknown id both fail closed as not-found.
@@ -13632,9 +13745,16 @@ mod tests {
                 .into_iter()
                 .find(|o| o.agent_runtime_id == runtime_id)
                 .unwrap();
-            assert_eq!(overview_online.runtime_status, RuntimeSummaryStatus::Online);
+            // Completion is the runner's bounded readiness wait, not a
+            // standing observation: the lifecycle latch says the restart
+            // succeeded and awaits the poller's first report, and the
+            // user-facing status stays the named unknown state until then.
             assert_eq!(
-                overview_online.runtime_status,
+                overview_online.lifecycle_status,
+                RuntimeSummaryStatus::PendingFirstReport
+            );
+            assert_eq!(
+                overview_online.lifecycle_status,
                 store
                     .agent_runtime(&runtime_id)
                     .await
@@ -13642,7 +13762,58 @@ mod tests {
                     .host_facts
                     .runtime_status
             );
+            assert_eq!(overview_online.runtime_status, RuntimeSummaryStatus::Unknown);
             assert!(overview_online.runtime_link_active);
+            // The restarted runtime is a standing-health target for its own
+            // host's runner (and for nobody else's).
+            let targets = store.runtime_health_targets_for_host(host).await.unwrap();
+            assert_eq!(targets.source_host_id, host);
+            let target = targets
+                .targets
+                .iter()
+                .find(|target| target.agent_runtime_id == runtime_id)
+                .expect("restarted runtime should be a health target");
+            assert_eq!(target.source_machine_id, machine);
+            assert_eq!(
+                target.lifecycle_status,
+                RuntimeSummaryStatus::PendingFirstReport
+            );
+            assert!(
+                store
+                    .runtime_health_targets_for_host("someotherhost")
+                    .await
+                    .unwrap()
+                    .targets
+                    .is_empty()
+            );
+            // The first accepted health report moves the latch to `online`,
+            // and a fresh ready report is what makes the derived status online.
+            store
+                .record_runtime_health_report(RecordRuntimeHealthReportInput {
+                    source_host_id: host.to_string(),
+                    agent_runtime_id: runtime_id.clone(),
+                    ready: true,
+                    reason: None,
+                    observed_at: current_time_iso().unwrap(),
+                    agent_npub: None,
+                    report_interval_seconds: Some(60),
+                    now: None,
+                })
+                .await
+                .unwrap();
+            let overview_online = store
+                .admin_runtime_overviews()
+                .await
+                .unwrap()
+                .into_iter()
+                .find(|o| o.agent_runtime_id == runtime_id)
+                .unwrap();
+            assert_eq!(overview_online.lifecycle_status, RuntimeSummaryStatus::Online);
+            assert_eq!(overview_online.runtime_status, RuntimeSummaryStatus::Online);
+            assert_eq!(
+                overview_online.runtime_health.status,
+                crate::RuntimeHealthStatus::Ready
+            );
 
             // Upgrade: target is an explicit promoted, digest-pinned artifact;
             // the lease carries it and completion updates artifact/endpoint

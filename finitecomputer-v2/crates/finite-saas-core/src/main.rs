@@ -11,7 +11,7 @@ use finite_saas_core::{
     ResetFinitePrivateUsageWindowInput, RevokeFinitePrivateApiKeyInput,
     RevokeFinitePrivateGrantInput, RotateFinitePrivateApiKeyInput, RuntimeArtifact,
     RuntimeArtifactKind, RuntimeControlRequest, RuntimeControlRequestStatus, RuntimePlacement,
-    RuntimeSummaryStatus, UpsertRuntimeArtifactInput,
+    UpsertRuntimeArtifactInput,
 };
 use serde::Serialize;
 use std::collections::{BTreeMap, BTreeSet};
@@ -897,7 +897,7 @@ fn plan_runtime_artifact_rollout(
                     && overview.source_host_id == source_host_id
                     && overview.runtime_link_active
                     && overview.runtime_artifact_id.as_deref() == Some(target_artifact_id)
-                    && overview.runtime_status == RuntimeSummaryStatus::Online
+                    && overview.lifecycle_status.is_launched()
             });
             (!canary_is_planned && !canary_is_already_ready).then(|| {
                 format!(
@@ -1163,7 +1163,10 @@ async fn runtime_artifact_rollout<S: RuntimeArtifactRolloutStore>(
                 && overview.source_machine_id == entry.source_machine_id
                 && overview.runtime_artifact_id.as_deref()
                     == Some(input.target_artifact_id.as_str())
-                && overview.runtime_status == RuntimeSummaryStatus::Online
+                // Completion latches `pending_first_report` until the standing
+                // poller confirms the upgraded runtime; that is still a
+                // successful up-bound lifecycle outcome on the target artifact.
+                && overview.lifecycle_status.is_launched()
         });
         if !postcondition_met {
             let detail = format!(
@@ -1660,7 +1663,7 @@ mod tests {
     use super::*;
     use finite_saas_core::{
         CoreError, RuntimeCapabilitiesV1, RuntimeControlKind, RuntimeHealthProjection,
-        RuntimeHealthStatus, RuntimeSummaryStatus,
+        RuntimeSummaryStatus,
     };
     use std::sync::Mutex;
 
@@ -1804,6 +1807,7 @@ mod tests {
             runtime_artifact_id: Some(artifact_id.to_string()),
             runtime_artifact_version_label: Some(artifact_id.to_string()),
             runtime_status,
+            lifecycle_status: runtime_status,
             last_heartbeat_at: Some("2026-07-15T01:00:00Z".to_string()),
             status_updated_at: Some("2026-07-15T01:00:00Z".to_string()),
             runtime_updated_at: "2026-07-15T01:00:00Z".to_string(),
@@ -1819,13 +1823,7 @@ mod tests {
                 runtime_retirement: false,
             }),
             offboarding_phase: None,
-            runtime_health: RuntimeHealthProjection {
-                status: RuntimeHealthStatus::Unknown,
-                reason: None,
-                reported_at: None,
-                observed_at: None,
-                agent_npub: None,
-            },
+            runtime_health: RuntimeHealthProjection::unreported(),
         }
     }
 

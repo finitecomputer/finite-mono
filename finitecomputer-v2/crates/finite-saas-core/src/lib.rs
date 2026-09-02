@@ -152,13 +152,29 @@ wire_enum! {
 }
 
 wire_enum! {
+/// A Runtime's lifecycle-latched summary. `Online`/`Offline` are the last
+/// successful up-/down-bound lifecycle outcomes, `Stale` is a failed control,
+/// `Unknown` is registered-but-unconfirmed, and `PendingFirstReport` is an
+/// up-bound control that completed but whose runtime has not yet been seen
+/// by the runner's standing health poller. The user-facing status is never
+/// this latch verbatim: see `derive_runtime_summary_status`.
     RuntimeSummaryStatus {
     Online => "online",
     Offline => "offline",
     Stale => "stale",
     Unknown => "unknown",
+    PendingFirstReport => "pending_first_report",
     }
     parse: parse_runtime_summary_status
+}
+
+impl RuntimeSummaryStatus {
+    /// True when the lifecycle machine last recorded a successful up-bound
+    /// operation (launch, restart, recovery, upgrade), whether or not the
+    /// standing health poller has confirmed the runtime since.
+    pub fn is_launched(self) -> bool {
+        matches!(self, Self::Online | Self::PendingFirstReport)
+    }
 }
 
 wire_enum! {
@@ -989,6 +1005,7 @@ wire_enum! {
     RuntimeHealthStatus {
     Ready => "ready",
     NotReady => "not_ready",
+    Stale => "stale",
     Unknown => "unknown",
     }
     parse: parse_runtime_health_status
@@ -1016,31 +1033,59 @@ pub struct RuntimeHealthProjection {
     pub reported_at: Option<String>,
     pub observed_at: Option<String>,
     pub agent_npub: Option<String>,
+    /// The reporter's poll cadence as stored (clamped to the accepted range);
+    /// `None` until a report has been recorded.
+    #[serde(default)]
+    pub report_interval_seconds: Option<i64>,
 }
 
-/// Project standing readiness from the latest stored report. Reports only
-/// speak for runtimes Core considers `online`; an intentionally offline
-/// runtime carries no standing readiness claim and projects `unknown`.
-/// Freshness is measured from `reported_at` (Core's receive clock), never the
-/// runner's `observed_at`, so runner clock skew cannot extend freshness.
+impl RuntimeHealthProjection {
+    /// The projection of a runtime that has never been reported on.
+    pub fn unreported() -> Self {
+        Self {
+            status: RuntimeHealthStatus::Unknown,
+            reason: None,
+            reported_at: None,
+            observed_at: None,
+            agent_npub: None,
+            report_interval_seconds: None,
+        }
+    }
+}
+
+/// Project standing readiness from the latest stored report. Reports do not
+/// speak for a runtime that is intentionally `offline`, nor for one whose
+/// up-bound control just completed (`pending_first_report`): any stored
+/// report predates that lifecycle change and is evidence about the previous
+/// incarnation. Freshness is measured from `reported_at` (Core's receive
+/// clock), never the runner's `observed_at`, so runner clock skew cannot
+/// extend freshness. A report older than
+/// `RUNTIME_HEALTH_REPORT_STALE_MULTIPLIER` intervals is the named `stale`
+/// state; no report at all is `unknown`.
 pub fn project_runtime_health(
     runtime_status: RuntimeSummaryStatus,
     health: &StoredRuntimeHealth,
     now: &str,
 ) -> CoreResult<RuntimeHealthProjection> {
-    let status = if runtime_status != RuntimeSummaryStatus::Online {
+    let interval_seconds = health.report_interval_seconds.map(|interval| {
+        interval.clamp(
+            RUNTIME_HEALTH_REPORT_MIN_INTERVAL_SECONDS,
+            RUNTIME_HEALTH_REPORT_MAX_INTERVAL_SECONDS,
+        )
+    });
+    let reports_speak = !matches!(
+        runtime_status,
+        RuntimeSummaryStatus::Offline | RuntimeSummaryStatus::PendingFirstReport
+    );
+    let status = if !reports_speak {
         RuntimeHealthStatus::Unknown
     } else if let (Some(ready), Some(reported_at)) = (health.ready, health.reported_at.as_deref()) {
-        let interval_seconds = health
-            .report_interval_seconds
+        let deadline_seconds = interval_seconds
             .unwrap_or(RUNTIME_HEALTH_REPORT_DEFAULT_INTERVAL_SECONDS)
-            .clamp(
-                RUNTIME_HEALTH_REPORT_MIN_INTERVAL_SECONDS,
-                RUNTIME_HEALTH_REPORT_MAX_INTERVAL_SECONDS,
-            );
+            * RUNTIME_HEALTH_REPORT_STALE_MULTIPLIER;
         let age = parse_time(now)? - parse_time(reported_at)?;
-        if age > Duration::seconds(interval_seconds * RUNTIME_HEALTH_REPORT_STALE_MULTIPLIER) {
-            RuntimeHealthStatus::Unknown
+        if age > Duration::seconds(deadline_seconds) {
+            RuntimeHealthStatus::Stale
         } else if ready {
             RuntimeHealthStatus::Ready
         } else {
@@ -1055,7 +1100,65 @@ pub fn project_runtime_health(
         reported_at: health.reported_at.clone(),
         observed_at: health.observed_at.clone(),
         agent_npub: health.reporting_npub.clone(),
+        report_interval_seconds: interval_seconds,
     })
+}
+
+/// The one user-facing summary rule: what a runtime's status *is* derives
+/// from report freshness, never from the last lifecycle outcome alone.
+///
+/// - an intentionally stopped runtime (`offline` latch) stays `offline`;
+/// - a runtime awaiting its first post-control report is `unknown`;
+/// - otherwise a fresh `ready` report is `online`, a fresh not-ready report
+///   is `offline` (nobody answers, or the guest says it is not ready), a
+///   report past the freshness deadline is `stale`, and a runtime that has
+///   never been reported on is `unknown`.
+///
+/// The latched lifecycle fact stays visible to operators under its own
+/// field; this value is what the summary status wire fields carry.
+pub fn derive_runtime_summary_status(
+    lifecycle_status: RuntimeSummaryStatus,
+    health: &RuntimeHealthProjection,
+) -> RuntimeSummaryStatus {
+    match lifecycle_status {
+        RuntimeSummaryStatus::Offline => RuntimeSummaryStatus::Offline,
+        RuntimeSummaryStatus::PendingFirstReport => RuntimeSummaryStatus::Unknown,
+        RuntimeSummaryStatus::Online
+        | RuntimeSummaryStatus::Stale
+        | RuntimeSummaryStatus::Unknown => match health.status {
+            RuntimeHealthStatus::Ready => RuntimeSummaryStatus::Online,
+            RuntimeHealthStatus::NotReady => RuntimeSummaryStatus::Offline,
+            RuntimeHealthStatus::Stale => RuntimeSummaryStatus::Stale,
+            RuntimeHealthStatus::Unknown => RuntimeSummaryStatus::Unknown,
+        },
+    }
+}
+
+/// One runtime the runner should keep in its standing-health registry, as
+/// listed by Core for the runner credential's host. The runner reconciles
+/// its on-disk registry against this at startup so runtimes it did not
+/// launch in this process (upgraded in place, relocated in, or launched by a
+/// pre-registry runner) are still reported on.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct RuntimeHealthTarget {
+    pub agent_runtime_id: String,
+    pub source_machine_id: String,
+    /// The contact endpoint Core holds for the runtime; `None` for rows that
+    /// never recorded one (the runner cannot poll those).
+    pub contact_endpoint: Option<String>,
+    /// The Agent Principal npub last observed for the runtime, if any: the
+    /// runner pins it so a reallocated port cannot wear this runtime's name.
+    #[serde(default)]
+    pub agent_npub: Option<String>,
+    pub lifecycle_status: RuntimeSummaryStatus,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct RuntimeHealthTargetList {
+    pub source_host_id: String,
+    pub targets: Vec<RuntimeHealthTarget>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -1812,7 +1915,11 @@ pub struct AdminRuntimeOverview {
     pub source_machine_id: String,
     pub runtime_artifact_id: Option<String>,
     pub runtime_artifact_version_label: Option<String>,
+    /// Derived at read time from `runtime_health` freshness
+    /// (`derive_runtime_summary_status`); never the lifecycle latch verbatim.
     pub runtime_status: RuntimeSummaryStatus,
+    /// The raw lifecycle-latched fact (last control outcome), for operators.
+    pub lifecycle_status: RuntimeSummaryStatus,
     pub last_heartbeat_at: Option<String>,
     pub status_updated_at: Option<String>,
     pub runtime_updated_at: String,
@@ -1824,8 +1931,8 @@ pub struct AdminRuntimeOverview {
     #[serde(default)]
     pub offboarding_phase: Option<OffboardingPhase>,
     /// Runner-ferried standing readiness, projected at read time. `unknown`
-    /// until the runner's standing poller first reports (and whenever reports
-    /// go stale), so this never displays a frozen last-known `ready`.
+    /// until the runner's standing poller first reports and `stale` once
+    /// reports lapse, so this never displays a frozen last-known `ready`.
     pub runtime_health: RuntimeHealthProjection,
 }
 
@@ -3864,13 +3971,14 @@ mod tests {
     }
 
     #[test]
-    fn runtime_health_projection_names_stale_and_missing_reports_unknown() {
+    fn runtime_health_projection_names_stale_and_missing_reports() {
         let now = "2026-08-24T12:00:00Z";
         // 181s old at a 60s cadence is past the 3x staleness deadline: the
-        // "died at 3am, shows ready forever" gap closes as `unknown`.
+        // "died at 3am, shows ready forever" gap closes as `stale`.
         let stale = stored_health(true, "2026-08-24T11:56:59Z", 60);
         let projected = project_runtime_health(RuntimeSummaryStatus::Online, &stale, now).unwrap();
-        assert_eq!(projected.status, RuntimeHealthStatus::Unknown);
+        assert_eq!(projected.status, RuntimeHealthStatus::Stale);
+        assert_eq!(projected.report_interval_seconds, Some(60));
 
         // Just inside the deadline still projects the report.
         let edge = stored_health(true, "2026-08-24T11:57:00Z", 60);
@@ -3891,24 +3999,124 @@ mod tests {
         )
         .unwrap();
         assert_eq!(projected.status, RuntimeHealthStatus::Unknown);
+        assert_eq!(projected.report_interval_seconds, None);
     }
 
     #[test]
-    fn runtime_health_projection_only_answers_for_online_runtimes() {
+    fn runtime_health_projection_is_silent_for_offline_and_pending_runtimes() {
         let now = "2026-08-24T12:00:00Z";
         let fresh = stored_health(true, "2026-08-24T11:59:30Z", 60);
         for status in [
             RuntimeSummaryStatus::Offline,
-            RuntimeSummaryStatus::Stale,
-            RuntimeSummaryStatus::Unknown,
+            RuntimeSummaryStatus::PendingFirstReport,
         ] {
             let projected = project_runtime_health(status, &fresh, now).unwrap();
             assert_eq!(
                 projected.status,
                 RuntimeHealthStatus::Unknown,
-                "an intentionally not-online runtime carries no standing readiness claim"
+                "a stopped runtime carries no standing readiness claim, and a report stored \
+                 before an up-bound control completed speaks for the previous incarnation"
             );
         }
+        // A failed control (`stale` latch) or an unconfirmed registration
+        // does not silence a fresh report: freshness is the truth.
+        for status in [RuntimeSummaryStatus::Stale, RuntimeSummaryStatus::Unknown] {
+            let projected = project_runtime_health(status, &fresh, now).unwrap();
+            assert_eq!(projected.status, RuntimeHealthStatus::Ready);
+        }
+    }
+
+    #[test]
+    fn derived_summary_status_follows_report_freshness() {
+        let now = "2026-08-24T12:00:00Z";
+        let project = |lifecycle: RuntimeSummaryStatus, health: &StoredRuntimeHealth| {
+            let projection = project_runtime_health(lifecycle, health, now).unwrap();
+            derive_runtime_summary_status(lifecycle, &projection)
+        };
+        let fresh_ready = stored_health(true, "2026-08-24T11:59:30Z", 60);
+        let fresh_not_ready = stored_health(false, "2026-08-24T11:59:30Z", 60);
+        let lapsed = stored_health(true, "2026-08-24T11:00:00Z", 60);
+        let never = StoredRuntimeHealth::default();
+
+        // The table: (lifecycle latch, stored report) => user-facing status.
+        let table = [
+            (
+                RuntimeSummaryStatus::Online,
+                &fresh_ready,
+                RuntimeSummaryStatus::Online,
+            ),
+            (
+                RuntimeSummaryStatus::Online,
+                &fresh_not_ready,
+                RuntimeSummaryStatus::Offline,
+            ),
+            (
+                RuntimeSummaryStatus::Online,
+                &lapsed,
+                RuntimeSummaryStatus::Stale,
+            ),
+            (
+                RuntimeSummaryStatus::Online,
+                &never,
+                RuntimeSummaryStatus::Unknown,
+            ),
+            // A failed control does not hide a live runtime, and does not
+            // invent one either.
+            (
+                RuntimeSummaryStatus::Stale,
+                &fresh_ready,
+                RuntimeSummaryStatus::Online,
+            ),
+            (
+                RuntimeSummaryStatus::Stale,
+                &lapsed,
+                RuntimeSummaryStatus::Stale,
+            ),
+            (
+                RuntimeSummaryStatus::Stale,
+                &never,
+                RuntimeSummaryStatus::Unknown,
+            ),
+            (
+                RuntimeSummaryStatus::Unknown,
+                &fresh_ready,
+                RuntimeSummaryStatus::Online,
+            ),
+            // Completed up-bound control, nothing reported since: unknown,
+            // even though an older report is still stored.
+            (
+                RuntimeSummaryStatus::PendingFirstReport,
+                &fresh_ready,
+                RuntimeSummaryStatus::Unknown,
+            ),
+            (
+                RuntimeSummaryStatus::PendingFirstReport,
+                &never,
+                RuntimeSummaryStatus::Unknown,
+            ),
+            // Deliberately stopped stays offline whatever the last report said.
+            (
+                RuntimeSummaryStatus::Offline,
+                &fresh_ready,
+                RuntimeSummaryStatus::Offline,
+            ),
+            (
+                RuntimeSummaryStatus::Offline,
+                &never,
+                RuntimeSummaryStatus::Offline,
+            ),
+        ];
+        for (lifecycle, health, expected) in table {
+            assert_eq!(
+                project(lifecycle, health),
+                expected,
+                "{lifecycle:?} / {health:?}"
+            );
+        }
+        assert!(RuntimeSummaryStatus::Online.is_launched());
+        assert!(RuntimeSummaryStatus::PendingFirstReport.is_launched());
+        assert!(!RuntimeSummaryStatus::Stale.is_launched());
+        assert!(!RuntimeSummaryStatus::Offline.is_launched());
     }
 
     /// `wire_enum!` now generates serde, `as_str`, and `parse_*` from one
@@ -3953,6 +4161,7 @@ mod tests {
             RuntimeSummaryStatus::Offline,
             RuntimeSummaryStatus::Stale,
             RuntimeSummaryStatus::Unknown,
+            RuntimeSummaryStatus::PendingFirstReport,
         );
 
         assert_wire_encodings_agree!(
@@ -3968,6 +4177,7 @@ mod tests {
             parse_runtime_health_status,
             RuntimeHealthStatus::Ready,
             RuntimeHealthStatus::NotReady,
+            RuntimeHealthStatus::Stale,
             RuntimeHealthStatus::Unknown,
         );
 
@@ -6324,13 +6534,15 @@ mod tests {
 
             assert_eq!(completed.status, RuntimeControlRequestStatus::Succeeded);
             assert!(completed.lease_token.is_none());
+            // The restart succeeded; the standing poller has not confirmed
+            // the restarted runtime yet.
             assert_eq!(
                 db.agent_runtime(&runtime_id)
                     .await
                     .unwrap()
                     .host_facts
                     .runtime_status,
-                RuntimeSummaryStatus::Online
+                RuntimeSummaryStatus::PendingFirstReport
             );
             assert!(
                 db.lease_runtime_control_request(LeaseRuntimeControlRequestInput {
@@ -9541,7 +9753,7 @@ mod tests {
                 .find(|overview| overview.agent_runtime_id == runtime_id)
                 .unwrap();
             assert_eq!(
-                stale_overview.runtime_status,
+                stale_overview.lifecycle_status,
                 db.agent_runtime(&runtime_id)
                     .await
                     .unwrap()
@@ -10201,7 +10413,11 @@ mod tests {
                 overview.runtime_artifact_version_label.as_deref(),
                 Some("v1")
             );
-            assert_eq!(overview.runtime_status, RuntimeSummaryStatus::Online);
+            // The launch latched `online`; nothing has reported on the box
+            // yet, so the user-facing status is the named unknown state.
+            assert_eq!(overview.lifecycle_status, RuntimeSummaryStatus::Online);
+            assert_eq!(overview.runtime_status, RuntimeSummaryStatus::Unknown);
+            assert_eq!(overview.runtime_health.status, RuntimeHealthStatus::Unknown);
             assert_eq!(overview.hermes_available, Some(true));
             assert_eq!(overview.active_finite_private_key_count, 1);
             assert!(overview.runtime_link_active);
