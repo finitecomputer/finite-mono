@@ -1,6 +1,7 @@
 use axum::Router;
 use axum::body::{Body, to_bytes};
 use axum::http::{Method, Request, StatusCode};
+use finitechat_client::rejected_entry_diagnostic::RejectedEntryErrorClass;
 use finitechat_client::{
     AppliedLogEntry, ClientError, ClientStoreError, FiniteChatDevice, FiniteChatDeviceConfig,
     HttpRuntimeDelivery, HttpRuntimeDeliveryError, HttpRuntimeTransport, LinkFanoutRoomStatus,
@@ -2930,20 +2931,40 @@ fn wedge_receiver_behind_rewound_sender(
 /// Operator rekey (self-update Commit) heals the receiver of a rewound
 /// sender without minting a new device: the epoch bump restarts every
 /// leaf's secret tree at generation 0. The receiver commits while its cursor
-/// is still frozen behind the quarantined entries; because everything below
-/// the Commit is the counterpart's application entry, the rekey's audited
-/// skip lands the cursor on the commit seq and normal sync carries on in
-/// both directions with no operator repair.
+/// is still frozen behind the quarantined entries. The rekey replays the
+/// backlog first: a third member's healthy sends interleaved with the
+/// poison are applied and stored, only the MLS-undecryptable poison is
+/// skipped (with sender and error class), the cursor lands on the commit
+/// seq, and normal sync carries on in both directions with no operator
+/// repair.
 #[test]
 fn rekey_room_heals_receiver_wedged_by_rewound_sender() {
     let dir = tempfile::tempdir().unwrap();
     let mut pair = RekeyPair::new(&dir, "heal");
     let options = pair.options();
+    let mut charlie = pair.admit_third_device("device_c_rekey_heal");
+    pair.sync_b(&options).unwrap();
+    assert_eq!(pair.b.group_epoch(ROOM_ID).unwrap(), 2);
     let (frozen_cursor, poison) =
-        wedge_receiver_behind_rewound_sender(&dir, &mut pair, &options, 3);
+        wedge_receiver_behind_rewound_sender(&dir, &mut pair, &options, 2);
 
-    // Rekey from the wedged receiver: the commit does not need the cursor at
-    // the server head, and the audited skip completes the heal.
+    // Above the freeze, the third member's healthy sends interleave with
+    // more poison; the frozen tick can reach none of them.
+    let healthy_1 = send_from(
+        &mut pair.delivery,
+        &mut charlie,
+        b"third healthy 1",
+        "app_third_1",
+    );
+    let poison_2 = pair.send_from_b(b"rekey poison 2", "app_rekey_poison_2");
+    let healthy_2 = send_from(
+        &mut pair.delivery,
+        &mut charlie,
+        b"third healthy 2",
+        "app_third_2",
+    );
+    let poison = [poison[0].clone(), poison[1].clone(), poison_2];
+
     let report = run_runtime_rekey_room(
         &mut pair.a_store,
         &mut pair.a,
@@ -2953,12 +2974,15 @@ fn rekey_room_heals_receiver_wedged_by_rewound_sender() {
     )
     .unwrap();
     assert_eq!(report.room_id, ROOM_ID);
-    assert_eq!(report.previous_epoch, 1);
-    assert_eq!(report.new_epoch, 2);
-    assert_eq!(report.commit_seq, poison[2].seq + 1);
+    assert_eq!(report.previous_epoch, 2);
+    assert_eq!(report.new_epoch, 3);
+    assert_eq!(report.commit_seq, healthy_2.seq + 1);
     assert_eq!(report.cursor_before, frozen_cursor);
     assert_eq!(report.cursor_after, report.commit_seq);
-    assert_eq!(report.skip_refused, None);
+    assert_eq!(
+        report.applied, 2,
+        "the healthy entries are applied, not skipped"
+    );
     assert_eq!(
         report.skipped,
         poison
@@ -2968,27 +2992,30 @@ fn rekey_room_heals_receiver_wedged_by_rewound_sender() {
                 sender_account_id: pair.b.device_ref().account_id.clone(),
                 sender_device_id: pair.b.device_ref().device_id.clone(),
                 message_id: entry.message_id.clone(),
+                error_class: RejectedEntryErrorClass::MlsApplicationCiphertext,
             })
             .collect::<Vec<_>>(),
-        "exactly the poison entries, attributed to the counterpart"
+        "exactly the poison entries, on evidence, attributed to the rewound sender"
     );
-    assert_eq!(pair.a.group_epoch(ROOM_ID).unwrap(), 2);
+    assert_eq!(pair.a.group_epoch(ROOM_ID).unwrap(), 3);
     assert!(!pair.a.has_pending_commit(ROOM_ID).unwrap());
     assert_eq!(pair.a.last_applied_seq(ROOM_ID).unwrap(), report.commit_seq);
     let durable_a = pair.a_store.load_device(pair.a_config.clone()).unwrap();
-    assert_eq!(durable_a.group_epoch(ROOM_ID).unwrap(), 2);
+    assert_eq!(durable_a.group_epoch(ROOM_ID).unwrap(), 3);
     assert!(!durable_a.has_pending_commit(ROOM_ID).unwrap());
     assert_eq!(
         durable_a.last_applied_seq(ROOM_ID).unwrap(),
         report.commit_seq
     );
-    let commit_page = pair
-        .delivery
-        .sync_events(ROOM_ID, pair.a.device_ref(), report.commit_seq - 1)
-        .unwrap();
-    assert_eq!(commit_page.entries.len(), 1);
-    assert_eq!(commit_page.entries[0].message_id, report.message_id);
-    assert_eq!(commit_page.entries[0].kind, LogEntryKind::Commit);
+    // The healthy entries were stored durably.
+    let stored = stored_plaintexts(&pair.a_store, pair.a.device_ref());
+    assert!(stored.contains(&(healthy_1.seq, b"third healthy 1".to_vec())));
+    assert!(stored.contains(&(healthy_2.seq, b"third healthy 2".to_vec())));
+    assert!(
+        !stored
+            .iter()
+            .any(|(seq, _)| poison.iter().any(|entry| entry.seq == *seq))
+    );
 
     // The rewound sender's first sync re-pages its own pre-rewind entry and
     // the currency gate records the rewind evidence (the tick fails); the
@@ -3005,10 +3032,10 @@ fn rekey_room_heals_receiver_wedged_by_rewound_sender() {
         "expected the currency gate to record the rewind, got {behind:?}"
     );
     let b_report = pair.sync_b(&options).unwrap();
-    assert_eq!(pair.b.group_epoch(ROOM_ID).unwrap(), 2);
+    assert_eq!(pair.b.group_epoch(ROOM_ID).unwrap(), 3);
     assert!(b_report.applied_entries.iter().any(|entry| {
         entry.seq == report.commit_seq
-            && matches!(entry.entry, AppliedLogEntry::Commit { epoch: 2, .. })
+            && matches!(entry.entry, AppliedLogEntry::Commit { epoch: 3, .. })
     }));
 
     // Its next send decrypts at the receiver directly: the cursor already
@@ -3052,20 +3079,62 @@ fn rekey_room_heals_receiver_wedged_by_rewound_sender() {
     );
 }
 
-/// An own application entry inside the frozen cursor's window refuses the
-/// audited skip: the rekey still succeeds (epoch bumped, Commit merged and
-/// durable) but the cursor stays put and the report names the offending
-/// seq for the operator's `repair skip-entry` follow-up.
+/// A device that is merely behind ordinary, decryptable traffic runs
+/// `rekey`: the unread message is applied and stored, nothing is skipped,
+/// and the epoch bumps. (Classifying by sender after the commit would have
+/// dropped it; the pre-commit replay is what makes the skip honest.)
 #[test]
-fn rekey_refuses_the_skip_when_the_window_holds_an_own_entry() {
+fn rekey_replays_ordinary_unread_traffic_instead_of_skipping_it() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut pair = RekeyPair::new(&dir, "unread");
+    let options = pair.options();
+    let unread_plaintext = b"ordinary unread message";
+    let unread = pair.send_from_b(unread_plaintext, "app_rekey_unread");
+    assert_eq!(pair.a.last_applied_seq(ROOM_ID).unwrap(), pair.add_seq);
+
+    let report = run_runtime_rekey_room(
+        &mut pair.a_store,
+        &mut pair.a,
+        &mut pair.delivery,
+        ROOM_ID,
+        "rekey_http_unread",
+    )
+    .unwrap();
+    assert_eq!(report.previous_epoch, 1);
+    assert_eq!(report.new_epoch, 2);
+    assert_eq!(report.commit_seq, unread.seq + 1);
+    assert_eq!(report.cursor_before, pair.add_seq);
+    assert_eq!(report.cursor_after, report.commit_seq);
+    assert_eq!(report.applied, 1);
+    assert!(
+        report.skipped.is_empty(),
+        "healthy traffic is never skipped"
+    );
+    assert_eq!(pair.a.last_applied_seq(ROOM_ID).unwrap(), report.commit_seq);
+    assert!(
+        stored_plaintexts(&pair.a_store, pair.a.device_ref())
+            .contains(&(unread.seq, unread_plaintext.to_vec())),
+        "the unread message is stored, not dropped"
+    );
+
+    pair.sync_b(&options).unwrap();
+    assert_eq!(pair.b.group_epoch(ROOM_ID).unwrap(), 2);
+    let next = pair.send_from_b(b"after the rekey", "app_rekey_unread_next");
+    let next_report = pair.sync_a(&options).unwrap();
+    assert_eq!(pair.a.last_applied_seq(ROOM_ID).unwrap(), next.seq);
+    assert_eq!(next_report.applied_entries.len(), 1);
+}
+
+/// The receiver's own application entry in the backlog is crossed the way
+/// the sync tick crosses it (own sends are not decryptable by their
+/// sender): it is neither applied nor skipped.
+#[test]
+fn rekey_crosses_an_own_entry_in_the_backlog_without_skipping_it() {
     let dir = tempfile::tempdir().unwrap();
     let mut pair = RekeyPair::new(&dir, "own_entry");
     let options = pair.options();
     let (frozen_cursor, poison) =
-        wedge_receiver_behind_rewound_sender(&dir, &mut pair, &options, 2);
-
-    // The wedged receiver's own send lands above the poison, inside the
-    // window the skip would cross.
+        wedge_receiver_behind_rewound_sender(&dir, &mut pair, &options, 1);
     let own = pair
         .a
         .create_application_request(ROOM_ID, b"receiver reply while wedged", "app_own_entry")
@@ -3074,7 +3143,7 @@ fn rekey_refuses_the_skip_when_the_window_holds_an_own_entry() {
         .delivery
         .append_event(&own, DurableAppEventKind::ChatMessage.delivery_policy())
         .unwrap();
-    assert!(own.seq > poison[1].seq);
+    assert!(own.seq > poison[0].seq);
 
     let report = run_runtime_rekey_room(
         &mut pair.a_store,
@@ -3084,40 +3153,31 @@ fn rekey_refuses_the_skip_when_the_window_holds_an_own_entry() {
         "rekey_http_own_entry",
     )
     .unwrap();
-    assert_eq!(report.previous_epoch, 1);
     assert_eq!(report.new_epoch, 2);
     assert_eq!(report.commit_seq, own.seq + 1);
     assert_eq!(report.cursor_before, frozen_cursor);
-    assert_eq!(report.cursor_after, frozen_cursor);
-    assert!(report.skipped.is_empty());
-    let reason = report.skip_refused.as_deref().expect("the skip is refused");
-    assert!(
-        reason.contains(&format!("seq {}", own.seq)) && reason.contains("this device"),
-        "unexpected refusal: {reason}"
+    assert_eq!(report.cursor_after, report.commit_seq);
+    assert_eq!(report.applied, 0);
+    assert_eq!(
+        report
+            .skipped
+            .iter()
+            .map(|entry| entry.seq)
+            .collect::<Vec<_>>(),
+        vec![poison[0].seq]
     );
-    assert_eq!(pair.a.group_epoch(ROOM_ID).unwrap(), 2);
-    assert!(!pair.a.has_pending_commit(ROOM_ID).unwrap());
-    assert_eq!(pair.a.last_applied_seq(ROOM_ID).unwrap(), frozen_cursor);
-    let durable_a = pair.a_store.load_device(pair.a_config.clone()).unwrap();
-    assert_eq!(durable_a.group_epoch(ROOM_ID).unwrap(), 2);
-    assert!(!durable_a.has_pending_commit(ROOM_ID).unwrap());
-    assert_eq!(durable_a.last_applied_seq(ROOM_ID).unwrap(), frozen_cursor);
-
-    // The wedge persists until the operator's repair: the tick still
-    // aborts on the poison entry.
-    assert!(pair.sync_a(&options).is_err());
-    assert_eq!(pair.a.last_applied_seq(ROOM_ID).unwrap(), frozen_cursor);
+    assert_eq!(pair.a.last_applied_seq(ROOM_ID).unwrap(), report.commit_seq);
 }
 
-/// A Commit or Proposal inside the frozen cursor's window refuses the
-/// audited skip the same way. The window is served through a delivery that
-/// relabels one poison entry's kind (a foreign Commit the receiver never
-/// applied cannot otherwise sit below its own accepted rekey Commit).
+/// A Commit or Proposal in the backlog that fails to apply refuses the
+/// rekey entirely: a typed error naming the seq, no Commit submitted, and
+/// no durable change. The backlog is served through a delivery that
+/// relabels one poison entry's kind.
 #[test]
-fn rekey_refuses_the_skip_when_the_window_holds_a_commit_or_proposal() {
-    for (kind, name, tag) in [
-        (LogEntryKind::Commit, "commit", "window_commit"),
-        (LogEntryKind::Proposal, "proposal", "window_proposal"),
+fn rekey_refuses_when_the_backlog_holds_a_failing_commit_or_proposal() {
+    for (kind, tag) in [
+        (LogEntryKind::Commit, "backlog_commit"),
+        (LogEntryKind::Proposal, "backlog_proposal"),
     ] {
         let dir = tempfile::tempdir().unwrap();
         let mut pair = RekeyPair::new(&dir, tag);
@@ -3126,11 +3186,18 @@ fn rekey_refuses_the_skip_when_the_window_holds_a_commit_or_proposal() {
             wedge_receiver_behind_rewound_sender(&dir, &mut pair, &options, 2);
         let relabeled_seq = poison[1].seq;
 
-        let report = {
-            let mut delivery = RelabeledWindowDelivery {
+        let error = {
+            let mut delivery = TamperedSyncDelivery {
                 inner: &mut pair.delivery,
-                seq: relabeled_seq,
-                kind,
+                tamper: |page: &mut SyncEventsPage| {
+                    for entry in page.entries.iter_mut() {
+                        if entry.seq == relabeled_seq {
+                            entry.kind = kind;
+                            entry.envelope.kind = kind;
+                            entry.message_id = entry.envelope.message_id().unwrap();
+                        }
+                    }
+                },
             };
             run_runtime_rekey_room(
                 &mut pair.a_store,
@@ -3139,26 +3206,111 @@ fn rekey_refuses_the_skip_when_the_window_holds_a_commit_or_proposal() {
                 ROOM_ID,
                 format!("rekey_http_{tag}"),
             )
-            .unwrap()
+            .unwrap_err()
         };
-        assert_eq!(report.previous_epoch, 1);
-        assert_eq!(report.new_epoch, 2);
-        assert_eq!(report.commit_seq, relabeled_seq + 1);
-        assert_eq!(report.cursor_before, frozen_cursor);
-        assert_eq!(report.cursor_after, frozen_cursor);
-        assert!(report.skipped.is_empty(), "{tag}: nothing is skipped");
-        let reason = report.skip_refused.as_deref().expect("the skip is refused");
         assert!(
-            reason.contains(&format!("seq {relabeled_seq}")) && reason.contains(name),
-            "{tag}: unexpected refusal: {reason}"
+            matches!(
+                &error,
+                RuntimeWorkerError::Client(ClientError::RekeyBacklogNotReplayable {
+                    room_id,
+                    seq,
+                    kind: failed_kind,
+                    ..
+                }) if room_id == ROOM_ID && *seq == relabeled_seq && *failed_kind == kind
+            ),
+            "{tag}: unexpected error: {error}"
         );
-        assert_eq!(pair.a.group_epoch(ROOM_ID).unwrap(), 2);
+        assert_eq!(pair.a.group_epoch(ROOM_ID).unwrap(), 1);
         assert!(!pair.a.has_pending_commit(ROOM_ID).unwrap());
-        assert_eq!(pair.a.last_applied_seq(ROOM_ID).unwrap(), frozen_cursor);
         let durable_a = pair.a_store.load_device(pair.a_config.clone()).unwrap();
-        assert_eq!(durable_a.group_epoch(ROOM_ID).unwrap(), 2);
+        assert_eq!(durable_a.group_epoch(ROOM_ID).unwrap(), 1);
         assert_eq!(durable_a.last_applied_seq(ROOM_ID).unwrap(), frozen_cursor);
+        assert!(!durable_a.has_pending_commit(ROOM_ID).unwrap());
+        let head = pair
+            .delivery
+            .sync_events(ROOM_ID, pair.a.device_ref(), relabeled_seq)
+            .unwrap();
+        assert!(
+            head.entries.is_empty(),
+            "{tag}: a refused rekey must not append"
+        );
     }
+}
+
+/// A previous attempt that committed but never completed its cursor skip
+/// (a run on the older image, or a crash after acceptance) leaves this
+/// device's own merged Commit above the frozen cursor. The backlog below it
+/// can no longer be classified honestly (past-epoch secrets are gone), so
+/// a re-run refuses with a typed error naming `repair skip-entry`, submits
+/// nothing, and changes nothing; the sanctioned skip then completes the
+/// heal (crossing the merged Commit as a no-op advance).
+#[test]
+fn rekey_refuses_when_its_own_merged_commit_sits_above_a_frozen_cursor() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut pair = RekeyPair::new(&dir, "frozen_own_commit");
+    let options = pair.options();
+    let (frozen_cursor, _poison) =
+        wedge_receiver_behind_rewound_sender(&dir, &mut pair, &options, 2);
+    let first = run_runtime_rekey_room(
+        &mut pair.a_store,
+        &mut pair.a,
+        &mut pair.delivery,
+        ROOM_ID,
+        "rekey_http_frozen_first",
+    )
+    .unwrap();
+    assert_eq!(first.cursor_after, first.commit_seq);
+
+    // Simulate the half-done state: the Commit is merged and durable but
+    // the cursor is still frozen below the poison.
+    pair.a.rewind_room_cursor_for_tests(ROOM_ID, frozen_cursor);
+    pair.a_store.save_device_state(&pair.a).unwrap();
+    assert!(pair.sync_a(&options).is_err());
+
+    let error = run_runtime_rekey_room(
+        &mut pair.a_store,
+        &mut pair.a,
+        &mut pair.delivery,
+        ROOM_ID,
+        "rekey_http_frozen_second",
+    )
+    .unwrap_err();
+    assert!(
+        matches!(
+            &error,
+            RuntimeWorkerError::Client(ClientError::RekeyCursorBehindOwnCommit {
+                room_id,
+                cursor,
+                commit_seq,
+            }) if room_id == ROOM_ID && *cursor == frozen_cursor && *commit_seq == first.commit_seq
+        ),
+        "unexpected error: {error}"
+    );
+    assert!(error.to_string().contains("repair skip-entry"));
+    assert_eq!(pair.a.group_epoch(ROOM_ID).unwrap(), 2);
+    assert_eq!(pair.a.last_applied_seq(ROOM_ID).unwrap(), frozen_cursor);
+    let durable_a = pair.a_store.load_device(pair.a_config.clone()).unwrap();
+    assert_eq!(durable_a.last_applied_seq(ROOM_ID).unwrap(), frozen_cursor);
+    let head = pair
+        .delivery
+        .sync_events(ROOM_ID, pair.a.device_ref(), first.commit_seq)
+        .unwrap();
+    assert!(head.entries.is_empty(), "a refused rekey must not append");
+
+    // The sanctioned path: the operator's skip lands the cursor on the
+    // commit seq and traffic resumes.
+    pair.a_store
+        .advance_room_cursor_and_save(&mut pair.a, ROOM_ID, first.commit_seq)
+        .unwrap();
+    assert!(
+        pair.sync_b(&options).is_err(),
+        "currency gate records the rewind"
+    );
+    pair.sync_b(&options).unwrap();
+    assert_eq!(pair.b.group_epoch(ROOM_ID).unwrap(), 2);
+    let healed = pair.send_from_b(b"rekey frozen healed", "app_rekey_frozen_healed");
+    pair.sync_a(&options).unwrap();
+    assert_eq!(pair.a.last_applied_seq(ROOM_ID).unwrap(), healed.seq);
 }
 
 /// Local preconditions fail closed before any server call: a pending Commit
@@ -3213,8 +3365,12 @@ fn rekey_room_refuses_pending_commit_without_calling_server() {
 }
 
 /// A device whose epoch is behind the server (another member committed
-/// first) is refused with a typed error and no local change; after it syncs
-/// the newer Commit the rekey succeeds and the other member applies it.
+/// first) is refused with a typed error and no local change when the
+/// backlog replay cannot see that Commit (served through a delivery that
+/// hides it, the shape of a Commit accepted between the replay and the
+/// epoch check); after it syncs the newer Commit the rekey succeeds and the
+/// other member applies it. When the Commit IS in the backlog, the replay
+/// applies it first (pinned by the third-member heal test).
 #[test]
 fn rekey_room_refuses_when_local_epoch_is_behind_server() {
     let dir = tempfile::tempdir().unwrap();
@@ -3239,14 +3395,24 @@ fn rekey_room_refuses_when_local_epoch_is_behind_server() {
     assert_eq!(pair.b.group_epoch(ROOM_ID).unwrap(), 2);
 
     let cursor = pair.a.last_applied_seq(ROOM_ID).unwrap();
-    let error = run_runtime_rekey_room(
-        &mut pair.a_store,
-        &mut pair.a,
-        &mut pair.delivery,
-        ROOM_ID,
-        "rekey_http_behind",
-    )
-    .unwrap_err();
+    let hidden_seq = b_accepted.seq;
+    let error = {
+        let mut delivery = TamperedSyncDelivery {
+            inner: &mut pair.delivery,
+            tamper: |page: &mut SyncEventsPage| {
+                page.entries.retain(|entry| entry.seq != hidden_seq);
+                page.next_after_seq = page.next_after_seq.min(hidden_seq - 1);
+            },
+        };
+        run_runtime_rekey_room(
+            &mut pair.a_store,
+            &mut pair.a,
+            &mut delivery,
+            ROOM_ID,
+            "rekey_http_behind",
+        )
+        .unwrap_err()
+    };
     assert!(
         matches!(
             &error,
@@ -3285,12 +3451,12 @@ fn rekey_room_refuses_when_local_epoch_is_behind_server() {
     assert_eq!(report.commit_seq, b_accepted.seq + 1);
     // Committed from the server head: the cursor advances across the
     // device's own Commit, so the next sync does not re-apply it; there is
-    // nothing to skip and nothing refused.
+    // nothing to replay and nothing to skip.
     assert_eq!(pair.a.last_applied_seq(ROOM_ID).unwrap(), report.commit_seq);
     assert_eq!(report.cursor_before, report.commit_seq - 1);
     assert_eq!(report.cursor_after, report.commit_seq);
+    assert_eq!(report.applied, 0);
     assert!(report.skipped.is_empty());
-    assert_eq!(report.skip_refused, None);
     assert!(pair.sync_a(&options).unwrap().applied_entries.is_empty());
     pair.sync_b(&options).unwrap();
     assert_eq!(pair.b.group_epoch(ROOM_ID).unwrap(), 3);
@@ -3823,6 +3989,45 @@ impl RekeyPair {
         }
     }
 
+    /// Device-a admits a third member (a fresh in-memory device on the
+    /// third account) with an add-member Commit that device-a applies from
+    /// the log; the caller syncs device-b. Returns the activated member.
+    fn admit_third_device(&mut self, device_id: &str) -> FiniteChatDevice {
+        let mut member = test_device(CHARLIE_ACCOUNT_SECRET_BYTES, device_id);
+        let key_package_id = format!("kp_{device_id}");
+        let welcome_id = format!("welcome_{device_id}");
+        self.delivery
+            .upload_key_package(member.upload_key_package_request(&key_package_id).unwrap())
+            .unwrap();
+        let claimed = self
+            .delivery
+            .claim_key_package_for_device(member.device_ref())
+            .unwrap()
+            .expect("third member key package");
+        let prepared = self
+            .a
+            .prepare_add_member_commit(
+                ROOM_ID,
+                &claimed,
+                &welcome_id,
+                format!("commit_{device_id}"),
+            )
+            .unwrap();
+        let accepted = self.delivery.submit_commit(prepared.request).unwrap();
+        let page = self
+            .delivery
+            .sync_events(ROOM_ID, self.a.device_ref(), accepted.seq - 1)
+            .unwrap();
+        self.a
+            .merge_pending_commit_from_log(ROOM_ID, &page.entries, &prepared.message_id)
+            .unwrap();
+        self.a_store
+            .advance_room_cursor_and_save(&mut self.a, ROOM_ID, accepted.seq)
+            .unwrap();
+        claim_and_activate(&mut self.delivery, &mut member, &welcome_id);
+        member
+    }
+
     fn send_from_b(&mut self, plaintext: &[u8], idempotency_key: &str) -> EventAccepted {
         let request = self
             .b
@@ -3960,16 +4165,16 @@ impl RuntimeDelivery for NeverCalledDelivery {
     }
 }
 
-/// Delegates to the in-process delivery but relabels one entry's kind on
-/// every sync page (recomputing its binding so the shape checks pass), to
-/// place a Commit or Proposal inside a frozen cursor's skip window.
-struct RelabeledWindowDelivery<'a> {
+/// Delegates to the in-process delivery but lets a test rewrite every sync
+/// page (relabel an entry's kind, hide an entry) to shape the backlog the
+/// rekey sees. A tamper that hides entries must keep `next_after_seq`
+/// consistent, as a real server does.
+struct TamperedSyncDelivery<'a, F: FnMut(&mut SyncEventsPage)> {
     inner: &'a mut TestHttpRuntimeDelivery,
-    seq: u64,
-    kind: LogEntryKind,
+    tamper: F,
 }
 
-impl RuntimeDelivery for RelabeledWindowDelivery<'_> {
+impl<F: FnMut(&mut SyncEventsPage)> RuntimeDelivery for TamperedSyncDelivery<'_, F> {
     type Error = HttpRuntimeDeliveryError<InProcessHttpTransportError>;
 
     fn key_package_inventory(
@@ -4026,15 +4231,36 @@ impl RuntimeDelivery for RelabeledWindowDelivery<'_> {
         after_seq: u64,
     ) -> Result<SyncEventsPage, Self::Error> {
         let mut page = self.inner.sync_events(room_id, requester, after_seq)?;
-        for entry in &mut page.entries {
-            if entry.seq == self.seq {
-                entry.kind = self.kind;
-                entry.envelope.kind = self.kind;
-                entry.message_id = entry.envelope.message_id().unwrap();
-            }
-        }
+        (self.tamper)(&mut page);
         Ok(page)
     }
+}
+
+/// Send one application message from `device` through the shared delivery.
+fn send_from(
+    delivery: &mut TestHttpRuntimeDelivery,
+    device: &mut FiniteChatDevice,
+    plaintext: &[u8],
+    idempotency_key: &str,
+) -> EventAccepted {
+    let request = device
+        .create_application_request(ROOM_ID, plaintext, idempotency_key)
+        .unwrap();
+    delivery
+        .append_event(&request, DurableAppEventKind::ChatMessage.delivery_policy())
+        .unwrap()
+}
+
+/// `(seq, plaintext)` of every stored application message the store holds
+/// for `owner` in the shared room.
+fn stored_plaintexts(store: &SqliteClientStore, owner: &DeviceRef) -> Vec<(u64, Vec<u8>)> {
+    store
+        .load_app_messages(owner, 100)
+        .unwrap()
+        .into_iter()
+        .filter(|message| message.room_id == ROOM_ID)
+        .map(|message| (message.seq, message.plaintext))
+        .collect()
 }
 
 fn spawn_live_http_server(path: &std::path::Path) -> String {

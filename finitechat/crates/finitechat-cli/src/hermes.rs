@@ -75,6 +75,8 @@ const HERMES_INBOX_FILE: &str = "hermes-inbox.json";
 const AGENTD_INBOX_FILE: &str = "agentd-inbox.json";
 const HERMES_RUNNING_FILE: &str = "hermes-running.json";
 const HERMES_HOME_CHANNEL_FILE: &str = "hermes-home-channel.json";
+/// Default JSONL audit trail for `hermes rekey` cursor-skip decisions.
+const HERMES_REKEY_AUDIT_FILE: &str = "rekey-audit.jsonl";
 const STORE_FILE: &str = "client.sqlite3";
 const ATTACHMENT_CACHE_DIR: &str = "attachments";
 const HERMES_PLATFORM_NAME: &str = "finitechat";
@@ -2866,11 +2868,14 @@ fn cmd_edit<W: Write>(home_dir: &Path, request: Value, output: &mut W) -> Result
 
 /// Operator rekey: run the core rekey action through a writer-lease runtime
 /// (the same open/dispatch shape as `recover`) and print its report. The
-/// action itself refuses to run unless the local epoch matches the server's
-/// and there is no pending Commit. A frozen cursor is completed with an
-/// audited skip only when everything below the Commit is another device's
-/// application entry; otherwise the report carries `skip_refused` and
-/// `finitechat repair skip-entry` is the follow-up.
+/// action replays the room's backlog first (healthy entries are delivered;
+/// only MLS-undecryptable application entries are skipped, on evidence),
+/// refuses with a typed error when anything else fails to replay or when a
+/// previous attempt already committed above a frozen cursor (then
+/// `finitechat repair skip-entry` is the path), and only then commits.
+/// Every run appends one line to the JSONL audit trail (default
+/// `<agent-home>/rekey-audit.jsonl`, same writer as the repair), opened
+/// before the rekey so an unwritable trail fails closed.
 fn cmd_rekey<W: Write>(
     home_dir: &Path,
     args: HermesRekeyArgs,
@@ -2878,8 +2883,54 @@ fn cmd_rekey<W: Write>(
     output: &mut W,
 ) -> Result<(), CliError> {
     let home = load_home(home_dir)?;
+    let audit_path = args
+        .audit_log
+        .map(PathBuf::from)
+        .unwrap_or_else(|| home_dir.join(HERMES_REKEY_AUDIT_FILE));
+    let mut audit = crate::repair::AuditLog::open(&audit_path)?;
     let runtime = open_agent_runtime(&home)?;
-    let report = runtime.rekey_room_and_wait(args.room)?;
+    let recorded_at_unix_seconds = || {
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|duration| duration.as_secs())
+            .unwrap_or(0)
+    };
+    let report = match runtime.rekey_room_and_wait(args.room.clone()) {
+        Ok(report) => report,
+        Err(error) => {
+            audit.append(&crate::repair::RekeyAuditLine {
+                schema_version: crate::repair::REKEY_AUDIT_SCHEMA_VERSION,
+                record: "rekey",
+                phase: "refused",
+                room_id: &args.room,
+                previous_epoch: None,
+                new_epoch: None,
+                commit_seq: None,
+                cursor_before: None,
+                cursor_after: None,
+                applied: None,
+                skipped: &[],
+                refusal: Some(error.to_string()),
+                recorded_at_unix_seconds: recorded_at_unix_seconds(),
+            })?;
+            return Err(error.into());
+        }
+    };
+    audit.append(&crate::repair::RekeyAuditLine {
+        schema_version: crate::repair::REKEY_AUDIT_SCHEMA_VERSION,
+        record: "rekey",
+        phase: "applied",
+        room_id: &report.room_id,
+        previous_epoch: Some(report.previous_epoch),
+        new_epoch: Some(report.new_epoch),
+        commit_seq: Some(report.commit_seq),
+        cursor_before: Some(report.cursor_before),
+        cursor_after: Some(report.cursor_after),
+        applied: Some(report.applied),
+        skipped: &report.skipped,
+        refusal: None,
+        recorded_at_unix_seconds: recorded_at_unix_seconds(),
+    })?;
     if json_mode {
         crate::write_pretty_json(output, &report)
     } else {
@@ -2895,9 +2946,10 @@ fn cmd_rekey<W: Write>(
         .map_err(CliError::Output)?;
         writeln!(
             output,
-            "  cursor {} -> {}; skipped {} entries below the commit{}",
+            "  cursor {} -> {}; replayed {} entries; skipped {} undecryptable entries{}",
             report.cursor_before,
             report.cursor_after,
+            report.applied,
             report.skipped.len(),
             if report.skipped.is_empty() {
                 String::new()
@@ -2913,15 +2965,7 @@ fn cmd_rekey<W: Write>(
                 )
             },
         )
-        .map_err(CliError::Output)?;
-        if let Some(reason) = &report.skip_refused {
-            writeln!(
-                output,
-                "  skip refused: {reason}; complete the heal with `finitechat repair skip-entry`",
-            )
-            .map_err(CliError::Output)?;
-        }
-        Ok(())
+        .map_err(CliError::Output)
     }
 }
 

@@ -14,6 +14,7 @@ use finitechat_blob::{
     prepare_attachment_upload, prepare_blossom_download_http_request,
     prepare_blossom_upload_http_request,
 };
+use finitechat_client::rejected_entry_diagnostic::RejectedEntryErrorClass;
 use finitechat_client::{
     AppliedLogEntry, ClientError, ClientStoreError, DeviceLinkBootstrapCommitOutcome,
     DeviceLinkBootstrapStageOutcome, FiniteChatDevice, FiniteChatDeviceConfig, HttpRuntimeDelivery,
@@ -869,11 +870,10 @@ pub struct AppSentMessage {
 
 /// Outcome of [`FiniteChatRuntime::rekey_room_and_wait`]: one accepted
 /// self-update Commit that moved the room from `previous_epoch` to
-/// `new_epoch` at server log position `commit_seq`, plus what happened to
-/// the room cursor: `skipped` lists the other-device application entries
-/// an audited skip moved a frozen cursor across to land on `commit_seq`;
-/// `skip_refused` names the first offending seq when the window held
-/// anything else and the cursor was left in place.
+/// `new_epoch` at server log position `commit_seq`, plus what the
+/// pre-commit backlog replay did: `applied` entries were stored normally
+/// and `skipped` lists the application entries dropped on evidence (MLS
+/// application-ciphertext rejections) with their senders and error class.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AppRekeyRoomReport {
     pub room_id: String,
@@ -886,18 +886,19 @@ pub struct AppRekeyRoomReport {
     #[serde(default)]
     pub cursor_after: u64,
     #[serde(default)]
+    pub applied: u64,
+    #[serde(default)]
     pub skipped: Vec<AppRekeySkippedEntry>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub skip_refused: Option<String>,
 }
 
-/// One entry the rekey's audited skip moved a frozen cursor across.
+/// One backlog entry the rekey's pre-commit replay skipped on evidence.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AppRekeySkippedEntry {
     pub seq: u64,
     pub sender_account_id: String,
     pub sender_device_id: String,
     pub message_id: String,
+    pub error_class: RejectedEntryErrorClass,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -8684,12 +8685,11 @@ impl CoreState {
         );
         match result {
             Ok(report) => {
-                // The client store has no durable audit surface; the skip
-                // decision is recorded in the report (printed by the
-                // operator CLI) and on the runtime's log.
+                // The operator CLI appends the durable audit line; the
+                // runtime log carries the same evidence-backed skips.
                 if !report.skipped.is_empty() {
                     eprintln!(
-                        "finitechat rekey audit: room {} cursor {} -> {} skipped {} entries below commit seq {}: {:?}",
+                        "finitechat rekey audit: room {} cursor {} -> {} skipped {} undecryptable entries below commit seq {}: {:?}",
                         report.room_id,
                         report.cursor_before,
                         report.cursor_after,
@@ -8698,14 +8698,8 @@ impl CoreState {
                         report
                             .skipped
                             .iter()
-                            .map(|entry| entry.seq)
+                            .map(|entry| (entry.seq, entry.error_class))
                             .collect::<Vec<_>>(),
-                    );
-                }
-                if let Some(reason) = &report.skip_refused {
-                    eprintln!(
-                        "finitechat rekey audit: room {} frozen cursor {} left below commit seq {}: {reason}",
-                        report.room_id, report.cursor_before, report.commit_seq,
                     );
                 }
                 Ok(AppRekeyRoomReport {
@@ -8716,6 +8710,7 @@ impl CoreState {
                     message_id: report.message_id,
                     cursor_before: report.cursor_before,
                     cursor_after: report.cursor_after,
+                    applied: report.applied,
                     skipped: report
                         .skipped
                         .into_iter()
@@ -8724,9 +8719,9 @@ impl CoreState {
                             sender_account_id: entry.sender_account_id,
                             sender_device_id: entry.sender_device_id,
                             message_id: entry.message_id,
+                            error_class: entry.error_class,
                         })
                         .collect(),
-                    skip_refused: report.skip_refused,
                 })
             }
             Err(error) => {

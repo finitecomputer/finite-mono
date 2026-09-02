@@ -868,6 +868,12 @@ pub(crate) struct HermesRekeyArgs {
     /// Room to rekey.
     #[arg(long, allow_hyphen_values = true)]
     pub(crate) room: String,
+
+    /// Append-only JSONL audit trail of the rekey's cursor-skip decision
+    /// (created mode 0600; same writer as `repair skip-entry`). Defaults
+    /// to `<agent-home>/rekey-audit.jsonl`.
+    #[arg(long, allow_hyphen_values = true)]
+    pub(crate) audit_log: Option<String>,
 }
 
 #[derive(Debug, Subcommand)]
@@ -1097,6 +1103,7 @@ mod tests {
             panic!("expected rekey");
         };
         assert_eq!(rekey.room, "room-1");
+        assert_eq!(rekey.audit_log, None);
     }
 
     #[test]
