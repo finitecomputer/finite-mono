@@ -1920,7 +1920,46 @@ impl FiniteChatDevice {
         room_id: &str,
         entry: &RoomLogEntry,
     ) -> Result<(), ClientError> {
+        self.apply_commit_entry_inner(room_id, entry)?;
+        // A Commit that moved the epoch past the evidence epoch re-derived
+        // every member's secret tree: fresh generations, rewind healed.
+        self.clear_behind_server_if_healed(room_id)
+    }
+
+    /// True when `entry` is this device's own Commit whose effects are
+    /// already merged: the group epoch has reached
+    /// `post_commit_epoch(entry.epoch)` and no Commit is pending. Re-paging
+    /// such an entry (a frozen cursor completing a rekey heal, an older
+    /// durable cursor restored from backup) is a no-op advance, not an
+    /// epoch error. Every other Commit shape keeps its existing rule: a
+    /// foreign Commit at an unexpected epoch, an own Commit whose epoch
+    /// has not moved, or an own Commit with a newer pending Commit all
+    /// still fail closed.
+    fn own_commit_already_merged(
+        &self,
+        room_id: &str,
+        entry: &RoomLogEntry,
+    ) -> Result<bool, ClientError> {
+        if entry.kind != LogEntryKind::Commit
+            || entry.sender != self.device_ref
+            || entry.envelope.sender != self.device_ref
+        {
+            return Ok(false);
+        }
+        let group = self.group(room_id)?;
+        Ok(group.epoch().as_u64() >= post_commit_epoch(entry.epoch)?
+            && group.pending_commit().is_none())
+    }
+
+    fn apply_commit_entry_inner(
+        &mut self,
+        room_id: &str,
+        entry: &RoomLogEntry,
+    ) -> Result<(), ClientError> {
         validate_log_entry_shape(room_id, entry, LogEntryKind::Commit)?;
+        if self.own_commit_already_merged(room_id, entry)? {
+            return Ok(());
+        }
         let post_commit_epoch = post_commit_epoch(entry.epoch)?;
         let own_device_ref = self.device_ref.clone();
         let now_unix_seconds = self.now_unix_seconds;
@@ -2039,6 +2078,193 @@ impl FiniteChatDevice {
                 server_url: entry.server_url.clone(),
             })
             .collect()
+    }
+
+    // ---- Currency gate -------------------------------------------------
+    //
+    // A device store that is older than what the server already accepted
+    // from this device (a WAL-less file copy, a restored backup) is a
+    // rewound MLS sender: its next sends reuse consumed secret-tree
+    // generations and every receiver quarantines. The witness is already
+    // in the sync stream — the rewound cursor re-pages the device's own
+    // later entries — so the gate needs no server change:
+    //
+    // * `own_send_high_water_seq` is the durable per-room mark of the
+    //   highest own application seq this store has seen accepted.
+    // * `unacknowledged_own_message_ids` lists ids minted here whose accept
+    //   this store has not yet recorded (crash between accept and save).
+    // * An own application entry above the mark whose id was not minted
+    //   here is proof the store is behind: record `behind_server`, refuse
+    //   sends, until a Commit moves the epoch above the evidence epoch.
+    // * `currency_initialized == false` (pre-v10 blob) turns the first
+    //   pass into initialization instead of enforcement.
+    // * `currency_verified` (in-memory) refuses sends from a loaded state
+    //   until one sync tick has completed for the room in this process.
+
+    /// True once a sync tick has completed for `room_id` since this state
+    /// was loaded, or the room was created/joined in this process.
+    pub fn room_currency_verified(&self, room_id: &str) -> bool {
+        self.rooms
+            .get(room_id)
+            .is_some_and(|entry| entry.currency_verified)
+    }
+
+    pub(crate) fn mark_room_currency_verified(&mut self, room_id: &str) {
+        if let Some(entry) = self.rooms.get_mut(room_id) {
+            entry.currency_verified = true;
+        }
+    }
+
+    /// Test-only escape hatch so a harness can *deliberately* send from a
+    /// rewound store (to pin receiver-side wedge/heal behavior). Never
+    /// compiled into production builds.
+    #[cfg(feature = "test-support")]
+    #[doc(hidden)]
+    pub fn bypass_currency_gate_for_tests(&mut self, room_id: &str) {
+        if let Some(entry) = self.rooms.get_mut(room_id) {
+            entry.currency_verified = true;
+            entry.behind_server = None;
+        }
+    }
+
+    /// Test-only: move a room's sync cursor backwards, simulating an older
+    /// durable cursor (a restored backup) that re-pages entries the group
+    /// already merged. The production cursor path is monotonic. Never
+    /// compiled into production builds.
+    #[cfg(feature = "test-support")]
+    #[doc(hidden)]
+    pub fn rewind_room_cursor_for_tests(&mut self, room_id: &str, seq: u64) {
+        if let Some(entry) = self.rooms.get_mut(room_id) {
+            entry.last_applied_seq = seq;
+        }
+    }
+
+    /// Advance the own-send high-water mark after the server accepted one
+    /// of this device's application entries (`EventAccepted { seq,
+    /// message_id }`). Callers persist the device state afterwards; a crash
+    /// before that save is covered by the unacknowledged-id list.
+    pub fn record_own_send_accepted(
+        &mut self,
+        room_id: &str,
+        seq: u64,
+        message_id: &str,
+    ) -> Result<(), ClientError> {
+        validate_room_id(room_id)?;
+        let entry = self.room_entry_mut(room_id)?;
+        entry.own_send_high_water_seq = entry.own_send_high_water_seq.max(seq);
+        entry
+            .unacknowledged_own_message_ids
+            .retain(|pending| pending != message_id);
+        Ok(())
+    }
+
+    /// The outbound gate. Refuses while any room carries rewind evidence
+    /// (the whole store is suspect, not one room) and while `room_id` has
+    /// not completed a sync tick since the store was opened.
+    pub fn ensure_current_for_send(&self, room_id: &str) -> Result<(), ClientError> {
+        if let Some((flagged_room_id, evidence)) = self
+            .rooms
+            .iter()
+            .find_map(|(id, entry)| entry.behind_server.as_ref().map(|e| (id, e)))
+        {
+            return Err(ClientError::DeviceStateBehindServer {
+                room_id: flagged_room_id.clone(),
+                local_mark: evidence.local_mark,
+                observed_seq: evidence.observed_seq,
+            });
+        }
+        let entry = self.room_entry(room_id)?;
+        if !entry.currency_verified {
+            return Err(ClientError::CurrencyUnverified {
+                room_id: room_id.to_string(),
+            });
+        }
+        Ok(())
+    }
+
+    /// Classify one of this device's own application entries seen in the
+    /// ordered log. Returns the rewind error after recording durable
+    /// evidence; the caller persists the device before surfacing it.
+    fn observe_own_application_entry(
+        &mut self,
+        room_id: &str,
+        entry: &RoomLogEntry,
+    ) -> Result<(), ClientError> {
+        let now_unix_seconds = self.now_unix_seconds;
+        let room = self.room_entry_mut(room_id)?;
+        let epoch = room.group.epoch().as_u64();
+        let minted_here = room
+            .unacknowledged_own_message_ids
+            .contains(&entry.message_id);
+        if minted_here {
+            room.unacknowledged_own_message_ids
+                .retain(|pending| *pending != entry.message_id);
+        }
+        if entry.seq <= room.own_send_high_water_seq || minted_here {
+            room.own_send_high_water_seq = room.own_send_high_water_seq.max(entry.seq);
+            return Ok(());
+        }
+        if !room.currency_initialized {
+            // Bootstrap: the pre-v10 blob kept no mark, so the first pass
+            // learns the mark from the log instead of enforcing it.
+            room.own_send_high_water_seq = entry.seq;
+            return Ok(());
+        }
+        if room.behind_server.is_some() {
+            // Already flagged (evidence is durable): later ticks advance
+            // past own entries normally so the healing Commit can be
+            // reached; the flag stays until that Commit clears it. The
+            // mark still tracks the highest own seq seen so it is truthful
+            // once healed (the evidence keeps the mark it tripped at).
+            room.own_send_high_water_seq = room.own_send_high_water_seq.max(entry.seq);
+            return Ok(());
+        }
+        let local_mark = room.own_send_high_water_seq;
+        room.behind_server = Some(BehindServerEvidence {
+            local_mark,
+            observed_seq: entry.seq,
+            message_id: entry.message_id.clone(),
+            observed_at: now_unix_seconds,
+            evidence_epoch: epoch,
+        });
+        Err(ClientError::DeviceStateBehindServer {
+            room_id: room_id.to_string(),
+            local_mark,
+            observed_seq: entry.seq,
+        })
+    }
+
+    /// Flip a pre-v10 room from initialization to enforcement once a sync
+    /// tick has completed for it. Returns whether the state changed.
+    fn complete_currency_initialization(&mut self, room_id: &str) -> Result<bool, ClientError> {
+        let room = self.room_entry_mut(room_id)?;
+        if room.currency_initialized {
+            return Ok(false);
+        }
+        room.currency_initialized = true;
+        Ok(true)
+    }
+
+    fn clear_behind_server_if_healed(&mut self, room_id: &str) -> Result<(), ClientError> {
+        let room = self.room_entry_mut(room_id)?;
+        let epoch = room.group.epoch().as_u64();
+        if room
+            .behind_server
+            .as_ref()
+            .is_some_and(|evidence| epoch > evidence.evidence_epoch)
+        {
+            room.behind_server = None;
+        }
+        Ok(())
+    }
+
+    fn remember_unacknowledged_own_message_id(&mut self, room_id: &str, message_id: MessageId) {
+        if let Some(room) = self.rooms.get_mut(room_id) {
+            if room.unacknowledged_own_message_ids.len() >= MAX_UNACKNOWLEDGED_OWN_MESSAGE_IDS {
+                room.unacknowledged_own_message_ids.remove(0);
+            }
+            room.unacknowledged_own_message_ids.push(message_id);
+        }
     }
 
     /// Record which server hosts a room's ordered log. `None` means the
@@ -4999,6 +5225,14 @@ fn apply_log_entry_in_memory(
                 Err(error) => Err(error.into()),
             };
         }
+        return Ok(None);
+    }
+    // An own Commit whose effects are already merged (rekey heal on a
+    // frozen cursor, older cursor restored from backup) is satisfied: the
+    // cursor advances across it without re-applying or re-reporting it.
+    if device.own_commit_already_merged(room_id, entry)? {
+        validate_log_entry_shape(room_id, entry, LogEntryKind::Commit)?;
+        device.set_last_applied_seq(room_id, entry.seq)?;
         return Ok(None);
     }
     // Own application messages cannot be decrypted by their sender (MLS);

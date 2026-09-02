@@ -3170,6 +3170,109 @@ fn rekey_room_restores_state_when_submit_fails() {
     assert_eq!(pair.b.group_epoch(ROOM_ID).unwrap(), 2);
 }
 
+/// Re-paging this device's own already-merged Commit (an older durable
+/// cursor: a restored backup, or a frozen cursor that completes a rekey
+/// heal) is a no-op advance, not an epoch error; a foreign Commit at a
+/// mismatched epoch still fails closed.
+#[test]
+fn repaging_an_already_merged_own_commit_is_a_no_op_advance() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut pair = RekeyPair::new(&dir, "repage");
+    let options = pair.options();
+
+    // Rekey from the server head: the cursor lands on the own Commit.
+    let report = run_runtime_rekey_room(
+        &mut pair.a_store,
+        &mut pair.a,
+        &mut pair.delivery,
+        ROOM_ID,
+        "rekey_http_repage",
+    )
+    .unwrap();
+    assert_eq!(pair.a.last_applied_seq(ROOM_ID).unwrap(), report.commit_seq);
+    assert_eq!(pair.a.group_epoch(ROOM_ID).unwrap(), 2);
+    pair.sync_b(&options).unwrap();
+    assert_eq!(pair.b.group_epoch(ROOM_ID).unwrap(), 2);
+    let after_plaintext = b"after the merged commit";
+    let after = pair.send_from_b(after_plaintext, "app_repage_after");
+
+    // Rewind the cursor below the merged Commit and tick: the Commit is
+    // satisfied (no epoch error, no phantom applied Commit), the cursor
+    // advances across it, and the entry behind it decrypts.
+    pair.a
+        .rewind_room_cursor_for_tests(ROOM_ID, report.commit_seq - 1);
+    let repaged = pair.sync_a(&options).unwrap();
+    assert_eq!(pair.a.last_applied_seq(ROOM_ID).unwrap(), after.seq);
+    assert_eq!(pair.a.group_epoch(ROOM_ID).unwrap(), 2);
+    assert!(!pair.a.has_pending_commit(ROOM_ID).unwrap());
+    assert_eq!(
+        repaged
+            .applied_entries
+            .iter()
+            .map(|entry| (entry.seq, entry.entry.clone()))
+            .collect::<Vec<_>>(),
+        vec![(
+            after.seq,
+            AppliedLogEntry::Application {
+                plaintext: after_plaintext.to_vec(),
+                sender: pair.b.device_ref().clone(),
+            }
+        )]
+    );
+
+    // The same rule holds for a direct apply of the merged own Commit.
+    let commit_page = pair
+        .delivery
+        .sync_events(ROOM_ID, pair.a.device_ref(), report.commit_seq - 1)
+        .unwrap();
+    let own_commit = commit_page
+        .entries
+        .iter()
+        .find(|entry| entry.seq == report.commit_seq)
+        .unwrap();
+    pair.a.apply_commit_entry(ROOM_ID, own_commit).unwrap();
+    assert_eq!(pair.a.group_epoch(ROOM_ID).unwrap(), 2);
+
+    // A foreign Commit at a mismatched epoch is still an error: the
+    // counterpart rekeys (2 -> 3), this device applies it, and re-paging it
+    // from a rewound cursor fails closed with the cursor unchanged.
+    let b_report = run_runtime_rekey_room(
+        &mut pair.b_store,
+        &mut pair.b,
+        &mut pair.delivery,
+        ROOM_ID,
+        "rekey_http_repage_b",
+    )
+    .unwrap();
+    pair.sync_a(&options).unwrap();
+    assert_eq!(pair.a.group_epoch(ROOM_ID).unwrap(), 3);
+    assert_eq!(
+        pair.a.last_applied_seq(ROOM_ID).unwrap(),
+        b_report.commit_seq
+    );
+    pair.a
+        .rewind_room_cursor_for_tests(ROOM_ID, b_report.commit_seq - 1);
+    let error = pair.sync_a(&options).unwrap_err();
+    assert!(
+        matches!(
+            &error,
+            RuntimeWorkerError::ClientStore(ClientStoreError::Client(
+                ClientError::UnexpectedCommitEpoch {
+                    room_id,
+                    current_epoch: 3,
+                    entry_epoch: 2,
+                }
+            )) if room_id == ROOM_ID
+        ),
+        "unexpected error: {error}"
+    );
+    assert_eq!(
+        pair.a.last_applied_seq(ROOM_ID).unwrap(),
+        b_report.commit_seq - 1
+    );
+    assert_eq!(pair.a.group_epoch(ROOM_ID).unwrap(), 3);
+}
+
 fn test_device(
     account_secret_bytes: [u8; NOSTR_SECRET_KEY_BYTES],
     device_id: &str,
