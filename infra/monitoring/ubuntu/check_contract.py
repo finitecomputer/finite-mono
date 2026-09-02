@@ -223,11 +223,35 @@ def check_systemd() -> None:
             "ExecReload=/opt/finite-monitoring/bin/caddy reload --config /etc/finite/monitoring/Caddyfile --adapter caddyfile --address unix//run/finite-monitoring-caddy/admin.sock --force",
             "CAP_NET_BIND_SERVICE",
         ],
+        "finite-monitoring-node-exporter.service": [
+            "User=finite-monitoring",
+            "ExecStart=/opt/finite-monitoring/bin/node_exporter --web.listen-address=127.0.0.1:9100",
+            "--collector.disable-defaults",
+            "--collector.textfile",
+        ],
+        "finite-monitoring-tinfoil-collector.service": [
+            "User=finite-monitoring",
+            "EnvironmentFile=/etc/finite/monitoring/tinfoil.env",
+            "ExecStart=/opt/finite-monitoring/bin/tinfoil-usage-collector",
+        ],
+        "finite-monitoring-tinfoil-collector.timer": [
+            "OnUnitActiveSec=60s",
+            "Unit=finite-monitoring-tinfoil-collector.service",
+        ],
     }
     for unit_name, needles in expected_units.items():
         unit = read(UBUNTU / "systemd" / unit_name)
-        require_contains(unit, "Restart=on-failure", unit_name)
-        require_contains(unit, "NoNewPrivileges=true", unit_name)
+        if unit_name == "finite-monitoring-tinfoil-collector.service":
+            # Type=oneshot rejects Restart=; the timer owns the cadence.
+            require_contains(unit, "Type=oneshot", unit_name)
+            require(
+                "Restart=" not in unit,
+                "oneshot collector must not set Restart=",
+            )
+            require_contains(unit, "NoNewPrivileges=true", unit_name)
+        elif not unit_name.endswith(".timer"):
+            require_contains(unit, "Restart=on-failure", unit_name)
+            require_contains(unit, "NoNewPrivileges=true", unit_name)
         if unit_name == "finite-monitoring-caddy.service":
             require(
                 "--envfile" not in unit,
@@ -252,6 +276,23 @@ def check_deploy_script() -> None:
         deploy, '"${GRAFANA_URL}" sha256 "${GRAFANA_SHA256}"', "deploy script"
     )
     require_contains(deploy, '"${CADDY_URL}" sha512 "${CADDY_SHA512}"', "deploy script")
+    require_contains(
+        deploy,
+        '"${NODE_EXPORTER_URL}" sha256 "${NODE_EXPORTER_SHA256}"',
+        "deploy script",
+    )
+    require_contains(deploy, '"${JQ_URL}" sha256 "${JQ_SHA256}"', "deploy script")
+    require_contains(
+        deploy, "tinfoil-usage-collector", "deploy script Tinfoil collector"
+    )
+    require_contains(
+        deploy, "/etc/finite/monitoring/tinfoil.env", "deploy script Tinfoil env file"
+    )
+    require_contains(
+        deploy,
+        "finite-monitoring-tinfoil-collector.timer",
+        "deploy script Tinfoil timer",
+    )
 
 
 def check_docs() -> None:

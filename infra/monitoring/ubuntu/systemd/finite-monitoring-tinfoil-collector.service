@@ -1,0 +1,21 @@
+[Unit]
+Description=Finite monitoring Tinfoil usage collector (one poll cycle)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=finite-monitoring
+Group=finite-monitoring
+EnvironmentFile=/etc/finite/monitoring/tinfoil.env
+ExecStart=/opt/finite-monitoring/bin/tinfoil-usage-collector
+# /etc/finite/monitoring/tinfoil.env holds the Tinfoil organization key
+# (TINFOIL_API_KEY), provisioned by the operator. Documented by NAME and
+# location only — never a value. The deploy creates the file empty (0600).
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectHome=true
+ReadWritePaths=/var/lib/finite-monitoring/tinfoil
+
+[Install]
+WantedBy=multi-user.target

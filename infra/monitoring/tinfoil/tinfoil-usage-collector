@@ -1,0 +1,300 @@
+#!/usr/bin/env bash
+# Finite Tinfoil usage collector — one poll cycle per invocation.
+#
+# Writes the `finite_tinfoil_*` Prometheus exposition file consumed by
+# node_exporter's textfile collector (finite-monitoring-node-exporter.service,
+# loopback :9100) and driven by finite-monitoring-tinfoil-collector.timer.
+#
+# Contract (frozen by the finite-tinfoil-gpu Grafana dashboard and
+# scripts/check_monitoring_nixos_contract.py):
+#   - finite_tinfoil_source_sample_timestamp_seconds only advances on a
+#     successful container-status poll (persisted in last-good-sample-ts), so
+#     a failing cycle ages the dashboard into AGING and then STALE. The
+#     dashboard must never rely on Prometheus up{}.
+#   - A failed dependency probe reports finite_tinfoil_component_ready{...} 0
+#     and still reports the elapsed probe duration.
+#   - An unusable container status reports container_ready 0 and gpus 0.
+#   - Until the owner pins a usage sample source, the four utilization series
+#     render NaN (empty charts, not zeroed ones).
+#
+# Credentials: TINFOIL_API_KEY is operator-provisioned in
+# /etc/finite/monitoring/tinfoil.env (name and location only — never commit a
+# value). It is passed through to the tinfoil CLI environment.
+#
+# Usage: tinfoil-usage-collector [selftest]
+set -euo pipefail
+
+CONTAINER="${FINITE_TINFOIL_CONTAINER:-finite-private}"
+CLI="${FINITE_TINFOIL_CLI:-tinfoil}"
+STATE_DIR="${FINITE_TINFOIL_STATE_DIR:-/var/lib/finite-monitoring/tinfoil}"
+TEXTFILE="${STATE_DIR}/textfile/tinfoil.prom"
+LAST_GOOD_TS_FILE="${STATE_DIR}/last-good-sample-ts"
+LAST_GOOD_USAGE_FILE="${STATE_DIR}/last-good-usage.tsv"
+CLI_TIMEOUT_SECS="${FINITE_TINFOIL_CLI_TIMEOUT_SECS:-30}"
+PROBE_TIMEOUT_SECS="${FINITE_TINFOIL_PROBE_TIMEOUT_SECS:-10}"
+UPSTREAM_PROBE_URL="${FINITE_TINFOIL_UPSTREAM_PROBE_URL:-https://finite-private.finite.containers.tinfoil.dev/live}"
+USAGE_API_PROBE_URL="${FINITE_TINFOIL_USAGE_API_PROBE_URL:-https://finite.computer/healthz}"
+USAGE_SAMPLE_COMMAND="${FINITE_TINFOIL_USAGE_SAMPLE_COMMAND:-}"
+
+COMPONENT_NAMES=(upstream usage_api)
+USAGE_KEYS=(gpu_utilization_percent gpu_memory_utilization_percent cpu_utilization_percent host_memory_utilization_percent)
+
+# Poll-cycle state (globals; reset by collect_cycle).
+STATUS_READY=0
+STATUS_GPUS=0
+TS_VALUE=""
+COMPONENT_READY=(0 0)
+COMPONENT_DURATION=(0 0)
+USAGE_VALUES=("" "" "" "")
+
+# Emit a metric value, or NaN when empty (missing observations fail closed).
+value_or_nan() {
+  if [[ -n "${1:-}" ]]; then printf '%s' "$1"; else printf 'NaN'; fi
+}
+
+parse_status() {
+  # stdin: `tinfoil container get <name> -o json` payload.
+  # stdout: "<ready>\t<gpus>"; nonzero exit on any shape mismatch. The live
+  # schema must be re-pinned against fresh evidence before any relaxation.
+  jq -re --arg name "$CONTAINER" '
+    if (type == "object")
+       and (.name? == $name)
+       and (.ready? | type == "boolean")
+       and (.gpus? | type == "number" and . >= 0 and . == floor)
+    then "\(.ready)\t\(.gpus)"
+    else error("invalid container status")
+    end
+  '
+}
+
+parse_usage_sample() {
+  # stdin: owner-controlled usage sample JSON.
+  # stdout: "<sampled_at>\t<gpu>\t<gpu_mem>\t<cpu>\t<host_mem>" (tsv).
+  jq -re '
+    if (type == "object")
+       and (.sampled_at_unix_seconds? | type == "number" and . > 0 and . == floor)
+       and ([.gpu_utilization_percent?, .gpu_memory_utilization_percent?,
+             .cpu_utilization_percent?, .host_memory_utilization_percent?]
+            | all(type == "number" and . >= 0 and . <= 100))
+    then [.sampled_at_unix_seconds, .gpu_utilization_percent,
+          .gpu_memory_utilization_percent, .cpu_utilization_percent,
+          .host_memory_utilization_percent]
+         | @tsv
+    else error("invalid usage sample")
+    end
+  '
+}
+
+probe_dependency() {
+  # stdout: "<ready>\t<seconds>"; never fails (fail closed on error).
+  local url="$1" outcome code secs
+  outcome="$(curl -sS -o /dev/null --max-time "$PROBE_TIMEOUT_SECS" \
+    -w '%{http_code}\t%{time_total}' -- "$url" 2>/dev/null || true)"
+  code="${outcome%%$'\t'*}"
+  secs="${outcome#*$'\t'}"
+  if [[ "$code" =~ ^2[0-9]{2}$ && "$secs" =~ ^[0-9]+(\.[0-9]+)?$ ]]; then
+    printf '1\t%s\n' "$secs"
+  else
+    printf '0\t%s\n' "$PROBE_TIMEOUT_SECS"
+  fi
+}
+
+observe_status() {
+  # Runs the CLI poll. On any failure reports ready 0 / gpus 0 and freezes
+  # the sample timestamp at the last good value (fail closed).
+  local payload status now
+  if payload="$("$CLI" container get "$CONTAINER" -o json 2>/dev/null)" \
+      && [[ -n "$payload" ]] \
+      && status="$(parse_status <<<"$payload")"; then
+    if [[ "${status%%$'\t'*}" == "true" ]]; then STATUS_READY=1; else STATUS_READY=0; fi
+    STATUS_GPUS="${status#*$'\t'}"
+    now="$(date +%s)"
+    printf '%s\n' "$now" > "$LAST_GOOD_TS_FILE"
+    TS_VALUE="$now"
+  else
+    STATUS_READY=0
+    STATUS_GPUS=0
+    if [[ -s "$LAST_GOOD_TS_FILE" ]]; then
+      TS_VALUE="$(<"$LAST_GOOD_TS_FILE")"
+    fi
+  fi
+}
+
+observe_probe() {
+  local component="$1" url="$2" result ready secs i
+  result="$(probe_dependency "$url")"
+  IFS=$'\t' read -r ready secs <<<"$result"
+  for i in 0 1; do
+    if [[ "${COMPONENT_NAMES[$i]}" == "$component" ]]; then
+      COMPONENT_READY[$i]="$ready"
+      COMPONENT_DURATION[$i]="$secs"
+    fi
+  done
+}
+
+observe_usage() {
+  # Populates the four utilization values. Keeps the last good sample on
+  # failure; the frozen sample-age thresholds surface staleness.
+  local out sample gpu gpu_mem cpu host_mem
+  if [[ -n "$USAGE_SAMPLE_COMMAND" ]] \
+      && out="$(bash -c "$USAGE_SAMPLE_COMMAND" 2>/dev/null)" \
+      && sample="$(parse_usage_sample <<<"$out")"; then
+    IFS=$'\t' read -r _ gpu gpu_mem cpu host_mem <<<"$sample"
+    USAGE_VALUES=("$gpu" "$gpu_mem" "$cpu" "$host_mem")
+    printf '%s\n' "$sample" > "$LAST_GOOD_USAGE_FILE"
+  elif [[ -s "$LAST_GOOD_USAGE_FILE" ]]; then
+    IFS=$'\t' read -r _ gpu gpu_mem cpu host_mem < "$LAST_GOOD_USAGE_FILE"
+    USAGE_VALUES=("$gpu" "$gpu_mem" "$cpu" "$host_mem")
+  fi
+}
+
+render_exposition() {
+  local lines=() i component labels key
+  lines+=(
+    "# TYPE finite_tinfoil_source_sample_timestamp_seconds gauge"
+    "finite_tinfoil_source_sample_timestamp_seconds{container=\"${CONTAINER}\"} $(value_or_nan "$TS_VALUE")"
+    "# TYPE finite_tinfoil_container_ready gauge"
+    "finite_tinfoil_container_ready{container=\"${CONTAINER}\"} ${STATUS_READY}"
+    "# TYPE finite_tinfoil_container_gpus gauge"
+    "finite_tinfoil_container_gpus{container=\"${CONTAINER}\"} ${STATUS_GPUS}"
+  )
+  for i in 0 1; do
+    component="${COMPONENT_NAMES[$i]}"
+    labels="container=\"${CONTAINER}\",component=\"${component}\""
+    lines+=(
+      "# TYPE finite_tinfoil_component_ready gauge"
+      "finite_tinfoil_component_ready{${labels}} ${COMPONENT_READY[$i]}"
+      "# TYPE finite_tinfoil_component_probe_duration_seconds gauge"
+      "finite_tinfoil_component_probe_duration_seconds{${labels}} ${COMPONENT_DURATION[$i]}"
+    )
+  done
+  for i in 0 1 2 3; do
+    key="${USAGE_KEYS[$i]}"
+    lines+=(
+      "# TYPE finite_tinfoil_${key} gauge"
+      "finite_tinfoil_${key}{container=\"${CONTAINER}\",aggregation=\"mean\"} $(value_or_nan "${USAGE_VALUES[$i]:-}")"
+    )
+  done
+  printf '%s\n' "${lines[@]}"
+}
+
+collect_cycle() {
+  STATUS_READY=0
+  STATUS_GPUS=0
+  TS_VALUE=""
+  COMPONENT_READY=(0 0)
+  COMPONENT_DURATION=(0 0)
+  USAGE_VALUES=("" "" "" "")
+  observe_status
+  observe_probe upstream "$UPSTREAM_PROBE_URL"
+  observe_probe usage_api "$USAGE_API_PROBE_URL"
+  observe_usage
+}
+
+write_textfile() {
+  mkdir -p "$(dirname "$TEXTFILE")"
+  local tmp="${TEXTFILE}.tmp.$$"
+  render_exposition > "$tmp"
+  mv "$tmp" "$TEXTFILE"
+}
+
+selftest() {
+  local failures=0
+  check() {
+    local label="$1" expected="$2" actual="$3"
+    if [[ "$actual" == "$expected" ]]; then
+      printf 'ok   %s\n' "$label"
+    else
+      printf 'FAIL %s: expected <%s>, got <%s>\n' "$label" "$expected" "$actual" >&2
+      failures=$((failures + 1))
+    fi
+  }
+  expect_fail() {
+    local label="$1"; shift
+    if "$@" >/dev/null 2>&1; then
+      printf 'FAIL %s: expected nonzero exit\n' "$label" >&2
+      failures=$((failures + 1))
+    else
+      printf 'ok   %s\n' "$label"
+    fi
+  }
+
+  check "value_or_nan empty" "NaN" "$(value_or_nan "")"
+  check "value_or_nan set" "8" "$(value_or_nan "8")"
+
+  check "status valid" "$(printf 'true\t8')" \
+    "$(printf '%s' '{"name":"finite-private","ready":true,"gpus":8}' | parse_status)"
+  expect_fail "status name mismatch" \
+    bash -c "printf '%s' '{\"name\":\"other\",\"ready\":true,\"gpus\":8}' | parse_status"
+  expect_fail "status ready non-bool" \
+    bash -c "printf '%s' '{\"name\":\"finite-private\",\"ready\":\"true\",\"gpus\":8}' | parse_status"
+  expect_fail "status gpus fractional" \
+    bash -c "printf '%s' '{\"name\":\"finite-private\",\"ready\":true,\"gpus\":8.5}' | parse_status"
+  expect_fail "status invalid json" \
+    bash -c "printf '%s' 'not json' | parse_status"
+
+  check "usage valid" "$(printf '1756000000\t42.5\t10\t0\t99.99')" \
+    "$(printf '%s' '{"sampled_at_unix_seconds":1756000000,"gpu_utilization_percent":42.5,"gpu_memory_utilization_percent":10,"cpu_utilization_percent":0,"host_memory_utilization_percent":99.99}' | parse_usage_sample)"
+  expect_fail "usage out of range" \
+    bash -c "printf '%s' '{\"sampled_at_unix_seconds\":1756000000,\"gpu_utilization_percent\":150,\"gpu_memory_utilization_percent\":10,\"cpu_utilization_percent\":0,\"host_memory_utilization_percent\":99.99}' | parse_usage_sample"
+  expect_fail "usage bad sampled_at" \
+    bash -c "printf '%s' '{\"sampled_at_unix_seconds\":-1,\"gpu_utilization_percent\":0,\"gpu_memory_utilization_percent\":0,\"cpu_utilization_percent\":0,\"host_memory_utilization_percent\":0}' | parse_usage_sample"
+
+  # Fail closed: a fresh collector renders NaN, never a fabricated value.
+  STATUS_READY=0
+  STATUS_GPUS=0
+  TS_VALUE=""
+  COMPONENT_READY=(0 0)
+  COMPONENT_DURATION=(10 10)
+  USAGE_VALUES=("" "" "" "")
+  local rendered rendered_lines
+  rendered="$(render_exposition)"
+  rendered_lines="$(printf '%s\n' "$rendered" | grep -vc '^#' || true)"
+  check "fresh render NaN timestamp" \
+    "finite_tinfoil_source_sample_timestamp_seconds{container=\"${CONTAINER}\"} NaN" \
+    "$(printf '%s\n' "$rendered" | grep '^finite_tinfoil_source_sample_timestamp_seconds')"
+  check "fresh render series count" "11" "$rendered_lines"
+  check "fresh render NaN utilization" \
+    "finite_tinfoil_gpu_utilization_percent{container=\"${CONTAINER}\",aggregation=\"mean\"} NaN" \
+    "$(printf '%s\n' "$rendered" | grep '^finite_tinfoil_gpu_utilization_percent')"
+
+  # Observed state renders exact values.
+  TS_VALUE=1756000000
+  STATUS_READY=1
+  STATUS_GPUS=8
+  COMPONENT_READY=(1 0)
+  COMPONENT_DURATION=(0.021 10)
+  USAGE_VALUES=(42.5 10 0 99.99)
+  rendered="$(render_exposition)"
+  check "observed render ready" \
+    "finite_tinfoil_container_ready{container=\"${CONTAINER}\"} 1" \
+    "$(printf '%s\n' "$rendered" | grep '^finite_tinfoil_container_ready')"
+  check "observed render probe label" \
+    "finite_tinfoil_component_ready{container=\"${CONTAINER}\",component=\"upstream\"} 1" \
+    "$(printf '%s\n' "$rendered" | grep 'component="upstream"' | grep '^finite_tinfoil_component_ready')"
+  check "observed render duration" \
+    "finite_tinfoil_component_probe_duration_seconds{container=\"${CONTAINER}\",component=\"usage_api\"} 10" \
+    "$(printf '%s\n' "$rendered" | grep 'component="usage_api"' | grep '^finite_tinfoil_component_probe_duration_seconds')"
+
+  # An unreachable probe target fails closed (loopback: connection refused).
+  local probe_result
+  probe_result="$(probe_dependency "https://127.0.0.1:1/x")"
+  check "probe fail closed" "0" "${probe_result%%$'\t'*}"
+
+  if [[ "$failures" -ne 0 ]]; then
+    printf 'selftest FAILED (%s failure(s))\n' "$failures" >&2
+    return 1
+  fi
+  printf 'selftest OK\n'
+}
+
+main() {
+  if [[ "${1:-}" == "selftest" ]]; then
+    selftest
+    return
+  fi
+  collect_cycle
+  write_textfile
+}
+
+main "$@"
