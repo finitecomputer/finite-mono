@@ -1,8 +1,10 @@
 # FiKnight account transfer — 2026-09-02
 
-> **BLOCKED — do not execute stage or finalize.** The Core-only transfer does
-> not transfer cryptographic Chat Room membership or retained history. The first
-> attempt was rolled back after FiKnight received a new empty Room. See
+> **PRODUCTION BLOCKED — local Chat handoff rehearsal passed; do not execute
+> stage or finalize without a fresh backup, reviewed cutover procedure, and new
+> explicit authorization.** The Core-only transfer does not transfer
+> cryptographic Chat Room membership or retained history. The first attempt was
+> rolled back after FiKnight received a new empty Room. See
 > [the cross-account Chat handoff investigation](fiknight-chat-handoff-investigation-2026-09-02.md).
 
 This is the operator ledger for moving the existing `Austin Finite` Project to
@@ -49,8 +51,9 @@ typed `--email` form.
 
 The ordering below is retained as the original reviewed proposal and is not an
 executable runbook. Steps 3–4 demonstrated the missing cross-account Chat
-handoff and must not be repeated until the linked investigation's replacement
-design is implemented and rehearsed.
+handoff. The replacement now passes a local production-shaped rehearsal, but a
+writer-fenced local-to-production cutover procedure is still required before
+another live attempt.
 
 1. Require a fresh successful `finite-hosted-web-chat-snapshot.service` run.
    Record its directory and verify its manifest. This is the pre-change

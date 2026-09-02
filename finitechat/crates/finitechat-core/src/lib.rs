@@ -67,6 +67,12 @@ use time::{OffsetDateTime, UtcOffset};
 pub mod native_authkit;
 pub mod native_device_link;
 pub mod nip_ab;
+mod one_time_room_handoff;
+
+pub use one_time_room_handoff::{
+    OneTimeRoomHandoffBundle, OneTimeRoomHandoffEvidence, OneTimeRoomHandoffFinalizeReport,
+    OneTimeRoomHandoffIntent, OneTimeRoomHandoffPreparedRemoval, OneTimeRoomHandoffReport,
+};
 
 const CLIENT_STORE_FILE: &str = "client.sqlite3";
 const LEGACY_DEVICE_LINK_BOOTSTRAP_REQUEST_EVENT_V2: &str =
@@ -1069,6 +1075,25 @@ enum AppRuntimeCommand {
         target_device_id: String,
         response: mpsc::SyncSender<Result<DeviceLinkFanoutReport, FiniteChatCoreError>>,
     },
+    ExportOneTimeRoomHandoff {
+        intent: Box<OneTimeRoomHandoffIntent>,
+        response: mpsc::SyncSender<Result<OneTimeRoomHandoffBundle, FiniteChatCoreError>>,
+    },
+    ImportOneTimeRoomHandoff {
+        intent: Box<OneTimeRoomHandoffIntent>,
+        evidence: OneTimeRoomHandoffEvidence,
+        bundle: Box<OneTimeRoomHandoffBundle>,
+        response: mpsc::SyncSender<Result<OneTimeRoomHandoffReport, FiniteChatCoreError>>,
+    },
+    PrepareOneTimeRoomHandoffSourceRemoval {
+        intent: Box<OneTimeRoomHandoffIntent>,
+        evidence: OneTimeRoomHandoffEvidence,
+        response: mpsc::SyncSender<Result<OneTimeRoomHandoffPreparedRemoval, FiniteChatCoreError>>,
+    },
+    SubmitOneTimeRoomHandoffSourceRemoval {
+        prepared: Box<OneTimeRoomHandoffPreparedRemoval>,
+        response: mpsc::SyncSender<Result<OneTimeRoomHandoffFinalizeReport, FiniteChatCoreError>>,
+    },
     RekeyRoom {
         room_id: String,
         response: mpsc::SyncSender<Result<AppRekeyRoomReport, FiniteChatCoreError>>,
@@ -1884,6 +1909,109 @@ impl FiniteChatRuntime {
             })?
     }
 
+    /// Export one exact Room into an in-memory, digest-bound handoff bundle.
+    /// This temporary operator seam is not part of the UniFFI/product surface.
+    #[doc(hidden)]
+    pub fn export_one_time_cross_account_room_handoff_and_wait(
+        &self,
+        intent: OneTimeRoomHandoffIntent,
+    ) -> Result<OneTimeRoomHandoffBundle, FiniteChatCoreError> {
+        let (response_tx, response_rx) = mpsc::sync_channel(1);
+        self.command_tx
+            .send(AppRuntimeCommand::ExportOneTimeRoomHandoff {
+                intent: Box::new(intent),
+                response: response_tx,
+            })
+            .map_err(|_| FiniteChatCoreError::Client {
+                reason: "runtime actor stopped before exporting the one-time Room handoff"
+                    .to_owned(),
+            })?;
+        response_rx
+            .recv()
+            .map_err(|_| FiniteChatCoreError::Client {
+                reason: "runtime actor stopped while exporting the one-time Room handoff"
+                    .to_owned(),
+            })?
+    }
+
+    /// Atomically import a previously exported one-Room bundle into its exact
+    /// target Device after the target has joined that Room through MLS.
+    #[doc(hidden)]
+    pub fn import_one_time_cross_account_room_handoff_and_wait(
+        &self,
+        intent: OneTimeRoomHandoffIntent,
+        evidence: OneTimeRoomHandoffEvidence,
+        bundle: OneTimeRoomHandoffBundle,
+    ) -> Result<OneTimeRoomHandoffReport, FiniteChatCoreError> {
+        let (response_tx, response_rx) = mpsc::sync_channel(1);
+        self.command_tx
+            .send(AppRuntimeCommand::ImportOneTimeRoomHandoff {
+                intent: Box::new(intent),
+                evidence,
+                bundle: Box::new(bundle),
+                response: response_tx,
+            })
+            .map_err(|_| FiniteChatCoreError::Client {
+                reason: "runtime actor stopped before importing the one-time Room handoff"
+                    .to_owned(),
+            })?;
+        response_rx
+            .recv()
+            .map_err(|_| FiniteChatCoreError::Client {
+                reason: "runtime actor stopped while importing the one-time Room handoff"
+                    .to_owned(),
+            })?
+    }
+
+    /// Prepare, but do not submit, the exact MLS Commit that removes the old
+    /// account after a verified cross-account history import. The returned
+    /// request is safe to record in the operator ledger before submission.
+    #[doc(hidden)]
+    pub fn prepare_one_time_room_handoff_source_removal_and_wait(
+        &self,
+        intent: OneTimeRoomHandoffIntent,
+        evidence: OneTimeRoomHandoffEvidence,
+    ) -> Result<OneTimeRoomHandoffPreparedRemoval, FiniteChatCoreError> {
+        let (response_tx, response_rx) = mpsc::sync_channel(1);
+        self.command_tx
+            .send(AppRuntimeCommand::PrepareOneTimeRoomHandoffSourceRemoval {
+                intent: Box::new(intent),
+                evidence,
+                response: response_tx,
+            })
+            .map_err(|_| FiniteChatCoreError::Client {
+                reason: "runtime actor stopped before preparing source removal".to_owned(),
+            })?;
+        response_rx
+            .recv()
+            .map_err(|_| FiniteChatCoreError::Client {
+                reason: "runtime actor stopped while preparing source removal".to_owned(),
+            })?
+    }
+
+    /// Submit a previously recorded source-removal Commit and prove the target
+    /// plus Agent are the only remaining accounts in the Room.
+    #[doc(hidden)]
+    pub fn submit_one_time_room_handoff_source_removal_and_wait(
+        &self,
+        prepared: OneTimeRoomHandoffPreparedRemoval,
+    ) -> Result<OneTimeRoomHandoffFinalizeReport, FiniteChatCoreError> {
+        let (response_tx, response_rx) = mpsc::sync_channel(1);
+        self.command_tx
+            .send(AppRuntimeCommand::SubmitOneTimeRoomHandoffSourceRemoval {
+                prepared: Box::new(prepared),
+                response: response_tx,
+            })
+            .map_err(|_| FiniteChatCoreError::Client {
+                reason: "runtime actor stopped before submitting source removal".to_owned(),
+            })?;
+        response_rx
+            .recv()
+            .map_err(|_| FiniteChatCoreError::Client {
+                reason: "runtime actor stopped while submitting source removal".to_owned(),
+            })?
+    }
+
     /// Operator-driven MLS rekey: advance one room's epoch with an ordinary
     /// self-update Commit from this device, so a counterpart whose send
     /// ratchet was rewound starts fresh at generation 0 in the new epoch.
@@ -2435,6 +2563,41 @@ fn spawn_app_runtime_worker(
                     response,
                 } => {
                     let result = state.link_device(fanout_id, target_device_id);
+                    if result.is_ok() {
+                        state.bump_rev();
+                        let snapshot = state.app.clone();
+                        publish_app_update(&snapshot, &shared_state, &reconciler);
+                    }
+                    let _ = response.send(result);
+                }
+                AppRuntimeCommand::ExportOneTimeRoomHandoff { intent, response } => {
+                    let _ = response.send(state.export_one_time_room_handoff(*intent));
+                }
+                AppRuntimeCommand::ImportOneTimeRoomHandoff {
+                    intent,
+                    evidence,
+                    bundle,
+                    response,
+                } => {
+                    let result = state.import_one_time_room_handoff(*intent, evidence, *bundle);
+                    if result.is_ok() {
+                        state.bump_rev();
+                        let snapshot = state.app.clone();
+                        publish_app_update(&snapshot, &shared_state, &reconciler);
+                    }
+                    let _ = response.send(result);
+                }
+                AppRuntimeCommand::PrepareOneTimeRoomHandoffSourceRemoval {
+                    intent,
+                    evidence,
+                    response,
+                } => {
+                    let _ = response.send(
+                        state.prepare_one_time_room_handoff_source_removal(*intent, evidence),
+                    );
+                }
+                AppRuntimeCommand::SubmitOneTimeRoomHandoffSourceRemoval { prepared, response } => {
+                    let result = state.submit_one_time_room_handoff_source_removal(*prepared);
                     if result.is_ok() {
                         state.bump_rev();
                         let snapshot = state.app.clone();
@@ -21624,6 +21787,300 @@ mod tests {
             app_room(&fresh_state, &room_id).state,
             AppRoomState::Connected
         );
+    }
+
+    #[test]
+    fn one_time_cross_account_handoff_imports_only_the_selected_room_and_replays_exactly() {
+        let dir = tempfile::tempdir().unwrap();
+        let server_url = spawn_live_http_server(dir.path().join("server.sqlite3"));
+        let source_options = with_test_secret(OpenOptions {
+            data_dir: dir.path().join("source").to_string_lossy().into_owned(),
+            server_url: server_url.clone(),
+            device_id: "hosted-web".to_owned(),
+            account_secret_hex: None,
+            now_unix_seconds: Some(NOW),
+        });
+        let target_options = OpenOptions {
+            data_dir: dir.path().join("target").to_string_lossy().into_owned(),
+            server_url: server_url.clone(),
+            device_id: "hosted-web".to_owned(),
+            account_secret_hex: Some(test_account_secret_hex("room-handoff-target")),
+            now_unix_seconds: Some(NOW),
+        };
+        let source = FiniteChatRuntime::open(source_options).unwrap();
+        let target = FiniteChatRuntime::open(target_options.clone()).unwrap();
+        let agent = FiniteChatRuntime::open(OpenOptions {
+            data_dir: dir.path().join("agent").to_string_lossy().into_owned(),
+            server_url: server_url.clone(),
+            device_id: "agent-runtime".to_owned(),
+            account_secret_hex: Some(test_account_secret_hex("room-handoff-agent")),
+            now_unix_seconds: Some(NOW),
+        })
+        .unwrap();
+
+        let canonical_room_id = source
+            .dispatch_and_wait(AppAction::CreateRoom {
+                display_name: "Canonical Agent Room".to_owned(),
+            })
+            .unwrap()
+            .selected_room_id
+            .unwrap();
+        let agent_account_id = agent.state().unwrap().identity.account_id;
+        let mut agent_profile = test_profile(&agent_account_id, "Agent");
+        agent_profile.is_agent = true;
+        add_runtime_member(&source, &agent, &canonical_room_id, agent_profile.clone());
+        source
+            .dispatch_and_wait(AppAction::PairAgent {
+                room_id: canonical_room_id.clone(),
+            })
+            .unwrap();
+        for text in ["source history one", "source history two"] {
+            source
+                .dispatch_and_wait(AppAction::SendMessage {
+                    room_id: canonical_room_id.clone(),
+                    text: text.to_owned(),
+                    metadata_json: None,
+                })
+                .unwrap();
+        }
+        agent
+            .dispatch_and_wait(AppAction::SendMessage {
+                room_id: canonical_room_id.clone(),
+                text: "agent history".to_owned(),
+                metadata_json: None,
+            })
+            .unwrap();
+        source.dispatch_and_wait(AppAction::StartRuntime).unwrap();
+
+        let mut unrelated_room_ids = Vec::new();
+        for index in 0..3 {
+            let room_id = source
+                .dispatch_and_wait(AppAction::CreateRoom {
+                    display_name: format!("Unrelated Room {index}"),
+                })
+                .unwrap()
+                .selected_room_id
+                .unwrap();
+            source
+                .dispatch_and_wait(AppAction::SendMessage {
+                    room_id: room_id.clone(),
+                    text: format!("private unrelated history {index}"),
+                    metadata_json: None,
+                })
+                .unwrap();
+            unrelated_room_ids.push(room_id);
+        }
+
+        let residue_room_id = target
+            .dispatch_and_wait(AppAction::CreateRoom {
+                display_name: "Failed empty bootstrap".to_owned(),
+            })
+            .unwrap()
+            .selected_room_id
+            .unwrap();
+        add_runtime_member(&target, &agent, &residue_room_id, agent_profile);
+        target.dispatch_and_wait(AppAction::StartRuntime).unwrap();
+        let target_account_id = target.state().unwrap().identity.account_id;
+        add_runtime_member_named(&source, &target, &canonical_room_id, "Target owner");
+
+        let source_identity = source.state().unwrap().identity;
+        let target_identity = target.state().unwrap().identity;
+        let intent = OneTimeRoomHandoffIntent {
+            version: 1,
+            migration_id: "migration-test-one-room".to_owned(),
+            project_id: "project-test".to_owned(),
+            room_id: canonical_room_id.clone(),
+            source: DeviceRef {
+                account_id: source_identity.account_id,
+                device_id: source_identity.device_id,
+            },
+            target: DeviceRef {
+                account_id: target_identity.account_id,
+                device_id: target_identity.device_id,
+            },
+            expected_member_account_ids: vec![
+                agent_account_id.clone(),
+                target_account_id.clone(),
+                source.state().unwrap().identity.account_id,
+            ],
+            expected_target_other_room_ids: vec![residue_room_id.clone()],
+        };
+
+        let mut same_account_intent = intent.clone();
+        same_account_intent.target.account_id = same_account_intent.source.account_id.clone();
+        let same_account_error =
+            match source.export_one_time_cross_account_room_handoff_and_wait(same_account_intent) {
+                Ok(_) => panic!("same-account intent unexpectedly exported a handoff"),
+                Err(error) => error,
+            };
+        assert!(
+            same_account_error
+                .to_string()
+                .contains("requires two different Chat accounts")
+        );
+
+        let mut wrong_isolation_intent = intent.clone();
+        wrong_isolation_intent.expected_target_other_room_ids =
+            vec!["room-aaaaaaaaaaaaaaaa".to_owned()];
+        let wrong_isolation_bundle = source
+            .export_one_time_cross_account_room_handoff_and_wait(wrong_isolation_intent.clone())
+            .unwrap();
+        let wrong_isolation_evidence = wrong_isolation_bundle.evidence();
+        let isolation_error = target
+            .import_one_time_cross_account_room_handoff_and_wait(
+                wrong_isolation_intent,
+                wrong_isolation_evidence,
+                wrong_isolation_bundle,
+            )
+            .unwrap_err();
+        assert!(isolation_error.to_string().contains("isolation mismatch"));
+
+        let tampered_bundle = source
+            .export_one_time_cross_account_room_handoff_and_wait(intent.clone())
+            .unwrap();
+        let evidence = tampered_bundle.evidence();
+        assert_eq!(evidence.source_cached_application_row_count, 5);
+        assert_eq!(evidence.projected_chat_message_count, 3);
+        assert!(evidence.history_event_count >= evidence.projected_chat_message_count);
+        let mut tampered_evidence = evidence.clone();
+        tampered_evidence.projected_chat_message_count += 1;
+        let tampered_error = target
+            .import_one_time_cross_account_room_handoff_and_wait(
+                intent.clone(),
+                tampered_evidence,
+                tampered_bundle,
+            )
+            .unwrap_err();
+        assert!(tampered_error.to_string().contains("does not match"));
+
+        let bundle = source
+            .export_one_time_cross_account_room_handoff_and_wait(intent.clone())
+            .unwrap();
+        assert_eq!(bundle.evidence(), evidence);
+        let report = target
+            .import_one_time_cross_account_room_handoff_and_wait(
+                intent.clone(),
+                evidence.clone(),
+                bundle,
+            )
+            .unwrap();
+        assert!(!report.exact_replay);
+        assert_eq!(report.evidence, evidence);
+
+        let target_state = target
+            .dispatch_and_wait(AppAction::OpenRoom {
+                room_id: canonical_room_id.clone(),
+            })
+            .unwrap();
+        assert!(
+            target_state
+                .rooms
+                .iter()
+                .any(|room| room.room_id == residue_room_id)
+        );
+        assert!(
+            target_state
+                .rooms
+                .iter()
+                .any(|room| room.room_id == canonical_room_id)
+        );
+        for unrelated_room_id in &unrelated_room_ids {
+            assert!(
+                !target_state
+                    .rooms
+                    .iter()
+                    .any(|room| &room.room_id == unrelated_room_id),
+                "the one-time handoff must not expose unrelated source Rooms"
+            );
+        }
+        assert_eq!(
+            target_state
+                .messages
+                .iter()
+                .filter(|message| message.room_id == canonical_room_id)
+                .count(),
+            3
+        );
+
+        let replay_bundle = source
+            .export_one_time_cross_account_room_handoff_and_wait(intent.clone())
+            .unwrap();
+        assert_eq!(replay_bundle.evidence(), evidence);
+        let replay = target
+            .import_one_time_cross_account_room_handoff_and_wait(
+                intent.clone(),
+                evidence.clone(),
+                replay_bundle,
+            )
+            .unwrap();
+        assert!(replay.exact_replay);
+
+        let prepared_removal = target
+            .prepare_one_time_room_handoff_source_removal_and_wait(intent.clone(), evidence.clone())
+            .unwrap();
+        let recorded_removal: OneTimeRoomHandoffPreparedRemoval =
+            serde_json::from_slice(&serde_json::to_vec(&prepared_removal).unwrap()).unwrap();
+        let finalized = target
+            .submit_one_time_room_handoff_source_removal_and_wait(recorded_removal)
+            .unwrap();
+        assert_eq!(finalized.removed_source, intent.source);
+        let mut expected_remaining = vec![agent_account_id, target_account_id];
+        expected_remaining.sort();
+        assert_eq!(finalized.remaining_account_ids, expected_remaining);
+        target
+            .dispatch_and_wait(AppAction::SendMessage {
+                room_id: canonical_room_id.clone(),
+                text: "post-handoff target message".to_owned(),
+                metadata_json: None,
+            })
+            .unwrap();
+        let agent_state = agent.dispatch_and_wait(AppAction::StartRuntime).unwrap();
+        assert!(
+            agent_state
+                .messages
+                .iter()
+                .any(|message| message.text == "post-handoff target message")
+        );
+        let source_after_removal = source.dispatch_and_wait(AppAction::StartRuntime).unwrap();
+        assert!(
+            source_after_removal
+                .rooms
+                .iter()
+                .any(|room| room.room_id == canonical_room_id)
+        );
+        let rejected = source
+            .dispatch_and_wait(AppAction::SendMessage {
+                room_id: canonical_room_id.clone(),
+                text: "must not send after handoff".to_owned(),
+                metadata_json: None,
+            })
+            .unwrap_err();
+        assert!(
+            rejected
+                .to_string()
+                .contains("failed to create application message"),
+            "unexpected post-removal send error: {rejected}"
+        );
+
+        drop(target);
+        let reopened = FiniteChatRuntime::open(target_options).unwrap();
+        let reopened_state = reopened.state().unwrap();
+        assert_eq!(
+            reopened_state
+                .messages
+                .iter()
+                .filter(|message| message.room_id == canonical_room_id)
+                .count(),
+            4
+        );
+        for unrelated_room_id in unrelated_room_ids {
+            assert!(
+                !reopened_state
+                    .rooms
+                    .iter()
+                    .any(|room| room.room_id == unrelated_room_id)
+            );
+        }
     }
 
     #[test]

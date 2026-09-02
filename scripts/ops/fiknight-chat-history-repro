@@ -27,29 +27,30 @@ scripts/snapshot-sqlite integrity-check "$fiknight_db" >/dev/null
 
 austin_room=$(query "$austin_db" \
   "SELECT count(*) FROM client_app_rooms WHERE room_id = '$canonical_room';")
-austin_messages=$(query "$austin_db" \
+austin_cached_application_rows=$(query "$austin_db" \
   "SELECT count(*) FROM client_app_messages WHERE room_id = '$canonical_room';")
 fiknight_room=$(query "$fiknight_db" \
   "SELECT count(*) FROM client_app_rooms WHERE room_id = '$canonical_room';")
-fiknight_messages=$(query "$fiknight_db" \
+fiknight_cached_application_rows=$(query "$fiknight_db" \
   "SELECT count(*) FROM client_app_messages WHERE room_id = '$canonical_room';")
 fiknight_other_rooms=$(query "$fiknight_db" \
   "SELECT group_concat(room_id, ',') FROM client_app_rooms WHERE room_id <> '$canonical_room';")
 
-printf 'Austin canonical Room:   present=%s messages=%s\n' \
-  "$austin_room" "$austin_messages"
-printf 'FiKnight canonical Room: present=%s messages=%s\n' \
-  "$fiknight_room" "$fiknight_messages"
+printf 'Austin canonical Room:   present=%s cached_application_rows=%s\n' \
+  "$austin_room" "$austin_cached_application_rows"
+printf 'FiKnight canonical Room: present=%s cached_application_rows=%s\n' \
+  "$fiknight_room" "$fiknight_cached_application_rows"
 printf 'FiKnight other Rooms:    %s\n' "${fiknight_other_rooms:-none}"
 
-if [ "$austin_room" -ne 1 ] || [ "$austin_messages" -eq 0 ]; then
+if [ "$austin_room" -ne 1 ] || [ "$austin_cached_application_rows" -eq 0 ]; then
   echo "invalid fixture: Austin's authoritative FiKnight Room is missing or empty" >&2
   exit 65
 fi
 
-if [ "$fiknight_room" -ne 1 ] || [ "$fiknight_messages" -ne "$austin_messages" ]; then
+if [ "$fiknight_room" -ne 1 ] || \
+  [ "$fiknight_cached_application_rows" -ne "$austin_cached_application_rows" ]; then
   echo "FAIL: FiKnight does not have the existing canonical Room and its message history" >&2
   exit 1
 fi
 
-echo "PASS: FiKnight has the existing canonical Room and its message history"
+echo "PASS: FiKnight has the existing canonical Room and its retained application cache"
