@@ -92,8 +92,20 @@ const DEVICE_LINK_BOOTSTRAP_MANIFEST_DIGEST_DOMAIN: &[u8] =
     b"finitechat.device-link-bootstrap-manifest.v2";
 const LEGACY_DEVICE_LINK_BOOTSTRAP_REQUEST_EVENT_V2: &str =
     "finitechat.device-link.bootstrap-request.v2";
-const LEGACY_CLIENT_STATE_SNAPSHOT_VERSION: u16 = 8;
-const CLIENT_STATE_SNAPSHOT_VERSION: u16 = 9;
+/// The snapshot version this build writes. Every version listed in
+/// `SUPPORTED_CLIENT_STATE_SNAPSHOT_VERSIONS` still decodes.
+const CLIENT_STATE_SNAPSHOT_VERSION: u16 = 10;
+/// v9 added the link-fanout bootstrap export to `LinkFanoutState`.
+const LINK_BOOTSTRAP_EXPORT_SNAPSHOT_VERSION: u16 = 9;
+/// v10 added the per-room currency-gate fields (own-send high-water mark,
+/// initialization flag, unacknowledged own message ids, behind-server
+/// evidence). Older blobs decode with the bootstrap defaults; see
+/// `PersistedRoomState::currency_initialized`.
+const CURRENCY_GATE_SNAPSHOT_VERSION: u16 = 10;
+const SUPPORTED_CLIENT_STATE_SNAPSHOT_VERSIONS: [u16; 3] = [10, 9, 8];
+/// Bound on the message ids one room remembers as "minted here, not yet
+/// seen accepted"; oldest are evicted beyond this.
+const MAX_UNACKNOWLEDGED_OWN_MESSAGE_IDS: usize = 256;
 const CLIENT_STORE_KEY_BYTES: usize = 32;
 const CLIENT_STORE_NONCE_BYTES: usize = 12;
 const CLIENT_STORE_AEAD_TAG_BYTES: u32 = 16;
@@ -238,6 +250,23 @@ pub struct FiniteChatDeviceState {
     pub openmls_storage_records: Vec<OpenMlsStorageRecord>,
 }
 
+/// Durable witness that a device store is older than what the server has
+/// already accepted from that device in one room: the ordered log carried
+/// an application entry sent by this device at `observed_seq`, above the
+/// store's own-send high-water mark `local_mark`, with a message id this
+/// store never minted. Sending from such a store would reuse consumed MLS
+/// secret-tree generations (receivers quarantine and freeze), so sends
+/// stay refused until a Commit moves the room's epoch above
+/// `evidence_epoch` — a rekey re-derives fresh generations for everyone.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BehindServerEvidence {
+    pub local_mark: u64,
+    pub observed_seq: u64,
+    pub message_id: MessageId,
+    pub observed_at: u64,
+    pub evidence_epoch: u64,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PersistedRoomState {
     pub room_id: RoomId,
@@ -248,6 +277,30 @@ pub struct PersistedRoomState {
     /// record the room server that stored the Welcome so sync ticks can
     /// group rooms by server.
     pub server_url: Option<String>,
+    /// Highest server seq at which this device has durably seen one of its
+    /// own application entries accepted — synchronously via
+    /// `EventAccepted`, or by paging a self-minted entry in the log. Kept
+    /// inside the device blob on purpose: a rewound store rewinds the mark
+    /// with it, which is exactly what lets the next sync notice the store
+    /// is behind (the server still holds the device's later entries).
+    pub own_send_high_water_seq: u64,
+    /// Currency bootstrap rule. `false` only for rooms decoded from a
+    /// pre-v10 blob, which kept no mark: the first sync pass after the
+    /// upgrade *initializes* the mark from any own entries it pages (they
+    /// cannot be told apart from a rewind) and then flips this to `true`;
+    /// every later pass *enforces*. Rooms created or joined by a v10+
+    /// build start `true`. This is the one mixed-version trap: a pre-v10
+    /// blob that is already a stale copy initializes instead of tripping,
+    /// once.
+    pub currency_initialized: bool,
+    /// Message ids this store minted (`create_application_request_at`) and
+    /// has not yet seen accepted. An own entry in the log carrying one of
+    /// these ids is our own send landing — not rewind evidence — even when
+    /// the process died between the server's accept and the mark save.
+    /// Bounded FIFO (`MAX_UNACKNOWLEDGED_OWN_MESSAGE_IDS`).
+    pub unacknowledged_own_message_ids: Vec<MessageId>,
+    /// Sticky proof that this store is behind the server for this room.
+    pub behind_server: Option<BehindServerEvidence>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -962,6 +1015,17 @@ pub struct RoomSyncCursor {
     pub after_seq: u64,
     /// `None` = the device's home server (ADR 0005).
     pub server_url: Option<String>,
+    /// See [`PersistedRoomState::own_send_high_water_seq`].
+    pub own_send_high_water_seq: u64,
+    /// See [`PersistedRoomState::currency_initialized`].
+    pub currency_initialized: bool,
+    /// A sync tick has completed for this room since the store was opened
+    /// in this process (or the room was born here). Sends are refused
+    /// with [`ClientError::CurrencyUnverified`] until then.
+    pub currency_verified: bool,
+    /// Sticky rewind evidence; sends are refused with
+    /// [`ClientError::DeviceStateBehindServer`] while any room carries it.
+    pub behind_server: Option<BehindServerEvidence>,
 }
 
 impl RuntimeSyncOptions {
@@ -1125,6 +1189,32 @@ struct RoomEntry {
     group: MlsGroup,
     last_applied_seq: u64,
     server_url: Option<String>,
+    own_send_high_water_seq: u64,
+    currency_initialized: bool,
+    unacknowledged_own_message_ids: Vec<MessageId>,
+    behind_server: Option<BehindServerEvidence>,
+    /// In-memory only: a sync tick has completed for this room since the
+    /// state was loaded, or the room was born in this process. Never
+    /// persisted, so every fresh open of a store starts unverified.
+    currency_verified: bool,
+}
+
+impl RoomEntry {
+    /// A room whose MLS state was created or joined in this process: no
+    /// prior own sends exist for it, so the mark starts at 0 initialized,
+    /// and it is trivially current.
+    fn born(group: MlsGroup) -> Self {
+        Self {
+            group,
+            last_applied_seq: 0,
+            server_url: None,
+            own_send_high_water_seq: 0,
+            currency_initialized: true,
+            unacknowledged_own_message_ids: Vec::new(),
+            behind_server: None,
+            currency_verified: true,
+        }
+    }
 }
 
 pub struct FiniteChatDevice {
@@ -1258,6 +1348,12 @@ impl FiniteChatDevice {
                 group,
                 last_applied_seq: room.last_applied_seq,
                 server_url: room.server_url.clone(),
+                own_send_high_water_seq: room.own_send_high_water_seq,
+                currency_initialized: room.currency_initialized,
+                unacknowledged_own_message_ids: room.unacknowledged_own_message_ids.clone(),
+                behind_server: room.behind_server.clone(),
+                // Loaded state is unverified until a sync tick completes.
+                currency_verified: false,
             };
             if rooms.insert(room.room_id.clone(), entry).is_some() {
                 return Err(ClientError::DuplicatePersistedRoom(room.room_id.clone()));
@@ -1329,6 +1425,10 @@ impl FiniteChatDevice {
                     mls_group_id: mls_group_id_string(entry.group.group_id())?,
                     last_applied_seq: entry.last_applied_seq,
                     server_url: entry.server_url.clone(),
+                    own_send_high_water_seq: entry.own_send_high_water_seq,
+                    currency_initialized: entry.currency_initialized,
+                    unacknowledged_own_message_ids: entry.unacknowledged_own_message_ids.clone(),
+                    behind_server: entry.behind_server.clone(),
                 })
             })
             .collect::<Result<Vec<_>, ClientError>>()?;
@@ -1387,14 +1487,7 @@ impl FiniteChatDevice {
             self.credential_with_key.clone(),
         )
         .map_err(|_| ClientError::CreateGroup)?;
-        self.rooms.insert(
-            room_id,
-            RoomEntry {
-                group,
-                last_applied_seq: 0,
-                server_url: None,
-            },
-        );
+        self.rooms.insert(room_id, RoomEntry::born(group));
         Ok(())
     }
 
@@ -1920,6 +2013,17 @@ impl FiniteChatDevice {
         room_id: &str,
         entry: &RoomLogEntry,
     ) -> Result<(), ClientError> {
+        self.apply_commit_entry_inner(room_id, entry)?;
+        // A Commit that moved the epoch past the evidence epoch re-derived
+        // every member's secret tree: fresh generations, rewind healed.
+        self.clear_behind_server_if_healed(room_id)
+    }
+
+    fn apply_commit_entry_inner(
+        &mut self,
+        room_id: &str,
+        entry: &RoomLogEntry,
+    ) -> Result<(), ClientError> {
         validate_log_entry_shape(room_id, entry, LogEntryKind::Commit)?;
         let post_commit_epoch = post_commit_epoch(entry.epoch)?;
         let own_device_ref = self.device_ref.clone();
@@ -2014,14 +2118,7 @@ impl FiniteChatDevice {
         .into_group(&self.provider)
         .map_err(|_| ClientError::ActivateWelcome)?;
         self.verify_member_in_group(&group, &self.device_ref)?;
-        self.rooms.insert(
-            room_id,
-            RoomEntry {
-                group,
-                last_applied_seq: 0,
-                server_url: None,
-            },
-        );
+        self.rooms.insert(room_id, RoomEntry::born(group));
         Ok(())
     }
 
@@ -2037,8 +2134,187 @@ impl FiniteChatDevice {
                 room_id: room_id.clone(),
                 after_seq: entry.last_applied_seq,
                 server_url: entry.server_url.clone(),
+                own_send_high_water_seq: entry.own_send_high_water_seq,
+                currency_initialized: entry.currency_initialized,
+                currency_verified: entry.currency_verified,
+                behind_server: entry.behind_server.clone(),
             })
             .collect()
+    }
+
+    // ---- Currency gate -------------------------------------------------
+    //
+    // A device store that is older than what the server already accepted
+    // from this device (a WAL-less file copy, a restored backup) is a
+    // rewound MLS sender: its next sends reuse consumed secret-tree
+    // generations and every receiver quarantines. The witness is already
+    // in the sync stream — the rewound cursor re-pages the device's own
+    // later entries — so the gate needs no server change:
+    //
+    // * `own_send_high_water_seq` is the durable per-room mark of the
+    //   highest own application seq this store has seen accepted.
+    // * `unacknowledged_own_message_ids` lists ids minted here whose accept
+    //   this store has not yet recorded (crash between accept and save).
+    // * An own application entry above the mark whose id was not minted
+    //   here is proof the store is behind: record `behind_server`, refuse
+    //   sends, until a Commit moves the epoch above the evidence epoch.
+    // * `currency_initialized == false` (pre-v10 blob) turns the first
+    //   pass into initialization instead of enforcement.
+    // * `currency_verified` (in-memory) refuses sends from a loaded state
+    //   until one sync tick has completed for the room in this process.
+
+    /// True once a sync tick has completed for `room_id` since this state
+    /// was loaded, or the room was created/joined in this process.
+    pub fn room_currency_verified(&self, room_id: &str) -> bool {
+        self.rooms
+            .get(room_id)
+            .is_some_and(|entry| entry.currency_verified)
+    }
+
+    pub(crate) fn mark_room_currency_verified(&mut self, room_id: &str) {
+        if let Some(entry) = self.rooms.get_mut(room_id) {
+            entry.currency_verified = true;
+        }
+    }
+
+    /// Test-only escape hatch so a harness can *deliberately* send from a
+    /// rewound store (to pin receiver-side wedge/heal behavior). Never
+    /// compiled into production builds.
+    #[cfg(feature = "test-support")]
+    #[doc(hidden)]
+    pub fn bypass_currency_gate_for_tests(&mut self, room_id: &str) {
+        if let Some(entry) = self.rooms.get_mut(room_id) {
+            entry.currency_verified = true;
+            entry.behind_server = None;
+        }
+    }
+
+    /// Advance the own-send high-water mark after the server accepted one
+    /// of this device's application entries (`EventAccepted { seq,
+    /// message_id }`). Callers persist the device state afterwards; a crash
+    /// before that save is covered by the unacknowledged-id list.
+    pub fn record_own_send_accepted(
+        &mut self,
+        room_id: &str,
+        seq: u64,
+        message_id: &str,
+    ) -> Result<(), ClientError> {
+        validate_room_id(room_id)?;
+        let entry = self.room_entry_mut(room_id)?;
+        entry.own_send_high_water_seq = entry.own_send_high_water_seq.max(seq);
+        entry
+            .unacknowledged_own_message_ids
+            .retain(|pending| pending != message_id);
+        Ok(())
+    }
+
+    /// The outbound gate. Refuses while any room carries rewind evidence
+    /// (the whole store is suspect, not one room) and while `room_id` has
+    /// not completed a sync tick since the store was opened.
+    pub fn ensure_current_for_send(&self, room_id: &str) -> Result<(), ClientError> {
+        if let Some((flagged_room_id, evidence)) = self
+            .rooms
+            .iter()
+            .find_map(|(id, entry)| entry.behind_server.as_ref().map(|e| (id, e)))
+        {
+            return Err(ClientError::DeviceStateBehindServer {
+                room_id: flagged_room_id.clone(),
+                local_mark: evidence.local_mark,
+                observed_seq: evidence.observed_seq,
+            });
+        }
+        let entry = self.room_entry(room_id)?;
+        if !entry.currency_verified {
+            return Err(ClientError::CurrencyUnverified {
+                room_id: room_id.to_string(),
+            });
+        }
+        Ok(())
+    }
+
+    /// Classify one of this device's own application entries seen in the
+    /// ordered log. Returns the rewind error after recording durable
+    /// evidence; the caller persists the device before surfacing it.
+    fn observe_own_application_entry(
+        &mut self,
+        room_id: &str,
+        entry: &RoomLogEntry,
+    ) -> Result<(), ClientError> {
+        let now_unix_seconds = self.now_unix_seconds;
+        let room = self.room_entry_mut(room_id)?;
+        let epoch = room.group.epoch().as_u64();
+        let minted_here = room
+            .unacknowledged_own_message_ids
+            .contains(&entry.message_id);
+        if minted_here {
+            room.unacknowledged_own_message_ids
+                .retain(|pending| *pending != entry.message_id);
+        }
+        if entry.seq <= room.own_send_high_water_seq || minted_here {
+            room.own_send_high_water_seq = room.own_send_high_water_seq.max(entry.seq);
+            return Ok(());
+        }
+        if !room.currency_initialized {
+            // Bootstrap: the pre-v10 blob kept no mark, so the first pass
+            // learns the mark from the log instead of enforcing it.
+            room.own_send_high_water_seq = entry.seq;
+            return Ok(());
+        }
+        if room.behind_server.is_some() {
+            // Already flagged (evidence is durable): later ticks advance
+            // past own entries normally so the healing Commit can be
+            // reached; the flag stays until that Commit clears it. The
+            // mark still tracks the highest own seq seen so it is truthful
+            // once healed (the evidence keeps the mark it tripped at).
+            room.own_send_high_water_seq = room.own_send_high_water_seq.max(entry.seq);
+            return Ok(());
+        }
+        let local_mark = room.own_send_high_water_seq;
+        room.behind_server = Some(BehindServerEvidence {
+            local_mark,
+            observed_seq: entry.seq,
+            message_id: entry.message_id.clone(),
+            observed_at: now_unix_seconds,
+            evidence_epoch: epoch,
+        });
+        Err(ClientError::DeviceStateBehindServer {
+            room_id: room_id.to_string(),
+            local_mark,
+            observed_seq: entry.seq,
+        })
+    }
+
+    /// Flip a pre-v10 room from initialization to enforcement once a sync
+    /// tick has completed for it. Returns whether the state changed.
+    fn complete_currency_initialization(&mut self, room_id: &str) -> Result<bool, ClientError> {
+        let room = self.room_entry_mut(room_id)?;
+        if room.currency_initialized {
+            return Ok(false);
+        }
+        room.currency_initialized = true;
+        Ok(true)
+    }
+
+    fn clear_behind_server_if_healed(&mut self, room_id: &str) -> Result<(), ClientError> {
+        let room = self.room_entry_mut(room_id)?;
+        let epoch = room.group.epoch().as_u64();
+        if room
+            .behind_server
+            .as_ref()
+            .is_some_and(|evidence| epoch > evidence.evidence_epoch)
+        {
+            room.behind_server = None;
+        }
+        Ok(())
+    }
+
+    fn remember_unacknowledged_own_message_id(&mut self, room_id: &str, message_id: MessageId) {
+        if let Some(room) = self.rooms.get_mut(room_id) {
+            if room.unacknowledged_own_message_ids.len() >= MAX_UNACKNOWLEDGED_OWN_MESSAGE_IDS {
+                room.unacknowledged_own_message_ids.remove(0);
+            }
+            room.unacknowledged_own_message_ids.push(message_id);
+        }
     }
 
     /// Record which server hosts a room's ordered log. `None` means the
@@ -2670,6 +2946,52 @@ impl FiniteChatDevice {
         idempotency_key: impl Into<String>,
         timestamp_unix_seconds: u64,
     ) -> Result<AppendEventRequest, ClientError> {
+        // Currency gate: never encrypt (and so never consume a secret-tree
+        // generation) from a store that is behind the server or unverified.
+        self.ensure_current_for_send(room_id)?;
+        self.create_application_request_ungated_at(
+            room_id,
+            plaintext,
+            idempotency_key,
+            timestamp_unix_seconds,
+        )
+    }
+
+    /// Encrypt an application message for a *queued* outbox row whose
+    /// release is gated separately (the caller must run
+    /// [`Self::ensure_current_for_send`] again before the bytes leave).
+    /// Refuses on durable rewind evidence like the gated variant, but not
+    /// on an unverified room: a device that opened offline may compose
+    /// into its outbox; nothing reaches the server until a sync tick has
+    /// verified the store. A generation consumed locally by a row that is
+    /// later refused is harmless — only released bytes can collide.
+    pub fn create_queued_application_request_at(
+        &mut self,
+        room_id: &str,
+        plaintext: &[u8],
+        idempotency_key: impl Into<String>,
+        timestamp_unix_seconds: u64,
+    ) -> Result<AppendEventRequest, ClientError> {
+        if let Err(error @ ClientError::DeviceStateBehindServer { .. }) =
+            self.ensure_current_for_send(room_id)
+        {
+            return Err(error);
+        }
+        self.create_application_request_ungated_at(
+            room_id,
+            plaintext,
+            idempotency_key,
+            timestamp_unix_seconds,
+        )
+    }
+
+    fn create_application_request_ungated_at(
+        &mut self,
+        room_id: &str,
+        plaintext: &[u8],
+        idempotency_key: impl Into<String>,
+        timestamp_unix_seconds: u64,
+    ) -> Result<AppendEventRequest, ClientError> {
         let own_device_ref = self.device_ref.clone();
         let provider = &self.provider;
         let signer = &self.signer;
@@ -2700,6 +3022,11 @@ impl FiniteChatDevice {
             timestamp_unix_seconds,
         };
         request.validate_limits()?;
+        let message_id = request
+            .envelope
+            .message_id()
+            .map_err(ClientError::EnvelopeMessageId)?;
+        self.remember_unacknowledged_own_message_id(room_id, message_id);
         Ok(request)
     }
 
@@ -3126,6 +3453,25 @@ impl PersistedRoomState {
         if let Some(server_url) = &self.server_url {
             validate_string_bytes("room.server_url", server_url, MAX_ROOM_SERVER_URL_BYTES)?;
         }
+        validate_item_count(
+            "room.unacknowledged_own_message_ids",
+            self.unacknowledged_own_message_ids.len(),
+            MAX_UNACKNOWLEDGED_OWN_MESSAGE_IDS as u32,
+        )?;
+        for message_id in &self.unacknowledged_own_message_ids {
+            validate_string_bytes(
+                "room.unacknowledged_own_message_id",
+                message_id,
+                MAX_OBJECT_ID_BYTES,
+            )?;
+        }
+        if let Some(evidence) = &self.behind_server {
+            validate_string_bytes(
+                "room.behind_server.message_id",
+                &evidence.message_id,
+                MAX_OBJECT_ID_BYTES,
+            )?;
+        }
         Ok(())
     }
 }
@@ -3426,6 +3772,11 @@ pub struct SqliteClientStore {
     // Holds the single-writer lease for the store's lifetime; dropping the
     // last handle releases the OS lock. Read-only opens never take it.
     _writer_lease: Option<Arc<WriterLease>>,
+    /// Rooms that completed a sync tick through this store handle. Seeds
+    /// `RoomEntry::currency_verified` on every `load_device`, so a Device
+    /// reloaded from the store mid-process (after a failed room tick) keeps
+    /// the verification the process already earned. In-memory only.
+    currency_verified_rooms: BTreeSet<RoomId>,
 }
 
 /// Advisory single-writer lease on `<db_path>.writer-lease`.
@@ -3579,6 +3930,7 @@ impl SqliteClientStore {
             options,
             read_only: false,
             _writer_lease: Some(writer_lease),
+            currency_verified_rooms: BTreeSet::new(),
         })
     }
 
@@ -3599,6 +3951,7 @@ impl SqliteClientStore {
             options,
             read_only: true,
             _writer_lease: None,
+            currency_verified_rooms: BTreeSet::new(),
         })
     }
 
@@ -3614,6 +3967,28 @@ impl SqliteClientStore {
         let state = device.export_state()?;
         let encryption_key = self.options.encryption_key.clone();
         self.with_transaction(|tx| save_device_state_tx(tx, &state, &encryption_key))
+    }
+
+    /// Persist the device in the pre-currency-gate snapshot layout (v9: no
+    /// own-send mark, no evidence), exactly as a store written by the
+    /// previous release looks. Exists only so tests can pin the upgrade
+    /// bootstrap rule (first sync initializes, later syncs enforce).
+    #[cfg(feature = "test-support")]
+    #[doc(hidden)]
+    pub fn save_device_state_as_pre_currency_gate_snapshot_for_tests(
+        &mut self,
+        device: &FiniteChatDevice,
+    ) -> Result<(), ClientStoreError> {
+        let state = device.export_state()?;
+        let encryption_key = self.options.encryption_key.clone();
+        self.with_transaction(|tx| {
+            save_device_state_tx_with_version(
+                tx,
+                &state,
+                &encryption_key,
+                LINK_BOOTSTRAP_EXPORT_SNAPSHOT_VERSION,
+            )
+        })
     }
 
     pub fn save_device_state_and_app_messages(
@@ -4490,7 +4865,26 @@ impl SqliteClientStore {
             account_id,
             device_id,
         })?;
-        Ok(FiniteChatDevice::from_state(config, state)?)
+        let mut device = FiniteChatDevice::from_state(config, state)?;
+        for room_id in &self.currency_verified_rooms {
+            device.mark_room_currency_verified(room_id);
+        }
+        Ok(device)
+    }
+
+    pub(crate) fn note_room_currency_verified(&mut self, room_id: &str) {
+        self.currency_verified_rooms.insert(room_id.to_owned());
+    }
+
+    /// Every persisted device state row in this store, across accounts.
+    /// Zero means the store has never held a device: the only condition
+    /// under which a runtime may mint one without an explicit init.
+    pub fn device_state_count(&self) -> Result<u64, ClientStoreError> {
+        Ok(self
+            .conn
+            .query_row("SELECT COUNT(*) FROM client_device_states", [], |row| {
+                row.get::<_, u64>(0)
+            })?)
     }
 
     pub fn load_device_ids_for_account(
@@ -4903,6 +5297,13 @@ impl SqliteClientStore {
     }
 }
 
+fn is_behind_server_error(error: &ClientStoreError) -> bool {
+    matches!(
+        error,
+        ClientStoreError::Client(ClientError::DeviceStateBehindServer { .. })
+    )
+}
+
 /// Apply one ordered log entry to the in-memory device without persisting.
 ///
 /// The sync workers apply their bounded room tick in memory and save only
@@ -4939,6 +5340,9 @@ fn apply_log_entry_in_memory(
     // they advance the cursor without producing an applied entry. Commits
     // are never skipped: own commits go through the pending-merge rule.
     if entry.kind == LogEntryKind::Application && entry.envelope.sender == *device.device_ref() {
+        // Currency gate: an own entry above the durable own-send mark that
+        // this store never minted proves the store is behind the server.
+        device.observe_own_application_entry(room_id, entry)?;
         device.set_last_applied_seq(room_id, entry.seq)?;
         return Ok(None);
     }
@@ -6054,6 +6458,9 @@ pub fn run_room_server_sync_setup_tick<D: RuntimeDelivery>(
 /// room's pinned server. On failure this function does not save the Device or
 /// any application rows for the attempted room; callers must discard the
 /// in-memory Device candidate because MLS processing may have changed it.
+/// The one exception is [`ClientError::DeviceStateBehindServer`]: the rewind
+/// evidence (and the entries applied before it) is persisted before the
+/// error surfaces, so the flag survives the caller's reload.
 pub fn run_room_sync_tick<D: RuntimeDelivery>(
     store: &mut SqliteClientStore,
     device: &mut FiniteChatDevice,
@@ -6571,7 +6978,24 @@ fn sync_room_pages<D: RuntimeDelivery>(
             let seq = entry.seq;
             let message_id = entry.message_id.clone();
             let before_seq = device.last_applied_seq(&room_id)?;
-            if let Some(applied) = apply_log_entry_in_memory(device, &room_id, &entry)? {
+            let applied = match apply_log_entry_in_memory(device, &room_id, &entry) {
+                Ok(applied) => applied,
+                Err(error) if is_behind_server_error(&error) => {
+                    // The rewind evidence must be durable before it is
+                    // surfaced (callers discard the in-memory Device on
+                    // error). Entries applied earlier in this tick are
+                    // saved with it; the cursor stops short of the
+                    // evidence entry.
+                    store.save_device_state_and_app_messages_and_events(
+                        device,
+                        &app_messages,
+                        &app_events,
+                    )?;
+                    return Err(error.into());
+                }
+                Err(error) => return Err(error.into()),
+            };
+            if let Some(applied) = applied {
                 dirty = true;
                 if let Some(message) = stored_app_message_from_applied(
                     &room_id,
@@ -6618,9 +7042,17 @@ fn sync_room_pages<D: RuntimeDelivery>(
         after_seq = page.next_after_seq;
     }
 
+    // One full bounded tick completed without rewind evidence: a pre-v10
+    // room graduates from initialization to enforcement, and the room is
+    // verified current for this process.
+    if device.complete_currency_initialization(&room_id)? {
+        dirty = true;
+    }
     if dirty {
         store.save_device_state_and_app_messages_and_events(device, &app_messages, &app_events)?;
     }
+    device.mark_room_currency_verified(&room_id);
+    store.note_room_currency_verified(&room_id);
 
     debug_assert!(pages <= options.max_sync_pages_per_room);
     Ok(())
@@ -7162,6 +7594,18 @@ pub enum ClientError {
         current_seq: u64,
         attempted_seq: u64,
     },
+    #[error(
+        "device state for room {room_id} is behind the server: own-send mark {local_mark}, but the server already holds this device's entry at seq {observed_seq}; the store was rewound (stale copy or restore) and sending would reuse consumed MLS generations — sends stay refused until a commit advances the room epoch"
+    )]
+    DeviceStateBehindServer {
+        room_id: RoomId,
+        local_mark: u64,
+        observed_seq: u64,
+    },
+    #[error(
+        "room {room_id} currency is unverified: no sync tick has completed for it since the store was opened; sync before sending"
+    )]
+    CurrencyUnverified { room_id: RoomId },
 }
 
 fn verified_key_package_from_claim(
@@ -7891,8 +8335,17 @@ fn save_device_state_tx(
     state: &FiniteChatDeviceState,
     encryption_key: &ClientStoreEncryptionKey,
 ) -> Result<(), ClientStoreError> {
+    save_device_state_tx_with_version(tx, state, encryption_key, CLIENT_STATE_SNAPSHOT_VERSION)
+}
+
+fn save_device_state_tx_with_version(
+    tx: &Transaction<'_>,
+    state: &FiniteChatDeviceState,
+    encryption_key: &ClientStoreEncryptionKey,
+    version: u16,
+) -> Result<(), ClientStoreError> {
     state.validate_limits()?;
-    let sealed = encrypt_device_state(encryption_key, state)?;
+    let sealed = encrypt_device_state_with_version(encryption_key, state, version)?;
     tx.execute(
         r#"
         INSERT INTO client_device_states (
@@ -9677,14 +10130,15 @@ struct AppProfileIdentity<'a> {
     profile_account_id: &'a str,
 }
 
-fn encrypt_device_state(
+fn encrypt_device_state_with_version(
     encryption_key: &ClientStoreEncryptionKey,
     state: &FiniteChatDeviceState,
+    version: u16,
 ) -> Result<SealedClientState, ClientStoreError> {
     state.validate_limits()?;
-    let plaintext = encode_device_state(state)?;
+    let plaintext = encode_device_state_with_version(state, version)?;
     let aad = client_store_aad(
-        CLIENT_STATE_SNAPSHOT_VERSION,
+        version,
         &state.device_ref.account_id,
         &state.device_ref.device_id,
     )?;
@@ -10126,10 +10580,7 @@ fn decrypt_device_state(
     .map_err(ClientError::from)?;
     let provider = OpenMlsRustCrypto::default();
     let mut plaintext = None;
-    for version in [
-        CLIENT_STATE_SNAPSHOT_VERSION,
-        LEGACY_CLIENT_STATE_SNAPSHOT_VERSION,
-    ] {
+    for version in SUPPORTED_CLIENT_STATE_SNAPSHOT_VERSIONS {
         let aad = client_store_aad(version, account_id, device_id)?;
         if let Ok(opened) = provider.crypto().aead_decrypt(
             AeadType::Aes256Gcm,
@@ -10782,11 +11233,18 @@ fn device_link_bootstrap_aad(
     Ok(aad)
 }
 
-fn encode_device_state(state: &FiniteChatDeviceState) -> Result<Vec<u8>, ClientStoreError> {
+/// Encode at a specific snapshot version. Production always writes
+/// `CLIENT_STATE_SNAPSHOT_VERSION`; the pre-currency-gate layout (v9) is
+/// only written by the test-support hook that pins the upgrade bootstrap.
+fn encode_device_state_with_version(
+    state: &FiniteChatDeviceState,
+    version: u16,
+) -> Result<Vec<u8>, ClientStoreError> {
+    debug_assert!(version >= LINK_BOOTSTRAP_EXPORT_SNAPSHOT_VERSION);
     state.validate_limits()?;
     let mut out = Vec::with_capacity(encoded_device_state_len(state)?);
     out.extend_from_slice(CLIENT_STATE_SNAPSHOT_MAGIC);
-    out.extend_from_slice(&CLIENT_STATE_SNAPSHOT_VERSION.to_be_bytes());
+    out.extend_from_slice(&version.to_be_bytes());
     append_string_field(
         &mut out,
         "account_id",
@@ -10836,6 +11294,39 @@ fn encode_device_state(state: &FiniteChatDeviceState) -> Result<Vec<u8>, ClientS
             &mut out,
             room.server_url.as_deref().unwrap_or("").as_bytes(),
         )?;
+        if version < CURRENCY_GATE_SNAPSHOT_VERSION {
+            continue;
+        }
+        // v10 currency-gate fields.
+        out.extend_from_slice(&room.own_send_high_water_seq.to_be_bytes());
+        append_bool(&mut out, room.currency_initialized);
+        append_count(
+            &mut out,
+            "room.unacknowledged_own_message_ids",
+            room.unacknowledged_own_message_ids.len(),
+            MAX_UNACKNOWLEDGED_OWN_MESSAGE_IDS as u32,
+        )?;
+        for message_id in &room.unacknowledged_own_message_ids {
+            append_string_field(
+                &mut out,
+                "room.unacknowledged_own_message_id",
+                message_id,
+                MAX_OBJECT_ID_BYTES,
+            )?;
+        }
+        append_bool(&mut out, room.behind_server.is_some());
+        if let Some(evidence) = &room.behind_server {
+            out.extend_from_slice(&evidence.local_mark.to_be_bytes());
+            out.extend_from_slice(&evidence.observed_seq.to_be_bytes());
+            append_string_field(
+                &mut out,
+                "room.behind_server.message_id",
+                &evidence.message_id,
+                MAX_OBJECT_ID_BYTES,
+            )?;
+            out.extend_from_slice(&evidence.observed_at.to_be_bytes());
+            out.extend_from_slice(&evidence.evidence_epoch.to_be_bytes());
+        }
     }
     append_count(
         &mut out,
@@ -10954,7 +11445,7 @@ fn decode_device_state(bytes: &[u8]) -> Result<FiniteChatDeviceState, ClientStor
     let mut cursor = ClientStateCursor::new(bytes);
     cursor.take_magic()?;
     let version = cursor.take_u16()?;
-    if version != CLIENT_STATE_SNAPSHOT_VERSION && version != LEGACY_CLIENT_STATE_SNAPSHOT_VERSION {
+    if !SUPPORTED_CLIENT_STATE_SNAPSHOT_VERSIONS.contains(&version) {
         return Err(ClientStoreError::StateSnapshotVersion(version));
     }
     let account_id = cursor.take_string("account_id", MAX_ACCOUNT_ID_BYTES)?;
@@ -10980,11 +11471,57 @@ fn decode_device_state(bytes: &[u8]) -> Result<FiniteChatDeviceState, ClientStor
                     .map_err(|_| ClientStoreError::StateSnapshotUtf8)?,
             )
         };
+        let (
+            own_send_high_water_seq,
+            currency_initialized,
+            unacknowledged_own_message_ids,
+            behind_server,
+        ) = if version >= CURRENCY_GATE_SNAPSHOT_VERSION {
+            let own_send_high_water_seq = cursor.take_u64()?;
+            let currency_initialized = cursor.take_bool()?;
+            let pending_count = cursor.take_count(
+                "room.unacknowledged_own_message_ids",
+                MAX_UNACKNOWLEDGED_OWN_MESSAGE_IDS as u32,
+            )?;
+            let mut unacknowledged_own_message_ids = Vec::with_capacity(pending_count);
+            for _ in 0..pending_count {
+                unacknowledged_own_message_ids.push(
+                    cursor
+                        .take_string("room.unacknowledged_own_message_id", MAX_OBJECT_ID_BYTES)?,
+                );
+            }
+            let behind_server = if cursor.take_bool()? {
+                Some(BehindServerEvidence {
+                    local_mark: cursor.take_u64()?,
+                    observed_seq: cursor.take_u64()?,
+                    message_id: cursor
+                        .take_string("room.behind_server.message_id", MAX_OBJECT_ID_BYTES)?,
+                    observed_at: cursor.take_u64()?,
+                    evidence_epoch: cursor.take_u64()?,
+                })
+            } else {
+                None
+            };
+            (
+                own_send_high_water_seq,
+                currency_initialized,
+                unacknowledged_own_message_ids,
+                behind_server,
+            )
+        } else {
+            // Pre-v10 blob: no mark was kept. Bootstrap rule — the first
+            // sync pass initializes the mark instead of enforcing it.
+            (0, false, Vec::new(), None)
+        };
         rooms.push(PersistedRoomState {
             room_id,
             mls_group_id,
             last_applied_seq,
             server_url,
+            own_send_high_water_seq,
+            currency_initialized,
+            unacknowledged_own_message_ids,
+            behind_server,
         });
     }
 
@@ -11083,6 +11620,15 @@ fn encoded_device_state_len(state: &FiniteChatDeviceState) -> Result<usize, Clie
             len,
             U32_BYTES + room.server_url.as_deref().unwrap_or("").len(),
         )?;
+        // v10 currency-gate fields.
+        len = checked_len_add(len, U64_BYTES + U16_BYTES + U32_BYTES)?;
+        for message_id in &room.unacknowledged_own_message_ids {
+            len = checked_len_add(len, U32_BYTES + message_id.len())?;
+        }
+        len = checked_len_add(len, U16_BYTES)?;
+        if let Some(evidence) = &room.behind_server {
+            len = checked_len_add(len, U64_BYTES * 4 + U32_BYTES + evidence.message_id.len())?;
+        }
     }
     len = checked_len_add(len, U32_BYTES)?;
     for welcome in &state.pending_welcomes {
@@ -11790,7 +12336,7 @@ impl<'a> ClientStateCursor<'a> {
             }
             rooms
         };
-        let bootstrap_export = if snapshot_version >= CLIENT_STATE_SNAPSHOT_VERSION {
+        let bootstrap_export = if snapshot_version >= LINK_BOOTSTRAP_EXPORT_SNAPSHOT_VERSION {
             let encoded = self.take_vec(
                 "link_fanout.bootstrap_export",
                 MAX_CLIENT_STATE_PLAINTEXT_BYTES,
@@ -12231,6 +12777,104 @@ mod tests {
             !alice.has_pending_commit(room_id).unwrap(),
             "own commit at or behind the cursor must clear pending MLS state"
         );
+    }
+
+    #[test]
+    fn currency_gate_fields_survive_snapshot_round_trip_and_default_on_legacy_blobs() {
+        let secret = NostrSecretKey::from_bytes([31; NOSTR_SECRET_KEY_BYTES]).unwrap();
+        let config = FiniteChatDeviceConfig {
+            account_secret_key: secret,
+            device_id: "device-currency-gate".to_owned(),
+            now_unix_seconds: NOW,
+            credential_not_before_unix_seconds: NOW.saturating_sub(60),
+            credential_not_after_unix_seconds: NOW.saturating_add(600),
+        };
+        let mut device = FiniteChatDevice::new(config.clone()).unwrap();
+        device
+            .create_group_state("room-currency-gate", "mls-room-currency-gate")
+            .unwrap();
+        // Born rooms are initialized and verified; minting remembers the id
+        // until the accept is recorded.
+        let request = device
+            .create_application_request("room-currency-gate", b"hello", "currency-gate-1")
+            .unwrap();
+        let message_id = request.envelope.message_id().unwrap();
+        let mut state = device.export_state().unwrap();
+        assert_eq!(
+            state.rooms[0].unacknowledged_own_message_ids,
+            vec![message_id.clone()]
+        );
+        assert!(state.rooms[0].currency_initialized);
+        assert_eq!(state.rooms[0].own_send_high_water_seq, 0);
+        device
+            .record_own_send_accepted("room-currency-gate", 7, &message_id)
+            .unwrap();
+        let cursor = &device.room_sync_cursors()[0];
+        assert_eq!(cursor.own_send_high_water_seq, 7);
+        assert!(cursor.currency_verified);
+        assert!(
+            device.export_state().unwrap().rooms[0]
+                .unacknowledged_own_message_ids
+                .is_empty()
+        );
+
+        state.rooms[0].own_send_high_water_seq = 7;
+        state.rooms[0].unacknowledged_own_message_ids =
+            vec!["msg-a".to_owned(), "msg-b".to_owned()];
+        state.rooms[0].behind_server = Some(BehindServerEvidence {
+            local_mark: 7,
+            observed_seq: 9,
+            message_id: "msg-later".to_owned(),
+            observed_at: NOW,
+            evidence_epoch: 0,
+        });
+        let current = decode_device_state(
+            &encode_device_state_with_version(&state, CLIENT_STATE_SNAPSHOT_VERSION).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(current, state);
+
+        // Loaded state is unverified, and durable evidence refuses sends
+        // ahead of the unverified check.
+        let mut loaded = FiniteChatDevice::from_state(config.clone(), current).unwrap();
+        let cursor = &loaded.room_sync_cursors()[0];
+        assert!(!cursor.currency_verified);
+        assert_eq!(
+            cursor.behind_server.as_ref().map(|e| e.observed_seq),
+            Some(9)
+        );
+        assert!(matches!(
+            loaded.create_application_request("room-currency-gate", b"x", "currency-gate-2"),
+            Err(ClientError::DeviceStateBehindServer {
+                local_mark: 7,
+                observed_seq: 9,
+                ..
+            })
+        ));
+
+        // A pre-gate (v9) blob decodes with the bootstrap defaults.
+        let legacy = decode_device_state(
+            &encode_device_state_with_version(&state, LINK_BOOTSTRAP_EXPORT_SNAPSHOT_VERSION)
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(legacy.rooms[0].own_send_high_water_seq, 0);
+        assert!(!legacy.rooms[0].currency_initialized);
+        assert!(legacy.rooms[0].unacknowledged_own_message_ids.is_empty());
+        assert!(legacy.rooms[0].behind_server.is_none());
+        assert_eq!(
+            legacy.rooms[0].last_applied_seq,
+            state.rooms[0].last_applied_seq
+        );
+        assert_eq!(
+            legacy.openmls_storage_records,
+            state.openmls_storage_records
+        );
+        let mut legacy_device = FiniteChatDevice::from_state(config, legacy).unwrap();
+        assert!(matches!(
+            legacy_device.create_application_request("room-currency-gate", b"x", "currency-gate-3"),
+            Err(ClientError::CurrencyUnverified { .. })
+        ));
     }
 
     #[test]

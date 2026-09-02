@@ -1303,6 +1303,9 @@ fn runtime_removed_device_processes_removal_but_not_future_http_ciphertext() {
     let stale_charlie_state = charlie.export_state().unwrap();
     let mut stale_charlie =
         FiniteChatDevice::from_state(charlie_config, stale_charlie_state).unwrap();
+    // This test deliberately sends from a stale state to pin the server's
+    // membership rejection; step around the client-side currency gate.
+    stale_charlie.bypass_currency_gate_for_tests(room_id);
 
     let remove_charlie = bob
         .prepare_remove_member_commit(room_id, stale_charlie.device_ref(), "remove_charlie_http")
@@ -2760,6 +2763,10 @@ fn rewound_sender_wedges_receiver_and_heals_via_readdmission_epoch_bump() {
     let _ = std::fs::remove_file(bob_db.parent().unwrap().join("rewind_bob.sqlite3-shm"));
     let bob_store = sqlite_client_store(bob_db.clone(), &bob_config);
     let mut bob = bob_store.load_device(bob_config.clone()).unwrap();
+    // The currency gate would refuse this rewound sender (pinned by the
+    // currency-gate tests); this test pins the *receiver's* wedge and heal,
+    // so step around the gate deliberately.
+    bob.bypass_currency_gate_for_tests(ROOM_ID);
 
     // Wedge: the rewound sender's message is accepted by the server (shape and
     // membership checks only — the server cannot see secret-tree generations)
@@ -2900,6 +2907,10 @@ fn rekey_room_heals_receiver_wedged_by_rewound_sender() {
     assert_eq!(pair.sync_a(&options).unwrap().applied_entries.len(), 4);
     let frozen_cursor = pair.a.last_applied_seq(ROOM_ID).unwrap();
     pair.restore_b(&t1);
+    // The currency gate would refuse this rewound sender (pinned by the
+    // currency-gate tests); this test pins the receiver's wedge and the
+    // rekey heal, so step around the gate deliberately.
+    pair.b.bypass_currency_gate_for_tests(ROOM_ID);
 
     // Wedge: the rewound sender's entry is accepted by the server but the
     // receiver's tick aborts on it and the cursor stays frozen.
@@ -2936,7 +2947,20 @@ fn rekey_room_heals_receiver_wedged_by_rewound_sender() {
     assert_eq!(commit_page.entries[0].message_id, report.message_id);
     assert_eq!(commit_page.entries[0].kind, LogEntryKind::Commit);
 
-    // The rewound sender applies the commit on its next sync.
+    // The rewound sender's first sync re-pages its own pre-rewind entry and
+    // the currency gate records the rewind evidence (the tick fails); the
+    // next tick advances past own entries, applies the healing commit, and
+    // the epoch bump clears the evidence.
+    let behind = pair.sync_b(&options).unwrap_err();
+    assert!(
+        matches!(
+            behind,
+            RuntimeWorkerError::ClientStore(ClientStoreError::Client(
+                ClientError::DeviceStateBehindServer { .. }
+            ))
+        ),
+        "expected the currency gate to record the rewind, got {behind:?}"
+    );
     let b_report = pair.sync_b(&options).unwrap();
     assert_eq!(pair.b.group_epoch(ROOM_ID).unwrap(), 2);
     assert!(b_report.applied_entries.iter().any(|entry| {
@@ -3827,4 +3851,554 @@ fn assert_application_acceptance(accepted: &EventAccepted, sent_plaintexts: &[Se
         .map(|message| message.seq + 1)
         .unwrap_or(2);
     assert_eq!(accepted.seq, expected_seq);
+}
+
+// ---------------------------------------------------------------------------
+// Currency gate: a device state that is behind the server must not send.
+//
+// The 2026-08-28 incident placed WAL-less file copies of agent stores into
+// service fleet-wide; every copy was a rewound MLS sender. These tests pin
+// the client-side gate that refuses such a store before it can consume a
+// generation the server already saw.
+
+struct CurrencyFixture {
+    dir: tempfile::TempDir,
+    delivery: TestHttpRuntimeDelivery,
+    alice: FiniteChatDevice,
+    alice_store: SqliteClientStore,
+    bob_config: FiniteChatDeviceConfig,
+    bob_db: std::path::PathBuf,
+    bob_store: SqliteClientStore,
+    bob: FiniteChatDevice,
+    options: RuntimeSyncOptions,
+}
+
+/// Owner (alice) and agent (bob), both durable, one room, both cursors at
+/// the add commit and both verified by one sync tick.
+fn currency_fixture(tag: &str) -> CurrencyFixture {
+    let dir = tempfile::tempdir().unwrap();
+    let server_db = dir
+        .path()
+        .join(format!("finitechat-http-currency-{tag}.sqlite3"));
+    let alice_config = test_config(ALICE_ACCOUNT_SECRET_BYTES, &format!("alice_currency_{tag}"));
+    let mut alice_store = sqlite_client_store(
+        dir.path().join(format!("currency_{tag}_alice.sqlite3")),
+        &alice_config,
+    );
+    let mut alice = FiniteChatDevice::new(alice_config.clone()).unwrap();
+    let bob_config = test_config(BOB_ACCOUNT_SECRET_BYTES, &format!("bob_currency_{tag}"));
+    let bob_db = dir.path().join(format!("currency_{tag}_bob.sqlite3"));
+    let mut bob_store = sqlite_client_store(bob_db.clone(), &bob_config);
+    let mut bob = FiniteChatDevice::new(bob_config.clone()).unwrap();
+    let options = RuntimeSyncOptions {
+        key_package_target_available: 0,
+        max_sync_pages_per_room: 8,
+    };
+    let mut delivery = HttpRuntimeDelivery::from_sqlite_path(&server_db);
+    let add_seq = create_group_room_with_member(
+        &mut delivery,
+        &mut alice,
+        &mut bob,
+        GroupMemberSetup {
+            room_id: ROOM_ID,
+            mls_group_id: MLS_GROUP_ID,
+            key_package_id: &format!("kp_currency_{tag}"),
+            welcome_id: &format!("welcome_currency_{tag}"),
+            idempotency_key: &format!("commit_currency_{tag}"),
+        },
+    );
+    bob_store.save_device_state(&bob).unwrap();
+    bob_store
+        .advance_room_cursor_and_save(&mut bob, ROOM_ID, add_seq)
+        .unwrap();
+    alice_store
+        .advance_room_cursor_and_save(&mut alice, ROOM_ID, add_seq)
+        .unwrap();
+    run_runtime_sync_tick(&mut bob_store, &mut bob, &mut delivery, &options).unwrap();
+    run_runtime_sync_tick(&mut alice_store, &mut alice, &mut delivery, &options).unwrap();
+    CurrencyFixture {
+        dir,
+        delivery,
+        alice,
+        alice_store,
+        bob_config,
+        bob_db,
+        bob_store,
+        bob,
+        options,
+    }
+}
+
+/// The production send shape: encrypt, append, record the accept, save.
+fn send_recorded(
+    delivery: &mut TestHttpRuntimeDelivery,
+    device: &mut FiniteChatDevice,
+    store: Option<&mut SqliteClientStore>,
+    text: &str,
+    idempotency_key: &str,
+) -> EventAccepted {
+    let plaintext = format!(r#"{{"type":"finitecomputer.command.v1","body":{{"text":"{text}"}}}}"#)
+        .into_bytes();
+    let request = device
+        .create_application_request(ROOM_ID, &plaintext, idempotency_key)
+        .unwrap();
+    let accepted = delivery
+        .append_event(&request, DurableAppEventKind::ChatMessage.delivery_policy())
+        .unwrap();
+    device
+        .record_own_send_accepted(ROOM_ID, accepted.seq, &accepted.message_id)
+        .unwrap();
+    if let Some(store) = store {
+        store.save_device_state(device).unwrap();
+    }
+    accepted
+}
+
+fn room_cursor(device: &FiniteChatDevice) -> finitechat_client::RoomSyncCursor {
+    device
+        .room_sync_cursors()
+        .into_iter()
+        .find(|cursor| cursor.room_id == ROOM_ID)
+        .expect("fixture room cursor")
+}
+
+/// Fold the WAL into the main database file so a later main-file-only copy
+/// carries exactly this state (the incident's copy shape).
+fn checkpoint_wal(db_path: &std::path::Path) {
+    Connection::open(db_path)
+        .unwrap()
+        .execute_batch("PRAGMA wal_checkpoint(TRUNCATE);")
+        .unwrap();
+}
+
+/// The incident mechanism: copy the main database file and nothing else.
+fn raw_copy_without_wal(src: &std::path::Path, dst: &std::path::Path) {
+    std::fs::copy(src, dst).unwrap();
+    for suffix in ["-wal", "-shm"] {
+        let _ = std::fs::remove_file(dst.with_file_name(format!(
+            "{}{suffix}",
+            dst.file_name().unwrap().to_string_lossy()
+        )));
+    }
+}
+
+/// The correct mechanism: SQLite's online backup API folds the WAL in.
+fn backup_api_copy(src: &std::path::Path, dst: &std::path::Path) {
+    let src = Connection::open(src).unwrap();
+    let mut dst = Connection::open(dst).unwrap();
+    let backup = rusqlite::backup::Backup::new(&src, &mut dst).unwrap();
+    backup
+        .run_to_completion(64, std::time::Duration::from_millis(5), None)
+        .unwrap();
+}
+
+fn behind_server_evidence_in<E: std::fmt::Debug>(
+    error: &RuntimeWorkerError<E>,
+) -> Option<(u64, u64)> {
+    match error {
+        RuntimeWorkerError::Client(ClientError::DeviceStateBehindServer {
+            local_mark,
+            observed_seq,
+            ..
+        })
+        | RuntimeWorkerError::ClientStore(ClientStoreError::Client(
+            ClientError::DeviceStateBehindServer {
+                local_mark,
+                observed_seq,
+                ..
+            },
+        )) => Some((*local_mark, *observed_seq)),
+        _ => None,
+    }
+}
+
+fn assert_send_refused_behind_server(device: &mut FiniteChatDevice, key: &str) {
+    let refused = device
+        .create_application_request(ROOM_ID, b"must not encrypt", key)
+        .unwrap_err();
+    assert!(
+        matches!(refused, ClientError::DeviceStateBehindServer { .. }),
+        "expected DeviceStateBehindServer, got {refused:?}"
+    );
+}
+
+/// T1 — the raw-copy regression pin. A main-file-only copy taken after a
+/// checkpoint but before later sends is behind the server: its first sync
+/// tick trips on the device's own later entry, the evidence is durable,
+/// and sends are refused. A backup-API copy of the same live store is
+/// current: it syncs clean and sends.
+#[test]
+fn currency_gate_refuses_wal_less_file_copy_but_allows_backup_api_copy() {
+    let mut f = currency_fixture("t1");
+    let first = send_recorded(
+        &mut f.delivery,
+        &mut f.bob,
+        Some(&mut f.bob_store),
+        "t1 first",
+        "t1_first",
+    );
+    checkpoint_wal(&f.bob_db);
+    let mut later = Vec::new();
+    for index in 0..3 {
+        later.push(
+            send_recorded(
+                &mut f.delivery,
+                &mut f.bob,
+                Some(&mut f.bob_store),
+                &format!("t1 later {index}"),
+                &format!("t1_later_{index}"),
+            )
+            .seq,
+        );
+    }
+    let owner_report = run_runtime_sync_tick(
+        &mut f.alice_store,
+        &mut f.alice,
+        &mut f.delivery,
+        &f.options,
+    )
+    .unwrap();
+    assert_eq!(owner_report.applied_entries.len(), 4);
+
+    // Raw copy (main file only): the checkpointed state, i.e. mark == first.
+    let raw_db = f.dir.path().join("t1_bob_raw.sqlite3");
+    raw_copy_without_wal(&f.bob_db, &raw_db);
+    let mut raw_store = sqlite_client_store(&raw_db, &f.bob_config);
+    let mut raw_bob = raw_store.load_device(f.bob_config.clone()).unwrap();
+    let before = room_cursor(&raw_bob);
+    assert_eq!(before.own_send_high_water_seq, first.seq);
+    assert!(before.currency_initialized);
+    assert!(!before.currency_verified);
+    assert!(before.behind_server.is_none());
+
+    let tripped = run_runtime_sync_tick(&mut raw_store, &mut raw_bob, &mut f.delivery, &f.options)
+        .unwrap_err();
+    assert_eq!(
+        behind_server_evidence_in(&tripped),
+        Some((first.seq, later[0])),
+        "unexpected tick error: {tripped:?}"
+    );
+    // The cursor stops short of the evidence entry.
+    assert_eq!(raw_bob.last_applied_seq(ROOM_ID).unwrap(), first.seq);
+    assert_send_refused_behind_server(&mut raw_bob, "t1_raw_refused_in_memory");
+
+    // Durable: a fresh load of the copy still carries the evidence.
+    let mut reloaded = raw_store.load_device(f.bob_config.clone()).unwrap();
+    let evidence = room_cursor(&reloaded)
+        .behind_server
+        .expect("rewind evidence persisted with the device state");
+    assert_eq!(evidence.local_mark, first.seq);
+    assert_eq!(evidence.observed_seq, later[0]);
+    assert_eq!(evidence.evidence_epoch, 1);
+    assert_eq!(evidence.observed_at, NOW);
+    assert_send_refused_behind_server(&mut reloaded, "t1_raw_refused_reloaded");
+    // Re-syncing does not re-trip (the flag is sticky, the tick proceeds)
+    // and does not lift the flag either.
+    run_runtime_sync_tick(&mut raw_store, &mut reloaded, &mut f.delivery, &f.options).unwrap();
+    assert!(room_cursor(&reloaded).behind_server.is_some());
+    assert_send_refused_behind_server(&mut reloaded, "t1_raw_refused_after_resync");
+
+    // Backup-API copy of the same live store: current, syncs clean, sends.
+    let backup_db = f.dir.path().join("t1_bob_backup.sqlite3");
+    backup_api_copy(&f.bob_db, &backup_db);
+    let mut backup_store = sqlite_client_store(&backup_db, &f.bob_config);
+    let mut backup_bob = backup_store.load_device(f.bob_config.clone()).unwrap();
+    assert_eq!(
+        room_cursor(&backup_bob).own_send_high_water_seq,
+        *later.last().unwrap()
+    );
+    run_runtime_sync_tick(
+        &mut backup_store,
+        &mut backup_bob,
+        &mut f.delivery,
+        &f.options,
+    )
+    .unwrap();
+    let cursor = room_cursor(&backup_bob);
+    assert!(cursor.behind_server.is_none());
+    assert!(cursor.currency_verified);
+    let healthy = send_recorded(
+        &mut f.delivery,
+        &mut backup_bob,
+        Some(&mut backup_store),
+        "t1 from backup copy",
+        "t1_backup_send",
+    );
+    let owner_report = run_runtime_sync_tick(
+        &mut f.alice_store,
+        &mut f.alice,
+        &mut f.delivery,
+        &f.options,
+    )
+    .unwrap();
+    assert_eq!(owner_report.applied_entries.len(), 1);
+    assert_eq!(owner_report.applied_entries[0].seq, healthy.seq);
+    assert!(matches!(
+        &owner_report.applied_entries[0].entry,
+        AppliedLogEntry::Application { sender, .. } if *sender == *backup_bob.device_ref()
+    ));
+}
+
+/// T2 — two current copies of one store: the moment one sends, the other
+/// is behind the server; its next sync trips and its sends are refused.
+#[test]
+fn currency_gate_trips_second_current_copy_after_first_copy_sends() {
+    let mut f = currency_fixture("t2");
+    let first = send_recorded(
+        &mut f.delivery,
+        &mut f.bob,
+        Some(&mut f.bob_store),
+        "t2 before fork",
+        "t2_before_fork",
+    );
+    let a_db = f.dir.path().join("t2_bob_a.sqlite3");
+    let b_db = f.dir.path().join("t2_bob_b.sqlite3");
+    backup_api_copy(&f.bob_db, &a_db);
+    backup_api_copy(&f.bob_db, &b_db);
+    let mut a_store = sqlite_client_store(&a_db, &f.bob_config);
+    let mut a = a_store.load_device(f.bob_config.clone()).unwrap();
+    let mut b_store = sqlite_client_store(&b_db, &f.bob_config);
+    let mut b = b_store.load_device(f.bob_config.clone()).unwrap();
+    run_runtime_sync_tick(&mut a_store, &mut a, &mut f.delivery, &f.options).unwrap();
+    run_runtime_sync_tick(&mut b_store, &mut b, &mut f.delivery, &f.options).unwrap();
+    assert!(room_cursor(&a).currency_verified);
+    assert!(room_cursor(&b).currency_verified);
+
+    let from_a = send_recorded(
+        &mut f.delivery,
+        &mut a,
+        Some(&mut a_store),
+        "t2 from a",
+        "t2_a",
+    );
+
+    let tripped =
+        run_runtime_sync_tick(&mut b_store, &mut b, &mut f.delivery, &f.options).unwrap_err();
+    assert_eq!(
+        behind_server_evidence_in(&tripped),
+        Some((first.seq, from_a.seq)),
+        "unexpected tick error: {tripped:?}"
+    );
+    assert_send_refused_behind_server(&mut b, "t2_b_refused");
+    let mut b_reloaded = b_store.load_device(f.bob_config.clone()).unwrap();
+    assert_send_refused_behind_server(&mut b_reloaded, "t2_b_refused_reloaded");
+
+    // The copy that actually sent stays current.
+    run_runtime_sync_tick(&mut a_store, &mut a, &mut f.delivery, &f.options).unwrap();
+    assert!(room_cursor(&a).behind_server.is_none());
+    send_recorded(
+        &mut f.delivery,
+        &mut a,
+        Some(&mut a_store),
+        "t2 from a again",
+        "t2_a_2",
+    );
+}
+
+/// T3 — upgrade bootstrap. A store written by the previous release kept no
+/// own-send mark: the first sync after the upgrade initializes the mark
+/// from the device's own entries instead of tripping, flips the room to
+/// enforcement, and the very next rewind trips.
+#[test]
+fn currency_gate_bootstraps_pre_mark_snapshot_then_enforces() {
+    let mut f = currency_fixture("t3");
+    let _first = send_recorded(&mut f.delivery, &mut f.bob, None, "t3 first", "t3_first");
+    let second = send_recorded(&mut f.delivery, &mut f.bob, None, "t3 second", "t3_second");
+    // Persist in the pre-gate layout: mark and pending ids are dropped.
+    f.bob_store
+        .save_device_state_as_pre_currency_gate_snapshot_for_tests(&f.bob)
+        .unwrap();
+    drop(f.bob_store);
+    let mut bob_store = sqlite_client_store(&f.bob_db, &f.bob_config);
+    let mut legacy_bob = bob_store.load_device(f.bob_config.clone()).unwrap();
+    let cursor = room_cursor(&legacy_bob);
+    assert!(!cursor.currency_initialized);
+    assert_eq!(cursor.own_send_high_water_seq, 0);
+    assert!(!cursor.currency_verified);
+    assert!(cursor.behind_server.is_none());
+
+    // Initialization pass: own entries above 0 raise the mark, no trip.
+    run_runtime_sync_tick(&mut bob_store, &mut legacy_bob, &mut f.delivery, &f.options).unwrap();
+    let cursor = room_cursor(&legacy_bob);
+    assert!(cursor.currency_initialized);
+    assert_eq!(cursor.own_send_high_water_seq, second.seq);
+    assert!(cursor.currency_verified);
+    assert!(cursor.behind_server.is_none());
+    // ...and the graduation is durable.
+    let cursor = room_cursor(&bob_store.load_device(f.bob_config.clone()).unwrap());
+    assert!(cursor.currency_initialized);
+    assert_eq!(cursor.own_send_high_water_seq, second.seq);
+
+    // Enforcement: the next rewind (raw copy before a later send) trips.
+    checkpoint_wal(&f.bob_db);
+    let third = send_recorded(
+        &mut f.delivery,
+        &mut legacy_bob,
+        Some(&mut bob_store),
+        "t3 third",
+        "t3_third",
+    );
+    let raw_db = f.dir.path().join("t3_bob_raw.sqlite3");
+    raw_copy_without_wal(&f.bob_db, &raw_db);
+    let mut raw_store = sqlite_client_store(&raw_db, &f.bob_config);
+    let mut raw_bob = raw_store.load_device(f.bob_config.clone()).unwrap();
+    assert!(room_cursor(&raw_bob).currency_initialized);
+    let tripped = run_runtime_sync_tick(&mut raw_store, &mut raw_bob, &mut f.delivery, &f.options)
+        .unwrap_err();
+    assert_eq!(
+        behind_server_evidence_in(&tripped),
+        Some((second.seq, third.seq)),
+        "unexpected tick error: {tripped:?}"
+    );
+    assert_send_refused_behind_server(&mut raw_bob, "t3_raw_refused");
+}
+
+/// T4 — unverified until synced. A freshly opened store cannot send until
+/// one sync tick has completed for the room in this process.
+#[test]
+fn currency_gate_refuses_sends_until_one_sync_tick_verifies_the_open() {
+    let mut f = currency_fixture("t4");
+    drop(f.bob_store);
+    let mut bob_store = sqlite_client_store(&f.bob_db, &f.bob_config);
+    let mut reopened = bob_store.load_device(f.bob_config.clone()).unwrap();
+    assert!(!room_cursor(&reopened).currency_verified);
+    let refused = reopened
+        .create_application_request(ROOM_ID, b"too early", "t4_too_early")
+        .unwrap_err();
+    assert!(
+        matches!(&refused, ClientError::CurrencyUnverified { room_id } if room_id == ROOM_ID),
+        "expected CurrencyUnverified, got {refused:?}"
+    );
+    // The queued (outbox) variant refuses only on evidence, not on an
+    // unverified room; its release is gated by the caller.
+    reopened
+        .create_queued_application_request_at(ROOM_ID, b"queued offline", "t4_queued", NOW)
+        .unwrap();
+
+    run_runtime_sync_tick(&mut bob_store, &mut reopened, &mut f.delivery, &f.options).unwrap();
+    assert!(room_cursor(&reopened).currency_verified);
+    let sent = send_recorded(
+        &mut f.delivery,
+        &mut reopened,
+        Some(&mut bob_store),
+        "t4 after sync",
+        "t4_after_sync",
+    );
+    // A reload through the same store handle keeps the verification the
+    // process already earned (the runtime reloads after failed room ticks).
+    let reloaded = bob_store.load_device(f.bob_config.clone()).unwrap();
+    assert!(room_cursor(&reloaded).currency_verified);
+    assert_eq!(room_cursor(&reloaded).own_send_high_water_seq, sent.seq);
+}
+
+/// T5 — clearing. A flagged room heals only when a Commit moves the epoch
+/// past the evidence epoch: the counterpart's self-update re-derives every
+/// secret tree, the rewound copy's next tick clears the flag, and its
+/// sends are decryptable again.
+#[test]
+fn currency_gate_clears_when_counterpart_commit_advances_the_epoch() {
+    let mut f = currency_fixture("t5");
+    let first = send_recorded(
+        &mut f.delivery,
+        &mut f.bob,
+        Some(&mut f.bob_store),
+        "t5 first",
+        "t5_first",
+    );
+    checkpoint_wal(&f.bob_db);
+    let later = send_recorded(
+        &mut f.delivery,
+        &mut f.bob,
+        Some(&mut f.bob_store),
+        "t5 later",
+        "t5_later",
+    );
+    run_runtime_sync_tick(
+        &mut f.alice_store,
+        &mut f.alice,
+        &mut f.delivery,
+        &f.options,
+    )
+    .unwrap();
+
+    let raw_db = f.dir.path().join("t5_bob_raw.sqlite3");
+    raw_copy_without_wal(&f.bob_db, &raw_db);
+    let mut raw_store = sqlite_client_store(&raw_db, &f.bob_config);
+    let mut raw_bob = raw_store.load_device(f.bob_config.clone()).unwrap();
+    let tripped = run_runtime_sync_tick(&mut raw_store, &mut raw_bob, &mut f.delivery, &f.options)
+        .unwrap_err();
+    assert_eq!(
+        behind_server_evidence_in(&tripped),
+        Some((first.seq, later.seq))
+    );
+    let mut raw_bob = raw_store.load_device(f.bob_config.clone()).unwrap();
+    assert_eq!(
+        room_cursor(&raw_bob)
+            .behind_server
+            .as_ref()
+            .map(|e| e.evidence_epoch),
+        Some(1)
+    );
+    assert_send_refused_behind_server(&mut raw_bob, "t5_refused");
+
+    // Counterpart rekey: alice self-updates, epoch 1 -> 2.
+    let prepared = f
+        .alice
+        .prepare_self_update_commit(ROOM_ID, "t5_alice_self_update")
+        .unwrap();
+    let commit_accepted = f.delivery.submit_commit(prepared.request).unwrap();
+    let alice_page = f
+        .delivery
+        .sync_events(
+            ROOM_ID,
+            f.alice.device_ref(),
+            f.alice.last_applied_seq(ROOM_ID).unwrap(),
+        )
+        .unwrap();
+    f.alice
+        .merge_pending_commit_from_log(ROOM_ID, &alice_page.entries, &prepared.message_id)
+        .unwrap();
+    f.alice_store
+        .advance_room_cursor_and_save(&mut f.alice, ROOM_ID, commit_accepted.seq)
+        .unwrap();
+    assert_eq!(f.alice.group_epoch(ROOM_ID).unwrap(), 2);
+
+    // The flagged copy's tick now passes its own later entry (sticky flag,
+    // no re-trip), applies the Commit, and the epoch advance clears it.
+    run_runtime_sync_tick(&mut raw_store, &mut raw_bob, &mut f.delivery, &f.options).unwrap();
+    assert_eq!(raw_bob.group_epoch(ROOM_ID).unwrap(), 2);
+    let cursor = room_cursor(&raw_bob);
+    assert!(
+        cursor.behind_server.is_none(),
+        "flag should clear: {cursor:?}"
+    );
+    assert!(cursor.currency_verified);
+    assert!(cursor.own_send_high_water_seq >= later.seq);
+    assert!(
+        room_cursor(&raw_store.load_device(f.bob_config.clone()).unwrap())
+            .behind_server
+            .is_none()
+    );
+
+    let healed = send_recorded(
+        &mut f.delivery,
+        &mut raw_bob,
+        Some(&mut raw_store),
+        "t5 healed",
+        "t5_healed",
+    );
+    let owner_report = run_runtime_sync_tick(
+        &mut f.alice_store,
+        &mut f.alice,
+        &mut f.delivery,
+        &f.options,
+    )
+    .unwrap();
+    assert_eq!(owner_report.applied_entries.len(), 1);
+    assert_eq!(owner_report.applied_entries[0].seq, healed.seq);
+    assert!(matches!(
+        &owner_report.applied_entries[0].entry,
+        AppliedLogEntry::Application { plaintext, .. }
+            if plaintext == br#"{"type":"finitecomputer.command.v1","body":{"text":"t5 healed"}}"#
+    ));
 }

@@ -1307,6 +1307,7 @@ version = "0.1.0"
 dependencies = [
  "axum",
  "finite-nostr",
+ "finitechat-client",
  "finitechat-delivery",
  "finitechat-http",
  "finitechat-mls",

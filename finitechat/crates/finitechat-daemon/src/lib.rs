@@ -839,6 +839,15 @@ impl IntoResponse for DaemonError {
             Self::Core(FiniteChatCoreError::ServerRejected { .. }) => StatusCode::BAD_GATEWAY,
             Self::Core(FiniteChatCoreError::IdempotencyConflict { .. }) => StatusCode::BAD_GATEWAY,
             Self::Core(FiniteChatCoreError::Delivery { .. }) => StatusCode::BAD_GATEWAY,
+            // Currency gate: the store is behind the server (needs a rekey) or
+            // has no state for the requested device; the request is well-formed
+            // but the device state refuses it.
+            Self::Core(FiniteChatCoreError::DeviceStateBehindServer { .. }) => StatusCode::CONFLICT,
+            Self::Core(FiniteChatCoreError::DeviceStateMissing { .. }) => StatusCode::CONFLICT,
+            // Not yet verified against the server since open: retry after a sync.
+            Self::Core(FiniteChatCoreError::CurrencyUnverified { .. }) => {
+                StatusCode::SERVICE_UNAVAILABLE
+            }
             Self::Core(FiniteChatCoreError::Filesystem { .. }) => StatusCode::INTERNAL_SERVER_ERROR,
             Self::Core(FiniteChatCoreError::Store { .. }) => StatusCode::INTERNAL_SERVER_ERROR,
             Self::Core(FiniteChatCoreError::InvalidAccountSecret) => StatusCode::BAD_REQUEST,

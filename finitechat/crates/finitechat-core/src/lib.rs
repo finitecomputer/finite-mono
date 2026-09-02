@@ -158,6 +158,36 @@ pub enum FiniteChatCoreError {
     LockPoisoned,
     #[error("this runtime opened the client store read-only and cannot change state")]
     ReadOnly,
+    /// The device store is older than what the server already accepted
+    /// from this device: sending would reuse consumed MLS generations.
+    /// Sticky until a commit advances the room epoch.
+    #[error(
+        "device state for room {room_id} is behind the server (own-send mark {local_mark}, server holds this device's entry at seq {observed_seq}); the store was rewound and sends are refused until a commit advances the room epoch"
+    )]
+    DeviceStateBehindServer {
+        room_id: String,
+        local_mark: u64,
+        observed_seq: u64,
+    },
+    /// No sync tick has completed for the room since the store was opened
+    /// in this process, so the store's currency is unknown.
+    #[error(
+        "room {room_id} currency is unverified: no sync tick has completed for it since the store was opened"
+    )]
+    CurrencyUnverified { room_id: String },
+    /// The client store already holds device state, but none for the
+    /// requested device id. Minting a fresh device under that id would put
+    /// a generation-0 MLS sender behind a device the server already knows
+    /// (the same rewind a stale file copy causes), so this fails closed.
+    #[error(
+        "client store {db_path} has no state for device '{requested_device_id}' but already holds {stored_device_states} device state row(s) (this account's stored devices: {stored_device_ids:?}); refusing to mint a fresh device under that id — it would rewind the device to MLS generation 0. Reuse a stored device id, or initialize a new store in an empty data dir (`finitechat hermes init` for an agent home)"
+    )]
+    DeviceStateMissing {
+        db_path: String,
+        requested_device_id: String,
+        stored_device_ids: Vec<String>,
+        stored_device_states: u64,
+    },
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, uniffi::Record)]
@@ -335,6 +365,31 @@ pub struct OutboundDelivery {
 pub struct AppRoomSyncCursor {
     pub room_id: String,
     pub last_applied_seq: u64,
+    /// Highest server seq at which this device has durably seen one of
+    /// its own application entries accepted (the currency-gate mark).
+    #[serde(default)]
+    pub own_send_high_water_seq: u64,
+    /// `false` only for a room decoded from a pre-mark blob whose first
+    /// post-upgrade sync has not completed yet (initialization pass).
+    #[serde(default)]
+    pub currency_initialized: bool,
+    /// A sync tick has completed for the room since this process opened
+    /// the store; sends are refused until then.
+    #[serde(default)]
+    pub currency_verified: bool,
+    /// Sticky rewind evidence: the store is behind the server for this
+    /// room and sends are refused until a commit advances the epoch.
+    #[serde(default)]
+    pub behind_server: Option<AppBehindServerEvidence>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AppBehindServerEvidence {
+    pub local_mark: u64,
+    pub observed_seq: u64,
+    pub message_id: String,
+    pub observed_at: u64,
+    pub evidence_epoch: u64,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -1001,6 +1056,11 @@ struct CoreState {
     /// store; one-shot diagnostics open this way so they can run alongside a
     /// resident service that owns the store.
     read_only: bool,
+    /// Entries applied by a sync-before-send gate whose caller had no
+    /// projection to return them in. Drained into the next
+    /// `sync_with_projection` / `sync_room_with_projection` result so the
+    /// app projection never misses what the gate applied.
+    deferred_projection: CoreSyncProjection,
 }
 
 #[derive(uniffi::Object)]
@@ -3361,6 +3421,18 @@ impl AppRuntimeState {
             .map(|cursor| AppRoomSyncCursor {
                 room_id: cursor.room_id,
                 last_applied_seq: cursor.after_seq,
+                own_send_high_water_seq: cursor.own_send_high_water_seq,
+                currency_initialized: cursor.currency_initialized,
+                currency_verified: cursor.currency_verified,
+                behind_server: cursor
+                    .behind_server
+                    .map(|evidence| AppBehindServerEvidence {
+                        local_mark: evidence.local_mark,
+                        observed_seq: evidence.observed_seq,
+                        message_id: evidence.message_id,
+                        observed_at: evidence.observed_at,
+                        evidence_epoch: evidence.evidence_epoch,
+                    }),
             })
             .collect()
     }
@@ -3498,7 +3570,18 @@ impl AppRuntimeState {
             .map(|room| room.room_id.clone())
             .collect::<Vec<_>>();
         for room_id in connected_room_ids {
-            self.ensure_home_topic(&room_id)?;
+            match self.ensure_home_topic(&room_id) {
+                Ok(()) => {}
+                // Deferred, not failed: the room is unverified (fresh open,
+                // server unreachable) or the store is behind the server.
+                // The next tick retries; failing here would drop the events
+                // this tick already received, and receiving is what heals.
+                Err(
+                    FiniteChatCoreError::CurrencyUnverified { .. }
+                    | FiniteChatCoreError::DeviceStateBehindServer { .. },
+                ) => {}
+                Err(error) => return Err(error),
+            }
         }
         if self.app.selected_room_id.is_none()
             && let Some(room_id) = self
@@ -5944,7 +6027,16 @@ impl AppRuntimeState {
                     self.apply_projection_events(projection.events)?;
                     self.append_messages(projection.result.messages, projection.attachment_blobs);
                 }
-                Err(FiniteChatCoreError::Delivery { .. }) => {
+                // A currency-gate refusal keeps the rows queued: the store
+                // is behind the server (heals on the next epoch bump) or
+                // not yet verified (heals on the next successful tick).
+                // Receiving must keep working meanwhile — that is how the
+                // healing commit arrives — so the tick does not fail.
+                Err(
+                    FiniteChatCoreError::Delivery { .. }
+                    | FiniteChatCoreError::DeviceStateBehindServer { .. }
+                    | FiniteChatCoreError::CurrencyUnverified { .. },
+                ) => {
                     break;
                 }
                 Err(FiniteChatCoreError::ServerRejected { reason }) => {
@@ -8429,8 +8521,14 @@ fn recover_or_create_device_state(
     let stored_device_ids = requested_store
         .load_device_ids_for_account(&account_id)
         .map_err(store_error)?;
+    let stored_device_states = requested_store.device_state_count().map_err(store_error)?;
 
-    if stored_device_ids.is_empty() || explicit_account_secret {
+    // Mint only into a store that has never held a device. A populated
+    // store whose rows do not include the requested id is either a
+    // mis-addressed open (wrong device id, wrong identity) or a stale
+    // copy — never silently answered with a fresh generation-0 device.
+    if stored_device_states == 0 {
+        debug_assert!(stored_device_ids.is_empty());
         let device = FiniteChatDevice::new(requested_config.clone()).map_err(client_error)?;
         requested_store
             .save_device_state(&device)
@@ -8438,6 +8536,21 @@ fn recover_or_create_device_state(
         return Ok((requested_store, requested_config));
     }
 
+    let missing = || FiniteChatCoreError::DeviceStateMissing {
+        db_path: db_path.display().to_string(),
+        requested_device_id: requested_config.device_id.clone(),
+        stored_device_ids: stored_device_ids.clone(),
+        stored_device_states,
+    };
+
+    // An explicit identity named an explicit device id; the store
+    // disagrees. Fail closed rather than guess.
+    if explicit_account_secret {
+        return Err(missing());
+    }
+
+    // Shared-identity single-device recovery: the store holds exactly one
+    // device for this account, so adopt it under its stored id.
     if stored_device_ids.len() == 1 {
         let mut recovered_config = requested_config;
         recovered_config.device_id = stored_device_ids[0].clone();
@@ -8453,13 +8566,7 @@ fn recover_or_create_device_state(
         return Ok((recovered_store, recovered_config));
     }
 
-    Err(FiniteChatCoreError::Client {
-        reason: format!(
-            "device state not found for requested device '{}'; stored devices for this account are: {}",
-            requested_config.device_id,
-            stored_device_ids.join(", ")
-        ),
-    })
+    Err(missing())
 }
 
 impl CoreState {
@@ -8541,6 +8648,7 @@ impl CoreState {
             store,
             device,
             read_only,
+            deferred_projection: CoreSyncProjection::default(),
         })
     }
 
@@ -8849,9 +8957,13 @@ impl CoreState {
             .generate_object_id("msg")
             .map_err(client_error)?;
         let timestamp_unix_seconds = self.now_unix_seconds()?;
+        // Outbox row: the release path (`submit_outbox_message_with_acceptance`)
+        // runs the full gate before any bytes leave, so composing while the
+        // server is unreachable stays possible on a not-yet-verified open.
+        self.currency_gate_before_send_with(room_id, true)?;
         let request = self
             .device
-            .create_application_request_at(
+            .create_queued_application_request_at(
                 room_id,
                 &app_event_plaintext,
                 idempotency_key,
@@ -8906,6 +9018,14 @@ impl CoreState {
         &mut self,
         message: &StoredOutboundMessage,
     ) -> Result<(EventAccepted, CoreSyncProjection), FiniteChatCoreError> {
+        // Outbox rows were encrypted earlier (possibly offline). Re-run the
+        // gate before the bytes leave: a store found behind the server in
+        // the meantime must not release a request minted at a consumed
+        // generation.
+        self.currency_gate_before_send(&message.room_id)?;
+        self.device
+            .ensure_current_for_send(&message.room_id)
+            .map_err(|error| send_error(&message.room_id, error))?;
         let room_server_url = self.room_server_url(&message.room_id);
         let mut delivery = self.delivery_for(&room_server_url);
         let accepted = match delivery.append_event(
@@ -8923,6 +9043,7 @@ impl CoreState {
                 ),
             });
         }
+        self.record_own_send_accepted(&message.room_id, &accepted)?;
 
         let (message, attachment_blobs) = project_chat_message(
             message.room_id.clone(),
@@ -9315,6 +9436,7 @@ impl CoreState {
         let app_event_plaintext =
             encode_application_event_with_segment(kind.clone(), conversation_id, None, payload)?;
         let timestamp_unix_seconds = self.now_unix_seconds()?;
+        self.currency_gate_before_send(room_id)?;
         let request = self
             .device
             .create_application_request_at(
@@ -9345,6 +9467,7 @@ impl CoreState {
             }
             Err(error) => return Err(delivery_error(error)),
         };
+        self.record_own_send_accepted(room_id, &accepted)?;
         let event = StoredAppEvent {
             room_id: room_id.to_owned(),
             seq: accepted.seq,
@@ -9379,6 +9502,7 @@ impl CoreState {
             .generate_object_id(idempotency_prefix)
             .map_err(client_error)?;
         let timestamp_unix_seconds = self.now_unix_seconds()?;
+        self.currency_gate_before_send(room_id)?;
         let request = self
             .device
             .create_application_request_at(
@@ -9402,6 +9526,7 @@ impl CoreState {
         let accepted = delivery
             .append_event(&request, kind.delivery_policy())
             .map_err(delivery_error)?;
+        self.record_own_send_accepted(room_id, &accepted)?;
         let event = StoredAppEvent {
             room_id: room_id.to_owned(),
             seq: accepted.seq,
@@ -9435,6 +9560,7 @@ impl CoreState {
             .generate_object_id("reaction")
             .map_err(client_error)?;
         let timestamp_unix_seconds = self.now_unix_seconds()?;
+        self.currency_gate_before_send(room_id)?;
         let request = self
             .device
             .create_application_request_at(
@@ -9461,6 +9587,7 @@ impl CoreState {
                 DurableAppEventKind::ChatReaction.delivery_policy(),
             )
             .map_err(delivery_error)?;
+        self.record_own_send_accepted(room_id, &accepted)?;
         let event = StoredAppEvent {
             room_id: room_id.to_owned(),
             seq: accepted.seq,
@@ -9502,6 +9629,7 @@ impl CoreState {
             .generate_object_id("receipt")
             .map_err(client_error)?;
         let timestamp_unix_seconds = self.now_unix_seconds()?;
+        self.currency_gate_before_send(room_id)?;
         let request = self
             .device
             .create_application_request_at(
@@ -9525,6 +9653,7 @@ impl CoreState {
         let accepted = delivery
             .append_event(&request, DurableAppEventKind::ChatReceipt.delivery_policy())
             .map_err(delivery_error)?;
+        self.record_own_send_accepted(room_id, &accepted)?;
         let event = StoredAppEvent {
             room_id: room_id.to_owned(),
             seq: accepted.seq,
@@ -9558,6 +9687,7 @@ impl CoreState {
             .generate_object_id("poll-vote")
             .map_err(client_error)?;
         let timestamp_unix_seconds = self.now_unix_seconds()?;
+        self.currency_gate_before_send(room_id)?;
         let request = self
             .device
             .create_application_request_at(
@@ -9581,6 +9711,7 @@ impl CoreState {
         let accepted = delivery
             .append_event(&request, kind.delivery_policy())
             .map_err(delivery_error)?;
+        self.record_own_send_accepted(room_id, &accepted)?;
         let event = StoredAppEvent {
             room_id: room_id.to_owned(),
             seq: accepted.seq,
@@ -9593,6 +9724,62 @@ impl CoreState {
             .import_app_events_atomically(self.device.device_ref(), std::slice::from_ref(&event))
             .map_err(store_error)?;
         Ok(event)
+    }
+
+    /// Sync-before-send. Runs the targeted room sync so the currency gate
+    /// (`FiniteChatDevice::ensure_current_for_send`, enforced inside
+    /// `create_application_request_at`) sees the freshest evidence before
+    /// any secret-tree generation is consumed. A rewound store trips here
+    /// and the send is then refused; an unreachable server is tolerated
+    /// only once the room has already been verified current in this
+    /// process (the outbox may queue), otherwise the delivery error
+    /// surfaces and nothing is encrypted. Whatever the sync applied is
+    /// deferred into the next projection the caller receives.
+    fn currency_gate_before_send(&mut self, room_id: &str) -> Result<(), FiniteChatCoreError> {
+        self.currency_gate_before_send_with(room_id, false)
+    }
+
+    /// `queued_send`: the caller is encrypting into the outbox, whose
+    /// release runs the gate again, so an unreachable server is tolerated
+    /// even before the room is verified (nothing leaves yet).
+    fn currency_gate_before_send_with(
+        &mut self,
+        room_id: &str,
+        queued_send: bool,
+    ) -> Result<(), FiniteChatCoreError> {
+        match self.sync_room_with_projection(room_id) {
+            Ok(projection) => {
+                self.deferred_projection.merge_earlier(projection);
+                Ok(())
+            }
+            Err(FiniteChatCoreError::Delivery { .. })
+                if queued_send || self.device.room_currency_verified(room_id) =>
+            {
+                Ok(())
+            }
+            Err(error) => Err(error),
+        }
+    }
+
+    /// Advance the durable own-send high-water mark for an accepted send.
+    fn record_own_send_accepted(
+        &mut self,
+        room_id: &str,
+        accepted: &EventAccepted,
+    ) -> Result<(), FiniteChatCoreError> {
+        self.device
+            .record_own_send_accepted(room_id, accepted.seq, &accepted.message_id)
+            .map_err(client_error)?;
+        self.store
+            .save_device_state(&self.device)
+            .map_err(store_error)
+    }
+
+    fn take_deferred_projection(&mut self, projection: &mut CoreSyncProjection) {
+        let deferred = std::mem::take(&mut self.deferred_projection);
+        if deferred.has_progress() || !deferred.room_sync_failures.is_empty() {
+            projection.merge_earlier(deferred);
+        }
     }
 
     fn sync_room_with_projection(
@@ -9641,6 +9828,7 @@ impl CoreState {
                 }
             }
         }
+        self.take_deferred_projection(&mut projection);
         Ok(projection)
     }
 
@@ -9724,6 +9912,7 @@ impl CoreState {
             }
         }
 
+        self.take_deferred_projection(&mut projection);
         if let Some(error) = first_error
             && !projection.has_progress()
         {
@@ -9761,6 +9950,40 @@ impl CoreState {
 }
 
 impl CoreSyncProjection {
+    /// Fold another projection in front of this one (its entries were
+    /// applied earlier).
+    fn merge_earlier(&mut self, mut earlier: CoreSyncProjection) {
+        earlier.result.uploaded_key_packages = earlier
+            .result
+            .uploaded_key_packages
+            .saturating_add(self.result.uploaded_key_packages);
+        earlier.result.claimed_welcomes = earlier
+            .result
+            .claimed_welcomes
+            .saturating_add(self.result.claimed_welcomes);
+        earlier.result.activated_welcome_acks_sent = earlier
+            .result
+            .activated_welcome_acks_sent
+            .saturating_add(self.result.activated_welcome_acks_sent);
+        earlier.result.denied_welcomes = earlier
+            .result
+            .denied_welcomes
+            .saturating_add(self.result.denied_welcomes);
+        earlier.result.sync_pages = earlier
+            .result
+            .sync_pages
+            .saturating_add(self.result.sync_pages);
+        earlier.result.messages.append(&mut self.result.messages);
+        for event in std::mem::take(&mut self.events) {
+            earlier.include_event(event);
+        }
+        earlier
+            .room_sync_failures
+            .append(&mut self.room_sync_failures);
+        earlier.attachment_blobs.append(&mut self.attachment_blobs);
+        *self = earlier;
+    }
+
     fn include_event(&mut self, event: StoredAppEvent) {
         if !self.events.iter().any(|existing| {
             existing.room_id == event.room_id && existing.message_id == event.message_id
@@ -13070,6 +13293,18 @@ fn client_error(error: impl std::fmt::Display) -> FiniteChatCoreError {
 
 fn send_error(room_id: &str, error: ClientError) -> FiniteChatCoreError {
     match error {
+        ClientError::DeviceStateBehindServer {
+            room_id,
+            local_mark,
+            observed_seq,
+        } => FiniteChatCoreError::DeviceStateBehindServer {
+            room_id,
+            local_mark,
+            observed_seq,
+        },
+        ClientError::CurrencyUnverified { room_id } => {
+            FiniteChatCoreError::CurrencyUnverified { room_id }
+        }
         ClientError::GroupNotFound(_) => FiniteChatCoreError::Client {
             reason: format!(
                 "this device has not created or joined room '{room_id}' yet; create the room on this device, or claim a Welcome before sending"
@@ -17749,11 +17984,37 @@ mod tests {
         let cursor = AppRoomSyncCursor {
             room_id: "room-cursor-shape".to_owned(),
             last_applied_seq: 41,
+            own_send_high_water_seq: 40,
+            currency_initialized: true,
+            currency_verified: false,
+            behind_server: None,
         };
         let json = serde_json::to_value(&cursor).unwrap();
         assert_eq!(
             json,
-            serde_json::json!({ "room_id": "room-cursor-shape", "last_applied_seq": 41 })
+            serde_json::json!({
+                "room_id": "room-cursor-shape",
+                "last_applied_seq": 41,
+                "own_send_high_water_seq": 40,
+                "currency_initialized": true,
+                "currency_verified": false,
+                "behind_server": null,
+            })
+        );
+        // Pre-gate readers/writers omit the currency fields.
+        assert_eq!(
+            serde_json::from_value::<AppRoomSyncCursor>(
+                serde_json::json!({ "room_id": "room-cursor-shape", "last_applied_seq": 41 })
+            )
+            .unwrap(),
+            AppRoomSyncCursor {
+                room_id: "room-cursor-shape".to_owned(),
+                last_applied_seq: 41,
+                own_send_high_water_seq: 0,
+                currency_initialized: false,
+                currency_verified: false,
+                behind_server: None,
+            }
         );
         assert_eq!(
             serde_json::from_value::<AppRoomSyncCursor>(json).unwrap(),
@@ -17938,6 +18199,10 @@ mod tests {
         let mut agent = AppRuntimeState::new(agent_core).unwrap();
         let user_core = CoreState::open(user_options).unwrap();
         let mut user = AppRuntimeState::new(user_core).unwrap();
+        // A reopened store is unverified until one sync tick completes; the
+        // raw request below bypasses the core send path (and its
+        // sync-before-send), so verify explicitly first.
+        let _verified = user.core.sync_with_projection().unwrap();
 
         let broken_before = agent.core.device.last_applied_seq(&broken_room_id).unwrap();
         let fresh_before = agent.core.device.last_applied_seq(&fresh_room_id).unwrap();
@@ -22758,6 +23023,73 @@ mod tests {
         .unwrap()
     }
 
+    /// T6 — no silent re-mint. A populated store opened with an explicit
+    /// identity and a device id it does not hold must fail closed with the
+    /// typed error, and must not write a new device row (a fresh device
+    /// under a known id is a generation-0 rewind).
+    #[test]
+    fn missing_device_row_in_populated_store_fails_closed_instead_of_minting() {
+        let dir = tempfile::tempdir().unwrap();
+        let server_url = spawn_live_http_server(dir.path().join("server.sqlite3"));
+        let data_dir = dir.path().join("agent");
+        let seed = "no-silent-mint";
+        let first = open_test_core_with_account(&data_dir, &server_url, "agent-a", seed);
+        let account_id = first.device.device_ref().account_id.clone();
+        drop(first);
+
+        let refused = match CoreState::open(OpenOptions {
+            data_dir: data_dir.to_string_lossy().into_owned(),
+            server_url: server_url.clone(),
+            device_id: "agent-b".to_owned(),
+            account_secret_hex: Some(test_account_secret_hex(seed)),
+            now_unix_seconds: Some(NOW),
+        }) {
+            Ok(_) => panic!("a populated store must not mint a second device id"),
+            Err(error) => error,
+        };
+        match &refused {
+            FiniteChatCoreError::DeviceStateMissing {
+                requested_device_id,
+                stored_device_ids,
+                stored_device_states,
+                db_path,
+            } => {
+                assert_eq!(requested_device_id, "agent-b");
+                assert_eq!(stored_device_ids, &["agent-a".to_owned()]);
+                assert_eq!(*stored_device_states, 1);
+                assert!(db_path.ends_with(CLIENT_STORE_FILE), "{db_path}");
+            }
+            other => panic!("expected DeviceStateMissing, got {other:?}"),
+        }
+        assert!(
+            refused.to_string().contains("finitechat hermes init"),
+            "the error names the explicit init path: {refused}"
+        );
+
+        // No row was written for the refused id.
+        let secret = parse_account_secret_hex(&test_account_secret_hex(seed)).unwrap();
+        let store = SqliteClientStore::open_read_only(
+            data_dir.join(CLIENT_STORE_FILE),
+            SqliteClientStoreOptions::from_nostr_secret(&secret, "agent-b").unwrap(),
+        )
+        .unwrap();
+        assert_eq!(
+            store.load_device_ids_for_account(&account_id).unwrap(),
+            vec!["agent-a".to_owned()]
+        );
+        assert_eq!(store.device_state_count().unwrap(), 1);
+        drop(store);
+
+        // The stored device still opens, and a genuinely empty store still
+        // mints.
+        let reopened = open_test_core_with_account(&data_dir, &server_url, "agent-a", seed);
+        assert_eq!(reopened.device.device_ref().device_id, "agent-a");
+        drop(reopened);
+        let fresh =
+            open_test_core_with_account(dir.path().join("fresh"), &server_url, "agent-b", seed);
+        assert_eq!(fresh.device.device_ref().device_id, "agent-b");
+    }
+
     #[test]
     fn read_only_runtime_reports_persisted_state_and_rejects_dispatch() {
         let dir = tempfile::tempdir().unwrap();
@@ -23095,20 +23427,17 @@ mod tests {
     /// The poison-entry regression: one logical device (same account+device
     /// identity, store snapshot from before the first fire) fires
     /// `ensure_home_topic` twice with a ratchet that has diverged from the
-    /// snapshot. Both fires use the same deterministic idempotency key, so
-    /// the second produces a different ciphertext under a key the server
-    /// already holds: the server answers 409 idempotency_conflict and the
-    /// stale writer adopts the existing topic locally instead of appending
-    /// an application ciphertext the room can never process.
+    /// snapshot. The stale snapshot is a rewound store, so the currency
+    /// gate's sync-before-send finds the device's own later entries above
+    /// the snapshot's own-send mark and refuses the send outright with
+    /// `DeviceStateBehindServer` — nothing is appended, the durable
+    /// evidence is recorded, and the room stays unpoisoned.
     ///
-    /// Note the double-fire cannot be an exact replay: MLS message creation
-    /// injects fresh randomness, so even a same-state re-fire differs from
-    /// the recorded request and conflicts. Adopting locally is safe because
-    /// the deterministic key proves the conflicting entry is this device's
-    /// own earlier home-topic create — and a sender cannot decrypt its own
-    /// MLS application entries, so the log cannot restore it.
+    /// The deterministic home-topic idempotency key remains defense in
+    /// depth behind the gate: if a diverged fire ever reached the server,
+    /// the 409 idempotency_conflict adoption path still applies.
     #[test]
-    fn diverged_double_fired_home_topic_adopts_instead_of_poisoning_the_log() {
+    fn diverged_double_fired_home_topic_is_refused_by_the_currency_gate() {
         let dir = tempfile::tempdir().unwrap();
         let server_url = spawn_live_http_server(dir.path().join("server.sqlite3"));
         let room_id = "room-home-topic-fail-closed";
@@ -23153,12 +23482,29 @@ mod tests {
         );
         assert!(second.room_is_connected(room_id));
         assert!(!second.topic_exists(room_id, HOME_TOPIC_ID));
-        second
+        let refused = second
             .ensure_home_topic(room_id)
-            .expect("the ratchet-diverged double-fire adopts the existing topic");
+            .expect_err("the rewound snapshot must not send at all");
         assert!(
-            second.topic_exists(room_id, HOME_TOPIC_ID),
-            "the stale writer adopts its own earlier home topic locally"
+            matches!(
+                &refused,
+                FiniteChatCoreError::DeviceStateBehindServer { room_id: flagged, local_mark: 0, observed_seq: 1 }
+                    if flagged == room_id
+            ),
+            "unexpected refusal: {refused:?}"
+        );
+        assert!(
+            !second.topic_exists(room_id, HOME_TOPIC_ID),
+            "a refused send adopts nothing"
+        );
+        let cursor = second
+            .room_sync_cursors()
+            .into_iter()
+            .find(|cursor| cursor.room_id == room_id)
+            .unwrap();
+        assert!(
+            cursor.behind_server.is_some(),
+            "rewind evidence is durable on the stale store: {cursor:?}"
         );
 
         assert_eq!(
