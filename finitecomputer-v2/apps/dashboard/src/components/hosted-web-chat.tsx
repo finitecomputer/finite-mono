@@ -95,7 +95,7 @@ import {
 import {
   activityLeaseIsFresh,
   beginPendingChatTurn,
-  attachmentSendError,
+  sendError,
   chatContentIsRenderable,
   isAskForInputToolMessage,
   liveActivityLabel as sharedLiveActivityLabel,
@@ -163,6 +163,13 @@ export function HostedWebChat({
   } = useHostedChat();
   const deviceLinkPresentation = electronDeviceLinkPresentation(deviceLinkStatus);
   const [actionError, setActionError] = useState<string | null>(null);
+  // A refused text send answers over HTTP with the raw core reason while the
+  // projection's status/toast arrive on the stream; the toast is the copy
+  // people should read, so it replaces whatever the request itself said.
+  const sendRefusal = state ? sendError(state) : null;
+  useEffect(() => {
+    if (sendRefusal) setActionError(sendRefusal);
+  }, [sendRefusal]);
   const [sending, setSending] = useState(false);
   const [draft, setDraft] = useState(initialDraft ?? "");
   const [attachments, setAttachments] = useState<PendingAttachment[]>([]);
@@ -606,11 +613,11 @@ export function HostedWebChat({
         formData.set("caption", text);
         for (const attachment of attachments) formData.append("files", attachment.file);
         next = await uploadAttachments(formData);
-        const uploadError = attachmentSendError(next);
-        if (uploadError) throw new Error(uploadError);
       } else {
         next = await dispatch(messageAction(selectedRoom.room_id, text, selectedTopic, selectedChat));
       }
+      const refusal = sendError(next);
+      if (refusal) throw new Error(refusal);
       setDraft("");
       setAttachments((current) => {
         current.forEach(revokeAttachmentPreview);

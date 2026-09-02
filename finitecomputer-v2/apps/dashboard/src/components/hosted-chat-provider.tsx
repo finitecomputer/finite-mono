@@ -278,8 +278,10 @@ export function HostedChatProvider({
         lastLoadErrorRef.current = message;
         if (showError) setTransportError(message);
         if (caught instanceof ElectronChatStateError) return "stop";
-        const status = caught instanceof HostedChatHttpError ? caught.status : null;
-        return shouldRetryHostedChatRequest(status) ? "retry" : "stop";
+        const http = caught instanceof HostedChatHttpError ? caught : null;
+        return shouldRetryHostedChatRequest(http?.status ?? null, http?.retryable)
+          ? "retry"
+          : "stop";
       }
     })();
     stateLoadRef.current = pending;
@@ -301,8 +303,10 @@ export function HostedChatProvider({
         const message = hostedChatErrorMessage(caught);
         lastClaimErrorRef.current = message;
         if (showError) setClaimError(message);
-        const status = caught instanceof HostedChatHttpError ? caught.status : null;
-        return shouldRetryHostedChatRequest(status) ? "retry" : "stop";
+        const http = caught instanceof HostedChatHttpError ? caught : null;
+        return shouldRetryHostedChatRequest(http?.status ?? null, http?.retryable)
+          ? "retry"
+          : "stop";
       }
     })();
     ownerClaimRef.current = pending;
@@ -766,11 +770,16 @@ async function hostedChatRequest<T>(url: string, init: RequestInit = {}): Promis
   if (!response.ok) {
     const text = await response.text();
     try {
-      const parsed = JSON.parse(text) as { error?: string; code?: string };
+      const parsed = JSON.parse(text) as {
+        error?: string;
+        code?: string;
+        retryable?: unknown;
+      };
       throw new HostedChatHttpError(
         parsed.error || text || `Chat returned ${response.status}`,
         response.status,
-        parsed.code
+        parsed.code,
+        typeof parsed.retryable === "boolean" ? parsed.retryable : undefined
       );
     } catch (error) {
       if (error instanceof SyntaxError) {
@@ -786,7 +795,8 @@ class HostedChatHttpError extends Error {
   constructor(
     message: string,
     readonly status: number,
-    readonly code?: string
+    readonly code?: string,
+    readonly retryable?: boolean
   ) {
     super(message);
   }

@@ -289,7 +289,16 @@ impl IntoResponse for HostedDeviceError {
             status.as_u16(),
             self.diagnostic_class()
         );
-        (status, Json(json!({ "error": self.to_string() }))).into_response()
+        let mut body = json!({ "error": self.to_string() });
+        if let Self::Core(error) = &self {
+            // The core's one classification rides along so the dashboard
+            // proxy and the browser never re-derive the class or the retry
+            // decision from the status or the message text.
+            let classification = error.classification();
+            body["error_kind"] = json!(classification.kind);
+            body["retryable"] = json!(classification.retryable);
+        }
+        (status, Json(body)).into_response()
     }
 }
 
@@ -316,12 +325,9 @@ impl HostedDeviceError {
             Self::IncompleteUserState | Self::AgentBindingInvalid(_) => {
                 StatusCode::SERVICE_UNAVAILABLE
             }
-            Self::Core(FiniteChatCoreError::Client { .. }) => StatusCode::BAD_REQUEST,
-            Self::Core(FiniteChatCoreError::Profile { .. }) => StatusCode::BAD_REQUEST,
-            Self::Core(FiniteChatCoreError::ServerRejected { .. })
-            | Self::Core(FiniteChatCoreError::Delivery { .. }) => StatusCode::BAD_GATEWAY,
-            Self::Core(_)
-            | Self::Identity(_)
+            Self::Core(error) => StatusCode::from_u16(error.classification().http_status())
+                .unwrap_or(StatusCode::INTERNAL_SERVER_ERROR),
+            Self::Identity(_)
             | Self::Serialize(_)
             | Self::UnsafeAttachmentPath
             | Self::LockPoisoned
@@ -355,11 +361,7 @@ impl HostedDeviceError {
             Self::CanonicalChatConflict(_) => "canonical_chat_conflict",
             Self::Io(_) => "io",
             Self::Task(_) => "task",
-            Self::Core(FiniteChatCoreError::Client { .. }) => "core_client",
-            Self::Core(FiniteChatCoreError::Profile { .. }) => "core_profile",
-            Self::Core(FiniteChatCoreError::ServerRejected { .. }) => "core_server_rejected",
-            Self::Core(FiniteChatCoreError::Delivery { .. }) => "core_delivery",
-            Self::Core(_) => "core_internal",
+            Self::Core(error) => error.classification().kind.as_str(),
             Self::Identity(_) => "identity",
             Self::Serialize(_) => "serialize",
         }
@@ -4277,5 +4279,67 @@ mod tests {
             read_cached_attachment(cache, Some(outside.to_string_lossy().into_owned())).await,
             Err(HostedDeviceError::UnsafeAttachmentPath)
         ));
+    }
+
+    #[tokio::test]
+    async fn core_errors_answer_with_the_one_classification() {
+        let cases = [
+            (
+                FiniteChatCoreError::DeviceStateBehindServer {
+                    room_id: "room-1".to_owned(),
+                    local_mark: 2,
+                    observed_seq: 3,
+                },
+                StatusCode::CONFLICT,
+                "currency_behind",
+                false,
+            ),
+            (
+                FiniteChatCoreError::CurrencyUnverified {
+                    room_id: "room-1".to_owned(),
+                },
+                StatusCode::SERVICE_UNAVAILABLE,
+                "currency_unverified",
+                true,
+            ),
+            (
+                FiniteChatCoreError::Delivery {
+                    reason: "server unreachable".to_owned(),
+                },
+                StatusCode::SERVICE_UNAVAILABLE,
+                "transport",
+                true,
+            ),
+            (
+                FiniteChatCoreError::Client {
+                    reason: "empty message".to_owned(),
+                },
+                StatusCode::BAD_REQUEST,
+                "client",
+                false,
+            ),
+        ];
+        for (error, status, kind, retryable) in cases {
+            let message = error.to_string();
+            let response = HostedDeviceError::Core(error).into_response();
+            assert_eq!(response.status(), status, "{message}");
+            let body = response_json(response).await;
+            assert_eq!(body["error"], message);
+            assert_eq!(body["error_kind"], kind);
+            assert_eq!(body["retryable"], retryable);
+        }
+
+        // Errors the hosted device raises itself carry no core envelope.
+        let body = response_json(HostedDeviceError::Unauthorized.into_response()).await;
+        assert_eq!(body["error"], "hosted device authorization is required");
+        assert!(body.get("error_kind").is_none());
+        assert!(body.get("retryable").is_none());
+    }
+
+    async fn response_json(response: Response) -> Value {
+        let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        serde_json::from_slice(&bytes).unwrap()
     }
 }

@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { readFile } from "node:fs/promises";
 import test from "node:test";
 
 import {
@@ -6,6 +7,7 @@ import {
   MAX_HOSTED_DEVICE_RECONCILE_REQUEST_BYTES,
   createHostedRequesterContext,
   hostedWebChatErrorMessage,
+  hostedWebChatErrorResponse,
   isAgentBindingAuthorizationRequired,
   isCanonicalNewChatTarget,
   parseHostedChatAction,
@@ -459,4 +461,56 @@ test("Device reconciliation JSON parsing enforces media type and body limits", a
     parseHostedDeviceReconcileJsonRequest(oversizedActual),
     (error: unknown) => error instanceof HostedWebChatError && error.status === 413
   );
+});
+
+test("a currency-gate refusal passes through the proxy with its classification", () => {
+  const behindMessage =
+    "device state for room room-1 is behind the server (own-send mark 2, server holds this device's entry at seq 3); the store was rewound and sends are refused until a commit advances the room epoch";
+  assert.deepEqual(
+    hostedWebChatErrorResponse(
+      new HostedDeviceRequestError(behindMessage, 409, "currency_behind", false)
+    ),
+    {
+      status: 409,
+      body: { error: behindMessage, error_kind: "currency_behind", retryable: false },
+    }
+  );
+  const unverifiedMessage =
+    "room room-1 currency is unverified: no sync tick has completed for it since the store was opened";
+  assert.deepEqual(
+    hostedWebChatErrorResponse(
+      new HostedDeviceRequestError(unverifiedMessage, 503, "currency_unverified", true)
+    ),
+    {
+      status: 503,
+      body: { error: unverifiedMessage, error_kind: "currency_unverified", retryable: true },
+    }
+  );
+});
+
+test("failures without a hosted-device envelope still read as the generic outage", () => {
+  assert.deepEqual(
+    hostedWebChatErrorResponse(new HostedDeviceRequestError("lock poisoned", 500)),
+    { status: 502, body: { error: CHAT_UNAVAILABLE_MESSAGE } }
+  );
+  assert.deepEqual(hostedWebChatErrorResponse(new Error("update stream failed")), {
+    status: 502,
+    body: { error: CHAT_UNAVAILABLE_MESSAGE },
+  });
+  assert.deepEqual(
+    hostedWebChatErrorResponse(new HostedWebChatError("Sign in again to use chat.", 401)),
+    { status: 401, body: { error: "Sign in again to use chat." } }
+  );
+});
+
+test("the actions proxy route answers failures through the one error response", async () => {
+  const routeSource = await readFile(
+    new URL(
+      "../app/api/chat/machines/[machineId]/hosted-device/actions/route.ts",
+      import.meta.url
+    ),
+    "utf8"
+  );
+  assert.match(routeSource, /const \{ status, body \} = hostedWebChatErrorResponse\(error\)/u);
+  assert.match(routeSource, /Response\.json\(body, \{ status \}\)/u);
 });

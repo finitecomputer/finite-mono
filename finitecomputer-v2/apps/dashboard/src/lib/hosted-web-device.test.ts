@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import {
+  HostedDeviceRequestError,
   hostedDeviceAuthorizeAgentBinding,
   hostedDeviceAction,
   hostedDeviceApproveLink,
@@ -652,4 +653,52 @@ test("Device reconciliation rejects mismatched or malformed service progress", a
       /Device reconciliation service returned an invalid response/u
     );
   }
+});
+
+test("a hosted-device core error envelope is kept on the request error", async (context) => {
+  const originalFetch = global.fetch;
+  const originalConsoleError = console.error;
+  context.after(() => {
+    global.fetch = originalFetch;
+    console.error = originalConsoleError;
+  });
+  console.error = () => {};
+  global.fetch = (async () =>
+    Response.json(
+      {
+        error: "device state for room room-a is behind the server",
+        error_kind: "currency_behind",
+        retryable: false,
+      },
+      { status: 409 }
+    )) as typeof fetch;
+
+  await assert.rejects(
+    hostedDeviceAction(
+      { baseUrl: "https://device.internal", apiToken: "internal-token" },
+      verifiedAccount,
+      { SendMessage: { room_id: "room-a", text: "hello" } }
+    ),
+    (error: unknown) =>
+      error instanceof HostedDeviceRequestError &&
+      error.status === 409 &&
+      error.kind === "currency_behind" &&
+      error.retryable === false &&
+      error.message === "device state for room room-a is behind the server"
+  );
+
+  global.fetch = (async () =>
+    Response.json({ error: "hosted device authorization is required" }, { status: 401 })) as typeof fetch;
+  await assert.rejects(
+    hostedDeviceAction(
+      { baseUrl: "https://device.internal", apiToken: "internal-token" },
+      verifiedAccount,
+      { SendMessage: { room_id: "room-a", text: "hello" } }
+    ),
+    (error: unknown) =>
+      error instanceof HostedDeviceRequestError &&
+      error.status === 401 &&
+      error.kind === undefined &&
+      error.retryable === undefined
+  );
 });
