@@ -112,5 +112,3 @@ cargo test -p finitechat-server --test http_routes
 cargo test -p finitechat-server --test http_persistence
 ```
 
-For Friends Alpha, continue with `docs/friends-alpha-integration-runbook.md`.
-For TestFlight, continue with `docs/testflight-runbook.md`.

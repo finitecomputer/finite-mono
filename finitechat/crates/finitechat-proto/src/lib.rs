@@ -6245,18 +6245,17 @@ mod tests {
 
     #[test]
     fn native_mode_keeps_device_secrets_on_user_device() {
-        for client_kind in [ProductClientKindV1::NativeDevice] {
-            let trust_mode = client_kind.product_trust_mode().unwrap();
-            let disclosure = ProductTrustDisclosureV1::for_mode(trust_mode);
+        let client_kind = ProductClientKindV1::NativeDevice;
+        let trust_mode = client_kind.product_trust_mode().unwrap();
+        let disclosure = ProductTrustDisclosureV1::for_mode(trust_mode);
 
-            assert_eq!(
-                client_kind.secret_location(),
-                DeviceSecretLocationV1::UserDevice
-            );
-            assert_eq!(trust_mode, ProductTrustModeV1::LocalDeviceE2ee);
-            assert!(disclosure.may_claim_e2ee);
-            assert!(disclosure.stores_device_secrets_on_user_device);
-        }
+        assert_eq!(
+            client_kind.secret_location(),
+            DeviceSecretLocationV1::UserDevice
+        );
+        assert_eq!(trust_mode, ProductTrustModeV1::LocalDeviceE2ee);
+        assert!(disclosure.may_claim_e2ee);
+        assert!(disclosure.stores_device_secrets_on_user_device);
     }
 
     #[test]

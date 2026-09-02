@@ -422,7 +422,7 @@ fsite project init --config finite.toml --output json
 ```
 
 Project Init atomically creates that human's explicit revocable Native
-Principal Share. The dashboard, Electron, and iOS can then exchange a bounded
+Principal Share. The dashboard can then exchange a bounded
 User Nostr Identity proof for the Output's ordinary Viewer Cookie, without an
 email or Magic Link flow. A proof never creates a Share, and removing the npub
 takes effect on the next content request even if the browser still has a

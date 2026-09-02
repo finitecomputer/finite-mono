@@ -21,7 +21,6 @@ use finitechat_delivery::{HttpKeyPackageId, HttpKeyPackagePublication};
 use finitechat_http::{
     HttpApplicationDeliveryEffect, HttpPairingSessionRecord, NostrProfileRecord,
 };
-use finitechat_proto::DeviceMembership;
 use finitechat_transport::MessageId;
 use rusqlite::{Connection, OptionalExtension, params};
 

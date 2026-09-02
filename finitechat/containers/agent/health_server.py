@@ -301,8 +301,8 @@ def startup_report() -> dict[str, Any] | None:
 def runtime_health() -> dict[str, Any]:
     payload = identity()
     # `npub` remains the generic identity-health field. `agent_npub` is the
-    # stable Finite Chat contact coordinate used by Hosted Web, Electron, and
-    # native Devices to perform MLS Add + Welcome admission.
+    # stable Finite Chat contact coordinate used by Hosted Web Devices to
+    # perform MLS Add + Welcome admission.
     payload["agent_npub"] = payload.get("npub")
     payload["bridge"] = bridge_status()
     payload["agentd"] = agentd_status()

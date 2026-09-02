@@ -53,7 +53,7 @@ gateway:
 ```
 
 Then `hermes gateway start` makes the Agent Principal reachable. The dashboard
-Hosted Web Device, Electron, or a native client starts the room independently.
+Hosted Web Device starts the room independently.
 
 ## Native Hermes capability profiles
 
