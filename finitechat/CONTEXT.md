@@ -192,12 +192,12 @@ server URL and toggle reachability only. Physical-phone runs use a Mac LAN
 server URL rather than loopback, build/sign/install the app on the phone, and
 copy the app-container `FiniteChatStore` through explicit harness commands for
 assertions. Harness-owned server runs refuse pre-existing listeners and probe
-all-interface binds through local loopback before toggling reachability. Text
-offline assertions check both the raw `client_app_outbox` key and Rust-decrypted
-metadata: Sent locally, Undelivered by the server, same append message id, and
-retained idempotency material. Attachment offline assertions attempt an
-upload-required send while unreachable and require no sent bubble, no additional
-outbox row, and no new server delivery effect.
+all-interface binds through local loopback before toggling reachability. There
+is no durable client outbox: a send either gets server acceptance synchronously
+or fails loudly to the caller, so offline assertions (text and attachment)
+require no sent bubble, no stored send, no retired `client_app_outbox` table,
+and no new server delivery effect, and a fresh send after the server returns
+must succeed under its own idempotency key.
 _Avoid_: Unit fixture, row-level cleanup, transient diagnostics
 
 ## Relationships
@@ -288,7 +288,7 @@ _Avoid_: Unit fixture, row-level cleanup, transient diagnostics
   Message's send or upload attempt receives a non-success server response.
 - Invite/profile/device-list actions are online-only controls in v1. If they
   are unreachable, Rust projects transient feedback/diagnostics and leaves
-  room state, message delivery, and durable outbox state alone.
+  room state and message delivery alone.
 - A **Delivery Failure** belongs to an outbound Message; it does not change
   **Room State** by itself.
 - A **Delivery Failure** is not an automatic-retry state; retry is explicit
@@ -350,8 +350,6 @@ _Avoid_: Unit fixture, row-level cleanup, transient diagnostics
   store open must fail instead of dropping those tables. Encrypted room metadata
   missing current lifecycle fields or carrying old `Offline` / `NeedsAttention`
   values fails closed instead of defaulting into a connected room. Encrypted
-  outbox metadata missing timestamps or carrying old one-axis `delivery_state`
-  payloads fails closed instead of becoming v1 outbound delivery. Encrypted
   app-state/profile metadata missing selected-room, revoked-device, or
   stale-profile fields fails
   closed instead of being defaulted into product state.

@@ -23,7 +23,6 @@ use finitechat_client::{
     RuntimeLinkFanoutOptions, RuntimeSyncOptions, RuntimeWorkerError, SqliteClientStore,
     SqliteClientStoreOptions, StoredAppEvent, StoredAppMessage, StoredAppProfile, StoredAppRoom,
     StoredAppRoomState, StoredAppState, StoredChatArchiveState, StoredDeviceLinkBootstrapReceipt,
-    StoredOutboundLocalState, StoredOutboundMessage, StoredOutboundServerDeliveryState,
     StoredPairedAgent, StoredPendingDeviceLinkBootstrap, device_link_bootstrap_chunk_sha256,
     generate_account_secret, run_link_fanout_tick, run_room_server_sync_setup_tick,
     run_room_sync_tick, run_runtime_rekey_room, run_runtime_sync_setup_tick,
@@ -38,25 +37,26 @@ use finitechat_http::{
 };
 use finitechat_mls::{NOSTR_SECRET_KEY_BYTES, NostrSecretKey};
 use finitechat_proto::{
-    AppendEphemeralActivityRequest, ApplicationDeliveryPolicy, AttachmentBlobMetadataV1,
-    AttachmentBlobReferenceV1, ChatArchiveV1, ChatReactionV1, ChatReceiptStateV1, ChatReceiptV1,
-    ChatRenameV1, ClaimKeyPackageResult, ConversationMetadataV1, ConversationProjection,
-    ConversationProjectionEntry, ConversationProjectionEventContext, ConversationSegmentStartV1,
-    CreateRoomRequest, DEVICE_LINK_BOOTSTRAP_VERSION_V2, DecryptedApplicationEventV1,
-    DecryptedEphemeralActivityV1, DeviceLinkBootstrapEventV2, DeviceLinkBootstrapProfileV2,
-    DeviceLinkBootstrapRoomV2, DeviceLinkBootstrapSelectionV2, DeviceLinkBootstrapV2, DeviceRef,
-    DurableAppEventKind, EphemeralActivityAccepted, EphemeralActivityActionV1,
-    EphemeralActivityIngressContext, EphemeralActivityProjection, EphemeralActivityProjectionEntry,
-    EventAccepted, FINITECHAT_ACTIVITY_KIND_THINKING, FINITECHAT_ACTIVITY_KIND_TYPING,
-    FINITECHAT_ACTIVITY_KIND_WORKING, FINITECHAT_CHAT_ARCHIVE_EVENT_V1,
-    FINITECHAT_CHAT_RENAME_EVENT_V1, FINITECHAT_DEVICE_LINK_BOOTSTRAP_EVENT_V2,
-    GenericActivityKindV1, ListAccountRoomsRequest, LogEntryKind, MAX_CHAT_TITLE_BYTES,
-    MAX_DEVICE_LINK_BOOTSTRAP_CHUNKS, MAX_DEVICE_LINK_BOOTSTRAP_EVENTS,
-    MAX_DEVICE_LINK_BOOTSTRAP_PAYLOAD_BYTES, MAX_DEVICE_LINK_BOOTSTRAP_TOTAL_EVENTS,
-    MAX_KEY_PACKAGES_PER_DEVICE, MAX_OBJECT_ID_BYTES, MAX_STAGED_WELCOMES_PER_COMMIT, RoomProtocol,
-    RuntimeActivityClearV1, RuntimeCommandRequestV1, RuntimeCommandResultV1,
-    RuntimeStateSnapshotV1, SubmitCommitRequest, delivery_member_id_for_device, nprofile_decode,
-    npub_decode, npub_encode, nsec_decode, nsec_encode, validate_item_count, validate_string_bytes,
+    AppendEphemeralActivityRequest, AppendEventRequest, ApplicationDeliveryPolicy,
+    AttachmentBlobMetadataV1, AttachmentBlobReferenceV1, ChatArchiveV1, ChatReactionV1,
+    ChatReceiptStateV1, ChatReceiptV1, ChatRenameV1, ClaimKeyPackageResult, ConversationMetadataV1,
+    ConversationProjection, ConversationProjectionEntry, ConversationProjectionEventContext,
+    ConversationSegmentStartV1, CreateRoomRequest, DEVICE_LINK_BOOTSTRAP_VERSION_V2,
+    DecryptedApplicationEventV1, DecryptedEphemeralActivityV1, DeviceLinkBootstrapEventV2,
+    DeviceLinkBootstrapProfileV2, DeviceLinkBootstrapRoomV2, DeviceLinkBootstrapSelectionV2,
+    DeviceLinkBootstrapV2, DeviceRef, DurableAppEventKind, EphemeralActivityAccepted,
+    EphemeralActivityActionV1, EphemeralActivityIngressContext, EphemeralActivityProjection,
+    EphemeralActivityProjectionEntry, EventAccepted, FINITECHAT_ACTIVITY_KIND_THINKING,
+    FINITECHAT_ACTIVITY_KIND_TYPING, FINITECHAT_ACTIVITY_KIND_WORKING,
+    FINITECHAT_CHAT_ARCHIVE_EVENT_V1, FINITECHAT_CHAT_RENAME_EVENT_V1,
+    FINITECHAT_DEVICE_LINK_BOOTSTRAP_EVENT_V2, GenericActivityKindV1, ListAccountRoomsRequest,
+    LogEntryKind, MAX_CHAT_TITLE_BYTES, MAX_DEVICE_LINK_BOOTSTRAP_CHUNKS,
+    MAX_DEVICE_LINK_BOOTSTRAP_EVENTS, MAX_DEVICE_LINK_BOOTSTRAP_PAYLOAD_BYTES,
+    MAX_DEVICE_LINK_BOOTSTRAP_TOTAL_EVENTS, MAX_KEY_PACKAGES_PER_DEVICE, MAX_OBJECT_ID_BYTES,
+    MAX_STAGED_WELCOMES_PER_COMMIT, RoomProtocol, RuntimeActivityClearV1, RuntimeCommandRequestV1,
+    RuntimeCommandResultV1, RuntimeStateSnapshotV1, SubmitCommitRequest,
+    delivery_member_id_for_device, nprofile_decode, npub_decode, npub_encode, nsec_decode,
+    nsec_encode, validate_item_count, validate_string_bytes,
 };
 use reqwest::header::CONTENT_TYPE;
 use serde::{Deserialize, Serialize};
@@ -84,7 +84,6 @@ const MAX_APP_CHAT_TITLES: usize = 5_000;
 const DEVICE_LINK_BOOTSTRAP_STORE_PAGE_SIZE: u32 = 256;
 const DEFAULT_TRANSCRIPT_WINDOW: usize = 50;
 const MAX_TRANSCRIPT_PAGE_SIZE: u32 = 100;
-const MAX_OUTBOX_DRAIN_PER_TICK: usize = 16;
 const DEFAULT_KEY_PACKAGE_TARGET_AVAILABLE: u32 = 2;
 const DEFAULT_MAX_SYNC_PAGES_PER_ROOM: u32 = 16;
 const DEFAULT_CREDENTIAL_VALIDITY_SECONDS: u64 = 10 * 365 * 24 * 60 * 60;
@@ -392,21 +391,6 @@ pub struct AppBehindServerEvidence {
     pub evidence_epoch: u64,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub struct AppOutboxDebugRow {
-    pub room_id: String,
-    pub message_id: String,
-    pub sender_account_id: String,
-    pub sender_device_id: String,
-    pub local_state: String,
-    pub server_delivery_state: String,
-    pub append_request_room_id: String,
-    pub append_request_message_id: String,
-    pub append_request_sender_account_id: String,
-    pub append_request_sender_device_id: String,
-    pub idempotency_key_present: bool,
-}
-
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize, uniffi::Enum)]
 #[serde(rename_all = "snake_case")]
 pub enum ChatMessageKind {
@@ -640,7 +624,7 @@ pub struct AppFlowState {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AppSentMessage {
     pub message_id: String,
-    pub seq: Option<u64>,
+    pub seq: u64,
 }
 
 /// Outcome of [`FiniteChatRuntime::rekey_room_and_wait`]: one accepted
@@ -1121,9 +1105,6 @@ enum AppRuntimeCommand {
         input: AppBridgeActivityInput,
         response: mpsc::SyncSender<Result<AppAcceptedActivity, FiniteChatCoreError>>,
     },
-    DebugOutbox {
-        response: mpsc::SyncSender<Result<Vec<AppOutboxDebugRow>, FiniteChatCoreError>>,
-    },
     LinkDevice {
         fanout_id: String,
         target_device_id: String,
@@ -1164,15 +1145,6 @@ enum AppRuntimeCommand {
         reason: Option<String>,
         intent_key: String,
         response: mpsc::SyncSender<Result<AppState, FiniteChatCoreError>>,
-    },
-    #[cfg(test)]
-    TestLoadOutbox {
-        response: mpsc::SyncSender<Result<Vec<StoredOutboundMessage>, FiniteChatCoreError>>,
-    },
-    #[cfg(test)]
-    TestSaveOutbox {
-        rows: Vec<StoredOutboundMessage>,
-        response: mpsc::SyncSender<Result<(), FiniteChatCoreError>>,
     },
     #[cfg(test)]
     TestRevokedDevices {
@@ -1231,10 +1203,17 @@ struct SendAttachmentInput {
     reply_to_message_id: Option<String>,
 }
 
+/// One own chat send, ratcheted and signed but not yet accepted by the room
+/// server. It lives only on the stack of the send that prepared it: a send
+/// either gets `EventAccepted` synchronously or fails to the caller, and
+/// nothing about the attempt is stored.
 struct PreparedOutboundMessage {
-    chat_message: ChatMessage,
-    stored_message: StoredOutboundMessage,
-    attachment_blobs: MessageAttachmentBlobs,
+    room_id: String,
+    message_id: String,
+    sender: DeviceRef,
+    plaintext: Vec<u8>,
+    timestamp_unix_seconds: u64,
+    append_request: AppendEventRequest,
 }
 
 #[derive(Clone, Debug)]
@@ -2217,22 +2196,6 @@ impl FiniteChatRuntime {
             })?
     }
 
-    pub fn app_outbox_debug_rows(&self) -> Result<Vec<AppOutboxDebugRow>, FiniteChatCoreError> {
-        let (response_tx, response_rx) = mpsc::sync_channel(1);
-        self.command_tx
-            .send(AppRuntimeCommand::DebugOutbox {
-                response: response_tx,
-            })
-            .map_err(|_| FiniteChatCoreError::Client {
-                reason: "runtime actor is stopped".to_owned(),
-            })?;
-        response_rx
-            .recv()
-            .map_err(|_| FiniteChatCoreError::Client {
-                reason: "runtime actor stopped before debug snapshot".to_owned(),
-            })?
-    }
-
     /// The device's durable per-room sync cursors (room id + last applied
     /// seq), read through the runtime actor so a probe can never race a
     /// concurrent apply. Pure read: no sync, no network, no state change.
@@ -2249,44 +2212,6 @@ impl FiniteChatRuntime {
             .recv()
             .map_err(|_| FiniteChatCoreError::Client {
                 reason: "runtime actor stopped before reading room cursors".to_owned(),
-            })?
-    }
-
-    #[cfg(test)]
-    fn test_outbox(&self) -> Result<Vec<StoredOutboundMessage>, FiniteChatCoreError> {
-        let (response_tx, response_rx) = mpsc::sync_channel(1);
-        self.command_tx
-            .send(AppRuntimeCommand::TestLoadOutbox {
-                response: response_tx,
-            })
-            .map_err(|_| FiniteChatCoreError::Client {
-                reason: "runtime actor is stopped".to_owned(),
-            })?;
-        response_rx
-            .recv()
-            .map_err(|_| FiniteChatCoreError::Client {
-                reason: "runtime actor stopped before test outbox snapshot".to_owned(),
-            })?
-    }
-
-    #[cfg(test)]
-    fn test_save_outbox(
-        &self,
-        rows: Vec<StoredOutboundMessage>,
-    ) -> Result<(), FiniteChatCoreError> {
-        let (response_tx, response_rx) = mpsc::sync_channel(1);
-        self.command_tx
-            .send(AppRuntimeCommand::TestSaveOutbox {
-                rows,
-                response: response_tx,
-            })
-            .map_err(|_| FiniteChatCoreError::Client {
-                reason: "runtime actor is stopped".to_owned(),
-            })?;
-        response_rx
-            .recv()
-            .map_err(|_| FiniteChatCoreError::Client {
-                reason: "runtime actor stopped before test outbox write".to_owned(),
             })?
     }
 
@@ -2486,9 +2411,6 @@ fn spawn_app_runtime_worker(
                     })();
                     let _ = response.send(result);
                 }
-                AppRuntimeCommand::DebugOutbox { response } => {
-                    let _ = response.send(state.app_outbox_debug_rows());
-                }
                 AppRuntimeCommand::LinkDevice {
                     fanout_id,
                     target_device_id,
@@ -2585,14 +2507,6 @@ fn spawn_app_runtime_worker(
                             snapshot
                         });
                     let _ = response.send(result);
-                }
-                #[cfg(test)]
-                AppRuntimeCommand::TestLoadOutbox { response } => {
-                    let _ = response.send(state.test_outbox());
-                }
-                #[cfg(test)]
-                AppRuntimeCommand::TestSaveOutbox { rows, response } => {
-                    let _ = response.send(state.test_save_outbox(rows));
                 }
                 #[cfg(test)]
                 AppRuntimeCommand::TestRevokedDevices { response } => {
@@ -2698,41 +2612,9 @@ impl AppRuntimeState {
             .into_iter()
             .filter(|event| !provisional_room_ids.contains(&event.room_id))
             .collect::<Vec<_>>();
-        let delivered_local_messages = stored_messages
-            .iter()
-            .filter(|message| message.sender == owner)
-            .map(|message| (message.room_id.clone(), message.message_id.clone()))
-            .collect::<BTreeSet<_>>();
         let mut chat_projection =
             ChatProjectionState::from_stored(stored_messages, stored_events, &owner);
         chat_projection.restore_chat_archives(&stored_app_state.chat_archives);
-        let stored_outbox = core.store.load_app_outbox(&owner).map_err(store_error)?;
-        let mut visible_outbox = Vec::new();
-        for message in stored_outbox {
-            if delivered_local_messages
-                .contains(&(message.room_id.clone(), message.message_id.clone()))
-            {
-                // Read-only opens project the same visible state but leave the
-                // durable cleanup to the writer.
-                if !core.read_only {
-                    core.store
-                        .delete_app_outbox_message(&owner, &message.room_id, &message.message_id)
-                        .map_err(store_error)?;
-                }
-            } else {
-                visible_outbox.push(message);
-            }
-        }
-        let mut outbox_messages = Vec::new();
-        let mut outbox_attachment_blobs = AttachmentBlobMap::new();
-        for (message, attachment_blobs) in visible_outbox
-            .into_iter()
-            .filter_map(|message| chat_message_from_outbox(message, &owner))
-        {
-            record_attachment_blobs(&mut outbox_attachment_blobs, &message, attachment_blobs);
-            outbox_messages.push(message);
-        }
-        chat_projection.append_messages(outbox_messages, outbox_attachment_blobs, &owner);
         let should_persist_chat_archive_repair =
             stored_app_state.chat_archives != chat_projection.stored_chat_archives();
         let all_messages = chat_projection.messages();
@@ -2897,6 +2779,69 @@ impl AppRuntimeState {
                 self.app.flow.scan_result = AppScanTargetOutcome::Unavailable;
                 self.app.flow.notice_text = Some(scan_target_failure_message(error));
                 self.app.status = "scan unavailable".to_owned();
+                true
+            }
+            AppAction::SendMessage { .. }
+            | AppAction::SendTopicMessage { .. }
+            | AppAction::SendChatMessage { .. }
+            | AppAction::SendReply { .. }
+            | AppAction::SendChatReply { .. }
+            | AppAction::SendPoll { .. }
+            | AppAction::SendChatPoll { .. }
+            | AppAction::StartHomeChat { .. }
+            | AppAction::StartTopicChat { .. }
+                if matches!(
+                    error,
+                    FiniteChatCoreError::Delivery { .. }
+                        | FiniteChatCoreError::ServerRejected { .. }
+                        | FiniteChatCoreError::IdempotencyConflict { .. }
+                ) =>
+            {
+                // Transient feedback only: the send left nothing behind, so
+                // there is no bubble to mark and nothing to retry later.
+                self.app.status = "delivery failed".to_owned();
+                self.app.toast = Some(format!(
+                    "Message could not be sent: {}",
+                    compact_error_reason(error)
+                ));
+                true
+            }
+            AppAction::SendMessage { .. }
+            | AppAction::SendTopicMessage { .. }
+            | AppAction::SendChatMessage { .. }
+            | AppAction::SendReply { .. }
+            | AppAction::SendChatReply { .. }
+            | AppAction::SendPoll { .. }
+            | AppAction::SendChatPoll { .. }
+            | AppAction::StartHomeChat { .. }
+            | AppAction::StartTopicChat { .. }
+                if matches!(error, FiniteChatCoreError::DeviceStateBehindServer { .. }) =>
+            {
+                // Currency-gate refusal: the store was rewound. Nothing was
+                // encrypted or appended; the refusal is sticky until a commit
+                // advances the room epoch.
+                self.app.status = "sending paused".to_owned();
+                self.app.toast = Some(
+                    "This device's chat state is behind the server; sending is paused until the room is re-keyed"
+                        .to_owned(),
+                );
+                true
+            }
+            AppAction::SendMessage { .. }
+            | AppAction::SendTopicMessage { .. }
+            | AppAction::SendChatMessage { .. }
+            | AppAction::SendReply { .. }
+            | AppAction::SendChatReply { .. }
+            | AppAction::SendChatPoll { .. }
+            | AppAction::SendPoll { .. }
+            | AppAction::StartHomeChat { .. }
+            | AppAction::StartTopicChat { .. }
+                if matches!(error, FiniteChatCoreError::CurrencyUnverified { .. }) =>
+            {
+                // Currency-gate refusal: no sync tick has verified the store
+                // yet in this process. Nothing was encrypted or appended.
+                self.app.status = "waiting for sync".to_owned();
+                self.app.toast = Some("Waiting for the first sync before sending".to_owned());
                 true
             }
             _ => false,
@@ -3153,10 +3098,14 @@ impl AppRuntimeState {
                 emoji,
             } => self.react_to_message(room_id, message_id, emoji)?,
             AppAction::MarkRoomRead { room_id } => self.mark_room_read(room_id)?,
-            AppAction::RetryMessage {
-                room_id,
-                message_id,
-            } => self.retry_message(room_id, message_id)?,
+            AppAction::RetryMessage { .. } => {
+                // Kept on the UniFFI action surface for older app builds; there
+                // is no stored send to retry because a send either succeeds
+                // synchronously or fails to the caller.
+                return Err(FiniteChatCoreError::Client {
+                    reason: "message retry is not supported: sends succeed synchronously or fail to the caller".to_owned(),
+                });
+            }
             AppAction::SetTyping { room_id, is_typing } => self.set_typing(room_id, is_typing)?,
             AppAction::RefreshDevices => self.refresh_devices()?,
             AppAction::RevokeDevice {
@@ -3290,7 +3239,6 @@ impl AppRuntimeState {
                 if self.room_is_connected(room_id) && self.core.has_room(room_id) =>
             {
                 self.refresh_ephemeral_activity_for_room(room_id)?;
-                self.drain_undelivered_outbox(MAX_OUTBOX_DRAIN_PER_TICK)?;
                 self.app.status = ready_status(self.room_sync_failures.len());
             }
             SyncHintEvent::Heartbeat => {}
@@ -3309,7 +3257,6 @@ impl AppRuntimeState {
         self.apply_projection_events(synced.events)?;
         self.append_messages(synced.result.messages, synced.attachment_blobs);
         self.materialize_known_connected_rooms()?;
-        self.drain_undelivered_outbox(MAX_OUTBOX_DRAIN_PER_TICK)?;
         self.app.status = ready_status(self.room_sync_failures.len());
         Ok(())
     }
@@ -3385,7 +3332,6 @@ impl AppRuntimeState {
         self.apply_projection_events(synced.events)?;
         self.append_messages(synced.result.messages, synced.attachment_blobs);
         self.materialize_known_connected_rooms()?;
-        self.drain_undelivered_outbox(MAX_OUTBOX_DRAIN_PER_TICK)?;
         self.app.status = ready_status(self.room_sync_failures.len());
         Ok(())
     }
@@ -3464,7 +3410,6 @@ impl AppRuntimeState {
                 if self.room_is_connected(room_id) && self.core.has_room(room_id) =>
             {
                 self.refresh_ephemeral_activity_for_room(room_id)?;
-                self.drain_undelivered_outbox(MAX_OUTBOX_DRAIN_PER_TICK)?;
                 self.sync_selected_room_messages();
                 self.app.status = ready_status(self.room_sync_failures.len());
                 AppBridgeSync::default()
@@ -3491,7 +3436,6 @@ impl AppRuntimeState {
         self.apply_projection_events(synced.events)?;
         self.append_messages(synced.result.messages, synced.attachment_blobs);
         self.materialize_known_connected_rooms()?;
-        self.drain_undelivered_outbox(MAX_OUTBOX_DRAIN_PER_TICK)?;
         self.sync_selected_room_messages();
         self.app.status = ready_status(self.room_sync_failures.len());
         let joined_account_ids = self.bridge_unseen_joined_account_ids();
@@ -3521,7 +3465,6 @@ impl AppRuntimeState {
         self.apply_projection_events(synced.events)?;
         self.append_messages(synced.result.messages, synced.attachment_blobs);
         self.materialize_known_connected_rooms()?;
-        self.drain_undelivered_outbox(MAX_OUTBOX_DRAIN_PER_TICK)?;
         self.sync_selected_room_messages();
         self.app.status = ready_status(self.room_sync_failures.len());
         let joined_account_ids = self.bridge_unseen_joined_account_ids();
@@ -3720,7 +3663,6 @@ impl AppRuntimeState {
 
     fn run_selection_housekeeping(&mut self) -> Result<(), FiniteChatCoreError> {
         self.refresh_ephemeral_activity_for_connected_rooms()?;
-        self.drain_undelivered_outbox(MAX_OUTBOX_DRAIN_PER_TICK)?;
         Ok(())
     }
 
@@ -5284,12 +5226,7 @@ impl AppRuntimeState {
             chat_id.clone(),
             &chat_payload,
         )?;
-        self.send_chat_message_with_local_outbox(
-            room_id,
-            app_event_plaintext,
-            trimmed.to_owned(),
-            "sent",
-        )?;
+        self.send_chat_message_now(room_id, app_event_plaintext, trimmed.to_owned(), "sent")?;
         Ok(())
     }
 
@@ -5306,7 +5243,7 @@ impl AppRuntimeState {
         }
         let (app_event_plaintext, selected_topic_id, selected_chat_id) =
             self.scope_unscoped_chat_event_to_default(&room_id, app_event_plaintext)?;
-        let sent = self.send_chat_message_with_local_outbox_result(
+        let sent = self.send_chat_message_now_with_result(
             room_id.clone(),
             app_event_plaintext,
             preview,
@@ -5378,89 +5315,43 @@ impl AppRuntimeState {
         self.core.upload_outbound_attachment(&room_id, attachment)
     }
 
-    fn send_chat_message_with_local_outbox(
+    fn send_chat_message_now(
         &mut self,
         room_id: String,
         app_event_plaintext: Vec<u8>,
         preview: String,
         sent_status: &str,
     ) -> Result<(), FiniteChatCoreError> {
-        self.send_chat_message_with_local_outbox_result(
-            room_id,
-            app_event_plaintext,
-            preview,
-            sent_status,
-        )
-        .map(|_| ())
+        self.send_chat_message_now_with_result(room_id, app_event_plaintext, preview, sent_status)
+            .map(|_| ())
     }
 
-    fn send_chat_message_with_local_outbox_result(
+    /// Prepare, append, and record one own chat send. The message is visible
+    /// only once the room server has accepted it; every failure class
+    /// (transport, server rejection, idempotency conflict, local) returns to
+    /// the caller as its typed error and leaves no trace in the store or the
+    /// projection.
+    fn send_chat_message_now_with_result(
         &mut self,
         room_id: String,
         app_event_plaintext: Vec<u8>,
         preview: String,
         sent_status: &str,
     ) -> Result<AppSentMessage, FiniteChatCoreError> {
-        let owner = self.core.device.device_ref().clone();
         let prepared = self
             .core
             .prepare_outbound_chat_message(&room_id, app_event_plaintext)?;
-        let local_message_id = prepared.chat_message.message_id.clone();
-        self.persist_outbox_message(&prepared.stored_message)?;
-        let attachment_blobs =
-            attachment_blob_map_for(&prepared.chat_message, prepared.attachment_blobs.clone());
-        self.chat_projection.append_messages(
-            vec![prepared.chat_message.clone()],
-            attachment_blobs,
-            &owner,
-        );
-        self.sync_chat_projection();
-
-        let sent = match self
-            .core
-            .submit_outbox_message_with_acceptance(&prepared.stored_message)
-        {
-            Ok((accepted, projection)) => {
-                self.remove_outbox_message(&room_id, &local_message_id)?;
-                self.apply_projection_events(projection.events)?;
-                self.append_messages(projection.result.messages, projection.attachment_blobs);
-                if let Some(room) = self.room_mut(&room_id) {
-                    room.last_message_preview = preview;
-                }
-                self.app.status = sent_status.to_owned();
-                AppSentMessage {
-                    message_id: accepted.message_id,
-                    seq: Some(accepted.seq),
-                }
-            }
-            Err(FiniteChatCoreError::Delivery { .. }) => {
-                self.app.status = sent_status.to_owned();
-                AppSentMessage {
-                    message_id: local_message_id,
-                    seq: None,
-                }
-            }
-            Err(FiniteChatCoreError::ServerRejected { reason }) => {
-                let failed = failed_outbox_message(prepared.stored_message, reason);
-                self.persist_outbox_message(&failed)?;
-                if let Some((message, blobs)) = chat_message_from_outbox(failed, &owner) {
-                    let attachment_blobs = attachment_blob_map_for(&message, blobs);
-                    self.chat_projection
-                        .append_messages(vec![message], attachment_blobs, &owner);
-                    self.sync_chat_projection();
-                }
-                self.app.status = "delivery failed".to_owned();
-                self.app.toast = Some("Message delivery failed. Retry when ready.".to_owned());
-                AppSentMessage {
-                    message_id: local_message_id,
-                    seq: None,
-                }
-            }
-            Err(error) => {
-                return Err(error);
-            }
-        };
-        Ok(sent)
+        let (accepted, projection) = self.core.submit_prepared_chat_message(&prepared)?;
+        self.apply_projection_events(projection.events)?;
+        self.append_messages(projection.result.messages, projection.attachment_blobs);
+        if let Some(room) = self.room_mut(&room_id) {
+            room.last_message_preview = preview;
+        }
+        self.app.status = sent_status.to_owned();
+        Ok(AppSentMessage {
+            message_id: accepted.message_id,
+            seq: accepted.seq,
+        })
     }
 
     fn send_chat_attachment(
@@ -5579,7 +5470,7 @@ impl AppRuntimeState {
             Some(chat_id.clone()),
             &chat_payload,
         )?;
-        self.send_chat_message_with_local_outbox(room_id, app_event_plaintext, preview, "sent")?;
+        self.send_chat_message_now(room_id, app_event_plaintext, preview, "sent")?;
         self.app.selected_topic_id = Some(topic_id);
         self.app.selected_chat_id = Some(chat_id);
         self.sync_selected_room_messages();
@@ -5610,7 +5501,7 @@ impl AppRuntimeState {
             Some(chat_id.clone()),
             &chat_payload,
         )?;
-        self.send_chat_message_with_local_outbox(room_id, app_event_plaintext, preview, "sent")?;
+        self.send_chat_message_now(room_id, app_event_plaintext, preview, "sent")?;
         self.app.selected_topic_id = Some(topic_id);
         self.app.selected_chat_id = Some(chat_id);
         self.sync_selected_room_messages();
@@ -5912,150 +5803,6 @@ impl AppRuntimeState {
             Ok(()) | Err(FiniteChatCoreError::Delivery { .. }) => Ok(()),
             Err(error) => Err(error),
         }
-    }
-
-    fn retry_message(
-        &mut self,
-        room_id: String,
-        message_id: String,
-    ) -> Result<(), FiniteChatCoreError> {
-        if !self.room_is_connected(&room_id) {
-            return Err(FiniteChatCoreError::Client {
-                reason: format!("room '{room_id}' is not ready to retry sends"),
-            });
-        }
-        let Some(message) = self.chat_projection.message(&room_id, &message_id).cloned() else {
-            self.app.status = "message unavailable".to_owned();
-            return Ok(());
-        };
-        let Some(outbound) = &message.outbound_delivery else {
-            self.app.status = "message unavailable".to_owned();
-            return Ok(());
-        };
-        match &outbound.server_delivery {
-            OutboundServerDeliveryState::Failed { .. } => {}
-            OutboundServerDeliveryState::Undelivered => {
-                self.app.status = "sent".to_owned();
-                return Ok(());
-            }
-            OutboundServerDeliveryState::Delivered => {
-                self.app.status = "sent".to_owned();
-                return Ok(());
-            }
-        }
-
-        let owner = self.core.device.device_ref().clone();
-        let Some(mut retrying) = self.load_outbox_message(&room_id, &message_id)? else {
-            self.app.status = "message unavailable".to_owned();
-            return Ok(());
-        };
-        retrying.local_state = StoredOutboundLocalState::Sending;
-        retrying.server_delivery_state = StoredOutboundServerDeliveryState::Undelivered;
-        self.persist_outbox_message(&retrying)?;
-        let (retry_message, blobs) = chat_message_from_outbox(retrying.clone(), &owner)
-            .ok_or_else(|| FiniteChatCoreError::Client {
-                reason: "outbox retry row did not project as a transcript row".to_owned(),
-            })?;
-        let attachment_blobs = attachment_blob_map_for(&retry_message, blobs);
-        self.chat_projection
-            .append_messages(vec![retry_message], attachment_blobs, &owner);
-        self.sync_chat_projection();
-
-        retrying.local_state = StoredOutboundLocalState::Sent;
-        match self.core.submit_outbox_message(&retrying) {
-            Ok(projection) => {
-                self.remove_outbox_message(&room_id, &message_id)?;
-                self.apply_projection_events(projection.events)?;
-                self.append_messages(projection.result.messages, projection.attachment_blobs);
-                self.app.status = "sent".to_owned();
-            }
-            Err(FiniteChatCoreError::Delivery { .. }) => {
-                self.persist_outbox_message(&retrying)?;
-                if let Some((message, blobs)) = chat_message_from_outbox(retrying, &owner) {
-                    let attachment_blobs = attachment_blob_map_for(&message, blobs);
-                    self.chat_projection
-                        .append_messages(vec![message], attachment_blobs, &owner);
-                    self.sync_chat_projection();
-                }
-                self.app.status = "sent".to_owned();
-            }
-            Err(FiniteChatCoreError::ServerRejected { reason }) => {
-                let failed = failed_outbox_message(retrying, reason);
-                self.persist_outbox_message(&failed)?;
-                if let Some((message, blobs)) = chat_message_from_outbox(failed, &owner) {
-                    let attachment_blobs = attachment_blob_map_for(&message, blobs);
-                    self.chat_projection
-                        .append_messages(vec![message], attachment_blobs, &owner);
-                    self.sync_chat_projection();
-                }
-                self.app.status = "delivery failed".to_owned();
-                self.app.toast = Some("Message delivery failed. Retry when ready.".to_owned());
-            }
-            Err(error) => return Err(error),
-        }
-        Ok(())
-    }
-
-    fn drain_undelivered_outbox(&mut self, limit: usize) -> Result<(), FiniteChatCoreError> {
-        if limit == 0 {
-            return Ok(());
-        }
-        let owner = self.core.device.device_ref().clone();
-        let messages = self
-            .core
-            .store
-            .load_app_outbox(&owner)
-            .map_err(store_error)?;
-        let mut drained = 0usize;
-        for message in messages {
-            if drained >= limit {
-                break;
-            }
-            if message.local_state != StoredOutboundLocalState::Sent {
-                continue;
-            }
-            if message.server_delivery_state != StoredOutboundServerDeliveryState::Undelivered {
-                continue;
-            }
-            if !self.room_is_connected(&message.room_id) {
-                continue;
-            }
-            drained = drained.saturating_add(1);
-            match self.core.submit_outbox_message(&message) {
-                Ok(projection) => {
-                    self.remove_outbox_message(&message.room_id, &message.message_id)?;
-                    self.apply_projection_events(projection.events)?;
-                    self.append_messages(projection.result.messages, projection.attachment_blobs);
-                }
-                // A currency-gate refusal keeps the rows queued: the store
-                // is behind the server (heals on the next epoch bump) or
-                // not yet verified (heals on the next successful tick).
-                // Receiving must keep working meanwhile — that is how the
-                // healing commit arrives — so the tick does not fail.
-                Err(
-                    FiniteChatCoreError::Delivery { .. }
-                    | FiniteChatCoreError::DeviceStateBehindServer { .. }
-                    | FiniteChatCoreError::CurrencyUnverified { .. },
-                ) => {
-                    break;
-                }
-                Err(FiniteChatCoreError::ServerRejected { reason }) => {
-                    let failed = failed_outbox_message(message, reason);
-                    self.persist_outbox_message(&failed)?;
-                    if let Some((projected, blobs)) = chat_message_from_outbox(failed, &owner) {
-                        let attachment_blobs = attachment_blob_map_for(&projected, blobs);
-                        self.chat_projection.append_messages(
-                            vec![projected],
-                            attachment_blobs,
-                            &owner,
-                        );
-                        self.sync_chat_projection();
-                    }
-                }
-                Err(error) => return Err(error),
-            }
-        }
-        Ok(())
     }
 
     fn fetch_profiles(&mut self, account_ids: Vec<String>) -> Result<bool, FiniteChatCoreError> {
@@ -7692,35 +7439,6 @@ impl AppRuntimeState {
             .collect()
     }
 
-    fn app_outbox_debug_rows(&self) -> Result<Vec<AppOutboxDebugRow>, FiniteChatCoreError> {
-        let owner = self.core.device.device_ref().clone();
-        self.core
-            .store
-            .load_app_outbox(&owner)
-            .map_err(store_error)?
-            .into_iter()
-            .map(app_outbox_debug_row)
-            .collect()
-    }
-
-    #[cfg(test)]
-    fn test_outbox(&self) -> Result<Vec<StoredOutboundMessage>, FiniteChatCoreError> {
-        let owner = self.core.device.device_ref().clone();
-        self.core.store.load_app_outbox(&owner).map_err(store_error)
-    }
-
-    #[cfg(test)]
-    fn test_save_outbox(
-        &mut self,
-        rows: Vec<StoredOutboundMessage>,
-    ) -> Result<(), FiniteChatCoreError> {
-        let owner = self.core.device.device_ref().clone();
-        self.core
-            .store
-            .save_app_outbox(&owner, &rows)
-            .map_err(store_error)
-    }
-
     #[cfg(test)]
     fn test_seed_room_state(
         &mut self,
@@ -7745,45 +7463,6 @@ impl AppRuntimeState {
                     chat_archives: Vec::new(),
                 },
             )
-            .map_err(store_error)
-    }
-
-    fn persist_outbox_message(
-        &mut self,
-        message: &StoredOutboundMessage,
-    ) -> Result<(), FiniteChatCoreError> {
-        let owner = self.core.device.device_ref().clone();
-        self.core
-            .store
-            .save_app_outbox(&owner, std::slice::from_ref(message))
-            .map_err(store_error)
-    }
-
-    fn load_outbox_message(
-        &mut self,
-        room_id: &str,
-        message_id: &str,
-    ) -> Result<Option<StoredOutboundMessage>, FiniteChatCoreError> {
-        let owner = self.core.device.device_ref().clone();
-        let messages = self
-            .core
-            .store
-            .load_app_outbox(&owner)
-            .map_err(store_error)?;
-        Ok(messages
-            .into_iter()
-            .find(|message| message.room_id == room_id && message.message_id == message_id))
-    }
-
-    fn remove_outbox_message(
-        &mut self,
-        room_id: &str,
-        message_id: &str,
-    ) -> Result<(), FiniteChatCoreError> {
-        let owner = self.core.device.device_ref().clone();
-        self.core
-            .store
-            .delete_app_outbox_message(&owner, room_id, message_id)
             .map_err(store_error)
     }
 
@@ -8944,7 +8623,8 @@ impl CoreState {
         app_event_plaintext: Vec<u8>,
     ) -> Result<CoreSyncProjection, FiniteChatCoreError> {
         let prepared = self.prepare_outbound_chat_message(room_id, app_event_plaintext)?;
-        self.submit_outbox_message(&prepared.stored_message)
+        self.submit_prepared_chat_message(&prepared)
+            .map(|(_, projection)| projection)
     }
 
     fn prepare_outbound_chat_message(
@@ -8957,13 +8637,12 @@ impl CoreState {
             .generate_object_id("msg")
             .map_err(client_error)?;
         let timestamp_unix_seconds = self.now_unix_seconds()?;
-        // Outbox row: the release path (`submit_outbox_message_with_acceptance`)
-        // runs the full gate before any bytes leave, so composing while the
-        // server is unreachable stays possible on a not-yet-verified open.
-        self.currency_gate_before_send_with(room_id, true)?;
+        // Sync-before-send, then the gated encrypt: the request is appended
+        // right after on this same stack, so no second gate runs later.
+        self.currency_gate_before_send(room_id)?;
         let request = self
             .device
-            .create_queued_application_request_at(
+            .create_application_request_at(
                 room_id,
                 &app_event_plaintext,
                 idempotency_key,
@@ -8976,7 +8655,9 @@ impl CoreState {
             .save_device_state(&self.device)
             .map_err(store_error)?;
 
-        let (mut chat_message, attachment_blobs) = project_chat_message(
+        // Fail before the network round trip if the payload would not render
+        // as a transcript row once accepted.
+        project_chat_message(
             room_id.to_owned(),
             u64::MAX,
             message_id.clone(),
@@ -8988,44 +8669,20 @@ impl CoreState {
         .ok_or_else(|| FiniteChatCoreError::Client {
             reason: "local chat message did not project as a transcript row".to_owned(),
         })?;
-        chat_message.outbound_delivery = Some(outbound_undelivered());
-        let stored_message = StoredOutboundMessage {
+        Ok(PreparedOutboundMessage {
             room_id: room_id.to_owned(),
             message_id,
             sender,
             plaintext: app_event_plaintext,
-            local_state: StoredOutboundLocalState::Sent,
-            server_delivery_state: StoredOutboundServerDeliveryState::Undelivered,
+            timestamp_unix_seconds: request.timestamp_unix_seconds,
             append_request: request,
-            timestamp_unix_seconds: chat_message.timestamp_unix_seconds,
-        };
-        Ok(PreparedOutboundMessage {
-            chat_message,
-            stored_message,
-            attachment_blobs,
         })
     }
 
-    fn submit_outbox_message(
+    fn submit_prepared_chat_message(
         &mut self,
-        message: &StoredOutboundMessage,
-    ) -> Result<CoreSyncProjection, FiniteChatCoreError> {
-        self.submit_outbox_message_with_acceptance(message)
-            .map(|(_, projection)| projection)
-    }
-
-    fn submit_outbox_message_with_acceptance(
-        &mut self,
-        message: &StoredOutboundMessage,
+        message: &PreparedOutboundMessage,
     ) -> Result<(EventAccepted, CoreSyncProjection), FiniteChatCoreError> {
-        // Outbox rows were encrypted earlier (possibly offline). Re-run the
-        // gate before the bytes leave: a store found behind the server in
-        // the meantime must not release a request minted at a consumed
-        // generation.
-        self.currency_gate_before_send(&message.room_id)?;
-        self.device
-            .ensure_current_for_send(&message.room_id)
-            .map_err(|error| send_error(&message.room_id, error))?;
         let room_server_url = self.room_server_url(&message.room_id);
         let mut delivery = self.delivery_for(&room_server_url);
         let accepted = match delivery.append_event(
@@ -9038,7 +8695,7 @@ impl CoreState {
         if accepted.message_id != message.message_id {
             return Err(FiniteChatCoreError::Client {
                 reason: format!(
-                    "server accepted message id '{}' but outbox expected '{}'",
+                    "server accepted message id '{}' but the send expected '{}'",
                     accepted.message_id, message.message_id
                 ),
             });
@@ -9732,28 +9389,17 @@ impl CoreState {
     /// any secret-tree generation is consumed. A rewound store trips here
     /// and the send is then refused; an unreachable server is tolerated
     /// only once the room has already been verified current in this
-    /// process (the outbox may queue), otherwise the delivery error
-    /// surfaces and nothing is encrypted. Whatever the sync applied is
-    /// deferred into the next projection the caller receives.
+    /// process (the append then fails loudly on its own), otherwise the
+    /// delivery error surfaces and nothing is encrypted. Whatever the sync
+    /// applied is deferred into the next projection the caller receives.
     fn currency_gate_before_send(&mut self, room_id: &str) -> Result<(), FiniteChatCoreError> {
-        self.currency_gate_before_send_with(room_id, false)
-    }
-
-    /// `queued_send`: the caller is encrypting into the outbox, whose
-    /// release runs the gate again, so an unreachable server is tolerated
-    /// even before the room is verified (nothing leaves yet).
-    fn currency_gate_before_send_with(
-        &mut self,
-        room_id: &str,
-        queued_send: bool,
-    ) -> Result<(), FiniteChatCoreError> {
         match self.sync_room_with_projection(room_id) {
             Ok(projection) => {
                 self.deferred_projection.merge_earlier(projection);
                 Ok(())
             }
             Err(FiniteChatCoreError::Delivery { .. })
-                if queued_send || self.device.room_currency_verified(room_id) =>
+                if self.device.room_currency_verified(room_id) =>
             {
                 Ok(())
             }
@@ -10289,13 +9935,6 @@ fn project_decoded_chat_message(
         },
         attachment_blobs,
     ))
-}
-
-fn outbound_undelivered() -> OutboundDelivery {
-    OutboundDelivery {
-        local_send: OutboundLocalSendState::Sent,
-        server_delivery: OutboundServerDeliveryState::Undelivered,
-    }
 }
 
 fn outbound_delivered() -> OutboundDelivery {
@@ -11186,16 +10825,6 @@ fn record_attachment_blobs(
     }
 }
 
-/// The blob map carrying a single projected message's references.
-fn attachment_blob_map_for(
-    message: &ChatMessage,
-    blobs: MessageAttachmentBlobs,
-) -> AttachmentBlobMap {
-    let mut map = AttachmentBlobMap::new();
-    record_attachment_blobs(&mut map, message, blobs);
-    map
-}
-
 fn attachment_plaintext_matches(reference: &AttachmentBlobReferenceV1, plaintext: &[u8]) -> bool {
     plaintext.len() as u64 == reference.plaintext_size
         && sha256_hex(plaintext) == reference.plaintext_sha256
@@ -11296,90 +10925,6 @@ fn chat_message_from_stored_decoded(
         timestamp_unix_seconds: message.timestamp_unix_seconds,
     };
     project_decoded_chat_message(event, decoded, owner)
-}
-
-fn chat_message_from_outbox(
-    message: StoredOutboundMessage,
-    owner: &DeviceRef,
-) -> Option<(ChatMessage, MessageAttachmentBlobs)> {
-    if message.sender != *owner {
-        return None;
-    }
-    let local_send = match message.local_state {
-        StoredOutboundLocalState::Sending => OutboundLocalSendState::Sending,
-        StoredOutboundLocalState::Sent => OutboundLocalSendState::Sent,
-    };
-    let server_delivery = match message.server_delivery_state {
-        StoredOutboundServerDeliveryState::Undelivered => OutboundServerDeliveryState::Undelivered,
-        StoredOutboundServerDeliveryState::Failed { reason } => {
-            OutboundServerDeliveryState::Failed { reason }
-        }
-    };
-    let (mut projected, attachment_blobs) = project_chat_message(
-        message.room_id,
-        u64::MAX,
-        message.message_id,
-        message.sender,
-        message.plaintext,
-        message.timestamp_unix_seconds,
-        owner,
-    )?;
-    projected.outbound_delivery = Some(OutboundDelivery {
-        local_send,
-        server_delivery,
-    });
-    Some((projected, attachment_blobs))
-}
-
-fn failed_outbox_message(
-    mut message: StoredOutboundMessage,
-    reason: String,
-) -> StoredOutboundMessage {
-    message.local_state = StoredOutboundLocalState::Sent;
-    message.server_delivery_state = StoredOutboundServerDeliveryState::Failed { reason };
-    message
-}
-
-fn app_outbox_debug_row(
-    message: StoredOutboundMessage,
-) -> Result<AppOutboxDebugRow, FiniteChatCoreError> {
-    let append_request_message_id = message
-        .append_request
-        .envelope
-        .message_id()
-        .map_err(client_error)?;
-    Ok(AppOutboxDebugRow {
-        room_id: message.room_id,
-        message_id: message.message_id,
-        sender_account_id: message.sender.account_id,
-        sender_device_id: message.sender.device_id,
-        local_state: stored_outbound_local_state_label(&message.local_state).to_owned(),
-        server_delivery_state: stored_outbound_server_delivery_state_label(
-            &message.server_delivery_state,
-        )
-        .to_owned(),
-        append_request_room_id: message.append_request.room_id,
-        append_request_message_id,
-        append_request_sender_account_id: message.append_request.sender.account_id,
-        append_request_sender_device_id: message.append_request.sender.device_id,
-        idempotency_key_present: !message.append_request.idempotency_key.is_empty(),
-    })
-}
-
-fn stored_outbound_local_state_label(state: &StoredOutboundLocalState) -> &'static str {
-    match state {
-        StoredOutboundLocalState::Sending => "sending",
-        StoredOutboundLocalState::Sent => "sent",
-    }
-}
-
-fn stored_outbound_server_delivery_state_label(
-    state: &StoredOutboundServerDeliveryState,
-) -> &'static str {
-    match state {
-        StoredOutboundServerDeliveryState::Undelivered => "undelivered",
-        StoredOutboundServerDeliveryState::Failed { .. } => "failed",
-    }
 }
 
 #[cfg(test)]
@@ -17421,7 +16966,6 @@ mod tests {
         assert_eq!(state.profiles[0].npub, npub);
         assert!(state.profiles[0].stale);
         assert!(state.messages.is_empty());
-        assert!(runtime_outbox(&app).is_empty());
         drop(app);
 
         let reopened = FiniteChatRuntime::open(with_test_secret(OpenOptions {
@@ -19843,22 +19387,21 @@ mod tests {
     }
 
     #[test]
-    fn app_offline_text_send_persists_undelivered_outbox_across_force_close() {
+    fn app_offline_text_send_fails_loudly_and_persists_nothing() {
         let dir = tempfile::tempdir().unwrap();
         let server_url = spawn_live_http_server(dir.path().join("server.sqlite3"));
         let alice_dir = dir.path().join("alice");
         let alice = FiniteChatRuntime::open(with_test_secret(OpenOptions {
             data_dir: alice_dir.to_string_lossy().into_owned(),
-            server_url,
+            server_url: server_url.clone(),
             device_id: "alice-ios".to_owned(),
             account_secret_hex: None,
             now_unix_seconds: Some(NOW),
         }))
         .unwrap();
-
         let alice_state = alice
             .dispatch_and_wait(AppAction::CreateRoom {
-                display_name: "Local Outbox".to_owned(),
+                display_name: "No Outbox".to_owned(),
             })
             .unwrap();
         let room_id = alice_state.rooms.first().unwrap().room_id.clone();
@@ -19872,112 +19415,30 @@ mod tests {
             now_unix_seconds: Some(NOW),
         }))
         .unwrap();
-        let failed = offline
+        let error = offline
             .dispatch_and_wait(AppAction::SendMessage {
                 room_id: room_id.clone(),
-                text: "do not lose this".to_owned(),
+                text: "lost on purpose".to_owned(),
                 metadata_json: None,
             })
-            .unwrap();
-        assert_eq!(failed.status, "sent");
-        assert_eq!(failed.toast, None);
-        let failed_message = failed
-            .messages
-            .iter()
-            .find(|message| message.text == "do not lose this")
-            .expect("undelivered local message projects immediately");
-        assert_outbound_undelivered(failed_message);
-        let local_message_id = failed_message.message_id.clone();
-        drop(offline);
-
-        let reopened = FiniteChatRuntime::open(with_test_secret(OpenOptions {
-            data_dir: alice_dir.to_string_lossy().into_owned(),
-            server_url: unavailable_http_server_url(),
-            device_id: "alice-ios".to_owned(),
-            account_secret_hex: None,
-            now_unix_seconds: Some(NOW),
-        }))
-        .unwrap();
-        let local_snapshot = reopened.state().unwrap();
-        let reopened_message = local_snapshot
-            .messages
-            .iter()
-            .find(|message| message.text == "do not lose this")
-            .expect("undelivered local message survives force-close reopen");
-        assert_eq!(reopened_message.message_id, local_message_id);
-        assert_outbound_undelivered(reopened_message);
-        let outbox_rows = reopened.app_outbox_debug_rows().unwrap();
-        assert_eq!(outbox_rows.len(), 1);
-        let outbox_row = &outbox_rows[0];
-        assert_eq!(outbox_row.room_id, room_id);
-        assert_eq!(outbox_row.message_id, local_message_id);
-        assert_eq!(outbox_row.sender_device_id, "alice-ios");
-        assert_eq!(outbox_row.local_state, "sent");
-        assert_eq!(outbox_row.server_delivery_state, "undelivered");
-        assert_eq!(outbox_row.append_request_room_id, outbox_row.room_id);
-        assert_eq!(outbox_row.append_request_message_id, outbox_row.message_id);
-        assert_eq!(
-            outbox_row.append_request_sender_device_id,
-            outbox_row.sender_device_id
+            .expect_err("unreachable server must fail the send to the caller");
+        assert!(
+            matches!(error, FiniteChatCoreError::Delivery { .. }),
+            "expected a typed delivery error, got {error:?}"
+        );
+        let after_failure = offline.state().unwrap();
+        assert_eq!(after_failure.status, "delivery failed");
+        assert!(
+            after_failure
+                .toast
+                .as_deref()
+                .is_some_and(|toast| toast.starts_with("Message could not be sent:"))
         );
         assert!(
-            outbox_row.idempotency_key_present,
-            "durable outbox row should retain retry idempotency material"
+            after_failure.messages.is_empty(),
+            "a failed send must not leave a bubble in the projection"
         );
-        assert_eq!(
-            app_room(&local_snapshot, &room_id).last_message_preview,
-            "do not lose this"
-        );
-    }
-
-    #[test]
-    fn app_offline_text_send_auto_drains_after_force_close_without_duplicate() {
-        let dir = tempfile::tempdir().unwrap();
-        let server_url = spawn_live_http_server(dir.path().join("server.sqlite3"));
-        let alice_dir = dir.path().join("alice");
-        let alice = FiniteChatRuntime::open(with_test_secret(OpenOptions {
-            data_dir: alice_dir.to_string_lossy().into_owned(),
-            server_url: server_url.clone(),
-            device_id: "alice-ios".to_owned(),
-            account_secret_hex: None,
-            now_unix_seconds: Some(NOW),
-        }))
-        .unwrap();
-
-        let alice_state = alice
-            .dispatch_and_wait(AppAction::CreateRoom {
-                display_name: "Retry Outbox".to_owned(),
-            })
-            .unwrap();
-        let room_id = alice_state.rooms.first().unwrap().room_id.clone();
-        drop(alice);
-
-        let offline = FiniteChatRuntime::open(with_test_secret(OpenOptions {
-            data_dir: alice_dir.to_string_lossy().into_owned(),
-            server_url: unavailable_http_server_url(),
-            device_id: "alice-ios".to_owned(),
-            account_secret_hex: None,
-            now_unix_seconds: Some(NOW),
-        }))
-        .unwrap();
-        let failed = offline
-            .dispatch_and_wait(AppAction::SendMessage {
-                room_id: room_id.clone(),
-                text: "retry after force close".to_owned(),
-                metadata_json: None,
-            })
-            .unwrap();
-        let local_message_id = failed
-            .messages
-            .iter()
-            .find(|message| message.text == "retry after force close")
-            .expect("undelivered local message projects immediately")
-            .message_id
-            .clone();
-        let stale_outbox_row = runtime_outbox(&offline)
-            .into_iter()
-            .find(|message| message.message_id == local_message_id)
-            .expect("offline send should persist the outbox row");
+        assert_eq!(app_room(&after_failure, &room_id).last_message_preview, "");
         drop(offline);
 
         let reopened = FiniteChatRuntime::open(with_test_secret(OpenOptions {
@@ -19988,62 +19449,41 @@ mod tests {
             now_unix_seconds: Some(NOW),
         }))
         .unwrap();
-        let before_retry = reopened.state().unwrap();
-        let before_message = before_retry
-            .messages
-            .iter()
-            .find(|message| message.message_id == local_message_id)
-            .expect("undelivered row should be visible before drain");
-        assert_outbound_undelivered(before_message);
-
-        let drained = reopened.dispatch_and_wait(AppAction::StartRuntime).unwrap();
-        let accepted_messages = drained
-            .messages
-            .iter()
-            .filter(|message| message.text == "retry after force close")
-            .collect::<Vec<_>>();
-        assert_eq!(accepted_messages.len(), 1);
-        let accepted = accepted_messages[0];
-        assert_eq!(accepted.message_id, local_message_id);
-        assert_outbound_delivered(accepted);
         assert!(
-            runtime_outbox(&reopened).is_empty(),
-            "successful drain removes the exact undelivered outbox row"
+            reopened.state().unwrap().messages.is_empty(),
+            "a failed send must not survive a force-close reopen"
         );
-        reopened
-            .test_save_outbox(vec![stale_outbox_row.clone()])
+        let started = reopened.dispatch_and_wait(AppAction::StartRuntime).unwrap();
+        assert!(
+            started.messages.is_empty(),
+            "startup must not drain or resend anything from a failed send"
+        );
+
+        let sent = reopened
+            .dispatch_and_wait(AppAction::SendMessage {
+                room_id: room_id.clone(),
+                text: "sent once the server is back".to_owned(),
+                metadata_json: None,
+            })
             .unwrap();
+        assert_eq!(sent.status, "sent");
+        assert_eq!(sent.toast, None);
+        assert_eq!(sent.messages.len(), 1);
+        let delivered = &sent.messages[0];
+        assert_eq!(delivered.text, "sent once the server is back");
+        assert_outbound_delivered(delivered);
+        let effect = application_effect(&server_url, &delivered.message_id)
+            .expect("the fresh send is accepted under its own idempotency key");
+        assert_eq!(effect.room_id, room_id);
+        assert_eq!(effect.message_id, delivered.message_id);
         assert_eq!(
-            runtime_outbox(&reopened).len(),
-            1,
-            "test setup should recreate the stale accepted outbox row observed in the demo"
-        );
-        drop(reopened);
-
-        let persisted_runtime = FiniteChatRuntime::open(with_test_secret(OpenOptions {
-            data_dir: alice_dir.to_string_lossy().into_owned(),
-            server_url: unavailable_http_server_url(),
-            device_id: "alice-ios".to_owned(),
-            account_secret_hex: None,
-            now_unix_seconds: Some(NOW),
-        }))
-        .unwrap();
-        let persisted = persisted_runtime.state().unwrap();
-        let persisted_message = persisted
-            .messages
-            .iter()
-            .find(|message| message.text == "retry after force close")
-            .expect("accepted retry survives force-close reopen");
-        assert_eq!(persisted_message.message_id, local_message_id);
-        assert_outbound_delivered(persisted_message);
-        assert!(
-            runtime_outbox(&persisted_runtime).is_empty(),
-            "force-close reopen deletes stale outbox rows once the same local message id is delivered"
+            app_room(&sent, &room_id).last_message_preview,
+            "sent once the server is back"
         );
     }
 
     #[test]
-    fn app_server_rejected_text_send_requires_explicit_retry_with_same_outbox_identity() {
+    fn app_server_rejected_text_send_fails_loudly_and_persists_nothing() {
         let dir = tempfile::tempdir().unwrap();
         let original_server_url = spawn_live_http_server(dir.path().join("server.sqlite3"));
         let empty_server_url = spawn_live_http_server(dir.path().join("empty-server.sqlite3"));
@@ -20056,7 +19496,6 @@ mod tests {
             now_unix_seconds: Some(NOW),
         }))
         .unwrap();
-
         let alice_state = alice
             .dispatch_and_wait(AppAction::CreateRoom {
                 display_name: "Rejected Send".to_owned(),
@@ -20073,185 +19512,144 @@ mod tests {
             now_unix_seconds: Some(NOW),
         }))
         .unwrap();
-        let rejected = rejected_runtime
+        let error = rejected_runtime
             .dispatch_and_wait(AppAction::SendMessage {
                 room_id: room_id.clone(),
-                text: "retry only after server rejection".to_owned(),
+                text: "rejected by the server".to_owned(),
                 metadata_json: None,
             })
-            .unwrap();
-        assert_eq!(rejected.status, "delivery failed");
-        assert_eq!(
-            rejected.toast.as_deref(),
-            Some("Message delivery failed. Retry when ready.")
+            .expect_err("server rejection must fail the send to the caller");
+        match &error {
+            FiniteChatCoreError::ServerRejected { reason } => {
+                assert!(
+                    reason.contains("room_membership_conflict"),
+                    "rejection reason {reason:?} should name the server's cause"
+                );
+            }
+            other => panic!("expected a typed server rejection, got {other:?}"),
+        }
+        let after_rejection = rejected_runtime.state().unwrap();
+        assert_eq!(after_rejection.status, "delivery failed");
+        assert!(
+            after_rejection
+                .toast
+                .as_deref()
+                .is_some_and(|toast| toast.starts_with("Message could not be sent:"))
         );
-        let rejected_message = rejected
-            .messages
-            .iter()
-            .find(|message| message.text == "retry only after server rejection")
-            .expect("server-rejected local message stays visible");
-        assert_outbound_failed_contains(rejected_message, "room_membership_conflict");
-        let local_message_id = rejected_message.message_id.clone();
-        let failed_outbox = runtime_outbox(&rejected_runtime);
-        assert_eq!(failed_outbox.len(), 1);
-        let failed_row = failed_outbox[0].clone();
-        assert_eq!(failed_row.room_id, room_id);
-        assert_eq!(failed_row.message_id, local_message_id);
-        assert_eq!(failed_row.local_state, StoredOutboundLocalState::Sent);
-        assert!(matches!(
-            failed_row.server_delivery_state,
-            StoredOutboundServerDeliveryState::Failed { .. }
-        ));
-        let retry_idempotency_key = failed_row.append_request.idempotency_key.clone();
-        let retry_append_request = failed_row.append_request.clone();
-        assert_eq!(
-            application_effect(&original_server_url, &local_message_id),
-            None,
-            "rejection on another configured server must not create an app effect on the original server"
+        assert!(
+            after_rejection.messages.is_empty(),
+            "a rejected send must not leave a failed bubble"
         );
         drop(rejected_runtime);
 
         let reopened = FiniteChatRuntime::open(with_test_secret(OpenOptions {
             data_dir: alice_dir.to_string_lossy().into_owned(),
-            server_url: original_server_url.clone(),
+            server_url: original_server_url,
             device_id: "alice-ios".to_owned(),
             account_secret_hex: None,
             now_unix_seconds: Some(NOW),
         }))
         .unwrap();
-        let before_retry = reopened.dispatch_and_wait(AppAction::StartRuntime).unwrap();
-        let still_failed = before_retry
-            .messages
-            .iter()
-            .find(|message| message.message_id == local_message_id)
-            .expect("failed message survives force close");
-        assert_outbound_failed_contains(still_failed, "room_membership_conflict");
-        let failed_after_start = runtime_outbox(&reopened);
-        assert_eq!(failed_after_start.len(), 1);
-        assert_eq!(failed_after_start[0].append_request, retry_append_request);
-        assert_eq!(
-            failed_after_start[0].append_request.idempotency_key,
-            retry_idempotency_key
+        assert!(reopened.state().unwrap().messages.is_empty());
+        let started = reopened.dispatch_and_wait(AppAction::StartRuntime).unwrap();
+        assert!(
+            started.messages.is_empty(),
+            "nothing about the rejected send is stored, so nothing is retried"
         );
-        assert_eq!(
-            application_effect(&original_server_url, &local_message_id),
-            None,
-            "failed rows are excluded from automatic outbox drain"
-        );
-
-        let retried = reopened
+        let retry = reopened
             .dispatch_and_wait(AppAction::RetryMessage {
                 room_id: room_id.clone(),
-                message_id: local_message_id.clone(),
+                message_id: "anything".to_owned(),
             })
-            .unwrap();
-        let delivered = retried
-            .messages
-            .iter()
-            .find(|message| message.message_id == local_message_id)
-            .expect("retry reuses the original visible bubble");
-        assert_eq!(delivered.text, "retry only after server rejection");
-        assert_outbound_delivered(delivered);
+            .expect_err("retry is a typed not-supported error");
         assert!(
-            runtime_outbox(&reopened).is_empty(),
-            "successful retry removes the exact failed outbox row"
+            matches!(&retry, FiniteChatCoreError::Client { reason } if reason.contains("not supported")),
+            "unexpected retry error {retry:?}"
         );
-        let effect = application_effect(&original_server_url, &local_message_id)
-            .expect("retry creates one application delivery effect");
-        assert_eq!(effect.room_id, room_id);
-        assert_eq!(effect.message_id, local_message_id);
-        assert_eq!(effect.sender.device_id, "alice-ios");
     }
 
     #[test]
-    fn app_offline_attachment_send_fails_fast_without_outbox_or_bubble() {
+    fn app_behind_server_text_send_sets_transient_status_and_persists_nothing() {
         let dir = tempfile::tempdir().unwrap();
         let server_url = spawn_live_http_server(dir.path().join("server.sqlite3"));
         let alice_dir = dir.path().join("alice");
-        let alice = FiniteChatRuntime::open(with_test_secret(OpenOptions {
-            data_dir: alice_dir.to_string_lossy().into_owned(),
-            server_url,
-            device_id: "alice-ios".to_owned(),
-            account_secret_hex: None,
-            now_unix_seconds: Some(NOW),
-        }))
-        .unwrap();
+        let stale_dir = dir.path().join("alice-stale");
+        let secret_hex = test_account_secret_hex(&alice_dir.to_string_lossy());
+        let open = |data_dir: &Path| {
+            FiniteChatRuntime::open(OpenOptions {
+                data_dir: data_dir.to_string_lossy().into_owned(),
+                server_url: server_url.clone(),
+                device_id: "alice-ios".to_owned(),
+                account_secret_hex: Some(secret_hex.clone()),
+                now_unix_seconds: Some(NOW),
+            })
+            .unwrap()
+        };
 
-        let alice_state = alice
+        let alice = open(&alice_dir);
+        let room_id = alice
             .dispatch_and_wait(AppAction::CreateRoom {
-                display_name: "Offline Attachment Fail Fast".to_owned(),
+                display_name: "Rewound Store".to_owned(),
+            })
+            .unwrap()
+            .rooms
+            .first()
+            .unwrap()
+            .room_id
+            .clone();
+        drop(alice);
+        // Snapshot the store, then advance the live copy's ratchet past it.
+        copy_client_store(&alice_dir, &stale_dir);
+        let alice = open(&alice_dir);
+        alice
+            .dispatch_and_wait(AppAction::SendMessage {
+                room_id: room_id.clone(),
+                text: "advance the ratchet".to_owned(),
+                metadata_json: None,
             })
             .unwrap();
-        let room_id = alice_state.rooms.first().unwrap().room_id.clone();
         drop(alice);
 
-        let caption = "offline media should not send";
-        let plaintext = b"offline media must not create an outbox row".to_vec();
-        let offline = FiniteChatRuntime::open(with_test_secret(OpenOptions {
-            data_dir: alice_dir.to_string_lossy().into_owned(),
-            server_url: unavailable_http_server_url(),
-            device_id: "alice-ios".to_owned(),
-            account_secret_hex: None,
-            now_unix_seconds: Some(NOW),
-        }))
-        .unwrap();
-        let failed = offline
-            .dispatch_and_wait(AppAction::SendAttachment {
+        let stale = open(&stale_dir);
+        let error = stale
+            .dispatch_and_wait(AppAction::SendMessage {
                 room_id: room_id.clone(),
-                filename: "offline-photo.jpg".to_owned(),
-                mime_type: "image/jpeg".to_owned(),
-                kind: ChatMediaKind::Image,
-                bytes: plaintext.clone(),
-                caption: caption.to_owned(),
-                reply_to_message_id: None,
+                text: "refused on the rewound store".to_owned(),
+                metadata_json: None,
             })
-            .unwrap();
-        assert_eq!(failed.status, "attachment unavailable");
+            .expect_err("a rewound store must not send");
         assert!(
-            failed
-                .toast
-                .as_deref()
-                .is_some_and(|toast| { toast.starts_with("Attachment upload failed:") })
+            matches!(&error, FiniteChatCoreError::DeviceStateBehindServer { room_id: flagged, .. } if *flagged == room_id),
+            "expected a typed behind-server refusal, got {error:?}"
+        );
+        let after_refusal = stale.state().unwrap();
+        assert_eq!(after_refusal.status, "sending paused");
+        assert_eq!(
+            after_refusal.toast.as_deref(),
+            Some(
+                "This device's chat state is behind the server; sending is paused until the room is re-keyed"
+            )
         );
         assert!(
-            failed
+            after_refusal
                 .messages
                 .iter()
-                .all(|message| message.text != caption)
+                .all(|message| message.text != "refused on the rewound store"),
+            "a refused send must not leave a bubble"
         );
-        assert_eq!(app_room(&failed, &room_id).last_message_preview, "");
-        assert_eq!(app_room(&failed, &room_id).state, AppRoomState::Connected);
-        assert!(
-            runtime_outbox(&offline).is_empty(),
-            "unreachable attachment upload must not create a durable outbox row"
-        );
-        drop(offline);
+        drop(stale);
 
-        let reopened = FiniteChatRuntime::open(with_test_secret(OpenOptions {
-            data_dir: alice_dir.to_string_lossy().into_owned(),
-            server_url: unavailable_http_server_url(),
-            device_id: "alice-ios".to_owned(),
-            account_secret_hex: None,
-            now_unix_seconds: Some(NOW),
-        }))
-        .unwrap();
-        let local_snapshot = reopened.state().unwrap();
-        assert_eq!(
-            local_snapshot
+        let reopened = open(&stale_dir);
+        let persisted = reopened.state().unwrap();
+        assert!(
+            persisted
                 .messages
                 .iter()
-                .filter(|message| message.text == caption)
-                .count(),
-            0
+                .all(|message| message.text != "refused on the rewound store"),
+            "a refused send must not survive a reopen"
         );
-        assert_eq!(
-            app_room(&local_snapshot, &room_id).state,
-            AppRoomState::Connected
-        );
-        assert!(
-            runtime_outbox(&reopened).is_empty(),
-            "attachment fail-fast must survive force-close without durable outbox rows"
-        );
+        assert_ne!(persisted.status, "sending paused");
+        assert_eq!(persisted.toast, None);
     }
 
     #[test]
@@ -22404,7 +21802,6 @@ mod tests {
         );
         assert!(refreshed.devices.is_empty());
         assert!(refreshed.messages.is_empty());
-        assert!(runtime_outbox(&app).is_empty());
 
         let account_id = refreshed.identity.account_id.clone();
         let revoked = app
@@ -22420,7 +21817,6 @@ mod tests {
         );
         assert!(revoked.devices.is_empty());
         assert!(revoked.messages.is_empty());
-        assert!(runtime_outbox(&app).is_empty());
         assert!(app.test_revoked_devices().unwrap().is_empty());
     }
 
@@ -22470,7 +21866,6 @@ mod tests {
         let room = app_room(&after_start, &room_id);
         assert_eq!(room.state, AppRoomState::UnavailableOnDevice);
         assert_eq!(room.status, LOCAL_ROOM_UNAVAILABLE_STATUS);
-        assert!(runtime_outbox(&app).is_empty());
     }
 
     #[test]
@@ -22696,18 +22091,6 @@ mod tests {
         profile
     }
 
-    fn assert_outbound_undelivered(message: &ChatMessage) {
-        let outbound = message
-            .outbound_delivery
-            .as_ref()
-            .unwrap_or_else(|| panic!("missing outbound delivery on {}", message.message_id));
-        assert_eq!(outbound.local_send, OutboundLocalSendState::Sent);
-        assert_eq!(
-            outbound.server_delivery,
-            OutboundServerDeliveryState::Undelivered
-        );
-    }
-
     fn assert_outbound_delivered(message: &ChatMessage) {
         let outbound = message
             .outbound_delivery
@@ -22718,27 +22101,6 @@ mod tests {
             outbound.server_delivery,
             OutboundServerDeliveryState::Delivered
         );
-    }
-
-    fn assert_outbound_failed_contains(message: &ChatMessage, expected_reason: &str) {
-        let outbound = message
-            .outbound_delivery
-            .as_ref()
-            .unwrap_or_else(|| panic!("missing outbound delivery on {}", message.message_id));
-        assert_eq!(outbound.local_send, OutboundLocalSendState::Sent);
-        match &outbound.server_delivery {
-            OutboundServerDeliveryState::Failed { reason } => {
-                assert!(
-                    reason.contains(expected_reason),
-                    "failure reason {reason:?} should contain {expected_reason:?}"
-                );
-            }
-            other => panic!("expected failed outbound delivery, got {other:?}"),
-        }
-    }
-
-    fn runtime_outbox(runtime: &FiniteChatRuntime) -> Vec<StoredOutboundMessage> {
-        runtime.test_outbox().unwrap()
     }
 
     fn application_effect(

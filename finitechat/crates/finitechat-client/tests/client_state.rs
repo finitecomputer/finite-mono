@@ -4269,12 +4269,6 @@ fn currency_gate_refuses_sends_until_one_sync_tick_verifies_the_open() {
         matches!(&refused, ClientError::CurrencyUnverified { room_id } if room_id == ROOM_ID),
         "expected CurrencyUnverified, got {refused:?}"
     );
-    // The queued (outbox) variant refuses only on evidence, not on an
-    // unverified room; its release is gated by the caller.
-    reopened
-        .create_queued_application_request_at(ROOM_ID, b"queued offline", "t4_queued", NOW)
-        .unwrap();
-
     run_runtime_sync_tick(&mut bob_store, &mut reopened, &mut f.delivery, &f.options).unwrap();
     assert!(room_cursor(&reopened).currency_verified);
     let sent = send_recorded(

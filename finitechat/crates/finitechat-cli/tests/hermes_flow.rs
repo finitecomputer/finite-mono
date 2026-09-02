@@ -1,7 +1,7 @@
 use finite_identity::{FiniteIdentity, IdentityPaths};
 use finitechat_client::{
     FiniteChatDeviceConfig, FiniteChatDeviceState, SqliteClientStore, SqliteClientStoreOptions,
-    StoredAppEvent, StoredAppMessage, StoredAppRoom, StoredAppState, StoredOutboundMessage,
+    StoredAppEvent, StoredAppMessage, StoredAppRoom, StoredAppState,
 };
 use finitechat_core::{AppAction, AppRoomState, ChatMediaKind, FiniteChatRuntime, OpenOptions};
 use finitechat_hermes::HermesMessagePayloadV1;
@@ -648,8 +648,8 @@ fn app_cli_add_member_flow_uses_key_packages_and_welcomes() {
 }
 
 /// The full durable content of an agent store: device state (MLS ratchets
-/// and KeyPackage inventory), projected rooms, persisted app state, the
-/// outbox, and the stored message/event op log. A probe that writes anything
+/// and KeyPackage inventory), projected rooms, persisted app state, and the
+/// stored message/event op log. A probe that writes anything
 /// — a StartRuntime's KeyPackage publication, a Welcome activation, a
 /// persisted selection — changes this snapshot, so equality across a probe
 /// proves the probe did not write.
@@ -658,7 +658,6 @@ struct AgentStoreSnapshot {
     device: FiniteChatDeviceState,
     rooms: Vec<StoredAppRoom>,
     app_state: StoredAppState,
-    outbox: Vec<StoredOutboundMessage>,
     messages: Vec<StoredAppMessage>,
     events: Vec<StoredAppEvent>,
 }
@@ -688,7 +687,6 @@ fn snapshot_agent_store(agent_home: &str, device_id: &str, now: u64) -> AgentSto
         device: device.export_state().expect("device state exports"),
         rooms: store.load_app_rooms(&owner).expect("rooms load"),
         app_state: store.load_app_state(&owner).expect("app state loads"),
-        outbox: store.load_app_outbox(&owner).expect("outbox loads"),
         messages: store
             .load_app_messages(&owner, u32::MAX)
             .expect("messages load"),
