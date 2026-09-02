@@ -353,13 +353,18 @@ class Lat2ClosureArtifactTests(unittest.TestCase):
 
     def test_trap_refuses_to_revert_a_folded_chat_database(self) -> None:
         source = DEPLOY.read_text(encoding="utf-8")
-        self.assertIn('"$binary" rollback-check --sqlite "$sqlite"', source)
-        self.assertIn("""'"fold_complete":true'""", source)
-        self.assertIn("""'"rollback_allowed":false'""", source)
+        self.assertIn('timeout 60 "$binary" rollback-check --sqlite "$sqlite"', source)
+        # Fail closed: only a POSITIVE verdict (exit 0 + rollback_allowed:true)
+        # permits the revert; the guard never keys on a negative shape.
+        self.assertIn("""'"rollback_allowed":true'""", source)
+        self.assertNotIn("""'"rollback_allowed":false'""", source)
+        self.assertIn('|| check_status=$?', source)
+        self.assertIn("gave no positive safe verdict", source)
+        self.assertIn("guard not applicable", source)
         rollback = source.index("rollback() {")
         self.assertIn("if chat_fold_forbids_rollback; then", source[rollback:])
         self.assertIn("REFUSING to revert to $previous_system", source)
-        self.assertIn("An older binary must never serve the folded chat database", source)
+        self.assertIn("An older binary must never serve a chat database whose fold state is not proven safe", source)
         self.assertIn("ROLL FORWARD ONLY", source)
         # The binary and database come from the candidate closure's own
         # unit file, not from a hard-coded store path.
@@ -385,8 +390,9 @@ class Lat2ClosureArtifactTests(unittest.TestCase):
                 shims,
                 "finitechat-server",
                 'if [[ "$1" != "rollback-check" ]]; then echo unknown >&2; exit 2; fi\n'
+                '[[ -z "${FAKE_VERDICT-}" ]] || printf \'%s\\n\' "$FAKE_VERDICT"\n'
+                '[[ -z "${FAKE_EXIT-}" ]] || exit "$FAKE_EXIT"\n'
                 '[[ -n "${FAKE_VERDICT-}" ]] || exit 1\n'
-                'printf \'%s\\n\' "$FAKE_VERDICT"\n'
                 '[[ "$FAKE_VERDICT" == *\'"rollback_allowed":true\'* ]]\n',
             )
             system = root / "system"
@@ -411,7 +417,7 @@ class Lat2ClosureArtifactTests(unittest.TestCase):
                 encoding="utf-8",
             )
 
-            def run(failed: str, verdict: str | None) -> str:
+            def run(failed: str, verdict: str | None, exit_status: int | None = None) -> str:
                 env = {
                     **os.environ,
                     "PATH": f"{shims}{os.pathsep}{os.environ['PATH']}",
@@ -419,6 +425,8 @@ class Lat2ClosureArtifactTests(unittest.TestCase):
                 }
                 if verdict is not None:
                     env["FAKE_VERDICT"] = verdict
+                if exit_status is not None:
+                    env["FAKE_EXIT"] = str(exit_status)
                 result = subprocess.run(
                     ["bash", str(probe)],
                     env=env,
@@ -443,11 +451,19 @@ class Lat2ClosureArtifactTests(unittest.TestCase):
                 },
                 separators=(",", ":"),
             )
+            # Decision table (candidate closure ships finitechat-server):
+            #   exit 1 + rollback_allowed:false   -> FORBID (reason relayed)
+            #   exit 0 + rollback_allowed:true    -> ALLOW
+            #   no output, nonzero exit           -> FORBID
+            #   rollback_allowed:true, exit 1     -> FORBID (exit status wins)
+            #   exit 0, unparseable output        -> FORBID
+            #   database path missing             -> FORBID
+            #   no chat unit in the closure       -> guard not applicable
             out = run(monitoring_only, forbid)
             head, _, verdict = out.partition("---\n")
             self.assertEqual(head.strip(), "")
             self.assertIn("FORBID\n", verdict)
-            self.assertIn("reason=post-fold writes exist: roll forward instead", verdict)
+            self.assertIn("rollback-check exited 1 (post-fold writes exist: roll forward instead)", verdict)
 
             core_down = monitoring_only + "finitechat-server.service loaded failed failed Chat\n"
             allow = forbid.replace('"rollback_allowed":false', '"rollback_allowed":true')
@@ -455,17 +471,35 @@ class Lat2ClosureArtifactTests(unittest.TestCase):
             head, _, verdict = out.partition("---\n")
             self.assertEqual(head.split(), ["finitechat-server.service"])
             self.assertIn("ALLOW\n", verdict)
+            self.assertIn("reason=rollback-check exit 0, rollback_allowed:true", verdict)
 
-            # A candidate binary without the subcommand yields no verdict:
-            # the trap keeps the pre-existing revert behavior, loudly.
+            # A candidate binary that prints no verdict (e.g. lacks the
+            # subcommand) leaves the fold state unknown: forbid.
             out = run("", None)
-            self.assertIn("ALLOW\n", out)
-            self.assertIn("reason=rollback-check produced no verdict", out)
+            self.assertIn("FORBID\n", out)
+            self.assertIn("reason=rollback-check exited 1 (no verdict printed)", out)
 
-            # A closure without the chat server never consults the guard.
+            # Exit status wins over reassuring text.
+            out = run("", allow, exit_status=1)
+            self.assertIn("FORBID\n", out)
+            self.assertIn("reason=rollback-check exited 1 (", out)
+
+            # Exit 0 without a parseable positive verdict is not positive.
+            out = run("", "not a verdict", exit_status=0)
+            self.assertIn("FORBID\n", out)
+            self.assertIn("without a parseable rollback_allowed:true verdict", out)
+
+            # Missing database path: unknown fold state, forbid.
+            sqlite.unlink()
+            out = run("", allow)
+            self.assertIn("FORBID\n", out)
+            self.assertIn("rollback-check unavailable", out)
+
+            # A closure without the chat server: the guard does not apply.
             (units / "finitechat-server.service").unlink()
             out = run("", forbid)
             self.assertIn("ALLOW\n", out)
+            self.assertIn("guard not applicable", out)
 
     def test_go_live_requires_product_health_after_the_switch(self) -> None:
         source = DEPLOY.read_text(encoding="utf-8")

@@ -357,27 +357,46 @@ start_monitoring_timers() {
   done
 }
 # Chat fold guard. The candidate closure's own unit file names the binary
-# and the SQLite path; that binary's read-only `rollback-check` says whether
-# the pre-fold restore is still legal. fold_complete=true with
-# rollback_allowed=false means the folded database already has post-fold
-# writes: an older binary must never serve it, so the trap may only roll
-# forward. Returns 0 exactly when reverting the binary is forbidden.
+# and the SQLite path; that binary's read-only `rollback-check` exits 0 only
+# when restoring the pre-fold backup is still safe (every failure to open or
+# read the database refuses). The trap may revert the binary only on that
+# POSITIVE verdict: exit 0 AND "rollback_allowed":true in the printed JSON.
+# Anything else — nonzero exit, unparseable output, missing binary or
+# database, timeout — forbids the revert: an older binary must never serve a
+# database whose fold state is unknown. A candidate closure that ships no
+# chat unit is the one case the guard does not apply to.
 chat_unit_file="$system/etc/systemd/system/finitechat-server.service"
 chat_fold_reason=""
+chat_fold_guard_applies() {
+  [[ -e "$chat_unit_file" ]]
+}
+# Returns 0 exactly when reverting the binary is forbidden.
 chat_fold_forbids_rollback() {
-  local exec_start binary sqlite verdict
-  [[ -e "$chat_unit_file" ]] || return 1
+  local exec_start binary sqlite verdict check_status reason
+  if ! chat_fold_guard_applies; then
+    chat_fold_reason="candidate closure ships no finitechat-server unit; guard not applicable"
+    return 1
+  fi
   exec_start="$(sed -n 's/^ExecStart=//p' "$chat_unit_file" | head -n 1)"
   binary="${exec_start%% *}"
   sqlite="$(printf '%s\n' "$exec_start" | sed -n 's/.*--sqlite \([^ ]*\).*/\1/p')"
   if [[ ! -x "$binary" || -z "$sqlite" || ! -e "$sqlite" ]]; then
-    chat_fold_reason="rollback-check unavailable (binary=${binary:-?} sqlite=${sqlite:-?})"
-    return 1
+    chat_fold_reason="rollback-check unavailable (binary=${binary:-?} sqlite=${sqlite:-?}); fold state unknown"
+    return 0
   fi
-  verdict="$("$binary" rollback-check --sqlite "$sqlite" 2>/dev/null || true)"
-  chat_fold_reason="$(printf '%s\n' "$verdict" | sed -n 's/.*"reason":"\([^"]*\)".*/\1/p')"
-  [[ -n "$chat_fold_reason" ]] || chat_fold_reason="rollback-check produced no verdict"
-  [[ "$verdict" == *'"fold_complete":true'* && "$verdict" == *'"rollback_allowed":false'* ]]
+  check_status=0
+  verdict="$(timeout 60 "$binary" rollback-check --sqlite "$sqlite" 2>/dev/null)" || check_status=$?
+  reason="$(printf '%s\n' "$verdict" | sed -n 's/.*"reason":"\([^"]*\)".*/\1/p')"
+  if [[ "$check_status" != 0 ]]; then
+    chat_fold_reason="rollback-check exited $check_status (${reason:-no verdict printed})"
+    return 0
+  fi
+  if [[ "$verdict" != *'"rollback_allowed":true'* ]]; then
+    chat_fold_reason="rollback-check exited 0 without a parseable rollback_allowed:true verdict (${verdict:-no output})"
+    return 0
+  fi
+  chat_fold_reason="rollback-check exit 0, rollback_allowed:true (${reason:-no reason given})"
+  return 1
 }
 # A post-switch verification failure must reach the ERR trap (a bare `exit 1`
 # inside `|| { ...; }` never did): the failing command after the final `||`
@@ -398,14 +417,14 @@ if [[ -n "$pre_failed" ]]; then
   exit 1
 fi
 
-if [[ -e "$chat_unit_file" ]]; then
-  if chat_fold_forbids_rollback; then
-    echo "==> chat fold guard: rollback-check FORBIDS reverting the binary ($chat_fold_reason);"
-    echo "    a failed activation will ROLL FORWARD ONLY"
-  else
-    echo "==> chat fold guard: rollback-check permits a revert for now ($chat_fold_reason);"
-    echo "    re-checked at rollback time, because the switch itself may fold the database"
-  fi
+if ! chat_fold_guard_applies; then
+  echo "==> chat fold guard: candidate closure ships no finitechat-server unit; guard not applicable"
+elif chat_fold_forbids_rollback; then
+  echo "==> chat fold guard: rollback-check FORBIDS reverting the binary ($chat_fold_reason);"
+  echo "    a failed activation will ROLL FORWARD ONLY"
+else
+  echo "==> chat fold guard: positive safe verdict for now ($chat_fold_reason);"
+  echo "    re-checked at rollback time, because the switch itself may fold the database"
 fi
 
 rollback() {
@@ -413,8 +432,8 @@ rollback() {
   trap - ERR
   if chat_fold_forbids_rollback; then
     echo "activation failed (exit $status) but REFUSING to revert to $previous_system:" >&2
-    echo "finitechat-server rollback-check reports fold_complete=true rollback_allowed=false" >&2
-    echo "($chat_fold_reason). An older binary must never serve the folded chat database;" >&2
+    echo "finitechat-server rollback-check gave no positive safe verdict ($chat_fold_reason)." >&2
+    echo "An older binary must never serve a chat database whose fold state is not proven safe;" >&2
     echo "ROLL FORWARD ONLY: $system stays in place — fix and activate a newer closure." >&2
     exit "$status"
   fi
