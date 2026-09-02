@@ -1166,11 +1166,23 @@ impl Probe<'_> {
     ) -> Result<std::process::Output, String> {
         let mut command = Command::new(program);
         command.args(&args);
-        let child = command
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .spawn()
-            .map_err(|error| format!("{}: {error}", program.display()))?;
+        command.stdout(Stdio::piped()).stderr(Stdio::piped());
+        // Linux can refuse to exec a freshly written executable with ETXTBSY
+        // while another thread's fork still holds its write handle between
+        // fork and exec (the CI harness hits this on the fixture's fake
+        // provider). The condition clears within milliseconds; retry a few
+        // times before treating it as a provider failure.
+        let mut attempt = 0u32;
+        let child = loop {
+            match command.spawn() {
+                Ok(child) => break child,
+                Err(error) if error.raw_os_error() == Some(26) && attempt < 5 => {
+                    attempt += 1;
+                    std::thread::sleep(Duration::from_millis(20 * u64::from(attempt)));
+                }
+                Err(error) => return Err(format!("{}: {error}", program.display())),
+            }
+        };
         wait_with_captured_output(child, program, self.config.command_timeout)
             .map_err(|error| error.to_string())
     }
