@@ -156,12 +156,21 @@ export function chatContentIsRenderable(
   return transcriptItemCount > 0 || Boolean(activityLabel);
 }
 
-export function attachmentSendError(
-  state: Pick<AppState, "status" | "toast">
-) {
-  return state.status === "attachment unavailable"
-    ? state.toast || "Attachment upload failed."
-    : null;
+/**
+ * Core swallows a refused send into the projection as a transient `status`
+ * plus `toast` rather than a bubble. These are the send outcomes the
+ * composer must show; the toast is the copy, and the fallback only covers
+ * a projection that set the status without one.
+ */
+const SEND_REFUSAL_FALLBACK: Record<string, string> = {
+  "attachment unavailable": "Attachment upload failed.",
+  "sending paused": "Sending is paused until this device's chat state catches up with the server.",
+  "waiting for sync": "Waiting for the first sync before sending.",
+};
+
+export function sendError(state: Pick<AppState, "status" | "toast">) {
+  const fallback = SEND_REFUSAL_FALLBACK[state.status];
+  return fallback === undefined ? null : state.toast || fallback;
 }
 
 function collapseMessageEdits(messages: ChatMessage[]) {

@@ -57,6 +57,43 @@ export function hostedWebChatErrorMessage(error: unknown) {
   return error instanceof HostedWebChatError ? error.message : CHAT_UNAVAILABLE_MESSAGE;
 }
 
+export type HostedWebChatErrorBody = {
+  error: string;
+  code?: string;
+  error_kind?: string;
+  retryable?: boolean;
+};
+
+/**
+ * The proxy's answer for a failed chat request. Product errors keep their
+ * status and copy. A hosted-device core refusal that arrived with its
+ * classification envelope passes through unchanged (status, kind, retry
+ * decision, message) so a currency-gate refusal is not mistaken for an
+ * outage and retried; anything without an envelope is an infrastructure
+ * failure and reads as one.
+ */
+export function hostedWebChatErrorResponse(
+  error: unknown
+): { status: number; body: HostedWebChatErrorBody } {
+  if (error instanceof HostedWebChatError) {
+    return {
+      status: error.status,
+      body: { error: error.message, ...(error.code ? { code: error.code } : {}) },
+    };
+  }
+  if (error instanceof HostedDeviceRequestError && error.kind) {
+    return {
+      status: error.status,
+      body: {
+        error: error.message,
+        error_kind: error.kind,
+        retryable: error.retryable ?? false,
+      },
+    };
+  }
+  return { status: 502, body: { error: CHAT_UNAVAILABLE_MESSAGE } };
+}
+
 export function isAgentBindingAuthorizationRequired(error: unknown) {
   return (
     error instanceof HostedDeviceRequestError &&

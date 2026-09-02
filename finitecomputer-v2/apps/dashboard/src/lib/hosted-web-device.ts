@@ -10,7 +10,11 @@ export type HostedRequesterContext = {
 export class HostedDeviceRequestError extends Error {
   constructor(
     message: string,
-    readonly status: number
+    readonly status: number,
+    /** `error_kind` from a hosted-device core error envelope, when one was sent. */
+    readonly kind?: string,
+    /** The core's own retry decision; absent when the response carried no envelope. */
+    readonly retryable?: boolean
   ) {
     super(message);
     this.name = "HostedDeviceRequestError";
@@ -447,7 +451,7 @@ export async function hostedDeviceBrainIdentityProvider(
     signal: AbortSignal.timeout(HOSTED_DEVICE_TIMEOUT_MS),
   });
   if (!response.ok) {
-    throw new HostedDeviceRequestError(await responseError(response), response.status);
+    throw await hostedDeviceRequestError(response);
   }
   return response.json() as Promise<BrainIdentityProviderResponse>;
 }
@@ -472,7 +476,7 @@ export async function hostedDeviceSitesIdentityProvider(
     signal: AbortSignal.timeout(HOSTED_DEVICE_TIMEOUT_MS),
   });
   if (!response.ok) {
-    throw new HostedDeviceRequestError(await responseError(response), response.status);
+    throw await hostedDeviceRequestError(response);
   }
   return response.json() as Promise<SitesIdentityProviderResponse>;
 }
@@ -618,7 +622,7 @@ export async function hostedDeviceResumeEnrollment(
     signal: AbortSignal.timeout(HOSTED_DEVICE_TIMEOUT_MS),
   });
   if (!response.ok) {
-    throw new HostedDeviceRequestError(await responseError(response), response.status);
+    throw await hostedDeviceRequestError(response);
   }
   return parseHostedDeviceLinkResponse(await response.json(), input);
 }
@@ -682,7 +686,7 @@ export async function hostedDeviceProfileImage(
     signal: AbortSignal.timeout(HOSTED_DEVICE_TIMEOUT_MS),
   });
   if (!response.ok) {
-    throw new HostedDeviceRequestError(await responseError(response), response.status);
+    throw await hostedDeviceRequestError(response);
   }
   const result = (await response.json()) as { image_url?: unknown };
   if (typeof result.image_url !== "string" || !result.image_url.trim()) {
@@ -745,7 +749,7 @@ async function hostedDeviceJson<T>(
       status: response.status,
       errorClass: "downstream_http",
     });
-    throw new HostedDeviceRequestError(await responseError(response), response.status);
+    throw await hostedDeviceRequestError(response);
   }
   return response.json() as Promise<T>;
 }
@@ -928,15 +932,27 @@ function parseHostedDeviceReconcileResponse(
   };
 }
 
-async function responseError(response: Response) {
+async function hostedDeviceRequestError(response: Response) {
   const text = await response.text();
   try {
-    const parsed = JSON.parse(text) as { error?: unknown };
+    const parsed = JSON.parse(text) as {
+      error?: unknown;
+      error_kind?: unknown;
+      retryable?: unknown;
+    };
     if (typeof parsed.error === "string" && parsed.error.trim()) {
-      return parsed.error;
+      return new HostedDeviceRequestError(
+        parsed.error,
+        response.status,
+        typeof parsed.error_kind === "string" ? parsed.error_kind : undefined,
+        typeof parsed.retryable === "boolean" ? parsed.retryable : undefined
+      );
     }
   } catch {
     // Preserve the bounded plain-text response below.
   }
-  return text.slice(0, 500) || "Chat is unavailable right now.";
+  return new HostedDeviceRequestError(
+    text.slice(0, 500) || "Chat is unavailable right now.",
+    response.status
+  );
 }
