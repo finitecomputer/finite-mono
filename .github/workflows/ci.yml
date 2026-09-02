@@ -229,9 +229,10 @@ jobs:
       run:
         working-directory: finitechat
     env:
-      LEGACY_HERMES_AGENT_REV: "a91a57fa5a13d516c38b07a141a9ce8a3daabeb0"
       # The upstream PyPI channel is retired; use the pinned upstream Nix
-      # package instead of downloading GitHub archives during CI.
+      # package instead of downloading GitHub archives during CI. The pin
+      # lives in flake.lock (hermes-agent, fetched from the codeload
+      # archive endpoint — see flake.nix); no live getFlake fetches here.
       HERMES_AGENT_NIX_ATTR: ".#packages.x86_64-linux.hermes-agent-runtime"
       HERMES_AGENT_PYTHON_NIX_ATTR: ".#packages.x86_64-linux.hermes-agent-runtime-python"
       NIX_CONFIG: |
@@ -330,7 +331,6 @@ jobs:
           BUILD_PLAN: ${{ runner.temp }}/hermes-agent-runtime-build-plan
           HERMES_AGENT_RUNTIME_OUTPUT: ${{ runner.temp }}/hermes-agent-runtime-output
           HERMES_AGENT_PYTHON_OUTPUT: ${{ runner.temp }}/hermes-agent-runtime-python-output
-          LEGACY_HERMES_AGENT_PYTHON_OUTPUT: ${{ runner.temp }}/legacy-hermes-agent-python-output
         run: |
           set -euo pipefail
 
@@ -345,23 +345,15 @@ jobs:
             "$HERMES_AGENT_NIX_ATTR" | tee "$HERMES_AGENT_RUNTIME_OUTPUT"
           nix build --no-link --print-build-logs --print-out-paths --option builders '' \
             "$HERMES_AGENT_PYTHON_NIX_ATTR" | tee "$HERMES_AGENT_PYTHON_OUTPUT"
-          legacy_hermes_expr="(builtins.getFlake \"github:NousResearch/hermes-agent/$LEGACY_HERMES_AGENT_REV\").packages.x86_64-linux.default.hermesVenv"
-          nix build --no-link --print-build-logs --print-out-paths --option builders '' \
-            --expr "$legacy_hermes_expr" | tee "$LEGACY_HERMES_AGENT_PYTHON_OUTPUT"
 
           hermes_agent_runtime="$(grep -E '^/nix/store/' "$HERMES_AGENT_RUNTIME_OUTPUT" | tail -n 1)"
           hermes_agent_python="$(grep -E '^/nix/store/' "$HERMES_AGENT_PYTHON_OUTPUT" | tail -n 1)"
-          legacy_hermes_agent_python="$(grep -E '^/nix/store/' "$LEGACY_HERMES_AGENT_PYTHON_OUTPUT" | tail -n 1)"
           if [[ -z "$hermes_agent_runtime" || ! -x "$hermes_agent_runtime/bin/hermes" ]]; then
             echo "::error::Hermes Agent Nix runtime did not produce an executable hermes"
             exit 1
           fi
           if [[ -z "$hermes_agent_python" || ! -x "$hermes_agent_python/bin/python3" ]]; then
             echo "::error::Hermes Agent Nix environment did not produce an executable python3"
-            exit 1
-          fi
-          if [[ -z "$legacy_hermes_agent_python" || ! -x "$legacy_hermes_agent_python/bin/python3" ]]; then
-            echo "::error::Legacy Hermes Agent Nix environment did not produce an executable python3"
             exit 1
           fi
 
@@ -372,17 +364,11 @@ jobs:
           import hermes_cli.plugins
           assert importlib.metadata.version("hermes-agent") == sys.argv[1]
           PY
-          "$legacy_hermes_agent_python/bin/python3" - <<'PY'
-          import importlib.metadata
-          assert importlib.metadata.version("hermes-agent") == "0.14.0"
-          PY
 
           {
             echo "path=$hermes_agent_runtime"
             echo "python_path=$hermes_agent_python"
             echo "python=$hermes_agent_python/bin/python3"
-            echo "legacy_python_path=$legacy_hermes_agent_python"
-            echo "legacy_python=$legacy_hermes_agent_python/bin/python3"
           } >> "$GITHUB_OUTPUT"
 
       - name: Push Hermes Agent runtime closure
@@ -437,16 +423,6 @@ jobs:
           HERMES_AGENT_PYTHON: ${{ steps.hermes_agent_runtime.outputs.python }}
         run: |
           "$HERMES_AGENT_PYTHON" -m unittest discover -s tests -p '*test*.py'
-
-      - name: Legacy Hermes mixed-version migration tests
-        working-directory: ${{ github.workspace }}
-        env:
-          HERMES_AGENT_PYTHON: ${{ steps.hermes_agent_runtime.outputs.python }}
-          LEGACY_HERMES_AGENT_PYTHON: ${{ steps.hermes_agent_runtime.outputs.legacy_python }}
-        run: |
-          "$HERMES_AGENT_PYTHON" -m unittest \
-            scripts.tests.test_legacy_hermes_migration \
-            finitechat.tests.hermes.test_legacy_hermes_migration
 
   skills-check:
     name: Skills static check

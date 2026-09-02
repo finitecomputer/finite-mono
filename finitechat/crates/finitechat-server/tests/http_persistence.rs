@@ -7290,6 +7290,18 @@ async fn sqlite_boot_prefers_v2_snapshot_over_stale_legacy_row() {
     {
         let json = zstd::decode_all(compressed.as_slice()).expect("decompress snapshot");
         let conn = rusqlite::Connection::open(&db_path).expect("open raw");
+        // The v1 DDL is gone (#786 dropped it), but the scenario this test
+        // pins — a database last snapshot-written by a pre-v2 build — really
+        // carries the legacy table; fabricate it exactly as that build did.
+        conn.execute(
+            "CREATE TABLE IF NOT EXISTS http_state_snapshots (
+                id INTEGER PRIMARY KEY CHECK (id = 1),
+                last_op_seq INTEGER NOT NULL,
+                snapshot_json TEXT NOT NULL
+            )",
+            [],
+        )
+        .expect("fabricate legacy v1 table");
         conn.execute(
             "INSERT INTO http_state_snapshots (id, last_op_seq, snapshot_json)
              VALUES (1, ?1, ?2)",
