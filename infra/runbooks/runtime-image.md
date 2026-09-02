@@ -311,8 +311,9 @@ Verify after completion:
 
 1. Core's admin Runtime overview reports the target artifact id and `online`.
 2. `nerdctl --namespace finite inspect <source-machine-id>` reports the target
-   digest and the unchanged `/var/lib/finite-saas-runner/kata/<source-machine-id>:/data`
-   bind.
+   digest and the unchanged `/var/lib/finite-saas-runner/kata/<durable-state-id>:/data`
+   bind (the durable state id is the Agent Runtime id; the durable root is
+   never named by the source machine id).
 3. `/contact` reports the pre-upgrade Agent Principal, and existing chat,
    attachments, workspace, Sites state, and agentd ledger remain accessible.
 
