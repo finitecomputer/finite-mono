@@ -309,7 +309,7 @@ function ProvisionedRuntimeRow({
             artifact {runtime.runtime_artifact_version_label ?? runtime.runtime_artifact_id ?? "none"}
           </span>
           <span>
-            heartbeat {heartbeatLabel(runtime.last_heartbeat_at)}
+            health {runtimeHealthLabel(runtime)}
             {" · "}
             hermes {runtime.hermes_available == null ? "unknown" : runtime.hermes_available ? "yes" : "no"}
             {" · "}
@@ -532,11 +532,22 @@ function runtimeStatusPillClass(status: CoreRuntimeStatus) {
   return "border-border text-muted-foreground";
 }
 
-function heartbeatLabel(lastHeartbeatAt: string | null | undefined) {
-  if (!lastHeartbeatAt) {
-    return "never";
+/**
+ * The evidence behind the derived status pill: the latest health report's
+ * state and when the runner observed it (absolute, like every other admin
+ * timestamp), plus the raw lifecycle latch whenever it differs.
+ */
+function runtimeHealthLabel(runtime: CoreAdminRuntimeOverview) {
+  const health = runtime.runtime_health;
+  const observedAt = health?.observed_at ?? health?.reported_at;
+  const parts = [
+    `${health?.status ?? "unknown"}${health?.reason ? ` (${health.reason})` : ""}`,
+    observedAt ? `observed ${formatAdminDate(observedAt)}` : "never reported",
+  ];
+  if (runtime.lifecycle_status && runtime.lifecycle_status !== runtime.runtime_status) {
+    parts.push(`lifecycle ${runtime.lifecycle_status}`);
   }
-  return formatAdminDate(lastHeartbeatAt);
+  return parts.join(", ");
 }
 
 function formatAdminDate(value: string) {

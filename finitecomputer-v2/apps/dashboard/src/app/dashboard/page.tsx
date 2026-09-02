@@ -55,7 +55,7 @@ import {
   type CoreMeResult,
   type CoreVisibleProject,
 } from "@/lib/core-client";
-import { runtimePrismState } from "@/lib/runtime-presentation";
+import { runtimeHealthSentence, runtimePrismState } from "@/lib/runtime-presentation";
 import {
   BILLING_SYNC_MAX_POLL_INTERVAL_MS,
   BILLING_SYNC_POLL_INTERVAL_MS,
@@ -867,11 +867,19 @@ function CoreProjectCard({
   const statusLabel = coreProjectLaunchStatusLabel(project, request);
   const runtimeStatus = project.runtime?.runtime_status ?? "unknown";
   const heroState = runtimePrismState(runtimeStatus);
-  const description = request?.status === "failed"
+  const statusDescription = request?.status === "failed"
     ? "We could not start this agent. Ask a team member to retry it."
     : statusLabel === "Online"
       ? "Your agent is online."
       : statusLabel || coreProjectLocationLabel(project, request);
+  // The status rests on the runner's standing checks; say how fresh they are.
+  const healthSentence =
+    project.runtime && request?.status !== "failed"
+      ? runtimeHealthSentence(runtimeStatus, project.runtime.runtime_health)
+      : "";
+  const description = healthSentence
+    ? `${statusDescription} ${healthSentence}`
+    : statusDescription;
 
   return (
     <AgentHeroCard
