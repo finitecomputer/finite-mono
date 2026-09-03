@@ -1,8 +1,8 @@
 # FiKnight cross-account Chat handoff investigation — 2026-09-02
 
-Status: **local handoff rehearsal passed; production remains blocked pending a
-fresh backup, reviewed cutover procedure, and explicit authorization. Do not
-retry `Finish chat setup`.**
+Status: **local handoff rehearsal passed; the authorized production cutover was
+rolled back and is now paused because the current method causes platform-wide
+Chat downtime. Do not reuse an attempt artifact or retry `Finish chat setup`.**
 
 This investigation explains why transferring the Core Project did not transfer
 the existing FiKnight conversation to the new `fiknight@finite.vip` login. It
@@ -194,7 +194,12 @@ A purpose-built, one-time cross-account canonical Room handoff now exists on
 this draft branch. It is intentionally absent from UniFFI and HTTP product
 surfaces, accepts only loopback Room-server URLs and marked scratch roots, and
 must remain unmerged. It has been proven on synthetic state and the restored
-production-shaped snapshot. It has not been run against production.
+production-shaped snapshot. It was later used to build transformed files from
+a stopped production copy during the authorized cutover. The first install was
+automatically rolled back before the Core transaction started, and the second
+attempt stopped after its fresh ciphertext copy. No production handoff
+completed. See the
+[paused cutover checkpoint](fiknight-account-transfer-2026-09-02.md#paused-production-cutover-checkpoint).
 
 The implemented phases are:
 
@@ -247,8 +252,10 @@ as migration-path proof or silently omitted.
 
 PR #813 remains draft and must never be merged. The existing Core SQL is
 retained as a review artifact and refuses to run without an explicit
-`fiknight_cross_account_handoff_ready` psql variable. The local prerequisites
-now pass, but that variable must not be used until a fresh coordinated backup,
-the local-to-production store replacement/fencing procedure, and a new explicit
-production authorization are recorded. FiKnight is the first migration; R2D2
-must not begin until FiKnight completes its live acceptance checks.
+`fiknight_cross_account_handoff_ready` psql variable. The paused attempt's
+copies, ledgers, prepared commits, migration IDs, and install images are stale
+evidence and must not be reused. A future attempt requires a newly approved
+availability design, fresh coordinated backup and state capture, updated
+Runtime fence and rehearsal, and new explicit production authorization.
+FiKnight is the first migration; R2D2 must not begin until FiKnight completes
+its live acceptance checks.

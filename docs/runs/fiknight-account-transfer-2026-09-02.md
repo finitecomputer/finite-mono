@@ -1,8 +1,12 @@
 # FiKnight account transfer — 2026-09-02
 
-> **PRODUCTION BLOCKED — local Chat handoff rehearsal passed; do not execute
-> stage or finalize without a fresh backup, reviewed cutover procedure, and new
-> explicit authorization.** The Core-only transfer does not transfer
+> **PRODUCTION PAUSED — do not resume this cutover or reuse any staged
+> artifact.** The local Chat handoff rehearsal passed, but the current
+> writer-fenced method causes platform-wide Chat downtime. Austin paused the
+> migration on 2026-09-02 after service was restored. Any later attempt requires
+> a newly approved availability plan, fresh backup and stopped-writer copy,
+> refreshed Runtime fence, and new explicit authorization. The Core-only
+> transfer does not transfer
 > cryptographic Chat Room membership or retained history. The first attempt was
 > rolled back after FiKnight received a new empty Room. See
 > [the cross-account Chat handoff investigation](fiknight-chat-handoff-investigation-2026-09-02.md).
@@ -37,6 +41,81 @@ The aggregate remained red only for the already-recorded stale `Smoke Studio`
 Core row; lat3 lifecycle detail was unavailable from the lat2 collector. The
 FiKnight Runtime remained online on the exact expected lat3 machine and current
 artifact.
+
+### Paused production-cutover checkpoint
+
+The authorized live cutover was started on 2026-09-02 and then paused at the
+user's request because the current procedure stops the shared Room server and
+Hosted Device service. The durable-data scope remained limited to the selected
+FiKnight/Austin Project and Room, but the availability impact applied to every
+Chat user while those shared writers were stopped.
+
+The live attempt behaved as follows:
+
+1. Several initial writer-fence attempts failed closed before mutation on
+   service-state, SQLite-path, and unit-ordering preconditions. Each guard
+   restarted the original services.
+2. The first actual install atomically swapped the three transformed encrypted
+   SQLite files and FiKnight's sealed binding. The subsequent Core stage could
+   not open the root-only SQL path as the `postgres` user. The Core transaction
+   never started. The rollback trap stopped the transformed files, restored all
+   four originals and their sidecars, and restarted the original services.
+3. Read-only rollback verification found the original sealed-binding hash, the
+   Project still owned by Austin, Austin's membership active, and FiKnight's
+   membership archived. The failed transformed files were retained root-only
+   under the `.fiknight-failed-20260902` suffix for audit; they are not install
+   candidates.
+4. Because services had resumed and the global Room database advanced, attempt
+   2 deliberately did not reuse the first install image. A new writer-fenced
+   ciphertext copy was pulled with a new migration ID. The user then paused the
+   migration. No attempt-2 handoff ledger, transformed install image, atomic
+   replacement, or Core transaction was produced.
+5. The original services were restored. No migration process or writer fence
+   remains active.
+
+The operator estimate for an otherwise successful run of this exact method is
+15–20 minutes of platform-wide Chat unavailability; a 30-minute maintenance
+window is required for verification or rollback margin. That estimate is not a
+measured availability guarantee. Eliminating platform-wide downtime requires a
+different online/per-Room migration design and a new rehearsal; the existing
+local-only utility intentionally refuses production endpoints and unmarked
+stores.
+
+A canonical read-only `finite-status --json` checkpoint was collected from
+`finite-lat-2` at `2026-09-03T16:44:53Z` after the pause:
+
+- host health was green; Core, dashboard, Room server, Hosted Device, Brain,
+  Sites, and node exporter were all active, and all recorded HTTP probes were
+  green;
+- the Chat plane was green, including the server watermark;
+- snapshot, Litestream, and Borg recovery boundaries were green;
+- rollout state was green;
+- the overall result remained red only because fleet convergence still contains
+  the previously documented stale `Smoke Studio` row;
+- the promoted Runtime target is now `finite-agent-runtime-2026-09-02.2`, so
+  the `.1` SQL/artifact fence proven before the attempt is stale again.
+
+The committed
+[post-pause status evidence](fiknight-pause-status-2026-09-03.json) contains
+the exact summarized values and the SHA-256 of the private raw collector output.
+
+All workstation attempt directories, host staging files, rollback copies,
+prepared MLS removals, evidence ledgers, migration IDs, digests, and install
+hashes from this attempt are evidence only. They must never be submitted,
+installed, or used as the starting point for a later cutover after services
+have resumed.
+
+Before any future production mutation, choose one of these paths explicitly:
+
+- approve a platform-wide maintenance window, then create a fresh coordinated
+  Recovery Snapshot and repeat the entire stopped-writer export, rehearsal,
+  install, and verification sequence from new state; or
+- implement and rehearse an online/per-Room handoff that does not replace the
+  shared live database.
+
+Either path also requires refreshing the exact Runtime artifact fence, rerunning
+stage/replay/rollback/finalize against the fresh Core dump, confirming current
+Room/account membership, and obtaining new explicit production authorization.
 
 ### Writer-fenced local-to-production procedure
 
