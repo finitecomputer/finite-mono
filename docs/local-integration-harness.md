@@ -65,8 +65,7 @@ just dev up --workos-staging
 - Logout URI: <http://127.0.0.1:13002/>
 
 `.env` is ignored and must never be committed.
-These staging values are used only by local Devfinity; packaged Electron builds
-load the production dashboard and authenticate with production WorkOS.
+These staging values are used only by local Devfinity.
 
 `just dev inference-key` prompts without echoing and stores an existing
 `fpk_live_...` key in the ignored local state directory with mode `0600`.

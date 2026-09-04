@@ -3,7 +3,9 @@
 
 from __future__ import annotations
 
+import importlib.util
 import json
+import re
 import subprocess
 import sys
 from pathlib import Path
@@ -11,7 +13,31 @@ from typing import Any
 
 
 ROOT = Path(__file__).resolve().parents[1]
-DASHBOARD = ROOT / "infra/monitoring/grafana/dashboards/finite-production-mvp.json"
+MVP_DASHBOARD = ROOT / "infra/monitoring/grafana/dashboards/finite-production-mvp.json"
+SLOTS_DASHBOARD = (
+    ROOT / "infra/monitoring/grafana/dashboards/finite-agent-runtime-slots.json"
+)
+SLOTS_HOSTS = ("finite-lat-3", "finite-lat-4")
+TINFOIL_DASHBOARD = ROOT / "infra/monitoring/grafana/dashboards/finite-tinfoil-gpu.json"
+TINFOIL_COLLECTOR = ROOT / "infra/monitoring/tinfoil/tinfoil-usage-collector"
+TINFOIL_CONTAINER_NAME = "finite-private"
+
+# Frozen binding of dashboard panel titles to the `finite_tinfoil_*` metric
+# names. Shared by the dashboard contract check and the collector contract
+# check so collector and dashboard cannot drift apart independently.
+TINFOIL_PANEL_METRIC_BINDINGS = {
+    "Data Freshness": "finite_tinfoil_source_sample_timestamp_seconds",
+    "Sample Age": "finite_tinfoil_source_sample_timestamp_seconds",
+    "Container Ready": "finite_tinfoil_container_ready",
+    "GPU Allocation": "finite_tinfoil_container_gpus",
+    "Model Upstream": "finite_tinfoil_component_ready",
+    "Accounting API": "finite_tinfoil_component_ready",
+    "GPU Utilization": "finite_tinfoil_gpu_utilization_percent",
+    "GPU Memory Utilization": "finite_tinfoil_gpu_memory_utilization_percent",
+    "CPU Utilization": "finite_tinfoil_cpu_utilization_percent",
+    "Host Memory Utilization": "finite_tinfoil_host_memory_utilization_percent",
+    "Current Dependency Probe Latency": "finite_tinfoil_component_probe_duration_seconds",
+}
 
 LAT_DASHBOARD_HOSTS = (
     "finite-lat-1",
@@ -291,20 +317,43 @@ def overlaps(left: dict[str, Any], right: dict[str, Any]) -> bool:
     )
 
 
-def check_dashboard_contract() -> None:
-    dashboard = json.loads(DASHBOARD.read_text(encoding="utf-8"))
-    require(dashboard["refresh"] == "30s", "Grafana dashboard must refresh every 30s")
+def check_dashboard_layout(dashboard: dict[str, Any], subject: str) -> None:
     panels = dashboard["panels"]
     panel_ids = [panel["id"] for panel in panels]
-    require(len(panel_ids) == len(set(panel_ids)), "Grafana panel IDs must be unique")
+    require(
+        len(panel_ids) == len(set(panel_ids)), f"{subject} panel IDs must be unique"
+    )
+
+    for panel in panels:
+        x1, y1, x2, y2 = panel_rect(panel)
+        require(
+            x1 >= 0 and y1 >= 0,
+            f"{subject} panel {panel['title']!r} starts outside the grid",
+        )
+        require(
+            x2 <= 24,
+            f"{subject} panel {panel['title']!r} exceeds the 24-column grid",
+        )
+        require(
+            x1 < x2 and y1 < y2,
+            f"{subject} panel {panel['title']!r} has an empty grid area",
+        )
 
     for index, left in enumerate(panels):
         for right in panels[index + 1 :]:
             require(
                 not overlaps(left, right),
-                f"Grafana panels overlap: {left['title']!r} and {right['title']!r}",
+                f"{subject} panels overlap: {left['title']!r} and {right['title']!r}",
             )
 
+
+def check_mvp_dashboard_contract() -> None:
+    dashboard = json.loads(MVP_DASHBOARD.read_text(encoding="utf-8"))
+    require(
+        dashboard["refresh"] == "30s", "MVP Grafana dashboard must refresh every 30s"
+    )
+    check_dashboard_layout(dashboard, "MVP Grafana dashboard")
+    panels = dashboard["panels"]
     panels_by_title = {panel["title"]: panel for panel in panels}
     for title in HOST_PANEL_TITLES:
         require(title in panels_by_title, f"missing Grafana host panel {title!r}")
@@ -371,7 +420,9 @@ def check_dashboard_contract() -> None:
                 f'host=~"{LAT_DASHBOARD_HOST_REGEX}"',
                 title,
             )
-            require_contains(expression, 'priority=~"warning|error|crit|alert|emerg"', title)
+            require_contains(
+                expression, 'priority=~"warning|error|crit|alert|emerg"', title
+            )
 
     require_contains(
         panels_by_title["LAT Recent Warning Logs"]["targets"][0]["expr"],
@@ -402,6 +453,317 @@ def check_dashboard_contract() -> None:
         panels_by_title["LAT SSH And Sudo Logs"]["targets"][0]["expr"],
         'source="auth"',
         "LAT SSH And Sudo Logs",
+    )
+
+
+def runner_slot_capacity() -> dict[str, str]:
+    """Import the operator-pinned slot ceiling from the runner host contract.
+
+    The Agent Runtime slots dashboard renders the per-host
+    FC_RUNNER_MAX_SANDBOXES ceiling as a query constant because no live
+    metric carries it. Importing the same mapping that
+    scripts/check_runner_host_contract.py enforces against the rendered
+    runner env keeps the dashboard and the hosts on one pinned value; a
+    ceiling change must update both or CI fails.
+    """
+    path = ROOT / "scripts/check_runner_host_contract.py"
+    spec = importlib.util.spec_from_file_location("check_runner_host_contract", path)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module.EXPECTED_MAX_SANDBOXES
+
+
+def check_agent_runtime_slots_dashboard_contract() -> None:
+    dashboard = json.loads(SLOTS_DASHBOARD.read_text(encoding="utf-8"))
+    require(
+        dashboard["uid"] == "finite-agent-runtime-slots", "unexpected dashboard uid"
+    )
+    require(dashboard["refresh"] == "2m", "slots dashboard must refresh every 2m")
+    panels = dashboard["panels"]
+    panel_ids = [panel["id"] for panel in panels]
+    require(
+        len(panel_ids) == len(set(panel_ids)),
+        "slots dashboard panel IDs must be unique",
+    )
+    for index, left in enumerate(panels):
+        for right in panels[index + 1 :]:
+            require(
+                not overlaps(left, right),
+                f"slots dashboard panels overlap: {left['title']!r} and {right['title']!r}",
+            )
+
+    panels_by_title = {panel["title"]: panel for panel in panels}
+    required_titles = (
+        "Draft data contract",
+        "lat3 Slots Used",
+        "lat3 Slots Free",
+        "lat4 Slots Used",
+        "lat4 Slots Free",
+        "Active Agent Runtimes",
+        "Free Slots",
+    )
+    for title in required_titles:
+        require(title in panels_by_title, f"slots dashboard missing panel {title!r}")
+
+    notice = panels_by_title["Draft data contract"]
+    require(notice["type"] == "text", "draft notice must stay a text panel")
+    rendered_notice = notice["options"]["content"]
+    for fragment in (
+        "not yet provisioned",
+        "finite_runtime_artifact_active_agents",
+        "FC_RUNNER_MAX_SANDBOXES",
+        "check_runner_host_contract.py",
+        "No data",
+    ):
+        require_contains(rendered_notice, fragment, "slots dashboard draft notice")
+
+    capacity = runner_slot_capacity()
+    require(
+        capacity["finite-lat-3"] == capacity["finite-lat-4"],
+        "the combined slots chart assumes equal ceilings on both Runner hosts",
+    )
+    expected_exprs: set[str] = set()
+    for host in SLOTS_HOSTS:
+        ceiling = capacity[host]
+        expected_exprs.add(
+            f'sum(finite_runtime_artifact_active_agents{{source_host_id="{host}"}})'
+        )
+        expected_exprs.add(
+            f'{ceiling} - sum(finite_runtime_artifact_active_agents{{source_host_id="{host}"}})'
+        )
+    expected_exprs.add(
+        "sum by (source_host_id) (finite_runtime_artifact_active_agents"
+        '{source_host_id=~"finite-lat-3|finite-lat-4"})'
+    )
+    expected_exprs.add(
+        f"{capacity['finite-lat-3']} - "
+        "sum by (source_host_id) (finite_runtime_artifact_active_agents"
+        '{source_host_id=~"finite-lat-3|finite-lat-4"})'
+    )
+
+    actual_exprs: set[str] = set()
+    for title in required_titles:
+        panel = panels_by_title[title]
+        if panel["type"] == "text":
+            continue
+        require(
+            panel["datasource"]["uid"] == "finite-prometheus",
+            f"{title} must use the finite-prometheus datasource",
+        )
+        for target in panel_targets(panel):
+            expression = target["expr"]
+            actual_exprs.add(expression)
+            require(
+                "or vector(" not in expression,
+                f"{title} must fail closed on missing data, not substitute a constant",
+            )
+            require(
+                "up{" not in expression,
+                f"{title} must not gate on scrape health",
+            )
+
+    require(
+        actual_exprs == expected_exprs,
+        "slots dashboard query expressions drifted from the pinned contract",
+    )
+
+    rendered_dashboard = json.dumps(dashboard)
+    metric_tokens = set(re.findall(r"finite_[a-z_]+", rendered_dashboard))
+    unexpected = metric_tokens - {"finite_runtime_artifact_active_agents"}
+    require(
+        not unexpected,
+        f"slots dashboard references metrics outside its contract: {sorted(unexpected)}",
+    )
+
+
+def check_tinfoil_dashboard_contract() -> None:
+    dashboard = json.loads(TINFOIL_DASHBOARD.read_text(encoding="utf-8"))
+    require(
+        dashboard["refresh"] == "2m",
+        "Tinfoil Grafana dashboard must refresh every 2m (Tinfoil publishes 48m buckets)",
+    )
+    check_dashboard_layout(dashboard, "Tinfoil Grafana dashboard")
+    panels = dashboard["panels"]
+    panels_by_title = {panel["title"]: panel for panel in panels}
+    required_titles = {
+        "Draft data contract",
+        "Data Freshness",
+        "Container Ready",
+        "Model Upstream",
+        "Accounting API",
+        "GPU Allocation",
+        "Sample Age",
+        "GPU Utilization",
+        "GPU Memory Utilization",
+        "CPU Utilization",
+        "Host Memory Utilization",
+        "Current Dependency Probe Latency",
+    }
+    missing_titles = sorted(required_titles - panels_by_title.keys())
+    require(
+        not missing_titles,
+        f"Tinfoil Grafana dashboard is missing panels: {missing_titles}",
+    )
+
+    for panel in panels:
+        if panel["type"] != "text":
+            require(
+                panel["datasource"]["uid"] == "finite-prometheus",
+                f"{panel['title']} must use finite-prometheus",
+            )
+            for target in panel_targets(panel):
+                require(
+                    'container="' in target["expr"],
+                    f"{panel['title']} query must select a container",
+                )
+
+    rendered_dashboard = json.dumps(dashboard)
+    container_selectors = set(
+        re.findall(r'container=\\"([^"\\]+)\\"', rendered_dashboard)
+    )
+    require(
+        len(container_selectors) == 1,
+        f"Tinfoil dashboard container selectors must agree: {sorted(container_selectors)}",
+    )
+    (container_name,) = container_selectors
+    require(
+        container_name in panels_by_title["Draft data contract"]["options"]["content"],
+        f"Tinfoil draft notice must name the selected container {container_name!r}",
+    )
+    panel_metric_bindings = TINFOIL_PANEL_METRIC_BINDINGS
+    for title, metric_name in panel_metric_bindings.items():
+        expressions = [
+            target["expr"] for target in panel_targets(panels_by_title[title])
+        ]
+        require(
+            expressions,
+            f"{title} must have at least one query target",
+        )
+        for expression in expressions:
+            require_contains(expression, metric_name, title)
+
+    require(
+        'component="upstream"'
+        in panels_by_title["Model Upstream"]["targets"][0]["expr"],
+        "Model Upstream must probe the upstream component",
+    )
+    require(
+        'component="usage_api"'
+        in panels_by_title["Accounting API"]["targets"][0]["expr"],
+        "Accounting API must probe the usage_api component",
+    )
+    require(
+        panels_by_title["Current Dependency Probe Latency"]["targets"][0][
+            "legendFormat"
+        ]
+        == "{{component}}",
+        "Current Dependency Probe Latency must label series by component",
+    )
+
+    freshness_expression = panels_by_title["Data Freshness"]["targets"][0]["expr"]
+    require_contains(
+        freshness_expression,
+        "clamp(floor((time() - finite_tinfoil_source_sample_timestamp_seconds",
+        "Data Freshness",
+    )
+    require_contains(freshness_expression, "/ 300), 0, 2)", "Data Freshness")
+    require_contains(freshness_expression, "or on() vector(2)", "Data Freshness")
+    sample_age_thresholds = [
+        step["value"]
+        for step in panels_by_title["Sample Age"]["fieldConfig"]["defaults"][
+            "thresholds"
+        ]["steps"]
+    ]
+    require(
+        sample_age_thresholds == [0, 300, 600],
+        "Sample Age thresholds must stay aligned with the freshness buckets",
+    )
+    require(
+        "up{" not in rendered_dashboard,
+        "Tinfoil collector health must fail closed on sample age",
+    )
+    freshness_defaults = panels_by_title["Data Freshness"]["fieldConfig"]["defaults"]
+    freshness_mappings = freshness_defaults["mappings"][0]
+    require(
+        {
+            value: mapping["text"]
+            for value, mapping in freshness_mappings["options"].items()
+        }
+        == {"0": "FRESH", "1": "AGING", "2": "STALE"},
+        "Data Freshness mappings drifted",
+    )
+    notice = panels_by_title["Draft data contract"]["options"]["content"]
+    require_contains(
+        notice,
+        "It is not yet provisioned to production Grafana and no production Tinfoil metrics source is wired yet",
+        "Tinfoil draft notice",
+    )
+
+
+def check_tinfoil_collector_contract() -> None:
+    """Pin the textfile collector to the dashboard's frozen metric bindings.
+
+    The dashboard's metric names are the collector contract: the collector
+    script must emit exactly those names, with the same container selector,
+    the same component label values, and fail-closed rendering (NaN until a
+    successful sample, frozen sample timestamp). Drift fails CI, not Grafana.
+    """
+    collector = TINFOIL_COLLECTOR.read_text()
+    # The collector writes utilization metrics as `finite_tinfoil_${key}`
+    # over its USAGE_KEYS list; expand that template before comparing with
+    # the frozen bindings.
+    usage_keys_match = re.search(r"USAGE_KEYS=\(([^)]*)\)", collector)
+    require(usage_keys_match, "Tinfoil collector must define USAGE_KEYS")
+    emitted = set(re.findall(r"finite_tinfoil_[a-z_]+", collector))
+    for key in re.findall(r"[a-z_]+", usage_keys_match.group(1)):
+        emitted.add(f"finite_tinfoil_{key}")
+    contract = set(TINFOIL_PANEL_METRIC_BINDINGS.values())
+    require(
+        emitted == contract,
+        "Tinfoil collector metrics must equal the dashboard panel bindings: "
+        f"collector-only={sorted(emitted - contract)} "
+        f"dashboard-only={sorted(contract - emitted)}",
+    )
+    require(
+        f'CONTAINER="${{FINITE_TINFOIL_CONTAINER:-{TINFOIL_CONTAINER_NAME}}}"'
+        in collector,
+        "Tinfoil collector default container must match the dashboard selector",
+    )
+    require(
+        "COMPONENT_NAMES=(upstream usage_api)" in collector,
+        "Tinfoil collector components must stay upstream and usage_api",
+    )
+    require_contains(
+        collector, 'aggregation=\\"mean\\"', "collector utilization aggregation label"
+    )
+    require_contains(
+        collector,
+        "value_or_nan",
+        "collector sample timestamp must render NaN until a good sample",
+    )
+    require_contains(
+        collector,
+        'LAST_GOOD_TS_FILE="${STATE_DIR}/last-good-sample-ts"',
+        "collector must persist the last good sample timestamp (fail closed)",
+    )
+    require_contains(
+        collector,
+        'TEXTFILE="${STATE_DIR}/textfile/tinfoil.prom"',
+        "collector must write the node_exporter textfile",
+    )
+    require_contains(
+        collector,
+        'container get "$CONTAINER" --output json',
+        "collector must use the same tinfoil CLI flags as finite-private-ops",
+    )
+    require_contains(
+        collector,
+        "timeout -s TERM",
+        "collector must bound the tinfoil CLI and usage command",
+    )
+    require(
+        "up{" not in collector,
+        "Tinfoil collector health must fail closed on sample age, not up{}",
     )
 
 
@@ -585,7 +947,10 @@ def main() -> int:
                 f"{host_name} host incident source label",
             )
 
-    check_dashboard_contract()
+    check_mvp_dashboard_contract()
+    check_agent_runtime_slots_dashboard_contract()
+    check_tinfoil_dashboard_contract()
+    check_tinfoil_collector_contract()
     check_ubuntu_contract()
 
     print("monitoring NixOS contract OK")

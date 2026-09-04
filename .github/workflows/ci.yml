@@ -20,6 +20,12 @@ permissions:
 
 env:
   CACHIX_CACHE_NAME: finite
+  # Authenticate Nix `github:` flake fetches so shared runner egress does not
+  # burn the unauthenticated GitHub API quota. Hermes itself is pinned to a
+  # direct archive URL below, but the rest of the flake graph still contains
+  # normal GitHub inputs such as nixpkgs, crane, disko, and flake-utils.
+  NIX_CONFIG: |
+    access-tokens = github.com=${{ github.token }}
 
 jobs:
   changes:
@@ -29,7 +35,6 @@ jobs:
       run_rust: ${{ steps.detect.outputs.run_rust }}
       run_dashboard: ${{ steps.detect.outputs.run_dashboard }}
       run_dashboard_browser: ${{ steps.detect.outputs.run_dashboard_browser }}
-      run_electron_alpha: ${{ steps.detect.outputs.run_electron_alpha }}
       run_hermes_bridge: ${{ steps.detect.outputs.run_hermes_bridge }}
       run_nix_checks: ${{ steps.detect.outputs.run_nix_checks }}
       run_skills_check: ${{ steps.detect.outputs.run_skills_check }}
@@ -171,55 +176,6 @@ jobs:
       - name: Build dashboard
         run: pnpm run build
 
-  electron-alpha:
-    name: Electron production-dashboard alpha
-    needs: changes
-    if: needs.changes.outputs.run_electron_alpha == 'true'
-    # This job builds and tests its own Rust daemon on macOS, so it consumes
-    # no artifacts from the Rust workspace or Dashboard jobs.
-    runs-on: macos-14
-    steps:
-      - uses: actions/checkout@v4
-      - uses: DeterminateSystems/nix-installer-action@v16
-      - name: Configure Cachix read-only cache
-        uses: cachix/cachix-action@v17
-        with:
-          name: ${{ env.CACHIX_CACHE_NAME }}
-          skipPush: true
-      - uses: Swatinem/rust-cache@v2
-
-      - name: Device parity and Electron boundary gates
-        run: nix develop --command just chat-device-parity
-
-      - name: Build ad-hoc-signed internal alpha
-        run: nix develop --command just chat-electron-package
-
-      - name: Inspect packaged daemon and production-dashboard boundary
-        run: |
-          app="finitechat/apps/electron-chat/release/Finite Chat.app"
-          test -x "$app/Contents/Resources/finitechatd"
-          test -f "$app/Contents/Resources/app/electron/main.cjs"
-          test -f "$app/Contents/Resources/app/electron/preload.cjs"
-          test ! -e "$app/Contents/Resources/app/dist"
-          grep -n 'https://finite\.computer' "$app/Contents/Resources/app/electron/main.cjs"
-          ! grep -R -n -E 'spawn\("cargo"|cargo run' "$app/Contents/Resources/app/electron"
-          ! otool -L "$app/Contents/Resources/finitechatd" | grep -F '/nix/store/'
-          "$app/Contents/Resources/finitechatd" --help >/dev/null
-          codesign --verify --deep --strict --verbose=2 "$app"
-
-      - name: Archive internal alpha
-        run: |
-          ditto -c -k --sequesterRsrc --keepParent \
-            "finitechat/apps/electron-chat/release/Finite Chat.app" \
-            finitechat/apps/electron-chat/release/finite-chat-electron-alpha.zip
-
-      - name: Publish internal alpha
-        uses: actions/upload-artifact@v4
-        with:
-          name: finite-chat-electron-alpha-macos-${{ runner.arch }}
-          path: finitechat/apps/electron-chat/release/finite-chat-electron-alpha.zip
-          if-no-files-found: error
-
   hermes-bridge:
     name: finitechat Hermes bridge
     needs: changes
@@ -231,8 +187,10 @@ jobs:
     env:
       # The upstream PyPI channel is retired; use the pinned upstream Nix
       # package instead of downloading GitHub archives during CI. The pin
-      # lives in flake.lock (hermes-agent, fetched from the codeload
-      # archive endpoint — see flake.nix); no live getFlake fetches here.
+      # lives in flake.lock (hermes-agent, fetched over git smart HTTP —
+      # not the api.github.com or codeload archive endpoints, which share
+      # GitHub's per-IP secondary rate limit and 429 from shared runner
+      # egress; see flake.nix); no live getFlake fetches here.
       HERMES_AGENT_NIX_ATTR: ".#packages.x86_64-linux.hermes-agent-runtime"
       HERMES_AGENT_PYTHON_NIX_ATTR: ".#packages.x86_64-linux.hermes-agent-runtime-python"
       NIX_CONFIG: |
@@ -610,7 +568,6 @@ jobs:
             ".#packages.x86_64-linux.fsite"
             ".#packages.x86_64-linux.fbrain"
             ".#packages.x86_64-linux.finitechat"
-            ".#packages.x86_64-linux.finitechat-rmp"
           )
 
           cargo_artifacts=()
@@ -819,7 +776,6 @@ jobs:
       - changes
       - rust
       - dashboard
-      - electron-alpha
       - hermes-bridge
       - skills-check
       - monitoring-nixos-contract
@@ -836,8 +792,6 @@ jobs:
       RUN_DASHBOARD: ${{ needs.changes.outputs.run_dashboard }}
       RUN_DASHBOARD_BROWSER: ${{ needs.changes.outputs.run_dashboard_browser }}
       RESULT_DASHBOARD: ${{ needs.dashboard.result }}
-      RUN_ELECTRON_ALPHA: ${{ needs.changes.outputs.run_electron_alpha }}
-      RESULT_ELECTRON_ALPHA: ${{ needs['electron-alpha'].result }}
       RUN_HERMES_BRIDGE: ${{ needs.changes.outputs.run_hermes_bridge }}
       RESULT_HERMES_BRIDGE: ${{ needs['hermes-bridge'].result }}
       RUN_SKILLS_CHECK: ${{ needs.changes.outputs.run_skills_check }}
@@ -889,7 +843,6 @@ jobs:
 
           check_selected "Rust workspace" "$RUN_RUST" "$RESULT_RUST"
           check_selected "Dashboard" "$RUN_DASHBOARD" "$RESULT_DASHBOARD"
-          check_selected "Electron alpha" "$RUN_ELECTRON_ALPHA" "$RESULT_ELECTRON_ALPHA"
           check_selected "Hermes bridge" "$RUN_HERMES_BRIDGE" "$RESULT_HERMES_BRIDGE"
           check_selected "Skills check" "$RUN_SKILLS_CHECK" "$RESULT_SKILLS_CHECK"
           check_selected "Monitoring NixOS contract" "$RUN_MONITORING_NIXOS_CONTRACT" "$RESULT_MONITORING_NIXOS_CONTRACT"

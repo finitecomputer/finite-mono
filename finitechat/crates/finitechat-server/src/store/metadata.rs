@@ -2,7 +2,7 @@
 //!
 //! These tables predate the normalized delivery engine (they lived behind
 //! the legacy op-log store's connection) but they were never part of the
-//! op-log engine itself: pairing sessions, Nostr profiles, push tokens and
+//! op-log engine itself: Nostr profiles and
 //! wakes, welcome claims, application-delivery effects, publish/claim
 //! idempotency, the finite KeyPackage inventory, and blob objects are
 //! current-state metadata written and read by the server layer directly.
@@ -18,17 +18,14 @@ use std::collections::{BTreeMap, HashMap};
 use std::time::SystemTime;
 
 use finitechat_delivery::{HttpKeyPackageId, HttpKeyPackagePublication};
-use finitechat_http::{
-    HttpApplicationDeliveryEffect, HttpPairingSessionRecord, NostrProfileRecord, PushTokenRecord,
-};
-use finitechat_proto::DeviceMembership;
+use finitechat_http::{HttpApplicationDeliveryEffect, NostrProfileRecord};
 use finitechat_transport::MessageId;
 use rusqlite::{Connection, OptionalExtension, params};
 
 use crate::DurableStoreError;
 use crate::state::{
     BlobBackend, BlobMeta, KeyPackageClaimIdempotencyRecord, KeyPackageInventoryRecord,
-    PublishIdempotencyRecord, PushWakeOutboxRecord, WelcomeClaimRecord,
+    PublishIdempotencyRecord, WelcomeClaimRecord,
 };
 
 pub(crate) fn unix_now_ms() -> i64 {
@@ -45,16 +42,17 @@ pub(crate) fn unix_now_ms() -> i64 {
 /// legacy-free so the fold gate ("legacy tables present") can tell a fresh
 /// database from a pre-cutover one.
 pub(crate) fn init_schema(conn: &Connection) -> Result<(), DurableStoreError> {
+    // Tables earlier builds created that no current code reads: the APNs
+    // push-wake outbox and device push-token registry served a native-client
+    // wake path that never shipped. Dropping them discards their rows for
+    // good; nothing consumes them.
+    conn.execute_batch("DROP TABLE IF EXISTS http_push_tokens;")?;
+    conn.execute_batch("DROP TABLE IF EXISTS http_push_wakes;")?;
+    // http_pairing_sessions held the NIP-AB native-device pairing protocol
+    // state; every pairing client (iOS, Electron) is gone.
+    conn.execute_batch("DROP TABLE IF EXISTS http_pairing_sessions;")?;
     conn.execute_batch(
-        "CREATE TABLE IF NOT EXISTS http_push_tokens (
-            device_key TEXT PRIMARY KEY,
-            record_json TEXT NOT NULL
-        );
-        CREATE TABLE IF NOT EXISTS http_push_wakes (
-            wake_id TEXT PRIMARY KEY,
-            record_json TEXT NOT NULL
-        );
-        CREATE TABLE IF NOT EXISTS http_publish_idempotency (
+        "CREATE TABLE IF NOT EXISTS http_publish_idempotency (
             idempotency_key TEXT PRIMARY KEY,
             fingerprint_json TEXT NOT NULL,
             receipt_json TEXT NOT NULL
@@ -68,10 +66,6 @@ pub(crate) fn init_schema(conn: &Connection) -> Result<(), DurableStoreError> {
             key_package_id_json TEXT PRIMARY KEY,
             owner_json TEXT NOT NULL,
             state_json TEXT NOT NULL
-        );
-        CREATE TABLE IF NOT EXISTS http_pairing_sessions (
-            pairing_session_id TEXT PRIMARY KEY,
-            record_json TEXT NOT NULL
         );
         CREATE TABLE IF NOT EXISTS http_nostr_profiles (
             account_id TEXT PRIMARY KEY,
@@ -355,39 +349,6 @@ pub(crate) fn upsert_key_package_payload(
     Ok(())
 }
 
-pub(crate) fn upsert_pairing_session(
-    conn: &Connection,
-    record: &HttpPairingSessionRecord,
-) -> Result<(), DurableStoreError> {
-    conn.execute(
-        "INSERT INTO http_pairing_sessions (pairing_session_id, record_json)
-         VALUES (?1, ?2)
-         ON CONFLICT(pairing_session_id) DO UPDATE SET
-            record_json = excluded.record_json",
-        params![record.pairing_session_id, serde_json::to_string(record)?],
-    )?;
-    Ok(())
-}
-
-pub(crate) fn load_pairing_sessions(
-    conn: &Connection,
-) -> Result<BTreeMap<String, HttpPairingSessionRecord>, DurableStoreError> {
-    let mut statement = conn.prepare(
-        "SELECT pairing_session_id, record_json
-         FROM http_pairing_sessions
-         ORDER BY pairing_session_id ASC",
-    )?;
-    let rows = statement.query_map([], |row| {
-        Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
-    })?;
-    let mut sessions = BTreeMap::new();
-    for row in rows {
-        let (pairing_session_id, record_json) = row?;
-        sessions.insert(pairing_session_id, serde_json::from_str(&record_json)?);
-    }
-    Ok(sessions)
-}
-
 pub(crate) fn upsert_nostr_profile(
     conn: &Connection,
     record: &NostrProfileRecord,
@@ -538,85 +499,6 @@ pub(crate) fn load_welcome_claims(
         );
     }
     Ok(claims)
-}
-
-pub(crate) fn load_push_tokens(
-    conn: &Connection,
-) -> Result<BTreeMap<String, PushTokenRecord>, DurableStoreError> {
-    let mut statement = conn.prepare("SELECT device_key, record_json FROM http_push_tokens")?;
-    let rows = statement.query_map([], |row| {
-        Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
-    })?;
-    let mut tokens = BTreeMap::new();
-    for row in rows {
-        let (key, json) = row?;
-        tokens.insert(key, serde_json::from_str(&json)?);
-    }
-    Ok(tokens)
-}
-
-pub(crate) fn upsert_push_token(
-    conn: &Connection,
-    record: &PushTokenRecord,
-) -> Result<(), DurableStoreError> {
-    conn.execute(
-        "INSERT INTO http_push_tokens (device_key, record_json)
-         VALUES (?1, ?2)
-         ON CONFLICT(device_key) DO UPDATE SET record_json = excluded.record_json",
-        params![
-            DeviceMembership::key(&record.device),
-            serde_json::to_string(record)?
-        ],
-    )?;
-    Ok(())
-}
-
-pub(crate) fn delete_push_token(
-    conn: &Connection,
-    device_key: &str,
-) -> Result<(), DurableStoreError> {
-    conn.execute(
-        "DELETE FROM http_push_tokens WHERE device_key = ?1",
-        params![device_key],
-    )?;
-    Ok(())
-}
-
-pub(crate) fn load_push_wakes(
-    conn: &Connection,
-) -> Result<BTreeMap<String, PushWakeOutboxRecord>, DurableStoreError> {
-    let mut statement =
-        conn.prepare("SELECT wake_id, record_json FROM http_push_wakes ORDER BY wake_id ASC")?;
-    let rows = statement.query_map([], |row| {
-        Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
-    })?;
-    let mut wakes = BTreeMap::new();
-    for row in rows {
-        let (wake_id, json) = row?;
-        wakes.insert(wake_id, serde_json::from_str(&json)?);
-    }
-    Ok(wakes)
-}
-
-pub(crate) fn upsert_push_wake_in_transaction(
-    transaction: &rusqlite::Transaction<'_>,
-    record: &PushWakeOutboxRecord,
-) -> Result<(), DurableStoreError> {
-    transaction.execute(
-        "INSERT INTO http_push_wakes (wake_id, record_json)
-         VALUES (?1, ?2)
-         ON CONFLICT(wake_id) DO UPDATE SET record_json = excluded.record_json",
-        params![&record.wake_id, serde_json::to_string(record)?],
-    )?;
-    Ok(())
-}
-
-pub(crate) fn delete_push_wake(conn: &Connection, wake_id: &str) -> Result<(), DurableStoreError> {
-    conn.execute(
-        "DELETE FROM http_push_wakes WHERE wake_id = ?1",
-        params![wake_id],
-    )?;
-    Ok(())
 }
 
 pub(crate) fn load_blob_meta(

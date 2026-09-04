@@ -16,27 +16,22 @@ use axum::{Json, Router};
 use finitechat_blob::BlobDescriptor;
 use finitechat_delivery::{HttpClaimedKeyPackage, HttpKeyPackagePublication, HttpSyncPage};
 use finitechat_http::{
-    AckPushWakeRequest, AckPushWakeResponse, AckWelcomeRequest, AckWelcomeResponse,
-    ApplicationEffectCountsResponse, ApplicationEffectRequest, BootstrapAccountRoomRequest,
-    BootstrapAccountRoomResponse, ClaimKeyPackageForAccountRequest, ClaimKeyPackageRequest,
-    ClaimKeyPackagesRequest, ClaimPushWakesRequest, ClaimPushWakesResponse, ClaimWelcomesRequest,
-    CreatePairingSessionRequest, DeviceLivenessRecord, ExpireKeyPackageLeaseRequest,
-    ExpireKeyPackageLeaseResponse, ExpirePairingSessionRequest, ExpirePairingSessionResponse,
-    FINITECHAT_SERVER_CONTRACT_VERSION, FailPushWakeRequest, FailPushWakeResponse,
-    GetDeviceLivenessRequest, GetDeviceLivenessResponse, GetEphemeralActivitiesRequest,
-    GetEphemeralActivitiesResponse, GetKeyPackageAvailabilityRequest,
-    GetKeyPackageAvailabilityResponse, GetNostrProfilesRequest, GetNostrProfilesResponse,
-    GetPairingSessionRequest, GroupSyncRequest, HealthResponse, HttpApplicationDeliveryEffect,
-    HttpClaimedWelcome, HttpKeyPackageClaim, HttpKeyPackageInventory, HttpPairingSessionRecord,
-    InboxSyncRequest, KeyPackageInventoryRequest, LeaveRoomRequest, LeaveRoomResponse,
+    AckWelcomeRequest, AckWelcomeResponse, ApplicationEffectCountsResponse,
+    ApplicationEffectRequest, BootstrapAccountRoomRequest, BootstrapAccountRoomResponse,
+    ClaimKeyPackageForAccountRequest, ClaimKeyPackageRequest, ClaimKeyPackagesRequest,
+    ClaimWelcomesRequest, DeviceLivenessRecord, ExpireKeyPackageLeaseRequest,
+    ExpireKeyPackageLeaseResponse, FINITECHAT_SERVER_CONTRACT_VERSION, GetDeviceLivenessRequest,
+    GetDeviceLivenessResponse, GetEphemeralActivitiesRequest, GetEphemeralActivitiesResponse,
+    GetKeyPackageAvailabilityRequest, GetKeyPackageAvailabilityResponse, GetNostrProfilesRequest,
+    GetNostrProfilesResponse, GroupSyncRequest, HealthResponse, HttpApplicationDeliveryEffect,
+    HttpClaimedWelcome, HttpKeyPackageClaim, HttpKeyPackageInventory, InboxSyncRequest,
+    KeyPackageInventoryRequest, LeaveRoomRequest, LeaveRoomResponse,
     ListAccountRoomDirectoryRequest, ListAccountRoomDirectoryResponse,
-    ObserveDeviceLivenessRequest, PublishKeyPackageResponse, PublishPairingCompleteRequest,
-    PublishPairingOfferRequest, PublishPairingResponseRequest, PutNostrProfileRequest,
-    PutNostrProfileResponse, RegisterPushTokenRequest, RegisterPushTokenResponse,
-    RemovePushTokenRequest, RemovePushTokenResponse, ReportInvalidCommitRequest,
-    ReportInvalidCommitResponse, RevokeDeviceRequest, RevokeDeviceResponse, SaveAccountRoomRequest,
-    SaveAccountRoomResponse, SyncHintEvent, SyncStreamRequest, SyncWaitRequest, SyncWaitResponse,
-    UpdateRoomAdminsRequest, UpdateRoomAdminsResponse,
+    ObserveDeviceLivenessRequest, PublishKeyPackageResponse, PutNostrProfileRequest,
+    PutNostrProfileResponse, ReportInvalidCommitRequest, ReportInvalidCommitResponse,
+    RevokeDeviceRequest, RevokeDeviceResponse, SaveAccountRoomRequest, SaveAccountRoomResponse,
+    SyncHintEvent, SyncStreamRequest, SyncWaitRequest, SyncWaitResponse, UpdateRoomAdminsRequest,
+    UpdateRoomAdminsResponse,
 };
 use finitechat_proto::{
     AppendApplicationEventRequest, AppendEphemeralActivityRequest, CommitAccepted,
@@ -79,15 +74,6 @@ pub fn http_router(state: HttpServerState) -> Router {
             "/key-packages/leases/expire",
             post(expire_key_package_lease),
         )
-        .route("/pairing-sessions", post(create_pairing_session))
-        .route("/pairing-sessions/get", post(get_pairing_session))
-        .route("/pairing-sessions/offer", post(publish_pairing_offer))
-        .route("/pairing-sessions/response", post(publish_pairing_response))
-        .route("/pairing-sessions/complete", post(publish_pairing_complete))
-        .route("/pairing-sessions/expire", post(expire_pairing_session))
-        .route("/push-wakes/claim", post(claim_push_wakes))
-        .route("/push-wakes/ack", post(ack_push_wake))
-        .route("/push-wakes/fail", post(fail_push_wake))
         .route_layer(middleware::from_fn_with_state(
             state.clone(),
             rate_limit_public_routes,
@@ -118,8 +104,6 @@ pub fn http_router(state: HttpServerState) -> Router {
         .route("/account-rooms/bootstrap", post(bootstrap_account_room))
         .route("/account-rooms", post(save_account_room))
         .route("/account-rooms/list", post(list_account_rooms))
-        .route("/push-tokens", post(register_push_token))
-        .route("/push-tokens/remove", post(remove_push_token))
         .route("/rooms/leave", post(leave_room))
         .route("/rooms/admins", post(update_room_admins))
         .route("/rooms/report-invalid-commit", post(report_invalid_commit))
@@ -640,54 +624,6 @@ async fn expire_key_package_lease(
     Ok(Json(response))
 }
 
-async fn create_pairing_session(
-    State(state): State<HttpServerState>,
-    Json(request): Json<CreatePairingSessionRequest>,
-) -> Result<Json<HttpPairingSessionRecord>, ServerHttpError> {
-    let record = state.create_pairing_session(request)?;
-    Ok(Json(record))
-}
-
-async fn get_pairing_session(
-    State(state): State<HttpServerState>,
-    Json(request): Json<GetPairingSessionRequest>,
-) -> Result<Json<Option<HttpPairingSessionRecord>>, ServerHttpError> {
-    let record = state.get_pairing_session(request)?;
-    Ok(Json(record))
-}
-
-async fn publish_pairing_offer(
-    State(state): State<HttpServerState>,
-    Json(request): Json<PublishPairingOfferRequest>,
-) -> Result<Json<HttpPairingSessionRecord>, ServerHttpError> {
-    let record = state.publish_pairing_offer(request)?;
-    Ok(Json(record))
-}
-
-async fn publish_pairing_response(
-    State(state): State<HttpServerState>,
-    Json(request): Json<PublishPairingResponseRequest>,
-) -> Result<Json<HttpPairingSessionRecord>, ServerHttpError> {
-    let record = state.publish_pairing_response(request)?;
-    Ok(Json(record))
-}
-
-async fn publish_pairing_complete(
-    State(state): State<HttpServerState>,
-    Json(request): Json<PublishPairingCompleteRequest>,
-) -> Result<Json<HttpPairingSessionRecord>, ServerHttpError> {
-    let record = state.publish_pairing_complete(request)?;
-    Ok(Json(record))
-}
-
-async fn expire_pairing_session(
-    State(state): State<HttpServerState>,
-    Json(request): Json<ExpirePairingSessionRequest>,
-) -> Result<Json<ExpirePairingSessionResponse>, ServerHttpError> {
-    let response = state.expire_pairing_session(request)?;
-    Ok(Json(response))
-}
-
 async fn save_account_room(
     State(state): State<HttpServerState>,
     SignedJson(request): SignedJson<SaveAccountRoomRequest>,
@@ -710,46 +646,6 @@ async fn list_account_rooms(
 ) -> Result<Json<ListAccountRoomDirectoryResponse>, ServerHttpError> {
     let page = state.list_account_rooms(request)?;
     Ok(Json(page))
-}
-
-async fn register_push_token(
-    State(state): State<HttpServerState>,
-    SignedJson(request): SignedJson<RegisterPushTokenRequest>,
-) -> Result<Json<RegisterPushTokenResponse>, ServerHttpError> {
-    let response = state.register_push_token(request)?;
-    Ok(Json(response))
-}
-
-async fn remove_push_token(
-    State(state): State<HttpServerState>,
-    SignedJson(request): SignedJson<RemovePushTokenRequest>,
-) -> Result<Json<RemovePushTokenResponse>, ServerHttpError> {
-    let response = state.remove_push_token(request)?;
-    Ok(Json(response))
-}
-
-async fn claim_push_wakes(
-    State(state): State<HttpServerState>,
-    Json(request): Json<ClaimPushWakesRequest>,
-) -> Result<Json<ClaimPushWakesResponse>, ServerHttpError> {
-    let response = state.claim_push_wakes(request)?;
-    Ok(Json(response))
-}
-
-async fn ack_push_wake(
-    State(state): State<HttpServerState>,
-    Json(request): Json<AckPushWakeRequest>,
-) -> Result<Json<AckPushWakeResponse>, ServerHttpError> {
-    let response = state.ack_push_wake(request)?;
-    Ok(Json(response))
-}
-
-async fn fail_push_wake(
-    State(state): State<HttpServerState>,
-    Json(request): Json<FailPushWakeRequest>,
-) -> Result<Json<FailPushWakeResponse>, ServerHttpError> {
-    let response = state.fail_push_wake(request)?;
-    Ok(Json(response))
 }
 
 async fn leave_room(

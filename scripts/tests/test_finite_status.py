@@ -730,20 +730,21 @@ class FiniteStatusTests(unittest.TestCase):
             "HEALTH Health Agent 01 [health-agent-01]: not_ready (unreachable)", output
         )
 
-    def test_stale_health_report_reads_unknown_past_three_cadences(self) -> None:
+    def test_stale_health_report_reads_stale_past_three_cadences(self) -> None:
         # 600s old at a 60s cadence is past the 3x deadline: the "died at 3am"
-        # runtime stops displaying its frozen last-known ready.
+        # runtime stops displaying its frozen last-known ready and names the
+        # lapse as `stale`, which leaves the host unknown.
         report = self.report_with_health_group(
             {"health_reported_at": "2026-08-01T13:50:00Z", "health_ready": True}
         )
         host = self.lat9(report)
         self.assertEqual(host["status"], "unknown")
         entry = host["health_unknown"][0]
-        self.assertEqual(entry["health"]["status"], "unknown")
+        self.assertEqual(entry["health"]["status"], "stale")
         self.assertEqual(entry["health"]["age_seconds"], 600)
         output = finite_status.render_human(report)
         self.assertIn(
-            "HEALTH-UNKNOWN Health Agent 01 [health-agent-01]: no fresh report (last report 10m ago)",
+            "HEALTH-STALE Health Agent 01 [health-agent-01]: no fresh report (last report 10m ago)",
             output,
         )
         # At exactly 3x cadence the report is still fresh.
@@ -771,6 +772,33 @@ class FiniteStatusTests(unittest.TestCase):
         self.assertIsNone(entry["health"]["age_seconds"])
         output = finite_status.render_human(report)
         self.assertIn("no fresh report (never reported)", output)
+
+    def test_legacy_pending_first_report_latch_projects_unknown(self) -> None:
+        # A row the previous Core latched `pending_first_report`, still
+        # carrying a fresh ready report from the incarnation before the
+        # control (migration 0024 rewrites it on the next Core start). The
+        # report must not speak: unknown regardless, and tracked as such.
+        report = self.report_with_health_group(
+            {
+                "runtime_status": "pending_first_report",
+                "health_reported_at": "2026-08-01T13:59:30Z",
+                "health_ready": True,
+            }
+        )
+        host = self.lat9(report)
+        self.assertEqual(host["status"], "unknown")
+        self.assertEqual(host["health_tracked_count"], 1)
+        entry = host["health_unknown"][0]
+        self.assertEqual(entry["health"]["status"], "unknown")
+        projected = finite_status.project_runtime_health(
+            {
+                "runtime_status": "pending_first_report",
+                "health_reported_at": "2026-08-01T13:59:30Z",
+                "health_ready": True,
+            },
+            finite_status.parse_time("2026-08-01T14:00:00Z"),
+        )
+        self.assertEqual(projected["status"], "unknown")
 
     def test_offline_runtime_health_is_displayed_but_not_tracked(self) -> None:
         # An intentionally stopped runtime carries no standing readiness claim:

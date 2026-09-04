@@ -16,29 +16,22 @@ use finitechat_delivery::{
     HttpServerError, HttpSyncPage, MAX_HTTP_SYNC_PAGE_ENTRIES,
 };
 use finitechat_http::{
-    AckPushWakeRequest, AckPushWakeResponse, AckWelcomeRequest, AckWelcomeResponse,
-    ApplicationEffectCountsResponse, ApplicationEffectRequest, BootstrapAccountRoomRequest,
-    BootstrapAccountRoomResponse, ClaimKeyPackageForAccountRequest, ClaimKeyPackageRequest,
-    ClaimKeyPackagesRequest, ClaimPushWakesRequest, ClaimPushWakesResponse, ClaimWelcomesRequest,
-    CreatePairingSessionRequest, DeviceLivenessRecord, ExpireKeyPackageLeaseRequest,
-    ExpireKeyPackageLeaseResponse, ExpirePairingSessionRequest, ExpirePairingSessionResponse,
-    FailPushWakeRequest, FailPushWakeResponse, FiniteAccountRoomCommitProjection,
-    GetDeviceLivenessRequest, GetDeviceLivenessResponse, GetEphemeralActivitiesRequest,
-    GetEphemeralActivitiesResponse, GetKeyPackageAvailabilityRequest,
-    GetKeyPackageAvailabilityResponse, GetNostrProfilesRequest, GetNostrProfilesResponse,
-    GetPairingSessionRequest, GroupSyncRequest, HttpApplicationDeliveryEffect, HttpClaimedWelcome,
-    HttpKeyPackageClaim, HttpKeyPackageInventory, HttpPairingEventRecord, HttpPairingSessionRecord,
-    HttpPairingSessionState, KeyPackageAvailabilityEntry, KeyPackageInventoryRequest,
-    LeaveRoomRequest, LeaveRoomResponse, ListAccountRoomDirectoryRequest,
-    ListAccountRoomDirectoryResponse, NostrProfileCacheEntry, NostrProfileRecord,
-    ObserveDeviceLivenessRequest, PublishKeyPackageResponse, PublishMessageRequest,
-    PublishPairingCompleteRequest, PublishPairingOfferRequest, PublishPairingResponseRequest,
-    PushTokenRecord, PushWakeDelivery, PushWakePayload, PutNostrProfileRequest,
-    PutNostrProfileResponse, RegisterPushTokenRequest, RegisterPushTokenResponse,
-    RemovePushTokenRequest, RemovePushTokenResponse, ReportInvalidCommitRequest,
-    ReportInvalidCommitResponse, RevokeDeviceRequest, RevokeDeviceResponse, SaveAccountRoomRequest,
-    SaveAccountRoomResponse, SyncHintEvent, SyncWaitRequest, UpdateRoomAdminsRequest,
-    UpdateRoomAdminsResponse,
+    AckWelcomeRequest, AckWelcomeResponse, ApplicationEffectCountsResponse,
+    ApplicationEffectRequest, BootstrapAccountRoomRequest, BootstrapAccountRoomResponse,
+    ClaimKeyPackageForAccountRequest, ClaimKeyPackageRequest, ClaimKeyPackagesRequest,
+    ClaimWelcomesRequest, DeviceLivenessRecord, ExpireKeyPackageLeaseRequest,
+    ExpireKeyPackageLeaseResponse, FiniteAccountRoomCommitProjection, GetDeviceLivenessRequest,
+    GetDeviceLivenessResponse, GetEphemeralActivitiesRequest, GetEphemeralActivitiesResponse,
+    GetKeyPackageAvailabilityRequest, GetKeyPackageAvailabilityResponse, GetNostrProfilesRequest,
+    GetNostrProfilesResponse, GroupSyncRequest, HttpApplicationDeliveryEffect, HttpClaimedWelcome,
+    HttpKeyPackageClaim, HttpKeyPackageInventory, KeyPackageAvailabilityEntry,
+    KeyPackageInventoryRequest, LeaveRoomRequest, LeaveRoomResponse,
+    ListAccountRoomDirectoryRequest, ListAccountRoomDirectoryResponse, NostrProfileCacheEntry,
+    NostrProfileRecord, ObserveDeviceLivenessRequest, PublishKeyPackageResponse,
+    PublishMessageRequest, PutNostrProfileRequest, PutNostrProfileResponse,
+    ReportInvalidCommitRequest, ReportInvalidCommitResponse, RevokeDeviceRequest,
+    RevokeDeviceResponse, SaveAccountRoomRequest, SaveAccountRoomResponse, SyncHintEvent,
+    SyncWaitRequest, UpdateRoomAdminsRequest, UpdateRoomAdminsResponse,
 };
 use finitechat_proto::{
     AccountRoomDevice, AccountRoomRecord, AppendApplicationEventRequest,
@@ -54,7 +47,6 @@ use finitechat_transport::transport::{
     Timestamp, TransportEnvelope, TransportMessage, TransportSource,
 };
 use finitechat_transport::{EpochId, GroupId, MemberId, MessageId};
-use nostr::PublicKey as NostrPublicKey;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
@@ -67,21 +59,18 @@ use crate::projections::{
 use crate::store::metadata;
 use crate::store::{SqlDelivery, Store};
 use crate::validate::{
-    blob_content_type, blob_url, ensure_pairing_session_open, normalize_blob_upload_content_type,
-    normalize_nostr_profile_record, normalize_public_url, pairing_conflict, pairing_corrupt,
-    pairing_invalid, pairing_now, pairing_recipient, sha256_hex, usize_to_u32,
+    blob_content_type, blob_url, normalize_blob_upload_content_type,
+    normalize_nostr_profile_record, normalize_public_url, sha256_hex, usize_to_u32,
     validate_account_room_id, validate_append_ephemeral_activity_request,
     validate_append_event_request, validate_blob_sha256, validate_blob_upload,
     validate_device_liveness_request, validate_get_ephemeral_activities_request,
     validate_key_package_availability_account_id, validate_key_package_availability_batch,
     validate_key_package_claim_batch, validate_nostr_profile_batch, validate_nostr_profile_record,
-    validate_pairing_device_id, validate_pairing_event, validate_pairing_public_key,
-    validate_pairing_session_id, validate_submit_commit_request,
+    validate_submit_commit_request,
 };
 use crate::{
-    DurableStoreError, HttpServerConfigurationError, MAX_PUSH_WAKE_ATTEMPTS,
-    MAX_PUSH_WAKE_CLAIM_BATCH, MAX_PUSH_WAKE_LEASE_MS, PAIRING_PROTOCOL_VERSION,
-    PAIRING_SESSION_TTL_SECONDS, SNAPSHOT_INTERVAL_OPS, ServerHttpError, finite_delivery_limits,
+    DurableStoreError, HttpServerConfigurationError, SNAPSHOT_INTERVAL_OPS, ServerHttpError,
+    finite_delivery_limits,
 };
 
 /// Per-route activity records inside one `(room_id, conversation_id)` bucket,
@@ -164,7 +153,7 @@ pub const DEFAULT_RATE_LIMIT_WINDOW_SECONDS: u64 = 60;
 const MAX_RATE_LIMIT_ENTRIES: usize = 10_000;
 
 /// Hand-rolled fixed-window per-IP rate limiter for the public mutating
-/// routes (KeyPackages, pairing sessions, uploads, push-wake drains). A
+/// routes (KeyPackages, uploads). A
 /// `Mutex<HashMap<IpAddr, (window_start, count)>>` is enough at the current
 /// fleet size and adds no dependency.
 #[derive(Debug)]
@@ -226,7 +215,6 @@ pub struct HttpServerState {
     key_package_claim_idempotency: Arc<Mutex<HashMap<String, KeyPackageClaimIdempotencyRecord>>>,
     key_package_inventory: Arc<Mutex<HashMap<HttpKeyPackageId, KeyPackageInventoryRecord>>>,
     revoked_devices: Arc<Mutex<BTreeSet<String>>>,
-    pairing_sessions: Arc<Mutex<BTreeMap<String, HttpPairingSessionRecord>>>,
     account_rooms: Arc<Mutex<BTreeMap<String, BTreeMap<String, Value>>>>,
     room_memberships: Arc<Mutex<BTreeMap<String, HttpRoomMembershipProjection>>>,
     application_effects: Arc<Mutex<BTreeMap<String, HttpApplicationDeliveryEffect>>>,
@@ -234,8 +222,6 @@ pub struct HttpServerState {
     device_liveness: Arc<Mutex<BTreeMap<String, DeviceLivenessRecord>>>,
     nostr_profiles: Arc<Mutex<BTreeMap<String, NostrProfileRecord>>>,
     welcome_claims: Arc<Mutex<HashMap<MessageId, WelcomeClaimRecord>>>,
-    push_tokens: Arc<Mutex<BTreeMap<String, PushTokenRecord>>>,
-    push_wakes: Arc<Mutex<BTreeMap<String, PushWakeOutboxRecord>>>,
     /// Blob metadata only (tens of bytes per blob). Payload bytes live in
     /// SQLite and are read per request; they are never resident in RAM on a
     /// durable server.
@@ -269,7 +255,7 @@ pub struct HttpServerState {
     /// `delivery_routes`/`delivery_entries`/`group_commit_epochs`/
     /// `sql_key_packages`, room state in the single `room_state_checkpoint`
     /// structure plus the `account_room_directory` current-state table, and
-    /// shared metadata (idempotency, claims, push, blobs, ...) in the
+    /// shared metadata (idempotency, claims, blobs, ...) in the
     /// metadata tables behind the same [`Store`]. There is no engine flag
     /// and no second engine: a boot either folds a pre-cutover database
     /// (`crate::cutover`) or starts fresh, and every request path serves
@@ -375,7 +361,6 @@ impl HttpServerState {
             key_package_claim_idempotency: Arc::new(Mutex::new(HashMap::new())),
             key_package_inventory: Arc::new(Mutex::new(HashMap::new())),
             revoked_devices: Arc::new(Mutex::new(BTreeSet::new())),
-            pairing_sessions: Arc::new(Mutex::new(BTreeMap::new())),
             account_rooms: Arc::new(Mutex::new(BTreeMap::new())),
             room_memberships: Arc::new(Mutex::new(BTreeMap::new())),
             application_effects: Arc::new(Mutex::new(BTreeMap::new())),
@@ -383,8 +368,6 @@ impl HttpServerState {
             device_liveness: Arc::new(Mutex::new(BTreeMap::new())),
             nostr_profiles: Arc::new(Mutex::new(BTreeMap::new())),
             welcome_claims: Arc::new(Mutex::new(HashMap::new())),
-            push_tokens: Arc::new(Mutex::new(BTreeMap::new())),
-            push_wakes: Arc::new(Mutex::new(BTreeMap::new())),
             blob_meta: Arc::new(Mutex::new(BTreeMap::new())),
             public_url: None,
             require_signed_requests: false,
@@ -453,7 +436,7 @@ impl HttpServerState {
     ///    heads (ahead, or a delta that will not apply) fails boot closed
     ///    instead of being absorbed — the #770 lesson.
     ///
-    /// Shared metadata (pairing sessions, nostr profiles, push tokens/wakes,
+    /// Shared metadata (nostr profiles,
     /// blobs, welcome claims, application effects, publish/claim
     /// idempotency, the finite KeyPackage inventory) loads through the same
     /// [`Store`] from the tables it owns in `store::metadata`.
@@ -498,19 +481,15 @@ impl HttpServerState {
                 ))
             })
             .map_err(normalized_store_error)?;
-        let (pairing_sessions, nostr_profiles, push_tokens, push_wakes, welcome_claims, blob_meta) =
-            sql_store
-                .read(|conn| {
-                    Ok((
-                        metadata::load_pairing_sessions(conn)?,
-                        metadata::load_nostr_profiles(conn)?,
-                        metadata::load_push_tokens(conn)?,
-                        metadata::load_push_wakes(conn)?,
-                        metadata::load_welcome_claims(conn)?,
-                        metadata::load_blob_meta(conn)?,
-                    ))
-                })
-                .map_err(normalized_store_error)?;
+        let (nostr_profiles, welcome_claims, blob_meta) = sql_store
+            .read(|conn| {
+                Ok((
+                    metadata::load_nostr_profiles(conn)?,
+                    metadata::load_welcome_claims(conn)?,
+                    metadata::load_blob_meta(conn)?,
+                ))
+            })
+            .map_err(normalized_store_error)?;
 
         // Normalized-owned state: directory + revoked devices are current
         // state; rooms derive from the checkpoint plus entry tails.
@@ -549,7 +528,6 @@ impl HttpServerState {
             key_package_claim_idempotency: Arc::new(Mutex::new(key_package_claim_idempotency)),
             key_package_inventory: Arc::new(Mutex::new(key_package_inventory)),
             revoked_devices: Arc::new(Mutex::new(revoked_devices)),
-            pairing_sessions: Arc::new(Mutex::new(pairing_sessions)),
             account_rooms: Arc::new(Mutex::new(account_rooms)),
             room_memberships: Arc::new(Mutex::new(room_memberships)),
             application_effects: Arc::new(Mutex::new(application_effects)),
@@ -557,8 +535,6 @@ impl HttpServerState {
             device_liveness: Arc::new(Mutex::new(BTreeMap::new())),
             nostr_profiles: Arc::new(Mutex::new(nostr_profiles)),
             welcome_claims: Arc::new(Mutex::new(welcome_claims)),
-            push_tokens: Arc::new(Mutex::new(push_tokens)),
-            push_wakes: Arc::new(Mutex::new(push_wakes)),
             blob_meta: Arc::new(Mutex::new(blob_meta)),
             public_url: None,
             require_signed_requests: false,
@@ -1342,14 +1318,6 @@ impl HttpServerState {
                 .map_err(sql_write_error)?;
             revoked_devices.insert(device_key.clone());
             drop(revoked_devices);
-            // A revoked device must never be woken again.
-            let mut tokens = self.push_tokens.lock().expect("HTTP push-token mutex");
-            if tokens.remove(&device_key).is_some() {
-                self.sql_delivery
-                    .store()
-                    .write(|tx| Ok(metadata::delete_push_token(tx, &device_key)?))
-                    .map_err(sql_write_error)?;
-            }
         }
         Ok(RevokeDeviceResponse { revoked: true })
     }
@@ -1539,297 +1507,6 @@ impl HttpServerState {
             available: usize_to_u32("available", available)?,
             claimed: usize_to_u32("claimed", claimed)?,
         })
-    }
-
-    pub(crate) fn create_pairing_session(
-        &self,
-        request: CreatePairingSessionRequest,
-    ) -> Result<HttpPairingSessionRecord, ServerHttpError> {
-        if request.version != PAIRING_PROTOCOL_VERSION {
-            return Err(pairing_invalid("unsupported pairing protocol version"));
-        }
-        validate_pairing_session_id(&request.pairing_session_id)?;
-        validate_pairing_device_id(&request.target_device_id)?;
-        let target_public_key = validate_pairing_public_key(&request.target_public_key)?;
-        let issued_at_unix_seconds = pairing_now();
-        let mut sessions = self
-            .pairing_sessions
-            .lock()
-            .expect("HTTP pairing-session mutex");
-        if sessions.contains_key(&request.pairing_session_id) {
-            return Err(ServerHttpError::PairingSessionAlreadyExists {
-                pairing_session_id: request.pairing_session_id,
-            });
-        }
-        let record = HttpPairingSessionRecord {
-            version: PAIRING_PROTOCOL_VERSION,
-            pairing_session_id: request.pairing_session_id,
-            target_device_id: request.target_device_id,
-            target_public_key: target_public_key.to_hex(),
-            issued_at_unix_seconds,
-            expires_at_unix_seconds: issued_at_unix_seconds
-                .saturating_add(PAIRING_SESSION_TTL_SECONDS),
-            source_public_key: None,
-            events: Vec::new(),
-            state: HttpPairingSessionState::Created,
-        };
-        sessions.insert(record.pairing_session_id.clone(), record.clone());
-        drop(sessions);
-
-        self.sql_delivery
-            .store()
-            .write(|tx| Ok(metadata::upsert_pairing_session(tx, &record)?))
-            .map_err(sql_write_error)?;
-        Ok(record)
-    }
-
-    pub(crate) fn get_pairing_session(
-        &self,
-        request: GetPairingSessionRequest,
-    ) -> Result<Option<HttpPairingSessionRecord>, ServerHttpError> {
-        validate_pairing_session_id(&request.pairing_session_id)?;
-        let sessions = self
-            .pairing_sessions
-            .lock()
-            .expect("HTTP pairing-session mutex");
-        Ok(sessions.get(&request.pairing_session_id).cloned())
-    }
-
-    pub(crate) fn publish_pairing_offer(
-        &self,
-        request: PublishPairingOfferRequest,
-    ) -> Result<HttpPairingSessionRecord, ServerHttpError> {
-        validate_pairing_session_id(&request.pairing_session_id)?;
-        let event = validate_pairing_event(&request.offer_event)?;
-        let mut sessions = self
-            .pairing_sessions
-            .lock()
-            .expect("HTTP pairing-session mutex");
-        let session = sessions
-            .get_mut(&request.pairing_session_id)
-            .ok_or_else(|| ServerHttpError::PairingSessionNotFound {
-                pairing_session_id: request.pairing_session_id.clone(),
-            })?;
-        ensure_pairing_session_open(session)?;
-        if session.state != HttpPairingSessionState::Expired
-            && session
-                .events
-                .first()
-                .is_some_and(|stored| stored.event == request.offer_event)
-        {
-            return Ok(session.clone());
-        }
-        if session.state != HttpPairingSessionState::Created {
-            return Err(ServerHttpError::PairingSessionClosed {
-                pairing_session_id: request.pairing_session_id,
-            });
-        }
-        let target = NostrPublicKey::from_hex(&session.target_public_key)
-            .map_err(|_| pairing_corrupt("stored target public key is invalid"))?;
-        if event.pubkey != target {
-            return Err(pairing_conflict(
-                &request.pairing_session_id,
-                "offer sender does not match the bound target",
-            ));
-        }
-        let source = pairing_recipient(&event)?;
-        if source == target {
-            return Err(pairing_conflict(
-                &request.pairing_session_id,
-                "source and target pairing keys must differ",
-            ));
-        }
-        session.source_public_key = Some(source.to_hex());
-        session.events.push(HttpPairingEventRecord {
-            seq: 1,
-            event: request.offer_event,
-        });
-        session.state = HttpPairingSessionState::OfferPublished;
-        let record = session.clone();
-        if let Err(error) = self
-            .sql_delivery
-            .store()
-            .write(|tx| Ok(metadata::upsert_pairing_session(tx, &record)?))
-        {
-            session.source_public_key = None;
-            session.events.clear();
-            session.state = HttpPairingSessionState::Created;
-            return Err(sql_write_error(error));
-        }
-        drop(sessions);
-        Ok(record)
-    }
-
-    pub(crate) fn publish_pairing_response(
-        &self,
-        request: PublishPairingResponseRequest,
-    ) -> Result<HttpPairingSessionRecord, ServerHttpError> {
-        validate_pairing_session_id(&request.pairing_session_id)?;
-        let confirmation = validate_pairing_event(&request.source_confirmation_event)?;
-        let payload = validate_pairing_event(&request.payload_event)?;
-        if confirmation.id == payload.id {
-            return Err(pairing_conflict(
-                &request.pairing_session_id,
-                "pairing response events must be distinct",
-            ));
-        }
-        let mut sessions = self
-            .pairing_sessions
-            .lock()
-            .expect("HTTP pairing-session mutex");
-        let session = sessions
-            .get_mut(&request.pairing_session_id)
-            .ok_or_else(|| ServerHttpError::PairingSessionNotFound {
-                pairing_session_id: request.pairing_session_id.clone(),
-            })?;
-        if session.state != HttpPairingSessionState::Expired
-            && session
-                .events
-                .get(1)
-                .is_some_and(|stored| stored.event == request.source_confirmation_event)
-            && session
-                .events
-                .get(2)
-                .is_some_and(|stored| stored.event == request.payload_event)
-        {
-            return Ok(session.clone());
-        }
-        if session.state != HttpPairingSessionState::OfferPublished {
-            return Err(ServerHttpError::PairingSessionClosed {
-                pairing_session_id: request.pairing_session_id,
-            });
-        }
-        let source = session
-            .source_public_key
-            .as_deref()
-            .and_then(|value| NostrPublicKey::from_hex(value).ok())
-            .ok_or_else(|| pairing_corrupt("stored source public key is invalid"))?;
-        let target = NostrPublicKey::from_hex(&session.target_public_key)
-            .map_err(|_| pairing_corrupt("stored target public key is invalid"))?;
-        for event in [&confirmation, &payload] {
-            if event.pubkey != source || pairing_recipient(event)? != target {
-                return Err(pairing_conflict(
-                    &request.pairing_session_id,
-                    "pairing response is not bound to this source and target",
-                ));
-            }
-        }
-        session.events.push(HttpPairingEventRecord {
-            seq: 2,
-            event: request.source_confirmation_event,
-        });
-        session.events.push(HttpPairingEventRecord {
-            seq: 3,
-            event: request.payload_event,
-        });
-        session.state = HttpPairingSessionState::ResponsePublished;
-        let record = session.clone();
-        if let Err(error) = self
-            .sql_delivery
-            .store()
-            .write(|tx| Ok(metadata::upsert_pairing_session(tx, &record)?))
-        {
-            session.events.truncate(1);
-            session.state = HttpPairingSessionState::OfferPublished;
-            return Err(sql_write_error(error));
-        }
-        drop(sessions);
-        Ok(record)
-    }
-
-    pub(crate) fn publish_pairing_complete(
-        &self,
-        request: PublishPairingCompleteRequest,
-    ) -> Result<HttpPairingSessionRecord, ServerHttpError> {
-        validate_pairing_session_id(&request.pairing_session_id)?;
-        let complete = validate_pairing_event(&request.complete_event)?;
-        let mut sessions = self
-            .pairing_sessions
-            .lock()
-            .expect("HTTP pairing-session mutex");
-        let session = sessions
-            .get_mut(&request.pairing_session_id)
-            .ok_or_else(|| ServerHttpError::PairingSessionNotFound {
-                pairing_session_id: request.pairing_session_id.clone(),
-            })?;
-        ensure_pairing_session_open(session)?;
-        if session.state == HttpPairingSessionState::Completed
-            && session
-                .events
-                .get(3)
-                .is_some_and(|stored| stored.event == request.complete_event)
-        {
-            return Ok(session.clone());
-        }
-        if session.state != HttpPairingSessionState::ResponsePublished {
-            return Err(ServerHttpError::PairingSessionClosed {
-                pairing_session_id: request.pairing_session_id,
-            });
-        }
-        let source = session
-            .source_public_key
-            .as_deref()
-            .and_then(|value| NostrPublicKey::from_hex(value).ok())
-            .ok_or_else(|| pairing_corrupt("stored source public key is invalid"))?;
-        let target = NostrPublicKey::from_hex(&session.target_public_key)
-            .map_err(|_| pairing_corrupt("stored target public key is invalid"))?;
-        if complete.pubkey != target || pairing_recipient(&complete)? != source {
-            return Err(pairing_conflict(
-                &request.pairing_session_id,
-                "completion is not bound to this source and target",
-            ));
-        }
-        session.events.push(HttpPairingEventRecord {
-            seq: 4,
-            event: request.complete_event,
-        });
-        session.state = HttpPairingSessionState::Completed;
-        let record = session.clone();
-        if let Err(error) = self
-            .sql_delivery
-            .store()
-            .write(|tx| Ok(metadata::upsert_pairing_session(tx, &record)?))
-        {
-            session.events.truncate(3);
-            session.state = HttpPairingSessionState::ResponsePublished;
-            return Err(sql_write_error(error));
-        }
-        drop(sessions);
-        Ok(record)
-    }
-
-    pub(crate) fn expire_pairing_session(
-        &self,
-        request: ExpirePairingSessionRequest,
-    ) -> Result<ExpirePairingSessionResponse, ServerHttpError> {
-        validate_pairing_session_id(&request.pairing_session_id)?;
-        let mut sessions = self
-            .pairing_sessions
-            .lock()
-            .expect("HTTP pairing-session mutex");
-        let session = sessions
-            .get_mut(&request.pairing_session_id)
-            .ok_or_else(|| ServerHttpError::PairingSessionNotFound {
-                pairing_session_id: request.pairing_session_id.clone(),
-            })?;
-        if session.state == HttpPairingSessionState::Completed {
-            return Err(ServerHttpError::PairingSessionClosed {
-                pairing_session_id: request.pairing_session_id,
-            });
-        }
-        let prior = session.state.clone();
-        session.state = HttpPairingSessionState::Expired;
-        let record = session.clone();
-        if let Err(error) = self
-            .sql_delivery
-            .store()
-            .write(|tx| Ok(metadata::upsert_pairing_session(tx, &record)?))
-        {
-            session.state = prior;
-            return Err(sql_write_error(error));
-        }
-        drop(sessions);
-        Ok(ExpirePairingSessionResponse { expired: true })
     }
 
     /// The /sync/wait predicate: any watched room advanced past its cursor.
@@ -2689,9 +2366,9 @@ impl HttpServerState {
     }
 
     /// Fresh typed application event: plan the publish, then land the
-    /// delivery entry, the effect row, the push-wake outbox row, and the
-    /// idempotency row in ONE transaction. The projection head advance is
-    /// derived state and rides the checkpoint cadence.
+    /// delivery entry, the effect row, and the idempotency row in ONE
+    /// transaction. The projection head advance is derived state and rides
+    /// the checkpoint cadence.
     fn append_application_event_fresh(
         &self,
         request: AppendApplicationEventRequest,
@@ -2711,8 +2388,6 @@ impl HttpServerState {
             .application_effects
             .lock()
             .expect("HTTP application-effects mutex");
-        let mut push_wakes = self.push_wakes.lock().expect("HTTP push-wake mutex");
-
         // Idempotency check against the same map the legacy path used: the
         // COMPOSED publish key ("event:{room}:{key}"), which is also the
         // durable row's key — a folded database carries rows in exactly
@@ -2779,10 +2454,6 @@ impl HttpServerState {
         };
         let effect_mutation =
             check_application_delivery_effect(&application_effects, effect, &idempotency_key)?;
-        let push_wake_mutation = effect_mutation
-            .as_ref()
-            .and_then(PushWakeOutboxRecord::from_effect);
-
         let idempotency_record = PublishIdempotencyRecord {
             fingerprint: PublishMessageFingerprint::from_request(&event_publish),
             receipt: receipt.clone(),
@@ -2792,10 +2463,6 @@ impl HttpServerState {
                 SqlDelivery::append_plan_in_tx(tx, &plans)?;
                 if let Some(effect) = &effect_mutation {
                     metadata::upsert_application_effect_in_transaction(tx, effect)
-                        .map_err(crate::store::StoreTxError::Store)?;
-                }
-                if let Some(wake) = &push_wake_mutation {
-                    metadata::upsert_push_wake_in_transaction(tx, wake)
                         .map_err(crate::store::StoreTxError::Store)?;
                 }
                 metadata::insert_publish_idempotency_in_transaction(
@@ -2815,13 +2482,9 @@ impl HttpServerState {
         if let Some(effect) = effect_mutation {
             application_effects.insert(effect.message_id.clone(), effect);
         }
-        if let Some(wake) = push_wake_mutation {
-            push_wakes.insert(wake.wake_id.clone(), wake);
-        }
         drop(idempotency);
         drop(room_memberships);
         drop(application_effects);
-        drop(push_wakes);
         drop(_ordering);
         self.note_op_for_snapshot();
         Ok(EventAccepted {
@@ -2898,13 +2561,9 @@ impl HttpServerState {
             .application_effects
             .lock()
             .expect("HTTP application-effects mutex");
-        let mut push_outbox = 0usize;
         let mut unread = 0usize;
         let mut command_inbox = 0usize;
         for effect in effects.values() {
-            if effect.delivery_policy.creates_push() {
-                push_outbox += 1;
-            }
             if effect.delivery_policy.creates_unread() {
                 unread += 1;
             }
@@ -2913,141 +2572,8 @@ impl HttpServerState {
             }
         }
         Ok(ApplicationEffectCountsResponse {
-            push_outbox: usize_to_u32("push_outbox", push_outbox)?,
             unread: usize_to_u32("unread", unread)?,
             command_inbox: usize_to_u32("command_inbox", command_inbox)?,
-        })
-    }
-
-    pub(crate) fn claim_push_wakes(
-        &self,
-        request: ClaimPushWakesRequest,
-    ) -> Result<ClaimPushWakesResponse, ServerHttpError> {
-        let limit = request.limit.min(MAX_PUSH_WAKE_CLAIM_BATCH);
-        if limit == 0 {
-            return Ok(ClaimPushWakesResponse { wakes: Vec::new() });
-        }
-        if request.lease_ms == 0 || request.lease_ms > MAX_PUSH_WAKE_LEASE_MS {
-            return Err(ServerHttpError::InvalidDeviceRequest {
-                reason: format!("push wake lease_ms must be 1..={MAX_PUSH_WAKE_LEASE_MS}"),
-            });
-        }
-
-        let mut push_wakes = self.push_wakes.lock().expect("HTTP push-wake mutex");
-        let mut claimable: Vec<(HttpSequence, String, PushWakeOutboxRecord)> = push_wakes
-            .iter()
-            .filter(|(_, record)| record.claimable_at(request.now_ms))
-            .map(|(wake_id, record)| (record.seq, wake_id.clone(), record.clone()))
-            .collect();
-        claimable.sort_by(|left, right| left.0.cmp(&right.0).then_with(|| left.1.cmp(&right.1)));
-
-        let claimed: Vec<PushWakeOutboxRecord> = claimable
-            .into_iter()
-            .take(limit)
-            .map(|(_, _, record)| record.claimed(request.now_ms, request.lease_ms))
-            .collect();
-        if claimed.is_empty() {
-            return Ok(ClaimPushWakesResponse { wakes: Vec::new() });
-        }
-
-        self.sql_delivery
-            .store()
-            .write(|tx| {
-                for record in &claimed {
-                    metadata::upsert_push_wake_in_transaction(tx, record)
-                        .map_err(crate::store::StoreTxError::Store)?;
-                }
-                Ok(())
-            })
-            .map_err(sql_write_error)?;
-        for record in &claimed {
-            push_wakes.insert(record.wake_id.clone(), record.clone());
-        }
-        drop(push_wakes);
-
-        let tokens = self.push_tokens.lock().expect("HTTP push-token mutex");
-        let rooms = self
-            .room_memberships
-            .lock()
-            .expect("HTTP room-membership mutex");
-        let revoked = self.revoked_devices.lock().expect("HTTP device mutex");
-        let wakes = claimed
-            .iter()
-            .map(|record| PushWakeDelivery {
-                wake_id: record.wake_id.clone(),
-                payload: PushWakePayload {
-                    room_id: record.room_id.clone(),
-                    seq: record.seq,
-                },
-                tokens: push_tokens_for_wake(record, &tokens, &rooms, &revoked),
-                attempt: record.attempts(),
-            })
-            .collect();
-        Ok(ClaimPushWakesResponse { wakes })
-    }
-
-    pub(crate) fn ack_push_wake(
-        &self,
-        request: AckPushWakeRequest,
-    ) -> Result<AckPushWakeResponse, ServerHttpError> {
-        validate_string_bytes("wake_id", &request.wake_id, MAX_OBJECT_ID_BYTES).map_err(
-            |error| ServerHttpError::InvalidDeviceRequest {
-                reason: error.to_string(),
-            },
-        )?;
-        let mut push_wakes = self.push_wakes.lock().expect("HTTP push-wake mutex");
-        let acked = push_wakes.contains_key(&request.wake_id);
-        if acked {
-            self.sql_delivery
-                .store()
-                .write(|tx| Ok(metadata::delete_push_wake(tx, &request.wake_id)?))
-                .map_err(sql_write_error)?;
-            push_wakes.remove(&request.wake_id);
-        }
-        Ok(AckPushWakeResponse { acked })
-    }
-
-    pub(crate) fn fail_push_wake(
-        &self,
-        request: FailPushWakeRequest,
-    ) -> Result<FailPushWakeResponse, ServerHttpError> {
-        validate_string_bytes("wake_id", &request.wake_id, MAX_OBJECT_ID_BYTES).map_err(
-            |error| ServerHttpError::InvalidDeviceRequest {
-                reason: error.to_string(),
-            },
-        )?;
-        let mut push_wakes = self.push_wakes.lock().expect("HTTP push-wake mutex");
-        let Some(record) = push_wakes.get(&request.wake_id).cloned() else {
-            return Ok(FailPushWakeResponse {
-                retry: false,
-                dropped: false,
-            });
-        };
-
-        if record.attempts() >= MAX_PUSH_WAKE_ATTEMPTS {
-            self.sql_delivery
-                .store()
-                .write(|tx| Ok(metadata::delete_push_wake(tx, &request.wake_id)?))
-                .map_err(sql_write_error)?;
-            push_wakes.remove(&request.wake_id);
-            return Ok(FailPushWakeResponse {
-                retry: false,
-                dropped: true,
-            });
-        }
-
-        let retry = record.released_for_retry();
-        self.sql_delivery
-            .store()
-            .write(|tx| {
-                metadata::upsert_push_wake_in_transaction(tx, &retry)
-                    .map_err(crate::store::StoreTxError::Store)
-            })
-            .map_err(sql_write_error)?;
-        push_wakes.insert(retry.wake_id.clone(), retry);
-        Ok(FailPushWakeResponse {
-            retry: true,
-            dropped: false,
         })
     }
 
@@ -3548,60 +3074,6 @@ impl HttpServerState {
         })
     }
 
-    pub(crate) fn register_push_token(
-        &self,
-        request: RegisterPushTokenRequest,
-    ) -> Result<RegisterPushTokenResponse, ServerHttpError> {
-        request.device.validate_limits().map_err(|error| {
-            ServerHttpError::InvalidDeviceRequest {
-                reason: error.to_string(),
-            }
-        })?;
-        if request.token.is_empty() || request.token.len() > 4_096 {
-            return Err(ServerHttpError::InvalidDeviceRequest {
-                reason: "push token must be 1..=4096 bytes".to_owned(),
-            });
-        }
-        self.ensure_device_not_revoked(&request.device)?;
-        let record = PushTokenRecord {
-            device: request.device.clone(),
-            platform: request.platform,
-            token: request.token,
-        };
-        let mut tokens = self.push_tokens.lock().expect("HTTP push-token mutex");
-        self.sql_delivery
-            .store()
-            .write(|tx| Ok(metadata::upsert_push_token(tx, &record)?))
-            .map_err(sql_write_error)?;
-        tokens.insert(DeviceMembership::key(&request.device), record);
-        Ok(RegisterPushTokenResponse { registered: true })
-    }
-
-    pub(crate) fn remove_push_token(
-        &self,
-        request: RemovePushTokenRequest,
-    ) -> Result<RemovePushTokenResponse, ServerHttpError> {
-        request.device.validate_limits().map_err(|error| {
-            ServerHttpError::InvalidDeviceRequest {
-                reason: error.to_string(),
-            }
-        })?;
-        let key = DeviceMembership::key(&request.device);
-        let mut tokens = self.push_tokens.lock().expect("HTTP push-token mutex");
-        let removed = match (tokens.get(&key), request.token.as_deref()) {
-            (None, _) => false,
-            (Some(record), Some(expected_token)) if record.token != expected_token => false,
-            (Some(_), _) => tokens.remove(&key).is_some(),
-        };
-        if removed {
-            self.sql_delivery
-                .store()
-                .write(|tx| Ok(metadata::delete_push_token(tx, &key)?))
-                .map_err(sql_write_error)?;
-        }
-        Ok(RemovePushTokenResponse { removed })
-    }
-
     /// Write a fresh room-state checkpoint so the next startup replays at
     /// most each room's delivery-entry tail. Called automatically every
     /// [`SNAPSHOT_INTERVAL_OPS`] accepted operations and available for
@@ -3861,77 +3333,6 @@ pub(crate) struct AccountRoomDirectoryMutation {
     pub(crate) upserts: Vec<AccountRoomDirectoryRecord>,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub(crate) struct PushWakeOutboxRecord {
-    pub(crate) wake_id: String,
-    room_id: String,
-    seq: HttpSequence,
-    sender: DeviceRef,
-    state: PushWakeOutboxState,
-}
-
-impl PushWakeOutboxRecord {
-    fn from_effect(effect: &HttpApplicationDeliveryEffect) -> Option<Self> {
-        effect
-            .delivery_policy
-            .creates_push()
-            .then(|| PushWakeOutboxRecord {
-                wake_id: effect.message_id.clone(),
-                room_id: effect.room_id.clone(),
-                seq: effect.seq,
-                sender: effect.sender.clone(),
-                state: PushWakeOutboxState::Pending { attempts: 0 },
-            })
-    }
-
-    fn attempts(&self) -> u32 {
-        match self.state {
-            PushWakeOutboxState::Pending { attempts }
-            | PushWakeOutboxState::Leased { attempts, .. } => attempts,
-        }
-    }
-
-    fn claimable_at(&self, now_ms: u64) -> bool {
-        match self.state {
-            PushWakeOutboxState::Pending { .. } => true,
-            PushWakeOutboxState::Leased {
-                lease_expires_at_ms,
-                ..
-            } => lease_expires_at_ms <= now_ms,
-        }
-    }
-
-    fn claimed(&self, now_ms: u64, lease_ms: u64) -> Self {
-        let mut next = self.clone();
-        let attempts = self.attempts().saturating_add(1);
-        next.state = PushWakeOutboxState::Leased {
-            lease_expires_at_ms: now_ms.saturating_add(lease_ms),
-            attempts,
-        };
-        next
-    }
-
-    fn released_for_retry(&self) -> Self {
-        let mut next = self.clone();
-        next.state = PushWakeOutboxState::Pending {
-            attempts: self.attempts(),
-        };
-        next
-    }
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-enum PushWakeOutboxState {
-    Pending {
-        attempts: u32,
-    },
-    Leased {
-        lease_expires_at_ms: u64,
-        attempts: u32,
-    },
-}
-
 /// Releases the snapshot in-flight flag when the background snapshot thread
 /// exits, even on panic: a flag stuck at `true` would stop every future
 /// snapshot attempt with no further error to observe — exactly the silent
@@ -3978,37 +3379,6 @@ fn check_application_delivery_effect(
         });
     }
     Ok(Some(effect))
-}
-
-fn push_tokens_for_wake(
-    record: &PushWakeOutboxRecord,
-    tokens: &BTreeMap<String, PushTokenRecord>,
-    rooms: &BTreeMap<String, HttpRoomMembershipProjection>,
-    revoked: &BTreeSet<String>,
-) -> Vec<PushTokenRecord> {
-    let Some(projection) = rooms.get(&record.room_id) else {
-        return Vec::new();
-    };
-    let mut recipients: Vec<PushTokenRecord> = projection
-        .membership
-        .values()
-        .filter(|membership| membership.device != record.sender)
-        .filter(|membership| projection.device_active_at_head(&membership.device))
-        .filter_map(|membership| {
-            let key = DeviceMembership::key(&membership.device);
-            if revoked.contains(&key) {
-                return None;
-            }
-            tokens.get(&key).cloned()
-        })
-        .collect();
-    recipients.sort_by(|left, right| {
-        left.device
-            .account_id
-            .cmp(&right.device.account_id)
-            .then_with(|| left.device.device_id.cmp(&right.device.device_id))
-    });
-    recipients
 }
 
 pub(crate) fn apply_account_room_membership_delta(

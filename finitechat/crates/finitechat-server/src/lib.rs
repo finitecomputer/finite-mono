@@ -5,27 +5,20 @@ use finitechat_delivery::{
     HttpDeliveryLimits, HttpKeyPackageId, HttpSequence, HttpServerError, MAX_HTTP_SYNC_PAGE_ENTRIES,
 };
 pub use finitechat_http::{
-    AckPushWakeRequest, AckPushWakeResponse, AckWelcomeRequest, AckWelcomeResponse,
-    ApplicationEffectCountsResponse, ApplicationEffectRequest, BootstrapAccountRoomRequest,
-    BootstrapAccountRoomResponse, ClaimKeyPackageForAccountRequest, ClaimKeyPackageRequest,
-    ClaimKeyPackagesRequest, ClaimPushWakesRequest, ClaimPushWakesResponse, ClaimWelcomesRequest,
-    CreatePairingSessionRequest, DeviceLivenessRecord, ErrorResponse, ExpireKeyPackageLeaseRequest,
-    ExpireKeyPackageLeaseResponse, ExpirePairingSessionRequest, ExpirePairingSessionResponse,
-    FINITECHAT_SERVER_CONTRACT_VERSION, FailPushWakeRequest, FailPushWakeResponse,
+    AckWelcomeRequest, AckWelcomeResponse, ApplicationEffectCountsResponse,
+    ApplicationEffectRequest, BootstrapAccountRoomRequest, BootstrapAccountRoomResponse,
+    ClaimKeyPackageForAccountRequest, ClaimKeyPackageRequest, ClaimKeyPackagesRequest,
+    ClaimWelcomesRequest, DeviceLivenessRecord, ErrorResponse, ExpireKeyPackageLeaseRequest,
+    ExpireKeyPackageLeaseResponse, FINITECHAT_SERVER_CONTRACT_VERSION,
     FiniteAccountRoomCommitProjection, GetDeviceLivenessRequest, GetDeviceLivenessResponse,
     GetEphemeralActivitiesRequest, GetEphemeralActivitiesResponse,
     GetKeyPackageAvailabilityRequest, GetKeyPackageAvailabilityResponse, GetNostrProfilesRequest,
-    GetNostrProfilesResponse, GetPairingSessionRequest, GroupSyncRequest, HealthResponse,
-    HttpApplicationDeliveryEffect, HttpClaimedWelcome, HttpKeyPackageClaim,
-    HttpKeyPackageInventory, HttpNipAbSourceDescriptorV1, HttpPairingEventRecord,
-    HttpPairingSessionRecord, HttpPairingSessionState, InboxSyncRequest,
+    GetNostrProfilesResponse, GroupSyncRequest, HealthResponse, HttpApplicationDeliveryEffect,
+    HttpClaimedWelcome, HttpKeyPackageClaim, HttpKeyPackageInventory, InboxSyncRequest,
     KeyPackageAvailabilityEntry, KeyPackageInventoryRequest, LeaveRoomRequest, LeaveRoomResponse,
     ListAccountRoomDirectoryRequest, ListAccountRoomDirectoryResponse, NostrProfileCacheEntry,
     NostrProfileRecord, ObserveDeviceLivenessRequest, PublishKeyPackageResponse,
-    PublishMessageRequest, PublishPairingCompleteRequest, PublishPairingOfferRequest,
-    PublishPairingResponseRequest, PushTokenRecord, PushWakeDelivery, PushWakePayload,
-    PutNostrProfileRequest, PutNostrProfileResponse, RegisterPushTokenRequest,
-    RegisterPushTokenResponse, RemovePushTokenRequest, RemovePushTokenResponse,
+    PublishMessageRequest, PutNostrProfileRequest, PutNostrProfileResponse,
     ReportInvalidCommitRequest, ReportInvalidCommitResponse, RevokeDeviceRequest,
     RevokeDeviceResponse, SaveAccountRoomRequest, SaveAccountRoomResponse, SyncHintEvent,
     SyncStreamRequest, SyncWaitRequest, SyncWaitResponse, UpdateRoomAdminsRequest,
@@ -36,11 +29,6 @@ use finitechat_transport::{GroupId, MemberId, MessageId};
 use thiserror::Error;
 
 pub(crate) const MAX_HTTP_ACCOUNT_ROOM_ID_BYTES: usize = 128;
-pub(crate) const PAIRING_PROTOCOL_VERSION: u16 = 1;
-pub(crate) const PAIRING_EVENT_KIND: u16 = 24_134;
-pub(crate) const PAIRING_SESSION_TTL_SECONDS: u64 = 120;
-pub(crate) const MAX_PAIRING_EVENT_BYTES: u32 = 96 * 1024;
-pub(crate) const MAX_PAIRING_EVENTS: usize = 8;
 pub(crate) const MAX_HTTP_BLOB_UPLOAD_BODY_BYTES: usize = MAX_ATTACHMENT_CIPHERTEXT_BYTES as usize;
 pub(crate) const MAX_KEY_PACKAGE_AVAILABILITY_BATCH: usize = MAX_HTTP_SYNC_PAGE_ENTRIES;
 pub(crate) const MAX_NOSTR_PROFILE_BATCH: usize = 64;
@@ -49,9 +37,6 @@ pub(crate) const MAX_NOSTR_PROFILE_ABOUT_BYTES: usize = 4 * 1024;
 pub(crate) const MAX_NOSTR_PROFILE_PICTURE_BYTES: usize = 2 * 1024;
 pub(crate) const MAX_NOSTR_PROFILE_METADATA_JSON_BYTES: usize = 16 * 1024;
 pub(crate) const MAX_PUBLIC_IMAGE_BLOB_BYTES: usize = 8 * 1024 * 1024;
-pub(crate) const MAX_PUSH_WAKE_CLAIM_BATCH: usize = 100;
-pub(crate) const MAX_PUSH_WAKE_LEASE_MS: u64 = 5 * 60 * 1_000;
-pub(crate) const MAX_PUSH_WAKE_ATTEMPTS: u32 = 5;
 
 /// Capacity limits for the durable finite chat server.
 ///
@@ -275,22 +260,6 @@ pub enum ServerHttpError {
     FanoutRoomNotFound {
         fanout_id: String,
         room_id: GroupId,
-    },
-    InvalidPairingSessionRequest {
-        reason: String,
-    },
-    PairingSessionAlreadyExists {
-        pairing_session_id: String,
-    },
-    PairingSessionNotFound {
-        pairing_session_id: String,
-    },
-    PairingSessionConflict {
-        pairing_session_id: String,
-        reason: String,
-    },
-    PairingSessionClosed {
-        pairing_session_id: String,
     },
     InvalidSyncRequest {
         reason: String,
@@ -555,34 +524,6 @@ impl IntoResponse for ServerHttpError {
                 StatusCode::NOT_FOUND,
                 "fanout_room_not_found".to_owned(),
                 format!("fanout {fanout_id} has no room {room_id:?}"),
-            ),
-            Self::InvalidPairingSessionRequest { reason } => (
-                StatusCode::BAD_REQUEST,
-                "invalid_pairing_session_request".to_owned(),
-                reason,
-            ),
-            Self::PairingSessionAlreadyExists { pairing_session_id } => (
-                StatusCode::CONFLICT,
-                "pairing_session_already_exists".to_owned(),
-                format!("pairing session {pairing_session_id} already exists"),
-            ),
-            Self::PairingSessionNotFound { pairing_session_id } => (
-                StatusCode::NOT_FOUND,
-                "pairing_session_not_found".to_owned(),
-                format!("pairing session {pairing_session_id} was not found"),
-            ),
-            Self::PairingSessionConflict {
-                pairing_session_id,
-                reason,
-            } => (
-                StatusCode::CONFLICT,
-                "pairing_session_conflict".to_owned(),
-                format!("pairing session {pairing_session_id} conflict: {reason}"),
-            ),
-            Self::PairingSessionClosed { pairing_session_id } => (
-                StatusCode::BAD_REQUEST,
-                "pairing_session_closed".to_owned(),
-                format!("pairing session {pairing_session_id} is closed"),
             ),
             Self::InvalidSyncRequest { reason } => (
                 StatusCode::BAD_REQUEST,

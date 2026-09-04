@@ -49,20 +49,6 @@ smoke:
 saas-smoke:
     cd .. && nix run .#devfinity -- up --headless -- scripts/devfinity-saas-smoke
 
-# Starts the local encrypted-chat stack, pairs the iOS app, and launches Simulator.
-
-# The pinned dev shell provides Rust's Apple targets; Xcode remains a host dependency.
-ios-local-agent:
-    cd .. && finitechat/scripts/ios-local-agent.sh
-
-# Same authority-free pairing stack, preloaded beyond the old sync window.
-ios-local-agent-stress:
-    cd .. && FINITECHAT_IOS_LOCAL_STRESS_MESSAGE_COUNT=5200 FINITECHAT_IOS_LOCAL_STRESS_CHAT_COUNT=81 finitechat/scripts/ios-local-agent.sh
-
-# Launches a clean Electron Device against either local-agent profile.
-electron-local-agent:
-    cd .. && finitechat/scripts/electron-local-agent.sh
-
 # Starts the headless stack, runs the ignored Rust smoke test, and tears the stack down
 rust-smoke:
     cd .. && nix run .#devfinity -- --state-dir .local-state/dfs up --services-only --fresh --headless -- cargo test -p devfinity --locked --test stack_smoke -- --ignored --nocapture

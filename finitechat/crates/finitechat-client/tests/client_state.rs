@@ -1,13 +1,14 @@
 use axum::Router;
 use axum::body::{Body, to_bytes};
 use axum::http::{Method, Request, StatusCode};
+use finitechat_client::rejected_entry_diagnostic::RejectedEntryErrorClass;
 use finitechat_client::{
     AppliedLogEntry, ClientError, ClientStoreError, FiniteChatDevice, FiniteChatDeviceConfig,
     HttpRuntimeDelivery, HttpRuntimeDeliveryError, HttpRuntimeTransport, LinkFanoutRoomStatus,
     ReqwestHttpRuntimeTransport, ReqwestHttpRuntimeTransportError, RuntimeDelivery,
-    RuntimeLinkFanoutOptions, RuntimeSyncOptions, RuntimeWorkerError, SqliteClientStore,
-    SqliteClientStoreOptions, WelcomeAdmissionPolicy, run_link_fanout_tick, run_runtime_rekey_room,
-    run_runtime_sync_tick,
+    RuntimeLinkFanoutOptions, RuntimeRekeySkippedEntry, RuntimeSyncOptions, RuntimeWorkerError,
+    SqliteClientStore, SqliteClientStoreOptions, WelcomeAdmissionPolicy, run_link_fanout_tick,
+    run_runtime_rekey_room, run_runtime_sync_tick,
 };
 use finitechat_delivery::MAX_HTTP_SYNC_PAGE_ENTRIES;
 use finitechat_http::{SyncHintEvent, SyncStreamRequest, SyncWaitRoom};
@@ -1303,6 +1304,9 @@ fn runtime_removed_device_processes_removal_but_not_future_http_ciphertext() {
     let stale_charlie_state = charlie.export_state().unwrap();
     let mut stale_charlie =
         FiniteChatDevice::from_state(charlie_config, stale_charlie_state).unwrap();
+    // This test deliberately sends from a stale state to pin the server's
+    // membership rejection; step around the client-side currency gate.
+    stale_charlie.bypass_currency_gate_for_tests(room_id);
 
     let remove_charlie = bob
         .prepare_remove_member_commit(room_id, stale_charlie.device_ref(), "remove_charlie_http")
@@ -2760,6 +2764,10 @@ fn rewound_sender_wedges_receiver_and_heals_via_readdmission_epoch_bump() {
     let _ = std::fs::remove_file(bob_db.parent().unwrap().join("rewind_bob.sqlite3-shm"));
     let bob_store = sqlite_client_store(bob_db.clone(), &bob_config);
     let mut bob = bob_store.load_device(bob_config.clone()).unwrap();
+    // The currency gate would refuse this rewound sender (pinned by the
+    // currency-gate tests); this test pins the *receiver's* wedge and heal,
+    // so step around the gate deliberately.
+    bob.bypass_currency_gate_for_tests(ROOM_ID);
 
     // Wedge: the rewound sender's message is accepted by the server (shape and
     // membership checks only — the server cannot see secret-tree generations)
@@ -2870,46 +2878,93 @@ fn rewound_sender_wedges_receiver_and_heals_via_readdmission_epoch_bump() {
     );
 }
 
-/// Operator rekey (self-update Commit) heals the receiver of a rewound
-/// sender without minting a new device: the epoch bump restarts every
-/// leaf's secret tree at generation 0. The receiver commits while its cursor
-/// is still frozen behind the quarantined entry; the runbook's mandatory
-/// skip to the commit seq then lets normal sync carry on in both directions.
-#[test]
-fn rekey_room_heals_receiver_wedged_by_rewound_sender() {
-    let dir = tempfile::tempdir().unwrap();
-    let mut pair = RekeyPair::new(&dir, "heal");
-    let options = pair.options();
-
+/// Wedge device-a behind device-b's rewound ratchet: healthy traffic, a
+/// file-level rewind of device-b (the production mechanism), then `poison`
+/// sends the server accepts and device-a's tick aborts on. Returns the
+/// frozen cursor and the accepted poison entries.
+fn wedge_receiver_behind_rewound_sender(
+    dir: &tempfile::TempDir,
+    pair: &mut RekeyPair,
+    options: &RuntimeSyncOptions,
+    poison: usize,
+) -> (u64, Vec<EventAccepted>) {
     // Healthy traffic: device-b sends, device-a receives and decrypts.
     let healthy = pair.send_from_b(b"rekey healthy", "app_rekey_healthy");
-    let healthy_report = pair.sync_a(&options).unwrap();
+    let healthy_report = pair.sync_a(options).unwrap();
     assert_eq!(healthy_report.applied_entries.len(), 1);
     assert_eq!(pair.a.last_applied_seq(ROOM_ID).unwrap(), healthy.seq);
 
     // Rewind device-b: persist (T1), advance its ratchet across sends the
     // receiver consumes, then restore the T1 store files.
     pair.b_store.save_device_state(&pair.b).unwrap();
-    let t1 = StoreFileSnapshot::take(&dir, &pair.b_db, "b_t1");
+    let t1 = StoreFileSnapshot::take(dir, &pair.b_db, "b_t1");
     for i in 0..4 {
         pair.send_from_b(
             format!("rekey advance {i}").as_bytes(),
             &format!("app_rekey_advance_{i}"),
         );
     }
-    assert_eq!(pair.sync_a(&options).unwrap().applied_entries.len(), 4);
+    assert_eq!(pair.sync_a(options).unwrap().applied_entries.len(), 4);
     let frozen_cursor = pair.a.last_applied_seq(ROOM_ID).unwrap();
     pair.restore_b(&t1);
+    // The currency gate would refuse this rewound sender (pinned by the
+    // currency-gate tests); these tests pin the receiver's wedge and the
+    // rekey heal, so step around the gate deliberately.
+    pair.b.bypass_currency_gate_for_tests(ROOM_ID);
 
-    // Wedge: the rewound sender's entry is accepted by the server but the
-    // receiver's tick aborts on it and the cursor stays frozen.
-    let poison = pair.send_from_b(b"rekey poison", "app_rekey_poison");
-    assert!(poison.seq > frozen_cursor);
-    assert!(pair.sync_a(&options).is_err());
+    // Wedge: the rewound sender's entries are accepted by the server but
+    // the receiver's tick aborts on the first and the cursor stays frozen.
+    let poison = (0..poison)
+        .map(|i| {
+            pair.send_from_b(
+                format!("rekey poison {i}").as_bytes(),
+                &format!("app_rekey_poison_{i}"),
+            )
+        })
+        .collect::<Vec<_>>();
+    assert!(poison[0].seq > frozen_cursor);
+    assert!(pair.sync_a(options).is_err());
     assert_eq!(pair.a.last_applied_seq(ROOM_ID).unwrap(), frozen_cursor);
+    (frozen_cursor, poison)
+}
 
-    // Rekey from the wedged receiver: the commit does not need the cursor at
-    // the server head, and it leaves the frozen cursor alone.
+/// Operator rekey (self-update Commit) heals the receiver of a rewound
+/// sender without minting a new device: the epoch bump restarts every
+/// leaf's secret tree at generation 0. The receiver commits while its cursor
+/// is still frozen behind the quarantined entries. The rekey replays the
+/// backlog first: a third member's healthy sends interleaved with the
+/// poison are applied and stored, only the MLS-undecryptable poison is
+/// skipped (with sender and error class), the cursor lands on the commit
+/// seq, and normal sync carries on in both directions with no operator
+/// repair.
+#[test]
+fn rekey_room_heals_receiver_wedged_by_rewound_sender() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut pair = RekeyPair::new(&dir, "heal");
+    let options = pair.options();
+    let mut charlie = pair.admit_third_device("device_c_rekey_heal");
+    pair.sync_b(&options).unwrap();
+    assert_eq!(pair.b.group_epoch(ROOM_ID).unwrap(), 2);
+    let (frozen_cursor, poison) =
+        wedge_receiver_behind_rewound_sender(&dir, &mut pair, &options, 2);
+
+    // Above the freeze, the third member's healthy sends interleave with
+    // more poison; the frozen tick can reach none of them.
+    let healthy_1 = send_from(
+        &mut pair.delivery,
+        &mut charlie,
+        b"third healthy 1",
+        "app_third_1",
+    );
+    let poison_2 = pair.send_from_b(b"rekey poison 2", "app_rekey_poison_2");
+    let healthy_2 = send_from(
+        &mut pair.delivery,
+        &mut charlie,
+        b"third healthy 2",
+        "app_third_2",
+    );
+    let poison = [poison[0].clone(), poison[1].clone(), poison_2];
+
     let report = run_runtime_rekey_room(
         &mut pair.a_store,
         &mut pair.a,
@@ -2919,41 +2974,74 @@ fn rekey_room_heals_receiver_wedged_by_rewound_sender() {
     )
     .unwrap();
     assert_eq!(report.room_id, ROOM_ID);
-    assert_eq!(report.previous_epoch, 1);
-    assert_eq!(report.new_epoch, 2);
-    assert!(report.commit_seq > poison.seq);
-    assert_eq!(pair.a.group_epoch(ROOM_ID).unwrap(), 2);
+    assert_eq!(report.previous_epoch, 2);
+    assert_eq!(report.new_epoch, 3);
+    assert_eq!(report.commit_seq, healthy_2.seq + 1);
+    assert_eq!(report.cursor_before, frozen_cursor);
+    assert_eq!(report.cursor_after, report.commit_seq);
+    assert_eq!(
+        report.applied, 2,
+        "the healthy entries are applied, not skipped"
+    );
+    assert_eq!(
+        report.skipped,
+        poison
+            .iter()
+            .map(|entry| RuntimeRekeySkippedEntry {
+                seq: entry.seq,
+                sender_account_id: pair.b.device_ref().account_id.clone(),
+                sender_device_id: pair.b.device_ref().device_id.clone(),
+                message_id: entry.message_id.clone(),
+                error_class: RejectedEntryErrorClass::MlsApplicationCiphertext,
+            })
+            .collect::<Vec<_>>(),
+        "exactly the poison entries, on evidence, attributed to the rewound sender"
+    );
+    assert_eq!(pair.a.group_epoch(ROOM_ID).unwrap(), 3);
     assert!(!pair.a.has_pending_commit(ROOM_ID).unwrap());
-    assert_eq!(pair.a.last_applied_seq(ROOM_ID).unwrap(), frozen_cursor);
+    assert_eq!(pair.a.last_applied_seq(ROOM_ID).unwrap(), report.commit_seq);
     let durable_a = pair.a_store.load_device(pair.a_config.clone()).unwrap();
-    assert_eq!(durable_a.group_epoch(ROOM_ID).unwrap(), 2);
+    assert_eq!(durable_a.group_epoch(ROOM_ID).unwrap(), 3);
     assert!(!durable_a.has_pending_commit(ROOM_ID).unwrap());
-    let commit_page = pair
-        .delivery
-        .sync_events(ROOM_ID, pair.a.device_ref(), report.commit_seq - 1)
-        .unwrap();
-    assert_eq!(commit_page.entries.len(), 1);
-    assert_eq!(commit_page.entries[0].message_id, report.message_id);
-    assert_eq!(commit_page.entries[0].kind, LogEntryKind::Commit);
+    assert_eq!(
+        durable_a.last_applied_seq(ROOM_ID).unwrap(),
+        report.commit_seq
+    );
+    // The healthy entries were stored durably.
+    let stored = stored_plaintexts(&pair.a_store, pair.a.device_ref());
+    assert!(stored.contains(&(healthy_1.seq, b"third healthy 1".to_vec())));
+    assert!(stored.contains(&(healthy_2.seq, b"third healthy 2".to_vec())));
+    assert!(
+        !stored
+            .iter()
+            .any(|(seq, _)| poison.iter().any(|entry| entry.seq == *seq))
+    );
 
-    // The rewound sender applies the commit on its next sync.
+    // The rewound sender's first sync re-pages its own pre-rewind entry and
+    // the currency gate records the rewind evidence (the tick fails); the
+    // next tick advances past own entries, applies the healing commit, and
+    // the epoch bump clears the evidence.
+    let behind = pair.sync_b(&options).unwrap_err();
+    assert!(
+        matches!(
+            behind,
+            RuntimeWorkerError::ClientStore(ClientStoreError::Client(
+                ClientError::DeviceStateBehindServer { .. }
+            ))
+        ),
+        "expected the currency gate to record the rewind, got {behind:?}"
+    );
     let b_report = pair.sync_b(&options).unwrap();
-    assert_eq!(pair.b.group_epoch(ROOM_ID).unwrap(), 2);
+    assert_eq!(pair.b.group_epoch(ROOM_ID).unwrap(), 3);
     assert!(b_report.applied_entries.iter().any(|entry| {
         entry.seq == report.commit_seq
-            && matches!(entry.entry, AppliedLogEntry::Commit { epoch: 2, .. })
+            && matches!(entry.entry, AppliedLogEntry::Commit { epoch: 3, .. })
     }));
 
-    // Its next send decrypts at the receiver once the operator's mandatory
-    // cursor skip moves the frozen cursor to the commit seq; the frozen tick
-    // still aborts on the poison entry before that.
+    // Its next send decrypts at the receiver directly: the cursor already
+    // sits on the commit seq, so no operator skip is needed.
     let healed_plaintext = b"rekey healed";
     let healed = pair.send_from_b(healed_plaintext, "app_rekey_healed");
-    assert!(pair.sync_a(&options).is_err());
-    assert_eq!(pair.a.last_applied_seq(ROOM_ID).unwrap(), frozen_cursor);
-    pair.a_store
-        .advance_room_cursor_and_save(&mut pair.a, ROOM_ID, report.commit_seq)
-        .unwrap();
     let healed_report = pair.sync_a(&options).unwrap();
     assert_eq!(pair.a.last_applied_seq(ROOM_ID).unwrap(), healed.seq);
     assert_eq!(
@@ -2989,6 +3077,240 @@ fn rekey_room_heals_receiver_wedged_by_rewound_sender() {
             sender: pair.a.device_ref().clone(),
         })
     );
+}
+
+/// A device that is merely behind ordinary, decryptable traffic runs
+/// `rekey`: the unread message is applied and stored, nothing is skipped,
+/// and the epoch bumps. (Classifying by sender after the commit would have
+/// dropped it; the pre-commit replay is what makes the skip honest.)
+#[test]
+fn rekey_replays_ordinary_unread_traffic_instead_of_skipping_it() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut pair = RekeyPair::new(&dir, "unread");
+    let options = pair.options();
+    let unread_plaintext = b"ordinary unread message";
+    let unread = pair.send_from_b(unread_plaintext, "app_rekey_unread");
+    assert_eq!(pair.a.last_applied_seq(ROOM_ID).unwrap(), pair.add_seq);
+
+    let report = run_runtime_rekey_room(
+        &mut pair.a_store,
+        &mut pair.a,
+        &mut pair.delivery,
+        ROOM_ID,
+        "rekey_http_unread",
+    )
+    .unwrap();
+    assert_eq!(report.previous_epoch, 1);
+    assert_eq!(report.new_epoch, 2);
+    assert_eq!(report.commit_seq, unread.seq + 1);
+    assert_eq!(report.cursor_before, pair.add_seq);
+    assert_eq!(report.cursor_after, report.commit_seq);
+    assert_eq!(report.applied, 1);
+    assert!(
+        report.skipped.is_empty(),
+        "healthy traffic is never skipped"
+    );
+    assert_eq!(pair.a.last_applied_seq(ROOM_ID).unwrap(), report.commit_seq);
+    assert!(
+        stored_plaintexts(&pair.a_store, pair.a.device_ref())
+            .contains(&(unread.seq, unread_plaintext.to_vec())),
+        "the unread message is stored, not dropped"
+    );
+
+    pair.sync_b(&options).unwrap();
+    assert_eq!(pair.b.group_epoch(ROOM_ID).unwrap(), 2);
+    let next = pair.send_from_b(b"after the rekey", "app_rekey_unread_next");
+    let next_report = pair.sync_a(&options).unwrap();
+    assert_eq!(pair.a.last_applied_seq(ROOM_ID).unwrap(), next.seq);
+    assert_eq!(next_report.applied_entries.len(), 1);
+}
+
+/// The receiver's own application entry in the backlog is crossed the way
+/// the sync tick crosses it (own sends are not decryptable by their
+/// sender): it is neither applied nor skipped.
+#[test]
+fn rekey_crosses_an_own_entry_in_the_backlog_without_skipping_it() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut pair = RekeyPair::new(&dir, "own_entry");
+    let options = pair.options();
+    let (frozen_cursor, poison) =
+        wedge_receiver_behind_rewound_sender(&dir, &mut pair, &options, 1);
+    let own = pair
+        .a
+        .create_application_request(ROOM_ID, b"receiver reply while wedged", "app_own_entry")
+        .unwrap();
+    let own = pair
+        .delivery
+        .append_event(&own, DurableAppEventKind::ChatMessage.delivery_policy())
+        .unwrap();
+    assert!(own.seq > poison[0].seq);
+
+    let report = run_runtime_rekey_room(
+        &mut pair.a_store,
+        &mut pair.a,
+        &mut pair.delivery,
+        ROOM_ID,
+        "rekey_http_own_entry",
+    )
+    .unwrap();
+    assert_eq!(report.new_epoch, 2);
+    assert_eq!(report.commit_seq, own.seq + 1);
+    assert_eq!(report.cursor_before, frozen_cursor);
+    assert_eq!(report.cursor_after, report.commit_seq);
+    assert_eq!(report.applied, 0);
+    assert_eq!(
+        report
+            .skipped
+            .iter()
+            .map(|entry| entry.seq)
+            .collect::<Vec<_>>(),
+        vec![poison[0].seq]
+    );
+    assert_eq!(pair.a.last_applied_seq(ROOM_ID).unwrap(), report.commit_seq);
+}
+
+/// A Commit or Proposal in the backlog that fails to apply refuses the
+/// rekey entirely: a typed error naming the seq, no Commit submitted, and
+/// no durable change. The backlog is served through a delivery that
+/// relabels one poison entry's kind.
+#[test]
+fn rekey_refuses_when_the_backlog_holds_a_failing_commit_or_proposal() {
+    for (kind, tag) in [
+        (LogEntryKind::Commit, "backlog_commit"),
+        (LogEntryKind::Proposal, "backlog_proposal"),
+    ] {
+        let dir = tempfile::tempdir().unwrap();
+        let mut pair = RekeyPair::new(&dir, tag);
+        let options = pair.options();
+        let (frozen_cursor, poison) =
+            wedge_receiver_behind_rewound_sender(&dir, &mut pair, &options, 2);
+        let relabeled_seq = poison[1].seq;
+
+        let error = {
+            let mut delivery = TamperedSyncDelivery {
+                inner: &mut pair.delivery,
+                tamper: |page: &mut SyncEventsPage| {
+                    for entry in page.entries.iter_mut() {
+                        if entry.seq == relabeled_seq {
+                            entry.kind = kind;
+                            entry.envelope.kind = kind;
+                            entry.message_id = entry.envelope.message_id().unwrap();
+                        }
+                    }
+                },
+            };
+            run_runtime_rekey_room(
+                &mut pair.a_store,
+                &mut pair.a,
+                &mut delivery,
+                ROOM_ID,
+                format!("rekey_http_{tag}"),
+            )
+            .unwrap_err()
+        };
+        assert!(
+            matches!(
+                &error,
+                RuntimeWorkerError::Client(ClientError::RekeyBacklogNotReplayable {
+                    room_id,
+                    seq,
+                    kind: failed_kind,
+                    ..
+                }) if room_id == ROOM_ID && *seq == relabeled_seq && *failed_kind == kind
+            ),
+            "{tag}: unexpected error: {error}"
+        );
+        assert_eq!(pair.a.group_epoch(ROOM_ID).unwrap(), 1);
+        assert!(!pair.a.has_pending_commit(ROOM_ID).unwrap());
+        let durable_a = pair.a_store.load_device(pair.a_config.clone()).unwrap();
+        assert_eq!(durable_a.group_epoch(ROOM_ID).unwrap(), 1);
+        assert_eq!(durable_a.last_applied_seq(ROOM_ID).unwrap(), frozen_cursor);
+        assert!(!durable_a.has_pending_commit(ROOM_ID).unwrap());
+        let head = pair
+            .delivery
+            .sync_events(ROOM_ID, pair.a.device_ref(), relabeled_seq)
+            .unwrap();
+        assert!(
+            head.entries.is_empty(),
+            "{tag}: a refused rekey must not append"
+        );
+    }
+}
+
+/// A previous attempt that committed but never completed its cursor skip
+/// (a run on the older image, or a crash after acceptance) leaves this
+/// device's own merged Commit above the frozen cursor. The backlog below it
+/// can no longer be classified honestly (past-epoch secrets are gone), so
+/// a re-run refuses with a typed error naming `repair skip-entry`, submits
+/// nothing, and changes nothing; the sanctioned skip then completes the
+/// heal (crossing the merged Commit as a no-op advance).
+#[test]
+fn rekey_refuses_when_its_own_merged_commit_sits_above_a_frozen_cursor() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut pair = RekeyPair::new(&dir, "frozen_own_commit");
+    let options = pair.options();
+    let (frozen_cursor, _poison) =
+        wedge_receiver_behind_rewound_sender(&dir, &mut pair, &options, 2);
+    let first = run_runtime_rekey_room(
+        &mut pair.a_store,
+        &mut pair.a,
+        &mut pair.delivery,
+        ROOM_ID,
+        "rekey_http_frozen_first",
+    )
+    .unwrap();
+    assert_eq!(first.cursor_after, first.commit_seq);
+
+    // Simulate the half-done state: the Commit is merged and durable but
+    // the cursor is still frozen below the poison.
+    pair.a.rewind_room_cursor_for_tests(ROOM_ID, frozen_cursor);
+    pair.a_store.save_device_state(&pair.a).unwrap();
+    assert!(pair.sync_a(&options).is_err());
+
+    let error = run_runtime_rekey_room(
+        &mut pair.a_store,
+        &mut pair.a,
+        &mut pair.delivery,
+        ROOM_ID,
+        "rekey_http_frozen_second",
+    )
+    .unwrap_err();
+    assert!(
+        matches!(
+            &error,
+            RuntimeWorkerError::Client(ClientError::RekeyCursorBehindOwnCommit {
+                room_id,
+                cursor,
+                commit_seq,
+            }) if room_id == ROOM_ID && *cursor == frozen_cursor && *commit_seq == first.commit_seq
+        ),
+        "unexpected error: {error}"
+    );
+    assert!(error.to_string().contains("repair skip-entry"));
+    assert_eq!(pair.a.group_epoch(ROOM_ID).unwrap(), 2);
+    assert_eq!(pair.a.last_applied_seq(ROOM_ID).unwrap(), frozen_cursor);
+    let durable_a = pair.a_store.load_device(pair.a_config.clone()).unwrap();
+    assert_eq!(durable_a.last_applied_seq(ROOM_ID).unwrap(), frozen_cursor);
+    let head = pair
+        .delivery
+        .sync_events(ROOM_ID, pair.a.device_ref(), first.commit_seq)
+        .unwrap();
+    assert!(head.entries.is_empty(), "a refused rekey must not append");
+
+    // The sanctioned path: the operator's skip lands the cursor on the
+    // commit seq and traffic resumes.
+    pair.a_store
+        .advance_room_cursor_and_save(&mut pair.a, ROOM_ID, first.commit_seq)
+        .unwrap();
+    assert!(
+        pair.sync_b(&options).is_err(),
+        "currency gate records the rewind"
+    );
+    pair.sync_b(&options).unwrap();
+    assert_eq!(pair.b.group_epoch(ROOM_ID).unwrap(), 2);
+    let healed = pair.send_from_b(b"rekey frozen healed", "app_rekey_frozen_healed");
+    pair.sync_a(&options).unwrap();
+    assert_eq!(pair.a.last_applied_seq(ROOM_ID).unwrap(), healed.seq);
 }
 
 /// Local preconditions fail closed before any server call: a pending Commit
@@ -3043,8 +3365,12 @@ fn rekey_room_refuses_pending_commit_without_calling_server() {
 }
 
 /// A device whose epoch is behind the server (another member committed
-/// first) is refused with a typed error and no local change; after it syncs
-/// the newer Commit the rekey succeeds and the other member applies it.
+/// first) is refused with a typed error and no local change when the
+/// backlog replay cannot see that Commit (served through a delivery that
+/// hides it, the shape of a Commit accepted between the replay and the
+/// epoch check); after it syncs the newer Commit the rekey succeeds and the
+/// other member applies it. When the Commit IS in the backlog, the replay
+/// applies it first (pinned by the third-member heal test).
 #[test]
 fn rekey_room_refuses_when_local_epoch_is_behind_server() {
     let dir = tempfile::tempdir().unwrap();
@@ -3069,14 +3395,24 @@ fn rekey_room_refuses_when_local_epoch_is_behind_server() {
     assert_eq!(pair.b.group_epoch(ROOM_ID).unwrap(), 2);
 
     let cursor = pair.a.last_applied_seq(ROOM_ID).unwrap();
-    let error = run_runtime_rekey_room(
-        &mut pair.a_store,
-        &mut pair.a,
-        &mut pair.delivery,
-        ROOM_ID,
-        "rekey_http_behind",
-    )
-    .unwrap_err();
+    let hidden_seq = b_accepted.seq;
+    let error = {
+        let mut delivery = TamperedSyncDelivery {
+            inner: &mut pair.delivery,
+            tamper: |page: &mut SyncEventsPage| {
+                page.entries.retain(|entry| entry.seq != hidden_seq);
+                page.next_after_seq = page.next_after_seq.min(hidden_seq - 1);
+            },
+        };
+        run_runtime_rekey_room(
+            &mut pair.a_store,
+            &mut pair.a,
+            &mut delivery,
+            ROOM_ID,
+            "rekey_http_behind",
+        )
+        .unwrap_err()
+    };
     assert!(
         matches!(
             &error,
@@ -3114,8 +3450,13 @@ fn rekey_room_refuses_when_local_epoch_is_behind_server() {
     assert_eq!(report.new_epoch, 3);
     assert_eq!(report.commit_seq, b_accepted.seq + 1);
     // Committed from the server head: the cursor advances across the
-    // device's own Commit, so the next sync does not re-apply it.
+    // device's own Commit, so the next sync does not re-apply it; there is
+    // nothing to replay and nothing to skip.
     assert_eq!(pair.a.last_applied_seq(ROOM_ID).unwrap(), report.commit_seq);
+    assert_eq!(report.cursor_before, report.commit_seq - 1);
+    assert_eq!(report.cursor_after, report.commit_seq);
+    assert_eq!(report.applied, 0);
+    assert!(report.skipped.is_empty());
     assert!(pair.sync_a(&options).unwrap().applied_entries.is_empty());
     pair.sync_b(&options).unwrap();
     assert_eq!(pair.b.group_epoch(ROOM_ID).unwrap(), 3);
@@ -3648,6 +3989,45 @@ impl RekeyPair {
         }
     }
 
+    /// Device-a admits a third member (a fresh in-memory device on the
+    /// third account) with an add-member Commit that device-a applies from
+    /// the log; the caller syncs device-b. Returns the activated member.
+    fn admit_third_device(&mut self, device_id: &str) -> FiniteChatDevice {
+        let mut member = test_device(CHARLIE_ACCOUNT_SECRET_BYTES, device_id);
+        let key_package_id = format!("kp_{device_id}");
+        let welcome_id = format!("welcome_{device_id}");
+        self.delivery
+            .upload_key_package(member.upload_key_package_request(&key_package_id).unwrap())
+            .unwrap();
+        let claimed = self
+            .delivery
+            .claim_key_package_for_device(member.device_ref())
+            .unwrap()
+            .expect("third member key package");
+        let prepared = self
+            .a
+            .prepare_add_member_commit(
+                ROOM_ID,
+                &claimed,
+                &welcome_id,
+                format!("commit_{device_id}"),
+            )
+            .unwrap();
+        let accepted = self.delivery.submit_commit(prepared.request).unwrap();
+        let page = self
+            .delivery
+            .sync_events(ROOM_ID, self.a.device_ref(), accepted.seq - 1)
+            .unwrap();
+        self.a
+            .merge_pending_commit_from_log(ROOM_ID, &page.entries, &prepared.message_id)
+            .unwrap();
+        self.a_store
+            .advance_room_cursor_and_save(&mut self.a, ROOM_ID, accepted.seq)
+            .unwrap();
+        claim_and_activate(&mut self.delivery, &mut member, &welcome_id);
+        member
+    }
+
     fn send_from_b(&mut self, plaintext: &[u8], idempotency_key: &str) -> EventAccepted {
         let request = self
             .b
@@ -3783,6 +4163,104 @@ impl RuntimeDelivery for NeverCalledDelivery {
     fn sync_events(&mut self, _: &str, _: &DeviceRef, _: u64) -> Result<SyncEventsPage, String> {
         panic!("refused rekey must not call sync_events");
     }
+}
+
+/// Delegates to the in-process delivery but lets a test rewrite every sync
+/// page (relabel an entry's kind, hide an entry) to shape the backlog the
+/// rekey sees. A tamper that hides entries must keep `next_after_seq`
+/// consistent, as a real server does.
+struct TamperedSyncDelivery<'a, F: FnMut(&mut SyncEventsPage)> {
+    inner: &'a mut TestHttpRuntimeDelivery,
+    tamper: F,
+}
+
+impl<F: FnMut(&mut SyncEventsPage)> RuntimeDelivery for TamperedSyncDelivery<'_, F> {
+    type Error = HttpRuntimeDeliveryError<InProcessHttpTransportError>;
+
+    fn key_package_inventory(
+        &mut self,
+        owner: &DeviceRef,
+    ) -> Result<KeyPackageInventory, Self::Error> {
+        self.inner.key_package_inventory(owner)
+    }
+
+    fn upload_key_package(&mut self, request: UploadKeyPackageRequest) -> Result<(), Self::Error> {
+        self.inner.upload_key_package(request)
+    }
+
+    fn claim_key_package_for_device(
+        &mut self,
+        owner: &DeviceRef,
+    ) -> Result<Option<ClaimKeyPackageResult>, Self::Error> {
+        self.inner.claim_key_package_for_device(owner)
+    }
+
+    fn claim_key_package_for_account(
+        &mut self,
+        account_id: &str,
+    ) -> Result<Option<ClaimKeyPackageResult>, Self::Error> {
+        self.inner.claim_key_package_for_account(account_id)
+    }
+
+    fn submit_commit(
+        &mut self,
+        request: SubmitCommitRequest,
+    ) -> Result<CommitAccepted, Self::Error> {
+        self.inner.submit_commit(request)
+    }
+
+    fn list_account_rooms(
+        &mut self,
+        request: ListAccountRoomsRequest,
+    ) -> Result<ListAccountRoomsPage, Self::Error> {
+        self.inner.list_account_rooms(request)
+    }
+
+    fn claim_welcomes(&mut self, device: &DeviceRef) -> Result<Vec<WelcomeRecord>, Self::Error> {
+        self.inner.claim_welcomes(device)
+    }
+
+    fn ack_welcome(&mut self, welcome_id: &str) -> Result<(), Self::Error> {
+        self.inner.ack_welcome(welcome_id)
+    }
+
+    fn sync_events(
+        &mut self,
+        room_id: &str,
+        requester: &DeviceRef,
+        after_seq: u64,
+    ) -> Result<SyncEventsPage, Self::Error> {
+        let mut page = self.inner.sync_events(room_id, requester, after_seq)?;
+        (self.tamper)(&mut page);
+        Ok(page)
+    }
+}
+
+/// Send one application message from `device` through the shared delivery.
+fn send_from(
+    delivery: &mut TestHttpRuntimeDelivery,
+    device: &mut FiniteChatDevice,
+    plaintext: &[u8],
+    idempotency_key: &str,
+) -> EventAccepted {
+    let request = device
+        .create_application_request(ROOM_ID, plaintext, idempotency_key)
+        .unwrap();
+    delivery
+        .append_event(&request, DurableAppEventKind::ChatMessage.delivery_policy())
+        .unwrap()
+}
+
+/// `(seq, plaintext)` of every stored application message the store holds
+/// for `owner` in the shared room.
+fn stored_plaintexts(store: &SqliteClientStore, owner: &DeviceRef) -> Vec<(u64, Vec<u8>)> {
+    store
+        .load_app_messages(owner, 100)
+        .unwrap()
+        .into_iter()
+        .filter(|message| message.room_id == ROOM_ID)
+        .map(|message| (message.seq, message.plaintext))
+        .collect()
 }
 
 fn spawn_live_http_server(path: &std::path::Path) -> String {
@@ -3930,4 +4408,548 @@ fn assert_application_acceptance(accepted: &EventAccepted, sent_plaintexts: &[Se
         .map(|message| message.seq + 1)
         .unwrap_or(2);
     assert_eq!(accepted.seq, expected_seq);
+}
+
+// ---------------------------------------------------------------------------
+// Currency gate: a device state that is behind the server must not send.
+//
+// The 2026-08-28 incident placed WAL-less file copies of agent stores into
+// service fleet-wide; every copy was a rewound MLS sender. These tests pin
+// the client-side gate that refuses such a store before it can consume a
+// generation the server already saw.
+
+struct CurrencyFixture {
+    dir: tempfile::TempDir,
+    delivery: TestHttpRuntimeDelivery,
+    alice: FiniteChatDevice,
+    alice_store: SqliteClientStore,
+    bob_config: FiniteChatDeviceConfig,
+    bob_db: std::path::PathBuf,
+    bob_store: SqliteClientStore,
+    bob: FiniteChatDevice,
+    options: RuntimeSyncOptions,
+}
+
+/// Owner (alice) and agent (bob), both durable, one room, both cursors at
+/// the add commit and both verified by one sync tick.
+fn currency_fixture(tag: &str) -> CurrencyFixture {
+    let dir = tempfile::tempdir().unwrap();
+    let server_db = dir
+        .path()
+        .join(format!("finitechat-http-currency-{tag}.sqlite3"));
+    let alice_config = test_config(ALICE_ACCOUNT_SECRET_BYTES, &format!("alice_currency_{tag}"));
+    let mut alice_store = sqlite_client_store(
+        dir.path().join(format!("currency_{tag}_alice.sqlite3")),
+        &alice_config,
+    );
+    let mut alice = FiniteChatDevice::new(alice_config.clone()).unwrap();
+    let bob_config = test_config(BOB_ACCOUNT_SECRET_BYTES, &format!("bob_currency_{tag}"));
+    let bob_db = dir.path().join(format!("currency_{tag}_bob.sqlite3"));
+    let mut bob_store = sqlite_client_store(bob_db.clone(), &bob_config);
+    let mut bob = FiniteChatDevice::new(bob_config.clone()).unwrap();
+    let options = RuntimeSyncOptions {
+        key_package_target_available: 0,
+        max_sync_pages_per_room: 8,
+    };
+    let mut delivery = HttpRuntimeDelivery::from_sqlite_path(&server_db);
+    let add_seq = create_group_room_with_member(
+        &mut delivery,
+        &mut alice,
+        &mut bob,
+        GroupMemberSetup {
+            room_id: ROOM_ID,
+            mls_group_id: MLS_GROUP_ID,
+            key_package_id: &format!("kp_currency_{tag}"),
+            welcome_id: &format!("welcome_currency_{tag}"),
+            idempotency_key: &format!("commit_currency_{tag}"),
+        },
+    );
+    bob_store.save_device_state(&bob).unwrap();
+    bob_store
+        .advance_room_cursor_and_save(&mut bob, ROOM_ID, add_seq)
+        .unwrap();
+    alice_store
+        .advance_room_cursor_and_save(&mut alice, ROOM_ID, add_seq)
+        .unwrap();
+    run_runtime_sync_tick(&mut bob_store, &mut bob, &mut delivery, &options).unwrap();
+    run_runtime_sync_tick(&mut alice_store, &mut alice, &mut delivery, &options).unwrap();
+    CurrencyFixture {
+        dir,
+        delivery,
+        alice,
+        alice_store,
+        bob_config,
+        bob_db,
+        bob_store,
+        bob,
+        options,
+    }
+}
+
+/// The production send shape: encrypt, append, record the accept, save.
+fn send_recorded(
+    delivery: &mut TestHttpRuntimeDelivery,
+    device: &mut FiniteChatDevice,
+    store: Option<&mut SqliteClientStore>,
+    text: &str,
+    idempotency_key: &str,
+) -> EventAccepted {
+    let plaintext = format!(r#"{{"type":"finitecomputer.command.v1","body":{{"text":"{text}"}}}}"#)
+        .into_bytes();
+    let request = device
+        .create_application_request(ROOM_ID, &plaintext, idempotency_key)
+        .unwrap();
+    let accepted = delivery
+        .append_event(&request, DurableAppEventKind::ChatMessage.delivery_policy())
+        .unwrap();
+    device
+        .record_own_send_accepted(ROOM_ID, accepted.seq, &accepted.message_id)
+        .unwrap();
+    if let Some(store) = store {
+        store.save_device_state(device).unwrap();
+    }
+    accepted
+}
+
+fn room_cursor(device: &FiniteChatDevice) -> finitechat_client::RoomSyncCursor {
+    device
+        .room_sync_cursors()
+        .into_iter()
+        .find(|cursor| cursor.room_id == ROOM_ID)
+        .expect("fixture room cursor")
+}
+
+/// Fold the WAL into the main database file so a later main-file-only copy
+/// carries exactly this state (the incident's copy shape).
+fn checkpoint_wal(db_path: &std::path::Path) {
+    Connection::open(db_path)
+        .unwrap()
+        .execute_batch("PRAGMA wal_checkpoint(TRUNCATE);")
+        .unwrap();
+}
+
+/// The incident mechanism: copy the main database file and nothing else.
+fn raw_copy_without_wal(src: &std::path::Path, dst: &std::path::Path) {
+    std::fs::copy(src, dst).unwrap();
+    for suffix in ["-wal", "-shm"] {
+        let _ = std::fs::remove_file(dst.with_file_name(format!(
+            "{}{suffix}",
+            dst.file_name().unwrap().to_string_lossy()
+        )));
+    }
+}
+
+/// The correct mechanism: SQLite's online backup API folds the WAL in.
+fn backup_api_copy(src: &std::path::Path, dst: &std::path::Path) {
+    let src = Connection::open(src).unwrap();
+    let mut dst = Connection::open(dst).unwrap();
+    let backup = rusqlite::backup::Backup::new(&src, &mut dst).unwrap();
+    backup
+        .run_to_completion(64, std::time::Duration::from_millis(5), None)
+        .unwrap();
+}
+
+fn behind_server_evidence_in<E: std::fmt::Debug>(
+    error: &RuntimeWorkerError<E>,
+) -> Option<(u64, u64)> {
+    match error {
+        RuntimeWorkerError::Client(ClientError::DeviceStateBehindServer {
+            local_mark,
+            observed_seq,
+            ..
+        })
+        | RuntimeWorkerError::ClientStore(ClientStoreError::Client(
+            ClientError::DeviceStateBehindServer {
+                local_mark,
+                observed_seq,
+                ..
+            },
+        )) => Some((*local_mark, *observed_seq)),
+        _ => None,
+    }
+}
+
+fn assert_send_refused_behind_server(device: &mut FiniteChatDevice, key: &str) {
+    let refused = device
+        .create_application_request(ROOM_ID, b"must not encrypt", key)
+        .unwrap_err();
+    assert!(
+        matches!(refused, ClientError::DeviceStateBehindServer { .. }),
+        "expected DeviceStateBehindServer, got {refused:?}"
+    );
+}
+
+/// T1 — the raw-copy regression pin. A main-file-only copy taken after a
+/// checkpoint but before later sends is behind the server: its first sync
+/// tick trips on the device's own later entry, the evidence is durable,
+/// and sends are refused. A backup-API copy of the same live store is
+/// current: it syncs clean and sends.
+#[test]
+fn currency_gate_refuses_wal_less_file_copy_but_allows_backup_api_copy() {
+    let mut f = currency_fixture("t1");
+    let first = send_recorded(
+        &mut f.delivery,
+        &mut f.bob,
+        Some(&mut f.bob_store),
+        "t1 first",
+        "t1_first",
+    );
+    checkpoint_wal(&f.bob_db);
+    let mut later = Vec::new();
+    for index in 0..3 {
+        later.push(
+            send_recorded(
+                &mut f.delivery,
+                &mut f.bob,
+                Some(&mut f.bob_store),
+                &format!("t1 later {index}"),
+                &format!("t1_later_{index}"),
+            )
+            .seq,
+        );
+    }
+    let owner_report = run_runtime_sync_tick(
+        &mut f.alice_store,
+        &mut f.alice,
+        &mut f.delivery,
+        &f.options,
+    )
+    .unwrap();
+    assert_eq!(owner_report.applied_entries.len(), 4);
+
+    // Raw copy (main file only): the checkpointed state, i.e. mark == first.
+    let raw_db = f.dir.path().join("t1_bob_raw.sqlite3");
+    raw_copy_without_wal(&f.bob_db, &raw_db);
+    let mut raw_store = sqlite_client_store(&raw_db, &f.bob_config);
+    let mut raw_bob = raw_store.load_device(f.bob_config.clone()).unwrap();
+    let before = room_cursor(&raw_bob);
+    assert_eq!(before.own_send_high_water_seq, first.seq);
+    assert!(before.currency_initialized);
+    assert!(!before.currency_verified);
+    assert!(before.behind_server.is_none());
+
+    let tripped = run_runtime_sync_tick(&mut raw_store, &mut raw_bob, &mut f.delivery, &f.options)
+        .unwrap_err();
+    assert_eq!(
+        behind_server_evidence_in(&tripped),
+        Some((first.seq, later[0])),
+        "unexpected tick error: {tripped:?}"
+    );
+    // The cursor stops short of the evidence entry.
+    assert_eq!(raw_bob.last_applied_seq(ROOM_ID).unwrap(), first.seq);
+    assert_send_refused_behind_server(&mut raw_bob, "t1_raw_refused_in_memory");
+
+    // Durable: a fresh load of the copy still carries the evidence.
+    let mut reloaded = raw_store.load_device(f.bob_config.clone()).unwrap();
+    let evidence = room_cursor(&reloaded)
+        .behind_server
+        .expect("rewind evidence persisted with the device state");
+    assert_eq!(evidence.local_mark, first.seq);
+    assert_eq!(evidence.observed_seq, later[0]);
+    assert_eq!(evidence.evidence_epoch, 1);
+    assert_eq!(evidence.observed_at, NOW);
+    assert_send_refused_behind_server(&mut reloaded, "t1_raw_refused_reloaded");
+    // Re-syncing does not re-trip (the flag is sticky, the tick proceeds)
+    // and does not lift the flag either.
+    run_runtime_sync_tick(&mut raw_store, &mut reloaded, &mut f.delivery, &f.options).unwrap();
+    assert!(room_cursor(&reloaded).behind_server.is_some());
+    assert_send_refused_behind_server(&mut reloaded, "t1_raw_refused_after_resync");
+
+    // Backup-API copy of the same live store: current, syncs clean, sends.
+    let backup_db = f.dir.path().join("t1_bob_backup.sqlite3");
+    backup_api_copy(&f.bob_db, &backup_db);
+    let mut backup_store = sqlite_client_store(&backup_db, &f.bob_config);
+    let mut backup_bob = backup_store.load_device(f.bob_config.clone()).unwrap();
+    assert_eq!(
+        room_cursor(&backup_bob).own_send_high_water_seq,
+        *later.last().unwrap()
+    );
+    run_runtime_sync_tick(
+        &mut backup_store,
+        &mut backup_bob,
+        &mut f.delivery,
+        &f.options,
+    )
+    .unwrap();
+    let cursor = room_cursor(&backup_bob);
+    assert!(cursor.behind_server.is_none());
+    assert!(cursor.currency_verified);
+    let healthy = send_recorded(
+        &mut f.delivery,
+        &mut backup_bob,
+        Some(&mut backup_store),
+        "t1 from backup copy",
+        "t1_backup_send",
+    );
+    let owner_report = run_runtime_sync_tick(
+        &mut f.alice_store,
+        &mut f.alice,
+        &mut f.delivery,
+        &f.options,
+    )
+    .unwrap();
+    assert_eq!(owner_report.applied_entries.len(), 1);
+    assert_eq!(owner_report.applied_entries[0].seq, healthy.seq);
+    assert!(matches!(
+        &owner_report.applied_entries[0].entry,
+        AppliedLogEntry::Application { sender, .. } if *sender == *backup_bob.device_ref()
+    ));
+}
+
+/// T2 — two current copies of one store: the moment one sends, the other
+/// is behind the server; its next sync trips and its sends are refused.
+#[test]
+fn currency_gate_trips_second_current_copy_after_first_copy_sends() {
+    let mut f = currency_fixture("t2");
+    let first = send_recorded(
+        &mut f.delivery,
+        &mut f.bob,
+        Some(&mut f.bob_store),
+        "t2 before fork",
+        "t2_before_fork",
+    );
+    let a_db = f.dir.path().join("t2_bob_a.sqlite3");
+    let b_db = f.dir.path().join("t2_bob_b.sqlite3");
+    backup_api_copy(&f.bob_db, &a_db);
+    backup_api_copy(&f.bob_db, &b_db);
+    let mut a_store = sqlite_client_store(&a_db, &f.bob_config);
+    let mut a = a_store.load_device(f.bob_config.clone()).unwrap();
+    let mut b_store = sqlite_client_store(&b_db, &f.bob_config);
+    let mut b = b_store.load_device(f.bob_config.clone()).unwrap();
+    run_runtime_sync_tick(&mut a_store, &mut a, &mut f.delivery, &f.options).unwrap();
+    run_runtime_sync_tick(&mut b_store, &mut b, &mut f.delivery, &f.options).unwrap();
+    assert!(room_cursor(&a).currency_verified);
+    assert!(room_cursor(&b).currency_verified);
+
+    let from_a = send_recorded(
+        &mut f.delivery,
+        &mut a,
+        Some(&mut a_store),
+        "t2 from a",
+        "t2_a",
+    );
+
+    let tripped =
+        run_runtime_sync_tick(&mut b_store, &mut b, &mut f.delivery, &f.options).unwrap_err();
+    assert_eq!(
+        behind_server_evidence_in(&tripped),
+        Some((first.seq, from_a.seq)),
+        "unexpected tick error: {tripped:?}"
+    );
+    assert_send_refused_behind_server(&mut b, "t2_b_refused");
+    let mut b_reloaded = b_store.load_device(f.bob_config.clone()).unwrap();
+    assert_send_refused_behind_server(&mut b_reloaded, "t2_b_refused_reloaded");
+
+    // The copy that actually sent stays current.
+    run_runtime_sync_tick(&mut a_store, &mut a, &mut f.delivery, &f.options).unwrap();
+    assert!(room_cursor(&a).behind_server.is_none());
+    send_recorded(
+        &mut f.delivery,
+        &mut a,
+        Some(&mut a_store),
+        "t2 from a again",
+        "t2_a_2",
+    );
+}
+
+/// T3 — upgrade bootstrap. A store written by the previous release kept no
+/// own-send mark: the first sync after the upgrade initializes the mark
+/// from the device's own entries instead of tripping, flips the room to
+/// enforcement, and the very next rewind trips.
+#[test]
+fn currency_gate_bootstraps_pre_mark_snapshot_then_enforces() {
+    let mut f = currency_fixture("t3");
+    let _first = send_recorded(&mut f.delivery, &mut f.bob, None, "t3 first", "t3_first");
+    let second = send_recorded(&mut f.delivery, &mut f.bob, None, "t3 second", "t3_second");
+    // Persist in the pre-gate layout: mark and pending ids are dropped.
+    f.bob_store
+        .save_device_state_as_pre_currency_gate_snapshot_for_tests(&f.bob)
+        .unwrap();
+    drop(f.bob_store);
+    let mut bob_store = sqlite_client_store(&f.bob_db, &f.bob_config);
+    let mut legacy_bob = bob_store.load_device(f.bob_config.clone()).unwrap();
+    let cursor = room_cursor(&legacy_bob);
+    assert!(!cursor.currency_initialized);
+    assert_eq!(cursor.own_send_high_water_seq, 0);
+    assert!(!cursor.currency_verified);
+    assert!(cursor.behind_server.is_none());
+
+    // Initialization pass: own entries above 0 raise the mark, no trip.
+    run_runtime_sync_tick(&mut bob_store, &mut legacy_bob, &mut f.delivery, &f.options).unwrap();
+    let cursor = room_cursor(&legacy_bob);
+    assert!(cursor.currency_initialized);
+    assert_eq!(cursor.own_send_high_water_seq, second.seq);
+    assert!(cursor.currency_verified);
+    assert!(cursor.behind_server.is_none());
+    // ...and the graduation is durable.
+    let cursor = room_cursor(&bob_store.load_device(f.bob_config.clone()).unwrap());
+    assert!(cursor.currency_initialized);
+    assert_eq!(cursor.own_send_high_water_seq, second.seq);
+
+    // Enforcement: the next rewind (raw copy before a later send) trips.
+    checkpoint_wal(&f.bob_db);
+    let third = send_recorded(
+        &mut f.delivery,
+        &mut legacy_bob,
+        Some(&mut bob_store),
+        "t3 third",
+        "t3_third",
+    );
+    let raw_db = f.dir.path().join("t3_bob_raw.sqlite3");
+    raw_copy_without_wal(&f.bob_db, &raw_db);
+    let mut raw_store = sqlite_client_store(&raw_db, &f.bob_config);
+    let mut raw_bob = raw_store.load_device(f.bob_config.clone()).unwrap();
+    assert!(room_cursor(&raw_bob).currency_initialized);
+    let tripped = run_runtime_sync_tick(&mut raw_store, &mut raw_bob, &mut f.delivery, &f.options)
+        .unwrap_err();
+    assert_eq!(
+        behind_server_evidence_in(&tripped),
+        Some((second.seq, third.seq)),
+        "unexpected tick error: {tripped:?}"
+    );
+    assert_send_refused_behind_server(&mut raw_bob, "t3_raw_refused");
+}
+
+/// T4 — unverified until synced. A freshly opened store cannot send until
+/// one sync tick has completed for the room in this process.
+#[test]
+fn currency_gate_refuses_sends_until_one_sync_tick_verifies_the_open() {
+    let mut f = currency_fixture("t4");
+    drop(f.bob_store);
+    let mut bob_store = sqlite_client_store(&f.bob_db, &f.bob_config);
+    let mut reopened = bob_store.load_device(f.bob_config.clone()).unwrap();
+    assert!(!room_cursor(&reopened).currency_verified);
+    let refused = reopened
+        .create_application_request(ROOM_ID, b"too early", "t4_too_early")
+        .unwrap_err();
+    assert!(
+        matches!(&refused, ClientError::CurrencyUnverified { room_id } if room_id == ROOM_ID),
+        "expected CurrencyUnverified, got {refused:?}"
+    );
+    run_runtime_sync_tick(&mut bob_store, &mut reopened, &mut f.delivery, &f.options).unwrap();
+    assert!(room_cursor(&reopened).currency_verified);
+    let sent = send_recorded(
+        &mut f.delivery,
+        &mut reopened,
+        Some(&mut bob_store),
+        "t4 after sync",
+        "t4_after_sync",
+    );
+    // A reload through the same store handle keeps the verification the
+    // process already earned (the runtime reloads after failed room ticks).
+    let reloaded = bob_store.load_device(f.bob_config.clone()).unwrap();
+    assert!(room_cursor(&reloaded).currency_verified);
+    assert_eq!(room_cursor(&reloaded).own_send_high_water_seq, sent.seq);
+}
+
+/// T5 — clearing. A flagged room heals only when a Commit moves the epoch
+/// past the evidence epoch: the counterpart's self-update re-derives every
+/// secret tree, the rewound copy's next tick clears the flag, and its
+/// sends are decryptable again.
+#[test]
+fn currency_gate_clears_when_counterpart_commit_advances_the_epoch() {
+    let mut f = currency_fixture("t5");
+    let first = send_recorded(
+        &mut f.delivery,
+        &mut f.bob,
+        Some(&mut f.bob_store),
+        "t5 first",
+        "t5_first",
+    );
+    checkpoint_wal(&f.bob_db);
+    let later = send_recorded(
+        &mut f.delivery,
+        &mut f.bob,
+        Some(&mut f.bob_store),
+        "t5 later",
+        "t5_later",
+    );
+    run_runtime_sync_tick(
+        &mut f.alice_store,
+        &mut f.alice,
+        &mut f.delivery,
+        &f.options,
+    )
+    .unwrap();
+
+    let raw_db = f.dir.path().join("t5_bob_raw.sqlite3");
+    raw_copy_without_wal(&f.bob_db, &raw_db);
+    let mut raw_store = sqlite_client_store(&raw_db, &f.bob_config);
+    let mut raw_bob = raw_store.load_device(f.bob_config.clone()).unwrap();
+    let tripped = run_runtime_sync_tick(&mut raw_store, &mut raw_bob, &mut f.delivery, &f.options)
+        .unwrap_err();
+    assert_eq!(
+        behind_server_evidence_in(&tripped),
+        Some((first.seq, later.seq))
+    );
+    let mut raw_bob = raw_store.load_device(f.bob_config.clone()).unwrap();
+    assert_eq!(
+        room_cursor(&raw_bob)
+            .behind_server
+            .as_ref()
+            .map(|e| e.evidence_epoch),
+        Some(1)
+    );
+    assert_send_refused_behind_server(&mut raw_bob, "t5_refused");
+
+    // Counterpart rekey: alice self-updates, epoch 1 -> 2.
+    let prepared = f
+        .alice
+        .prepare_self_update_commit(ROOM_ID, "t5_alice_self_update")
+        .unwrap();
+    let commit_accepted = f.delivery.submit_commit(prepared.request).unwrap();
+    let alice_page = f
+        .delivery
+        .sync_events(
+            ROOM_ID,
+            f.alice.device_ref(),
+            f.alice.last_applied_seq(ROOM_ID).unwrap(),
+        )
+        .unwrap();
+    f.alice
+        .merge_pending_commit_from_log(ROOM_ID, &alice_page.entries, &prepared.message_id)
+        .unwrap();
+    f.alice_store
+        .advance_room_cursor_and_save(&mut f.alice, ROOM_ID, commit_accepted.seq)
+        .unwrap();
+    assert_eq!(f.alice.group_epoch(ROOM_ID).unwrap(), 2);
+
+    // The flagged copy's tick now passes its own later entry (sticky flag,
+    // no re-trip), applies the Commit, and the epoch advance clears it.
+    run_runtime_sync_tick(&mut raw_store, &mut raw_bob, &mut f.delivery, &f.options).unwrap();
+    assert_eq!(raw_bob.group_epoch(ROOM_ID).unwrap(), 2);
+    let cursor = room_cursor(&raw_bob);
+    assert!(
+        cursor.behind_server.is_none(),
+        "flag should clear: {cursor:?}"
+    );
+    assert!(cursor.currency_verified);
+    assert!(cursor.own_send_high_water_seq >= later.seq);
+    assert!(
+        room_cursor(&raw_store.load_device(f.bob_config.clone()).unwrap())
+            .behind_server
+            .is_none()
+    );
+
+    let healed = send_recorded(
+        &mut f.delivery,
+        &mut raw_bob,
+        Some(&mut raw_store),
+        "t5 healed",
+        "t5_healed",
+    );
+    let owner_report = run_runtime_sync_tick(
+        &mut f.alice_store,
+        &mut f.alice,
+        &mut f.delivery,
+        &f.options,
+    )
+    .unwrap();
+    assert_eq!(owner_report.applied_entries.len(), 1);
+    assert_eq!(owner_report.applied_entries[0].seq, healed.seq);
+    assert!(matches!(
+        &owner_report.applied_entries[0].entry,
+        AppliedLogEntry::Application { plaintext, .. }
+            if plaintext == br#"{"type":"finitecomputer.command.v1","body":{"text":"t5 healed"}}"#
+    ));
 }

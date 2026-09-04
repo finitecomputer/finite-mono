@@ -1,0 +1,22 @@
+[Unit]
+Description=Finite monitoring Tinfoil usage collector (one poll cycle)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=finite-monitoring
+Group=finite-monitoring
+# Pinned jq lives in /opt/finite-monitoring/bin; tinfoil CLI is operator-installed.
+Environment=PATH=/opt/finite-monitoring/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin
+EnvironmentFile=/etc/finite/monitoring/tinfoil.env
+ExecStart=/opt/finite-monitoring/bin/tinfoil-usage-collector
+# /etc/finite/monitoring/tinfoil.env holds the Tinfoil organization key
+# (TINFOIL_API_KEY), provisioned by the operator. Documented by NAME and
+# location only — never a value. The deploy creates the file empty (0640
+# root:finite-monitoring) so this unit can read it.
+TimeoutStartSec=90
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectHome=true
+ReadWritePaths=/var/lib/finite-monitoring/tinfoil

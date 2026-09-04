@@ -89,8 +89,6 @@ def build_release_metadata(
     paths = sorted(path for path in assets_dir.iterdir() if path.is_file())
     if not paths:
         raise DeliveryError("release has no assets")
-    if component == "finitechat" and any("electron" in path.name for path in paths):
-        raise DeliveryError("Electron assets are outside the CLI release path")
 
     _validate_checksum_pairs(paths)
 

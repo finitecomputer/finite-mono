@@ -1,5 +1,6 @@
 import argparse
 import importlib.util
+import json
 import pathlib
 import re
 import sys
@@ -51,10 +52,58 @@ class CiHarnessSelectionTests(unittest.TestCase):
         self.assertIn("pull_request:\n    branches:\n      - main", workflow)
         self.assertNotIn("branches: [production]", workflow)
 
+    def test_ci_authenticates_nix_github_fetches(self) -> None:
+        workflow = ci_workflow_text()
+
+        self.assertIn(
+            "NIX_CONFIG: |\n"
+            "    access-tokens = github.com=${{ github.token }}",
+            workflow,
+        )
+
+    def test_hermes_flake_input_avoids_github_archive_fetchers(self) -> None:
+        # Both the `github:` scheme (api.github.com/.../tarball/<rev>) and the
+        # codeload archive URL (github.com/.../archive/<rev>.tar.gz) hit the
+        # same archive service behind GitHub's per-IP secondary rate limit,
+        # which shared CI runner egress trips (HTTP 429). The git smart-HTTP
+        # fetch is not behind that limit, so the pin must stay `git+https`.
+        flake_nix = (ROOT / "flake.nix").read_text(encoding="utf-8")
+        flake_lock = json.loads((ROOT / "flake.lock").read_text(encoding="utf-8"))
+        hermes_agent = flake_lock["nodes"]["hermes-agent"]
+        locked = hermes_agent["locked"]
+        original = hermes_agent["original"]
+
+        self.assertEqual(locked["type"], "git")
+        self.assertEqual(locked["url"], "https://github.com/NousResearch/hermes-agent")
+        self.assertRegex(locked["rev"], r"^[0-9a-f]{40}$")
+        # shallow=1 keeps the fresh-runner clone to the pinned commit instead
+        # of full upstream history; it locks to the same rev and narHash.
+        self.assertIs(locked["shallow"], True)
+        self.assertEqual(
+            original,
+            {
+                "type": "git",
+                "url": locked["url"],
+                "rev": locked["rev"],
+                "shallow": True,
+            },
+        )
+        self.assertIn(
+            f'hermes-agent.url = "git+{locked["url"]}?rev={locked["rev"]}&shallow=1";',
+            flake_nix,
+        )
+        self.assertNotIn("github:NousResearch/hermes-agent", flake_nix)
+        self.assertNotIn("github:NousResearch/hermes-agent", ci_workflow_text())
+        self.assertNotIn(
+            "api.github.com/repos/NousResearch/hermes-agent/tarball",
+            flake_nix + ci_workflow_text(),
+        )
+        self.assertNotIn("NousResearch/hermes-agent/archive/", flake_nix)
+        self.assertNotIn("NousResearch/hermes-agent/archive/", ci_workflow_text())
+
     def test_nix_consuming_ci_jobs_configure_cachix_read_only(self) -> None:
         for job_id in (
             "rust",
-            "electron-alpha",
             "skills-check",
             "monitoring-nixos-contract",
             "finite-status-contract",
@@ -178,10 +227,7 @@ class CiHarnessSelectionTests(unittest.TestCase):
         values = selection_for(".github/workflows/ci.yml")
 
         for key, value in values.items():
-            if key == "run_electron_alpha":
-                self.assertEqual(value, "false")
-            else:
-                self.assertEqual(value, "true", key)
+            self.assertEqual(value, "true", key)
 
     def test_non_ci_workflow_selects_nix_checks(self) -> None:
         self.assertEqual(
@@ -193,19 +239,13 @@ class CiHarnessSelectionTests(unittest.TestCase):
         values = selection_for("pnpm-workspace.yaml")
 
         for key, value in values.items():
-            if key == "run_electron_alpha":
-                self.assertEqual(value, "false")
-            else:
-                self.assertEqual(value, "true", key)
+            self.assertEqual(value, "true", key)
 
     def test_unknown_root_script_selects_every_active_harness(self) -> None:
         values = selection_for("scripts/new_domain_helper.py")
 
         for key, value in values.items():
-            if key == "run_electron_alpha":
-                self.assertEqual(value, "false")
-            else:
-                self.assertEqual(value, "true", key)
+            self.assertEqual(value, "true", key)
 
     def test_dashboard_lib_change_skips_browser_e2e(self) -> None:
         self.assertEqual(
@@ -345,10 +385,7 @@ class CiHarnessSelectionTests(unittest.TestCase):
         values = selection.values()
 
         for key, value in values.items():
-            if key == "run_electron_alpha":
-                self.assertEqual(value, "false")
-            else:
-                self.assertEqual(value, "true", key)
+            self.assertEqual(value, "true", key)
 
     def test_changed_file_workflow_path_selects_nix_checks(self) -> None:
         args = argparse.Namespace(

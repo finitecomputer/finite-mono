@@ -36,7 +36,7 @@ import {
   type CoreFinitePrivateUsageResult,
   type CoreRuntimeStatus,
 } from "@/lib/core-client";
-import { runtimePrismState } from "@/lib/runtime-presentation";
+import { runtimeHealthAnnotation, runtimePrismState } from "@/lib/runtime-presentation";
 
 type RelayOverviewState = {
   state: "connected" | "stale" | "missing" | "unavailable";
@@ -107,7 +107,10 @@ async function ImportedMachineOverview({
           ? "Retirement is retrying safely. Your agent data remains retained."
           : "Your agent is being retired safely.",
       }
-    : coreRuntimeOverview(runtimeStatus);
+    : coreRuntimeOverview(
+        runtimeStatus,
+        runtimeHealthAnnotation(access.coreProject.runtime?.runtime_health)
+      );
   const prismState = activeRetirement ? "working" : runtimePrismState(runtimeStatus);
   const canRestartRuntime = coreProjectSupportsHostedRestart(access.coreProject);
   const canStopRuntime = coreProjectSupportsHostedStop(access.coreProject);
@@ -265,27 +268,34 @@ function firstSearchParam(value: string | string[] | undefined) {
   return Array.isArray(value) ? (value[0] ?? null) : (value ?? null);
 }
 
-function coreRuntimeOverview(status: CoreRuntimeStatus): RelayOverviewState {
+// Core derives `status` server-side; this only chooses the wording for it
+// and appends Core's health annotation when there is one.
+function coreRuntimeOverview(
+  status: CoreRuntimeStatus,
+  healthAnnotation: string
+): RelayOverviewState {
+  const withHealth = (description: string) =>
+    healthAnnotation ? `${description} ${healthAnnotation}` : description;
   if (status === "online") {
     return {
       state: "connected",
-      description: "Your agent is online.",
+      description: withHealth("Your agent is online."),
     };
   }
   if (status === "stale") {
     return {
       state: "stale",
-      description: "Your agent needs attention.",
+      description: withHealth("Your agent needs attention."),
     };
   }
   if (status === "offline") {
     return {
       state: "missing",
-      description: "Your agent is stopped.",
+      description: withHealth("Your agent is stopped."),
     };
   }
   return {
     state: "unavailable",
-    description: "Your agent is starting.",
+    description: withHealth("Your agent is starting."),
   };
 }

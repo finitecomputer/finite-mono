@@ -42,20 +42,40 @@ is rewound.
 
 ## Remediation, per room
 
-1. **Epoch-advancing commit from the owner side.** The only commit
-   vehicle in the product today is add-member: the owner admits a fresh
-   device key package (e.g. links a second own device) through the
-   normal hosted-web bootstrap, whose add-member commit bumps the room's
-   epoch and re-derives everyone's secret trees at generation 0. The
-   commit is not secret-tree generation bound, so a still-rewound owner
-   device can drive it. Do NOT mint/replace the healthy party's device.
-2. **Skip-repair the wedged receiver's cursor — MANDATORY.** The frozen
-   tick aborts on the first quarantined entry and can never reach the
-   commit behind it (proven in the CI test: the receiver stays wedged
-   after the epoch bump until its cursor is advanced). Advance the
-   receiver's room cursor past the quarantined backlog, up to the commit
-   seq (recovery.md §4a surgery), then let normal sync apply the commit
-   and everything after it.
+1. **Epoch-advancing commit.** Preferred: `finitechat hermes rekey
+   --room <room> --json` from the wedged receiver's agent home — an
+   ordinary self-update Commit that bumps the room's epoch and
+   re-derives everyone's secret trees at generation 0. It does not need
+   the receiver's cursor at the server head (it replays the backlog
+   first, step 2, and refuses unless the local epoch then matches the
+   server's).
+   Alternative when the receiver cannot commit: an owner-side add-member
+   commit (the owner links a second own device through the normal
+   hosted-web bootstrap); commits are not secret-tree generation bound,
+   so a still-rewound owner device can drive it. Do NOT mint/replace the
+   healthy party's device.
+2. **Backlog: the rekey replays it first, on evidence.** Before it
+   commits, `rekey` replays every entry above the receiver's cursor at
+   the current epoch through the real apply path. Healthy messages are
+   delivered and stored (`applied` in the report); only application
+   entries that fail with the MLS application-ciphertext class — the
+   rewound sender's poison — are skipped, listed under `skipped` (seq,
+   sender account/device, message id, error class), and appended to
+   `<agent-home>/rekey-audit.jsonl` (`record: "rekey"`; `--audit-log`
+   overrides the path). The same skip rule drives `repair skip-entry`.
+   The cursor then lands on `commit_seq` through the normal merge. The
+   rewound sender must resend the skipped messages. If anything else
+   fails to replay (a Commit or Proposal, any other error class, one of
+   the receiver's own entries), the rekey refuses with a typed error and
+   changes nothing: sync or repair the room first, then run it again. If
+   a previous attempt already committed and left the cursor frozen (a
+   run on the old image, or a crash after acceptance), the backlog can no
+   longer be classified honestly and the rekey refuses naming the path:
+   use `finitechat repair skip-entry` (recovery.md §4a; canonical
+   container stopped) — its rehearsal replay crosses the merged own
+   commit as a no-op advance, derives the poison-only skip list, and the
+   restarted device converges on its next sync. A cursor that was already
+   current reports `applied: 0`, `skipped: []`.
 3. **Verify both directions:** owner decrypts the agent's next send;
    agent decrypts the owner's next send (the epoch-2 trees make the
    rewound sender's position moot); receiver cursor tracks the room head;
@@ -80,9 +100,10 @@ Concrete room/runtime identifiers live in the incident handoff notes
 1. `scripts/finite-status` run and archived (before-state).
 2. Evidence copies of both stores (sender and receiver) taken within the
    last 24 h; retake if older.
-3. The receiver-side skip tooling is the already-proven recovery.md §4a
-   procedure; rehearse on the dev stack once for the owner-driven
-   re-admission flow before the first production room.
+3. `repair skip-entry` is needed only when the rekey refuses (a
+   previous attempt already committed above a frozen cursor); it is the
+   already-proven recovery.md §4a procedure. Rehearse the rekey on the
+   dev stack once before the first production room.
 
 ## Rollback
 
