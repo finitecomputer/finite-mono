@@ -1,0 +1,853 @@
+#!/usr/bin/env python3
+"""Generate the architecture contract views from docs/architecture/contracts.py.
+
+Outputs (all generated — never edit by hand):
+  docs/architecture/ARCHITECTURE.md    the human document (aimed at simplicity)
+  docs/architecture/site/index.html    the interactive board (publish via fragment)
+  docs/architecture/contracts.json     machine-readable snapshot
+
+Usage:
+  scripts/render-architecture            regenerate everything
+  scripts/render-architecture --check    lint + fail if generated files are stale
+
+stdlib only; any python3 ≥ 3.9 works. The lint is the point: every contract
+must declare its lifecycle, and dying/proposed work must name a campaign.
+"""
+
+import importlib.util
+import json
+import os
+import sys
+from collections import Counter
+
+REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+ARCH_DIR = os.path.join(REPO, "docs", "architecture")
+DATA_FILE = os.path.join(ARCH_DIR, "contracts.py")
+BRAID_FILE = os.path.join(ARCH_DIR, "braid.py")
+MECH_FILE = os.path.join(ARCH_DIR, "braid-mechanical.json")
+
+STATUSES = ["current", "dying", "proposed", "kept", "dead"]
+KINDS = ["edge", "convention", "data", "deploy", "duplication"]
+BRAID_KINDS = ["wire-type", "protocol-impl", "file-format", "concept",
+               "dup-logic", "implicit-coupling", "schema", "secret", "build-unit"]
+DISPOSITIONS = ["interface", "die", "contested", "fine"]
+
+# Diagram layout (SVG coords) and curated edge pairs — renderer-owned, not data.
+LAYOUT = {
+    # external column
+    "workos":      (40, 120),
+    "cloudflare":  (40, 260),
+    "resend":      (40, 400),
+    "ci":          (40, 540),
+    # app plane (lat2)
+    "dashboard":   (330, 60),
+    "core":        (330, 210),
+    "identity":    (330, 360),
+    "chat-server": (560, 60),
+    "hosted-device": (560, 210),
+    "brain":       (560, 360),
+    "sites":       (560, 510),
+    "edge":        (330, 660),
+    # runtime fleet
+    "runner":      (790, 210),
+    "agent-runtime": (790, 400),
+    # clients
+    "fbrain-cli":  (1020, 360),
+    "fsite-cli":   (1020, 510),
+    "chat-clients": (1020, 210),
+}
+NODE_W, NODE_H = 168, 52
+SHORT_LABELS = {
+    "edge": "edge (Caddy)",
+    "chat-clients": "chat clients",
+    "agent-runtime": "agent runtime",
+    "hosted-device": "hosted-device",
+}
+DRAW = {
+    "hd-chat-pair": [("hosted-device", "chat-server")],
+    "dash-hd-vouch": [("dashboard", "hosted-device")],
+    "hd-brain-idp": [("hosted-device", "brain")],
+    "hd-sites-idp": [("hosted-device", "sites")],
+    "runner-core-lease": [("runner", "core")],
+    "runner-identity-names": [("runner", "identity")],
+    "dash-core-api": [("dashboard", "core")],
+    "core-workos": [("core", "workos")],
+    "dash-workos": [("dashboard", "workos")],
+    "mail-notification": [("brain", "resend"), ("sites", "resend")],
+    "dash-sites-viewer-token": [("dashboard", "sites")],
+    "sites-core-reconcile": [("sites", "core")],
+    "agentd-chat-sync": [("agent-runtime", "chat-server")],
+    "nostrjson-read": [("fbrain-cli", "identity"), ("fsite-cli", "identity")],
+    # dead edges stay on the diagram as ghosts until the story is old news
+    "brain-identity-resolution": [("brain", "identity")],
+    "brain-core-roster": [("brain", "core")],
+    "sites-identity-proofs": [("sites", "identity")],
+    "hd-identity-bindings": [("hosted-device", "identity")],
+}
+
+STATUS_LABEL = {
+    "current": "current",
+    "dying": "dying",
+    "proposed": "proposed",
+    "kept": "kept by design",
+    "dead": "DELETED",
+}
+
+
+def load_data():
+    spec = importlib.util.spec_from_file_location("contracts_data", DATA_FILE)
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    bspec = importlib.util.spec_from_file_location("braid_data", BRAID_FILE)
+    bmod = importlib.util.module_from_spec(bspec)
+    bspec.loader.exec_module(bmod)
+    mod.BRAID = bmod
+    return mod
+
+
+def lint(d):
+    errs, warns = [], []
+    ids = set()
+    for c in d.CONTRACTS:
+        cid = c.get("id")
+        if not cid:
+            errs.append("contract without id: %r" % c.get("name"))
+            continue
+        if cid in ids:
+            errs.append("duplicate contract id: %s" % cid)
+        ids.add(cid)
+        if c.get("kind") not in KINDS:
+            errs.append("%s: bad kind %r" % (cid, c.get("kind")))
+        if c.get("status") not in STATUSES:
+            errs.append("%s: bad status %r" % (cid, c.get("status")))
+        if not c.get("summary"):
+            errs.append("%s: missing summary" % cid)
+        if not c.get("owner"):
+            errs.append("%s: missing owner" % cid)
+        if c.get("status") in ("dying", "proposed") and not c.get("campaigns"):
+            errs.append("%s: %s work must name a campaign" % (cid, c["status"]))
+        if c.get("status") == "dead" and not c.get("closed"):
+            errs.append("%s: dead contracts need a closed date" % cid)
+        for p in c.get("parties", []):
+            if p not in d.COMPONENTS and p not in d.HOSTS:
+                errs.append("%s: unknown party %r" % (cid, p))
+        for camp in c.get("campaigns", []):
+            if camp not in d.CAMPAIGNS:
+                errs.append("%s: unknown campaign %r" % (cid, camp))
+        if c.get("kind") == "edge" and c.get("status") != "dead" and not c.get("via"):
+            errs.append("%s: edges need a 'via' transport" % cid)
+    used = {camp for c in d.CONTRACTS for camp in c.get("campaigns", [])}
+    for camp in d.CAMPAIGNS:
+        if camp not in used:
+            warns.append("campaign %r closes no contracts (fine for meta-work)" % camp)
+    # braid rows
+    b_ids = set()
+    for b in d.BRAID.SHARED_THINGS:
+        bid = b.get("id")
+        if not bid or not b.get("name"):
+            errs.append("braid row without id/name: %r" % b.get("story", "")[:40])
+            continue
+        if bid in b_ids:
+            errs.append("duplicate braid id: %s" % bid)
+        b_ids.add(bid)
+        if b.get("kind") not in BRAID_KINDS:
+            errs.append("%s: bad braid kind %r" % (bid, b.get("kind")))
+        if b.get("disposition") not in DISPOSITIONS:
+            errs.append("%s: bad disposition %r" % (bid, b.get("disposition")))
+        if not b.get("story") or not b.get("evidence"):
+            errs.append("%s: braid rows need story + evidence" % bid)
+        for lane in b.get("touched", []):
+            if lane not in d.BRAID.LANES:
+                errs.append("%s: unknown lane %r" % (bid, lane))
+        owner = b.get("owner", "none")
+        if owner != "none" and owner not in d.BRAID.LANES:
+            errs.append("%s: owner %r is not a lane or 'none'" % (bid, owner))
+        if b.get("disposition") == "interface" and owner == "none":
+            errs.append("%s: interface rows must name the owning lane" % bid)
+        if b.get("closed") and not str(b["closed"]).startswith("20"):
+            errs.append("%s: closed must carry a date" % bid)
+    return errs, warns
+
+
+def counts(d):
+    by_status = Counter(c["status"] for c in d.CONTRACTS)
+    return by_status
+
+
+# --------------------------------------------------------------------------- md
+
+BADGE = {"current": "🟦", "dying": "🟧", "proposed": "🟪", "kept": "🟩", "dead": "⬛"}
+
+
+def parties_str(d, c):
+    if not c.get("parties"):
+        return "—"
+    return " ↔ ".join(d.COMPONENTS[p]["name"] if p in d.COMPONENTS else p
+                      for p in c["parties"])
+
+
+def render_md(d):
+    cs = counts(d)
+    total = len(d.CONTRACTS)
+    L = []
+    w = L.append
+    w("<!-- GENERATED by scripts/render-architecture from contracts.py — "
+      "edit the data module, never this file. -->")
+    w("")
+    w("# Finite Architecture — the contracts ledger")
+    w("")
+    w("Every place where *changing X forces changing Y*: runtime calls, "
+      "shared protocols, data formats, deploy couplings, and duplicated "
+      "implementations. The purpose of this ledger is to argue about each "
+      "entry and delete it. Entries never silently disappear — deleted "
+      "contracts stay so the downward trend is visible.")
+    w("")
+    w("**Verified against `origin/main` @ %s · updated %s · %d contracts: "
+      "%d current, %d dying, %d proposed, %d kept, %d dead.**"
+      % (d.MAIN_REV, d.UPDATED, total, cs["current"], cs["dying"],
+         cs["proposed"], cs["kept"], cs["dead"]))
+    w("")
+    w("## The kernel (the rules contracts are reviewed against)")
+    w("")
+    for i, (title, body) in enumerate(d.PRINCIPLES, 1):
+        w("%d. **%s** — %s" % (i, title, body))
+    w("")
+    w("## Scoreboard")
+    w("")
+    w("| status | meaning | count |")
+    w("| --- | --- | --- |")
+    w("| 🟦 current | live today | %d |" % cs["current"])
+    w("| 🟧 dying | in flight or fully designed | %d |" % cs["dying"])
+    w("| 🟪 proposed | audit proposal, not started | %d |" % cs["proposed"])
+    w("| 🟩 kept | kept by design | %d |" % cs["kept"])
+    w("| ⬛ dead | deleted (kept in the ledger) | %d |" % cs["dead"])
+    w("")
+    dead = [c for c in d.CONTRACTS if c["status"] == "dead"]
+    if dead:
+        w("Deleted so far: " + "; ".join(
+            "**%s** (%s)" % (c["name"], c.get("closed", "?")) for c in dead) + ".")
+        w("")
+    # ---- the braid (primary view) ----
+    braid = d.BRAID.SHARED_THINGS
+    from collections import Counter as _C
+    bc = _C(b["disposition"] for b in braid)
+    sizes = d.SIZES
+    closed_rows = [b for b in braid if b.get("closed")]
+    open_rows = [b for b in braid if not b.get("closed")]
+    w("## The braid — shared things (%d)" % len(braid))
+    w("")
+    w("Every shared thing must either become **a self-service interface with "
+      "one owner, or die.** No third state. Sorted by evidence LOC (the "
+      "documented lines that must move together) — the attack order; "
+      "`files` counts the distinct files named in evidence.")
+    w("")
+    w("**%d interface · %d die · %d contested · %d closed.** "
+      % (bc["interface"], bc["die"], bc["contested"], len(closed_rows)))
+    w("")
+    w("| verdict | shared thing | kind | braids | files | LOC | story |")
+    w("| --- | --- | --- | --- | --- | --- | --- |")
+    for b in sorted(open_rows, key=lambda x: (-sizes[x["id"]]["loc"], x["id"])):
+        icon = {"interface": "🔌", "die": "☠️", "contested": "⚖️",
+                "fine": "✅"}[b["disposition"]]
+        owner = ("→ own in **%s**" % b["owner"]) if b["owner"] != "none" else ""
+        sz = sizes[b["id"]]
+        w("| %s | **%s**`%s`<br>%s | %s | %s | %d | %d | %s |" % (
+            icon, b["name"], b["id"], owner, b["kind"],
+            ", ".join(sorted(b["touched"])), sz["files"], sz["loc"], b["story"]))
+    w("")
+    if closed_rows:
+        w("Closed — the wins (%d): " % len(closed_rows) + "; ".join(
+            "~~%s~~ (%s)" % (b["name"], b["closed"]) for b in closed_rows) + ".")
+        w("")
+    mech_path = os.path.join(ARCH_DIR, "braid-mechanical.json")
+    if os.path.exists(mech_path):
+        with open(mech_path) as f:
+            mech = json.load(f)
+        hot = [r for r in mech["rows"] if r["fan_in"] >= 3]
+        w("### Unreviewed mechanical candidates (%d rows, fan-in ≥ 3 shown; "
+          "full list in `braid-mechanical.json`)" % len(mech["rows"]))
+        w("")
+        w("| fan-in | kind | thing | touched |")
+        w("| --- | --- | --- | --- |")
+        for r in hot:
+            w("| %d | %s | `%s` | %s |" % (
+                r["fan_in"], r["kind"], r["name"],
+                ", ".join(sorted(r["touched_by"]))))
+        w("")
+    w("## Where things run")
+    w("")
+    w("| host | status | role |")
+    w("| --- | --- | --- |")
+    for h in d.HOSTS.values():
+        w("| %s | %s | %s |" % (h["name"], h["status"], h["role"]))
+    w("")
+    w("| component | lane | host | store |")
+    w("| --- | --- | --- | --- |")
+    for comp in d.COMPONENTS.values():
+        w("| %s | %s | %s | %s |" % (comp["name"], comp["lane"],
+                                     comp["host"], comp["store"]))
+    w("")
+    for kind in KINDS:
+        rows = [c for c in d.CONTRACTS if c["kind"] == kind]
+        if not rows:
+            continue
+        w("## %s contracts (%d)" % (kind, len(rows)))
+        w("")
+        w("| | contract | parties | seam | story / fate |")
+        w("| --- | --- | --- | --- | --- |")
+        rows.sort(key=lambda c: (STATUSES.index(c["status"]), c["id"]))
+        for c in rows:
+            story = c["summary"]
+            if c.get("death"):
+                story += " — *%s*" % c["death"]
+            w("| %s | **%s**`%s` | %s | %s | %s |" % (
+                BADGE[c["status"]], c["name"], c["id"], parties_str(d, c),
+                c.get("via", "—"), story))
+        w("")
+    w("## Campaigns")
+    w("")
+    w("| campaign | status | closes | point |")
+    w("| --- | --- | --- | --- |")
+    for cid, camp in d.CAMPAIGNS.items():
+        closes = [c["id"] for c in d.CONTRACTS if cid in c.get("campaigns", [])]
+        w("| **%s** | %s | %s | %s *(%s)* |" % (
+            camp["name"], camp["status"], ", ".join(closes) or "—",
+            camp["summary"], camp["source"]))
+    w("")
+    w("## Keeping this true")
+    w("")
+    w("- Edit `docs/architecture/contracts.py` in the same PR that changes a "
+      "seam, then run `scripts/render-architecture` (or let `--check` catch "
+      "the drift in CI).")
+    w("- A PR that adds a `current` contract owes the reviewer a story about "
+      "which contract it deletes. The count should trend down.")
+    w("- `dying` and `proposed` entries must name their campaign.")
+    return "\n".join(L) + "\n"
+
+
+# --------------------------------------------------------------------------- html
+
+HTML = """<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Finite — architecture contracts</title>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Bricolage+Grotesque:wght@500;600;700;800&family=Source+Serif+4:ital,opsz,wght@0,8..60,400;0,8..60,600;1,8..60,400&family=JetBrains+Mono:wght@400;600&display=swap">
+<style>
+:root{--bg:#f3f5f7;--bg2:#e9edf1;--fg:#17202a;--muted:#5c6975;--card:#fff;--border:#d7dee5;
+--cur:#3b5bdb;--cur-soft:#e3e8fb;--kept:#1f7a6d;--kept-soft:#dff0ec;--dy:#a3670c;--dy-soft:#f6ecd8;
+--prop:#7c4dbf;--prop-soft:#eee3fa;--dead:#8a95a0;--code:#e9edf1;--red:#b23a48;--red-soft:#f7e3e6;
+--shadow:0 1px 2px rgba(23,32,42,.06),0 8px 24px -12px rgba(23,32,42,.18);
+--display:"Bricolage Grotesque","Avenir Next","Helvetica Neue",Arial,sans-serif;
+--body:"Source Serif 4",Georgia,serif;--mono:"JetBrains Mono",ui-monospace,Menlo,monospace}
+@media (prefers-color-scheme:dark){:root{--bg:#12161b;--bg2:#1a2027;--fg:#e6eaee;--muted:#98a4b0;--card:#1a2027;--border:#2c3640;
+--cur:#8da2fb;--cur-soft:#1f2540;--kept:#4fb5a5;--kept-soft:#1b3330;--dy:#d9a85a;--dy-soft:#33301f;
+--prop:#b598e8;--prop-soft:#2a2338;--dead:#5f6b76;--code:#242c35;--red:#e06c7a;--red-soft:#3a2228;
+--shadow:0 1px 2px rgba(0,0,0,.4),0 8px 24px -12px rgba(0,0,0,.6)}}
+*{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--fg);font:16px/1.6 var(--body);
+-webkit-font-smoothing:antialiased;-moz-osx-font-smoothing:grayscale}
+main{max-width:1180px;margin:0 auto;padding:2.2rem 1.3rem 6rem}
+h1,h2,h3{font-family:var(--display);letter-spacing:-.015em;line-height:1.15;text-wrap:balance}
+h1{font-size:clamp(1.9rem,4vw,2.9rem);font-weight:800;margin:0 0 .5rem}
+h2{font-size:1.5rem;font-weight:700;margin:2.6rem 0 .7rem}
+p{max-width:72ch}code{font-family:var(--mono);font-size:.82em;background:var(--code);padding:.08em .35em;border-radius:4px}
+.lede{font-size:1.12rem;color:var(--muted);max-width:64ch;margin:0 0 1.2rem}
+.eyebrow{font-family:var(--display);font-size:.72rem;font-weight:700;letter-spacing:.1em;text-transform:uppercase;
+display:inline-block;padding:.2rem .65rem;border-radius:999px;background:var(--cur-soft);color:var(--cur);margin-bottom:.7rem}
+.chips{display:flex;flex-wrap:wrap;gap:.45rem;margin:.9rem 0}
+.chip{font-family:var(--display);font-size:.8rem;font-weight:600;padding:.3rem .75rem;border-radius:999px;
+border:1px solid var(--border);background:var(--card);color:var(--muted);cursor:pointer}
+.chip[aria-pressed="true"]{color:var(--fg);border-color:var(--fg)}
+.chip.cur[aria-pressed="true"]{color:var(--cur);border-color:var(--cur)}
+.chip.kept[aria-pressed="true"]{color:var(--kept);border-color:var(--kept)}
+.chip.dy[aria-pressed="true"]{color:var(--dy);border-color:var(--dy)}
+.chip.prop[aria-pressed="true"]{color:var(--prop);border-color:var(--prop)}
+.chip.dead[aria-pressed="true"]{color:var(--dead);border-color:var(--dead)}
+.score{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:.6rem;margin:1rem 0}
+.score .s{background:var(--card);border:1px solid var(--border);border-radius:10px;padding:.7rem .9rem;cursor:pointer}
+.score .s b{font-family:var(--display);font-size:1.7rem;display:block;line-height:1.1}
+.score .s span{font-size:.78rem;color:var(--muted);font-family:var(--display);text-transform:uppercase;letter-spacing:.06em}
+.frame{background:var(--card);border:1px solid var(--border);border-radius:12px;box-shadow:var(--shadow);overflow:hidden;margin:1rem 0}
+.frame .scroll{overflow-x:auto}
+svg{display:block;max-width:100%;height:auto}
+.legend{display:flex;gap:1rem;flex-wrap:wrap;padding:.55rem .85rem;border-bottom:1px solid var(--border);
+background:var(--bg2);font-family:var(--display);font-size:.78rem;font-weight:600;color:var(--muted)}
+.legend i{display:inline-block;width:1.4em;height:0;border-top:3px solid;vertical-align:middle;margin-right:.35em;border-radius:2px}
+.cards{display:grid;grid-template-columns:repeat(auto-fill,minmax(330px,1fr));gap:.8rem;margin:1rem 0}
+.card{background:var(--card);border:1px solid var(--border);border-left:4px solid var(--muted);border-radius:10px;padding:.85rem 1rem;display:none}
+.card.show{display:block}
+.card.cur{border-left-color:var(--cur)}.card.kept{border-left-color:var(--kept)}
+.card.dy{border-left-color:var(--dy)}.card.prop{border-left-color:var(--prop)}
+.card.dead{border-left-color:var(--dead);opacity:.72}
+.card.if{border-left-color:var(--cur)}.card.di{border-left-color:var(--red)}
+.card.ct{border-left-color:var(--dy)}.card.fn{border-left-color:var(--kept)}
+.st.if{background:var(--cur-soft);color:var(--cur)}.st.di{background:var(--red-soft);color:var(--red)}
+.st.ct{background:var(--dy-soft);color:var(--dy)}.st.fn{background:var(--kept-soft);color:var(--kept)}
+.chip.if[aria-pressed="true"]{color:var(--cur);border-color:var(--cur)}
+.chip.di[aria-pressed="true"]{color:var(--red);border-color:var(--red)}
+.chip.ct[aria-pressed="true"]{color:var(--dy);border-color:var(--dy)}
+table.sortable th{cursor:pointer;user-select:none}
+table.sortable th::after{content:" ↕";opacity:.4;font-size:.8em}
+table.sortable th.sa::after{content:" ↓";opacity:1}
+table.sortable th.sd::after{content:" ↑";opacity:1}
+.card h3{font-size:1rem;margin:0 0 .3rem}
+.card .meta{font-family:var(--mono);font-size:.72rem;color:var(--muted);margin-bottom:.4rem;word-break:break-word}
+.card p{font-size:.9rem;margin:.35rem 0;max-width:none}
+.card .fate{color:var(--muted);font-style:italic;font-size:.86rem}
+.st{font-family:var(--display);font-size:.68rem;font-weight:700;letter-spacing:.07em;text-transform:uppercase;
+padding:.14rem .5rem;border-radius:999px;float:right}
+.st.cur{background:var(--cur-soft);color:var(--cur)}.st.kept{background:var(--kept-soft);color:var(--kept)}
+.st.dy{background:var(--dy-soft);color:var(--dy)}.st.prop{background:var(--prop-soft);color:var(--prop)}
+.st.dead{background:var(--bg2);color:var(--dead)}
+table{border-collapse:collapse;width:100%;font-size:.88rem}
+th,td{text-align:left;vertical-align:top;padding:.5rem .65rem;border-bottom:1px solid var(--border)}
+th{font-family:var(--display);font-size:.74rem;text-transform:uppercase;letter-spacing:.06em;color:var(--muted)}
+ol.rules{max-width:76ch;padding-left:1.2rem}ol.rules li{margin:.4rem 0}
+.dg .node{fill:var(--card);stroke:var(--border);stroke-width:1.2;rx:8}
+.dg .hostl{font-family:var(--mono);font-size:10.5px;fill:var(--muted);letter-spacing:.08em}
+.dg .hostbox{fill:none;stroke:var(--muted);stroke-opacity:.3;stroke-dasharray:5 4;rx:10}
+.dg text.nlabel,.dg text.nsub,.dg .hostl{-webkit-paint-order:stroke;paint-order:stroke;stroke:var(--card);stroke-width:3px;stroke-linejoin:round}
+.dg text.nlabel{font-family:var(--display);font-size:12px;font-weight:700;fill:var(--fg)}
+.dg text.nsub{font-family:var(--mono);font-size:9.5px;fill:var(--muted)}
+.dg .edge path{fill:none;stroke-width:1.8}
+.dg .edge.cur path{stroke:var(--cur)}.dg .edge.kept path{stroke:var(--kept)}
+.dg .edge.dy path{stroke:var(--dy);stroke-dasharray:7 4}
+.dg .edge.prop path{stroke:var(--prop);stroke-dasharray:2 5}
+.dg .edge.dead path{stroke:var(--dead);stroke-dasharray:2 6;stroke-opacity:.5}
+.dg .edge{transition:opacity .2s}.dg.f-edge .edge{opacity:.06}
+.dg .edge.hi{opacity:1}
+.dg .node{cursor:pointer}
+@media (max-width:700px){body{font-size:15px}}
+</style>
+</head>
+<body>
+<main>
+<span class="eyebrow">Trimming campaign ledger</span>
+<h1>Finite architecture contracts</h1>
+<p class="lede" id="lede"></p>
+<div class="score" id="score"></div>
+
+<h2 id="braid-h">The braid — shared things</h2>
+<p class="lede" id="braid-lede" style="margin-bottom:.4rem"></p>
+<p class="lede" style="font-size:.95rem">Every shared thing must either become a <b>self-service interface with one owner</b>, or <b>die</b>. No third state. Sorted by how many lanes it braids — that is the attack order.</p>
+<div class="chips" id="bdisp-chips"></div>
+<div class="chips" id="bkind-chips"></div>
+<div class="chips" style="gap:.45rem .9rem">
+  <span style="font-family:var(--display);font-size:.78rem;font-weight:700;color:var(--muted)">sort:</span>
+  <span id="bsort-chips"></span>
+  <span style="flex:1"></span>
+  <button class="chip" id="bview-toggle" aria-pressed="false">table view</button>
+</div>
+<div class="cards" id="bcards"></div>
+<div class="frame" id="btable-frame" style="display:none"><div style="overflow-x:auto"><table class="sortable" id="btable"></table></div></div>
+<details style="max-width:none"><summary style="font-family:var(--display)">Unreviewed mechanical candidates</summary>
+<div class="frame" style="box-shadow:none;margin-top:.6rem"><div style="overflow-x:auto"><table id="mech-tbl"></table></div></div>
+</details>
+
+<h2>The kernel</h2>
+<ol class="rules" id="rules"></ol>
+
+<h2>Topology — who talks to whom</h2>
+<div class="frame">
+<div class="legend">
+<span><i style="border-color:var(--kept)"></i>kept by design</span>
+<span><i style="border-color:var(--cur)"></i>current</span>
+<span><i style="border-color:var(--dy);border-top-style:dashed"></i>dying</span>
+<span><i style="border-color:var(--prop);border-top-style:dotted"></i>proposed</span>
+<span><i style="border-color:var(--dead);border-top-style:dashed"></i>deleted</span>
+<span style="margin-left:auto">click a node or card to isolate its edges</span>
+</div>
+<div class="scroll" id="diagram"></div>
+</div>
+
+<h2>Filters</h2>
+<div class="chips" id="kind-chips"></div>
+<div class="chips" id="status-chips"></div>
+
+<h2 id="cards-h">Contracts</h2>
+<div class="cards" id="cards"></div>
+
+<h2>Campaigns</h2>
+<div class="frame"><div style="overflow-x:auto"><table id="camp-tbl"></table></div></div>
+
+<p style="color:var(--muted);font-size:.85rem" id="foot"></p>
+</main>
+<script>
+const DATA = __DATA__;
+const ST = {current:["cur","current"],dying:["dy","dying"],proposed:["prop","proposed"],kept:["kept","kept by design"],dead:["dead","deleted"]};
+
+// header
+document.getElementById("lede").textContent =
+  "Every place where changing X forces changing Y — runtime calls, shared protocols, data formats, " +
+  "deploy couplings, duplicated implementations. " + DATA.meta.total + " contracts: " +
+  DATA.counts.current + " current · " + DATA.counts.dying + " dying · " + DATA.counts.proposed +
+  " proposed · " + DATA.counts.kept + " kept · " + DATA.counts.dead + " deleted. Source of truth: " +
+  "docs/architecture/contracts.py in finite-mono @ " + DATA.meta.rev + ".";
+document.getElementById("rules").innerHTML =
+  DATA.principles.map(p => "<li><b>" + p[0] + "</b> — " + p[1] + "</li>").join("");
+document.getElementById("foot").textContent =
+  "Generated by scripts/render-architecture from docs/architecture/contracts.py (updated " +
+  DATA.meta.updated + "). Edit the data module in the PR that changes a seam; a PR that adds a " +
+  "current contract owes a story about which one it deletes.";
+
+// scoreboard
+const score = document.getElementById("score");
+score.innerHTML = Object.keys(ST).filter(k=>k!=="proposed"||DATA.counts.proposed>0).map(k =>
+  '<div class="s" data-st="' + k + '"><b style="color:var(--' + (k==="current"?"cur":k==="dying"?"dy":k==="proposed"?"prop":k) + ')">' +
+  DATA.counts[k] + '</b><span>' + ST[k][1] + "</span></div>").join("");
+
+// ---- the braid (primary view) ----
+const BDIS={interface:["if","interface"],die:["di","die"],contested:["ct","contested"],fine:["fn","fine"]};
+const bc={};DATA.braid.forEach(b=>bc[b.disposition]=(bc[b.disposition]||0)+1);
+DATA.braid.forEach(b=>{b.size=DATA.sizes[b.id]||{files:0,loc:0}});
+const closedN=DATA.braid.filter(b=>b.closed).length;
+document.getElementById("braid-lede").innerHTML =
+  "<b>"+DATA.braid.length+" shared things</b> — "+(bc.interface||0)+" to give an owner, "+(bc.die||0)+
+  " to delete, "+(bc.contested||0)+" decisions owed, <b style='color:var(--kept)'>"+closedN+" closed</b>. From 11 read-only audit lanes + mechanical scans @ "+DATA.meta.rev+".";
+// sort state + controls
+let bSort="loc";
+const SORTS={loc:["LOC",b=>-b.size.loc],"files":["files",b=>-b.size.files],"braids":["lanes braided",b=>-b.touched.length]};
+const sHost=document.getElementById("bsort-chips");
+const sBtns=[];
+Object.entries(SORTS).forEach(([k,[label]])=>{
+  const b=document.createElement("button");b.className="chip";b.textContent="by "+label;
+  b.onclick=()=>{bSort=k;drawBraid()};sHost.appendChild(b);sBtns.push([k,b])});
+// view toggle
+let bTable=false;
+const vt=document.getElementById("bview-toggle");
+vt.onclick=()=>{bTable=!bTable;vt.setAttribute("aria-pressed",String(bTable));
+  vt.textContent=bTable?"card view":"table view";drawBraid()};
+// filters
+let fBDisp=null,fBKind=null;
+const bdHost=document.getElementById("bdisp-chips"),bkHost=document.getElementById("bkind-chips");
+const bdBtns=[],bkBtns=[];
+[[null,"all verdicts"]].concat(Object.keys(BDIS).map(k=>[k,BDIS[k][1]+" ("+(bc[k]||0)+")"])).forEach(([val,label])=>{
+  const b=document.createElement("button");b.className="chip "+(val?BDIS[val][0]:"");b.textContent=label;
+  b.onclick=()=>{fBDisp=fBDisp===val?null:val;applyBraid()};bdHost.appendChild(b);bdBtns.push([val,b])});
+[[null,"all kinds"]].concat([...new Set(DATA.braid.map(b=>b.kind))].map(k=>[k,k])).forEach(([val,label])=>{
+  const b=document.createElement("button");b.className="chip";b.textContent=label;
+  b.onclick=()=>{fBKind=fBKind===val?null:val;applyBraid()};bkHost.appendChild(b);bkBtns.push([val,b])});
+function bVisible(b){
+  return (fBDisp===null||b.disposition===fBDisp)&&(fBKind===null||b.kind===fBKind)}
+function drawBraid(){
+  sBtns.forEach(([k,b])=>b.setAttribute("aria-pressed",String(bSort===k)));
+  const rows=DATA.braid.slice().sort((a,b)=>(!!a.closed-!!b.closed)||SORTS[bSort][1](a)-SORTS[bSort][1](b)||a.id.localeCompare(b.id));
+  const cards=document.getElementById("bcards");
+  cards.innerHTML="";
+  rows.forEach(b=>{
+    const div=document.createElement("div");
+    div.className="card "+BDIS[b.disposition][0]+(bVisible(b)?" show":"");
+    div.dataset.disp=b.disposition;div.dataset.kind=b.kind;div.dataset.id=b.id;
+    div.innerHTML='<span class="st '+BDIS[b.disposition][0]+'">'+(b.closed?"CLOSED":BDIS[b.disposition][1])+'</span>'+
+      "<h3>"+(b.closed?"<s>"+b.name+"</s>":b.name)+"</h3><div class='meta'>"+b.id+" · "+b.kind+" · braids: "+b.touched.join(", ")+
+      (b.owner&&b.owner!=="none"?"<br>owner should be: "+b.owner:"<br><b style='color:var(--red)'>no owner today</b>")+
+      " · "+b.confidence+" confidence</div>"+
+      "<p>"+b.story+"</p>"+
+      (b.closed?"<div class='meta' style='color:var(--kept)'><b>closed "+b.closed.split(" ")[0]+"</b></div>":"")+
+      "<div class='meta'><b>"+b.size.loc+" LOC · "+b.size.files+" files</b> in evidence<br>"+
+      b.evidence.slice(0,3).map(e=>"<code>"+e.split(" (")[0]+"</code>").join("<br>")+"</div>";
+    cards.appendChild(div)});
+  // table view
+  const tbl=document.getElementById("btable");
+  const cols=[["verdict",b=>BDIS[b.disposition][1],x=>x],["shared thing",b=>b.name,(x,html)=>html],
+    ["kind",b=>b.kind,x=>x],["lanes",b=>b.touched.length,x=>x],["files",b=>b.size.files,x=>x],
+    ["LOC",b=>b.size.loc,x=>x]];
+  const keys=["verdict","name","kind","lanes","files","loc"];
+  const orders={verdict:1,name:1,kind:1,lanes:-1,files:-1,loc:-1};
+  let h="<tr>";keys.forEach(k=>{h+="<th data-k='"+k+"'>"+ (k==="loc"?"LOC":k==="lanes"?"lanes braided":k) +"</th>"});h+="</tr>";
+  rows.filter(bVisible).forEach(b=>{
+    h+="<tr><td><span class='st "+BDIS[b.disposition][0]+"'>"+BDIS[b.disposition][1]+"</span></td>"+
+       "<td><b>"+b.name+"</b> <code>"+b.id+"</code></td><td>"+b.kind+"</td><td>"+b.touched.length+
+       "</td><td>"+b.size.files+"</td><td><b>"+b.size.loc+"</b></td></tr>"});
+  tbl.innerHTML=h;
+  tbl.querySelectorAll("th").forEach(th=>th.onclick=()=>{
+    const k=th.dataset.k;
+    if(k==="name"||k==="kind"||k==="verdict"){rowsNotSupported(k);return}
+    bSort=k;drawBraid()});
+  document.getElementById("bcards").style.display=bTable?"none":"grid";
+  document.getElementById("btable-frame").style.display=bTable?"block":"none";
+  const n=rows.filter(bVisible).length;
+  document.getElementById("braid-h").textContent="The braid — shared things ("+n+" shown)";
+}
+function rowsNotSupported(){/* text columns keep current sort */}
+function applyBraid(){
+  bdBtns.forEach(([v,b])=>b.setAttribute("aria-pressed",String(fBDisp===v)));
+  bkBtns.forEach(([v,b])=>b.setAttribute("aria-pressed",String(fBKind===v)));
+  document.querySelectorAll("#bcards .card").forEach(c=>{
+    const b=DATA.braid.find(x=>x.id===c.dataset.id);
+    c.classList.toggle("show",b&&bVisible(b))});
+  drawBraid();
+}
+drawBraid();
+// mechanical candidates table
+const mech=document.getElementById("mech-tbl");
+if(DATA.mech&&DATA.mech.length){
+  mech.innerHTML="<tr><th>fan-in</th><th>kind</th><th>thing</th><th>touched</th></tr>"+DATA.mech.map(r=>
+    "<tr><td>"+r.fan_in+"</td><td>"+r.kind+"</td><td><code>"+r.name+"</code></td><td>"+r.touched_by.join(", ")+"</td></tr>").join("");
+}
+
+// diagram
+const NS = "http://www.w3.org/2000/svg";
+const W = 1230, H = 780, NW = 168, NH = 52;
+function el(t,a,c){const n=document.createElementNS(NS,t);for(const k in a)n.setAttribute(k,a[k]);(c||[]).forEach(x=>n.appendChild(x));return n}
+const svg = el("svg",{viewBox:"0 0 "+W+" "+H,class:"dg",role:"img","aria-label":"component dependency diagram"});
+const groups=[["EXTERNAL",20,60,240,640],["APP PLANE · LAT2 (LIVE)",300,20,460,720],["RUNTIME FLEET · LAT3/4",760,140,210,420],["CLIENTS + PLANNED HOSTS",990,140,210,460]];
+groups.forEach(g=>{svg.appendChild(el("rect",{class:"hostbox",x:g[1],y:g[2],width:g[3],height:g[4],rx:10}));
+svg.appendChild(el("text",{class:"hostl",x:g[1]+10,y:g[2]+18},[document.createTextNode(g[0])]))});
+const center=id=>{const p=DATA.layout[id];return{x:p[0]+NW/2,y:p[1]+NH/2}};
+let hover=null;
+const edgeG=el("g",{}),nodeG=el("g",{});
+svg.appendChild(edgeG);svg.appendChild(nodeG);
+DATA.draw.forEach(d=>{
+  const a=center(d.from),b=center(d.to);
+  const dx=b.x-a.x,dy=b.y-a.y,L=Math.hypot(dx,dy),ux=dx/L,uy=dy/L;
+  const cut=Math.min(Math.abs((NW/2)/(ux||1e-6)),Math.abs((NH/2)/(uy||1e-6)));
+  const p={x:a.x+ux*cut,y:a.y+uy*cut},q={x:b.x-ux*(cut+4),y:b.y-uy*(cut+4)};
+  const mx=(p.x+q.x)/2-uy*30,my=(p.y+q.y)/2+ux*30;
+  const st=d.status==="current"?"cur":d.status==="dying"?"dy":d.status==="proposed"?"prop":d.status;
+  const g=el("g",{class:"edge "+st,"data-parties":d.from+" "+d.to});
+  g.appendChild(el("path",{d:"M"+p.x+","+p.y+" Q"+mx+","+my+" "+q.x+","+q.y}));
+  const t=el("title",{});t.textContent=d.name+" ("+ST[d.status][1]+")";g.appendChild(t);
+  edgeG.appendChild(g);
+});
+Object.entries(DATA.layout).forEach(([id,pos])=>{
+  const comp=DATA.components[id]||{name:id,lane:"",host:""};
+  const g=el("g",{class:"node","data-id":id});
+  g.appendChild(el("rect",{x:pos[0],y:pos[1],width:NW,height:NH,rx:8}));
+  g.appendChild(el("text",{class:"nlabel",x:pos[0]+10,y:pos[1]+21},[document.createTextNode((DATA.short||{})[id]||comp.name)]));
+  g.appendChild(el("text",{class:"nsub",x:pos[0]+10,y:pos[1]+38},[document.createTextNode(comp.lane)]));
+  const t=el("title",{});t.textContent=comp.name+" — "+comp.summary;g.appendChild(t);
+  g.addEventListener("click",()=>{hover=hover===id?null:id;apply()});
+  nodeG.appendChild(g);
+});
+document.getElementById("diagram").appendChild(svg);
+
+// cards
+const cards=document.getElementById("cards");
+DATA.contracts.forEach(c=>{
+  const div=document.createElement("div");
+  div.className="card "+ST[c.status][0];div.dataset.id=c.id;div.dataset.kind=c.kind;
+  div.dataset.st=c.status;div.dataset.parties=(c.parties||[]).join(" ");
+  const parties=(c.parties||[]).map(p=>(DATA.components[p]||{name:p}).name).join(" ↔ ")||"—";
+  div.innerHTML='<span class="st '+ST[c.status][0]+'">'+ST[c.status][1]+'</span>'+
+    "<h3>"+c.name+"</h3><div class='meta'>"+c.id+" · "+c.kind+" · "+parties+
+    (c.via?"<br>"+c.via:"")+(c.owner?" · owner "+c.owner:"")+
+    (c.closed?" · closed "+c.closed:"")+"</div>"+
+    "<p>"+c.summary+"</p>"+
+    (c.death?"<p class='fate'>"+c.death+"</p>":"")+
+    (c.campaigns&&c.campaigns.length?"<div class='meta'>campaigns: "+c.campaigns.join(", ")+"</div>":"");
+  div.addEventListener("mouseenter",()=>{hover=c.parties&&c.parties[0]||null;apply()});
+  div.addEventListener("mouseleave",()=>{hover=null;apply()});
+  div.addEventListener("click",()=>{hover=(c.parties||[])[0]||null;apply()});
+  cards.appendChild(div);
+});
+
+// campaigns
+const camps=document.getElementById("camp-tbl");
+camps.innerHTML="<tr><th>campaign</th><th>status</th><th>closes</th><th>point</th></tr>"+
+  DATA.campaigns.map(([id,c])=>"<tr><td><b>"+c.name+"</b></td><td>"+c.status+"</td><td>"+
+  (DATA.contracts.filter(x=>(x.campaigns||[]).includes(id)).map(x=>x.id).join(", ")||"—")+
+  "</td><td>"+c.summary+" <i style='color:var(--muted)'>("+c.source+")</i></td></tr>").join("");
+
+// filters — chips are built once; apply() only flips state (rebuilding them
+// mid-click breaks pointer interactions)
+let fKind=null,fSt=null;
+const kindHost=document.getElementById("kind-chips"),stHost=document.getElementById("status-chips");
+const kindBtns=[],stBtns=[];
+function buildChips(){
+  kindHost.innerHTML="";stHost.innerHTML="";
+  [[null,"all kinds"]].concat(DATA.kinds.map(k=>[k,k])).forEach(([val,label])=>{
+    const b=document.createElement("button");b.className="chip";b.textContent=label;
+    b.onclick=()=>{fKind=fKind===val?null:val;apply()};kindHost.appendChild(b);kindBtns.push([val,b])});
+  [[null,"all statuses"]].concat(Object.keys(ST).map(s=>[s,ST[s][1]])).forEach(([val,label])=>{
+    const b=document.createElement("button");b.className="chip";b.textContent=label;
+    b.onclick=()=>{fSt=fSt===val?null:val;apply()};stHost.appendChild(b);stBtns.push([val,b])});
+}
+function apply(){
+  kindBtns.forEach(([v,b])=>b.setAttribute("aria-pressed",String(fKind===v)));
+  stBtns.forEach(([v,b])=>b.setAttribute("aria-pressed",String(fSt===v)));
+  document.querySelectorAll(".score .s").forEach(s=>s.style.outline=s.dataset.st===fSt?"2px solid var(--fg)":"none");
+  let n=0;
+  document.querySelectorAll("#cards .card").forEach(c=>{
+    const ok=(fKind===null||c.dataset.kind===fKind)&&(fSt===null||c.dataset.st===fSt)&&
+      (hover===null||(c.dataset.parties+" "+c.dataset.id).includes(hover));
+    c.classList.toggle("show",ok);if(ok)n++});
+  document.getElementById("cards-h").textContent="Contracts ("+n+" shown)";
+  svg.classList.toggle("f-edge",hover!==null);
+  document.querySelectorAll(".dg .edge").forEach(e=>{
+    e.classList.toggle("hi",hover!==null&&e.dataset.parties.includes(hover))});
+  document.querySelectorAll(".dg .node").forEach(g=>{
+    const id=g.dataset.id;
+    const touched=DATA.draw.some(d=>(d.from===id||d.to===id)&&(!hover||d.from===hover||d.to===hover));
+    g.style.opacity=hover===null?1:(touched?1:.45)});
+}
+document.querySelectorAll(".score .s").forEach(s=>s.addEventListener("click",()=>{fSt=fSt===s.dataset.st?null:s.dataset.st;apply()}));
+buildChips();
+apply();
+</script>
+</body>
+</html>
+"""
+
+
+def _load_mech():
+    if os.path.exists(MECH_FILE):
+        with open(MECH_FILE) as f:
+            return json.load(f).get("rows", [])
+    return []
+
+
+_PATH_ROOTS = [
+    "", "finitechat/crates/", "finite-brain/crates/", "finite-sites/crates/",
+    "finitecomputer-v2/crates/", "finitecomputer-v2/apps/", "finitechat/apps/",
+    "finitechat/", "finitecomputer-v2/deploy/finite-computer/images/",
+    "finitecomputer-v2/", "infra/nixos/hosts/", "infra/nixos/modules/",
+    "infra/nixos/", "infra/hosts/", "infra/scripts/", "infra/",
+    "finite-skills/", "scripts/", "devfinity/",
+]
+
+
+def _resolve(path):
+    p = path.strip()
+    if p.startswith("/") or p.startswith("$"):
+        return None
+    for root in _PATH_ROOTS:
+        cand = os.path.join(REPO, root, p)
+        if os.path.exists(cand):
+            return cand
+    return None
+
+
+def measure_rows(rows):
+    """Approximate each shared thing's footprint from its evidence citations.
+
+    loc = sum of cited line spans (+1 per bare line number, whole file when
+    cited without lines); files = distinct resolvable paths. Evidence paths
+    may be written relative to their component root; _resolve maps them into
+    the repo. It skews low — it measures the documented surface, not every
+    ripple — but it is consistent across rows, which is what prioritization
+    needs. Unresolvable paths are reported so rows never silently score 0.
+    """
+    out, unresolved = {}, []
+    for row in rows:
+        files, total = {}, 0
+        for ev in row.get("evidence", []):
+            base = ev.split(" (")[0].strip()
+            for piece in base.split(" + "):
+                piece = piece.strip()
+                if not piece or " " in piece:  # prose evidence, not a path
+                    continue
+                n = 0
+                if ":" in piece:
+                    path, _, lines = piece.partition(":")
+                    path = path.strip()
+                    for part in lines.split(","):
+                        part = part.strip()
+                        if "-" in part:
+                            a, _, b = part.partition("-")
+                            try:
+                                n += max(1, int(b) - int(a) + 1)
+                            except ValueError:
+                                n += 1
+                        else:
+                            try:
+                                int(part)
+                                n += 1
+                            except ValueError:
+                                n = 0
+                else:
+                    path = piece
+                    n = None
+                p = _resolve(path)
+                if p is None:
+                    if not row.get("closed"):  # closed rows cite deleted files
+                        unresolved.append("%s: %s" % (row.get("id"), path))
+                    continue
+                if p not in files:
+                    try:
+                        with open(p, errors="replace") as f:
+                            files[p] = sum(1 for _ in f)
+                    except OSError:
+                        files[p] = 0
+                total += files[p] if n is None else n
+        out[row["id"]] = {"files": len(files), "loc": total}
+    return out, unresolved
+
+
+def render_html(d):
+    payload = {
+        "meta": {"rev": d.MAIN_REV, "updated": d.UPDATED,
+                 "total": len(d.CONTRACTS)},
+        "counts": dict(counts(d)),
+        "principles": [list(p) for p in d.PRINCIPLES],
+        "components": d.COMPONENTS,
+        "contracts": d.CONTRACTS,
+        "campaigns": sorted(d.CAMPAIGNS.items()),
+        "kinds": KINDS,
+        "lanes": d.BRAID.LANES,
+        "braid": sorted(d.BRAID.SHARED_THINGS,
+                        key=lambda b: (-len(b["touched"]), b["id"])),
+        "sizes": d.SIZES,
+        "mech": _load_mech(),
+        "layout": {k: list(v) for k, v in LAYOUT.items()},
+        "short": SHORT_LABELS,
+        "draw": [
+            {"from": a, "to": b, "status": c["status"], "name": c["name"]}
+            for c in d.CONTRACTS if c["id"] in DRAW
+            for a, b in DRAW[c["id"]]
+        ],
+    }
+    return HTML.replace("__DATA__", json.dumps(payload, sort_keys=False))
+
+
+def main():
+    d = load_data()
+    d.SIZES, d.UNRESOLVED = measure_rows(d.BRAID.SHARED_THINGS)
+    for u in d.UNRESOLVED:
+        print("WARN: unresolved evidence path in %s" % u)
+    errs, warns = lint(d)
+    for w in warns:
+        print("WARN: %s" % w)
+    if errs:
+        for e in errs:
+            print("ERROR: %s" % e)
+        sys.exit(2)
+    print("lint ok: %d contracts, %d components, %d campaigns"
+          % (len(d.CONTRACTS), len(d.COMPONENTS), len(d.CAMPAIGNS)))
+
+    outputs = {
+        os.path.join(ARCH_DIR, "ARCHITECTURE.md"): render_md(d),
+        os.path.join(ARCH_DIR, "fragment", "site", "index.html"): render_html(d),
+        os.path.join(ARCH_DIR, "contracts.json"): json.dumps(
+            {"meta": {"rev": d.MAIN_REV, "updated": d.UPDATED},
+             "principles": d.PRINCIPLES, "hosts": d.HOSTS,
+             "components": d.COMPONENTS, "contracts": d.CONTRACTS,
+             "campaigns": d.CAMPAIGNS},
+            indent=2, sort_keys=True) + "\n",
+    }
+    check = "--check" in sys.argv
+    stale = []
+    for path, content in outputs.items():
+        if check:
+            try:
+                with open(path) as f:
+                    if f.read() != content:
+                        stale.append(path)
+            except FileNotFoundError:
+                stale.append(path)
+        else:
+            os.makedirs(os.path.dirname(path), exist_ok=True)
+            with open(path, "w") as f:
+                f.write(content)
+            print("wrote %s" % os.path.relpath(path, REPO))
+    if check:
+        if stale:
+            for p in stale:
+                print("STALE: %s (run scripts/render-architecture)" % p)
+            sys.exit(1)
+        print("generated views are up to date")
+
+
+if __name__ == "__main__":
+    main()

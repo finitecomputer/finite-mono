@@ -1,0 +1,208 @@
+#!/usr/bin/env python3
+"""Mechanical braid discovery — read-only scans for shared things.
+
+Finds couplings a grep can see: workspace-internal crates used across
+component trees, env var names read in multiple trees, SQLite tables created
+by more than one component, route paths claimed by more than one service,
+and hostnames referenced across the repo. Output is UNREVIEWED candidate
+rows for the braid matrix; humans/agents adopt them into
+docs/architecture/contracts.py with a disposition.
+
+stdlib only. Writes docs/architecture/braid-mechanical.json.
+"""
+
+import json
+import os
+import re
+import subprocess
+import sys
+
+REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+
+# A component tree is a top-level directory that owns workspace members.
+TREES = [
+    "finitechat", "finite-brain", "finite-sites", "finite-identity",
+    "finite-nostr", "finite-mail", "finite-agentd", "finitecomputer-v2",
+    "devfinity",
+]
+EXTRA_TREES = ["infra", "scripts", "finite-skills", "docs", "devfinity"]
+# Legacy whiteglove tree and vendored/imported material are out of scope.
+EXCLUDE_DIRS = {"target", "node_modules", ".git", "finitecomputer",
+                "finitecomputer-v2/apps/dashboard/node_modules"}
+
+
+def tree_of(path):
+    top = path.split(os.sep)[0]
+    if top == "finitecomputer-v2" and path.startswith(
+            "finitecomputer-v2/apps/dashboard"):
+        return "dashboard"
+    return top if top in TREES + ["dashboard"] else None
+
+
+def cargo_members():
+    members = []
+    with open(os.path.join(REPO, "Cargo.toml")) as f:
+        in_members = False
+        for line in f:
+            if line.strip().startswith("members"):
+                in_members = True
+            elif in_members and line.strip() == "]":
+                break
+            elif in_members:
+                m = re.search(r'"([^"]+)"', line)
+                if m:
+                    members.append(m.group(1))
+    return members
+
+
+def scan_crates(members):
+    """Workspace-internal crates depended on by 2+ distinct component trees."""
+    internal = {os.path.basename(m) for m in members}
+    usage = {}
+    for mem in members:
+        tree = tree_of(mem)
+        if not tree:
+            continue
+        toml = os.path.join(REPO, mem, "Cargo.toml")
+        if not os.path.exists(toml):
+            continue
+        with open(toml) as f:
+            content = f.read()
+        for dep in internal:
+            if dep == os.path.basename(mem):
+                continue
+            if re.search(r'(^|\s)"?%s"?\s*=' % re.escape(dep), content,
+                         re.M) or re.search(r'workspace\s*=\s*true', content) \
+               and re.search(r'"?%s"?' % re.escape(dep), content):
+                usage.setdefault(dep, {}).setdefault(tree, []).append(mem)
+    rows = []
+    for dep, trees in sorted(usage.items()):
+        if len(trees) >= 2:
+            rows.append({
+                "name": dep, "kind": "crate",
+                "touched_by": sorted(trees),
+                "evidence": {t: ", ".join(ms) for t, ms in trees.items()},
+                "fan_in": len(trees),
+            })
+    return rows
+
+
+def rg(pattern, globs=None):
+    cmd = ["rg", "--no-messages", "-l", pattern]
+    if globs:
+        for g in globs:
+            cmd += ["-g", g]
+    try:
+        out = subprocess.run(cmd, cwd=REPO, capture_output=True, text=True)
+        return [p for p in out.stdout.splitlines() if p]
+    except FileNotFoundError:
+        print("ERROR: rg (ripgrep) not available", file=sys.stderr)
+        sys.exit(2)
+
+
+def group_by_tree(files):
+    g = {}
+    for f in files:
+        t = tree_of(f)
+        if t:
+            g.setdefault(t, []).append(f)
+    return g
+
+
+def scan_env():
+    pat = r'env::var(?:_os)?\(\s*"([A-Z][A-Z0-9_]{3,})"'
+    out = subprocess.run(["rg", "--no-messages", "-o", "-N", pat, "-g",
+                          "*.rs"], cwd=REPO, capture_output=True, text=True)
+    names = set(re.findall(r'"([A-Z][A-Z0-9_]{3,})"', out.stdout))
+    usage = {}
+    for name in sorted(names):
+        files = rg('env::var(?:_os)?\\(\\s*"%s"' % re.escape(name),
+                   ["*.rs"])
+        trees = group_by_tree(files)
+        # infra env files count as a tree
+        env_files = [f for f in rg(re.escape(name), ["*.env.example",
+                       "*.nix", "*.env"]) if f.startswith(("infra", "devfinity"))]
+        if env_files:
+            trees.setdefault("infra", env_files)
+        if len(trees) >= 2:
+            usage[name] = {t: fs[:3] for t, fs in trees.items()}
+    return [{"name": n, "kind": "env-var", "touched_by": sorted(ts),
+             "evidence": ts, "fan_in": len(ts)}
+            for n, ts in sorted(usage.items())]
+
+
+def scan_tables():
+    pat = r'CREATE TABLE(?:\s+IF\s+NOT\s+EXISTS)?\s+"?([a-z_]+)"?'
+    out = subprocess.run(["rg", "--no-messages", "-o", "-N", pat, "-g",
+                          "*.rs"], cwd=REPO, capture_output=True, text=True)
+    names = set(re.findall(r'CREATE TABLE(?:\s+IF\s+NOT\s+EXISTS)?\s+"?([a-z_]+)"?', out.stdout))
+    rows = []
+    for name in sorted(names):
+        files = rg('CREATE TABLE(?:\\s+IF\\s+NOT\\s+EXISTS)?\\s+"?%s"?' % name,
+                   ["*.rs"])
+        trees = group_by_tree(files)
+        if len(trees) >= 2:
+            rows.append({"name": name, "kind": "table",
+                         "touched_by": sorted(trees),
+                         "evidence": {t: fs[:3] for t, fs in trees.items()},
+                         "fan_in": len(trees)})
+    return rows
+
+
+def scan_routes():
+    pat = r'"/(api|v1|\.well-known|operator|internal)/[a-z0-9_/.{}-]+"'
+    out = subprocess.run(["rg", "--no-messages", "-o", "-N", pat, "-g",
+                          "*.rs"], cwd=REPO, capture_output=True, text=True)
+    paths = set(re.findall(r'"(/(?:api|v1|\.well-known|operator|internal)/[a-z0-9_/.{}-]+)"', out.stdout))
+    rows = []
+    for p in sorted(paths):
+        files = rg('"%s"' % re.escape(p), ["*.rs"])
+        trees = group_by_tree(files)
+        if len(trees) >= 2:
+            rows.append({"name": p, "kind": "route",
+                         "touched_by": sorted(trees),
+                         "evidence": {t: fs[:3] for t, fs in trees.items()},
+                         "fan_in": len(trees)})
+    return rows
+
+
+def scan_hostnames():
+    pat = r'[a-z0-9-]+\.finite\.(?:computer|vip|chat)'
+    out = subprocess.run(["rg", "--no-messages", "-o", "-N", pat], cwd=REPO,
+                         capture_output=True, text=True)
+    names = set(re.findall(r'[a-z0-9-]+\.finite\.(?:computer|vip|chat)', out.stdout))
+    rows = []
+    for name in sorted(names):
+        files = rg(re.escape(name))
+        trees = group_by_tree(files)
+        if len(trees) >= 2:
+            rows.append({"name": name, "kind": "hostname",
+                         "touched_by": sorted(trees),
+                         "evidence": {t: len(fs) for t, fs in trees.items()},
+                         "fan_in": len(trees)})
+    return rows
+
+
+def main():
+    members = cargo_members()
+    data = {
+        "meta": {"generated_by": "scripts/discover-braid",
+                 "note": "UNREVIEWED mechanical candidates; adopt into "
+                         "docs/architecture/contracts.py with a disposition."},
+        "rows": [],
+    }
+    for scan in (lambda: scan_crates(members), scan_env, scan_tables,
+                 scan_routes, scan_hostnames):
+        rows = scan()
+        data["rows"].extend(rows)
+        print("%d rows from %s" % (len(rows), scan.__name__ if hasattr(scan, "__name__") else "scan"))
+    data["rows"].sort(key=lambda r: -r["fan_in"])
+    out = os.path.join(REPO, "docs", "architecture", "braid-mechanical.json")
+    with open(out, "w") as f:
+        json.dump(data, f, indent=2, sort_keys=True)
+        f.write("\n")
+    print("wrote %s (%d rows)" % (os.path.relpath(out, REPO), len(data["rows"])))
+
+
+if __name__ == "__main__":
+    main()

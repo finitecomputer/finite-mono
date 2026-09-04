@@ -1,0 +1,964 @@
+{
+  "meta": {
+    "generated_by": "scripts/discover-braid",
+    "note": "UNREVIEWED mechanical candidates; adopt into docs/architecture/contracts.py with a disposition."
+  },
+  "rows": [
+    {
+      "evidence": {
+        "finite-brain": [
+          "finite-brain/crates/finite-brain-cli/src/environment.rs",
+          "finite-brain/crates/finite-brain-cli/src/lib.rs",
+          "finite-brain/crates/finite-brain-cli/src/requester_context.rs"
+        ],
+        "finite-sites": [
+          "finite-sites/crates/fsite-cli/src/keys.rs"
+        ],
+        "finitechat": [
+          "finitechat/crates/finitechat-rmp/src/product_store.rs",
+          "finitechat/crates/finitechat-cli/src/hermes.rs"
+        ],
+        "infra": [
+          "infra/nixos/modules/finite-saas-runner.nix",
+          "infra/nixos/hosts/finite-lat-4/default.nix",
+          "infra/nixos/hosts/finite-lat-3/default.nix"
+        ]
+      },
+      "fan_in": 4,
+      "kind": "env-var",
+      "name": "HOME",
+      "touched_by": [
+        "finite-brain",
+        "finite-sites",
+        "finitechat",
+        "infra"
+      ]
+    },
+    {
+      "evidence": {
+        "devfinity": [
+          "devfinity/src/lib.rs"
+        ],
+        "finitechat": [
+          "finitechat/crates/finitechat-rmp/src/util.rs"
+        ],
+        "finitecomputer-v2": [
+          "finitecomputer-v2/crates/finite-saas-runner/src/lib.rs"
+        ],
+        "infra": [
+          "infra/nixos/modules/metrics.nix",
+          "infra/nixos/modules/kata-host-runtime.nix",
+          "infra/nixos/modules/finite-saas-runner.nix"
+        ]
+      },
+      "fan_in": 4,
+      "kind": "env-var",
+      "name": "PATH",
+      "touched_by": [
+        "devfinity",
+        "finitechat",
+        "finitecomputer-v2",
+        "infra"
+      ]
+    },
+    {
+      "evidence": {
+        "dashboard": 2,
+        "finite-mail": 1,
+        "finite-sites": 2,
+        "finitechat": 1
+      },
+      "fan_in": 4,
+      "kind": "hostname",
+      "name": "hello.finite.chat",
+      "touched_by": [
+        "dashboard",
+        "finite-mail",
+        "finite-sites",
+        "finitechat"
+      ]
+    },
+    {
+      "evidence": {
+        "finite-brain": "finite-brain/crates/finite-brain-cli",
+        "finite-sites": "finite-sites/crates/fsite-cli",
+        "finitechat": "finitechat/crates/finitechat-cli, finitechat/crates/finitechat-core, finitechat/crates/finitechat-hosted-device"
+      },
+      "fan_in": 3,
+      "kind": "crate",
+      "name": "finite-identity",
+      "touched_by": [
+        "finite-brain",
+        "finite-sites",
+        "finitechat"
+      ]
+    },
+    {
+      "evidence": {
+        "finite-brain": "finite-brain/crates/finite-brain-server",
+        "finite-identity": "finite-identity",
+        "finite-sites": "finite-sites/crates/finitesitesd"
+      },
+      "fan_in": 3,
+      "kind": "crate",
+      "name": "finite-mail",
+      "touched_by": [
+        "finite-brain",
+        "finite-identity",
+        "finite-sites"
+      ]
+    },
+    {
+      "evidence": {
+        "finite-agentd": "finite-agentd",
+        "finite-identity": "finite-identity",
+        "finitechat": "finitechat/crates/finitechat-blob, finitechat/crates/finitechat-cli, finitechat/crates/finitechat-client, finitechat/crates/finitechat-core, finitechat/crates/finitechat-hermes, finitechat/crates/finitechat-hosted-device, finitechat/crates/finitechat-http, finitechat/crates/finitechat-mls, finitechat/crates/finitechat-server"
+      },
+      "fan_in": 3,
+      "kind": "crate",
+      "name": "finitechat-proto",
+      "touched_by": [
+        "finite-agentd",
+        "finite-identity",
+        "finitechat"
+      ]
+    },
+    {
+      "evidence": {
+        "devfinity": [
+          "devfinity/tests/stack_smoke.rs"
+        ],
+        "finitechat": [
+          "finitechat/crates/finitechat-hosted-device/src/main.rs"
+        ],
+        "infra": [
+          "infra/nixos/modules/finitechat-hosted-device.nix"
+        ]
+      },
+      "fan_in": 3,
+      "kind": "env-var",
+      "name": "FINITECHAT_HOSTED_API_TOKEN",
+      "touched_by": [
+        "devfinity",
+        "finitechat",
+        "infra"
+      ]
+    },
+    {
+      "evidence": {
+        "devfinity": [
+          "devfinity/tests/stack_smoke.rs"
+        ],
+        "finitechat": [
+          "finitechat/crates/finitechat-daemon/src/main.rs",
+          "finitechat/crates/finitechat-rmp/src/run.rs"
+        ],
+        "infra": [
+          "infra/nixos/modules/finitechat-hosted-device.nix"
+        ]
+      },
+      "fan_in": 3,
+      "kind": "env-var",
+      "name": "FINITECHAT_SERVER_URL",
+      "touched_by": [
+        "devfinity",
+        "finitechat",
+        "infra"
+      ]
+    },
+    {
+      "evidence": {
+        "devfinity": [
+          "devfinity/tests/stack_smoke.rs"
+        ],
+        "finite-sites": [
+          "finite-sites/crates/fsite-cli/src/api.rs"
+        ],
+        "infra": [
+          "infra/nixos/modules/kata-runner-host.nix",
+          "infra/hosts/lat1/systemd/runner.env.example",
+          "infra/nixos/modules/finite-saas-phala-runner.nix"
+        ]
+      },
+      "fan_in": 3,
+      "kind": "env-var",
+      "name": "FINITE_SITES_API",
+      "touched_by": [
+        "devfinity",
+        "finite-sites",
+        "infra"
+      ]
+    },
+    {
+      "evidence": {
+        "dashboard": 1,
+        "finite-sites": 10,
+        "finitecomputer-v2": 2
+      },
+      "fan_in": 3,
+      "kind": "hostname",
+      "name": "api.finite.chat",
+      "touched_by": [
+        "dashboard",
+        "finite-sites",
+        "finitecomputer-v2"
+      ]
+    },
+    {
+      "evidence": {
+        "dashboard": 2,
+        "finite-brain": 5,
+        "finitecomputer-v2": 4
+      },
+      "fan_in": 3,
+      "kind": "hostname",
+      "name": "brain.finite.computer",
+      "touched_by": [
+        "dashboard",
+        "finite-brain",
+        "finitecomputer-v2"
+      ]
+    },
+    {
+      "evidence": {
+        "finite-brain": 4,
+        "finite-identity": 3,
+        "finite-sites": 2
+      },
+      "fan_in": 3,
+      "kind": "hostname",
+      "name": "identity.finite.vip",
+      "touched_by": [
+        "finite-brain",
+        "finite-identity",
+        "finite-sites"
+      ]
+    },
+    {
+      "evidence": {
+        "finite-brain": "finite-brain/crates/finite-brain-cli, finite-brain/crates/finite-brain-server, finite-brain/crates/finite-brain-store",
+        "finitechat": "finitechat/crates/finitechat-hosted-device"
+      },
+      "fan_in": 2,
+      "kind": "crate",
+      "name": "finite-brain-core",
+      "touched_by": [
+        "finite-brain",
+        "finitechat"
+      ]
+    },
+    {
+      "evidence": {
+        "finite-brain": "finite-brain/crates/finite-brain-app, finite-brain/crates/finite-brain-cli",
+        "finitechat": "finitechat/crates/finitechat-hosted-device"
+      },
+      "fan_in": 2,
+      "kind": "crate",
+      "name": "finite-brain-server",
+      "touched_by": [
+        "finite-brain",
+        "finitechat"
+      ]
+    },
+    {
+      "evidence": {
+        "finite-brain": "finite-brain/crates/finite-brain-cli, finite-brain/crates/finite-brain-server",
+        "finitechat": "finitechat/crates/finitechat-hosted-device"
+      },
+      "fan_in": 2,
+      "kind": "crate",
+      "name": "finite-brain-store",
+      "touched_by": [
+        "finite-brain",
+        "finitechat"
+      ]
+    },
+    {
+      "evidence": {
+        "finite-brain": "finite-brain/crates/finite-brain-cli, finite-brain/crates/finite-brain-core, finite-brain/crates/finite-brain-server",
+        "finitechat": "finitechat/crates/finitechat-client, finitechat/crates/finitechat-core, finitechat/crates/finitechat-hosted-device, finitechat/crates/finitechat-server"
+      },
+      "fan_in": 2,
+      "kind": "crate",
+      "name": "finite-nostr",
+      "touched_by": [
+        "finite-brain",
+        "finitechat"
+      ]
+    },
+    {
+      "evidence": {
+        "devfinity": "devfinity",
+        "finitechat": "finitechat/crates/finitechat-cli, finitechat/crates/finitechat-daemon, finitechat/crates/finitechat-hosted-device, finitechat/crates/finitechat-rmp"
+      },
+      "fan_in": 2,
+      "kind": "crate",
+      "name": "finitechat-core",
+      "touched_by": [
+        "devfinity",
+        "finitechat"
+      ]
+    },
+    {
+      "evidence": {
+        "finite-identity": "finite-identity",
+        "finite-sites": "finite-sites/crates/finitesites-blob, finite-sites/crates/finitesites-engine, finite-sites/crates/finitesites-store, finite-sites/crates/finitesitesd, finite-sites/crates/fsite-cli"
+      },
+      "fan_in": 2,
+      "kind": "crate",
+      "name": "finitesites-proto",
+      "touched_by": [
+        "finite-identity",
+        "finite-sites"
+      ]
+    },
+    {
+      "evidence": {
+        "finite-brain": [
+          "finite-brain/crates/finite-brain-cli/src/environment.rs"
+        ],
+        "infra": [
+          "infra/nixos/modules/finite-brain.nix"
+        ]
+      },
+      "fan_in": 2,
+      "kind": "env-var",
+      "name": "FBRAIN_CONFIG_DIR",
+      "touched_by": [
+        "finite-brain",
+        "infra"
+      ]
+    },
+    {
+      "evidence": {
+        "finitecomputer-v2": [
+          "finitecomputer-v2/crates/finite-saas-core/src/main.rs"
+        ],
+        "infra": [
+          "infra/nixos/modules/finite-saas-core.nix"
+        ]
+      },
+      "fan_in": 2,
+      "kind": "env-var",
+      "name": "FC_CORE_BIND",
+      "touched_by": [
+        "finitecomputer-v2",
+        "infra"
+      ]
+    },
+    {
+      "evidence": {
+        "finitecomputer-v2": [
+          "finitecomputer-v2/crates/finite-saas-core/src/api.rs"
+        ],
+        "infra": [
+          "infra/nixos/modules/finite-saas-core.nix"
+        ]
+      },
+      "fan_in": 2,
+      "kind": "env-var",
+      "name": "FC_CORE_ENABLE_RUNTIME_RETIREMENT",
+      "touched_by": [
+        "finitecomputer-v2",
+        "infra"
+      ]
+    },
+    {
+      "evidence": {
+        "finitecomputer-v2": [
+          "finitecomputer-v2/crates/finite-saas-core/src/api.rs"
+        ],
+        "infra": [
+          "infra/nixos/modules/finite-saas-core.nix"
+        ]
+      },
+      "fan_in": 2,
+      "kind": "env-var",
+      "name": "FC_CORE_ENABLE_RUNTIME_UPGRADES",
+      "touched_by": [
+        "finitecomputer-v2",
+        "infra"
+      ]
+    },
+    {
+      "evidence": {
+        "finitecomputer-v2": [
+          "finitecomputer-v2/crates/finite-saas-core/src/main.rs"
+        ],
+        "infra": [
+          "infra/hosts/lat1/systemd/runner.env.example",
+          "infra/nixos/modules/kata-runner-host.nix",
+          "infra/nixos/modules/finite-saas-core.nix"
+        ]
+      },
+      "fan_in": 2,
+      "kind": "env-var",
+      "name": "FC_CORE_RUNTIME_ENV_JSON",
+      "touched_by": [
+        "finitecomputer-v2",
+        "infra"
+      ]
+    },
+    {
+      "evidence": {
+        "finitecomputer-v2": [
+          "finitecomputer-v2/crates/finite-saas-core/src/main.rs"
+        ],
+        "infra": [
+          "infra/nixos/modules/finite-saas-core.nix"
+        ]
+      },
+      "fan_in": 2,
+      "kind": "env-var",
+      "name": "FC_CORE_RUNTIME_SECRET_REFERENCES_JSON",
+      "touched_by": [
+        "finitecomputer-v2",
+        "infra"
+      ]
+    },
+    {
+      "evidence": {
+        "devfinity": [
+          "devfinity/tests/stack_smoke.rs"
+        ],
+        "infra": [
+          "infra/nixos/modules/kata-runner-host.nix",
+          "infra/hosts/lat1/systemd/runner.env.example",
+          "infra/nixos/modules/finite-saas-phala-runner.nix"
+        ]
+      },
+      "fan_in": 2,
+      "kind": "env-var",
+      "name": "FC_CORE_URL",
+      "touched_by": [
+        "devfinity",
+        "infra"
+      ]
+    },
+    {
+      "evidence": {
+        "devfinity": [
+          "devfinity/tests/stack_smoke.rs"
+        ],
+        "infra": [
+          "infra/nixos/modules/dashboard.nix"
+        ]
+      },
+      "fan_in": 2,
+      "kind": "env-var",
+      "name": "FC_HOSTED_WEB_DEVICE_URL",
+      "touched_by": [
+        "devfinity",
+        "infra"
+      ]
+    },
+    {
+      "evidence": {
+        "devfinity": [
+          "devfinity/src/lib.rs"
+        ],
+        "infra": [
+          "infra/nixos/modules/kata-runner-host.nix",
+          "infra/hosts/lat1/systemd/runner.env.example",
+          "infra/nixos/hosts/finite-lat-4/runner.env.example"
+        ]
+      },
+      "fan_in": 2,
+      "kind": "env-var",
+      "name": "FC_RUNNER_FINITE_PRIVATE_BASE_URL",
+      "touched_by": [
+        "devfinity",
+        "infra"
+      ]
+    },
+    {
+      "evidence": {
+        "finite-agentd": [
+          "finite-agentd/src/daemon.rs"
+        ],
+        "finitechat": [
+          "finitechat/crates/finitechat-daemon/src/main.rs"
+        ]
+      },
+      "fan_in": 2,
+      "kind": "env-var",
+      "name": "FINITECHAT_HOME",
+      "touched_by": [
+        "finite-agentd",
+        "finitechat"
+      ]
+    },
+    {
+      "evidence": {
+        "finitechat": [
+          "finitechat/crates/finitechat-server/src/main.rs"
+        ],
+        "infra": [
+          "infra/nixos/modules/finitechat-hosted-device.nix",
+          "infra/nixos/modules/finitechat-server.nix"
+        ]
+      },
+      "fan_in": 2,
+      "kind": "env-var",
+      "name": "FINITECHAT_PUBLIC_URL",
+      "touched_by": [
+        "finitechat",
+        "infra"
+      ]
+    },
+    {
+      "evidence": {
+        "finite-brain": [
+          "finite-brain/crates/finite-brain-app/src/main.rs"
+        ],
+        "infra": [
+          "infra/nixos/modules/finite-brain.nix"
+        ]
+      },
+      "fan_in": 2,
+      "kind": "env-var",
+      "name": "FINITE_BRAIN_ADDR",
+      "touched_by": [
+        "finite-brain",
+        "infra"
+      ]
+    },
+    {
+      "evidence": {
+        "finite-brain": [
+          "finite-brain/crates/finite-brain-app/src/main.rs"
+        ],
+        "infra": [
+          "infra/nixos/modules/finite-brain.nix"
+        ]
+      },
+      "fan_in": 2,
+      "kind": "env-var",
+      "name": "FINITE_BRAIN_DB",
+      "touched_by": [
+        "finite-brain",
+        "infra"
+      ]
+    },
+    {
+      "evidence": {
+        "finite-brain": [
+          "finite-brain/crates/finite-brain-app/src/main.rs"
+        ],
+        "infra": [
+          "infra/nixos/modules/finite-brain.nix"
+        ]
+      },
+      "fan_in": 2,
+      "kind": "env-var",
+      "name": "FINITE_BRAIN_INVITE_MAILER",
+      "touched_by": [
+        "finite-brain",
+        "infra"
+      ]
+    },
+    {
+      "evidence": {
+        "finite-brain": [
+          "finite-brain/crates/finite-brain-app/src/main.rs"
+        ],
+        "infra": [
+          "infra/nixos/modules/finite-brain.nix"
+        ]
+      },
+      "fan_in": 2,
+      "kind": "env-var",
+      "name": "FINITE_BRAIN_INVITE_MAIL_FROM",
+      "touched_by": [
+        "finite-brain",
+        "infra"
+      ]
+    },
+    {
+      "evidence": {
+        "finite-brain": [
+          "finite-brain/crates/finite-brain-app/src/main.rs",
+          "finite-brain/crates/finite-brain-cli/src/environment.rs"
+        ],
+        "infra": [
+          "infra/nixos/modules/kata-runner-host.nix",
+          "infra/hosts/lat1/systemd/runner.env.example",
+          "infra/nixos/modules/finite-saas-core.nix"
+        ]
+      },
+      "fan_in": 2,
+      "kind": "env-var",
+      "name": "FINITE_BRAIN_PUBLIC_BASE_URL",
+      "touched_by": [
+        "finite-brain",
+        "infra"
+      ]
+    },
+    {
+      "evidence": {
+        "finite-brain": [
+          "finite-brain/crates/finite-brain-cli/src/environment.rs"
+        ],
+        "infra": [
+          "infra/hosts/lat1/systemd/runner.env.example",
+          "infra/nixos/modules/kata-runner-host.nix",
+          "infra/nixos/modules/finite-saas-phala-runner.nix"
+        ]
+      },
+      "fan_in": 2,
+      "kind": "env-var",
+      "name": "FINITE_BRAIN_SERVER_URL",
+      "touched_by": [
+        "finite-brain",
+        "infra"
+      ]
+    },
+    {
+      "evidence": {
+        "finite-brain": [
+          "finite-brain/crates/finite-brain-cli/src/environment.rs",
+          "finite-brain/crates/finite-brain-cli/src/requester_context.rs"
+        ],
+        "finitechat": [
+          "finitechat/crates/finitechat-core/tests/shared_identity.rs",
+          "finitechat/crates/finitechat-cli/src/hermes.rs"
+        ]
+      },
+      "fan_in": 2,
+      "kind": "env-var",
+      "name": "FINITE_HOME",
+      "touched_by": [
+        "finite-brain",
+        "finitechat"
+      ]
+    },
+    {
+      "evidence": {
+        "finite-brain": [
+          "finite-brain/crates/finite-brain-cli/src/environment.rs"
+        ],
+        "infra": [
+          "infra/hosts/lat2/systemd/sites.env.example",
+          "infra/nixos/hosts/finite-lat-4/default.nix",
+          "infra/nixos/modules/finite-identity.nix"
+        ]
+      },
+      "fan_in": 2,
+      "kind": "env-var",
+      "name": "FINITE_IDENTITY_AUTHORITY",
+      "touched_by": [
+        "finite-brain",
+        "infra"
+      ]
+    },
+    {
+      "evidence": {
+        "finite-identity": [
+          "finite-identity/src/bin/finite-identityd.rs"
+        ],
+        "infra": [
+          "infra/nixos/modules/finitechat-hosted-device.nix",
+          "infra/nixos/modules/finite-brain.nix"
+        ]
+      },
+      "fan_in": 2,
+      "kind": "env-var",
+      "name": "FINITE_IDENTITY_OPERATOR_TOKEN",
+      "touched_by": [
+        "finite-identity",
+        "infra"
+      ]
+    },
+    {
+      "evidence": {
+        "finitecomputer-v2": [
+          "finitecomputer-v2/crates/finite-private-limiter/src/main.rs"
+        ],
+        "infra": [
+          "infra/nixos/modules/kata-runner-host.nix",
+          "infra/hosts/lat1/systemd/runner.env.example",
+          "infra/nixos/hosts/finite-lat-4/runner.env.example"
+        ]
+      },
+      "fan_in": 2,
+      "kind": "env-var",
+      "name": "FINITE_PRIVATE_MODEL",
+      "touched_by": [
+        "finitecomputer-v2",
+        "infra"
+      ]
+    },
+    {
+      "evidence": {
+        "finite-agentd": [
+          "finite-agentd/src/daemon.rs"
+        ],
+        "finitechat": [
+          "finitechat/crates/finitechat-cli/src/hermes.rs"
+        ]
+      },
+      "fan_in": 2,
+      "kind": "env-var",
+      "name": "HERMES_HOME",
+      "touched_by": [
+        "finite-agentd",
+        "finitechat"
+      ]
+    },
+    {
+      "evidence": {
+        "finite-brain": [
+          "finite-brain/crates/finite-brain-cli/src/requester_context.rs"
+        ],
+        "finite-sites": [
+          "finite-sites/crates/fsite-cli/src/requester_context.rs"
+        ]
+      },
+      "fan_in": 2,
+      "kind": "env-var",
+      "name": "HERMES_SESSION_KEY",
+      "touched_by": [
+        "finite-brain",
+        "finite-sites"
+      ]
+    },
+    {
+      "evidence": {
+        "finite-brain": [
+          "finite-brain/crates/finite-brain-cli/src/requester_context.rs"
+        ],
+        "finite-sites": [
+          "finite-sites/crates/fsite-cli/src/requester_context.rs"
+        ]
+      },
+      "fan_in": 2,
+      "kind": "env-var",
+      "name": "HERMES_SESSION_PLATFORM",
+      "touched_by": [
+        "finite-brain",
+        "finite-sites"
+      ]
+    },
+    {
+      "evidence": {
+        "finite-brain": [
+          "finite-brain/crates/finite-brain-cli/src/requester_context.rs"
+        ],
+        "finite-sites": [
+          "finite-sites/crates/fsite-cli/src/requester_context.rs"
+        ]
+      },
+      "fan_in": 2,
+      "kind": "env-var",
+      "name": "HERMES_SESSION_USER_ID",
+      "touched_by": [
+        "finite-brain",
+        "finite-sites"
+      ]
+    },
+    {
+      "evidence": {
+        "finite-brain": [
+          "finite-brain/crates/finite-brain-app/src/main.rs"
+        ],
+        "infra": [
+          "infra/hosts/lat2/systemd/sites.env.example",
+          "infra/nixos/modules/finitesitesd.nix"
+        ]
+      },
+      "fan_in": 2,
+      "kind": "env-var",
+      "name": "RESEND_API_KEY",
+      "touched_by": [
+        "finite-brain",
+        "infra"
+      ]
+    },
+    {
+      "evidence": {
+        "finite-identity": [
+          "finite-identity/src/authority.rs"
+        ],
+        "finite-sites": [
+          "finite-sites/crates/finitesites-proto/src/manifest.rs"
+        ]
+      },
+      "fan_in": 2,
+      "kind": "route",
+      "name": "/.well-known/nostr.json",
+      "touched_by": [
+        "finite-identity",
+        "finite-sites"
+      ]
+    },
+    {
+      "evidence": {
+        "finite-brain": [
+          "finite-brain/crates/finite-brain-cli/src/identity_authority.rs"
+        ],
+        "finite-identity": [
+          "finite-identity/src/authority.rs",
+          "finite-identity/tests/authority.rs"
+        ]
+      },
+      "fan_in": 2,
+      "kind": "route",
+      "name": "/api/v1/email-challenges",
+      "touched_by": [
+        "finite-brain",
+        "finite-identity"
+      ]
+    },
+    {
+      "evidence": {
+        "devfinity": [
+          "devfinity/src/lib.rs"
+        ],
+        "finite-sites": [
+          "finite-sites/crates/finitesitesd/src/api.rs"
+        ]
+      },
+      "fan_in": 2,
+      "kind": "route",
+      "name": "/api/v1/healthz",
+      "touched_by": [
+        "devfinity",
+        "finite-sites"
+      ]
+    },
+    {
+      "evidence": {
+        "finite-identity": [
+          "finite-identity/src/authority.rs",
+          "finite-identity/tests/authority.rs"
+        ],
+        "finite-sites": [
+          "finite-sites/crates/fsite-cli/src/api.rs"
+        ]
+      },
+      "fan_in": 2,
+      "kind": "route",
+      "name": "/api/v1/nip05-resolution",
+      "touched_by": [
+        "finite-identity",
+        "finite-sites"
+      ]
+    },
+    {
+      "evidence": {
+        "finite-agentd": [
+          "finite-agentd/src/transport.rs"
+        ],
+        "finitechat": [
+          "finitechat/crates/finitechat-cli/src/hermes.rs"
+        ]
+      },
+      "fan_in": 2,
+      "kind": "route",
+      "name": "/v1/agentd/ack",
+      "touched_by": [
+        "finite-agentd",
+        "finitechat"
+      ]
+    },
+    {
+      "evidence": {
+        "finite-agentd": [
+          "finite-agentd/src/transport.rs"
+        ],
+        "finitechat": [
+          "finitechat/crates/finitechat-cli/src/hermes.rs"
+        ]
+      },
+      "fan_in": 2,
+      "kind": "route",
+      "name": "/v1/agentd/result",
+      "touched_by": [
+        "finite-agentd",
+        "finitechat"
+      ]
+    },
+    {
+      "evidence": {
+        "finite-agentd": [
+          "finite-agentd/src/transport.rs"
+        ],
+        "finitechat": [
+          "finitechat/crates/finitechat-cli/src/hermes.rs"
+        ]
+      },
+      "fan_in": 2,
+      "kind": "route",
+      "name": "/v1/agentd/state",
+      "touched_by": [
+        "finite-agentd",
+        "finitechat"
+      ]
+    },
+    {
+      "evidence": {
+        "dashboard": 1,
+        "finite-sites": 1
+      },
+      "fan_in": 2,
+      "kind": "hostname",
+      "name": "b.finite.chat",
+      "touched_by": [
+        "dashboard",
+        "finite-sites"
+      ]
+    },
+    {
+      "evidence": {
+        "finitechat": 30,
+        "finitecomputer-v2": 5
+      },
+      "fan_in": 2,
+      "kind": "hostname",
+      "name": "chat.finite.computer",
+      "touched_by": [
+        "finitechat",
+        "finitecomputer-v2"
+      ]
+    },
+    {
+      "evidence": {
+        "dashboard": 2,
+        "finite-sites": 5
+      },
+      "fan_in": 2,
+      "kind": "hostname",
+      "name": "docs.finite.chat",
+      "touched_by": [
+        "dashboard",
+        "finite-sites"
+      ]
+    },
+    {
+      "evidence": {
+        "dashboard": 2,
+        "finite-sites": 14
+      },
+      "fan_in": 2,
+      "kind": "hostname",
+      "name": "git.finite.chat",
+      "touched_by": [
+        "dashboard",
+        "finite-sites"
+      ]
+    },
+    {
+      "evidence": {
+        "dashboard": 1,
+        "finite-sites": 1
+      },
+      "fan_in": 2,
+      "kind": "hostname",
+      "name": "site.finite.vip",
+      "touched_by": [
+        "dashboard",
+        "finite-sites"
+      ]
+    }
+  ]
+}

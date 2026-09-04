@@ -1,0 +1,13 @@
+{
+  "debounceMs": 4000,
+  "editors": [],
+  "meta": {
+    "description": "The Finite contracts ledger — every seam between components, tracked as it gets deleted.",
+    "title": "Finite architecture contracts"
+  },
+  "name": "finite-architecture",
+  "secrets": [],
+  "viewers": [],
+  "visibility": "public",
+  "workflows": []
+}

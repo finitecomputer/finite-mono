@@ -1,0 +1,1315 @@
+{
+  "campaigns": {
+    "aeon-clawland-decommission": {
+      "name": "AEON + clawland decommission",
+      "source": "audit 03; #782 (worker teardown merged 2026-09-01)",
+      "status": "dying",
+      "summary": "AEON worker teardown landed (#782). Remaining: the finite.vip fleet + NIP-05 route on clawland."
+    },
+    "auth-kernel": {
+      "name": "auth-kernel",
+      "source": "#784 (merged 2026-08-31), stack #652\u2192#657; explainer 2026-08-25",
+      "status": "done",
+      "summary": "Products answer auth against their own tables; grants name keys or tokens; identity shrinks to the NIP-05 directory."
+    },
+    "backup-truth": {
+      "name": "backup truth matrix",
+      "source": "audit 14",
+      "status": "proposed",
+      "summary": "\u226424h everything, \u226410s chat+brain; runners' /data gets its first backup ever."
+    },
+    "capability-tokens": {
+      "name": "Finite Capability Token v1",
+      "source": "audit 05c",
+      "status": "proposed",
+      "summary": "Eleven grant mechanisms \u2192 fbit- verbatim; shared tokens spanning hosts get one primitive."
+    },
+    "cf-edge": {
+      "name": "all-Cloudflare edge via tunnels",
+      "source": "audit 08",
+      "status": "proposed",
+      "summary": "11 hostnames/4 zones \u2192 tunnels; per-host Caddys never multiply; SSE compatible as-shipped."
+    },
+    "chat-custody-epochs": {
+      "name": "chat custody restore epochs",
+      "source": "audit 16; #810 merged",
+      "status": "dying",
+      "summary": "Landed 2026-09-02 (#810): the currency gate refuses device state behind the server (snapshot v10 high-water marks) and the silent same-device-id re-mint is deleted. Remaining: epoch-continuity probes + key-joins-restore-set bookkeeping."
+    },
+    "core-planetscale": {
+      "name": "core \u2192 PlanetScale Postgres",
+      "source": "audit 15",
+      "status": "proposed",
+      "summary": "Dump-restore + one-secret swap; dialect risk LOW."
+    },
+    "directory-claim-token": {
+      "name": "runtime claims its own name",
+      "source": "auth-kernel explainer follow-up (runner-identity-names)",
+      "status": "proposed",
+      "summary": "Claim-token mint at the directory; runtimes claim names with their own keys; launch stops waiting on identity; the WireGuard identity reader and lat3 operator token go."
+    },
+    "grafana-cloud": {
+      "name": "observability that alerts",
+      "source": "audit 09",
+      "status": "proposed",
+      "summary": "Monitoring VPS \u2192 Grafana Cloud free tier; 15 alert rules ported; finite-status hardcode fixed. For Alex."
+    },
+    "launcher-deletion": {
+      "name": "non-prod launcher deletion",
+      "source": "audit 02; branch cleanup/delete-non-prod-launchers @ 3440f022",
+      "status": "dying",
+      "summary": "Phala/Enclavia/Docker launchers out; Kata + Apple remain."
+    },
+    "per-service-closures": {
+      "name": "per-service build/deploy units",
+      "source": "audit 12",
+      "status": "proposed",
+      "summary": "Service becomes the unit of build/restart/snapshot/deploy; fixes the CD-conductor-to-lat1 hazard on the way."
+    },
+    "r2-blobs": {
+      "name": "R2 as the single object substrate",
+      "source": "audit 07",
+      "status": "proposed",
+      "summary": "Chat + sites blobs to R2 (start fresh, no history copy); restores retention; zeroes Class-A cost with 1s\u219210s sync."
+    },
+    "search-retirement": {
+      "name": "finite-search retirement",
+      "source": "#774 (merged)",
+      "status": "done",
+      "summary": "Zero live dependencies; config-first atomic deletion."
+    },
+    "service-isolation": {
+      "name": "one VPS per product lane",
+      "source": "audit 11; ADR 0007 lineage",
+      "status": "dying",
+      "summary": "Break the lat2 god-box. Plan of record (Paul, 2026-08-31): sites first (Alex), then brain, then chat+hosted-device last. NOTE: audit 11 recommended brain first (Litestream restore is the drilled path) and sites only after blobs move to R2 \u2014 reconcile the order before cutting."
+    },
+    "single-nip98": {
+      "name": "single NIP-98 implementation",
+      "source": "audit 05a; branch cleanup/single-nip98 @ 2a473720",
+      "status": "dying",
+      "summary": "Four copies \u2192 finite-nostr."
+    },
+    "sleep-wake": {
+      "name": "agent sleep / cheap compute",
+      "source": "audit 06",
+      "status": "proposed",
+      "summary": "Suspend-first two-tier (\u2248300\u2013500ms resume); cron authority in Core ('Chronos'). Independent convergence with Hermes Cloud's Fly primitive."
+    },
+    "stale-prune": {
+      "name": "stale docs & scripts prune",
+      "source": "#792 (merged 2026-08-31)",
+      "status": "done",
+      "summary": "\u221217.8k lines of confusing docs/scripts that coupled readers to dead architecture."
+    },
+    "store-consolidation": {
+      "name": "finish the chat store swap",
+      "source": "audit 13",
+      "status": "proposed",
+      "summary": "legacy_store.rs is authoritative; the normalized rewrite is unwired. Finish the swap, don't delete the legacy file."
+    },
+    "tanstack-query": {
+      "name": "dashboard data layer",
+      "source": "audit 05b; spike/tanstack-query @ f35fa1a2",
+      "status": "proposed",
+      "summary": "24 hand-rolled fetch mechanisms \u2192 SSE\u2192QueryCache."
+    }
+  },
+  "components": {
+    "agent-runtime": {
+      "host": "lat3, lat4",
+      "kind": "runtime",
+      "lane": "runtime-fleet",
+      "name": "agent runtime",
+      "store": "Per-agent home, Hermes state, workspace, skills cache",
+      "summary": "Hermes + finitechat sidecar + finite-agentd + fbrain/fsite CLIs + managed skills revision, packaged in lockstep in one runtime image."
+    },
+    "brain": {
+      "host": "lat2",
+      "kind": "service",
+      "lane": "brain",
+      "name": "finite-brain",
+      "store": "SQLite /var/lib/finitebrain",
+      "summary": "Encrypted Folder-scoped knowledge spaces. brain_members is the access record; invites are capability tokens."
+    },
+    "chat-clients": {
+      "host": "agent-runtime / user devices",
+      "kind": "client",
+      "lane": "chat",
+      "name": "chat clients + CLI + Hermes plugin",
+      "store": "Local device stores",
+      "summary": "Native clients, finitechat-cli, the Hermes finitechat plugin, and the agent sidecar \u2014 all speak the device protocol to chat-server."
+    },
+    "chat-server": {
+      "host": "lat2",
+      "kind": "service",
+      "lane": "chat",
+      "name": "finitechat-server",
+      "store": "SQLite (single writer, blobs inline)",
+      "summary": "Ordered ciphertext log: MLS commits, Welcomes, KeyPackage leases, membership intervals, SSE hints. Zero same-host dependencies."
+    },
+    "ci": {
+      "host": "external",
+      "kind": "external",
+      "lane": "control",
+      "name": "GitHub Actions + Depot",
+      "store": "CI-built digest-pinned images, NixOS closures via Cachix",
+      "summary": "Nothing is built on a prod box; releases are component-scoped tags with rolling aliases in finite-releases."
+    },
+    "cloudflare": {
+      "host": "external",
+      "kind": "external",
+      "lane": "control",
+      "name": "Cloudflare",
+      "store": "R2 (planned blob substrate), DNS zones, tunnels (planned)",
+      "summary": "DNS for 4 zones / 11 hostnames today; audit 07 moves blobs to R2 and audit 08 moves the edge to CF tunnels."
+    },
+    "core": {
+      "host": "lat2",
+      "kind": "service",
+      "lane": "control",
+      "name": "finite-saas-core",
+      "store": "Postgres 16 (loopback)",
+      "summary": "Accounts, projects, agent-launch leases, capacity fences, Finite Private grants, skills revision pins."
+    },
+    "dashboard": {
+      "host": "lat2",
+      "kind": "service",
+      "lane": "control",
+      "name": "dashboard",
+      "store": "None (stateless UI over Core + hosted-device)",
+      "summary": "WorkOS-session web UI. Authenticates users and vouches for them to hosted-device and sites via shared tokens."
+    },
+    "edge": {
+      "host": "lat2",
+      "kind": "infra",
+      "lane": "control",
+      "name": "edge (Caddy \u2192 Cloudflare tunnels planned)",
+      "store": "\u2014",
+      "summary": "One Caddy terminates finite.computer, brain/chat.finite.computer, identity.finite.vip, api/*./*.docs.finite.chat. Proxies public listeners verbatim, never filters."
+    },
+    "fbrain-cli": {
+      "host": "agent-runtime / laptops",
+      "kind": "client",
+      "lane": "brain",
+      "name": "fbrain CLI",
+      "store": "Local working tree",
+      "summary": "Agent's surface into brain; NIP-98; also the org-brain control plane (this very workflow)."
+    },
+    "fsite-cli": {
+      "host": "agent-runtime / laptops",
+      "kind": "client",
+      "lane": "sites",
+      "name": "fsite CLI",
+      "store": "Local site source",
+      "summary": "Agent's surface into sites; NIP-98 + local email token redeem."
+    },
+    "hosted-device": {
+      "host": "lat2",
+      "kind": "service",
+      "lane": "chat",
+      "name": "finitechat-hosted-device",
+      "store": "Per-user durable tree /var/lib/finitechat-hosted-device",
+      "summary": "A real chat Device operated per WorkOS user + a narrow dashboard HTTP adapter. Inseparable pair with chat-server."
+    },
+    "identity": {
+      "host": "lat2",
+      "kind": "service",
+      "lane": "control",
+      "name": "identity \u2192 Directory",
+      "store": "SQLite",
+      "summary": "Post auth-kernel: the NIP-05 name directory. Answers 'what npub is name@finite.vip' (public nostr.json) and name claiming. Two listeners: 8790 full router (loopback operator routes), 8791 public_router only."
+    },
+    "legacy": {
+      "host": "clawland, smoke",
+      "kind": "legacy",
+      "lane": "legacy",
+      "name": "legacy finitecomputer fleet",
+      "store": "Legacy statefulsets, matrix-synapse, finited planes",
+      "summary": "Whiteglove product for unmigrated box1/TRF users + the AEON worker + finite.vip fleet. Deliberately outside mono's authority; shrinking."
+    },
+    "resend": {
+      "host": "external",
+      "kind": "external",
+      "lane": "\u2014",
+      "name": "Resend",
+      "store": "\u2014",
+      "summary": "Transactional mail \u2014 notification delivery only, never identity."
+    },
+    "runner": {
+      "host": "lat3, lat4",
+      "kind": "service",
+      "lane": "runtime-fleet",
+      "name": "finite-saas-runner",
+      "store": "Agent /data trees (UNBACKED \u2014 RPO \u2248 \u221e, audit 14)",
+      "summary": "Launches and supervises agent runtimes. Kata is the only prod launcher now; Apple containers are the local-dev lane. Takes leases from Core; registers agent names at the Directory."
+    },
+    "sites": {
+      "host": "lat2",
+      "kind": "service",
+      "lane": "sites",
+      "name": "finitesitesd",
+      "store": "registry.db + blobs/ + git/projects/ (Kata tier-2 apps)",
+      "summary": "Site publishing/hosting: daemon-local email proofs, shares, viewer cookies, git smart HTTP, stateful app outputs as Kata microVMs (needs /dev/kvm)."
+    },
+    "skills": {
+      "host": "CI \u2192 runtime images",
+      "kind": "pipeline",
+      "lane": "control",
+      "name": "finite-skills pipeline",
+      "store": "Immutable Finite Skills Revisions",
+      "summary": "finite-skills is the only editable source; CI publishes immutable revisions; runtime images embed one offline revision."
+    },
+    "workos": {
+      "host": "external",
+      "kind": "external",
+      "lane": "control",
+      "name": "WorkOS",
+      "store": "Accounts and orgs (source of truth, never access authority)",
+      "summary": "Account system for the dashboard. Product servers never consult it at request time."
+    }
+  },
+  "contracts": [
+    {
+      "campaigns": [
+        "service-isolation"
+      ],
+      "death": "Kept by design: the pair is the hosted chat product. It moves to finite-chat-1 together, last, in the isolation wave.",
+      "evidence": [
+        "infra/nixos/modules/finitechat-hosted-device.nix:14-30"
+      ],
+      "id": "hd-chat-pair",
+      "kind": "edge",
+      "name": "hosted-device \u2194 chat-server pairing",
+      "owner": "paul",
+      "parties": [
+        "hosted-device",
+        "chat-server"
+      ],
+      "status": "kept",
+      "summary": "Hosted-device is a chat Device driven over loopback HTTP to the server. They are one unit for availability and moves.",
+      "via": "loopback HTTP FINITECHAT_SERVER_URL; systemd Requires=/PartOf="
+    },
+    {
+      "campaigns": [],
+      "death": "Kept by design (auth kernel rule: agents are principals, humans act through hosted surfaces). Survives the host split as-is \u2014 token over HTTPS/WireGuard.",
+      "evidence": [
+        "infra/nixos/modules/finitechat-hosted-device.nix:41-49",
+        "infra/nixos/modules/dashboard.nix:32,55"
+      ],
+      "id": "dash-hd-vouch",
+      "kind": "edge",
+      "name": "dashboard vouches users into hosted-device",
+      "owner": "paul",
+      "parties": [
+        "dashboard",
+        "hosted-device"
+      ],
+      "status": "kept",
+      "summary": "The dashboard authenticates the human via WorkOS and vouches for them to hosted-device with a header plus a shared bearer. Hosted-device never calls WorkOS itself.",
+      "via": "x-finite-workos-user-id header + shared FINITECHAT_HOSTED_API_TOKEN"
+    },
+    {
+      "campaigns": [],
+      "death": "Candidate future trim: browser auth via capability links instead of the hosted key surface. Not designed yet.",
+      "evidence": [
+        "finitechat/crates/finitechat-hosted-device/src/lib.rs:2579-2660",
+        "essentials-audit 11 \u00a72.2"
+      ],
+      "id": "hd-brain-idp",
+      "kind": "edge",
+      "name": "hosted-device mints brain credentials for browsers",
+      "owner": "paul",
+      "parties": [
+        "hosted-device",
+        "brain"
+      ],
+      "status": "current",
+      "summary": "The browser reaches brain through hosted-device, which mints proofs from the user's per-user identity.json secret. Real cross-product coupling: a chat-lane outage degrades browser auth for brain.",
+      "via": "HTTP /v1/brain/\u2026 key ops from per-user identity.json"
+    },
+    {
+      "campaigns": [],
+      "death": "Same candidate trim as hd-brain-idp.",
+      "evidence": [
+        "finitechat/crates/finitechat-hosted-device/src/lib.rs:2579-2660",
+        "essentials-audit 11 \u00a72.2"
+      ],
+      "id": "hd-sites-idp",
+      "kind": "edge",
+      "name": "hosted-device mints sites viewer sessions",
+      "owner": "paul",
+      "parties": [
+        "hosted-device",
+        "sites"
+      ],
+      "status": "current",
+      "summary": "Same pattern as hd-brain-idp: browser viewer sessions for sites minted through the chat lane's hosted-device.",
+      "via": "HTTP /v1/sites/identity-provider authorizeViewerSession"
+    },
+    {
+      "campaigns": [],
+      "death": "Kept by design: core is the launch authority. The kata-runner role itself is CI-pinned by just runner-host-contract.",
+      "evidence": [
+        "infra/nixos/modules/kata-runner-host.nix:100",
+        "finitecomputer-v2/crates/finite-saas-core/src/store.rs lease_agent_creation"
+      ],
+      "id": "runner-core-lease",
+      "kind": "edge",
+      "name": "runner \u2194 core launch leases",
+      "owner": "team",
+      "parties": [
+        "runner",
+        "core"
+      ],
+      "status": "kept",
+      "summary": "Agent creation leases, capacity fences, drain state. This is the control-plane contract of the runtime fleet.",
+      "via": "HTTP over WireGuard; route-scoped runner credential bound by core"
+    },
+    {
+      "campaigns": [
+        "directory-claim-token"
+      ],
+      "death": "Designed: mint a single-use claim token at the directory; the runtime claims its own name with its own key over the public URL, off the launch critical path. Deletes the WireGuard reader and the operator token on runner hosts.",
+      "evidence": [
+        "finitecomputer-v2/crates/finite-saas-runner/src/lib.rs:56,766",
+        "auth-kernel explainer, Agent launch section"
+      ],
+      "id": "runner-identity-names",
+      "kind": "edge",
+      "name": "runner registers agent names at the directory",
+      "owner": "paul",
+      "parties": [
+        "runner",
+        "identity"
+      ],
+      "status": "current",
+      "summary": "The one identity hop the auth kernel kept: launch binds agent@finite.vip synchronously, so agent creation on a runner host still depends on the directory answering.",
+      "via": "POST /api/v1/operator/agent-email-bindings over WireGuard, operator token, 250ms retry loop"
+    },
+    {
+      "campaigns": [],
+      "death": "Kept by design.",
+      "evidence": [
+        "infra/nixos/modules/dashboard.nix:44"
+      ],
+      "id": "dash-core-api",
+      "kind": "edge",
+      "name": "dashboard reads core",
+      "owner": "team",
+      "parties": [
+        "dashboard",
+        "core"
+      ],
+      "status": "kept",
+      "summary": "Projects, launches, entitlements \u2014 the dashboard is a WorkOS-authenticated view over core state.",
+      "via": "HTTP (FC_CORE_API_TOKEN)"
+    },
+    {
+      "campaigns": [],
+      "death": "Kept by design \u2014 the WorkOS boundary sentence.",
+      "evidence": [
+        "docs/architecture narrative; architecture-overview.md"
+      ],
+      "id": "core-workos",
+      "kind": "edge",
+      "name": "core resolves WorkOS users",
+      "owner": "team",
+      "parties": [
+        "core",
+        "workos"
+      ],
+      "status": "kept",
+      "summary": "Accounts and orgs source of truth. Explicitly never an access authority inside any product server (kernel rule).",
+      "via": "WorkOS API"
+    },
+    {
+      "campaigns": [],
+      "death": "Kept by design. WorkOS is a request-time dependency of the dashboard only \u2014 never of brain/sites/chat.",
+      "evidence": [
+        "infra/nixos/modules/dashboard.nix"
+      ],
+      "id": "dash-workos",
+      "kind": "edge",
+      "name": "dashboard WorkOS sessions",
+      "owner": "team",
+      "parties": [
+        "dashboard",
+        "workos"
+      ],
+      "status": "kept",
+      "summary": "Human login for the only human-facing surface.",
+      "via": "OAuth session cookies"
+    },
+    {
+      "campaigns": [],
+      "death": "Kept by design.",
+      "evidence": [
+        "finite-brain/crates/finite-brain-app/src/main.rs:105-112",
+        "/etc/finite-saas/sites.env (name only)"
+      ],
+      "id": "mail-notification",
+      "kind": "edge",
+      "name": "brain + sites send notification mail",
+      "owner": "team",
+      "parties": [
+        "brain",
+        "sites",
+        "resend"
+      ],
+      "status": "kept",
+      "summary": "Invite links, publication and token mail. Delivery only \u2014 kernel rule: email is never identity.",
+      "via": "Resend API (RESEND_API_KEY per service)"
+    },
+    {
+      "campaigns": [
+        "capability-tokens"
+      ],
+      "death": "Survives the split mechanically (bearer over HTTPS) but is a candidate for the capability-token consolidation (05c).",
+      "evidence": [
+        "infra/nixos/modules/dashboard.nix:35,56",
+        "infra/nixos/modules/finitesitesd.nix:106-117"
+      ],
+      "id": "dash-sites-viewer-token",
+      "kind": "edge",
+      "name": "dashboard \u2194 sites shared viewer-session token",
+      "owner": "team",
+      "parties": [
+        "dashboard",
+        "sites"
+      ],
+      "status": "current",
+      "summary": "The dashboard mints viewer cookies for sites browser sessions. One of the two secrets that span hosts after the VPS split (the other is the hosted-device vouch token).",
+      "via": "Shared FINITE_SITES_VIEWER_SESSION_TOKEN (64-hex) in both env files"
+    },
+    {
+      "campaigns": [
+        "capability-tokens"
+      ],
+      "death": "Candidate deletion with the capability-token consolidation; operator tooling, not a runtime seam.",
+      "evidence": [
+        "finite-sites/crates/finitesitesd/src/lib.rs:45-46,525-544"
+      ],
+      "id": "sites-core-reconcile",
+      "kind": "edge",
+      "name": "sites reconcile-identity operator CLI \u2192 core",
+      "owner": "alex",
+      "parties": [
+        "sites",
+        "core"
+      ],
+      "status": "current",
+      "summary": "Operator-run reconciliation only \u2014 the sites daemon's serve path never calls core.",
+      "via": "Optional FC_CORE_API_BASE_URL/TOKEN; unset on the serve path"
+    },
+    {
+      "campaigns": [],
+      "death": "Kept by design \u2014 this is the chat protocol itself.",
+      "evidence": [
+        "finitechat sidecar; dd3b7f88, f6e3a389 (#712)"
+      ],
+      "id": "agentd-chat-sync",
+      "kind": "edge",
+      "name": "agent sidecar \u2194 chat-server device sync",
+      "owner": "paul",
+      "parties": [
+        "chat-clients",
+        "chat-server",
+        "agent-runtime"
+      ],
+      "status": "kept",
+      "summary": "The agent's chat Device syncs every joined Room; admission is seeded from FINITECHAT_OWNER_NPUBS through finite-agentd (owner-npubs authz, #712) with the allowed-users mirror as the launcher's only source.",
+      "via": "chat device protocol (MLS, SSE hints) + store-backed admission"
+    },
+    {
+      "campaigns": [],
+      "death": "Kept by design \u2014 this is the directory's whole job.",
+      "evidence": [
+        "infra/nixos/modules/finite-identity.nix:8-14"
+      ],
+      "id": "nostrjson-read",
+      "kind": "edge",
+      "name": "public nostr.json resolution",
+      "owner": "team",
+      "parties": [
+        "identity",
+        "fbrain-cli",
+        "fsite-cli",
+        "chat-clients"
+      ],
+      "status": "kept",
+      "summary": "Post auth-kernel name resolution: clients read nostr.json like any nostr client; product servers resolve nothing.",
+      "via": "Unauthenticated public GET on the 8791 public_router"
+    },
+    {
+      "campaigns": [
+        "auth-kernel"
+      ],
+      "closed": "2026-08-31",
+      "death": "Dead: #784. Grants now name npubs or tokens; the server keeps no FINITE_IDENTITY_* wiring.",
+      "evidence": [
+        "infra/nixos/modules/finite-brain.nix:41-42 (remnant comment)"
+      ],
+      "id": "brain-identity-resolution",
+      "kind": "edge",
+      "name": "brain \u2192 identity resolution",
+      "owner": "paul",
+      "parties": [
+        "brain",
+        "identity"
+      ],
+      "status": "dead",
+      "summary": "Brain asked identity to resolve emails/npubs at request time. Killed by the auth kernel.",
+      "via": "NIP-05 fetch + satisfies-grant"
+    },
+    {
+      "campaigns": [
+        "auth-kernel"
+      ],
+      "closed": "2026-08-31",
+      "death": "Dead: #784 (\u221217.5k lines with the rest of the cut). Offboarding is now an explicit revoke per product.",
+      "evidence": [
+        "essentials-audit 11 \u00a72.3 (pre-cut state)"
+      ],
+      "id": "brain-core-roster",
+      "kind": "edge",
+      "name": "brain \u2192 core roster + departure facts",
+      "owner": "paul",
+      "parties": [
+        "brain",
+        "core"
+      ],
+      "status": "dead",
+      "summary": "The two-phase invitation plans, roster revisions, and the departure poller \u2014 the distributed-authority knot.",
+      "via": "30s departure-facts poll; roster lookups; invitation plans"
+    },
+    {
+      "campaigns": [
+        "auth-kernel"
+      ],
+      "closed": "2026-08-31",
+      "death": "Dead: #784. Daemon-local email_login_tokens + local mailer are the only proof sites consults.",
+      "evidence": [
+        "essentials-audit 11 \u00a72.4 (pre-cut state)"
+      ],
+      "id": "sites-identity-proofs",
+      "kind": "edge",
+      "name": "sites \u2192 identity proofs + mail relay",
+      "owner": "paul",
+      "parties": [
+        "sites",
+        "identity"
+      ],
+      "status": "dead",
+      "summary": "Sites' mailbox proofs lived in identity and its first-publication mail relayed through identity's mailer.",
+      "via": "satisfies-grant, mailbox-proofs, nip05-resolution, notification relay"
+    },
+    {
+      "campaigns": [
+        "auth-kernel"
+      ],
+      "closed": "2026-08-31",
+      "death": "Dead: #784. The identity-operator.env load is gone from the hosted-device unit.",
+      "evidence": [
+        "infra/nixos/modules/finitechat-hosted-device.nix:44-46"
+      ],
+      "id": "hd-identity-bindings",
+      "kind": "edge",
+      "name": "hosted-device \u2192 identity account-principal bindings",
+      "owner": "paul",
+      "parties": [
+        "hosted-device",
+        "identity"
+      ],
+      "status": "dead",
+      "summary": "Runtime creation used to fail if identity was down \u2014 chat availability coupled to a service with no other reason to be in that path.",
+      "via": "POST account-principal-bindings at runtime creation"
+    },
+    {
+      "campaigns": [
+        "search-retirement"
+      ],
+      "closed": "2026-08-30",
+      "death": "Dead: #774.",
+      "evidence": [
+        "08d3042d, becd877e"
+      ],
+      "id": "search-stack",
+      "kind": "edge",
+      "name": "finite-search (SearXNG + Firecrawl)",
+      "owner": "alex",
+      "parties": [],
+      "status": "dead",
+      "summary": "Retired with zero live dependencies; two-commit revert resurrection documented.",
+      "via": "NixOS stack on the app plane"
+    },
+    {
+      "campaigns": [
+        "single-nip98"
+      ],
+      "death": "Kept by design \u2014 but the implementations are consolidating onto finite-nostr (see nip98-impls-4).",
+      "evidence": [
+        "finite-brain protected_routes.rs; finite-nostr"
+      ],
+      "id": "nip98",
+      "kind": "convention",
+      "name": "NIP-98 signed requests",
+      "owner": "team",
+      "parties": [
+        "brain",
+        "sites",
+        "chat-server",
+        "fbrain-cli",
+        "fsite-cli",
+        "chat-clients",
+        "runner",
+        "agent-runtime"
+      ],
+      "status": "kept",
+      "summary": "The universal operator/product auth: principals are keys, requests are signed. The one auth protocol everything speaks.",
+      "via": "schnorr-signed url + method + payload hash"
+    },
+    {
+      "campaigns": [
+        "capability-tokens"
+      ],
+      "death": "Proposed: this entry dies into 'kept' once adopted \u2014 it is the consolidation target, not a victim.",
+      "evidence": [
+        "essentials-audit 05c"
+      ],
+      "id": "capability-tokens-v1",
+      "kind": "convention",
+      "name": "Finite Capability Token v1 (fbit-)",
+      "owner": "paul",
+      "parties": [
+        "brain",
+        "sites",
+        "chat-server",
+        "identity"
+      ],
+      "status": "proposed",
+      "summary": "05c: adopt brain's fbit- token verbatim as the one grant mechanism across products (see grant-mechanisms-11 for the eleven it replaces).",
+      "via": "unguessable token: hash-stored, single-use, revocable, expiry optional"
+    },
+    {
+      "campaigns": [],
+      "death": "Kept by design.",
+      "evidence": [
+        "docs/architecture-overview.md chat layering table"
+      ],
+      "id": "mls-chat-protocol",
+      "kind": "convention",
+      "name": "chat protocol (MLS over ordered ciphertext log)",
+      "owner": "paul",
+      "parties": [
+        "chat-server",
+        "chat-clients",
+        "hosted-device",
+        "agent-runtime"
+      ],
+      "status": "kept",
+      "summary": "Server owns ordering and delivery; Devices own keys, groups, and applied cursors. Product layers must not acquire protocol authority by convenience.",
+      "via": "MLS commits/Welcomes; server never sees plaintext"
+    },
+    {
+      "campaigns": [],
+      "death": "Kept by design.",
+      "evidence": [
+        "AGENTS.md; infra/images/README.md"
+      ],
+      "id": "release-assets",
+      "kind": "convention",
+      "name": "component releases + rolling aliases",
+      "owner": "team",
+      "parties": [
+        "ci",
+        "chat-clients",
+        "fbrain-cli",
+        "fsite-cli"
+      ],
+      "status": "kept",
+      "summary": "Release asset names are product contracts \u2014 never rename.",
+      "via": "finitechat/vX.Y.Z tags; finitechat-latest rolling aliases in finite-releases"
+    },
+    {
+      "campaigns": [
+        "per-service-closures"
+      ],
+      "death": "Kept by design, but per-service closures (12) make *build and deploy* per-service while the image stays lockstep.",
+      "evidence": [
+        "infra/images/README.md"
+      ],
+      "id": "runtime-image-lockstep",
+      "kind": "convention",
+      "name": "runtime image packages the toolchain in lockstep",
+      "owner": "team",
+      "parties": [
+        "agent-runtime",
+        "chat-clients",
+        "fbrain-cli",
+        "fsite-cli",
+        "skills",
+        "ci"
+      ],
+      "status": "kept",
+      "summary": "The runtime image is the compatibility unit: everything the agent runs ships together.",
+      "via": "One image: finitechat plugin + fsite + fbrain + one skills revision"
+    },
+    {
+      "campaigns": [],
+      "death": "Kept by design (kernel-conformant). Watch that the mirror stays the launcher's only source.",
+      "evidence": [
+        "dd3b7f88, f6e3a389, 466ac211 (#712)"
+      ],
+      "id": "owner-npubs-admission",
+      "kind": "convention",
+      "name": "chat admission birth seed (owner npubs)",
+      "owner": "paul",
+      "parties": [
+        "agent-runtime",
+        "chat-server",
+        "core"
+      ],
+      "status": "current",
+      "summary": "#712: which agents may talk to a runtime is decided by owner npubs seeded before any child process starts \u2014 product-owned authorization, no identity-service call.",
+      "via": "FINITECHAT_OWNER_NPUBS \u2192 agentd seeds sidecar admission; store-backed mirror"
+    },
+    {
+      "campaigns": [
+        "r2-blobs",
+        "service-isolation"
+      ],
+      "death": "Blobs move to R2 (07) \u2014 the database shrinks before the process moves hosts. The SQLite file itself is kept.",
+      "evidence": [
+        "finitechat/crates/finitechat-server/src/store/mod.rs:109-111",
+        "essentials-audit 07, 14"
+      ],
+      "id": "chat-sqlite",
+      "kind": "data",
+      "name": "chat single-writer SQLite (blobs inline)",
+      "owner": "paul",
+      "parties": [
+        "chat-server"
+      ],
+      "status": "current",
+      "summary": "The entire durable chat state including attachments. Single-writer doctrine: a restored copy must never run alongside the live server. RPO target \u226410s (audit 14).",
+      "via": "/var/lib/finite-chat/data/server.sqlite3, WAL enforced"
+    },
+    {
+      "campaigns": [
+        "service-isolation"
+      ],
+      "death": "Kept by design for the store; the host moves (finite-brain-1).",
+      "evidence": [
+        "infra/nixos/modules/finite-brain.nix:27,53-54"
+      ],
+      "id": "brain-sqlite",
+      "kind": "data",
+      "name": "brain SQLite",
+      "owner": "paul",
+      "parties": [
+        "brain"
+      ],
+      "status": "kept",
+      "summary": "Members, folders, grants, tokens. Litestream lane moves with the service; restore is the drilled path (already done once in the ADR 0007 cutover).",
+      "via": "/var/lib/finitebrain/finite-brain.sqlite3"
+    },
+    {
+      "campaigns": [
+        "r2-blobs",
+        "service-isolation"
+      ],
+      "death": "blobs/ \u2192 R2 (07) before the host move, so data shrinks first; git/projects/ stays on disk.",
+      "evidence": [
+        "finite-sites/crates/finitesitesd/src/git.rs:128",
+        "essentials-audit 07, 11 \u00a72.4"
+      ],
+      "id": "sites-store",
+      "kind": "data",
+      "name": "sites registry + blobs + git repos",
+      "owner": "alex",
+      "parties": [
+        "sites"
+      ],
+      "status": "current",
+      "summary": "Content-addressed blobs and bare git repos on disk today; tier-2 Kata apps add microVM state.",
+      "via": "/var/lib/finite-sites: registry.db, blobs/, git/projects/"
+    },
+    {
+      "campaigns": [
+        "core-planetscale"
+      ],
+      "death": "Proposed (15): PlanetScale Postgres is GA; dump-restore + one-secret swap, dialect risk LOW.",
+      "evidence": [
+        "infra/nixos/modules/postgres.nix:1-3",
+        "essentials-audit 15"
+      ],
+      "id": "core-postgres",
+      "kind": "data",
+      "name": "core Postgres 16 (loopback)",
+      "owner": "team",
+      "parties": [
+        "core"
+      ],
+      "status": "current",
+      "summary": "The only Postgres in the tree \u2014 no product server touches it. Control-plane component; stays on the app-plane host.",
+      "via": "FC_CORE_DATABASE_URL at 127.0.0.1:5432"
+    },
+    {
+      "campaigns": [],
+      "death": "Kept by design.",
+      "evidence": [
+        "ADR 0002"
+      ],
+      "id": "skills-revisions",
+      "kind": "data",
+      "name": "immutable Finite Skills Revisions",
+      "owner": "team",
+      "parties": [
+        "skills",
+        "agent-runtime",
+        "core"
+      ],
+      "status": "kept",
+      "summary": "Skills are release artifacts, not git state; old revisions must keep resolving forever.",
+      "via": "CI-published revisions; core pins desired revision ids"
+    },
+    {
+      "campaigns": [
+        "backup-truth"
+      ],
+      "death": "14's target matrix: \u226424h everything, \u226410s chat+brain; pairing with store consolidation to shrink what needs backing up.",
+      "evidence": [
+        "essentials-audit 14"
+      ],
+      "id": "runner-data-unbacked",
+      "kind": "data",
+      "name": "runner /data has no backup (RPO \u2248 \u221e)",
+      "owner": "alex",
+      "parties": [
+        "runner",
+        "agent-runtime"
+      ],
+      "status": "current",
+      "summary": "Audit 14: the fleet's most durable user state has zero backup. The un-argued-about hole in the recovery story.",
+      "via": "Agent identities, Hermes homes, workspaces on lat3/lat4 /data"
+    },
+    {
+      "campaigns": [
+        "r2-blobs"
+      ],
+      "death": "Kept by design; destination moves to R2 (07, start-fresh).",
+      "evidence": [
+        "infra/nixos/modules/finite-litestream.nix:281-312"
+      ],
+      "id": "litestream-per-db",
+      "kind": "data",
+      "name": "per-db Litestream replication",
+      "owner": "team",
+      "parties": [
+        "chat-server",
+        "brain",
+        "sites",
+        "identity"
+      ],
+      "status": "kept",
+      "summary": "The product backup lane; moves with its service when hosts split.",
+      "via": "One replicator unit per SQLite db, PartOf= the owning service"
+    },
+    {
+      "campaigns": [
+        "service-isolation"
+      ],
+      "death": "Kept; per-service decomposition of the recovery fence is part of the isolation wave.",
+      "evidence": [
+        "infra/nixos/hosts/finite-lat-2/default.nix (bottom)"
+      ],
+      "id": "borg-rsyncnet",
+      "kind": "data",
+      "name": "borg host backups \u2192 rsync.net",
+      "owner": "team",
+      "parties": [
+        "edge",
+        "dashboard"
+      ],
+      "status": "kept",
+      "summary": "Host-level backup lane for the app plane.",
+      "via": "Per-host repositories; lat2 got a dedicated repo at cutover"
+    },
+    {
+      "campaigns": [
+        "cf-edge",
+        "service-isolation"
+      ],
+      "death": "08: all-CF via tunnels; SSE compatible as-shipped. The Caddy modules dissolve with the split.",
+      "evidence": [
+        "infra/nixos/modules/caddy.nix:2-83",
+        "essentials-audit 08"
+      ],
+      "id": "edge-hostnames",
+      "kind": "deploy",
+      "name": "Caddy edge + 11 hostnames / 4 zones",
+      "owner": "team",
+      "parties": [
+        "edge",
+        "cloudflare"
+      ],
+      "status": "current",
+      "summary": "Verbatim proxy of each service's public listener (edge never filters). After the VPS split, per-host Caddys would multiply \u2014 08 replaces them with Cloudflare tunnels.",
+      "via": "lat2 Caddy terminates finite.computer, brain/chat.finite.computer, identity.finite.vip, api.finite.chat, *.finite.chat, *.docs.finite.chat"
+    },
+    {
+      "campaigns": [
+        "directory-claim-token"
+      ],
+      "death": "directory-claim-token removes the identity reader; the runner\u2192core lane remains until launch auth is re-examined.",
+      "evidence": [
+        "infra/nixos/hosts/finite-lat-2/default.nix:210-235"
+      ],
+      "id": "wireguard-mesh",
+      "kind": "deploy",
+      "name": "WireGuard mesh (10.254.x, hub on lat2)",
+      "owner": "team",
+      "parties": [
+        "runner",
+        "core",
+        "identity",
+        "lat2",
+        "lat3",
+        "lat4"
+      ],
+      "status": "current",
+      "summary": "Carries runner\u2192core leases and runner\u2192identity name registration today.",
+      "via": "lat2 hub; lat3/lat4 spokes; /29 widening in flight for lat4"
+    },
+    {
+      "campaigns": [
+        "capability-tokens"
+      ],
+      "death": "Shrinks with capability-token consolidation (05c); the bootstrap contract keeps the file inventory honest.",
+      "evidence": [
+        "docs/runs/lat1-lat3-sops-nix-inventory-baseline.md",
+        "infra/nixos/hosts/finite-lat-2/secret-bootstrap-contract.json"
+      ],
+      "id": "sops-env-distribution",
+      "kind": "deploy",
+      "name": "operator env-file secret distribution",
+      "owner": "team",
+      "parties": [
+        "dashboard",
+        "hosted-device",
+        "sites",
+        "brain",
+        "runner"
+      ],
+      "status": "current",
+      "summary": "Two shared tokens span hosts after the split: the hosted-device vouch token (dashboard+hosted-device) and the sites viewer token (dashboard+sites). Everything else is per-service.",
+      "via": "sops-rendered /etc/finite* env files per host; secret-bootstrap-contract.json"
+    },
+    {
+      "campaigns": [
+        "per-service-closures",
+        "service-isolation"
+      ],
+      "death": "Must die before the isolation wave can deploy anything \u2014 the conductor has to target per-host closures (12) anyway.",
+      "evidence": [
+        "essentials-audit 10; infra/deployments/production.toml"
+      ],
+      "id": "cd-conductor-lat1",
+      "kind": "deploy",
+      "name": "CD conductor hard-wired to dead lat1",
+      "owner": "alex",
+      "parties": [
+        "ci",
+        "lat1",
+        "lat2"
+      ],
+      "status": "dying",
+      "summary": "Audit 10's flagged hazard: the protected CD path still points at the thermally dead chassis while production runs on lat2. Also the lat1\u2194lat2 topology tables drifted.",
+      "via": "production-cd workflow targets the retired host; mutation_enabled = true"
+    },
+    {
+      "campaigns": [
+        "per-service-closures"
+      ],
+      "death": "12: make the service the unit of build/restart/snapshot/deploy \u2014 five-step rollout, keeps the single Cargo.lock.",
+      "evidence": [
+        "essentials-audit 12; AGENTS.md workspace rule"
+      ],
+      "id": "cargo-lock-vendor",
+      "kind": "deploy",
+      "name": "whole-workspace Cargo.lock vendor derivation",
+      "owner": "team",
+      "parties": [
+        "ci",
+        "chat-server",
+        "brain",
+        "sites",
+        "core",
+        "identity"
+      ],
+      "status": "current",
+      "summary": "Doctrine (one workspace) but the build unit is still the whole host: deploys restart everything (12's finding).",
+      "via": "One root workspace, one root Cargo.lock, one vendored build"
+    },
+    {
+      "campaigns": [
+        "grafana-cloud"
+      ],
+      "death": "09 (for Alex): repoint 2 remote-write URLs, port 15 alert rules, fix the finite-status storage-unit hardcode.",
+      "evidence": [
+        "essentials-audit 09; finite_status.py:1220-1223"
+      ],
+      "id": "monitoring-no-alerts",
+      "kind": "deploy",
+      "name": "monitoring VPS has never alerted",
+      "owner": "alex",
+      "parties": [
+        "monitoring"
+      ],
+      "status": "dying",
+      "summary": "Audit 09: the observability box observes in silence. Fleet fits Grafana Cloud free tier.",
+      "via": "Metrics scrape only; zero alert rules reach a human"
+    },
+    {
+      "campaigns": [],
+      "death": "Kept by design \u2014 this is what keeps the fleet from drifting.",
+      "evidence": [
+        "infra/nixos/README.md; scripts/check_runner_host_contract.py"
+      ],
+      "id": "kata-runner-contract",
+      "kind": "deploy",
+      "name": "kata-runner-host shared module contract",
+      "owner": "team",
+      "parties": [
+        "runner",
+        "lat3",
+        "lat4"
+      ],
+      "status": "kept",
+      "summary": "One declaration of the Runner role across hosts; drift outside the declared per-host set fails CI. Runner-role changes go in the shared module.",
+      "via": "modules/kata-runner-host.nix + just runner-host-contract CI pin"
+    },
+    {
+      "campaigns": [
+        "launcher-deletion"
+      ],
+      "death": "PR #791 (branch cleanup/delete-non-prod-launchers) \u2014 review advanced past the Phala CVM check; Phala half of the runtime-image contract already deleted on the branch.",
+      "evidence": [
+        "essentials-audit 02"
+      ],
+      "id": "non-prod-launchers",
+      "kind": "deploy",
+      "name": "phala + enclavia + docker launchers",
+      "owner": "paul",
+      "parties": [
+        "runner"
+      ],
+      "status": "dying",
+      "summary": "\u22128,112 LOC: Phala canary, the undeployed Enclavia evaluation lane, and the unused Docker fallback. FC_RUNNER_CLASS becomes required \u2014 no silent default.",
+      "via": "FC_RUNNER_CLASS dispatch: kata (prod) + apple (local dev) remain"
+    },
+    {
+      "campaigns": [
+        "aeon-clawland-decommission"
+      ],
+      "death": "03 (narrowed): decommission the finite.vip fleet path; the NIP-05 route's successor already runs on lat2's edge.",
+      "evidence": [
+        "essentials-audit 03; infra/hosts/clawland/README.md"
+      ],
+      "id": "clawland-legacy-fleet",
+      "kind": "deploy",
+      "name": "clawland legacy fleet + AEON worker",
+      "owner": "austin",
+      "parties": [
+        "legacy",
+        "clawland"
+      ],
+      "status": "dying",
+      "summary": "AEON teardown landed 2026-09-01 (#782: worker crate/image, agentd writer, runner shim). What remains on clawland is the legacy finite.vip fleet and the NIP-05 route proxy.",
+      "via": "finite.vip NIP-05 proxy, ~50 agent namespaces (AEON worker REMOVED via #782)"
+    },
+    {
+      "campaigns": [],
+      "death": "Blocked on user migration; then the bridge, broad finitec/finited surface, and the smoke host all go.",
+      "evidence": [
+        "docs/architecture-overview.md ownership boundaries"
+      ],
+      "id": "legacy-whiteglove",
+      "kind": "deploy",
+      "name": "legacy whiteglove product (finitecomputer)",
+      "owner": "team",
+      "parties": [
+        "legacy"
+      ],
+      "status": "current",
+      "summary": "The v1 product keeps running for unmigrated users; its migration bridge is the only reason it's alive.",
+      "via": "box1/TRF/smoke users unmigrated; dashboard relay loop"
+    },
+    {
+      "campaigns": [
+        "single-nip98"
+      ],
+      "death": "Branch cleanup/single-nip98 @ 2a473720 (worktree finite-mono-worktrees/proposals/05a-single-nip98, session sess_4fa05740) consolidates sites; brain + dashboard follow.",
+      "evidence": [
+        "essentials-audit 05a"
+      ],
+      "id": "nip98-impls-4",
+      "kind": "duplication",
+      "name": "NIP-98 implemented four times",
+      "owner": "paul",
+      "parties": [
+        "brain",
+        "sites",
+        "chat-server",
+        "runner"
+      ],
+      "status": "dying",
+      "summary": "Same protocol, multiple implementations. Chat consolidated onto finite-nostr (merged); the sites branch is reviewed and unmerged; brain-core + dashboard TS copies remain.",
+      "via": "Four in-tree copies of signed-request verification"
+    },
+    {
+      "campaigns": [
+        "capability-tokens"
+      ],
+      "death": "05c: adopt fbit- verbatim as Finite Capability Token v1; mounted variants deleted with conversion. ~5\u20136k LOC out.",
+      "evidence": [
+        "essentials-audit 05c"
+      ],
+      "id": "grant-mechanisms-11",
+      "kind": "duplication",
+      "name": "eleven grant/mint/redeem mechanisms",
+      "owner": "paul",
+      "parties": [
+        "brain",
+        "sites",
+        "chat-server",
+        "identity",
+        "dashboard"
+      ],
+      "status": "proposed",
+      "summary": "Post auth-kernel there is no authority knot, but each product still rolls its own capability-ish machinery.",
+      "via": "fbit- tokens, viewer sessions, email links, vouch tokens, \u2026"
+    },
+    {
+      "campaigns": [
+        "store-consolidation"
+      ],
+      "death": "13: finish the swap (not delete-the-legacy-file), with schema/data droppables proven first.",
+      "evidence": [
+        "essentials-audit 13"
+      ],
+      "id": "chat-stores-2",
+      "kind": "duplication",
+      "name": "two chat stores (the 'legacy' one is authoritative)",
+      "owner": "paul",
+      "parties": [
+        "chat-server"
+      ],
+      "status": "proposed",
+      "summary": "The clean rewrite sits dead next to the real store. The risk is finishing neither; the decision is finish-the-swap.",
+      "via": "legacy_store.rs (live) vs the unwired normalized rewrite"
+    },
+    {
+      "campaigns": [
+        "tanstack-query"
+      ],
+      "death": "05b: SSE \u2192 TanStack Query Cache, five phases, ~800\u20131,300 LOC out. Spike renders clean.",
+      "evidence": [
+        "essentials-audit 05b"
+      ],
+      "id": "dashboard-fetch-24",
+      "kind": "duplication",
+      "name": "24 hand-rolled dashboard fetch mechanisms",
+      "owner": "team",
+      "parties": [
+        "dashboard"
+      ],
+      "status": "proposed",
+      "summary": "Every dashboard surface re-implements data fetching and cache invalidation slightly differently.",
+      "via": "Bespoke SSE/fetch caching per surface"
+    }
+  ],
+  "hosts": {
+    "brain-vps": {
+      "name": "finite-brain-1 (planned)",
+      "role": "Dedicated brain VPS \u2014 second move. Audit 11 actually recommended brain first (Litestream restore is the drilled path); resolve the ordering discrepancy before cutting.",
+      "status": "planned"
+    },
+    "chat-vps": {
+      "name": "finite-chat-1 (planned)",
+      "role": "Dedicated chat VPS \u2014 chat-server + hosted-device move last, as an inseparable pair.",
+      "status": "planned"
+    },
+    "clawland": {
+      "name": "clawland-ovh",
+      "role": "Legacy finite.vip fleet box + AEON specialization worker + finite.vip NIP-05 route proxy. Decommission proposed (audit 03).",
+      "status": "legacy"
+    },
+    "lat1": {
+      "name": "finite-lat-1",
+      "role": "RETIRED \u2014 thermal disk failure 2026-08-27 (ADR 0007). The production CD conductor is still hard-wired to it (hazard, see cd-conductor-lat1).",
+      "status": "retired"
+    },
+    "lat2": {
+      "name": "finite-lat-2",
+      "role": "App-plane god-box (live): core, postgres, identity, chat-server, hosted-device, sites, brain, dashboard, caddy, litestream, borg, monitoring. ADR 0007 cutover target.",
+      "status": "live"
+    },
+    "lat3": {
+      "name": "finite-lat-3",
+      "role": "Kata Runner host (live) \u2014 agent runtime capacity, RAID1 + storage contract.",
+      "status": "live"
+    },
+    "lat4": {
+      "name": "finite-lat-4",
+      "role": "Third storage-qualified Runner (drained admission, 2026-08-28; takes 10.254.3.4 after the /29 widening).",
+      "status": "drained"
+    },
+    "monitoring": {
+      "name": "finite-monitoring",
+      "role": "Metrics VPS. Has never alerted anyone (audit 09).",
+      "status": "live"
+    },
+    "sites-vps": {
+      "name": "finite-sites-1 (planned)",
+      "role": "Dedicated sites VPS \u2014 first move of the service-isolation wave (Paul, 2026-08-31). Needs KVM for tier-2 Kata apps.",
+      "status": "planned"
+    },
+    "smoke": {
+      "name": "ovh-vps-smoke",
+      "role": "Legacy-managed box (old brain host). Brain now runs on lat2.",
+      "status": "legacy"
+    }
+  },
+  "meta": {
+    "rev": "31bf31d6",
+    "updated": "2026-09-02"
+  },
+  "principles": [
+    [
+      "Local authority",
+      "A product answers every authorization question against its own tables. If the answer isn't local, the answer is no. No cross-service auth calls at request time."
+    ],
+    [
+      "Grants name keys or tokens, never emails",
+      "An email-shaped grant is a promise to resolve a third party's identity later \u2014 that is the complecting vector the auth kernel removed."
+    ],
+    [
+      "Email is delivery, not identity",
+      "Mail carries a capability link. The link is the auth; the email proved nothing. Wrong-person risk is handled by single-use tokens and revocation."
+    ],
+    [
+      "One public router per service",
+      "Each service exposes exactly one public router on a dedicated listener; the edge proxies it verbatim and never filters per route."
+    ],
+    [
+      "Chat availability is the primary promise",
+      "Durable history and availability outrank every other property; anything that couples chat availability to another service's uptime is a bug."
+    ],
+    [
+      "Recoverability precedes operator blindness",
+      "ADR 0001: no Recovery Authority is removed until the same Recovery Set has restored onto an empty target. A TEE is not a backup."
+    ]
+  ]
+}

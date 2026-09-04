@@ -1,0 +1,26 @@
+{
+  "schemaVersion": 2,
+  "name": "finite-architecture",
+  "root_dev": 16777231,
+  "root_ino": 235896256,
+  "files": {
+    "fragment.json": {
+      "rev": 1,
+      "sha256": "5281eccdd98578bdb786d050293a6bb312e2dc23e87d3185082721d8de2a5788",
+      "size": 329,
+      "mtime_ns": 1788215137854289539
+    },
+    "site/index.html": {
+      "rev": 9,
+      "sha256": "cf45dbb4e954a6476445ed248d1763102ed15cbde4e75a598839bd6f2e48cce7",
+      "size": 132877,
+      "mtime_ns": 1788368571119893218
+    },
+    "index.html": {
+      "rev": 2,
+      "sha256": "e534891bb26d2b93b76581820691ee3447883be1512829c2e7e8b8bf4515c3b4",
+      "size": 56464,
+      "mtime_ns": 1788215163788084066
+    }
+  }
+}
