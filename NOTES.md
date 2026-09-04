@@ -91,6 +91,46 @@ the next full `up` after `inference-key` skips straight to booting.
 One-time per worktree: `direnv allow .` at the worktree root, or
 `scripts/with-dev-env` silently no-ops.
 
+## Architecture (decided 2026-09-04, second pass)
+
+**Browser → gateway, direct.** No Next API routes, no server-side client, no
+cache: the browser opens `ws://127.0.0.1:9119/api/ws?token=…` itself
+(WebSockets have no CORS gate; the token rides the query string exactly like
+hermes' own web UI). Connection info is inlined from
+`NEXT_PUBLIC_HERMES_GATEWAY_WS_URL` / `NEXT_PUBLIC_HERMES_GATEWAY_TOKEN` —
+for a real deployment the per-viewer token is the ONE injection point left
+to design. Everything lives in
+`src/components/hermes-gateway-chat.tsx` (hook + section, one file) with a
+one-line mount in agent-sidebar.tsx, so the eventual cutover is one file
+plus one line.
+
+**Protocol facts (all verified live against v2026.8.3):**
+
+- `projects.tree` is hermes' own authoritative sidebar RPC: projects →
+  repos → lanes with preview sessions + `scoped_session_ids`. Topics =
+  projects is not an invention — it IS the desktop's sidebar model. It also
+  includes a zero-session "discovery tier" (every repo hermes has ever seen
+  a cwd for — ~200 on this machine); the chat sidebar filters to
+  `sessionCount > 0`.
+- Sessions join projects by `cwd` at creation time (my test session created
+  with the gateway's cwd landed in the "finite-mono" project). `cwd` is a
+  `session.create` param — new chats choose their topic by choosing cwd.
+- Drafts are invisible: `session.create` makes a gateway-memory draft with
+  NO DB row; it appears in `session.list`/`projects.tree` only after its
+  first `prompt.submit`. Drafts also die with the connection that made
+  them. Parity note: the existing web chat shows empty new chats; hermes
+  hides them until they say something.
+- Lists are pull, turns are push: `session.list`/`projects.tree` are
+  queries; `message.delta`/`message.complete`/`tool.*`/approvals stream as
+  events. There is no session-list-change push — refresh the list after
+  actions that change it.
+- `prompt.submit` returns `{"status":"streaming"}` immediately; the reply
+  arrives as events on the same socket.
+- Titles: `session.list` showed an empty title for the test session (the
+  create-time title had not materialized at list time; hermes auto-titles
+  from the first turn, and `session.title` sets explicitly). UI falls back
+  title → preview.
+
 ## Parity probe: side-by-side sidebar (landed 2026-09-04)
 
 The sidebar now renders both transports next to each other:
@@ -121,7 +161,7 @@ also rides ?token= like hermes' own web UI).
 
 | Existing (finitechat) | Gateway protocol mapping | Status |
 |---|---|---|
-| Chat list | `session.list` | ✅ read-only |
+| Chat list | `session.list` + `projects.tree` | ✅ read-only, grouped by project |
 | Open chat → transcript | `session.history` (rows by `row_id`) | next |
 | Send message | `prompt.submit` | — |
 | Streaming reply | `message.delta` (coalesced ~30fps) + `message.complete` | needs live subscription |
@@ -131,7 +171,7 @@ also rides ?token= like hermes' own web UI).
 | Unread counts | no analogue (server-side read state is finitechat MLS) | gap to name |
 | Rewind/edit | `prompt.submit` + `truncate_before_row_id` | — |
 | Approvals | `approval.request` / `approval.respond` events | — |
-| Topics/rooms | no first-class analogue — gateway is flat sessions | structural gap: decide mapping (one topic = N sessions? hermes projects?) |
+| Topics/rooms | `projects.tree` (user projects + auto-discovery by cwd) | ✅ projects ARE topics (desktop sidebar model) |
 
 Hermes pin: v2026.8.3. Checked v2026.8.3..v2026.8.31 — gateway changes are
 fixes (compute-host interrupt forwarding, clarify relay, per-profile PID

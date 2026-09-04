@@ -62,10 +62,10 @@ function localChildEnvironment(): NodeJS.ProcessEnv {
     "NIX_PATH",
     "NIX_PROFILES",
     "IN_NIX_SHELL",
-    // Spike: pass the hermes tui_gateway connection through to the dashboard
-    // so /api/chat/gateway/sessions can reach a local `hermes serve`.
-    "HERMES_GATEWAY_WS_URL",
-    "HERMES_GATEWAY_TOKEN",
+    // Spike: the browser talks DIRECTLY to the local hermes gateway, so the
+    // dashboard only needs the connection info inlined (public env).
+    "NEXT_PUBLIC_HERMES_GATEWAY_WS_URL",
+    "NEXT_PUBLIC_HERMES_GATEWAY_TOKEN",
   ]) {
     const value = process.env[key];
     if (value !== undefined) environment[key] = value;
