@@ -1,12 +1,12 @@
 # FiKnight account transfer — 2026-09-02
 
-> **PRODUCTION PAUSED — do not resume this cutover or reuse any staged
-> artifact.** The local Chat handoff rehearsal passed, but the current
-> writer-fenced method causes platform-wide Chat downtime. Austin paused the
-> migration on 2026-09-02 after service was restored. Any later attempt requires
-> a newly approved availability plan, fresh backup and stopped-writer copy,
-> refreshed Runtime fence, and new explicit authorization. The Core-only
-> transfer does not transfer
+> **OUTAGE BOUNDARY PAUSED — do not stop a shared writer without Austin's
+> fresh explicit confirmation.** Online preparation resumed on 2026-09-03,
+> but the current writer-fenced method causes platform-wide Chat downtime.
+> Every artifact from the 2026-09-02 attempt remains audit-only. The resumed
+> attempt uses a fresh backup, migration ID, receipts, binaries, and scratch
+> copies; it still requires a new stopped-writer copy after the outage is
+> authorized. The Core-only transfer does not transfer
 > cryptographic Chat Room membership or retained history. The first attempt was
 > rolled back after FiKnight received a new empty Room. See
 > [the cross-account Chat handoff investigation](fiknight-chat-handoff-investigation-2026-09-02.md).
@@ -182,6 +182,81 @@ for `fiknight`; the durable FiKnight name remains unbound. The post-repair
 `3b6df628f59b62ebfef275993eeb8809fedd5d9eecff8baaec5d781f6e7c952e` and
 showed Chat, host health, recovery, and rollout state green, with only the
 accepted stale `Smoke Studio` row keeping aggregate fleet convergence red.
+
+The fresh snapshot was copied into owner-only private root
+`/tmp/fiknight-production-cutover-20260904T022527Z` without using any earlier
+attempt as an rsync basis. Independent hashes of its Room, Austin client,
+FiKnight client, and FiKnight sealed binding matched the sealed manifest above.
+The old and current private roots contain no group- or other-accessible path.
+
+The first two current-snapshot rehearsals failed closed before producing an
+accepted handoff:
+
+- `rehearsal-v3` timed out while starting the loopback Room server; no handoff
+  phase ran. The driver now waits up to 60 seconds and also fails if its exact
+  spawned server PID exits.
+- `rehearsal-v3b` reached the read-only inspect phase but could not decrypt the
+  production client state. The snapshot identities and database hashes still
+  matched production. The cause was source compatibility: the draft branch
+  reader supported encrypted state AAD v9/v8, while the current production
+  snapshot was v10.
+
+The branch was brought forward to current `origin/main` (`97538f8d682f`) while
+preserving the intentionally isolated one-time handoff seams. Merge commit
+`435d4165` is the exact source for all successful evidence below. Workspace
+check, rustfmt, and clippy with warnings denied passed. The complete Core and
+Hosted Device suites passed, including cross-account handoff and exact rebind
+replay. One unchanged `main` client heartbeat timing test failed consistently
+with a response-body error; the client compatibility tests, including actual
+v9 and v8 encrypted snapshots and the v10 currency-gate round trip, passed.
+The migration code does not alter that transport or test.
+
+Release binaries built from `435d4165` have these SHA-256 values:
+
+- loopback `finitechat-server`:
+  `22441bce648f58e85f922381becba9d1fc8563c35752a82708221dff618c1909`
+- `one_time_room_handoff`:
+  `11feef688905e36b3102dfdb369463e9fba74f3f27e4d3df6c4c99076a0de6ed`
+- `one_time_agent_rebind`:
+  `4f37671f254694e3957839e62422cddf0b05ee9637794337acff580528ecbc2a`
+
+Fresh `rehearsal-v3c` then passed the complete local lifecycle with migration
+ID `fiknight-cross-account-room-handoff-2026-09-03-production-v3`: inspect,
+join, plan, first apply, exact apply replay, prepared source removal, submitted
+source removal, first binding replacement, exact binding replay, and final
+verify. Non-secret acceptance evidence:
+
+- canonical Room: `room-c9289c5d35f365f3`
+- through sequence: `811`
+- Room history events: `809`
+- source cached application rows: `465`
+- projected chat messages: `433`
+- transfer chunks: `4`
+- history SHA-256:
+  `755d190dacc8a3f79dcf15fb163ac9fe9b8dfdb0dd0a5c1e80e6c9d64d4c8053`
+- manifest SHA-256:
+  `5cad4c250f7de20f49a359f944006c8278b167cc26d08091e31c7afef6b58336`
+- final membership was exactly FiKnight plus the unchanged Agent; both replay
+  checks passed.
+
+The successful scratch state was converted into the same four-file install
+shape required during the outage. SQLite-native backups for all three
+databases returned `PRAGMA integrity_check = ok`, no process retained an open
+handle, and every file remained owner-only. Rehearsal install hashes:
+
+- Room database:
+  `3cf53a2a9b8f069e42f310a4151cff5b2988b4f11c6099660fdf99da923b4a5b`
+- Austin client database:
+  `ee8ec95bc3909d5e7759e2de3abc03b2e5547e7c67e89e410332e718740efbc4`
+- FiKnight client database:
+  `4b029a5209cea32afb22284ad87827f2724616954a8c185fb1edd3274a222b88`
+- FiKnight sealed binding:
+  `048367253c78e57db6d2a1c9dd3e5ad8c5d6bb688b26246f75c4ecd3831ba45b`
+
+An exact-prefix driver rerun refused to overwrite existing evidence with exit
+73. Pre- and post-refusal hashes of all three working databases were identical.
+No result above is an install candidate after writers resume; the outage run
+must still start from new stopped-writer images and produce new exact hashes.
 
 ### Final go/no-go boundary
 
