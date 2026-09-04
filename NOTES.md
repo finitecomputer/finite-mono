@@ -226,6 +226,29 @@ collapsed tool rollups ("Worked through N steps") exactly as stored.
 Fixture gotcha: the web-design fixture allowlists env into the next dev
 child — the gated-mode vars and the proxy target had to be added there.
 
+Data parity: finitechat topics never exist in hermes (2026-09-04)
+
+A topic created in the finitechat view ("Fun Stuff") does not appear in
+the gateway view — not a bug. The two systems have DISJOINT conversation
+stores: finitechat topics/chats are MLS rooms in its own stores (names
+live inside encrypted state on the real stack); hermes has only sessions
++ projects. Feature parity ≠ data parity: on cutover, existing finitechat
+conversations do not come along by themselves. Options, all expressible
+with existing RPCs:
+
+- Transition (no data invention): keep the finitechat surface readable
+  for old chats; new chats go hermes-only until deprecation.
+- Import: session.create accepts seeded history (the `messages` param →
+  _coerce_seed_history), so a finitechat transcript can be replayed into
+  a hermes session. Topic structure can even be preserved: per finitechat
+  topic → projects.create(name) + session.create(messages, cwd inside
+  that project's primary_path so the tree claims it). Costs: one-time
+  migration job; MLS metadata/attachments do not carry.
+- Hard cut with export.
+
+Conceptual mapping for users: finitechat "topics" (MLS rooms) ≠ hermes
+"projects" (cwd folders) — on cutover, topics BECOME projects.
+
 "Home" decoded (remote sandbox): it is hermes' NO-PROJECT bucket —
 projects.tree emits it as {label: "Home", isNoProject: true, path: null}
 (the __no_project__ id in project_tree.py). The 21 old sessions were
