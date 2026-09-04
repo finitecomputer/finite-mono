@@ -20,27 +20,40 @@ fed a presentation model (`src/model.ts`: rooms/chats/messages + seq cursors,
 Device renderers deliberately share the model, not the transport — so an
 alternative transport only needs to produce this model.
 
-## The experiment path
+## The experiment path (verified working 2026-09-04)
 
     browser chat UI
-      → ws://127.0.0.1:9119/api/ws   (hermes web server, tui_gateway JSON-RPC)
+      → ws://127.0.0.1:9119/api/ws?token=<token>   (hermes serve, tui_gateway JSON-RPC)
 
-Run the agent locally (flake packages hermes for aarch64-darwin):
+### Running the agent gateway
 
-    nix run .#hermes-agent -- web            # http://127.0.0.1:9119, /api/ws
-    nix run .#hermes-agent -- web --port 9119
+    # headless gateway (this is what remote clients use; `dashboard` subcommand
+    # is the same server + browser UI). NOTE: pinned v2026.8.3 has no `web`
+    # subcommand despite the upstream docs page mentioning `main`.
+    nix run .#hermes-agent -- serve              # 127.0.0.1:9119
 
-`hermes web` (hermes_cli/web_server.py) mounts `tui_gateway.ws.handle_ws` at
-`/api/ws` — the same `server.dispatch` the Ink TUI uses over stdio. Wire
-protocol: newline-delimited JSON-RPC both ways; server emits `gateway.ready`
-immediately on connect. `/api/ws` takes `?token=<session token>` (printed at
-startup) when auth is enabled.
+Auth: `/api/ws` requires `?token=<session token>`. Set your own at launch:
 
-Model provider: hermes resolves providers from its own config (`~/.hermes`
-config.yaml / env / auth.json). A Finite Private key for local inference is
-cached by devfinity at
-`.local-state/devfinity/runs/default/finite-private-upstream.key`
-(or `just dev inference-key` to set it).
+    HERMES_DASHBOARD_SESSION_TOKEN=$(cat .local-state/hermes-session-token) \
+      nix run .#hermes-agent -- serve
+
+The token for the currently-running instance is at
+`.local-state/hermes-session-token` (mode 600, gitignored); server log at
+`.local-state/hermes-serve.log`.
+
+Verified round-trip (hermes venv python has `websockets`):
+
+    /nix/store/lq8c19c5vfw3nwfvk6lkf5m76rkmaxmb-hermes-agent-env/bin/python
+    # → connect ws://127.0.0.1:9119/api/ws?token=…
+    # RECV {"method":"event","params":{"type":"gateway.ready",...}}
+    # SEND {"jsonrpc":"2.0","id":1,"method":"session.list"}
+    # RECV {"id":1,"result":{"sessions":[...real session history...]}}
+
+Model provider: hermes resolves from its own config (`~/.hermes` config.yaml /
+env / auth.json). It boots fine keyless — prompting just fails until a
+provider key exists. A Finite Private key for local inference is cached by
+devfinity at `.local-state/devfinity/runs/default/finite-private-upstream.key`
+after `just dev inference-key` (one-time interactive paste).
 
 ### JSON-RPC surface relevant to a chat client
 
@@ -57,22 +70,26 @@ Mapping to the chat-ui model: one gateway session ≈ one AppChatSummary;
 `session.history` rows + `message.delta`/`message.complete` events ≈ message
 list; seq cursors have no direct analogue (gateway rows carry `row_id`).
 
-## Dashboard with hot reload
+## Dashboard with hot reload (running now, keyless)
 
-devfinity's own dashboard process IS `pnpm run dev` (hot reload) on
-127.0.0.1:13002 — but it watches the main checkout, which is shared. Iterate
-HERE instead:
+The design fixture is self-contained: an in-process fixture Core + fixture
+hosted device + real `next dev`, serving THIS worktree's source with hot
+reload. No stack, no keys:
 
-    cd /Users/futurepaul/dev/finite/finite-mono-worktrees/hermes-gateway-spike/finitecomputer-v2/apps/dashboard
-    pnpm install --frozen-lockfile
-    source ../../.local-state/spike-env.sh    # extracted from the running stack
-    pnpm run dev --hostname 127.0.0.1 --port 13003
+    cd finitecomputer-v2/apps/dashboard
+    ../../scripts/with-dev-env pnpm run design
+    # → http://127.0.0.1:13002/dashboard/machines/runtime_web_design/chat
 
-spike-env.sh is generated from the stack's process-compose.yaml dashboard
-process env (FC_CORE_BASE_URL, FC_HOSTED_WEB_DEVICE_URL, FC_BRAIN_*,
-FINITECHAT_HOSTED_API_TOKEN, FC_CORE_API_TOKEN, WorkOS fixture vars, plus
-NEXT_DIST_DIR pointed at this worktree so manifests never mix with the main
-checkout's — see the warning in devfinity/src/lib.rs ~2192).
+(scenarios: `pnpm run design:state healthy|unavailable|recovering`.)
+
+The full devfinity stack (`just dev up`) also runs its dashboard as
+`pnpm run dev` on 13002 — but every profile requires a Finite Private key
+(`just dev inference-key`) and it watches the shared main checkout, so
+iterate here instead. All Rust services are already built and nix-cached;
+the next full `up` after `inference-key` skips straight to booting.
+
+One-time per worktree: `direnv allow .` at the worktree root, or
+`scripts/with-dev-env` silently no-ops.
 
 ## Integration point for the swap
 
@@ -82,4 +99,6 @@ bookkeeping (agent bindings, recovery); everything the renderer needs is the
 presentation model. For the spike, add a parallel minimal path — e.g. a
 `/api/chat/gateway/*` route pair (state + updates) backed by a server-side
 ws client to `ws://127.0.0.1:9119/api/ws` that folds gateway events into
-chat-ui model snapshots — and a chat page variant that uses it.
+chat-ui model snapshots — and a chat page variant that uses it. Browser →
+gateway direct is also possible (WebSocket has no CORS gate; the token rides
+the query string exactly as hermes' own web UI does).
