@@ -1,0 +1,135 @@
+# Depot CI Migration
+# Source: .github/workflows/hermes-runtime-smoke.yml
+#
+# No changes were necessary.
+
+name: Hermes runtime smoke
+# Ported from finitechat's pre-mono Docker smoke. It now builds and proves the
+# one canonical finite-mono Agent Runtime image. This workflow never publishes
+# a second Hermes-only runtime; `.github/workflows/runtime-image.yml` is the
+# sole publication path.
+#
+# Dispatch-only while the production-image proof stays explicit. Keep the
+# production-image proof explicit until it has enough green history to become
+# a normal main-branch gate.
+run-name: Hermes runtime smoke (${{ github.ref_name }})
+on:
+  workflow_dispatch:
+    inputs:
+      durable_home_docker_smoke:
+        description: "Run canonical Docker Add/Welcome chat plus durable /data restart smoke"
+        required: false
+        type: boolean
+        default: true
+      chat_interruption_smoke:
+        description: "Run graceful, SIGKILL, and empty-target chat recovery matrix"
+        required: false
+        type: boolean
+        default: true
+env:
+  CACHIX_CACHE_NAME: finite
+  FINITE_HERMES_AGENT_VERSION: "0.20.0"
+  USER: runner
+permissions:
+  contents: read
+  id-token: write
+jobs:
+  docker-runtime-smoke:
+    name: Docker runtime smoke
+    runs-on: depot-ubuntu-24.04
+    timeout-minutes: 75
+    defaults:
+      run:
+        working-directory: finitechat
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+      - uses: depot/setup-action@v1
+        with:
+          oidc: true
+      - uses: DeterminateSystems/nix-installer-action@v16
+      - name: Require Cachix token
+        env:
+          CACHIX_AUTH_TOKEN: ${{ secrets.CACHIX_AUTH_TOKEN }}
+        run: |
+          set -euo pipefail
+          if [[ -z "$CACHIX_AUTH_TOKEN" ]]; then
+            echo "::error::set CACHIX_AUTH_TOKEN as a repository or organization Actions secret"
+            exit 1
+          fi
+      - uses: cachix/cachix-action@v17
+        with:
+          name: ${{ env.CACHIX_CACHE_NAME }}
+          authToken: ${{ secrets.CACHIX_AUTH_TOKEN }}
+      - name: Install Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+      - name: Set runtime image ref
+        run: |
+          image_ref="finite-agent-runtime-smoke:${GITHUB_SHA}"
+          echo "RUNTIME_IMAGE_REF=$image_ref" >> "$GITHUB_ENV"
+          echo "FINITE_DOCKER_IMAGE=$image_ref" >> "$GITHUB_ENV"
+      - name: Build canonical runtime image
+        env:
+          DEPOT_PROJECT_ID: ${{ vars.DEPOT_RUNTIME_IMAGE_PROJECT_ID || secrets.DEPOT_RUNTIME_IMAGE_PROJECT_ID || vars.DEPOT_PROJECT_ID || secrets.DEPOT_PROJECT_ID }}
+          DEPOT_DISABLE_OTEL: "1"
+          FC_RUNTIME_IMAGE_ENGINE: depot
+        run: |
+          if [ -z "$DEPOT_PROJECT_ID" ]; then
+            echo "::error::set DEPOT_RUNTIME_IMAGE_PROJECT_ID or DEPOT_PROJECT_ID as a repository variable or secret"
+            exit 1
+          fi
+          ../finitecomputer-v2/scripts/build_runtime_image.py \
+            --image-ref "$RUNTIME_IMAGE_REF" \
+            --hermes-agent-version "$FINITE_HERMES_AGENT_VERSION" \
+            --platform linux/amd64 \
+            --report target/hermes-docker-smoke/image-build.json
+      - name: Durable home Docker smoke
+        if: ${{ inputs.durable_home_docker_smoke }}
+        env:
+          OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
+          FINITE_PRIVATE_API_KEY: ${{ secrets.FINITE_PRIVATE_SMOKE_API_KEY }}
+          FINITECHAT_HERMES_MODEL: ${{ vars.FINITECHAT_HERMES_MODEL || 'anthropic/claude-sonnet-4.6' }}
+          FINITECHAT_HERMES_PROVIDER: ${{ vars.FINITECHAT_HERMES_PROVIDER || 'openrouter' }}
+        run: |
+          if [ -z "$FINITE_PRIVATE_API_KEY" ] && [ -z "$OPENROUTER_API_KEY" ]; then
+            echo "The durable chat smoke requires the FINITE_PRIVATE_SMOKE_API_KEY secret (preferred, honest finite-private path) or OPENROUTER_API_KEY." >&2
+            exit 1
+          fi
+          python3 -m py_compile scripts/hermes-durable-home-docker-smoke.py
+          scripts/hermes-durable-home-docker-smoke.py \
+            --image "$RUNTIME_IMAGE_REF" \
+            --report target/hermes-durable-home-docker-smoke/report.json
+      - name: In-flight chat interruption and restore smoke
+        if: ${{ inputs.chat_interruption_smoke }}
+        run: |
+          server_out="$(nix build --no-link --print-build-logs --print-out-paths --option builders '' ../#finitechat-server)"
+          python3 -m py_compile scripts/hermes-chat-interruption-docker-smoke.py
+          FINITECHAT_SERVER_BIN="$server_out/bin/finitechat-server" \
+            scripts/hermes-chat-interruption-docker-smoke.py \
+            --image "$RUNTIME_IMAGE_REF" \
+            --report target/hermes-chat-interruption-docker-smoke/report.json
+      - name: Build hardening evidence audit
+        if: always()
+        run: scripts/hermes-hardening-audit.py --report target/hermes-hardening-audit.json
+      - name: Prepare Docker runtime smoke artifacts
+        if: always()
+        run: |
+          if [ -d target/hermes-docker-smoke ]; then
+            sudo chown -R "$(id -u):$(id -g)" target/hermes-docker-smoke
+            chmod -R u+rwX,go+rX target/hermes-docker-smoke
+          fi
+      - name: Upload Docker runtime smoke report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: hermes-docker-smoke-report
+          path: |
+            finitechat/target/hermes-hardening-audit.json
+            finitechat/target/hermes-docker-smoke/image-build.json
+            finitechat/target/hermes-docker-smoke/report.json
+            finitechat/target/hermes-docker-smoke/restic-preflight.json
+            finitechat/target/hermes-durable-home-docker-smoke/report.json
+            finitechat/target/hermes-chat-interruption-docker-smoke/report.json
+          if-no-files-found: ignore
