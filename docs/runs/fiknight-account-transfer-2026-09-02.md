@@ -183,6 +183,34 @@ for `fiknight`; the durable FiKnight name remains unbound. The post-repair
 showed Chat, host health, recovery, and rollout state green, with only the
 accepted stale `Smoke Studio` row keeping aggregate fleet convergence red.
 
+### Final go/no-go boundary
+
+Complete every item below while Chat remains online, then ask Austin for a
+fresh explicit confirmation. Do not stop any shared writer before receiving
+that confirmation.
+
+1. Prebuild the loopback Room server and both handoff utilities from the exact
+   committed checkout; record their SHA-256 hashes.
+2. Set `umask 077`, keep every prior and current cutover root owner-only, and
+   require `find CUTOVER_ROOT -perm -007 -print -quit` to return nothing.
+3. Seed only from Recovery Snapshot `20260904T022527Z`; match the Room and both
+   hosted-client hashes to its sealed manifest. Do not use an earlier attempt
+   as an rsync basis or migration input.
+4. Use the new migration ID
+   `fiknight-cross-account-room-handoff-2026-09-03-production-v3`. Create new
+   evidence, removal, and rebind receipts; do not reuse v1/v2 receipts,
+   commits, databases, or install images.
+5. Rehearse the full Room join/apply/replay/source-removal/rebind/replay/verify
+   lifecycle on a copy-on-write clone of the fresh seed using
+   `scripts/ops/one-time-room-handoff-local`. The driver refuses
+   reused outputs, captures owner-only receipts, checks both idempotent
+   replays, verifies final membership/history counts, and stops its loopback
+   server before returning. Retain only hashes and non-secret counts in this
+   ledger.
+6. Immediately before the confirmation request, recheck exact Core and Runtime
+   fences, both public NIP-05 routes, available disk, service health, and the
+   canonical `finite-status` report.
+
 ### Writer-fenced local-to-production procedure
 
 1. Stop the dashboard, Core, Hosted Device, and Room server. Confirm no process
