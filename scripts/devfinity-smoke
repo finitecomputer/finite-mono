@@ -175,7 +175,6 @@ check_native_requesting_user_site() {
   local session_key
   local init_json
   local init_fields
-  local output_id
   local site_id
   local output_url
   local git_remote
@@ -245,9 +244,8 @@ JS
     '[project]' \
     "slug = \"$slug\"" \
     '' \
-    '[outputs.site]' \
-    'kind = "site"' \
-    "site_name = \"$slug\"" \
+    '[site]' \
+    "name = \"$slug\"" \
     'branch = "main"' \
     'path = "site"' \
     'spa = false' >"$project_dir/finite.toml"
@@ -348,26 +346,25 @@ JS
   init_fields="$(node - "$init_json" "$slug" <<'JS'
 const fs = require("node:fs");
 const response = JSON.parse(fs.readFileSync(process.argv[2], "utf8"));
-const output = response.outputs?.[0];
+const site = response.site;
 if (
   response.slug !== process.argv[3] ||
   !response.requesting_user_npub?.startsWith("npub1") ||
   response.owner_email !== "devfinity@finite.computer" ||
-  !output?.requesting_user_shared ||
-  output.visibility !== "private"
+  !site?.requesting_user_shared ||
+  site.visibility !== "private"
 ) {
   throw new Error(`Project Init did not create a private requesting-user Share: ${JSON.stringify(response)}`);
 }
 process.stdout.write([
-  output.output_id,
-  output.site_id,
-  output.output_url,
+  site.site_id,
+  site.url,
   response.git_remote_url,
   response.requesting_user_npub,
 ].join("\t"));
 JS
 )"
-  IFS=$'\t' read -r output_id site_id output_url git_remote requesting_user_npub <<<"$init_fields"
+  IFS=$'\t' read -r site_id output_url git_remote requesting_user_npub <<<"$init_fields"
   if [[ ! "$site_id" =~ ^site_[0-9a-f]{32}$ ]]; then
     echo "Sites smoke Project Init returned an invalid Site id" >&2
     return 1
@@ -478,7 +475,7 @@ if (typeof proof.authorization_header !== "string" || typeof proof.body_json !==
   throw new Error("Hosted Device did not return the bounded Sites proof");
 }
 process.stdout.write(JSON.stringify({
-  output_url: new URL(process.argv[3]).origin + "/",
+  site_url: new URL(process.argv[3]).origin + "/",
   authorization: proof.authorization_header,
   signed_body: proof.body_json,
 }));
@@ -525,7 +522,7 @@ JS
     FINITE_HOME="$agent_finite_home" \
     FINITE_SITES_API="$sites_url" \
     GIT_CONFIG_GLOBAL="$agent_home/gitconfig" \
-    fsite project share "$slug" "$output_id" \
+    fsite project share "$slug" \
       --remove-npub "$requesting_user_npub" \
       --output json >"$revoke_json"
   status="$(curl -sS --max-time 15 -o /dev/null -H "Cookie: $viewer_cookie" -w '%{http_code}' "$output_url")"
@@ -561,7 +558,7 @@ check_tcp "postgres" "127.0.0.1" "$postgres_port"
 check_http "core" "$core_url/healthz" '"ok":true'
 check_http "finitechat" "$chat_url/health" '"status":"ok"'
 check_http "hosted-web-device" "$hosted_device_url/healthz" '"status":"ok"'
-check_http "finitesites" "$sites_url/api/v1/healthz" '"ok":true'
+check_http "finitesites" "$sites_url/api/v2/healthz" '"ok":true'
 check_http "finitebrain" "$brain_url/health" '"status":"ok"'
 check_http "dashboard" "$dashboard_url" '<html'
 check_native_requesting_user_site

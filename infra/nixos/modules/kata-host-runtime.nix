@@ -1,11 +1,9 @@
 # Shared Kata host runtime: rootful containerd with the kata-v2 runtime
 # handler, the pinned guest configuration, and the finite0 CNI network.
 #
-# Two consumers import this: the finite-saas-runner worker (lat1/lat3, via
-# finite-saas-runner.nix) and the app-plane host's finitesitesd tier-2 Kata
-# apps (finite-saas-sites requires the shared containerd host runtime). This
+# The finite-saas-runner worker imports this via finite-saas-runner.nix. This
 # module deliberately carries NO runner role — no worker unit, no capacity,
-# no credentials.
+# no credentials. Sites no longer consumes this runtime after ADR 0028.
 {
   kataPackages,
   lib,

@@ -1,6 +1,8 @@
-# finite-lat-1 — 64.34.82.77, Latitude.sh — THE single app server.
-# Reinstalled as NixOS via nixos-anywhere per finite-fable/single-server-plan.md.
-# Public exposure is exactly 22/80/443; every service binds loopback behind Caddy.
+# finite-lat-1 — 64.34.82.77, Latitude.sh — RETIRED 2026-08-29.
+#
+# ADR 0007 moved the app plane to finite-lat-2 after lat1's thermal failure.
+# This config is retained only for historical contract checks and forensic
+# reference; do not build or activate it as a production target.
 { config, pkgs, ... }:
 let
   privateIdentityProxyPort = 18790;

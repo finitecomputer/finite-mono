@@ -12,27 +12,24 @@ the style contract for this repo.
 
 Finite Sites replaces self-hosting sites from inside agent machines with a
 Finite-owned serving substrate behind wildcard domains. Agents collaborate in
-git. A Project Repository is the editable source of truth, and Project Outputs
-select committed bytes to serve as immutable Versions.
+git. A Project Repository is the editable source of truth, and an optional
+Project Site selects committed static bytes to serve as immutable Versions.
 
-Current v1 capabilities:
+Current v2 capabilities:
 
-- Static site Project Outputs served from committed deploy bytes.
-- Document Outputs served from authored Markdown under the document base
-  domain, including clean routes, Markdown companion URLs, `/llms.txt`, and
-  `/llms-full.txt`.
+- Static Project Sites served from committed deploy bytes.
 - NIP-98-signed registry mutations through a local Publishing Key.
 - Self-registration with `fsite auth register`.
 - Project Repositories over Git smart HTTP through `git-http-backend`.
-- Generated `/llms.txt` for project-backed editable outputs when the project
-  did not publish that path itself.
-- Per-output visibility: `private`, `shared`, or `public`.
+- Generated `/llms.txt` for project-backed editable sites when the project did
+  not publish that path itself.
+- Per-site visibility: `private`, `shared`, or `public`.
 - Email magic links for external viewer and collaborator bootstrap.
-- Operator controls for publish grants, output disable/delete, and selected
+- Operator controls for publish grants, site disable/delete, and selected
   public-read Project Repository visibility.
 
-Stateful apps and PDF outputs use or will use the same Project Repository
-model. See `docs/roadmap.md` and the ADRs for the current design history.
+Stateful apps, document rendering, PDF outputs, and output kinds are retired
+from Sites v2. See `docs/adr/0028-static-only-sites-platform-service.md`.
 
 ## Crate Layout
 
@@ -40,7 +37,7 @@ model. See `docs/roadmap.md` and the ADRs for the current design history.
 | --- | --- |
 | `finitesites-proto` | Nostr events, NIP-98, manifests, names, limits, DTOs, `finite.toml` parsing |
 | `finitesites-blob` | Content-addressed blob storage |
-| `finitesites-store` | SQLite registry: grants, projects, outputs, versions, shares, tokens |
+| `finitesites-store` | SQLite registry: grants, projects, sites, versions, shares, tokens |
 | `finitesites-engine` | Product decisions: project init, git deploy, sharing, viewing, auth |
 | `finitesitesd` | HTTP server, wildcard site serving, Git smart HTTP, operator commands |
 | `fsite-cli` | Agent-facing CLI binary, `fsite` |
@@ -102,7 +99,7 @@ open http://finitechat-native-mockup.sites.localhost:8787/
 
 The name form of `fsite view` resolves through the configured API for Projects
 owned by the local Finite identity. Never infer a `finite.chat` URL from a
-local slug; use the server-returned `output_url`.
+local slug; use the server-returned site URL.
 
 `*.sites.localhost` resolves to loopback in modern browsers. For curl, pass a
 Host header against `127.0.0.1:8787`.
@@ -116,13 +113,13 @@ curl -H "Host: finitechat-native-mockup.sites.localhost:8787" \
 
 `finitesitesd` executes the system `git` binary for bare-repository setup and
 Git smart HTTP. The daemon preflights `git --version` before it starts serving;
-`/api/v1/healthz` also returns 503 with `git_unavailable` if that dependency
+`/api/v2/healthz` also returns 503 with `git_unavailable` if that dependency
 disappears. Packaged services must therefore put Git on the daemon's runtime
 `PATH` explicitly (the NixOS module uses `path = [ pkgs.git ];`).
 
 Project Init commits registry state before provisioning the corresponding bare
 repository. That boundary is intentional so an interrupted repository setup
-cannot erase the Project or its claimed outputs. A setup failure returns
+cannot erase the Project or its claimed site. A setup failure returns
 `git_repository_setup_failed`; after fixing Git or repository storage, replay
 the identical Project Init once. The replay uses the existing Project ID,
 repairs a missing or partially initialized bare repository, and returns
@@ -131,7 +128,7 @@ recovery.
 
 For local guests that can reach only one gateway origin, set `--api-url` and
 `--git-url` to that same origin. Requests matching `/{slug}.git` are routed to
-Git smart HTTP while `/api/v1/*` remains on the API plane. This is a server
+Git smart HTTP while `/api/v2/*` remains on the API plane. This is a server
 transport feature; no Runner-specific Sites configuration is required.
 
 ## Test Expectations
@@ -196,7 +193,7 @@ cargo build --locked --release --workspace
 - `AGENTS.md`: prompting contract and repo commands.
 - `docs/engineering-style.md`: engineering rules and test shape.
 - `docs/adr/`: decisions and alternatives.
-- `docs/roadmap.md`: planned tiers and future outputs.
+- `docs/roadmap.md`: current target and retired out-of-scope paths.
 - `docs/bare-repos-and-skills-hosting.md`: source-only Project Repository
   requirements and public-read policy for finitecomputer-managed skills.
 - `docs/technical-debt-ledger.md`: accepted shortcuts with delete conditions.

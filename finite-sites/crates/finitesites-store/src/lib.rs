@@ -117,31 +117,18 @@ impl ProjectVisibility {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SiteKind {
     Static,
-    Document,
-    App,
 }
 
 impl SiteKind {
     pub fn as_str(&self) -> &'static str {
         match self {
             SiteKind::Static => "static",
-            SiteKind::Document => "document",
-            SiteKind::App => "app",
-        }
-    }
-
-    pub fn as_output_kind(&self) -> ProjectOutputKind {
-        match self {
-            SiteKind::Static | SiteKind::App => ProjectOutputKind::Site,
-            SiteKind::Document => ProjectOutputKind::Document,
         }
     }
 
     fn from_db(value: &str) -> Result<SiteKind, StoreError> {
         match value {
             "static" => Ok(SiteKind::Static),
-            "document" => Ok(SiteKind::Document),
-            "app" => Ok(SiteKind::App),
             _ => Err(StoreError::CorruptState("unknown site kind in db")),
         }
     }
@@ -156,14 +143,13 @@ pub struct SiteRecord {
     pub visibility: Visibility,
     pub active_version_id: Option<String>,
     pub active_version_number: Option<u32>,
-    /// True when the active version was published as a single-page app:
-    /// lookup misses serve `/index.html` instead of a 404.
+    /// True when lookup misses serve `/index.html` instead of a 404.
     pub active_version_spa: bool,
-    /// Static file site or tier-2 app site. Fixed by the first publish.
+    /// Static file site. Kept explicit because older rows stored this field.
     pub kind: SiteKind,
-    /// Loopback port assigned to this app site's process, if kind is app.
+    /// Deprecated compatibility field; static-only sites never set this.
     pub app_port: Option<u16>,
-    /// The active version's start command, if kind is app.
+    /// Deprecated compatibility field; static-only sites never set this.
     pub active_version_start: Option<String>,
 }
 
@@ -590,7 +576,7 @@ impl Store {
             &conn,
             "sites",
             "kind",
-            "kind TEXT NOT NULL DEFAULT 'static' CHECK (kind IN ('static', 'document', 'app'))",
+            "kind TEXT NOT NULL DEFAULT 'static' CHECK (kind IN ('static'))",
         )?;
         Self::ensure_column(
             &conn,
@@ -622,7 +608,7 @@ impl Store {
             &conn,
             "name_claims",
             "kind",
-            "kind TEXT NOT NULL DEFAULT 'site' CHECK (kind IN ('site', 'document'))",
+            "kind TEXT NOT NULL DEFAULT 'site' CHECK (kind IN ('site'))",
         )?;
         Self::ensure_column(
             &conn,
@@ -1158,22 +1144,79 @@ impl Store {
         } else {
             "'static'"
         };
-        let app_port_expr = if columns.iter().any(|column| column == "app_port") {
-            "app_port"
-        } else {
-            "NULL"
-        };
-
         conn.pragma_update(None, "foreign_keys", "OFF")?;
         let result: Result<(), StoreError> = (|| {
             conn.execute_batch(
                 "BEGIN IMMEDIATE;
+                 DROP TABLE IF EXISTS static_sites_kind_migration_removed_sites;
+                 DROP TABLE IF EXISTS static_sites_kind_migration_removed_outputs;
+                 DROP TABLE IF EXISTS static_sites_kind_migration_removed_versions;
+                 CREATE TEMP TABLE static_sites_kind_migration_removed_sites (
+                   id TEXT PRIMARY KEY
+                 );
+                 CREATE TEMP TABLE static_sites_kind_migration_removed_outputs (
+                   id TEXT PRIMARY KEY
+                 );
+                 CREATE TEMP TABLE static_sites_kind_migration_removed_versions (
+                   id TEXT PRIMARY KEY
+                 );
+                 INSERT INTO static_sites_kind_migration_removed_sites (id)
+                   SELECT id FROM sites WHERE kind != 'static';
+                 INSERT INTO static_sites_kind_migration_removed_outputs (id)
+                   SELECT id FROM project_outputs
+                   WHERE site_id IN (SELECT id FROM static_sites_kind_migration_removed_sites);
+                 INSERT INTO static_sites_kind_migration_removed_versions (id)
+                   SELECT id FROM versions
+                   WHERE site_id IN (SELECT id FROM static_sites_kind_migration_removed_sites);
+                 UPDATE git_ref_events
+                   SET project_output_id = NULL
+                   WHERE project_output_id IN (
+                     SELECT id FROM static_sites_kind_migration_removed_outputs
+                   );
+                 UPDATE git_ref_events
+                   SET version_id = NULL
+                   WHERE version_id IN (
+                     SELECT id FROM static_sites_kind_migration_removed_versions
+                   );
+                 DELETE FROM version_files
+                   WHERE version_id IN (
+                     SELECT id FROM static_sites_kind_migration_removed_versions
+                   );
+                 DELETE FROM publish_files
+                   WHERE publish_id IN (
+                     SELECT id FROM publishes
+                     WHERE site_id IN (SELECT id FROM static_sites_kind_migration_removed_sites)
+                   );
+                 DELETE FROM publishes
+                   WHERE site_id IN (SELECT id FROM static_sites_kind_migration_removed_sites);
+                 DELETE FROM shares
+                   WHERE site_id IN (SELECT id FROM static_sites_kind_migration_removed_sites);
+                 DELETE FROM native_shares
+                   WHERE site_id IN (SELECT id FROM static_sites_kind_migration_removed_sites);
+                 DELETE FROM native_viewer_nonces
+                   WHERE site_id IN (SELECT id FROM static_sites_kind_migration_removed_sites);
+                 DELETE FROM native_viewer_tokens
+                   WHERE site_id IN (SELECT id FROM static_sites_kind_migration_removed_sites);
+                 DELETE FROM login_tokens
+                   WHERE site_id IN (SELECT id FROM static_sites_kind_migration_removed_sites);
+                 DELETE FROM site_access_requests
+                   WHERE site_id IN (SELECT id FROM static_sites_kind_migration_removed_sites);
+                 DELETE FROM site_notification_outbox
+                   WHERE site_id IN (SELECT id FROM static_sites_kind_migration_removed_sites);
+                 DELETE FROM project_outputs
+                   WHERE site_id IN (SELECT id FROM static_sites_kind_migration_removed_sites);
+                 DELETE FROM name_claims
+                   WHERE site_id IN (SELECT id FROM static_sites_kind_migration_removed_sites);
+                 DELETE FROM site_events
+                   WHERE site_id IN (SELECT id FROM static_sites_kind_migration_removed_sites);
+                 DELETE FROM versions
+                   WHERE site_id IN (SELECT id FROM static_sites_kind_migration_removed_sites);
                  CREATE TABLE sites_new (
                    id TEXT PRIMARY KEY,
                    owner_pubkey TEXT NOT NULL CHECK (length(owner_pubkey) = 64),
                    status TEXT NOT NULL CHECK (status IN ('claimed_unpublished', 'published', 'disabled', 'deleted')),
                    visibility TEXT NOT NULL CHECK (visibility IN ('private', 'shared', 'public')),
-                   kind TEXT NOT NULL DEFAULT 'static' CHECK (kind IN ('static', 'document', 'app')),
+                   kind TEXT NOT NULL DEFAULT 'static' CHECK (kind IN ('static')),
                    app_port INTEGER UNIQUE CHECK (app_port IS NULL OR (app_port >= 21000 AND app_port <= 29999)),
                    active_version_id TEXT REFERENCES versions(id),
                    created_at INTEGER NOT NULL,
@@ -1184,9 +1227,10 @@ impl Store {
                 &format!(
                     "INSERT INTO sites_new
                         (id, owner_pubkey, status, visibility, kind, app_port, active_version_id, created_at, updated_at)
-                     SELECT id, {owner_expr}, status, visibility, {kind_expr}, {app_port_expr},
+                     SELECT id, {owner_expr}, status, visibility, 'static', NULL,
                             active_version_id, created_at, updated_at
-                     FROM sites"
+                     FROM sites
+                     WHERE {kind_expr} = 'static'"
                 ),
                 [],
             )?;
@@ -1194,6 +1238,9 @@ impl Store {
                 "DROP TABLE sites;
                  ALTER TABLE sites_new RENAME TO sites;
                  CREATE INDEX IF NOT EXISTS sites_owner ON sites(owner_pubkey, created_at);
+                 DROP TABLE static_sites_kind_migration_removed_sites;
+                 DROP TABLE static_sites_kind_migration_removed_outputs;
+                 DROP TABLE static_sites_kind_migration_removed_versions;
                  COMMIT;",
             )?;
             Ok(())
@@ -1351,15 +1398,15 @@ impl Store {
         Ok(true)
     }
 
-    /// Returns whether the `sites` table predates the `document` site kind
-    /// and was rebuilt.
+    /// Returns whether the `sites` table advertised legacy non-static kinds
+    /// and was rebuilt with the static-only invariant.
     fn migrate_site_kind_shape(conn: &Connection) -> Result<bool, StoreError> {
         let sql: String = conn.query_row(
             "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'sites'",
             [],
             |row| row.get(0),
         )?;
-        if sql.contains("'document'") {
+        if sql.contains("kind IN ('static')") {
             return Ok(false);
         }
 
@@ -1367,12 +1414,75 @@ impl Store {
         let result: Result<(), StoreError> = (|| {
             conn.execute_batch(
                 "BEGIN IMMEDIATE;
+                 DROP TABLE IF EXISTS static_sites_kind_migration_removed_sites;
+                 DROP TABLE IF EXISTS static_sites_kind_migration_removed_outputs;
+                 DROP TABLE IF EXISTS static_sites_kind_migration_removed_versions;
+                 CREATE TEMP TABLE static_sites_kind_migration_removed_sites (
+                   id TEXT PRIMARY KEY
+                 );
+                 CREATE TEMP TABLE static_sites_kind_migration_removed_outputs (
+                   id TEXT PRIMARY KEY
+                 );
+                 CREATE TEMP TABLE static_sites_kind_migration_removed_versions (
+                   id TEXT PRIMARY KEY
+                 );
+                 INSERT INTO static_sites_kind_migration_removed_sites (id)
+                   SELECT id FROM sites WHERE kind != 'static';
+                 INSERT INTO static_sites_kind_migration_removed_outputs (id)
+                   SELECT id FROM project_outputs
+                   WHERE site_id IN (SELECT id FROM static_sites_kind_migration_removed_sites);
+                 INSERT INTO static_sites_kind_migration_removed_versions (id)
+                   SELECT id FROM versions
+                   WHERE site_id IN (SELECT id FROM static_sites_kind_migration_removed_sites);
+                 UPDATE git_ref_events
+                   SET project_output_id = NULL
+                   WHERE project_output_id IN (
+                     SELECT id FROM static_sites_kind_migration_removed_outputs
+                   );
+                 UPDATE git_ref_events
+                   SET version_id = NULL
+                   WHERE version_id IN (
+                     SELECT id FROM static_sites_kind_migration_removed_versions
+                   );
+                 DELETE FROM version_files
+                   WHERE version_id IN (
+                     SELECT id FROM static_sites_kind_migration_removed_versions
+                   );
+                 DELETE FROM publish_files
+                   WHERE publish_id IN (
+                     SELECT id FROM publishes
+                     WHERE site_id IN (SELECT id FROM static_sites_kind_migration_removed_sites)
+                   );
+                 DELETE FROM publishes
+                   WHERE site_id IN (SELECT id FROM static_sites_kind_migration_removed_sites);
+                 DELETE FROM shares
+                   WHERE site_id IN (SELECT id FROM static_sites_kind_migration_removed_sites);
+                 DELETE FROM native_shares
+                   WHERE site_id IN (SELECT id FROM static_sites_kind_migration_removed_sites);
+                 DELETE FROM native_viewer_nonces
+                   WHERE site_id IN (SELECT id FROM static_sites_kind_migration_removed_sites);
+                 DELETE FROM native_viewer_tokens
+                   WHERE site_id IN (SELECT id FROM static_sites_kind_migration_removed_sites);
+                 DELETE FROM login_tokens
+                   WHERE site_id IN (SELECT id FROM static_sites_kind_migration_removed_sites);
+                 DELETE FROM site_access_requests
+                   WHERE site_id IN (SELECT id FROM static_sites_kind_migration_removed_sites);
+                 DELETE FROM site_notification_outbox
+                   WHERE site_id IN (SELECT id FROM static_sites_kind_migration_removed_sites);
+                 DELETE FROM project_outputs
+                   WHERE site_id IN (SELECT id FROM static_sites_kind_migration_removed_sites);
+                 DELETE FROM name_claims
+                   WHERE site_id IN (SELECT id FROM static_sites_kind_migration_removed_sites);
+                 DELETE FROM site_events
+                   WHERE site_id IN (SELECT id FROM static_sites_kind_migration_removed_sites);
+                 DELETE FROM versions
+                   WHERE site_id IN (SELECT id FROM static_sites_kind_migration_removed_sites);
                  CREATE TABLE sites_new (
                    id TEXT PRIMARY KEY,
                    owner_pubkey TEXT NOT NULL CHECK (length(owner_pubkey) = 64),
                    status TEXT NOT NULL CHECK (status IN ('claimed_unpublished', 'published', 'disabled', 'deleted')),
                    visibility TEXT NOT NULL CHECK (visibility IN ('private', 'shared', 'public')),
-                   kind TEXT NOT NULL DEFAULT 'static' CHECK (kind IN ('static', 'document', 'app')),
+                   kind TEXT NOT NULL DEFAULT 'static' CHECK (kind IN ('static')),
                    app_port INTEGER UNIQUE CHECK (app_port IS NULL OR (app_port >= 21000 AND app_port <= 29999)),
                    active_version_id TEXT REFERENCES versions(id),
                    created_at INTEGER NOT NULL,
@@ -1380,11 +1490,15 @@ impl Store {
                  );
                  INSERT INTO sites_new
                    (id, owner_pubkey, status, visibility, kind, app_port, active_version_id, created_at, updated_at)
-                 SELECT id, owner_pubkey, status, visibility, kind, app_port, active_version_id, created_at, updated_at
-                 FROM sites;
+                 SELECT id, owner_pubkey, status, visibility, 'static', NULL, active_version_id, created_at, updated_at
+                 FROM sites
+                 WHERE kind = 'static';
                  DROP TABLE sites;
                  ALTER TABLE sites_new RENAME TO sites;
                  CREATE INDEX IF NOT EXISTS sites_owner ON sites(owner_pubkey, created_at);
+                 DROP TABLE static_sites_kind_migration_removed_sites;
+                 DROP TABLE static_sites_kind_migration_removed_outputs;
+                 DROP TABLE static_sites_kind_migration_removed_versions;
                  COMMIT;",
             )?;
             Ok(())
@@ -1398,15 +1512,15 @@ impl Store {
         Ok(true)
     }
 
-    /// Returns whether the `project_outputs` table predates the
-    /// document/start-command columns and was rebuilt.
+    /// Returns whether the `project_outputs` table advertised legacy
+    /// document/app kinds and was rebuilt with the static-only invariant.
     fn migrate_project_output_document_shape(conn: &Connection) -> Result<bool, StoreError> {
         let sql: String = conn.query_row(
             "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'project_outputs'",
             [],
             |row| row.get(0),
         )?;
-        if sql.contains("'document'") && sql.contains("'app'") && sql.contains("start_command") {
+        if sql.contains("kind IN ('site')") && sql.contains("start_command") {
             return Ok(false);
         }
 
@@ -1414,11 +1528,73 @@ impl Store {
         let result: Result<(), StoreError> = (|| {
             conn.execute_batch(
                 "BEGIN IMMEDIATE;
+                 DROP TABLE IF EXISTS static_project_output_migration_removed_sites;
+                 DROP TABLE IF EXISTS static_project_output_migration_removed_outputs;
+                 DROP TABLE IF EXISTS static_project_output_migration_removed_versions;
+                 CREATE TEMP TABLE static_project_output_migration_removed_sites (
+                   id TEXT PRIMARY KEY
+                 );
+                 CREATE TEMP TABLE static_project_output_migration_removed_outputs (
+                   id TEXT PRIMARY KEY
+                 );
+                 CREATE TEMP TABLE static_project_output_migration_removed_versions (
+                   id TEXT PRIMARY KEY
+                 );
+                 INSERT OR IGNORE INTO static_project_output_migration_removed_sites (id)
+                   SELECT site_id FROM project_outputs WHERE kind != 'site';
+                 INSERT INTO static_project_output_migration_removed_outputs (id)
+                   SELECT id FROM project_outputs WHERE kind != 'site';
+                 INSERT INTO static_project_output_migration_removed_versions (id)
+                   SELECT id FROM versions
+                   WHERE site_id IN (SELECT id FROM static_project_output_migration_removed_sites);
+                 UPDATE git_ref_events
+                   SET project_output_id = NULL
+                   WHERE project_output_id IN (
+                     SELECT id FROM static_project_output_migration_removed_outputs
+                   );
+                 UPDATE git_ref_events
+                   SET version_id = NULL
+                   WHERE version_id IN (
+                     SELECT id FROM static_project_output_migration_removed_versions
+                   );
+                 DELETE FROM version_files
+                   WHERE version_id IN (
+                     SELECT id FROM static_project_output_migration_removed_versions
+                   );
+                 DELETE FROM publish_files
+                   WHERE publish_id IN (
+                     SELECT id FROM publishes
+                     WHERE site_id IN (SELECT id FROM static_project_output_migration_removed_sites)
+                   );
+                 DELETE FROM publishes
+                   WHERE site_id IN (SELECT id FROM static_project_output_migration_removed_sites);
+                 DELETE FROM shares
+                   WHERE site_id IN (SELECT id FROM static_project_output_migration_removed_sites);
+                 DELETE FROM native_shares
+                   WHERE site_id IN (SELECT id FROM static_project_output_migration_removed_sites);
+                 DELETE FROM native_viewer_nonces
+                   WHERE site_id IN (SELECT id FROM static_project_output_migration_removed_sites);
+                 DELETE FROM native_viewer_tokens
+                   WHERE site_id IN (SELECT id FROM static_project_output_migration_removed_sites);
+                 DELETE FROM login_tokens
+                   WHERE site_id IN (SELECT id FROM static_project_output_migration_removed_sites);
+                 DELETE FROM site_access_requests
+                   WHERE site_id IN (SELECT id FROM static_project_output_migration_removed_sites);
+                 DELETE FROM site_notification_outbox
+                   WHERE site_id IN (SELECT id FROM static_project_output_migration_removed_sites);
+                 DELETE FROM name_claims
+                   WHERE site_id IN (SELECT id FROM static_project_output_migration_removed_sites);
+                 DELETE FROM site_events
+                   WHERE site_id IN (SELECT id FROM static_project_output_migration_removed_sites);
+                 DELETE FROM versions
+                   WHERE site_id IN (SELECT id FROM static_project_output_migration_removed_sites);
+                 DELETE FROM sites
+                   WHERE id IN (SELECT id FROM static_project_output_migration_removed_sites);
                  CREATE TABLE project_outputs_new (
                    id TEXT PRIMARY KEY,
                    project_id TEXT NOT NULL REFERENCES projects(id),
                    output_id TEXT NOT NULL,
-                   kind TEXT NOT NULL CHECK (kind IN ('site', 'document', 'app')),
+                   kind TEXT NOT NULL CHECK (kind IN ('site')),
                    site_id TEXT NOT NULL REFERENCES sites(id),
                    site_name TEXT NOT NULL,
                    branch TEXT NOT NULL,
@@ -1435,11 +1611,15 @@ impl Store {
                    (id, project_id, output_id, kind, site_id, site_name, branch, output_path, document_entry, start_command, spa_fallback, created_at, updated_at)
                  SELECT id, project_id, output_id, kind, site_id, site_name, branch, output_path,
                         document_entry, start_command, spa_fallback, created_at, updated_at
-                 FROM project_outputs;
+                 FROM project_outputs
+                 WHERE kind = 'site';
                  DROP TABLE project_outputs;
                  ALTER TABLE project_outputs_new RENAME TO project_outputs;
                  CREATE INDEX IF NOT EXISTS project_outputs_project
                    ON project_outputs(project_id, output_id);
+                 DROP TABLE static_project_output_migration_removed_sites;
+                 DROP TABLE static_project_output_migration_removed_outputs;
+                 DROP TABLE static_project_output_migration_removed_versions;
                  COMMIT;",
             )?;
             Ok(())
@@ -1464,12 +1644,57 @@ impl Store {
                 "name claim kind column missing after ensure_column",
             ));
         }
-        conn.execute("DROP INDEX IF EXISTS name_claims_one_active_name", [])?;
-        conn.execute(
-            "CREATE UNIQUE INDEX IF NOT EXISTS name_claims_one_active_name
-             ON name_claims(kind, name) WHERE status = 'active'",
-            [],
-        )?;
+        if !sql.contains("kind IN ('site')") {
+            conn.pragma_update(None, "foreign_keys", "OFF")?;
+            let result: Result<(), StoreError> = (|| {
+                conn.execute_batch(
+                    "BEGIN IMMEDIATE;
+                     DROP INDEX IF EXISTS name_claims_one_active_name;
+                     DROP INDEX IF EXISTS name_claims_one_active_claim_per_site;
+                     CREATE TABLE name_claims_new (
+                       id TEXT PRIMARY KEY,
+                       site_id TEXT NOT NULL REFERENCES sites(id),
+                       kind TEXT NOT NULL DEFAULT 'site' CHECK (kind IN ('site')),
+                       name TEXT NOT NULL,
+                       status TEXT NOT NULL CHECK (status IN ('active', 'released', 'blocked')),
+                       released_at INTEGER,
+                       created_at INTEGER NOT NULL,
+                       CHECK ((status = 'active' AND released_at IS NULL) OR (status IN ('released', 'blocked')))
+                     );
+                     INSERT INTO name_claims_new
+                       (id, site_id, kind, name, status, released_at, created_at)
+                     SELECT id, site_id, kind, name, status, released_at, created_at
+                     FROM name_claims
+                     WHERE kind = 'site';
+                     DROP TABLE name_claims;
+                     ALTER TABLE name_claims_new RENAME TO name_claims;
+                     CREATE UNIQUE INDEX IF NOT EXISTS name_claims_one_active_name
+                       ON name_claims(kind, name) WHERE status = 'active';
+                     CREATE UNIQUE INDEX IF NOT EXISTS name_claims_one_active_claim_per_site
+                       ON name_claims(site_id) WHERE status = 'active';
+                     COMMIT;",
+                )?;
+                Ok(())
+            })();
+            if result.is_err() {
+                let _ = conn.execute_batch("ROLLBACK;");
+            }
+            conn.pragma_update(None, "foreign_keys", "ON")?;
+            result?;
+            Self::assert_no_foreign_key_violations(conn, "name claims kind migration")?;
+        } else {
+            conn.execute("DROP INDEX IF EXISTS name_claims_one_active_name", [])?;
+            conn.execute(
+                "CREATE UNIQUE INDEX IF NOT EXISTS name_claims_one_active_name
+                 ON name_claims(kind, name) WHERE status = 'active'",
+                [],
+            )?;
+            conn.execute(
+                "CREATE UNIQUE INDEX IF NOT EXISTS name_claims_one_active_claim_per_site
+                 ON name_claims(site_id) WHERE status = 'active'",
+                [],
+            )?;
+        }
         Ok(())
     }
 
@@ -1514,7 +1739,7 @@ impl Store {
     pub fn list_allowed(&self) -> Result<Vec<(String, String)>, StoreError> {
         let grants = self.list_publish_grants(0)?;
         let mut out = Vec::with_capacity(grants.len());
-        // Bounded: the publish grant cache is operator/Core curated.
+        // Bounded: the publish grant cache is Sites-local policy state.
         for grant in grants {
             out.push((grant.pubkey, grant.note));
         }
@@ -1627,7 +1852,7 @@ impl Store {
             Ok(grant)
         })?;
         let mut out = Vec::new();
-        // Bounded: the publish grant cache is operator/Core curated.
+        // Bounded: the publish grant cache is Sites-local policy state.
         for row in rows {
             out.push(row?);
         }
@@ -2113,7 +2338,7 @@ impl Store {
         )?;
         let rows = stmt.query_map(params![principal_id], Self::row_to_project_access)?;
         let mut out = Vec::new();
-        // Bounded by Project Output publishing limits and collaborator grants.
+        // Bounded by Project Site publishing limits and collaborator grants.
         for row in rows {
             out.push(row??);
         }
@@ -2419,6 +2644,22 @@ impl Store {
     ) -> Result<ProjectInitStoreOutcome, StoreError> {
         assert!(owner_pubkey.len() == 64);
         assert!(!slug.is_empty());
+        if outputs.len() > 1 {
+            return Err(StoreError::Conflict(
+                "static-only projects have at most one site",
+            ));
+        }
+        for output in outputs {
+            if output.kind != ProjectOutputKind::Site
+                || output.output_id != "site"
+                || output.entry.is_some()
+                || output.start_command.is_some()
+            {
+                return Err(StoreError::Conflict(
+                    "static-only projects support only site outputs",
+                ));
+            }
+        }
         let tx = self.conn.transaction()?;
 
         let actor_principal_id = ensure_native_principal(
@@ -2554,7 +2795,7 @@ impl Store {
         )?;
 
         let mut applied_outputs = Vec::with_capacity(outputs.len());
-        // Bounded by MAX_PROJECT_OUTPUTS, validated before this call.
+        // Static-only projects have at most one Project Site.
         for output in outputs {
             let existing = tx
                 .query_row(
@@ -2583,11 +2824,8 @@ impl Store {
                     (record, false)
                 }
                 None => {
-                    let site_kind = match output.kind {
-                        ProjectOutputKind::Site | ProjectOutputKind::App => SiteKind::Static,
-                        ProjectOutputKind::Document => SiteKind::Document,
-                    };
-                    let claim_kind = output_claim_kind(output.kind);
+                    let site_kind = SiteKind::Static;
+                    let claim_kind = "site";
                     let claimed: Option<i64> = tx
                         .query_row(
                             "SELECT 1 FROM name_claims
@@ -3297,6 +3535,9 @@ impl Store {
         now: u64,
     ) -> Result<(), StoreError> {
         assert!(!files.is_empty());
+        if start_command.is_some() {
+            return Err(StoreError::Conflict("static-only sites do not run apps"));
+        }
         let tx = self.conn.transaction()?;
         tx.execute(
             "INSERT INTO publishes (id, site_id, status, version_id, spa_fallback, start_command, created_at, updated_at)
@@ -3553,16 +3794,8 @@ impl Store {
                 publish_id
             ],
         )?;
-        // App publishes switch the output to the app runner. Static and
-        // document Project Outputs keep their renderer kind from allocation.
-        let start_command: Option<String> = tx.query_row(
-            "SELECT start_command FROM publishes WHERE id = ?1",
-            params![publish_id],
-            |row| row.get(0),
-        )?;
         if version_number == 1 {
             let idempotency_key = format!("sites:first-publication:{site_id}");
-            let ready_at = start_command.is_none().then_some(now);
             tx.execute(
                 "INSERT OR IGNORE INTO site_notification_outbox
                     (idempotency_key, site_id, kind, email, site_name,
@@ -3575,33 +3808,8 @@ impl Store {
                  JOIN name_claims nc
                    ON nc.site_id = s.id AND nc.status = 'active'
                  WHERE s.id = ?4",
-                params![idempotency_key, ready_at, now, site_id],
+                params![idempotency_key, now, now, site_id],
             )?;
-        }
-        if start_command.is_some() {
-            tx.execute(
-                "UPDATE sites SET kind = 'app' WHERE id = ?1",
-                params![site_id],
-            )?;
-            let has_port: Option<i64> = tx.query_row(
-                "SELECT app_port FROM sites WHERE id = ?1",
-                params![site_id],
-                |row| row.get(0),
-            )?;
-            if has_port.is_none() {
-                let next_port: i64 = tx.query_row(
-                    "SELECT COALESCE(MAX(app_port), 20999) + 1 FROM sites",
-                    params![],
-                    |row| row.get(0),
-                )?;
-                if next_port > 29999 {
-                    return Err(StoreError::Conflict("app port range exhausted"));
-                }
-                tx.execute(
-                    "UPDATE sites SET app_port = ?1 WHERE id = ?2",
-                    params![next_port, site_id],
-                )?;
-            }
         }
         tx.execute(
             "INSERT INTO version_files (version_id, path, sha256, size)
@@ -4773,21 +4981,9 @@ fn map_unique_violation(error: rusqlite::Error, conflict: &'static str) -> Store
 fn project_output_kind_from_db(value: &str) -> Result<ProjectOutputKind, StoreError> {
     match value {
         "site" => Ok(ProjectOutputKind::Site),
-        "document" => Ok(ProjectOutputKind::Document),
-        "app" => Ok(ProjectOutputKind::App),
         _ => Err(StoreError::CorruptState(
             "unknown project output kind in db",
         )),
-    }
-}
-
-fn output_claim_kind(output_kind: ProjectOutputKind) -> &'static str {
-    match output_kind {
-        // App outputs still serve at `{site_name}.{base_domain}` and must
-        // collide with static sites. The Project Output kind remains `app`
-        // so agents see the runtime contract explicitly.
-        ProjectOutputKind::Site | ProjectOutputKind::App => "site",
-        ProjectOutputKind::Document => "document",
     }
 }
 
@@ -5036,7 +5232,7 @@ mod tests {
 
     fn project_output(site_name: &str) -> ProjectOutputApply {
         ProjectOutputApply {
-            output_id: "mockup".to_string(),
+            output_id: "site".to_string(),
             kind: ProjectOutputKind::Site,
             site_name: site_name.to_string(),
             branch: "main".to_string(),
@@ -5049,7 +5245,7 @@ mod tests {
 
     fn app_output(site_name: &str) -> ProjectOutputApply {
         ProjectOutputApply {
-            output_id: "web".to_string(),
+            output_id: "site".to_string(),
             kind: ProjectOutputKind::App,
             site_name: site_name.to_string(),
             branch: "main".to_string(),
@@ -5101,38 +5297,16 @@ mod tests {
     }
 
     #[test]
-    fn project_init_creates_app_output_and_rejects_changed_start_replay() {
+    fn project_init_rejects_app_output() {
         let mut store = Store::open_in_memory().unwrap();
         let app = app_output("tiny-crm");
-        let first = store
-            .init_project(OWNER, "tiny-crm", std::slice::from_ref(&app), NOW)
-            .unwrap();
-        assert!(first.created);
-        assert_eq!(first.outputs.len(), 1);
-        let output = &first.outputs[0].record;
-        assert!(first.outputs[0].created);
-        assert_eq!(output.kind, ProjectOutputKind::App);
-        assert_eq!(output.path, "app");
-        assert_eq!(output.start_command.as_deref(), Some("bun server.ts"));
-
-        let site = store.site_by_name("tiny-crm").unwrap().unwrap();
-        assert_eq!(site.kind, SiteKind::Static);
-
-        let replay = store
-            .init_project(OWNER, "tiny-crm", std::slice::from_ref(&app), NOW + 1)
-            .unwrap();
-        assert!(!replay.created);
-        assert!(!replay.outputs[0].created);
-
-        let mut changed = app_output("tiny-crm");
-        changed.start_command = Some("node server.js".to_string());
-        let rejected = store.init_project(OWNER, "tiny-crm", &[changed], NOW + 2);
         assert!(matches!(
-            rejected,
+            store.init_project(OWNER, "tiny-crm", std::slice::from_ref(&app), NOW),
             Err(StoreError::Conflict(
-                "project output config cannot change during init"
+                "static-only projects support only site outputs"
             ))
         ));
+        assert!(store.site_by_name("tiny-crm").unwrap().is_none());
     }
 
     #[test]
@@ -5166,11 +5340,10 @@ mod tests {
     }
 
     #[test]
-    fn project_init_namespaces_document_names_from_site_names() {
+    fn project_init_rejects_document_output() {
         let mut store = Store::open_in_memory().unwrap();
-        let site = project_output("shared-name");
         let document = ProjectOutputApply {
-            output_id: "docs".to_string(),
+            output_id: "site".to_string(),
             kind: ProjectOutputKind::Document,
             site_name: "shared-name".to_string(),
             branch: "main".to_string(),
@@ -5180,53 +5353,13 @@ mod tests {
             spa: false,
         };
 
-        let site_outcome = store
-            .init_project(OWNER, "site-project", std::slice::from_ref(&site), NOW)
-            .unwrap();
-        let doc_outcome = store
-            .init_project(
-                OWNER,
-                "doc-project",
-                std::slice::from_ref(&document),
-                NOW + 1,
-            )
-            .unwrap();
-        assert!(site_outcome.outputs[0].created);
-        assert!(doc_outcome.outputs[0].created);
-
-        let site_record = store.site_by_name("shared-name").unwrap().unwrap();
-        let doc_record = store
-            .site_by_output_name("document", "shared-name")
-            .unwrap()
-            .unwrap();
-        assert_ne!(site_record.id, doc_record.id);
-        assert_eq!(site_record.kind, SiteKind::Static);
-        assert_eq!(doc_record.kind, SiteKind::Document);
-
-        let conflicting_doc = store.init_project(
-            OWNER,
-            "another-doc-project",
-            std::slice::from_ref(&document),
-            NOW + 2,
-        );
         assert!(matches!(
-            conflicting_doc,
-            Err(StoreError::Conflict("site name already claimed"))
+            store.init_project(OWNER, "doc-project", std::slice::from_ref(&document), NOW),
+            Err(StoreError::Conflict(
+                "static-only projects support only site outputs"
+            ))
         ));
-
-        let conflicting_app =
-            store.init_project(OWNER, "app-project", &[app_output("shared-name")], NOW + 3);
-        assert!(matches!(
-            conflicting_app,
-            Err(StoreError::Conflict("site name already claimed"))
-        ));
-    }
-
-    #[test]
-    fn output_claim_kind_namespaces_app_outputs_with_sites() {
-        assert_eq!(output_claim_kind(ProjectOutputKind::Site), "site");
-        assert_eq!(output_claim_kind(ProjectOutputKind::App), "site");
-        assert_eq!(output_claim_kind(ProjectOutputKind::Document), "document");
+        assert!(store.site_by_name("shared-name").unwrap().is_none());
     }
 
     #[test]
@@ -6871,21 +7004,7 @@ mod tests {
             .unwrap();
         }
 
-        let mut store = Store::open(&db_path).unwrap();
-        let document = ProjectOutputApply {
-            output_id: "doc".to_string(),
-            kind: ProjectOutputKind::Document,
-            site_name: "shared".to_string(),
-            branch: "main".to_string(),
-            path: "docs".to_string(),
-            entry: Some("index.md".to_string()),
-            start_command: None,
-            spa: false,
-        };
-        let doc_outcome = store
-            .init_project(OWNER, "doc-project", &[document], NOW + 1)
-            .unwrap();
-        assert!(doc_outcome.outputs[0].created);
+        let store = Store::open(&db_path).unwrap();
         let index_sql: String = store
             .conn
             .query_row(
@@ -6899,7 +7018,7 @@ mod tests {
     }
 
     #[test]
-    fn migration_rebuilds_project_outputs_for_document_outputs() {
+    fn migration_rebuilds_project_outputs_for_static_only_shape() {
         let dir = tempfile::tempdir().unwrap();
         let db_path = dir.path().join("registry.db");
         {
@@ -6915,7 +7034,7 @@ mod tests {
                    id TEXT PRIMARY KEY,
                    project_id TEXT NOT NULL REFERENCES projects(id),
                    output_id TEXT NOT NULL,
-                   kind TEXT NOT NULL CHECK (kind IN ('site')),
+                   kind TEXT NOT NULL CHECK (kind IN ('site', 'document', 'app')),
                    site_id TEXT NOT NULL REFERENCES sites(id),
                    site_name TEXT NOT NULL,
                    branch TEXT NOT NULL,
@@ -6933,21 +7052,7 @@ mod tests {
             conn.pragma_update(None, "foreign_keys", "ON").unwrap();
         }
 
-        let mut store = Store::open(&db_path).unwrap();
-        let document = ProjectOutputApply {
-            output_id: "doc".to_string(),
-            kind: ProjectOutputKind::Document,
-            site_name: "hermes".to_string(),
-            branch: "main".to_string(),
-            path: "docs".to_string(),
-            entry: Some("index.md".to_string()),
-            start_command: None,
-            spa: false,
-        };
-        let created = store
-            .init_project(OWNER, "hermes-docs", &[document], NOW)
-            .unwrap();
-        assert!(created.outputs[0].created);
+        let store = Store::open(&db_path).unwrap();
         let columns = Store::table_column_names(&store.conn, "project_outputs").unwrap();
         assert!(columns.iter().any(|column| column == "document_entry"));
         let sql: String = store
@@ -6959,7 +7064,191 @@ mod tests {
                 |row| row.get(0),
             )
             .unwrap();
-        assert!(sql.contains("'document'"));
+        assert!(sql.contains("kind IN ('site')"));
+    }
+
+    #[test]
+    fn migration_prunes_legacy_app_and_document_state_on_open() {
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("registry.db");
+        {
+            let _store = Store::open(&db_path).unwrap();
+        }
+        {
+            let conn = Connection::open(&db_path).unwrap();
+            conn.pragma_update(None, "foreign_keys", "OFF").unwrap();
+            conn.execute_batch(
+                "DROP TABLE project_outputs;
+                 DROP TABLE name_claims;
+                 DROP TABLE sites;
+                 CREATE TABLE sites (
+                   id TEXT PRIMARY KEY,
+                   owner_pubkey TEXT NOT NULL CHECK (length(owner_pubkey) = 64),
+                   status TEXT NOT NULL CHECK (status IN ('claimed_unpublished', 'published', 'disabled', 'deleted')),
+                   visibility TEXT NOT NULL CHECK (visibility IN ('private', 'shared', 'public')),
+                   kind TEXT NOT NULL DEFAULT 'static' CHECK (kind IN ('static', 'app')),
+                   app_port INTEGER UNIQUE CHECK (app_port IS NULL OR (app_port >= 21000 AND app_port <= 29999)),
+                   active_version_id TEXT REFERENCES versions(id),
+                   created_at INTEGER NOT NULL,
+                   updated_at INTEGER NOT NULL
+                 );
+                 CREATE TABLE name_claims (
+                   id TEXT PRIMARY KEY,
+                   site_id TEXT NOT NULL REFERENCES sites(id),
+                   kind TEXT NOT NULL DEFAULT 'site' CHECK (kind IN ('site', 'document', 'app')),
+                   name TEXT NOT NULL,
+                   status TEXT NOT NULL CHECK (status IN ('active', 'released', 'blocked')),
+                   released_at INTEGER,
+                   created_at INTEGER NOT NULL,
+                   CHECK ((status = 'active' AND released_at IS NULL) OR (status IN ('released', 'blocked')))
+                 );
+                 CREATE TABLE project_outputs (
+                   id TEXT PRIMARY KEY,
+                   project_id TEXT NOT NULL REFERENCES projects(id),
+                   output_id TEXT NOT NULL,
+                   kind TEXT NOT NULL CHECK (kind IN ('site', 'document', 'app')),
+                   site_id TEXT NOT NULL REFERENCES sites(id),
+                   site_name TEXT NOT NULL,
+                   branch TEXT NOT NULL,
+                   output_path TEXT NOT NULL,
+                   document_entry TEXT,
+                   start_command TEXT,
+                   spa_fallback INTEGER NOT NULL DEFAULT 0 CHECK (spa_fallback IN (0, 1)),
+                   created_at INTEGER NOT NULL,
+                   updated_at INTEGER NOT NULL,
+                   UNIQUE (project_id, output_id),
+                   UNIQUE (site_id)
+                 );",
+            )
+            .unwrap();
+            conn.pragma_update(None, "foreign_keys", "ON").unwrap();
+            conn.execute(
+                "INSERT INTO principals (id, kind, email, pubkey, created_at, updated_at)
+                 VALUES ('principal_owner', 'native', NULL, ?1, ?2, ?2)",
+                params![OWNER, NOW],
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO projects (id, slug, owner_principal_id, visibility, created_at, updated_at)
+                 VALUES ('project_legacy', 'legacy-project', 'principal_owner', 'private', ?1, ?1)",
+                params![NOW],
+            )
+            .unwrap();
+            for (site_id, kind, name, app_port) in [
+                ("site_static", "static", "static-site", None),
+                ("site_app", "app", "app-site", Some(21000_i64)),
+                ("site_document", "static", "document-site", None),
+            ] {
+                conn.execute(
+                    "INSERT INTO sites
+                       (id, owner_pubkey, status, visibility, kind, app_port,
+                        active_version_id, created_at, updated_at)
+                     VALUES (?1, ?2, 'published', 'public', ?3, ?4, NULL, ?5, ?5)",
+                    params![site_id, OWNER, kind, app_port, NOW],
+                )
+                .unwrap();
+                let claim_kind = if site_id == "site_document" {
+                    "document"
+                } else {
+                    "site"
+                };
+                conn.execute(
+                    "INSERT INTO name_claims
+                       (id, site_id, kind, name, status, released_at, created_at)
+                     VALUES (?1, ?2, ?3, ?4, 'active', NULL, ?5)",
+                    params![format!("claim_{site_id}"), site_id, claim_kind, name, NOW],
+                )
+                .unwrap();
+            }
+            for (id, output_id, kind, site_id, site_name, path, entry, start_command) in [
+                (
+                    "po_static",
+                    "site",
+                    "site",
+                    "site_static",
+                    "static-site",
+                    ".",
+                    None,
+                    None,
+                ),
+                (
+                    "po_app",
+                    "app",
+                    "app",
+                    "site_app",
+                    "app-site",
+                    "app",
+                    None,
+                    Some("bun server.ts"),
+                ),
+                (
+                    "po_document",
+                    "docs",
+                    "document",
+                    "site_document",
+                    "document-site",
+                    "docs",
+                    Some("index.md"),
+                    None,
+                ),
+            ] {
+                conn.execute(
+                    "INSERT INTO project_outputs
+                       (id, project_id, output_id, kind, site_id, site_name, branch,
+                        output_path, document_entry, start_command, spa_fallback,
+                        created_at, updated_at)
+                     VALUES (?1, 'project_legacy', ?2, ?3, ?4, ?5, 'main',
+                             ?6, ?7, ?8, 0, ?9, ?9)",
+                    params![
+                        id,
+                        output_id,
+                        kind,
+                        site_id,
+                        site_name,
+                        path,
+                        entry,
+                        start_command,
+                        NOW
+                    ],
+                )
+                .unwrap();
+            }
+        }
+
+        let store = Store::open(&db_path).unwrap();
+        let surviving_sites: i64 = store
+            .conn
+            .query_row("SELECT COUNT(*) FROM sites", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(surviving_sites, 1);
+        assert!(store.site_by_name("static-site").unwrap().is_some());
+        assert!(store.site_by_name("app-site").unwrap().is_none());
+        assert!(store.site_by_name("document-site").unwrap().is_none());
+        let surviving_outputs: Vec<String> = store
+            .conn
+            .prepare("SELECT id FROM project_outputs ORDER BY id")
+            .unwrap()
+            .query_map([], |row| row.get(0))
+            .unwrap()
+            .collect::<Result<_, _>>()
+            .unwrap();
+        assert_eq!(surviving_outputs, vec!["po_static".to_string()]);
+        let legacy_claims: i64 = store
+            .conn
+            .query_row(
+                "SELECT COUNT(*) FROM name_claims WHERE kind != 'site'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(legacy_claims, 0);
+        let violations: i64 = store
+            .conn
+            .query_row("SELECT COUNT(*) FROM pragma_foreign_key_check", [], |row| {
+                row.get(0)
+            })
+            .unwrap();
+        assert_eq!(violations, 0);
     }
 
     #[test]
@@ -7029,69 +7318,22 @@ mod tests {
     }
 
     #[test]
-    fn app_publish_sets_kind_and_allocates_stable_port() {
+    fn create_publish_rejects_start_command() {
         let mut store = store_with_site("hello");
         store.record_blob(SHA_A, 10, NOW).unwrap();
 
-        store
-            .create_publish(
+        assert!(matches!(
+            store.create_publish(
                 "pub_1",
                 "site_1",
-                &[file("/app.tar.gz", SHA_A, 10)],
+                &[file("/index.html", SHA_A, 10)],
                 false,
                 Some("node server.js"),
                 NOW,
-            )
-            .unwrap();
-        store
-            .finalize_publish("pub_1", "ver_1", &"c".repeat(64), NOW)
-            .unwrap();
-        let site = store.site_by_name("hello").unwrap().unwrap();
-        assert_eq!(site.kind, SiteKind::App);
-        assert_eq!(site.app_port, Some(21000));
-        assert_eq!(site.active_version_start.as_deref(), Some("node server.js"));
-
-        // A second app version keeps the same port.
-        store.record_blob(SHA_B, 5, NOW).unwrap();
-        store
-            .create_publish(
-                "pub_2",
-                "site_1",
-                &[file("/app.tar.gz", SHA_B, 5)],
-                false,
-                Some("bun run start.ts"),
-                NOW + 1,
-            )
-            .unwrap();
-        store
-            .finalize_publish("pub_2", "ver_2", &"d".repeat(64), NOW + 1)
-            .unwrap();
-        let site = store.site_by_name("hello").unwrap().unwrap();
-        assert_eq!(site.app_port, Some(21000));
-        assert_eq!(
-            site.active_version_start.as_deref(),
-            Some("bun run start.ts")
-        );
-
-        // A second app site gets the next port.
-        store
-            .create_site_with_claim("site_2", "claim_2", "world", OWNER, NOW)
-            .unwrap();
-        store
-            .create_publish(
-                "pub_3",
-                "site_2",
-                &[file("/app.tar.gz", SHA_A, 10)],
-                false,
-                Some("uv run app.py"),
-                NOW + 2,
-            )
-            .unwrap();
-        store
-            .finalize_publish("pub_3", "ver_3", &"e".repeat(64), NOW + 2)
-            .unwrap();
-        let other = store.site_by_name("world").unwrap().unwrap();
-        assert_eq!(other.app_port, Some(21001));
+            ),
+            Err(StoreError::Conflict("static-only sites do not run apps"))
+        ));
+        assert!(store.publish_by_id("pub_1").unwrap().is_none());
     }
 
     #[test]
@@ -7118,6 +7360,53 @@ mod tests {
     }
 
     #[test]
+    fn project_init_rejects_multiple_static_sites() {
+        let mut store = Store::open_in_memory().unwrap();
+        let second = ProjectOutputApply {
+            output_id: "other".to_string(),
+            kind: ProjectOutputKind::Site,
+            site_name: "world".to_string(),
+            branch: "main".to_string(),
+            path: "public".to_string(),
+            entry: None,
+            start_command: None,
+            spa: false,
+        };
+        assert!(matches!(
+            store.init_project(
+                OWNER,
+                "hello-project",
+                &[project_output("hello"), second],
+                NOW
+            ),
+            Err(StoreError::Conflict(
+                "static-only projects have at most one site"
+            ))
+        ));
+    }
+
+    #[test]
+    fn project_init_rejects_noncanonical_output_id() {
+        let mut store = Store::open_in_memory().unwrap();
+        let output = ProjectOutputApply {
+            output_id: "mockup".to_string(),
+            kind: ProjectOutputKind::Site,
+            site_name: "hello".to_string(),
+            branch: "main".to_string(),
+            path: ".".to_string(),
+            entry: None,
+            start_command: None,
+            spa: false,
+        };
+        assert!(matches!(
+            store.init_project(OWNER, "hello-project", &[output], NOW),
+            Err(StoreError::Conflict(
+                "static-only projects support only site outputs"
+            ))
+        ));
+    }
+
+    #[test]
     fn registry_survives_restart() {
         let dir = tempfile::tempdir().unwrap();
         let db_path = dir.path().join("registry.db");
@@ -7128,7 +7417,7 @@ mod tests {
                 .unwrap();
             store
                 .create_publish(
-                    "pub_1",
+                    "pub_2",
                     "site_1",
                     &[file("/index.html", SHA_A, 10)],
                     false,
@@ -7138,7 +7427,7 @@ mod tests {
                 .unwrap();
             store.record_blob(SHA_A, 10, NOW).unwrap();
             store
-                .finalize_publish("pub_1", "ver_1", &"c".repeat(64), NOW)
+                .finalize_publish("pub_2", "ver_1", &"c".repeat(64), NOW)
                 .unwrap();
             store.allow_pubkey(OWNER, "paul", NOW).unwrap();
         }

@@ -8,9 +8,8 @@ use finitesites_proto::dto::{
     SharingRequest,
 };
 use finitesites_proto::limits::{LOGIN_TOKEN_TTL_SECONDS, MAX_SHARES_PER_SITE};
-use finitesites_proto::manifest::APP_BUNDLE_PATH;
 use finitesites_proto::project_config::{
-    ProjectConfig, ProjectOutputConfig, ProjectOutputKind, ProjectSection,
+    ProjectConfig, ProjectOutputConfig, ProjectOutputKind, ProjectSection, ProjectSiteConfig,
 };
 use finitesites_proto::{ManifestFile, hex};
 use finitesites_store::{PublishGrantSource, SiteStatus, Store, Visibility};
@@ -33,7 +32,6 @@ fn fixture() -> Fixture {
     let blobs = BlobStore::open(blob_dir.path()).unwrap();
     let config = EngineConfig {
         base_domain: "sites.test".into(),
-        document_base_domain: "docs.sites.test".into(),
         site_url_scheme: "http".into(),
         site_url_port: None,
     };
@@ -64,26 +62,18 @@ fn output_file(path: &str, bytes: &[u8]) -> (ManifestFile, Vec<u8>) {
 }
 
 fn project_request(slug: &str, site_name: &str, spa: bool, dry_run: bool) -> ProjectInitRequest {
-    let mut outputs = BTreeMap::new();
-    outputs.insert(
-        "site".to_string(),
-        ProjectOutputConfig {
-            kind: ProjectOutputKind::Site,
-            site_name: Some(site_name.to_string()),
-            document_name: None,
-            branch: "main".to_string(),
-            path: ".".to_string(),
-            entry: None,
-            spa,
-            start: None,
-        },
-    );
     ProjectInitRequest {
         config: ProjectConfig {
             project: ProjectSection {
                 slug: slug.to_string(),
             },
-            outputs,
+            site: Some(ProjectSiteConfig {
+                name: Some(site_name.to_string()),
+                branch: "main".to_string(),
+                path: ".".to_string(),
+                spa,
+            }),
+            outputs: BTreeMap::new(),
         },
         dry_run,
         requesting_user_npub: None,
@@ -112,7 +102,24 @@ fn app_project_request(slug: &str, site_name: &str, dry_run: bool) -> ProjectIni
             project: ProjectSection {
                 slug: slug.to_string(),
             },
+            site: None,
             outputs,
+        },
+        dry_run,
+        requesting_user_npub: None,
+        owner_email: None,
+        hosted_requester_assertion: None,
+    }
+}
+
+fn source_project_request(slug: &str, dry_run: bool) -> ProjectInitRequest {
+    ProjectInitRequest {
+        config: ProjectConfig {
+            project: ProjectSection {
+                slug: slug.to_string(),
+            },
+            site: None,
+            outputs: BTreeMap::new(),
         },
         dry_run,
         requesting_user_npub: None,
@@ -125,6 +132,14 @@ fn remote(slug: &str) -> String {
     format!("https://git.finite.chat/{slug}.git")
 }
 
+fn response_site_id(response: &finitesites_proto::dto::ProjectInitResponse) -> String {
+    response
+        .site
+        .as_ref()
+        .and_then(|site| site.site_id.clone())
+        .expect("project response includes a materialized site")
+}
+
 fn init_project_site(engine: &mut Engine, slug: &str, site_name: &str, spa: bool) -> String {
     let response = engine
         .init_project(
@@ -134,7 +149,7 @@ fn init_project_site(engine: &mut Engine, slug: &str, site_name: &str, spa: bool
             NOW,
         )
         .unwrap();
-    response.outputs[0].site_id.as_ref().unwrap().clone()
+    response_site_id(&response)
 }
 
 fn publish_project_site(
@@ -183,7 +198,7 @@ fn project_init_dry_run_create_and_replay() {
     assert!(dry_run.dry_run);
     assert!(dry_run.created);
     assert_eq!(dry_run.project_id, None);
-    assert_eq!(dry_run.outputs[0].site_id, None);
+    assert_eq!(dry_run.site.as_ref().unwrap().site_id, None);
     assert!(
         fx.engine
             .resolve_site("finitechat-native-mockup")
@@ -208,7 +223,7 @@ fn project_init_dry_run_create_and_replay() {
     assert!(!created.dry_run);
     assert!(created.created);
     assert!(created.project_id.is_some());
-    assert!(created.outputs[0].created);
+    assert!(created.site.as_ref().unwrap().created);
     let site = fx
         .engine
         .resolve_site("finitechat-native-mockup")
@@ -232,7 +247,7 @@ fn project_init_dry_run_create_and_replay() {
         )
         .unwrap();
     assert!(!replay.created);
-    assert!(!replay.outputs[0].created);
+    assert!(!replay.site.as_ref().unwrap().created);
     assert_eq!(replay.project_id, created.project_id);
 }
 
@@ -670,7 +685,7 @@ fn authorized_sites_key_can_manage_same_mailbox_owned_project_without_identity_l
         remove_npubs: Vec::new(),
     };
     fx.engine
-        .set_project_output_sharing(OTHER_OWNER, "mailbox-owned", "site", &sharing, NOW + 3)
+        .set_project_site_sharing(OTHER_OWNER, "mailbox-owned", &sharing, NOW + 3)
         .unwrap();
     let site = fx
         .engine
@@ -1000,16 +1015,15 @@ fn git_credential_requires_verified_editor_and_honors_revocation() {
     assert_eq!(replay.revoked_git_credentials, 0);
 }
 
-// ---- project output deployment -------------------------------------------
+// ---- project site deployment ---------------------------------------------
 
 #[test]
-fn project_output_version_publishes_and_serves_content() {
+fn project_site_version_publishes_and_serves_content() {
     let mut fx = fixture();
     let outcome = publish_project_site(&mut fx.engine, "hello-project", "hello", false);
     assert_eq!(outcome.version_number, 1);
     assert_eq!(outcome.path_count, 2);
     assert_eq!(outcome.url, "http://hello.sites.test/");
-    assert!(outcome.app.is_none());
 
     let site = fx.engine.resolve_site("hello").unwrap().unwrap();
     assert_eq!(site.status, SiteStatus::Published);
@@ -1103,7 +1117,7 @@ fn project_output_version_replays_by_git_ref_event_id_after_ack_crash() {
             NOW,
         )
         .unwrap();
-    let site_id = created.outputs[0].site_id.as_ref().unwrap().clone();
+    let site_id = response_site_id(&created);
     let project = fx
         .engine
         .store_mut()
@@ -1183,109 +1197,18 @@ fn project_output_version_replays_by_git_ref_event_id_after_ack_crash() {
 }
 
 #[test]
-fn project_app_output_version_records_bundle_and_replays_by_git_ref_event() {
+fn project_init_rejects_legacy_app_output() {
     let mut fx = fixture();
-    let created = fx
-        .engine
-        .init_project(
+    assert!(matches!(
+        fx.engine.init_project(
             OWNER,
             &app_project_request("tiny-crm", "tiny-crm", false),
             remote("tiny-crm"),
-            NOW,
-        )
-        .unwrap();
-    let site_id = created.outputs[0].site_id.as_ref().unwrap().clone();
-    assert_eq!(created.outputs[0].kind, "app");
-    assert_eq!(created.outputs[0].start.as_deref(), Some("bun server.ts"));
-
-    let project = fx
-        .engine
-        .store_mut()
-        .project_by_slug("tiny-crm")
-        .unwrap()
-        .unwrap();
-    let credential_id = "gcred_22222222222222222222222222222222";
-    fx.engine
-        .store_mut()
-        .create_git_credential(
-            credential_id,
-            &project.id,
-            &project.owner_principal_id,
-            &"b".repeat(64),
-            None,
-            NOW + 1,
-        )
-        .unwrap();
-    let (event, inserted) = fx
-        .engine
-        .store_mut()
-        .record_git_ref_event(
-            &project.id,
-            "refs/heads/main",
-            "0000000000000000000000000000000000000000",
-            "2222222222222222222222222222222222222222",
-            &project.owner_principal_id,
-            None,
-            credential_id,
-            NOW + 2,
-        )
-        .unwrap();
-    assert!(inserted);
-
-    let first = fx
-        .engine
-        .commit_project_app_version_for_git_event(
-            &site_id,
-            Some(event.id),
-            b"bundle-v1".to_vec(),
-            "bun server.ts",
-            NOW + 3,
-        )
-        .unwrap();
-    assert_eq!(first.version_number, 1);
-    let deploy = first.app.as_ref().expect("app publish returns deploy info");
-    assert_eq!(deploy.site_id, site_id);
-    assert_eq!(deploy.start_command, "bun server.ts");
-    assert_eq!(deploy.port, 21000);
-
-    let replay = fx
-        .engine
-        .commit_project_app_version_for_git_event(
-            &site_id,
-            Some(event.id),
-            b"bundle-v2-ignored".to_vec(),
-            "bun server.ts",
-            NOW + 4,
-        )
-        .unwrap();
-    assert_eq!(replay.version_id, first.version_id);
-    assert_eq!(replay.version_number, 1);
-
-    let site = fx.engine.resolve_site("tiny-crm").unwrap().unwrap();
-    assert_eq!(site.kind, finitesites_store::SiteKind::App);
-    assert!(fx.engine.should_generate_llms_txt(&site).unwrap());
-    let deploy_for_site = fx.engine.app_deploy_for(&site.id).unwrap().unwrap();
-    assert_eq!(deploy_for_site.version_id, first.version_id);
-    assert_eq!(deploy_for_site.start_command, "bun server.ts");
-
-    let bundle = fx
-        .engine
-        .lookup_exact_file(&site, APP_BUNDLE_PATH)
-        .unwrap()
-        .unwrap();
-    assert_eq!(fx.engine.read_blob(&bundle.sha256).unwrap(), b"bundle-v1");
-
-    let static_attempt = fx.engine.commit_project_output_version_for_git_event(
-        &site_id,
-        None,
-        vec![output_file("/index.html", b"not an app bundle")],
-        false,
-        NOW + 5,
-    );
-    assert!(matches!(
-        static_attempt,
-        Err(EngineError::Conflict("project output site is an app"))
+            NOW
+        ),
+        Err(EngineError::Proto(_))
     ));
+    assert!(fx.engine.resolve_site("tiny-crm").unwrap().is_none());
 }
 
 #[test]
@@ -1371,19 +1294,15 @@ fn sharing_is_owner_controlled_and_public_requires_confirmation() {
     };
     let response = fx
         .engine
-        .set_project_output_sharing(OWNER, "hello-project", "site", &request, NOW)
+        .set_project_site_sharing(OWNER, "hello-project", &request, NOW)
         .unwrap();
     assert_eq!(response.site_name, "hello");
     assert_eq!(response.response.visibility, "shared");
     assert_eq!(response.response.shared_emails, vec!["friend@example.com"]);
 
-    let collaborator_attempt = fx.engine.set_project_output_sharing(
-        OTHER_OWNER,
-        "hello-project",
-        "site",
-        &request,
-        NOW + 1,
-    );
+    let collaborator_attempt =
+        fx.engine
+            .set_project_site_sharing(OTHER_OWNER, "hello-project", &request, NOW + 1);
     assert!(matches!(
         collaborator_attempt,
         Err(EngineError::NotAuthorized)
@@ -1399,7 +1318,7 @@ fn sharing_is_owner_controlled_and_public_requires_confirmation() {
     };
     let rejected =
         fx.engine
-            .set_project_output_sharing(OWNER, "hello-project", "site", &unconfirmed, NOW + 2);
+            .set_project_site_sharing(OWNER, "hello-project", &unconfirmed, NOW + 2);
     assert!(matches!(rejected, Err(EngineError::Validation(_))));
 
     let confirmed = SharingRequest {
@@ -1408,18 +1327,22 @@ fn sharing_is_owner_controlled_and_public_requires_confirmation() {
     };
     let public = fx
         .engine
-        .set_project_output_sharing(OWNER, "hello-project", "site", &confirmed, NOW + 3)
+        .set_project_site_sharing(OWNER, "hello-project", &confirmed, NOW + 3)
         .unwrap();
     assert_eq!(public.response.visibility, "public");
 
-    let missing_output = fx.engine.set_project_output_sharing(
-        OWNER,
-        "hello-project",
-        "missing",
-        &confirmed,
-        NOW + 4,
-    );
-    assert!(matches!(missing_output, Err(EngineError::OutputNotFound)));
+    fx.engine
+        .init_project(
+            OWNER,
+            &source_project_request("source-only", false),
+            remote("source-only"),
+            NOW + 4,
+        )
+        .unwrap();
+    let missing_site =
+        fx.engine
+            .set_project_site_sharing(OWNER, "source-only", &confirmed, NOW + 5);
+    assert!(matches!(missing_site, Err(EngineError::SiteNotFound)));
 }
 
 #[test]
@@ -1589,7 +1512,7 @@ fn verified_unshared_mailbox_can_request_and_receive_explicit_access() {
         .engine
         .init_project(OWNER, &request, remote("owner-project"), NOW)
         .unwrap();
-    let site_id = response.outputs[0].site_id.clone().unwrap();
+    let site_id = response_site_id(&response);
     fx.engine
         .commit_project_output_version(
             &site_id,
@@ -1692,10 +1615,10 @@ fn verified_unshared_mailbox_can_request_and_receive_explicit_access() {
             NOW + 9 + crate::SITE_ACCESS_APPROVAL_TTL_SECONDS,
         )
         .unwrap();
-    let other_site_id = other_response.outputs[0].site_id.as_deref().unwrap();
+    let other_site_id = response_site_id(&other_response);
     assert!(matches!(
         fx.engine.approve_site_access(
-            other_site_id,
+            &other_site_id,
             approval_token,
             NOW + 9 + crate::SITE_ACCESS_APPROVAL_TTL_SECONDS,
         ),
@@ -1767,23 +1690,29 @@ fn project_owner_native_share_grants_direct_viewing_and_revokes_live_session() {
         initialized.requesting_user_npub,
         Some(finitesites_proto::npub::encode_npub(OTHER_OWNER).unwrap())
     );
-    assert!(initialized.outputs[0].requesting_user_shared);
+    assert!(initialized.site.as_ref().unwrap().requesting_user_shared);
     let replayed = fx
         .engine
         .init_project(OWNER, &request, remote("requesting-user"), NOW + 1)
         .unwrap();
     assert!(!replayed.created);
-    assert!(!replayed.outputs[0].created);
+    assert!(!replayed.site.as_ref().unwrap().created);
     assert_eq!(
         fx.engine
             .store_mut()
-            .native_shares(replayed.outputs[0].site_id.as_deref().unwrap())
+            .native_shares(replayed.site.as_ref().unwrap().site_id.as_deref().unwrap())
             .unwrap()
             .len(),
         1
     );
 
-    let site_id = initialized.outputs[0].site_id.as_deref().unwrap();
+    let site_id = initialized
+        .site
+        .as_ref()
+        .unwrap()
+        .site_id
+        .as_deref()
+        .unwrap();
     fx.engine
         .commit_project_output_version(
             site_id,
@@ -2004,7 +1933,6 @@ fn list_and_status_respect_ownership() {
     let sites = fx.engine.list_sites(OWNER).unwrap();
     assert_eq!(sites.len(), 1);
     assert_eq!(sites[0].name, "hello");
-    assert_eq!(sites[0].kind, "static");
     assert_eq!(sites[0].active_version, Some(1));
     assert!(fx.engine.list_sites(OTHER_OWNER).unwrap().is_empty());
 

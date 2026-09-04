@@ -29,9 +29,8 @@ select the dev mailer with `--mailer dev`; omitting the flag is an error.
 ## 3. RESOLVED for serving — one control-plane writer remains
 
 - **Resolution**: site traffic uses a bounded pool of independent query-only
-  SQLite connections. Registry reads, verified blob reads, and document
-  rendering run on Tokio's blocking pool. Static and document requests do not
-  take `AppState.engine`.
+  SQLite connections. Registry reads and verified blob reads run on Tokio's
+  blocking pool. Static site requests do not take `AppState.engine`.
 - **Atomicity boundary**: the control-plane writer still serializes mutations.
   Publication writes and verifies immutable blobs before atomically activating
   the new version; readers retain the resolved version id.
@@ -67,7 +66,7 @@ select the dev mailer with `--mailer dev`; omitting the flag is an error.
   rotation remain out of the v1 user contract.
 - **Risk**: names cannot be intentionally returned to the pool without
   operator SQL, and compromised or lost owner keys can permanently block user
-  access even though Sites still holds the repository and outputs. This is a
+  access even though Sites still holds the repository and site. This is a
   first-slice Recoverability Contract blocker, not post-launch polish.
 - **Proof**: `finitesitesd disable-site` and `finitesitesd delete-site`
   mutate site status with audit events; there is no release-name or key
@@ -86,62 +85,22 @@ succeeded against finite-lat-2. The residual behavior (a
 misconfigured `--api-url` fails closed with "url mismatch") remains the
 expected signed-call behavior.
 
-## 8. RESOLVED — tier-2 runs in Kata microVMs
+## 8. RESOLVED — app runner debt removed by static-only Sites
 
-ADR-0015: app sites run as Kata Containers microVMs (Cloud Hypervisor) on
-finite-lat-2, hardware-isolated from each other and the host (verified:
-guest kernel 6.18.28 vs host 7.0.0). The systemd runner remains for boxes
-without KVM. Residual: KSM/templating intentionally unused; Firecracker
-snapshot suspend deferred (stop/start already gets idle RAM to ~0).
+ADR 0028 cuts app/document output kinds, Kata app runners, app proxying, and
+wake-on-request from Finite Sites. The previous tier-2 runtime debt entries
+are closed by removal rather than by completing the app-hosting path:
 
-## 9. App proxy gaps: no websockets, no user-facing logs
+- no `kind = "app"` public contract;
+- no app bundle manifest exception;
+- no app proxy or websocket/log surface;
+- no Sites-specific Kata/containerd/sudo integration;
+- no wake-on-request app supervisor.
 
-- **Source**: tier-2 scope cut. (Idle sleep/wake now SHIPPED — the
-  Supervisor stops idle apps and wakes them on request, ADR-0015.)
-- **Risk**: websocket apps fail opaquely; users cannot see their own app
-  logs (operators read `nerdctl logs finite-app-{site}` /
-  `journalctl -u finite-app@{site}`).
-- **Proof**: `crates/finitesitesd/src/proxy.rs` (no upgrade handling);
-  no log surface in the API.
-- **Delete condition**: websocket upgrade support and an `fsite logs NAME`
-  surface before tier 2 is announced to users.
+Future dynamic compute belongs in a separate product boundary, not as another
+Sites kind.
 
-## 10. Kata config relaxes the daemon filesystem sandbox
-
-- **Source**: ADR-0015; `sudo nerdctl` needs containerd/CNI filesystem and
-  privilege access that the daemon's ProtectSystem=strict blocked.
-- **Risk**: a finitesitesd compromise reaches root via `sudo nerdctl`
-  (true regardless of ProtectSystem once that sudo path exists). The
-  daemon still runs as the unprivileged finite-sites user.
-- **Proof**: `infra/nixos/modules/finitesitesd.nix` declares the relaxed unit,
-  exact Nix-store nerdctl command, and passwordless rule for only the
-  `finite-sites` user. Historical lat2 proof remains in
-  `infra/hosts/lat2/systemd/finite-saas-sites-kata.conf` and
-  `finite-sites-nerdctl-sudoers`.
-- **Delete condition**: drive containerd via its gRPC API from the daemon
-  (no nerdctl, no sudo) with a privilege-separated networking helper, if
-  the daemon's own attack surface ever warrants it.
-
-## 11. Wake-path gaps: no admission cap, first-wake latency, guest-root files
-
-- **Source**: ADR-0015 wake-on-request scope cuts.
-- **Risk**: (a) a request storm against many idle apps wakes them all at
-  once with no global cap on resident microVMs; (b) the very first start
-  of a uv app resolves dependencies and can exceed the 20s wake timeout
-  (one 502, then fine — the cache persists in `$DATA_DIR`); (c) apps run
-  as the image's default user (often root *inside the VM*), so files in
-  the host-side data dirs can be root-owned, complicating cleanup by the
-  unprivileged daemon.
-- **Proof**: no admission control in `Supervisor::note_request_and_start`;
-  `WAKE_TIMEOUT` in `crates/finitesitesd/src/proxy.rs`; bind-mounted data
-  dirs in `KataAppRunner::run_fresh`.
-- **Delete condition**: (a) a resident-VM budget with LRU eviction before
-  app counts approach memory limits; (b) warm the dependency cache during
-  deploy (run the start command once before flipping live) before tier 2
-  is announced; (c) a fixed in-guest uid mapping or a root-owned cleanup
-  helper when app deletion ships.
-
-## 12. RESOLVED — Project Repository pushes use durable post-receive events
+## 9. RESOLVED — Project Repository pushes use durable post-receive events
 
 Project Repositories now install a `hooks/post-receive` helper that records
 bounded durable git ref-change events before the Git client sees success.
@@ -151,7 +110,7 @@ missing output failure, restart reconciliation after a ref update before
 deploy, and idempotent replay after Version creation before event
 acknowledgement.
 
-## 13. RETIRED — `reconcile-identity` one-shot migration command
+## 10. RETIRED — `reconcile-identity` one-shot migration command
 
 - **Source**: the mailbox-grant → native-Principal reconciliation was a
   completed one-shot migration. Its optional Core cross-check called

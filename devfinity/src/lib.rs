@@ -1690,7 +1690,7 @@ wait "$postgres_pid"
         let _ = writeln!(yaml, "    depends_on:");
         let _ = writeln!(yaml, "      {}:", ManagedProcess::ServiceBinaries);
         let _ = writeln!(yaml, "        condition: process_completed_successfully");
-        self.write_http_probe(yaml, "/api/v1/healthz", self.ports.finitesites, 1, 2, 3, 45);
+        self.write_http_probe(yaml, "/api/v2/healthz", self.ports.finitesites, 1, 2, 3, 45);
     }
 
     fn write_finite_brain(&self, yaml: &mut String) {
@@ -1890,7 +1890,7 @@ wait "$postgres_pid"
         let probe_container_name = self.apple_network_probe_container_name();
         let mut urls = vec![
             format!("{}/health", self.runtime_finitechat_url()),
-            format!("{}/api/v1/healthz", self.finitesites_api_url()),
+            format!("{}/api/v2/healthz", self.finitesites_api_url()),
         ];
         if self.inference_mode == InferenceMode::ChainedLimiter {
             urls.push(format!("{}/health", self.runtime_limiter_root_url()));
@@ -3052,7 +3052,7 @@ wait "$postgres_pid"
                 ManagedProcess::FiniteSites,
                 "127.0.0.1",
                 self.ports.finitesites,
-                "/api/v1/healthz",
+                "/api/v2/healthz",
             ),
             check_http_service(
                 ManagedProcess::FiniteIdentity,
