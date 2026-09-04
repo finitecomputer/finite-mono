@@ -122,6 +122,53 @@ real stack's own dashboard at 14002 (main-checkout code, no hermes
 section), worktree dashboard at 13003 (real finitechat half + live
 hermes section).
 
+## Same components, hermes backend (2026-09-04, third pass)
+
+Decision: NO new chat UI, ever. The existing chat components (AgentSidebar,
+HostedWebChat, the whole tree) render UNCHANGED over the hermes gateway:
+
+- `hermes-chat-provider.tsx` implements the SAME context the finitechat
+  provider does (HostedChatContextValue — the context is now exported from
+  hosted-chat-provider.tsx for exactly this swap). It maps room → the
+  gateway, topics → projects (+ Recents), chats → sessions (+ local
+  unprompted drafts), messages → session.resume transcript + streamed
+  deltas as one "running" assistant message, SendMessage → prompt.submit,
+  OpenChat → session.resume, CreateTopic → projects.create,
+  StartTopicChatIntent → session.create with cwd = the project's path,
+  RenameChat → session.title. MarkRoomRead/SetTyping/archive are quiet
+  no-ops (gaps tracked below).
+- `dashboard-shell.tsx` swaps the provider by route:
+  `/dashboard/machines/[machineId]/gateway-chat` (page mirrors ../chat)
+  gets HermesChatProvider; `/chat` is untouched. The route matcher
+  (dashboard-chat-route.ts) treats gateway-chat as a chat surface.
+- The invented portal chat pane and custom sidebar section from the
+  previous pass are DELETED — that was new UI and the point of this pass
+  is that none is needed.
+- Verified: typecheck, SSR shell over the swapped provider, and the ws
+  flow itself (earlier passes). Interactive loop in the real components:
+  open http://127.0.0.1:13002/dashboard/machines/runtime_web_design/gateway-chat.
+
+## Local gateway hygiene (learned the hard way, 2026-09-04)
+
+The spike's first gateway borrowed the desktop-owned ~/.hermes home and
+hermes' default port. A hermes desktop UPDATE then killed our process and
+took port 9119 for its own backend (desktop runs `hermes serve` too) —
+"gateway unreachable". Fixes now in place:
+
+- Isolated home: HERMES_HOME=.local-state/hermes-home (config.yaml +
+  auth.json copied once for provider credentials; sessions/state stay
+  separate from desktop forever). Fresh home ⇒ empty sidebar is correct.
+- Dedicated port: `nix run .#hermes-agent -- serve --port 9120` with
+  HERMES_DASHBOARD_SESSION_TOKEN from .local-state/hermes-session-token.
+- Relaunch command + NEXT_PUBLIC_HERMES_GATEWAY_WS_URL=ws://127.0.0.1:9120/api/ws
+  for the fixture. Eventual home for this hermes: inside the Apple
+  Container runtime (needs `just dev inference-key`), not on the host.
+
+Auth decisions captured: per-agent static token is the credential for
+now; if hermes gated-mode password is added for DESKTOP clients, the web
+dashboard never prompts for it — web rides brokered single-use tickets
+(see defense-in-depth note).
+
 ## Public agent gateways: agents.finite.computer (captured 2026-09-04, design only)
 
 Strategic frame: if every Finite agent's hermes gateway is reachable at a

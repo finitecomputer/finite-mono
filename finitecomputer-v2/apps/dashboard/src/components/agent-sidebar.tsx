@@ -17,7 +17,6 @@ import {
 
 import { AccountMenu, AgentNavigation } from "@/components/agent-navigation";
 import { FiniteBrand } from "@/components/finite-brand";
-import { HermesGatewayChat } from "@/components/hermes-gateway-chat";
 import { useHostedChat } from "@/components/hosted-chat-provider";
 import { Button } from "@/components/ui/button";
 import {
@@ -407,10 +406,6 @@ export function AgentSidebar({
               </div>
             );
           })}
-          {/* Spike: the hermes tui_gateway half of the parity probe. The whole
-              new-world frontend lives in hermes-gateway-chat.tsx so the
-              eventual cutover is one file plus this mount. */}
-          <HermesGatewayChat />
         </nav>
 
         <button
