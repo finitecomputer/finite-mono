@@ -192,6 +192,38 @@ transcript is REPLACED by hermes' authoritative history (session.resume
 returns it inline; an in-flight stream keeps its tail after the fetched
 rows). The local transcript is a display buffer, never truth.
 
+## Remote gateways + gated mode (staged 2026-09-04; sandbox was offline)
+
+Pointing the dashboard at a REMOTE hermes (e.g. a bot on the tailnet) is an
+env flip once the host is up:
+
+    . .local-state/remote-gateway-env.sh   # gitignored; secrets live only there
+    # then relaunch the fixture with those vars exported
+
+Three facts drive the shape (read from hermes source + probed):
+
+- Gated gateways auth by POST /auth/password-login {provider, username,
+  password} (JSON; sets session cookies), then mint SINGLE-USE 30s ws
+  tickets via POST /api/auth/ws-ticket → ws ?ticket=. The provider now
+  supports this alongside the static ?token= path (username/password env
+  selects gated mode; the password provider id is discovered from
+  GET /api/auth/providers).
+- Hermes' CORS allowlist is localhost-origins WITHOUT allow_credentials,
+  so cookie login cannot happen cross-origin from the dashboard. The dev
+  answer is an opt-in same-origin rewrite (next.config.ts,
+  HERMES_GATEWAY_PROXY_TARGET): /hermes-gateway/* → the remote, verbatim.
+  On our own prod domain (agents.finite.computer) dashboard and gateway
+  are same-site and cookies flow natively — no proxy needed there.
+- Zero-code alternative: restart the remote gateway with
+  HERMES_DASHBOARD_SESSION_TOKEN=<secret> and use the static ?token= path
+  (full-trust; fine for sandboxes).
+
+Recents note: on any gateway, sessions are claimed by the project matching
+their cwd, so Recents stays empty unless a session's cwd matches no known
+project — that is hermes' model, not a bug. Expect the remote's real home
+to render MANY projects; previews are capped (preview_limit 25) and
+zero-message drafts are invisible by protocol.
+
 ## Local gateway hygiene (learned the hard way, 2026-09-04)
 
 The spike's first gateway borrowed the desktop-owned ~/.hermes home and

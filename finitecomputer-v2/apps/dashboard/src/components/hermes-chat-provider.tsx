@@ -48,6 +48,56 @@ import type { PendingChatRefreshTarget } from "@/lib/hosted-web-chat-refresh";
 const GATEWAY_WS_URL =
   process.env.NEXT_PUBLIC_HERMES_GATEWAY_WS_URL || "ws://127.0.0.1:9120/api/ws";
 const GATEWAY_TOKEN = process.env.NEXT_PUBLIC_HERMES_GATEWAY_TOKEN || "";
+// Gated mode (password-protected gateway): login once, then mint a
+// single-use 30s ws ticket per connection (hermes: POST /auth/password-login
+// then POST /api/auth/ws-ticket). Cross-origin cookies need a same-origin
+// path — use the dev rewrite (see next.config.ts) and point
+// GATEWAY_WS_URL at it.
+const GATEWAY_USERNAME = process.env.NEXT_PUBLIC_HERMES_GATEWAY_USERNAME || "";
+const GATEWAY_PASSWORD = process.env.NEXT_PUBLIC_HERMES_GATEWAY_PASSWORD || "";
+
+function gatewayHttpBase() {
+  return GATEWAY_WS_URL.replace(/^ws:/u, "http:").replace(/^wss:/u, "https:").replace(/\/api\/ws\/?$/u, "");
+}
+
+async function mintWsTarget(): Promise<string> {
+  if (!GATEWAY_USERNAME) {
+    return GATEWAY_TOKEN
+      ? `${GATEWAY_WS_URL}?token=${encodeURIComponent(GATEWAY_TOKEN)}`
+      : GATEWAY_WS_URL;
+  }
+  const base = gatewayHttpBase();
+  const providers = await fetch(`${base}/api/auth/providers`, {
+    credentials: "include",
+  }).then(
+    (response) =>
+      response.json() as Promise<
+        { providers?: { id?: string; name?: string; supports_password?: boolean }[] } | null
+      >
+  );
+  const passwordProvider = providers?.providers?.find(
+    (provider) => provider.supports_password
+  );
+  if (!passwordProvider) throw new Error("gateway has no password auth provider");
+  const login = await fetch(`${base}/auth/password-login`, {
+    method: "POST",
+    credentials: "include",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({
+      provider: passwordProvider.id ?? passwordProvider.name ?? "",
+      username: GATEWAY_USERNAME,
+      password: GATEWAY_PASSWORD,
+      next: "",
+    }),
+  });
+  if (!login.ok) throw new Error(`gateway login failed (${login.status})`);
+  const ticket = await fetch(`${base}/api/auth/ws-ticket`, {
+    method: "POST",
+    credentials: "include",
+  }).then((response) => response.json() as Promise<{ ticket?: string } | null>);
+  if (!ticket?.ticket) throw new Error("gateway returned no ws ticket");
+  return `${GATEWAY_WS_URL}?ticket=${encodeURIComponent(ticket.ticket)}`;
+}
 
 const ROOM_ID = "hermes";
 // hermes' own sidebar model: projects.tree claims sessions (scoped_session_ids)
@@ -374,9 +424,22 @@ export function HermesChatProvider({ children }: { children: ReactNode }) {
 
     const connect = () => {
       if (disposed) return;
-      const target = GATEWAY_TOKEN
-        ? `${GATEWAY_WS_URL}?token=${encodeURIComponent(GATEWAY_TOKEN)}`
-        : GATEWAY_WS_URL;
+      void mintWsTarget()
+        .then((target) => {
+          if (disposed) return;
+          openSocket(target);
+        })
+        .catch(() => {
+          if (disposed) return;
+          setStreamConnected(false);
+          setTransportError(`gateway unreachable at ${GATEWAY_WS_URL}`);
+          retryTimer = setTimeout(connect, retryMs);
+          retryMs = Math.min(retryMs * 2, 10_000);
+        });
+    };
+
+    const openSocket = (target: string) => {
+      if (disposed) return;
       const socket = new WebSocket(target);
       socketRef.current = socket;
 
