@@ -1,0 +1,31 @@
+set shell := ["../scripts/dev-shell", "-cu"]
+
+default: check
+
+bootstrap:
+    corepack yarn install --immutable
+
+check: bootstrap
+    corepack yarn typecheck
+    corepack yarn app:build
+    python3 ../infra/commercial-register/ubuntu/check_contract.py
+
+test: bootstrap
+    corepack yarn test
+
+app-build: bootstrap
+    corepack yarn app:build
+
+app-plan: bootstrap
+    corepack yarn twenty plan
+
+app-apply: bootstrap
+    corepack yarn twenty apply
+
+production-contract:
+    python3 ../infra/commercial-register/ubuntu/check_contract.py
+
+[positional-arguments]
+agent *args: bootstrap
+    corepack yarn build:agent
+    node dist/agent/cli.js "$@"

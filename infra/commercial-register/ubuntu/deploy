@@ -1,0 +1,225 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+target="${FINITE_COMMERCIAL_REGISTER_TARGET:-ubuntu@152.236.5.27}"
+activate=0
+bootstrap_secrets=0
+
+usage() {
+  cat >&2 <<'USAGE'
+usage: infra/commercial-register/ubuntu/deploy --activate [--bootstrap-secrets] [ubuntu@host]
+
+Deploy the digest-pinned Finite Business application to the monitoring VM.
+--activate is the explicit production-mutation boundary. --bootstrap-secrets
+creates the first root-owned Twenty secrets if they do not exist; it never
+creates or guesses the separately custodied Borg repository credentials.
+USAGE
+}
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --activate)
+      activate=1
+      shift
+      ;;
+    --bootstrap-secrets)
+      bootstrap_secrets=1
+      shift
+      ;;
+    -h|--help)
+      usage
+      exit 0
+      ;;
+    *)
+      target="$1"
+      shift
+      ;;
+  esac
+done
+
+if [[ "${activate}" -ne 1 ]]; then
+  usage
+  exit 64
+fi
+
+repo_root="$(git rev-parse --show-toplevel)"
+cd "${repo_root}"
+rev="$(git rev-parse HEAD)"
+[[ "${rev}" =~ ^[0-9a-f]{40}$ ]] || exit 64
+if [[ -n "$(git status --porcelain)" && "${FINITE_COMMERCIAL_REGISTER_ALLOW_DIRTY:-0}" != 1 ]]; then
+  echo "refusing to deploy a dirty checkout" >&2
+  exit 65
+fi
+
+python3 infra/commercial-register/ubuntu/check_contract.py
+
+archive="$(mktemp "${TMPDIR:-/tmp}/finite-commercial-register.XXXXXX.tar.gz")"
+trap 'rm -f "${archive}"' EXIT
+COPYFILE_DISABLE=1 tar -czf "${archive}" \
+  infra/commercial-register/ubuntu \
+  scripts/finite-status \
+  scripts/finite_status.py
+remote_archive="/tmp/finite-commercial-register-${rev}.tar.gz"
+scp -q "${archive}" "${target}:${remote_archive}"
+
+ssh -o BatchMode=yes "${target}" sudo bash -s -- \
+  "${rev}" "${remote_archive}" "${bootstrap_secrets}" <<'REMOTE'
+set -euo pipefail
+
+rev="$1"
+remote_archive="$2"
+bootstrap_secrets="$3"
+[[ "${rev}" =~ ^[0-9a-f]{40}$ ]] || exit 64
+[[ "${remote_archive}" == "/tmp/finite-commercial-register-${rev}.tar.gz" ]] || exit 64
+
+source /etc/os-release
+if [[ "${ID:-}" != ubuntu || "${VERSION_ID:-}" != 24.04 ]]; then
+  echo "commercial-register deploy supports Ubuntu 24.04; found ${PRETTY_NAME:-unknown}" >&2
+  exit 1
+fi
+
+staging="$(mktemp -d /tmp/finite-commercial-register.XXXXXX)"
+trap 'rm -rf "${staging}"' EXIT
+tar -xzf "${remote_archive}" -C "${staging}"
+source "${staging}/infra/commercial-register/ubuntu/versions.env"
+
+status_dir="/var/lib/finite-commercial-register/deployments/${rev}"
+install -d -m 0700 "${status_dir}"
+(
+  cd "${staging}/scripts"
+  python3 ./finite-status --json > "${status_dir}/finite-status-before.json"
+) || {
+  code=$?
+  echo "pre-deploy finite-status was not green (exit ${code}); evidence: ${status_dir}/finite-status-before.json" >&2
+  exit "${code}"
+}
+
+apt-get update
+DEBIAN_FRONTEND=noninteractive apt-get install -y \
+  borgbackup ca-certificates curl docker.io docker-compose-v2 openssl tar
+systemctl enable --now docker.service
+docker compose version >/dev/null
+
+install -d -m 0700 /etc/finite/commercial-register
+install -d -m 0755 /opt/finite-commercial-register/bin
+install -d -m 0755 /opt/finite-commercial-register/status
+install -d -m 0700 \
+  /var/lib/finite-commercial-register \
+  /var/lib/finite-commercial-register/deployments \
+  /var/lib/finite-commercial-register/postgres \
+  /var/lib/finite-commercial-register/redis \
+  /var/lib/finite-commercial-register/snapshots \
+  /var/lib/finite-commercial-register/storage
+
+twenty_env=/etc/finite/commercial-register/twenty.env
+postgres_env=/etc/finite/commercial-register/postgres.env
+if [[ ! -s "${twenty_env}" || ! -s "${postgres_env}" ]]; then
+  if [[ -e "${twenty_env}" || -e "${postgres_env}" ]]; then
+    echo "refusing partial commercial-register secret set; restore both env files from one Recovery Set" >&2
+    exit 66
+  fi
+  if [[ "${bootstrap_secrets}" -ne 1 ]]; then
+    echo "missing Twenty/Postgres env files; rerun once with --bootstrap-secrets" >&2
+    exit 66
+  fi
+  umask 077
+  postgres_password="$(openssl rand -hex 32)"
+  encryption_key="$(openssl rand -base64 32)"
+  app_secret="$(openssl rand -hex 32)"
+  cat > "${postgres_env}" <<ENV
+POSTGRES_DB=twenty
+POSTGRES_USER=twenty
+POSTGRES_PASSWORD=${postgres_password}
+ENV
+  cat > "${twenty_env}" <<ENV
+PG_DATABASE_URL=postgres://twenty:${postgres_password}@db:5432/twenty
+SERVER_URL=http://localhost:3020
+REDIS_URL=redis://redis:6379
+STORAGE_TYPE=LOCAL
+ENCRYPTION_KEY=${encryption_key}
+APP_SECRET=${app_secret}
+IS_MULTIWORKSPACE_ENABLED=false
+IS_CONFIG_VARIABLES_IN_DB_ENABLED=true
+ENV
+  unset postgres_password encryption_key app_secret
+fi
+
+for secret_file in \
+  /etc/finite/commercial-register/twenty.env \
+  /etc/finite/commercial-register/postgres.env \
+  /etc/finite/commercial-register/borg.env
+do
+  if [[ ! -s "${secret_file}" ]]; then
+    echo "missing required secret file: ${secret_file}" >&2
+    exit 66
+  fi
+  chown root:root "${secret_file}"
+  chmod 0600 "${secret_file}"
+done
+for key in BORG_REPO BORG_PASSPHRASE BORG_RSH; do
+  grep -Eq "^${key}=" /etc/finite/commercial-register/borg.env || {
+    echo "/etc/finite/commercial-register/borg.env missing ${key}" >&2
+    exit 66
+  }
+done
+
+if systemctl is-active --quiet finite-commercial-register.service; then
+  systemctl start finite-commercial-register-backup.service
+fi
+
+install -m 0644 "${staging}/infra/commercial-register/ubuntu/compose.yaml" \
+  /etc/finite/commercial-register/compose.yaml
+install -m 0644 "${staging}/infra/commercial-register/ubuntu/versions.env" \
+  /etc/finite/commercial-register/versions.env
+install -m 0755 "${staging}/infra/commercial-register/ubuntu/scripts/backup" \
+  /opt/finite-commercial-register/bin/backup
+install -m 0755 "${staging}/infra/commercial-register/ubuntu/scripts/health" \
+  /opt/finite-commercial-register/bin/health
+install -m 0755 "${staging}/infra/commercial-register/ubuntu/scripts/publish-url" \
+  /opt/finite-commercial-register/bin/publish-url
+install -m 0755 "${staging}/infra/commercial-register/ubuntu/scripts/restore-check" \
+  /opt/finite-commercial-register/bin/restore-check
+install -m 0755 "${staging}/scripts/finite-status" \
+  /opt/finite-commercial-register/status/finite-status
+install -m 0644 "${staging}/scripts/finite_status.py" \
+  /opt/finite-commercial-register/status/finite_status.py
+for unit in \
+  finite-commercial-register.service \
+  finite-commercial-register-backup.service \
+  finite-commercial-register-backup.timer \
+  finite-commercial-register-health.service \
+  finite-commercial-register-health.timer
+do
+  install -m 0644 "${staging}/infra/commercial-register/ubuntu/systemd/${unit}" \
+    "/etc/systemd/system/${unit}"
+done
+
+docker pull "${TWENTY_IMAGE}"
+docker pull "${POSTGRES_IMAGE}"
+docker pull "${REDIS_IMAGE}"
+docker compose --env-file /etc/finite/commercial-register/twenty.env \
+  --file /etc/finite/commercial-register/compose.yaml config --quiet
+
+systemctl daemon-reload
+systemctl enable --now finite-commercial-register.service
+systemctl restart finite-commercial-register.service
+systemctl start finite-commercial-register-backup.service
+/opt/finite-commercial-register/bin/restore-check
+systemctl enable --now \
+  finite-commercial-register-backup.timer \
+  finite-commercial-register-health.timer
+systemctl start finite-commercial-register-health.service
+printf '%s\n' "${rev}" > /etc/finite/commercial-register/revision
+chmod 0644 /etc/finite/commercial-register/revision
+
+(
+  cd "${staging}/scripts"
+  python3 ./finite-status --json > "${status_dir}/finite-status-after.json"
+) || {
+  code=$?
+  echo "post-deploy finite-status was not green (exit ${code}); evidence: ${status_dir}/finite-status-after.json" >&2
+  exit "${code}"
+}
+
+echo "commercial-register deploy OK rev=${rev} image=${TWENTY_IMAGE}"
+REMOTE

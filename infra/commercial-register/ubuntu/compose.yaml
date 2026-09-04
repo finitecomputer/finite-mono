@@ -1,0 +1,83 @@
+name: finite-commercial-register
+
+services:
+  server:
+    image: docker.io/twentycrm/twenty@sha256:a8ab7d34ac102a3c75d4538f917b57ab3f3f853a2afcdf01b4e6fcb7dec2cd6f
+    container_name: finite-commercial-register-server
+    env_file:
+      - /etc/finite/commercial-register/twenty.env
+    environment:
+      NODE_PORT: "3000"
+      DISABLE_DB_MIGRATIONS: "false"
+      DISABLE_CRON_JOBS_REGISTRATION: "false"
+      LOGIC_FUNCTION_TYPE: DISABLED
+      CODE_INTERPRETER_TYPE: DISABLED
+    ports:
+      - "127.0.0.1:3020:3000"
+    volumes:
+      - /var/lib/finite-commercial-register/storage:/app/packages/twenty-server/.local-storage
+    depends_on:
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "curl", "--fail", "http://127.0.0.1:3000/healthz"]
+      interval: 10s
+      timeout: 5s
+      retries: 30
+      start_period: 60s
+    restart: unless-stopped
+    stop_grace_period: 60s
+
+  worker:
+    image: docker.io/twentycrm/twenty@sha256:a8ab7d34ac102a3c75d4538f917b57ab3f3f853a2afcdf01b4e6fcb7dec2cd6f
+    container_name: finite-commercial-register-worker
+    command: ["yarn", "worker:prod"]
+    env_file:
+      - /etc/finite/commercial-register/twenty.env
+    environment:
+      DISABLE_DB_MIGRATIONS: "true"
+      DISABLE_CRON_JOBS_REGISTRATION: "true"
+      LOGIC_FUNCTION_TYPE: DISABLED
+      CODE_INTERPRETER_TYPE: DISABLED
+    volumes:
+      - /var/lib/finite-commercial-register/storage:/app/packages/twenty-server/.local-storage
+    depends_on:
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      server:
+        condition: service_healthy
+    restart: unless-stopped
+    stop_grace_period: 60s
+
+  db:
+    image: docker.io/library/postgres@sha256:64154d0babcb1741988719e703419af0382b19953706149f9872fbd0f438efa8
+    container_name: finite-commercial-register-db
+    env_file:
+      - /etc/finite/commercial-register/postgres.env
+    volumes:
+      - /var/lib/finite-commercial-register/postgres:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
+      interval: 10s
+      timeout: 5s
+      retries: 30
+    restart: unless-stopped
+    stop_grace_period: 60s
+
+  redis:
+    image: docker.io/library/redis@sha256:7d1e4ce8b9395088377ab382d1f6cfdbd13b3690795198a0399ab8d683064d6d
+    container_name: finite-commercial-register-redis
+    command: ["redis-server", "--appendonly", "yes", "--maxmemory-policy", "noeviction"]
+    volumes:
+      - /var/lib/finite-commercial-register/redis:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 30
+    restart: unless-stopped
+    stop_grace_period: 30s

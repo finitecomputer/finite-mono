@@ -1,0 +1,18 @@
+[Unit]
+Description=Finite Business (Twenty commercial module)
+After=docker.service network-online.target
+Requires=docker.service
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+RemainAfterExit=true
+WorkingDirectory=/etc/finite/commercial-register
+ExecStartPre=/usr/bin/docker compose --env-file twenty.env --file compose.yaml config --quiet
+ExecStart=/usr/bin/docker compose --env-file twenty.env --file compose.yaml up --detach --wait --remove-orphans
+ExecStop=/usr/bin/docker compose --env-file twenty.env --file compose.yaml stop
+TimeoutStartSec=15min
+TimeoutStopSec=3min
+
+[Install]
+WantedBy=multi-user.target

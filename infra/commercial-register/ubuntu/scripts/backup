@@ -1,0 +1,75 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+config_root=/etc/finite/commercial-register
+state_root=/var/lib/finite-commercial-register
+snapshot_root=/var/lib/finite-commercial-register/snapshots
+borg_success_stamp=/var/lib/finite-commercial-register/borg-last-success
+compose=(/usr/bin/docker compose --env-file "${config_root}/twenty.env" --file "${config_root}/compose.yaml")
+
+# shellcheck disable=SC1091
+source "${config_root}/twenty.env"
+# shellcheck disable=SC1091
+source "${config_root}/postgres.env"
+# shellcheck disable=SC1091
+source "${config_root}/borg.env"
+
+stamp="$(date -u +%Y%m%dT%H%M%SZ)"
+staging="${snapshot_root}/.staging-${stamp}"
+final="${snapshot_root}/${stamp}"
+writers_stopped=0
+
+cleanup() {
+  status=$?
+  if [[ "${writers_stopped}" -eq 1 ]]; then
+    "${compose[@]}" start server worker >/dev/null || status=1
+  fi
+  if [[ -d "${staging}" ]]; then
+    chmod -R u+w -- "${staging}" || true
+    rm -rf -- "${staging}"
+  fi
+  exit "${status}"
+}
+trap cleanup EXIT
+
+install -d -m 0700 "${snapshot_root}" "${staging}"
+
+# Fence only the two Twenty writers. Monitoring stays online, and Postgres
+# remains available long enough to create its transaction-consistent dump.
+"${compose[@]}" stop worker server >/dev/null
+writers_stopped=1
+"${compose[@]}" exec -T db \
+  pg_dump --username "${POSTGRES_USER}" --format=custom "${POSTGRES_DB}" \
+  > "${staging}/twenty.dump"
+"${compose[@]}" exec -T db pg_restore --list >/dev/null < "${staging}/twenty.dump"
+
+tar --create --gzip --numeric-owner \
+  --file "${staging}/storage.tar.gz" \
+  --directory "${state_root}" storage
+install -m 0600 "${config_root}/twenty.env" "${staging}/twenty.env"
+install -m 0600 "${config_root}/postgres.env" "${staging}/postgres.env"
+install -m 0644 "${config_root}/compose.yaml" "${staging}/compose.yaml"
+printf '%s\n' 'finite.commercial-register-recovery.v1' > "${staging}/format"
+(
+  cd "${staging}"
+  sha256sum format twenty.dump storage.tar.gz twenty.env postgres.env compose.yaml > manifest.sha256
+  sha256sum --check manifest.sha256 >/dev/null
+)
+chmod -R a-w -- "${staging}"
+mv "${staging}" "${final}"
+ln -sfn "${stamp}" "${snapshot_root}/latest"
+
+"${compose[@]}" start server worker >/dev/null
+writers_stopped=0
+curl --fail --silent --show-error --max-time 20 \
+  http://127.0.0.1:3020/healthz >/dev/null
+
+export BORG_REPO BORG_PASSPHRASE BORG_RSH
+borg create --show-rc --stats \
+  "::finite-commercial-register-${stamp}" "${final}"
+date -u +%s > "${borg_success_stamp}"
+chmod 0600 "${borg_success_stamp}"
+
+find "${snapshot_root}" -mindepth 1 -maxdepth 1 -type d \
+  -name '20*T*Z' -mtime +7 -exec chmod -R u+w -- {} \; -exec rm -rf -- {} \;
+trap - EXIT
