@@ -333,6 +333,7 @@ in
     mdadm
     nvme-cli
     pciutils
+    python3
     quota
     smartmontools
   ];
