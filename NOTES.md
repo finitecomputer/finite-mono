@@ -226,6 +226,22 @@ collapsed tool rollups ("Worked through N steps") exactly as stored.
 Fixture gotcha: the web-design fixture allowlists env into the next dev
 child — the gated-mode vars and the proxy target had to be added there.
 
+"Home" decoded (remote sandbox): it is hermes' NO-PROJECT bucket —
+projects.tree emits it as {label: "Home", isNoProject: true, path: null}
+(the __no_project__ id in project_tree.py). The 21 old sessions were
+created by the DESKTOP app, and _persisted_session_cwd stamps NO cwd for
+source "desktop" (_LAUNCH_CWD_NOT_A_WORKSPACE = {"desktop"}) — unpicked
+desktop chats land in Home by design. Our web client sends
+source "gateway": unpicked creates inherit the gateway's LAUNCH DIR
+(terminal-client rule — the launch dir IS a workspace), which on the
+sandbox is /data/workspace → the auto "workspace" project. So "mirror the
+old Home behavior" cannot be done honestly at this pin: joining Home
+requires claiming to be the desktop. The honest adjacent fix (landed):
+the sidebar FAB prefers the currently-open topic when no Home topic
+exists, so unpicked new chats join where the user is working. A future
+pin bump could ask upstream to add web sources to
+_LAUNCH_CWD_NOT_A_WORKSPACE — noted, not pursued (no upstream work).
+
 Recents note: on any gateway, sessions are claimed by the project matching
 their cwd, so Recents stays empty unless a session's cwd matches no known
 project — that is hermes' model, not a bug. Expect the remote's real home
