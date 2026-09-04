@@ -258,6 +258,26 @@ An exact-prefix driver rerun refused to overwrite existing evidence with exit
 No result above is an install candidate after writers resume; the outage run
 must still start from new stopped-writer images and produce new exact hashes.
 
+The final online-only go/no-go preflight completed at
+`2026-09-04T03:31:55Z`. The canonical `finite-status` report SHA-256 was
+`667fcee0e263a97eff26cd786b4725907317f058ba47dffc29c8617641beb3d4`.
+Host health, the Chat plane, recovery boundary, and rollout state were green;
+overall status remained red only for the accepted stale fleet-convergence row.
+Read-only Core inspection found the exact Austin source state, the FiKnight
+membership archived, no other FiKnight-owned Project, and no in-flight Runtime
+control request. The active Runtime remained the exact `.2` artifact on the
+exact lat3 machine and its `/contact` response was ready with agentd processes
+running, bridge connected, and the unchanged Agent Principal. Both public
+NIP-05 origins returned HTTP 200 with `fiknight` still unbound.
+
+The dashboard, Core, Hosted Device, and Room server were all active. `/data`
+had 1.6 TB available and the system filesystem had 244 GB available. The live
+Room database was 5,293,752,320 bytes, the Austin client database 16,048,128
+bytes, the FiKnight client database 176,128 bytes, and the FiKnight binding
+1,464 bytes, all at the exact deployed paths with their expected service
+ownership and modes. These are observations only; the rollback and migration
+inputs must be produced after the confirmed writer fence.
+
 ### Final go/no-go boundary
 
 Complete every item below while Chat remains online, then ask Austin for a
