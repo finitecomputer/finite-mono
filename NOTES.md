@@ -174,9 +174,12 @@ the shared transcript groups them into the existing collapsed ToolRollup
 collapsed after, expandable <pre> body). The answer stream is the only
 prose bubble; the two can never bleed. Stable per-turn message ids
 (chat:think:turnKey / chat:reply:turnKey) let React reconcile in place.
-After the turn, hermes history (session.resume) carries no reasoning, so
-reopening a stored chat shows just the exchange — matches hermes' own
-persistence.
+Correction: hermes history (session.resume) DOES return each assistant
+row's reasoning, plus role:"tool" rows (name + context, no text). The
+history mapping sends both to kind:"tool" rollup rows — tool steps are
+labeled name:context, reasoning becomes a think step — and drops rows
+with nothing to show. (The first mapping turned empty tool rows into
+blank timestamp-only bubbles and dropped the reasoning entirely.)
 
 First-message disappearance (fixed): the real transcript filters messages
 by conversation_id === selectedTopic.topic_id. The first message was sent

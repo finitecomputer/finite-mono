@@ -91,7 +91,15 @@ type GatewayProject = {
   previewSessions: GatewaySession[];
 };
 
-type GatewayMessage = { role: string; text: string };
+// hermes history rows are richer than user/assistant prose: tool calls carry
+// name/context, assistant rows carry their reasoning.
+type GatewayMessage = {
+  role: string;
+  text?: string;
+  name?: string;
+  context?: string;
+  reasoning?: string;
+};
 
 type Streaming = { turnKey: number; reasoning: string; answer: string };
 
@@ -447,9 +455,7 @@ export function HermesChatProvider({ children }: { children: ReactNode }) {
           entry.handleId = resumed?.session_id ?? entry.handleId;
           transcriptRef.current.set(
             chat_id,
-            (resumed?.messages ?? []).map((message) =>
-              gatewayMessage(message.role, message.text, chat_id, entry.topicId, true)
-            )
+            historyMessageRows(resumed?.messages ?? [], chat_id, entry.topicId)
           );
         }
         publish();
@@ -663,9 +669,7 @@ export function HermesChatProvider({ children }: { children: ReactNode }) {
         messages?: GatewayMessage[];
       } | null;
       const current = transcriptRef.current.get(chatId) ?? [];
-      const history = (resumed?.messages ?? []).map((message) =>
-        gatewayMessage(message.role, message.text, chatId, topicId, true)
-      );
+      const history = historyMessageRows(resumed?.messages ?? [], chatId, topicId);
       const streamingIndex = current.findIndex((message) => message.status === "running");
       transcriptRef.current.set(
         chatId,
@@ -728,6 +732,53 @@ function uniqueChats(...sources: HostedChatSummary[][]): HostedChatSummary[] {
     }
   }
   return [...byId.values()];
+}
+
+/**
+ * Map hermes history rows onto transcript rows: user/assistant prose stay
+ * prose; tool calls and assistant reasoning ride kind:"tool" rows so the
+ * shared transcript collapses them into the ToolRollup; rows with nothing
+ * to show (empty markers) are dropped instead of becoming blank bubbles.
+ */
+function historyMessageRows(
+  rows: GatewayMessage[],
+  chatId: string,
+  topicId: string
+): HostedChatMessage[] {
+  const mapped: HostedChatMessage[] = [];
+  let step = 0;
+  for (const row of rows) {
+    if (row.role === "user" && row.text) {
+      mapped.push(gatewayMessage("user", row.text, chatId, topicId, true));
+    } else if (row.role === "assistant") {
+      if (row.reasoning) {
+        step += 1;
+        mapped.push({
+          ...gatewayMessage("assistant", row.reasoning, chatId, topicId, true),
+          message_id: `${chatId}:think:h${step}`,
+          kind: "tool",
+          display_content: row.reasoning,
+        });
+      }
+      if (row.text) {
+        mapped.push(gatewayMessage("assistant", row.text, chatId, topicId, true));
+      }
+    } else if (row.role === "tool") {
+      const label = [row.name, row.context].filter(Boolean).join(": ");
+      const content = row.text || label;
+      if (!content) continue;
+      step += 1;
+      mapped.push({
+        ...gatewayMessage("assistant", content, chatId, topicId, true),
+        message_id: `${chatId}:tool:h${step}`,
+        kind: "tool",
+        display_content: content,
+      });
+    } else if (row.text) {
+      mapped.push(gatewayMessage(row.role, row.text, chatId, topicId, true));
+    }
+  }
+  return mapped;
 }
 
 function summaryFromSession(session: GatewaySession): HostedChatSummary {
