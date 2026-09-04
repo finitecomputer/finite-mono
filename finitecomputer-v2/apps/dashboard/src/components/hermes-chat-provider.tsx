@@ -142,6 +142,10 @@ export function HermesChatProvider({ children }: { children: ReactNode }) {
       chatsRef.current
     );
     const selected = selectedRef.current;
+    // The chat's CURRENT home topic — hermes can move a chat between topics
+    // (draft in Recents → project) and messages must follow the chat.
+    const selectedTopicId = (selected.chatId ? chatsRef.current.get(selected.chatId)?.topicId : null)
+      ?? selected.topicId;
     const next: HostedChatState = {
       rev: revRef.current++,
       identity: { account_id: MY_ACCOUNT, device_id: "web-gateway" },
@@ -160,12 +164,18 @@ export function HermesChatProvider({ children }: { children: ReactNode }) {
       ],
       topics,
       selected_room_id: ROOM_ID,
-      selected_topic_id: selected.topicId,
+      selected_topic_id: selectedTopicId,
       selected_chat_id: selected.chatId,
       active_profile_id: null,
       status: "ok",
       toast: null,
-      messages: (selected.chatId ? transcriptRef.current.get(selected.chatId) : null) ?? [],
+      messages: selected.chatId
+        ? (transcriptRef.current.get(selected.chatId) ?? []).map((message) =>
+            message.conversation_id === selectedTopicId
+              ? message
+              : { ...message, conversation_id: selectedTopicId }
+          )
+        : [],
       profiles: [
         {
           account_id: AGENT_ACCOUNT,
@@ -260,6 +270,10 @@ export function HermesChatProvider({ children }: { children: ReactNode }) {
       if (selectedRef.current.chatId === chatId) {
         selectedRef.current = { topicId, chatId: real.id };
       }
+      // hermes is now authoritative for this chat: refetch the transcript
+      // instead of trusting the local display buffer. A turn still in
+      // flight keeps its streaming tail after the fetched history.
+      void hydrateTranscript(real.id, topicId);
     }
     publish();
   }, [publish]);
@@ -630,6 +644,34 @@ export function HermesChatProvider({ children }: { children: ReactNode }) {
         flow: { notice_busy: false, scan_in_flight: false, scan_result: "" },
       }
     );
+  }
+
+  async function hydrateTranscript(chatId: string, topicId: string) {
+    const call = callRef.current;
+    if (!call) return;
+    try {
+      const resumed = (await call("session.resume", { session_id: chatId })) as {
+        session_id: string;
+        messages?: GatewayMessage[];
+      } | null;
+      const current = transcriptRef.current.get(chatId) ?? [];
+      const history = (resumed?.messages ?? []).map((message) =>
+        gatewayMessage(message.role, message.text, chatId, topicId, true)
+      );
+      const streamingIndex = current.findIndex((message) => message.status === "running");
+      transcriptRef.current.set(
+        chatId,
+        streamingIndex >= 0 ? [...history, ...current.slice(streamingIndex)] : history
+      );
+      const entry = chatsRef.current.get(chatId);
+      if (entry && resumed?.session_id && !entry.handleId) {
+        entry.handleId = resumed.session_id;
+      }
+      publish();
+    } catch {
+      // The local transcript stays as-is; hermes remains authoritative on
+      // the next open.
+    }
   }
 
   function replaceStreamingMessage(

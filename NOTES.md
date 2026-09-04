@@ -168,6 +168,17 @@ If hermes states it, the provider sources it; the provider invents nothing:
 - Known hot-reload artifact: heavy provider edits under Next fast refresh
   keep stale ref state (duplicate rows); a page reload resets it.
 
+First-message disappearance (fixed): the real transcript filters messages
+by conversation_id === selectedTopic.topic_id. The first message was sent
+while the chat was a draft in Recents, so it carried conversation_id
+"recents"; when hermes filed the chat under its project the filter dropped
+it. Two rules now hold: (1) conversation_id is a RENDER concern — publish()
+stamps every message with the chat's CURRENT topic, so a topic move can
+never orphan a message; (2) the moment a draft materializes, the local
+transcript is REPLACED by hermes' authoritative history (session.resume
+returns it inline; an in-flight stream keeps its tail after the fetched
+rows). The local transcript is a display buffer, never truth.
+
 ## Local gateway hygiene (learned the hard way, 2026-09-04)
 
 The spike's first gateway borrowed the desktop-owned ~/.hermes home and
