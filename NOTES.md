@@ -122,6 +122,61 @@ real stack's own dashboard at 14002 (main-checkout code, no hermes
 section), worktree dashboard at 13003 (real finitechat half + live
 hermes section).
 
+## Defense in depth: gating the ws connection (captured 2026-09-04, design only)
+
+Goal: reaching an agent's gateway requires BOTH (1) a real connection
+credential AND (2) being signed in as the WorkOS account that owns that
+agent. Two independent gates; neither alone suffices.
+
+What hermes already ships (verified in pinned v2026.8.3 source):
+
+- `hermes_cli/dashboard_auth/ws_tickets.py` — gated mode mints
+  **single-use, 30s-TTL WS tickets** via authenticated REST
+  (`POST /api/auth/ws-ticket`, passed as `?ticket=` on upgrade) because
+  browsers can't set Authorization headers on WS. Plus a
+  process-lifetime `internal_ws_credential` (env-only, never in HTML)
+  for server-spawned clients. A leaked ticket is uninteresting.
+- `dashboard_auth/` stack: middleware, token_auth, OAuth providers,
+  login page, cookies, audit logging.
+
+Leading design — the dashboard as ticket broker (small lift, no protocol
+changes):
+
+    browser ──WorkOS session──▶ dashboard route /api/chat/[machine]/gateway/ticket
+                                  │ checks: WorkOS session + account-owns-agent
+                                  │         (same Core machine-access check the
+                                  │          hosted-device routes already do)
+                                  ▼
+                              agent gateway POST /api/auth/ws-ticket
+                                  (dashboard authenticates with the agent's
+                                   per-agent supervisor token, env-injected at
+                                   runtime spawn — HERMES_DASHBOARD_SESSION_TOKEN
+                                   already works this way)
+                                  ▼
+    browser ◀── single-use 30s ticket ── then ws://gateway/api/ws?ticket=…
+
+Layers: (1) WorkOS auth + ownership is the only way to obtain a ticket;
+(2) the ticket itself is single-use/TTL; (3) in the prod topology the
+gateway binds loopback inside the agent's runtime, so the broker is the
+only reachable path. Per-agent tokens arrive naturally because each
+agent runtime spawns its own hermes.
+
+Open questions:
+- Does the static env token authenticate REST (ticket minting), or only
+  gated-mode cookie/OAuth sessions? (token_auth.py exists — verify.)
+- If hermes' OAuth provider can point at WorkOS as an OIDC IdP, hermes
+  itself could validate viewer identity — but it cannot express
+  ACCOUNT-OWNS-THIS-AGENT, so the broker still has to do ownership.
+  Treat direct-WorkOS-to-hermes as a possible future simplification of
+  layer 1, never a replacement for the ownership check.
+- Fallback with zero hermes changes: a WorkOS+ownership-gated WS
+  passthrough proxy (tunnel only — no protocol translation, no state).
+  It reintroduces one server hop; only take it if ticket brokering
+  needs upstream hermes work.
+- Upstream ask if needed: externally-mintable tickets (an RPC for a
+  supervisor to mint tickets) — matches the existing internal
+  credential's philosophy.
+
 ## Architecture (decided 2026-09-04, second pass)
 
 **Browser → gateway, direct.** No Next API routes, no server-side client, no
