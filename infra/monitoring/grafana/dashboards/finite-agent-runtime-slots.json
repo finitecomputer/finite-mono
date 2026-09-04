@@ -3,7 +3,7 @@
     "list": []
   },
   "description": "Core-recorded Agent Runtime occupancy estimates on lat3/lat4, gated by the age of the app-plane export. Not an admission-capacity signal.",
-  "editable": false,
+  "editable": true,
   "fiscalYearStartMonth": 0,
   "graphTooltip": 0,
   "id": null,
@@ -16,14 +16,14 @@
       "title": "How to read these estimates",
       "description": "Core-recorded occupancy is not the Runner admission decision.",
       "gridPos": {
-        "h": 8,
+        "h": 6,
         "w": 18,
         "x": 0,
         "y": 0
       },
       "options": {
         "mode": "markdown",
-        "content": "**Recorded occupancy, not admission capacity.** Counts include Core-linked active Runtimes with known artifact identity on lat3/lat4. Runtimes with incomplete artifact identity are excluded, so unused slots can be overstated. Runner drain, reservations and host readiness are not measured here; check `scripts/finite-status` before admission or capacity decisions.\n\n**Unused slots (estimate)** = the 42-slot `FC_RUNNER_MAX_SANDBOXES` ceiling minus recorded Runtimes. The ceiling is a query constant guarded by `scripts/check_runner_host_contract.py`, not live configuration.\n\nCore collection runs every 5 minutes; this page refreshes every 2 minutes. Counts are hidden when the source file is missing, future-dated or at least 10 minutes old. **Unknown / No data** also covers a host with no counted Runtimes; it never implies zero usage or 42 available slots. Source age measures the last successful Core export, not scrape health."
+        "content": "**Unused slots are estimates, not admission capacity.** 42 minus Core-recorded active Runtimes. Runtimes with incomplete artifact identity are excluded. Runner drain, reservations and host readiness are not measured; check `scripts/finite-status` before capacity decisions.\n\nCore exports every 5 minutes. Missing, future-dated or at least 10-minute-old exports hide counts. **Unknown / No data** can also mean no counted Runtimes; it never means 42 available slots. The 42-slot ceiling is pinned configuration, not a live metric."
       },
       "pluginVersion": "13.0.2"
     },
@@ -66,7 +66,7 @@
         "overrides": []
       },
       "gridPos": {
-        "h": 8,
+        "h": 6,
         "w": 6,
         "x": 18,
         "y": 0
@@ -106,7 +106,7 @@
         "type": "prometheus",
         "uid": "finite-prometheus"
       },
-      "description": "Core-recorded active Runtimes with known artifact identity. Only the live app-plane collector (finite-lat-2) is accepted. Samples at least 10 minutes old, future-dated or missing are hidden.",
+      "description": "Core-linked active Runtimes with known artifact identity.",
       "fieldConfig": {
         "defaults": {
           "color": {
@@ -136,7 +136,7 @@
         "h": 5,
         "w": 6,
         "x": 0,
-        "y": 8
+        "y": 6
       },
       "id": 2,
       "options": {
@@ -173,7 +173,7 @@
         "type": "prometheus",
         "uid": "finite-prometheus"
       },
-      "description": "42 minus recorded Runtimes; an upper estimate, not available admission capacity. Drain, reservations, host readiness and incomplete artifact identity are not included. Only the live app-plane collector (finite-lat-2) is accepted. Samples at least 10 minutes old, future-dated or missing are hidden.",
+      "description": "42 minus recorded Runtimes; see the estimate limits above.",
       "fieldConfig": {
         "defaults": {
           "color": {
@@ -202,7 +202,7 @@
         "h": 5,
         "w": 6,
         "x": 6,
-        "y": 8
+        "y": 6
       },
       "id": 3,
       "options": {
@@ -239,7 +239,7 @@
         "type": "prometheus",
         "uid": "finite-prometheus"
       },
-      "description": "Core-recorded active Runtimes with known artifact identity. Only the live app-plane collector (finite-lat-2) is accepted. Samples at least 10 minutes old, future-dated or missing are hidden.",
+      "description": "Core-linked active Runtimes with known artifact identity.",
       "fieldConfig": {
         "defaults": {
           "color": {
@@ -269,7 +269,7 @@
         "h": 5,
         "w": 6,
         "x": 12,
-        "y": 8
+        "y": 6
       },
       "id": 4,
       "options": {
@@ -306,7 +306,7 @@
         "type": "prometheus",
         "uid": "finite-prometheus"
       },
-      "description": "42 minus recorded Runtimes; an upper estimate, not available admission capacity. Drain, reservations, host readiness and incomplete artifact identity are not included. Only the live app-plane collector (finite-lat-2) is accepted. Samples at least 10 minutes old, future-dated or missing are hidden.",
+      "description": "42 minus recorded Runtimes; see the estimate limits above.",
       "fieldConfig": {
         "defaults": {
           "color": {
@@ -335,7 +335,7 @@
         "h": 5,
         "w": 6,
         "x": 18,
-        "y": 8
+        "y": 6
       },
       "id": 5,
       "options": {
@@ -372,7 +372,7 @@
         "type": "prometheus",
         "uid": "finite-prometheus"
       },
-      "description": "Core-recorded active Runtimes with known artifact identity. Only the live app-plane collector (finite-lat-2) is accepted. Samples at least 10 minutes old, future-dated or missing are hidden.",
+      "description": "Core-linked active Runtimes with known artifact identity.",
       "fieldConfig": {
         "defaults": {
           "color": {
@@ -397,7 +397,7 @@
         "h": 8,
         "w": 12,
         "x": 0,
-        "y": 13
+        "y": 11
       },
       "id": 6,
       "options": {
@@ -432,7 +432,7 @@
         "type": "prometheus",
         "uid": "finite-prometheus"
       },
-      "description": "42 minus recorded Runtimes; an upper estimate, not available admission capacity. Drain, reservations, host readiness and incomplete artifact identity are not included. Only the live app-plane collector (finite-lat-2) is accepted. Samples at least 10 minutes old, future-dated or missing are hidden.",
+      "description": "42 minus recorded Runtimes; see the estimate limits above.",
       "fieldConfig": {
         "defaults": {
           "color": {
@@ -456,7 +456,7 @@
         "h": 8,
         "w": 12,
         "x": 12,
-        "y": 13
+        "y": 11
       },
       "id": 7,
       "options": {
