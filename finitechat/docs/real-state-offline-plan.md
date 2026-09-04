@@ -1,12 +1,19 @@
 # Real State And Offline Plan
 
 Date: 2026-06-17
-Status: active core/offline reference; iOS product-surface scope superseded
+Status: historical (superseded by storage-plan.md, 2026-09-02)
 
-The offline and persistence invariants in this document still apply to the
-focused iOS chat slice. Historical invite, profile, device-list, create-room,
-and scan/PIN scenarios below are Rust runtime regression coverage only; they
-must not be restored as iOS UI or AppModel paths. See
+The durable client outbox this plan built (`client_app_outbox`, offline text
+send surviving force-close, automatic restart drain, `RetryMessage` over a
+persisted row) was deleted on 2026-09-02: a send now either gets server
+acceptance synchronously or fails loudly to the caller with nothing stored.
+The current persistence and send contract lives in
+[storage-plan.md](storage-plan.md) and `CONTEXT.md`; the outbox requirements,
+matrix rows, phases, and done-list items below are kept only as the record of
+what was built and why, and must not be treated as current acceptance
+criteria. Historical invite, profile, device-list, create-room, and scan/PIN
+scenarios below are Rust runtime regression coverage only; they must not be
+restored as iOS UI or AppModel paths. See
 [ADR 0013](adr/0013-ios-single-agent-client.md).
 
 ## Problem Statement
@@ -105,15 +112,27 @@ The product state work is done when all of these are true:
   without usable local MLS membership. That condition is covered only by
   explicitly named corrupted-state repair tests.
 - A room with local MLS state can be opened offline, display its cached
-  transcript, keep the composer enabled, accept new outbound messages, and keep
-  those messages visible after force close.
-- Restarting the server drains the local outbox exactly once per message and
-  promotes local outbound bubbles to accepted server-backed transcript rows
-  without duplicates, reorder flicker, or visible row replacement.
+  transcript, and keep the composer enabled from local membership.
+- (Superseded 2026-09-02) Offline sends were kept visible after force close
+  and drained once per message on server restart. Now a send while the server
+  is unreachable fails loudly, stores nothing, and a fresh send after the
+  server returns succeeds under its own idempotency key.
 
 ## Offline Send Semantics
 
-Sending while offline is a first-class path, not an error edge.
+Superseded 2026-09-02: everything in this section that describes a durable
+outbox row, `sending`/`undelivered`/`failed` persistence, automatic drain,
+or `RetryMessage` over persisted material is no longer the contract. A send
+either gets `EventAccepted` synchronously or returns a typed error to the
+caller with transient app feedback and nothing stored; `RetryMessage` and
+the `Undelivered`/`Failed` outbound-delivery values remain on the API only
+for older clients and are never produced. The rules that still hold are:
+attachment sends fail fast before any bubble exists, `outbound_delivery` is
+projected only for local-device messages, read receipts are display-only,
+and invite/profile/device-list actions are online-only with transient
+feedback. The original text follows as history.
+
+Sending while offline was a first-class path, not an error edge.
 
 Target user-visible outbound states have two axes: local send acceptance and
 server delivery. Only messages authored by the local device carry outbound
@@ -487,7 +506,7 @@ Diagnostics-only coverage outside the product matrix:
   `computer.finite.finitechat`. The same-matrix phone pass remains a first-user
   gate until the full product harness completes on that provisioned phone.
 
-### Phase 4: Durable Outbox Product Semantics
+### Phase 4: Durable Outbox Product Semantics (deleted 2026-09-02)
 
 - Verify current Rust outbox paths for text first. Reply, poll, and voice-note
   sends may use the same rule if enabled, but the first-user release gate is
@@ -592,8 +611,12 @@ Diagnostics-only coverage outside the product matrix:
 
 ## Done List
 
-This work is done when a new session can run one documented local command set
-and prove:
+Historical: items 3–5, 10, 11, and 14 describe the deleted durable outbox and
+no longer hold; the current proof is that an offline send fails loudly with
+nothing stored and a fresh send succeeds once the server is back.
+
+This work was done when a new session could run one documented local command
+set and prove:
 
 1. A saved room opens with the server on.
 2. The same saved room opens with the server off.
@@ -638,6 +661,5 @@ and prove:
 - `docs/storage-plan.md`
 - `docs/adr/0007-hint-channel-abstraction.md`
 - `docs/adr/0008-rust-owned-app-runtime.md`
-- `docs/technical-debt-ledger.md`
 - `docs/feature-audit-marmot-pika.md`
 - [RMP Architecture Bible](https://github.com/rust-multiplatform/rmp/blob/master/rmp-architecture-bible.md)

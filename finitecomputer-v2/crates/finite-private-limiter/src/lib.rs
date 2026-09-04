@@ -6,6 +6,7 @@ use axum::routing::{get, post};
 use axum::{Json, Router};
 use futures_util::StreamExt;
 use reqwest::Client;
+use reqwest::redirect::Policy;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::sync::Arc;
@@ -14,7 +15,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use tokio::time::{sleep, timeout};
 
 const USAGE_FORMULA_VERSION: &str = "2026-05-26.v1";
-const DEFAULT_MODEL: &str = "deepseek-v4-flash-0731";
+const DEFAULT_MODEL: &str = "glm-5-3-flash";
 const HTTP_CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 
 static REQUEST_COUNTER: AtomicU64 = AtomicU64::new(1);
@@ -26,6 +27,8 @@ pub struct LimiterConfig {
     pub upstream_base_url: String,
     pub vllm_internal_api_key: String,
     pub default_model: String,
+    pub upstream_model: Option<String>,
+    pub model_aliases: Vec<String>,
     pub dashboard_url: String,
     pub upstream_health_path: String,
     pub usage_api_health_path: String,
@@ -35,6 +38,43 @@ pub struct LimiterConfig {
     pub upstream_body_timeout: Duration,
     pub upstream_stream_idle_timeout: Duration,
     pub watchdog: WatchdogConfig,
+    /// Degraded-admission escape hatch. `UsageApi` (the default) reserves and
+    /// settles every request against the Finite usage API. `Allowlist` admits
+    /// only bearer keys listed in `admission_allowlist`, performs no
+    /// reservation, and skips settlement: usage during this mode is
+    /// unaccounted. Every degraded response carries the
+    /// `x-finite-admission: degraded-allowlist` header so the mode is
+    /// observable in captured traffic. Revert by switching the mode back to
+    /// `usage-api` (or removing the env) only after `FINITE_USAGE_API_URL`
+    /// reaches Core. A public HTML outage page on that origin is not a usage
+    /// API. No data format changes either way.
+    pub admission_mode: AdmissionMode,
+    pub admission_allowlist: Vec<String>,
+    /// When set, omitted `reasoning_effort` on `/v1/chat/completions` is
+    /// filled with this value. Explicit client values are left alone.
+    /// GLM-5.3-Flash's checkpoint default is `max`; Finite's product default
+    /// is `high`.
+    pub default_reasoning_effort: Option<String>,
+    /// When set, omitted `chat_template_kwargs.enable_thinking` /
+    /// `chat_template_kwargs.thinking` is filled. Explicit client values win.
+    pub default_enable_thinking: Option<bool>,
+}
+
+/// Admission operating mode. See [`LimiterConfig`](struct.LimiterConfig.html)
+/// field docs for the degraded-mode trade-off.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AdmissionMode {
+    UsageApi,
+    Allowlist,
+}
+
+impl AdmissionMode {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            AdmissionMode::UsageApi => "usage-api",
+            AdmissionMode::Allowlist => "allowlist",
+        }
+    }
 }
 
 impl LimiterConfig {
@@ -51,6 +91,8 @@ impl LimiterConfig {
             upstream_base_url,
             vllm_internal_api_key,
             default_model: DEFAULT_MODEL.to_string(),
+            upstream_model: None,
+            model_aliases: Vec::new(),
             dashboard_url,
             upstream_health_path: "/health".to_string(),
             usage_api_health_path: "/internal/finite-private/v1/health".to_string(),
@@ -60,6 +102,10 @@ impl LimiterConfig {
             upstream_body_timeout: Duration::from_secs(600),
             upstream_stream_idle_timeout: Duration::from_secs(600),
             watchdog: WatchdogConfig::default(),
+            admission_mode: AdmissionMode::UsageApi,
+            admission_allowlist: Vec::new(),
+            default_reasoning_effort: None,
+            default_enable_thinking: None,
         }
     }
 }
@@ -99,6 +145,42 @@ pub enum LimiterConfigError {
     InvalidDuration(&'static str),
     #[error("failed to build HTTP client: {0}")]
     HttpClient(String),
+    #[error("invalid model routing: {0}")]
+    InvalidModelRouting(String),
+}
+
+impl LimiterConfig {
+    fn routed_model(&self, requested_model: &str) -> Option<String> {
+        let Some(upstream_model) = self.upstream_model.as_deref() else {
+            return Some(requested_model.to_string());
+        };
+        if requested_model == upstream_model
+            || requested_model == self.default_model
+            || self
+                .model_aliases
+                .iter()
+                .any(|alias| alias == requested_model)
+        {
+            Some(upstream_model.to_string())
+        } else {
+            None
+        }
+    }
+
+    fn accepted_models(&self) -> Vec<String> {
+        let mut models = vec![self.default_model.clone()];
+        if let Some(upstream_model) = &self.upstream_model
+            && !models.contains(upstream_model)
+        {
+            models.push(upstream_model.clone());
+        }
+        for alias in &self.model_aliases {
+            if !models.contains(alias) {
+                models.push(alias.clone());
+            }
+        }
+        models
+    }
 }
 
 pub fn app(config: LimiterConfig) -> Result<Router, LimiterConfigError> {
@@ -107,6 +189,9 @@ pub fn app(config: LimiterConfig) -> Result<Router, LimiterConfigError> {
         config: Arc::new(config),
         client: Client::builder()
             .connect_timeout(HTTP_CONNECT_TIMEOUT)
+            // Core does not redirect health, reserve, or settle. Following a
+            // public outage origin 307 onto HTML 200 would look like success.
+            .redirect(Policy::none())
             .build()
             .map_err(|error| LimiterConfigError::HttpClient(error.to_string()))?,
     };
@@ -139,6 +224,14 @@ fn validate_config(config: &LimiterConfig) -> Result<(), LimiterConfigError> {
             return Err(LimiterConfigError::Missing(name));
         }
     }
+    if config.admission_mode == AdmissionMode::Allowlist && config.admission_allowlist.is_empty() {
+        // Fail closed: an allowlist mode with no keys would either admit
+        // nobody (harmless but confusing) or, if ever "optimized" into an
+        // empty-means-anyone semantic, admit everybody. Refuse to start.
+        return Err(LimiterConfigError::Missing(
+            "FINITE_ADMISSION_ALLOWLIST (required when FINITE_ADMISSION_MODE=allowlist)",
+        ));
+    }
     for (name, value) in [
         ("readiness_timeout", config.readiness_timeout),
         ("usage_api_timeout", config.usage_api_timeout),
@@ -165,6 +258,27 @@ fn validate_config(config: &LimiterConfig) -> Result<(), LimiterConfigError> {
                 "watchdog.failure_threshold",
             ));
         }
+    }
+    if config.upstream_model.is_none() && !config.model_aliases.is_empty() {
+        return Err(LimiterConfigError::InvalidModelRouting(
+            "model aliases require an upstream model".to_string(),
+        ));
+    }
+    if let Some(upstream_model) = &config.upstream_model
+        && upstream_model.trim().is_empty()
+    {
+        return Err(LimiterConfigError::InvalidModelRouting(
+            "upstream model must not be empty".to_string(),
+        ));
+    }
+    if config
+        .model_aliases
+        .iter()
+        .any(|alias| alias.trim().is_empty())
+    {
+        return Err(LimiterConfigError::InvalidModelRouting(
+            "model aliases must not contain an empty value".to_string(),
+        ));
     }
     Ok(())
 }
@@ -212,6 +326,7 @@ async fn readiness_snapshot(state: &AppState) -> ReadinessSnapshot {
         upstream_target,
         None,
         state.config.readiness_timeout,
+        HealthBody::AnySuccess,
     );
     let usage_api_check = check_component(
         &state.client,
@@ -219,10 +334,15 @@ async fn readiness_snapshot(state: &AppState) -> ReadinessSnapshot {
         usage_api_target,
         Some(&state.config.finite_usage_api_service_key),
         state.config.readiness_timeout,
+        HealthBody::CoreJsonOk,
     );
     let (upstream, usage_api) = tokio::join!(upstream_check, usage_api_check);
+    // In allowlist mode the usage API is intentionally out of the request
+    // path, so its state is reported for observability but does not gate
+    // readiness.
+    let degraded = state.config.admission_mode == AdmissionMode::Allowlist;
     ReadinessSnapshot {
-        ok: upstream.ok && usage_api.ok,
+        ok: upstream.ok && (usage_api.ok || degraded),
         service: "finite-private-limiter",
         kind: "ready",
         checked_at_unix_ms: unix_millis(),
@@ -234,12 +354,23 @@ async fn readiness_snapshot(state: &AppState) -> ReadinessSnapshot {
     }
 }
 
+/// What a component health response must look like. Upstream inference
+/// health is a status-only probe (SGLang may return plain text). The usage
+/// API is Core's JSON `{"ok": true}` contract — a 2xx HTML outage page is
+/// not that contract.
+#[derive(Clone, Copy)]
+enum HealthBody {
+    AnySuccess,
+    CoreJsonOk,
+}
+
 async fn check_component(
     client: &Client,
     name: &'static str,
     url: String,
     bearer_token: Option<&str>,
     timeout_duration: Duration,
+    body: HealthBody,
 ) -> ComponentCheck {
     let started = Instant::now();
     let mut request = client.get(url.clone());
@@ -249,15 +380,25 @@ async fn check_component(
     match timeout(timeout_duration, request.send()).await {
         Ok(Ok(response)) => {
             let status = response.status();
+            let (ok, error) = match body {
+                HealthBody::AnySuccess => {
+                    drop(response);
+                    (status.is_success(), None)
+                }
+                HealthBody::CoreJsonOk => match usage_api_health_ok(response).await {
+                    Ok(()) => (true, None),
+                    Err(error) => (false, Some(error)),
+                },
+            };
             ComponentCheck {
-                ok: status.is_success(),
+                ok,
                 name,
                 target_url: url,
                 authenticated: bearer_token.is_some(),
                 status: Some(status.as_u16()),
                 latency_ms: elapsed_millis(started),
                 timeout_ms: timeout_duration.as_millis(),
-                error: None,
+                error,
             }
         }
         Ok(Err(error)) => ComponentCheck {
@@ -286,9 +427,45 @@ async fn check_component(
     }
 }
 
+/// Core usage-API health is `GET .../internal/finite-private/v1/health` →
+/// JSON `{"ok": true}`. Following a public origin 307 onto an HTML 200
+/// (the finite.computer outage page) must not count as ready.
+async fn usage_api_health_ok(response: reqwest::Response) -> Result<(), String> {
+    let status = response.status();
+    if !status.is_success() {
+        return Err(format!("usage API health returned {status}"));
+    }
+    let content_type = response
+        .headers()
+        .get(reqwest::header::CONTENT_TYPE)
+        .and_then(|value| value.to_str().ok())
+        .unwrap_or("")
+        .to_ascii_lowercase();
+    if !content_type.contains("application/json") {
+        let got = if content_type.is_empty() {
+            "missing Content-Type".to_string()
+        } else {
+            content_type
+        };
+        return Err(format!(
+            "usage API health returned {got} instead of application/json"
+        ));
+    }
+    let body: Value = response
+        .json()
+        .await
+        .map_err(|error| format!("usage API health is not JSON: {error}"))?;
+    if body.get("ok") != Some(&json!(true)) {
+        return Err("usage API health JSON is not ok".to_string());
+    }
+    Ok(())
+}
+
 fn public_config_snapshot(config: &LimiterConfig) -> PublicConfigSnapshot {
     PublicConfigSnapshot {
         default_model: config.default_model.clone(),
+        upstream_model: config.upstream_model.clone(),
+        accepted_models: config.accepted_models(),
         upstream_base_url: config.upstream_base_url.clone(),
         upstream_health_path: config.upstream_health_path.clone(),
         usage_api_base_url: config.finite_usage_api_url.clone(),
@@ -298,6 +475,10 @@ fn public_config_snapshot(config: &LimiterConfig) -> PublicConfigSnapshot {
         upstream_first_byte_timeout_ms: config.upstream_first_byte_timeout.as_millis(),
         upstream_body_timeout_ms: config.upstream_body_timeout.as_millis(),
         upstream_stream_idle_timeout_ms: config.upstream_stream_idle_timeout.as_millis(),
+        admission_mode: config.admission_mode.as_str().to_string(),
+        admission_allowlist_entries: config.admission_allowlist.len(),
+        default_reasoning_effort: config.default_reasoning_effort.clone(),
+        default_enable_thinking: config.default_enable_thinking,
         required_secrets: RequiredSecretsSnapshot {
             finite_usage_api_service_key_present: !config.finite_usage_api_service_key.is_empty(),
             vllm_internal_api_key_present: !config.vllm_internal_api_key.is_empty(),
@@ -373,7 +554,16 @@ async fn proxy_openai(
     // value or the extracted facts instead of re-parsing. Unparseable bodies
     // decode to Null so they are still forwarded (fail-open).
     let parsed_body = serde_json::from_slice::<Value>(&body).unwrap_or(Value::Null);
-    let facts = RequestFacts::from_value(&parsed_body, &state.config.default_model);
+    let mut facts = RequestFacts::from_value(&parsed_body, &state.config.default_model);
+    let Some(routed_model) = state.config.routed_model(&facts.model) else {
+        return openai_error(
+            StatusCode::BAD_REQUEST,
+            "The requested model is not available through Finite Private.",
+            "invalid_request_error",
+            "unsupported_model",
+        );
+    };
+    facts.model = routed_model.clone();
     let is_streaming = facts.streaming;
     if uri.path() == "/v1/responses" && is_streaming {
         return openai_error(
@@ -386,45 +576,79 @@ async fn proxy_openai(
 
     let request_id = new_request_id();
     let estimate = estimate_usage(&facts);
-    let reserve = ReserveRequest {
-        request_id: request_id.clone(),
-        presented_api_key,
-        endpoint: uri.path().to_string(),
-        model: estimate.model.clone(),
-        estimated_prompt_tokens: estimate.prompt_tokens,
-        estimated_completion_tokens: estimate.completion_tokens,
-        estimated_usage_units: estimate.usage_units,
-        usage_formula_version: USAGE_FORMULA_VERSION.to_string(),
-        dashboard_url: state.config.dashboard_url.clone(),
-    };
+    let degraded_admission = state.config.admission_mode == AdmissionMode::Allowlist;
+    if degraded_admission
+        && !state
+            .config
+            .admission_allowlist
+            .contains(&presented_api_key)
+    {
+        return openai_error(
+            StatusCode::UNAUTHORIZED,
+            "The provided Finite Private API key is not accepted in degraded admission mode.",
+            "invalid_api_key",
+            "invalid_api_key",
+        );
+    }
+    let reservation_id = if degraded_admission {
+        eprintln!(
+            "finite-private-limiter degraded admission: request {request_id} admitted via allowlist (settlement skipped)"
+        );
+        format!("degraded-{request_id}")
+    } else {
+        let reserve = ReserveRequest {
+            request_id: request_id.clone(),
+            presented_api_key,
+            endpoint: uri.path().to_string(),
+            model: estimate.model.clone(),
+            estimated_prompt_tokens: estimate.prompt_tokens,
+            estimated_completion_tokens: estimate.completion_tokens,
+            estimated_usage_units: estimate.usage_units,
+            usage_formula_version: USAGE_FORMULA_VERSION.to_string(),
+            dashboard_url: state.config.dashboard_url.clone(),
+        };
 
-    let reserve_decision = match reserve_usage(&state, &reserve).await {
-        Ok(decision) => decision,
-        Err(error) => {
-            eprintln!("finite-private-limiter reserve failed: {error}");
+        let reserve_decision = match reserve_usage(&state, &reserve).await {
+            Ok(decision) => decision,
+            Err(error) => {
+                eprintln!("finite-private-limiter reserve failed: {error}");
+                return openai_error(
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    "Finite Private usage admission is unavailable.",
+                    "usage_api_unavailable",
+                    "usage_api_unavailable",
+                );
+            }
+        };
+
+        if reserve_decision.decision != "allow" {
+            return denied_response(reserve_decision);
+        }
+
+        let Some(reservation_id) = reserve_decision.reservation_id.clone() else {
             return openai_error(
                 StatusCode::SERVICE_UNAVAILABLE,
-                "Finite Private usage admission is unavailable.",
-                "usage_api_unavailable",
-                "usage_api_unavailable",
+                "Finite Private usage admission did not return a reservation.",
+                "usage_api_invalid_response",
+                "usage_api_invalid_response",
             );
-        }
+        };
+        reservation_id
     };
 
-    if reserve_decision.decision != "allow" {
-        return denied_response(reserve_decision);
-    }
-
-    let Some(reservation_id) = reserve_decision.reservation_id.clone() else {
-        return openai_error(
-            StatusCode::SERVICE_UNAVAILABLE,
-            "Finite Private usage admission did not return a reservation.",
-            "usage_api_invalid_response",
-            "usage_api_invalid_response",
-        );
-    };
-
-    let upstream_body = upstream_body_for_request(&uri, body, parsed_body, is_streaming);
+    let rewrite_model = state
+        .config
+        .upstream_model
+        .as_ref()
+        .map(|_| routed_model.as_str());
+    let upstream_body = upstream_body_for_request(
+        &uri,
+        body,
+        parsed_body,
+        is_streaming,
+        rewrite_model,
+        &state.config,
+    );
     if is_streaming {
         let upstream = match call_upstream_response(&state, &uri, upstream_body).await {
             Ok(response) => response,
@@ -453,7 +677,13 @@ async fn proxy_openai(
                 );
             }
         };
-        return streaming_response(state, upstream, reservation_id, request_id);
+        return streaming_response(
+            state,
+            upstream,
+            reservation_id,
+            request_id,
+            degraded_admission,
+        );
     }
 
     let upstream = match call_upstream(&state, &uri, upstream_body).await {
@@ -512,6 +742,9 @@ async fn proxy_openai(
     if let Some(content_type) = upstream.content_type {
         response = response.header("content-type", content_type);
     }
+    if degraded_admission {
+        response = response.header("x-finite-admission", "degraded-allowlist");
+    }
     response
         .body(axum::body::Body::from(upstream.body))
         .unwrap()
@@ -554,6 +787,12 @@ async fn settle_usage(
     reservation_id: &str,
     input: &SettleRequest,
 ) -> Result<(), String> {
+    if state.config.admission_mode == AdmissionMode::Allowlist {
+        // Degraded mode never settles: there is no reservation to settle and
+        // the usage API is intentionally out of the request path. Usage is
+        // unaccounted for the duration of this mode.
+        return Ok(());
+    }
     let url = format!(
         "{}/internal/finite-private/v1/reservations/{}/settle",
         state.config.finite_usage_api_url.trim_end_matches('/'),
@@ -668,6 +907,7 @@ fn streaming_response(
     upstream: reqwest::Response,
     reservation_id: String,
     request_id: String,
+    degraded_admission: bool,
 ) -> Response {
     let status =
         StatusCode::from_u16(upstream.status().as_u16()).unwrap_or(StatusCode::BAD_GATEWAY);
@@ -680,6 +920,9 @@ fn streaming_response(
     let mut response = Response::builder().status(status);
     if let Some(content_type) = content_type {
         response = response.header("content-type", content_type);
+    }
+    if degraded_admission {
+        response = response.header("x-finite-admission", "degraded-allowlist");
     }
     let mut stream = upstream.bytes_stream();
     let settlement = Settlement::new(state, reservation_id, request_id.clone());
@@ -905,18 +1148,68 @@ fn new_request_id() -> String {
     format!("fp_req_{millis}_{counter}")
 }
 
-fn upstream_body_for_request(uri: &Uri, body: Bytes, mut value: Value, streaming: bool) -> Bytes {
-    if uri.path() != "/v1/chat/completions" || !streaming {
+fn upstream_body_for_request(
+    uri: &Uri,
+    body: Bytes,
+    mut value: Value,
+    streaming: bool,
+    routed_model: Option<&str>,
+    config: &LimiterConfig,
+) -> Bytes {
+    let is_chat = uri.path() == "/v1/chat/completions";
+    let add_stream_usage = is_chat && streaming;
+    let thinking_defaults = is_chat
+        && (config.default_reasoning_effort.is_some() || config.default_enable_thinking.is_some());
+    if !add_stream_usage && routed_model.is_none() && !thinking_defaults {
         return body;
     }
     let Some(object) = value.as_object_mut() else {
         return body;
     };
-    let stream_options = object.entry("stream_options").or_insert_with(|| json!({}));
-    if let Some(options) = stream_options.as_object_mut() {
-        options.insert("include_usage".to_string(), Value::Bool(true));
+    if add_stream_usage {
+        let stream_options = object.entry("stream_options").or_insert_with(|| json!({}));
+        if let Some(options) = stream_options.as_object_mut() {
+            options.insert("include_usage".to_string(), Value::Bool(true));
+        }
+    }
+    if let Some(routed_model) = routed_model {
+        object.insert("model".to_string(), Value::String(routed_model.to_string()));
+    }
+    if thinking_defaults {
+        apply_thinking_defaults(
+            object,
+            config.default_reasoning_effort.as_deref(),
+            config.default_enable_thinking,
+        );
     }
     serde_json::to_vec(&value).map(Bytes::from).unwrap_or(body)
+}
+
+/// Fill omitted thinking fields. Never overwrite a client-supplied value.
+fn apply_thinking_defaults(
+    object: &mut serde_json::Map<String, Value>,
+    default_reasoning_effort: Option<&str>,
+    default_enable_thinking: Option<bool>,
+) {
+    if let Some(effort) = default_reasoning_effort
+        && !object.contains_key("reasoning_effort")
+    {
+        object.insert(
+            "reasoning_effort".to_string(),
+            Value::String(effort.to_string()),
+        );
+    }
+    if let Some(enable_thinking) = default_enable_thinking {
+        let kwargs = object
+            .entry("chat_template_kwargs")
+            .or_insert_with(|| json!({}));
+        let Some(kwargs) = kwargs.as_object_mut() else {
+            return;
+        };
+        if !kwargs.contains_key("enable_thinking") && !kwargs.contains_key("thinking") {
+            kwargs.insert("enable_thinking".to_string(), Value::Bool(enable_thinking));
+        }
+    }
 }
 
 fn estimate_usage(facts: &RequestFacts) -> EstimatedUsage {
@@ -1154,6 +1447,8 @@ struct ComponentCheck {
 #[serde(rename_all = "camelCase")]
 struct PublicConfigSnapshot {
     default_model: String,
+    upstream_model: Option<String>,
+    accepted_models: Vec<String>,
     upstream_base_url: String,
     upstream_health_path: String,
     usage_api_base_url: String,
@@ -1163,6 +1458,12 @@ struct PublicConfigSnapshot {
     upstream_first_byte_timeout_ms: u128,
     upstream_body_timeout_ms: u128,
     upstream_stream_idle_timeout_ms: u128,
+    admission_mode: String,
+    admission_allowlist_entries: usize,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    default_reasoning_effort: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    default_enable_thinking: Option<bool>,
     required_secrets: RequiredSecretsSnapshot,
 }
 
@@ -1299,6 +1600,176 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn degraded_allowlist_admits_listed_key_without_core_calls() {
+        let core = FakeCoreState::new("fpk_live_secret", 1_000_000);
+        let core_url = spawn(fake_core_router(core.clone())).await;
+        let upstream = FakeUpstreamState::new();
+        let upstream_url = spawn(fake_upstream_router(upstream.clone())).await;
+
+        let mut config = test_config(core_url, upstream_url);
+        config.admission_mode = AdmissionMode::Allowlist;
+        config.admission_allowlist = vec!["fpk_degraded_key".to_string()];
+        let limiter_url = spawn(app(config).unwrap()).await;
+
+        let client = reqwest::Client::new();
+        let response = client
+            .post(format!("{limiter_url}/v1/chat/completions"))
+            .bearer_auth("fpk_degraded_key")
+            .header("x-request-id", "req-degraded-ok")
+            .json(&json!({
+                "model": "glm-5-2",
+                "messages": [{ "role": "user", "content": "hello" }],
+                "max_tokens": 64
+            }))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(
+            response
+                .headers()
+                .get("x-finite-admission")
+                .and_then(|value| value.to_str().ok()),
+            Some("degraded-allowlist")
+        );
+        let body: Value = response.json().await.unwrap();
+        assert_eq!(body["choices"][0]["message"]["content"], "ok");
+        assert_eq!(upstream.calls.load(Ordering::SeqCst), 1);
+        // Degraded mode must never touch the usage API.
+        assert_eq!(core.reserve_calls.load(Ordering::SeqCst), 0);
+        assert_eq!(core.settle_calls.load(Ordering::SeqCst), 0);
+
+        // Health stays green in degraded mode even with the usage API down,
+        // while still reporting the real usage-api component state.
+        let health: Value = client
+            .get(format!("{limiter_url}/health"))
+            .send()
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        assert_eq!(health["ok"], json!(true));
+        assert_eq!(health["config"]["admissionMode"], json!("allowlist"));
+        assert_eq!(health["config"]["admissionAllowlistEntries"], json!(1));
+    }
+
+    #[tokio::test]
+    async fn degraded_allowlist_rejects_unlisted_key_before_upstream() {
+        let core = FakeCoreState::new("fpk_live_secret", 1_000_000);
+        let core_url = spawn(fake_core_router(core.clone())).await;
+        let upstream = FakeUpstreamState::new();
+        let upstream_url = spawn(fake_upstream_router(upstream.clone())).await;
+
+        let mut config = test_config(core_url, upstream_url);
+        config.admission_mode = AdmissionMode::Allowlist;
+        config.admission_allowlist = vec!["fpk_degraded_key".to_string()];
+        let limiter_url = spawn(app(config).unwrap()).await;
+
+        let client = reqwest::Client::new();
+        let response = client
+            .post(format!("{limiter_url}/v1/chat/completions"))
+            .bearer_auth("some-other-key")
+            .header("x-request-id", "req-degraded-denied")
+            .json(&json!({
+                "model": "glm-5-2",
+                "messages": [{ "role": "user", "content": "hello" }],
+                "max_tokens": 64
+            }))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+        let body: Value = response.json().await.unwrap();
+        assert_eq!(body["error"]["code"], json!("invalid_api_key"));
+        assert_eq!(upstream.calls.load(Ordering::SeqCst), 0);
+        assert_eq!(core.reserve_calls.load(Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test]
+    async fn allowlist_mode_without_keys_fails_validation() {
+        let mut config = test_config(
+            "http://127.0.0.1:1".to_string(),
+            "http://127.0.0.1:2".to_string(),
+        );
+        config.admission_mode = AdmissionMode::Allowlist;
+        config.admission_allowlist = Vec::new();
+        assert!(app(config).is_err());
+    }
+
+    #[tokio::test]
+    async fn usage_api_health_does_not_follow_html_outage_redirect() {
+        let origin = spawn(public_outage_origin_router()).await;
+        let upstream = FakeUpstreamState::new();
+        let upstream_url = spawn(fake_upstream_router(upstream.clone())).await;
+        let mut config = test_config(origin, upstream_url);
+        config.admission_mode = AdmissionMode::Allowlist;
+        config.admission_allowlist = vec!["fpk_degraded_key".to_string()];
+        let limiter_url = spawn(app(config).unwrap()).await;
+
+        let health: Value = reqwest::Client::new()
+            .get(format!("{limiter_url}/health"))
+            .send()
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        // Allowlist keeps the limiter ready, but must not report the HTML
+        // origin as a healthy usage API.
+        assert_eq!(health["ok"], json!(true));
+        assert_eq!(health["components"]["upstream"]["ok"], json!(true));
+        assert_eq!(health["components"]["usageApi"]["ok"], json!(false));
+        assert_eq!(health["components"]["usageApi"]["status"], json!(307));
+    }
+
+    #[tokio::test]
+    async fn usage_api_mode_is_not_ready_when_origin_is_html_outage_page() {
+        let origin = spawn(public_outage_origin_router()).await;
+        let upstream = FakeUpstreamState::new();
+        let upstream_url = spawn(fake_upstream_router(upstream.clone())).await;
+        let limiter_url = spawn(app(test_config(origin, upstream_url)).unwrap()).await;
+
+        let response = reqwest::Client::new()
+            .get(format!("{limiter_url}/ready"))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+        let health: Value = response.json().await.unwrap();
+        assert_eq!(health["ok"], json!(false));
+        assert_eq!(health["config"]["admissionMode"], json!("usage-api"));
+        assert_eq!(health["components"]["usageApi"]["ok"], json!(false));
+    }
+
+    #[tokio::test]
+    async fn usage_api_health_rejects_html_200_at_the_health_path() {
+        let origin = spawn(html_health_origin_router()).await;
+        let upstream = FakeUpstreamState::new();
+        let upstream_url = spawn(fake_upstream_router(upstream.clone())).await;
+        let limiter_url = spawn(app(test_config(origin, upstream_url)).unwrap()).await;
+
+        let health: Value = reqwest::Client::new()
+            .get(format!("{limiter_url}/health"))
+            .send()
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        assert_eq!(health["ok"], json!(false));
+        assert_eq!(health["components"]["usageApi"]["ok"], json!(false));
+        assert_eq!(health["components"]["usageApi"]["status"], json!(200));
+        let error = health["components"]["usageApi"]["error"]
+            .as_str()
+            .unwrap_or_default();
+        assert!(
+            error.contains("application/json"),
+            "expected content-type rejection, got {error:?}"
+        );
+    }
+
+    #[tokio::test]
     async fn limiter_streams_and_settles_sse_usage() {
         let core = FakeCoreState::new("fpk_live_stream", 10_000_000);
         let core_url = spawn(fake_core_router(core.clone())).await;
@@ -1410,6 +1881,151 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn omitted_thinking_fields_take_configured_defaults() {
+        let core = FakeCoreState::new("fpk_live_thinking", 10_000_000);
+        let core_url = spawn(fake_core_router(core.clone())).await;
+        let upstream = FakeUpstreamState::new();
+        let upstream_url = spawn(fake_upstream_router(upstream.clone())).await;
+        let mut config = test_config(core_url, upstream_url);
+        config.default_reasoning_effort = Some("high".to_string());
+        config.default_enable_thinking = Some(true);
+        let limiter_url = spawn(app(config).unwrap()).await;
+
+        let client = reqwest::Client::new();
+        let response = client
+            .post(format!("{limiter_url}/v1/chat/completions"))
+            .bearer_auth("fpk_live_thinking")
+            .json(&json!({
+                "model": "glm-5-2",
+                "messages": [{ "role": "user", "content": "hello" }],
+                "max_tokens": 64
+            }))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let bodies = upstream.bodies.lock().unwrap();
+        let forwarded: Value = serde_json::from_slice(&bodies[0]).unwrap();
+        assert_eq!(forwarded["reasoning_effort"], "high");
+        assert_eq!(forwarded["chat_template_kwargs"]["enable_thinking"], true);
+    }
+
+    #[tokio::test]
+    async fn explicit_thinking_fields_are_not_overwritten() {
+        let core = FakeCoreState::new("fpk_live_thinking_explicit", 10_000_000);
+        let core_url = spawn(fake_core_router(core.clone())).await;
+        let upstream = FakeUpstreamState::new();
+        let upstream_url = spawn(fake_upstream_router(upstream.clone())).await;
+        let mut config = test_config(core_url, upstream_url);
+        config.default_reasoning_effort = Some("high".to_string());
+        config.default_enable_thinking = Some(true);
+        let limiter_url = spawn(app(config).unwrap()).await;
+
+        let client = reqwest::Client::new();
+        let response = client
+            .post(format!("{limiter_url}/v1/chat/completions"))
+            .bearer_auth("fpk_live_thinking_explicit")
+            .json(&json!({
+                "model": "glm-5-2",
+                "messages": [{ "role": "user", "content": "hello" }],
+                "max_tokens": 64,
+                "reasoning_effort": "max",
+                "chat_template_kwargs": { "enable_thinking": false }
+            }))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let bodies = upstream.bodies.lock().unwrap();
+        let forwarded: Value = serde_json::from_slice(&bodies[0]).unwrap();
+        assert_eq!(forwarded["reasoning_effort"], "max");
+        assert_eq!(forwarded["chat_template_kwargs"]["enable_thinking"], false);
+    }
+
+    #[tokio::test]
+    async fn configured_model_aliases_route_to_one_upstream_model() {
+        let core = FakeCoreState::new("fpk_live_aliases", 10_000_000);
+        let core_url = spawn(fake_core_router(core.clone())).await;
+        let upstream = FakeUpstreamState::new();
+        let upstream_url = spawn(fake_upstream_router(upstream.clone())).await;
+        let mut config = test_config(core_url, upstream_url);
+        config.default_model = "glm-5-3-flash".to_string();
+        config.upstream_model = Some("glm-5-3-flash".to_string());
+        config.model_aliases = vec![
+            "deepseek-v4-flash-0731".to_string(),
+            "glm-5-2".to_string(),
+            "glm-5.3-flash".to_string(),
+        ];
+        let limiter_url = spawn(app(config).unwrap()).await;
+
+        let client = reqwest::Client::new();
+        for requested_model in [
+            "glm-5-3-flash",
+            "deepseek-v4-flash-0731",
+            "glm-5-2",
+            "glm-5.3-flash",
+        ] {
+            let response = client
+                .post(format!("{limiter_url}/v1/chat/completions"))
+                .bearer_auth("fpk_live_aliases")
+                .json(&json!({
+                    "model": requested_model,
+                    "messages": [{ "role": "user", "content": "hello" }],
+                    "max_tokens": 64
+                }))
+                .send()
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::OK);
+        }
+
+        let bodies = upstream.bodies.lock().unwrap();
+        assert_eq!(bodies.len(), 4);
+        for body in bodies.iter() {
+            let forwarded: Value = serde_json::from_slice(body).unwrap();
+            assert_eq!(forwarded["model"], "glm-5-3-flash");
+        }
+        let reservations = core.reservations.lock().unwrap();
+        assert_eq!(reservations.len(), 4);
+        assert!(
+            reservations
+                .iter()
+                .all(|reservation| reservation["model"] == "glm-5-3-flash")
+        );
+    }
+
+    #[tokio::test]
+    async fn configured_model_routing_rejects_unknown_model_before_reservation() {
+        let core = FakeCoreState::new("fpk_live_aliases", 10_000_000);
+        let core_url = spawn(fake_core_router(core.clone())).await;
+        let upstream = FakeUpstreamState::new();
+        let upstream_url = spawn(fake_upstream_router(upstream.clone())).await;
+        let mut config = test_config(core_url, upstream_url);
+        config.default_model = "glm-5-3-flash".to_string();
+        config.upstream_model = Some("glm-5-3-flash".to_string());
+        config.model_aliases = vec!["deepseek-v4-flash-0731".to_string()];
+        let limiter_url = spawn(app(config).unwrap()).await;
+
+        let response = reqwest::Client::new()
+            .post(format!("{limiter_url}/v1/chat/completions"))
+            .bearer_auth("fpk_live_aliases")
+            .json(&json!({
+                "model": "some-other-model",
+                "messages": [{ "role": "user", "content": "hello" }],
+                "max_tokens": 64
+            }))
+            .send()
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        let body: Value = response.json().await.unwrap();
+        assert_eq!(body["error"]["code"], "unsupported_model");
+        assert_eq!(core.reserve_calls.load(Ordering::SeqCst), 0);
+        assert_eq!(upstream.calls.load(Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test]
     async fn malformed_body_is_still_proxied() {
         let core = FakeCoreState::new("fpk_live_secret", 1_000_000);
         let core_url = spawn(fake_core_router(core.clone())).await;
@@ -1492,7 +2108,7 @@ mod tests {
             .unwrap();
         assert_eq!(live.status(), StatusCode::OK);
         let live: Value = live.json().await.unwrap();
-        assert_eq!(live["config"]["defaultModel"], "deepseek-v4-flash-0731");
+        assert_eq!(live["config"]["defaultModel"], "glm-5-3-flash");
         assert_eq!(live["config"]["upstreamHealthPath"], "/health");
         assert_eq!(
             live["config"]["requiredSecrets"]["finiteUsageApiServiceKeyPresent"],
@@ -1511,7 +2127,7 @@ mod tests {
         assert_eq!(ready.status(), StatusCode::OK);
         let ready: Value = ready.json().await.unwrap();
         assert_eq!(ready["ok"], true);
-        assert_eq!(ready["config"]["defaultModel"], "deepseek-v4-flash-0731");
+        assert_eq!(ready["config"]["defaultModel"], "glm-5-3-flash");
         assert_eq!(ready["components"]["upstream"]["name"], "upstream");
         assert_eq!(ready["components"]["upstream"]["ok"], true);
         assert_eq!(
@@ -1819,6 +2435,39 @@ mod tests {
                 post(fake_core_settle),
             )
             .with_state(state)
+    }
+
+    /// Public finite.computer outage origin: usage-API path 307s to an HTML 200.
+    fn public_outage_origin_router() -> Router {
+        Router::new()
+            .route(
+                "/internal/finite-private/v1/health",
+                get(|| async { axum::response::Redirect::temporary("/") }),
+            )
+            .route(
+                "/",
+                get(|| async {
+                    (
+                        StatusCode::OK,
+                        [(axum::http::header::CONTENT_TYPE, "text/html; charset=utf-8")],
+                        "<!doctype html><title>Finite — Service outage</title>",
+                    )
+                }),
+            )
+    }
+
+    /// Same HTML 200 parked directly on the usage-API health path.
+    fn html_health_origin_router() -> Router {
+        Router::new().route(
+            "/internal/finite-private/v1/health",
+            get(|| async {
+                (
+                    StatusCode::OK,
+                    [(axum::http::header::CONTENT_TYPE, "text/html; charset=utf-8")],
+                    "<!doctype html><title>Finite — Service outage</title>",
+                )
+            }),
+        )
     }
 
     async fn fake_core_health(State(state): State<FakeCoreState>) -> Response {

@@ -66,7 +66,9 @@ def run_json(command: Sequence[str]) -> object:
     result = subprocess.run(command, check=False, capture_output=True, text=True)
     if result.returncode != 0:
         detail = result.stderr.strip() or result.stdout.strip()
-        raise delivery.DeliveryError(f"command failed ({' '.join(command[:3])}): {detail}")
+        raise delivery.DeliveryError(
+            f"command failed ({' '.join(command[:3])}): {detail}"
+        )
     return json.loads(result.stdout)
 
 
@@ -80,7 +82,11 @@ def source_commit(repository: str, tag: str) -> str:
 
 
 def download_assets(
-    *, source_repository: str, tag: str, assets: Sequence[dict[str, object]], output: Path
+    *,
+    source_repository: str,
+    tag: str,
+    assets: Sequence[dict[str, object]],
+    output: Path,
 ) -> None:
     output.mkdir(parents=True, exist_ok=True)
     for asset in assets:

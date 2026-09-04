@@ -19,9 +19,11 @@ class ConfigError(RuntimeError):
 
 
 LEGACY_PLUGIN_NAMES = ("finite-platform", "finite")
-LEGACY_FINITE_PRIVATE_MODEL = "glm-5-2"
+LEGACY_FINITE_PRIVATE_MODELS = ("glm-5-2", "deepseek-v4-flash-0731", "glm-5.3-flash")
 FINITE_PRIVATE_PROVIDER = "custom"
-FINITE_PRIVATE_BASE_URL = "https://kimi-k2-6.finite.containers.tinfoil.dev/v1"
+FINITE_PRIVATE_BASE_URL = "https://finite-private.finite.containers.tinfoil.dev/v1"
+HISTORICAL_FINITE_PRIVATE_BASE_URL = "https://kimi-k2-6.finite.containers.tinfoil.dev/v1"
+FINITE_PRIVATE_BASE_URLS = (FINITE_PRIVATE_BASE_URL, HISTORICAL_FINITE_PRIVATE_BASE_URL)
 FINITE_PRIVATE_API_MODES = ("chat_completions", None)
 FINITE_PRIVATE_KEY_REFERENCES = (
     "${FINITE_PRIVATE_API_KEY}",
@@ -59,29 +61,43 @@ def _integer(settings: dict[str, str], key: str, *, minimum: int = 0) -> int:
     return value
 
 
+def _is_image_owned_finite_private_shape(model: dict[str, Any]) -> bool:
+    return (
+        model.get("provider") == FINITE_PRIVATE_PROVIDER
+        and model.get("base_url") in FINITE_PRIVATE_BASE_URLS
+        and model.get("api_mode") in FINITE_PRIVATE_API_MODES
+        and model.get("api_key") in FINITE_PRIVATE_KEY_REFERENCES
+    )
+
+
+def _migrate_historical_finite_private_route(config: dict[str, Any]) -> None:
+    """Rewrite only the retired kimi-k2-6 Finite Private URL.
+
+    Matching the complete Finite Private provider/key shape prevents an image
+    restart from moving a deliberate custom-provider selection.
+    """
+
+    model = config.get("model")
+    if not isinstance(model, dict) or not _is_image_owned_finite_private_shape(model):
+        return
+    if model.get("base_url") == HISTORICAL_FINITE_PRIVATE_BASE_URL:
+        model["base_url"] = FINITE_PRIVATE_BASE_URL
+
+
 def _migrate_legacy_finite_private_model(config: dict[str, Any], settings: dict[str, str]) -> None:
-    """Move only the exact image-owned GLM default to the current model.
+    """Move only the exact image-owned Finite Private default to the current model.
 
     Model configuration is otherwise durable and user-owned. Matching the
     complete Finite Private route/provider/key shape prevents an image restart
     from overwriting a deliberate custom-provider or model selection.
     """
 
-    if (
-        settings.get("FINITE_CONFIG_PROVIDER") != FINITE_PRIVATE_PROVIDER
-        or settings.get("FINITE_CONFIG_BASE_URL") != FINITE_PRIVATE_BASE_URL
-    ):
+    if settings.get("FINITE_CONFIG_PROVIDER") != FINITE_PRIVATE_PROVIDER:
         return
     model = config.get("model")
-    if not isinstance(model, dict):
+    if not isinstance(model, dict) or not _is_image_owned_finite_private_shape(model):
         return
-    if (
-        model.get("default") != LEGACY_FINITE_PRIVATE_MODEL
-        or model.get("provider") != FINITE_PRIVATE_PROVIDER
-        or model.get("base_url") != FINITE_PRIVATE_BASE_URL
-        or model.get("api_mode") not in FINITE_PRIVATE_API_MODES
-        or model.get("api_key") not in FINITE_PRIVATE_KEY_REFERENCES
-    ):
+    if model.get("default") not in LEGACY_FINITE_PRIVATE_MODELS:
         return
     model["default"] = settings["FINITE_CONFIG_MODEL"]
     model["context_length"] = _integer(
@@ -149,6 +165,7 @@ def reconcile_config(
         )
 
     if not first_seed:
+        _migrate_historical_finite_private_route(config)
         _migrate_legacy_finite_private_model(config, settings)
 
     # Outside the explicit migration above, these are the only settings Finite

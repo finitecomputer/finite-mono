@@ -5,7 +5,7 @@
 Use three storage profiles:
 
 - Client/device: encrypted local SQLite for MLS client state, pending outbound
-  work, inbound event cache, and device-linking state.
+  work, and inbound event cache.
 - Local/dev, first server proof, and self-hosted single-node production: SQLite.
 - Hosted multi-node room server: Postgres.
 
@@ -28,7 +28,6 @@ rollback.
 - `client_app_rooms`
 - `client_app_state`
 - `client_app_messages`
-- `client_app_outbox`
 - `client_app_profiles`
 
 `client_device_states` stores one encrypted binary snapshot per
@@ -74,47 +73,32 @@ id, sequence, message id, and authenticated sender so copied or tampered rows
 fail closed on load. The table has owner and owner/room/seq indexes so startup
 can load a bounded recent projection without replaying room history.
 
-`client_app_outbox` stores encrypted local chat sends that have not become
-accepted server log entries. Outbox rows are scoped to the owning
-account/device and keyed by `(room_id, message_id)`, where `message_id` is a
-local client id. The encrypted payload carries the sender, decrypted application
-plaintext, local send state, server delivery state, a bounded failure reason
-when the message send or upload request receives a non-success server response,
-local-to-server correlation material, and retry metadata. Runtime startup
-merges these rows into the Rust-owned chat projection after accepted
-messages/events, so a force-close after an
-undelivered send reopens with the visible saved bubble instead of an empty
-transcript. When a send is accepted by the room server, the runtime writes the
+There is no durable client outbox. An own chat send is ratcheted, signed, and
+appended in one synchronous step: on `EventAccepted` the runtime writes the
 accepted app message/event projection with outbound delivery marked delivered,
-projects it through the same visible message identity as the local bubble, and
-deletes the matching outbox row.
-A failed outbox row is not a room lifecycle transition. Auth, admission, or
-room-not-found style send rejections attach to the outbound message and hidden
-diagnostics/repair work; only confirmed missing or unusable local MLS
-membership projects the room as unavailable on this device.
-Message retry is a Rust action over this stored row, keyed by `(room_id,
-message_id)`; Swift only asks to retry the projected failed message and never
-reconstructs plaintext send intent from UI state. Retry reuses the same local
-message id, visible message identity, local-to-server correlation material, and
-idempotency material; it must not create a new message row or second visible
-bubble. Inbound messages do not carry outbound delivery state. Read receipts
-may change the rendered checkmark for a delivered outbound message, but they do
-not alter outbox rows, delivery state, or retry policy.
+and on any failure (transport, server rejection, idempotency conflict) it
+returns the typed error to the caller and stores nothing, so nothing is queued,
+drained, or retried later. Offline composing that survives a force-close may
+return as an enhancement when mobile/desktop clients ship. A send rejection is
+not a room lifecycle transition: only confirmed missing or unusable local MLS
+membership projects the room as unavailable on this device. Inbound messages do
+not carry outbound delivery state. Read receipts may change the rendered
+checkmark for a delivered outbound message, but they do not alter delivery
+state. Writer opens drop a `client_app_outbox` table left by earlier builds.
 
-Attachment sends are not part of the v1 offline outbox. Before a sent
+Attachment sends follow the same contract. Before a sent
 attachment message exists, the runtime validates the local file, encrypts it,
 uploads ciphertext, and then sends the encrypted blob-reference payload. If
 upload is unreachable, the attachment send fails immediately with transient
-feedback and creates no sent bubble, no outbound delivery state, and no
-`client_app_outbox` row. SQLite must not store plaintext attachment bytes.
+feedback and creates no sent bubble, no outbound delivery state, and no stored
+send. SQLite must not store plaintext attachment bytes.
 After the accepted encrypted blob-reference message exists, the local plaintext
 cache is not delivery state. If plaintext is absent on a later open, the
 runtime treats it as an attachment cache miss. It waits for an explicit
 tap/download action before fetching and decrypting from the blob reference, and
 reports attachment-view unavailable/download error if that fails while the
 message remains delivered.
-Attachment crash recovery is therefore smaller than text outbox recovery in v1:
-before server acceptance, relaunch must not show a sent attachment bubble;
+Before server acceptance, relaunch must not show a sent attachment bubble;
 after server acceptance, relaunch must restore the delivered blob-reference
 message. There is no durable undelivered offline media row.
 Attachment upload/download progress is not inferred by Swift. Until the blob
@@ -146,19 +130,12 @@ matches that pending Commit.
 
 Received application messages are inserted in the same SQLite transaction that
 persists the device cursor that consumed them, including the timestamp carried
-by the server room-log entry. Own sends are first inserted into
-`client_app_outbox` before network delivery, then promoted by deleting the
-outbox row after the server append is accepted and the accepted app
-message/event projection, including the accepted timestamp, is saved.
-Undelivered own sends drain automatically through the same stored outbox row on
-bounded runtime ticks after restart, sync/hint wake, or opening a room; failed
-own sends are excluded from automatic drain and require explicit user retry or
-a named repair flow over the same outbox row and idempotency material.
-Successful delivery promotes to the accepted server-backed row while preserving
-the same visible message identity, then removes the local outbox placeholder.
+by the server room-log entry. Own sends are written only after the server
+append is accepted, as the accepted app message/event projection including the
+accepted timestamp; a send that is not accepted leaves no row.
 Swift and the app runtime render the Rust state and do not own persistence or
 timestamp formatting. Startup reads the bounded SQLite
-app-state, room, message, outbox, and profile projections before network sync;
+app-state, room, message, and profile projections before network sync;
 transport failure during startup must return the saved chat list and selected
 transcript as offline local state, not an empty UI. Full room-history sync
 remains a repair/recovery path, not the ordinary way the UI gets messages after
@@ -197,10 +174,6 @@ Encrypted app-room metadata is also strict: rows missing the current
 `state`/`status`/`local_read_seq` fields, or carrying the old `Offline` /
 `NeedsAttention` lifecycle payloads, fail closed instead of defaulting into a
 connected room.
-Encrypted app-outbox metadata is strict as well: rows missing
-`timestamp_unix_seconds`, or carrying the old one-axis `delivery_state` instead
-of current `local_state` plus `server_delivery_state`, fail closed instead of
-being interpreted as v1 outbound delivery.
 Encrypted app-state and app-profile metadata must carry the current
 selected-room, revoked-device, and stale-profile fields. Missing fields fail
 closed instead of being silently defaulted into product state.
@@ -245,7 +218,6 @@ Postgres shape:
 - `room_membership_intervals`
 - `key_packages`
 - `welcomes`
-- `link_sessions`
 - `idempotency_records`
 
 The store still uses SQLite for local/dev and first-server proof, but the
@@ -315,9 +287,7 @@ The Postgres schema should keep this same model:
 - `key_packages`
 - `welcomes`
 - `idempotency_records`
-- `link_sessions`
 - `repair_reports`
-- `push_outbox`
 
 The critical transaction remains the same:
 
@@ -330,8 +300,7 @@ The critical transaction remains the same:
 7. update membership interval cache;
 8. consume KeyPackages;
 9. release Welcomes with opaque Welcome and ratchet-tree bytes;
-10. persist idempotency response;
-11. enqueue opaque push wakes.
+10. persist idempotency response.
 
 The mutation path must not reconstruct the full room log. Full log validation is
 for read/replay paths; append and Commit validation use the indexed room head,

@@ -62,8 +62,8 @@ story.
    → message round trip through Hermes → restart survival.
 7. **Perf.** Measure invite→joined and message round-trip; kill pathological
    polling (long-poll `wait_ms` on sync/inbox/invite routes is the lead
-   candidate); perf_baseline additions; perf-log + architecture report
-   updates.
+   candidate); perf_baseline additions; benchmark evidence plus architecture
+   report updates.
 
 ## Status
 

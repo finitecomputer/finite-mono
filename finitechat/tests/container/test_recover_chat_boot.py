@@ -25,11 +25,12 @@ CLIENT_TABLES = (
     "client_device_states",
     "client_app_messages",
     "client_app_events",
-    "client_app_outbox",
     "client_app_rooms",
     "client_app_state",
     "client_app_profiles",
 )
+# Dropped by current client builds on open; older stores may still carry it.
+RETIRED_CLIENT_TABLES = ("client_app_outbox",)
 
 
 def load_hermes_config(path: Path) -> dict[str, Any]:
@@ -74,7 +75,7 @@ if "install" in args:
     raise SystemExit(0)
 
 if "home-channel" in args and "set" in args:
-    home = Path(args[args.index("--home") + 1])
+    home = Path(args[args.index("--agent-home") + 1])
     room_id = args[args.index("--room-id") + 1]
     conversation_id = None
     if "--conversation-id" in args:
@@ -91,7 +92,7 @@ if "home-channel" in args and "set" in args:
     raise SystemExit(0)
 
 if "recover" in args:
-    home = Path(args[args.index("--home") + 1])
+    home = Path(args[args.index("--agent-home") + 1])
     running_path = home / "hermes-running.json"
     running = json.loads(running_path.read_text(encoding="utf-8"))
     recovered = len(running.get("messages", []))
@@ -439,6 +440,22 @@ class RecoverChatBootTest(unittest.TestCase):
         self.assertTrue(report["preservation"]["identity_reused_in_place"])
         self.assertTrue(report["preservation"]["client_store_reused_in_place"])
         self.assertEqual(json.loads(fixture.operation_marker().read_text()), report)
+
+    def test_store_with_retired_outbox_table_is_still_accepted(self) -> None:
+        fixture = self.make_fixture()
+        connection = sqlite3.connect(fixture.client_store)
+        try:
+            for table in RETIRED_CLIENT_TABLES:
+                connection.execute(f"CREATE TABLE {table} (id TEXT)")
+            connection.commit()
+        finally:
+            connection.close()
+
+        result = fixture.run()
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("FINITE_RECOVER_CHAT_COMPLETE", result.stdout)
+        fixture.close()
 
     def test_same_operation_replay_is_a_true_noop(self) -> None:
         fixture = self.make_fixture()

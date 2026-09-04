@@ -27,7 +27,6 @@ on:
 
 env:
   CACHIX_CACHE_NAME: finite
-  FINITE_HERMES_AGENT_VERSION: "0.20.0"
   NIX_CONFIG: |
     access-tokens = github.com=${{ github.token }}
 
@@ -90,7 +89,6 @@ jobs:
           fi
           ../finitecomputer-v2/scripts/build_runtime_image.py \
             --image-ref "$RUNTIME_IMAGE_REF" \
-            --hermes-agent-version "$FINITE_HERMES_AGENT_VERSION" \
             --platform linux/amd64 \
             --report target/hermes-docker-smoke/image-build.json
 
@@ -142,7 +140,6 @@ jobs:
             finitechat/target/hermes-hardening-audit.json
             finitechat/target/hermes-docker-smoke/image-build.json
             finitechat/target/hermes-docker-smoke/report.json
-            finitechat/target/hermes-docker-smoke/restic-preflight.json
             finitechat/target/hermes-durable-home-docker-smoke/report.json
             finitechat/target/hermes-chat-interruption-docker-smoke/report.json
           if-no-files-found: ignore

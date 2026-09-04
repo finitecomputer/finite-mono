@@ -18,7 +18,6 @@ in
     ../../modules/finitesitesd.nix
     ../../modules/finite-brain.nix
     ../../modules/dashboard.nix
-    ../../modules/finite-search.nix
     ../../modules/caddy.nix
     ../../modules/postgres.nix
     ../../modules/backups.nix
@@ -27,6 +26,14 @@ in
   ];
 
   networking.hostName = "finite-lat-1";
+
+  # Production deploys activate exact CI-built NixOS closures. CI publishes
+  # those store paths to the Finite Cachix cache; this host may read from that
+  # cache but never receives a write token or builds missing production paths.
+  nix.settings = {
+    substituters = [ "https://finite.cachix.org" ];
+    trusted-public-keys = [ "finite.cachix.org-1:Sg/y/5ax+IxMrPXS4moFro6YFdqa+a2gzDYAesRcVsk=" ];
+  };
 
   # Shared Kata Runner role (modules/kata-runner-host.nix); only genuine host
   # differences are declared here. Core and this Runner share the host, so the
@@ -301,7 +308,7 @@ in
     }
   ];
 
-  # Container-shaped services (dashboard, finite-search) run under podman.
+  # Container-shaped services (dashboard) run under podman.
   virtualisation.podman.enable = true;
   virtualisation.oci-containers.backend = "podman";
 

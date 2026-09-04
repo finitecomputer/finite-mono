@@ -37,14 +37,20 @@ TOKEN_PATH = HERMES_HOME / "google_token.json"
 def load_scopes():
     """Load the platform-owned Google Workspace scope contract."""
     script_path = Path(__file__).resolve()
-    candidates = [script_path.parent.parent / "references" / "google-workspace-scopes.json"]
+    candidates = [
+        script_path.parent.parent / "references" / "google-workspace-scopes.json"
+    ]
     profile_assets_root = os.getenv("FC_PROFILE_ASSETS_ROOT")
     if profile_assets_root:
-        candidates.append(Path(profile_assets_root) / "contracts" / "google-workspace-scopes.json")
+        candidates.append(
+            Path(profile_assets_root) / "contracts" / "google-workspace-scopes.json"
+        )
 
     for parent in script_path.parents:
         if parent.name == "managed-skills":
-            candidates.append(parent.parent / "contracts" / "google-workspace-scopes.json")
+            candidates.append(
+                parent.parent / "contracts" / "google-workspace-scopes.json"
+            )
             break
 
     for candidate in candidates:
@@ -55,7 +61,9 @@ def load_scopes():
             return data
         raise RuntimeError(f"Invalid Google Workspace scope contract at {candidate}")
 
-    raise RuntimeError("Missing Google Workspace scope contract in the installed skill.")
+    raise RuntimeError(
+        "Missing Google Workspace scope contract in the installed skill."
+    )
 
 
 SCOPES = load_scopes()
@@ -79,7 +87,11 @@ def granted_scopes():
         return SCOPES
 
     scopes = data.get("scopes")
-    if isinstance(scopes, list) and all(isinstance(item, str) for item in scopes) and scopes:
+    if (
+        isinstance(scopes, list)
+        and all(isinstance(item, str) for item in scopes)
+        and scopes
+    ):
         return scopes
     return SCOPES
 
@@ -118,7 +130,10 @@ def build_service(api, version):
 def gmail_search(args):
     service = build_service("gmail", "v1")
     results = (
-        service.users().messages().list(userId="me", q=args.query, maxResults=args.max).execute()
+        service.users()
+        .messages()
+        .list(userId="me", q=args.query, maxResults=args.max)
+        .execute()
     )
     messages = results.get("messages", [])
     if not messages:
@@ -138,7 +153,9 @@ def gmail_search(args):
             )
             .execute()
         )
-        headers = {h["name"]: h["value"] for h in msg.get("payload", {}).get("headers", [])}
+        headers = {
+            h["name"]: h["value"] for h in msg.get("payload", {}).get("headers", [])
+        }
         output.append(
             {
                 "id": msg["id"],
@@ -156,7 +173,12 @@ def gmail_search(args):
 
 def gmail_get(args):
     service = build_service("gmail", "v1")
-    msg = service.users().messages().get(userId="me", id=args.message_id, format="full").execute()
+    msg = (
+        service.users()
+        .messages()
+        .get(userId="me", id=args.message_id, format="full")
+        .execute()
+    )
 
     headers = {h["name"]: h["value"] for h in msg.get("payload", {}).get("headers", [])}
 
@@ -164,17 +186,23 @@ def gmail_get(args):
     body = ""
     payload = msg.get("payload", {})
     if payload.get("body", {}).get("data"):
-        body = base64.urlsafe_b64decode(payload["body"]["data"]).decode("utf-8", errors="replace")
+        body = base64.urlsafe_b64decode(payload["body"]["data"]).decode(
+            "utf-8", errors="replace"
+        )
     elif payload.get("parts"):
         for part in payload["parts"]:
-            if part.get("mimeType") == "text/plain" and part.get("body", {}).get("data"):
+            if part.get("mimeType") == "text/plain" and part.get("body", {}).get(
+                "data"
+            ):
                 body = base64.urlsafe_b64decode(part["body"]["data"]).decode(
                     "utf-8", errors="replace"
                 )
                 break
         if not body:
             for part in payload["parts"]:
-                if part.get("mimeType") == "text/html" and part.get("body", {}).get("data"):
+                if part.get("mimeType") == "text/html" and part.get("body", {}).get(
+                    "data"
+                ):
                     body = base64.urlsafe_b64decode(part["body"]["data"]).decode(
                         "utf-8", errors="replace"
                     )
@@ -210,7 +238,12 @@ def gmail_send(args):
     result = service.users().messages().send(userId="me", body=body).execute()
     print(
         json.dumps(
-            {"status": "sent", "id": result["id"], "threadId": result.get("threadId", "")}, indent=2
+            {
+                "status": "sent",
+                "id": result["id"],
+                "threadId": result.get("threadId", ""),
+            },
+            indent=2,
         )
     )
 
@@ -229,7 +262,9 @@ def gmail_reply(args):
         )
         .execute()
     )
-    headers = {h["name"]: h["value"] for h in original.get("payload", {}).get("headers", [])}
+    headers = {
+        h["name"]: h["value"] for h in original.get("payload", {}).get("headers", [])
+    }
 
     subject = headers.get("Subject", "")
     if not subject.startswith("Re:"):
@@ -248,7 +283,12 @@ def gmail_reply(args):
     result = service.users().messages().send(userId="me", body=body).execute()
     print(
         json.dumps(
-            {"status": "sent", "id": result["id"], "threadId": result.get("threadId", "")}, indent=2
+            {
+                "status": "sent",
+                "id": result["id"],
+                "threadId": result.get("threadId", ""),
+            },
+            indent=2,
         )
     )
 
@@ -270,8 +310,15 @@ def gmail_modify(args):
         body["addLabelIds"] = args.add_labels.split(",")
     if args.remove_labels:
         body["removeLabelIds"] = args.remove_labels.split(",")
-    result = service.users().messages().modify(userId="me", id=args.message_id, body=body).execute()
-    print(json.dumps({"id": result["id"], "labels": result.get("labelIds", [])}, indent=2))
+    result = (
+        service.users()
+        .messages()
+        .modify(userId="me", id=args.message_id, body=body)
+        .execute()
+    )
+    print(
+        json.dumps({"id": result["id"], "labels": result.get("labelIds", [])}, indent=2)
+    )
 
 
 # =========================================================================
@@ -309,8 +356,12 @@ def calendar_list(args):
             {
                 "id": e["id"],
                 "summary": e.get("summary", "(no title)"),
-                "start": e.get("start", {}).get("dateTime", e.get("start", {}).get("date", "")),
-                "end": e.get("end", {}).get("dateTime", e.get("end", {}).get("date", "")),
+                "start": e.get("start", {}).get(
+                    "dateTime", e.get("start", {}).get("date", "")
+                ),
+                "end": e.get("end", {}).get(
+                    "dateTime", e.get("end", {}).get("date", "")
+                ),
                 "location": e.get("location", ""),
                 "description": e.get("description", ""),
                 "status": e.get("status", ""),
@@ -468,7 +519,11 @@ def sheets_append(args):
         )
         .execute()
     )
-    print(json.dumps({"updatedCells": result.get("updates", {}).get("updatedCells", 0)}, indent=2))
+    print(
+        json.dumps(
+            {"updatedCells": result.get("updates", {}).get("updatedCells", 0)}, indent=2
+        )
+    )
 
 
 # =========================================================================
@@ -501,7 +556,9 @@ def docs_get(args):
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Google Workspace API for Hermes Agent")
+    parser = argparse.ArgumentParser(
+        description="Google Workspace API for Hermes Agent"
+    )
     sub = parser.add_subparsers(dest="service", required=True)
 
     # --- Gmail ---
@@ -537,7 +594,9 @@ def main():
     p = gmail_sub.add_parser("modify")
     p.add_argument("message_id")
     p.add_argument("--add-labels", default="", help="Comma-separated label IDs to add")
-    p.add_argument("--remove-labels", default="", help="Comma-separated label IDs to remove")
+    p.add_argument(
+        "--remove-labels", default="", help="Comma-separated label IDs to remove"
+    )
     p.set_defaults(func=gmail_modify)
 
     # --- Calendar ---
@@ -573,7 +632,9 @@ def main():
     p = drv_sub.add_parser("search")
     p.add_argument("query")
     p.add_argument("--max", type=int, default=10)
-    p.add_argument("--raw-query", action="store_true", help="Use query as raw Drive API query")
+    p.add_argument(
+        "--raw-query", action="store_true", help="Use query as raw Drive API query"
+    )
     p.set_defaults(func=drive_search)
 
     # --- Contacts ---

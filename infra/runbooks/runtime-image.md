@@ -2,14 +2,17 @@
 
 `ghcr.io/finitecomputer/agent-runtime` (mono-owned; the legacy
 `finite-agent-runtime` package is frozen with the deployed pins) — the image
-the lat1 finite-saas-runner will launch into Kata first and Phala as a fast
-follow. Image
+the Kata runners on lat3 and lat4 launch into. Phala is
+a fast follow and must consume the same artifact contract and image digest.
+Image
 definitions map: `infra/images/README.md`. Rung-ladder discipline: see
 [README.md](README.md) — no Kata/Phala/Tinfoil promotion without a Docker proof.
 
-> **Runner status:** finite-saas-runner lives on lat1 as a NixOS systemd timer
-> (`modules/finite-saas-runner.nix`) and advertises the Kata adapter. Phala is
-> a fast follow and must consume the same artifact contract and image digest.
+> **Runner status:** finite-saas-runner runs as a NixOS systemd timer on the
+> active Kata hosts lat3 and lat4 (`modules/finite-saas-runner.nix`) and
+> advertises the Kata adapter. lat1 is retired/leftover-inactive; its runner
+> cannot lease work. Phala is a fast follow and must consume the same
+> artifact contract and image digest.
 
 ## PRECONDITIONS
 
@@ -17,8 +20,8 @@ definitions map: `infra/images/README.md`. Rung-ladder discipline: see
   `depot-ubuntu-24.04` label. Set `DEPOT_RUNTIME_IMAGE_PROJECT_ID` or the
   shared `DEPOT_PROJECT_ID` repository variable or secret for Depot remote
   container builds. The workflow authenticates through `depot/setup-action`
-  OIDC. Image builds run in CI on ephemeral Depot runners/builders; lat1
-  launches only the resulting digest-pinned artifact.
+   OIDC. Image builds run in CI on ephemeral Depot runners/builders; the
+   active hosts launch only the resulting digest-pinned artifact.
 - The tree state you are building is on the ref you dispatch (the single
   checkout SHA pins finitechat + finite-sites + finite-brain + finite-skills
   together; that is the whole point of the mono adaptation — see the header in
@@ -39,10 +42,11 @@ build it is not the promotion proof for the final digest.
 
 1. On the reviewed revision, dispatch **Agent Runtime Image**
    (`.github/workflows/runtime-image.yml`) with
-   `version=<date-based, e.g. 2026-07-08.1>`. Hermes is repository-pinned to
-   `0.20.0`, the same version exercised by every smoke lane. For future
-   upgrades, move the reviewed pin in the image and all smoke lanes together;
-   do not add a dispatch-time override.
+   `version=<date-based, e.g. 2026-07-08.1>`. Hermes is pinned once through the
+   root flake (`flake.lock`); the build stamps that pin's version into the
+   image label and every smoke lane asserts the running Hermes against it. For
+   future upgrades, move the reviewed flake pin alone; do not add a
+   dispatch-time override.
 2. The publication workflow builds exactly once via
    `finitecomputer-v2/scripts/build_runtime_image.py` from one staged
    finite-mono checkout and root Cargo lockfile, embeds the Finite Skills
@@ -66,11 +70,12 @@ custody, or an empty-target restore. Those remain separate paid-cohort gates;
 do not describe the boot repair or a provider-volume restart as product
 Recovery Readiness.
 
-### 3. Promote to the lat1 runner
+### 3. Promote to the Kata hosts
 
-The runner does **not** read an image tag directly. On NixOS lat1 the env is
-`/etc/finite/runner.env` (secrets bootstrap — `infra/nixos/README.md`;
-template: `infra/hosts/lat1/systemd/runner.env.example`). The pin is:
+The runner does **not** read an image tag directly. On each active NixOS Kata
+host (lat3 and lat4) the env is `/etc/finite/runner.env` (secrets bootstrap —
+`infra/nixos/README.md`; template:
+`infra/hosts/lat1/systemd/runner.env.example`). The pin is:
 
 - **`FC_RUNNER_RUNTIME_ARTIFACT_ID`** (e.g.
   `finite-agent-runtime-canary-20260702-41b0c6d`) — product launches fetch
@@ -88,12 +93,12 @@ So promotion is two steps — **in this order**:
    additive field defaults to `false`, so older/N-1 artifacts and rollbacks do
    not inherit a control their image cannot execute.
 2. Edit `FC_RUNNER_RUNTIME_ARTIFACT_ID` in `/etc/finite/runner.env` on every
-   Kata host (lat1 and lat3). That operator file is the only place the pin
-   exists: the Nix-rendered shared env deliberately carries no default, and
-   the unit fails closed at start (`FC_RUNNER_RUNTIME_ARTIFACT_ID is
-   required`) if it is missing. No restart needed: the timer re-invokes the
-   runner with the new env (set `FC_RUNNER_DRAIN=true` first if you want
-   in-flight launches to settle).
+   Kata host (lat3 and lat4; lat1 is leftover/inactive only). That operator
+   file is the only place the pin exists: the Nix-rendered shared env
+   deliberately carries no default, and the unit fails closed at start
+   (`FC_RUNNER_RUNTIME_ARTIFACT_ID is required`) if it is missing. No restart
+   needed: the timer re-invokes the runner with the new env (set
+   `FC_RUNNER_DRAIN=true` first if you want in-flight launches to settle).
 
 > **Order matters (learned 2026-08-27):** finish step 1 before touching any
 > host pin. A pin referencing an id Core does not know makes every runner
@@ -164,13 +169,14 @@ Private key.
 
 After a canary passes, prepare the broad production cohort. Preparation reads
 Core's deterministic scope, verifies the already-target canary, checks every
-eligible canonical Kata container directly on lat1, and writes a mode-0600
-reviewed plan under the ignored `.local-state/runtime-rollouts/` tree. It does
-not enqueue an upgrade:
+eligible canonical Kata container directly on the selected host, and writes a
+mode-0600 reviewed plan under the ignored `.local-state/runtime-rollouts/`
+tree. It does not enqueue an upgrade:
 
 ```sh
 scripts/rollout-lat1-runtime-artifact \
   --prepare \
+  --host lat4 \
   --roll-runtime-artifact finite-agent-runtime-YYYY-MM-DD.N \
   --roll-admin-email operator@example.com \
   --roll-admin-workos-user-id user_operator \
@@ -185,6 +191,7 @@ adds only the approved hash:
 ```sh
 scripts/rollout-lat1-runtime-artifact \
   --execute-plan-hash <approved-64-hex-plan-hash> \
+  --host lat4 \
   --roll-runtime-artifact finite-agent-runtime-YYYY-MM-DD.N \
   --roll-admin-email operator@example.com \
   --roll-admin-workos-user-id user_operator \
@@ -209,9 +216,10 @@ plan may differ only by entries Core already records on the target artifact,
 and each entry is reconciled before acting — already on target is verified and
 skipped, an identical in-flight upgrade request is awaited (Core never
 enqueues a duplicate), and anything else executes normally. The same wrapper
-covers lat3 with `--host lat3` (default `lat1`); the plan is provably
-single-host and mixed-host plans are refused. Core CLI calls always run on
-lat1; only provider facts and Runner addressing follow `--host`.
+covers lat3 and lat4 with `--host lat3` or `--host lat4` (default `lat1`
+is leftover/inactive only). The plan is provably single-host and mixed-host
+plans are refused. Core CLI calls always run on lat2; only provider facts
+and Runner addressing follow `--host`.
 For `--roll-all`, a canonical container that is already stopped is retained in
 the hashed plan as `provider_not_running` and is never contacted, started, or
 enqueued; healthy eligible Runtimes may continue. An explicitly selected
@@ -258,7 +266,7 @@ both `GET /api/core/v1/finite-private/usage` and
 `POST /api/core/v1/finite-private/usage/reset` must reach Core and return 401,
 not an edge 404. After completion, inspect the one canonical Runtime and any
 operation-scoped helper containers: exactly one running container may mount
-that Runtime's `/data`, the old rollback helper must be stopped, `/contact`
+that Runtime's `/data` and no `Created`-state candidate may remain bound to it (upgrade completion and interrupted-upgrade reconcile now sweep never-started candidates from any request id; a running one is left in place and reported), the old rollback helper must be stopped, `/contact`
 must report the unchanged Agent Principal, and the runtime must successfully
 reach the status control route after a successful turn. Exact notice routing
 at synthetic 25%/10% thresholds is a Core/adapter integration-test gate; do not
@@ -303,8 +311,9 @@ Verify after completion:
 
 1. Core's admin Runtime overview reports the target artifact id and `online`.
 2. `nerdctl --namespace finite inspect <source-machine-id>` reports the target
-   digest and the unchanged `/var/lib/finite-saas-runner/kata/<source-machine-id>:/data`
-   bind.
+   digest and the unchanged `/var/lib/finite-saas-runner/kata/<durable-state-id>:/data`
+   bind (the durable state id is the Agent Runtime id; the durable root is
+   never named by the source machine id).
 3. `/contact` reports the pre-upgrade Agent Principal, and existing chat,
    attachments, workspace, Sites state, and agentd ledger remain accessible.
 
@@ -322,13 +331,14 @@ in `infra/tinfoil/README.md`.
 ## VERIFY
 
 1. Smoke evidence and the publication report name the same monorepo SHA,
-   Hermes `0.20.0`, Runtime image digest, CLIs, plugin, bundled Finite
-   Skills source, and the Nix-staged baseline toolchains (node, bun, deno,
-   uv, Playwright browsers).
+   the lock-pinned Hermes version stamped on the image label, Runtime image
+   digest, CLIs, plugin, bundled Finite Skills source, and the Nix-staged
+   baseline toolchains (node, bun, deno, uv, Playwright browsers).
 2. After promotion: the next runner-launched Kata Runtime comes up ready within
    `FC_RUNNER_RUNTIME_READY_TIMEOUT_SECS` and runs the new image. TODO:
-   verify the Core runtime row, `journalctl -u finite-saas-runner` on lat1,
-   `nerdctl --namespace finite inspect`, and the Runtime `/healthz` response.
+   verify the Core runtime row, `journalctl -u finite-saas-runner` on the
+   target host (lat3 or lat4), `nerdctl --namespace finite inspect`, and the
+   Runtime `/healthz` response.
 3. Runtime status and the Product Release manifest agree on the image and
    component versions; no mutable branch or second runtime package is used.
 4. `scripts/finite-status` shows the new pin on every Kata host, and

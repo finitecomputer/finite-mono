@@ -1,6 +1,6 @@
 # Finite Identity
 
-Finite Identity owns the shared identity language for Finite tools and products. It defines how Finite-controlled email names, Nostr keys, NIP-05 names, and product principals relate to each other.
+Finite Identity owns the shared identity language for Finite tools and products. It defines how Finite-controlled email names, Nostr keys, and NIP-05 names relate to each other. Its deployed service is the NIP-05 name Directory; products answer every authorization question against their own tables.
 
 ## Language
 
@@ -29,7 +29,7 @@ A NIP-05 identifier on a domain not owned by Finite. Third-Party NIP-05 Names ar
 _Avoid_: external handle, external nostr address
 
 **NIP-05 Endpoint**:
-The public `.well-known/nostr.json` HTTP endpoint for the Finite VIP Domain. In v1, the Identity Authority owns the response for this endpoint.
+The public `.well-known/nostr.json` HTTP endpoint for the Finite VIP Domain. In v1, the Identity Directory owns the response for this endpoint.
 _Avoid_: static nostr file, nostr profile endpoint
 
 **Identity Recovery**:
@@ -37,11 +37,12 @@ The explicit process for restoring control of a Native Principal or moving its p
 _Avoid_: reset, relink, silent reassignment
 
 **Disabled Binding**:
-A Finite VIP Mailbox Address or NIP-05 Name binding that the Identity Authority keeps for audit history but no longer serves or resolves. Disabling a binding is an operator safety action, not Identity Recovery or reassignment.
+A Finite VIP Mailbox Address or NIP-05 Name binding that the Identity Directory keeps for audit history but no longer serves or resolves. Disabling a binding is an operator safety action, not Identity Recovery or reassignment.
 _Avoid_: deleted binding, reset binding, transferred binding
 
 **Principal**:
-The identity subject that Finite products attach permissions to. A Principal is either a Native Principal or an Email-Only Principal.
+The identity subject that Finite products attach permissions to, identified
+by its Nostr public key.
 _Avoid_: account, user, member
 
 **Native Principal**:
@@ -49,9 +50,9 @@ A Principal backed by a Nostr public key controlled by a human or agent Finite i
 _Avoid_: native account, npub user
 
 **User Nostr Identity**:
-The human-controlled Nostr keypair used across that user's Hosted Web, Electron,
-and iOS surfaces. Hosted Web keeps it behind a server-side signer adapter while
-native surfaces keep it in protected local storage; the custody difference does
+The human-controlled Nostr keypair used across that user's Hosted Web
+surfaces. Hosted Web keeps it behind a server-side signer adapter; a future
+native surface would keep it in protected local storage; the custody difference does
 not create another Principal.
 _Avoid_: WorkOS identity, hosted-device identity, agent key
 
@@ -73,28 +74,22 @@ _Avoid_: agent email, agent account, shared user email
 The filesystem root that scopes one Local Identity Key and the Finite tool state belonging to that identity owner.
 _Avoid_: User home, shared fleet home, product config directory
 
-**Email-Only Principal**:
-A Principal backed by verified control of an email address before the person has linked that email to a Native Principal.
-_Avoid_: guest user, invited user, external account
-
 **Invited Email**:
-Legacy name for a Mailbox Address that a Finite product can grant access to before the recipient has a Native Principal. An Invited Email can become an Email-Only Principal, but only a Finite VIP Mailbox Address can also receive a human NIP-05 binding in v1.
+Legacy name for a Mailbox Address that a Finite product granted access to
+before the recipient had a Native Principal. Retired with the email-shaped
+grant machinery: products grant npubs or capability links, and an email
+address is delivery, never an identity.
 _Avoid_: external email, collaborator email
-
-**Principal Link**:
-A verified identity-equivalence relationship from an email address to a Native Principal. Products can use Principal Links during authorization without immediately rewriting their product-owned permission records. A Principal Link says the email and npub are the same Principal; it is never an authorization for a distinct agent to act for that Principal.
-_Avoid_: alias, migration, account merge
 
 **Email Access Delegation**:
 A revocable product-owned authorization allowing a distinct Agent Principal to exercise a verified email Principal's grants inside exactly one Finite product.
 _Avoid_: email link, account link, agent identity binding
 
-**Principal Resolution**:
-The Finite Identity answer to "who does this email, NIP-05 name, npub, or caller prove as right now?" Principal Resolution lets products attach permissions to stable product concepts while delegating identity proof and email-to-native links to Finite Identity.
-_Avoid_: user lookup, account lookup, auth mapping
-
 **Product Grant**:
-A product-owned permission record that names a Principal or Invited Email exactly as the product user granted it. Finite Identity does not own Product Grants; it only resolves whether a caller satisfies them.
+A product-owned permission record that names a Principal (npub) or a
+capability token exactly as the product user granted it. Products resolve
+Product Grants against their own tables; Finite Identity is never asked
+whether a caller satisfies a grant.
 _Avoid_: identity grant, membership row, access mapping
 
 **Sites Email Principal**:
@@ -115,12 +110,17 @@ provenance even when access was exercised through a Sites Email Principal's
 Authorized Sites Key set.
 _Avoid_: owner email, publishing account
 
-**Identity Authority**:
-The deployed Finite Identity service and its identity-owned storage. It is the source of truth for Principal Resolution, Finite VIP Mailbox bindings, and NIP-05 Names.
+**Identity Directory**:
+The deployed Finite Identity service and its identity-owned storage — the
+shrunken Identity Authority; both names name the same deployment. It is the
+source of truth for Finite VIP Mailbox bindings and NIP-05 Names: name lookup
+and name claiming, plus operator audit/disable. It resolves nothing else.
 _Avoid_: auth server, account service
 
 **Identity Contract**:
-The product-facing HTTP contract exposed by the Identity Authority. Finite products consume identity through this contract rather than by owning or directly mutating identity storage.
+The product-facing HTTP contract exposed by the Identity Directory. Finite
+products use it for NIP-05 lookup and name claiming rather than by owning or
+directly mutating identity storage.
 _Avoid_: internal API, shared database, crate API
 
 **Identity Client Flow**:
@@ -134,16 +134,12 @@ handing raw key material to product client code. Each product owns its own
 adapter and bounded provider contract; Finite Identity does not own a universal
 product adapter, product grants, content crypto, or authorization policy.
 For Hosted Web, Finite Chat's Hosted Device is the initial user-key setup and
-custody flow. The product's adapter acts as the same User Nostr Identity used
-by Electron and iOS, not as a separate product identity. Account Auth may
+custody flow. The product's adapter acts as the same User Nostr Identity, not
+as a separate product identity. Account Auth may
 authorize its session, but the product must still grant the User Nostr Identity
 access explicitly. It does not make the User Nostr Identity and an Agent
 Principal Key the same identity.
 _Avoid_: shared signer, generic signer API, product key store
-
-**Resolution Cache**:
-A short-lived product-held cache of Principal Resolution answers. A Resolution Cache is never the source of truth and must fail closed when an answer is missing, expired, or uncertain.
-_Avoid_: identity replica, local identity store
 
 **Local Identity Key**:
 The human- or agent-owned Nostr keypair generated, imported, and stored under one Finite Home by the Finite Identity client contract.
@@ -154,12 +150,8 @@ The combined proof required to bind a Finite VIP Mailbox Address to a Native Pri
 _Avoid_: signup proof, verification proof, login proof
 
 **Email Challenge**:
-A short-lived, single-use proof request sent to an email address. The challenge token is opaque random secret material, stored only as a hash by the Identity Authority.
+A short-lived, single-use proof request sent to an email address. The challenge token is opaque random secret material, stored only as a hash by the Identity Directory. Its only remaining use is proving control of a Finite VIP Mailbox Address when claiming its NIP-05 Name.
 _Avoid_: magic token, signed token, email login
-
-**Mailbox Proof**:
-A short-lived, single-use receipt proving that one exact NIP-98 signing key just redeemed an Email Challenge. It creates no Principal Link; a product may consume it into product-owned authorization such as a Sites Authorized Key.
-_Avoid_: identity binding, login session, global email ownership
 
 **Mailer Adapter**:
 The deployment-specific implementation that delivers Email Challenges. Finite Identity owns the challenge flow, while a Mailer Adapter performs delivery through dev outbox, the shared `finite-mail` Resend transport, or another provider.
@@ -181,14 +173,11 @@ _Avoid_: email service, notification service
   Home** and may be generated or imported by the human.
 - **Account Auth** is outside Finite Identity; proving a dashboard session does
   not reveal, replace, or silently mint a **Local Identity Key**.
-- The **Identity Authority** stores public resolution/binding state and never a
+- The **Identity Directory** stores public binding state and never a
   **Local Identity Key** secret.
-- A **Product Grant** may name an email or Native Principal, but an agent does
-  not satisfy a human email grant merely because the agent belongs to that
-  human's Project.
-- A **Principal Link** proves identity equivalence. An **Email Access
-  Delegation** authorizes a different Principal; the two are never inferred
-  from each other.
+- A **Product Grant** names an npub or a capability token, never an email;
+  an agent does not satisfy a grant merely because it belongs to a human's
+  Project.
 - One **Email Access Delegation** connects one verified email Principal, one
   Agent Principal, and one Finite product; revocation in that product grants no
   authority in another product.
@@ -220,5 +209,6 @@ _Avoid_: email service, notification service
 - The Identity Authority v1 contract deliberately omitted key-loss recovery;
   that omission is now a launch gap, not an acceptable permanent product state.
 - "Link my email to my agent" previously mixed identity equivalence with
-  authorization. Resolved: same-identity proof creates a **Principal Link**;
-  cross-identity access creates a product-scoped **Email Access Delegation**.
+  authorization. Resolved by deletion: email-shaped identity claims died with
+  the directory shrink; cross-identity access is a product-scoped **Email
+  Access Delegation** or a capability link.

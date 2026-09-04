@@ -3,8 +3,8 @@
 #
 # This is not the hardened physical-phone canary gate. It may use loopback
 # server URLs and does not prove the full product flow on a phone. For the
-# local phone and remote Docker canary gates, see
-# docs/hermes-phone-canary-loop.md. Provider promotion belongs to
+# local phone canary gate, see scripts/hermes-phone-canary.py. Provider
+# promotion belongs to
 # ../finitecomputer-v2/docs/hermes-runtime-test-matrix.md.
 set -euo pipefail
 
@@ -128,7 +128,7 @@ curl -fsS "${server_url}/health" >/dev/null
 
 if [[ ! -f "${agent_home}/config.json" ]]; then
   umask 077
-  FINITE_HOME="${finite_home}" "${finitechat_bin}" hermes --home "${agent_home}" init \
+  FINITE_HOME="${finite_home}" "${finitechat_bin}" hermes --agent-home "${agent_home}" init \
     --server "${server_url}" \
     --device-id "${agent_device_id}" \
     --agent-name "${FINITECHAT_HERMES_ROOM_NAME:-Finite Agent}" \
@@ -153,7 +153,7 @@ service_ready_file="${state_root}/service-ready.json"
 if [[ -f "${service_pid_file}" ]] && kill -0 "$(cat "${service_pid_file}")" 2>/dev/null; then
   :
 else
-  FINITE_HOME="${finite_home}" "${finitechat_bin}" hermes --home "${agent_home}" serve \
+  FINITE_HOME="${finite_home}" "${finitechat_bin}" hermes --agent-home "${agent_home}" serve \
     --addr "127.0.0.1:${service_port}" \
     --ready-file "${service_ready_file}" \
     --json >"${state_root}/service.log" 2>&1 &

@@ -8,16 +8,19 @@ old Docker Compose monitoring stack is removed from the active path. LAT host
 collection and production rollout remain separate steps.
 
 Current implementation progress: steps 1 through 4 below are implemented;
-step 5 remains pending.
+step 5 remains pending. During the lat1/lat3 hardware incident, the Grafana
+dashboard has been widened to show lat1 through lat4 so the retiring hosts
+remain visible while lat2 and lat4 come online.
 
 ## Goal
 
 Show centralized logs and basic host performance metrics for the LAT fleet in
 Grafana without changing product behavior.
 
-The production rollout target is `finite-lat-1` and `finite-lat-3`. `finite-lat-2`
-is included only after an explicit role decision, because the current infra
-inventory names it as a decommission target rather than production capacity.
+The production dashboard target is the whole `finite-lat-1` through
+`finite-lat-4` fleet. `finite-lat-1` and `finite-lat-3` remain visible while
+they are retired so operators can see them as down instead of silently losing
+the hosts from the dashboard.
 
 ## Non-Goals
 
@@ -56,6 +59,9 @@ Prometheus relabel allowlist to include basic node-exporter host metrics.
 Initial metric families:
 
 - CPU: `node_cpu_seconds_total`, `node_load1`, `node_load5`, `node_load15`.
+- CPU thermals and frequency: `node_hwmon_temp_celsius`,
+  `node_hwmon_sensor_label`, `node_cpu_scaling_frequency_hertz`, and
+  `node_cpu_scaling_frequency_max_hertz`.
 - Memory and swap: `node_memory_MemTotal_bytes`,
   `node_memory_MemAvailable_bytes`, `node_memory_SwapTotal_bytes`,
   `node_memory_SwapFree_bytes`.
@@ -67,6 +73,12 @@ Initial metric families:
   `node_network_transmit_bytes_total`, `node_network_receive_errs_total`,
   `node_network_transmit_errs_total`.
 - Existing health/version series remain unchanged.
+
+Scrape LAT host metrics every 15 seconds so short thermal and frequency
+excursions remain visible. The dashboard's thermal-throttling signal is a
+heuristic, because these AMD hosts do not export a direct hardware throttle
+counter: it requires a temperature of at least 95 C, CPU busy of at least 70%,
+and average current frequency at or below 70% of the exported maximum.
 
 Bound the cardinality at collection time where practical:
 
@@ -87,6 +99,7 @@ Initial Loki labels:
 - `unit`
 - `priority`
 - `role`
+- `source`
 
 Do not add labels derived from log message content.
 
@@ -98,9 +111,25 @@ Initial unit allowlist:
   storage-health units.
 - `finite-lat-3`: finite-saas-runner, storage-health units, WireGuard/network
   units, Alloy, node exporter.
-- `finite-lat-2`: excluded from the production dashboard unless its role is
-  updated. If explicitly monitored while decommissioning, label it
-  `role="decommission"` and keep it out of production availability summaries.
+- `finite-lat-2`: app-plane successor for `finite-lat-1`; collect the same
+  app-facing service logs once its production role is activated.
+- `finite-lat-4`: runner successor for `finite-lat-3`; collect the same
+  runner, storage-health, WireGuard/network, Alloy, and node-exporter logs once
+  its production role is activated.
+
+Separate host-incident sources:
+
+- Kernel warning-or-higher journal entries (`_TRANSPORT=kernel`,
+  `PRIORITY=0..4`) to catch thermal, OOM, filesystem, disk, NIC, and reset
+  evidence without forwarding all kernel info/debug logs.
+- systemd manager entries (`SYSLOG_IDENTIFIER=systemd`) to preserve unit
+  lifecycle evidence that does not belong to the affected service's
+  `_SYSTEMD_UNIT`.
+- NixOS activation entries (`SYSLOG_IDENTIFIER=nixos`) to preserve
+  `switch-to-configuration` and deployment activation context.
+- SSH/sudo auth entries (`SYSLOG_IDENTIFIER=sshd|sudo`) for operator-access
+  incident context. These remain message-only logs with the same bounded label
+  set; auth message contents are not parsed into labels.
 
 ### Ingest
 
@@ -146,13 +175,16 @@ Set a short initial Loki retention window: 14 days until log volume is measured.
 4. Add LAT journald collection.
    - Add Nix options or a small Nix data structure for the host/unit allowlist.
    - Configure Alloy `loki.source.journal`, relabeling only safe journald
-     fields into `host`, `unit`, `priority`, and `role`.
+     fields into `host`, `unit`, `priority`, `role`, and `source`.
    - Point Alloy at the protected Loki push route.
    - Keep the Loki credential in a root-owned environment file or SOPS-managed
      equivalent; do not reuse the Prometheus credential.
 
    Repo status: implemented in `infra/nixos/modules/metrics.nix` for
-   `finite-lat-1` and `finite-lat-3`. The next LAT NixOS activation will require
+   `finite-lat-1` and `finite-lat-3`, including the service allowlist and the
+   host-incident sources above. `finite-lat-2` and `finite-lat-4` must use the
+   same app and runner collection profiles respectively when their NixOS host
+   definitions land. The next LAT NixOS activation will require
    `/etc/finite/logs-write.env` on each host with `FINITE_LOGS_WRITE_USERNAME`
    and `FINITE_LOGS_WRITE_PASSWORD`. The current host-local secret strategy is
    covered by `infra/nixos/scripts/check-lat-monitoring-secrets`; lat1 closure
@@ -164,26 +196,27 @@ Set a short initial Loki retention window: 14 days until log volume is measured.
    - Optionally run `infra/nixos/scripts/check-lat-monitoring-secrets` on the
      target host before activation for an early failure; NixOS activation also
      enforces the same check.
-   - Roll out `finite-lat-3` first.
+   - Roll out the replacement host for the currently failing role first.
    - Verify Prometheus host metrics and Loki logs in Grafana.
-   - Roll out `finite-lat-1` after `finite-lat-3` is clean.
-   - Add `finite-lat-2` only after its role is explicitly updated or a
-     decommission-only monitoring view is approved.
+   - Keep `finite-lat-1` and `finite-lat-3` visible in Grafana while retired;
+     the scrape-health panel provides explicit zero-valued fallback series so
+     absent retired hosts render as down.
    - Run `scripts/finite-status --json` after each host rollout.
 
 ## Acceptance Criteria
 
 - Grafana has a repository-provisioned `LAT Fleet` dashboard.
 - The dashboard shows CPU, load, memory, swap, filesystem, disk I/O, network,
-  and scrape-health data for each monitored LAT host.
+  scrape-health, CPU temperature, and CPU frequency data for each monitored LAT
+  host, plus a clearly labeled thermal-throttling heuristic.
 - Grafana Explore can query recent logs by `host`, `unit`, `priority`, and
   `role`.
 - Loki is not directly internet-accessible.
 - Prometheus remote write and Loki push use separate credentials.
 - No log or metric label contains user, account, email, project, runtime,
   request, route, file path, or other customer-derived values.
-- `finite-lat-2` is either absent from production availability panels or
-  clearly labeled as decommission-only.
+- The scrape-health panel keeps `finite-lat-1` through `finite-lat-4` visible,
+  including retired hosts that are no longer remote-writing metrics.
 - `scripts/finite-status --json` is captured before and after each host rollout.
 
 ## Deferred Follow-Ups

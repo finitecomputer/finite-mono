@@ -9,16 +9,15 @@ use crate::{
     AdminRevokeFinitePrivateApiKeyInput, AdminRotateFinitePrivateApiKeyInput,
     AdminRuntimeControlInput, AdminRuntimeOverview, AdminRuntimeUpgradeInput,
     AgentCreationConfiguration, AgentCreationLease, AgentCreationRequest, AgentRuntime,
-    BillingOverview, BrainAccountAgentRoster, BrainAccountRosterLookup, BrainAgentAccount,
-    BrainAgentDepartureFactsPage, CancelAgentCreationRequestInput,
-    CompleteAgentCreationRequestInput, CompleteRuntimeControlRequestInput, CoreError,
-    CustomerBillingAccount, FailAgentCreationRequestInput, FailRuntimeControlRequestInput,
-    FinitePrivateAdminAuditEvent, FinitePrivateAdminState, FinitePrivateApiKey,
-    FinitePrivateDailyResetResult, FinitePrivateGrant, FinitePrivateSettlementKind,
-    FinitePrivateUsageDecision, FinitePrivateUsageStatus, HostingTier,
-    IssueFinitePrivateApiKeyInput, LeaseAgentCreationRequestInput, LeaseRuntimeControlRequestInput,
-    LinkStripeCustomerInput, LinkStripeCustomerRequest, LinkVerifiedUserInput, Project,
-    ProviderOperationEnvelope, ProviderOperationTransition, ProviderRuntimeHandleEnvelope,
+    BillingOverview, CancelAgentCreationRequestInput, CompleteAgentCreationRequestInput,
+    CompleteRuntimeControlRequestInput, CoreError, CustomerBillingAccount,
+    FailAgentCreationRequestInput, FailRuntimeControlRequestInput, FinitePrivateAdminAuditEvent,
+    FinitePrivateAdminState, FinitePrivateApiKey, FinitePrivateDailyResetResult,
+    FinitePrivateGrant, FinitePrivateSettlementKind, FinitePrivateUsageDecision,
+    FinitePrivateUsageStatus, HostingTier, IssueFinitePrivateApiKeyInput,
+    LeaseAgentCreationRequestInput, LeaseRuntimeControlRequestInput, LinkStripeCustomerInput,
+    LinkStripeCustomerRequest, LinkVerifiedUserInput, Project, ProviderOperationEnvelope,
+    ProviderOperationTransition, ProviderRuntimeHandleEnvelope,
     ProvisionFinitePrivateRuntimeKeyInput, ProvisionFinitePrivateRuntimeKeyResult,
     RecordProviderOperationTransitionInput, RecordRuntimeHealthReportInput,
     RegisterAgentCreationRuntimeInput, RenewRuntimeControlRequestInput, RequestAgentCreationInput,
@@ -26,11 +25,13 @@ use crate::{
     RequestRuntimeRestartInput, ReserveFinitePrivateUsageInput, ResetFinitePrivateUsageWindowInput,
     RetryRuntimeControlRequestInput, RevokeFinitePrivateApiKeyInput, RevokeFinitePrivateGrantInput,
     RotateFinitePrivateApiKeyInput, RunnerLeaseCapacity, RuntimeArtifact, RuntimeArtifactKind,
-    RuntimeCapabilitiesEnvelope, RuntimeCapabilitiesV1, RuntimeHealthReportAck,
-    RuntimeHealthReportRequest, RuntimePlacement, RuntimeSummaryStatus,
+    RuntimeCapabilitiesEnvelope, RuntimeCapabilitiesV1, RuntimeHealthProjection,
+    RuntimeHealthReportAck, RuntimeHealthReportRequest, RuntimeHealthStatus,
+    RuntimeHealthTargetList, RuntimePlacement, RuntimeSummaryStatus,
     SettleFinitePrivateReservationInput, SettleFinitePrivateReservationResult,
     SyncStripeSubscriptionInput, SyncStripeSubscriptionRequest, UpsertRuntimeArtifactInput,
-    normalize_owner_email, normalize_runtime_contact_endpoint, normalize_source_host_id,
+    derive_runtime_summary_status, normalize_owner_email, normalize_runtime_contact_endpoint,
+    normalize_source_host_id,
 };
 use axum::extract::{Path, State};
 use axum::http::{HeaderMap, HeaderValue, StatusCode};
@@ -88,6 +89,12 @@ pub struct CreateAgentRequest {
     pub hosting_tier: Option<crate::HostingTier>,
     #[serde(default)]
     pub profile_picture_url: Option<String>,
+    /// Owner hosted-chat account id (64 hex), pre-minted by the dashboard via
+    /// the hosted-device app state so the lease-time runtime spec can carry
+    /// `FINITECHAT_OWNER_NPUBS`. Missing is accepted (legacy allow-all chat
+    /// admission); malformed is rejected with 400.
+    #[serde(default)]
+    pub owner_chat_account_id: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -153,6 +160,10 @@ pub struct CompleteAgentCreationRequest {
     pub active_inference_profile: Option<String>,
     pub hermes_available: Option<bool>,
     pub published_app_urls: Vec<String>,
+    /// Additive: the launch-verified Agent Principal, seeding the
+    /// standing-health attribution pin. N-1 runners omit it.
+    #[serde(default)]
+    pub agent_npub: Option<String>,
     pub now: Option<String>,
 }
 
@@ -283,27 +294,6 @@ impl From<crate::RuntimeControlRequest> for RuntimeControlRequestView {
 #[serde(rename_all = "camelCase")]
 pub struct CancelAgentCreationRequest {
     pub now: Option<String>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct BrainAgentAccountRequest {
-    pub managed_agent_email: String,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct BrainAccountAgentRosterRequest {
-    pub workos_user_id: Option<String>,
-    pub email: Option<String>,
-    pub managed_agent_email: Option<String>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct BrainDepartureFactsRequest {
-    pub after_revision: Option<i64>,
-    pub limit: Option<u32>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -490,12 +480,52 @@ impl From<&RuntimeCapabilitiesEnvelope> for PublicRuntimeCapabilities {
     }
 }
 
+/// The runtime's standing readiness as projected by Core at read time. The
+/// raw report fields ride along as evidence; `status` is the derived fact.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct PublicRuntimeHealth {
+    pub status: RuntimeHealthStatus,
+    #[serde(default)]
+    pub reason: Option<String>,
+    /// When Core recorded the latest report (freshness is measured from this).
+    #[serde(default)]
+    pub reported_at: Option<String>,
+    /// When the runner last read the runtime (runner clock; evidence only).
+    #[serde(default)]
+    pub observed_at: Option<String>,
+    /// The reporter's cadence; staleness is declared after three intervals.
+    #[serde(default)]
+    pub report_interval_seconds: Option<i64>,
+}
+
+impl From<&RuntimeHealthProjection> for PublicRuntimeHealth {
+    fn from(health: &RuntimeHealthProjection) -> Self {
+        Self {
+            status: health.status,
+            reason: health.reason.clone(),
+            reported_at: health.reported_at.clone(),
+            observed_at: health.observed_at.clone(),
+            report_interval_seconds: health.report_interval_seconds,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct PublicAgentRuntime {
     pub id: String,
     pub project_id: String,
     pub contact_endpoint: Option<String>,
+    /// Derived at read time from `runtime_health` freshness: `online` only
+    /// while a fresh report says ready, `stale` once reports lapse, `unknown`
+    /// until the runtime has been reported on. Never a frozen lifecycle
+    /// outcome. Older readers keep consuming this field unchanged.
     pub runtime_status: RuntimeSummaryStatus,
+    /// The raw lifecycle-latched fact (last control outcome), for operators.
+    #[serde(default = "PublicAgentRuntime::default_lifecycle_status")]
+    pub lifecycle_status: RuntimeSummaryStatus,
+    /// Additive: the standing readiness `runtime_status` derives from.
+    #[serde(default)]
+    pub runtime_health: Option<PublicRuntimeHealth>,
     pub hermes_available: Option<bool>,
     /// Populated only from Core's persisted, versioned Runtime capability
     /// record. N-1 rows remain absent and Dashboard fails closed.
@@ -505,18 +535,27 @@ pub struct PublicAgentRuntime {
     pub updated_at: String,
 }
 
-impl From<AgentRuntime> for PublicAgentRuntime {
-    fn from(runtime: AgentRuntime) -> Self {
+impl PublicAgentRuntime {
+    fn default_lifecycle_status() -> RuntimeSummaryStatus {
+        RuntimeSummaryStatus::Unknown
+    }
+
+    /// Project the user-facing runtime from the stored row plus its
+    /// read-time health projection. `runtime_status` is derived here, once.
+    pub fn project(runtime: AgentRuntime, health: &RuntimeHealthProjection) -> Self {
         let contact_endpoint = public_runtime_contact_endpoint(&runtime);
         let runtime_capabilities = runtime
             .runtime_capabilities
             .as_ref()
             .map(PublicRuntimeCapabilities::from);
+        let lifecycle_status = runtime.host_facts.runtime_status;
         Self {
             id: runtime.id,
             project_id: runtime.project_id,
             contact_endpoint,
-            runtime_status: runtime.host_facts.runtime_status,
+            runtime_status: derive_runtime_summary_status(lifecycle_status, health),
+            lifecycle_status,
+            runtime_health: Some(PublicRuntimeHealth::from(health)),
             hermes_available: runtime.host_facts.hermes_available,
             runtime_capabilities,
             created_at: runtime.created_at,
@@ -559,9 +598,14 @@ impl From<VisibleProject> for PublicVisibleProject {
                     created_at: request.created_at,
                     updated_at: request.updated_at,
                 });
+        let runtime_health = project
+            .runtime_health
+            .unwrap_or_else(RuntimeHealthProjection::unreported);
         Self {
             project: project.project.into(),
-            runtime: project.runtime.map(PublicAgentRuntime::from),
+            runtime: project
+                .runtime
+                .map(|runtime| PublicAgentRuntime::project(runtime, &runtime_health)),
             active_runtime_control,
         }
     }
@@ -716,24 +760,16 @@ fn router_with_runtime_upgrades_and_agent_creation_placement(
     Router::new()
         .route("/healthz", get(healthz))
         .route(
-            "/api/core/v1/brain/agent-account",
-            post(brain_agent_account),
-        )
-        .route(
-            "/api/core/v1/brain/account-agent-roster",
-            post(brain_account_agent_roster),
-        )
-        .route(
-            "/api/core/v1/brain/departure-facts",
-            post(brain_agent_departure_facts),
-        )
-        .route(
             "/api/core/v1/runtime-artifacts/{artifact_id}",
             get(runtime_artifact).put(upsert_runtime_artifact),
         )
         .route(
             "/api/core/v1/runtime-health-reports",
             post(report_runtime_health),
+        )
+        .route(
+            "/api/core/v1/runtime-health-targets",
+            get(runtime_health_targets),
         )
         .route(
             "/api/core/v1/finite-private/grants",
@@ -938,65 +974,6 @@ async fn healthz() -> Json<serde_json::Value> {
     Json(json!({ "ok": true }))
 }
 
-async fn brain_agent_account(
-    State(state): State<CoreApiState>,
-    headers: HeaderMap,
-    Json(request): Json<BrainAgentAccountRequest>,
-) -> Result<Json<BrainAgentAccount>, ApiError> {
-    require_service_auth(&state, &headers)?;
-    let email = normalize_owner_email(Some(&request.managed_agent_email))
-        .ok_or_else(|| ApiError::bad_request("invalid Managed Agent Email"))?;
-    let binding = state
-        .store
-        .brain_agent_account(&email)
-        .await?
-        .ok_or_else(|| ApiError::not_found("active account-agent association not found"))?;
-    Ok(Json(binding))
-}
-
-async fn brain_account_agent_roster(
-    State(state): State<CoreApiState>,
-    headers: HeaderMap,
-    Json(request): Json<BrainAccountAgentRosterRequest>,
-) -> Result<Json<BrainAccountAgentRoster>, ApiError> {
-    require_service_auth(&state, &headers)?;
-    let lookup = BrainAccountRosterLookup {
-        workos_user_id: request.workos_user_id,
-        email: request.email,
-        managed_agent_email: request.managed_agent_email,
-    };
-    if lookup.is_empty() {
-        return Err(ApiError::bad_request(
-            "one of workosUserId, email, or managedAgentEmail is required",
-        ));
-    }
-    let roster = state
-        .store
-        .brain_account_agent_roster(&lookup)
-        .await?
-        .ok_or_else(|| ApiError::not_found("account not found"))?;
-    Ok(Json(roster))
-}
-
-async fn brain_agent_departure_facts(
-    State(state): State<CoreApiState>,
-    headers: HeaderMap,
-    Json(request): Json<BrainDepartureFactsRequest>,
-) -> Result<Json<BrainAgentDepartureFactsPage>, ApiError> {
-    require_service_auth(&state, &headers)?;
-    let after_revision = request.after_revision.unwrap_or(0);
-    if after_revision < 0 {
-        return Err(ApiError::bad_request("afterRevision must be non-negative"));
-    }
-    let limit = i64::from(request.limit.unwrap_or(100));
-    Ok(Json(
-        state
-            .store
-            .brain_agent_departure_facts(after_revision, limit)
-            .await?,
-    ))
-}
-
 async fn runtime_artifact(
     State(state): State<CoreApiState>,
     headers: HeaderMap,
@@ -1033,6 +1010,22 @@ async fn report_runtime_health(
                 report_interval_seconds: input.report_interval_seconds,
                 now: input.now,
             })
+            .await?,
+    ))
+}
+
+/// The runner's startup registry reconcile: every runtime this runner should
+/// be reporting on. Host-scoped by the credential, like reports, so a runner
+/// only ever learns about (and polls) its own host's runtimes.
+async fn runtime_health_targets(
+    State(state): State<CoreApiState>,
+    headers: HeaderMap,
+) -> Result<Json<RuntimeHealthTargetList>, ApiError> {
+    let credential = require_runner_auth(&state, &headers)?;
+    Ok(Json(
+        state
+            .store
+            .runtime_health_targets_for_host(&credential.source_host_id)
             .await?,
     ))
 }
@@ -1756,6 +1749,7 @@ async fn create_agent_request(
                         input.hosting_tier.unwrap_or(crate::HostingTier::Standard),
                     ),
                     profile_picture_url: input.profile_picture_url,
+                    owner_chat_account_id: input.owner_chat_account_id,
                 },
             )
             .await?,
@@ -1903,19 +1897,18 @@ async fn lease_runtime_control_request(
     let runner_capacity = authorize_runner_capacity(&credential, input.runner_capacity)?;
     let source_host_id =
         authorize_runner_source_host(&credential, input.source_host_id.as_deref())?;
-    Ok(Json(
-        state
-            .store
-            .lease_runtime_control_request(LeaseRuntimeControlRequestInput {
-                runner_id: input.runner_id,
-                lease_token: input.lease_token,
-                lease_seconds: input.lease_seconds,
-                source_host_id: Some(source_host_id),
-                runner_capacity: Some(runner_capacity),
-                now: input.now,
-            })
-            .await?,
-    ))
+    let lease = state
+        .store
+        .lease_runtime_control_request(LeaseRuntimeControlRequestInput {
+            runner_id: input.runner_id,
+            lease_token: input.lease_token,
+            lease_seconds: input.lease_seconds,
+            source_host_id: Some(source_host_id),
+            runner_capacity: Some(runner_capacity),
+            now: input.now,
+        })
+        .await?;
+    Ok(Json(lease))
 }
 
 async fn complete_runtime_control_request(
@@ -2049,6 +2042,7 @@ async fn complete_agent_creation_request(
                 active_inference_profile: input.active_inference_profile,
                 hermes_available: input.hermes_available,
                 published_app_urls: input.published_app_urls,
+                agent_npub: input.agent_npub,
                 now: input.now,
             })
             .await?,
@@ -2458,14 +2452,6 @@ impl ApiError {
         }
     }
 
-    fn bad_request(message: impl Into<String>) -> Self {
-        Self {
-            status: StatusCode::BAD_REQUEST,
-            message: message.into(),
-            correlation_id: None,
-        }
-    }
-
     fn service_unavailable(message: impl Into<String>) -> Self {
         Self {
             status: StatusCode::SERVICE_UNAVAILABLE,
@@ -2545,6 +2531,7 @@ impl From<CoreError> for ApiError {
             | CoreError::MissingAgentCreationRunnerId
             | CoreError::MissingAgentCreationLeaseToken
             | CoreError::InvalidAgentCreationLeaseDuration
+            | CoreError::InvalidOwnerChatAccountId
             | CoreError::MissingSourceMachineId
             | CoreError::MissingRuntimeArtifactId
             | CoreError::MissingRuntimeArtifactReference
@@ -2598,6 +2585,7 @@ impl From<CoreError> for ApiError {
             | CoreError::RuntimeUpgradeStateSchemaIncompatible
             | CoreError::RuntimeUpgradeTargetConflict
             | CoreError::RuntimeControlOperationConflict
+            | CoreError::RuntimeHealthReportPrincipalMismatch
             | CoreError::RuntimeUpgradeCompletionMismatch
             | CoreError::RuntimeRetirementSnapshotMismatch
             | CoreError::RuntimeRetirementSnapshotConflict
@@ -2980,19 +2968,62 @@ mod tests {
             Some("https://legacy.example.test/contact")
         );
 
-        let public_legacy = PublicAgentRuntime::from(legacy_runtime.clone());
+        let unreported = RuntimeHealthProjection::unreported();
+        let public_legacy = PublicAgentRuntime::project(legacy_runtime.clone(), &unreported);
         assert!(public_legacy.runtime_capabilities.is_none());
-        assert!(
-            serde_json::to_value(public_legacy)
-                .unwrap()
-                .get("runtime_capabilities")
-                .is_none()
+        // The lifecycle latch says online, but nothing has reported: the
+        // derived status is the named unknown state and the latch stays
+        // visible under its own name, with the health evidence alongside.
+        assert_eq!(public_legacy.runtime_status, RuntimeSummaryStatus::Unknown);
+        assert_eq!(public_legacy.lifecycle_status, RuntimeSummaryStatus::Online);
+        let public_legacy_json = serde_json::to_value(&public_legacy).unwrap();
+        assert!(public_legacy_json.get("runtime_capabilities").is_none());
+        assert_eq!(public_legacy_json["runtime_status"], "unknown");
+        assert_eq!(public_legacy_json["lifecycle_status"], "online");
+        assert_eq!(public_legacy_json["runtime_health"]["status"], "unknown");
+        // Older readers parse the new document (the added fields are
+        // additive), and this reader parses a pre-health document.
+        let pre_health: PublicAgentRuntime = serde_json::from_value(serde_json::json!({
+            "id": "runtime-public-contact",
+            "project_id": "project-public-contact",
+            "contact_endpoint": null,
+            "runtime_status": "online",
+            "hermes_available": true,
+            "created_at": "2026-07-11T12:00:00Z",
+            "updated_at": "2026-07-11T12:00:00Z"
+        }))
+        .unwrap();
+        assert_eq!(pre_health.runtime_status, RuntimeSummaryStatus::Online);
+        assert_eq!(pre_health.runtime_health, None);
+
+        let fresh_ready = RuntimeHealthProjection {
+            status: RuntimeHealthStatus::Ready,
+            reason: None,
+            reported_at: Some("2026-07-11T12:00:00Z".to_string()),
+            observed_at: Some("2026-07-11T11:59:59Z".to_string()),
+            agent_npub: None,
+            report_interval_seconds: Some(60),
+        };
+        let public_reported = PublicAgentRuntime::project(legacy_runtime.clone(), &fresh_ready);
+        assert_eq!(public_reported.runtime_status, RuntimeSummaryStatus::Online);
+        assert_eq!(
+            public_reported.runtime_health,
+            Some(PublicRuntimeHealth {
+                status: RuntimeHealthStatus::Ready,
+                reason: None,
+                reported_at: Some("2026-07-11T12:00:00Z".to_string()),
+                observed_at: Some("2026-07-11T11:59:59Z".to_string()),
+                report_interval_seconds: Some(60),
+            })
         );
 
-        let public_current = PublicAgentRuntime::from(AgentRuntime {
-            runtime_capabilities: Some(legacy_kata_runtime_capabilities()),
-            ..legacy_runtime
-        });
+        let public_current = PublicAgentRuntime::project(
+            AgentRuntime {
+                runtime_capabilities: Some(legacy_kata_runtime_capabilities()),
+                ..legacy_runtime
+            },
+            &unreported,
+        );
         assert_eq!(
             public_current.runtime_capabilities,
             Some(PublicRuntimeCapabilities {
@@ -3127,6 +3158,7 @@ mod tests {
                     active_inference_profile: None,
                     hermes_available: Some(true),
                     published_app_urls: Vec::new(),
+                    agent_npub: None,
                     now: None,
                 })
                 .await
@@ -3186,6 +3218,71 @@ mod tests {
             .await;
             assert_eq!(status, StatusCode::OK);
             assert_eq!(ack["agentRuntimeId"], runtime_id);
+
+            // A report presenting another principal than the one on record
+            // (pinned by the first report above) is refused, not recorded.
+            let (status, _) = send_json(
+                &app,
+                "POST",
+                "/api/core/v1/runtime-health-reports",
+                &runner_b(),
+                Some(serde_json::json!({
+                    "agentRuntimeId": runtime_id,
+                    "ready": true,
+                    "observedAt": "2026-08-24T12:00:30Z",
+                    "agentNpub": format!("npub1{}", "z".repeat(58)),
+                    "reportIntervalSeconds": 60
+                })),
+            )
+            .await;
+            assert_eq!(status, StatusCode::CONFLICT);
+
+            // The poll-target listing is runner-authed and scoped to the
+            // credential's host the same way.
+            let (status, _) = send_json(
+                &app,
+                "GET",
+                "/api/core/v1/runtime-health-targets",
+                &[],
+                None,
+            )
+            .await;
+            assert_eq!(status, StatusCode::UNAUTHORIZED);
+            let (status, targets) = send_json(
+                &app,
+                "GET",
+                "/api/core/v1/runtime-health-targets",
+                &[(
+                    "authorization".to_string(),
+                    "Bearer runner-health-a-token".to_string(),
+                )],
+                None,
+            )
+            .await;
+            assert_eq!(status, StatusCode::OK);
+            assert_eq!(targets["sourceHostId"], "health-host-a");
+            assert_eq!(targets["targets"], serde_json::json!([]));
+            let (status, targets) = send_json(
+                &app,
+                "GET",
+                "/api/core/v1/runtime-health-targets",
+                &runner_b(),
+                None,
+            )
+            .await;
+            assert_eq!(status, StatusCode::OK);
+            assert_eq!(targets["sourceHostId"], "health-host-b");
+            let target = targets["targets"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|target| target["agentRuntimeId"] == runtime_id)
+                .expect("the reporting host's runtime is listed");
+            assert_eq!(target["sourceMachineId"], "health-api-agent-001");
+            assert_eq!(target["contactEndpoint"], "http://127.0.0.1:41002/contact");
+            assert_eq!(target["agentNpub"], format!("npub1{}", "q".repeat(58)));
+            assert_eq!(target["lifecycleStatus"], "online");
+            assert_eq!(target["reportIntervalSeconds"], 60);
 
             // Out-of-shape bodies fail closed.
             let (status, _) = send_json(
@@ -3251,263 +3348,6 @@ mod tests {
                 .unwrap();
             assert_eq!(overview["runtime_health"]["status"], "not_ready");
             assert_eq!(overview["runtime_health"]["reason"], "unreachable");
-        })
-        .await;
-    }
-
-    #[tokio::test]
-    async fn core_api_brain_roster_and_departure_facts_are_service_authenticated() {
-        with_isolated_postgres(|db| async move {
-            let store = db.store.clone();
-            let launch_code = issue_test_launch_code(&store).await;
-            let app = router(store, scoped_test_auth());
-            let service_headers =
-                || vec![("authorization".to_string(), "Bearer core-token".to_string())];
-
-            // Both Brain enrichment endpoints require the service credential.
-            let (status, _) = send_json(
-                &app,
-                "POST",
-                "/api/core/v1/brain/account-agent-roster",
-                &[],
-                Some(serde_json::json!({"workosUserId": "user_workos_new"})),
-            )
-            .await;
-            assert_eq!(status, StatusCode::UNAUTHORIZED);
-            let (status, _) = send_json(
-                &app,
-                "POST",
-                "/api/core/v1/brain/departure-facts",
-                &[],
-                Some(serde_json::json!({})),
-            )
-            .await;
-            assert_eq!(status, StatusCode::UNAUTHORIZED);
-
-            // The roster lookup needs one account handle; unknown accounts miss.
-            let (status, _) = send_json(
-                &app,
-                "POST",
-                "/api/core/v1/brain/account-agent-roster",
-                &service_headers(),
-                Some(serde_json::json!({})),
-            )
-            .await;
-            assert_eq!(status, StatusCode::BAD_REQUEST);
-            let (status, _) = send_json(
-                &app,
-                "POST",
-                "/api/core/v1/brain/account-agent-roster",
-                &service_headers(),
-                Some(serde_json::json!({"workosUserId": "user_workos_missing"})),
-            )
-            .await;
-            assert_eq!(status, StatusCode::NOT_FOUND);
-
-            // The departure-facts log starts empty; cursors must be non-negative.
-            let (status, body) = send_json(
-                &app,
-                "POST",
-                "/api/core/v1/brain/departure-facts",
-                &service_headers(),
-                Some(serde_json::json!({})),
-            )
-            .await;
-            assert_eq!(status, StatusCode::OK);
-            assert_eq!(body["facts"], serde_json::json!([]));
-            assert_eq!(body["maxRevision"], 0);
-            let (status, _) = send_json(
-                &app,
-                "POST",
-                "/api/core/v1/brain/departure-facts",
-                &service_headers(),
-                Some(serde_json::json!({"afterRevision": -1})),
-            )
-            .await;
-            assert_eq!(status, StatusCode::BAD_REQUEST);
-
-            let response = app
-                .clone()
-                .oneshot(
-                    Request::builder()
-                        .method("PUT")
-                        .uri("/api/core/v1/runtime-artifacts/artifact-v1")
-                        .header("authorization", "Bearer core-token")
-                        .header("content-type", "application/json")
-                        .body(Body::from(
-                            serde_json::json!({
-                                "kind": "oci_image",
-                                "reference": format!(
-                                    "ghcr.io/finitecomputer/agent-runtime:v1@sha256:{}",
-                                    "a".repeat(64)
-                                ),
-                                "versionLabel": "v1",
-                                "stateSchemaVersion": "state-v1",
-                                "baseImage": "python:3.11-trixie",
-                                "promoted": true,
-                                "now": "2026-05-25T12:00:00Z"
-                            })
-                            .to_string(),
-                        ))
-                        .unwrap(),
-                )
-                .await
-                .unwrap();
-            assert_eq!(response.status(), StatusCode::OK);
-
-            let response = app
-                .clone()
-                .oneshot(
-                    Request::builder()
-                        .method("POST")
-                        .uri("/api/core/v1/me/agent-creation-requests")
-                        .header(
-                            "authorization",
-                            format!(
-                                "Bearer {}",
-                                access_token_with_subject(
-                                    "user_workos_new",
-                                    "new@finite.vip",
-                                    true,
-                                    None,
-                                )
-                            ),
-                        )
-                        .header("content-type", "application/json")
-                        .body(Body::from(
-                            serde_json::json!({
-                                "displayName": "Roster Agent",
-                                "launchCode": launch_code,
-                                "idempotencyKey": "roster-submit-1"
-                            })
-                            .to_string(),
-                        ))
-                        .unwrap(),
-                )
-                .await
-                .unwrap();
-            assert_eq!(response.status(), StatusCode::OK);
-            let body = axum::body::to_bytes(response.into_body(), usize::MAX)
-                .await
-                .unwrap();
-            let created: serde_json::Value = serde_json::from_slice(&body).unwrap();
-            let agent_email = created["project"]["agent_email"]
-                .as_str()
-                .expect("hosted agent receives a canonical email")
-                .to_string();
-
-            // A requested-but-never-completed creation is not on the roster yet.
-            let (status, body) = send_json(
-                &app,
-                "POST",
-                "/api/core/v1/brain/account-agent-roster",
-                &service_headers(),
-                Some(serde_json::json!({"managedAgentEmail": agent_email})),
-            )
-            .await;
-            assert_eq!(status, StatusCode::OK);
-            assert_eq!(body["agents"], serde_json::json!([]));
-            assert_eq!(body["rosterRevision"], 0);
-
-            let response = app
-                .clone()
-                .oneshot(
-                    Request::builder()
-                        .method("POST")
-                        .uri("/api/core/v1/agent-creation-requests/lease")
-                        .header("authorization", runner_authorization())
-                        .header("content-type", "application/json")
-                        .body(Body::from(
-                            serde_json::json!({
-                                "runnerId": "runner-oslo-1",
-                                "leaseToken": "lease-token-1",
-                                "leaseSeconds": 300,
-                                "runnerCapacity": runner_capacity_json(RunnerClass::Kata)
-                            })
-                            .to_string(),
-                        ))
-                        .unwrap(),
-                )
-                .await
-                .unwrap();
-            assert_eq!(response.status(), StatusCode::OK);
-            let body = axum::body::to_bytes(response.into_body(), usize::MAX)
-                .await
-                .unwrap();
-            let lease: serde_json::Value = serde_json::from_slice(&body).unwrap();
-            let request_id = lease["request"]["id"].as_str().unwrap().to_string();
-
-            let response = app
-                .clone()
-                .oneshot(
-                    Request::builder()
-                        .method("POST")
-                        .uri(format!(
-                            "/api/core/v1/agent-creation-requests/{request_id}/complete"
-                        ))
-                        .header("authorization", runner_authorization())
-                        .header("content-type", "application/json")
-                        .body(Body::from(
-                            serde_json::json!({
-                                "runnerId": "runner-oslo-1",
-                                "leaseToken": "lease-token-1",
-                                "sourceHostId": "oslo-host-1",
-                                "sourceMachineId": "oslo-agent-roster",
-                                "runtimeArtifactId": "artifact-v1",
-                                "runtimeHost": "oslo-host-1",
-                                "runtimeStatus": "online",
-                                "activeInferenceProfile": "finite-private",
-                                "hermesAvailable": true,
-                                "publishedAppUrls": [],
-                                "runtimeCapabilities": runtime_capabilities_json(false),
-                                "now": "2026-05-25T13:01:00Z"
-                            })
-                            .to_string(),
-                        ))
-                        .unwrap(),
-                )
-                .await
-                .unwrap();
-            assert_eq!(response.status(), StatusCode::OK);
-
-            // The completed agent joins the roster and bumps the account revision.
-            let (status, body) = send_json(
-                &app,
-                "POST",
-                "/api/core/v1/brain/account-agent-roster",
-                &service_headers(),
-                Some(serde_json::json!({"managedAgentEmail": agent_email})),
-            )
-            .await;
-            assert_eq!(status, StatusCode::OK);
-            assert_eq!(body["workosUserId"], "user_workos_new");
-            assert_eq!(body["humanMailbox"], "new@finite.vip");
-            assert_eq!(body["rosterRevision"], 1);
-            assert_eq!(body["departed"], serde_json::json!([]));
-            let agents = body["agents"].as_array().unwrap();
-            assert_eq!(agents.len(), 1);
-            assert_eq!(agents[0]["managedAgentEmail"], agent_email);
-            assert_eq!(agents[0]["status"], "active");
-            assert_eq!(agents[0]["placementRunnerClass"], "kata");
-            assert!(agents[0].get("agentNpub").is_none());
-
-            // The same account resolves by WorkOS user id or verified mailbox.
-            for lookup in [
-                serde_json::json!({"workosUserId": "user_workos_new"}),
-                serde_json::json!({"email": "New@Finite.VIP"}),
-            ] {
-                let (status, body) = send_json(
-                    &app,
-                    "POST",
-                    "/api/core/v1/brain/account-agent-roster",
-                    &service_headers(),
-                    Some(lookup),
-                )
-                .await;
-                assert_eq!(status, StatusCode::OK);
-                assert_eq!(body["agents"].as_array().unwrap().len(), 1);
-                assert_eq!(body["rosterRevision"], 1);
-            }
         })
         .await;
     }
@@ -4143,6 +3983,121 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn core_api_owner_chat_account_id_validation() {
+        with_isolated_postgres(|db| async move {
+            let store = db.store.clone();
+            let app = router(store, test_auth());
+            let submit = |owner_chat_account_id: serde_json::Value, key: &str| {
+                let app = app.clone();
+                let store = db.store.clone();
+                let key = key.to_string();
+                async move {
+                    let launch_code = issue_test_launch_code(&store).await;
+                    app.oneshot(
+                        Request::builder()
+                            .method("POST")
+                            .uri("/api/core/v1/me/agent-creation-requests")
+                            .header(
+                                "authorization",
+                                format!(
+                                    "Bearer {}",
+                                    access_token_with_subject(
+                                        "user_workos_owner_npub",
+                                        "owner-npub@finite.vip",
+                                        true,
+                                        None,
+                                    )
+                                ),
+                            )
+                            .header("content-type", "application/json")
+                            .body(Body::from(
+                                serde_json::json!({
+                                    "displayName": "Owner Npub Agent",
+                                    "launchCode": launch_code,
+                                    "idempotencyKey": key,
+                                    "ownerChatAccountId": owner_chat_account_id,
+                                })
+                                .to_string(),
+                            ))
+                            .unwrap(),
+                    )
+                    .await
+                    .unwrap()
+                }
+            };
+
+            // Malformed values are rejected with 400 before any durable state.
+            let response = submit(serde_json::json!("npub1qqqqqq"), "owner-npub-bad").await;
+            assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+
+            // Mixed-version contract the dashboard's fail-open retry keys on:
+            // a field the receiving Core does not know (a new dashboard
+            // posting `ownerChatAccountId` to a pre-owner-npub Core hits the
+            // same path) is a 422 JSON data rejection, never a 400.
+            let response = app
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .method("POST")
+                        .uri("/api/core/v1/me/agent-creation-requests")
+                        .header(
+                            "authorization",
+                            format!(
+                                "Bearer {}",
+                                access_token_with_subject(
+                                    "user_workos_owner_npub",
+                                    "owner-npub@finite.vip",
+                                    true,
+                                    None,
+                                )
+                            ),
+                        )
+                        .header("content-type", "application/json")
+                        .body(Body::from(
+                            serde_json::json!({
+                                "displayName": "Unknown Field",
+                                "launchCode": "finite_test",
+                                "idempotencyKey": "owner-npub-unknown-field",
+                                "futureUnknownField": "x",
+                            })
+                            .to_string(),
+                        ))
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::UNPROCESSABLE_ENTITY);
+
+            // Missing the field keeps the legacy allow-all admission path.
+            let response = submit(serde_json::Value::Null, "owner-npub-absent").await;
+            assert_eq!(response.status(), StatusCode::OK);
+            let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+                .await
+                .unwrap();
+            let result: RequestAgentCreationResult = serde_json::from_slice(&body).unwrap();
+            assert_eq!(result.request.owner_chat_account_id, None);
+
+            // A 64-hex account id is accepted, normalized, and persisted.
+            let owner_account_id = "b".repeat(64);
+            let response = submit(
+                serde_json::json!(owner_account_id.to_uppercase()),
+                "owner-npub-good",
+            )
+            .await;
+            assert_eq!(response.status(), StatusCode::OK);
+            let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+                .await
+                .unwrap();
+            let result: RequestAgentCreationResult = serde_json::from_slice(&body).unwrap();
+            assert_eq!(
+                result.request.owner_chat_account_id.as_deref(),
+                Some(owner_account_id.as_str())
+            );
+        })
+        .await;
+    }
+
+    #[tokio::test]
     async fn core_api_creates_self_serve_agent_request_with_launch_code() {
         with_isolated_postgres(|db| async move {
             let store = db.store.clone();
@@ -4156,6 +4111,7 @@ mod tests {
                 profile_picture_url: Some(
                     "https://chat.finite.computer/v1/blobs/profile".to_string(),
                 ),
+                owner_chat_account_id: None,
             })
             .unwrap();
 
@@ -4196,30 +4152,6 @@ mod tests {
                 .expect("new hosted agents receive a canonical email");
             assert!(agent_email.starts_with("oslo-agent-"));
             assert!(agent_email.ends_with("@finite.vip"));
-
-            let response = app
-                .clone()
-                .oneshot(
-                    Request::builder()
-                        .method("POST")
-                        .uri("/api/core/v1/brain/agent-account")
-                        .header("authorization", "Bearer core-token")
-                        .header("content-type", "application/json")
-                        .body(Body::from(
-                            serde_json::json!({ "managedAgentEmail": agent_email }).to_string(),
-                        ))
-                        .unwrap(),
-                )
-                .await
-                .unwrap();
-            assert_eq!(response.status(), StatusCode::OK);
-            let body = axum::body::to_bytes(response.into_body(), usize::MAX)
-                .await
-                .unwrap();
-            let binding: serde_json::Value = serde_json::from_slice(&body).unwrap();
-            assert_eq!(binding["workosUserId"], "user_workos_new");
-            assert_eq!(binding["managedAgentEmail"], agent_email);
-            assert_eq!(binding["status"], "active");
 
             assert!(result.project.import_candidate_id.is_none());
             assert!(result.request.agent_runtime_id.is_none());
@@ -4309,6 +4241,7 @@ mod tests {
                 idempotency_key: "browser-submit-2".to_string(),
                 hosting_tier: None,
                 profile_picture_url: None,
+                owner_chat_account_id: None,
             })
             .unwrap();
             let response = app
@@ -4473,6 +4406,7 @@ mod tests {
                 idempotency_key: "browser-submit-1".to_string(),
                 hosting_tier: None,
                 profile_picture_url: None,
+                owner_chat_account_id: None,
             })
             .unwrap();
             let response = app
@@ -4745,9 +4679,25 @@ mod tests {
             );
             let projects: Vec<PublicVisibleProject> = serde_json::from_slice(&body).unwrap();
             assert_eq!(projects.len(), 1);
+            // Launched but never reported on: the derived status is unknown
+            // while the lifecycle latch stays visible under its own name.
             assert_eq!(
                 projects[0].runtime.as_ref().unwrap().runtime_status,
+                RuntimeSummaryStatus::Unknown
+            );
+            assert_eq!(
+                projects[0].runtime.as_ref().unwrap().lifecycle_status,
                 RuntimeSummaryStatus::Online
+            );
+            assert_eq!(
+                projects[0]
+                    .runtime
+                    .as_ref()
+                    .unwrap()
+                    .runtime_health
+                    .as_ref()
+                    .map(|health| health.status),
+                Some(RuntimeHealthStatus::Unknown)
             );
             assert_eq!(
                 projects[0]
@@ -4988,6 +4938,7 @@ mod tests {
                 idempotency_key: "browser-submit-1".to_string(),
                 hosting_tier: None,
                 profile_picture_url: None,
+                owner_chat_account_id: None,
             })
             .unwrap();
             let response = app
@@ -5506,17 +5457,16 @@ mod tests {
                 }
             }
 
-            // A service-token-only route: auth is checked before the empty
-            // email is rejected, so the wrong credential sees 401 and the
-            // right one sees the post-auth validation error instead.
-            let brain_probe = serde_json::json!({ "managedAgentEmail": "" });
+            // A service-token-only route: auth is checked before the missing
+            // creation request is rejected, so the wrong credential sees 401
+            // and the right one sees the post-auth lookup error instead.
             for headers in [&runner, &usage] {
                 let (status, _) = send_json(
                     &app,
                     "POST",
-                    "/api/core/v1/brain/agent-account",
+                    "/api/core/v1/agent-creation-requests/missing/cancel",
                     headers,
-                    Some(brain_probe.clone()),
+                    Some(serde_json::json!({})),
                 )
                 .await;
                 assert_eq!(status, StatusCode::UNAUTHORIZED);
@@ -5524,9 +5474,9 @@ mod tests {
             let (status, _) = send_json(
                 &app,
                 "POST",
-                "/api/core/v1/brain/agent-account",
+                "/api/core/v1/agent-creation-requests/missing/cancel",
                 &service,
-                Some(brain_probe),
+                Some(serde_json::json!({})),
             )
             .await;
             assert_ne!(status, StatusCode::UNAUTHORIZED);
@@ -6211,7 +6161,9 @@ mod tests {
             assert_eq!(overview["owner_email"], "owner@finite.vip");
             assert_eq!(overview["source_host_id"], "oslo-host-1");
             assert_eq!(overview["runtime_artifact_version_label"], "v1");
-            assert_eq!(overview["runtime_status"], "online");
+            assert_eq!(overview["runtime_status"], "unknown");
+            assert_eq!(overview["lifecycle_status"], "online");
+            assert_eq!(overview["runtime_health"]["status"], "unknown");
             assert_eq!(overview["runtime_capabilities"]["restart"], true);
             assert_eq!(
                 overview["runtime_capabilities"]["recover_known_good_chat"],
@@ -6329,6 +6281,24 @@ mod tests {
             assert_eq!(status, StatusCode::OK);
             assert_eq!(lease["request"]["id"], upgrade_id);
             assert_eq!(lease["target_runtime_artifact"]["id"], "artifact-v2");
+            // The restart just completed: the lifecycle latch is `online`
+            // (health cleared until the poller reports), and the lease
+            // carries a value every runner generation parses.
+            assert_eq!(
+                db.store
+                    .agent_runtime(&runtime_id)
+                    .await
+                    .unwrap()
+                    .host_facts
+                    .runtime_status,
+                RuntimeSummaryStatus::Online
+            );
+            assert_eq!(lease["runtime"]["host_facts"]["runtime_status"], "online");
+            let parsed: crate::RuntimeControlLease = serde_json::from_value(lease.clone()).unwrap();
+            assert_eq!(
+                parsed.runtime.host_facts.runtime_status,
+                RuntimeSummaryStatus::Online
+            );
             let (status, upgraded) = send_json(
                 &app,
                 "POST",

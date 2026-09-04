@@ -144,10 +144,11 @@ loopback addresses, or the exact development host explicitly named by
 - `FINITE_BRAIN_DEVELOPMENT_HTTP_HOST`: local-harness-only exact HTTP host
   allowlist entry for an Apple Container host bridge.
 - `FINITE_BRAIN_DB`: SQLite database path, default `finite-brain.sqlite3`.
-- `FINITE_IDENTITY_AUTHORITY`: finite-identity Authority base URL used by
-  email-targeted Brain Invitation claims to verify current email proof, and by
-  `fbrain auth login|redeem` for email proof. `fbrain` defaults to the public
-  Authority `https://identity.finite.vip`; this variable is an override.
+- `FINITE_IDENTITY_AUTHORITY`: Directory (shrunken finite-identity) base URL
+  used by `fbrain auth login|redeem` for `name@finite.vip` claims. `fbrain`
+  defaults to the public Directory `https://identity.finite.vip`; this
+  variable is an override. The Brain server itself no longer takes any
+  `FINITE_IDENTITY_*` or `FC_CORE_*` wiring (auth-kernel cut).
 - `FINITE_BRAIN_INVITE_MAILER`: optional Brain invite delivery mode: `dev`,
   `resend`, or `none`.
 - `FINITE_BRAIN_INVITE_MAIL_FROM`: sender address for `resend`.

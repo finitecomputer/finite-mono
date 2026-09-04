@@ -1,0 +1,17 @@
+# The single Rust pin for this repository.
+#
+# Every consumer resolves this file; do not add a second version string
+# anywhere else (CI workflows, flake.nix, scripts, docs):
+#   - rustup on a dev host honors it automatically inside the checkout.
+#   - CI workflows parse the channel out of this file and pass it to the
+#     install action explicitly (the dtolnay action does not read this file
+#     itself — unpinned, it installs floating stable).
+#   - flake.nix builds via oxalica's `fromRustupToolchainFile`, so Nix dev
+#     shells, CI nix shells, and deploy images all build with this toolchain.
+# Upgrade by editing this file in one reviewed PR. Platform-specific std
+# targets (the Darwin iOS targets) stay in flake.nix, which adds them
+# conditionally on top of this file.
+[toolchain]
+channel = "1.93.1"
+profile = "minimal"
+components = ["clippy", "rust-analyzer", "rust-src", "rustfmt"]

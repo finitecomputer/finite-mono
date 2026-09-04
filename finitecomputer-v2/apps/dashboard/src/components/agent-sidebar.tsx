@@ -29,10 +29,6 @@ import {
 } from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
 import { CHAT_TOPIC_DESCRIPTION } from "@/lib/chat-product-copy";
-import {
-  electronChatRuntime,
-  electronRuntimeSupportsChatArchive,
-} from "@/lib/electron-chat-runtime";
 import type {
   HostedChatAction,
   HostedChatSummary,
@@ -76,8 +72,8 @@ export function AgentSidebar({
     () => true,
     () => false
   );
-  const supportsChatArchive =
-    hydrated && electronRuntimeSupportsChatArchive(electronChatRuntime());
+  // The hosted web runtime always supports the durable chat archive.
+  const supportsChatArchive = hydrated;
   const [busy, setBusy] = useState(false);
   const [actionError, setActionError] = useState<string | null>(null);
   const [createTopicOpen, setCreateTopicOpen] = useState(false);

@@ -23,7 +23,7 @@ durability, and membership bookkeeping over bytes it cannot read.**
 
 ```
 ┌────────────────────────────────────────────────────────────────────┐
-│ Devices (CLI / Electron / iOS — one FiniteChatDevice each)         │
+│ Devices (CLI — one FiniteChatDevice each)                           │
 │  OpenMLS group state · encrypted SQLite snapshot store             │
 │  sync worker · link-fanout worker                                  │
 └───────────────▲────────────────────────────────────────────────────┘
@@ -74,8 +74,7 @@ client), `finitechat-transport` (shared transport value types), and
   secret; `finitechat auth status`/`auth import` are the CLI surface); the
   secret is never copied into finitechat's own stores — the legacy
   `account-secret.hex` / `identity.env` / `agent.nsec` locations are
-  hard-cut and never read. iOS keeps its keychain identity and passes the
-  secret explicitly (the shared file does not apply inside an app sandbox).
+  hard-cut and never read.
 - Everything the client needs at rest is **derived** from that account
   secret at runtime via HKDF domain separation
   (`NostrSecretKey::derive_secret_32`), e.g. the client-store encryption key
@@ -246,7 +245,7 @@ slogan:
 ## 9. Performance characteristics
 
 Measured on the repo's benchmark harness (`perf_baseline` tests, release
-mode; history in `docs/perf-log.md`):
+mode):
 
 | Operation | Result | Design reason |
 | --- | --- | --- |
@@ -282,7 +281,7 @@ Decisions are ADRs; vocabulary is the glossary; running work is logged.
   and the hermes bridge onboarding surface
 - `CONTEXT.md` / `docs/protocol-glossary.md` — domain language and the
   user-promise behind each mechanism
-- `docs/perf-plan.md` / `docs/perf-log.md` — performance program and ledger
+- `docs/perf-plan.md` — performance program
 - `docs/feature-audit-marmot-pika.md` — what adjacent projects taught us
 
 ## 11. Deliberately not built yet

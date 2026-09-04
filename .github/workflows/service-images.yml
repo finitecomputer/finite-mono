@@ -11,7 +11,6 @@ on:
           - core
           - dashboard
           - private-limiter
-          - specialization-worker
       version:
         description: Image version tag, for example 2026-07-08.1
         required: true
@@ -29,6 +28,7 @@ jobs:
     permissions:
       contents: read
       id-token: write
+      packages: write
     steps:
       - uses: actions/checkout@v4
       - uses: depot/setup-action@v1
@@ -61,17 +61,11 @@ jobs:
               echo "context=." >> "$GITHUB_OUTPUT"
               echo "build_args=FINITE_MONO_REV=$GITHUB_SHA" >> "$GITHUB_OUTPUT"
               ;;
-            specialization-worker)
-              echo "name=finite-specialization-worker" >> "$GITHUB_OUTPUT"
-              echo "dockerfile=infra/images/specialization-worker.Dockerfile" >> "$GITHUB_OUTPUT"
-              echo "context=." >> "$GITHUB_OUTPUT"
-              echo "build_args=" >> "$GITHUB_OUTPUT"
-              ;;
           esac
       - name: Log in to GHCR for canary publication
         env:
-          GHCR_TOKEN: ${{ secrets.FINITE_GHCR_TOKEN }}
-          GHCR_USERNAME: ${{ secrets.FINITE_GHCR_USERNAME }}
+          GHCR_TOKEN: ${{ github.token }}
+          GHCR_USERNAME: ${{ github.actor }}
         run: echo "$GHCR_TOKEN" | docker login ghcr.io -u "$GHCR_USERNAME" --password-stdin
       - name: Build and save
         id: build
@@ -131,8 +125,8 @@ jobs:
           BUILD_ID: ${{ steps.build.outputs.build-id }}
           SOURCE_DIGEST: ${{ steps.canary.outputs.digest }}
           DEPOT_PROJECT_ID: ${{ steps.build.outputs.project-id }}
-          GHCR_TOKEN: ${{ secrets.FINITE_GHCR_TOKEN }}
-          GHCR_USERNAME: ${{ secrets.FINITE_GHCR_USERNAME }}
+          GHCR_TOKEN: ${{ github.token }}
+          GHCR_USERNAME: ${{ github.actor }}
         run: |
           echo "$GHCR_TOKEN" | docker login ghcr.io -u "$GHCR_USERNAME" --password-stdin
           version_ref="$IMAGE:$VERSION"
@@ -154,3 +148,4 @@ jobs:
             echo "Production promotion: \`$PRODUCTION\`" >> "$GITHUB_STEP_SUMMARY"
           else
             echo "Production promotion remained disabled." >> "$GITHUB_STEP_SUMMARY"
+          fi

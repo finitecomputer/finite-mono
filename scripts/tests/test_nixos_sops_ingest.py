@@ -128,7 +128,7 @@ class NixosSopsIngestTest(unittest.TestCase):
         combined = result.stdout + result.stderr
         self.assertNotIn(b"synthetic-secret-value", combined)
         self.assertIn(b'finite.secrets.files."metrics-remote-write"', result.stdout)
-        self.assertIn(b"restartUnits = [ \"alloy.service\" ];", result.stdout)
+        self.assertIn(b'restartUnits = [ "alloy.service" ];', result.stdout)
 
     def test_refuses_to_overwrite_without_force(self) -> None:
         target = self.secrets_root / "shared/metrics-remote-write.env"
@@ -147,7 +147,9 @@ class NixosSopsIngestTest(unittest.TestCase):
             decrypt_fail=True,
         )
         self.assertEqual(result.returncode, 1)
-        self.assertFalse((self.secrets_root / "shared/metrics-remote-write.env").exists())
+        self.assertFalse(
+            (self.secrets_root / "shared/metrics-remote-write.env").exists()
+        )
         combined = result.stdout + result.stderr
         self.assertIn(b"not decryptable by this operator", combined)
         self.assertNotIn(b"synthetic-secret-value", combined)
@@ -163,7 +165,9 @@ class NixosSopsIngestTest(unittest.TestCase):
         combined = result.stdout + result.stderr
         self.assertIn(b"cannot decrypt existing SOPS file", combined)
         self.assertIn(b"just infra secrets updatekeys", combined)
-        self.assertFalse((self.secrets_root / "shared/metrics-remote-write.env").exists())
+        self.assertFalse(
+            (self.secrets_root / "shared/metrics-remote-write.env").exists()
+        )
         self.assertNotIn(b"synthetic-secret-value", combined)
 
     def test_refuses_when_same_scope_recipients_are_stale(self) -> None:
@@ -177,7 +181,9 @@ class NixosSopsIngestTest(unittest.TestCase):
         combined = result.stdout + result.stderr
         self.assertIn(b"recipient set differs", combined)
         self.assertIn(b"just infra secrets updatekeys", combined)
-        self.assertFalse((self.secrets_root / "shared/metrics-remote-write.env").exists())
+        self.assertFalse(
+            (self.secrets_root / "shared/metrics-remote-write.env").exists()
+        )
         self.assertNotIn(b"synthetic-secret-value", combined)
 
     def test_allows_different_recipients_in_different_scope(self) -> None:

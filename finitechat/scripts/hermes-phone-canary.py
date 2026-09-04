@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 """Start a fresh real-Hermes agent for the physical-phone canary.
 
-This is the local layer of docs/hermes-phone-canary-loop.md. It uses the
-hosted Finite Chat server by default, starts finitechat hermes serve before the
-real Hermes gateway, proves owner-side invite admission with a throwaway CLI
-client, then prints a human invite URL only after the preflight passes.
+Uses the hosted Finite Chat server by default, starts finitechat hermes serve
+before the real Hermes gateway, proves owner-side invite admission with a
+throwaway CLI client, then prints a human invite URL only after the preflight
+passes.
 """
 
 from __future__ import annotations
@@ -30,8 +30,6 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 MONOREPO_ROOT = REPO_ROOT.parent
 DEFAULT_SERVER_URL = "https://chat.finite.computer"
 DEFAULT_HERMES_NIX_SHELL = f"{MONOREPO_ROOT}#hermes-bridge-ci"
-DEFAULT_BUNDLE_ID = "computer.finite.finitechat"
-DEFAULT_TEAM = ""
 MODEL_ENV_NAMES = (
     "OPENROUTER_API_KEY",
     "ANTHROPIC_API_KEY",
@@ -88,24 +86,6 @@ def parse_args() -> argparse.Namespace:
         "--keep-running",
         action="store_true",
         help="Leave sidecar and Hermes gateway running after the admission preflight passes.",
-    )
-    parser.add_argument(
-        "--install-phone-app",
-        action="store_true",
-        help="Build and install the current iOS app on a paired physical phone.",
-    )
-    parser.add_argument(
-        "--ios-device",
-        default=os.environ.get("FINITECHAT_IOS_DEVICE_ID") or os.environ.get("IOS_DEVICE_ID") or "",
-        help="CoreDevice identifier or hardware UDID. Required only with --install-phone-app.",
-    )
-    parser.add_argument(
-        "--ios-development-team",
-        default=os.environ.get("RMP_IOS_DEVELOPMENT_TEAM") or DEFAULT_TEAM,
-        help="Apple development team for physical-device signing. If omitted, xcodebuild uses local signing defaults.",
-    )
-    parser.add_argument(
-        "--bundle-id", default=os.environ.get("FINITECHAT_IOS_BUNDLE_ID", DEFAULT_BUNDLE_ID)
     )
     parser.add_argument(
         "--env-file",
@@ -428,116 +408,6 @@ def write_stop_script(state_root: Path, children: dict[str, subprocess.Popen[str
     stop_script.chmod(0o755)
 
 
-def discover_device(requested: str) -> dict[str, str]:
-    with subprocess.Popen(
-        ["xcrun", "devicectl", "list", "devices", "--json-output", "-"],
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        text=True,
-    ) as proc:
-        stdout, stderr = proc.communicate(timeout=60)
-    if proc.returncode != 0:
-        raise CanaryFailure(f"devicectl list devices failed: {stderr[-1000:]}")
-    data = json.loads(stdout)
-    candidates = data.get("result", {}).get("devices", [])
-    for device in candidates:
-        identifier = str(device.get("identifier") or "")
-        hardware_udid = str(device.get("hardwareProperties", {}).get("udid") or "")
-        name = str(device.get("name") or "")
-        if requested and requested not in {identifier, hardware_udid, name}:
-            continue
-        if not identifier:
-            continue
-        state = str(device.get("connectionProperties", {}).get("tunnelState") or "").lower()
-        if "unavailable" in state:
-            continue
-        return {
-            "identifier": identifier,
-            "hardware_udid": hardware_udid or identifier,
-            "name": name or identifier,
-        }
-    if requested:
-        raise CanaryFailure(f"no available paired iPhone matched {requested!r}")
-    raise CanaryFailure("no available paired iPhone found; pass --ios-device")
-
-
-def install_phone_app(args: argparse.Namespace, state_root: Path) -> dict[str, Any]:
-    device = discover_device(args.ios_device)
-    derived_data = state_root / "xcode-device-derived-data"
-    team = args.ios_development_team.strip()
-    run_inherit(
-        ["cargo", "run", "-q", "-p", "finitechat-rmp", "--", "bindings", "swift"], timeout=2400
-    )
-    run_inherit(["xcodegen", "generate"], cwd=REPO_ROOT / "ios", timeout=300)
-    xcode_cmd = [
-        "xcrun",
-        "xcodebuild",
-        "-project",
-        str(REPO_ROOT / "ios/FiniteChat.xcodeproj"),
-        "-scheme",
-        "FiniteChat",
-        "-destination",
-        f"id={device['hardware_udid']}",
-        "-configuration",
-        "Debug",
-        "-sdk",
-        "iphoneos",
-        "-derivedDataPath",
-        str(derived_data),
-    ]
-    if team:
-        xcode_cmd.extend(["-allowProvisioningUpdates", "-allowProvisioningDeviceRegistration"])
-    xcode_cmd.extend(
-        [
-            "build",
-            "ARCHS=arm64",
-            "ONLY_ACTIVE_ARCH=YES",
-            f"PRODUCT_BUNDLE_IDENTIFIER={args.bundle_id}",
-        ]
-    )
-    if team:
-        xcode_cmd.append(f"DEVELOPMENT_TEAM={team}")
-    run_inherit(xcode_cmd, timeout=2400)
-    app_path = derived_data / "Build/Products/Debug-iphoneos/FiniteChat.app"
-    if not app_path.is_dir():
-        raise CanaryFailure(f"built app not found at {app_path}")
-    run(
-        [
-            "xcrun",
-            "devicectl",
-            "device",
-            "uninstall",
-            "app",
-            "--device",
-            device["identifier"],
-            args.bundle_id,
-        ],
-        check=False,
-        timeout=120,
-    )
-    run(
-        [
-            "xcrun",
-            "devicectl",
-            "device",
-            "install",
-            "app",
-            "--device",
-            device["identifier"],
-            str(app_path),
-        ],
-        timeout=180,
-    )
-    return {
-        "device_name": device["name"],
-        "device_identifier": device["identifier"],
-        "hardware_udid": device["hardware_udid"],
-        "installed_bundle_id": args.bundle_id,
-        "installed": True,
-        "app_path": str(app_path),
-    }
-
-
 def message_matches_phone_canary(text: str) -> bool:
     return "phone canary cli ok" in text.lower()
 
@@ -693,9 +563,6 @@ def main() -> int:
             "restored": False,
             "device_id": args.agent_device_id,
         },
-        "phone": {
-            "installed": False,
-        },
         "steps": [],
     }
     started = time.monotonic()
@@ -717,10 +584,6 @@ def main() -> int:
 
         wait_http_ok(f"{args.server_url.rstrip('/')}/health", timeout=15, name="finitechat server")
         step("server.health")
-
-        if args.install_phone_app:
-            report["phone"] = install_phone_app(args, state_root)
-            step("phone.app_installed", device=report["phone"].get("device_name"))
 
         agent_home = state_root / "agent-home"
         probe_home = state_root / "probe-home"

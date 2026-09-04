@@ -1,0 +1,65 @@
+name: Lat2 NixOS Closure
+
+on:
+  workflow_dispatch:
+    inputs:
+      rev:
+        description: "Exact finite-mono commit on main to build"
+        required: true
+        type: string
+      runs_on_json:
+        description: "GitHub runner label JSON string or labels array"
+        required: true
+        default: '"depot-ubuntu-24.04"'
+        type: string
+
+concurrency:
+  group: lat2-nixos-closure-${{ inputs.rev }}
+
+permissions:
+  contents: read
+
+env:
+  CACHIX_CACHE_NAME: finite
+
+jobs:
+  build:
+    runs-on: ${{ fromJSON(inputs.runs_on_json) }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.rev }}
+          fetch-depth: 1
+
+      - uses: DeterminateSystems/nix-installer-action@v16
+
+      - name: Configure Cachix read-only cache
+        uses: cachix/cachix-action@v17
+        with:
+          name: ${{ env.CACHIX_CACHE_NAME }}
+          skipPush: true
+
+      - name: Build and package finite-lat-2 closure
+        env:
+          REV: ${{ inputs.rev }}
+        run: |
+          set -euo pipefail
+          [[ "$REV" =~ ^[0-9a-f]{40}$ ]]
+          test "$(git rev-parse HEAD)" = "$REV"
+          git fetch origin main --depth=1
+          git merge-base --is-ancestor "$REV" origin/main
+          scripts/build-lat2-nixos-closure-artifact \
+            "$REV" \
+            target/lat2-nixos-closure
+
+      - name: Upload closure artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: lat2-nixos-closure-${{ inputs.rev }}
+          path: |
+            target/lat2-nixos-closure/manifest.json
+            target/lat2-nixos-closure/nix-cache
+            target/lat2-nixos-closure/store-paths.txt
+            target/lat2-nixos-closure/closure-size.txt
+          if-no-files-found: error
+          retention-days: 14

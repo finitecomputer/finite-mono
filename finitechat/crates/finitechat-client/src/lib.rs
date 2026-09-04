@@ -8,10 +8,9 @@ use finitechat_http::{
     GetEphemeralActivitiesResponse, GetNostrProfilesRequest, GetNostrProfilesResponse,
     GroupSyncRequest, HttpClaimedWelcome, HttpKeyPackageInventory, KeyPackageInventoryRequest,
     ListAccountRoomDirectoryRequest, ListAccountRoomDirectoryResponse, NostrProfileRecord,
-    PublishKeyPackageResponse, PushPlatform, PutNostrProfileRequest, PutNostrProfileResponse,
-    RegisterPushTokenRequest, RegisterPushTokenResponse, RemovePushTokenRequest,
-    RemovePushTokenResponse, RevokeDeviceRequest, RevokeDeviceResponse, SaveAccountRoomRequest,
-    SaveAccountRoomResponse, SyncHintEvent, SyncStreamRequest, SyncWaitRequest, SyncWaitResponse,
+    PublishKeyPackageResponse, PutNostrProfileRequest, PutNostrProfileResponse,
+    RevokeDeviceRequest, RevokeDeviceResponse, SaveAccountRoomRequest, SaveAccountRoomResponse,
+    SyncHintEvent, SyncStreamRequest, SyncWaitRequest, SyncWaitResponse,
 };
 use finitechat_mls::{
     ExpectedDeviceCredential, FiniteDeviceCredentialV1, MlsCredentialError, NOSTR_PUBLIC_KEY_BYTES,
@@ -67,6 +66,7 @@ use std::fs;
 use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Condvar, Mutex, OnceLock, Weak};
+use std::time::Duration;
 use thiserror::Error;
 
 pub mod rejected_entry_diagnostic;
@@ -79,7 +79,6 @@ const CLIENT_STORE_KEY_DERIVATION_DOMAIN: &[u8] = b"finitechat.client-store-key.
 const CLIENT_STATE_SNAPSHOT_MAGIC: &[u8] = b"finitechat.client-state-snapshot.v1";
 const CLIENT_APP_MESSAGE_AAD_DOMAIN: &[u8] = b"finitechat.client-app-message.v1";
 const CLIENT_APP_EVENT_AAD_DOMAIN: &[u8] = b"finitechat.client-app-event.v1";
-const CLIENT_APP_OUTBOX_AAD_DOMAIN: &[u8] = b"finitechat.client-app-outbox.v1";
 const CLIENT_APP_ROOM_AAD_DOMAIN: &[u8] = b"finitechat.client-app-room.v1";
 const CLIENT_APP_STATE_AAD_DOMAIN: &[u8] = b"finitechat.client-app-state.v1";
 const CLIENT_APP_PROFILE_AAD_DOMAIN: &[u8] = b"finitechat.client-app-profile.v1";
@@ -91,8 +90,20 @@ const DEVICE_LINK_BOOTSTRAP_MANIFEST_DIGEST_DOMAIN: &[u8] =
     b"finitechat.device-link-bootstrap-manifest.v2";
 const LEGACY_DEVICE_LINK_BOOTSTRAP_REQUEST_EVENT_V2: &str =
     "finitechat.device-link.bootstrap-request.v2";
-const LEGACY_CLIENT_STATE_SNAPSHOT_VERSION: u16 = 8;
-const CLIENT_STATE_SNAPSHOT_VERSION: u16 = 9;
+/// The snapshot version this build writes. Every version listed in
+/// `SUPPORTED_CLIENT_STATE_SNAPSHOT_VERSIONS` still decodes.
+const CLIENT_STATE_SNAPSHOT_VERSION: u16 = 10;
+/// v9 added the link-fanout bootstrap export to `LinkFanoutState`.
+const LINK_BOOTSTRAP_EXPORT_SNAPSHOT_VERSION: u16 = 9;
+/// v10 added the per-room currency-gate fields (own-send high-water mark,
+/// initialization flag, unacknowledged own message ids, behind-server
+/// evidence). Older blobs decode with the bootstrap defaults; see
+/// `PersistedRoomState::currency_initialized`.
+const CURRENCY_GATE_SNAPSHOT_VERSION: u16 = 10;
+const SUPPORTED_CLIENT_STATE_SNAPSHOT_VERSIONS: [u16; 3] = [10, 9, 8];
+/// Bound on the message ids one room remembers as "minted here, not yet
+/// seen accepted"; oldest are evicted beyond this.
+const MAX_UNACKNOWLEDGED_OWN_MESSAGE_IDS: usize = 256;
 const CLIENT_STORE_KEY_BYTES: usize = 32;
 const CLIENT_STORE_NONCE_BYTES: usize = 12;
 const CLIENT_STORE_AEAD_TAG_BYTES: u32 = 16;
@@ -120,9 +131,6 @@ const MAX_APP_MESSAGE_CIPHERTEXT_BYTES: u32 =
     MAX_ENVELOPE_PAYLOAD_BYTES + CLIENT_STORE_AEAD_TAG_BYTES;
 const MAX_APP_EVENT_CIPHERTEXT_BYTES: u32 =
     MAX_ENVELOPE_PAYLOAD_BYTES + CLIENT_STORE_AEAD_TAG_BYTES;
-const MAX_APP_OUTBOX_METADATA_PLAINTEXT_BYTES: u32 = MAX_ENVELOPE_PAYLOAD_BYTES + 8 * 1024;
-const MAX_APP_OUTBOX_METADATA_CIPHERTEXT_BYTES: u32 =
-    MAX_APP_OUTBOX_METADATA_PLAINTEXT_BYTES + CLIENT_STORE_AEAD_TAG_BYTES;
 const MAX_APP_ROOM_DISPLAY_NAME_BYTES: u32 = 256;
 const MAX_APP_ROOM_PICTURE_BYTES: u32 = 2 * 1024;
 const MAX_APP_ROOM_STATUS_BYTES: u32 = 512;
@@ -150,7 +158,6 @@ const MAX_PENDING_DEVICE_LINK_BOOTSTRAPS: u32 = 32;
 // Message retention is complete. This is the API's addressability bound, not
 // a product history window; callers must not silently prune durable history.
 const MAX_STORED_APP_MESSAGES: u32 = u32::MAX;
-const MAX_STORED_APP_OUTBOX_MESSAGES: u32 = 512;
 const MAX_STORED_APP_PROFILES: u32 = 4_096;
 const MAX_STORED_APP_REVOKED_DEVICES: u32 = 64;
 const MAX_STORED_APP_CHAT_ARCHIVES: u32 = 5_000;
@@ -237,6 +244,23 @@ pub struct FiniteChatDeviceState {
     pub openmls_storage_records: Vec<OpenMlsStorageRecord>,
 }
 
+/// Durable witness that a device store is older than what the server has
+/// already accepted from that device in one room: the ordered log carried
+/// an application entry sent by this device at `observed_seq`, above the
+/// store's own-send high-water mark `local_mark`, with a message id this
+/// store never minted. Sending from such a store would reuse consumed MLS
+/// secret-tree generations (receivers quarantine and freeze), so sends
+/// stay refused until a Commit moves the room's epoch above
+/// `evidence_epoch` — a rekey re-derives fresh generations for everyone.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BehindServerEvidence {
+    pub local_mark: u64,
+    pub observed_seq: u64,
+    pub message_id: MessageId,
+    pub observed_at: u64,
+    pub evidence_epoch: u64,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PersistedRoomState {
     pub room_id: RoomId,
@@ -247,6 +271,30 @@ pub struct PersistedRoomState {
     /// record the room server that stored the Welcome so sync ticks can
     /// group rooms by server.
     pub server_url: Option<String>,
+    /// Highest server seq at which this device has durably seen one of its
+    /// own application entries accepted — synchronously via
+    /// `EventAccepted`, or by paging a self-minted entry in the log. Kept
+    /// inside the device blob on purpose: a rewound store rewinds the mark
+    /// with it, which is exactly what lets the next sync notice the store
+    /// is behind (the server still holds the device's later entries).
+    pub own_send_high_water_seq: u64,
+    /// Currency bootstrap rule. `false` only for rooms decoded from a
+    /// pre-v10 blob, which kept no mark: the first sync pass after the
+    /// upgrade *initializes* the mark from any own entries it pages (they
+    /// cannot be told apart from a rewind) and then flips this to `true`;
+    /// every later pass *enforces*. Rooms created or joined by a v10+
+    /// build start `true`. This is the one mixed-version trap: a pre-v10
+    /// blob that is already a stale copy initializes instead of tripping,
+    /// once.
+    pub currency_initialized: bool,
+    /// Message ids this store minted (`create_application_request_at`) and
+    /// has not yet seen accepted. An own entry in the log carrying one of
+    /// these ids is our own send landing — not rewind evidence — even when
+    /// the process died between the server's accept and the mark save.
+    /// Bounded FIFO (`MAX_UNACKNOWLEDGED_OWN_MESSAGE_IDS`).
+    pub unacknowledged_own_message_ids: Vec<MessageId>,
+    /// Sticky proof that this store is behind the server for this room.
+    pub behind_server: Option<BehindServerEvidence>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -263,6 +311,35 @@ pub struct PendingWelcomeAckState {
     pub welcome_id: WelcomeId,
     pub room_id: RoomId,
     pub commit_seq: u64,
+}
+
+/// Admission policy applied to claimed Welcomes before any of them is
+/// stored, activated, or acked. A device with no persisted policy row admits
+/// every Welcome ([`WelcomeAdmissionPolicy::AllowAll`], the pre-allowlist
+/// behavior); [`WelcomeAdmissionPolicy::Allowlist`] admits only senders in
+/// the device's allowlist, plus the device's own account (device link).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WelcomeAdmissionPolicy {
+    AllowAll,
+    Allowlist,
+}
+
+impl WelcomeAdmissionPolicy {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::AllowAll => "allow_all",
+            Self::Allowlist => "allowlist",
+        }
+    }
+
+    fn from_mode(mode: &str) -> Self {
+        match mode {
+            "allow_all" => Self::AllowAll,
+            // Fail closed: anything but an explicit allow-all admits through
+            // the allowlist (the schema CHECK keeps this unreachable).
+            _ => Self::Allowlist,
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -391,6 +468,10 @@ pub struct RuntimeSyncReport {
     pub uploaded_key_packages: u32,
     pub claimed_welcomes: u32,
     pub activated_welcome_acks_sent: u32,
+    /// Welcomes claimed but discarded because the sender is not admitted by
+    /// the device's Welcome admission policy (never stored, activated, or
+    /// acked).
+    pub denied_welcomes: u32,
     pub sync_pages: u32,
     pub applied_entries: Vec<RuntimeAppliedEntry>,
 }
@@ -458,110 +539,6 @@ impl StoredAppEvent {
         )?;
         Ok(())
     }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct StoredOutboundMessage {
-    pub room_id: RoomId,
-    pub message_id: MessageId,
-    pub sender: DeviceRef,
-    pub plaintext: Vec<u8>,
-    pub local_state: StoredOutboundLocalState,
-    pub server_delivery_state: StoredOutboundServerDeliveryState,
-    pub append_request: AppendEventRequest,
-    pub timestamp_unix_seconds: u64,
-}
-
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
-pub enum StoredOutboundLocalState {
-    Sending,
-    #[default]
-    Sent,
-}
-
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
-pub enum StoredOutboundServerDeliveryState {
-    #[default]
-    Undelivered,
-    Failed {
-        reason: String,
-    },
-}
-
-impl StoredOutboundLocalState {
-    fn validate_limits(&self) -> Result<(), ClientError> {
-        Ok(())
-    }
-}
-
-impl StoredOutboundServerDeliveryState {
-    fn validate_limits(&self) -> Result<(), ClientError> {
-        match self {
-            Self::Undelivered => Ok(()),
-            Self::Failed { reason } => {
-                validate_string_bytes(
-                    "app_outbox.failure_reason",
-                    reason,
-                    MAX_APP_ROOM_STATUS_BYTES,
-                )?;
-                Ok(())
-            }
-        }
-    }
-}
-
-impl StoredOutboundMessage {
-    fn validate_limits(&self) -> Result<(), ClientError> {
-        validate_room_id(&self.room_id)?;
-        validate_string_bytes(
-            "app_outbox.message_id",
-            &self.message_id,
-            MAX_OBJECT_ID_BYTES,
-        )?;
-        self.sender.validate_limits().map_err(ClientError::from)?;
-        validate_bytes_len(
-            "app_outbox.plaintext",
-            self.plaintext.len(),
-            MAX_ENVELOPE_PAYLOAD_BYTES,
-        )?;
-        self.local_state.validate_limits()?;
-        self.server_delivery_state.validate_limits()?;
-        self.append_request.validate_limits()?;
-        if self.append_request.room_id != self.room_id {
-            return Err(ClientError::OutboxRoomMismatch {
-                expected: self.room_id.clone(),
-                actual: self.append_request.room_id.clone(),
-            });
-        }
-        let append_message_id = self
-            .append_request
-            .envelope
-            .message_id()
-            .map_err(ClientError::EnvelopeMessageId)?;
-        if append_message_id != self.message_id {
-            return Err(ClientError::OutboxMessageIdMismatch {
-                expected: self.message_id.clone(),
-                actual: append_message_id,
-            });
-        }
-        if self.append_request.sender != self.sender {
-            return Err(ClientError::OutboxSenderMismatch {
-                expected: self.sender.clone(),
-                actual: self.append_request.sender.clone(),
-            });
-        }
-        Ok(())
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-struct StoredOutboundMessageMetadataV1 {
-    sender: DeviceRef,
-    plaintext: Vec<u8>,
-    local_state: StoredOutboundLocalState,
-    server_delivery_state: StoredOutboundServerDeliveryState,
-    append_request: AppendEventRequest,
-    timestamp_unix_seconds: u64,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -928,6 +905,17 @@ pub struct RoomSyncCursor {
     pub after_seq: u64,
     /// `None` = the device's home server (ADR 0005).
     pub server_url: Option<String>,
+    /// See [`PersistedRoomState::own_send_high_water_seq`].
+    pub own_send_high_water_seq: u64,
+    /// See [`PersistedRoomState::currency_initialized`].
+    pub currency_initialized: bool,
+    /// A sync tick has completed for this room since the store was opened
+    /// in this process (or the room was born here). Sends are refused
+    /// with [`ClientError::CurrencyUnverified`] until then.
+    pub currency_verified: bool,
+    /// Sticky rewind evidence; sends are refused with
+    /// [`ClientError::DeviceStateBehindServer`] while any room carries it.
+    pub behind_server: Option<BehindServerEvidence>,
 }
 
 impl RuntimeSyncOptions {
@@ -1009,6 +997,14 @@ impl RuntimeSyncReport {
         Ok(())
     }
 
+    fn record_denied_welcome(&mut self) -> Result<(), ClientError> {
+        self.denied_welcomes = self
+            .denied_welcomes
+            .checked_add(1)
+            .ok_or(ClientError::RuntimeCounterOverflow)?;
+        Ok(())
+    }
+
     fn record_sync_page(&mut self) -> Result<(), ClientError> {
         self.sync_pages = self
             .sync_pages
@@ -1083,6 +1079,32 @@ struct RoomEntry {
     group: MlsGroup,
     last_applied_seq: u64,
     server_url: Option<String>,
+    own_send_high_water_seq: u64,
+    currency_initialized: bool,
+    unacknowledged_own_message_ids: Vec<MessageId>,
+    behind_server: Option<BehindServerEvidence>,
+    /// In-memory only: a sync tick has completed for this room since the
+    /// state was loaded, or the room was born in this process. Never
+    /// persisted, so every fresh open of a store starts unverified.
+    currency_verified: bool,
+}
+
+impl RoomEntry {
+    /// A room whose MLS state was created or joined in this process: no
+    /// prior own sends exist for it, so the mark starts at 0 initialized,
+    /// and it is trivially current.
+    fn born(group: MlsGroup) -> Self {
+        Self {
+            group,
+            last_applied_seq: 0,
+            server_url: None,
+            own_send_high_water_seq: 0,
+            currency_initialized: true,
+            unacknowledged_own_message_ids: Vec::new(),
+            behind_server: None,
+            currency_verified: true,
+        }
+    }
 }
 
 pub struct FiniteChatDevice {
@@ -1216,6 +1238,12 @@ impl FiniteChatDevice {
                 group,
                 last_applied_seq: room.last_applied_seq,
                 server_url: room.server_url.clone(),
+                own_send_high_water_seq: room.own_send_high_water_seq,
+                currency_initialized: room.currency_initialized,
+                unacknowledged_own_message_ids: room.unacknowledged_own_message_ids.clone(),
+                behind_server: room.behind_server.clone(),
+                // Loaded state is unverified until a sync tick completes.
+                currency_verified: false,
             };
             if rooms.insert(room.room_id.clone(), entry).is_some() {
                 return Err(ClientError::DuplicatePersistedRoom(room.room_id.clone()));
@@ -1287,6 +1315,10 @@ impl FiniteChatDevice {
                     mls_group_id: mls_group_id_string(entry.group.group_id())?,
                     last_applied_seq: entry.last_applied_seq,
                     server_url: entry.server_url.clone(),
+                    own_send_high_water_seq: entry.own_send_high_water_seq,
+                    currency_initialized: entry.currency_initialized,
+                    unacknowledged_own_message_ids: entry.unacknowledged_own_message_ids.clone(),
+                    behind_server: entry.behind_server.clone(),
                 })
             })
             .collect::<Result<Vec<_>, ClientError>>()?;
@@ -1345,14 +1377,7 @@ impl FiniteChatDevice {
             self.credential_with_key.clone(),
         )
         .map_err(|_| ClientError::CreateGroup)?;
-        self.rooms.insert(
-            room_id,
-            RoomEntry {
-                group,
-                last_applied_seq: 0,
-                server_url: None,
-            },
-        );
+        self.rooms.insert(room_id, RoomEntry::born(group));
         Ok(())
     }
 
@@ -1878,7 +1903,46 @@ impl FiniteChatDevice {
         room_id: &str,
         entry: &RoomLogEntry,
     ) -> Result<(), ClientError> {
+        self.apply_commit_entry_inner(room_id, entry)?;
+        // A Commit that moved the epoch past the evidence epoch re-derived
+        // every member's secret tree: fresh generations, rewind healed.
+        self.clear_behind_server_if_healed(room_id)
+    }
+
+    /// True when `entry` is this device's own Commit whose effects are
+    /// already merged: the group epoch has reached
+    /// `post_commit_epoch(entry.epoch)` and no Commit is pending. Re-paging
+    /// such an entry (a frozen cursor completing a rekey heal, an older
+    /// durable cursor restored from backup) is a no-op advance, not an
+    /// epoch error. Every other Commit shape keeps its existing rule: a
+    /// foreign Commit at an unexpected epoch, an own Commit whose epoch
+    /// has not moved, or an own Commit with a newer pending Commit all
+    /// still fail closed.
+    fn own_commit_already_merged(
+        &self,
+        room_id: &str,
+        entry: &RoomLogEntry,
+    ) -> Result<bool, ClientError> {
+        if entry.kind != LogEntryKind::Commit
+            || entry.sender != self.device_ref
+            || entry.envelope.sender != self.device_ref
+        {
+            return Ok(false);
+        }
+        let group = self.group(room_id)?;
+        Ok(group.epoch().as_u64() >= post_commit_epoch(entry.epoch)?
+            && group.pending_commit().is_none())
+    }
+
+    fn apply_commit_entry_inner(
+        &mut self,
+        room_id: &str,
+        entry: &RoomLogEntry,
+    ) -> Result<(), ClientError> {
         validate_log_entry_shape(room_id, entry, LogEntryKind::Commit)?;
+        if self.own_commit_already_merged(room_id, entry)? {
+            return Ok(());
+        }
         let post_commit_epoch = post_commit_epoch(entry.epoch)?;
         let own_device_ref = self.device_ref.clone();
         let now_unix_seconds = self.now_unix_seconds;
@@ -1972,14 +2036,7 @@ impl FiniteChatDevice {
         .into_group(&self.provider)
         .map_err(|_| ClientError::ActivateWelcome)?;
         self.verify_member_in_group(&group, &self.device_ref)?;
-        self.rooms.insert(
-            room_id,
-            RoomEntry {
-                group,
-                last_applied_seq: 0,
-                server_url: None,
-            },
-        );
+        self.rooms.insert(room_id, RoomEntry::born(group));
         Ok(())
     }
 
@@ -1995,8 +2052,199 @@ impl FiniteChatDevice {
                 room_id: room_id.clone(),
                 after_seq: entry.last_applied_seq,
                 server_url: entry.server_url.clone(),
+                own_send_high_water_seq: entry.own_send_high_water_seq,
+                currency_initialized: entry.currency_initialized,
+                currency_verified: entry.currency_verified,
+                behind_server: entry.behind_server.clone(),
             })
             .collect()
+    }
+
+    // ---- Currency gate -------------------------------------------------
+    //
+    // A device store that is older than what the server already accepted
+    // from this device (a WAL-less file copy, a restored backup) is a
+    // rewound MLS sender: its next sends reuse consumed secret-tree
+    // generations and every receiver quarantines. The witness is already
+    // in the sync stream — the rewound cursor re-pages the device's own
+    // later entries — so the gate needs no server change:
+    //
+    // * `own_send_high_water_seq` is the durable per-room mark of the
+    //   highest own application seq this store has seen accepted.
+    // * `unacknowledged_own_message_ids` lists ids minted here whose accept
+    //   this store has not yet recorded (crash between accept and save).
+    // * An own application entry above the mark whose id was not minted
+    //   here is proof the store is behind: record `behind_server`, refuse
+    //   sends, until a Commit moves the epoch above the evidence epoch.
+    // * `currency_initialized == false` (pre-v10 blob) turns the first
+    //   pass into initialization instead of enforcement.
+    // * `currency_verified` (in-memory) refuses sends from a loaded state
+    //   until one sync tick has completed for the room in this process.
+
+    /// True once a sync tick has completed for `room_id` since this state
+    /// was loaded, or the room was created/joined in this process.
+    pub fn room_currency_verified(&self, room_id: &str) -> bool {
+        self.rooms
+            .get(room_id)
+            .is_some_and(|entry| entry.currency_verified)
+    }
+
+    pub(crate) fn mark_room_currency_verified(&mut self, room_id: &str) {
+        if let Some(entry) = self.rooms.get_mut(room_id) {
+            entry.currency_verified = true;
+        }
+    }
+
+    /// Test-only escape hatch so a harness can *deliberately* send from a
+    /// rewound store (to pin receiver-side wedge/heal behavior). Never
+    /// compiled into production builds.
+    #[cfg(feature = "test-support")]
+    #[doc(hidden)]
+    pub fn bypass_currency_gate_for_tests(&mut self, room_id: &str) {
+        if let Some(entry) = self.rooms.get_mut(room_id) {
+            entry.currency_verified = true;
+            entry.behind_server = None;
+        }
+    }
+
+    /// Test-only: move a room's sync cursor backwards, simulating an older
+    /// durable cursor (a restored backup) that re-pages entries the group
+    /// already merged. The production cursor path is monotonic. Never
+    /// compiled into production builds.
+    #[cfg(feature = "test-support")]
+    #[doc(hidden)]
+    pub fn rewind_room_cursor_for_tests(&mut self, room_id: &str, seq: u64) {
+        if let Some(entry) = self.rooms.get_mut(room_id) {
+            entry.last_applied_seq = seq;
+        }
+    }
+
+    /// Advance the own-send high-water mark after the server accepted one
+    /// of this device's application entries (`EventAccepted { seq,
+    /// message_id }`). Callers persist the device state afterwards; a crash
+    /// before that save is covered by the unacknowledged-id list.
+    pub fn record_own_send_accepted(
+        &mut self,
+        room_id: &str,
+        seq: u64,
+        message_id: &str,
+    ) -> Result<(), ClientError> {
+        validate_room_id(room_id)?;
+        let entry = self.room_entry_mut(room_id)?;
+        entry.own_send_high_water_seq = entry.own_send_high_water_seq.max(seq);
+        entry
+            .unacknowledged_own_message_ids
+            .retain(|pending| pending != message_id);
+        Ok(())
+    }
+
+    /// The outbound gate. Refuses while any room carries rewind evidence
+    /// (the whole store is suspect, not one room) and while `room_id` has
+    /// not completed a sync tick since the store was opened.
+    pub fn ensure_current_for_send(&self, room_id: &str) -> Result<(), ClientError> {
+        if let Some((flagged_room_id, evidence)) = self
+            .rooms
+            .iter()
+            .find_map(|(id, entry)| entry.behind_server.as_ref().map(|e| (id, e)))
+        {
+            return Err(ClientError::DeviceStateBehindServer {
+                room_id: flagged_room_id.clone(),
+                local_mark: evidence.local_mark,
+                observed_seq: evidence.observed_seq,
+            });
+        }
+        let entry = self.room_entry(room_id)?;
+        if !entry.currency_verified {
+            return Err(ClientError::CurrencyUnverified {
+                room_id: room_id.to_string(),
+            });
+        }
+        Ok(())
+    }
+
+    /// Classify one of this device's own application entries seen in the
+    /// ordered log. Returns the rewind error after recording durable
+    /// evidence; the caller persists the device before surfacing it.
+    fn observe_own_application_entry(
+        &mut self,
+        room_id: &str,
+        entry: &RoomLogEntry,
+    ) -> Result<(), ClientError> {
+        let now_unix_seconds = self.now_unix_seconds;
+        let room = self.room_entry_mut(room_id)?;
+        let epoch = room.group.epoch().as_u64();
+        let minted_here = room
+            .unacknowledged_own_message_ids
+            .contains(&entry.message_id);
+        if minted_here {
+            room.unacknowledged_own_message_ids
+                .retain(|pending| *pending != entry.message_id);
+        }
+        if entry.seq <= room.own_send_high_water_seq || minted_here {
+            room.own_send_high_water_seq = room.own_send_high_water_seq.max(entry.seq);
+            return Ok(());
+        }
+        if !room.currency_initialized {
+            // Bootstrap: the pre-v10 blob kept no mark, so the first pass
+            // learns the mark from the log instead of enforcing it.
+            room.own_send_high_water_seq = entry.seq;
+            return Ok(());
+        }
+        if room.behind_server.is_some() {
+            // Already flagged (evidence is durable): later ticks advance
+            // past own entries normally so the healing Commit can be
+            // reached; the flag stays until that Commit clears it. The
+            // mark still tracks the highest own seq seen so it is truthful
+            // once healed (the evidence keeps the mark it tripped at).
+            room.own_send_high_water_seq = room.own_send_high_water_seq.max(entry.seq);
+            return Ok(());
+        }
+        let local_mark = room.own_send_high_water_seq;
+        room.behind_server = Some(BehindServerEvidence {
+            local_mark,
+            observed_seq: entry.seq,
+            message_id: entry.message_id.clone(),
+            observed_at: now_unix_seconds,
+            evidence_epoch: epoch,
+        });
+        Err(ClientError::DeviceStateBehindServer {
+            room_id: room_id.to_string(),
+            local_mark,
+            observed_seq: entry.seq,
+        })
+    }
+
+    /// Flip a pre-v10 room from initialization to enforcement once a sync
+    /// tick has completed for it. Returns whether the state changed.
+    fn complete_currency_initialization(&mut self, room_id: &str) -> Result<bool, ClientError> {
+        let room = self.room_entry_mut(room_id)?;
+        if room.currency_initialized {
+            return Ok(false);
+        }
+        room.currency_initialized = true;
+        Ok(true)
+    }
+
+    fn clear_behind_server_if_healed(&mut self, room_id: &str) -> Result<(), ClientError> {
+        let room = self.room_entry_mut(room_id)?;
+        let epoch = room.group.epoch().as_u64();
+        if room
+            .behind_server
+            .as_ref()
+            .is_some_and(|evidence| epoch > evidence.evidence_epoch)
+        {
+            room.behind_server = None;
+        }
+        Ok(())
+    }
+
+    fn remember_unacknowledged_own_message_id(&mut self, room_id: &str, message_id: MessageId) {
+        if let Some(room) = self.rooms.get_mut(room_id) {
+            if room.unacknowledged_own_message_ids.len() >= MAX_UNACKNOWLEDGED_OWN_MESSAGE_IDS {
+                room.unacknowledged_own_message_ids.remove(0);
+            }
+            room.unacknowledged_own_message_ids.push(message_id);
+        }
     }
 
     /// Record which server hosts a room's ordered log. `None` means the
@@ -2628,6 +2876,9 @@ impl FiniteChatDevice {
         idempotency_key: impl Into<String>,
         timestamp_unix_seconds: u64,
     ) -> Result<AppendEventRequest, ClientError> {
+        // Currency gate: never encrypt (and so never consume a secret-tree
+        // generation) from a store that is behind the server or unverified.
+        self.ensure_current_for_send(room_id)?;
         let own_device_ref = self.device_ref.clone();
         let provider = &self.provider;
         let signer = &self.signer;
@@ -2658,6 +2909,11 @@ impl FiniteChatDevice {
             timestamp_unix_seconds,
         };
         request.validate_limits()?;
+        let message_id = request
+            .envelope
+            .message_id()
+            .map_err(ClientError::EnvelopeMessageId)?;
+        self.remember_unacknowledged_own_message_id(room_id, message_id);
         Ok(request)
     }
 
@@ -2870,6 +3126,27 @@ impl FiniteChatDevice {
         Ok(self.group(room_id)?.pending_commit().is_some())
     }
 
+    /// Drop a prepared-but-unaccepted Commit so the group returns to the
+    /// state it had before `prepare_*_commit`. Returns whether anything was
+    /// pending. Never call this for a Commit the server may have accepted:
+    /// that Commit must be merged from the ordered log instead.
+    pub fn discard_pending_commit(&mut self, room_id: &str) -> Result<bool, ClientError> {
+        let provider = &self.provider;
+        let group = &mut self
+            .rooms
+            .get_mut(room_id)
+            .ok_or_else(|| ClientError::GroupNotFound(room_id.to_string()))?
+            .group;
+        if group.pending_commit().is_none() {
+            return Ok(false);
+        }
+        group
+            .clear_pending_commit(provider.storage())
+            .map_err(|_| ClientError::ClearPendingCommit)?;
+        debug_assert!(group.pending_commit().is_none());
+        Ok(true)
+    }
+
     fn verify_member_in_group(
         &self,
         group: &MlsGroup,
@@ -3062,6 +3339,25 @@ impl PersistedRoomState {
         validate_mls_group_id(&self.mls_group_id)?;
         if let Some(server_url) = &self.server_url {
             validate_string_bytes("room.server_url", server_url, MAX_ROOM_SERVER_URL_BYTES)?;
+        }
+        validate_item_count(
+            "room.unacknowledged_own_message_ids",
+            self.unacknowledged_own_message_ids.len(),
+            MAX_UNACKNOWLEDGED_OWN_MESSAGE_IDS as u32,
+        )?;
+        for message_id in &self.unacknowledged_own_message_ids {
+            validate_string_bytes(
+                "room.unacknowledged_own_message_id",
+                message_id,
+                MAX_OBJECT_ID_BYTES,
+            )?;
+        }
+        if let Some(evidence) = &self.behind_server {
+            validate_string_bytes(
+                "room.behind_server.message_id",
+                &evidence.message_id,
+                MAX_OBJECT_ID_BYTES,
+            )?;
         }
         Ok(())
     }
@@ -3363,6 +3659,11 @@ pub struct SqliteClientStore {
     // Holds the single-writer lease for the store's lifetime; dropping the
     // last handle releases the OS lock. Read-only opens never take it.
     _writer_lease: Option<Arc<WriterLease>>,
+    /// Rooms that completed a sync tick through this store handle. Seeds
+    /// `RoomEntry::currency_verified` on every `load_device`, so a Device
+    /// reloaded from the store mid-process (after a failed room tick) keeps
+    /// the verification the process already earned. In-memory only.
+    currency_verified_rooms: BTreeSet<RoomId>,
 }
 
 /// Advisory single-writer lease on `<db_path>.writer-lease`.
@@ -3516,6 +3817,7 @@ impl SqliteClientStore {
             options,
             read_only: false,
             _writer_lease: Some(writer_lease),
+            currency_verified_rooms: BTreeSet::new(),
         })
     }
 
@@ -3536,6 +3838,7 @@ impl SqliteClientStore {
             options,
             read_only: true,
             _writer_lease: None,
+            currency_verified_rooms: BTreeSet::new(),
         })
     }
 
@@ -3551,6 +3854,28 @@ impl SqliteClientStore {
         let state = device.export_state()?;
         let encryption_key = self.options.encryption_key.clone();
         self.with_transaction(|tx| save_device_state_tx(tx, &state, &encryption_key))
+    }
+
+    /// Persist the device in the pre-currency-gate snapshot layout (v9: no
+    /// own-send mark, no evidence), exactly as a store written by the
+    /// previous release looks. Exists only so tests can pin the upgrade
+    /// bootstrap rule (first sync initializes, later syncs enforce).
+    #[cfg(feature = "test-support")]
+    #[doc(hidden)]
+    pub fn save_device_state_as_pre_currency_gate_snapshot_for_tests(
+        &mut self,
+        device: &FiniteChatDevice,
+    ) -> Result<(), ClientStoreError> {
+        let state = device.export_state()?;
+        let encryption_key = self.options.encryption_key.clone();
+        self.with_transaction(|tx| {
+            save_device_state_tx_with_version(
+                tx,
+                &state,
+                &encryption_key,
+                LINK_BOOTSTRAP_EXPORT_SNAPSHOT_VERSION,
+            )
+        })
     }
 
     pub fn save_device_state_and_app_messages(
@@ -4162,90 +4487,6 @@ impl SqliteClientStore {
         Ok(events)
     }
 
-    pub fn load_app_outbox(
-        &self,
-        owner: &DeviceRef,
-    ) -> Result<Vec<StoredOutboundMessage>, ClientStoreError> {
-        validate_app_message_owner(owner)?;
-        let mut stmt = self.conn.prepare(
-            r#"
-            SELECT room_id, message_id, nonce, ciphertext
-            FROM client_app_outbox
-            WHERE account_id = ?1 AND device_id = ?2
-            ORDER BY rowid ASC
-            "#,
-        )?;
-        let rows = stmt.query_map(params![&owner.account_id, &owner.device_id], |row| {
-            Ok((
-                row.get::<_, RoomId>(0)?,
-                row.get::<_, MessageId>(1)?,
-                row.get::<_, Vec<u8>>(2)?,
-                row.get::<_, Vec<u8>>(3)?,
-            ))
-        })?;
-        let mut messages = Vec::new();
-        for row in rows {
-            let (room_id, message_id, nonce, ciphertext) = row?;
-            let metadata = decrypt_app_outbox_metadata(
-                &self.options.encryption_key,
-                AppOutboxIdentity {
-                    owner,
-                    room_id: &room_id,
-                    message_id: &message_id,
-                },
-                &nonce,
-                &ciphertext,
-            )?;
-            let message = StoredOutboundMessage {
-                room_id,
-                message_id,
-                sender: metadata.sender,
-                plaintext: metadata.plaintext,
-                local_state: metadata.local_state,
-                server_delivery_state: metadata.server_delivery_state,
-                append_request: metadata.append_request,
-                timestamp_unix_seconds: metadata.timestamp_unix_seconds,
-            };
-            message.validate_limits()?;
-            messages.push(message);
-        }
-        Ok(messages)
-    }
-
-    pub fn save_app_outbox(
-        &mut self,
-        owner: &DeviceRef,
-        messages: &[StoredOutboundMessage],
-    ) -> Result<(), ClientStoreError> {
-        let encryption_key = self.options.encryption_key.clone();
-        self.with_transaction(|tx| {
-            save_app_outbox_tx(tx, &encryption_key, owner, messages)?;
-            prune_app_outbox_tx(tx, owner, MAX_STORED_APP_OUTBOX_MESSAGES)
-        })
-    }
-
-    pub fn delete_app_outbox_message(
-        &mut self,
-        owner: &DeviceRef,
-        room_id: &str,
-        message_id: &str,
-    ) -> Result<(), ClientStoreError> {
-        validate_app_message_owner(owner)?;
-        validate_room_id(room_id).map_err(ClientError::from)?;
-        validate_string_bytes("app_outbox.message_id", message_id, MAX_OBJECT_ID_BYTES)
-            .map_err(ClientError::from)?;
-        self.with_transaction(|tx| {
-            tx.execute(
-                r#"
-                DELETE FROM client_app_outbox
-                WHERE account_id = ?1 AND device_id = ?2 AND room_id = ?3 AND message_id = ?4
-                "#,
-                params![&owner.account_id, &owner.device_id, room_id, message_id],
-            )?;
-            Ok(())
-        })
-    }
-
     pub fn load_app_rooms(
         &self,
         owner: &DeviceRef,
@@ -4427,7 +4668,26 @@ impl SqliteClientStore {
             account_id,
             device_id,
         })?;
-        Ok(FiniteChatDevice::from_state(config, state)?)
+        let mut device = FiniteChatDevice::from_state(config, state)?;
+        for room_id in &self.currency_verified_rooms {
+            device.mark_room_currency_verified(room_id);
+        }
+        Ok(device)
+    }
+
+    pub(crate) fn note_room_currency_verified(&mut self, room_id: &str) {
+        self.currency_verified_rooms.insert(room_id.to_owned());
+    }
+
+    /// Every persisted device state row in this store, across accounts.
+    /// Zero means the store has never held a device: the only condition
+    /// under which a runtime may mint one without an explicit init.
+    pub fn device_state_count(&self) -> Result<u64, ClientStoreError> {
+        Ok(self
+            .conn
+            .query_row("SELECT COUNT(*) FROM client_device_states", [], |row| {
+                row.get::<_, u64>(0)
+            })?)
     }
 
     pub fn load_device_ids_for_account(
@@ -4471,6 +4731,169 @@ impl SqliteClientStore {
             commit_seq,
         })?;
         self.save_device_state(device)
+    }
+
+    /// The device's Welcome admission policy. An absent row means
+    /// [`WelcomeAdmissionPolicy::AllowAll`], the backwards-compatible
+    /// default for devices which never configured an allowlist.
+    pub fn welcome_admission_policy(
+        &self,
+        owner: &DeviceRef,
+    ) -> Result<WelcomeAdmissionPolicy, ClientStoreError> {
+        Ok(self
+            .configured_welcome_admission_policy(owner)?
+            .unwrap_or(WelcomeAdmissionPolicy::AllowAll))
+    }
+
+    /// The explicitly persisted policy row, if any. Distinguishing "no row"
+    /// from an explicit [`WelcomeAdmissionPolicy::AllowAll`] matters for boot
+    /// seeding: only a device with no row at all is eligible for a birth-time
+    /// seed, so an operator- or seed-written row is never overwritten.
+    pub fn configured_welcome_admission_policy(
+        &self,
+        owner: &DeviceRef,
+    ) -> Result<Option<WelcomeAdmissionPolicy>, ClientStoreError> {
+        owner.validate_limits().map_err(ClientError::from)?;
+        let mode = self.conn.query_row(
+            r#"
+            SELECT mode
+            FROM client_welcome_admission_policy
+            WHERE account_id = ?1 AND device_id = ?2
+            "#,
+            params![&owner.account_id, &owner.device_id],
+            |row| row.get::<_, String>(0),
+        );
+        match mode {
+            Ok(mode) => Ok(Some(WelcomeAdmissionPolicy::from_mode(&mode))),
+            Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
+            Err(error) => Err(error.into()),
+        }
+    }
+
+    pub fn set_welcome_admission_policy(
+        &mut self,
+        owner: &DeviceRef,
+        mode: WelcomeAdmissionPolicy,
+    ) -> Result<(), ClientStoreError> {
+        owner.validate_limits().map_err(ClientError::from)?;
+        self.conn.execute(
+            r#"
+            INSERT INTO client_welcome_admission_policy (account_id, device_id, mode)
+            VALUES (?1, ?2, ?3)
+            ON CONFLICT (account_id, device_id) DO UPDATE SET mode = excluded.mode
+            "#,
+            params![&owner.account_id, &owner.device_id, mode.as_str()],
+        )?;
+        Ok(())
+    }
+
+    pub fn add_welcome_allowed_senders<I, S>(
+        &mut self,
+        owner: &DeviceRef,
+        sender_account_ids: I,
+    ) -> Result<(), ClientStoreError>
+    where
+        I: IntoIterator<Item = S>,
+        S: AsRef<str>,
+    {
+        owner.validate_limits().map_err(ClientError::from)?;
+        for sender_account_id in sender_account_ids {
+            let sender_account_id = sender_account_id.as_ref();
+            validate_string_bytes(
+                "welcome_allowlist.sender_account_id",
+                sender_account_id,
+                MAX_ACCOUNT_ID_BYTES,
+            )
+            .map_err(ClientError::from)?;
+            self.conn.execute(
+                r#"
+                INSERT OR IGNORE INTO client_welcome_allowlist (
+                  account_id,
+                  device_id,
+                  sender_account_id
+                )
+                VALUES (?1, ?2, ?3)
+                "#,
+                params![&owner.account_id, &owner.device_id, sender_account_id],
+            )?;
+        }
+        Ok(())
+    }
+
+    pub fn welcome_sender_allowed(
+        &self,
+        owner: &DeviceRef,
+        sender_account_id: &str,
+    ) -> Result<bool, ClientStoreError> {
+        owner.validate_limits().map_err(ClientError::from)?;
+        self.conn
+            .query_row(
+                r#"
+                SELECT EXISTS(
+                  SELECT 1
+                  FROM client_welcome_allowlist
+                  WHERE account_id = ?1
+                    AND device_id = ?2
+                    AND sender_account_id = ?3
+                )
+                "#,
+                params![&owner.account_id, &owner.device_id, sender_account_id],
+                |row| row.get::<_, bool>(0),
+            )
+            .map_err(ClientStoreError::from)
+    }
+
+    /// Every allowlisted sender, sorted for a stable mirror rendering.
+    pub fn welcome_allowed_senders(
+        &self,
+        owner: &DeviceRef,
+    ) -> Result<Vec<String>, ClientStoreError> {
+        owner.validate_limits().map_err(ClientError::from)?;
+        let mut stmt = self.conn.prepare(
+            r#"
+            SELECT sender_account_id
+            FROM client_welcome_allowlist
+            WHERE account_id = ?1 AND device_id = ?2
+            ORDER BY sender_account_id
+            "#,
+        )?;
+        let rows = stmt.query_map(params![&owner.account_id, &owner.device_id], |row| {
+            row.get::<_, String>(0)
+        })?;
+        let mut senders = Vec::new();
+        for row in rows {
+            senders.push(row?);
+        }
+        Ok(senders)
+    }
+
+    /// Remove one allowlisted sender. Returns whether a row was actually
+    /// removed; removing a sender which was never listed is a no-op so
+    /// duplicate revocations settle idempotently. Callers must refuse to
+    /// remove the final entry themselves — an allowlist policy with zero
+    /// entries admits no one's Welcomes, which bricks room admission.
+    pub fn remove_welcome_allowed_sender(
+        &mut self,
+        owner: &DeviceRef,
+        sender_account_id: &str,
+    ) -> Result<bool, ClientStoreError> {
+        owner.validate_limits().map_err(ClientError::from)?;
+        validate_string_bytes(
+            "welcome_allowlist.sender_account_id",
+            sender_account_id,
+            MAX_ACCOUNT_ID_BYTES,
+        )
+        .map_err(ClientError::from)?;
+        let removed = self.conn.execute(
+            r#"
+            DELETE FROM client_welcome_allowlist
+            WHERE account_id = ?1
+              AND device_id = ?2
+              AND sender_account_id = ?3
+            "#,
+            params![&owner.account_id, &owner.device_id, sender_account_id],
+        )?;
+        Ok(removed > 0)
     }
 
     pub fn store_pending_welcome_and_save(
@@ -4677,6 +5100,13 @@ impl SqliteClientStore {
     }
 }
 
+fn is_behind_server_error(error: &ClientStoreError) -> bool {
+    matches!(
+        error,
+        ClientStoreError::Client(ClientError::DeviceStateBehindServer { .. })
+    )
+}
+
 /// Apply one ordered log entry to the in-memory device without persisting.
 ///
 /// The sync workers apply their bounded room tick in memory and save only
@@ -4709,10 +5139,21 @@ fn apply_log_entry_in_memory(
         }
         return Ok(None);
     }
+    // An own Commit whose effects are already merged (rekey heal on a
+    // frozen cursor, older cursor restored from backup) is satisfied: the
+    // cursor advances across it without re-applying or re-reporting it.
+    if device.own_commit_already_merged(room_id, entry)? {
+        validate_log_entry_shape(room_id, entry, LogEntryKind::Commit)?;
+        device.set_last_applied_seq(room_id, entry.seq)?;
+        return Ok(None);
+    }
     // Own application messages cannot be decrypted by their sender (MLS);
     // they advance the cursor without producing an applied entry. Commits
     // are never skipped: own commits go through the pending-merge rule.
     if entry.kind == LogEntryKind::Application && entry.envelope.sender == *device.device_ref() {
+        // Currency gate: an own entry above the durable own-send mark that
+        // this store never minted proves the store is behind the server.
+        device.observe_own_application_entry(room_id, entry)?;
         device.set_last_applied_seq(room_id, entry.seq)?;
         return Ok(None);
     }
@@ -4833,22 +5274,89 @@ pub trait HttpRuntimeTransport {
         R: DeserializeOwned;
 }
 
+fn current_unix_seconds() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|duration| duration.as_secs())
+        .unwrap_or(0)
+}
+
 #[derive(Debug, Clone)]
 pub struct ReqwestHttpRuntimeTransport {
     base_url: String,
     client: reqwest::blocking::Client,
+    signer: Option<[u8; 32]>,
+}
+
+/// Default bounds for every runtime-transport HTTP call. The connect bound
+/// mirrors the server-contract health check; the total bound applies per
+/// request and, for streaming responses, per body read (reqwest resets it on
+/// every successful read, so a heartbeat-driven SSE stream stays alive while
+/// a silent connection errors out).
+pub const DEFAULT_HTTP_CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
+pub const DEFAULT_HTTP_TIMEOUT: Duration = Duration::from_secs(60);
+
+/// The standard blocking HTTP client for runtime transports: every call is
+/// bounded. An unbounded `reqwest::blocking` call parks its calling thread on
+/// the client's internal channel for as long as the server stays silent, and
+/// the callers here include the single-threaded runtime actor and the resident
+/// bridge sync thread — one silently-stalled connection (half-open TCP, edge
+/// hiccup, server pause) then wedges the whole sidecar with no error, no
+/// retry, and no restart. The bounded HTTP transport tests below pin this
+/// wedge class.
+pub fn blocking_http_client() -> reqwest::blocking::Client {
+    blocking_http_client_with_timeouts(DEFAULT_HTTP_CONNECT_TIMEOUT, DEFAULT_HTTP_TIMEOUT)
+}
+
+/// Testable core of [`blocking_http_client`].
+pub fn blocking_http_client_with_timeouts(
+    connect_timeout: Duration,
+    timeout: Duration,
+) -> reqwest::blocking::Client {
+    reqwest::blocking::Client::builder()
+        .connect_timeout(connect_timeout)
+        .timeout(timeout)
+        .build()
+        .expect("static reqwest blocking client configuration is valid")
+}
+
+/// Heartbeat interval the server uses when the stream request does not
+/// negotiate one (mirrors the server default).
+const SYNC_STREAM_DEFAULT_HEARTBEAT_MILLIS: u64 = 15_000;
+
+/// Per-read budget for one SSE hint stream, derived from the negotiated
+/// heartbeat: the server emits an event at least every `heartbeat_ms`, so
+/// allow three missed intervals plus slack. The blocking client applies the
+/// request timeout to *each* body read, so a healthy stream never trips this
+/// while a silent one errors and the caller reconnects. Deriving it from the
+/// heartbeat (instead of the client's flat total bound) keeps the server's
+/// maximum heartbeat interval (60s) from false-tripping a healthy stream.
+fn sync_stream_read_timeout(request: &SyncStreamRequest) -> Duration {
+    let heartbeat_ms = request
+        .heartbeat_ms
+        .unwrap_or(SYNC_STREAM_DEFAULT_HEARTBEAT_MILLIS);
+    Duration::from_millis(heartbeat_ms.saturating_mul(3).saturating_add(5_000))
 }
 
 impl ReqwestHttpRuntimeTransport {
     pub fn new(base_url: impl Into<String>) -> Self {
-        Self::with_client(base_url, reqwest::blocking::Client::new())
+        Self::with_client(base_url, blocking_http_client())
     }
 
     pub fn with_client(base_url: impl Into<String>, client: reqwest::blocking::Client) -> Self {
         Self {
             base_url: base_url.into(),
             client,
+            signer: None,
         }
+    }
+
+    /// Attach the raw 32-byte account secret so every request carries a
+    /// NIP-98-style `Authorization: Nostr <base64>` header binding the method,
+    /// absolute URL, and exact body bytes to the account key.
+    pub fn with_signer(mut self, secret: [u8; 32]) -> Self {
+        self.signer = Some(secret);
+        self
     }
 
     pub fn base_url(&self) -> &str {
@@ -4863,14 +5371,47 @@ impl ReqwestHttpRuntimeTransport {
         )
     }
 
+    fn auth_header(
+        &self,
+        url: &str,
+        body: &[u8],
+    ) -> Result<Option<String>, ReqwestHttpRuntimeTransportError> {
+        let Some(secret) = self.signer else {
+            return Ok(None);
+        };
+        let request = finite_nostr::HttpAuthEventRequest::new("POST", url, current_unix_seconds())
+            .with_body(body.to_vec());
+        finite_nostr::sign_http_auth_header_with_secret(&secret, &request)
+            .map(Some)
+            .map_err(ReqwestHttpRuntimeTransportError::AuthSign)
+    }
+
+    fn signed_post(
+        &self,
+        url: &str,
+        body_bytes: Vec<u8>,
+    ) -> Result<reqwest::blocking::RequestBuilder, ReqwestHttpRuntimeTransportError> {
+        let mut request = self
+            .client
+            .post(url)
+            .header(reqwest::header::CONTENT_TYPE, "application/json")
+            .body(body_bytes.clone());
+        if let Some(header) = self.auth_header(url, &body_bytes)? {
+            request = request.header(reqwest::header::AUTHORIZATION, header);
+        }
+        Ok(request)
+    }
+
     pub fn sync_stream(
         &mut self,
         request: &SyncStreamRequest,
     ) -> Result<ReqwestSyncHintStream, ReqwestHttpRuntimeTransportError> {
+        let url = self.route_url("/sync/stream");
+        let body_bytes =
+            serde_json::to_vec(request).map_err(ReqwestHttpRuntimeTransportError::Encode)?;
         let response = self
-            .client
-            .post(self.route_url("/sync/stream"))
-            .json(request)
+            .signed_post(&url, body_bytes)?
+            .timeout(sync_stream_read_timeout(request))
             .send()
             .map_err(ReqwestHttpRuntimeTransportError::Request)?;
         let status = response.status();
@@ -4895,10 +5436,11 @@ impl HttpRuntimeTransport for ReqwestHttpRuntimeTransport {
         T: Serialize,
         R: DeserializeOwned,
     {
+        let url = self.route_url(uri);
+        let body_bytes =
+            serde_json::to_vec(body).map_err(ReqwestHttpRuntimeTransportError::Encode)?;
         let response = self
-            .client
-            .post(self.route_url(uri))
-            .json(body)
+            .signed_post(&url, body_bytes)?
             .send()
             .map_err(ReqwestHttpRuntimeTransportError::Request)?;
         let status = response.status();
@@ -4917,6 +5459,8 @@ impl HttpRuntimeTransport for ReqwestHttpRuntimeTransport {
 #[derive(Debug)]
 pub enum ReqwestHttpRuntimeTransportError {
     Request(reqwest::Error),
+    Encode(serde_json::Error),
+    AuthSign(finite_nostr::NostrPrimitiveError),
     Server {
         status: reqwest::StatusCode,
         body: String,
@@ -4933,6 +5477,12 @@ impl fmt::Display for ReqwestHttpRuntimeTransportError {
                     error_message_with_sources(error)
                 )
             }
+            Self::Encode(error) => {
+                write!(formatter, "HTTP runtime request encode failed: {error}")
+            }
+            Self::AuthSign(error) => {
+                write!(formatter, "HTTP runtime auth signing failed: {error}")
+            }
             Self::Server { status, body } => {
                 write!(formatter, "server returned {status}: {body}")
             }
@@ -4944,6 +5494,8 @@ impl StdError for ReqwestHttpRuntimeTransportError {
     fn source(&self) -> Option<&(dyn StdError + 'static)> {
         match self {
             Self::Request(error) => Some(error),
+            Self::Encode(error) => Some(error),
+            Self::AuthSign(error) => Some(error),
             Self::Server { .. } => None,
         }
     }
@@ -5127,35 +5679,6 @@ impl<T: HttpRuntimeTransport> HttpRuntimeDelivery<T> {
             "/devices/revoke",
             &RevokeDeviceRequest {
                 device: device.clone(),
-            },
-        )
-    }
-
-    pub fn register_push_token(
-        &mut self,
-        device: &DeviceRef,
-        platform: PushPlatform,
-        token: String,
-    ) -> Result<RegisterPushTokenResponse, HttpRuntimeDeliveryError<T::Error>> {
-        self.post_json(
-            "/push-tokens",
-            &RegisterPushTokenRequest {
-                device: device.clone(),
-                platform,
-                token,
-            },
-        )
-    }
-
-    pub fn remove_push_token(
-        &mut self,
-        device: &DeviceRef,
-    ) -> Result<RemovePushTokenResponse, HttpRuntimeDeliveryError<T::Error>> {
-        self.post_json(
-            "/push-tokens/remove",
-            &RemovePushTokenRequest {
-                device: device.clone(),
-                token: None,
             },
         )
     }
@@ -5621,7 +6144,16 @@ pub fn run_runtime_sync_setup_tick<D: RuntimeDelivery>(
         .map_err(RuntimeWorkerError::Delivery)?;
     report.record_claimed_welcomes(claimed_welcomes.len())?;
     for welcome in claimed_welcomes {
-        store.store_pending_welcome_and_save(device, &welcome)?;
+        if welcome_admission_allows(store, device.device_ref(), &welcome)? {
+            store.store_pending_welcome_and_save(device, &welcome)?;
+        } else {
+            // Claim-then-discard: the claim consumes the Welcome server-side
+            // (claimed-but-unacked Welcomes are not re-delivered), so dropping
+            // it here leaves no redelivery loop. It is never stored, never
+            // activated, and never acked, so the sender's projection never
+            // marks this device as an active room member.
+            report.record_denied_welcome()?;
+        }
     }
 
     activate_pending_welcomes(store, device)?;
@@ -5683,7 +6215,12 @@ pub fn run_room_server_sync_setup_tick<D: RuntimeDelivery>(
         .map_err(RuntimeWorkerError::Delivery)?;
     report.record_claimed_welcomes(claimed_welcomes.len())?;
     for welcome in claimed_welcomes {
-        store.store_pending_welcome_and_save(device, &welcome)?;
+        if welcome_admission_allows(store, device.device_ref(), &welcome)? {
+            store.store_pending_welcome_and_save(device, &welcome)?;
+        } else {
+            // Claim-then-discard: see run_runtime_sync_setup_tick.
+            report.record_denied_welcome()?;
+        }
     }
 
     activate_pending_welcomes(store, device)?;
@@ -5703,6 +6240,9 @@ pub fn run_room_server_sync_setup_tick<D: RuntimeDelivery>(
 /// room's pinned server. On failure this function does not save the Device or
 /// any application rows for the attempted room; callers must discard the
 /// in-memory Device candidate because MLS processing may have changed it.
+/// The one exception is [`ClientError::DeviceStateBehindServer`]: the rewind
+/// evidence (and the entries applied before it) is persisted before the
+/// error surfaces, so the flag survives the caller's reload.
 pub fn run_room_sync_tick<D: RuntimeDelivery>(
     store: &mut SqliteClientStore,
     device: &mut FiniteChatDevice,
@@ -5723,6 +6263,362 @@ pub fn run_room_sync_tick<D: RuntimeDelivery>(
         &mut report,
     )?;
     Ok(report)
+}
+
+/// Outcome of one accepted rekey Commit (see [`run_runtime_rekey_room`]).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RuntimeRekeyRoomReport {
+    pub room_id: RoomId,
+    pub previous_epoch: u64,
+    pub new_epoch: u64,
+    pub commit_seq: u64,
+    pub message_id: MessageId,
+    /// The room's sync cursor before the rekey.
+    #[serde(default)]
+    pub cursor_before: u64,
+    /// The room's sync cursor after the rekey: `commit_seq` once the
+    /// backlog replay and the merge completed.
+    #[serde(default)]
+    pub cursor_after: u64,
+    /// Backlog entries the pre-commit replay applied and stored normally
+    /// (application messages and any Commit that applied).
+    #[serde(default)]
+    pub applied: u64,
+    /// Backlog entries the pre-commit replay skipped on evidence: application
+    /// entries whose apply at the current epoch failed with the MLS
+    /// application-ciphertext error class. Each carries its sender and
+    /// error class; nothing else is ever skipped.
+    #[serde(default)]
+    pub skipped: Vec<RuntimeRekeySkippedEntry>,
+}
+
+/// One backlog entry the rekey's pre-commit replay skipped on evidence.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RuntimeRekeySkippedEntry {
+    pub seq: u64,
+    pub sender_account_id: String,
+    pub sender_device_id: String,
+    pub message_id: MessageId,
+    pub error_class: rejected_entry_diagnostic::RejectedEntryErrorClass,
+}
+
+/// Pages read while paging the backlog above the cursor, matching the
+/// bounded replay tick. A backlog that does not fit refuses the rekey
+/// instead of being truncated.
+const MAX_REKEY_BACKLOG_PAGES: u32 = 64;
+
+/// Page a room's log strictly above `after_seq` up to the server head.
+/// Read-only. Returns the entries and the head's `next_after_seq`, or
+/// `None` when the page bound is hit or paging stalls.
+fn page_rekey_backlog<D: RuntimeDelivery>(
+    delivery: &mut D,
+    own_device: &DeviceRef,
+    room_id: &str,
+    after_seq: u64,
+) -> Result<Option<(Vec<RoomLogEntry>, u64)>, D::Error> {
+    let mut entries = Vec::new();
+    let mut after = after_seq;
+    for _ in 0..MAX_REKEY_BACKLOG_PAGES {
+        let page = delivery.sync_events(room_id, own_device, after)?;
+        entries.extend(
+            page.entries
+                .into_iter()
+                .filter(|entry| entry.seq > after_seq),
+        );
+        if !page.has_more {
+            return Ok(Some((entries, page.next_after_seq.max(after))));
+        }
+        if page.next_after_seq <= after {
+            return Ok(None);
+        }
+        after = page.next_after_seq;
+    }
+    Ok(None)
+}
+
+/// Outcome of the pre-commit backlog replay.
+#[derive(Default)]
+struct RekeyBacklogReplay {
+    applied: u64,
+    skipped: Vec<RuntimeRekeySkippedEntry>,
+}
+
+/// Replay the backlog above the cursor at the current epoch through the
+/// real apply path, before any Commit is prepared. An entry that applies
+/// is applied and stored normally. An entry whose apply fails is skipped
+/// only under the one skip rule shared with `repair skip-entry`
+/// ([`rejected_entry_diagnostic::is_skippable_rejection`]: an application
+/// entry rejected with the MLS application-ciphertext class); the cursor
+/// moves past it and the skip is recorded with its sender and error class.
+/// Any other failure (a Commit or Proposal that fails, a non-MLS error, an
+/// own-device entry that errors) refuses the rekey with a typed error and
+/// no durable change. The single save happens only when the whole backlog
+/// replayed or skipped.
+fn replay_rekey_backlog<E>(
+    store: &mut SqliteClientStore,
+    device: &mut FiniteChatDevice,
+    room_id: &str,
+    entries: &[RoomLogEntry],
+    head_after_seq: u64,
+) -> Result<RekeyBacklogReplay, RuntimeWorkerError<E>> {
+    let mut replay = RekeyBacklogReplay::default();
+    if entries.is_empty() && head_after_seq <= device.last_applied_seq(room_id)? {
+        return Ok(replay);
+    }
+    let mut app_messages = Vec::new();
+    let mut app_events = Vec::new();
+    for entry in entries {
+        let applied = match apply_log_entry_in_memory(device, room_id, entry) {
+            Ok(applied) => applied,
+            Err(error) => {
+                let (kind, error_class) =
+                    rejected_entry_diagnostic::classify_rejected_entry(entry.kind, &error);
+                if rejected_entry_diagnostic::is_skippable_rejection(kind, error_class) {
+                    device.set_last_applied_seq(room_id, entry.seq)?;
+                    replay.skipped.push(RuntimeRekeySkippedEntry {
+                        seq: entry.seq,
+                        sender_account_id: entry.sender.account_id.clone(),
+                        sender_device_id: entry.sender.device_id.clone(),
+                        message_id: entry.message_id.clone(),
+                        error_class,
+                    });
+                    continue;
+                }
+                return Err(ClientError::RekeyBacklogNotReplayable {
+                    room_id: room_id.to_string(),
+                    seq: entry.seq,
+                    kind: entry.kind,
+                    error_class,
+                }
+                .into());
+            }
+        };
+        let Some(applied) = applied else {
+            continue;
+        };
+        replay.applied = replay
+            .applied
+            .checked_add(1)
+            .ok_or(ClientError::RuntimeCounterOverflow)?;
+        if let Some(message) = stored_app_message_from_applied(
+            room_id,
+            entry.seq,
+            &entry.message_id,
+            entry.timestamp_unix_seconds,
+            &applied,
+        ) {
+            app_messages.push(message);
+        }
+        if let Some(event) = stored_app_event_from_applied(
+            room_id,
+            entry.seq,
+            &entry.message_id,
+            entry.timestamp_unix_seconds,
+            &applied,
+        ) {
+            app_events.push(event);
+        }
+    }
+    if head_after_seq > device.last_applied_seq(room_id)? {
+        device.set_last_applied_seq(room_id, head_after_seq)?;
+    }
+    store.save_device_state_and_app_messages_and_events(device, &app_messages, &app_events)?;
+    Ok(replay)
+}
+
+/// Directory pages scanned while looking up one room's server epoch.
+const MAX_REKEY_DIRECTORY_PAGES: u32 = 64;
+/// Page size for that lookup: the server's account-room list ceiling, as
+/// used by the other directory readers.
+const REKEY_DIRECTORY_PAGE_LIMIT: u32 = 100;
+
+/// Read the server's current epoch for one room from the account room
+/// directory. Read-only: no cursor, Welcome, or KeyPackage state changes.
+fn server_room_epoch<D: RuntimeDelivery>(
+    delivery: &mut D,
+    account_id: &str,
+    room_id: &str,
+) -> Result<Option<u64>, D::Error> {
+    let mut after_room_id = None;
+    for _ in 0..MAX_REKEY_DIRECTORY_PAGES {
+        let page = delivery.list_account_rooms(ListAccountRoomsRequest {
+            account_id: account_id.to_owned(),
+            after_room_id: after_room_id.clone(),
+            limit: REKEY_DIRECTORY_PAGE_LIMIT,
+        })?;
+        if let Some(room) = page.rooms.iter().find(|room| room.room_id == room_id) {
+            return Ok(Some(room.current_epoch));
+        }
+        if !page.has_more {
+            break;
+        }
+        let Some(next) = page.next_after_room_id else {
+            break;
+        };
+        if after_room_id.as_ref() == Some(&next) {
+            break;
+        }
+        after_room_id = Some(next);
+    }
+    Ok(None)
+}
+
+/// Advance one room's MLS epoch with an ordinary self-update Commit from
+/// this device. Every epoch transition re-derives every leaf's secret tree
+/// at generation 0, which is the durable heal for a counterpart whose send
+/// ratchet was rewound (its stale generations become irrelevant without
+/// replacing any device).
+///
+/// Fails closed, with no durable change, unless the room exists locally
+/// and no Commit is pending. The room's sync cursor is NOT required to be
+/// at the server head: the backlog above the cursor is replayed first, at
+/// the current epoch, through the real apply path (see
+/// [`replay_rekey_backlog`]). Healthy entries are applied and stored; only
+/// application entries rejected with the MLS application-ciphertext class
+/// are skipped, on that evidence, and listed in the report with their
+/// sender and error class. A Commit or Proposal that fails, any other
+/// error class, or an own-device entry that errors refuses the rekey with
+/// a typed error ("sync or repair first"). A backlog whose newest own
+/// Commit is already merged above a frozen cursor (a previous attempt on
+/// an older image, or a crash after acceptance) can no longer be
+/// classified honestly — past-epoch secrets are gone — so it is refused
+/// with [`ClientError::RekeyCursorBehindOwnCommit`], naming `finitechat
+/// repair skip-entry` as the sanctioned path (which crosses the merged
+/// Commit as a no-op advance).
+///
+/// Only after the backlog is fully replayed-or-skipped is the Commit
+/// prepared; the local epoch must then equal the server's current epoch
+/// (read from the account room directory), and the cursor lands on
+/// `commit_seq` through the normal merge.
+///
+/// Durability order mirrors the add-member flow: the pending Commit is
+/// saved before submit (so a crash after acceptance is merged by the next
+/// sync), a server rejection restores the pre-rekey state, and acceptance
+/// is merged from the ordered log before the final save.
+pub fn run_runtime_rekey_room<D: RuntimeDelivery>(
+    store: &mut SqliteClientStore,
+    device: &mut FiniteChatDevice,
+    delivery: &mut D,
+    room_id: &str,
+    idempotency_key: impl Into<String>,
+) -> Result<RuntimeRekeyRoomReport, RuntimeWorkerError<D::Error>> {
+    validate_room_id(room_id).map_err(ClientError::from)?;
+    if device.has_pending_commit(room_id)? {
+        return Err(ClientError::PendingCommitExists(room_id.to_string()).into());
+    }
+    let cursor_before = device.last_applied_seq(room_id)?;
+
+    let Some((backlog, head_after_seq)) =
+        page_rekey_backlog(delivery, device.device_ref(), room_id, cursor_before)
+            .map_err(RuntimeWorkerError::Delivery)?
+    else {
+        return Err(ClientError::RekeyBacklogNotPaged {
+            room_id: room_id.to_string(),
+            cursor: cursor_before,
+        }
+        .into());
+    };
+    for entry in backlog.iter().rev() {
+        if device.own_commit_already_merged(room_id, entry)? {
+            return Err(ClientError::RekeyCursorBehindOwnCommit {
+                room_id: room_id.to_string(),
+                cursor: cursor_before,
+                commit_seq: entry.seq,
+            }
+            .into());
+        }
+    }
+    let replay = replay_rekey_backlog(store, device, room_id, &backlog, head_after_seq)?;
+
+    let previous_epoch = device.group_epoch(room_id)?;
+    let account_id = device.device_ref().account_id.clone();
+    let server_epoch = server_room_epoch(delivery, &account_id, room_id)
+        .map_err(RuntimeWorkerError::Delivery)?
+        .ok_or_else(|| ClientError::RekeyRoomNotOnServer(room_id.to_string()))?;
+    if server_epoch != previous_epoch {
+        return Err(ClientError::RekeyEpochMismatch {
+            room_id: room_id.to_string(),
+            local_epoch: previous_epoch,
+            server_epoch,
+        }
+        .into());
+    }
+
+    let PreparedCommit {
+        request,
+        message_id,
+    } = device.prepare_self_update_commit(room_id, idempotency_key)?;
+    store.save_device_state(device)?;
+    let accepted = match delivery.submit_commit(request) {
+        Ok(accepted) => accepted,
+        Err(error) => {
+            device.discard_pending_commit(room_id)?;
+            store.save_device_state(device)?;
+            return Err(RuntimeWorkerError::Delivery(error));
+        }
+    };
+    if accepted.message_id != message_id {
+        return Err(ClientError::RekeyPreparedCommitMismatch {
+            room_id: room_id.to_string(),
+            expected: message_id,
+            actual: accepted.message_id,
+        }
+        .into());
+    }
+
+    let page = delivery
+        .sync_events(room_id, device.device_ref(), accepted.seq.saturating_sub(1))
+        .map_err(RuntimeWorkerError::Delivery)?;
+    device.merge_pending_commit_from_log(room_id, &page.entries, &message_id)?;
+    let new_epoch = device.group_epoch(room_id)?;
+    // The replay left the cursor at the head; the Commit is the next entry
+    // unless something landed in between (the next sync tick pages it).
+    if device.last_applied_seq(room_id)?.saturating_add(1) == accepted.seq {
+        device.set_last_applied_seq(room_id, accepted.seq)?;
+    }
+    let cursor_after = device.last_applied_seq(room_id)?;
+    store.save_device_state(device)?;
+
+    Ok(RuntimeRekeyRoomReport {
+        room_id: room_id.to_string(),
+        previous_epoch,
+        new_epoch,
+        commit_seq: accepted.seq,
+        message_id,
+        cursor_before,
+        cursor_after,
+        applied: replay.applied,
+        skipped: replay.skipped,
+    })
+}
+
+/// Decide whether a claimed Welcome may be stored and activated.
+///
+/// Trust anchor: `WelcomeRecord.sender` is server-asserted from the commit
+/// request's `sender` field, which `SignedJson` binds to the NIP-98 signer
+/// only when the server runs with `FINITECHAT_REQUIRE_SIGNED_REQUESTS=true`.
+/// Until that flag is enforced, a caller able to reach the server can submit
+/// a commit naming any `sender`, so this gate is a policy control that
+/// becomes a security control only after the server-side flag flip. The
+/// Welcome payload itself stays opaque to us until activation.
+fn welcome_admission_allows(
+    store: &SqliteClientStore,
+    owner: &DeviceRef,
+    welcome: &WelcomeRecord,
+) -> Result<bool, ClientStoreError> {
+    if store.welcome_admission_policy(owner)? == WelcomeAdmissionPolicy::AllowAll {
+        return Ok(true);
+    }
+    // Device-link exemption: a Welcome from the same account is the account
+    // adding one of its own linked devices to a room. Caveat: the sender is
+    // only authenticated once the server enforces signed requests; until
+    // then this exemption is the cheapest allowlist bypass available (claim
+    // sender = the victim's own npub), which is acceptable only because the
+    // flag flip is sequenced inside this same rollout.
+    if welcome.sender.account_id == owner.account_id {
+        return Ok(true);
+    }
+    store.welcome_sender_allowed(owner, &welcome.sender.account_id)
 }
 
 fn activate_pending_welcomes(
@@ -6058,7 +6954,24 @@ fn sync_room_pages<D: RuntimeDelivery>(
             let seq = entry.seq;
             let message_id = entry.message_id.clone();
             let before_seq = device.last_applied_seq(&room_id)?;
-            if let Some(applied) = apply_log_entry_in_memory(device, &room_id, &entry)? {
+            let applied = match apply_log_entry_in_memory(device, &room_id, &entry) {
+                Ok(applied) => applied,
+                Err(error) if is_behind_server_error(&error) => {
+                    // The rewind evidence must be durable before it is
+                    // surfaced (callers discard the in-memory Device on
+                    // error). Entries applied earlier in this tick are
+                    // saved with it; the cursor stops short of the
+                    // evidence entry.
+                    store.save_device_state_and_app_messages_and_events(
+                        device,
+                        &app_messages,
+                        &app_events,
+                    )?;
+                    return Err(error.into());
+                }
+                Err(error) => return Err(error.into()),
+            };
+            if let Some(applied) = applied {
                 dirty = true;
                 if let Some(message) = stored_app_message_from_applied(
                     &room_id,
@@ -6105,9 +7018,17 @@ fn sync_room_pages<D: RuntimeDelivery>(
         after_seq = page.next_after_seq;
     }
 
+    // One full bounded tick completed without rewind evidence: a pre-v10
+    // room graduates from initialization to enforcement, and the room is
+    // verified current for this process.
+    if device.complete_currency_initialization(&room_id)? {
+        dirty = true;
+    }
     if dirty {
         store.save_device_state_and_app_messages_and_events(device, &app_messages, &app_events)?;
     }
+    device.mark_room_currency_verified(&room_id);
+    store.note_room_currency_verified(&room_id);
 
     debug_assert!(pages <= options.max_sync_pages_per_room);
     Ok(())
@@ -6238,18 +7159,6 @@ pub enum ClientStoreError {
     StoredAppTimestampOutOfRange { timestamp: u64 },
     #[error("stored app timestamp is negative: {timestamp}")]
     NegativeStoredAppTimestamp { timestamp: i64 },
-    #[error("encrypted app outbox nonce has {actual_bytes} bytes")]
-    InvalidAppOutboxNonceLength { actual_bytes: usize },
-    #[error("failed to encrypt app outbox metadata")]
-    EncryptAppOutbox,
-    #[error("failed to decrypt app outbox metadata")]
-    DecryptAppOutbox,
-    #[error("failed to encode app outbox metadata")]
-    EncodeAppOutboxMetadata,
-    #[error("failed to decode app outbox metadata")]
-    DecodeAppOutboxMetadata,
-    #[error("stored app outbox count cannot be represented in sqlite")]
-    StoredAppOutboxCountOverflow,
     #[error("failed to encrypt stored app event")]
     EncryptAppEvent,
     #[error("failed to decrypt stored app event")]
@@ -6334,15 +7243,6 @@ pub enum ClientError {
     EnvelopeMessageId(#[source] serde_json::Error),
     #[error("invalid persisted client state: {0}")]
     InvalidClientState(String),
-    #[error("stored outbox request room mismatch: expected {expected}, actual {actual}")]
-    OutboxRoomMismatch { expected: String, actual: String },
-    #[error("stored outbox request message id mismatch: expected {expected}, actual {actual}")]
-    OutboxMessageIdMismatch { expected: String, actual: String },
-    #[error("stored outbox request sender mismatch: expected {expected:?}, actual {actual:?}")]
-    OutboxSenderMismatch {
-        expected: DeviceRef,
-        actual: DeviceRef,
-    },
     #[error("failed to create OpenMLS signer")]
     CreateSigner,
     #[error("failed to store OpenMLS signer")]
@@ -6531,6 +7431,43 @@ pub enum ClientError {
     },
     #[error("link fanout prepared Commit mismatch: expected {expected}, actual {actual}")]
     LinkFanoutPreparedCommitMismatch { expected: String, actual: String },
+    #[error(
+        "rekey refused for {room_id}: local epoch {local_epoch} does not match server epoch {server_epoch}; sync the room first"
+    )]
+    RekeyEpochMismatch {
+        room_id: RoomId,
+        local_epoch: u64,
+        server_epoch: u64,
+    },
+    #[error("rekey refused for {0}: the server directory does not list this room")]
+    RekeyRoomNotOnServer(RoomId),
+    #[error(
+        "rekey refused for {room_id}: the backlog above cursor {cursor} could not be paged within the bound; sync the room first"
+    )]
+    RekeyBacklogNotPaged { room_id: RoomId, cursor: u64 },
+    #[error(
+        "rekey refused for {room_id}: seq {seq} ({kind:?}) failed to replay with {error_class:?}; sync or repair the room first"
+    )]
+    RekeyBacklogNotReplayable {
+        room_id: RoomId,
+        seq: u64,
+        kind: LogEntryKind,
+        error_class: rejected_entry_diagnostic::RejectedEntryErrorClass,
+    },
+    #[error(
+        "rekey refused for {room_id}: this device's own Commit at seq {commit_seq} is already merged above the frozen cursor {cursor}; complete the heal with `finitechat repair skip-entry`"
+    )]
+    RekeyCursorBehindOwnCommit {
+        room_id: RoomId,
+        cursor: u64,
+        commit_seq: u64,
+    },
+    #[error("rekey Commit acceptance mismatch for {room_id}: expected {expected}, actual {actual}")]
+    RekeyPreparedCommitMismatch {
+        room_id: RoomId,
+        expected: String,
+        actual: String,
+    },
     #[error("member credential missing or duplicated: {0:?}")]
     MemberCredentialMissing(DeviceRef),
     #[error("persisted client state account does not match config")]
@@ -6633,6 +7570,18 @@ pub enum ClientError {
         current_seq: u64,
         attempted_seq: u64,
     },
+    #[error(
+        "device state for room {room_id} is behind the server: own-send mark {local_mark}, but the server already holds this device's entry at seq {observed_seq}; the store was rewound (stale copy or restore) and sending would reuse consumed MLS generations — sends stay refused until a commit advances the room epoch"
+    )]
+    DeviceStateBehindServer {
+        room_id: RoomId,
+        local_mark: u64,
+        observed_seq: u64,
+    },
+    #[error(
+        "room {room_id} currency is unverified: no sync tick has completed for it since the store was opened; sync before sending"
+    )]
+    CurrencyUnverified { room_id: RoomId },
 }
 
 fn verified_key_package_from_claim(
@@ -6944,8 +7893,18 @@ fn hex_lower(bytes: &[u8]) -> String {
 
 fn prepare_client_store_schema(conn: &Connection) -> Result<(), ClientStoreError> {
     reject_legacy_client_store_tables(conn)?;
+    drop_retired_client_store_tables(conn)?;
     reject_legacy_app_projection_schema(conn)?;
     create_current_client_store_schema(conn)?;
+    Ok(())
+}
+
+/// Tables earlier builds created that no current code reads. Dropping them on
+/// a writer open discards their rows for good: `client_app_outbox` held queued
+/// own sends, and a send now either gets server acceptance synchronously or
+/// fails to the caller with no durable trace.
+fn drop_retired_client_store_tables(conn: &Connection) -> Result<(), ClientStoreError> {
+    conn.execute_batch("DROP TABLE IF EXISTS client_app_outbox;")?;
     Ok(())
 }
 
@@ -7005,22 +7964,6 @@ fn create_current_client_store_schema(conn: &Connection) -> Result<(), ClientSto
 
         CREATE INDEX IF NOT EXISTS client_app_events_owner_idx
           ON client_app_events(account_id, device_id);
-
-        CREATE TABLE IF NOT EXISTS client_app_outbox (
-          account_id TEXT NOT NULL,
-          device_id TEXT NOT NULL,
-          room_id TEXT NOT NULL,
-          message_id TEXT NOT NULL,
-          nonce BLOB NOT NULL,
-          ciphertext BLOB NOT NULL,
-          PRIMARY KEY (account_id, device_id, room_id, message_id),
-          FOREIGN KEY (account_id, device_id)
-            REFERENCES client_device_states(account_id, device_id)
-            ON DELETE CASCADE
-        );
-
-        CREATE INDEX IF NOT EXISTS client_app_outbox_owner_idx
-          ON client_app_outbox(account_id, device_id);
 
         CREATE TABLE IF NOT EXISTS client_app_rooms (
           account_id TEXT NOT NULL,
@@ -7143,6 +8086,21 @@ fn create_current_client_store_schema(conn: &Connection) -> Result<(), ClientSto
             source_device_id,
             chunk_index
           );
+
+        CREATE TABLE IF NOT EXISTS client_welcome_admission_policy (
+          account_id TEXT NOT NULL,
+          device_id TEXT NOT NULL,
+          mode TEXT NOT NULL
+            CHECK (mode IN ('allow_all', 'allowlist')),
+          PRIMARY KEY (account_id, device_id)
+        );
+
+        CREATE TABLE IF NOT EXISTS client_welcome_allowlist (
+          account_id TEXT NOT NULL,
+          device_id TEXT NOT NULL,
+          sender_account_id TEXT NOT NULL,
+          PRIMARY KEY (account_id, device_id, sender_account_id)
+        );
         "#,
     )?;
     Ok(())
@@ -7177,18 +8135,6 @@ fn reject_legacy_app_projection_schema(conn: &Connection) -> Result<(), ClientSt
             "sender_account_id",
             "sender_device_id",
             "timestamp_unix_seconds",
-            "nonce",
-            "ciphertext",
-        ],
-    )?;
-    reject_legacy_app_projection_table(
-        conn,
-        "client_app_outbox",
-        &[
-            "account_id",
-            "device_id",
-            "room_id",
-            "message_id",
             "nonce",
             "ciphertext",
         ],
@@ -7347,8 +8293,17 @@ fn save_device_state_tx(
     state: &FiniteChatDeviceState,
     encryption_key: &ClientStoreEncryptionKey,
 ) -> Result<(), ClientStoreError> {
+    save_device_state_tx_with_version(tx, state, encryption_key, CLIENT_STATE_SNAPSHOT_VERSION)
+}
+
+fn save_device_state_tx_with_version(
+    tx: &Transaction<'_>,
+    state: &FiniteChatDeviceState,
+    encryption_key: &ClientStoreEncryptionKey,
+    version: u16,
+) -> Result<(), ClientStoreError> {
     state.validate_limits()?;
-    let sealed = encrypt_device_state(encryption_key, state)?;
+    let sealed = encrypt_device_state_with_version(encryption_key, state, version)?;
     tx.execute(
         r#"
         INSERT INTO client_device_states (
@@ -8730,43 +9685,6 @@ fn validate_app_event_import_tx(
     Ok(())
 }
 
-fn save_app_outbox_tx(
-    tx: &Transaction<'_>,
-    encryption_key: &ClientStoreEncryptionKey,
-    owner: &DeviceRef,
-    messages: &[StoredOutboundMessage],
-) -> Result<(), ClientStoreError> {
-    validate_app_message_owner(owner)?;
-    let mut stmt = tx.prepare(
-        r#"
-        INSERT INTO client_app_outbox (
-          account_id,
-          device_id,
-          room_id,
-          message_id,
-          nonce,
-          ciphertext
-        ) VALUES (?1, ?2, ?3, ?4, ?5, ?6)
-        ON CONFLICT(account_id, device_id, room_id, message_id) DO UPDATE SET
-          nonce = excluded.nonce,
-          ciphertext = excluded.ciphertext
-        "#,
-    )?;
-    for message in messages {
-        message.validate_limits()?;
-        let sealed = encrypt_app_outbox_metadata(encryption_key, owner, message)?;
-        stmt.execute(params![
-            &owner.account_id,
-            &owner.device_id,
-            &message.room_id,
-            &message.message_id,
-            &sealed.nonce,
-            &sealed.ciphertext,
-        ])?;
-    }
-    Ok(())
-}
-
 fn save_app_rooms_tx(
     tx: &Transaction<'_>,
     encryption_key: &ClientStoreEncryptionKey,
@@ -8945,43 +9863,6 @@ fn prune_app_events_tx(
     Ok(())
 }
 
-fn prune_app_outbox_tx(
-    tx: &Transaction<'_>,
-    owner: &DeviceRef,
-    max_messages: u32,
-) -> Result<(), ClientStoreError> {
-    validate_app_message_owner(owner)?;
-    let count = tx.query_row(
-        r#"
-        SELECT COUNT(*)
-        FROM client_app_outbox
-        WHERE account_id = ?1 AND device_id = ?2
-        "#,
-        params![&owner.account_id, &owner.device_id],
-        |row| row.get::<_, u64>(0),
-    )?;
-    let excess = count.saturating_sub(u64::from(max_messages));
-    if excess == 0 {
-        return Ok(());
-    }
-    let limit =
-        i64::try_from(excess).map_err(|_| ClientStoreError::StoredAppOutboxCountOverflow)?;
-    tx.execute(
-        r#"
-        DELETE FROM client_app_outbox
-        WHERE rowid IN (
-          SELECT rowid
-          FROM client_app_outbox
-          WHERE account_id = ?1 AND device_id = ?2
-          ORDER BY rowid ASC
-          LIMIT ?3
-        )
-        "#,
-        params![&owner.account_id, &owner.device_id, limit],
-    )?;
-    Ok(())
-}
-
 fn prune_app_profiles_tx(
     tx: &Transaction<'_>,
     owner: &DeviceRef,
@@ -9071,12 +9952,6 @@ struct SealedAppEvent {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-struct SealedAppOutbox {
-    nonce: Vec<u8>,
-    ciphertext: Vec<u8>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
 struct SealedAppRoom {
     nonce: Vec<u8>,
     ciphertext: Vec<u8>,
@@ -9110,13 +9985,6 @@ struct AppMessageIdentity<'a> {
 }
 
 #[derive(Clone, Copy)]
-struct AppOutboxIdentity<'a> {
-    owner: &'a DeviceRef,
-    room_id: &'a str,
-    message_id: &'a str,
-}
-
-#[derive(Clone, Copy)]
 struct AppRoomIdentity<'a> {
     owner: &'a DeviceRef,
     room_id: &'a str,
@@ -9133,14 +10001,15 @@ struct AppProfileIdentity<'a> {
     profile_account_id: &'a str,
 }
 
-fn encrypt_device_state(
+fn encrypt_device_state_with_version(
     encryption_key: &ClientStoreEncryptionKey,
     state: &FiniteChatDeviceState,
+    version: u16,
 ) -> Result<SealedClientState, ClientStoreError> {
     state.validate_limits()?;
-    let plaintext = encode_device_state(state)?;
+    let plaintext = encode_device_state_with_version(state, version)?;
     let aad = client_store_aad(
-        CLIENT_STATE_SNAPSHOT_VERSION,
+        version,
         &state.device_ref.account_id,
         &state.device_ref.device_id,
     )?;
@@ -9252,61 +10121,6 @@ fn encrypt_app_event_plaintext(
     )
     .map_err(ClientError::from)?;
     Ok(SealedAppEvent {
-        nonce: nonce.to_vec(),
-        ciphertext,
-    })
-}
-
-fn encrypt_app_outbox_metadata(
-    encryption_key: &ClientStoreEncryptionKey,
-    owner: &DeviceRef,
-    message: &StoredOutboundMessage,
-) -> Result<SealedAppOutbox, ClientStoreError> {
-    validate_app_message_owner(owner)?;
-    message.validate_limits()?;
-    let metadata = StoredOutboundMessageMetadataV1 {
-        sender: message.sender.clone(),
-        plaintext: message.plaintext.clone(),
-        local_state: message.local_state.clone(),
-        server_delivery_state: message.server_delivery_state.clone(),
-        append_request: message.append_request.clone(),
-        timestamp_unix_seconds: message.timestamp_unix_seconds,
-    };
-    let plaintext =
-        serde_json::to_vec(&metadata).map_err(|_| ClientStoreError::EncodeAppOutboxMetadata)?;
-    validate_bytes_len(
-        "app_outbox.metadata",
-        plaintext.len(),
-        MAX_APP_OUTBOX_METADATA_PLAINTEXT_BYTES,
-    )
-    .map_err(ClientError::from)?;
-    let aad = app_outbox_aad(AppOutboxIdentity {
-        owner,
-        room_id: &message.room_id,
-        message_id: &message.message_id,
-    })?;
-    let provider = OpenMlsRustCrypto::default();
-    let nonce: [u8; CLIENT_STORE_NONCE_BYTES] = provider
-        .rand()
-        .random_array()
-        .map_err(|_| ClientStoreError::Randomness)?;
-    let ciphertext = provider
-        .crypto()
-        .aead_encrypt(
-            AeadType::Aes256Gcm,
-            encryption_key.as_bytes(),
-            &plaintext,
-            &nonce,
-            &aad,
-        )
-        .map_err(|_| ClientStoreError::EncryptAppOutbox)?;
-    validate_bytes_len(
-        "app_outbox.ciphertext",
-        ciphertext.len(),
-        MAX_APP_OUTBOX_METADATA_CIPHERTEXT_BYTES,
-    )
-    .map_err(ClientError::from)?;
-    Ok(SealedAppOutbox {
         nonce: nonce.to_vec(),
         ciphertext,
     })
@@ -9582,10 +10396,7 @@ fn decrypt_device_state(
     .map_err(ClientError::from)?;
     let provider = OpenMlsRustCrypto::default();
     let mut plaintext = None;
-    for version in [
-        CLIENT_STATE_SNAPSHOT_VERSION,
-        LEGACY_CLIENT_STATE_SNAPSHOT_VERSION,
-    ] {
+    for version in SUPPORTED_CLIENT_STATE_SNAPSHOT_VERSIONS {
         let aad = client_store_aad(version, account_id, device_id)?;
         if let Ok(opened) = provider.crypto().aead_decrypt(
             AeadType::Aes256Gcm,
@@ -9680,64 +10491,6 @@ fn decrypt_app_event_plaintext(
     )
     .map_err(ClientError::from)?;
     Ok(plaintext)
-}
-
-fn decrypt_app_outbox_metadata(
-    encryption_key: &ClientStoreEncryptionKey,
-    identity: AppOutboxIdentity<'_>,
-    nonce: &[u8],
-    ciphertext: &[u8],
-) -> Result<StoredOutboundMessageMetadataV1, ClientStoreError> {
-    if nonce.len() != CLIENT_STORE_NONCE_BYTES {
-        return Err(ClientStoreError::InvalidAppOutboxNonceLength {
-            actual_bytes: nonce.len(),
-        });
-    }
-    validate_bytes_non_empty("app_outbox.ciphertext", ciphertext.len())
-        .map_err(ClientError::from)?;
-    validate_bytes_len(
-        "app_outbox.ciphertext",
-        ciphertext.len(),
-        MAX_APP_OUTBOX_METADATA_CIPHERTEXT_BYTES,
-    )
-    .map_err(ClientError::from)?;
-    let aad = app_outbox_aad(identity)?;
-    let provider = OpenMlsRustCrypto::default();
-    let plaintext = provider
-        .crypto()
-        .aead_decrypt(
-            AeadType::Aes256Gcm,
-            encryption_key.as_bytes(),
-            ciphertext,
-            nonce,
-            &aad,
-        )
-        .map_err(|_| ClientStoreError::DecryptAppOutbox)?;
-    validate_bytes_len(
-        "app_outbox.metadata",
-        plaintext.len(),
-        MAX_APP_OUTBOX_METADATA_PLAINTEXT_BYTES,
-    )
-    .map_err(ClientError::from)?;
-    let metadata = serde_json::from_slice::<StoredOutboundMessageMetadataV1>(&plaintext)
-        .map_err(|_| ClientStoreError::DecodeAppOutboxMetadata)?;
-    metadata
-        .sender
-        .validate_limits()
-        .map_err(ClientError::from)?;
-    validate_bytes_len(
-        "app_outbox.plaintext",
-        metadata.plaintext.len(),
-        MAX_ENVELOPE_PAYLOAD_BYTES,
-    )
-    .map_err(ClientError::from)?;
-    metadata.local_state.validate_limits()?;
-    metadata.server_delivery_state.validate_limits()?;
-    metadata
-        .append_request
-        .validate_limits()
-        .map_err(ClientError::from)?;
-    Ok(metadata)
 }
 
 fn decrypt_app_room_metadata(
@@ -10109,34 +10862,6 @@ fn app_event_or_message_aad(
     Ok(aad)
 }
 
-fn app_outbox_aad(identity: AppOutboxIdentity<'_>) -> Result<Vec<u8>, ClientStoreError> {
-    validate_app_message_owner(identity.owner)?;
-    validate_room_id(identity.room_id).map_err(ClientError::from)?;
-    validate_string_bytes(
-        "app_outbox.message_id",
-        identity.message_id,
-        MAX_OBJECT_ID_BYTES,
-    )
-    .map_err(ClientError::from)?;
-    let mut aad = Vec::with_capacity(
-        CLIENT_APP_OUTBOX_AAD_DOMAIN.len()
-            + U32_BYTES
-            + identity.owner.account_id.len()
-            + U32_BYTES
-            + identity.owner.device_id.len()
-            + U32_BYTES
-            + identity.room_id.len()
-            + U32_BYTES
-            + identity.message_id.len(),
-    );
-    aad.extend_from_slice(CLIENT_APP_OUTBOX_AAD_DOMAIN);
-    append_raw_len_prefixed(&mut aad, identity.owner.account_id.as_bytes())?;
-    append_raw_len_prefixed(&mut aad, identity.owner.device_id.as_bytes())?;
-    append_raw_len_prefixed(&mut aad, identity.room_id.as_bytes())?;
-    append_raw_len_prefixed(&mut aad, identity.message_id.as_bytes())?;
-    Ok(aad)
-}
-
 fn app_room_aad(identity: AppRoomIdentity<'_>) -> Result<Vec<u8>, ClientStoreError> {
     validate_app_message_owner(identity.owner)?;
     validate_room_id(identity.room_id).map_err(ClientError::from)?;
@@ -10238,11 +10963,18 @@ fn device_link_bootstrap_aad(
     Ok(aad)
 }
 
-fn encode_device_state(state: &FiniteChatDeviceState) -> Result<Vec<u8>, ClientStoreError> {
+/// Encode at a specific snapshot version. Production always writes
+/// `CLIENT_STATE_SNAPSHOT_VERSION`; the pre-currency-gate layout (v9) is
+/// only written by the test-support hook that pins the upgrade bootstrap.
+fn encode_device_state_with_version(
+    state: &FiniteChatDeviceState,
+    version: u16,
+) -> Result<Vec<u8>, ClientStoreError> {
+    debug_assert!(version >= LINK_BOOTSTRAP_EXPORT_SNAPSHOT_VERSION);
     state.validate_limits()?;
     let mut out = Vec::with_capacity(encoded_device_state_len(state)?);
     out.extend_from_slice(CLIENT_STATE_SNAPSHOT_MAGIC);
-    out.extend_from_slice(&CLIENT_STATE_SNAPSHOT_VERSION.to_be_bytes());
+    out.extend_from_slice(&version.to_be_bytes());
     append_string_field(
         &mut out,
         "account_id",
@@ -10292,6 +11024,39 @@ fn encode_device_state(state: &FiniteChatDeviceState) -> Result<Vec<u8>, ClientS
             &mut out,
             room.server_url.as_deref().unwrap_or("").as_bytes(),
         )?;
+        if version < CURRENCY_GATE_SNAPSHOT_VERSION {
+            continue;
+        }
+        // v10 currency-gate fields.
+        out.extend_from_slice(&room.own_send_high_water_seq.to_be_bytes());
+        append_bool(&mut out, room.currency_initialized);
+        append_count(
+            &mut out,
+            "room.unacknowledged_own_message_ids",
+            room.unacknowledged_own_message_ids.len(),
+            MAX_UNACKNOWLEDGED_OWN_MESSAGE_IDS as u32,
+        )?;
+        for message_id in &room.unacknowledged_own_message_ids {
+            append_string_field(
+                &mut out,
+                "room.unacknowledged_own_message_id",
+                message_id,
+                MAX_OBJECT_ID_BYTES,
+            )?;
+        }
+        append_bool(&mut out, room.behind_server.is_some());
+        if let Some(evidence) = &room.behind_server {
+            out.extend_from_slice(&evidence.local_mark.to_be_bytes());
+            out.extend_from_slice(&evidence.observed_seq.to_be_bytes());
+            append_string_field(
+                &mut out,
+                "room.behind_server.message_id",
+                &evidence.message_id,
+                MAX_OBJECT_ID_BYTES,
+            )?;
+            out.extend_from_slice(&evidence.observed_at.to_be_bytes());
+            out.extend_from_slice(&evidence.evidence_epoch.to_be_bytes());
+        }
     }
     append_count(
         &mut out,
@@ -10410,7 +11175,7 @@ fn decode_device_state(bytes: &[u8]) -> Result<FiniteChatDeviceState, ClientStor
     let mut cursor = ClientStateCursor::new(bytes);
     cursor.take_magic()?;
     let version = cursor.take_u16()?;
-    if version != CLIENT_STATE_SNAPSHOT_VERSION && version != LEGACY_CLIENT_STATE_SNAPSHOT_VERSION {
+    if !SUPPORTED_CLIENT_STATE_SNAPSHOT_VERSIONS.contains(&version) {
         return Err(ClientStoreError::StateSnapshotVersion(version));
     }
     let account_id = cursor.take_string("account_id", MAX_ACCOUNT_ID_BYTES)?;
@@ -10436,11 +11201,57 @@ fn decode_device_state(bytes: &[u8]) -> Result<FiniteChatDeviceState, ClientStor
                     .map_err(|_| ClientStoreError::StateSnapshotUtf8)?,
             )
         };
+        let (
+            own_send_high_water_seq,
+            currency_initialized,
+            unacknowledged_own_message_ids,
+            behind_server,
+        ) = if version >= CURRENCY_GATE_SNAPSHOT_VERSION {
+            let own_send_high_water_seq = cursor.take_u64()?;
+            let currency_initialized = cursor.take_bool()?;
+            let pending_count = cursor.take_count(
+                "room.unacknowledged_own_message_ids",
+                MAX_UNACKNOWLEDGED_OWN_MESSAGE_IDS as u32,
+            )?;
+            let mut unacknowledged_own_message_ids = Vec::with_capacity(pending_count);
+            for _ in 0..pending_count {
+                unacknowledged_own_message_ids.push(
+                    cursor
+                        .take_string("room.unacknowledged_own_message_id", MAX_OBJECT_ID_BYTES)?,
+                );
+            }
+            let behind_server = if cursor.take_bool()? {
+                Some(BehindServerEvidence {
+                    local_mark: cursor.take_u64()?,
+                    observed_seq: cursor.take_u64()?,
+                    message_id: cursor
+                        .take_string("room.behind_server.message_id", MAX_OBJECT_ID_BYTES)?,
+                    observed_at: cursor.take_u64()?,
+                    evidence_epoch: cursor.take_u64()?,
+                })
+            } else {
+                None
+            };
+            (
+                own_send_high_water_seq,
+                currency_initialized,
+                unacknowledged_own_message_ids,
+                behind_server,
+            )
+        } else {
+            // Pre-v10 blob: no mark was kept. Bootstrap rule — the first
+            // sync pass initializes the mark instead of enforcing it.
+            (0, false, Vec::new(), None)
+        };
         rooms.push(PersistedRoomState {
             room_id,
             mls_group_id,
             last_applied_seq,
             server_url,
+            own_send_high_water_seq,
+            currency_initialized,
+            unacknowledged_own_message_ids,
+            behind_server,
         });
     }
 
@@ -10539,6 +11350,15 @@ fn encoded_device_state_len(state: &FiniteChatDeviceState) -> Result<usize, Clie
             len,
             U32_BYTES + room.server_url.as_deref().unwrap_or("").len(),
         )?;
+        // v10 currency-gate fields.
+        len = checked_len_add(len, U64_BYTES + U16_BYTES + U32_BYTES)?;
+        for message_id in &room.unacknowledged_own_message_ids {
+            len = checked_len_add(len, U32_BYTES + message_id.len())?;
+        }
+        len = checked_len_add(len, U16_BYTES)?;
+        if let Some(evidence) = &room.behind_server {
+            len = checked_len_add(len, U64_BYTES * 4 + U32_BYTES + evidence.message_id.len())?;
+        }
     }
     len = checked_len_add(len, U32_BYTES)?;
     for welcome in &state.pending_welcomes {
@@ -11246,7 +12066,7 @@ impl<'a> ClientStateCursor<'a> {
             }
             rooms
         };
-        let bootstrap_export = if snapshot_version >= CLIENT_STATE_SNAPSHOT_VERSION {
+        let bootstrap_export = if snapshot_version >= LINK_BOOTSTRAP_EXPORT_SNAPSHOT_VERSION {
             let encoded = self.take_vec(
                 "link_fanout.bootstrap_export",
                 MAX_CLIENT_STATE_PLAINTEXT_BYTES,
@@ -11687,6 +12507,104 @@ mod tests {
             !alice.has_pending_commit(room_id).unwrap(),
             "own commit at or behind the cursor must clear pending MLS state"
         );
+    }
+
+    #[test]
+    fn currency_gate_fields_survive_snapshot_round_trip_and_default_on_legacy_blobs() {
+        let secret = NostrSecretKey::from_bytes([31; NOSTR_SECRET_KEY_BYTES]).unwrap();
+        let config = FiniteChatDeviceConfig {
+            account_secret_key: secret,
+            device_id: "device-currency-gate".to_owned(),
+            now_unix_seconds: NOW,
+            credential_not_before_unix_seconds: NOW.saturating_sub(60),
+            credential_not_after_unix_seconds: NOW.saturating_add(600),
+        };
+        let mut device = FiniteChatDevice::new(config.clone()).unwrap();
+        device
+            .create_group_state("room-currency-gate", "mls-room-currency-gate")
+            .unwrap();
+        // Born rooms are initialized and verified; minting remembers the id
+        // until the accept is recorded.
+        let request = device
+            .create_application_request("room-currency-gate", b"hello", "currency-gate-1")
+            .unwrap();
+        let message_id = request.envelope.message_id().unwrap();
+        let mut state = device.export_state().unwrap();
+        assert_eq!(
+            state.rooms[0].unacknowledged_own_message_ids,
+            vec![message_id.clone()]
+        );
+        assert!(state.rooms[0].currency_initialized);
+        assert_eq!(state.rooms[0].own_send_high_water_seq, 0);
+        device
+            .record_own_send_accepted("room-currency-gate", 7, &message_id)
+            .unwrap();
+        let cursor = &device.room_sync_cursors()[0];
+        assert_eq!(cursor.own_send_high_water_seq, 7);
+        assert!(cursor.currency_verified);
+        assert!(
+            device.export_state().unwrap().rooms[0]
+                .unacknowledged_own_message_ids
+                .is_empty()
+        );
+
+        state.rooms[0].own_send_high_water_seq = 7;
+        state.rooms[0].unacknowledged_own_message_ids =
+            vec!["msg-a".to_owned(), "msg-b".to_owned()];
+        state.rooms[0].behind_server = Some(BehindServerEvidence {
+            local_mark: 7,
+            observed_seq: 9,
+            message_id: "msg-later".to_owned(),
+            observed_at: NOW,
+            evidence_epoch: 0,
+        });
+        let current = decode_device_state(
+            &encode_device_state_with_version(&state, CLIENT_STATE_SNAPSHOT_VERSION).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(current, state);
+
+        // Loaded state is unverified, and durable evidence refuses sends
+        // ahead of the unverified check.
+        let mut loaded = FiniteChatDevice::from_state(config.clone(), current).unwrap();
+        let cursor = &loaded.room_sync_cursors()[0];
+        assert!(!cursor.currency_verified);
+        assert_eq!(
+            cursor.behind_server.as_ref().map(|e| e.observed_seq),
+            Some(9)
+        );
+        assert!(matches!(
+            loaded.create_application_request("room-currency-gate", b"x", "currency-gate-2"),
+            Err(ClientError::DeviceStateBehindServer {
+                local_mark: 7,
+                observed_seq: 9,
+                ..
+            })
+        ));
+
+        // A pre-gate (v9) blob decodes with the bootstrap defaults.
+        let legacy = decode_device_state(
+            &encode_device_state_with_version(&state, LINK_BOOTSTRAP_EXPORT_SNAPSHOT_VERSION)
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(legacy.rooms[0].own_send_high_water_seq, 0);
+        assert!(!legacy.rooms[0].currency_initialized);
+        assert!(legacy.rooms[0].unacknowledged_own_message_ids.is_empty());
+        assert!(legacy.rooms[0].behind_server.is_none());
+        assert_eq!(
+            legacy.rooms[0].last_applied_seq,
+            state.rooms[0].last_applied_seq
+        );
+        assert_eq!(
+            legacy.openmls_storage_records,
+            state.openmls_storage_records
+        );
+        let mut legacy_device = FiniteChatDevice::from_state(config, legacy).unwrap();
+        assert!(matches!(
+            legacy_device.create_application_request("room-currency-gate", b"x", "currency-gate-3"),
+            Err(ClientError::CurrencyUnverified { .. })
+        ));
     }
 
     #[test]
@@ -12456,144 +13374,6 @@ mod tests {
     }
 
     #[test]
-    fn sqlite_client_store_persists_app_outbox_across_reopen() {
-        let dir = tempfile::tempdir().unwrap();
-        let secret = NostrSecretKey::from_bytes([11; NOSTR_SECRET_KEY_BYTES]).unwrap();
-        let device_id = "phone";
-        let config = FiniteChatDeviceConfig {
-            account_secret_key: secret.clone(),
-            device_id: device_id.to_owned(),
-            now_unix_seconds: NOW,
-            credential_not_before_unix_seconds: NOW.saturating_sub(60),
-            credential_not_after_unix_seconds: NOW.saturating_add(60),
-        };
-        let device = FiniteChatDevice::new(config).unwrap();
-        let owner = device.device_ref().clone();
-        let options = SqliteClientStoreOptions::from_nostr_secret(&secret, device_id).unwrap();
-        let db_path = dir.path().join("client.sqlite3");
-
-        let mut store = SqliteClientStore::open(&db_path, options.clone()).unwrap();
-        store.save_device_state(&device).unwrap();
-        let pending = outbound_message(&owner, "pending body");
-        store
-            .save_app_outbox(&owner, std::slice::from_ref(&pending))
-            .unwrap();
-        assert_eq!(
-            store.load_app_outbox(&owner).unwrap(),
-            vec![pending.clone()]
-        );
-        drop(store);
-
-        let mut reopened = SqliteClientStore::open(&db_path, options).unwrap();
-        assert_eq!(
-            reopened.load_app_outbox(&owner).unwrap(),
-            vec![pending.clone()]
-        );
-
-        let failed = StoredOutboundMessage {
-            server_delivery_state: StoredOutboundServerDeliveryState::Failed {
-                reason: "network unavailable".to_owned(),
-            },
-            ..pending.clone()
-        };
-        reopened
-            .save_app_outbox(&owner, std::slice::from_ref(&failed))
-            .unwrap();
-        assert_eq!(reopened.load_app_outbox(&owner).unwrap(), vec![failed]);
-
-        reopened
-            .delete_app_outbox_message(&owner, "room-store", &pending.message_id)
-            .unwrap();
-        assert!(reopened.load_app_outbox(&owner).unwrap().is_empty());
-    }
-
-    #[test]
-    fn sqlite_client_store_rejects_legacy_outbox_metadata_shapes() {
-        for case in ["missing timestamp", "legacy delivery state"] {
-            let dir = tempfile::tempdir().unwrap();
-            let secret = NostrSecretKey::from_bytes([15; NOSTR_SECRET_KEY_BYTES]).unwrap();
-            let device_id = "phone";
-            let config = FiniteChatDeviceConfig {
-                account_secret_key: secret.clone(),
-                device_id: device_id.to_owned(),
-                now_unix_seconds: NOW,
-                credential_not_before_unix_seconds: NOW.saturating_sub(60),
-                credential_not_after_unix_seconds: NOW.saturating_add(60),
-            };
-            let device = FiniteChatDevice::new(config).unwrap();
-            let owner = device.device_ref().clone();
-            let options = SqliteClientStoreOptions::from_nostr_secret(&secret, device_id).unwrap();
-            let db_path = dir.path().join("client.sqlite3");
-            let mut store = SqliteClientStore::open(&db_path, options.clone()).unwrap();
-            store.save_device_state(&device).unwrap();
-
-            let message = outbound_message(&owner, "legacy pending body");
-            let mut metadata = serde_json::to_value(StoredOutboundMessageMetadataV1 {
-                sender: message.sender.clone(),
-                plaintext: message.plaintext.clone(),
-                local_state: message.local_state.clone(),
-                server_delivery_state: message.server_delivery_state.clone(),
-                append_request: message.append_request.clone(),
-                timestamp_unix_seconds: message.timestamp_unix_seconds,
-            })
-            .unwrap();
-            let metadata_object = metadata.as_object_mut().unwrap();
-            match case {
-                "missing timestamp" => {
-                    metadata_object.remove("timestamp_unix_seconds");
-                }
-                "legacy delivery state" => {
-                    metadata_object.remove("local_state");
-                    metadata_object.remove("server_delivery_state");
-                    metadata_object.remove("append_request");
-                    metadata_object.insert(
-                        "delivery_state".to_owned(),
-                        serde_json::Value::String("Pending".to_owned()),
-                    );
-                }
-                other => panic!("unknown outbox metadata case {other}"),
-            }
-
-            let sealed = encrypt_app_outbox_metadata_json(
-                &options.encryption_key,
-                &owner,
-                &message.room_id,
-                &message.message_id,
-                &metadata,
-            );
-            store
-                .conn
-                .execute(
-                    r#"
-                    INSERT INTO client_app_outbox (
-                      account_id,
-                      device_id,
-                      room_id,
-                      message_id,
-                      nonce,
-                      ciphertext
-                    ) VALUES (?1, ?2, ?3, ?4, ?5, ?6)
-                    "#,
-                    params![
-                        &owner.account_id,
-                        &owner.device_id,
-                        &message.room_id,
-                        &message.message_id,
-                        &sealed.nonce,
-                        &sealed.ciphertext,
-                    ],
-                )
-                .unwrap();
-
-            let error = store.load_app_outbox(&owner).unwrap_err();
-            assert!(
-                matches!(error, ClientStoreError::DecodeAppOutboxMetadata),
-                "{case} should fail closed, got {error}"
-            );
-        }
-    }
-
-    #[test]
     fn sqlite_client_store_rejects_encrypted_app_rows_without_timestamps() {
         let dir = tempfile::tempdir().unwrap();
         let secret = NostrSecretKey::from_bytes([12; NOSTR_SECRET_KEY_BYTES]).unwrap();
@@ -12738,11 +13518,6 @@ mod tests {
                 "account_id, device_id, room_id, message_id",
             ),
             (
-                "client_app_outbox",
-                &["room_id TEXT NOT NULL", "message_id TEXT NOT NULL"][..],
-                "account_id, device_id, room_id, message_id",
-            ),
-            (
                 "client_app_rooms",
                 &["room_id TEXT NOT NULL"][..],
                 "account_id, device_id, room_id",
@@ -12801,6 +13576,40 @@ mod tests {
                 "unexpected error for {table}: {error}"
             );
         }
+    }
+
+    #[test]
+    fn sqlite_client_store_drops_retired_app_outbox_table_on_open() {
+        let dir = tempfile::tempdir().unwrap();
+        let secret = NostrSecretKey::from_bytes([11; NOSTR_SECRET_KEY_BYTES]).unwrap();
+        let device_id = "phone";
+        let options = SqliteClientStoreOptions::from_nostr_secret(&secret, device_id).unwrap();
+        let db_path = dir.path().join("client.sqlite3");
+        drop(SqliteClientStore::open(&db_path, options.clone()).unwrap());
+        {
+            let conn = Connection::open(&db_path).unwrap();
+            conn.execute_batch(
+                r#"
+                CREATE TABLE client_app_outbox (
+                  account_id TEXT NOT NULL,
+                  device_id TEXT NOT NULL,
+                  room_id TEXT NOT NULL,
+                  message_id TEXT NOT NULL,
+                  nonce BLOB NOT NULL,
+                  ciphertext BLOB NOT NULL,
+                  PRIMARY KEY (account_id, device_id, room_id, message_id)
+                );
+                INSERT INTO client_app_outbox VALUES
+                  ('account', 'phone', 'room-a', 'msg-1', x'00', x'00'),
+                  ('account', 'phone', 'room-a', 'msg-2', x'00', x'00');
+                "#,
+            )
+            .unwrap();
+            assert!(sqlite_table_exists(&conn, "client_app_outbox").unwrap());
+        }
+
+        let store = SqliteClientStore::open(&db_path, options).unwrap();
+        assert!(!sqlite_table_exists(&store.conn, "client_app_outbox").unwrap());
     }
 
     #[test]
@@ -13505,68 +14314,6 @@ mod tests {
             timestamp_unix_seconds: NOW + seq,
         }
     }
-
-    fn outbound_message(sender: &DeviceRef, plaintext: &str) -> StoredOutboundMessage {
-        let envelope = envelope(
-            "room-store".to_owned(),
-            "mls-store".to_owned(),
-            sender.clone(),
-            1,
-            LogEntryKind::Application,
-            plaintext.as_bytes().to_vec(),
-        );
-        let message_id = envelope.message_id().unwrap();
-        let append_request = AppendEventRequest {
-            room_id: "room-store".to_owned(),
-            sender: sender.clone(),
-            envelope,
-            idempotency_key: format!("idem-{message_id}"),
-            timestamp_unix_seconds: NOW,
-        };
-        StoredOutboundMessage {
-            room_id: "room-store".to_owned(),
-            message_id,
-            sender: sender.clone(),
-            plaintext: plaintext.as_bytes().to_vec(),
-            local_state: StoredOutboundLocalState::Sent,
-            server_delivery_state: StoredOutboundServerDeliveryState::Undelivered,
-            append_request,
-            timestamp_unix_seconds: NOW,
-        }
-    }
-
-    fn encrypt_app_outbox_metadata_json(
-        encryption_key: &ClientStoreEncryptionKey,
-        owner: &DeviceRef,
-        room_id: &str,
-        message_id: &str,
-        metadata: &serde_json::Value,
-    ) -> SealedAppOutbox {
-        let plaintext = serde_json::to_vec(metadata).unwrap();
-        let aad = app_outbox_aad(AppOutboxIdentity {
-            owner,
-            room_id,
-            message_id,
-        })
-        .unwrap();
-        let provider = OpenMlsRustCrypto::default();
-        let nonce: [u8; CLIENT_STORE_NONCE_BYTES] = provider.rand().random_array().unwrap();
-        let ciphertext = provider
-            .crypto()
-            .aead_encrypt(
-                AeadType::Aes256Gcm,
-                encryption_key.as_bytes(),
-                &plaintext,
-                &nonce,
-                &aad,
-            )
-            .unwrap();
-        SealedAppOutbox {
-            nonce: nonce.to_vec(),
-            ciphertext,
-        }
-    }
-
     fn app_room(room_id: &str, display_name: &str) -> StoredAppRoom {
         StoredAppRoom {
             room_id: room_id.to_owned(),
@@ -13848,5 +14595,204 @@ mod tests {
         child.wait().unwrap();
         SqliteClientStore::open(&db_path, lease_test_options(&secret, "parent"))
             .expect("the lease is released when the child process exits");
+    }
+
+    // ---- bounded HTTP transport ------------------------------------------
+    //
+    // These pin the sidecar wedge class:
+    // `reqwest::blocking` parks its calling thread on the client's internal
+    // channel until the server speaks, and the callers are the single-
+    // threaded runtime actor and the resident bridge sync thread. A server
+    // that accepts but never answers — or an SSE stream that goes silent —
+    // must surface as an Err within the configured bound, not a forever-park.
+
+    /// One-connection TCP server whose handler gets the accepted stream.
+    fn once_server(
+        respond: impl Fn(&mut std::net::TcpStream) + Send + 'static,
+    ) -> (String, std::thread::JoinHandle<()>) {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let handle = std::thread::spawn(move || {
+            for stream in listener.incoming() {
+                let Ok(mut stream) = stream else { break };
+                respond(&mut stream);
+            }
+        });
+        (format!("http://{addr}"), handle)
+    }
+
+    /// Drain the request head (plus any short body) so the client's write
+    /// side never blocks, without bothering to parse it.
+    fn drain_request_head(stream: &mut std::net::TcpStream) {
+        use std::io::Read;
+        let mut scratch = [0u8; 8192];
+        let _ = stream.set_read_timeout(Some(Duration::from_millis(50)));
+        let _ = stream.read(&mut scratch);
+    }
+
+    fn bounded_transport(timeout: Duration, base_url: String) -> ReqwestHttpRuntimeTransport {
+        ReqwestHttpRuntimeTransport::with_client(
+            base_url,
+            blocking_http_client_with_timeouts(Duration::from_secs(5), timeout),
+        )
+    }
+
+    #[test]
+    fn post_json_errors_within_bound_when_server_never_responds() {
+        let (base_url, _server) = once_server(|stream| {
+            drain_request_head(stream);
+            std::thread::sleep(Duration::from_secs(600));
+        });
+        let mut transport = bounded_transport(Duration::from_millis(250), base_url);
+
+        let started = std::time::Instant::now();
+        let result: Result<serde_json::Value, _> =
+            transport.post_json("/health", &serde_json::json!({}));
+
+        assert!(
+            result.is_err(),
+            "a never-answering server must error, not hang"
+        );
+        assert!(
+            started.elapsed() < Duration::from_secs(10),
+            "timeout must fire near the configured bound, took {:?}",
+            started.elapsed()
+        );
+    }
+
+    #[test]
+    fn sync_stream_read_errors_within_bound_when_stream_goes_silent() {
+        let (base_url, _server) = once_server(|stream| {
+            drain_request_head(stream);
+            use std::io::Write;
+            let _ = stream.write_all(
+                b"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nCache-Control: no-store\r\n\r\n",
+            );
+            let _ = stream.flush();
+            // Established stream that never sends another byte: no hint, no
+            // heartbeat, no EOF — the production canary wedge shape.
+            std::thread::sleep(Duration::from_secs(600));
+        });
+        let mut transport = bounded_transport(Duration::from_millis(250), base_url);
+
+        let mut stream = transport
+            .sync_stream(&SyncStreamRequest {
+                rooms: Vec::new(),
+                inbox: None,
+                heartbeat_ms: Some(50),
+            })
+            .expect("headers arrive, so the stream opens");
+        let started = std::time::Instant::now();
+        let result = stream.next_hint();
+
+        assert!(result.is_err(), "a silent stream must error, not hang");
+        assert!(
+            started.elapsed() < Duration::from_secs(10),
+            "read timeout must fire near the configured bound, took {:?}",
+            started.elapsed()
+        );
+    }
+
+    #[test]
+    fn sync_stream_survives_healthy_heartbeats_longer_than_the_timeout() {
+        let (base_url, _server) = once_server(|stream| {
+            drain_request_head(stream);
+            use std::io::Write;
+            let _ = stream.write_all(
+                b"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nCache-Control: no-store\r\n\r\n",
+            );
+            for _ in 0..40 {
+                let _ = stream.write_all(b"data: {\"type\":\"heartbeat\"}\n\n");
+                let _ = stream.flush();
+                std::thread::sleep(Duration::from_millis(50));
+            }
+        });
+        let mut transport = bounded_transport(Duration::from_millis(250), base_url);
+
+        let mut stream = transport
+            .sync_stream(&SyncStreamRequest {
+                rooms: Vec::new(),
+                inbox: None,
+                heartbeat_ms: Some(50),
+            })
+            .expect("healthy stream opens");
+
+        // 40 heartbeats at 50 ms = ~2 s of stream life: every read reset
+        // proves heartbeats keep a healthy stream alive under the same
+        // heartbeat-derived per-read budget that kills a silent one.
+        let mut received = 0usize;
+        for _ in 0..40 {
+            match stream.next_hint() {
+                Ok(SyncHintEvent::Heartbeat) => received += 1,
+                Ok(_) => {}
+                Err(error) => panic!("healthy heartbeat stream must not time out: {error}"),
+            }
+        }
+        assert!(received >= 30, "expected mostly heartbeats, got {received}");
+    }
+
+    #[test]
+    fn sync_stream_read_timeout_tracks_negotiated_heartbeat() {
+        let request = |heartbeat_ms: Option<u64>| SyncStreamRequest {
+            rooms: Vec::new(),
+            inbox: None,
+            heartbeat_ms,
+        };
+        // Unset heartbeat: the server default (15s) governs.
+        assert_eq!(
+            sync_stream_read_timeout(&request(None)),
+            Duration::from_secs(50)
+        );
+        // Resident bridge default (10s heartbeats).
+        assert_eq!(
+            sync_stream_read_timeout(&request(Some(10_000))),
+            Duration::from_secs(35)
+        );
+        // Server maximum (60s heartbeats): a flat 60s client bound would
+        // false-trip here; the derived budget must clear it.
+        assert_eq!(
+            sync_stream_read_timeout(&request(Some(60_000))),
+            Duration::from_secs(185)
+        );
+        // Absurd input saturates instead of overflowing.
+        let _ = sync_stream_read_timeout(&request(Some(u64::MAX)));
+    }
+
+    #[test]
+    fn sync_stream_survives_heartbeat_slower_than_the_client_bound() {
+        // Heartbeats every 200 ms against a flat 50 ms client bound: the
+        // heartbeat-derived read budget (not the small-call bound) must
+        // govern stream reads, or a healthy slow-heartbeat stream dies.
+        let (base_url, _server) = once_server(|stream| {
+            drain_request_head(stream);
+            use std::io::Write;
+            let _ = stream.write_all(
+                b"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nCache-Control: no-store\r\n\r\n",
+            );
+            for _ in 0..6 {
+                let _ = stream.write_all(b"data: {\"type\":\"heartbeat\"}\n\n");
+                let _ = stream.flush();
+                std::thread::sleep(Duration::from_millis(200));
+            }
+        });
+        let mut transport = bounded_transport(Duration::from_millis(50), base_url);
+
+        let mut stream = transport
+            .sync_stream(&SyncStreamRequest {
+                rooms: Vec::new(),
+                inbox: None,
+                heartbeat_ms: Some(200),
+            })
+            .expect("healthy stream opens");
+
+        for _ in 0..6 {
+            match stream.next_hint() {
+                Ok(SyncHintEvent::Heartbeat) => {}
+                Ok(_) => {}
+                Err(error) => {
+                    panic!("healthy slow-heartbeat stream must not time out: {error}")
+                }
+            }
+        }
     }
 }

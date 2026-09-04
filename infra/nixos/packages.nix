@@ -209,6 +209,7 @@ let
   };
 
   finitechatServerSourcePaths = [
+    "finite-nostr"
     "finitechat/crates/finitechat-blob"
     "finitechat/crates/finitechat-delivery"
     "finitechat/crates/finitechat-http"
@@ -254,22 +255,6 @@ let
     "finitechat/integrations/hermes/finitechat/adapter.py"
     "finitechat/integrations/hermes/finitechat/plugin.yaml"
   ];
-  finitechatRmpSourcePaths = [
-    "finite-identity"
-    "finite-mail"
-    "finite-nostr"
-    "finitechat/crates/finitechat-blob"
-    "finitechat/crates/finitechat-client"
-    "finitechat/crates/finitechat-core"
-    "finitechat/crates/finitechat-delivery"
-    "finitechat/crates/finitechat-hermes"
-    "finitechat/crates/finitechat-http"
-    "finitechat/crates/finitechat-mls"
-    "finitechat/crates/finitechat-proto"
-    "finitechat/crates/finitechat-rmp"
-    "finitechat/crates/finitechat-server"
-    "finitechat/crates/finitechat-transport"
-  ];
   finitechatCargoArtifacts = mkCargoArtifacts {
     pname = "finitechat-group";
     version = crateVersion "finitechat/crates/finitechat-hosted-device";
@@ -277,14 +262,12 @@ let
       finitechatServerSourcePaths
       ++ finitechatHostedDeviceSourcePaths
       ++ finitechatCliSourcePaths
-      ++ finitechatRmpSourcePaths
     );
     cargoExtraArgs = "--offline -p finitechat-server";
     cargoBuildArgs = [
       "--offline -p finitechat-server"
       "--offline -p finitechat-hosted-device"
       "--offline -p finitechat-cli"
-      "--offline -p finitechat-rmp"
     ];
   };
 
@@ -423,11 +406,6 @@ rec {
       "finitechat/crates/finitechat-proto"
     ];
   };
-  finite-specialization-worker = mkWorkspaceCrate {
-    pname = "finite-specialization-worker";
-    dir = "finitecomputer-v2/crates/finite-specialization-worker";
-    sourcePaths = [ "finitecomputer-v2/crates/finite-specialization-worker" ];
-  };
   finitesitesd = mkWorkspaceCrate {
     pname = "finitesitesd";
     dir = "finite-sites/crates/finitesitesd";
@@ -485,13 +463,6 @@ rec {
     crate = "finitechat-cli";
     dir = "finitechat/crates/finitechat-cli";
     sourcePaths = finitechatCliSourcePaths;
-    sharedCargoArtifacts = finitechatCargoArtifacts;
-    cargoArtifactGroup = "finitechat";
-  };
-  finitechat-rmp = mkWorkspaceCrate {
-    pname = "finitechat-rmp";
-    dir = "finitechat/crates/finitechat-rmp";
-    sourcePaths = finitechatRmpSourcePaths;
     sharedCargoArtifacts = finitechatCargoArtifacts;
     cargoArtifactGroup = "finitechat";
   };

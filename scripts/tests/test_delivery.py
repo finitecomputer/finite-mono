@@ -138,16 +138,6 @@ class DeliveryTests(unittest.TestCase):
                     require_attestation=True,
                 )
 
-    def test_production_guard_rejects_enabled_mutation(self) -> None:
-        with tempfile.TemporaryDirectory() as directory:
-            manifest = Path(directory) / "production.json"
-            manifest.write_text(
-                json.dumps({"environment": "production", "mutation_enabled": True}),
-                encoding="utf-8",
-            )
-            with self.assertRaisesRegex(delivery.DeliveryError, "disabled"):
-                delivery.require_production_disabled(manifest)
-
     def test_release_retry_rejects_changed_versioned_asset(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -181,7 +171,9 @@ class DeliveryTests(unittest.TestCase):
             ],
         }
         retried = {**original, "build_run": "github-run-retry"}
-        original_bytes = (json.dumps(original, indent=2, sort_keys=True) + "\n").encode()
+        original_bytes = (
+            json.dumps(original, indent=2, sort_keys=True) + "\n"
+        ).encode()
 
         self.assertEqual(
             delivery.canonical_release_metadata(original_bytes, retried),
@@ -199,10 +191,12 @@ class DeliveryTests(unittest.TestCase):
             "assets": [],
         }
         changed = {**original, "source_sha": "b" * 40}
-        original_bytes = (json.dumps(original, indent=2, sort_keys=True) + "\n").encode()
+        original_bytes = (
+            json.dumps(original, indent=2, sort_keys=True) + "\n"
+        ).encode()
 
         with self.assertRaisesRegex(delivery.DeliveryError, "different facts"):
-                delivery.canonical_release_metadata(original_bytes, changed)
+            delivery.canonical_release_metadata(original_bytes, changed)
 
     def test_alias_promotion_reuses_verified_versioned_assets(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -240,7 +234,9 @@ class DeliveryTests(unittest.TestCase):
                     "_release_assets",
                     return_value={path.name for path in source.iterdir()},
                 ),
-                mock.patch.object(delivery, "_download_release_assets", side_effect=download),
+                mock.patch.object(
+                    delivery, "_download_release_assets", side_effect=download
+                ),
                 mock.patch.object(
                     delivery,
                     "_ensure_metadata_commit",

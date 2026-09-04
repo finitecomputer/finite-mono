@@ -34,9 +34,9 @@ class AgentRuntimeLauncherConfigTest(unittest.TestCase):
     @staticmethod
     def _reconciler_settings() -> dict[str, str]:
         return {
-            "FINITE_CONFIG_MODEL": "deepseek-v4-flash-0731",
+            "FINITE_CONFIG_MODEL": "glm-5-3-flash",
             "FINITE_CONFIG_PROVIDER": "custom",
-            "FINITE_CONFIG_BASE_URL": "https://kimi-k2-6.finite.containers.tinfoil.dev/v1",
+            "FINITE_CONFIG_BASE_URL": "https://finite-private.finite.containers.tinfoil.dev/v1",
             "FINITE_CONFIG_CONTEXT_LENGTH": "393216",
             "FINITE_CONFIG_API_MODE": "chat_completions",
             "FINITE_CONFIG_API_KEY_REFERENCE": "${FINITE_PRIVATE_API_KEY}",
@@ -51,7 +51,7 @@ class AgentRuntimeLauncherConfigTest(unittest.TestCase):
         }
 
     @staticmethod
-    def _gateway_model(*, model: str, base_url: str) -> str:
+    def _gateway_model(*, model: str, base_url: str) -> tuple[str, str]:
         launcher = REPO_ROOT / "containers/agent/run_hermes_gateway.sh"
         with tempfile.TemporaryDirectory() as raw_tmp:
             tmp = Path(raw_tmp)
@@ -64,7 +64,8 @@ class AgentRuntimeLauncherConfigTest(unittest.TestCase):
             capture.write_text(
                 "import os, pathlib\n"
                 "pathlib.Path(os.environ['MODEL_CAPTURE']).write_text("
-                "os.environ['FINITE_CONFIG_MODEL'])\n",
+                "os.environ['FINITE_CONFIG_MODEL'] + '\\n' + "
+                "os.environ['FINITE_CONFIG_BASE_URL'])\n",
                 encoding="utf-8",
             )
             model_capture = tmp / "model.txt"
@@ -97,25 +98,48 @@ class AgentRuntimeLauncherConfigTest(unittest.TestCase):
 
             if result.returncode != 0:
                 raise AssertionError(result.stderr)
-            return model_capture.read_text(encoding="utf-8")
+            captured = model_capture.read_text(encoding="utf-8").splitlines()
+            return captured[0], captured[1]
 
-    def test_gateway_maps_finite_private_legacy_alias_to_deepseek(self) -> None:
-        self.assertEqual(
-            self._gateway_model(
-                model="glm-5-2",
-                base_url="https://kimi-k2-6.finite.containers.tinfoil.dev/v1",
-            ),
-            "deepseek-v4-flash-0731",
+    def test_gateway_rewrites_historical_route_and_legacy_model(self) -> None:
+        model, base_url = self._gateway_model(
+            model="glm-5-2",
+            base_url="https://kimi-k2-6.finite.containers.tinfoil.dev/v1",
         )
+        self.assertEqual(model, "glm-5-3-flash")
+        self.assertEqual(base_url, "https://finite-private.finite.containers.tinfoil.dev/v1")
+
+    def test_gateway_rewrites_deepseek_label_on_the_historical_route(self) -> None:
+        model, base_url = self._gateway_model(
+            model="deepseek-v4-flash-0731",
+            base_url="https://kimi-k2-6.finite.containers.tinfoil.dev/v1",
+        )
+        self.assertEqual(model, "glm-5-3-flash")
+        self.assertEqual(base_url, "https://finite-private.finite.containers.tinfoil.dev/v1")
+
+    def test_gateway_rewrites_dotted_glm_name_on_the_live_route(self) -> None:
+        model, base_url = self._gateway_model(
+            model="glm-5.3-flash",
+            base_url="https://finite-private.finite.containers.tinfoil.dev/v1",
+        )
+        self.assertEqual(model, "glm-5-3-flash")
+        self.assertEqual(base_url, "https://finite-private.finite.containers.tinfoil.dev/v1")
+
+    def test_gateway_rewrites_historical_url_when_model_is_already_canonical(self) -> None:
+        model, base_url = self._gateway_model(
+            model="glm-5-3-flash",
+            base_url="https://kimi-k2-6.finite.containers.tinfoil.dev/v1",
+        )
+        self.assertEqual(model, "glm-5-3-flash")
+        self.assertEqual(base_url, "https://finite-private.finite.containers.tinfoil.dev/v1")
 
     def test_gateway_preserves_legacy_name_for_a_custom_endpoint(self) -> None:
-        self.assertEqual(
-            self._gateway_model(
-                model="glm-5-2",
-                base_url="https://inference.example.com/v1",
-            ),
-            "glm-5-2",
+        model, base_url = self._gateway_model(
+            model="glm-5-2",
+            base_url="https://inference.example.com/v1",
         )
+        self.assertEqual(model, "glm-5-2")
+        self.assertEqual(base_url, "https://inference.example.com/v1")
 
     def test_reconciler_seeds_current_finite_private_model_and_context(self) -> None:
         reconciled = self._reconcile_config(None, self._reconciler_settings())
@@ -123,9 +147,9 @@ class AgentRuntimeLauncherConfigTest(unittest.TestCase):
         self.assertEqual(
             reconciled["model"],
             {
-                "default": "deepseek-v4-flash-0731",
+                "default": "glm-5-3-flash",
                 "provider": "custom",
-                "base_url": "https://kimi-k2-6.finite.containers.tinfoil.dev/v1",
+                "base_url": "https://finite-private.finite.containers.tinfoil.dev/v1",
                 "context_length": 393216,
                 "api_mode": "chat_completions",
                 "api_key": "${FINITE_PRIVATE_API_KEY}",
@@ -146,9 +170,32 @@ class AgentRuntimeLauncherConfigTest(unittest.TestCase):
 
         reconciled = self._reconcile_config(existing, self._reconciler_settings())
 
-        self.assertEqual(reconciled["model"]["default"], "deepseek-v4-flash-0731")
+        self.assertEqual(reconciled["model"]["default"], "glm-5-3-flash")
+        self.assertEqual(
+            reconciled["model"]["base_url"],
+            "https://finite-private.finite.containers.tinfoil.dev/v1",
+        )
         self.assertEqual(reconciled["model"]["context_length"], 393216)
         self.assertEqual(reconciled["model"]["temperature"], 0.4)
+
+    def test_reconciler_migrates_deepseek_image_owned_default(self) -> None:
+        existing = {
+            "model": {
+                "default": "deepseek-v4-flash-0731",
+                "provider": "custom",
+                "base_url": "https://kimi-k2-6.finite.containers.tinfoil.dev/v1",
+                "api_mode": "chat_completions",
+                "api_key": "${FINITE_PRIVATE_API_KEY}",
+            }
+        }
+
+        reconciled = self._reconcile_config(existing, self._reconciler_settings())
+
+        self.assertEqual(reconciled["model"]["default"], "glm-5-3-flash")
+        self.assertEqual(
+            reconciled["model"]["base_url"],
+            "https://finite-private.finite.containers.tinfoil.dev/v1",
+        )
 
     def test_reconciler_preserves_user_selected_model(self) -> None:
         model = {
@@ -160,6 +207,25 @@ class AgentRuntimeLauncherConfigTest(unittest.TestCase):
         reconciled = self._reconcile_config({"model": model.copy()}, self._reconciler_settings())
 
         self.assertEqual(reconciled["model"], model)
+
+    def test_reconciler_rewrites_retired_url_but_keeps_a_non_alias_model(self) -> None:
+        existing = {
+            "model": {
+                "default": "user-chosen-model",
+                "provider": "custom",
+                "base_url": "https://kimi-k2-6.finite.containers.tinfoil.dev/v1",
+                "api_mode": "chat_completions",
+                "api_key": "${FINITE_PRIVATE_API_KEY}",
+            }
+        }
+
+        reconciled = self._reconcile_config(existing, self._reconciler_settings())
+
+        self.assertEqual(reconciled["model"]["default"], "user-chosen-model")
+        self.assertEqual(
+            reconciled["model"]["base_url"],
+            "https://finite-private.finite.containers.tinfoil.dev/v1",
+        )
 
     def test_reconciler_preserves_near_match_with_custom_route(self) -> None:
         model = {
@@ -236,7 +302,7 @@ class AgentRuntimeLauncherConfigTest(unittest.TestCase):
         script = (REPO_ROOT / "containers/agent/run_hermes_gateway.sh").read_text(encoding="utf-8")
 
         self.assertIn("Room admission is Welcome-first", script)
-        self.assertNotIn('hermes --home "$agent_home" invite', script)
+        self.assertNotIn('hermes --agent-home "$agent_home" invite', script)
         self.assertNotIn("home-channel show", script)
         self.assertNotIn("home-channel set", script)
         self.assertNotIn("invite_room_id", script)
@@ -258,7 +324,7 @@ class AgentRuntimeLauncherConfigTest(unittest.TestCase):
 
         fresh_agent_branch = script.index('if [[ ! -f "${agent_home}/config.json" ]]')
         seed = script.index('cp -a "${bundled_skills_dir}/."', fresh_agent_branch)
-        init = script.index('"$finitechat_bin" hermes --home "$agent_home" init', seed)
+        init = script.index('"$finitechat_bin" hermes --agent-home "$agent_home" init', seed)
         branch_end = script.index("\nfi\n", init)
         self.assertLess(fresh_agent_branch, seed)
         self.assertLess(seed, init)
@@ -432,6 +498,187 @@ exec {sys.executable!s} "$@"
 
                 existing_config_data = yaml.safe_load(existing_config)
             self.assertEqual(existing_config_data["model"], expected_model)
+
+    def _gateway_chat_authz_env(
+        self,
+        *,
+        supervised: bool = True,
+        owner_npubs: str | None = None,
+        allowed_users: list[str] | None = None,
+        seed_writes_mirror: bool = False,
+        seed_fails: bool = False,
+    ) -> dict[str, str]:
+        """Run the launcher with stub binaries and capture the chat-authz env
+        the gateway process would inherit. The runner always injects
+        FINITECHAT_ALLOW_ALL_USERS=true for old-image compatibility.
+
+        Under agentd supervision (the production topology) agentd has already
+        run `finitechat hermes admission seed` before starting this script, so
+        the launcher only reads the allowed-users mirror. Standalone mode
+        (FINITE_AGENTD_SUPERVISED unset) makes the launcher run the seed step
+        itself; the stub finitechat emulates it by consuming the env seed and
+        publishing the mirror."""
+        launcher = REPO_ROOT / "containers/agent/run_hermes_gateway.sh"
+        with tempfile.TemporaryDirectory() as raw_tmp:
+            tmp = Path(raw_tmp)
+            fake_bin = tmp / "bin"
+            fake_bin.mkdir()
+            seed_stub = tmp / "seed-stub.env"
+            seed_stub.write_text(
+                f"SEED_WRITES={1 if seed_writes_mirror else 0}\n"
+                f"SEED_FAILS={1 if seed_fails else 0}\n",
+                encoding="utf-8",
+            )
+            finitechat = fake_bin / "finitechat"
+            finitechat.write_text(
+                "#!/usr/bin/env bash\n"
+                f". {seed_stub}\n"
+                "# Emulate `hermes admission seed`: consume the env seed and\n"
+                "# publish the store's allowed-users mirror.\n"
+                'if [[ "${1:-}" == "hermes" && "${4:-}" == "admission" ]]; then\n'
+                '  if [[ "$SEED_FAILS" == "1" ]]; then exit 1; fi\n'
+                '  if [[ "$SEED_WRITES" == "1" ]]; then\n'
+                '    seed="${FINITECHAT_WELCOME_ALLOWLIST:-${FINITECHAT_OWNER_NPUBS:-}}"\n'
+                '    if [[ -n "$seed" ]]; then\n'
+                '      printf "%s\\n" ${seed//,/ } > "${FINITECHAT_HOME}/allowed-users"\n'
+                "    fi\n"
+                "  fi\n"
+                "fi\n"
+                "exit 0\n",
+                encoding="utf-8",
+            )
+            finitechat.chmod(0o755)
+            env_capture = tmp / "gateway.env"
+            hermes = fake_bin / "hermes"
+            hermes.write_text(
+                "#!/usr/bin/env bash\n"
+                "for key in FINITECHAT_ALLOW_ALL_USERS FINITE_ALLOW_ALL_USERS"
+                " GATEWAY_ALLOW_ALL_USERS FINITECHAT_ALLOWED_USERS"
+                " FINITECHAT_WELCOME_ALLOWLIST FINITECHAT_OWNER_NPUBS; do\n"
+                '  if [[ -v $key ]]; then printf \'%s=%s\\n\' "$key" "${!key}"'
+                f" >>{env_capture}; fi\n"
+                "done\n",
+                encoding="utf-8",
+            )
+            hermes.chmod(0o755)
+            python = fake_bin / "python"
+            python.write_text(
+                f'#!/usr/bin/env bash\nexec {sys.executable!s} "$@"\n',
+                encoding="utf-8",
+            )
+            python.chmod(0o755)
+            agent_home = tmp / "agent"
+            hermes_home = agent_home / "hermes-home"
+            hermes_home.mkdir(parents=True)
+            (agent_home / "config.json").write_text("{}\n", encoding="utf-8")
+            if allowed_users is not None:
+                # The sidecar-maintained mirror of the store's Welcome
+                # allowlist: one 64-hex account id per line.
+                (agent_home / "allowed-users").write_text(
+                    "".join(f"{entry}\n" for entry in allowed_users),
+                    encoding="utf-8",
+                )
+            env = {
+                **os.environ,
+                "PATH": f"{fake_bin}:{os.environ['PATH']}",
+                "FINITECHAT_BIN": str(finitechat),
+                "FINITECHAT_HOME": str(agent_home),
+                "HERMES_HOME": str(hermes_home),
+                "FINITECHAT_WORKSPACE": str(tmp / "workspace"),
+                "FINITE_DEFAULT_INFERENCE_PROFILE": "openrouter",
+                "FINITE_AGENTD_SUPERVISED": "1" if supervised else "0",
+                "FINITECHAT_ALLOW_ALL_USERS": "true",
+                "FINITE_ALLOW_ALL_USERS": "true",
+                "GATEWAY_ALLOW_ALL_USERS": "true",
+                "FINITE_HERMES_CONFIG_RECONCILER": str(
+                    REPO_ROOT / "containers/agent/reconcile_hermes_config.py"
+                ),
+            }
+            if owner_npubs is not None:
+                env["FINITECHAT_OWNER_NPUBS"] = owner_npubs
+            else:
+                env.pop("FINITECHAT_OWNER_NPUBS", None)
+
+            result = subprocess.run(
+                ["bash", str(launcher)],
+                env=env,
+                capture_output=True,
+                text=True,
+                timeout=15,
+                check=False,
+            )
+            self.assertEqual(result.returncode, 0, result.stderr)
+            captured: dict[str, str] = {}
+            if env_capture.exists():
+                for line in env_capture.read_text(encoding="utf-8").splitlines():
+                    key, _, value = line.partition("=")
+                    captured[key] = value
+            return captured
+
+    def test_gateway_launcher_mirror_scopes_gateway_admission(self) -> None:
+        """Under agentd the seed already ran and the store mirrored its
+        allowlist: the gateway locks to exactly those entries."""
+        owner = "a" * 64
+        guest = "b" * 64
+        captured = self._gateway_chat_authz_env(allowed_users=[owner, guest])
+
+        self.assertEqual(captured.get("FINITECHAT_ALLOWED_USERS"), f"{owner},{guest}")
+        # The mirror is a gateway concern only; the sidecar's store is the
+        # source of truth and needs no env re-seed.
+        self.assertNotIn("FINITECHAT_WELCOME_ALLOWLIST", captured)
+        self.assertNotIn("FINITECHAT_ALLOW_ALL_USERS", captured)
+        self.assertNotIn("FINITE_ALLOW_ALL_USERS", captured)
+        self.assertNotIn("GATEWAY_ALLOW_ALL_USERS", captured)
+
+    def test_gateway_launcher_without_mirror_keeps_legacy_allow_all(self) -> None:
+        """No mirrored admission state means the legacy allow-all delegation
+        stands. The launcher itself must not key on the birth-time
+        FINITECHAT_OWNER_NPUBS: seeding belongs to the seed step, not the
+        gateway launcher."""
+        owner = "a" * 64
+        captured = self._gateway_chat_authz_env(owner_npubs=owner)
+
+        self.assertEqual(captured.get("FINITECHAT_ALLOW_ALL_USERS"), "true")
+        self.assertNotIn("FINITECHAT_ALLOWED_USERS", captured)
+        self.assertNotIn("FINITECHAT_WELCOME_ALLOWLIST", captured)
+        self.assertNotIn("FINITE_ALLOW_ALL_USERS", captured)
+        self.assertNotIn("GATEWAY_ALLOW_ALL_USERS", captured)
+
+    def test_gateway_launcher_empty_mirror_keeps_legacy_allow_all(self) -> None:
+        """An empty mirror must fail open to the same legacy behavior as a
+        missing one: the sidecar writes no file until admission is locked."""
+        captured = self._gateway_chat_authz_env(allowed_users=[])
+
+        self.assertEqual(captured.get("FINITECHAT_ALLOW_ALL_USERS"), "true")
+        self.assertNotIn("FINITECHAT_ALLOWED_USERS", captured)
+
+    def test_gateway_launcher_standalone_mode_seeds_admission(self) -> None:
+        """Without agentd the launcher runs the seed step itself; the seed
+        consumed the birth env and published the mirror, and the gateway
+        locks to it."""
+        owner = "a" * 64
+        captured = self._gateway_chat_authz_env(
+            supervised=False,
+            owner_npubs=owner,
+            seed_writes_mirror=True,
+        )
+
+        self.assertEqual(captured.get("FINITECHAT_ALLOWED_USERS"), owner)
+        self.assertNotIn("FINITECHAT_ALLOW_ALL_USERS", captured)
+        self.assertNotIn("GATEWAY_ALLOW_ALL_USERS", captured)
+
+    def test_gateway_launcher_standalone_seed_failure_falls_back_to_allow_all(self) -> None:
+        """A failing seed step must not wedge the gateway: the legacy
+        allow-all delegation stands and the launcher still boots."""
+        owner = "a" * 64
+        captured = self._gateway_chat_authz_env(
+            supervised=False,
+            owner_npubs=owner,
+            seed_fails=True,
+        )
+
+        self.assertEqual(captured.get("FINITECHAT_ALLOW_ALL_USERS"), "true")
+        self.assertNotIn("FINITECHAT_ALLOWED_USERS", captured)
 
     def test_gateway_launcher_fails_closed_without_replacing_invalid_config(self) -> None:
         reconciler = REPO_ROOT / "containers/agent/reconcile_hermes_config.py"

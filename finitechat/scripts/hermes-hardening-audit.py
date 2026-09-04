@@ -71,14 +71,6 @@ REQUIRED_MEDIA_E2E_STEPS = {
     "agent_receive_media",
     "user_receive_agent_replies",
 }
-REQUIRED_IOS_MEDIA_E2E_STEPS = {
-    "server_ready",
-    "agent_init",
-    "adapter_connect",
-    "ios_app_launch",
-    "agent_receive_ios_media",
-    "ios_receive_agent_replies",
-}
 REQUIRED_TINFOIL_PROOF_LAYERS = {
     "Tinfoil container running",
     "digest-pinned runtime image",
@@ -130,13 +122,11 @@ REQUIRED_CANARY_SECRET_ENV = {
 REQUIRED_GITHUB_PUBLISH_ARTIFACTS = {
     "target/hermes-hardening-audit.json",
     "target/hermes-docker-smoke/report.json",
-    "target/hermes-docker-smoke/restic-preflight.json",
     "target/hermes-docker-smoke/image-publish.json",
     "target/hermes-docker-smoke/tinfoil-handoff.json",
     "target/hermes-docker-smoke/tinfoil-canary/tinfoil-canary-summary.json",
 }
 REQUIRED_HANDOFF_RUNTIME = {
-    "hermes_agent_version": "0.20.0",
     "finitechat_hermes_inbound_stream": "1",
     "finite_agent_restore_on_start": "1",
     "finite_agent_restore_latest": "1",
@@ -157,7 +147,6 @@ REQUIRED_HANDOFF_CONTAINER_ENV = {
 }
 REQUIRED_PUBLISH_PROOF = {
     "smoke_status": "passed",
-    "hermes_agent_version_actual": "0.20.0",
     "restic_backend": "s3",
     "real_gateway_runtime": True,
     "gateway_admission_before_restore": True,
@@ -510,39 +499,6 @@ def validate_real_s3_smoke_facts(facts: dict[str, Any]) -> list[str]:
     return errors
 
 
-def validate_s3_preflight(preflight: dict[str, Any] | None) -> list[str]:
-    if not preflight:
-        return ["requires S3 restic preflight report"]
-
-    errors: list[str] = []
-    if preflight.get("status") != "ok":
-        errors.append(f"preflight status={preflight.get('status')!r}; expected 'ok'")
-    if preflight.get("backend") != "s3":
-        errors.append(f"preflight backend={preflight.get('backend')!r}; expected 's3'")
-    repository = preflight.get("repository")
-    if not non_empty_str(repository) or not str(repository).startswith("s3:"):
-        errors.append("preflight repository must be an s3: URL")
-
-    report_errors = preflight.get("errors")
-    if isinstance(report_errors, list) and report_errors:
-        errors.append(f"preflight errors: {', '.join(str(item) for item in report_errors)}")
-
-    env = preflight.get("env")
-    if not isinstance(env, dict):
-        errors.append("preflight env is required")
-    else:
-        for key in (
-            "FINITE_DOCKER_RESTIC_REPOSITORY",
-            "FINITE_DOCKER_RESTIC_PASSWORD",
-            "AWS_ACCESS_KEY_ID",
-            "AWS_SECRET_ACCESS_KEY",
-        ):
-            if env.get(key) is not True:
-                errors.append(f"preflight env.{key} must be true")
-
-    return errors
-
-
 def validate_tinfoil_handoff(
     handoff: dict[str, Any] | None,
     *,
@@ -567,7 +523,7 @@ def validate_tinfoil_handoff(
     if not isinstance(source_reports, dict):
         errors.append("handoff source_reports is required")
     else:
-        for key in ("smoke", "preflight", "publish"):
+        for key in ("smoke", "publish"):
             if not non_empty_str(source_reports.get(key)):
                 errors.append(f"handoff source_reports.{key} is required")
 
@@ -596,6 +552,10 @@ def validate_tinfoil_handoff(
         for key, expected in REQUIRED_HANDOFF_RUNTIME.items():
             if runtime.get(key) != expected:
                 errors.append(f"handoff runtime.{key}={runtime.get(key)!r}; expected {expected!r}")
+        # The version equality is proven by the smokes against the image's
+        # lock-derived stamp; evidence only has to record it.
+        if not non_empty_str(runtime.get("hermes_agent_version")):
+            errors.append("handoff runtime.hermes_agent_version is required")
 
     restore = handoff.get("restore")
     if not isinstance(restore, dict):
@@ -698,6 +658,8 @@ def validate_publish_report(
     for key, expected in REQUIRED_PUBLISH_PROOF.items():
         if proof.get(key) != expected:
             errors.append(f"publish proof.{key}={proof.get(key)!r}; expected {expected!r}")
+    if not non_empty_str(proof.get("hermes_agent_version_actual")):
+        errors.append("publish proof.hermes_agent_version_actual is required")
     if not non_empty_str(proof.get("restic_version")):
         errors.append("publish proof.restic_version is required")
     if not non_empty_str(proof.get("agent_npub_after_restore")):
@@ -723,12 +685,10 @@ def audit(args: argparse.Namespace) -> dict[str, Any]:
     adapter_regression_path = Path(args.adapter_regression_report)
     sidecar_path = Path(args.sidecar_report)
     media_e2e_path = Path(args.media_e2e_report)
-    ios_media_e2e_path = Path(args.ios_media_e2e_report)
     docker_path = Path(args.docker_report)
     s3_emulator_path = Path(args.s3_emulator_report)
     github_setup_path = Path(args.github_setup_report)
     github_publish_gate_path = Path(args.github_publish_gate_report)
-    preflight_path = Path(args.preflight_report)
     publish_path = Path(args.publish_report)
     handoff_path = Path(args.handoff_report)
     canary_summary_path = Path(args.canary_summary)
@@ -737,12 +697,10 @@ def audit(args: argparse.Namespace) -> dict[str, Any]:
     adapter_regression = load_optional_json(adapter_regression_path)
     sidecar = load_optional_json(sidecar_path)
     media_e2e = load_optional_json(media_e2e_path)
-    ios_media_e2e = load_optional_json(ios_media_e2e_path)
     docker = load_optional_json(docker_path)
     s3_emulator = load_optional_json(s3_emulator_path)
     github_setup = load_optional_json(github_setup_path)
     github_publish_gate = load_optional_json(github_publish_gate_path)
-    preflight = load_optional_json(preflight_path)
     publish = load_optional_json(publish_path)
     handoff = load_optional_json(handoff_path)
     canary_summary = load_optional_json(canary_summary_path)
@@ -823,39 +781,6 @@ def audit(args: argparse.Namespace) -> dict[str, Any]:
         ),
     )
 
-    ios_facts = ios_media_e2e.get("facts", {}) if isinstance(ios_media_e2e, dict) else {}
-    ios_steps_missing = sorted(REQUIRED_IOS_MEDIA_E2E_STEPS - step_names(ios_media_e2e or {}))
-    ios_texts = ios_facts.get("ios_received_text")
-    ios_media_types = ios_facts.get("agent_received_media_types")
-    ios_passed = (
-        bool(ios_media_e2e)
-        and ios_media_e2e.get("status") == "passed"
-        and ios_media_e2e.get("name") == "ios_simulator_hermes_agent_media_e2e"
-        and not ios_steps_missing
-        and ios_facts.get("platform") == "ios_simulator"
-        and ios_facts.get("adapter_inbound_stream") is True
-        and ios_facts.get("adapter_service_url_present") is True
-        and bool(ios_facts.get("simulator_udid"))
-        and isinstance(ios_media_types, list)
-        and "image/png" in ios_media_types
-        and isinstance(ios_texts, list)
-        and "agent text echo: ios media hello" in ios_texts
-        and "agent media echo" in ios_texts
-        and int(ios_facts.get("ios_received_media_count") or 0) >= 1
-    )
-    add_check(
-        checks,
-        name="ios_simulator_media_e2e",
-        status="passed" if ios_passed else "missing",
-        evidence=str(ios_media_e2e_path) if ios_media_e2e else None,
-        detail=None
-        if ios_passed
-        else (
-            "requires live iOS Simulator media e2e report with sidecar stream, "
-            f"native store decrypt, and text/image replies; missing steps: {', '.join(ios_steps_missing)}"
-        ),
-    )
-
     docker_missing = missing_layers(docker or {}, REQUIRED_DOCKER_PROOF_LAYERS)
     docker_facts = docker.get("facts", {}) if isinstance(docker, dict) else {}
     docker_backup_errors = [
@@ -872,7 +797,7 @@ def audit(args: argparse.Namespace) -> dict[str, Any]:
         and docker.get("status") == "passed"
         and not docker_missing
         and not docker_backup_errors
-        and docker_facts.get("hermes_agent_version_actual") == "0.20.0"
+        and non_empty_str(docker_facts.get("hermes_agent_version_actual"))
         and docker_facts.get("agent_npub") == docker_facts.get("agent_npub_after_restore")
         and docker_facts.get("real_gateway_runtime") is True
         and docker_facts.get("gateway_admission_before_restore") is True
@@ -916,7 +841,7 @@ def audit(args: argparse.Namespace) -> dict[str, Any]:
         and not s3_emulator_backup_errors
         and s3_emulator_facts.get("restic_backend") == "s3"
         and s3_emulator_facts.get("s3_endpoint_kind") == "local_emulator"
-        and s3_emulator_facts.get("hermes_agent_version_actual") == "0.20.0"
+        and non_empty_str(s3_emulator_facts.get("hermes_agent_version_actual"))
         and s3_emulator_facts.get("agent_npub") == s3_emulator_facts.get("agent_npub_after_restore")
         and s3_emulator_facts.get("real_gateway_runtime") is True
         and s3_emulator_facts.get("gateway_admission_before_restore") is True
@@ -979,16 +904,6 @@ def audit(args: argparse.Namespace) -> dict[str, Any]:
             f"s3_endpoint_kind={s3_endpoint_kind!r}; expected real S3; "
             f"proof errors: {'; '.join(s3_smoke_errors)}"
         ),
-    )
-
-    preflight_s3_errors = validate_s3_preflight(preflight)
-    preflight_s3 = not preflight_s3_errors
-    add_check(
-        checks,
-        name="s3_restic_preflight",
-        status="passed" if preflight_s3 else "missing",
-        evidence=str(preflight_path) if preflight else None,
-        detail=None if preflight_s3 else "; ".join(preflight_s3_errors),
     )
 
     publish_errors = validate_publish_report(publish, docker_facts=docker_facts)
@@ -1080,10 +995,6 @@ def main() -> int:
         default="target/hermes-agent-media-e2e/report.json",
     )
     parser.add_argument(
-        "--ios-media-e2e-report",
-        default="target/ios-hermes-agent-media-e2e/report.json",
-    )
-    parser.add_argument(
         "--docker-report",
         default="target/hermes-docker-smoke/report.json",
     )
@@ -1098,10 +1009,6 @@ def main() -> int:
     parser.add_argument(
         "--github-publish-gate-report",
         default="target/hermes-github-publish-gate/report.json",
-    )
-    parser.add_argument(
-        "--preflight-report",
-        default="target/hermes-docker-smoke/restic-preflight.json",
     )
     parser.add_argument(
         "--publish-report",

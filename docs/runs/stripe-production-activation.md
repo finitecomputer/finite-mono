@@ -114,8 +114,9 @@ support a stronger operator-blindness claim.
 
 ## Product and policy defaults
 
-These are the proposed v0 settings. Changing one updates `billing-v0.md`, the
-customer disclosures, tests, and Dashboard checklist before Stripe mutation.
+These are the proposed v0 settings. Changing one updates the current billing
+runbook, customer disclosures, tests, and Dashboard checklist before Stripe
+mutation.
 
 | Decision | Billing v0 default |
 | --- | --- |
@@ -425,7 +426,7 @@ sandbox is never proof of live configuration.
       human review. Do not auto-delete, purge, or retire a runtime.
 - [ ] Keep monthly renewal reminders off unless the published policy or a
       customer's jurisdiction requires them; if enabled, record the chosen
-      notice interval in `billing-v0.md`.
+      notice interval in the current billing runbook.
 
 ### 9. Create the live restricted API key
 
@@ -592,6 +593,6 @@ follows the published policy under separate explicit authority.
 - [`docs/runs/README.md`](README.md)
 - [`docs/runs/stripe-checkout-readiness.md`](stripe-checkout-readiness.md)
 - [`docs/runs/hosted-web-chat-disaster-recovery.md`](hosted-web-chat-disaster-recovery.md)
-- [`finitecomputer-v2/docs/billing-v0.md`](../../finitecomputer-v2/docs/billing-v0.md)
+- [`infra/runbooks/stripe-billing.md`](../../infra/runbooks/stripe-billing.md)
 - [`docs/adr/0001-recoverability-precedes-operator-blindness.md`](../adr/0001-recoverability-precedes-operator-blindness.md)
 - [`infra/nixos/README.md`](../../infra/nixos/README.md)

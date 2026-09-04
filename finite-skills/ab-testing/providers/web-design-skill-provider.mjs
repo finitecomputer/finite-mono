@@ -13,13 +13,10 @@ import {
 const providerDir = path.dirname(fileURLToPath(import.meta.url));
 const harnessRoot = path.resolve(providerDir, "..");
 const repoRoot = path.resolve(harnessRoot, "../..");
-const finitePrivateDefaultBaseUrl = "https://kimi-k2-6.finite.containers.tinfoil.dev/v1";
-// Finite Private model rollout is intentionally moving quickly right now. This
-// is the currently working streaming chat-completions model for the deployed
-// limiter. The direct shim also disables DeepSeek thinking for artifact
-// generation below. If a later rollout changes the served model or endpoint
-// contract, update this shim to match the product path again.
-const finitePrivateDefaultModel = "deepseek-v4-flash-0731";
+const finitePrivateDefaultBaseUrl = "https://finite-private.finite.containers.tinfoil.dev/v1";
+// Canonical Finite Private model after the 2026-08-28 GLM cutover. Keep this
+// aligned with DEFAULT_FINITE_PRIVATE_MODEL in finite-saas-runner.
+const finitePrivateDefaultModel = "glm-5-3-flash";
 const openAIDefaultBaseUrl = "https://api.openai.com/v1";
 const openAIDefaultModel = "gpt-5-mini";
 

@@ -9,6 +9,7 @@ mod hermes;
 mod repair;
 
 use clap::Parser;
+use finitechat_core::FiniteChatCoreError;
 use finitechat_delivery::{HttpKeyPackageId, HttpKeyPackagePublication};
 use finitechat_http::{
     AckWelcomeRequest, ApplicationEffectRequest, BootstrapAccountRoomRequest,
@@ -65,6 +66,10 @@ pub enum CliError {
     Identity(String),
     #[error("runtime: {0}")]
     Runtime(String),
+    /// A Core failure, carried whole so `kind`, `retryable`, and the service
+    /// HTTP status all come from [`FiniteChatCoreError::classification`].
+    #[error("{0}")]
+    Core(#[from] FiniteChatCoreError),
 }
 
 impl CliError {
@@ -78,7 +83,8 @@ impl CliError {
             | Self::Output(_)
             | Self::Hermes(_)
             | Self::Identity(_)
-            | Self::Runtime(_) => 1,
+            | Self::Runtime(_)
+            | Self::Core(_) => 1,
         }
     }
 
@@ -96,6 +102,7 @@ impl CliError {
             Self::Hermes(_) => "hermes",
             Self::Identity(_) => "identity",
             Self::Runtime(_) => "runtime",
+            Self::Core(error) => error.classification().kind.as_str(),
         }
     }
 
@@ -116,6 +123,7 @@ impl CliError {
             | Self::Hermes(_)
             | Self::Identity(_)
             | Self::Runtime(_) => false,
+            Self::Core(error) => error.classification().retryable,
         }
     }
 
@@ -523,6 +531,13 @@ fn execute_http_request<W: Write>(
     let status = response.status();
     let body = response.text()?;
     if !status.is_success() {
+        let body = if status == reqwest::StatusCode::UNAUTHORIZED {
+            format!(
+                "{body}\nnote: account-scoped routes require NIP-98 signed requests; the raw 'http' subcommand does not sign"
+            )
+        } else {
+            body
+        };
         return Err(CliError::Server { status, body });
     }
     writeln!(output, "{body}").map_err(CliError::Output)
@@ -1025,8 +1040,9 @@ mod tests {
         ]);
         assert_eq!(bootstrap["bootstrapped"], true);
 
-        let mut delivery =
-            HttpRuntimeDelivery::new(ReqwestHttpRuntimeTransport::new(server_url.clone()));
+        let mut delivery = HttpRuntimeDelivery::new(
+            ReqwestHttpRuntimeTransport::new(server_url.clone()).with_signer(CLI_LIVE_ALICE_SECRET),
+        );
         let upload = phone
             .upload_key_package_request("key-package-add-device")
             .expect("phone upload KeyPackage request");

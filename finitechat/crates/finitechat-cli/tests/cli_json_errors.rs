@@ -56,7 +56,11 @@ fn without_json_flag_cli_errors_stay_human_readable() {
 #[test]
 fn json_errors_requested_matches_only_the_exact_flag() {
     assert!(finitechat_cli::json_errors_requested([
-        "hermes", "--home", "/h", "send", "--json"
+        "hermes",
+        "--agent-home",
+        "/h",
+        "send",
+        "--json"
     ]));
     assert!(!finitechat_cli::json_errors_requested([
         "hermes",

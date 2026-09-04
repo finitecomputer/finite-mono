@@ -7,11 +7,11 @@
 //! The agent's account key is the shared Finite identity at
 //! `$FINITE_HOME/identity/identity.json` (else `~/.finite/identity/`),
 //! minted by whichever Finite tool runs first and never copied into the
-//! agent home. The agent's durable home lives under `--home` /
+//! agent home. The agent's durable home lives under `--agent-home` /
 //! `$FINITECHAT_HOME`: `config.json`, the encrypted client store
 //! `client.sqlite3`, and sidecar state files.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::convert::Infallible;
 use std::fs;
 use std::io::{Read, Write};
@@ -37,12 +37,12 @@ use finitechat_blob::{
 use finitechat_client::{
     ClientStoreError, FiniteChatDevice, FiniteChatDeviceConfig, HttpRuntimeDelivery,
     ReqwestHttpRuntimeTransport, SqliteClientStore, SqliteClientStoreOptions, StoredAppEvent,
-    StoredAppMessage, StoredAppRoom, StoredAppRoomState,
+    StoredAppMessage, StoredAppRoom, StoredAppRoomState, WelcomeAdmissionPolicy,
 };
 use finitechat_core::{
-    AppAction, AppBridgeActivityInput, AppBridgeSync, AppRoomState, AppSentMessage,
-    AppTopicSummary, ChatMediaKind, FiniteChatCoreError, FiniteChatRuntime, OpenOptions,
-    OutboundAttachment,
+    AppAction, AppBridgeActivityInput, AppBridgeSync, AppRoomState, AppRoomSyncCursor,
+    AppSentMessage, AppTopicSummary, ChatMediaKind, FiniteChatCoreError, FiniteChatRuntime,
+    OpenOptions, OutboundAttachment,
 };
 use finitechat_hermes::{
     HERMES_MESSAGE_PAYLOAD_TYPE_V1, HermesAckRequestV1, HermesActivityRequestV1,
@@ -57,7 +57,7 @@ use finitechat_proto::{
     EphemeralActivityActionV1, MAX_ATTACHMENT_PLAINTEXT_BYTES, MAX_RUNTIME_COMMAND_LEDGER_RECORDS,
     ProtocolLimitError, RuntimeCommandCancelV1, RuntimeCommandDeliveryAckV1,
     RuntimeCommandDeliveryV1, RuntimeCommandInboundPayloadV1, RuntimeCommandRequestV1,
-    RuntimeCommandResultDeliveryV1, RuntimeStateSnapshotDeliveryV1, npub_encode,
+    RuntimeCommandResultDeliveryV1, RuntimeStateSnapshotDeliveryV1, npub_decode, npub_encode,
 };
 use futures_util::stream;
 use serde::{Deserialize, Serialize};
@@ -65,8 +65,9 @@ use serde_json::{Value, json};
 
 use crate::CliError;
 use crate::cli::{
-    HermesArgs, HermesCommand, HermesHomeChannelCommand, HermesHomeChannelSetArgs, HermesInitArgs,
-    HermesInstallArgs, HermesRoomStatusArgs, HermesServeArgs,
+    HermesAdmissionCommand, HermesArgs, HermesCommand, HermesHomeChannelCommand,
+    HermesHomeChannelSetArgs, HermesInitArgs, HermesInstallArgs, HermesRekeyArgs,
+    HermesRoomStatusArgs, HermesServeArgs,
 };
 
 const CONFIG_FILE: &str = "config.json";
@@ -74,11 +75,10 @@ const HERMES_INBOX_FILE: &str = "hermes-inbox.json";
 const AGENTD_INBOX_FILE: &str = "agentd-inbox.json";
 const HERMES_RUNNING_FILE: &str = "hermes-running.json";
 const HERMES_HOME_CHANNEL_FILE: &str = "hermes-home-channel.json";
-const BACKUP_ACTIVITY_FILE: &str = ".finitechat-backup-active";
+/// Default JSONL audit trail for `hermes rekey` cursor-skip decisions.
+const HERMES_REKEY_AUDIT_FILE: &str = "rekey-audit.jsonl";
 const STORE_FILE: &str = "client.sqlite3";
 const ATTACHMENT_CACHE_DIR: &str = "attachments";
-const LEGACY_HERMES_PLUGIN_NAME: &str = "finite-platform";
-const AMBIGUOUS_HERMES_PLUGIN_NAME: &str = "finite";
 const HERMES_PLATFORM_NAME: &str = "finitechat";
 const HERMES_PLUGIN_INIT: &str =
     include_str!("../../../integrations/hermes/finitechat/__init__.py");
@@ -107,15 +107,46 @@ const HERMES_STORED_EVENT_RECOVERY_LIMIT: u32 = 5_000;
 /// override per host with `FINITECHAT_HERMES_LEASE_TTL_MILLIS`.
 const DEFAULT_HERMES_INBOX_LEASE_TTL_MILLIS: u64 = 45 * 60 * 1000;
 const HERMES_INBOX_LEASE_TTL_ENV: &str = "FINITECHAT_HERMES_LEASE_TTL_MILLIS";
-/// Policy for a `thread_id` that resolves to no conversation or segment in the
-/// agent store. Unset (the default) routes unknown threads to Core's Home
-/// default with a loud warning — the pre-d6a8b424 product semantics: a topic
-/// archived mid-session must never silently consume the user's message, so the
-/// reply stays deliverable and the routing decision is visible in the log.
-/// Values: `home`/`default` spell the fallback explicitly; `error` (and any
-/// other value) restores the strict typed error so a typo fails closed instead
-/// of silently rerouting replies.
-const HERMES_UNKNOWN_THREAD_ROUTE_ENV: &str = "FINITECHAT_HERMES_UNKNOWN_THREAD_ROUTE";
+/// Comma-separated account ids (64-hex or `npub1…`) allowed to auto-admit
+/// this agent into rooms: a claimed Welcome from any other sender is
+/// discarded without being stored, activated, or acked, which closes
+/// stranger self-admission into agent rooms. The value is a birth-time seed
+/// only: it is consumed into the store's Welcome admission policy exactly
+/// once, when no policy row exists, and later boots never re-apply it (the
+/// store is the single source of truth; `finite.chat.admission.v1` commands
+/// manage the entries thereafter). Absent or empty seeds nothing; a
+/// present-but-malformed value is a hard boot error because an operator typo
+/// must never silently fail open. The agent's own account is always admitted
+/// (device link needs no allowlist entry).
+const WELCOME_ALLOWLIST_ENV: &str = "FINITECHAT_WELCOME_ALLOWLIST";
+/// Core-injected birth seed (the owner's hosted-chat account id list) read
+/// directly from the container environment. Same consume-once contract as
+/// [`WELCOME_ALLOWLIST_ENV`], which overrides it when both are set: the
+/// store is the single source of truth and both spellings are only seeds
+/// into it. Core normalizes the value to comma-separated 64-hex account ids.
+const OWNER_NPUBS_ENV: &str = "FINITECHAT_OWNER_NPUBS";
+/// Hosted-image marker exported by finite-agentd for the sidecar it spawns
+/// (agentd only runs inside the container). The value `locked` makes a device
+/// with no policy row default to allowlist admission, seeded from the
+/// relayed owner list and the existing rooms' counterparties, so legacy
+/// hosted agents launched before owner-npub injection still leave allow-all
+/// on their first boot of the new image. Standalone `finitechat hermes
+/// serve` never sees the marker and keeps the legacy allow-all default.
+const ADMISSION_DEFAULT_ENV: &str = "FINITECHAT_ADMISSION_DEFAULT";
+const ADMISSION_DEFAULT_LOCKED: &str = "locked";
+/// Typed command consumed by the sidecar itself (never agentd, never the
+/// Hermes inbox) to manage the Welcome allowlist at runtime. The body schema
+/// is [`CHAT_ADMISSION_SCHEMA`] with `{action: "grant"|"revoke", account_id}`
+/// and only a currently-allowlisted sender is honored.
+const CHAT_ADMISSION_COMMAND: &str = "chat.admission";
+const CHAT_ADMISSION_SCHEMA: &str = "finite.chat.admission.v1";
+/// Plain-text mirror of the Welcome allowlist (one 64-hex account id per
+/// line) maintained for `run_hermes_gateway.sh`, which turns it into
+/// FINITECHAT_ALLOWED_USERS when no birth-time FINITECHAT_OWNER_NPUBS exists.
+/// The store stays authoritative; this file is rewritten after every
+/// seed/grant/revoke and removed if admission is explicitly set back to
+/// allow-all.
+const ALLOWED_USERS_FILE: &str = "allowed-users";
 /// Bounded ring of recently-acked entry keys. It makes a post-restart
 /// duplicate ack a no-op and blocks a redelivery of an already-acked entry
 /// from durable recovery even if its seq is re-observed, so the sidecar is
@@ -161,28 +192,16 @@ pub(crate) fn run<W: Write>(args: HermesArgs, output: &mut W) -> Result<(), CliE
         HermesCommand::Install(args) => cmd_install(&home_dir, args, json_mode, output),
         HermesCommand::Serve(args) => cmd_serve(&home_dir, args, json_mode, output),
         HermesCommand::HomeChannel { command } => cmd_home_channel(&home_dir, command, output),
+        HermesCommand::Admission { command } => cmd_admission(&home_dir, command, output),
         HermesCommand::RoomStatus(args) => cmd_room_status(&home_dir, args, json_mode, output),
-        HermesCommand::Poll => with_backup_activity(&home_dir, "poll", || {
-            cmd_poll(&home_dir, read_request(request_json)?, output)
-        }),
-        HermesCommand::Ack => with_backup_activity(&home_dir, "ack", || {
-            cmd_ack(&home_dir, read_request(request_json)?, output)
-        }),
-        HermesCommand::Release => with_backup_activity(&home_dir, "release", || {
-            cmd_release(&home_dir, read_request(request_json)?, output)
-        }),
-        HermesCommand::Send => with_backup_activity(&home_dir, "send", || {
-            cmd_send(&home_dir, read_request(request_json)?, output)
-        }),
-        HermesCommand::Edit => with_backup_activity(&home_dir, "edit", || {
-            cmd_edit(&home_dir, read_request(request_json)?, output)
-        }),
-        HermesCommand::Recover => with_backup_activity(&home_dir, "recover", || {
-            cmd_recover(&home_dir, read_request(request_json)?, output)
-        }),
-        HermesCommand::Activity => with_backup_activity(&home_dir, "activity", || {
-            cmd_activity(&home_dir, read_request(request_json)?, output)
-        }),
+        HermesCommand::Rekey(args) => cmd_rekey(&home_dir, args, json_mode, output),
+        HermesCommand::Poll => cmd_poll(&home_dir, read_request(request_json)?, output),
+        HermesCommand::Ack => cmd_ack(&home_dir, read_request(request_json)?, output),
+        HermesCommand::Release => cmd_release(&home_dir, read_request(request_json)?, output),
+        HermesCommand::Send => cmd_send(&home_dir, read_request(request_json)?, output),
+        HermesCommand::Edit => cmd_edit(&home_dir, read_request(request_json)?, output),
+        HermesCommand::Recover => cmd_recover(&home_dir, read_request(request_json)?, output),
+        HermesCommand::Activity => cmd_activity(&home_dir, read_request(request_json)?, output),
     }
 }
 
@@ -196,22 +215,6 @@ struct HermesInstallSummary {
     files: Vec<String>,
     recommended_config: String,
     warnings: Vec<String>,
-    legacy_plugin_conflicts: Vec<HermesInstallLegacyPluginConflict>,
-    legacy_config_conflicts: Vec<HermesInstallLegacyConfigConflict>,
-}
-
-#[derive(Debug, Serialize)]
-struct HermesInstallLegacyPluginConflict {
-    plugin_name: String,
-    plugin_dir: String,
-    reason: String,
-}
-
-#[derive(Debug, Serialize)]
-struct HermesInstallLegacyConfigConflict {
-    config_path: String,
-    enabled_plugin: String,
-    replacement_plugin: String,
 }
 
 fn cmd_install<W: Write>(
@@ -238,23 +241,13 @@ fn cmd_install<W: Write>(
         )));
     }
 
-    let (plugin_dir, plugins_dir_for_audit) = match plugin_dir_arg {
-        Some(path) => {
-            let plugin_dir = PathBuf::from(path);
-            let plugins_dir = plugin_dir
-                .parent()
-                .map(Path::to_path_buf)
-                .unwrap_or_else(|| PathBuf::from("."));
-            (plugin_dir, plugins_dir)
-        }
-        None => {
-            let plugins_dir = plugins_dir_arg
-                .map(PathBuf::from)
-                .map(Ok)
-                .unwrap_or_else(default_hermes_plugins_dir)?;
-            let plugin_dir = plugins_dir.join(&plugin_name);
-            (plugin_dir, plugins_dir)
-        }
+    let plugin_dir = match plugin_dir_arg {
+        Some(path) => PathBuf::from(path),
+        None => plugins_dir_arg
+            .map(PathBuf::from)
+            .map(Ok)
+            .unwrap_or_else(default_hermes_plugins_dir)?
+            .join(&plugin_name),
     };
     let finitechat_bin = match finitechat_bin_arg {
         Some(path) => PathBuf::from(path),
@@ -293,24 +286,6 @@ fn cmd_install<W: Write>(
         &mut installed,
     )?;
 
-    let legacy_plugin_conflicts =
-        detect_legacy_plugin_conflicts(&plugins_dir_for_audit, &plugin_dir, &plugin_name);
-    let legacy_config_conflicts =
-        detect_legacy_config_conflicts(&plugins_dir_for_audit, &plugin_name);
-    let mut warnings = Vec::new();
-    for conflict in &legacy_plugin_conflicts {
-        warnings.push(format!(
-            "found legacy Hermes plugin '{}' at {}; {}",
-            conflict.plugin_name, conflict.plugin_dir, conflict.reason
-        ));
-    }
-    for conflict in &legacy_config_conflicts {
-        warnings.push(format!(
-            "{} enables legacy plugin '{}'; change plugins.enabled to '{}'",
-            conflict.config_path, conflict.enabled_plugin, conflict.replacement_plugin
-        ));
-    }
-
     let summary = HermesInstallSummary {
         plugin_name: plugin_name.clone(),
         platform_name: HERMES_PLATFORM_NAME.to_owned(),
@@ -319,9 +294,7 @@ fn cmd_install<W: Write>(
         finitechat_bin: finitechat_bin.display().to_string(),
         files: installed,
         recommended_config: hermes_recommended_config(&plugin_name, home_dir),
-        warnings,
-        legacy_plugin_conflicts,
-        legacy_config_conflicts,
+        warnings: Vec::new(),
     };
     if json_mode {
         crate::write_pretty_json(output, &summary)
@@ -368,6 +341,7 @@ struct HermesServiceState {
     running_lock: Arc<Mutex<()>>,
     bridge_updates: Arc<(Mutex<u64>, Condvar)>,
     joined_account_ids: Arc<Mutex<Vec<String>>>,
+    server_stream: ServerStreamMonitor,
 }
 
 #[derive(Debug, Serialize)]
@@ -444,15 +418,14 @@ async fn prepare_hermes_service(
         .local_addr()
         .map_err(|error| CliError::Hermes(error.to_string()))?;
     let url = format!("http://{bound_addr}");
+    seed_welcome_allowlist(home)?;
     let runtime = open_agent_runtime(home)?;
     // Service readiness means this Device is actually reachable for the
     // Welcome-first product flow, not merely that its local SQLite file opens.
     // StartRuntime publishes/replenishes KeyPackages and activates pending
     // Welcomes on every resident-service start, which also makes restart the
     // natural healing path after Chat/server interruption.
-    runtime
-        .dispatch_and_wait(AppAction::StartRuntime)
-        .map_err(map_core_hermes_error)?;
+    runtime.dispatch_and_wait(AppAction::StartRuntime)?;
     let state = HermesServiceState {
         agent_home: home_dir.to_path_buf(),
         account_id: home.config.account_id.clone(),
@@ -463,6 +436,7 @@ async fn prepare_hermes_service(
         running_lock: Arc::new(Mutex::new(())),
         bridge_updates: Arc::new((Mutex::new(0), Condvar::new())),
         joined_account_ids: Arc::new(Mutex::new(Vec::new())),
+        server_stream: ServerStreamMonitor::default(),
     };
     start_resident_bridge_sync(state.clone())?;
     let started = HermesServiceStarted {
@@ -514,6 +488,135 @@ fn hermes_service_router(state: HermesServiceState) -> Router {
         .with_state(state)
 }
 
+/// Outbound link state for the sidecar's server sync, as the resident sync
+/// loop knows it. This is deliberately NOT the local hermes<->sidecar
+/// bridge that `hermes-bridge-status.json` describes (127.0.0.1 adapter to
+/// this service); it is this process's outbound connection to the Finite
+/// chat server — the two links fail independently and were conflated
+/// during the 2026-08-29 incident.
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct ServerStreamStatus {
+    /// `connecting` until the first cycle completes, then `connected` after
+    /// a successful cycle (stream open + hint/heartbeat applied, or a full
+    /// poll) and `reconnecting` after a failed one.
+    state: &'static str,
+    /// Unix ms when the outbound link of the last successful cycle was
+    /// established (cycle start: the sync stream is opened, or the poll
+    /// request sent, first thing inside each cycle).
+    last_established_unix_ms: Option<u64>,
+    /// Bounded error of the most recent failed cycle, with its timestamp.
+    last_error: Option<String>,
+    last_error_unix_ms: Option<u64>,
+}
+
+impl Default for ServerStreamStatus {
+    fn default() -> Self {
+        Self {
+            state: "connecting",
+            last_established_unix_ms: None,
+            last_error: None,
+            last_error_unix_ms: None,
+        }
+    }
+}
+
+/// Shared slot written only by the resident sync loop and read by
+/// `/readyz`. A poisoned lock reads as the last known state rather than
+/// failing the probe: the loop is the writer, so poison means the loop
+/// panicked mid-write, and the last durable value is still the best truth
+/// available.
+#[derive(Clone, Default)]
+struct ServerStreamMonitor(Arc<Mutex<ServerStreamStatus>>);
+
+impl ServerStreamMonitor {
+    fn record_established(&self, established_unix_ms: u64) {
+        if let Ok(mut status) = self.0.lock() {
+            status.state = "connected";
+            status.last_established_unix_ms = Some(established_unix_ms);
+            status.last_error = None;
+            status.last_error_unix_ms = None;
+        }
+    }
+
+    fn record_failure(&self, failed_unix_ms: u64, error: &FiniteChatCoreError) {
+        if let Ok(mut status) = self.0.lock() {
+            status.state = "reconnecting";
+            status.last_error = Some(bounded_error_summary(error));
+            status.last_error_unix_ms = Some(failed_unix_ms);
+        }
+    }
+
+    fn snapshot(&self) -> ServerStreamStatus {
+        match self.0.lock() {
+            Ok(status) => status.clone(),
+            // A panicked writer leaves the last written value in place;
+            // that is still the best truth available to the probe.
+            Err(poisoned) => poisoned.into_inner().clone(),
+        }
+    }
+}
+
+/// Keep the surfaced error small: transport errors can embed whole HTTP
+/// bodies, and this string rides every `/readyz` response.
+const SERVER_STREAM_ERROR_SUMMARY_CHARS: usize = 240;
+
+fn bounded_error_summary(error: &FiniteChatCoreError) -> String {
+    let mut summary = error.to_string();
+    if summary.chars().count() > SERVER_STREAM_ERROR_SUMMARY_CHARS {
+        summary = summary
+            .chars()
+            .take(SERVER_STREAM_ERROR_SUMMARY_CHARS)
+            .collect();
+        summary.push_str("...");
+    }
+    summary
+}
+
+fn server_stream_status_json(status: &ServerStreamStatus) -> Value {
+    json!({
+        "state": status.state,
+        "last_established_unix_ms": status.last_established_unix_ms,
+        "last_error": status.last_error,
+        "last_error_unix_ms": status.last_error_unix_ms,
+    })
+}
+
+/// How many per-room durable cursors `/readyz` reports. The cursor list is
+/// a diagnostic bound, not a directory: enough to spot a frozen or diverged
+/// room at a glance (tonight's incident needed a dedicated diagnostic tool
+/// to see even one) while keeping the probe response small on homes with
+/// many rooms.
+const READYZ_ROOM_CURSOR_LIMIT: usize = 32;
+
+fn room_cursors_summary_json(cursors: &[AppRoomSyncCursor]) -> Value {
+    let total = cursors.len();
+    json!({
+        // The durable resume point per room — deliberately NOT derived from
+        // client_app_events max-seq, which diverged from the real cursor by
+        // 10 seq on one agent during the 2026-08-29 incident.
+        "rooms": cursors
+            .iter()
+            .take(READYZ_ROOM_CURSOR_LIMIT)
+            // The core's cursor record is passed through as-is (it owns the
+            // field set: durable cursor, own-send mark, currency state,
+            // behind-server evidence); this bridge does not interpret it.
+            .map(|cursor| {
+                serde_json::to_value(cursor)
+                    .unwrap_or_else(|_| json!({ "room_id": cursor.room_id }))
+            })
+            .collect::<Vec<_>>(),
+        "total": total,
+        "truncated": total > READYZ_ROOM_CURSOR_LIMIT,
+        // Any room behind the server means every send from this store is
+        // refused; surfaced at the top level so a probe need not scan rooms.
+        "behind_server_rooms": cursors
+            .iter()
+            .filter(|cursor| cursor.behind_server.is_some())
+            .map(|cursor| cursor.room_id.clone())
+            .collect::<Vec<_>>(),
+    })
+}
+
 fn start_resident_bridge_sync(state: HermesServiceState) -> Result<(), CliError> {
     std::thread::Builder::new()
         .name("finitechat-resident-sync".to_owned())
@@ -521,6 +624,7 @@ fn start_resident_bridge_sync(state: HermesServiceState) -> Result<(), CliError>
             let mut retry_millis = 250u64;
             let mut sync_immediately = true;
             loop {
+                let cycle_started_unix_ms = now_ms();
                 let result = if sync_immediately {
                     state.runtime.agent_bridge_poll_once()
                 } else {
@@ -530,6 +634,9 @@ fn start_resident_bridge_sync(state: HermesServiceState) -> Result<(), CliError>
                 };
                 match result {
                     Ok(bridge) => {
+                        state
+                            .server_stream
+                            .record_established(cycle_started_unix_ms);
                         retry_millis = 250;
                         sync_immediately = false;
                         let has_updates = bridge_sync_has_updates(&bridge);
@@ -544,7 +651,8 @@ fn start_resident_bridge_sync(state: HermesServiceState) -> Result<(), CliError>
                             signal_bridge_update(&state);
                         }
                     }
-                    Err(_) => {
+                    Err(error) => {
+                        state.server_stream.record_failure(now_ms(), &error);
                         std::thread::sleep(Duration::from_millis(retry_millis));
                         retry_millis = (retry_millis.saturating_mul(2)).min(5_000);
                         sync_immediately = true;
@@ -621,9 +729,21 @@ async fn hermes_service_readyz(
     State(state): State<HermesServiceState>,
 ) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
     let result = tokio::task::spawn_blocking(move || {
-        let app = state.runtime.state().map_err(map_core_hermes_error)?;
+        let app = state.runtime.state()?;
+        let room_cursors = state.runtime.room_sync_cursors()?;
         Ok(json!({
             "status": "ready",
+            // The runtime's own status line names quarantined rooms (e.g.
+            // "ready; 1 room needs repair"); mirrored verbatim so a
+            // quarantined room is visible in the readiness probe without a
+            // new file or route.
+            "runtime_status": app.status,
+            // The sidecar's OUTBOUND link to the chat server, maintained by
+            // the resident sync loop. Distinct from the local
+            // hermes<->sidecar bridge that hermes-bridge-status.json
+            // describes; the two fail independently.
+            "server_stream": server_stream_status_json(&state.server_stream.snapshot()),
+            "room_cursors": room_cursors_summary_json(&room_cursors),
             "service": "finitechat-hermes",
             "version": env!("CARGO_PKG_VERSION"),
             "agent_home": state.agent_home.display().to_string(),
@@ -794,10 +914,11 @@ fn handle_agentd_result(
         .validate_structure()
         .map_err(|error| CliError::Hermes(error.to_string()))?;
     let payload = serde_json::to_vec(&delivery.result).map_err(CliError::Serialize)?;
-    let message_id = state
-        .runtime
-        .send_runtime_command_result_and_wait(delivery.room_id, delivery.conversation_id, payload)
-        .map_err(map_core_hermes_error)?;
+    let message_id = state.runtime.send_runtime_command_result_and_wait(
+        delivery.room_id,
+        delivery.conversation_id,
+        payload,
+    )?;
     Ok(json!({ "message_id": message_id }))
 }
 
@@ -809,10 +930,11 @@ fn handle_agentd_state(
         .validate_limits()
         .map_err(|error| CliError::Hermes(error.to_string()))?;
     let payload = serde_json::to_vec(&delivery.snapshot).map_err(CliError::Serialize)?;
-    let message_id = state
-        .runtime
-        .send_runtime_state_snapshot_and_wait(delivery.room_id, delivery.conversation_id, payload)
-        .map_err(map_core_hermes_error)?;
+    let message_id = state.runtime.send_runtime_state_snapshot_and_wait(
+        delivery.room_id,
+        delivery.conversation_id,
+        payload,
+    )?;
     Ok(json!({ "message_id": message_id }))
 }
 
@@ -957,10 +1079,7 @@ fn handle_hermes_service_activity(
         serde_json::from_value(payload).map_err(CliError::Json)?;
     resolve_hermes_activity_route(&state.runtime, &mut request)?;
     let input = app_bridge_activity_input(request)?;
-    let accepted = state
-        .runtime
-        .append_ephemeral_activity_and_wait(input)
-        .map_err(map_core_hermes_error)?;
+    let accepted = state.runtime.append_ephemeral_activity_and_wait(input)?;
     Ok(json!({ "accepted": true, "result": accepted }))
 }
 
@@ -1042,22 +1161,14 @@ fn collect_hermes_service_inbound_payload(
     let limit = normalized_hermes_poll_limit(request);
     let _guard = lock_service_mutex(&state.inbox_lock)?;
     let mut inbox = load_hermes_inbox(&state.agent_home)?;
-    let recent_events = load_recent_agent_app_events(home)?;
-    initialize_hermes_inbox_cursors_from_events(
-        &state.agent_home,
-        &mut inbox,
-        &home.config.account_id,
-        recent_events.iter(),
-    )?;
     let joined = take_joined_accounts(state);
 
-    recover_stored_hermes_events_from_events(
+    recover_stored_hermes_events(
         &state.agent_home,
         home,
         &state.account_id,
         request.room_id.as_deref(),
         &mut inbox,
-        recent_events,
     )?;
     let events = lease_pending_hermes_inbox_events(
         &state.agent_home,
@@ -1109,42 +1220,6 @@ fn lock_service_mutex(mutex: &Mutex<()>) -> Result<std::sync::MutexGuard<'_, ()>
         .map_err(|_| CliError::Hermes("Hermes service state lock poisoned".to_owned()))
 }
 
-struct BackupActivityGuard {
-    path: PathBuf,
-}
-
-impl BackupActivityGuard {
-    fn enter(home_dir: &Path, action: &str) -> Result<Self, CliError> {
-        fs::create_dir_all(home_dir).map_err(|error| CliError::Hermes(error.to_string()))?;
-        let path = home_dir.join(BACKUP_ACTIVITY_FILE);
-        let marker = json!({
-            "pid": std::process::id(),
-            "action": action,
-            "started_at_ms": now_ms(),
-        });
-        write_private(
-            path.clone(),
-            &serde_json::to_string(&marker).map_err(CliError::Serialize)?,
-        )?;
-        Ok(Self { path })
-    }
-}
-
-impl Drop for BackupActivityGuard {
-    fn drop(&mut self) {
-        let _ = fs::remove_file(&self.path);
-    }
-}
-
-fn with_backup_activity<T>(
-    home_dir: &Path,
-    action: &str,
-    f: impl FnOnce() -> Result<T, CliError>,
-) -> Result<T, CliError> {
-    let _guard = BackupActivityGuard::enter(home_dir, action)?;
-    f()
-}
-
 fn hermes_inbound_ndjson(payload: &Value) -> Result<String, CliError> {
     let mut lines = String::new();
     if let Some(joined) = payload.get("joined").and_then(Value::as_array) {
@@ -1172,6 +1247,10 @@ fn hermes_inbound_ndjson(payload: &Value) -> Result<String, CliError> {
 
 fn status_for_cli_error(error: &CliError) -> StatusCode {
     match error {
+        // Core errors carry their own class; the status is that class's, so
+        // the daemon and this service answer identically for the same failure.
+        CliError::Core(error) => StatusCode::from_u16(error.classification().http_status())
+            .unwrap_or(StatusCode::INTERNAL_SERVER_ERROR),
         CliError::Usage(_) | CliError::Json(_) => StatusCode::BAD_REQUEST,
         CliError::Hermes(_) | CliError::Identity(_) => StatusCode::CONFLICT,
         CliError::Serialize(_)
@@ -1245,6 +1324,53 @@ fn cmd_home_channel<W: Write>(
     }
 }
 
+fn cmd_admission<W: Write>(
+    home_dir: &Path,
+    command: HermesAdmissionCommand,
+    output: &mut W,
+) -> Result<(), CliError> {
+    match command {
+        HermesAdmissionCommand::Seed => cmd_admission_seed(home_dir, output),
+    }
+}
+
+/// Run the admission birth-seed step (`hermes admission seed`).
+///
+/// agentd invokes this after prepare and before starting the gateway or the
+/// sidecar, so the store's admission policy is settled and the gateway
+/// launcher reads a current `allowed-users` mirror on its first start.
+/// `hermes serve` runs the same step again at boot; the step is idempotent.
+fn cmd_admission_seed<W: Write>(home_dir: &Path, output: &mut W) -> Result<(), CliError> {
+    let home = load_home(home_dir)?;
+    seed_welcome_allowlist(&home)?;
+    let options = SqliteClientStoreOptions::from_nostr_secret(&home.secret, &home.config.device_id)
+        .map_err(|error| CliError::Hermes(error.to_string()))?;
+    let store = SqliteClientStore::open_read_only(home_dir.join(STORE_FILE), options)
+        .map_err(|error| CliError::Hermes(error.to_string()))?;
+    let owner = DeviceRef::new(
+        home.config.account_id.clone(),
+        home.config.device_id.clone(),
+    );
+    let policy = store
+        .configured_welcome_admission_policy(&owner)
+        .map_err(|error| CliError::Hermes(error.to_string()))?;
+    let allowed_senders = store
+        .welcome_allowed_senders(&owner)
+        .map_err(|error| CliError::Hermes(error.to_string()))?;
+    let mirror = fs::read_to_string(home_dir.join(ALLOWED_USERS_FILE)).ok();
+    crate::write_pretty_json(
+        output,
+        &json!({
+            "admission_policy": policy.map(|policy| match policy {
+                WelcomeAdmissionPolicy::AllowAll => "allow_all",
+                WelcomeAdmissionPolicy::Allowlist => "allowlist",
+            }),
+            "allowed_senders": allowed_senders,
+            "allowed_users_mirror": mirror,
+        }),
+    )
+}
+
 fn set_home_channel<W: Write>(
     home_dir: &Path,
     room_id: String,
@@ -1281,9 +1407,7 @@ fn non_empty_home_channel_value(name: &str, value: String) -> Result<String, Cli
 fn ensure_agent_room_available(home_dir: &Path, room_id: &str) -> Result<(), CliError> {
     let home = load_home(home_dir)?;
     let runtime = open_agent_runtime(&home)?;
-    let state = runtime
-        .dispatch_and_wait(AppAction::StartRuntime)
-        .map_err(map_core_hermes_error)?;
+    let state = runtime.dispatch_and_wait(AppAction::StartRuntime)?;
     if state
         .rooms
         .iter()
@@ -1352,9 +1476,8 @@ fn cmd_init<W: Write>(
         device_id: device_id.clone(),
         account_secret_hex: Some(hex_lower(secret.as_bytes())),
         now_unix_seconds: Some(now_secs()),
-    })
-    .map_err(map_core_hermes_error)?;
-    let state = runtime.state().map_err(map_core_hermes_error)?;
+    })?;
+    let state = runtime.state()?;
 
     let config = AgentConfig {
         server_url,
@@ -1373,6 +1496,7 @@ fn cmd_init<W: Write>(
     } else {
         Some(publish_agent_profile(
             &config,
+            &secret,
             normalize_agent_profile_text("--agent-name", agent_name)?,
             normalize_agent_profile_text("--agent-about", agent_about)?,
             normalize_agent_profile_picture(agent_picture)?,
@@ -1404,6 +1528,7 @@ struct HermesAgentProfileSummary {
 
 fn publish_agent_profile(
     config: &AgentConfig,
+    secret: &NostrSecretKey,
     display_name: String,
     about: String,
     picture: String,
@@ -1421,8 +1546,9 @@ fn publish_agent_profile(
         fetched_at_ms: now,
         expires_at_ms: now + CREDENTIAL_VALIDITY_SECONDS * 1000,
     };
-    let mut delivery =
-        HttpRuntimeDelivery::new(ReqwestHttpRuntimeTransport::new(config.server_url.clone()));
+    let mut delivery = HttpRuntimeDelivery::new(
+        ReqwestHttpRuntimeTransport::new(config.server_url.clone()).with_signer(*secret.as_bytes()),
+    );
     let response = delivery
         .put_nostr_profile(&profile)
         .map_err(|error| CliError::Hermes(format!("could not publish agent profile: {error}")))?;
@@ -1701,15 +1827,12 @@ fn cmd_poll<W: Write>(home_dir: &Path, request: Value, output: &mut W) -> Result
     let started = Instant::now();
     let own_account = home.config.account_id.clone();
     let mut inbox = load_hermes_inbox(home_dir)?;
-    initialize_hermes_inbox_cursors(home_dir, &home, &mut inbox)?;
     let mut events =
         lease_pending_hermes_inbox_events(home_dir, &mut inbox, request.room_id.as_deref(), limit)?;
     let mut joined: Vec<String> = Vec::new();
 
     while events.is_empty() {
-        let bridge = runtime
-            .agent_bridge_poll_once()
-            .map_err(map_core_hermes_error)?;
+        let bridge = runtime.agent_bridge_poll_once()?;
         joined.extend(bridge.joined_account_ids);
         joined.sort();
         joined.dedup();
@@ -1864,6 +1987,17 @@ fn recover_stored_agentd_events(
         let Some(delivery) = delivery else {
             continue;
         };
+        // `chat.admission` commands are consumed by the sidecar itself: they
+        // manage the store's Welcome allowlist (the single source of truth
+        // for admission) and must never reach agentd, which would reject the
+        // unknown command, nor the Hermes inbox, which never sees typed
+        // command events.
+        if let RuntimeCommandInboundPayloadV1::Request(request) = &delivery.payload
+            && request.command == CHAT_ADMISSION_COMMAND
+        {
+            handle_chat_admission_command(home, own_account, &delivery, request);
+            continue;
+        }
         let key = agentd_inbox_key(&stored.room_id, stored.seq, &stored.message_id);
         if inbox.events.iter().any(|event| event.key == key) {
             continue;
@@ -1977,74 +2111,6 @@ fn enqueue_hermes_inbox_event(
     save_hermes_inbox(home_dir, inbox)
 }
 
-fn initialize_hermes_inbox_cursors(
-    home_dir: &Path,
-    home: &AgentHome,
-    inbox: &mut HermesInboxState,
-) -> Result<(), CliError> {
-    if !inbox.cursors.is_empty() {
-        return Ok(());
-    }
-    let recent_events = load_recent_agent_app_events(home)?;
-    initialize_hermes_inbox_cursors_from_events(
-        home_dir,
-        inbox,
-        &home.config.account_id,
-        recent_events.iter(),
-    )
-}
-
-fn initialize_hermes_inbox_cursors_from_events<'a>(
-    home_dir: &Path,
-    inbox: &mut HermesInboxState,
-    own_account: &str,
-    recent_events: impl IntoIterator<Item = &'a StoredAppEvent>,
-) -> Result<(), CliError> {
-    let recent_events = recent_events.into_iter().collect::<Vec<_>>();
-    if !inbox.cursors.is_empty() {
-        return Ok(());
-    }
-    let mut changed = false;
-    let pending = inbox
-        .events
-        .iter()
-        .map(|event| (event.room_id.clone(), event.seq))
-        .collect::<Vec<_>>();
-    for (room_id, seq) in pending {
-        changed |= advance_hermes_inbox_cursor(inbox, &room_id, seq);
-    }
-    if !inbox.events.is_empty() {
-        if changed {
-            save_hermes_inbox(home_dir, inbox)?;
-        }
-        return Ok(());
-    }
-
-    let mut first_counterparty_seq_by_room = BTreeMap::<&str, u64>::new();
-    for event in &recent_events {
-        if event.sender.account_id != own_account {
-            first_counterparty_seq_by_room
-                .entry(event.room_id.as_str())
-                .and_modify(|seq| *seq = (*seq).min(event.seq))
-                .or_insert(event.seq);
-        }
-    }
-
-    for event in recent_events {
-        if event.sender.account_id == own_account
-            && first_counterparty_seq_by_room
-                .get(event.room_id.as_str())
-                .is_none_or(|seq| event.seq < *seq)
-        {
-            changed |= advance_hermes_inbox_cursor(inbox, &event.room_id, event.seq);
-        }
-    }
-    if changed {
-        save_hermes_inbox(home_dir, inbox)?;
-    }
-    Ok(())
-}
-
 fn recover_stored_hermes_events(
     home_dir: &Path,
     home: &AgentHome,
@@ -2115,6 +2181,14 @@ fn load_recent_agent_app_events(home: &AgentHome) -> Result<Vec<StoredAppEvent>,
         .map_err(|error| CliError::Hermes(error.to_string()))
 }
 
+/// Highest app-event seq the bridge has already handed to hermes (or skipped
+/// as a non-hermes event) in `room_id`. This is bridge delivery state, not the
+/// device's room sync cursor: the two coincide only in steady state, and a
+/// room with no cursor means *nothing has been handed over yet*, so durable
+/// recovery delivers every counterparty event the store holds. It is never
+/// seeded from the store or from the room sync cursor — the latter is the
+/// device's applied position and seeding from it swallowed the first
+/// counterparty message of a fresh home.
 fn hermes_inbox_cursor(inbox: &HermesInboxState, room_id: &str) -> u64 {
     inbox.cursors.get(room_id).copied().unwrap_or(0)
 }
@@ -2309,8 +2383,9 @@ fn wait_for_hermes_sync_hint(
         if target_wait_ms == 0 {
             break;
         }
-        let mut room_delivery =
-            HttpRuntimeDelivery::new(ReqwestHttpRuntimeTransport::new(server_url));
+        let mut room_delivery = HttpRuntimeDelivery::new(
+            ReqwestHttpRuntimeTransport::new(server_url).with_signer(*home.secret.as_bytes()),
+        );
         let wait = SyncWaitRequest {
             rooms,
             wait_ms: target_wait_ms,
@@ -2772,9 +2847,7 @@ fn cmd_send<W: Write>(home_dir: &Path, request: Value, output: &mut W) -> Result
         serde_json::from_value(request).map_err(CliError::Json)?;
     let home = load_home(home_dir)?;
     let runtime = open_agent_runtime(&home)?;
-    runtime
-        .dispatch_and_wait(AppAction::StartRuntime)
-        .map_err(map_core_hermes_error)?;
+    runtime.dispatch_and_wait(AppAction::StartRuntime)?;
     resolve_hermes_send_route(&runtime, &mut request)?;
     let sent = send_hermes_request_with_runtime(&runtime, &request)?;
     update_running_after_send(home_dir, &request, &sent.message_id)?;
@@ -2786,13 +2859,114 @@ fn cmd_edit<W: Write>(home_dir: &Path, request: Value, output: &mut W) -> Result
         serde_json::from_value(request).map_err(CliError::Json)?;
     let home = load_home(home_dir)?;
     let runtime = open_agent_runtime(&home)?;
-    runtime
-        .dispatch_and_wait(AppAction::StartRuntime)
-        .map_err(map_core_hermes_error)?;
+    runtime.dispatch_and_wait(AppAction::StartRuntime)?;
     resolve_hermes_edit_route(home_dir, &runtime, &mut request)?;
     let sent = edit_hermes_request_with_runtime(&runtime, &request)?;
     update_running_after_edit(home_dir, &request)?;
     write_sent_message(output, &sent)
+}
+
+/// Operator rekey: run the core rekey action through a writer-lease runtime
+/// (the same open/dispatch shape as `recover`) and print its report. The
+/// action replays the room's backlog first (healthy entries are delivered;
+/// only MLS-undecryptable application entries are skipped, on evidence),
+/// refuses with a typed error when anything else fails to replay or when a
+/// previous attempt already committed above a frozen cursor (then
+/// `finitechat repair skip-entry` is the path), and only then commits.
+/// Every run appends one line to the JSONL audit trail (default
+/// `<agent-home>/rekey-audit.jsonl`, same writer as the repair), opened
+/// before the rekey so an unwritable trail fails closed.
+fn cmd_rekey<W: Write>(
+    home_dir: &Path,
+    args: HermesRekeyArgs,
+    json_mode: bool,
+    output: &mut W,
+) -> Result<(), CliError> {
+    let home = load_home(home_dir)?;
+    let audit_path = args
+        .audit_log
+        .map(PathBuf::from)
+        .unwrap_or_else(|| home_dir.join(HERMES_REKEY_AUDIT_FILE));
+    let mut audit = crate::repair::AuditLog::open(&audit_path)?;
+    let runtime = open_agent_runtime(&home)?;
+    let recorded_at_unix_seconds = || {
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|duration| duration.as_secs())
+            .unwrap_or(0)
+    };
+    let report = match runtime.rekey_room_and_wait(args.room.clone()) {
+        Ok(report) => report,
+        Err(error) => {
+            audit.append(&crate::repair::RekeyAuditLine {
+                schema_version: crate::repair::REKEY_AUDIT_SCHEMA_VERSION,
+                record: "rekey",
+                phase: "refused",
+                room_id: &args.room,
+                previous_epoch: None,
+                new_epoch: None,
+                commit_seq: None,
+                cursor_before: None,
+                cursor_after: None,
+                applied: None,
+                skipped: &[],
+                refusal: Some(error.to_string()),
+                recorded_at_unix_seconds: recorded_at_unix_seconds(),
+            })?;
+            return Err(error.into());
+        }
+    };
+    audit.append(&crate::repair::RekeyAuditLine {
+        schema_version: crate::repair::REKEY_AUDIT_SCHEMA_VERSION,
+        record: "rekey",
+        phase: "applied",
+        room_id: &report.room_id,
+        previous_epoch: Some(report.previous_epoch),
+        new_epoch: Some(report.new_epoch),
+        commit_seq: Some(report.commit_seq),
+        cursor_before: Some(report.cursor_before),
+        cursor_after: Some(report.cursor_after),
+        applied: Some(report.applied),
+        skipped: &report.skipped,
+        refusal: None,
+        recorded_at_unix_seconds: recorded_at_unix_seconds(),
+    })?;
+    if json_mode {
+        crate::write_pretty_json(output, &report)
+    } else {
+        writeln!(
+            output,
+            "Room {}: rekeyed epoch {} -> {} (commit seq {}, message {})",
+            report.room_id,
+            report.previous_epoch,
+            report.new_epoch,
+            report.commit_seq,
+            report.message_id,
+        )
+        .map_err(CliError::Output)?;
+        writeln!(
+            output,
+            "  cursor {} -> {}; replayed {} entries; skipped {} undecryptable entries{}",
+            report.cursor_before,
+            report.cursor_after,
+            report.applied,
+            report.skipped.len(),
+            if report.skipped.is_empty() {
+                String::new()
+            } else {
+                format!(
+                    " (seqs {})",
+                    report
+                        .skipped
+                        .iter()
+                        .map(|entry| entry.seq.to_string())
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                )
+            },
+        )
+        .map_err(CliError::Output)
+    }
 }
 
 fn cmd_recover<W: Write>(home_dir: &Path, _request: Value, output: &mut W) -> Result<(), CliError> {
@@ -2822,9 +2996,7 @@ fn cmd_recover<W: Write>(home_dir: &Path, _request: Value, output: &mut W) -> Re
         )?;
         let home = load_home(home_dir)?;
         let runtime = open_agent_runtime(&home)?;
-        runtime
-            .dispatch_and_wait(AppAction::StartRuntime)
-            .map_err(map_core_hermes_error)?;
+        runtime.dispatch_and_wait(AppAction::StartRuntime)?;
         append_payload_to_room_with_runtime(
             &runtime,
             &recovery.room_id,
@@ -2837,32 +3009,6 @@ fn cmd_recover<W: Write>(home_dir: &Path, _request: Value, output: &mut W) -> Re
         save_hermes_running(home_dir, &HermesRunningState::default())?;
     }
     crate::write_pretty_json(output, &json!({ "recovered": recovered }))
-}
-
-/// What a send/edit/activity does when its `thread_id` matches nothing in the
-/// agent store; selected by [`HERMES_UNKNOWN_THREAD_ROUTE_ENV`].
-enum UnknownThreadRoutePolicy {
-    /// Fail closed: a typed non-retryable error (HTTP 409 from the resident
-    /// service, `error_kind: "hermes"`, `retryable: false`).
-    Error,
-    /// Deliver anyway: clear the route fields so Core applies its Home
-    /// default, after logging a loud routing warning.
-    HomeDefault,
-}
-
-fn unknown_thread_route_policy() -> UnknownThreadRoutePolicy {
-    match std::env::var(HERMES_UNKNOWN_THREAD_ROUTE_ENV)
-        .ok()
-        .as_deref()
-        .map(str::trim)
-    {
-        // Unset is the deliverable-by-default product behavior; only an
-        // explicitly set value selects strict (so `=error` opts in and any
-        // unrecognized value fails closed rather than rerouting silently).
-        None => UnknownThreadRoutePolicy::HomeDefault,
-        Some("home") | Some("default") => UnknownThreadRoutePolicy::HomeDefault,
-        Some(_) => UnknownThreadRoutePolicy::Error,
-    }
 }
 
 /// Resolve a Hermes `thread_id` against the agent store: it is either a
@@ -2896,9 +3042,8 @@ fn resolve_thread_id_route(
 /// explicit `conversation_id`/`segment_id` always wins (thread_id is only a
 /// resolver); with neither route nor thread_id the send is an intentional Home
 /// message (Core applies its default). An unknown thread_id falls back to the
-/// Home default with a loud warning by default so replies stay deliverable;
-/// setting `FINITECHAT_HERMES_UNKNOWN_THREAD_ROUTE` to `error` restores the
-/// strict typed failure.
+/// Home default with a loud warning so the reply stays deliverable: a topic
+/// archived mid-session must never silently consume the user's message.
 fn resolve_route_fields(
     runtime: &FiniteChatRuntime,
     room_id: &str,
@@ -2913,26 +3058,17 @@ fn resolve_route_fields(
     let Some(thread_id) = thread_id.map(str::trim).filter(|value| !value.is_empty()) else {
         return Ok((None, None));
     };
-    let state = runtime.state().map_err(map_core_hermes_error)?;
+    let state = runtime.state()?;
     if let Some((conversation_id, segment_id)) =
         resolve_thread_id_route(&state.topics, room_id, thread_id)
     {
         return Ok((Some(conversation_id), segment_id));
     }
-    match unknown_thread_route_policy() {
-        UnknownThreadRoutePolicy::Error => Err(CliError::Hermes(format!(
-            "unknown thread_id {thread_id:?} for room {room_id} ({context}): \
-             no matching conversation or segment in the agent store"
-        ))),
-        UnknownThreadRoutePolicy::HomeDefault => {
-            eprintln!(
-                "[finitechat] hermes {context}: unknown thread_id {thread_id:?} for room \
-                 {room_id}; falling back to the Home default so this reply stays deliverable \
-                 ({HERMES_UNKNOWN_THREAD_ROUTE_ENV}=error restores the strict typed error)"
-            );
-            Ok((None, None))
-        }
-    }
+    eprintln!(
+        "[finitechat] hermes {context}: unknown thread_id {thread_id:?} for room {room_id}; \
+         falling back to the Home default so this reply stays deliverable"
+    );
+    Ok((None, None))
 }
 
 fn resolve_hermes_send_route(
@@ -2994,7 +3130,7 @@ fn resolve_hermes_edit_route(
         // A route override must name a real conversation, so a wrong override
         // is a typed error rather than a silent misroute to a phantom topic.
         if let Some(conversation_id) = request.conversation_id.as_deref() {
-            let state = runtime.state().map_err(map_core_hermes_error)?;
+            let state = runtime.state()?;
             let exists = state.topics.iter().any(|topic| {
                 topic.room_id == request.room_id
                     && topic.topic_id == conversation_id
@@ -3117,8 +3253,7 @@ fn prepare_hermes_send_attachments(
 
     for attachment in loaded {
         prepared.attachments[attachment.index] = runtime
-            .upload_bridge_attachment_and_wait(request.room_id.clone(), attachment.outbound)
-            .map_err(map_core_hermes_error)?;
+            .upload_bridge_attachment_and_wait(request.room_id.clone(), attachment.outbound)?;
     }
     prepared
         .validate_limits()
@@ -3237,7 +3372,7 @@ fn append_payload_to_room_with_runtime(
 ) -> Result<AppSentMessage, CliError> {
     runtime
         .send_encoded_chat_message_and_wait(room_id.to_owned(), payload, preview)
-        .map_err(map_core_hermes_error)
+        .map_err(CliError::from)
 }
 
 fn write_sent_message<W: Write>(output: &mut W, sent: &AppSentMessage) -> Result<(), CliError> {
@@ -3354,14 +3489,10 @@ fn cmd_activity<W: Write>(home_dir: &Path, request: Value, output: &mut W) -> Re
         serde_json::from_value(request).map_err(CliError::Json)?;
     let home = load_home(home_dir)?;
     let runtime = open_agent_runtime(&home)?;
-    runtime
-        .dispatch_and_wait(AppAction::StartRuntime)
-        .map_err(map_core_hermes_error)?;
+    runtime.dispatch_and_wait(AppAction::StartRuntime)?;
     resolve_hermes_activity_route(&runtime, &mut request)?;
     let input = app_bridge_activity_input(request)?;
-    let accepted = runtime
-        .append_ephemeral_activity_and_wait(input)
-        .map_err(map_core_hermes_error)?;
+    let accepted = runtime.append_ephemeral_activity_and_wait(input)?;
     crate::write_pretty_json(output, &json!({ "accepted": true, "result": accepted }))
 }
 
@@ -3389,7 +3520,7 @@ fn app_bridge_activity_input(
 
 /// Resolve the agent home (durable agent state — never the identity, whose
 /// location is fixed by the Finite Identity Contract). Precedence:
-/// `--agent-home`/`--home` (parsed by clap), then `$FINITE_AGENT_HOME`,
+/// `--agent-home` (parsed by clap), then `$FINITE_AGENT_HOME`,
 /// then `$FINITECHAT_HOME`, then `~/.finite/agent`.
 fn resolve_home(agent_home: Option<String>) -> Result<PathBuf, CliError> {
     if let Some(path) = agent_home {
@@ -3451,116 +3582,6 @@ fn hermes_recommended_config(plugin_name: &str, home_dir: &Path) -> String {
         platform_name = HERMES_PLATFORM_NAME,
         home = home_dir.display()
     )
-}
-
-fn detect_legacy_plugin_conflicts(
-    plugins_dir: &Path,
-    installed_plugin_dir: &Path,
-    plugin_name: &str,
-) -> Vec<HermesInstallLegacyPluginConflict> {
-    let mut conflicts = Vec::new();
-    for (candidate_name, reason) in [
-        (
-            LEGACY_HERMES_PLUGIN_NAME,
-            "this is the legacy plaintext bridge",
-        ),
-        (
-            AMBIGUOUS_HERMES_PLUGIN_NAME,
-            "this is the old generic Finite plugin name",
-        ),
-    ] {
-        let candidate_dir = plugins_dir.join(candidate_name);
-        if same_path(&candidate_dir, installed_plugin_dir) {
-            continue;
-        }
-        let yaml = candidate_dir.join("plugin.yaml");
-        if !yaml.exists() {
-            continue;
-        }
-        let yaml_name = plugin_yaml_name(&yaml);
-        if yaml_name.as_deref() == Some(candidate_name)
-            || yaml_name.as_deref() == Some(LEGACY_HERMES_PLUGIN_NAME)
-        {
-            conflicts.push(HermesInstallLegacyPluginConflict {
-                plugin_name: candidate_name.to_owned(),
-                plugin_dir: candidate_dir.display().to_string(),
-                reason: format!("{reason}; enable '{plugin_name}' for Finite Chat"),
-            });
-        }
-    }
-    conflicts
-}
-
-fn detect_legacy_config_conflicts(
-    plugins_dir: &Path,
-    plugin_name: &str,
-) -> Vec<HermesInstallLegacyConfigConflict> {
-    let mut configs = Vec::new();
-    if let Some(hermes_home) = plugins_dir.parent() {
-        configs.push(hermes_home.join("config.yaml"));
-        configs.push(hermes_home.join("config.yml"));
-    }
-    if let Some(home) = std::env::var_os("HERMES_HOME") {
-        let home = PathBuf::from(home);
-        configs.push(home.join("config.yaml"));
-        configs.push(home.join("config.yml"));
-    }
-    configs.sort();
-    configs.dedup();
-
-    configs
-        .into_iter()
-        .flat_map(|path| {
-            config_enabled_conflicting_plugins(&path)
-                .into_iter()
-                .map(move |enabled_plugin| HermesInstallLegacyConfigConflict {
-                    config_path: path.display().to_string(),
-                    enabled_plugin,
-                    replacement_plugin: plugin_name.to_owned(),
-                })
-        })
-        .collect()
-}
-
-fn config_enabled_conflicting_plugins(path: &Path) -> Vec<String> {
-    let Ok(contents) = fs::read_to_string(path) else {
-        return Vec::new();
-    };
-    let mut found = Vec::new();
-    for candidate in [LEGACY_HERMES_PLUGIN_NAME, AMBIGUOUS_HERMES_PLUGIN_NAME] {
-        if contents
-            .lines()
-            .any(|line| yaml_line_is_value(line, candidate))
-        {
-            found.push(candidate.to_owned());
-        }
-    }
-    found
-}
-
-fn yaml_line_is_value(line: &str, value: &str) -> bool {
-    let trimmed = line.trim();
-    trimmed == format!("- {value}")
-        || trimmed == value
-        || trimmed == format!("\"{value}\"")
-        || trimmed == format!("'{value}'")
-}
-
-fn plugin_yaml_name(path: &Path) -> Option<String> {
-    let contents = fs::read_to_string(path).ok()?;
-    contents.lines().find_map(|line| {
-        let trimmed = line.trim();
-        let value = trimmed.strip_prefix("name:")?.trim();
-        Some(value.trim_matches('"').trim_matches('\'').trim().to_owned())
-    })
-}
-
-fn same_path(left: &Path, right: &Path) -> bool {
-    left == right
-        || match (fs::canonicalize(left), fs::canonicalize(right)) {
-            (Ok(left), Ok(right)) => left == right,
-            _ => false,
-        }
 }
 
 fn hermes_plugin_env_contents(
@@ -3705,7 +3726,7 @@ fn load_or_generate_agent_secret() -> Result<NostrSecretKey, CliError> {
 type AgentDelivery = HttpRuntimeDelivery<ReqwestHttpRuntimeTransport>;
 
 fn open_agent_runtime(home: &AgentHome) -> Result<Arc<FiniteChatRuntime>, CliError> {
-    FiniteChatRuntime::open(agent_runtime_open_options(home)).map_err(map_core_hermes_error)
+    FiniteChatRuntime::open(agent_runtime_open_options(home)).map_err(CliError::from)
 }
 
 fn agent_runtime_open_options(home: &AgentHome) -> OpenOptions {
@@ -3718,10 +3739,6 @@ fn agent_runtime_open_options(home: &AgentHome) -> OpenOptions {
     }
 }
 
-fn map_core_hermes_error(error: FiniteChatCoreError) -> CliError {
-    CliError::Hermes(error.to_string())
-}
-
 fn open_agent(
     home: &AgentHome,
 ) -> Result<(SqliteClientStore, FiniteChatDevice, AgentDelivery), CliError> {
@@ -3730,9 +3747,10 @@ fn open_agent(
     let device = store
         .load_device(config)
         .map_err(|error| CliError::Hermes(error.to_string()))?;
-    let delivery = HttpRuntimeDelivery::new(ReqwestHttpRuntimeTransport::new(
-        home.config.server_url.clone(),
-    ));
+    let delivery = HttpRuntimeDelivery::new(
+        ReqwestHttpRuntimeTransport::new(home.config.server_url.clone())
+            .with_signer(*home.secret.as_bytes()),
+    );
     // The store mutably borrows during ticks; return all three.
     Ok((store, device, delivery))
 }
@@ -3746,6 +3764,353 @@ fn open_store(
         .map_err(|error| CliError::Hermes(error.to_string()))?;
     SqliteClientStore::open(dir.join(STORE_FILE), options)
         .map_err(|error| CliError::Hermes(error.to_string()))
+}
+
+/// Parse `FINITECHAT_WELCOME_ALLOWLIST`: comma-separated account ids, each
+/// either 64 lowercase hex or a NIP-19 `npub1…`. Every entry must decode —
+/// one malformed entry fails the whole parse so a typo cannot shrink the
+/// allowlist (and silently fail open for the intended senders).
+fn parse_welcome_allowlist(raw: &str) -> Result<BTreeSet<String>, CliError> {
+    let mut senders = BTreeSet::new();
+    for entry in raw.split(',') {
+        let entry = entry.trim().to_lowercase();
+        if entry.is_empty() {
+            return Err(CliError::Hermes(format!(
+                "{WELCOME_ALLOWLIST_ENV} contains an empty entry"
+            )));
+        }
+        let account_id = if entry.len() == 64 && entry.bytes().all(|byte| byte.is_ascii_hexdigit())
+        {
+            entry
+        } else if entry.starts_with("npub1") {
+            npub_decode(&entry).map_err(|error| {
+                CliError::Hermes(format!("{WELCOME_ALLOWLIST_ENV} entry {entry:?}: {error}"))
+            })?
+        } else {
+            return Err(CliError::Hermes(format!(
+                "{WELCOME_ALLOWLIST_ENV} entry {entry:?} is neither 64-hex nor an npub"
+            )));
+        };
+        senders.insert(account_id);
+    }
+    Ok(senders)
+}
+
+/// Read the admission birth seed from the environment and run the seed step.
+///
+/// Precedence: an explicit `FINITECHAT_WELCOME_ALLOWLIST` wins, then the
+/// Core-injected `FINITECHAT_OWNER_NPUBS`. Both are birth-time seeds: the
+/// store consumes them exactly once, when no policy row exists. Called at
+/// every entry that can be first to touch the store — agentd before it
+/// starts any child process, the launcher script when it runs without
+/// agentd, and `hermes serve` itself — so the step must stay idempotent.
+fn seed_welcome_allowlist(home: &AgentHome) -> Result<(), CliError> {
+    let welcome_allowlist = match std::env::var(WELCOME_ALLOWLIST_ENV) {
+        Ok(raw) => Some(raw),
+        Err(std::env::VarError::NotPresent) => None,
+        Err(error) => {
+            return Err(CliError::Hermes(format!(
+                "{WELCOME_ALLOWLIST_ENV} is not valid unicode: {error}"
+            )));
+        }
+    };
+    let owner_npubs = match std::env::var(OWNER_NPUBS_ENV) {
+        Ok(raw) => Some(raw),
+        Err(std::env::VarError::NotPresent) => None,
+        Err(error) => {
+            return Err(CliError::Hermes(format!(
+                "{OWNER_NPUBS_ENV} is not valid unicode: {error}"
+            )));
+        }
+    };
+    let locked = std::env::var(ADMISSION_DEFAULT_ENV)
+        .map(|value| value.trim().eq_ignore_ascii_case(ADMISSION_DEFAULT_LOCKED))
+        .unwrap_or(false);
+    let raw = resolve_birth_seed(welcome_allowlist.as_deref(), owner_npubs.as_deref());
+    seed_welcome_allowlist_from_values(home, raw.as_deref(), locked)
+}
+
+/// Birth-seed precedence. An explicit `FINITECHAT_WELCOME_ALLOWLIST` wins —
+/// including an empty one, which is a deliberate "no env seed" that also
+/// suppresses the owner list. Otherwise the Core-injected
+/// `FINITECHAT_OWNER_NPUBS` seeds when non-empty.
+fn resolve_birth_seed(
+    welcome_allowlist: Option<&str>,
+    owner_npubs: Option<&str>,
+) -> Option<String> {
+    match welcome_allowlist {
+        Some(raw) => Some(raw.to_owned()),
+        None => owner_npubs
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(str::to_owned),
+    }
+}
+
+/// The env values are a birth-time seed, consumed into the store exactly
+/// once. Compat edges, named:
+///
+/// - No env seed and no locked marker: return before touching the store.
+///   The absent policy row keeps the byte-for-byte legacy admit-everyone
+///   behavior of standalone agents.
+/// - Any existing policy row (allowlist or explicit allow-all): seeding is a
+///   no-op apart from refreshing the gateway's `allowed-users` mirror from
+///   the store, which stays the single source of truth.
+/// - Locked with no derivable seed (a new agent whose first room does not
+///   exist yet): persist nothing. An empty persisted allowlist would brick
+///   admission before the owner ever chats, and leaving the row absent lets
+///   the next boot retry the derivation once a room exists.
+fn seed_welcome_allowlist_from_values(
+    home: &AgentHome,
+    raw_allowlist: Option<&str>,
+    locked_default: bool,
+) -> Result<(), CliError> {
+    let env_senders = match raw_allowlist {
+        Some(raw) if !raw.trim().is_empty() => Some(parse_welcome_allowlist(raw)?),
+        _ => None,
+    };
+    if env_senders.is_none() && !locked_default {
+        return Ok(());
+    }
+    let mut store = open_store(&home.dir, &home.secret, &home.config.device_id)?;
+    let owner = DeviceRef::new(
+        home.config.account_id.clone(),
+        home.config.device_id.clone(),
+    );
+    if store
+        .configured_welcome_admission_policy(&owner)
+        .map_err(|error| CliError::Hermes(error.to_string()))?
+        .is_some()
+    {
+        return refresh_allowed_users_mirror(&home.dir, &store, &owner);
+    }
+    let mut senders = env_senders.unwrap_or_default();
+    if locked_default {
+        senders.extend(legacy_admission_seed_account_ids(home, &store)?);
+    }
+    if senders.is_empty() {
+        eprintln!(
+            "finitechat hermes: {ADMISSION_DEFAULT_ENV}={ADMISSION_DEFAULT_LOCKED} but no owner \
+             seed and no existing room counterparty; leaving Welcome admission at the legacy \
+             allow-all until a room exists to derive it from"
+        );
+        return Ok(());
+    }
+    store
+        .set_welcome_admission_policy(&owner, WelcomeAdmissionPolicy::Allowlist)
+        .map_err(|error| CliError::Hermes(error.to_string()))?;
+    store
+        .add_welcome_allowed_senders(&owner, &senders)
+        .map_err(|error| CliError::Hermes(error.to_string()))?;
+    refresh_allowed_users_mirror(&home.dir, &store, &owner)
+}
+
+/// Derive the locked-default seed for a device which predates owner-npub
+/// injection: the counterparties of the agent's existing home room (the
+/// profile chat the owner's Hosted Web Device opened), or of every connected
+/// room when no home-channel pointer was ever written. MLS membership is
+/// read from the local store and every member credential is verified, so a
+/// name here is proof the account already chats with this agent.
+///
+/// Known grandfathering edge: when the all-rooms fallback runs for an agent
+/// that was exploited before the upgrade (a stranger self-admitted via the
+/// pre-stack open Welcome path), that stranger is an MLS-verified member and
+/// IS seeded — lockdown then only prevents new strangers. Operators should
+/// audit the allowlist after upgrading such agents and revoke via
+/// `chat.admission`; revocation reaches gateway dispatch at the next gateway
+/// restart. A room whose members cannot be verified (e.g. expired
+/// credentials in a long-idle room) is skipped loudly rather than blocking
+/// the other rooms.
+fn legacy_admission_seed_account_ids(
+    home: &AgentHome,
+    store: &SqliteClientStore,
+) -> Result<BTreeSet<String>, CliError> {
+    let config = device_config(&home.secret, &home.config.device_id, now_secs());
+    let device = match store.load_device(config) {
+        Ok(device) => device,
+        // A device with no client state has never finished init or chatted;
+        // there is no room membership to derive a seed from. Return empty so
+        // boot continues with the wait-for-a-room path instead of failing.
+        Err(ClientStoreError::DeviceStateNotFound { .. }) => return Ok(BTreeSet::new()),
+        Err(error) => return Err(CliError::Hermes(error.to_string())),
+    };
+    let owner = DeviceRef::new(
+        home.config.account_id.clone(),
+        home.config.device_id.clone(),
+    );
+    let room_ids = match load_home_channel(&home.dir)? {
+        Some(channel) => vec![channel.room_id],
+        None => store
+            .load_app_rooms(&owner)
+            .map_err(|error| CliError::Hermes(error.to_string()))?
+            .into_iter()
+            .filter(|room| room.state == StoredAppRoomState::Connected)
+            .map(|room| room.room_id)
+            .collect(),
+    };
+    let mut seeds = BTreeSet::new();
+    for room_id in room_ids {
+        match device.room_members(&room_id) {
+            Ok(members) => {
+                for member in members {
+                    if member.account_id != home.config.account_id {
+                        seeds.insert(member.account_id);
+                    }
+                }
+            }
+            Err(error) => eprintln!(
+                "finitechat hermes: could not derive admission seed from room {room_id}: {error}"
+            ),
+        }
+    }
+    Ok(seeds)
+}
+
+/// Rewrite the gateway's plain-text allowlist mirror from the store. The
+/// store is authoritative; this file exists only so `run_hermes_gateway.sh`
+/// can export FINITECHAT_ALLOWED_USERS on runtimes whose birth predates
+/// FINITECHAT_OWNER_NPUBS. An explicit allow-all row removes the mirror so
+/// the gateway cannot lock to entries the sidecar no longer uses; no row at
+/// all leaves the filesystem untouched (byte-for-byte legacy).
+fn refresh_allowed_users_mirror(
+    home_dir: &Path,
+    store: &SqliteClientStore,
+    owner: &DeviceRef,
+) -> Result<(), CliError> {
+    match store
+        .configured_welcome_admission_policy(owner)
+        .map_err(|error| CliError::Hermes(error.to_string()))?
+    {
+        Some(WelcomeAdmissionPolicy::Allowlist) => {
+            let senders = store
+                .welcome_allowed_senders(owner)
+                .map_err(|error| CliError::Hermes(error.to_string()))?;
+            let mut contents = senders.join("\n");
+            if !contents.is_empty() {
+                contents.push('\n');
+            }
+            write_private(home_dir.join(ALLOWED_USERS_FILE), &contents)
+        }
+        Some(WelcomeAdmissionPolicy::AllowAll) => {
+            match fs::remove_file(home_dir.join(ALLOWED_USERS_FILE)) {
+                Ok(()) => Ok(()),
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+                Err(error) => Err(CliError::Hermes(error.to_string())),
+            }
+        }
+        None => Ok(()),
+    }
+}
+
+#[derive(Debug, Deserialize)]
+struct ChatAdmissionRequestV1 {
+    action: String,
+    account_id: String,
+}
+
+/// Consume a `chat.admission` runtime command in the sidecar itself: grant
+/// or revoke one Welcome-allowlist entry, then refresh the gateway mirror.
+/// Failures are logged and the event is consumed either way — a malformed or
+/// unauthorized command must never wedge the agentd inbound scan, and agentd
+/// would only reject the unknown command if it were enqueued.
+fn handle_chat_admission_command(
+    home: &AgentHome,
+    own_account: &str,
+    delivery: &RuntimeCommandDeliveryV1,
+    request: &RuntimeCommandRequestV1,
+) {
+    if let Err(error) = apply_chat_admission_command(home, own_account, delivery, request) {
+        eprintln!(
+            "finitechat hermes: {CHAT_ADMISSION_COMMAND} request {} from {} rejected: {error}",
+            request.request_id, delivery.sender.account_id,
+        );
+    }
+}
+
+fn apply_chat_admission_command(
+    home: &AgentHome,
+    own_account: &str,
+    delivery: &RuntimeCommandDeliveryV1,
+    request: &RuntimeCommandRequestV1,
+) -> Result<(), CliError> {
+    let owner = DeviceRef::new(own_account.to_owned(), home.config.device_id.clone());
+    if !request.target.matches_device(&owner) {
+        return Err(CliError::Hermes(
+            "command target does not name this device".to_owned(),
+        ));
+    }
+    if request.body.schema != CHAT_ADMISSION_SCHEMA {
+        return Err(CliError::Hermes(format!(
+            "expected body schema {CHAT_ADMISSION_SCHEMA:?}"
+        )));
+    }
+    let body: ChatAdmissionRequestV1 = serde_json::from_slice(&request.body.json_payload)
+        .map_err(|error| CliError::Hermes(format!("invalid admission body: {error}")))?;
+    let account_id = normalize_admission_account_id(&body.account_id)?;
+    let mut store = open_store(&home.dir, &home.secret, &home.config.device_id)?;
+    // Authz: only a currently-allowlisted sender may manage the allowlist
+    // (post-seed the owner always is). Under the legacy allow-all — no
+    // policy row — the command is inert so a stranger cannot bootstrap
+    // admission state on an unlocked device. Trust anchor: the sender
+    // account id is server-asserted from the event submission, which the
+    // server binds to a NIP-98 signer only while
+    // FINITECHAT_REQUIRE_SIGNED_REQUESTS is enforced; until that flip this
+    // check is a policy control, not a security control.
+    if store
+        .welcome_admission_policy(&owner)
+        .map_err(|error| CliError::Hermes(error.to_string()))?
+        != WelcomeAdmissionPolicy::Allowlist
+    {
+        return Err(CliError::Hermes(
+            "device is not in allowlist admission mode".to_owned(),
+        ));
+    }
+    if !store
+        .welcome_sender_allowed(&owner, &delivery.sender.account_id)
+        .map_err(|error| CliError::Hermes(error.to_string()))?
+    {
+        return Err(CliError::Hermes(
+            "sender is not on the Welcome allowlist".to_owned(),
+        ));
+    }
+    match body.action.as_str() {
+        "grant" => store
+            .add_welcome_allowed_senders(&owner, [account_id])
+            .map_err(|error| CliError::Hermes(error.to_string()))?,
+        "revoke" => {
+            // Self-revoke is refused: the sender must be allowlisted to
+            // manage the list at all, so refusing self-revoke also keeps at
+            // least one manager on the list forever (the older last-entry
+            // guard is unreachable under this rule).
+            if account_id == delivery.sender.account_id {
+                return Err(CliError::Hermes(
+                    "refusing to revoke the requesting sender; that would cut this \
+                     management channel off from the agent"
+                        .to_owned(),
+                ));
+            }
+            store
+                .remove_welcome_allowed_sender(&owner, &account_id)
+                .map_err(|error| CliError::Hermes(error.to_string()))?;
+        }
+        action => {
+            return Err(CliError::Hermes(format!(
+                "unknown admission action {action:?}"
+            )));
+        }
+    }
+    refresh_allowed_users_mirror(&home.dir, &store, &owner)
+}
+
+fn normalize_admission_account_id(value: &str) -> Result<String, CliError> {
+    let normalized = value.trim().to_lowercase();
+    if normalized.len() == 64 && normalized.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+        Ok(normalized)
+    } else {
+        Err(CliError::Hermes(
+            "admission account_id must be a 64-character hex account id".to_owned(),
+        ))
+    }
 }
 
 /// The store handle for read-only status probes (the typed read/write
@@ -3885,6 +4250,52 @@ fn now_secs() -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn core_envelope(error: FiniteChatCoreError) -> (StatusCode, Value) {
+        let (status, Json(body)) = service_cli_error(CliError::from(error));
+        (status, body)
+    }
+
+    #[test]
+    fn service_error_envelope_is_the_core_classification() {
+        // A transport failure is advertised as retryable with the retry
+        // status, not as a permanent 409.
+        let (status, body) = core_envelope(FiniteChatCoreError::Delivery {
+            reason: "connection refused".into(),
+        });
+        assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(body["http_status"], 503);
+        assert_eq!(body["error_kind"], "transport");
+        assert_eq!(body["retryable"], Value::Bool(true));
+        assert_eq!(body["error"], "delivery error: connection refused");
+
+        let (status, body) = core_envelope(FiniteChatCoreError::ServerRejected {
+            reason: "stale epoch".into(),
+        });
+        assert_eq!(status, StatusCode::BAD_GATEWAY);
+        assert_eq!(body["error_kind"], "server_rejected");
+        assert_eq!(body["retryable"], Value::Bool(false));
+
+        let (status, body) = core_envelope(FiniteChatCoreError::IdempotencyConflict {
+            reason: "key reused".into(),
+        });
+        assert_eq!(status, StatusCode::CONFLICT);
+        assert_eq!(body["error_kind"], "conflict");
+        assert_eq!(body["retryable"], Value::Bool(false));
+
+        let (status, body) = core_envelope(FiniteChatCoreError::Store {
+            reason: "disk full".into(),
+        });
+        assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
+        assert_eq!(body["error_kind"], "store");
+        assert_eq!(body["retryable"], Value::Bool(false));
+
+        // The bridge's own string errors keep their own class.
+        let (status, Json(body)) = service_cli_error(CliError::Hermes("no such turn".into()));
+        assert_eq!(status, StatusCode::CONFLICT);
+        assert_eq!(body["error_kind"], "hermes");
+        assert_eq!(body["retryable"], Value::Bool(false));
+    }
     use clap::Parser as _;
     use finitechat_blob::{MemoryBlobStore, upload_attachment};
     use finitechat_hermes::HermesMessageTypeV1;
@@ -4002,27 +4413,121 @@ mod tests {
     }
 
     #[test]
-    fn initialized_hermes_inbox_does_not_reopen_event_store() {
-        let dir = tempfile::tempdir().unwrap();
-        let agent_home = dir.path().join("store-must-remain-unopened");
-        let home = AgentHome {
-            dir: agent_home.clone(),
-            config: AgentConfig {
-                server_url: "http://127.0.0.1:1".to_owned(),
-                device_id: "agent-device".to_owned(),
-                account_id: "agent-account".to_owned(),
-            },
-            secret: NostrSecretKey::from_bytes([0x19; 32]).unwrap(),
-        };
-        let mut inbox = HermesInboxState::default();
-        inbox.cursors.insert("room-main".to_owned(), 7);
+    fn server_stream_monitor_tracks_outage_and_recovery() {
+        let monitor = ServerStreamMonitor::default();
 
-        initialize_hermes_inbox_cursors(&agent_home, &home, &mut inbox).unwrap();
-
-        assert!(
-            !agent_home.exists(),
-            "an initialized inbox should not open or scan the encrypted Agent store"
+        // Before the first resident cycle completes the link is honestly
+        // "connecting" — never a pretend "connected".
+        let initial = monitor.snapshot();
+        assert_eq!(initial.state, "connecting");
+        assert_eq!(initial.last_established_unix_ms, None);
+        assert_eq!(
+            server_stream_status_json(&initial),
+            serde_json::json!({
+                "state": "connecting",
+                "last_established_unix_ms": null,
+                "last_error": null,
+                "last_error_unix_ms": null,
+            })
         );
+
+        monitor.record_established(1_000);
+        let connected = monitor.snapshot();
+        assert_eq!(connected.state, "connected");
+        assert_eq!(connected.last_established_unix_ms, Some(1_000));
+        assert_eq!(connected.last_error, None);
+
+        monitor.record_failure(
+            2_000,
+            &FiniteChatCoreError::Delivery {
+                reason: "sync stream read failed".to_owned(),
+            },
+        );
+        let reconnecting = monitor.snapshot();
+        assert_eq!(reconnecting.state, "reconnecting");
+        assert_eq!(reconnecting.last_established_unix_ms, Some(1_000));
+        assert_eq!(
+            reconnecting.last_error.as_deref(),
+            Some("delivery error: sync stream read failed")
+        );
+        assert_eq!(reconnecting.last_error_unix_ms, Some(2_000));
+
+        // Recovery moves the establishment watermark forward and clears the
+        // stale failure.
+        monitor.record_established(3_000);
+        let recovered = monitor.snapshot();
+        assert_eq!(recovered.state, "connected");
+        assert_eq!(recovered.last_established_unix_ms, Some(3_000));
+        assert_eq!(recovered.last_error, None);
+        assert_eq!(recovered.last_error_unix_ms, None);
+    }
+
+    #[test]
+    fn bounded_error_summary_keeps_transport_bodies_small() {
+        let long_body = "x".repeat(10_000);
+        let summary = bounded_error_summary(&FiniteChatCoreError::Delivery { reason: long_body });
+        assert_eq!(
+            summary.chars().count(),
+            SERVER_STREAM_ERROR_SUMMARY_CHARS + 3
+        );
+        assert!(summary.ends_with("..."));
+
+        let short = bounded_error_summary(&FiniteChatCoreError::Delivery {
+            reason: "boom".to_owned(),
+        });
+        assert_eq!(short, "delivery error: boom");
+    }
+
+    #[test]
+    fn room_cursors_summary_is_bounded_and_flags_truncation() {
+        let cursors = (0..(READYZ_ROOM_CURSOR_LIMIT + 8))
+            .map(|index| AppRoomSyncCursor {
+                room_id: format!("room-{index:03}"),
+                last_applied_seq: index as u64,
+                own_send_high_water_seq: 0,
+                currency_initialized: true,
+                currency_verified: index == 0,
+                behind_server: (index == 1).then(|| finitechat_core::AppBehindServerEvidence {
+                    local_mark: 1,
+                    observed_seq: 2,
+                    message_id: "msg-1".to_owned(),
+                    observed_at: 3,
+                    evidence_epoch: 4,
+                }),
+            })
+            .collect::<Vec<_>>();
+        let summary = room_cursors_summary_json(&cursors);
+
+        assert_eq!(
+            summary["total"],
+            serde_json::json!(READYZ_ROOM_CURSOR_LIMIT + 8)
+        );
+        assert_eq!(summary["truncated"], serde_json::json!(true));
+        let rooms = summary["rooms"].as_array().unwrap();
+        assert_eq!(rooms.len(), READYZ_ROOM_CURSOR_LIMIT);
+        // Deterministic first-rooms slice, not an arbitrary sample.
+        assert_eq!(rooms[0]["room_id"], serde_json::json!("room-000"));
+        assert_eq!(rooms[0]["last_applied_seq"], serde_json::json!(0));
+        assert_eq!(rooms[0]["currency_verified"], serde_json::json!(true));
+        assert_eq!(rooms[0]["behind_server"], serde_json::Value::Null);
+        assert_eq!(rooms[1]["currency_verified"], serde_json::json!(false));
+        assert_eq!(
+            rooms[1]["behind_server"]["observed_seq"],
+            serde_json::json!(2)
+        );
+        assert_eq!(
+            summary["behind_server_rooms"],
+            serde_json::json!(["room-001"])
+        );
+        assert_eq!(
+            rooms[READYZ_ROOM_CURSOR_LIMIT - 1]["room_id"],
+            serde_json::json!(format!("room-{:03}", READYZ_ROOM_CURSOR_LIMIT - 1))
+        );
+
+        let small = room_cursors_summary_json(&cursors[..3]);
+        assert_eq!(small["total"], serde_json::json!(3));
+        assert_eq!(small["truncated"], serde_json::json!(false));
+        assert_eq!(small["rooms"].as_array().unwrap().len(), 3);
     }
 
     fn encoded_media_payload(reference: AttachmentBlobReferenceV1, text: &str) -> Vec<u8> {
@@ -4179,101 +4684,6 @@ mod tests {
         assert!(env.contains(&format!("FINITECHAT_HOME={}", home.display())));
         assert!(env.contains("FINITECHAT_BIN=/usr/local/bin/finitechat"));
         assert!(env.contains("FINITECHAT_HERMES_SERVICE_URL=http://127.0.0.1:4321"));
-    }
-
-    #[test]
-    fn install_reports_legacy_plaintext_plugin_and_config_collision() {
-        let dir = tempfile::tempdir().unwrap();
-        let home = dir.path().join("agent-home");
-        let hermes_home = dir.path().join("hermes");
-        let plugins_dir = hermes_home.join("plugins");
-        let legacy_dir = plugins_dir.join(LEGACY_HERMES_PLUGIN_NAME);
-        let ambiguous_dir = plugins_dir.join(AMBIGUOUS_HERMES_PLUGIN_NAME);
-        write_test_agent_config(&home);
-        fs::create_dir_all(&legacy_dir).unwrap();
-        fs::write(
-            legacy_dir.join("plugin.yaml"),
-            "name: finite-platform\nkind: platform\nversion: 1.0.0\n",
-        )
-        .unwrap();
-        fs::create_dir_all(&ambiguous_dir).unwrap();
-        fs::write(
-            ambiguous_dir.join("plugin.yaml"),
-            "name: finite-platform\nkind: platform\nversion: 0.2.0\n",
-        )
-        .unwrap();
-        fs::write(
-            hermes_home.join("config.yaml"),
-            "plugins:\n  enabled:\n    - finite-platform\n    - finite\ngateway:\n  platforms:\n    finite:\n      enabled: true\n",
-        )
-        .unwrap();
-
-        let mut output = Vec::new();
-        cmd_install(
-            &home,
-            install_args(&[
-                "--plugins-dir",
-                &plugins_dir.display().to_string(),
-                "--finitechat-bin",
-                "/usr/local/bin/finitechat",
-            ]),
-            true,
-            &mut output,
-        )
-        .expect("install succeeds with warnings");
-
-        let summary: serde_json::Value = serde_json::from_slice(&output).unwrap();
-        assert_eq!(summary["plugin_name"], "finitechat");
-        assert_eq!(
-            summary["plugin_dir"],
-            plugins_dir.join("finitechat").display().to_string()
-        );
-        let legacy_plugins = summary["legacy_plugin_conflicts"].as_array().unwrap();
-        assert_eq!(legacy_plugins.len(), 2);
-        assert_eq!(legacy_plugins[0]["plugin_name"], "finite-platform");
-        assert!(
-            legacy_plugins[0]["reason"]
-                .as_str()
-                .unwrap()
-                .contains("legacy plaintext bridge")
-        );
-        assert_eq!(legacy_plugins[1]["plugin_name"], "finite");
-        assert!(
-            legacy_plugins[1]["reason"]
-                .as_str()
-                .unwrap()
-                .contains("old generic Finite plugin name")
-        );
-        let legacy_configs = summary["legacy_config_conflicts"].as_array().unwrap();
-        assert_eq!(legacy_configs.len(), 2);
-        assert_eq!(legacy_configs[0]["enabled_plugin"], "finite-platform");
-        assert_eq!(legacy_configs[0]["replacement_plugin"], "finitechat");
-        assert_eq!(legacy_configs[1]["enabled_plugin"], "finite");
-        assert_eq!(legacy_configs[1]["replacement_plugin"], "finitechat");
-        assert!(
-            summary["warnings"]
-                .as_array()
-                .unwrap()
-                .iter()
-                .any(|warning| warning
-                    .as_str()
-                    .unwrap()
-                    .contains("change plugins.enabled to 'finitechat'"))
-        );
-    }
-
-    #[test]
-    fn backup_activity_guard_marks_and_unmarks_agent_home() {
-        let dir = tempfile::tempdir().unwrap();
-        let home = dir.path().join("agent-home");
-        let marker = home.join(BACKUP_ACTIVITY_FILE);
-        {
-            let _guard = BackupActivityGuard::enter(&home, "send").unwrap();
-            assert!(marker.exists());
-            let value: Value = serde_json::from_str(&fs::read_to_string(&marker).unwrap()).unwrap();
-            assert_eq!(value["action"], "send");
-        }
-        assert!(!marker.exists());
     }
 
     #[test]
@@ -5169,6 +5579,149 @@ mod tests {
         );
     }
 
+    fn recovery_test_home(dir: &Path) -> AgentHome {
+        AgentHome {
+            dir: dir.to_path_buf(),
+            config: AgentConfig {
+                server_url: "http://127.0.0.1:1".to_owned(),
+                device_id: "agent-device".to_owned(),
+                account_id: "agent-account".to_owned(),
+            },
+            secret: NostrSecretKey::from_bytes([0x19; 32]).unwrap(),
+        }
+    }
+
+    fn stored_hermes_text(seq: u64, message_id: &str, account: &str, text: &str) -> StoredAppEvent {
+        let plaintext = HermesMessagePayloadV1 {
+            payload_type: finitechat_hermes::HERMES_MESSAGE_PAYLOAD_TYPE_V1.to_owned(),
+            conversation_id: None,
+            segment_id: None,
+            text: text.to_owned(),
+            kind: finitechat_hermes::HermesSendKindV1::Message,
+            status: HermesMessageStatusV1::Complete,
+            edit_of: None,
+            attachments: Vec::new(),
+            reply_to_message_id: None,
+            sender_name: None,
+            metadata: BTreeMap::new(),
+        }
+        .encode()
+        .expect("encode text payload");
+        StoredAppEvent {
+            room_id: "room-a".to_owned(),
+            seq,
+            message_id: message_id.to_owned(),
+            sender: finitechat_proto::DeviceRef::new(account, "device"),
+            plaintext,
+            timestamp_unix_seconds: seq,
+        }
+    }
+
+    fn recover_into(home: &AgentHome, inbox: &mut HermesInboxState, events: &[StoredAppEvent]) {
+        recover_stored_hermes_events_from_events(
+            &home.dir,
+            home,
+            &home.config.account_id,
+            None,
+            inbox,
+            events.to_vec(),
+        )
+        .unwrap();
+    }
+
+    fn ack_room_a(home_dir: &Path, seq: u64, message_id: &str) {
+        let mut output = Vec::new();
+        cmd_ack(
+            home_dir,
+            serde_json::to_value(HermesAckRequestV1 {
+                room_id: "room-a".to_owned(),
+                seq,
+                message_id: message_id.to_owned(),
+            })
+            .unwrap(),
+            &mut output,
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn fresh_inbox_hands_over_every_stored_counterparty_event_once() {
+        let dir = tempfile::tempdir().unwrap();
+        let home = recovery_test_home(dir.path());
+        let events = [
+            stored_hermes_text(1, "agent-setup", "agent-account", "agent setup"),
+            stored_hermes_text(2, "user-first", "user-account", "hello agent"),
+            stored_hermes_text(3, "agent-after", "agent-account", "agent after"),
+        ];
+
+        // No cursor means nothing has been handed to hermes yet: the store
+        // (not a seed derived from it) decides what is pending.
+        let mut inbox = HermesInboxState::default();
+        recover_into(&home, &mut inbox, &events);
+        let pending = pending_hermes_inbox_events(&inbox, None, 10);
+        assert_eq!(pending.len(), 1);
+        assert_eq!(pending[0].message_id, "user-first");
+        assert_eq!(hermes_inbox_cursor(&inbox, "room-a"), 2);
+
+        // Re-scanning the same store is idempotent.
+        recover_into(&home, &mut inbox, &events);
+        assert_eq!(pending_hermes_inbox_events(&inbox, None, 10).len(), 1);
+    }
+
+    #[test]
+    fn reopened_inbox_does_not_redeliver_acked_stored_events() {
+        let dir = tempfile::tempdir().unwrap();
+        let home = recovery_test_home(dir.path());
+        let events = [
+            stored_hermes_text(1, "agent-setup", "agent-account", "agent setup"),
+            stored_hermes_text(2, "user-first", "user-account", "hello agent"),
+        ];
+        let mut inbox = HermesInboxState::default();
+        recover_into(&home, &mut inbox, &events);
+        lease_pending_hermes_inbox_events(dir.path(), &mut inbox, None, 10).unwrap();
+        ack_room_a(dir.path(), 2, "user-first");
+
+        // A fresh process reloads the durable inbox and re-scans the store.
+        let mut reopened = load_hermes_inbox(dir.path()).unwrap();
+        assert_eq!(hermes_inbox_cursor(&reopened, "room-a"), 2);
+        recover_into(&home, &mut reopened, &events);
+        assert!(
+            pending_hermes_inbox_events(&reopened, None, 10).is_empty(),
+            "an acked turn must not come back after a reopen"
+        );
+    }
+
+    #[test]
+    fn counterparty_event_after_the_cursor_is_delivered_exactly_once() {
+        let dir = tempfile::tempdir().unwrap();
+        let home = recovery_test_home(dir.path());
+        let mut events = vec![stored_hermes_text(
+            2,
+            "user-first",
+            "user-account",
+            "hello agent",
+        )];
+        let mut inbox = HermesInboxState::default();
+        recover_into(&home, &mut inbox, &events);
+        lease_pending_hermes_inbox_events(dir.path(), &mut inbox, None, 10).unwrap();
+        ack_room_a(dir.path(), 2, "user-first");
+
+        events.push(stored_hermes_text(3, "agent-reply", "agent-account", "hi"));
+        events.push(stored_hermes_text(
+            4,
+            "user-second",
+            "user-account",
+            "again",
+        ));
+        let mut inbox = load_hermes_inbox(dir.path()).unwrap();
+        recover_into(&home, &mut inbox, &events);
+        recover_into(&home, &mut inbox, &events);
+        let pending = pending_hermes_inbox_events(&inbox, None, 10);
+        assert_eq!(pending.len(), 1);
+        assert_eq!(pending[0].message_id, "user-second");
+        assert_eq!(hermes_inbox_cursor(&inbox, "room-a"), 4);
+    }
+
     fn topic_with_chats(room_id: &str, topic_id: &str, chat_ids: &[&str]) -> AppTopicSummary {
         use finitechat_core::AppChatSummary;
         AppTopicSummary {
@@ -5242,33 +5795,464 @@ mod tests {
     }
 
     #[test]
-    fn unknown_thread_route_policy_defaults_to_home_fallback() {
-        // The env var is process-global; this test owns it and restores it.
-        // SAFETY: single-threaded mutation of a test-only environment variable.
-        unsafe {
-            std::env::remove_var(HERMES_UNKNOWN_THREAD_ROUTE_ENV);
+    fn parse_welcome_allowlist_accepts_hex_and_npub_entries() {
+        let hex_entry = "ab".repeat(32);
+        let npub = npub_encode(&"cd".repeat(32)).unwrap();
+        let parsed = parse_welcome_allowlist(&format!("{hex_entry},{npub}")).unwrap();
+        assert_eq!(parsed, BTreeSet::from(["ab".repeat(32), "cd".repeat(32)]));
+    }
+
+    #[test]
+    fn parse_welcome_allowlist_trims_whitespace_and_lowercases() {
+        let parsed = parse_welcome_allowlist(
+            "  AB01AB01AB01AB01AB01AB01AB01AB01AB01AB01AB01AB01AB01AB01AB01AB01 \n",
+        )
+        .unwrap();
+        assert_eq!(
+            parsed,
+            BTreeSet::from([
+                "ab01ab01ab01ab01ab01ab01ab01ab01ab01ab01ab01ab01ab01ab01ab01ab01".to_owned()
+            ])
+        );
+    }
+
+    #[test]
+    fn parse_welcome_allowlist_dedups_hex_and_npub_spellings() {
+        let hex_entry = "ef".repeat(32);
+        let npub = npub_encode(&hex_entry).unwrap();
+        let parsed = parse_welcome_allowlist(&format!("{hex_entry}, {npub}")).unwrap();
+        assert_eq!(parsed, BTreeSet::from([hex_entry]));
+    }
+
+    #[test]
+    fn parse_welcome_allowlist_rejects_malformed_entries() {
+        for raw in [
+            // Too short to be an account id and not an npub.
+            "abcd",
+            // 64 chars but not hex.
+            &"zz".repeat(32),
+            // Not an npub bech32 payload.
+            "npub1notarealnpub",
+            // Empty entries (trailing/doubled commas) are operator typos.
+            &format!("{},", "ab".repeat(32)),
+            ",",
+        ] {
+            assert!(
+                parse_welcome_allowlist(raw).is_err(),
+                "malformed allowlist entry should fail closed: {raw:?}"
+            );
         }
-        assert!(matches!(
-            unknown_thread_route_policy(),
-            UnknownThreadRoutePolicy::HomeDefault
-        ));
-        unsafe {
-            std::env::set_var(HERMES_UNKNOWN_THREAD_ROUTE_ENV, "home");
+    }
+
+    fn admission_test_home(dir: &tempfile::TempDir, secret_byte: u8) -> AgentHome {
+        let secret = NostrSecretKey::from_bytes([secret_byte; 32]).unwrap();
+        // Mirror init: config.json's account_id is the identity's public key
+        // hex, which is also what MLS membership reports for the agent.
+        let account_id = hex_lower(secret.public_key().as_bytes());
+        AgentHome {
+            dir: dir.path().join("agent-home"),
+            config: AgentConfig {
+                server_url: "http://127.0.0.1:1".to_owned(),
+                device_id: "agent-device".to_owned(),
+                account_id,
+            },
+            secret,
         }
-        assert!(matches!(
-            unknown_thread_route_policy(),
-            UnknownThreadRoutePolicy::HomeDefault
-        ));
-        unsafe {
-            std::env::set_var(HERMES_UNKNOWN_THREAD_ROUTE_ENV, "error");
+    }
+
+    fn admission_owner(home: &AgentHome) -> finitechat_proto::DeviceRef {
+        finitechat_proto::DeviceRef::new(
+            home.config.account_id.clone(),
+            home.config.device_id.clone(),
+        )
+    }
+
+    fn admission_store(home: &AgentHome) -> SqliteClientStore {
+        open_store(&home.dir, &home.secret, &home.config.device_id).unwrap()
+    }
+
+    fn admission_delivery(
+        home: &AgentHome,
+        sender_account: &str,
+        action: &str,
+        account_id: &str,
+    ) -> RuntimeCommandDeliveryV1 {
+        let request = RuntimeCommandRequestV1 {
+            payload_kind: finitechat_proto::RuntimeCommandPayloadKindV1::Request,
+            request_id: format!("admission-{action}-1"),
+            command: CHAT_ADMISSION_COMMAND.to_owned(),
+            target: finitechat_proto::RuntimeCommandTargetV1 {
+                account_id: home.config.account_id.clone(),
+                device_id: Some(home.config.device_id.clone()),
+            },
+            resource_key: None,
+            body: finitechat_proto::RuntimeCommandJsonPayloadV1 {
+                schema: CHAT_ADMISSION_SCHEMA.to_owned(),
+                json_payload: serde_json::to_vec(&json!({
+                    "action": action,
+                    "account_id": account_id,
+                }))
+                .unwrap(),
+            },
+        };
+        RuntimeCommandDeliveryV1 {
+            room_id: "room-main".to_owned(),
+            conversation_id: None,
+            seq: 9,
+            message_id: format!("admission-{action}-message-1"),
+            sender: finitechat_proto::DeviceRef::new(sender_account, "hosted-web"),
+            payload: RuntimeCommandInboundPayloadV1::Request(request),
         }
-        assert!(matches!(
-            unknown_thread_route_policy(),
-            UnknownThreadRoutePolicy::Error
-        ));
-        unsafe {
-            std::env::remove_var(HERMES_UNKNOWN_THREAD_ROUTE_ENV);
+    }
+
+    fn apply_admission(
+        home: &AgentHome,
+        sender_account: &str,
+        action: &str,
+        account_id: &str,
+    ) -> Result<(), CliError> {
+        let delivery = admission_delivery(home, sender_account, action, account_id);
+        let RuntimeCommandInboundPayloadV1::Request(request) = &delivery.payload else {
+            unreachable!("admission_delivery always builds a request");
+        };
+        apply_chat_admission_command(home, &home.config.account_id, &delivery, request)
+    }
+
+    fn read_allowed_users_mirror(home: &AgentHome) -> Option<String> {
+        fs::read_to_string(home.dir.join(ALLOWED_USERS_FILE)).ok()
+    }
+
+    #[test]
+    fn birth_seed_precedence_explicit_wins_then_owner_npubs() {
+        let owner = "a".repeat(64);
+        let override_list = "b".repeat(64);
+        // The explicit seed wins over the Core-injected owner list.
+        assert_eq!(
+            resolve_birth_seed(Some(&override_list), Some(&owner)),
+            Some(override_list.clone())
+        );
+        // The owner list seeds when no explicit seed is set.
+        assert_eq!(resolve_birth_seed(None, Some(&owner)), Some(owner.clone()));
+        // A deliberately empty explicit seed suppresses the owner list too.
+        assert_eq!(
+            resolve_birth_seed(Some("  "), Some(&owner)),
+            Some("  ".to_owned())
+        );
+        // Neither set: no seed; a locked marker may still derive one.
+        assert_eq!(resolve_birth_seed(None, None), None);
+        assert_eq!(resolve_birth_seed(None, Some("   ")), None);
+    }
+
+    #[test]
+    fn seed_welcome_allowlist_from_env_writes_policy_and_mirror() {
+        let dir = tempfile::tempdir().unwrap();
+        let home = admission_test_home(&dir, 0x21);
+        let owner = "cd".repeat(32);
+
+        seed_welcome_allowlist_from_values(&home, Some(&owner), false).unwrap();
+
+        let store = admission_store(&home);
+        let owner_ref = admission_owner(&home);
+        assert_eq!(
+            store
+                .configured_welcome_admission_policy(&owner_ref)
+                .unwrap(),
+            Some(WelcomeAdmissionPolicy::Allowlist)
+        );
+        assert_eq!(
+            store.welcome_allowed_senders(&owner_ref).unwrap(),
+            vec![owner.clone()]
+        );
+        assert_eq!(read_allowed_users_mirror(&home), Some(format!("{owner}\n")));
+    }
+
+    #[test]
+    fn seed_welcome_allowlist_is_idempotent_over_existing_policy_row() {
+        let dir = tempfile::tempdir().unwrap();
+        let home = admission_test_home(&dir, 0x22);
+        let original = "cd".repeat(32);
+        let late_env = "ef".repeat(32);
+        let owner_ref = admission_owner(&home);
+        {
+            let mut store = admission_store(&home);
+            store
+                .set_welcome_admission_policy(&owner_ref, WelcomeAdmissionPolicy::Allowlist)
+                .unwrap();
+            store
+                .add_welcome_allowed_senders(&owner_ref, [original.clone()])
+                .unwrap();
         }
+
+        // A later boot with a different env value must not overwrite or widen
+        // the store: the store is the single source of truth.
+        seed_welcome_allowlist_from_values(&home, Some(&late_env), true).unwrap();
+
+        let store = admission_store(&home);
+        assert_eq!(
+            store.welcome_allowed_senders(&owner_ref).unwrap(),
+            vec![original.clone()]
+        );
+        assert_eq!(
+            read_allowed_users_mirror(&home),
+            Some(format!("{original}\n")),
+            "the mirror is refreshed from the store, not the env"
+        );
+    }
+
+    #[test]
+    fn seed_welcome_allowlist_preserves_explicit_allow_all_row_and_drops_mirror() {
+        let dir = tempfile::tempdir().unwrap();
+        let home = admission_test_home(&dir, 0x23);
+        let owner_ref = admission_owner(&home);
+        {
+            let mut store = admission_store(&home);
+            store
+                .set_welcome_admission_policy(&owner_ref, WelcomeAdmissionPolicy::AllowAll)
+                .unwrap();
+        }
+        write_private(home.dir.join(ALLOWED_USERS_FILE), "stale\n").unwrap();
+
+        seed_welcome_allowlist_from_values(&home, Some(&"cd".repeat(32)), true).unwrap();
+
+        let store = admission_store(&home);
+        assert_eq!(
+            store
+                .configured_welcome_admission_policy(&owner_ref)
+                .unwrap(),
+            Some(WelcomeAdmissionPolicy::AllowAll)
+        );
+        assert_eq!(
+            store.welcome_allowed_senders(&owner_ref).unwrap(),
+            Vec::<String>::new()
+        );
+        assert_eq!(
+            read_allowed_users_mirror(&home),
+            None,
+            "a stale mirror must not outlive an explicit allow-all row"
+        );
+    }
+
+    #[test]
+    fn seed_welcome_allowlist_without_marker_keeps_legacy_allow_all_untouched() {
+        let dir = tempfile::tempdir().unwrap();
+        let home = admission_test_home(&dir, 0x24);
+
+        seed_welcome_allowlist_from_values(&home, None, false).unwrap();
+
+        assert!(
+            !home.dir.join(STORE_FILE).exists(),
+            "byte-for-byte legacy: the standalone no-marker path never opens the store"
+        );
+        assert_eq!(read_allowed_users_mirror(&home), None);
+    }
+
+    #[test]
+    fn seed_welcome_allowlist_locked_without_derivable_seed_waits_for_a_room() {
+        let dir = tempfile::tempdir().unwrap();
+        let home = admission_test_home(&dir, 0x25);
+
+        // Locked, but the agent has no owner seed and no room to derive one
+        // from (its first Welcome has not arrived): persist nothing so the
+        // next boot retries instead of bricking admission with an empty list.
+        seed_welcome_allowlist_from_values(&home, None, true).unwrap();
+
+        let store = admission_store(&home);
+        assert_eq!(
+            store
+                .configured_welcome_admission_policy(&admission_owner(&home))
+                .unwrap(),
+            None
+        );
+        assert_eq!(read_allowed_users_mirror(&home), None);
+    }
+
+    #[test]
+    fn seed_welcome_allowlist_locked_derives_the_home_room_but_never_the_agent_itself() {
+        let dir = tempfile::tempdir().unwrap();
+        let home = admission_test_home(&dir, 0x26);
+        let owner_seed = "cd".repeat(32);
+        {
+            let mut store = admission_store(&home);
+            let mut device = FiniteChatDevice::new(device_config(
+                &home.secret,
+                &home.config.device_id,
+                now_secs(),
+            ))
+            .unwrap();
+            device
+                .create_group_state("room-home", "mls-group-home")
+                .unwrap();
+            store.save_device_state(&device).unwrap();
+        }
+        save_home_channel(
+            &home.dir,
+            &HermesHomeChannel {
+                room_id: "room-home".to_owned(),
+                conversation_id: None,
+                set_at_ms: 1,
+            },
+        )
+        .unwrap();
+
+        // The home room's only member so far is the agent itself; the env
+        // owner seed is the union and the agent's own account is excluded.
+        seed_welcome_allowlist_from_values(&home, Some(&owner_seed), true).unwrap();
+
+        let store = admission_store(&home);
+        let owner_ref = admission_owner(&home);
+        assert_eq!(
+            store.welcome_allowed_senders(&owner_ref).unwrap(),
+            vec![owner_seed.clone()]
+        );
+        assert_eq!(
+            read_allowed_users_mirror(&home),
+            Some(format!("{owner_seed}\n"))
+        );
+    }
+
+    #[test]
+    fn chat_admission_grant_and_revoke_update_store_and_mirror() {
+        let dir = tempfile::tempdir().unwrap();
+        let home = admission_test_home(&dir, 0x27);
+        let owner_ref = admission_owner(&home);
+        let owner = "cd".repeat(32);
+        let guest = "ef".repeat(32);
+        {
+            let mut store = admission_store(&home);
+            store
+                .set_welcome_admission_policy(&owner_ref, WelcomeAdmissionPolicy::Allowlist)
+                .unwrap();
+            store
+                .add_welcome_allowed_senders(&owner_ref, [owner.clone()])
+                .unwrap();
+        }
+
+        apply_admission(&home, &owner, "grant", &guest).unwrap();
+        let store = admission_store(&home);
+        assert_eq!(
+            store.welcome_allowed_senders(&owner_ref).unwrap(),
+            vec![owner.clone(), guest.clone()]
+        );
+        assert_eq!(
+            read_allowed_users_mirror(&home),
+            Some(format!("{owner}\n{guest}\n"))
+        );
+
+        apply_admission(&home, &owner, "revoke", &guest).unwrap();
+        let store = admission_store(&home);
+        assert_eq!(
+            store.welcome_allowed_senders(&owner_ref).unwrap(),
+            vec![owner.clone()]
+        );
+        assert_eq!(read_allowed_users_mirror(&home), Some(format!("{owner}\n")));
+    }
+
+    #[test]
+    fn chat_admission_revoke_refuses_the_requesting_sender() {
+        // Revoking your own entry cuts the management channel off from the
+        // agent; the last-entry guard alone does not cover multi-entry
+        // lists.
+        let dir = tempfile::tempdir().unwrap();
+        let home = admission_test_home(&dir, 0x2b);
+        let owner_ref = admission_owner(&home);
+        let owner = "cd".repeat(32);
+        let guest = "ef".repeat(32);
+        {
+            let mut store = admission_store(&home);
+            store
+                .set_welcome_admission_policy(&owner_ref, WelcomeAdmissionPolicy::Allowlist)
+                .unwrap();
+            store
+                .add_welcome_allowed_senders(&owner_ref, [owner.clone(), guest.clone()])
+                .unwrap();
+        }
+
+        let error = apply_admission(&home, &owner, "revoke", &owner).unwrap_err();
+        assert!(
+            error.to_string().contains("cut this management channel"),
+            "unexpected error: {error}"
+        );
+        let store = admission_store(&home);
+        assert_eq!(
+            store.welcome_allowed_senders(&owner_ref).unwrap(),
+            vec![owner, guest]
+        );
+    }
+
+    #[test]
+    fn chat_admission_rejects_strangers_and_is_inert_under_allow_all() {
+        let dir = tempfile::tempdir().unwrap();
+        let home = admission_test_home(&dir, 0x29);
+        let owner_ref = admission_owner(&home);
+        let owner = "cd".repeat(32);
+        let stranger = "aa".repeat(32);
+        let guest = "ef".repeat(32);
+
+        // No policy row at all (legacy allow-all): the command is inert so a
+        // stranger cannot bootstrap admission state on an unlocked device.
+        assert!(apply_admission(&home, &stranger, "grant", &guest).is_err());
+        let store = admission_store(&home);
+        assert_eq!(
+            store
+                .configured_welcome_admission_policy(&owner_ref)
+                .unwrap(),
+            None
+        );
+
+        // Allowlist mode: a non-listed sender is rejected even for a grant.
+        {
+            let mut store = admission_store(&home);
+            store
+                .set_welcome_admission_policy(&owner_ref, WelcomeAdmissionPolicy::Allowlist)
+                .unwrap();
+            store
+                .add_welcome_allowed_senders(&owner_ref, [owner.clone()])
+                .unwrap();
+        }
+        assert!(apply_admission(&home, &stranger, "grant", &guest).is_err());
+        let store = admission_store(&home);
+        assert_eq!(
+            store.welcome_allowed_senders(&owner_ref).unwrap(),
+            vec![owner]
+        );
+    }
+
+    #[test]
+    fn chat_admission_rejects_wrong_target_and_malformed_account_id() {
+        let dir = tempfile::tempdir().unwrap();
+        let home = admission_test_home(&dir, 0x2a);
+        let owner_ref = admission_owner(&home);
+        let owner = "cd".repeat(32);
+        {
+            let mut store = admission_store(&home);
+            store
+                .set_welcome_admission_policy(&owner_ref, WelcomeAdmissionPolicy::Allowlist)
+                .unwrap();
+            store
+                .add_welcome_allowed_senders(&owner_ref, [owner.clone()])
+                .unwrap();
+        }
+
+        let mut delivery = admission_delivery(&home, &owner, "grant", &"ef".repeat(32));
+        if let RuntimeCommandInboundPayloadV1::Request(request) = &mut delivery.payload {
+            request.target.account_id = "other-agent".to_owned();
+        }
+        let RuntimeCommandInboundPayloadV1::Request(request) = &delivery.payload else {
+            unreachable!();
+        };
+        assert!(
+            apply_chat_admission_command(&home, &home.config.account_id, &delivery, request)
+                .is_err()
+        );
+
+        assert!(apply_admission(&home, &owner, "grant", "not-hex").is_err());
+        assert!(apply_admission(&home, &owner, "rename", &"ef".repeat(32)).is_err());
+
+        let store = admission_store(&home);
+        assert_eq!(
+            store.welcome_allowed_senders(&owner_ref).unwrap(),
+            vec![owner]
+        );
     }
 
     #[test]
@@ -5349,65 +6333,6 @@ mod tests {
         assert!(!advance_agentd_inbox_cursor(&mut inbox, "room-a", 3));
         assert_eq!(agentd_inbox_cursor(&inbox, "room-a"), 5);
         assert_eq!(inbox.events.len(), 1, "cursor movement is not an ack");
-    }
-
-    #[test]
-    fn inbox_initialization_does_not_consume_first_counterparty_message() {
-        let home = tempfile::tempdir().unwrap();
-        let mut inbox = HermesInboxState::default();
-        let events = [
-            StoredAppEvent {
-                room_id: "room-a".to_owned(),
-                seq: 1,
-                message_id: "agent-setup".to_owned(),
-                sender: finitechat_proto::DeviceRef::new("agent-account", "agent-device"),
-                plaintext: b"agent setup".to_vec(),
-                timestamp_unix_seconds: 1,
-            },
-            StoredAppEvent {
-                room_id: "room-a".to_owned(),
-                seq: 2,
-                message_id: "user-first".to_owned(),
-                sender: finitechat_proto::DeviceRef::new("user-account", "electron"),
-                plaintext: b"hello agent".to_vec(),
-                timestamp_unix_seconds: 2,
-            },
-            StoredAppEvent {
-                room_id: "room-a".to_owned(),
-                seq: 3,
-                message_id: "agent-after".to_owned(),
-                sender: finitechat_proto::DeviceRef::new("agent-account", "agent-device"),
-                plaintext: b"agent after".to_vec(),
-                timestamp_unix_seconds: 3,
-            },
-        ];
-
-        initialize_hermes_inbox_cursors_from_events(
-            home.path(),
-            &mut inbox,
-            "agent-account",
-            events.iter(),
-        )
-        .unwrap();
-        assert_eq!(
-            hermes_inbox_cursor(&inbox, "room-a"),
-            1,
-            "first run must not advance past unseen counterparty messages"
-        );
-
-        let user_event = HermesPollEventV1::finite_chat_text(
-            "room-a",
-            2,
-            "user-first",
-            "user-account",
-            "electron",
-            "hello agent",
-        )
-        .unwrap();
-        enqueue_hermes_inbox_event(home.path(), &mut inbox, user_event).unwrap();
-        let pending = pending_hermes_inbox_events(&inbox, None, 10);
-        assert_eq!(pending.len(), 1);
-        assert_eq!(pending[0].message_id, "user-first");
     }
 
     #[test]

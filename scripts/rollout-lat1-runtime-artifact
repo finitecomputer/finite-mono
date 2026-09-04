@@ -5,8 +5,12 @@
 # operator commands.
 set -euo pipefail
 
+# Core / app-plane lives on lat2 after the 2026-08-29 cutover. lat1 remains
+# only as a leftover runner destination for inactive historical records.
+LAT2="${LAT2:-root@64.34.80.19}"
 LAT1="${LAT1:-root@64.34.82.77}"
 LAT3="${LAT3:-root@207.188.7.157}"
+LAT4="${LAT4:-root@152.236.34.15}"
 ROLLOUT_HOST=lat1
 SOURCE_HOST_ID=finite-lat-1
 RUNNER_DEST="$LAT1"
@@ -15,7 +19,7 @@ ROLLOUT_STATE_ROOT="${ROLLOUT_STATE_ROOT:-$REPO_ROOT/.local-state/runtime-rollou
 
 usage() {
   cat >&2 <<'EOF'
-usage: scripts/rollout-lat1-runtime-artifact [--validate-only] [--host lat1|lat3] \
+usage: scripts/rollout-lat1-runtime-artifact [--validate-only] [--host lat1|lat3|lat4] \
   (--prepare | --execute-plan-hash 64_LOWERCASE_HEX | --summarize) \
   --roll-runtime-artifact ID \
   --roll-admin-email EMAIL \
@@ -41,7 +45,10 @@ validate_id() {
 }
 
 validate_local_inputs() {
+  [[ $LAT2 =~ ^[A-Za-z0-9][A-Za-z0-9_.@:-]{0,254}$ ]] || { invalid_value "LAT2 destination"; return; }
   [[ $LAT1 =~ ^[A-Za-z0-9][A-Za-z0-9_.@:-]{0,254}$ ]] || { invalid_value "LAT1 destination"; return; }
+  [[ $LAT3 =~ ^[A-Za-z0-9][A-Za-z0-9_.@:-]{0,254}$ ]] || { invalid_value "LAT3 destination"; return; }
+  [[ $LAT4 =~ ^[A-Za-z0-9][A-Za-z0-9_.@:-]{0,254}$ ]] || { invalid_value "LAT4 destination"; return; }
   [[ $RUNNER_DEST =~ ^[A-Za-z0-9][A-Za-z0-9_.@:-]{0,254}$ ]] || { invalid_value "rollout host destination"; return; }
   validate_id "runtime artifact id" "$ROLLOUT_ARTIFACT_ID" || return
   [[ $ROLLOUT_ADMIN_EMAIL =~ ^[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+$ ]] || { invalid_value "admin email"; return; }
@@ -81,7 +88,7 @@ parse_args() {
       --host)
         [[ $# -ge 2 && -n $2 ]] || { usage; return 64; }
         case "$2" in
-          lat1|lat3) ROLLOUT_HOST="$2" ;;
+          lat1|lat3|lat4) ROLLOUT_HOST="$2" ;;
           *)
             echo "unknown runtime rollout host: $2" >&2
             return 64
@@ -166,6 +173,11 @@ parse_args() {
       RUNNER_DEST="$LAT3"
       RUNNER_WORK_ROOT=/data/finite-saas-runner
       ;;
+    lat4)
+      SOURCE_HOST_ID=finite-lat-4
+      RUNNER_DEST="$LAT4"
+      RUNNER_WORK_ROOT=/data/finite-saas-runner
+      ;;
   esac
   if [[ $ROLLOUT_MODE == summarize ]]; then
     [[ $ROLLOUT_STATE_ROOT == /* ]] || invalid_value "ROLLOUT_STATE_ROOT: expected an absolute path"
@@ -242,9 +254,9 @@ run_remote_bash() {
   ssh -n -o BatchMode=yes -- "$destination" "$remote_command"
 }
 
-# Core is the lifecycle authority and runs on lat1 for every rollout host.
+# Core is the lifecycle authority and runs on lat2 for every rollout host.
 run_remote_cli() {
-  run_remote_bash "$LAT1" 'set -euo pipefail
+  run_remote_bash "$LAT2" 'set -euo pipefail
 set -a
 . /etc/finite/core.env
 set +a
@@ -486,8 +498,8 @@ while (($#)); do
   shift 4
   printf '\036CONTACT\t%s\t%s\t%s\n' "$runtime_id" "$machine" "$project_id"
   # Kata guests publish their host port on the runner's configured address:
-  # lat1 binds loopback, lat3 binds FC_RUNNER_KATA_HOST_ADDRESS. Read it from
-  # the runner's own env instead of assuming loopback.
+  # lat1 bound loopback; lat3 and lat4 bind FC_RUNNER_KATA_HOST_ADDRESS. Read
+  # it from the runner's own env instead of assuming loopback.
   bind_host="127.0.0.1"
   if [[ -r /etc/finite/runner.env ]]; then
     configured_bind="$(sed -n 's/^FC_RUNNER_KATA_HOST_ADDRESS=//p' /etc/finite/runner.env | head -1)"

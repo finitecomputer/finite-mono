@@ -6,8 +6,9 @@
 # host use loopback so managed-agent creation does not depend on public DNS.
 #
 # The daemon binds two loopback listeners. 8790 serves the full router
-# (operator, /internal/*, and server-to-server routes such as
-# mailbox-proofs/consume) and stays reachable only from this host. 8791 serves
+# (the public surface plus the loopback-only operator routes such as
+# operator/agent-email-bindings, which the managed-agent Runner still calls)
+# and stays reachable only from this host. 8791 serves
 # only the service-owned public surface (`public_router` in
 # finite-identity/src/authority.rs); the Caddy edge proxies 8791 verbatim and
 # keeps no route list of its own.
@@ -23,7 +24,6 @@ let
   loopbackAuthority = "http://127.0.0.1:8790";
   loopbackPublic = "http://127.0.0.1:8791";
   operatorEnvironmentFile = "/etc/finite/identity-operator.env";
-  sitesNotificationEnvironmentFile = "/etc/finite/identity-sites-notification.env";
 in
 {
   systemd.services.${serviceName} = {
@@ -63,9 +63,11 @@ in
       # The operator token is shared only with trusted provisioning services.
       # The existing Resend send-only credential remains owned by Sites and is
       # read here by systemd without copying its value into the Nix store.
+      # The retired identity-sites-notification.env load is gone: the
+      # directory shrink removed the Sites notification relay, and Sites now
+      # sends its own mail.
       EnvironmentFile = [
         operatorEnvironmentFile
-        sitesNotificationEnvironmentFile
         "/etc/finite-saas/sites.env"
       ];
 
@@ -123,7 +125,14 @@ in
   # Standard (Kata) and Confidential (Phala) runtimes. Make the shared
   # authority and Core hard startup dependencies, and inject only the
   # loopback URL plus the root-owned operator environment.
-  systemd.services.finite-saas-runner = {
+  #
+  # Runner hosts only: these stanzas must not exist where the runner module
+  # isn't imported — defining `systemd.services.finite-saas-runner`
+  # unconditionally creates ExecStart-less husk units on runnerless hosts
+  # (the lat2 app plane), tripping the no-runner fence in
+  # deploy-lat2-closure-cache by unit-file existence. `or false` keeps
+  # hosts that don't define the option evaluating.
+  systemd.services.finite-saas-runner = lib.mkIf (config.finite.saasRunner or false) {
     requires = [
       "${serviceName}.service"
       "finite-saas-core.service"
@@ -136,7 +145,7 @@ in
     serviceConfig.EnvironmentFile = lib.mkAfter [ operatorEnvironmentFile ];
   };
 
-  systemd.services.finite-saas-runner-phala = {
+  systemd.services.finite-saas-runner-phala = lib.mkIf (config.finite.saasRunner or false) {
     requires = [
       "${serviceName}.service"
       "finite-saas-core.service"
@@ -149,55 +158,42 @@ in
     serviceConfig.EnvironmentFile = lib.mkAfter [ operatorEnvironmentFile ];
   };
 
-  # Sites resolves readable email grants through the shared public-resolution
-  # contract. It does not receive the operator credential and it still owns
-  # every Project grant, role, revocation, and Viewer Session.
-  systemd.services.finite-saas-sites = {
-    requires = [ "${serviceName}.service" ];
-    after = [ "${serviceName}.service" ];
-    environment.FINITE_IDENTITY_AUTHORITY = loopbackAuthority;
-    serviceConfig.EnvironmentFile = lib.mkAfter [ sitesNotificationEnvironmentFile ];
-  };
+  # Sites no longer resolves anything through the Directory at request time
+  # (daemon-local email proofs, ADR 0027): no FINITE_IDENTITY_AUTHORITY, no
+  # shared notification credential, no boot ordering against this service.
 
   assertions = [
     {
+      # Runner hosts only (see the mkIf gates above); the short-circuit keeps
+      # runnerless hosts from forcing the nonexistent unit attributes.
       assertion =
-        config.systemd.services.finite-saas-runner.environment.FINITE_IDENTITY_AUTHORITY
-        == loopbackAuthority;
+        !(config.finite.saasRunner or false)
+        ||
+          config.systemd.services.finite-saas-runner.environment.FINITE_IDENTITY_AUTHORITY
+          == loopbackAuthority;
       message = "the Kata worker must use the loopback Identity Authority";
     }
     {
       assertion =
-        config.systemd.services.finite-saas-runner-phala.environment.FINITE_IDENTITY_AUTHORITY
-        == loopbackAuthority;
+        !(config.finite.saasRunner or false)
+        ||
+          config.systemd.services.finite-saas-runner-phala.environment.FINITE_IDENTITY_AUTHORITY
+          == loopbackAuthority;
       message = "the Phala worker must use the loopback Identity Authority";
     }
     {
       assertion =
-        builtins.elem operatorEnvironmentFile config.systemd.services.finite-saas-runner.serviceConfig.EnvironmentFile
-        && builtins.elem operatorEnvironmentFile config.systemd.services.finite-saas-runner-phala.serviceConfig.EnvironmentFile;
+        !(config.finite.saasRunner or false)
+        || (
+          builtins.elem operatorEnvironmentFile config.systemd.services.finite-saas-runner.serviceConfig.EnvironmentFile
+          && builtins.elem operatorEnvironmentFile config.systemd.services.finite-saas-runner-phala.serviceConfig.EnvironmentFile
+        );
       message = "both managed-agent workers must load the shared Identity Authority operator credential";
-    }
-    {
-      assertion =
-        config.systemd.services.finite-brain-app.environment.FINITE_IDENTITY_AUTHORITY
-        == loopbackAuthority
-        && config.systemd.services.finitechat-hosted-device.environment.FINITE_IDENTITY_AUTHORITY
-        == loopbackAuthority
-        && config.systemd.services.finite-saas-sites.environment.FINITE_IDENTITY_AUTHORITY
-        == loopbackAuthority;
-      message = "Brain, Hosted Device, and Sites must use the same loopback Identity Authority";
     }
     {
       assertion =
         !(builtins.elem operatorEnvironmentFile config.systemd.services.finite-saas-sites.serviceConfig.EnvironmentFile);
       message = "Sites must not receive the Identity Authority operator credential";
-    }
-    {
-      assertion =
-        builtins.elem sitesNotificationEnvironmentFile config.systemd.services.${serviceName}.serviceConfig.EnvironmentFile
-        && builtins.elem sitesNotificationEnvironmentFile config.systemd.services.finite-saas-sites.serviceConfig.EnvironmentFile;
-      message = "Identity and Sites must share only the narrow Sites notification credential";
     }
   ];
 }

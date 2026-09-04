@@ -1,7 +1,7 @@
 use finite_identity::{FiniteIdentity, IdentityPaths};
 use finitechat_client::{
     FiniteChatDeviceConfig, FiniteChatDeviceState, SqliteClientStore, SqliteClientStoreOptions,
-    StoredAppEvent, StoredAppMessage, StoredAppRoom, StoredAppState, StoredOutboundMessage,
+    StoredAppEvent, StoredAppMessage, StoredAppRoom, StoredAppState,
 };
 use finitechat_core::{AppAction, AppRoomState, ChatMediaKind, FiniteChatRuntime, OpenOptions};
 use finitechat_hermes::HermesMessagePayloadV1;
@@ -91,7 +91,7 @@ fn hermes_cli_uses_mls_add_welcome_and_round_trips_messages() {
 
     let init = cli_json(&[
         "hermes",
-        "--home",
+        "--agent-home",
         &agent_home,
         "init",
         "--server",
@@ -172,7 +172,7 @@ fn hermes_cli_uses_mls_add_welcome_and_round_trips_messages() {
 
     let poll = cli_json(&[
         "hermes",
-        "--home",
+        "--agent-home",
         &agent_home,
         "poll",
         "--request-json",
@@ -187,7 +187,7 @@ fn hermes_cli_uses_mls_add_welcome_and_round_trips_messages() {
 
     cli_json(&[
         "hermes",
-        "--home",
+        "--agent-home",
         &agent_home,
         "send",
         "--request-json",
@@ -221,7 +221,7 @@ fn hermes_cli_uses_mls_add_welcome_and_round_trips_messages() {
     std::fs::write(&image_path, image_bytes).unwrap();
     cli_json(&[
         "hermes",
-        "--home",
+        "--agent-home",
         &agent_home,
         "send",
         "--request-json",
@@ -303,7 +303,7 @@ fn hermes_cli_uses_mls_add_welcome_and_round_trips_messages() {
     let invalid_error = finitechat_cli::run(
         [
             "hermes".to_owned(),
-            "--home".to_owned(),
+            "--agent-home".to_owned(),
             agent_home.clone(),
             "send".to_owned(),
             "--request-json".to_owned(),
@@ -346,7 +346,7 @@ fn hermes_cli_uses_mls_add_welcome_and_round_trips_messages() {
 
     let status = cli_json(&[
         "hermes",
-        "--home",
+        "--agent-home",
         &agent_home,
         "room-status",
         "--room-id",
@@ -355,6 +355,110 @@ fn hermes_cli_uses_mls_add_welcome_and_round_trips_messages() {
     ]);
     assert_eq!(status["connected"], true);
     assert_eq!(status["paired"], true);
+
+    // Operator rekey through the agent home: an ordinary self-update Commit
+    // bumps the room epoch (create 0 -> add 1 -> rekey 2) and the user's
+    // runtime applies it on its next sync, so traffic keeps flowing.
+    let rekeyed = cli_json(&[
+        "hermes",
+        "--agent-home",
+        &agent_home,
+        "rekey",
+        "--room",
+        &room_id,
+        "--json",
+    ]);
+    assert_eq!(rekeyed["room_id"], room_id);
+    assert_eq!(rekeyed["previous_epoch"], 1);
+    assert_eq!(rekeyed["new_epoch"], 2);
+    assert!(rekeyed["commit_seq"].as_u64().is_some_and(|seq| seq > 0));
+    assert!(
+        rekeyed["message_id"]
+            .as_str()
+            .is_some_and(|message_id| !message_id.is_empty())
+    );
+    // Committed from a current cursor: nothing replayed, nothing skipped.
+    assert_eq!(rekeyed["cursor_after"], rekeyed["commit_seq"]);
+    assert_eq!(rekeyed["applied"], 0);
+    assert_eq!(rekeyed["skipped"].as_array().map(Vec::len), Some(0));
+    // Every run appends one line to the agent home's rekey audit trail.
+    let audit_path = std::path::Path::new(&agent_home).join("rekey-audit.jsonl");
+    let read_audit = |path: &std::path::Path| {
+        std::fs::read_to_string(path)
+            .expect("rekey audit trail exists")
+            .lines()
+            .map(|line| serde_json::from_str::<Value>(line).expect("audit line is JSON"))
+            .collect::<Vec<_>>()
+    };
+    let audit_lines = read_audit(&audit_path);
+    assert_eq!(audit_lines.len(), 1);
+    assert_eq!(audit_lines[0]["record"], "rekey");
+    assert_eq!(audit_lines[0]["phase"], "applied");
+    assert_eq!(audit_lines[0]["schema_version"], 1);
+    assert_eq!(audit_lines[0]["room_id"], room_id);
+    assert_eq!(audit_lines[0]["commit_seq"], rekeyed["commit_seq"]);
+    assert_eq!(audit_lines[0]["cursor_after"], rekeyed["commit_seq"]);
+    assert_eq!(audit_lines[0]["applied"], 0);
+    assert_eq!(audit_lines[0]["skipped"].as_array().map(Vec::len), Some(0));
+    let rekey_error = finitechat_cli::run(
+        [
+            "hermes".to_owned(),
+            "--agent-home".to_owned(),
+            agent_home.clone(),
+            "rekey".to_owned(),
+            "--room".to_owned(),
+            "room-1-unknown".to_owned(),
+            "--json".to_owned(),
+        ],
+        &mut Vec::new(),
+    )
+    .expect_err("rekey of an unknown room must fail closed");
+    assert!(
+        rekey_error
+            .to_string()
+            .contains("not available on this device")
+    );
+    // A refusal is audited too.
+    let audit_lines = read_audit(&audit_path);
+    assert_eq!(audit_lines.len(), 2);
+    assert_eq!(audit_lines[1]["phase"], "refused");
+    assert_eq!(audit_lines[1]["room_id"], "room-1-unknown");
+    assert!(
+        audit_lines[1]["refusal"]
+            .as_str()
+            .is_some_and(|reason| reason.contains("not available on this device"))
+    );
+
+    cli_json(&[
+        "hermes",
+        "--agent-home",
+        &agent_home,
+        "send",
+        "--request-json",
+        &json!({
+            "room_id": room_id,
+            "conversation_id": null,
+            "text": "hello after rekey",
+            "kind": "message",
+            "status": "complete",
+            "reply_to_message_id": null,
+            "metadata": {},
+        })
+        .to_string(),
+    ]);
+    user.dispatch_and_wait(AppAction::StartRuntime)
+        .expect("user applies the rekey Commit and the message after it");
+    let after_rekey = user
+        .dispatch_and_wait(AppAction::OpenRoom {
+            room_id: room_id.clone(),
+        })
+        .expect("user opens room after rekey");
+    assert!(
+        after_rekey
+            .messages
+            .iter()
+            .any(|message| message.text == "hello after rekey")
+    );
 }
 
 /// Ownership audit O1, end to end against `hermes poll`/`ack`/`release`: an
@@ -373,7 +477,7 @@ fn hermes_inbox_leases_on_delivery_and_settles_with_ack_or_release() {
 
     cli_json(&[
         "hermes",
-        "--home",
+        "--agent-home",
         &agent_home,
         "init",
         "--server",
@@ -434,7 +538,7 @@ fn hermes_inbox_leases_on_delivery_and_settles_with_ack_or_release() {
     let poll = |timeout_millis: u64| -> Vec<Value> {
         cli_json(&[
             "hermes",
-            "--home",
+            "--agent-home",
             &agent_home,
             "poll",
             "--request-json",
@@ -447,7 +551,7 @@ fn hermes_inbox_leases_on_delivery_and_settles_with_ack_or_release() {
     let settle = |action: &str, event: &Value| {
         cli_json(&[
             "hermes",
-            "--home",
+            "--agent-home",
             &agent_home,
             action,
             "--request-json",
@@ -577,8 +681,8 @@ fn app_cli_add_member_flow_uses_key_packages_and_welcomes() {
 }
 
 /// The full durable content of an agent store: device state (MLS ratchets
-/// and KeyPackage inventory), projected rooms, persisted app state, the
-/// outbox, and the stored message/event op log. A probe that writes anything
+/// and KeyPackage inventory), projected rooms, persisted app state, and the
+/// stored message/event op log. A probe that writes anything
 /// — a StartRuntime's KeyPackage publication, a Welcome activation, a
 /// persisted selection — changes this snapshot, so equality across a probe
 /// proves the probe did not write.
@@ -587,7 +691,6 @@ struct AgentStoreSnapshot {
     device: FiniteChatDeviceState,
     rooms: Vec<StoredAppRoom>,
     app_state: StoredAppState,
-    outbox: Vec<StoredOutboundMessage>,
     messages: Vec<StoredAppMessage>,
     events: Vec<StoredAppEvent>,
 }
@@ -617,7 +720,6 @@ fn snapshot_agent_store(agent_home: &str, device_id: &str, now: u64) -> AgentSto
         device: device.export_state().expect("device state exports"),
         rooms: store.load_app_rooms(&owner).expect("rooms load"),
         app_state: store.load_app_state(&owner).expect("app state loads"),
-        outbox: store.load_app_outbox(&owner).expect("outbox loads"),
         messages: store
             .load_app_messages(&owner, u32::MAX)
             .expect("messages load"),
@@ -642,7 +744,7 @@ fn room_status_and_app_state_read_read_only_while_a_writer_holds_the_store() {
 
     cli_json(&[
         "hermes",
-        "--home",
+        "--agent-home",
         &agent_home,
         "init",
         "--server",
@@ -683,7 +785,7 @@ fn room_status_and_app_state_read_read_only_while_a_writer_holds_the_store() {
 
     let status = cli_json(&[
         "hermes",
-        "--home",
+        "--agent-home",
         &agent_home,
         "room-status",
         "--room-id",

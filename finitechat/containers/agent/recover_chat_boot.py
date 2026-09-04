@@ -54,7 +54,6 @@ REQUIRED_CLIENT_TABLES = {
     "client_device_states",
     "client_app_messages",
     "client_app_events",
-    "client_app_outbox",
     "client_app_rooms",
     "client_app_state",
     "client_app_profiles",
@@ -437,7 +436,7 @@ def _apply_home_channel_plan(
         command = [
             str(finitechat_bin),
             "hermes",
-            "--home",
+            "--agent-home",
             str(agent_home),
             "home-channel",
             "set",
@@ -474,7 +473,7 @@ def _recover_interrupted_turns(
         [
             str(finitechat_bin),
             "hermes",
-            "--home",
+            "--agent-home",
             str(agent_home),
             "recover",
             "--json",
@@ -782,7 +781,7 @@ def recover_known_good_boot(config_path: Path) -> int:
                 [
                     str(finitechat_bin),
                     "hermes",
-                    "--home",
+                    "--agent-home",
                     str(agent_home),
                     "install",
                     "--plugins-dir",

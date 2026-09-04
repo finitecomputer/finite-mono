@@ -90,9 +90,9 @@ with a delete condition.
   workflow. Local Docker, Kata, and Phala prove the same image digest; do not
   create provider- or feature-specific image lanes.
 - Keep Hermes pinned through the root flake across image, smoke, and release
-  defaults. The runtime image asserts the packaged version through
-  `HERMES_AGENT_VERSION` in `deploy/finite-computer/images/runtime.Dockerfile`;
-  do not restate a version here. Baseline agent CLIs (Node from Hermes, bun,
+  paths. Every Hermes version fact derives from that pin: the image build
+  stamps the pinned Nix package's evaluated version into
+  `deploy/finite-computer/images/runtime.Dockerfile`; never hand-copy one. Baseline agent CLIs (Node from Hermes, bun,
   deno, uv, Playwright browsers) are `.#agent-runtime-toolchains` on the
   same flake (`deploy/finite-computer/images/agent-runtime-toolchains.nix`);
   the image copies that closure and does not pin tarball hashes, and that

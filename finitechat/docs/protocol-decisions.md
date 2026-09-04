@@ -108,7 +108,7 @@ separate work.
 feature we may want, but the protocol-shaping part is on our server: the
 durable ordered log currently keeps everything forever, every client assumes
 "sync from 0 replays everything," and the Phase E compaction/snapshot work
-(perf-log items 2–4) needs cursor semantics decided before it can exist.
+needs cursor semantics decided before it can exist.
 
 **Proposal.** Decide the cursor contract now, implement at Phase E:
 - Room metadata gains `retention: Option<RetentionPolicyV1>` with

@@ -1,0 +1,19 @@
+[Unit]
+Description=Finite monitoring node_exporter (textfile gateway for the Tinfoil usage collector)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+User=finite-monitoring
+Group=finite-monitoring
+# Loopback only, defaults disabled: this instance exists to expose the
+# collector's textfile (finite_tinfoil_*) to Prometheus, nothing else.
+ExecStart=/opt/finite-monitoring/bin/node_exporter --web.listen-address=127.0.0.1:9100 --collector.disable-defaults --collector.textfile --collector.textfile.directory=/var/lib/finite-monitoring/tinfoil/textfile
+Restart=on-failure
+RestartSec=5s
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectHome=true
+
+[Install]
+WantedBy=multi-user.target

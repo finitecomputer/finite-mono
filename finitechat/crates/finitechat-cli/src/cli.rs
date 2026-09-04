@@ -7,11 +7,9 @@
 //!
 //! Parity invariants carried over from the previous hand-rolled parser:
 //! - The family-level options (`http --server`, `app --data-dir/--server/
-//!   --device-id/--now`, `hermes --agent-home/--home/--json/--request-json`)
+//!   --device-id/--now`, `hermes --agent-home/--json/--request-json`)
 //!   may appear before OR after their subcommand; they are clap `global`
 //!   arguments for that reason.
-//! - `--home` is a hidden compatibility alias of `hermes --agent-home`
-//!   (the Hermes Python adapter still invokes it).
 //! - The hermes agent home falls back to `$FINITE_AGENT_HOME`, then
 //!   `$FINITECHAT_HOME`, then `~/.finite/agent`; that chain is resolved in
 //!   code after parsing so its precedence is testable.
@@ -719,14 +717,8 @@ pub(crate) struct RepairSkipEntryArgs {
 #[derive(Debug, Args)]
 pub(crate) struct HermesArgs {
     /// Durable agent home directory (default: $FINITE_AGENT_HOME, then
-    /// $FINITECHAT_HOME, then ~/.finite/agent). `--home` is a compatibility
-    /// alias.
-    #[arg(
-        long = "agent-home",
-        alias = "home",
-        global = true,
-        allow_hyphen_values = true
-    )]
+    /// $FINITECHAT_HOME, then ~/.finite/agent).
+    #[arg(long = "agent-home", global = true, allow_hyphen_values = true)]
     pub(crate) agent_home: Option<String>,
 
     /// Machine-readable JSON output for the commands that support it.
@@ -760,8 +752,20 @@ pub(crate) enum HermesCommand {
         command: HermesHomeChannelCommand,
     },
 
+    /// Manage chat room admission (who may add this agent to rooms).
+    Admission {
+        #[command(subcommand)]
+        command: HermesAdmissionCommand,
+    },
+
     /// Report one room's connection/pairing status.
     RoomStatus(HermesRoomStatusArgs),
+
+    /// Advance one room's MLS epoch with a self-update Commit so a
+    /// counterpart whose send ratchet was rewound starts fresh at
+    /// generation 0. Refuses to run unless the local epoch matches the
+    /// server's; the room cursor is not required to be at the server head.
+    Rekey(HermesRekeyArgs),
 
     /// Poll inbound Hermes events ({room_id?, limit?, timeout_millis?}).
     Poll,
@@ -859,6 +863,19 @@ pub(crate) struct HermesRoomStatusArgs {
     pub(crate) room_id: String,
 }
 
+#[derive(Debug, Args)]
+pub(crate) struct HermesRekeyArgs {
+    /// Room to rekey.
+    #[arg(long, allow_hyphen_values = true)]
+    pub(crate) room: String,
+
+    /// Append-only JSONL audit trail of the rekey's cursor-skip decision
+    /// (created mode 0600; same writer as `repair skip-entry`). Defaults
+    /// to `<agent-home>/rekey-audit.jsonl`.
+    #[arg(long, allow_hyphen_values = true)]
+    pub(crate) audit_log: Option<String>,
+}
+
 #[derive(Debug, Subcommand)]
 pub(crate) enum HermesHomeChannelCommand {
     /// Print the current home channel.
@@ -869,6 +886,17 @@ pub(crate) enum HermesHomeChannelCommand {
 
     /// Clear the home channel.
     Clear,
+}
+
+#[derive(Debug, Subcommand)]
+pub(crate) enum HermesAdmissionCommand {
+    /// Run the admission birth-seed step: consume the environment seed into
+    /// the store's Welcome admission policy exactly once (a store with a
+    /// policy row only refreshes the gateway's allowed-users mirror), then
+    /// print the current admission state. Safe to run repeatedly; agentd runs
+    /// it before starting the gateway and sidecar, and `hermes serve` runs it
+    /// again at boot.
+    Seed,
 }
 
 #[derive(Debug, Args)]
@@ -908,16 +936,27 @@ mod tests {
     /// Every invocation form below is copied from a real caller: the
     /// embedded Hermes Python adapter (integrations/hermes/finitechat/
     /// adapter.py), the canary/docker smoke scripts under finitechat/
-    /// scripts/, .github/workflows/runtime-image.yml, and
-    /// docs/local-dev-matrix.md. If one of these stops parsing, operator
+    /// scripts/, .github/workflows/runtime-image.yml, and current local
+    /// integration docs. If one of these stops parsing, operator
     /// tooling breaks — keep them green.
+
+    #[test]
+    fn removed_home_alias_is_rejected() {
+        // `--home` was a hidden compatibility alias of `--agent-home` kept
+        // for the Hermes Python adapter; every in-repo caller now spells
+        // `--agent-home`, so the alias is gone. A stale caller (e.g. an
+        // adapter copy installed by an older CLI) must fail loudly with a
+        // usage error instead of silently acting on a different home.
+        let stderr = parse_err(&["hermes", "--home", "/agent/home", "poll", "--json"]);
+        assert!(stderr.contains("--home"), "{stderr:?}");
+    }
 
     #[test]
     fn adapter_service_spawn_form_parses() {
         // adapter.py _ensure_service: spawn the resident service.
         let args = hermes(&[
             "hermes",
-            "--home",
+            "--agent-home",
             "/agent/home",
             "serve",
             "--addr",
@@ -940,10 +979,10 @@ mod tests {
 
     #[test]
     fn adapter_cli_fallback_action_forms_parse() {
-        // adapter.py _finitechat_json fallback: `<bin> hermes --home H
+        // adapter.py _finitechat_json fallback: `<bin> hermes --agent-home H
         // <action> --json` with the request on stdin.
         for action in ["poll", "ack", "send", "edit", "recover", "activity"] {
-            let args = hermes(&["hermes", "--home", "/agent/home", action, "--json"]);
+            let args = hermes(&["hermes", "--agent-home", "/agent/home", action, "--json"]);
             assert!(args.json, "{action} must see --json");
             assert!(args.request_json.is_none());
         }
@@ -951,7 +990,7 @@ mod tests {
         // hermes_flow.rs request form: --request-json replaces stdin.
         let args = hermes(&[
             "hermes",
-            "--home",
+            "--agent-home",
             "/agent/home",
             "poll",
             "--request-json",
@@ -1035,10 +1074,10 @@ mod tests {
         assert!(wait_update_ms.is_none());
         assert!(room_id.is_none());
 
-        // The docker hermes wrapper runs `finitechat hermes --home ...`.
+        // The docker hermes wrapper runs `finitechat hermes --agent-home ...`.
         let args = hermes(&[
             "hermes",
-            "--home",
+            "--agent-home",
             "/home/node/.finitechat/agent",
             "room-status",
             "--room-id",
@@ -1048,11 +1087,28 @@ mod tests {
             panic!("expected room-status");
         };
         assert_eq!(status.room_id, "room");
+
+        // Operator rekey of one wedged room (runbook: epoch bump + skip).
+        let args = hermes(&[
+            "hermes",
+            "--agent-home",
+            "/home/node/.finitechat/agent",
+            "rekey",
+            "--room",
+            "room-1",
+            "--json",
+        ]);
+        assert!(args.json);
+        let HermesCommand::Rekey(rekey) = args.command else {
+            panic!("expected rekey");
+        };
+        assert_eq!(rekey.room, "room-1");
+        assert_eq!(rekey.audit_log, None);
     }
 
     #[test]
     fn documented_forms_parse() {
-        // docs/local-dev-matrix.md operator quickstart.
+        // Current local integration documentation operator quickstart.
         assert!(matches!(
             parse(&["auth", "status"]).command,
             Command::Auth(AuthArgs {
@@ -1072,7 +1128,7 @@ mod tests {
         // hermes_flow.rs init form, flags after the subcommand.
         let args = hermes(&[
             "hermes",
-            "--home",
+            "--agent-home",
             "/agent/home",
             "init",
             "--server",

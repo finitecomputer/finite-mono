@@ -92,7 +92,9 @@ def provider_fact(
 ) -> dict[str, object]:
     principal = f"npub1{runtime}principal"
     work_root = (
-        "/data/finite-saas-runner" if host == "finite-lat-3" else "/var/lib/finite-saas-runner"
+        "/data/finite-saas-runner"
+        if host in {"finite-lat-3", "finite-lat-4"}
+        else "/var/lib/finite-saas-runner"
     )
     return {
         "project_id": project,
@@ -309,6 +311,9 @@ class RuntimeRolloutScriptTests(unittest.TestCase):
         environment = {
             "PATH": f"{temp}:{os.environ['PATH']}",
             "LAT1": "root@test-lat1",
+            "LAT2": "root@test-lat2",
+            "LAT3": "root@test-lat3",
+            "LAT4": "root@test-lat4",
             "ROLLOUT_STATE_ROOT": str(state_root),
             "FAKE_SSH_LOG": str(log),
             "FAKE_STATE_DIR": str(state_dir),
@@ -416,7 +421,9 @@ class RuntimeRolloutScriptTests(unittest.TestCase):
             calls = log.read_text(encoding="utf-8").splitlines()
             self.assertEqual(len(calls), 3, calls)
             self.assertTrue(any("--plan-only" in call for call in calls))
-            self.assertFalse(any("--expected-agent-runtime-id" in call for call in calls))
+            self.assertFalse(
+                any("--expected-agent-runtime-id" in call for call in calls)
+            )
 
             evidence_dir = state_root / plan_hash
             plan_path = evidence_dir / "plan.json"
@@ -424,7 +431,9 @@ class RuntimeRolloutScriptTests(unittest.TestCase):
             saved = json.loads(plan_path.read_text(encoding="utf-8"))
             self.assertNotIn("actor", saved)
             self.assertNotIn("wait_timeout_seconds", saved)
-            self.assertNotIn("project_display_name", plan_path.read_text(encoding="utf-8"))
+            self.assertNotIn(
+                "project_display_name", plan_path.read_text(encoding="utf-8")
+            )
             self.assertRegex(saved["repo_revision"], r"^[0-9a-f]{40}$")
             self.assertEqual(
                 saved["remote_system_closure"], env["FAKE_REMOTE_SYSTEM_CLOSURE"]
@@ -438,12 +447,15 @@ class RuntimeRolloutScriptTests(unittest.TestCase):
             self.assertEqual(stat.S_IMODE(plan_path.stat().st_mode), 0o600)
             self.assertEqual(stat.S_IMODE(events_path.stat().st_mode), 0o600)
             events = [
-                json.loads(line) for line in events_path.read_text(encoding="utf-8").splitlines()
+                json.loads(line)
+                for line in events_path.read_text(encoding="utf-8").splitlines()
             ]
             self.assertEqual([event["event"] for event in events], ["start", "final"])
             self.assertEqual(events[-1]["status"], "success")
 
-    def test_all_requires_already_target_canary_and_provider_preflights_it(self) -> None:
+    def test_all_requires_already_target_canary_and_provider_preflights_it(
+        self,
+    ) -> None:
         with tempfile.TemporaryDirectory() as directory:
             temp = Path(directory)
             planned = [plan_entry("project-next", "runtime-next", "kata-next")]
@@ -474,7 +486,8 @@ class RuntimeRolloutScriptTests(unittest.TestCase):
             )
             self.assertEqual(result.returncode, 0, result.stderr)
             provider_call = next(
-                call for call in log.read_text(encoding="utf-8").splitlines()
+                call
+                for call in log.read_text(encoding="utf-8").splitlines()
                 if "provider-snapshot-v1" in call
             )
             self.assertIn("runtime-canary", provider_call)
@@ -552,7 +565,9 @@ class RuntimeRolloutScriptTests(unittest.TestCase):
                 [entry["agent_runtime_id"] for entry in saved["planned"]],
                 ["runtime-running"],
             )
-            self.assertEqual(saved["excluded"][0]["agent_runtime_id"], "runtime-offline")
+            self.assertEqual(
+                saved["excluded"][0]["agent_runtime_id"], "runtime-offline"
+            )
             self.assertEqual(saved["excluded"][0]["reason"], "provider_not_running")
             self.assertEqual(saved["excluded"][0]["provider_facts"]["state"], "exited")
             self.assertIsNone(
@@ -564,7 +579,9 @@ class RuntimeRolloutScriptTests(unittest.TestCase):
                 if "provider-contact-v1" in call
             ]
             self.assertTrue(prepare_contacts)
-            self.assertTrue(all("runtime-offline" not in call for call in prepare_contacts))
+            self.assertTrue(
+                all("runtime-offline" not in call for call in prepare_contacts)
+            )
 
             log.write_text("", encoding="utf-8")
             executed = self.run_rollout(
@@ -707,7 +724,9 @@ class RuntimeRolloutScriptTests(unittest.TestCase):
             self.assertIn("could not inspect canonical container", result.stderr)
             self.assertFalse(state_root.exists())
 
-    def test_execute_recomputes_hash_then_rechecks_each_entry_and_postflight(self) -> None:
+    def test_execute_recomputes_hash_then_rechecks_each_entry_and_postflight(
+        self,
+    ) -> None:
         with tempfile.TemporaryDirectory() as directory:
             temp = Path(directory)
             entries = [
@@ -715,8 +734,20 @@ class RuntimeRolloutScriptTests(unittest.TestCase):
                 plan_entry("project-a", "runtime-a", "kata-a"),
             ]
             facts = [
-                provider_fact("project-z", "runtime-z", "kata-z", artifact="artifact-v2", image=TARGET_IMAGE),
-                provider_fact("project-a", "runtime-a", "kata-a", artifact="artifact-v2", image=TARGET_IMAGE),
+                provider_fact(
+                    "project-z",
+                    "runtime-z",
+                    "kata-z",
+                    artifact="artifact-v2",
+                    image=TARGET_IMAGE,
+                ),
+                provider_fact(
+                    "project-a",
+                    "runtime-a",
+                    "kata-a",
+                    artifact="artifact-v2",
+                    image=TARGET_IMAGE,
+                ),
             ]
             env, log, state_root = self.fake_ssh_environment(
                 temp, rollout_report(entries), facts
@@ -749,7 +780,9 @@ class RuntimeRolloutScriptTests(unittest.TestCase):
             self.assertIn("--project-id project-a", exact[0])
             self.assertIn("--project-id project-z", exact[1])
             provider = [call for call in calls if "provider-snapshot-v1" in call]
-            self.assertEqual(len(provider), 5, calls)  # full recompute, then pre/post per entry
+            self.assertEqual(
+                len(provider), 5, calls
+            )  # full recompute, then pre/post per entry
 
             events = [
                 json.loads(line)
@@ -765,10 +798,15 @@ class RuntimeRolloutScriptTests(unittest.TestCase):
                 sum(event["event"] == "entry_postflight" for event in execute_events), 2
             )
             postflights = [
-                event for event in execute_events if event["event"] == "entry_postflight"
+                event
+                for event in execute_events
+                if event["event"] == "entry_postflight"
             ]
             self.assertTrue(all("provider_facts" in event for event in postflights))
-            self.assertNotIn("npub1", (state_root / plan_hash / "events.jsonl").read_text(encoding="utf-8"))
+            self.assertNotIn(
+                "npub1",
+                (state_root / plan_hash / "events.jsonl").read_text(encoding="utf-8"),
+            )
 
     def execute_single_entry(
         self, env: dict[str, str], plan_hash: str
@@ -801,7 +839,10 @@ class RuntimeRolloutScriptTests(unittest.TestCase):
             ("inoperable", "orphaned_task"),
             ("unknown", "task_list_error"),
         ):
-            with self.subTest(verdict=verdict), tempfile.TemporaryDirectory() as directory:
+            with (
+                self.subTest(verdict=verdict),
+                tempfile.TemporaryDirectory() as directory,
+            ):
                 temp = Path(directory)
                 env, log, state_root, plan_hash = self.single_entry_environment(temp)
                 env["FAKE_PROBE_VERDICT"] = verdict
@@ -885,7 +926,9 @@ class RuntimeRolloutScriptTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             temp = Path(directory)
             env, log, state_root, plan_hash = self.single_entry_environment(temp)
-            env["FAKE_PROBE_REPORT"] = '{"schema":"something-else","verdict":"operable"}'
+            env["FAKE_PROBE_REPORT"] = (
+                '{"schema":"something-else","verdict":"operable"}'
+            )
 
             executed = self.execute_single_entry(env, plan_hash)
             self.assertEqual(executed.returncode, 0, executed.stderr)
@@ -946,7 +989,10 @@ class RuntimeRolloutScriptTests(unittest.TestCase):
             ("degraded", "wrapped_vmm_process_name"),
             ("inoperable", "orphaned_task"),
         ):
-            with self.subTest(verdict=verdict), tempfile.TemporaryDirectory() as directory:
+            with (
+                self.subTest(verdict=verdict),
+                tempfile.TemporaryDirectory() as directory,
+            ):
                 temp = Path(directory)
                 env, log, state_root, plan_hash = self.single_entry_environment(temp)
                 env["FAKE_PROBE_VERDICT"] = verdict
@@ -1096,7 +1142,9 @@ class RuntimeRolloutScriptTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             temp = Path(directory)
             env, log, state_root, plan_hash = self.single_entry_environment(temp)
-            env["FAKE_PROBE_REPORT"] = '{"schema":"something-else","verdict":"operable"}'
+            env["FAKE_PROBE_REPORT"] = (
+                '{"schema":"something-else","verdict":"operable"}'
+            )
 
             executed = self.run_rollout(
                 "--execute-plan-hash",
@@ -1166,7 +1214,10 @@ class RuntimeRolloutScriptTests(unittest.TestCase):
             ("ambiguous container topology", "ambiguous container topology", "running"),
             ("missing container topology", "ambiguous container topology", "running"),
         ):
-            with self.subTest(failure=failure), tempfile.TemporaryDirectory() as directory:
+            with (
+                self.subTest(failure=failure),
+                tempfile.TemporaryDirectory() as directory,
+            ):
                 temp = Path(directory)
                 entry = plan_entry("project-a", "runtime-a", "kata-a")
                 env, _, _ = self.fake_ssh_environment(
@@ -1266,19 +1317,19 @@ class RuntimeRolloutScriptTests(unittest.TestCase):
             ]
             self.assertTrue(provider_commands)
             self.assertTrue(
-                all("jq" not in call and "sha256sum" not in call for call in provider_commands)
+                all(
+                    "jq" not in call and "sha256sum" not in call
+                    for call in provider_commands
+                )
             )
             # The fake receives only the remote command, so inspect the script source for
             # the invariant that protects loops/process substitutions from SSH stdin, and
-            # for the pin that keeps Core CLI calls on lat1 for every rollout host.
+            # for the pin that keeps Core CLI calls on lat2 for every rollout host.
             source = ROLLOUT.read_text(encoding="utf-8")
             self.assertIn('ssh -n -o BatchMode=yes -- "$destination"', source)
-            self.assertIn('run_remote_bash "$LAT1"', source)
+            self.assertIn('run_remote_bash "$LAT2"', source)
 
-
-    def read_events(
-        self, state_root: Path, plan_hash: str
-    ) -> list[dict[str, object]]:
+    def read_events(self, state_root: Path, plan_hash: str) -> list[dict[str, object]]:
         return [
             json.loads(line)
             for line in (state_root / plan_hash / "events.jsonl")
@@ -1341,7 +1392,9 @@ class RuntimeRolloutScriptTests(unittest.TestCase):
             process.args, process.returncode, stdout, stderr
         )
 
-    def test_sigint_mid_entry_records_interrupted_with_run_id_then_resumes(self) -> None:
+    def test_sigint_mid_entry_records_interrupted_with_run_id_then_resumes(
+        self,
+    ) -> None:
         with tempfile.TemporaryDirectory() as directory:
             temp = Path(directory)
             entries = [
@@ -1444,9 +1497,7 @@ class RuntimeRolloutScriptTests(unittest.TestCase):
             self.assertEqual(terminated.returncode, 143, terminated.stderr)
 
             events = self.read_events(state_root, plan_hash)
-            execute_events = [
-                event for event in events if event["phase"] == "execute"
-            ]
+            execute_events = [event for event in events if event["phase"] == "execute"]
             self.assertEqual(execute_events[-1]["event"], "final")
             self.assertEqual(execute_events[-1]["status"], "interrupted")
             self.assertEqual(execute_events[-1]["signal"], "TERM")
@@ -1501,13 +1552,13 @@ class RuntimeRolloutScriptTests(unittest.TestCase):
             self.assertIn("runtime-b", enqueues[0])
             self.assertIn("runtime-c", enqueues[1])
             self.assertFalse(
-                any("--expected-agent-runtime-id runtime-a" in call for call in enqueues)
+                any(
+                    "--expected-agent-runtime-id runtime-a" in call for call in enqueues
+                )
             )
 
             events = self.read_events(state_root, plan_hash)
-            execute_events = [
-                event for event in events if event["phase"] == "execute"
-            ]
+            execute_events = [event for event in events if event["phase"] == "execute"]
             self.assertEqual(execute_events[-1]["status"], "success")
             core_events = [
                 event
@@ -1515,7 +1566,10 @@ class RuntimeRolloutScriptTests(unittest.TestCase):
                 if event["event"] == "core" and event["status"] == "succeeded"
             ]
             self.assertEqual(
-                {event["agent_runtime_id"]: event["request_id"] for event in core_events},
+                {
+                    event["agent_runtime_id"]: event["request_id"]
+                    for event in core_events
+                },
                 {"runtime-b": "runtime_ctl_inflight", "runtime-c": "runtime_ctl_test"},
             )
             postflights = [
@@ -1563,9 +1617,7 @@ class RuntimeRolloutScriptTests(unittest.TestCase):
             )
             self.assertEqual(executed.returncode, 0, executed.stderr)
             events = self.read_events(state_root, plan_hash)
-            execute_events = [
-                event for event in events if event["phase"] == "execute"
-            ]
+            execute_events = [event for event in events if event["phase"] == "execute"]
             self.assertEqual(execute_events[-1]["event"], "final")
             self.assertEqual(execute_events[-1]["status"], "noop")
 
@@ -1684,7 +1736,7 @@ class RuntimeRolloutScriptTests(unittest.TestCase):
             core_calls = [call for call in calls if "--plan-only" in call]
             self.assertTrue(core_calls)
             self.assertTrue(
-                all(call.startswith("root@test-lat1\t") for call in core_calls), calls
+                all(call.startswith("root@test-lat2\t") for call in core_calls), calls
             )
             provider_calls = [
                 call
@@ -1702,9 +1754,7 @@ class RuntimeRolloutScriptTests(unittest.TestCase):
             )
             self.assertEqual(executed.returncode, 0, executed.stderr)
             events = self.read_events(state_root, plan_hash)
-            execute_events = [
-                event for event in events if event["phase"] == "execute"
-            ]
+            execute_events = [event for event in events if event["phase"] == "execute"]
             self.assertEqual(execute_events[-1]["status"], "success")
 
     def test_mixed_host_plan_is_refused(self) -> None:
@@ -1740,6 +1790,53 @@ class RuntimeRolloutScriptTests(unittest.TestCase):
                     for call in log.read_text(encoding="utf-8").splitlines()
                 )
             )
+
+    def test_host_lat4_scopes_plan_and_addresses_runner(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            temp = Path(directory)
+            entries = [
+                plan_entry("project-a", "runtime-a", "kata-a", host="finite-lat-4")
+            ]
+            facts = [
+                provider_fact("project-a", "runtime-a", "kata-a", host="finite-lat-4")
+            ]
+            env, log, state_root = self.fake_ssh_environment(
+                temp, rollout_report(entries, host="finite-lat-4"), facts
+            )
+            env["LAT4"] = "root@test-lat4"
+            env["FAKE_SOURCE_HOST_ID"] = "finite-lat-4"
+            scope = ("--host", "lat4", "--roll-project-id", "project-a")
+            prepared, plan_hash = self.prepare(env, *scope)
+            self.assertEqual(prepared.returncode, 0, prepared.stderr)
+            saved = json.loads(
+                (state_root / plan_hash / "plan.json").read_text(encoding="utf-8")
+            )
+            self.assertEqual(saved["source_host_id"], "finite-lat-4")
+
+            calls = log.read_text(encoding="utf-8").splitlines()
+            core_calls = [call for call in calls if "--plan-only" in call]
+            self.assertTrue(core_calls)
+            self.assertTrue(
+                all(call.startswith("root@test-lat2\t") for call in core_calls), calls
+            )
+            provider_calls = [
+                call
+                for call in calls
+                if "provider-snapshot-v1" in call or "provider-contact-v1" in call
+            ]
+            self.assertTrue(provider_calls)
+            self.assertTrue(
+                all(call.startswith("root@test-lat4\t") for call in provider_calls),
+                calls,
+            )
+
+            executed = self.run_rollout(
+                "--execute-plan-hash", plan_hash, *self.actor_args(), *scope, env=env
+            )
+            self.assertEqual(executed.returncode, 0, executed.stderr)
+            events = self.read_events(state_root, plan_hash)
+            execute_events = [event for event in events if event["phase"] == "execute"]
+            self.assertEqual(execute_events[-1]["status"], "success")
 
     def test_unknown_host_is_rejected(self) -> None:
         result = self.run_rollout(

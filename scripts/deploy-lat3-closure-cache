@@ -178,9 +178,11 @@ if [[ "$mode" == "prepare" ]]; then
 fi
 
 echo "==> activating the fenced Runner-only closure"
-ssh -o BatchMode=yes "$LAT3" bash -s -- "$SYSTEM" <<'LAT3'
+ssh -o BatchMode=yes "$LAT3" bash -s -- "$SYSTEM" "${approved_extra_units[@]+"${approved_extra_units[@]}"}" <<'LAT3'
 set -euo pipefail
 system="$1"
+shift 1
+approved_units=("${@-}")
 [[ "$system" =~ ^/nix/store/[0-9a-z]{32}-nixos-system-finite-lat-3-[^/[:space:]]+$ ]] || exit 64
 test -x "$system/bin/switch-to-configuration"
 nix-store --check-validity "$system" >/dev/null
@@ -225,12 +227,52 @@ done
 
 echo "==> mutation boundary: switching finite-lat-3 to $system"
 nix-env --option builders '' --profile /nix/var/nix/profiles/system --set "$system"
+set +e
 "$system/bin/switch-to-configuration" switch
+stc_rc=$?
+set -e
+if [[ "$stc_rc" != 0 ]]; then
+  # A cold-start runner failure is recoverable by design: the unit is a
+  # 5s-retry oneshot, and its first attempt can race networkd's interface
+  # configuration while the switch restarts networkd (hub flip). If the
+  # runner is the ONLY failed unit, wait for the overlay address and
+  # start it once more before treating the switch as failed.
+  if systemctl is-failed --quiet finite-saas-runner.service \
+    && ! systemctl --failed --no-legend | grep -qv finite-saas-runner.service; then
+    echo "==> runner failed its cold-start attempt; waiting for the overlay and retrying once" >&2
+    overlay_wait=0
+    until ip -4 addr show dev wg-finite 2>/dev/null | grep -q "inet 10.254.3." || (( overlay_wait >= 60 )); do
+      sleep 1
+      overlay_wait=$((overlay_wait + 1))
+    done
+    systemctl reset-failed finite-saas-runner.service
+    systemctl start finite-saas-runner.service
+    echo "==> runner retry succeeded after overlay came up" >&2
+  else
+    echo "switch-to-configuration failed (rc=$stc_rc) with non-runner failures" >&2
+    exit 1
+  fi
+fi
 test "$(readlink -f /run/current-system)" = "$system"
 test "$(readlink -f /nix/var/nix/profiles/system)" = "$system"
 
-test "$(systemctl show containerd.service --property=MainPID --value)" = "$containerd_pid"
-test "$(systemctl show systemd-networkd.service --property=MainPID --value)" = "$networkd_pid"
+# Infra units whose PID must survive the switch UNLESS the operator
+# explicitly approved restarting them via --allow-unit (the fence and this
+# assertion must agree; the Gate E hub flip legitimately restarts
+# networkd on lat3).
+pid_unchanged_unless_approved() {
+  local unit="$1" before="$2" u now
+  for u in "${approved_units[@]-}"; do
+    [[ "$u" = "$unit" ]] && return 0
+  done
+  now="$(systemctl show "$unit" --property=MainPID --value)"
+  if [[ "$now" != "$before" ]]; then
+    echo "$unit restarted during activation (pid $before -> $now) without --allow-unit approval" >&2
+    return 1
+  fi
+}
+pid_unchanged_unless_approved containerd.service "$containerd_pid"
+pid_unchanged_unless_approved systemd-networkd.service "$networkd_pid"
 systemctl is-active --quiet containerd.service
 systemctl is-active --quiet systemd-networkd.service
 

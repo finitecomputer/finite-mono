@@ -6,13 +6,12 @@ use finite_saas_runner::lifecycle_probe::{
 use finite_saas_runner::phala::PhalaApiClient;
 use finite_saas_runner::{
     AgentCreationRunner, AgentIdentityAuthorityConfig, AppleContainerConfig,
-    AppleContainerLauncher, CoreHttpAgentCreationQueue, DEFAULT_FINITE_AGENT_PICTURE_URL,
-    DEFAULT_FINITE_PRIVATE_BASE_URL, DEFAULT_FINITE_PRIVATE_MODEL,
-    DEFAULT_FINITE_PRIVATE_SPECIALIZATION_BUNDLE, DEFAULT_FINITECHAT_SERVER_URL, DockerConfig,
-    DockerLauncher, EnclaviaConfig, EnclaviaLauncher, FinitePrivateRuntimeDefaults, KataConfig,
-    KataLauncher, KataRetirementConfig, PhalaConfig, PhalaLauncher, RandomLeaseTokenSource,
-    RunOnceOutcome, RuntimeLauncher, SpecializationBundleRuntimeDefaults,
-    durable_state_manifest_sha256,
+    AppleContainerLauncher, CoreHttpAgentCreationQueue, DEFAULT_DURABLE_TREE_QUIESCENCE_WINDOW,
+    DEFAULT_FINITE_AGENT_PICTURE_URL, DEFAULT_FINITE_PRIVATE_BASE_URL,
+    DEFAULT_FINITE_PRIVATE_MODEL, DEFAULT_FINITECHAT_SERVER_URL, DockerConfig, DockerLauncher,
+    EnclaviaConfig, EnclaviaLauncher, FinitePrivateRuntimeDefaults, KataConfig, KataLauncher,
+    KataRetirementConfig, PhalaConfig, PhalaLauncher, RandomLeaseTokenSource, RunOnceOutcome,
+    RuntimeLauncher, durable_state_manifest_sha256,
 };
 use std::collections::BTreeMap;
 use std::env;
@@ -188,31 +187,10 @@ fn run_cycle() -> Result<RunOnceOutcome> {
     );
     let finite_private_api_key_override =
         optional_env_value("FC_RUNNER_FINITE_PRIVATE_API_KEY_OVERRIDE");
-    let configured_specialization_worker_api_key =
-        optional_env_value("FC_RUNNER_FINITE_PRIVATE_SPECIALIZATION_WORKER_API_KEY");
-    let specialization_policy_evidence =
-        optional_env_value("FC_RUNNER_FINITE_PRIVATE_SPECIALIZATION_POLICY_EVIDENCE_ID");
-    let specialization_deployment_verified = optional_bool(
-        "FC_RUNNER_FINITE_PRIVATE_SPECIALIZATION_DEPLOYMENT_VERIFIED",
-        false,
-    )?;
-    // The bearer token alone never enables plaintext egress. Operators must
-    // attest that the deployed digest exposes the verified-policy health
-    // contract and name the reviewed evidence. Until then Runner withholds the
-    // entire specialization bundle from newly launched runtimes.
-    let finite_private_specialization_worker_api_key = if specialization_deployment_verified
-        && specialization_policy_evidence
-            .as_deref()
-            .is_some_and(|evidence| !evidence.trim().is_empty())
-    {
-        configured_specialization_worker_api_key
-    } else {
-        None
-    };
     let runtime_environment = optional_runtime_environment()?;
     let runtime_secret_environment = optional_runtime_secret_environment()?;
     let agent_identity_authority = optional_agent_identity_authority()?;
-    let health_reports = optional_health_report_config()?;
+    let health_reports = health_report_config()?;
     // This identifies the adapter offered by this worker. Placement remains
     // project-selected in Core; product code never toggles a process-global
     // backend to change an existing agent's runtime.
@@ -265,7 +243,6 @@ fn run_cycle() -> Result<RunOnceOutcome> {
                     finite_private_base_url,
                     finite_private_model,
                     finite_private_api_key_override,
-                    finite_private_specialization_worker_api_key,
                     runtime_environment,
                     runtime_secret_environment,
                     agent_identity_authority: agent_identity_authority.clone(),
@@ -328,7 +305,6 @@ fn run_cycle() -> Result<RunOnceOutcome> {
                     finite_private_base_url,
                     finite_private_model,
                     finite_private_api_key_override,
-                    finite_private_specialization_worker_api_key,
                     runtime_environment,
                     runtime_secret_environment,
                     agent_identity_authority: agent_identity_authority.clone(),
@@ -378,6 +354,7 @@ fn run_cycle() -> Result<RunOnceOutcome> {
                 readiness_timeout: runtime_ready_timeout,
                 readiness_interval: runtime_ready_interval,
                 stop_timeout_secs: optional_u64("FC_RUNNER_KATA_STOP_TIMEOUT_SECS", 180)?,
+                durable_tree_quiescence_window: DEFAULT_DURABLE_TREE_QUIESCENCE_WINDOW,
                 retirement: optional_kata_retirement_config()?,
             });
             run_once_with_launcher(
@@ -389,7 +366,6 @@ fn run_cycle() -> Result<RunOnceOutcome> {
                     finite_private_base_url,
                     finite_private_model,
                     finite_private_api_key_override,
-                    finite_private_specialization_worker_api_key,
                     runtime_environment,
                     runtime_secret_environment,
                     agent_identity_authority: agent_identity_authority.clone(),
@@ -430,7 +406,6 @@ fn run_cycle() -> Result<RunOnceOutcome> {
                     finite_private_base_url,
                     finite_private_model,
                     finite_private_api_key_override,
-                    finite_private_specialization_worker_api_key,
                     runtime_environment,
                     runtime_secret_environment,
                     agent_identity_authority: agent_identity_authority.clone(),
@@ -481,7 +456,6 @@ fn run_cycle() -> Result<RunOnceOutcome> {
                     finite_private_base_url,
                     finite_private_model,
                     finite_private_api_key_override,
-                    finite_private_specialization_worker_api_key,
                     runtime_environment,
                     runtime_secret_environment,
                     agent_identity_authority,
@@ -548,11 +522,10 @@ struct RunOnceConfig {
     finite_private_base_url: String,
     finite_private_model: String,
     finite_private_api_key_override: Option<String>,
-    finite_private_specialization_worker_api_key: Option<String>,
     runtime_environment: BTreeMap<String, String>,
     runtime_secret_environment: BTreeMap<String, String>,
     agent_identity_authority: Option<AgentIdentityAuthorityConfig>,
-    health_reports: Option<finite_saas_runner::HealthReportConfig>,
+    health_reports: finite_saas_runner::HealthReportConfig,
 }
 
 fn run_once_with_launcher<L>(
@@ -574,55 +547,35 @@ where
         base_url: config.finite_private_base_url,
         model: config.finite_private_model,
         api_key_override: config.finite_private_api_key_override,
-        specialization_bundle: config.finite_private_specialization_worker_api_key.map(
-            |worker_api_key| SpecializationBundleRuntimeDefaults {
-                bundle_id: DEFAULT_FINITE_PRIVATE_SPECIALIZATION_BUNDLE.to_owned(),
-                worker_api_key,
-            },
-        ),
     })
     .with_runtime_environment(config.runtime_environment)?
     .with_runtime_secret_environment(config.runtime_secret_environment)?
-    .with_health_reports(config.health_reports);
+    .with_health_reports(Some(config.health_reports));
     if let Some(identity_authority) = config.agent_identity_authority {
         runner = runner.with_agent_identity_authority(identity_authority)?;
     }
     runner.run_once().map_err(Into::into)
 }
 
-/// The standing readiness ferry polls each launched runtime's `/contact` on a
-/// bounded cadence and posts health reports to Core. The poll-target registry
-/// lives on disk because `run_cycle` rebuilds the runner every cycle. The
-/// directory defaults to `<FC_RUNNER_WORK_ROOT>/health-reports`; runners
-/// without a work root (Phala, Enclavia) set FC_RUNNER_HEALTH_REPORTS_DIR
-/// explicitly. Without a directory the ferry stays off and Core projects
-/// runtimes as health `unknown` rather than stale-ready.
-fn optional_health_report_config() -> Result<Option<finite_saas_runner::HealthReportConfig>> {
-    let registry_dir = match optional_env_value("FC_RUNNER_HEALTH_REPORTS_DIR").or_else(|| {
-        optional_env_value("FC_RUNNER_WORK_ROOT").map(|root| format!("{root}/health-reports"))
-    }) {
-        Some(dir) => PathBuf::from(dir),
-        None => {
-            static WARNED: std::sync::atomic::AtomicBool =
-                std::sync::atomic::AtomicBool::new(false);
-            if !WARNED.swap(true, std::sync::atomic::Ordering::Relaxed) {
-                eprintln!(
-                    "warning: standing health reports are disabled: set FC_RUNNER_HEALTH_REPORTS_DIR \
-                     (or FC_RUNNER_WORK_ROOT) to a writable registry directory"
-                );
-            }
-            return Ok(None);
-        }
-    };
+/// The standing readiness ferry polls each of this host's runtimes at its
+/// `/contact` on a bounded cadence and posts health reports to Core. Core's
+/// host-scoped target listing names the runtimes every cycle; the only
+/// runner-side state is the per-runtime throttle, held for the life of the
+/// process because `run_cycle` rebuilds the runner every cycle.
+fn health_report_config() -> Result<finite_saas_runner::HealthReportConfig> {
+    static STATE: std::sync::OnceLock<std::sync::Arc<finite_saas_runner::HealthReportState>> =
+        std::sync::OnceLock::new();
     let interval =
         Duration::from_secs(optional_u64("FC_RUNNER_HEALTH_REPORT_INTERVAL_SECS", 60)?.max(5));
     let http_timeout =
         Duration::from_secs(optional_u64("FC_RUNNER_HEALTH_REPORT_TIMEOUT_SECS", 5)?.max(1));
-    Ok(Some(finite_saas_runner::HealthReportConfig {
-        registry_dir,
+    Ok(finite_saas_runner::HealthReportConfig {
         interval,
         http_timeout,
-    }))
+        state: STATE
+            .get_or_init(finite_saas_runner::HealthReportState::new)
+            .clone(),
+    })
 }
 
 fn optional_agent_identity_authority() -> Result<Option<AgentIdentityAuthorityConfig>> {

@@ -1,16 +1,19 @@
-# infra/nixos — finite-lat-1 as code
+# infra/nixos — Finite NixOS fleet as code
 
-The NixOS definition of the single app server (finite-lat-1, 64.34.82.77).
-The root flake's `nixosConfigurations.finite-lat-1` composes the modules here;
-`packages.nix` builds every server binary from this workspace.
+The NixOS definitions for the live app-plane host and Runner hosts live here.
+The root flake's `nixosConfigurations.*` compose these modules; `packages.nix`
+builds every server binary from this workspace.
 
-**LIVE since 2026-07-09.** The cutover is done — lat1 was reinstalled as
-NixOS and now runs the whole coupled cluster (Core, dashboard, native
-Postgres, chat, sites, search, one Caddy edge). This tree IS lat1's current
-config; copying and directly switching to the exact CI-built closure artifact
-is the deploy.
-The historical cutover and its hard-won gotchas (single-disk/no-mdadm, disks
-by-id, WAN-by-MAC) are in `infra/runbooks/lat1-nixos-reinstall.md`; its
+**Current app plane since 2026-08-29:** finite-lat-2 (64.34.80.19) runs the
+coupled cluster (Core, dashboard, native Postgres, chat, hosted-device, Sites,
+Brain, Identity, search, one Caddy edge, backups, litestream). finite-lat-1 is
+retired after the ADR 0007 thermal-failure cutover; its docs and config remain
+historical evidence, not current deploy authority. Copying and switching the
+exact CI-built finite-lat-2 closure artifact is the current app-plane deploy
+primitive.
+
+The historical lat1 cutover and its hard-won gotchas (single-disk/no-mdadm,
+disks by-id, WAN-by-MAC) are in `infra/runbooks/lat1-nixos-reinstall.md`; its
 destructive procedure is paused and is not current recovery authority. Brain is
 served under the WorkOS-protected dashboard origin. The Hosted Web Chat
 offsite-health jobs and first archive now pass; its complete empty-target
@@ -21,12 +24,14 @@ is defense in depth, not a backup.
 
 ## Shared Kata Runner host role (one declaration, no drift)
 
-`modules/kata-runner-host.nix` is the single declaration of the Kata Runner
-role shared by finite-lat-1 and finite-lat-3. It renders the non-secret,
-host-identical Runner environment to `/etc/finite/runner-shared.env` and loads
-it BEFORE the operator-managed `/etc/finite/runner.env`, which keeps only
-credentials, drain state, and bounded incident overrides (its values still
-win). The shared file carries the Kata adapter settings and
+`modules/kata-runner-host.nix` is the single declaration of the live Kata
+Runner role shared by finite-lat-3 and finite-lat-4. finite-lat-1 still has a
+historical import of this module, but it is retired and not active capacity. The
+module renders the non-secret, host-identical Runner environment to
+`/etc/finite/runner-shared.env` and loads it BEFORE the operator-managed
+`/etc/finite/runner.env`, which keeps only credentials, drain state, and
+bounded incident overrides (its values still win). The shared file carries the
+Kata adapter settings and
 `FC_RUNNER_KATA_STOP_TIMEOUT_SECS=180` — the value operators had
 to raise by hand on both hosts after the stock 30s timeout caused two false
 upgrade failures and halted a 25-Agent rollout.
@@ -56,8 +61,39 @@ It was installed and storage-qualified on 2026-07-20. Kata/containerd and the
 Runner now provide customer capacity. It is still not a Recovery Authority:
 RAID preserves availability through one disk failure but does not provide an
 independent backup. The authoritative sequence and dated evidence are in
-`docs/runs/finite-lat-capacity-and-redundancy.md`. Lat2's services and storage
-are unchanged.
+`docs/runs/finite-lat-capacity-and-redundancy.md`.
+
+## finite-lat-2, the replacement app server (in progress)
+
+`nixosConfigurations.finite-lat-2` carries finite-lat-1's service stack
+(Core, Postgres, chat, hosted-device, sites, Brain, Identity, dashboard,
+search, Caddy, backups, litestream) on the lat3-qualified storage chassis,
+for the ADR 0007 emergency cutover off the thermally failed lat1. It runs
+no Agent Runner — the runner lane moves to a future host. The host boots in
+declarative import mode (`modules/import-mode.nix`): product units stay
+down while lat1's state is imported and verified. Its `storage-ids.nix`
+and networking carry `captured = false` placeholders until
+`scripts/capture-lat2-host-evidence` has run against the physical machine;
+`scripts/build-lat2-nixos-closure-artifact` refuses to package a closure
+before that capture. Authority: `docs/adr/0007-finite-lat-2-emergency-app-plane-cutover.md`
+and `../runbooks/lat2-replacement-cutover.md`.
+
+## finite-lat-4, the third storage-qualified Runner (in progress)
+
+`nixosConfigurations.finite-lat-4` mirrors the lat3 host shape (same module
+stack, storage contract, ESP guard, and Runner role; `hosts/finite-lat-4/`)
+for the fresh box at `152.236.34.15` (ADR 0007 model; lat4 is the third
+runner host and follows the lat2 rejoin of PR #715). Its `storage-ids.nix`
+carries `captured = true` with identities read from the physical machine on
+2026-08-28 (see `docs/runs/lat4-provisioning-prep.md`), and
+`scripts/capture-lat4-host-evidence` re-verifies them before the wipe;
+`scripts/build-lat4-nixos-closure-artifact` refuses to package a closure
+while that flag is false. The lat3 disk geometry was re-proven against the
+real disks (root last-usable `937703054 >= 935331839`, data
+`3750748814 >= 3747612671`), so the storage contract is identical. It is
+installed, verified, and admitted **drained** only through
+`../runbooks/lat4-nixos-runner-install.md`; it takes the `10.254.3.4`
+WireGuard address after the PR #715 /29 widening merges.
 
 ## Deploy story
 
@@ -66,8 +102,8 @@ are unchanged.
 Do not run the original lat2-driven cutover transcript. The helper and commands
 that built and drove the install from `finite-lat-2` have been removed in the
 hard cut. A future recovery-proved bare-metal procedure must consume a
-`lat1-nixos-closure-REV` artifact, prove the complete Recovery Set, and replace
-this historical section before any destructive reinstall is considered
+a current app-plane closure artifact, prove the complete Recovery Set, and
+replace this historical section before any destructive reinstall is considered
 repeatable. Until then, start an incident with `infra/runbooks/break-glass.md`
 and preserve state.
 
@@ -80,27 +116,25 @@ current routine deploy path is the CI-built closure artifact documented in
 
 ### Every deploy after that
 
-The protected CD path is the `main` to `production` pull request described in
-[`../runbooks/production-cd.md`](../runbooks/production-cd.md). That workflow
-builds the same `lat1-nixos-closure-REV` artifact and, once
-`mutation_enabled` is explicitly enabled, deploys it after GitHub production
-environment approval.
+There is currently no protected production-branch CD conductor. The retired
+lat1-targeted conductor was removed rather than retargeted after the ADR 0007
+cutover. The current production app-plane deploy primitive is manual and
+artifact-driven:
 
-The underlying deploy primitive remains:
-
-1. Dispatch `.github/workflows/lat1-nixos-closure.yml` for the exact reviewed
+1. Dispatch `.github/workflows/lat2-nixos-closure.yml` for the exact reviewed
    `origin/main` revision. The workflow runs on `depot-ubuntu-24.04` by default,
-   builds `nixosConfigurations.finite-lat-1.config.system.build.toplevel` and
-   the matching disko script with remote builders disabled, and uploads a file
-   binary cache artifact named `lat1-nixos-closure-REV`.
-2. Download that artifact and run `just deploy-lat1-closure ARTIFACT_DIR`.
-   `scripts/deploy-lat1-closure-cache` validates the manifest, copies the
-   prebuilt closure to lat1, advances `/nix/var/nix/profiles/system`, activates
-   the exact `SYSTEM` path in a transient systemd unit, and verifies
-   `/run/current-system` equals that path. For revisions that include LAT
-   journald shipping, both the deploy script and the NixOS activation run the
-   values-redacting `infra/nixos/scripts/check-lat-monitoring-secrets` preflight
-   so a missing `/etc/finite/logs-write.env` blocks before Alloy restarts.
+   builds `nixosConfigurations.finite-lat-2.config.system.build.toplevel` plus
+   the matching disko and kexec installer outputs, and uploads an artifact named
+   `lat2-nixos-closure-REV`.
+2. Download that artifact and run `just deploy-lat2-closure ARTIFACT_DIR
+   --prepare`. This validates the manifest, copies the prebuilt closure to
+   finite-lat-2, and dry-activates it without changing the system profile.
+3. After reviewing the dry-activation output and fresh `scripts/finite-status`
+   evidence, run `just deploy-lat2-closure ARTIFACT_DIR --activate`. The helper
+   switches the exact `SYSTEM` path, fences unexpected app-plane unit changes,
+   refuses any Runner unit on finite-lat-2, holds monitoring timers across the
+   boundary, and leaves any post-boundary rollback to an explicit operator
+   decision.
 
 For a finite-lat-3 Runner change, use the separate `Lat3 NixOS Closure`
 workflow. It builds only
@@ -112,6 +146,19 @@ package a disk installer and cannot deploy by itself. Download the exact
 just deploy-lat3-closure ARTIFACT_DIR --validate-only
 just deploy-lat3-closure ARTIFACT_DIR --prepare
 ```
+
+finite-lat-2 has the `Lat2 NixOS Closure` workflow and its own
+`just deploy-lat2-closure` primitive — an app-plane lifecycle, not a copy
+of the lat3 Runner rollout: the dry-activation fence allows only the
+declared app-plane unit set (with `--expect-startup` marking the one
+import-mode → product startup at go-live), activation refuses if any
+runner unit exists on the host, and product health is checked after the
+switch. Its artifact additionally packages the disko script and the
+same-pin kexec installer tarball; Gate C installs with
+`scripts/install-lat2-from-artifact`, which validates the manifest,
+realizes those three store paths from the artifact cache, and drives the
+pinned nixos-anywhere. The workflow refuses to build any of it until the
+host's storage identity is captured (ADR 0007, Gate B).
 
 `--prepare` validates the main-branch revision, copies the prebuilt closure,
 checks lat3's monitoring-secret names and modes, and runs NixOS dry activation.
@@ -134,10 +181,11 @@ if any activation or verification step fails. Run `scripts/finite-status
 --json` again immediately afterward. Do not continue an Agent launch unless
 the post-rollout status and Runner artifact evidence are green.
 
-Do not build production closures on the Mac, clawland, lat1, or lat2. There is
-no lat2 fallback deploy path. Rollback remains
-`ssh root@64.34.82.77 nixos-rebuild switch --rollback`, or the same artifact
-workflow for a previous known-good revision followed by `just deploy-lat1-closure`.
+Do not build production closures on the Mac, clawland, lat1, or lat2. A missing
+artifact or cache path is a failed release pipeline, not permission to build on
+the host. Rollback remains `ssh root@64.34.80.19 nixos-rebuild
+switch --rollback`, or the same artifact workflow for a previous known-good
+revision followed by `just deploy-lat2-closure`.
 
 ## Secrets bootstrap checklist (values NEVER in this repo)
 
@@ -145,24 +193,20 @@ All root-owned, 0600 unless noted. Names only; sources are the old hosts.
 
 | File | Variable names | Value source |
 |---|---|---|
-| `/etc/finite/core.env` | `FC_CORE_DATABASE_URL` (embeds `POSTGRES_PASSWORD`), `FC_CORE_API_TOKEN`, `FC_CORE_RUNNER_CREDENTIALS_JSON`, one `FC_CORE_RUNNER_CREDENTIAL_TOKEN_*` variable per active Runner credential, `FC_FINITE_PRIVATE_USAGE_API_TOKEN`, `WORKOS_API_KEY`, `WORKOS_CLIENT_ID`, `FC_WORKOS_OPERATOR_ORG_ID` | Existing names come from the k8s Secret on old lat1. The checked-in production Kata generation may temporarily retain legacy `FC_CORE_RUNNER_API_TOKEN`; before any second worker starts, replace it with the metadata keyring and separately named Kata/Phala bearer variables documented in `finitecomputer-v2/docs/finite-stack-deployment.md`. Route and worker credentials must be distinct. The usage token pairs with the Tinfoil-sealed `FINITE_USAGE_API_SERVICE_KEY` — **do not rotate at cutover**. Core uses the WorkOS API key only to resolve the verified user record for a validated JWT `sub`. |
-| `/etc/finite/metrics-remote-write.env` | `FINITE_METRICS_REMOTE_WRITE_USERNAME`, `FINITE_METRICS_REMOTE_WRITE_PASSWORD` | Install the same root-owned, mode `0600` file independently on finite-lat-1 and finite-lat-3. The username must match the NixOS monitoring receiver's `METRICS_USERNAME`; the password comes from off-host custody and must not be recovered from the Caddy password hash in `/etc/finite/monitoring/caddy.env`. The remote-write URL is fixed in Nix to `https://metrics-ingest.finite.computer/api/v1/write`. This file is read only by Grafana Alloy and must exist before activating a closure that enables Alloy. |
-| `/etc/finite/logs-write.env` | `FINITE_LOGS_WRITE_USERNAME`, `FINITE_LOGS_WRITE_PASSWORD` | Install the same root-owned, mode `0600` file independently on finite-lat-1 and finite-lat-3 before activating a closure with LAT journald shipping. The username must match the monitoring receiver's `LOGS_USERNAME`; the password comes from off-host custody and must not be recovered from the Caddy password hash in `/etc/finite/monitoring/caddy.env`. The Loki push URL is fixed in Nix to `https://metrics-ingest.finite.computer/loki/api/v1/push`. This is deliberately separate from the Prometheus remote-write credential. |
-| `/etc/finite/runner.env` | only credentials, the promoted Runtime artifact pin, and deliberate overrides: `FC_CORE_RUNNER_API_TOKEN`, `FC_RUNNER_FINITE_PRIVATE_SPECIALIZATION_WORKER_API_KEY`, `FC_RUNNER_RUNTIME_ARTIFACT_ID` (required; the shared env has no default), drain state (see `infra/hosts/lat1/systemd/runner.env.example`); the shared non-secret keys are Nix-rendered to `/etc/finite/runner-shared.env` by `modules/kata-runner-host.nix` | provision the route-scoped Runner credential; copy the dedicated specialization worker client token from its owning host secret without reusing the GLM key |
-| `/etc/finite/phala-runner.env` | `FC_CORE_RUNNER_API_TOKEN`, `FC_RUNNER_PHALA_API_KEY`, `FC_RUNNER_FINITE_PRIVATE_SPECIALIZATION_WORKER_API_KEY` | Installed with `scripts/install-phala-canary-credentials` for the ACTIVE one-canary run. The script creates a distinct Core keyring credential named `finite-phala-runner-1`, bound to class `phala` and source host `finite-lat-1-phala-control-1`, and accepts the host-only Phala key through a hidden prompt. Never reuse the Kata token or put either credential in Runtime environment. Non-secret workspace/artifact/runtime facts are pinned in the Nix unit; shared runtime secrets enter through a systemd credential copy. |
-| `/etc/finite/identity-operator.env` | `FINITE_IDENTITY_OPERATOR_TOKEN` | Created on lat1 without displaying the value by `scripts/install-identity-authority-credentials`. Systemd reads the same trusted provisioning credential for `finite-identityd`, Kata Runner, Phala Runner, Brain, and Hosted Device; it never enters a browser or Agent Runtime. The replaceable token is not identity data and may be regenerated consistently after host loss. |
-| `/etc/finite/identity-sites-notification.env` | `FINITE_IDENTITY_SITES_NOTIFICATION_TOKEN` | Created on lat1 without displaying the value by `scripts/install-identity-sites-notification-credential`. Only `finite-identityd` and `finitesitesd` read this narrow same-host credential. It authorizes Sites publication/access-request mail delivery only; it is not the Identity operator credential and must never enter the dashboard, Hosted Device, Runner, or Agent Runtime. Install it before switching to a system closure that requires the file. |
-| `/etc/finite/runtime-secrets.env` | the shared tool-provider names selected by Core's names-only `FC_CORE_RUNTIME_SECRET_REFERENCES_JSON` and listed in `infra/hosts/lat1/systemd/runtime-secrets.env.example` | legacy `../finitecomputer/secrets/shared-provider-keys.env`; values remain host-only, OpenRouter is not selected for the new platform, and specialization credentials stay in their owning service |
+| `/etc/finite/core.env` | `FC_CORE_DATABASE_URL` (embeds `POSTGRES_PASSWORD`), `FC_CORE_API_TOKEN`, `FC_CORE_RUNNER_CREDENTIALS_JSON`, one `FC_CORE_RUNNER_CREDENTIAL_TOKEN_*` variable per active Runner credential, `FC_FINITE_PRIVATE_USAGE_API_TOKEN`, `WORKOS_API_KEY`, `WORKOS_CLIENT_ID`, `FC_WORKOS_OPERATOR_ORG_ID` | Existing names come from the k8s Secret on old lat1. The checked-in production Kata generation may temporarily retain legacy `FC_CORE_RUNNER_API_TOKEN`; before any second worker starts, replace it with the metadata keyring and separately named Kata/Phala bearer variables documented in the Runner contract and Phala runbook. Route and worker credentials must be distinct. The usage token pairs with the Tinfoil-sealed `FINITE_USAGE_API_SERVICE_KEY` — **do not rotate at cutover**. Core uses the WorkOS API key only to resolve the verified user record for a validated JWT `sub`. |
+| `/etc/finite/metrics-remote-write.env` | `FINITE_METRICS_REMOTE_WRITE_USERNAME`, `FINITE_METRICS_REMOTE_WRITE_PASSWORD` | Install the same root-owned, mode `0600` file independently on finite-lat-2, finite-lat-3, and finite-lat-4. The username must match the NixOS monitoring receiver's `METRICS_USERNAME`; the password comes from off-host custody and must not be recovered from the Caddy password hash in `/etc/finite/monitoring/caddy.env`. The remote-write URL is fixed in Nix to `https://metrics-ingest.finite.computer/api/v1/write`. This file is read only by Grafana Alloy and must exist before activating a closure that enables Alloy. |
+| `/etc/finite/logs-write.env` | `FINITE_LOGS_WRITE_USERNAME`, `FINITE_LOGS_WRITE_PASSWORD` | Install the same root-owned, mode `0600` file independently on finite-lat-2, finite-lat-3, and finite-lat-4 before activating a closure with LAT journald shipping. The username must match the monitoring receiver's `LOGS_USERNAME`; the password comes from off-host custody and must not be recovered from the Caddy password hash in `/etc/finite/monitoring/caddy.env`. The Loki push URL is fixed in Nix to `https://metrics-ingest.finite.computer/loki/api/v1/push`. This is deliberately separate from the Prometheus remote-write credential. |
+| `/etc/finite/runner.env` | only credentials, the promoted Runtime artifact pin, and deliberate overrides: `FC_CORE_RUNNER_API_TOKEN`, `FC_RUNNER_RUNTIME_ARTIFACT_ID` (required; the shared env has no default), drain state (see `infra/hosts/lat1/systemd/runner.env.example`); the shared non-secret keys are Nix-rendered to `/etc/finite/runner-shared.env` by `modules/kata-runner-host.nix` | provision the route-scoped Runner credential |
+| `/etc/finite/phala-runner.env` | `FC_CORE_RUNNER_API_TOKEN`, `FC_RUNNER_PHALA_API_KEY` | Installed with `scripts/install-phala-canary-credentials` for the ACTIVE one-canary run. The script creates a distinct Core keyring credential named `finite-phala-runner-1`, bound to class `phala` and source host `finite-lat-1-phala-control-1`, and accepts the host-only Phala key through a hidden prompt. Never reuse the Kata token or put either credential in Runtime environment. Non-secret workspace/artifact/runtime facts are pinned in the Nix unit; shared runtime secrets enter through a systemd credential copy. |
+| `/etc/finite/identity-operator.env` | `FINITE_IDENTITY_OPERATOR_TOKEN` | Created on lat1 without displaying the value by `scripts/install-identity-authority-credentials`. Systemd reads the same trusted provisioning credential for `finite-identityd`, Kata Runner, and Phala Runner; it never enters a browser or Agent Runtime. The replaceable token is not identity data and may be regenerated consistently after host loss. |
+| `/etc/finite/runtime-secrets.env` | the shared tool-provider names selected by Core's names-only `FC_CORE_RUNTIME_SECRET_REFERENCES_JSON` and listed in `infra/hosts/lat1/systemd/runtime-secrets.env.example` | legacy `../finitecomputer/secrets/shared-provider-keys.env`; values remain host-only, and OpenRouter is not selected for the new platform |
 | `/etc/finite/dashboard.env` | `FC_CORE_API_TOKEN`, `WORKOS_API_KEY`, `WORKOS_CLIENT_ID`, `WORKOS_COOKIE_PASSWORD`, `FC_WORKOS_OPERATOR_ORG_ID`, `STRIPE_SECRET_KEY`, `STRIPE_WEBHOOK_SECRET`, `GOOGLE_WORKSPACE_CLIENT_ID`, `GOOGLE_WORKSPACE_CLIENT_SECRET` | Existing names come from the k8s Secret on old lat1; provision the same missing operator-org predicate used by Core before rollout |
 | `/etc/finite/hosted-web-device.env` | `FINITECHAT_HOSTED_API_TOKEN` | generate for the Hosted Web Device internal service boundary; the service and dashboard read this same server-only value; store it in the team password manager |
-| `/etc/finite/brain-authority.env` | `FC_CORE_API_TOKEN` | provision Brain's trusted service credential for the narrow Core account/Agent resolution routes; never expose it to the Product Client |
 | `/etc/finite/sites-viewer-session.env` | `FINITE_SITES_VIEWER_SESSION_TOKEN` | generate exactly 32 random bytes as 64 lowercase hex characters (`openssl rand -hex 32`) for the Sites verified-email viewer-session boundary; systemd/Podman read this root:root 0600 file before dropping service privileges; Sites and the dashboard receive the same server-only value; store it in the team password manager |
 | `/var/lib/finitecomputer/backups/rsync-net/{id_ed25519,known_hosts,borg-passphrase}` | existing finitecomputer Borg SSH private key, pinned rsync.net host key, and repository passphrase | copy the established root-only credential bundle from an existing finitecomputer host; the off-host passphrase copy already lives in the ignored `../finitecomputer/workspaces/trf/secrets/` tree. Do not generate a parallel credential set or put values in this repo. Verify the destination restriction before claiming append-only protection. |
-| `/etc/finite-saas/sites.env` | `RESEND_API_KEY` (+ optional `FINITE_IDENTITY_AUTHORITY`) | migrated from lat2 `/etc/finite-saas/sites.env`; systemd reads the root:root 0600 file before dropping privileges, and Sites, Identity, and Brain reuse the existing send-only Resend credential without copying its value |
+| `/etc/finite-saas/sites.env` | `RESEND_API_KEY` | migrated from lat2 `/etc/finite-saas/sites.env`; systemd reads the root:root 0600 file before dropping privileges, and Sites, Identity, and Brain reuse the existing send-only Resend credential without copying its value |
 | `/etc/finite-saas/certs/finite-chat-origin.pem` (0644) / `.key` (0640 root:caddy) | — | copied from lat2 at cutover (Cloudflare Origin CA pair; host-agnostic, covers the zone) |
-| `/etc/finite/litestream-latitude.env` | `LITESTREAM_ACCESS_KEY_ID`, `LITESTREAM_SECRET_ACCESS_KEY` | generate a scoped credential for the `finite-lat-1-litestream` bucket at Latitude.sh object storage (chi region — nearest to lat1); store a copy in the team password manager. If the file is absent, every per-database `finite-litestream-*` replicator unit is condition-skipped (chat and Brain keep serving) and `finite-litestream-health` fails loudly every five minutes until it exists (`infra/runbooks/litestream-chat-replication.md`). |
-| `/etc/finite/searxng.env` | `SEARXNG_SECRET` (+ optional `SEARXNG_BASE_URL`, `SEARXNG_LIMITER`) | lat2 `finite-search/searxng/.env` |
-| `/etc/finite/firecrawl.env` | `BULL_AUTH_KEY`, `POSTGRES_USER`, `POSTGRES_PASSWORD`, `POSTGRES_DB`, `MAX_CPU`, `MAX_RAM` | lat2 `finite-search/firecrawl-upstream/.env` |
+| `/etc/finite/litestream-latitude.env` | `LITESTREAM_ACCESS_KEY_ID`, `LITESTREAM_SECRET_ACCESS_KEY` | generate a scoped credential for the `finite-lat-2-litestream` bucket at Latitude.sh object storage; store a copy in the team password manager. If the file is absent, every per-database `finite-litestream-*` replicator unit is condition-skipped (chat and Brain keep serving) and `finite-litestream-health` fails loudly every five minutes until it exists (`infra/runbooks/litestream-chat-replication.md`). |
 | Postgres role password | — | `ALTER ROLE finite WITH PASSWORD '<POSTGRES_PASSWORD>';` before the restore (`modules/postgres.nix` header) |
 
 The machine-readable, values-free file inventory is
@@ -189,18 +233,20 @@ log shipping is configured. To check earlier, run the same values-redacting
 preflight against the target host:
 
 ```sh
-ssh root@64.34.82.77 'bash -s' < infra/nixos/scripts/check-lat-monitoring-secrets
+ssh root@64.34.80.19 'bash -s' < infra/nixos/scripts/check-lat-monitoring-secrets
 ssh root@207.188.7.157 'bash -s' < infra/nixos/scripts/check-lat-monitoring-secrets
+ssh root@152.236.34.15 'bash -s' < infra/nixos/scripts/check-lat-monitoring-secrets
 ```
 
 The helper checks only `/etc/finite/metrics-remote-write.env` and
 `/etc/finite/logs-write.env` metadata plus required variable names. It discards
 values and prints none.
 
-Finite Brain reads `/etc/finite/identity-operator.env`,
-`/etc/finite/brain-authority.env`, and the send-only Resend credential from
-`/etc/finite-saas/sites.env`; the Product Client and Agent Runtime never
-receive any of those credentials.
+Finite Brain reads the send-only Resend credential from
+`/etc/finite-saas/sites.env` for its own invitation mailer; the retired
+`identity-operator.env` and `brain-authority.env` loads are gone (the server
+no longer calls the Directory or Core). The Product Client and Agent Runtime
+never receive any service credential.
 
 ## Google Workspace OAuth production setup
 
@@ -255,26 +301,26 @@ that final operation read-only unless the tester explicitly intends a write.
 | 22 | public | sshd (root key-only) | lat1 |
 | 80/443 | public | Caddy — ALL vhosts | lat1 + lat2 + clawland + smoke edges |
 | 3000 | 127.0.0.1 | dashboard (podman, host-net) | was lat1 k3s NodePort 30080 |
-| 3002 | 127.0.0.1 | firecrawl api (podman) | lat2 |
 | 3015 | 127.0.0.1 | finite-brain | smoke (previously public-bound there) |
 | 4200 | 127.0.0.1 | finite-saas-core (nix-built binary) | was lat1 k3s ClusterIP |
 | 5432 | 127.0.0.1 | postgres 16 native (`finite_core`) | was lat1 k3s StatefulSet |
 | 8080 | 127.0.0.1 | searxng (podman) | lat2 |
-| 8790 | 127.0.0.1 | Finite Identity Authority | new |
+| 8790 | 127.0.0.1 | Finite Identity Directory (full router; operator routes are loopback-only) | new |
+| 8791 | 127.0.0.1 | Finite Identity Directory public router (Caddy proxies this verbatim) | new |
 | 8787 | 127.0.0.1 | finitesitesd | lat2 |
 | **8788** | 127.0.0.1 | **finitechat-server (moved off 8787** — sitesd owns it here; public URL unchanged) | clawland 8787 |
 | 38918 | 127.0.0.1 | Finite Chat Hosted Web Device (dashboard-internal) | new |
 | 9100 | 127.0.0.1 | node-exporter | new |
-| 2019 | 127.0.0.1 | caddy admin API | lat1/lat2 |
-| 14200 | 10.254.3.1 (WireGuard) | private proxy to Core :4200 | lat3 Runner only |
-| 18790 | 10.254.3.1 (WireGuard) | private proxy to Identity Authority :8790 | lat3 Runner only |
-| dynamic 32768-60999 | 10.254.3.2 (WireGuard) | lat3 Kata Runtime contact/health | lat1 peer only |
+| 2019 | 127.0.0.1 | caddy admin API | app-plane host |
+| 14200 | 10.254.3.1 (WireGuard) | private proxy to Core :4200 | Runner hosts only |
+| 18790 | 10.254.3.1 (WireGuard) | private proxy to Identity Authority :8790 | Runner hosts only |
+| dynamic 32768-60999 | Runner WireGuard address | Kata Runtime contact/health | app-plane peer only |
 
 Caddy vhost → backend: `finite.computer` → 4200 for
 `/internal/finite-private/*` and the exact API-key usage/reset paths under
 `/api/core/v1/finite-private/`, else 3000; `chat.finite.computer` → 8788; `api./*.finite.chat` +
 `*.docs.finite.chat` → 8787 (Cloudflare Origin CA);
-`identity.finite.vip` public identity routes → 8790. Brain has no independent
+`identity.finite.vip` public identity routes → 8791. Brain has no independent
 edge: authenticated `/client` and `/_admin/*` requests go through the dashboard
 to loopback :3015, then Brain applies its Nostr authorization.
 
@@ -305,6 +351,4 @@ by-id), gateways/resolvers, root ssh key, dashboard image digest. Still open:
   Agent Runtimes on the same containerd host. Production activation must follow
   `runbooks/deploy-sites.md`, including the coordinated v3 snapshot and a
   named disposable state-survival canary.
-- **firecrawl API** (:3002) down — searxng works; crawl/scrape degraded.
-- Dead-man's-switch ping (`modules/monitoring.nix`); finite-search image
-  digest pins (`modules/finite-search.nix`).
+- Dead-man's-switch ping (`modules/monitoring.nix`).

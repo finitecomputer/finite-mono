@@ -5,9 +5,6 @@ use std::io::Write;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::Command as StdCommand;
-use std::process::Stdio;
-use std::sync::Arc;
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use finitechat_proto::{
@@ -19,58 +16,29 @@ use finitechat_proto::{
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use serde_json::{Value, json};
 use tempfile::NamedTempFile;
-use tokio::process::Command as TokioCommand;
 use tokio::sync::mpsc;
 
 use crate::AgentdError;
-use crate::config::{
-    AeonSpecializationDesiredStateV1, ConfigManager, DEFAULT_AEON_SPECIALIZATION_BUNDLE,
-    HermesConfigOfferV1, HermesConfigRollbackV1,
-};
+use crate::config::{ConfigManager, HermesConfigOfferV1, HermesConfigRollbackV1};
 use crate::connections::{
     ConnectionManager, GoogleApplyRequest, InferenceApplyRequest, TelegramApproveRequest,
     TelegramConnectRequest, TelegramHomeRequest,
 };
-use crate::ledger::{CommandDecision, Ledger, hex_digest};
-use crate::supervisor::{
-    ProcessSpec, ProcessState, SupervisorHandle, SupervisorStatus, start_supervisor,
-};
+use crate::ledger::{CommandDecision, Ledger};
+use crate::supervisor::{ProcessSpec, SupervisorHandle, SupervisorStatus, start_supervisor};
 use crate::transport::BridgeClient;
 
 const STATUS_SCHEMA: &str = "finite.agent.status.v1";
 const STATUS_REQUEST_SCHEMA: &str = "finite.agent.status.request.v1";
 const EMPTY_REQUEST_SCHEMA: &str = "finite.agent.empty.request.v1";
-const CONFIG_OFFER_SCHEMA: &str = "finite.hermes.config.offer.v1";
-const CONFIG_ROLLBACK_SCHEMA: &str = "finite.hermes.config.rollback.v1";
 const RESULT_SCHEMA: &str = "finite.agent.command.result.v1";
 const OWNER_CLAIM_COMMAND: &str = "agent.owner.claim";
 const INFERENCE_APPLY_SCHEMA: &str = "finite.agent.inference.apply.v1";
-const AEON_SPECIALIZATION_RECONCILE_SCHEMA: &str = "finite.agent.specialization.aeon.reconcile.v1";
 const TELEGRAM_CONNECT_SCHEMA: &str = "finite.agent.telegram.connect.v1";
 const TELEGRAM_APPROVE_SCHEMA: &str = "finite.agent.telegram.approve.v1";
 const TELEGRAM_HOME_SCHEMA: &str = "finite.agent.telegram.home.v1";
 const GOOGLE_APPLY_SCHEMA: &str = "finite.agent.google.apply.v1";
-const AEON_HERMES_PROBE_MARKER: &str = "FINITE_AEON_HERMES_PROBE ";
-const SPECIALIZATION_BUNDLE_ENV: &str = "FINITE_SPECIALIZATION_BUNDLE";
-const SPECIALIZATION_WORKER_API_KEY_ENV: &str = "FINITE_SPECIALIZATION_WORKER_API_KEY";
-const UNVERIFIED_HERMES_GENERATION: u64 = u64::MAX;
 const BRIDGE_READY_TIMEOUT_ENV: &str = "FINITE_AGENTD_BRIDGE_READY_TIMEOUT_SECS";
-
-#[derive(Clone, PartialEq, Eq)]
-pub struct StartupSpecializationBundleConfig {
-    pub bundle_id: String,
-    pub worker_api_key: String,
-}
-
-impl std::fmt::Debug for StartupSpecializationBundleConfig {
-    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        formatter
-            .debug_struct("StartupSpecializationBundleConfig")
-            .field("bundle_id", &self.bundle_id)
-            .field("worker_api_key", &"<redacted>")
-            .finish()
-    }
-}
 
 #[derive(Debug, Clone)]
 pub struct DaemonConfig {
@@ -81,12 +49,21 @@ pub struct DaemonConfig {
     pub finitechat_bin: PathBuf,
     pub prepare_command: PathBuf,
     pub hermes_command: PathBuf,
-    pub hermes_probe_python: PathBuf,
-    pub hermes_probe_script: PathBuf,
     pub health_python: PathBuf,
     pub health_script: PathBuf,
     pub authorized_accounts: BTreeSet<String>,
-    pub specialization_bundle: Option<StartupSpecializationBundleConfig>,
+    /// Admission-default marker exported for the supervised chat sidecar.
+    /// agentd only runs inside the container, so the marker is what
+    /// distinguishes a hosted sidecar from a standalone `finitechat hermes
+    /// serve`: `locked` makes a sidecar with no persisted admission policy
+    /// row default to allowlist mode (seeded from the owner list and the
+    /// existing rooms' counterparties) instead of the legacy allow-all.
+    /// `None` when an explicit `FINITECHAT_ADMISSION_DEFAULT` is already set
+    /// (the sidecar inherits it unchanged). The sidecar inherits
+    /// `FINITECHAT_OWNER_NPUBS` and `FINITECHAT_WELCOME_ALLOWLIST` directly
+    /// from the container environment — agentd never derives admission
+    /// values; it only marks hostedness.
+    pub sidecar_admission_default: Option<String>,
     /// How long startup waits for the Finite Chat bridge to serve readiness
     /// before failing the daemon. Defaults to [`DEFAULT_BRIDGE_READY_TIMEOUT`];
     /// `FINITE_AGENTD_BRIDGE_READY_TIMEOUT_SECS` overrides it.
@@ -161,14 +138,6 @@ impl DaemonConfig {
                 std::env::var("FINITE_AGENTD_HERMES_COMMAND")
                     .unwrap_or_else(|_| "/opt/run_hermes_gateway.sh".to_owned()),
             ),
-            hermes_probe_python: PathBuf::from(
-                std::env::var("FINITE_AGENTD_HERMES_PROBE_PYTHON")
-                    .unwrap_or_else(|_| "python".to_owned()),
-            ),
-            hermes_probe_script: PathBuf::from(
-                std::env::var("FINITE_AGENTD_HERMES_PROBE_SCRIPT")
-                    .unwrap_or_else(|_| "/opt/probe_hermes_vision.py".to_owned()),
-            ),
             health_python: PathBuf::from(
                 std::env::var("FINITE_AGENTD_HEALTH_PYTHON")
                     .unwrap_or_else(|_| "python".to_owned()),
@@ -178,12 +147,11 @@ impl DaemonConfig {
                     .unwrap_or_else(|_| "/opt/health_server.py".to_owned()),
             ),
             authorized_accounts,
-            specialization_bundle: startup_specialization_bundle_from_values(
-                std::env::var(SPECIALIZATION_BUNDLE_ENV).ok().as_deref(),
-                std::env::var(SPECIALIZATION_WORKER_API_KEY_ENV)
+            sidecar_admission_default: sidecar_admission_default_from_value(
+                std::env::var("FINITECHAT_ADMISSION_DEFAULT")
                     .ok()
                     .as_deref(),
-            )?,
+            ),
             bridge_ready_timeout: bridge_ready_timeout_from_value(
                 std::env::var(BRIDGE_READY_TIMEOUT_ENV).ok().as_deref(),
             )?,
@@ -199,78 +167,11 @@ impl DaemonConfig {
     }
 }
 
-fn startup_specialization_bundle_from_values(
-    bundle_id: Option<&str>,
-    worker_api_key: Option<&str>,
-) -> Result<Option<StartupSpecializationBundleConfig>, AgentdError> {
-    let bundle_id = bundle_id.map(str::trim).filter(|value| !value.is_empty());
-    let worker_api_key = worker_api_key
-        .map(str::trim)
-        .filter(|value| !value.is_empty());
-    match (bundle_id, worker_api_key) {
-        (None, None) => Ok(None),
-        (None, Some(_)) => Err(AgentdError::Config(format!(
-            "{SPECIALIZATION_WORKER_API_KEY_ENV} requires {SPECIALIZATION_BUNDLE_ENV}"
-        ))),
-        (Some(_), None) => Err(AgentdError::Config(format!(
-            "{SPECIALIZATION_BUNDLE_ENV} requires {SPECIALIZATION_WORKER_API_KEY_ENV}"
-        ))),
-        (Some(bundle_id), Some(worker_api_key)) => {
-            if bundle_id != DEFAULT_AEON_SPECIALIZATION_BUNDLE {
-                return Err(AgentdError::Config(format!(
-                    "unsupported specialization bundle {bundle_id:?}"
-                )));
-            }
-            if worker_api_key.len() > 16 * 1024 {
-                return Err(AgentdError::Config(
-                    "specialization worker credential is oversized".to_owned(),
-                ));
-            }
-            Ok(Some(StartupSpecializationBundleConfig {
-                bundle_id: bundle_id.to_owned(),
-                worker_api_key: worker_api_key.to_owned(),
-            }))
-        }
-    }
-}
-
-fn startup_specialization_desired_state(
-    bundle: &StartupSpecializationBundleConfig,
-) -> AeonSpecializationDesiredStateV1 {
-    let credential_fingerprint = hex_digest(bundle.worker_api_key.as_bytes());
-    let mut desired = AeonSpecializationDesiredStateV1::canonical(format!(
-        "runtime-bundle-{}-{}",
-        bundle.bundle_id,
-        &credential_fingerprint[..16]
-    ));
-    // Hermes owns transcript-first audio handling today. The startup bundle
-    // activates only its native image and sampled-video capability profile.
-    desired.capabilities.audio = false;
-    desired.worker_api_key = Some(bundle.worker_api_key.clone());
-    desired
-}
-
-fn specialization_bundle_status(
-    manager: &ConfigManager,
-    desired: Option<&AeonSpecializationDesiredStateV1>,
-    verified_hermes_generation: &AtomicU64,
-    processes: &SupervisorStatus,
-) -> SpecializationBundleStatusV1 {
-    let Some(desired) = desired else {
-        return SpecializationBundleStatusV1 {
-            bundle_id: None,
-            desired: false,
-            effective: false,
-        };
-    };
-    let running_generation = running_hermes_identity(processes).map(|(generation, _)| generation);
+fn inactive_specialization_status() -> SpecializationBundleStatusV1 {
     SpecializationBundleStatusV1 {
-        bundle_id: Some(DEFAULT_AEON_SPECIALIZATION_BUNDLE.to_owned()),
-        desired: true,
-        effective: running_generation == Some(verified_hermes_generation.load(Ordering::Relaxed))
-            && manager
-                .startup_aeon_specialization_matches(desired)
-                .unwrap_or(false),
+        bundle_id: None,
+        desired: false,
+        effective: false,
     }
 }
 
@@ -280,29 +181,27 @@ pub async fn run_daemon(config: DaemonConfig) -> Result<(), AgentdError> {
     fs::set_permissions(config.state_dir(), fs::Permissions::from_mode(0o700))?;
     clear_boot_scoped_health_evidence(&config);
     prepare_agent_runtime(&config)?;
+    // After prepare (the agent home and store exist) and before the
+    // supervisor starts the gateway or the sidecar, so admission state is
+    // settled before anything reads it and the store writer lease is still
+    // uncontended. Best-effort here by design: a failure (operator typo in
+    // the seed env, store hiccup) must not take the whole agent down —
+    // that would turn a typo into a total chat outage in a restart loop.
+    // The sidecar's own boot-time seed re-runs the step and remains the
+    // hard gate: a malformed seed env crash-loops the sidecar loudly
+    // instead of silently downgrading to allow-all.
+    if let Err(error) = seed_chat_admission(&config) {
+        eprintln!(
+            "finite-agentd: chat admission seed failed ({error}); \
+             the sidecar enforces admission policy at its own boot"
+        );
+    }
     let identity = load_agent_identity(&config.agent_home)?;
     let ledger = Ledger::open(config.state_dir().join("agentd.sqlite3"))?;
     for account_id in &config.authorized_accounts {
         ledger.authorize_principal(account_id)?;
     }
     let config_manager = ConfigManager::new(config.hermes_home.join("config.yaml"), ledger.clone());
-    let startup_specialization_desired = config
-        .specialization_bundle
-        .as_ref()
-        .map(startup_specialization_desired_state);
-    if let Some(desired) = startup_specialization_desired.as_ref() {
-        match config_manager.activate_aeon_specialization_if_unset(desired, || {
-            validate_hermes_config(&config.hermes_home)
-        }) {
-            Ok(_) => {}
-            Err(AgentdError::ConfigConflict(_)) => {
-                eprintln!(
-                    "finite-agentd: specialization bundle remains desired but a user-owned Hermes profile was preserved"
-                );
-            }
-            Err(error) => return Err(error),
-        }
-    }
     let connection_manager = ConnectionManager::new(
         config.agent_home.clone(),
         config.hermes_home.clone(),
@@ -314,24 +213,11 @@ pub async fn run_daemon(config: DaemonConfig) -> Result<(), AgentdError> {
         health_spec(&config),
         hermes_spec(&config),
     );
-    let verified_hermes_generation = Arc::new(AtomicU64::new(UNVERIFIED_HERMES_GENERATION));
-    spawn_startup_specialization_verifier(
-        config_manager.clone(),
-        startup_specialization_desired.clone(),
-        supervisor.clone(),
-        config.hermes_probe_python.clone(),
-        config.hermes_probe_script.clone(),
-        config.hermes_home.clone(),
-        Arc::clone(&verified_hermes_generation),
-    );
     spawn_status_writer(
         config.status_path(),
         identity.clone(),
         ledger.clone(),
         supervisor.clone(),
-        config_manager.clone(),
-        startup_specialization_desired.clone(),
-        Arc::clone(&verified_hermes_generation),
     );
 
     wait_for_bridge(&bridge, config.bridge_ready_timeout).await?;
@@ -343,12 +229,8 @@ pub async fn run_daemon(config: DaemonConfig) -> Result<(), AgentdError> {
         config_manager,
         connection_manager,
         hermes_home: config.hermes_home,
-        hermes_probe_python: config.hermes_probe_python,
-        hermes_probe_script: config.hermes_probe_script,
         bridge: bridge.clone(),
         supervisor: supervisor.clone(),
-        startup_specialization_desired,
-        verified_hermes_generation,
     };
 
     let delivery_worker =
@@ -465,116 +347,6 @@ fn prepare_agent_runtime(config: &DaemonConfig) -> Result<(), AgentdError> {
     }
 }
 
-async fn probe_hermes_vision(
-    python: &Path,
-    script: &Path,
-    hermes_home: &Path,
-) -> Result<(), AgentdError> {
-    let output = tokio::time::timeout(
-        Duration::from_secs(150),
-        TokioCommand::new(python)
-            .arg(script)
-            .env("HERMES_HOME", hermes_home)
-            .stdin(Stdio::null())
-            .kill_on_drop(true)
-            .output(),
-    )
-    .await
-    .map_err(|_| AgentdError::Config("Hermes vision probe timed out".to_owned()))??;
-    if !output.status.success() {
-        return Err(AgentdError::Config(
-            "Hermes vision probe failed through auxiliary.vision".to_owned(),
-        ));
-    }
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    let result = stdout
-        .lines()
-        .rev()
-        .find_map(|line| line.strip_prefix(AEON_HERMES_PROBE_MARKER))
-        .ok_or_else(|| AgentdError::Config("Hermes vision probe result was missing".to_owned()))?;
-    let result: Value = serde_json::from_str(result)
-        .map_err(|_| AgentdError::Config("Hermes vision probe result was invalid".to_owned()))?;
-    if result.get("success").and_then(Value::as_bool) != Some(true)
-        || result.get("analysis").and_then(Value::as_str) != Some("RED")
-        || result.get("video_analyze").and_then(Value::as_bool) != Some(true)
-    {
-        return Err(AgentdError::Config(
-            "Hermes did not admit video_analyze and return exact RED through auxiliary.vision"
-                .to_owned(),
-        ));
-    }
-    Ok(())
-}
-
-fn spawn_startup_specialization_verifier(
-    manager: ConfigManager,
-    desired: Option<AeonSpecializationDesiredStateV1>,
-    supervisor: SupervisorHandle,
-    python: PathBuf,
-    script: PathBuf,
-    hermes_home: PathBuf,
-    verified_hermes_generation: Arc<AtomicU64>,
-) {
-    let Some(desired) = desired else {
-        return;
-    };
-    tokio::spawn(async move {
-        loop {
-            let before = supervisor.status().await;
-            let Some((generation, pid)) = running_hermes_identity(&before) else {
-                verified_hermes_generation.store(UNVERIFIED_HERMES_GENERATION, Ordering::Relaxed);
-                tokio::time::sleep(Duration::from_secs(1)).await;
-                continue;
-            };
-            if !manager
-                .startup_aeon_specialization_matches(&desired)
-                .unwrap_or(false)
-            {
-                verified_hermes_generation.store(UNVERIFIED_HERMES_GENERATION, Ordering::Relaxed);
-                tokio::time::sleep(Duration::from_secs(5)).await;
-                continue;
-            }
-            if verified_hermes_generation.load(Ordering::Relaxed) == generation {
-                tokio::time::sleep(Duration::from_secs(1)).await;
-                continue;
-            }
-
-            let probe_result = if desired.capabilities.image {
-                probe_hermes_vision(&python, &script, &hermes_home).await
-            } else {
-                Ok(())
-            };
-            let after = supervisor.status().await;
-            let same_process = running_hermes_identity(&after) == Some((generation, pid));
-            let config_matches = manager
-                .startup_aeon_specialization_matches(&desired)
-                .unwrap_or(false);
-            if probe_result.is_ok() && same_process && config_matches {
-                verified_hermes_generation.store(generation, Ordering::Relaxed);
-                tokio::time::sleep(Duration::from_secs(1)).await;
-                continue;
-            }
-
-            verified_hermes_generation.store(UNVERIFIED_HERMES_GENERATION, Ordering::Relaxed);
-            if let Err(error) = probe_result {
-                eprintln!(
-                    "finite-agentd: specialization bundle is configured but not effective: {}",
-                    error.public_message()
-                );
-            }
-            tokio::time::sleep(Duration::from_secs(30)).await;
-        }
-    });
-}
-
-fn running_hermes_identity(status: &SupervisorStatus) -> Option<(u64, u32)> {
-    let hermes = status.processes.get("hermes")?;
-    match hermes.state {
-        ProcessState::Running { pid } => Some((hermes.restart_count, pid)),
-        _ => None,
-    }
-}
-
 #[derive(Clone)]
 struct CommandExecutor {
     identity: DeviceRef,
@@ -582,65 +354,11 @@ struct CommandExecutor {
     config_manager: ConfigManager,
     connection_manager: ConnectionManager,
     hermes_home: PathBuf,
-    hermes_probe_python: PathBuf,
-    hermes_probe_script: PathBuf,
     bridge: BridgeClient,
     supervisor: SupervisorHandle,
-    startup_specialization_desired: Option<AeonSpecializationDesiredStateV1>,
-    verified_hermes_generation: Arc<AtomicU64>,
 }
 
 impl CommandExecutor {
-    async fn rollback_aeon_specialization(
-        &self,
-        desired: &AeonSpecializationDesiredStateV1,
-    ) -> Result<(), AgentdError> {
-        let rollback = HermesConfigRollbackV1 {
-            proposal_id: desired.proposal_id.clone(),
-        };
-        let manager = self.config_manager.clone();
-        let hermes_home = self.hermes_home.clone();
-        tokio::task::spawn_blocking(move || {
-            manager.rollback(&rollback, || validate_hermes_config(&hermes_home))
-        })
-        .await
-        .map_err(|error| {
-            AgentdError::Config(format!("specialization rollback failed: {error}"))
-        })??;
-        self.supervisor.restart_hermes().await
-    }
-
-    async fn verify_aeon_specialization(
-        &self,
-        desired: &AeonSpecializationDesiredStateV1,
-    ) -> Result<(), AgentdError> {
-        let manager = self.config_manager.clone();
-        let hermes_home = self.hermes_home.clone();
-        let desired_for_readback = desired.clone();
-        tokio::task::spawn_blocking(move || {
-            validate_hermes_config(&hermes_home)?;
-            if !manager.aeon_specialization_matches(&desired_for_readback)? {
-                return Err(AgentdError::Config(
-                    "Hermes specialization read-back did not match desired state".to_owned(),
-                ));
-            }
-            Ok(())
-        })
-        .await
-        .map_err(|error| AgentdError::Config(error.to_string()))??;
-
-        if desired.capabilities.image {
-            probe_hermes_vision(
-                &self.hermes_probe_python,
-                &self.hermes_probe_script,
-                &self.hermes_home,
-            )
-            .await
-        } else {
-            Ok(())
-        }
-    }
-
     async fn handle_delivery(&self, delivery: RuntimeCommandDeliveryV1) -> Result<(), AgentdError> {
         let RuntimeCommandInboundPayloadV1::Request(request) = &delivery.payload else {
             self.bridge.acknowledge(&delivery).await?;
@@ -713,15 +431,6 @@ impl CommandExecutor {
                 parse_body::<EmptyRequest>(request, EMPTY_REQUEST_SCHEMA)?;
                 Ok(json!({ "connected": true }))
             }
-            "agent.hermes.restart" => {
-                parse_body::<EmptyRequest>(request, EMPTY_REQUEST_SCHEMA)?;
-                self.supervisor.restart_hermes().await?;
-                Ok(json!({ "restart": "requested" }))
-            }
-            "agent.chat.recover" => {
-                parse_body::<EmptyRequest>(request, EMPTY_REQUEST_SCHEMA)?;
-                self.bridge.recover_chat().await
-            }
             "agent.connections.status" => {
                 parse_body::<EmptyRequest>(request, EMPTY_REQUEST_SCHEMA)?;
                 Ok(serde_json::to_value(self.connection_manager.status()?)?)
@@ -732,48 +441,6 @@ impl CommandExecutor {
                     .connection_manager
                     .inference_plan(&request.request_id, body)?;
                 self.apply_inference_plan(plan).await
-            }
-            "agent.specialization.aeon.reconcile" => {
-                let desired = parse_body::<AeonSpecializationDesiredStateV1>(
-                    request,
-                    AEON_SPECIALIZATION_RECONCILE_SCHEMA,
-                )?;
-                let manager = self.config_manager.clone();
-                let hermes_home = self.hermes_home.clone();
-                let desired_for_apply = desired.clone();
-                let mut result = tokio::task::spawn_blocking(move || {
-                    manager.reconcile_aeon_specialization(&desired_for_apply, || {
-                        validate_hermes_config(&hermes_home)
-                    })
-                })
-                .await
-                .map_err(|error| AgentdError::Config(error.to_string()))??;
-                if let Err(error) = self.supervisor.restart_hermes().await {
-                    if result.applied {
-                        self.rollback_aeon_specialization(&desired).await.map_err(
-                            |restore_error| {
-                                AgentdError::Supervisor(format!(
-                                    "Hermes specialization activation failed ({error}); previous configuration could not be reactivated ({restore_error})"
-                                ))
-                            },
-                        )?;
-                    }
-                    return Err(error);
-                }
-                if let Err(error) = self.verify_aeon_specialization(&desired).await {
-                    if result.applied {
-                        self.rollback_aeon_specialization(&desired).await.map_err(
-                            |restore_error| {
-                                AgentdError::Config(format!(
-                                    "Hermes specialization verification failed ({error}); previous configuration could not be reactivated ({restore_error})"
-                                ))
-                            },
-                        )?;
-                    }
-                    return Err(error);
-                }
-                result.effective_matches_desired = true;
-                Ok(serde_json::to_value(result)?)
             }
             "agent.telegram.connect" => {
                 let body = parse_body::<TelegramConnectRequest>(request, TELEGRAM_CONNECT_SCHEMA)?;
@@ -819,39 +486,6 @@ impl CommandExecutor {
                     .await
                     .map_err(|error| AgentdError::Config(error.to_string()))??;
                 Ok(json!({ "connected": false }))
-            }
-            "agent.hermes.config.preview" => {
-                let offer = parse_body::<HermesConfigOfferV1>(request, CONFIG_OFFER_SCHEMA)?;
-                Ok(serde_json::to_value(self.config_manager.preview(&offer)?)?)
-            }
-            "agent.hermes.config.apply" => {
-                let offer = parse_body::<HermesConfigOfferV1>(request, CONFIG_OFFER_SCHEMA)?;
-                let manager = self.config_manager.clone();
-                let hermes_home = self.hermes_home.clone();
-                let result = tokio::task::spawn_blocking(move || {
-                    manager.apply(&offer, || validate_hermes_config(&hermes_home))
-                })
-                .await
-                .map_err(|error| AgentdError::Config(error.to_string()))??;
-                if result.restart_required {
-                    self.supervisor.restart_hermes().await?;
-                }
-                Ok(serde_json::to_value(result)?)
-            }
-            "agent.hermes.config.rollback" => {
-                let rollback =
-                    parse_body::<HermesConfigRollbackV1>(request, CONFIG_ROLLBACK_SCHEMA)?;
-                let manager = self.config_manager.clone();
-                let hermes_home = self.hermes_home.clone();
-                let result = tokio::task::spawn_blocking(move || {
-                    manager.rollback(&rollback, || validate_hermes_config(&hermes_home))
-                })
-                .await
-                .map_err(|error| AgentdError::Config(error.to_string()))??;
-                if result.restart_required {
-                    self.supervisor.restart_hermes().await?;
-                }
-                Ok(serde_json::to_value(result)?)
             }
             command => Err(AgentdError::UnsupportedCommand(command.to_owned())),
         }
@@ -952,12 +586,7 @@ impl CommandExecutor {
             device_id: self.identity.device_id.clone(),
             authorized_principals: self.ledger.authorized_principal_count().unwrap_or(0),
             processes: processes.clone(),
-            specialization: specialization_bundle_status(
-                &self.config_manager,
-                self.startup_specialization_desired.as_ref(),
-                &self.verified_hermes_generation,
-                &processes,
-            ),
+            specialization: inactive_specialization_status(),
             updated_at_ms: now_ms(),
         }
     }
@@ -1059,7 +688,53 @@ fn load_agent_identity(agent_home: &Path) -> Result<DeviceRef, AgentdError> {
     Ok(DeviceRef::new(config.account_id, config.device_id))
 }
 
+fn sidecar_admission_default_from_value(admission_default: Option<&str>) -> Option<String> {
+    // An explicit marker is inherited by the sidecar unchanged; otherwise
+    // agentd's presence is itself the hosted marker, so the sidecar it spawns
+    // defaults a row-less admission policy to locked (allowlist) mode.
+    if admission_default.is_some_and(|value| !value.trim().is_empty()) {
+        return None;
+    }
+    Some("locked".to_owned())
+}
+
+/// Seed chat admission once, before the supervisor starts any child process.
+///
+/// The sidecar's SQLite admission store is the single source of truth; this
+/// step is its only writer at container boot. Running it here — after
+/// `prepare_agent_runtime` has created the agent home and before the gateway
+/// script or the sidecar can race for the store writer lease — means the
+/// gateway launcher reads a current `allowed-users` mirror on its very first
+/// start, including the legacy-lockdown derivation on an upgraded agent.
+/// Later allowlist changes go through `chat.admission` commands, which
+/// rewrite the mirror in place; they reach the gateway at its next restart.
+///
+/// Callers treat failure as non-fatal: log and continue. The sidecar's own
+/// boot-time seed is the enforcing copy of this step and fails its boot on
+/// a malformed seed env, so skipping here can never silently downgrade
+/// admission to allow-all.
+fn seed_chat_admission(config: &DaemonConfig) -> Result<(), AgentdError> {
+    let status = StdCommand::new(&config.finitechat_bin)
+        .args(["hermes", "--agent-home"])
+        .arg(config.agent_home.as_os_str())
+        .arg("admission")
+        .arg("seed")
+        .stdin(std::process::Stdio::null())
+        .status()?;
+    if status.success() {
+        Ok(())
+    } else {
+        Err(AgentdError::Supervisor(format!(
+            "chat admission seed failed with {status}"
+        )))
+    }
+}
+
 fn sidecar_spec(config: &DaemonConfig) -> ProcessSpec {
+    let mut environment = BTreeMap::new();
+    if let Some(default) = &config.sidecar_admission_default {
+        environment.insert("FINITECHAT_ADMISSION_DEFAULT".to_owned(), default.clone());
+    }
     ProcessSpec {
         name: "finitechat",
         program: config.finitechat_bin.clone(),
@@ -1078,7 +753,7 @@ fn sidecar_spec(config: &DaemonConfig) -> ProcessSpec {
                 .to_string(),
             "--json".to_owned(),
         ],
-        environment: BTreeMap::new(),
+        environment,
     }
 }
 
@@ -1165,9 +840,6 @@ fn spawn_status_writer(
     identity: DeviceRef,
     ledger: Ledger,
     supervisor: SupervisorHandle,
-    config_manager: ConfigManager,
-    startup_specialization_desired: Option<AeonSpecializationDesiredStateV1>,
-    verified_hermes_generation: Arc<AtomicU64>,
 ) {
     tokio::spawn(async move {
         let mut interval = tokio::time::interval(Duration::from_secs(1));
@@ -1180,13 +852,8 @@ fn spawn_status_writer(
                 account_id: identity.account_id.clone(),
                 device_id: identity.device_id.clone(),
                 authorized_principals: ledger.authorized_principal_count().unwrap_or(0),
-                processes: processes.clone(),
-                specialization: specialization_bundle_status(
-                    &config_manager,
-                    startup_specialization_desired.as_ref(),
-                    &verified_hermes_generation,
-                    &processes,
-                ),
+                processes,
+                specialization: inactive_specialization_status(),
                 updated_at_ms: now_ms(),
             };
             let _ = write_private_json(&path, &status);
@@ -1233,36 +900,6 @@ mod tests {
     use super::*;
 
     #[test]
-    fn startup_specialization_bundle_requires_an_explicit_pair() {
-        assert!(
-            startup_specialization_bundle_from_values(None, None)
-                .unwrap()
-                .is_none()
-        );
-        assert!(
-            startup_specialization_bundle_from_values(
-                Some(DEFAULT_AEON_SPECIALIZATION_BUNDLE),
-                None,
-            )
-            .is_err()
-        );
-        assert!(startup_specialization_bundle_from_values(None, Some("worker-secret")).is_err());
-        assert!(
-            startup_specialization_bundle_from_values(Some("unknown"), Some("worker-secret"))
-                .is_err()
-        );
-
-        let bundle = startup_specialization_bundle_from_values(
-            Some(DEFAULT_AEON_SPECIALIZATION_BUNDLE),
-            Some("worker-secret"),
-        )
-        .unwrap()
-        .unwrap();
-        assert_eq!(bundle.bundle_id, DEFAULT_AEON_SPECIALIZATION_BUNDLE);
-        assert!(!format!("{bundle:?}").contains("worker-secret"));
-    }
-
-    #[test]
     fn bridge_ready_timeout_defaults_to_180s_and_validates_override() {
         assert_eq!(
             bridge_ready_timeout_from_value(None).unwrap(),
@@ -1307,12 +944,10 @@ mod tests {
             finitechat_bin: PathBuf::from("/bin/finitechat"),
             prepare_command: PathBuf::from("/bin/true"),
             hermes_command: PathBuf::from("/bin/true"),
-            hermes_probe_python: PathBuf::from("python"),
-            hermes_probe_script: PathBuf::from("/opt/probe_hermes_vision.py"),
             health_python: PathBuf::from("python"),
             health_script: PathBuf::from("/opt/health_server.py"),
             authorized_accounts: BTreeSet::new(),
-            specialization_bundle: None,
+            sidecar_admission_default: None,
             bridge_ready_timeout: Duration::from_secs(1),
         };
         clear_boot_scoped_health_evidence(&config);
@@ -1330,127 +965,95 @@ mod tests {
     }
 
     #[test]
-    fn specialization_status_exposes_desired_and_effective_without_secrets() {
-        let home = tempfile::tempdir().unwrap();
-        let config_path = home.path().join("config.yaml");
-        fs::write(&config_path, "auxiliary: {}\n").unwrap();
-        let manager = ConfigManager::new(
-            config_path,
-            Ledger::open(home.path().join("agentd.sqlite3")).unwrap(),
-        );
-        let bundle = StartupSpecializationBundleConfig {
-            bundle_id: DEFAULT_AEON_SPECIALIZATION_BUNDLE.to_owned(),
-            worker_api_key: "worker-secret".to_owned(),
+    fn sidecar_spec_relays_only_the_admission_default_marker() {
+        let mut config = DaemonConfig {
+            agent_home: PathBuf::from("/data/agent"),
+            hermes_home: PathBuf::from("/data/agent/hermes-home"),
+            bridge_url: "http://127.0.0.1:37633".to_owned(),
+            bridge_addr: "127.0.0.1:37633".to_owned(),
+            finitechat_bin: PathBuf::from("/bin/finitechat"),
+            prepare_command: PathBuf::from("/bin/true"),
+            hermes_command: PathBuf::from("/bin/true"),
+            health_python: PathBuf::from("python"),
+            health_script: PathBuf::from("/opt/health_server.py"),
+            authorized_accounts: BTreeSet::new(),
+            sidecar_admission_default: Some("locked".to_owned()),
+            bridge_ready_timeout: Duration::from_secs(1),
         };
-        let desired = startup_specialization_desired_state(&bundle);
-        assert!(!desired.capabilities.audio);
-        let verified_generation = AtomicU64::new(UNVERIFIED_HERMES_GENERATION);
-        let mut processes = SupervisorStatus::default();
-        processes.processes.insert(
-            "hermes".to_owned(),
-            crate::supervisor::ProcessStatus {
-                state: ProcessState::Running { pid: 42 },
-                restart_count: 7,
-                updated_at_ms: 0,
-            },
+        let spec = sidecar_spec(&config);
+        assert_eq!(
+            spec.environment.get("FINITECHAT_ADMISSION_DEFAULT"),
+            Some(&"locked".to_owned())
         );
-
-        let before = specialization_bundle_status(
-            &manager,
-            Some(&desired),
-            &verified_generation,
-            &processes,
-        );
-        assert!(before.desired);
-        assert!(!before.effective);
-        manager
-            .activate_aeon_specialization_if_unset(&desired, || Ok(()))
-            .unwrap();
-        let configured = specialization_bundle_status(
-            &manager,
-            Some(&desired),
-            &verified_generation,
-            &processes,
-        );
-        assert!(!configured.effective);
-        verified_generation.store(7, Ordering::Relaxed);
-        let after = specialization_bundle_status(
-            &manager,
-            Some(&desired),
-            &verified_generation,
-            &processes,
-        );
-        assert!(after.effective);
-        processes.processes.get_mut("hermes").unwrap().restart_count = 8;
-        let restarted = specialization_bundle_status(
-            &manager,
-            Some(&desired),
-            &verified_generation,
-            &processes,
-        );
-        assert!(!restarted.effective);
-        assert!(
-            !serde_json::to_string(&after)
-                .unwrap()
-                .contains("worker-secret")
-        );
+        // Admission values are never derived here: the sidecar inherits
+        // FINITECHAT_OWNER_NPUBS and FINITECHAT_WELCOME_ALLOWLIST from the
+        // container environment (spawns are additive), so no allowlist key
+        // may appear in the spec.
+        config.sidecar_admission_default = None;
+        let spec = sidecar_spec(&config);
+        assert!(spec.environment.is_empty());
     }
 
-    #[tokio::test]
-    async fn aeon_reconciliation_probe_runs_through_hermes_with_its_home() {
-        let home = tempfile::tempdir().unwrap();
-        fs::write(home.path().join("config.yaml"), "auxiliary: {}\n").unwrap();
-        let script = home.path().join("probe.sh");
-        fs::write(
-            &script,
-            format!(
-                "#!/bin/sh\ntest -f \"$HERMES_HOME/config.yaml\" || exit 2\nprintf '%s\\n' '{}{{\"success\":true,\"analysis\":\"RED\",\"video_analyze\":true}}'\n",
-                AEON_HERMES_PROBE_MARKER
-            ),
-        )
-        .unwrap();
-
-        probe_hermes_vision(Path::new("/bin/sh"), &script, home.path())
-            .await
-            .unwrap();
+    #[test]
+    fn sidecar_admission_default_is_locked_unless_explicitly_set() {
+        assert_eq!(
+            sidecar_admission_default_from_value(None),
+            Some("locked".to_owned())
+        );
+        assert_eq!(
+            sidecar_admission_default_from_value(Some("  ")),
+            Some("locked".to_owned())
+        );
+        // An explicit marker (e.g. an operator previewing a future value) is
+        // inherited by the sidecar unchanged.
+        assert_eq!(sidecar_admission_default_from_value(Some("open")), None);
     }
 
-    #[tokio::test]
-    async fn aeon_reconciliation_rejects_stale_hermes_semantics() {
-        let home = tempfile::tempdir().unwrap();
-        let script = home.path().join("probe.sh");
-        fs::write(
-            &script,
-            format!(
-                "#!/bin/sh\nprintf '%s\\n' 'WORKER_DIRECT_HEALTHY RED'\nprintf '%s\\n' '{}{{\"success\":true,\"analysis\":\"BLUE\",\"video_analyze\":true}}'\n",
-                AEON_HERMES_PROBE_MARKER
-            ),
-        )
-        .unwrap();
-
-        let error = probe_hermes_vision(Path::new("/bin/sh"), &script, home.path())
-            .await
-            .unwrap_err();
-        assert!(matches!(error, AgentdError::Config(_)));
+    #[test]
+    fn specialization_status_stays_inactive_after_aeon_retirement() {
+        let status = inactive_specialization_status();
+        assert!(status.bundle_id.is_none());
+        assert!(!status.desired);
+        assert!(!status.effective);
     }
 
-    #[tokio::test]
-    async fn aeon_reconciliation_rejects_a_runtime_without_video_analyze() {
-        let home = tempfile::tempdir().unwrap();
-        let script = home.path().join("probe.sh");
-        fs::write(
-            &script,
-            format!(
-                "#!/bin/sh\nprintf '%s\\n' '{}{{\"success\":true,\"analysis\":\"RED\",\"video_analyze\":false}}'\n",
-                AEON_HERMES_PROBE_MARKER
-            ),
-        )
+    #[test]
+    fn leftover_specialization_env_cannot_become_desired_or_fail_boot() {
+        // from_env no longer reads FINITE_SPECIALIZATION_* or FBRAIN_EMBEDDING_*.
+        // Leftover container env cannot fail boot or become desired state.
+        let config = DaemonConfig {
+            agent_home: PathBuf::from("/data/agent"),
+            hermes_home: PathBuf::from("/data/agent/hermes-home"),
+            bridge_url: "http://127.0.0.1:37633".to_owned(),
+            bridge_addr: "127.0.0.1:37633".to_owned(),
+            finitechat_bin: PathBuf::from("/bin/finitechat"),
+            prepare_command: PathBuf::from("/bin/true"),
+            hermes_command: PathBuf::from("/bin/true"),
+            health_python: PathBuf::from("python"),
+            health_script: PathBuf::from("/opt/health_server.py"),
+            authorized_accounts: BTreeSet::new(),
+            sidecar_admission_default: None,
+            bridge_ready_timeout: Duration::from_secs(1),
+        };
+        assert!(!format!("{config:?}").contains("aeon-multimodal"));
+        let json = serde_json::to_value(AgentdStatus {
+            service: "finite-agentd".to_owned(),
+            version: env!("CARGO_PKG_VERSION").to_owned(),
+            account_id: "acct".to_owned(),
+            device_id: "dev".to_owned(),
+            authorized_principals: 0,
+            processes: SupervisorStatus::default(),
+            specialization: inactive_specialization_status(),
+            updated_at_ms: 0,
+        })
         .unwrap();
-
-        let error = probe_hermes_vision(Path::new("/bin/sh"), &script, home.path())
-            .await
-            .unwrap_err();
-        assert!(matches!(error, AgentdError::Config(_)));
+        assert_eq!(json["specialization"]["desired"], false);
+        assert_eq!(json["specialization"]["effective"], false);
+        assert!(json["specialization"]["bundle_id"].is_null());
+        assert_eq!(
+            AgentdError::UnsupportedCommand("agent.retired.command".to_owned()).public_code(),
+            "unsupported_command"
+        );
     }
 
     fn delivery(message_id: &str, seq: u64) -> RuntimeCommandDeliveryV1 {

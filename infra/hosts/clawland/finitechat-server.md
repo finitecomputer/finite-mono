@@ -47,10 +47,12 @@ requires a deploy here to pass the gate.
 
 ## Migration story
 
-Its future home is **lat1**, via
-`infra/hosts/lat1/scripts/deploy-finitechat-server.sh`. A 2026-07-07 lat1
-deploy was rolled back after ~2 minutes; leftovers from that attempt are
-still on lat1 (see `infra/hosts/lat1/`).
+The server moved to **lat1** after this capture. Current deploy authority lives
+in `infra/runbooks/deploy-finitechat-server.md`; the old pre-NixOS
+`infra/hosts/lat1/scripts/deploy-finitechat-server.sh` path was removed during
+the 2026-08-29 cleanup. A 2026-07-07 lat1 deploy was rolled back after about
+two minutes; leftovers from that attempt are still recorded in
+`infra/hosts/lat1/`.
 
 Moving it is a **deliberate cutover with a data migration** — quiesced SQLite
 copy of `/var/lib/finite-chat/data/server.sqlite3` plus a DNS flip of

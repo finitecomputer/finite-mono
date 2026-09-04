@@ -51,7 +51,9 @@ def _validate_checksum_pairs(paths: Sequence[Path]) -> None:
     for archive_path in archives:
         checksum_name = f"{archive_path.name}.sha256"
         if checksum_name not in paths_by_name:
-            raise DeliveryError(f"release asset is missing checksum: {archive_path.name}")
+            raise DeliveryError(
+                f"release asset is missing checksum: {archive_path.name}"
+            )
 
     for checksum_path in checksums:
         archive_name = checksum_path.name.removesuffix(".sha256")
@@ -87,8 +89,6 @@ def build_release_metadata(
     paths = sorted(path for path in assets_dir.iterdir() if path.is_file())
     if not paths:
         raise DeliveryError("release has no assets")
-    if component == "finitechat" and any("electron" in path.name for path in paths):
-        raise DeliveryError("Electron assets are outside the CLI release path")
 
     _validate_checksum_pairs(paths)
 
@@ -110,7 +110,9 @@ def build_release_metadata(
     }
 
 
-def verify_component_version(component: str, version: str, repository_root: Path) -> None:
+def verify_component_version(
+    component: str, version: str, repository_root: Path
+) -> None:
     if component not in COMPONENT_MANIFESTS:
         raise DeliveryError(f"unsupported release component: {component}")
     if not VERSION_RE.fullmatch(version):
@@ -120,7 +122,9 @@ def verify_component_version(component: str, version: str, repository_root: Path
         manifest = tomllib.loads(manifest_path.read_text(encoding="utf-8"))
         package_version = str(manifest["package"]["version"])
     except (OSError, KeyError, tomllib.TOMLDecodeError) as error:
-        raise DeliveryError(f"cannot read component manifest {manifest_path}: {error}") from error
+        raise DeliveryError(
+            f"cannot read component manifest {manifest_path}: {error}"
+        ) from error
     if package_version != version:
         raise DeliveryError(
             f"release version {version} does not match {component} package version "
@@ -153,7 +157,9 @@ def _validated_versioned_release(
         metadata_bytes = metadata_path.read_bytes()
         metadata = json.loads(metadata_bytes)
     except (OSError, UnicodeDecodeError, json.JSONDecodeError) as error:
-        raise DeliveryError(f"versioned release metadata is invalid: {error}") from error
+        raise DeliveryError(
+            f"versioned release metadata is invalid: {error}"
+        ) from error
     if not isinstance(metadata, dict):
         raise DeliveryError("versioned release metadata is not an object")
     expected_facts = {
@@ -178,12 +184,16 @@ def _validated_versioned_release(
         raise DeliveryError("versioned release metadata has no assets")
 
     local_assets = sorted(
-        path for path in downloaded_dir.iterdir() if path.is_file() and path.name != "release.json"
+        path
+        for path in downloaded_dir.iterdir()
+        if path.is_file() and path.name != "release.json"
     )
     records_by_name: dict[str, dict[str, object]] = {}
     for record in asset_records:
         if not isinstance(record, dict) or not isinstance(record.get("name"), str):
-            raise DeliveryError("versioned release metadata has an invalid asset record")
+            raise DeliveryError(
+                "versioned release metadata has an invalid asset record"
+            )
         name = str(record["name"])
         if name in records_by_name:
             raise DeliveryError(f"versioned release metadata repeats asset: {name}")
@@ -192,8 +202,13 @@ def _validated_versioned_release(
         raise DeliveryError("versioned release assets do not match release metadata")
     for path in local_assets:
         record = records_by_name[path.name]
-        if record.get("sha256") != sha256_file(path) or record.get("size") != path.stat().st_size:
-            raise DeliveryError(f"versioned release asset does not match metadata: {path.name}")
+        if (
+            record.get("sha256") != sha256_file(path)
+            or record.get("size") != path.stat().st_size
+        ):
+            raise DeliveryError(
+                f"versioned release asset does not match metadata: {path.name}"
+            )
     _validate_checksum_pairs(local_assets)
     return metadata, metadata_bytes, [*local_assets, metadata_path]
 
@@ -209,7 +224,9 @@ def canonical_release_metadata(
     if not isinstance(existing, dict):
         raise DeliveryError("existing release metadata is not an object")
 
-    existing_facts = {key: value for key, value in existing.items() if key != "build_run"}
+    existing_facts = {
+        key: value for key, value in existing.items() if key != "build_run"
+    }
     candidate_facts = {
         key: value for key, value in candidate.items() if key != "build_run"
     }
@@ -358,7 +375,9 @@ def _ensure_tag(
         if current_sha == commit_sha:
             return
         if not movable:
-            raise DeliveryError(f"version tag already points at a different commit: {tag}")
+            raise DeliveryError(
+                f"version tag already points at a different commit: {tag}"
+            )
         _run(
             [
                 "gh",
@@ -512,8 +531,12 @@ def promote_release_alias(
         raise DeliveryError(f"unsupported release component: {component}")
     if not VERSION_RE.fullmatch(version):
         raise DeliveryError(f"invalid release version: {version}")
-    if expected_source_sha is not None and not SOURCE_SHA_RE.fullmatch(expected_source_sha):
-        raise DeliveryError("expected source SHA must be a lowercase 40-character git SHA")
+    if expected_source_sha is not None and not SOURCE_SHA_RE.fullmatch(
+        expected_source_sha
+    ):
+        raise DeliveryError(
+            "expected source SHA must be a lowercase 40-character git SHA"
+        )
 
     version_tag = f"{component}/v{version}"
     alias_tag = f"{component}-latest"
@@ -741,7 +764,9 @@ def verify_image_promotion(source_digest: str, destination_digest: str) -> None:
     if not DIGEST_RE.fullmatch(source_digest) or not DIGEST_RE.fullmatch(
         destination_digest
     ):
-        raise DeliveryError("image digest must be sha256 followed by 64 lowercase hex characters")
+        raise DeliveryError(
+            "image digest must be sha256 followed by 64 lowercase hex characters"
+        )
     if source_digest != destination_digest:
         raise DeliveryError(
             f"image digest changed during promotion: {source_digest} != {destination_digest}"
@@ -787,17 +812,6 @@ def verify_image_index(
         raise DeliveryError("published image index is missing an attestation manifest")
 
 
-def require_production_disabled(manifest_path: Path) -> None:
-    try:
-        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError) as error:
-        raise DeliveryError(f"cannot read production manifest: {error}") from error
-    if manifest.get("environment") != "production":
-        raise DeliveryError("expected the production deployment manifest")
-    if manifest.get("mutation_enabled") is not False:
-        raise DeliveryError("production mutation must remain disabled during migration")
-
-
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
     commands = parser.add_subparsers(dest="command", required=True)
@@ -821,26 +835,19 @@ def build_parser() -> argparse.ArgumentParser:
     image.add_argument("--source-digest", required=True)
     image.add_argument("--destination-digest", required=True)
 
-    production = commands.add_parser("require-production-disabled")
-    production.add_argument("--manifest", type=Path, required=True)
-
     publish = commands.add_parser("publish-release")
     publish.add_argument("--component", required=True, choices=sorted(COMPONENTS))
     publish.add_argument("--version", required=True)
     publish.add_argument("--source-sha", required=True)
     publish.add_argument("--run-id", required=True)
     publish.add_argument("--assets-dir", type=Path, required=True)
-    publish.add_argument(
-        "--repository", default="finitecomputer/finite-releases"
-    )
+    publish.add_argument("--repository", default="finitecomputer/finite-releases")
 
     promote_alias = commands.add_parser("promote-release-alias")
     promote_alias.add_argument("--component", required=True, choices=sorted(COMPONENTS))
     promote_alias.add_argument("--version", required=True)
     promote_alias.add_argument("--expected-source-sha")
-    promote_alias.add_argument(
-        "--repository", default="finitecomputer/finite-releases"
-    )
+    promote_alias.add_argument("--repository", default="finitecomputer/finite-releases")
 
     image_index = commands.add_parser("verify-image-index")
     image_index.add_argument("--manifest", type=Path, required=True)
@@ -873,8 +880,6 @@ def main(argv: Sequence[str] | None = None) -> int:
             )
         elif args.command == "verify-image-promotion":
             verify_image_promotion(args.source_digest, args.destination_digest)
-        elif args.command == "require-production-disabled":
-            require_production_disabled(args.manifest)
         elif args.command == "publish-release":
             publish_release(
                 component=args.component,

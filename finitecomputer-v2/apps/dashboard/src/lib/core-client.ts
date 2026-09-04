@@ -11,7 +11,37 @@ export type CoreBridgeStatus = {
   missing: string[];
 };
 
+/**
+ * The user-facing runtime status. Core derives it at read time from the
+ * runner-ferried health report's freshness (`online` only while a fresh
+ * report says ready, `stale` once reports lapse, `unknown` until the runtime
+ * has been reported on); it is never a frozen lifecycle outcome.
+ */
 export type CoreRuntimeStatus = "online" | "offline" | "stale" | "unknown";
+
+/**
+ * The raw lifecycle latch Core keeps alongside the derived status, for
+ * operators (the last control outcome; never a health-derived value).
+ */
+export type CoreRuntimeLatchedStatus = CoreRuntimeStatus;
+
+/**
+ * Runner-ferried standing readiness, projected by Core at read time. Additive:
+ * older Core responses omit it. `unknown` means "never reported" and `stale`
+ * means "no fresh report", never a failed runtime; a frozen last-known ready
+ * is never displayed.
+ */
+export type CoreRuntimeHealth = {
+  status: "ready" | "not_ready" | "stale" | "unknown";
+  reason?: string | null;
+  /** When Core recorded the latest report (freshness is measured from this). */
+  reported_at?: string | null;
+  /** When the runner last read the runtime (runner clock; evidence only). */
+  observed_at?: string | null;
+  /** The reporter's cadence; Core declares staleness after three intervals. */
+  report_interval_seconds?: number | null;
+  agent_npub?: string | null;
+};
 
 export type CoreProject = {
   id: string;
@@ -35,6 +65,9 @@ export type CoreAgentRuntime = {
   project_id: string;
   contact_endpoint?: string | null;
   runtime_status: CoreRuntimeStatus;
+  /** Additive; older Core responses omit both. */
+  lifecycle_status?: CoreRuntimeLatchedStatus | null;
+  runtime_health?: CoreRuntimeHealth | null;
   hermes_available?: boolean | null;
   /**
    * Populated only from Core's persisted, versioned runtime capability
@@ -249,6 +282,8 @@ export type CoreAdminRuntimeOverview = {
   runtime_artifact_id?: string | null;
   runtime_artifact_version_label?: string | null;
   runtime_status: CoreRuntimeStatus;
+  /** Additive; older Core responses omit it. */
+  lifecycle_status?: CoreRuntimeLatchedStatus | null;
   last_heartbeat_at?: string | null;
   status_updated_at?: string | null;
   runtime_updated_at: string;
@@ -261,18 +296,7 @@ export type CoreAdminRuntimeOverview = {
    * every Dashboard control must treat absence as support for no operations.
    */
   runtime_capabilities?: CoreRuntimeCapabilities | null;
-  /**
-   * Runner-ferried standing readiness, projected by Core at read time.
-   * Additive: older Core responses omit it, and `unknown` means "no fresh
-   * report" rather than a failed runtime. Never a frozen last-known ready.
-   */
-  runtime_health?: {
-    status: "ready" | "not_ready" | "unknown";
-    reason?: string | null;
-    reported_at?: string | null;
-    observed_at?: string | null;
-    agent_npub?: string | null;
-  } | null;
+  runtime_health?: CoreRuntimeHealth | null;
 };
 
 export type CoreAdminRuntimesResult = CoreBridgeStatus & {
@@ -608,16 +632,25 @@ export type CoreAgentCreationInput = {
   idempotencyKey: string;
   hostingTier: "standard" | "confidential";
   profilePictureUrl?: string | null;
+  /**
+   * Owner hosted-chat account id (64 hex), pre-minted via the hosted-device
+   * app state before the creation request so a runner lease can never race
+   * the identity mint. Core injects it into the runtime spec environment as
+   * FINITECHAT_OWNER_NPUBS at lease time.
+   */
+  ownerChatAccountId?: string | null;
 };
 
 export function coreAgentCreationRequestBody(input: CoreAgentCreationInput) {
   const profilePictureUrl = optionalString(input.profilePictureUrl);
+  const ownerChatAccountId = optionalString(input.ownerChatAccountId);
   return {
     displayName: input.displayName,
     launchCode: input.launchCode,
     idempotencyKey: input.idempotencyKey,
     hostingTier: input.hostingTier,
     ...(profilePictureUrl ? { profilePictureUrl } : {}),
+    ...(ownerChatAccountId ? { ownerChatAccountId } : {}),
   };
 }
 
@@ -631,16 +664,34 @@ export async function requestCoreAgentCreation(input: CoreAgentCreationInput) {
     throw new Error("Sign in again to create an agent.");
   }
 
-  const result = await coreFetch<CoreAgentCreationResult>(
-    "/api/core/v1/me/agent-creation-requests",
-    account,
-    {
+  const post = (body: CoreAgentCreationInput) =>
+    coreFetch<CoreAgentCreationResult>("/api/core/v1/me/agent-creation-requests", account, {
       method: "POST",
-      body: JSON.stringify(coreAgentCreationRequestBody(input)),
+      body: JSON.stringify(coreAgentCreationRequestBody(body)),
+    });
+  try {
+    const result = await post(input);
+    invalidateCoreReadCache();
+    return result;
+  } catch (error) {
+    // An N-1 Core predating owner-npub granting has no `ownerChatAccountId`
+    // field and rejects the unknown key at JSON deserialization (axum data
+    // error, 422). Agent creation must never depend on the chat grant, so
+    // retry once without it; every other failure propagates unchanged.
+    if (
+      optionalString(input.ownerChatAccountId) &&
+      error instanceof CoreFetchError &&
+      error.status === 422
+    ) {
+      console.warn(
+        "Core rejected ownerChatAccountId (pre-owner-npub Core); retrying agent creation without the chat grant"
+      );
+      const result = await post({ ...input, ownerChatAccountId: null });
+      invalidateCoreReadCache();
+      return result;
     }
-  );
-  invalidateCoreReadCache();
-  return result;
+    throw error;
+  }
 }
 
 export async function linkCoreStripeCustomer(stripeCustomerId: string) {

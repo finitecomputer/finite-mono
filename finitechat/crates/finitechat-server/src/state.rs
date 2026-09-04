@@ -2,43 +2,36 @@
 //! server-side record types they operate on.
 
 use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
+use std::net::IpAddr;
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex, TryLockError};
-use std::thread;
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use axum::http::HeaderMap;
 use finitechat_blob::BlobDescriptor;
 use finitechat_delivery::{
-    HTTP_SERVER_SOURCE, HttpClaimedKeyPackage, HttpCommitAdmission, HttpDeliveryService,
-    HttpKeyPackageId, HttpKeyPackagePublication, HttpPublishCheck, HttpPublishReceipt,
-    HttpPublishTarget, HttpSequence, HttpServerError, HttpSyncPage, MAX_HTTP_SYNC_PAGE_ENTRIES,
+    HTTP_SERVER_SOURCE, HttpClaimedKeyPackage, HttpCommitAdmission, HttpKeyPackageId,
+    HttpKeyPackagePublication, HttpPublishReceipt, HttpPublishTarget, HttpSequence,
+    HttpServerError, HttpSyncPage, MAX_HTTP_SYNC_PAGE_ENTRIES,
 };
 use finitechat_http::{
-    AckPushWakeRequest, AckPushWakeResponse, AckWelcomeRequest, AckWelcomeResponse,
-    ApplicationEffectCountsResponse, ApplicationEffectRequest, BootstrapAccountRoomRequest,
-    BootstrapAccountRoomResponse, ClaimKeyPackageForAccountRequest, ClaimKeyPackageRequest,
-    ClaimKeyPackagesRequest, ClaimPushWakesRequest, ClaimPushWakesResponse, ClaimWelcomesRequest,
-    CreatePairingSessionRequest, DeviceLivenessRecord, ExpireKeyPackageLeaseRequest,
-    ExpireKeyPackageLeaseResponse, ExpirePairingSessionRequest, ExpirePairingSessionResponse,
-    FailPushWakeRequest, FailPushWakeResponse, FiniteAccountRoomCommitProjection,
-    GetDeviceLivenessRequest, GetDeviceLivenessResponse, GetEphemeralActivitiesRequest,
-    GetEphemeralActivitiesResponse, GetKeyPackageAvailabilityRequest,
-    GetKeyPackageAvailabilityResponse, GetNostrProfilesRequest, GetNostrProfilesResponse,
-    GetPairingSessionRequest, GroupSyncRequest, HttpApplicationDeliveryEffect, HttpClaimedWelcome,
-    HttpKeyPackageClaim, HttpKeyPackageInventory, HttpPairingEventRecord, HttpPairingSessionRecord,
-    HttpPairingSessionState, KeyPackageAvailabilityEntry, KeyPackageInventoryRequest,
-    LeaveRoomRequest, LeaveRoomResponse, ListAccountRoomDirectoryRequest,
-    ListAccountRoomDirectoryResponse, NostrProfileCacheEntry, NostrProfileRecord,
-    ObserveDeviceLivenessRequest, PublishKeyPackageResponse, PublishMessageRequest,
-    PublishPairingCompleteRequest, PublishPairingOfferRequest, PublishPairingResponseRequest,
-    PushTokenRecord, PushWakeDelivery, PushWakePayload, PutNostrProfileRequest,
-    PutNostrProfileResponse, RegisterPushTokenRequest, RegisterPushTokenResponse,
-    RemovePushTokenRequest, RemovePushTokenResponse, ReportInvalidCommitRequest,
-    ReportInvalidCommitResponse, RevokeDeviceRequest, RevokeDeviceResponse, SaveAccountRoomRequest,
-    SaveAccountRoomResponse, SyncHintEvent, SyncWaitRequest, UpdateRoomAdminsRequest,
-    UpdateRoomAdminsResponse,
+    AckWelcomeRequest, AckWelcomeResponse, ApplicationEffectCountsResponse,
+    ApplicationEffectRequest, BootstrapAccountRoomRequest, BootstrapAccountRoomResponse,
+    ClaimKeyPackageForAccountRequest, ClaimKeyPackageRequest, ClaimKeyPackagesRequest,
+    ClaimWelcomesRequest, DeviceLivenessRecord, ExpireKeyPackageLeaseRequest,
+    ExpireKeyPackageLeaseResponse, FiniteAccountRoomCommitProjection, GetDeviceLivenessRequest,
+    GetDeviceLivenessResponse, GetEphemeralActivitiesRequest, GetEphemeralActivitiesResponse,
+    GetKeyPackageAvailabilityRequest, GetKeyPackageAvailabilityResponse, GetNostrProfilesRequest,
+    GetNostrProfilesResponse, GroupSyncRequest, HttpApplicationDeliveryEffect, HttpClaimedWelcome,
+    HttpKeyPackageClaim, HttpKeyPackageInventory, KeyPackageAvailabilityEntry,
+    KeyPackageInventoryRequest, LeaveRoomRequest, LeaveRoomResponse,
+    ListAccountRoomDirectoryRequest, ListAccountRoomDirectoryResponse, NostrProfileCacheEntry,
+    NostrProfileRecord, ObserveDeviceLivenessRequest, PublishKeyPackageResponse,
+    PublishMessageRequest, PutNostrProfileRequest, PutNostrProfileResponse,
+    ReportInvalidCommitRequest, ReportInvalidCommitResponse, RevokeDeviceRequest,
+    RevokeDeviceResponse, SaveAccountRoomRequest, SaveAccountRoomResponse, SyncHintEvent,
+    SyncWaitRequest, UpdateRoomAdminsRequest, UpdateRoomAdminsResponse,
 };
 use finitechat_proto::{
     AccountRoomDevice, AccountRoomRecord, AppendApplicationEventRequest,
@@ -54,36 +47,30 @@ use finitechat_transport::transport::{
     Timestamp, TransportEnvelope, TransportMessage, TransportSource,
 };
 use finitechat_transport::{EpochId, GroupId, MemberId, MessageId};
-use nostr::PublicKey as NostrPublicKey;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-use crate::legacy_store::{
-    PersistedOperation, SqliteHttpDeliveryStore, apply_operations_to_key_package_inventory,
-    apply_operations_to_revoked_devices, replay_operation,
-};
 use crate::projections::{
     HttpRoomMembershipProjection, ObservedRoomHead, apply_room_membership_delta,
     ensure_device_not_revoked_in, ensure_welcome_message_recipient_not_revoked, group_id_for_room,
     initial_room_membership_projection, member_id_for_device, room_id_for_group_id,
     transport_group_id_for_room, validate_membership_adds_for_projection,
 };
+use crate::store::metadata;
+use crate::store::{SqlDelivery, Store};
 use crate::validate::{
-    blob_content_type, blob_url, ensure_pairing_session_open, normalize_blob_upload_content_type,
-    normalize_nostr_profile_record, normalize_public_url, pairing_conflict, pairing_corrupt,
-    pairing_invalid, pairing_now, pairing_recipient, sha256_hex, usize_to_u32,
+    blob_content_type, blob_url, normalize_blob_upload_content_type,
+    normalize_nostr_profile_record, normalize_public_url, sha256_hex, usize_to_u32,
     validate_account_room_id, validate_append_ephemeral_activity_request,
     validate_append_event_request, validate_blob_sha256, validate_blob_upload,
     validate_device_liveness_request, validate_get_ephemeral_activities_request,
     validate_key_package_availability_account_id, validate_key_package_availability_batch,
     validate_key_package_claim_batch, validate_nostr_profile_batch, validate_nostr_profile_record,
-    validate_pairing_device_id, validate_pairing_event, validate_pairing_public_key,
-    validate_pairing_session_id, validate_submit_commit_request,
+    validate_submit_commit_request,
 };
 use crate::{
-    DurableStoreError, HttpServerConfigurationError, MAX_PUSH_WAKE_ATTEMPTS,
-    MAX_PUSH_WAKE_CLAIM_BATCH, MAX_PUSH_WAKE_LEASE_MS, PAIRING_PROTOCOL_VERSION,
-    PAIRING_SESSION_TTL_SECONDS, SNAPSHOT_INTERVAL_OPS, ServerHttpError, finite_delivery_limits,
+    DurableStoreError, HttpServerConfigurationError, SNAPSHOT_INTERVAL_OPS, ServerHttpError,
+    finite_delivery_limits,
 };
 
 /// Per-route activity records inside one `(room_id, conversation_id)` bucket,
@@ -97,7 +84,6 @@ type EphemeralActivityCache = BTreeMap<(String, Option<String>), EphemeralActivi
 
 pub(crate) const READINESS_BUDGET_MILLIS: u64 = 1_000;
 const READINESS_COMPONENT_BUDGET: Duration = Duration::from_millis(450);
-const READINESS_LOCK_POLL_INTERVAL: Duration = Duration::from_millis(5);
 // Cache contract: the live delivery-core sync plus committed SQLite read-back
 // below are the source of truth. Completion time invalidates a result after 30
 // seconds. While one replacement probe is running, concurrent callers may see
@@ -154,14 +140,81 @@ struct CachedReadiness {
     result: ServerReadiness,
 }
 
-#[derive(Clone, Debug, Default)]
+/// Default allowance for the public mutating routes: generous headroom over
+/// what a healthy device can produce, tight enough to blunt naive abuse.
+/// Device-link export legitimately publishes and claims hundreds of
+/// KeyPackages per minute from one address, so the floor sits well above that.
+pub const DEFAULT_RATE_LIMIT_PER_WINDOW: u32 = 1_200;
+pub const DEFAULT_RATE_LIMIT_WINDOW_SECONDS: u64 = 60;
+
+/// Cap on tracked client buckets; past it, each check sweeps expired
+/// windows so a spray of spoofed/one-shot IPs cannot grow the map without
+/// bound.
+const MAX_RATE_LIMIT_ENTRIES: usize = 10_000;
+
+/// Hand-rolled fixed-window per-IP rate limiter for the public mutating
+/// routes (KeyPackages, uploads). A
+/// `Mutex<HashMap<IpAddr, (window_start, count)>>` is enough at the current
+/// fleet size and adds no dependency.
+#[derive(Debug)]
+pub(crate) struct PublicRouteRateLimiter {
+    max_requests: u32,
+    window: Duration,
+    max_entries: usize,
+    windows: Mutex<HashMap<IpAddr, (Instant, u32)>>,
+}
+
+impl PublicRouteRateLimiter {
+    pub(crate) fn new(max_requests: u32, window_seconds: u64) -> Self {
+        Self {
+            max_requests,
+            window: Duration::from_secs(window_seconds),
+            max_entries: MAX_RATE_LIMIT_ENTRIES,
+            windows: Mutex::new(HashMap::new()),
+        }
+    }
+
+    /// Record one request from `ip`; false once the window allowance is spent.
+    pub(crate) fn check(&self, ip: IpAddr) -> bool {
+        let now = Instant::now();
+        let mut windows = self
+            .windows
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        if windows.len() >= self.max_entries {
+            windows.retain(|_, (started, _)| now.duration_since(*started) < self.window);
+        }
+        match windows.get_mut(&ip) {
+            Some((started, count)) if now.duration_since(*started) < self.window => {
+                if *count >= self.max_requests {
+                    return false;
+                }
+                *count += 1;
+                true
+            }
+            _ => {
+                windows.insert(ip, (now, 1));
+                true
+            }
+        }
+    }
+}
+
+impl Default for PublicRouteRateLimiter {
+    fn default() -> Self {
+        Self::new(
+            DEFAULT_RATE_LIMIT_PER_WINDOW,
+            DEFAULT_RATE_LIMIT_WINDOW_SECONDS,
+        )
+    }
+}
+
+#[derive(Clone)]
 pub struct HttpServerState {
-    service: Arc<Mutex<HttpDeliveryService>>,
     publish_idempotency: Arc<Mutex<HashMap<String, PublishIdempotencyRecord>>>,
     key_package_claim_idempotency: Arc<Mutex<HashMap<String, KeyPackageClaimIdempotencyRecord>>>,
     key_package_inventory: Arc<Mutex<HashMap<HttpKeyPackageId, KeyPackageInventoryRecord>>>,
     revoked_devices: Arc<Mutex<BTreeSet<String>>>,
-    pairing_sessions: Arc<Mutex<BTreeMap<String, HttpPairingSessionRecord>>>,
     account_rooms: Arc<Mutex<BTreeMap<String, BTreeMap<String, Value>>>>,
     room_memberships: Arc<Mutex<BTreeMap<String, HttpRoomMembershipProjection>>>,
     application_effects: Arc<Mutex<BTreeMap<String, HttpApplicationDeliveryEffect>>>,
@@ -169,20 +222,24 @@ pub struct HttpServerState {
     device_liveness: Arc<Mutex<BTreeMap<String, DeviceLivenessRecord>>>,
     nostr_profiles: Arc<Mutex<BTreeMap<String, NostrProfileRecord>>>,
     welcome_claims: Arc<Mutex<HashMap<MessageId, WelcomeClaimRecord>>>,
-    push_tokens: Arc<Mutex<BTreeMap<String, PushTokenRecord>>>,
-    push_wakes: Arc<Mutex<BTreeMap<String, PushWakeOutboxRecord>>>,
     /// Blob metadata only (tens of bytes per blob). Payload bytes live in
     /// SQLite and are read per request; they are never resident in RAM on a
     /// durable server.
     blob_meta: Arc<Mutex<BTreeMap<String, BlobMeta>>>,
-    /// Payload fallback for store-less servers (`HttpServerState::default()`
-    /// in tests and dev tooling). A durable server never inserts here.
-    blob_bytes_in_memory: Arc<Mutex<BTreeMap<String, Vec<u8>>>>,
     /// Canonical externally reachable origin used in durable blob references.
     /// Request-derived hosts remain the local-development fallback only.
     public_url: Option<String>,
+    /// Mixed-version rollout gate for NIP-98 request auth on account-scoped
+    /// routes. When false, requests without an `Authorization` header are
+    /// still accepted (old clients) and a present-but-invalid header is
+    /// logged and ignored (upgraded clients may sign a dial URL that differs
+    /// from this server's public URL). When true, a missing or invalid
+    /// header is rejected. A signature that validates binds the signer to
+    /// the body account in both modes.
+    require_signed_requests: bool,
+    rate_limiter: Arc<PublicRouteRateLimiter>,
     ops_since_snapshot: Arc<Mutex<u64>>,
-    /// True while a snapshot persist runs on its background thread; op
+    /// True while a checkpoint persist runs on its background thread; op
     /// triggers that land in the meantime skip instead of stacking threads.
     snapshot_in_flight: Arc<AtomicBool>,
     /// Bounds the public readiness endpoint's SQLite write rate and coalesces
@@ -194,7 +251,24 @@ pub struct HttpServerState {
     /// current phase (hundreds of users); per-key channels are the documented
     /// next step if waiter counts grow.
     pub(crate) wake: Arc<tokio::sync::Notify>,
-    store: Option<Arc<SqliteHttpDeliveryStore>>,
+    /// The normalized delivery engine. Delivery state lives in
+    /// `delivery_routes`/`delivery_entries`/`group_commit_epochs`/
+    /// `sql_key_packages`, room state in the single `room_state_checkpoint`
+    /// structure plus the `account_room_directory` current-state table, and
+    /// shared metadata (idempotency, claims, blobs, ...) in the
+    /// metadata tables behind the same [`Store`]. There is no engine flag
+    /// and no second engine: a boot either folds a pre-cutover database
+    /// (`crate::cutover`) or starts fresh, and every request path serves
+    /// through this engine.
+    sql_delivery: Arc<SqlDelivery>,
+    /// The normalized engine's ordering authority: plan-then-commit publish
+    /// transactions serialize behind this lock so predicted seqs cannot be
+    /// invalidated between read and write.
+    delivery_ordering: Arc<Mutex<()>>,
+    /// The durable database's path; `None` on volatile (`new()`) servers.
+    /// The readiness probe uses it to bound its own write wait without
+    /// borrowing the engine's writer connection.
+    sqlite_path: Option<std::path::PathBuf>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -255,15 +329,38 @@ pub(crate) struct SyncStreamLoop {
     pub(crate) heartbeat_ms: u64,
 }
 
+/// Manual Debug: the state owns SQLite connections that are not `Debug`.
+impl std::fmt::Debug for HttpServerState {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("HttpServerState")
+            .field("engine", &"normalized")
+            .field("public_url", &self.public_url)
+            .finish_non_exhaustive()
+    }
+}
+
+impl Default for HttpServerState {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl HttpServerState {
-    pub fn new(service: HttpDeliveryService) -> Self {
+    /// A volatile server backed by a private in-memory SQLite database.
+    /// Tests, dev tooling, and `serve` without `--state` use this; it has
+    /// the same engine and the same durability-per-request semantics as a
+    /// file-backed server, and no state survives the process.
+    pub fn new() -> Self {
+        let store = Store::open_in_memory().expect("in-memory SQLite store");
+        store
+            .write(|tx| Ok(metadata::init_schema(tx)?))
+            .expect("in-memory metadata schema");
+        let sql_delivery = Arc::new(SqlDelivery::new(store, finite_delivery_limits()));
         Self {
-            service: Arc::new(Mutex::new(service)),
             publish_idempotency: Arc::new(Mutex::new(HashMap::new())),
             key_package_claim_idempotency: Arc::new(Mutex::new(HashMap::new())),
             key_package_inventory: Arc::new(Mutex::new(HashMap::new())),
             revoked_devices: Arc::new(Mutex::new(BTreeSet::new())),
-            pairing_sessions: Arc::new(Mutex::new(BTreeMap::new())),
             account_rooms: Arc::new(Mutex::new(BTreeMap::new())),
             room_memberships: Arc::new(Mutex::new(BTreeMap::new())),
             application_effects: Arc::new(Mutex::new(BTreeMap::new())),
@@ -271,16 +368,17 @@ impl HttpServerState {
             device_liveness: Arc::new(Mutex::new(BTreeMap::new())),
             nostr_profiles: Arc::new(Mutex::new(BTreeMap::new())),
             welcome_claims: Arc::new(Mutex::new(HashMap::new())),
-            push_tokens: Arc::new(Mutex::new(BTreeMap::new())),
-            push_wakes: Arc::new(Mutex::new(BTreeMap::new())),
             blob_meta: Arc::new(Mutex::new(BTreeMap::new())),
-            blob_bytes_in_memory: Arc::new(Mutex::new(BTreeMap::new())),
             public_url: None,
+            require_signed_requests: false,
+            rate_limiter: Arc::new(PublicRouteRateLimiter::default()),
             ops_since_snapshot: Arc::new(Mutex::new(0)),
             snapshot_in_flight: Arc::new(AtomicBool::new(false)),
             readiness_cache: Arc::new(Mutex::new(ReadinessCache::default())),
             wake: Arc::new(tokio::sync::Notify::new()),
-            store: None,
+            sql_delivery,
+            delivery_ordering: Arc::new(Mutex::new(())),
+            sqlite_path: None,
         }
     }
 
@@ -292,65 +390,144 @@ impl HttpServerState {
         Ok(self)
     }
 
+    pub fn with_require_signed_requests(mut self, require_signed_requests: bool) -> Self {
+        self.require_signed_requests = require_signed_requests;
+        self
+    }
+
+    pub fn with_rate_limit(mut self, max_requests: u32, window_seconds: u64) -> Self {
+        self.rate_limiter = Arc::new(PublicRouteRateLimiter::new(max_requests, window_seconds));
+        self
+    }
+
+    /// Record one request to a public mutating route from `ip`; false once
+    /// the per-IP window allowance is spent.
+    pub(crate) fn check_public_route_rate_limit(&self, ip: IpAddr) -> bool {
+        self.rate_limiter.check(ip)
+    }
+
+    pub(crate) fn public_url(&self) -> Option<&str> {
+        self.public_url.as_deref()
+    }
+
+    pub(crate) fn require_signed_requests(&self) -> bool {
+        self.require_signed_requests
+    }
+
+    /// Boot a durable server from `path`. THE single boot path (chat store
+    /// swap): there is no engine flag — the deploy IS the flip.
+    ///
+    /// 1. First boot of this build on a pre-cutover database runs the
+    ///    one-time guarded fold (`crate::cutover`): the retained legacy
+    ///    reader boots one final time (v2 snapshot + op-log tail + #770
+    ///    reconciliation) and its state is transplanted into the normalized
+    ///    tables inside ONE boot transaction with row counts and a sampled
+    ///    fold asserted before the marker commits. A fresh database (no
+    ///    legacy tables) skips the fold entirely and starts normalized.
+    /// 2. Steady state: the account-room directory and revoked devices load
+    ///    from their current-state tables, the room-membership projections
+    ///    load from exactly ONE durable structure (`room_state_checkpoint`)
+    ///    and re-derive from the `delivery_entries` tails, and acked
+    ///    Welcomes re-activate from the claims table. The legacy tables
+    ///    (`http_state_snapshots_v2`, `http_room_memberships`,
+    ///    `http_account_rooms`, `http_delivery_ops`) are never read.
+    /// 3. Divergence is impossible-or-blocking: a checkpoint that lags
+    ///    simply replays more entries; one that disagrees with the route
+    ///    heads (ahead, or a delta that will not apply) fails boot closed
+    ///    instead of being absorbed — the #770 lesson.
+    ///
+    /// Shared metadata (nostr profiles,
+    /// blobs, welcome claims, application effects, publish/claim
+    /// idempotency, the finite KeyPackage inventory) loads through the same
+    /// [`Store`] from the tables it owns in `store::metadata`.
     pub fn from_sqlite_path(path: impl AsRef<Path>) -> Result<Self, DurableStoreError> {
-        let store = Arc::new(SqliteHttpDeliveryStore::open(path)?);
-        // Boot from the latest snapshot plus the operation-log tail; full
-        // replay only happens for stores that have never snapshotted.
-        let (mut service, mut key_package_inventory, mut revoked_devices, snapshot_seq) =
-            match store.load_state_snapshot()? {
-                Some((seq, snapshot)) => (
-                    snapshot.service,
-                    snapshot
-                        .key_package_inventory
-                        .into_iter()
-                        .map(|record| (record.key_package_id.clone(), record))
-                        .collect(),
-                    snapshot.revoked_devices,
-                    seq,
-                ),
-                None => (
-                    HttpDeliveryService::with_limits(finite_delivery_limits()),
-                    HashMap::new(),
-                    BTreeSet::new(),
-                    0,
-                ),
-            };
-        let operations = store.load_operations_after(snapshot_seq)?;
-        for operation in operations.iter().cloned() {
-            replay_operation(&mut service, operation)?;
+        crate::print_engine_rollout_banner();
+        Self::boot(path)
+    }
+
+    fn boot(path: impl AsRef<Path>) -> Result<Self, DurableStoreError> {
+        let store = Store::open_file(&path)?;
+        store
+            .write(|tx| Ok(metadata::init_schema(tx)?))
+            .map_err(|error| match error {
+                crate::store::StoreWriteError::Store(error) => error,
+                crate::store::StoreWriteError::Domain(error) => DurableStoreError::Replay(error),
+            })?;
+        if let Some(report) = crate::cutover::fold_if_needed(&store, path.as_ref())? {
+            eprintln!(
+                "finitechat-server: op-log fold complete ({} routes, {} entries, \
+                 {} commit epochs, {} key packages, {} directory rows, {} revoked devices, \
+                 {} checkpoint rooms; {} routes and {} directory rows sampled-verified)",
+                report.routes,
+                report.entries,
+                report.commit_epochs,
+                report.key_packages,
+                report.directory_rows,
+                report.revoked_devices,
+                report.checkpoint_rooms,
+                report.sampled_routes,
+                report.sampled_directory_rows
+            );
         }
-        apply_operations_to_key_package_inventory(&mut key_package_inventory, &operations);
-        apply_operations_to_revoked_devices(&mut revoked_devices, &operations);
-        let publish_idempotency = store.load_publish_idempotency()?;
-        let key_package_claim_idempotency = store.load_key_package_claim_idempotency()?;
-        if snapshot_seq == 0
-            && !key_package_inventory_cache_matches(
-                &store.load_key_package_inventory()?,
-                &key_package_inventory,
-            )
-        {
-            for record in key_package_inventory.values() {
-                store.upsert_key_package_inventory(record)?;
-            }
+        let sql_delivery = Arc::new(SqlDelivery::new(store, finite_delivery_limits()));
+
+        let sql_store = sql_delivery.store();
+        let (publish_idempotency, key_package_claim_idempotency, key_package_inventory) = sql_store
+            .read(|conn| {
+                Ok((
+                    metadata::load_publish_idempotency(conn)?,
+                    metadata::load_key_package_claim_idempotency(conn)?,
+                    metadata::load_key_package_inventory(conn)?,
+                ))
+            })
+            .map_err(normalized_store_error)?;
+        let (nostr_profiles, welcome_claims, blob_meta) = sql_store
+            .read(|conn| {
+                Ok((
+                    metadata::load_nostr_profiles(conn)?,
+                    metadata::load_welcome_claims(conn)?,
+                    metadata::load_blob_meta(conn)?,
+                ))
+            })
+            .map_err(normalized_store_error)?;
+
+        // Normalized-owned state: directory + revoked devices are current
+        // state; rooms derive from the checkpoint plus entry tails.
+        let revoked_devices = sql_store
+            .read(|conn| Ok(crate::store::room_state::load_revoked_devices(conn)?))
+            .map_err(normalized_store_error)?;
+        let mut account_rooms = sql_store
+            .read(|conn| Ok(crate::store::room_state::load_directory(conn)?))
+            .map_err(normalized_store_error)?;
+        let room_memberships = Self::derive_rooms_from_checkpoint(sql_store, &welcome_claims)
+            .map_err(normalized_store_error)?;
+        let directory_mutation =
+            Self::activate_acked_welcomes_in_directory(&mut account_rooms, &welcome_claims);
+        // Persist the boot derivation: a fresh checkpoint of the derived
+        // rooms (the loaded one may have lagged the tails) plus the welcome
+        // activations' directory rows, in one transaction. Failing to
+        // persist it fails the boot rather than serving state the next
+        // boot would re-derive differently.
+        if !directory_mutation.deletes.is_empty() || !directory_mutation.upserts.is_empty() {
+            sql_store
+                .write(|tx| {
+                    Ok(crate::store::room_state::apply_directory_mutation(
+                        tx,
+                        &directory_mutation,
+                    )?)
+                })
+                .map_err(normalized_store_error)?;
         }
-        let pairing_sessions = store.load_pairing_sessions()?;
-        let account_rooms = store.load_account_room_directory()?;
-        let room_memberships = store.load_room_memberships()?;
-        let application_effects = store.load_application_effects()?;
-        let nostr_profiles = store.load_nostr_profiles()?;
-        let welcome_claims = store.load_welcome_claims()?;
-        let push_tokens = store.load_push_tokens()?;
-        let push_wakes = store.load_push_wakes()?;
-        // Meta only: payload bytes stay in SQLite and are read per request,
-        // so boot cost and RSS no longer scale with stored blob volume.
-        let blob_meta = store.load_blob_meta()?;
+        Self::checkpoint_rooms(&room_memberships, sql_store).map_err(normalized_store_error)?;
+        let application_effects = sql_store
+            .read(|conn| Ok(metadata::load_application_effects(conn)?))
+            .map_err(normalized_store_error)?;
+
         Ok(Self {
-            service: Arc::new(Mutex::new(service)),
             publish_idempotency: Arc::new(Mutex::new(publish_idempotency)),
             key_package_claim_idempotency: Arc::new(Mutex::new(key_package_claim_idempotency)),
             key_package_inventory: Arc::new(Mutex::new(key_package_inventory)),
             revoked_devices: Arc::new(Mutex::new(revoked_devices)),
-            pairing_sessions: Arc::new(Mutex::new(pairing_sessions)),
             account_rooms: Arc::new(Mutex::new(account_rooms)),
             room_memberships: Arc::new(Mutex::new(room_memberships)),
             application_effects: Arc::new(Mutex::new(application_effects)),
@@ -358,22 +535,214 @@ impl HttpServerState {
             device_liveness: Arc::new(Mutex::new(BTreeMap::new())),
             nostr_profiles: Arc::new(Mutex::new(nostr_profiles)),
             welcome_claims: Arc::new(Mutex::new(welcome_claims)),
-            push_tokens: Arc::new(Mutex::new(push_tokens)),
-            push_wakes: Arc::new(Mutex::new(push_wakes)),
             blob_meta: Arc::new(Mutex::new(blob_meta)),
-            blob_bytes_in_memory: Arc::new(Mutex::new(BTreeMap::new())),
             public_url: None,
+            require_signed_requests: false,
+            rate_limiter: Arc::new(PublicRouteRateLimiter::default()),
             ops_since_snapshot: Arc::new(Mutex::new(0)),
             snapshot_in_flight: Arc::new(AtomicBool::new(false)),
             readiness_cache: Arc::new(Mutex::new(ReadinessCache::default())),
             wake: Arc::new(tokio::sync::Notify::new()),
-            store: Some(store),
+            sql_delivery,
+            delivery_ordering: Arc::new(Mutex::new(())),
+            sqlite_path: Some(path.as_ref().to_path_buf()),
         })
     }
 
+    /// The single room-state derivation: checkpoint rooms, replay every
+    /// room's `delivery_entries` tail above the checkpoint watermark,
+    /// re-activate acked Welcomes, then assert the head invariant. Any
+    /// checkpoint/entry disagreement fails closed — never the #770
+    /// advance-but-stay-frozen fallback.
+    fn derive_rooms_from_checkpoint(
+        store: &Store,
+        welcome_claims: &HashMap<MessageId, WelcomeClaimRecord>,
+    ) -> Result<BTreeMap<String, HttpRoomMembershipProjection>, crate::store::StoreWriteError> {
+        store.read(|conn| {
+            let checkpoint = crate::store::room_state::load_checkpoint(conn)?.unwrap_or_default();
+            let mut rooms = checkpoint.rooms;
+            for (room_id, head) in crate::store::room_state::group_room_heads(conn)? {
+                let Some(projection) = rooms.get(&room_id) else {
+                    // Rooms without a checkpoint entry keep the typed
+                    // bootstrap path, exactly like legacy rooms without a
+                    // durable projection row: the log stays authoritative
+                    // and the next bootstrap derives from it.
+                    continue;
+                };
+                if projection.last_seq > head {
+                    return Err(divergence(format!(
+                        "room {room_id} checkpoint is ahead of its delivery route \
+                         (projection last_seq {}, route head {head})",
+                        projection.last_seq
+                    )));
+                }
+                let tail = crate::store::room_state::group_entries_after(
+                    conn,
+                    &room_id,
+                    projection.last_seq,
+                )?;
+                let mls_group_id = projection.mls_group_id.clone();
+                for queued in &tail {
+                    let commit = serde_json::from_slice::<FiniteAccountRoomCommitProjection>(
+                        &queued.message.payload,
+                    )
+                    .ok()
+                    .filter(|commit| {
+                        commit.entry.room_id == room_id && commit.entry.kind == LogEntryKind::Commit
+                    });
+                    match commit {
+                        Some(commit) => {
+                            if let Err(error) = apply_room_membership_delta(
+                                &mut rooms,
+                                &room_id,
+                                &mls_group_id,
+                                &commit.entry.sender,
+                                commit.entry.epoch,
+                                &commit.membership_delta,
+                                queued.seq,
+                            ) {
+                                return Err(divergence(format!(
+                                    "room {room_id} membership delta replay broke at seq {} \
+                                     ({error:?}); the checkpoint disagrees with the delivery log",
+                                    queued.seq
+                                )));
+                            }
+                        }
+                        None => {
+                            if let Some(projection) = rooms.get_mut(&room_id) {
+                                projection.last_seq = projection.last_seq.max(queued.seq);
+                            }
+                        }
+                    }
+                }
+                if let Some(projection) = rooms.get(&room_id)
+                    && projection.last_seq != head
+                {
+                    return Err(divergence(format!(
+                        "room {room_id} derived head {} does not match its delivery route \
+                         head {head}",
+                        projection.last_seq
+                    )));
+                }
+            }
+            // Rooms with a projection but no delivery route can only be
+            // bootstrap-only rooms (no entries yet); anything else is a
+            // checkpoint that claims history the entries do not hold.
+            for (room_id, projection) in &rooms {
+                if projection.last_seq != 0
+                    && crate::store::room_state::group_entries_after(conn, room_id, 0)?.is_empty()
+                {
+                    return Err(divergence(format!(
+                        "room {room_id} checkpoint claims last_seq {} but the delivery \
+                         route holds no entries",
+                        projection.last_seq
+                    )));
+                }
+            }
+            // Welcome ACKs are durable delivery events, not group-log
+            // entries: the delta replay above re-creates added intervals as
+            // pending, so activate the ones whose Welcomes were already
+            // acked. Mere claims stay pending, exactly like the live routes.
+            for claim in welcome_claims.values() {
+                if claim.state != WelcomeClaimState::Acked {
+                    continue;
+                }
+                let Ok(welcome) = serde_json::from_slice::<WelcomeRecord>(&claim.message.payload)
+                else {
+                    continue;
+                };
+                if claim.message.id.as_slice() != welcome.welcome_id.as_bytes() {
+                    continue;
+                }
+                if let Some(projection) = rooms.get_mut(&welcome.room_id) {
+                    projection.activate_interval(&welcome.recipient, welcome.commit_seq);
+                }
+            }
+            Ok(rooms)
+        })
+    }
+
+    /// Mirror of the legacy boot's directory welcome-activation: mark acked
+    /// recipients active in the account-room directory records that still
+    /// show them pending. Returns the rows to persist (boot writes them in
+    /// one transaction).
+    fn activate_acked_welcomes_in_directory(
+        directory: &mut BTreeMap<String, BTreeMap<String, Value>>,
+        welcome_claims: &HashMap<MessageId, WelcomeClaimRecord>,
+    ) -> AccountRoomDirectoryMutation {
+        let mut mutation = AccountRoomDirectoryMutation::default();
+        for claim in welcome_claims.values() {
+            if claim.state != WelcomeClaimState::Acked {
+                continue;
+            }
+            let Ok(welcome) = serde_json::from_slice::<WelcomeRecord>(&claim.message.payload)
+            else {
+                continue;
+            };
+            if claim.message.id.as_slice() != welcome.welcome_id.as_bytes() {
+                continue;
+            }
+            if let Some(record) = activate_account_room_device_in_directory(
+                directory,
+                &welcome.recipient,
+                &welcome.room_id,
+            ) {
+                mutation.upserts.push(record);
+            }
+        }
+        mutation
+    }
+
+    /// Write a fresh room-state checkpoint (the normalized engine's single
+    /// room-state structure) from the live map.
+    fn checkpoint_rooms(
+        rooms: &BTreeMap<String, HttpRoomMembershipProjection>,
+        store: &Store,
+    ) -> Result<(), crate::store::StoreWriteError> {
+        let checkpoint = crate::store::room_state::RoomStateCheckpoint {
+            rooms: rooms.clone(),
+        };
+        store.write(|tx| Ok(crate::store::room_state::save_checkpoint(tx, &checkpoint)?))
+    }
+
+    /// Upsert one account-room directory row (direct saves, bootstraps,
+    /// welcome activations). Current state, written immediately.
+    fn upsert_account_room_row(
+        &self,
+        record: &AccountRoomDirectoryRecord,
+    ) -> Result<(), ServerHttpError> {
+        let mutation = AccountRoomDirectoryMutation {
+            deletes: Vec::new(),
+            upserts: vec![record.clone()],
+        };
+        self.sql_delivery
+            .store()
+            .write(|tx| {
+                Ok(crate::store::room_state::apply_directory_mutation(
+                    tx, &mutation,
+                )?)
+            })
+            .map_err(sql_write_error)?;
+        Ok(())
+    }
+
+    /// Persist the live room-membership map as a fresh checkpoint. Called
+    /// for the rare primary room mutations (bootstrap, leave, admin
+    /// changes, repair) whose projection state is not re-derivable from
+    /// delivery entries alone; commit-derived projection changes ride the
+    /// snapshot cadence instead.
+    fn normalized_checkpoint_rooms(&self) -> Result<(), ServerHttpError> {
+        let rooms = self
+            .room_memberships
+            .lock()
+            .expect("HTTP room-membership mutex")
+            .clone();
+        Self::checkpoint_rooms(&rooms, self.sql_delivery.store()).map_err(sql_write_error)
+    }
+
     /// Exercise the two shared seams every delivered chat message needs:
-    /// access to the ordering-authoritative in-memory core and a committed
-    /// write through the durable SQLite store.
+    /// the delivery-core read contract and a committed write through the
+    /// durable SQLite store.
     pub(crate) fn probe_readiness(&self) -> ServerReadiness {
         let now = Instant::now();
         let mut cache = match self.readiness_cache.lock() {
@@ -419,30 +788,17 @@ impl HttpServerState {
     fn probe_readiness_uncached(&self) -> ServerReadiness {
         let started = Instant::now();
         let core_started = Instant::now();
-        let core_failure = loop {
-            match self.service.try_lock() {
-                Ok(service) => {
-                    // Exercise the same bounded group-sync contract and
-                    // central state lock as a reconnecting user, without
-                    // advancing any cursor or mutating a Room.
-                    let probe_group = GroupId::new(b"finitechat-readiness-v1".to_vec());
-                    match service.sync_group(&probe_group, 0, 1) {
-                        Ok(_) => break None,
-                        Err(error) => {
-                            eprintln!(
-                                "finitechat-server: readiness delivery-core sync failed: {error}"
-                            );
-                            break Some("delivery_core_sync_failed");
-                        }
-                    }
+        // The engine has no central delivery lock to contend on: the core
+        // probe is the same bounded group-sync contract served from the
+        // query_only read pool.
+        let core_failure = {
+            let probe_group = GroupId::new(b"finitechat-readiness-v1".to_vec());
+            match self.sql_delivery.sync_group(&probe_group, 0, 1) {
+                Ok(_) => None,
+                Err(error) => {
+                    eprintln!("finitechat-server: readiness delivery-core sync failed: {error:?}");
+                    Some("delivery_core_sync_failed")
                 }
-                Err(TryLockError::WouldBlock)
-                    if core_started.elapsed() < READINESS_COMPONENT_BUDGET =>
-                {
-                    thread::sleep(READINESS_LOCK_POLL_INTERVAL);
-                }
-                Err(TryLockError::WouldBlock) => break Some("delivery_core_contended"),
-                Err(TryLockError::Poisoned(_)) => break Some("delivery_core_lock_poisoned"),
             }
         };
         let delivery_core = ReadinessCheckResult {
@@ -451,9 +807,66 @@ impl HttpServerState {
         };
 
         let store_started = Instant::now();
-        let store_failure = match &self.store {
-            Some(store) => store.probe_readiness(READINESS_COMPONENT_BUDGET).err(),
-            None => Some("durable_store_not_configured"),
+        // Prove a committed write through the same SQLite file user writes
+        // take: a server_meta stamp written and read back in one
+        // transaction. On a durable store the probe uses its OWN connection
+        // with a bounded busy timeout, so an externally held write lock
+        // fails the probe within the component budget instead of queueing
+        // the engine's writer behind a five-second busy wait (and user
+        // writes never wait behind the probe).
+        let checked_at_ms = metadata::unix_now_ms();
+        let written = match &self.sqlite_path {
+            Some(path) => (|| -> Result<String, DurableStoreError> {
+                let mut conn = rusqlite::Connection::open(path)?;
+                conn.busy_timeout(READINESS_COMPONENT_BUDGET)?;
+                let tx =
+                    conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+                tx.execute(
+                    "INSERT INTO server_meta (key, value) VALUES ('readiness_probe_ms', ?1)
+                     ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+                    rusqlite::params![checked_at_ms.to_string()],
+                )?;
+                let observed: String = tx.query_row(
+                    "SELECT value FROM server_meta WHERE key = 'readiness_probe_ms'",
+                    [],
+                    |row| row.get(0),
+                )?;
+                tx.commit()?;
+                Ok(observed)
+            })(),
+            None => self
+                .sql_delivery
+                .store()
+                .write(|tx| {
+                    tx.execute(
+                        "INSERT INTO server_meta (key, value) VALUES ('readiness_probe_ms', ?1)
+                         ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+                        rusqlite::params![checked_at_ms.to_string()],
+                    )?;
+                    let observed: String = tx.query_row(
+                        "SELECT value FROM server_meta WHERE key = 'readiness_probe_ms'",
+                        [],
+                        |row| row.get(0),
+                    )?;
+                    Ok(observed)
+                })
+                .map_err(|error| match error {
+                    crate::store::StoreWriteError::Store(error) => error,
+                    crate::store::StoreWriteError::Domain(error) => {
+                        DurableStoreError::Replay(error)
+                    }
+                }),
+        };
+        let store_failure = match written {
+            Ok(observed) if observed == checked_at_ms.to_string() => None,
+            Ok(_) => {
+                eprintln!("finitechat-server: readiness store read-back mismatch");
+                Some("read_back_mismatch")
+            }
+            Err(error) => {
+                eprintln!("finitechat-server: readiness store commit failed: {error:?}");
+                Some("commit_failed")
+            }
         };
         let durable_store = ReadinessCheckResult {
             elapsed: store_started.elapsed(),
@@ -494,14 +907,17 @@ impl HttpServerState {
             return Err(ServerHttpError::BlobConflict { sha256 });
         }
 
-        if let Some(store) = &self.store {
-            store.insert_blob_object(&sha256, content_type, bytes)?;
-        } else {
-            self.blob_bytes_in_memory
-                .lock()
-                .expect("HTTP blob bytes mutex")
-                .insert(sha256.clone(), bytes.to_vec());
-        }
+        self.sql_delivery
+            .store()
+            .write(|tx| {
+                Ok(metadata::insert_blob_object(
+                    tx,
+                    &sha256,
+                    content_type,
+                    bytes,
+                )?)
+            })
+            .map_err(sql_write_error)?;
         meta.insert(
             sha256.clone(),
             BlobMeta {
@@ -528,34 +944,27 @@ impl HttpServerState {
                 sha256: sha256.to_owned(),
             });
         };
-        let bytes = if let Some(store) = &self.store {
-            let Some(bytes) = store.load_blob_payload(sha256)? else {
-                // Meta says present; a missing payload row is corruption, not
-                // a 404 a client could mistake for permanent deletion.
-                return Err(DurableStoreError::BlobObjectCorrupt {
-                    sha256: sha256.to_owned(),
-                }
-                .into());
-            };
-            // Boot used to verify every stored blob up front; the same
-            // verification now runs per read on just the requested object.
-            if bytes.len() as u64 != meta.size_bytes || sha256 != sha256_hex(&bytes) {
-                return Err(DurableStoreError::BlobObjectCorrupt {
-                    sha256: sha256.to_owned(),
-                }
-                .into());
+        let bytes = self
+            .sql_delivery
+            .store()
+            .read(|conn| Ok(metadata::load_blob_payload(conn, sha256)?))
+            .map_err(sql_write_error)?;
+        let Some(bytes) = bytes else {
+            // Meta says present; a missing payload row is corruption, not
+            // a 404 a client could mistake for permanent deletion.
+            return Err(DurableStoreError::BlobObjectCorrupt {
+                sha256: sha256.to_owned(),
             }
-            bytes
-        } else {
-            self.blob_bytes_in_memory
-                .lock()
-                .expect("HTTP blob bytes mutex")
-                .get(sha256)
-                .cloned()
-                .ok_or_else(|| ServerHttpError::BlobNotFound {
-                    sha256: sha256.to_owned(),
-                })?
+            .into());
         };
+        // Boot used to verify every stored blob up front; the same
+        // verification now runs per read on just the requested object.
+        if bytes.len() as u64 != meta.size_bytes || sha256 != sha256_hex(&bytes) {
+            return Err(DurableStoreError::BlobObjectCorrupt {
+                sha256: sha256.to_owned(),
+            }
+            .into());
+        }
         Ok(BlobObject {
             content_type: meta.content_type,
             bytes,
@@ -564,38 +973,40 @@ impl HttpServerState {
 
     /// Raw delivery-contract publish, also used by the shared delivery
     /// conformance suite against this durable server.
+    ///
+    /// Plan the publish read-only, then append it inside one
+    /// `BEGIN IMMEDIATE` transaction under the delivery ordering lock.
+    /// Digest-exact duplicate replays return the original receipt without
+    /// appending; the idempotency row lands on the shared table inside the
+    /// same transaction as the entry it describes, so a crash in between
+    /// replays as a digest duplicate with the same seq.
     pub fn publish_message(
         &self,
         request: PublishMessageRequest,
     ) -> Result<HttpPublishReceipt, ServerHttpError> {
         self.validate_raw_commit_import(&request)?;
+        let sql = &self.sql_delivery;
         let Some(idempotency_key) = request.idempotency_key.clone() else {
-            let mut service = self.service.lock().expect("HTTP delivery service mutex");
-            let receipt = match service.check_publish(&request.target, &request.message)? {
-                HttpPublishCheck::DuplicateReplay(receipt) => return Ok(receipt),
-                HttpPublishCheck::Fresh(receipt) => receipt,
-            };
-            if let Some(store) = &self.store {
-                store.append_operation(&PersistedOperation::PublishMessage {
-                    target: request.target.clone(),
-                    message: request.message.clone(),
-                    idempotency_key: None,
-                })?;
-            }
-            // The dry run admitted this publish under the held lock, so the
-            // apply cannot fail; `?` keeps the impossible path a 500 instead
-            // of a panic.
-            let published = service.publish(request.target, request.message)?;
-            debug_assert_eq!(published, receipt);
-            return Ok(published);
+            let _ordering = self
+                .delivery_ordering
+                .lock()
+                .expect("HTTP delivery ordering mutex");
+            let plans = sql
+                .plan_batch(std::slice::from_ref(&request))
+                .map_err(sql_write_error)?;
+            let receipt = plans[0].receipt.clone();
+            sql.store()
+                .write(|tx| SqlDelivery::append_plan_in_tx(tx, &plans))
+                .map_err(sql_write_error)?;
+            drop(_ordering);
+            self.note_op_for_snapshot();
+            return Ok(receipt);
         };
 
         if idempotency_key.is_empty() {
             return Err(ServerHttpError::InvalidIdempotencyKey);
         }
-
         let fingerprint = PublishMessageFingerprint::from_request(&request);
-        let mut service = self.service.lock().expect("HTTP delivery service mutex");
         let mut idempotency = self
             .publish_idempotency
             .lock()
@@ -607,27 +1018,33 @@ impl HttpServerState {
             return Err(ServerHttpError::IdempotencyConflict { idempotency_key });
         }
 
-        let receipt = match service.check_publish(&request.target, &request.message)? {
-            HttpPublishCheck::DuplicateReplay(receipt) => receipt,
-            HttpPublishCheck::Fresh(receipt) => receipt,
-        };
-        let operation = (!receipt.duplicate).then_some(PersistedOperation::PublishMessage {
-            target: request.target.clone(),
-            message: request.message.clone(),
-            idempotency_key: Some(idempotency_key.clone()),
-        });
+        let _ordering = self
+            .delivery_ordering
+            .lock()
+            .expect("HTTP delivery ordering mutex");
+        let plans = sql
+            .plan_batch(std::slice::from_ref(&request))
+            .map_err(sql_write_error)?;
+        let fresh = plans[0].fresh;
+        let receipt = plans[0].receipt.clone();
         let record = PublishIdempotencyRecord {
             fingerprint,
             receipt: receipt.clone(),
         };
-        if let Some(store) = &self.store {
-            store.append_publish_mutation(operation.as_ref(), Some((&idempotency_key, &record)))?;
-        }
-        if !receipt.duplicate {
-            let published = service.publish(request.target, request.message)?;
-            debug_assert_eq!(published, receipt);
-        }
+        sql.store()
+            .write(|tx| {
+                SqlDelivery::append_plan_in_tx(tx, &plans)?;
+                metadata::insert_publish_idempotency_in_transaction(tx, &idempotency_key, &record)
+                    .map_err(crate::store::StoreTxError::Store)?;
+                Ok(())
+            })
+            .map_err(sql_write_error)?;
         idempotency.insert(idempotency_key, record);
+        drop(idempotency);
+        drop(_ordering);
+        if fresh {
+            self.note_op_for_snapshot();
+        }
         Ok(receipt)
     }
 
@@ -670,6 +1087,32 @@ impl HttpServerState {
         Ok(())
     }
 
+    /// Persist the durable legs of a KeyPackage inventory mutation: the
+    /// changed inventory rows (current state) plus, when the caller produced
+    /// a claim idempotency record, its row — one transaction.
+    fn persist_key_package_mutation(
+        &self,
+        idempotency: Option<(&str, &KeyPackageClaimIdempotencyRecord)>,
+        changed: &[KeyPackageInventoryRecord],
+    ) -> Result<(), ServerHttpError> {
+        self.sql_delivery
+            .store()
+            .write(|tx| {
+                for record in changed {
+                    metadata::upsert_key_package_inventory_in_transaction(tx, record)
+                        .map_err(crate::store::StoreTxError::Store)?;
+                    metadata::upsert_key_package_payload(tx, record)
+                        .map_err(crate::store::StoreTxError::Store)?;
+                }
+                if let Some((key, record)) = idempotency {
+                    metadata::insert_key_package_claim_idempotency_in_transaction(tx, key, record)
+                        .map_err(crate::store::StoreTxError::Store)?;
+                }
+                Ok(())
+            })
+            .map_err(sql_write_error)
+    }
+
     pub fn publish_key_package(
         &self,
         publication: HttpKeyPackagePublication,
@@ -686,11 +1129,9 @@ impl HttpServerState {
             return Ok(PublishKeyPackageResponse { published: true });
         };
         let changed = changed_key_package_inventory_records(&inventory, &candidate);
-        let operation = PersistedOperation::PublishKeyPackage { publication };
-        if let Some(store) = &self.store {
-            store.append_key_package_claim_mutation(Some(&operation), None, &changed)?;
-        }
+        self.persist_key_package_mutation(None, &changed)?;
         *inventory = candidate;
+        drop(inventory);
         Ok(PublishKeyPackageResponse { published: true })
     }
 
@@ -717,19 +1158,9 @@ impl HttpServerState {
             .as_ref()
             .and_then(|package| candidate.get(&package.key_package_id).cloned());
         let changed = changed.into_iter().collect::<Vec<_>>();
-        let operation = claimed
-            .is_some()
-            .then_some(PersistedOperation::ClaimKeyPackage {
-                owner: request.owner,
-            });
-        if let Some(store) = &self.store {
-            store.append_key_package_claim_mutation(
-                operation.as_ref(),
-                None,
-                changed.as_slice(),
-            )?;
-        }
+        self.persist_key_package_mutation(None, &changed)?;
         *inventory = candidate;
+        drop(inventory);
         Ok(claimed)
     }
 
@@ -753,19 +1184,9 @@ impl HttpServerState {
             .as_ref()
             .and_then(|package| candidate.get(&package.key_package_id).cloned());
         let changed = changed.into_iter().collect::<Vec<_>>();
-        let operation = claimed
-            .as_ref()
-            .map(|package| PersistedOperation::ClaimKeyPackage {
-                owner: package.owner.clone(),
-            });
-        if let Some(store) = &self.store {
-            store.append_key_package_claim_mutation(
-                operation.as_ref(),
-                None,
-                changed.as_slice(),
-            )?;
-        }
+        self.persist_key_package_mutation(None, &changed)?;
         *inventory = candidate;
+        drop(inventory);
         Ok(claimed)
     }
 
@@ -787,20 +1208,9 @@ impl HttpServerState {
                 &revoked_devices,
             );
             let changed = key_package_claim_inventory_records(&candidate, &claims);
-            let operation = claims
-                .iter()
-                .any(|claim| claim.claimed.is_some())
-                .then_some(PersistedOperation::ClaimKeyPackages {
-                    owners: request.owners,
-                });
-            if let Some(store) = &self.store {
-                store.append_key_package_claim_mutation(
-                    operation.as_ref(),
-                    None,
-                    changed.as_slice(),
-                )?;
-            }
+            self.persist_key_package_mutation(None, &changed)?;
             *inventory = candidate;
+            drop(inventory);
             return Ok(claims);
         };
 
@@ -831,25 +1241,15 @@ impl HttpServerState {
         let claims =
             claim_key_packages_from_inventory(&mut candidate, &request.owners, &revoked_devices);
         let changed = key_package_claim_inventory_records(&candidate, &claims);
-        let operation = claims
-            .iter()
-            .any(|claim| claim.claimed.is_some())
-            .then_some(PersistedOperation::ClaimKeyPackages {
-                owners: request.owners,
-            });
         let record = KeyPackageClaimIdempotencyRecord {
             fingerprint,
             response: claims.clone(),
         };
-        if let Some(store) = &self.store {
-            store.append_key_package_claim_mutation(
-                operation.as_ref(),
-                Some((&idempotency_key, &record)),
-                changed.as_slice(),
-            )?;
-        }
+        self.persist_key_package_mutation(Some((&idempotency_key, &record)), &changed)?;
         *inventory = candidate;
         idempotency.insert(idempotency_key, record);
+        drop(inventory);
+        drop(idempotency);
         Ok(claims)
     }
 
@@ -886,13 +1286,10 @@ impl HttpServerState {
             }
         }
         let changed = record.clone();
-        let operation = PersistedOperation::ExpireKeyPackageLease {
-            key_package_id: request.key_package_id,
-        };
-        if let Some(store) = &self.store {
-            store.append_key_package_inventory_operation(&operation, &changed)?;
-        }
+        // The inventory row IS the durable state.
+        self.persist_key_package_mutation(None, std::slice::from_ref(&changed))?;
         *inventory = candidate;
+        drop(inventory);
         Ok(ExpireKeyPackageLeaseResponse { expired: true })
     }
 
@@ -908,21 +1305,19 @@ impl HttpServerState {
         let device_key = DeviceMembership::key(&request.device);
         let mut revoked_devices = self.revoked_devices.lock().expect("HTTP device mutex");
         if !revoked_devices.contains(&device_key) {
-            let operation = PersistedOperation::RevokeDevice {
-                device: request.device.clone(),
-            };
-            if let Some(store) = &self.store {
-                store.append_operation(&operation)?;
-            }
+            // The revoked-device set is current state in its own table.
+            self.sql_delivery
+                .store()
+                .write(|tx| {
+                    tx.execute(
+                        "INSERT OR IGNORE INTO revoked_devices (device_key) VALUES (?1)",
+                        rusqlite::params![&device_key],
+                    )?;
+                    Ok(())
+                })
+                .map_err(sql_write_error)?;
             revoked_devices.insert(device_key.clone());
             drop(revoked_devices);
-            // A revoked device must never be woken again.
-            let mut tokens = self.push_tokens.lock().expect("HTTP push-token mutex");
-            if tokens.remove(&device_key).is_some()
-                && let Some(store) = &self.store
-            {
-                store.delete_push_token(&device_key)?;
-            }
         }
         Ok(RevokeDeviceResponse { revoked: true })
     }
@@ -1001,9 +1396,10 @@ impl HttpServerState {
             .lock()
             .expect("HTTP nostr-profile mutex");
         profiles.insert(record.account_id.clone(), record.clone());
-        if let Some(store) = &self.store {
-            store.upsert_nostr_profile(&record)?;
-        }
+        self.sql_delivery
+            .store()
+            .write(|tx| Ok(metadata::upsert_nostr_profile(tx, &record)?))
+            .map_err(sql_write_error)?;
         Ok(PutNostrProfileResponse { saved: true })
     }
 
@@ -1113,288 +1509,6 @@ impl HttpServerState {
         })
     }
 
-    pub(crate) fn create_pairing_session(
-        &self,
-        request: CreatePairingSessionRequest,
-    ) -> Result<HttpPairingSessionRecord, ServerHttpError> {
-        if request.version != PAIRING_PROTOCOL_VERSION {
-            return Err(pairing_invalid("unsupported pairing protocol version"));
-        }
-        validate_pairing_session_id(&request.pairing_session_id)?;
-        validate_pairing_device_id(&request.target_device_id)?;
-        let target_public_key = validate_pairing_public_key(&request.target_public_key)?;
-        let issued_at_unix_seconds = pairing_now();
-        let mut sessions = self
-            .pairing_sessions
-            .lock()
-            .expect("HTTP pairing-session mutex");
-        if sessions.contains_key(&request.pairing_session_id) {
-            return Err(ServerHttpError::PairingSessionAlreadyExists {
-                pairing_session_id: request.pairing_session_id,
-            });
-        }
-        let record = HttpPairingSessionRecord {
-            version: PAIRING_PROTOCOL_VERSION,
-            pairing_session_id: request.pairing_session_id,
-            target_device_id: request.target_device_id,
-            target_public_key: target_public_key.to_hex(),
-            issued_at_unix_seconds,
-            expires_at_unix_seconds: issued_at_unix_seconds
-                .saturating_add(PAIRING_SESSION_TTL_SECONDS),
-            source_public_key: None,
-            events: Vec::new(),
-            state: HttpPairingSessionState::Created,
-        };
-        sessions.insert(record.pairing_session_id.clone(), record.clone());
-        drop(sessions);
-
-        if let Some(store) = &self.store {
-            store.upsert_pairing_session(&record)?;
-        }
-        Ok(record)
-    }
-
-    pub(crate) fn get_pairing_session(
-        &self,
-        request: GetPairingSessionRequest,
-    ) -> Result<Option<HttpPairingSessionRecord>, ServerHttpError> {
-        validate_pairing_session_id(&request.pairing_session_id)?;
-        let sessions = self
-            .pairing_sessions
-            .lock()
-            .expect("HTTP pairing-session mutex");
-        Ok(sessions.get(&request.pairing_session_id).cloned())
-    }
-
-    pub(crate) fn publish_pairing_offer(
-        &self,
-        request: PublishPairingOfferRequest,
-    ) -> Result<HttpPairingSessionRecord, ServerHttpError> {
-        validate_pairing_session_id(&request.pairing_session_id)?;
-        let event = validate_pairing_event(&request.offer_event)?;
-        let mut sessions = self
-            .pairing_sessions
-            .lock()
-            .expect("HTTP pairing-session mutex");
-        let session = sessions
-            .get_mut(&request.pairing_session_id)
-            .ok_or_else(|| ServerHttpError::PairingSessionNotFound {
-                pairing_session_id: request.pairing_session_id.clone(),
-            })?;
-        ensure_pairing_session_open(session)?;
-        if session.state != HttpPairingSessionState::Expired
-            && session
-                .events
-                .first()
-                .is_some_and(|stored| stored.event == request.offer_event)
-        {
-            return Ok(session.clone());
-        }
-        if session.state != HttpPairingSessionState::Created {
-            return Err(ServerHttpError::PairingSessionClosed {
-                pairing_session_id: request.pairing_session_id,
-            });
-        }
-        let target = NostrPublicKey::from_hex(&session.target_public_key)
-            .map_err(|_| pairing_corrupt("stored target public key is invalid"))?;
-        if event.pubkey != target {
-            return Err(pairing_conflict(
-                &request.pairing_session_id,
-                "offer sender does not match the bound target",
-            ));
-        }
-        let source = pairing_recipient(&event)?;
-        if source == target {
-            return Err(pairing_conflict(
-                &request.pairing_session_id,
-                "source and target pairing keys must differ",
-            ));
-        }
-        session.source_public_key = Some(source.to_hex());
-        session.events.push(HttpPairingEventRecord {
-            seq: 1,
-            event: request.offer_event,
-        });
-        session.state = HttpPairingSessionState::OfferPublished;
-        let record = session.clone();
-        if let Some(store) = &self.store
-            && let Err(error) = store.upsert_pairing_session(&record)
-        {
-            session.source_public_key = None;
-            session.events.clear();
-            session.state = HttpPairingSessionState::Created;
-            return Err(error.into());
-        }
-        drop(sessions);
-        Ok(record)
-    }
-
-    pub(crate) fn publish_pairing_response(
-        &self,
-        request: PublishPairingResponseRequest,
-    ) -> Result<HttpPairingSessionRecord, ServerHttpError> {
-        validate_pairing_session_id(&request.pairing_session_id)?;
-        let confirmation = validate_pairing_event(&request.source_confirmation_event)?;
-        let payload = validate_pairing_event(&request.payload_event)?;
-        if confirmation.id == payload.id {
-            return Err(pairing_conflict(
-                &request.pairing_session_id,
-                "pairing response events must be distinct",
-            ));
-        }
-        let mut sessions = self
-            .pairing_sessions
-            .lock()
-            .expect("HTTP pairing-session mutex");
-        let session = sessions
-            .get_mut(&request.pairing_session_id)
-            .ok_or_else(|| ServerHttpError::PairingSessionNotFound {
-                pairing_session_id: request.pairing_session_id.clone(),
-            })?;
-        if session.state != HttpPairingSessionState::Expired
-            && session
-                .events
-                .get(1)
-                .is_some_and(|stored| stored.event == request.source_confirmation_event)
-            && session
-                .events
-                .get(2)
-                .is_some_and(|stored| stored.event == request.payload_event)
-        {
-            return Ok(session.clone());
-        }
-        if session.state != HttpPairingSessionState::OfferPublished {
-            return Err(ServerHttpError::PairingSessionClosed {
-                pairing_session_id: request.pairing_session_id,
-            });
-        }
-        let source = session
-            .source_public_key
-            .as_deref()
-            .and_then(|value| NostrPublicKey::from_hex(value).ok())
-            .ok_or_else(|| pairing_corrupt("stored source public key is invalid"))?;
-        let target = NostrPublicKey::from_hex(&session.target_public_key)
-            .map_err(|_| pairing_corrupt("stored target public key is invalid"))?;
-        for event in [&confirmation, &payload] {
-            if event.pubkey != source || pairing_recipient(event)? != target {
-                return Err(pairing_conflict(
-                    &request.pairing_session_id,
-                    "pairing response is not bound to this source and target",
-                ));
-            }
-        }
-        session.events.push(HttpPairingEventRecord {
-            seq: 2,
-            event: request.source_confirmation_event,
-        });
-        session.events.push(HttpPairingEventRecord {
-            seq: 3,
-            event: request.payload_event,
-        });
-        session.state = HttpPairingSessionState::ResponsePublished;
-        let record = session.clone();
-        if let Some(store) = &self.store
-            && let Err(error) = store.upsert_pairing_session(&record)
-        {
-            session.events.truncate(1);
-            session.state = HttpPairingSessionState::OfferPublished;
-            return Err(error.into());
-        }
-        drop(sessions);
-        Ok(record)
-    }
-
-    pub(crate) fn publish_pairing_complete(
-        &self,
-        request: PublishPairingCompleteRequest,
-    ) -> Result<HttpPairingSessionRecord, ServerHttpError> {
-        validate_pairing_session_id(&request.pairing_session_id)?;
-        let complete = validate_pairing_event(&request.complete_event)?;
-        let mut sessions = self
-            .pairing_sessions
-            .lock()
-            .expect("HTTP pairing-session mutex");
-        let session = sessions
-            .get_mut(&request.pairing_session_id)
-            .ok_or_else(|| ServerHttpError::PairingSessionNotFound {
-                pairing_session_id: request.pairing_session_id.clone(),
-            })?;
-        ensure_pairing_session_open(session)?;
-        if session.state == HttpPairingSessionState::Completed
-            && session
-                .events
-                .get(3)
-                .is_some_and(|stored| stored.event == request.complete_event)
-        {
-            return Ok(session.clone());
-        }
-        if session.state != HttpPairingSessionState::ResponsePublished {
-            return Err(ServerHttpError::PairingSessionClosed {
-                pairing_session_id: request.pairing_session_id,
-            });
-        }
-        let source = session
-            .source_public_key
-            .as_deref()
-            .and_then(|value| NostrPublicKey::from_hex(value).ok())
-            .ok_or_else(|| pairing_corrupt("stored source public key is invalid"))?;
-        let target = NostrPublicKey::from_hex(&session.target_public_key)
-            .map_err(|_| pairing_corrupt("stored target public key is invalid"))?;
-        if complete.pubkey != target || pairing_recipient(&complete)? != source {
-            return Err(pairing_conflict(
-                &request.pairing_session_id,
-                "completion is not bound to this source and target",
-            ));
-        }
-        session.events.push(HttpPairingEventRecord {
-            seq: 4,
-            event: request.complete_event,
-        });
-        session.state = HttpPairingSessionState::Completed;
-        let record = session.clone();
-        if let Some(store) = &self.store
-            && let Err(error) = store.upsert_pairing_session(&record)
-        {
-            session.events.truncate(3);
-            session.state = HttpPairingSessionState::ResponsePublished;
-            return Err(error.into());
-        }
-        drop(sessions);
-        Ok(record)
-    }
-
-    pub(crate) fn expire_pairing_session(
-        &self,
-        request: ExpirePairingSessionRequest,
-    ) -> Result<ExpirePairingSessionResponse, ServerHttpError> {
-        validate_pairing_session_id(&request.pairing_session_id)?;
-        let mut sessions = self
-            .pairing_sessions
-            .lock()
-            .expect("HTTP pairing-session mutex");
-        let session = sessions
-            .get_mut(&request.pairing_session_id)
-            .ok_or_else(|| ServerHttpError::PairingSessionNotFound {
-                pairing_session_id: request.pairing_session_id.clone(),
-            })?;
-        if session.state == HttpPairingSessionState::Completed {
-            return Err(ServerHttpError::PairingSessionClosed {
-                pairing_session_id: request.pairing_session_id,
-            });
-        }
-        let prior = session.state.clone();
-        session.state = HttpPairingSessionState::Expired;
-        let record = session.clone();
-        if let Some(store) = &self.store
-            && let Err(error) = store.upsert_pairing_session(&record)
-        {
-            session.state = prior;
-            return Err(error.into());
-        }
-        drop(sessions);
-        Ok(ExpirePairingSessionResponse { expired: true })
-    }
-
     /// The /sync/wait predicate: any watched room advanced past its cursor.
     pub(crate) fn check_wait_signal(&self, request: &SyncWaitRequest) -> Option<String> {
         {
@@ -1446,13 +1560,11 @@ impl HttpServerState {
         }
 
         if let Some(watch) = &mut cursors.inbox {
-            let next_seq = {
-                let service = self.service.lock().expect("HTTP delivery service mutex");
-                service
-                    .sync_inbox(&watch.recipient, watch.after_seq, 1)
-                    .ok()
-                    .and_then(|page| page.entries.first().map(|entry| entry.seq))
-            };
+            let next_seq = self
+                .sql_delivery
+                .sync_inbox(&watch.recipient, watch.after_seq, 1)
+                .ok()
+                .and_then(|page| page.entries.first().map(|entry| entry.seq));
             if let Some(seq) = next_seq {
                 watch.after_seq = seq;
                 events.push(SyncHintEvent::InboxAdvanced { seq });
@@ -1507,13 +1619,12 @@ impl HttpServerState {
             .entry(request.account_id.clone())
             .or_default()
             .insert(request.room_id.clone(), value.clone());
-        if let Some(store) = &self.store {
-            store.upsert_account_room(&AccountRoomDirectoryRecord {
-                account_id: request.account_id,
-                room_id: request.room_id,
-                record: value,
-            })?;
-        }
+        let record = AccountRoomDirectoryRecord {
+            account_id: request.account_id,
+            room_id: request.room_id,
+            record: value,
+        };
+        self.upsert_account_room_row(&record)?;
         Ok(SaveAccountRoomResponse { saved: true })
     }
 
@@ -1600,13 +1711,12 @@ impl HttpServerState {
                     .entry(account_id.clone())
                     .or_default()
                     .insert(request.room_id.clone(), value.clone());
-                if let Some(store) = &self.store {
-                    store.upsert_account_room(&AccountRoomDirectoryRecord {
-                        account_id: account_id.clone(),
-                        room_id: request.room_id.clone(),
-                        record: value,
-                    })?;
-                }
+                let record = AccountRoomDirectoryRecord {
+                    account_id: account_id.clone(),
+                    room_id: request.room_id.clone(),
+                    record: value,
+                };
+                self.upsert_account_room_row(&record)?;
                 bootstrapped = true;
             }
         }
@@ -1700,16 +1810,16 @@ impl HttpServerState {
         projection.status = RoomStatus::NeedsRepair;
 
         let account_records = self.account_room_repair_records(&request.room_id)?;
-        if let Some(store) = &self.store {
-            store.upsert_room_repair_state(&projection, &account_records)?;
-        }
-
-        let mut rooms = self
-            .room_memberships
+        // Update the live map FIRST so the checkpoint persist below captures
+        // the NeedsRepair status (the projection is primary state here).
+        self.room_memberships
             .lock()
-            .expect("HTTP room-membership mutex");
-        rooms.insert(request.room_id.clone(), projection);
-        drop(rooms);
+            .expect("HTTP room-membership mutex")
+            .insert(request.room_id.clone(), projection);
+        for record in &account_records {
+            self.upsert_account_room_row(record)?;
+        }
+        self.normalized_checkpoint_rooms()?;
 
         let mut directory = self
             .account_rooms
@@ -1800,9 +1910,9 @@ impl HttpServerState {
         rooms.insert(request.room_id.clone(), projection.clone());
         drop(rooms);
 
-        if let Some(store) = &self.store {
-            store.upsert_room_membership(&projection)?;
-        }
+        // A bootstrapped room has no delivery entries yet, so its
+        // projection is primary state: checkpoint synchronously.
+        self.normalized_checkpoint_rooms()?;
         Ok(())
     }
 
@@ -1812,13 +1922,17 @@ impl HttpServerState {
         mls_group_id: &str,
     ) -> Result<ObservedRoomHead, ServerHttpError> {
         let group_id = group_id_for_room(room_id);
-        let service = self.service.lock().expect("HTTP delivery service mutex");
+        let sync_page = |after_seq: u64| -> Result<HttpSyncPage, ServerHttpError> {
+            self.sql_delivery
+                .sync_group(&group_id, after_seq, MAX_HTTP_SYNC_PAGE_ENTRIES)
+                .map_err(sql_write_error)
+        };
         let mut current_epoch = 0;
         let mut last_seq = 0;
         let mut after_seq = 0;
         let mut raw_commit_without_projection = false;
         loop {
-            let page = service.sync_group(&group_id, after_seq, MAX_HTTP_SYNC_PAGE_ENTRIES)?;
+            let page = sync_page(after_seq)?;
             for queued in &page.entries {
                 last_seq = last_seq.max(queued.seq);
                 let has_membership_delta = serde_json::from_slice::<
@@ -1917,14 +2031,14 @@ impl HttpServerState {
         )?;
         drop(directory);
 
-        if let Some(store) = &self.store {
-            for (account_id, room_id) in mutation.deletes {
-                store.delete_account_room(&account_id, &room_id)?;
-            }
-            for record in mutation.upserts {
-                store.upsert_account_room(&record)?;
-            }
-        }
+        self.sql_delivery
+            .store()
+            .write(|tx| {
+                Ok(crate::store::room_state::apply_directory_mutation(
+                    tx, &mutation,
+                )?)
+            })
+            .map_err(sql_write_error)?;
         Ok(())
     }
 
@@ -1941,7 +2055,7 @@ impl HttpServerState {
             .room_memberships
             .lock()
             .expect("HTTP room-membership mutex");
-        let projection = apply_room_membership_delta(
+        apply_room_membership_delta(
             &mut rooms,
             room_id,
             mls_group_id,
@@ -1952,9 +2066,10 @@ impl HttpServerState {
         )?;
         drop(rooms);
 
-        if let Some(store) = &self.store {
-            store.upsert_room_membership(&projection)?;
-        }
+        // Projection durability is the checkpoint; this repair path
+        // (idempotent commit replay whose projection lagged) refreshes it
+        // synchronously.
+        self.normalized_checkpoint_rooms()?;
         Ok(())
     }
 
@@ -1991,9 +2106,23 @@ impl HttpServerState {
         }
         self.validate_commit_room_membership(&request)?;
 
-        // Fresh typed commits must publish the commit, release Welcomes, and update
-        // Finite projections as one candidate snapshot before the durable swap.
-        let mut service = self.service.lock().expect("HTTP delivery service mutex");
+        self.submit_commit_fresh(request, message_id, commit_publish)
+    }
+
+    /// Fresh typed commit: the delivery appends, the commit-derived
+    /// directory rows, the KeyPackage inventory consumption, and the publish
+    /// idempotency rows all land in ONE `BEGIN IMMEDIATE` transaction on the
+    /// normalized store, with candidate maps swapped only after the durable
+    /// write commits. The room projection itself is derived state: it lands
+    /// in RAM and in the room-state checkpoint on the snapshot cadence
+    /// (boot re-derives it from the delivery entries committed here).
+    fn submit_commit_fresh(
+        &self,
+        request: SubmitCommitRequest,
+        message_id: String,
+        commit_publish: PublishMessageRequest,
+    ) -> Result<CommitAccepted, ServerHttpError> {
+        let sql = &self.sql_delivery;
         let mut publish_idempotency = self
             .publish_idempotency
             .lock()
@@ -2011,16 +2140,31 @@ impl HttpServerState {
             .lock()
             .expect("HTTP KeyPackage inventory mutex");
 
-        // Commit and Welcome publishes are dry-run checked against live
-        // state (the delivery service is never cloned); only the small
-        // projection maps keep the candidate pattern.
+        // Idempotency half of the legacy check phase, against the same map.
+        for publish in std::iter::once(&commit_publish) {
+            let key = publish.idempotency_key.as_deref().unwrap_or_default();
+            if let Some(record) = publish_idempotency.get(key) {
+                let fingerprint = PublishMessageFingerprint::from_request(publish);
+                if record.fingerprint != fingerprint {
+                    return Err(ServerHttpError::IdempotencyConflict {
+                        idempotency_key: key.to_owned(),
+                    });
+                }
+            }
+        }
+
+        let _ordering = self
+            .delivery_ordering
+            .lock()
+            .expect("HTTP delivery ordering mutex");
+        let commit_plans = sql
+            .plan_batch(std::slice::from_ref(&commit_publish))
+            .map_err(sql_write_error)?;
+        let receipt = commit_plans[0].receipt.clone();
+
         let mut candidate_account_rooms = account_rooms.clone();
         let mut candidate_room_memberships = room_memberships.clone();
         let mut candidate_key_package_inventory = key_package_inventory.clone();
-
-        let commit_check = check_publish_request(&service, &publish_idempotency, &commit_publish)?;
-        let receipt = commit_check.receipt.clone();
-        let mut checked_publishes = vec![(commit_publish, commit_check)];
         let account_room_mutation = apply_account_room_membership_delta(
             &mut candidate_account_rooms,
             &request.room_id,
@@ -2029,7 +2173,10 @@ impl HttpServerState {
             &request.membership_delta,
             receipt.seq,
         )?;
-        let room_membership_projection = apply_room_membership_delta(
+        // The projection delta must apply cleanly against the live map; the
+        // result lives in RAM (candidate swap below) and rides the checkpoint
+        // cadence rather than a per-commit durable row.
+        apply_room_membership_delta(
             &mut candidate_room_memberships,
             &request.room_id,
             &request.envelope.mls_group_id,
@@ -2044,42 +2191,90 @@ impl HttpServerState {
         )?;
 
         let welcomes = released_welcome_records_for_commit(&request, receipt.seq)?;
+        let mut welcome_publishes = Vec::with_capacity(welcomes.len());
         for welcome in &welcomes {
-            let publish = welcome_publish_request(welcome)?;
-            let check = check_publish_request(&service, &publish_idempotency, &publish)?;
-            checked_publishes.push((publish, check));
+            welcome_publishes.push(welcome_publish_request(welcome)?);
         }
-        let publish_mutations = checked_publishes
-            .iter()
-            .filter_map(|(_, check)| check.mutation.clone())
-            .collect::<Vec<_>>();
+        let welcome_plans = if welcome_publishes.is_empty() {
+            Vec::new()
+        } else {
+            sql.plan_batch(&welcome_publishes)
+                .map_err(sql_write_error)?
+        };
 
-        if let Some(store) = &self.store {
-            store.append_submit_commit_mutation(
-                &publish_mutations,
-                &account_room_mutation,
-                &room_membership_projection,
-                &key_package_inventory_mutation,
-            )?;
-        }
+        // One transaction: delivery entries (+ commit epochs), directory
+        // rows derived from the delta, inventory consumption, and the
+        // publish idempotency rows. A crash anywhere before the commit
+        // leaves nothing behind; the client retries.
+        sql.store()
+            .write(|tx| {
+                SqlDelivery::append_plan_in_tx(tx, &commit_plans)?;
+                SqlDelivery::append_plan_in_tx(tx, &welcome_plans)?;
+                crate::store::room_state::apply_directory_mutation(tx, &account_room_mutation)?;
+                for record in &key_package_inventory_mutation {
+                    metadata::upsert_key_package_inventory_in_transaction(tx, record)
+                        .map_err(crate::store::StoreTxError::Store)?;
+                }
+                for (publish, plan) in welcome_publishes.iter().zip(&welcome_plans) {
+                    if let Some(key) = publish.idempotency_key.as_deref() {
+                        metadata::insert_publish_idempotency_in_transaction(
+                            tx,
+                            key,
+                            &PublishIdempotencyRecord {
+                                fingerprint: PublishMessageFingerprint::from_request(publish),
+                                receipt: plan.receipt.clone(),
+                            },
+                        )
+                        .map_err(crate::store::StoreTxError::Store)?;
+                    }
+                }
+                if let Some(key) = commit_publish.idempotency_key.as_deref() {
+                    metadata::insert_publish_idempotency_in_transaction(
+                        tx,
+                        key,
+                        &PublishIdempotencyRecord {
+                            fingerprint: PublishMessageFingerprint::from_request(&commit_publish),
+                            receipt: receipt.clone(),
+                        },
+                    )
+                    .map_err(crate::store::StoreTxError::Store)?;
+                }
+                Ok(())
+            })
+            .map_err(sql_write_error)?;
 
-        for (publish, check) in checked_publishes {
-            if check.fresh {
-                let published = service.publish(publish.target, publish.message)?;
-                debug_assert_eq!(published, check.receipt);
-            }
-            if let Some(mutation) = check.mutation {
-                publish_idempotency.insert(mutation.idempotency_key, mutation.record);
-            }
-        }
+        // Apply phase: infallible given the transaction above committed.
         *account_rooms = candidate_account_rooms;
         *room_memberships = candidate_room_memberships;
         *key_package_inventory = candidate_key_package_inventory;
-        drop(service);
+        for (publish, plan) in welcome_publishes.iter().zip(&welcome_plans) {
+            if let Some(key) = publish.idempotency_key.clone() {
+                publish_idempotency.insert(
+                    key,
+                    PublishIdempotencyRecord {
+                        fingerprint: PublishMessageFingerprint::from_request(publish),
+                        receipt: plan.receipt.clone(),
+                    },
+                );
+            }
+        }
+        if let Some(key) = commit_publish.idempotency_key.clone() {
+            publish_idempotency.insert(
+                key,
+                PublishIdempotencyRecord {
+                    fingerprint: PublishMessageFingerprint::from_request(&commit_publish),
+                    receipt: receipt.clone(),
+                },
+            );
+        }
         drop(publish_idempotency);
         drop(account_rooms);
         drop(room_memberships);
         drop(key_package_inventory);
+        drop(_ordering);
+        if commit_plans[0].fresh {
+            self.note_op_for_snapshot();
+        }
 
         Ok(CommitAccepted {
             seq: receipt.seq,
@@ -2167,8 +2362,20 @@ impl HttpServerState {
             }
         })?;
         let event_publish = event_publish_request(&request.event, &message_id)?;
+        self.append_application_event_fresh(request, message_id, event_publish)
+    }
 
-        let mut service = self.service.lock().expect("HTTP delivery service mutex");
+    /// Fresh typed application event: plan the publish, then land the
+    /// delivery entry, the effect row, and the idempotency row in ONE
+    /// transaction. The projection head advance is derived state and rides
+    /// the checkpoint cadence.
+    fn append_application_event_fresh(
+        &self,
+        request: AppendApplicationEventRequest,
+        message_id: String,
+        event_publish: PublishMessageRequest,
+    ) -> Result<EventAccepted, ServerHttpError> {
+        let sql = &self.sql_delivery;
         let mut idempotency = self
             .publish_idempotency
             .lock()
@@ -2181,12 +2388,61 @@ impl HttpServerState {
             .application_effects
             .lock()
             .expect("HTTP application-effects mutex");
-        let mut push_wakes = self.push_wakes.lock().expect("HTTP push-wake mutex");
+        // Idempotency check against the same map the legacy path used: the
+        // COMPOSED publish key ("event:{room}:{key}"), which is also the
+        // durable row's key — a folded database carries rows in exactly
+        // this shape. An exact replay must still agree with the stored
+        // delivery effect (same key, different policy is a conflict, not
+        // a replay).
+        let idempotency_key = event_publish
+            .idempotency_key
+            .clone()
+            .ok_or(ServerHttpError::InvalidIdempotencyKey)?;
+        if idempotency_key.is_empty() {
+            return Err(ServerHttpError::InvalidIdempotencyKey);
+        }
+        if let Some(record) = idempotency.get(&idempotency_key) {
+            let fingerprint = PublishMessageFingerprint::from_request(&event_publish);
+            if record.fingerprint == fingerprint {
+                let effect = HttpApplicationDeliveryEffect {
+                    room_id: request.event.room_id.clone(),
+                    seq: record.receipt.seq,
+                    message_id: message_id.clone(),
+                    sender: request.event.sender.clone(),
+                    delivery_policy: request.delivery_policy,
+                };
+                check_application_delivery_effect(&application_effects, effect, &idempotency_key)?;
+                return Ok(EventAccepted {
+                    seq: record.receipt.seq,
+                    message_id,
+                });
+            }
+            return Err(ServerHttpError::IdempotencyConflict { idempotency_key });
+        }
 
-        // Check phase: every admission rule runs read-only against live
-        // state, producing exactly the rows to persist.
-        let (receipt, publish_mutation) =
-            check_typed_event_publish(&service, &idempotency, &event_publish, &message_id)?;
+        let _ordering = self
+            .delivery_ordering
+            .lock()
+            .expect("HTTP delivery ordering mutex");
+        let plans = sql
+            .plan_batch(std::slice::from_ref(&event_publish))
+            .map_err(|error| match error {
+                crate::store::StoreWriteError::Domain(HttpServerError::ConflictingMessageId {
+                    ..
+                }) => ServerHttpError::DuplicateMessageId {
+                    message_id: MessageId::new(message_id.as_bytes().to_vec()),
+                },
+                other => sql_write_error(other),
+            })?;
+        let receipt = plans[0].receipt.clone();
+        if !plans[0].fresh {
+            // Typed events never digest-replay: a duplicate message id is a
+            // client bug, exactly like the legacy check-typed path.
+            return Err(ServerHttpError::DuplicateMessageId {
+                message_id: MessageId::new(message_id.as_bytes().to_vec()),
+            });
+        }
+
         let room_membership_projection =
             check_room_event_acceptance(&room_memberships, &request.event.room_id, receipt.seq);
         let effect = HttpApplicationDeliveryEffect {
@@ -2196,43 +2452,41 @@ impl HttpServerState {
             sender: request.event.sender,
             delivery_policy: request.delivery_policy,
         };
-        let effect_mutation = check_application_delivery_effect(
-            &application_effects,
-            effect,
-            &request.event.idempotency_key,
-        )?;
-        let push_wake_mutation = effect_mutation
-            .as_ref()
-            .and_then(PushWakeOutboxRecord::from_effect);
+        let effect_mutation =
+            check_application_delivery_effect(&application_effects, effect, &idempotency_key)?;
+        let idempotency_record = PublishIdempotencyRecord {
+            fingerprint: PublishMessageFingerprint::from_request(&event_publish),
+            receipt: receipt.clone(),
+        };
+        sql.store()
+            .write(|tx| {
+                SqlDelivery::append_plan_in_tx(tx, &plans)?;
+                if let Some(effect) = &effect_mutation {
+                    metadata::upsert_application_effect_in_transaction(tx, effect)
+                        .map_err(crate::store::StoreTxError::Store)?;
+                }
+                metadata::insert_publish_idempotency_in_transaction(
+                    tx,
+                    &idempotency_key,
+                    &idempotency_record,
+                )
+                .map_err(crate::store::StoreTxError::Store)?;
+                Ok(())
+            })
+            .map_err(sql_write_error)?;
 
-        // Persist phase: one SQLite transaction, before any in-memory state
-        // changes, so an injected failure rolls back with nothing to undo.
-        if let Some(store) = &self.store {
-            store.append_application_event_mutation(
-                publish_mutation.as_ref(),
-                room_membership_projection.as_ref(),
-                effect_mutation.as_ref(),
-                push_wake_mutation.as_ref(),
-            )?;
-        }
-
-        // Apply phase: infallible given the checks above ran under the held
-        // locks.
-        if let Some(mutation) = publish_mutation {
-            let published =
-                service.publish(event_publish.target.clone(), event_publish.message.clone())?;
-            debug_assert_eq!(published, receipt);
-            idempotency.insert(mutation.idempotency_key, mutation.record);
-        }
+        idempotency.insert(idempotency_key, idempotency_record);
         if let Some(projection) = room_membership_projection {
             room_memberships.insert(request.event.room_id.clone(), projection);
         }
         if let Some(effect) = effect_mutation {
             application_effects.insert(effect.message_id.clone(), effect);
         }
-        if let Some(wake) = push_wake_mutation {
-            push_wakes.insert(wake.wake_id.clone(), wake);
-        }
+        drop(idempotency);
+        drop(room_memberships);
+        drop(application_effects);
+        drop(_ordering);
+        self.note_op_for_snapshot();
         Ok(EventAccepted {
             seq: receipt.seq,
             message_id,
@@ -2307,13 +2561,9 @@ impl HttpServerState {
             .application_effects
             .lock()
             .expect("HTTP application-effects mutex");
-        let mut push_outbox = 0usize;
         let mut unread = 0usize;
         let mut command_inbox = 0usize;
         for effect in effects.values() {
-            if effect.delivery_policy.creates_push() {
-                push_outbox += 1;
-            }
             if effect.delivery_policy.creates_unread() {
                 unread += 1;
             }
@@ -2322,128 +2572,8 @@ impl HttpServerState {
             }
         }
         Ok(ApplicationEffectCountsResponse {
-            push_outbox: usize_to_u32("push_outbox", push_outbox)?,
             unread: usize_to_u32("unread", unread)?,
             command_inbox: usize_to_u32("command_inbox", command_inbox)?,
-        })
-    }
-
-    pub(crate) fn claim_push_wakes(
-        &self,
-        request: ClaimPushWakesRequest,
-    ) -> Result<ClaimPushWakesResponse, ServerHttpError> {
-        let limit = request.limit.min(MAX_PUSH_WAKE_CLAIM_BATCH);
-        if limit == 0 {
-            return Ok(ClaimPushWakesResponse { wakes: Vec::new() });
-        }
-        if request.lease_ms == 0 || request.lease_ms > MAX_PUSH_WAKE_LEASE_MS {
-            return Err(ServerHttpError::InvalidDeviceRequest {
-                reason: format!("push wake lease_ms must be 1..={MAX_PUSH_WAKE_LEASE_MS}"),
-            });
-        }
-
-        let mut push_wakes = self.push_wakes.lock().expect("HTTP push-wake mutex");
-        let mut claimable: Vec<(HttpSequence, String, PushWakeOutboxRecord)> = push_wakes
-            .iter()
-            .filter(|(_, record)| record.claimable_at(request.now_ms))
-            .map(|(wake_id, record)| (record.seq, wake_id.clone(), record.clone()))
-            .collect();
-        claimable.sort_by(|left, right| left.0.cmp(&right.0).then_with(|| left.1.cmp(&right.1)));
-
-        let claimed: Vec<PushWakeOutboxRecord> = claimable
-            .into_iter()
-            .take(limit)
-            .map(|(_, _, record)| record.claimed(request.now_ms, request.lease_ms))
-            .collect();
-        if claimed.is_empty() {
-            return Ok(ClaimPushWakesResponse { wakes: Vec::new() });
-        }
-
-        if let Some(store) = &self.store {
-            store.upsert_push_wakes(&claimed)?;
-        }
-        for record in &claimed {
-            push_wakes.insert(record.wake_id.clone(), record.clone());
-        }
-        drop(push_wakes);
-
-        let tokens = self.push_tokens.lock().expect("HTTP push-token mutex");
-        let rooms = self
-            .room_memberships
-            .lock()
-            .expect("HTTP room-membership mutex");
-        let revoked = self.revoked_devices.lock().expect("HTTP device mutex");
-        let wakes = claimed
-            .iter()
-            .map(|record| PushWakeDelivery {
-                wake_id: record.wake_id.clone(),
-                payload: PushWakePayload {
-                    room_id: record.room_id.clone(),
-                    seq: record.seq,
-                },
-                tokens: push_tokens_for_wake(record, &tokens, &rooms, &revoked),
-                attempt: record.attempts(),
-            })
-            .collect();
-        Ok(ClaimPushWakesResponse { wakes })
-    }
-
-    pub(crate) fn ack_push_wake(
-        &self,
-        request: AckPushWakeRequest,
-    ) -> Result<AckPushWakeResponse, ServerHttpError> {
-        validate_string_bytes("wake_id", &request.wake_id, MAX_OBJECT_ID_BYTES).map_err(
-            |error| ServerHttpError::InvalidDeviceRequest {
-                reason: error.to_string(),
-            },
-        )?;
-        let mut push_wakes = self.push_wakes.lock().expect("HTTP push-wake mutex");
-        let acked = push_wakes.contains_key(&request.wake_id);
-        if acked {
-            if let Some(store) = &self.store {
-                store.delete_push_wake(&request.wake_id)?;
-            }
-            push_wakes.remove(&request.wake_id);
-        }
-        Ok(AckPushWakeResponse { acked })
-    }
-
-    pub(crate) fn fail_push_wake(
-        &self,
-        request: FailPushWakeRequest,
-    ) -> Result<FailPushWakeResponse, ServerHttpError> {
-        validate_string_bytes("wake_id", &request.wake_id, MAX_OBJECT_ID_BYTES).map_err(
-            |error| ServerHttpError::InvalidDeviceRequest {
-                reason: error.to_string(),
-            },
-        )?;
-        let mut push_wakes = self.push_wakes.lock().expect("HTTP push-wake mutex");
-        let Some(record) = push_wakes.get(&request.wake_id).cloned() else {
-            return Ok(FailPushWakeResponse {
-                retry: false,
-                dropped: false,
-            });
-        };
-
-        if record.attempts() >= MAX_PUSH_WAKE_ATTEMPTS {
-            if let Some(store) = &self.store {
-                store.delete_push_wake(&request.wake_id)?;
-            }
-            push_wakes.remove(&request.wake_id);
-            return Ok(FailPushWakeResponse {
-                retry: false,
-                dropped: true,
-            });
-        }
-
-        let retry = record.released_for_retry();
-        if let Some(store) = &self.store {
-            store.upsert_push_wakes(std::slice::from_ref(&retry))?;
-        }
-        push_wakes.insert(retry.wake_id.clone(), retry);
-        Ok(FailPushWakeResponse {
-            retry: true,
-            dropped: false,
         })
     }
 
@@ -2598,7 +2728,11 @@ impl HttpServerState {
         }
         let revoked_devices = self.revoked_device_keys();
 
-        let service = self.service.lock().expect("HTTP delivery service mutex");
+        let sync_inbox_page = |after_seq: u64| -> Result<HttpSyncPage, ServerHttpError> {
+            self.sql_delivery
+                .sync_inbox(&request.recipient, after_seq, MAX_HTTP_SYNC_PAGE_ENTRIES)
+                .map_err(sql_write_error)
+        };
         let mut claims = self
             .welcome_claims
             .lock()
@@ -2606,8 +2740,7 @@ impl HttpServerState {
         let mut claimed = Vec::new();
         let mut after_seq = 0;
         loop {
-            let page =
-                service.sync_inbox(&request.recipient, after_seq, MAX_HTTP_SYNC_PAGE_ENTRIES)?;
+            let page = sync_inbox_page(after_seq)?;
             for entry in page.entries {
                 if claimed.len() >= request.limit {
                     break;
@@ -2625,9 +2758,10 @@ impl HttpServerState {
                     message: entry.message,
                     state: WelcomeClaimState::Claimed,
                 };
-                if let Some(store) = &self.store {
-                    store.upsert_welcome_claim(&record)?;
-                }
+                self.sql_delivery
+                    .store()
+                    .write(|tx| Ok(metadata::upsert_welcome_claim(tx, &record)?))
+                    .map_err(sql_write_error)?;
                 claims.insert(record.message.id.clone(), record.clone());
                 claimed.push(record.into_claimed_welcome());
             }
@@ -2657,9 +2791,10 @@ impl HttpServerState {
         match record.state {
             WelcomeClaimState::Claimed => {
                 record.state = WelcomeClaimState::Acked;
-                if let Some(store) = &self.store {
-                    store.upsert_welcome_claim(record)?;
-                }
+                self.sql_delivery
+                    .store()
+                    .write(|tx| Ok(metadata::upsert_welcome_claim(tx, record)?))
+                    .map_err(sql_write_error)?;
                 activation_message = Some(record.message.clone());
             }
             // A failed activation never reaches the server: the device simply
@@ -2730,13 +2865,12 @@ impl HttpServerState {
             .insert(welcome.room_id.clone(), value.clone());
         drop(directory);
 
-        if let Some(store) = &self.store {
-            store.upsert_account_room(&AccountRoomDirectoryRecord {
-                account_id,
-                room_id: welcome.room_id,
-                record: value,
-            })?;
-        }
+        let record = AccountRoomDirectoryRecord {
+            account_id,
+            room_id: welcome.room_id,
+            record: value,
+        };
+        self.upsert_account_room_row(&record)?;
         Ok(())
     }
 
@@ -2827,7 +2961,6 @@ impl HttpServerState {
             }
         }
         projection.admins.remove(&account_id);
-        let updated = projection.clone();
         drop(rooms);
 
         // Drop the room from the departing account's directory.
@@ -2840,9 +2973,29 @@ impl HttpServerState {
                 rooms_for_account.remove(&request.room_id);
             }
         }
-        if let Some(store) = &self.store {
-            store.upsert_room_membership(&updated)?;
-            store.delete_account_room(&account_id, &request.room_id)?;
+        // One transaction moves the interval closes (checkpoint) and the
+        // directory delete together; a crash leaves the leave
+        // unconfirmed and the client retries idempotently.
+        {
+            let rooms = self
+                .room_memberships
+                .lock()
+                .expect("HTTP room-membership mutex")
+                .clone();
+            self.sql_delivery
+                .store()
+                .write(|tx| {
+                    tx.execute(
+                        "DELETE FROM account_room_directory WHERE account_id = ?1 AND room_id = ?2",
+                        rusqlite::params![&account_id, &request.room_id],
+                    )?;
+                    crate::store::room_state::save_checkpoint(
+                        tx,
+                        &crate::store::room_state::RoomStateCheckpoint { rooms },
+                    )?;
+                    Ok(())
+                })
+                .map_err(sql_write_error)?;
         }
         Ok(LeaveRoomResponse {
             left: true,
@@ -2915,101 +3068,19 @@ impl HttpServerState {
         let updated = projection.clone();
         drop(rooms);
 
-        if let Some(store) = &self.store {
-            store.upsert_room_membership(&updated)?;
-        }
+        self.normalized_checkpoint_rooms()?;
         Ok(UpdateRoomAdminsResponse {
             admins: updated.admins.iter().cloned().collect(),
         })
     }
 
-    pub(crate) fn register_push_token(
-        &self,
-        request: RegisterPushTokenRequest,
-    ) -> Result<RegisterPushTokenResponse, ServerHttpError> {
-        request.device.validate_limits().map_err(|error| {
-            ServerHttpError::InvalidDeviceRequest {
-                reason: error.to_string(),
-            }
-        })?;
-        if request.token.is_empty() || request.token.len() > 4_096 {
-            return Err(ServerHttpError::InvalidDeviceRequest {
-                reason: "push token must be 1..=4096 bytes".to_owned(),
-            });
-        }
-        self.ensure_device_not_revoked(&request.device)?;
-        let record = PushTokenRecord {
-            device: request.device.clone(),
-            platform: request.platform,
-            token: request.token,
-        };
-        let mut tokens = self.push_tokens.lock().expect("HTTP push-token mutex");
-        if let Some(store) = &self.store {
-            store.upsert_push_token(&record)?;
-        }
-        tokens.insert(DeviceMembership::key(&request.device), record);
-        Ok(RegisterPushTokenResponse { registered: true })
-    }
-
-    pub(crate) fn remove_push_token(
-        &self,
-        request: RemovePushTokenRequest,
-    ) -> Result<RemovePushTokenResponse, ServerHttpError> {
-        request.device.validate_limits().map_err(|error| {
-            ServerHttpError::InvalidDeviceRequest {
-                reason: error.to_string(),
-            }
-        })?;
-        let key = DeviceMembership::key(&request.device);
-        let mut tokens = self.push_tokens.lock().expect("HTTP push-token mutex");
-        let removed = match (tokens.get(&key), request.token.as_deref()) {
-            (None, _) => false,
-            (Some(record), Some(expected_token)) if record.token != expected_token => false,
-            (Some(_), _) => tokens.remove(&key).is_some(),
-        };
-        if removed && let Some(store) = &self.store {
-            store.delete_push_token(&key)?;
-        }
-        Ok(RemovePushTokenResponse { removed })
-    }
-
-    /// Write a fresh durable-state snapshot so the next startup replays only
-    /// the operation-log tail. Called automatically every
+    /// Write a fresh room-state checkpoint so the next startup replays at
+    /// most each room's delivery-entry tail. Called automatically every
     /// [`SNAPSHOT_INTERVAL_OPS`] accepted operations and available for
-    /// graceful shutdowns.
+    /// graceful shutdowns. Delivery state itself is already durable in the
+    /// normalized tables — there is no op log and nothing else to snapshot.
     pub fn snapshot_now(&self) -> Result<(), ServerHttpError> {
-        let Some(store) = &self.store else {
-            return Ok(());
-        };
-        // Lock order matches submit_commit (service before inventory); the
-        // revoked set is copied last. Holding these blocks op appends, so the
-        // MAX(seq) read is consistent with the captured state.
-        let (snapshot, last_op_seq) = {
-            let service = self.service.lock().expect("HTTP delivery service mutex");
-            let inventory = self
-                .key_package_inventory
-                .lock()
-                .expect("HTTP KeyPackage inventory mutex");
-            let revoked = self
-                .revoked_devices
-                .lock()
-                .expect("HTTP revoked device mutex");
-            let snapshot = DurableStateSnapshot {
-                service: service.clone(),
-                key_package_inventory: inventory.values().cloned().collect(),
-                revoked_devices: revoked.clone(),
-            };
-            let last_op_seq = store.max_operation_seq()?;
-            (snapshot, last_op_seq)
-        };
-        // Serialization and the SQLite write run after the state locks drop,
-        // so request handlers only ever wait behind the capture clone.
-        store.save_state_snapshot(last_op_seq, &snapshot)?;
-        *self
-            .ops_since_snapshot
-            .lock()
-            .expect("snapshot counter mutex") = 0;
-        Ok(())
+        self.normalized_checkpoint_rooms()
     }
 
     pub(crate) fn note_op_for_snapshot(&self) {
@@ -3039,13 +3110,19 @@ impl HttpServerState {
             return;
         }
         // Snapshotting is an optimization; it runs on its own thread so the
-        // triggering request neither waits for it nor fails with it.
+        // triggering request neither waits for it nor fails with it. The
+        // guard clears the in-flight flag on scope exit — including a panic,
+        // which would otherwise leave it stuck true and silently freeze
+        // snapshots for the rest of the process lifetime.
         let state = self.clone();
+        let guard = SnapshotInFlightGuard(self.snapshot_in_flight.clone());
         std::thread::spawn(move || {
+            let _guard = guard;
             if let Err(error) = state.snapshot_now() {
-                eprintln!("finitechat-server: state snapshot failed: {error:?}");
+                eprintln!(
+                    "finitechat-server: state snapshot persist failed; the op log keeps growing and the next interval retries: {error:?}"
+                );
             }
-            state.snapshot_in_flight.store(false, Ordering::Release);
         });
     }
 
@@ -3055,8 +3132,9 @@ impl HttpServerState {
         after_seq: u64,
         limit: usize,
     ) -> Result<HttpSyncPage, ServerHttpError> {
-        let service = self.service.lock().expect("HTTP delivery service mutex");
-        Ok(service.sync_inbox(recipient, after_seq, limit)?)
+        self.sql_delivery
+            .sync_inbox(recipient, after_seq, limit)
+            .map_err(sql_write_error)
     }
 
     pub fn sync_group(&self, request: GroupSyncRequest) -> Result<HttpSyncPage, ServerHttpError> {
@@ -3066,9 +3144,10 @@ impl HttpServerState {
                 max: MAX_HTTP_SYNC_PAGE_ENTRIES,
             });
         }
-        let service = self.service.lock().expect("HTTP delivery service mutex");
-        let page = service.sync_group(&request.group_id, request.after_seq, request.limit)?;
-        drop(service);
+        let page = self
+            .sql_delivery
+            .sync_group(&request.group_id, request.after_seq, request.limit)
+            .map_err(sql_write_error)?;
 
         let Some(requester) = &request.requester else {
             return Ok(page);
@@ -3128,12 +3207,12 @@ impl HttpServerState {
         if !projection.activate_interval(&welcome.recipient, welcome.commit_seq) {
             return Ok(());
         }
-        let projection = projection.clone();
         drop(rooms);
 
-        if let Some(store) = &self.store {
-            store.upsert_room_membership(&projection)?;
-        }
+        // Re-derivable at boot from the claims table plus the delivery
+        // entries, but cheap to keep current: checkpoint on the cadence
+        // rather than synchronously here.
+        self.note_op_for_snapshot();
         Ok(())
     }
 }
@@ -3223,17 +3302,29 @@ pub(crate) struct AccountRoomDirectoryRecord {
     pub(crate) record: Value,
 }
 
-/// Everything `from_sqlite_path` otherwise derives by replaying the full
-/// operation log. Snapshotting it makes startup snapshot + tail replay, per
-/// the standing constraint that full-history replay is a rare recovery
-/// action (ADR 0003).
-#[derive(Serialize, Deserialize)]
-pub(crate) struct DurableStateSnapshot {
-    service: HttpDeliveryService,
-    // Stored as a list: JSON maps need string keys, and the record carries
-    // its own id.
-    key_package_inventory: Vec<KeyPackageInventoryRecord>,
-    revoked_devices: BTreeSet<String>,
+/// Widen a normalized-store failure for a live request path: contract
+/// rejections keep their HTTP mapping, storage failures become 500s.
+fn sql_write_error(error: crate::store::StoreWriteError) -> ServerHttpError {
+    match error {
+        crate::store::StoreWriteError::Store(error) => error.into(),
+        crate::store::StoreWriteError::Domain(error) => error.into(),
+    }
+}
+
+/// Boot divergence between the room-state checkpoint and the delivery
+/// entries: fail closed (the error names recovery), never absorb.
+fn divergence(details: String) -> crate::store::StoreTxError {
+    crate::store::StoreTxError::Store(DurableStoreError::CheckpointDivergence { details })
+}
+
+/// Widen a normalized-store failure for the boot path. A `Domain` rejection
+/// during boot is a delivery-contract replay failure, which `DurableStoreError`
+/// already names.
+fn normalized_store_error(error: crate::store::StoreWriteError) -> DurableStoreError {
+    match error {
+        crate::store::StoreWriteError::Store(error) => error,
+        crate::store::StoreWriteError::Domain(error) => DurableStoreError::Replay(error),
+    }
 }
 
 #[derive(Clone, Debug, Default, PartialEq)]
@@ -3242,210 +3333,16 @@ pub(crate) struct AccountRoomDirectoryMutation {
     pub(crate) upserts: Vec<AccountRoomDirectoryRecord>,
 }
 
-#[derive(Clone, Debug, PartialEq)]
-pub(crate) struct PublishMutation {
-    pub(crate) operation: Option<PersistedOperation>,
-    pub(crate) idempotency_key: String,
-    pub(crate) record: PublishIdempotencyRecord,
-}
+/// Releases the snapshot in-flight flag when the background snapshot thread
+/// exits, even on panic: a flag stuck at `true` would stop every future
+/// snapshot attempt with no further error to observe — exactly the silent
+/// durable-state freeze to guard against.
+struct SnapshotInFlightGuard(Arc<AtomicBool>);
 
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub(crate) struct PushWakeOutboxRecord {
-    pub(crate) wake_id: String,
-    room_id: String,
-    seq: HttpSequence,
-    sender: DeviceRef,
-    state: PushWakeOutboxState,
-}
-
-impl PushWakeOutboxRecord {
-    fn from_effect(effect: &HttpApplicationDeliveryEffect) -> Option<Self> {
-        effect
-            .delivery_policy
-            .creates_push()
-            .then(|| PushWakeOutboxRecord {
-                wake_id: effect.message_id.clone(),
-                room_id: effect.room_id.clone(),
-                seq: effect.seq,
-                sender: effect.sender.clone(),
-                state: PushWakeOutboxState::Pending { attempts: 0 },
-            })
+impl Drop for SnapshotInFlightGuard {
+    fn drop(&mut self) {
+        self.0.store(false, Ordering::Release);
     }
-
-    fn attempts(&self) -> u32 {
-        match self.state {
-            PushWakeOutboxState::Pending { attempts }
-            | PushWakeOutboxState::Leased { attempts, .. } => attempts,
-        }
-    }
-
-    fn claimable_at(&self, now_ms: u64) -> bool {
-        match self.state {
-            PushWakeOutboxState::Pending { .. } => true,
-            PushWakeOutboxState::Leased {
-                lease_expires_at_ms,
-                ..
-            } => lease_expires_at_ms <= now_ms,
-        }
-    }
-
-    fn claimed(&self, now_ms: u64, lease_ms: u64) -> Self {
-        let mut next = self.clone();
-        let attempts = self.attempts().saturating_add(1);
-        next.state = PushWakeOutboxState::Leased {
-            lease_expires_at_ms: now_ms.saturating_add(lease_ms),
-            attempts,
-        };
-        next
-    }
-
-    fn released_for_retry(&self) -> Self {
-        let mut next = self.clone();
-        next.state = PushWakeOutboxState::Pending {
-            attempts: self.attempts(),
-        };
-        next
-    }
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-enum PushWakeOutboxState {
-    Pending {
-        attempts: u32,
-    },
-    Leased {
-        lease_expires_at_ms: u64,
-        attempts: u32,
-    },
-}
-
-/// Result of a read-only publish admission check inside a typed commit.
-struct CheckedPublish {
-    receipt: HttpPublishReceipt,
-    /// True when the publish must be applied to the live service after the
-    /// durable rows are persisted; false for exact replays.
-    fresh: bool,
-    mutation: Option<PublishMutation>,
-}
-
-/// Read-only form of the old candidate publish: validates one publish inside
-/// a typed commit against live state and returns the receipt it would
-/// produce, whether it still needs applying, and the durable rows to
-/// persist. Distinct queues and idempotency keys per publish are guaranteed
-/// by typed-commit validation (duplicate adds are rejected), so a batch of
-/// these checks against the same live state predicts seqs correctly.
-fn check_publish_request(
-    service: &HttpDeliveryService,
-    idempotency: &HashMap<String, PublishIdempotencyRecord>,
-    request: &PublishMessageRequest,
-) -> Result<CheckedPublish, ServerHttpError> {
-    let Some(idempotency_key) = request.idempotency_key.clone() else {
-        let (receipt, fresh) = match service.check_publish(&request.target, &request.message)? {
-            HttpPublishCheck::DuplicateReplay(receipt) => (receipt, false),
-            HttpPublishCheck::Fresh(receipt) => (receipt, true),
-        };
-        return Ok(CheckedPublish {
-            receipt,
-            fresh,
-            mutation: None,
-        });
-    };
-    if idempotency_key.is_empty() {
-        return Err(ServerHttpError::InvalidIdempotencyKey);
-    }
-
-    let fingerprint = PublishMessageFingerprint::from_request(request);
-    if let Some(record) = idempotency.get(&idempotency_key) {
-        if record.fingerprint == fingerprint {
-            return Ok(CheckedPublish {
-                receipt: record.receipt.clone(),
-                fresh: false,
-                mutation: None,
-            });
-        }
-        return Err(ServerHttpError::IdempotencyConflict { idempotency_key });
-    }
-
-    let (receipt, fresh) = match service.check_publish(&request.target, &request.message)? {
-        HttpPublishCheck::DuplicateReplay(receipt) => (receipt, false),
-        HttpPublishCheck::Fresh(receipt) => (receipt, true),
-    };
-    let operation = fresh.then(|| PersistedOperation::PublishMessage {
-        target: request.target.clone(),
-        message: request.message.clone(),
-        idempotency_key: Some(idempotency_key.clone()),
-    });
-    let record = PublishIdempotencyRecord {
-        fingerprint,
-        receipt: receipt.clone(),
-    };
-
-    Ok(CheckedPublish {
-        receipt,
-        fresh,
-        mutation: Some(PublishMutation {
-            operation,
-            idempotency_key,
-            record,
-        }),
-    })
-}
-
-/// Read-only admission check for a typed event publish. Returns the receipt
-/// the publish would produce plus the durable mutation to persist before
-/// applying. Returns `(receipt, None)` for an exact idempotent replay.
-fn check_typed_event_publish(
-    service: &HttpDeliveryService,
-    idempotency: &HashMap<String, PublishIdempotencyRecord>,
-    request: &PublishMessageRequest,
-    message_id: &str,
-) -> Result<(HttpPublishReceipt, Option<PublishMutation>), ServerHttpError> {
-    let Some(idempotency_key) = request.idempotency_key.clone() else {
-        return Err(ServerHttpError::InvalidIdempotencyKey);
-    };
-    if idempotency_key.is_empty() {
-        return Err(ServerHttpError::InvalidIdempotencyKey);
-    }
-
-    let fingerprint = PublishMessageFingerprint::from_request(request);
-    if let Some(record) = idempotency.get(&idempotency_key) {
-        if record.fingerprint == fingerprint {
-            return Ok((record.receipt.clone(), None));
-        }
-        return Err(ServerHttpError::IdempotencyConflict { idempotency_key });
-    }
-
-    let typed_message_id = MessageId::new(message_id.as_bytes().to_vec());
-    let receipt = match service.check_publish(&request.target, &request.message) {
-        Ok(HttpPublishCheck::Fresh(receipt)) => receipt,
-        Ok(HttpPublishCheck::DuplicateReplay(_))
-        | Err(HttpServerError::ConflictingMessageId { .. }) => {
-            return Err(ServerHttpError::DuplicateMessageId {
-                message_id: typed_message_id,
-            });
-        }
-        Err(error) => return Err(error.into()),
-    };
-
-    let operation = PersistedOperation::PublishMessage {
-        target: request.target.clone(),
-        message: request.message.clone(),
-        idempotency_key: Some(idempotency_key.clone()),
-    };
-    let record = PublishIdempotencyRecord {
-        fingerprint,
-        receipt: receipt.clone(),
-    };
-
-    Ok((
-        receipt,
-        Some(PublishMutation {
-            operation: Some(operation),
-            idempotency_key,
-            record,
-        }),
-    ))
 }
 
 /// Compute the room-membership `last_seq` advance for an accepted typed
@@ -3484,38 +3381,7 @@ fn check_application_delivery_effect(
     Ok(Some(effect))
 }
 
-fn push_tokens_for_wake(
-    record: &PushWakeOutboxRecord,
-    tokens: &BTreeMap<String, PushTokenRecord>,
-    rooms: &BTreeMap<String, HttpRoomMembershipProjection>,
-    revoked: &BTreeSet<String>,
-) -> Vec<PushTokenRecord> {
-    let Some(projection) = rooms.get(&record.room_id) else {
-        return Vec::new();
-    };
-    let mut recipients: Vec<PushTokenRecord> = projection
-        .membership
-        .values()
-        .filter(|membership| membership.device != record.sender)
-        .filter(|membership| projection.device_active_at_head(&membership.device))
-        .filter_map(|membership| {
-            let key = DeviceMembership::key(&membership.device);
-            if revoked.contains(&key) {
-                return None;
-            }
-            tokens.get(&key).cloned()
-        })
-        .collect();
-    recipients.sort_by(|left, right| {
-        left.device
-            .account_id
-            .cmp(&right.device.account_id)
-            .then_with(|| left.device.device_id.cmp(&right.device.device_id))
-    });
-    recipients
-}
-
-fn apply_account_room_membership_delta(
+pub(crate) fn apply_account_room_membership_delta(
     directory: &mut BTreeMap<String, BTreeMap<String, Value>>,
     room_id: &str,
     mls_group_id: &str,
@@ -3619,20 +3485,6 @@ fn apply_account_room_membership_delta(
     }
     Ok(mutation)
 }
-
-fn key_package_inventory_cache_matches(
-    cached: &HashMap<HttpKeyPackageId, KeyPackageInventoryRecord>,
-    rebuilt: &HashMap<HttpKeyPackageId, KeyPackageInventoryRecord>,
-) -> bool {
-    cached.len() == rebuilt.len()
-        && rebuilt.iter().all(|(key_package_id, rebuilt_record)| {
-            cached.get(key_package_id).is_some_and(|cached_record| {
-                cached_record.owner == rebuilt_record.owner
-                    && cached_record.state == rebuilt_record.state
-            })
-        })
-}
-
 pub(crate) fn mark_next_key_package_claimed(
     inventory: &mut HashMap<HttpKeyPackageId, KeyPackageInventoryRecord>,
     owner: &MemberId,
@@ -3980,6 +3832,48 @@ fn account_scoped_account_room_record(
     Ok(Some(record))
 }
 
+/// Boot-replay half of the Welcome-ack activation: mark the recipient's
+/// device active in the account-room directory record (mirroring
+/// `activate_account_room_from_welcome`) and return the record to persist,
+/// or `None` when nothing changed. Corrupt or absent records are left
+/// untouched — the live ack path keeps that behavior.
+pub(crate) fn activate_account_room_device_in_directory(
+    directory: &mut BTreeMap<String, BTreeMap<String, Value>>,
+    recipient: &DeviceRef,
+    room_id: &str,
+) -> Option<AccountRoomDirectoryRecord> {
+    let account_id = recipient.account_id.clone();
+    let existing_value = directory
+        .get(&account_id)
+        .and_then(|rooms| rooms.get(room_id))
+        .cloned()?;
+    let mut record = account_scoped_account_room_record(&account_id, room_id, &existing_value)
+        .ok()
+        .flatten()?;
+    if !record
+        .devices
+        .iter()
+        .any(|device| device.device == *recipient && !device.active)
+    {
+        return None;
+    }
+    for device in &mut record.devices {
+        if device.device == *recipient {
+            device.active = true;
+        }
+    }
+    let value = serde_json::to_value(&record).ok()?;
+    directory
+        .entry(account_id.clone())
+        .or_default()
+        .insert(room_id.to_owned(), value.clone());
+    Some(AccountRoomDirectoryRecord {
+        account_id,
+        room_id: room_id.to_owned(),
+        record: value,
+    })
+}
+
 fn claim_key_packages_from_inventory(
     inventory: &mut HashMap<HttpKeyPackageId, KeyPackageInventoryRecord>,
     owners: &[MemberId],
@@ -4002,11 +3896,20 @@ fn record_key_package_publication(
     publication: &HttpKeyPackagePublication,
 ) -> Result<Option<KeyPackageInventoryRecord>, ServerHttpError> {
     if let Some(record) = inventory.get_mut(&publication.key_package_id) {
-        if record.owner != publication.owner || record.key_package != publication.key_package {
+        if record.owner != publication.owner
+            || (!record.key_package.bytes.is_empty()
+                && record.key_package != publication.key_package)
+        {
             return Err(HttpServerError::ConflictingKeyPackage {
                 key_package_id: publication.key_package_id.clone(),
             }
             .into());
+        }
+        // A record loaded from the shared table carries no payload bytes;
+        // the publication is the authority, exactly like the legacy op
+        // replay's empty-bytes repair.
+        if record.key_package.bytes.is_empty() {
+            record.key_package = publication.key_package.clone();
         }
         if record.finite_metadata.is_none() {
             record.finite_metadata = finite_key_package_metadata(publication);
@@ -4212,23 +4115,42 @@ fn key_package_claim_inventory_records(
 }
 
 #[cfg(test)]
-mod readiness_tests {
-    use super::HttpServerState;
+mod rate_limit_tests {
+    use super::PublicRouteRateLimiter;
+    use std::net::{IpAddr, Ipv4Addr};
+
+    fn ip(last: u8) -> IpAddr {
+        IpAddr::V4(Ipv4Addr::new(203, 0, 113, last))
+    }
+
+    fn len(limiter: &PublicRouteRateLimiter) -> usize {
+        limiter.windows.lock().expect("windows").len()
+    }
 
     #[test]
-    fn readiness_reports_delivery_core_contention_separately_from_storage() {
-        let directory = tempfile::tempdir().expect("tempdir");
-        let state = HttpServerState::from_sqlite_path(directory.path().join("server.sqlite3"))
-            .expect("durable state");
-        let _delivery_guard = state.service.lock().expect("delivery core lock");
+    fn expired_windows_are_evicted_once_the_map_hits_the_cap() {
+        let mut limiter = PublicRouteRateLimiter::new(120, 0);
+        limiter.max_entries = 2;
 
-        let readiness = state.probe_readiness();
+        assert!(limiter.check(ip(1)));
+        assert!(limiter.check(ip(2)));
+        assert_eq!(len(&limiter), 2);
+        // The third distinct IP triggers the sweep; with a zero-length window
+        // every entry is stale, so the map shrinks instead of growing.
+        assert!(limiter.check(ip(3)));
+        assert_eq!(len(&limiter), 1);
+    }
 
-        assert_eq!(
-            readiness.delivery_core.failure,
-            Some("delivery_core_contended")
-        );
-        assert_eq!(readiness.durable_store.failure, None);
-        assert!(!readiness.is_ready());
+    #[test]
+    fn live_windows_survive_the_sweep() {
+        let mut limiter = PublicRouteRateLimiter::new(120, 60);
+        limiter.max_entries = 2;
+
+        assert!(limiter.check(ip(1)));
+        assert!(limiter.check(ip(2)));
+        // All entries are live, so the sweep evicts nothing and the cap is a
+        // soft bound for genuinely concurrent clients.
+        assert!(limiter.check(ip(3)));
+        assert_eq!(len(&limiter), 3);
     }
 }

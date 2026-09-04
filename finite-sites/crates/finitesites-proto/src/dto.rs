@@ -30,14 +30,18 @@ pub struct EmailRedeemResponse {
     pub linked_to_native_principal: bool,
 }
 
+/// Sites Authorized Key mutations carry a fresh daemon-local email proof:
+/// the single-use token delivered by `/api/v1/email-auth/request`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SitesAuthorizedKeyRegisterRequest {
-    pub mailbox_proof: String,
+    pub email: String,
+    pub token: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SitesAuthorizedKeyRevokeRequest {
-    pub mailbox_proof: String,
+    pub email: String,
+    pub token: String,
     pub target_npub: String,
 }
 

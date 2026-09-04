@@ -8,9 +8,9 @@ use finite_saas_core::{
     RetryRuntimeControlRequestInput, RunnerClass, RunnerLeaseCapacity, RuntimeArtifact,
     RuntimeArtifactKind, RuntimeBootIntent, RuntimeCapabilitiesEnvelope, RuntimeCapabilitiesV1,
     RuntimeControlKind, RuntimeControlLease, RuntimeControlRequest, RuntimeHealthReportAck,
-    RuntimeHealthReportRequest, RuntimeLifecycleStage, RuntimePlacement, RuntimeResourceClass,
-    RuntimeRetirementSnapshotReceipt, RuntimeSpecEnvelope, RuntimeSpecV1, RuntimeSummaryStatus,
-    api::RecordProviderOperationTransitionRequest,
+    RuntimeHealthReportRequest, RuntimeHealthTargetList, RuntimeLifecycleStage, RuntimePlacement,
+    RuntimeResourceClass, RuntimeRetirementSnapshotReceipt, RuntimeSpecEnvelope, RuntimeSpecV1,
+    RuntimeSummaryStatus, api::RecordProviderOperationTransitionRequest,
 };
 #[cfg(test)]
 use finite_saas_core::{FinitePrivateApiKey, RuntimeEndpointContractV1};
@@ -37,9 +37,11 @@ mod phala_inventory;
 pub mod retirement;
 
 pub use apple_container::{AppleContainerConfig, AppleContainerLaunchPlan, AppleContainerLauncher};
-pub use health_reports::HealthReportConfig;
+pub use health_reports::{HealthReportConfig, HealthReportState};
 pub use kata::{
-    KataConfig, KataLaunchPlan, KataLauncher, KataRetirementConfig, durable_state_manifest_sha256,
+    DEFAULT_DURABLE_TREE_QUIESCENCE_WINDOW, DURABLE_TREE_WRITER_LEASE, KataConfig, KataLaunchPlan,
+    KataLauncher, KataRetirementConfig, Quiescence, durable_state_manifest_sha256,
+    durable_tree_is_quiescent, durable_tree_is_quiescent_within,
 };
 pub use lifecycle_probe::{
     LIFECYCLE_PROBE_SCHEMA, LifecycleProbeConfig, LifecycleProbeReport, LifecycleProbeRequest,
@@ -57,23 +59,21 @@ const IDENTITY_BINDING_RETRY_INTERVAL: Duration = Duration::from_millis(250);
 const DEFAULT_COMMAND_TIMEOUT: Duration = Duration::from_secs(15);
 const DEFAULT_LAUNCH_TIMEOUT: Duration = Duration::from_secs(300);
 const RUNTIME_RETIREMENT_LEASE_SECONDS: i64 = 60 * 60;
-// The deployed limiter domain keeps the historical kimi-k2-6 name but now
-// serves DeepSeek V4 Flash 0731 (see docs/service-dependencies.md, Finite
-// Private Routing Debt). Do not rename the URL as a cosmetic change.
+// Live Finite Private route after the 2026-08-28 GLM cutover. The historical
+// kimi-k2-6 hostname is retired; issued Runtime env still needs the Hermes
+// rewrite in finitechat/containers/agent until those agents upgrade.
 pub const DEFAULT_FINITE_PRIVATE_BASE_URL: &str =
+    "https://finite-private.finite.containers.tinfoil.dev/v1";
+pub const DEFAULT_FINITE_PRIVATE_MODEL: &str = "glm-5-3-flash";
+pub const HISTORICAL_FINITE_PRIVATE_BASE_URL: &str =
     "https://kimi-k2-6.finite.containers.tinfoil.dev/v1";
-pub const DEFAULT_FINITE_PRIVATE_MODEL: &str = "deepseek-v4-flash-0731";
+pub const FINITE_PRIVATE_MODEL_ALIASES: &[&str] =
+    &["deepseek-v4-flash-0731", "glm-5-2", "glm-5.3-flash"];
 pub const DEFAULT_FINITE_PRIVATE_CONTEXT_LENGTH: usize = 393_216;
-pub const DEFAULT_FINITE_PRIVATE_SPECIALIZATION_BUNDLE: &str = "aeon-multimodal";
 pub const DEFAULT_FINITECHAT_SERVER_URL: &str = "https://chat.finite.computer";
 pub const DEFAULT_FINITE_AGENT_PICTURE_URL: &str =
     "https://avatars.githubusercontent.com/u/274919006?v=4";
 const FINITE_PRIVATE_PROFILE_ID: &str = "finite-private";
-const FINITE_SPECIALIZATION_BUNDLE_ENV: &str = "FINITE_SPECIALIZATION_BUNDLE";
-const FINITE_SPECIALIZATION_WORKER_API_KEY_ENV: &str = "FINITE_SPECIALIZATION_WORKER_API_KEY";
-const FBRAIN_EMBEDDING_ENDPOINT_ENV: &str = "FBRAIN_EMBEDDING_ENDPOINT";
-const FBRAIN_EMBEDDING_BEARER_TOKEN_ENV: &str = "FBRAIN_EMBEDDING_BEARER_TOKEN";
-const DEFAULT_FBRAIN_EMBEDDING_ENDPOINT: &str = "https://specialization.finite.vip";
 const DEFAULT_DOCKER_CONTAINER_PORT: u16 = 8080;
 const MAX_RUNTIME_ENVIRONMENT_ENTRIES: usize = 64;
 const MAX_RUNTIME_ENVIRONMENT_KEY_BYTES: usize = 128;
@@ -255,6 +255,61 @@ pub enum RunnerError {
     CoreJson(String),
     #[error("runtime launch failed: {0}")]
     RuntimeLaunch(String),
+    /// A Kata plan was requested for a runtime whose lease carries no
+    /// Core-bound `durable_state_id`. The durable state root is derived from
+    /// that id only; a machine-named root is never derived as a fallback.
+    #[error(
+        "runtime {source_machine_id} has no durable_state_id; refusing to derive a machine-named durable state root"
+    )]
+    MissingDurableStateId { source_machine_id: String },
+    /// Both a runtime-id durable root and a pre-runtime-id-era machine-named
+    /// root exist for the same runtime. The Runner never guesses which one
+    /// is the agent's life; an operator reconciles them.
+    #[error(
+        "durable state roots {} (runtime id) and {} (machine-named) both exist for {source_machine_id}; an operator must reconcile them",
+        .runtime_id_root.display(),
+        .machine_named_root.display()
+    )]
+    AmbiguousDurableStateRoots {
+        source_machine_id: String,
+        runtime_id_root: PathBuf,
+        machine_named_root: PathBuf,
+    },
+    /// A machine-named durable root is still bound at `/data` by a
+    /// provider-known container. Renaming it would leave that container
+    /// pointing at a path that no longer exists, or at a fresh empty one.
+    #[error(
+        "legacy durable state root {} is still bound by container {container_name} ({status}); remove that compute before it can migrate",
+        .machine_named_root.display()
+    )]
+    LegacyDurableStateRootBound {
+        container_name: String,
+        status: String,
+        machine_named_root: PathBuf,
+    },
+    #[error(
+        "failed to migrate legacy durable state root {} to {}: {message}",
+        .machine_named_root.display(),
+        .runtime_id_root.display()
+    )]
+    DurableStateRootMigration {
+        machine_named_root: PathBuf,
+        runtime_id_root: PathBuf,
+        message: String,
+    },
+    /// A durable state root still has a live writer. This is decided by
+    /// testing the writer itself (the chat store's single-writer lease, then
+    /// the tree's change manifest), not by provider records: an orphaned Kata
+    /// VM keeps writing through its bind mount long after containerd has
+    /// forgotten the container.
+    #[error(
+        "durable state root {} still has a live writer ({evidence}); a missing provider record (nerdctl \"no such object\", or an inspect that times out) is not proof the compute is absent — find and stop the orphaned VM (containerd-shim-kata, qemu, virtiofsd) before migrating or relocating this tree",
+        .state_root.display()
+    )]
+    DurableStateRootLive {
+        state_root: PathBuf,
+        evidence: String,
+    },
     /// The post-compute readiness wait expired. Core records this as a
     /// `readiness`-stage lifecycle failure, distinct from compute faults: a
     /// restart whose runtime never proves ready must surface as exactly that.
@@ -507,11 +562,15 @@ where
         // Best-effort, throttled per runtime: standing health telemetry must
         // never fail or slow the lease cycle beyond its own bounded HTTP
         // timeouts.
+        let source_host_id = self.launcher.source_host_id().map(str::to_string);
         if let Some(config) = self.health_reports.clone() {
-            health_reports::forward_due_reports(&mut self.queue, &config);
+            health_reports::forward_due_reports(
+                &mut self.queue,
+                &config,
+                source_host_id.as_deref(),
+            );
         }
         let lease_token = self.lease_tokens.next_lease_token()?;
-        let source_host_id = self.launcher.source_host_id().map(str::to_string);
         let runtime_capabilities = self.launcher.runtime_capabilities();
         let mut runner_capacity = self.launcher.runner_capacity();
         runner_capacity.runtime_capabilities = Some(runtime_capabilities.clone());
@@ -612,62 +671,46 @@ where
                         // restored state exposes the existing Agent
                         // Principal. Rebinding it after Core switches the
                         // Runtime host would add a fallible post-commit
-                        // step to the relocation boundary. The retained
-                        // principal still pins standing health reports.
+                        // step to the relocation boundary.
                         Ok(Some(relocation.v1().expected_agent_npub.clone()))
                     } else {
                         self.bind_agent_identity(&lease, &facts)
                     } {
-                        Ok(launch_verified_npub) => self
-                            .queue
-                            .complete_agent_creation(
-                                &request_id,
-                                CompleteAgentCreationRequestInput {
-                                    request_id: request_id.clone(),
-                                    runner_id: self.runner_id.clone(),
-                                    lease_token: lease_token.clone(),
-                                    source_host_id: facts.source_host_id.clone(),
-                                    source_machine_id: facts.source_machine_id.clone(),
-                                    runtime_artifact_id: facts.runtime_artifact_id.clone(),
-                                    state_schema_version: facts.state_schema_version.clone(),
-                                    provider_runtime_handle: facts.provider_runtime_handle.clone(),
-                                    contact_endpoint: facts.contact_endpoint.clone(),
-                                    display_name: facts.display_name.clone(),
-                                    hostname: facts.hostname.clone(),
-                                    runtime_host: facts.runtime_host.clone(),
-                                    runtime_status: Some(RuntimeSummaryStatus::Online),
-                                    active_inference_profile: facts
-                                        .active_inference_profile
-                                        .clone(),
-                                    hermes_available: facts.hermes_available,
-                                    published_app_urls: facts.published_app_urls.clone(),
-                                    runtime_capabilities: Some(runtime_capabilities),
-                                    now: None,
-                                },
-                            )
-                            .map(|completed| (completed, launch_verified_npub)),
+                        // The verified principal seeds Core's standing-health
+                        // attribution pin for the new incarnation.
+                        Ok(launch_verified_npub) => self.queue.complete_agent_creation(
+                            &request_id,
+                            CompleteAgentCreationRequestInput {
+                                request_id: request_id.clone(),
+                                runner_id: self.runner_id.clone(),
+                                lease_token: lease_token.clone(),
+                                source_host_id: facts.source_host_id.clone(),
+                                source_machine_id: facts.source_machine_id.clone(),
+                                runtime_artifact_id: facts.runtime_artifact_id.clone(),
+                                state_schema_version: facts.state_schema_version.clone(),
+                                provider_runtime_handle: facts.provider_runtime_handle.clone(),
+                                contact_endpoint: facts.contact_endpoint.clone(),
+                                display_name: facts.display_name.clone(),
+                                hostname: facts.hostname.clone(),
+                                runtime_host: facts.runtime_host.clone(),
+                                runtime_status: Some(RuntimeSummaryStatus::Online),
+                                active_inference_profile: facts.active_inference_profile.clone(),
+                                hermes_available: facts.hermes_available,
+                                published_app_urls: facts.published_app_urls.clone(),
+                                runtime_capabilities: Some(runtime_capabilities),
+                                agent_npub: launch_verified_npub,
+                                now: None,
+                            },
+                        ),
                         Err(error) => Err(error),
                     },
                     Err(error) => Err(error),
                 };
                 match launch_result {
-                    Ok((completed, launch_verified_npub)) => {
-                        if let Some(config) = &self.health_reports
-                            && let Some(runtime_id) = completed.request.agent_runtime_id.as_deref()
-                        {
-                            health_reports::record_target(
-                                config,
-                                runtime_id,
-                                &facts.source_machine_id,
-                                facts.contact_endpoint.as_deref(),
-                                launch_verified_npub.as_deref(),
-                            );
-                        }
-                        Ok(RunOnceOutcome::Launched {
-                            request_id,
-                            runtime_id: completed.request.agent_runtime_id,
-                        })
-                    }
+                    Ok(completed) => Ok(RunOnceOutcome::Launched {
+                        request_id,
+                        runtime_id: completed.request.agent_runtime_id,
+                    }),
                     Err(error) => {
                         let failure_message = error.to_string();
                         let cleanup_error = self.launcher.cleanup_failed_launch(&facts).err();
@@ -950,35 +993,6 @@ where
                         now: None,
                     },
                 )?;
-                // Keep the standing-health registry aligned with the lifecycle
-                // outcome: a deliberately offline runtime is deregistered, and
-                // an upgrade moves the entry to the new contact endpoint
-                // (restart and recover preserve it — Kata asserts the
-                // persisted endpoint is unchanged and Phala restarts the same
-                // CVM).
-                if let Some(config) = &self.health_reports {
-                    match kind {
-                        RuntimeControlKind::Stop | RuntimeControlKind::Destroy => {
-                            health_reports::remove_target(config, &completed.agent_runtime_id);
-                        }
-                        RuntimeControlKind::Upgrade => {
-                            if let Some(facts) = upgrade_facts.as_ref()
-                                && let Some(contact_endpoint) = facts
-                                    .published_app_urls
-                                    .iter()
-                                    .find(|url| url.ends_with("/contact"))
-                            {
-                                health_reports::refresh_target_endpoint(
-                                    config,
-                                    &completed.agent_runtime_id,
-                                    contact_endpoint,
-                                );
-                            }
-                        }
-                        RuntimeControlKind::Restart
-                        | RuntimeControlKind::RecoverKnownGoodChatRuntime => {}
-                    }
-                }
                 Ok(runtime_control_success_outcome(
                     kind,
                     request_id,
@@ -1079,7 +1093,6 @@ where
                 "RuntimeSpec omitted the Finite Private secret reference".to_string(),
             ));
         }
-        let specialization_bundle = specialization_bundle_for_finite_private_profile(&defaults)?;
         if let Some(raw_api_key) = defaults
             .api_key_override
             .as_deref()
@@ -1092,7 +1105,6 @@ where
                 base_url: defaults.base_url,
                 model: defaults.model,
                 revoke_on_launch_failure: false,
-                specialization_bundle,
             });
             return Ok(options);
         }
@@ -1118,7 +1130,6 @@ where
             base_url: defaults.base_url,
             model: defaults.model,
             revoke_on_launch_failure: true,
-            specialization_bundle,
         });
         Ok(options)
     }
@@ -1202,6 +1213,16 @@ pub trait AgentCreationQueue {
         &mut self,
         input: RuntimeHealthReportRequest,
     ) -> Result<RuntimeHealthReportAck, RunnerError>;
+
+    /// Core's host-scoped list of the runtimes this runner polls for standing
+    /// health, fetched every cycle. `Ok(None)` means the queue cannot list
+    /// (an older Core, or a test double), which turns reporting off for the
+    /// cycle.
+    fn list_runtime_health_targets(
+        &mut self,
+    ) -> Result<Option<RuntimeHealthTargetList>, RunnerError> {
+        Ok(None)
+    }
 }
 
 pub trait ProviderOperationJournal {
@@ -1544,7 +1565,6 @@ pub struct FinitePrivateRuntimeDefaults {
     pub base_url: String,
     pub model: String,
     pub api_key_override: Option<String>,
-    pub specialization_bundle: Option<SpecializationBundleRuntimeDefaults>,
 }
 
 impl Default for FinitePrivateRuntimeDefaults {
@@ -1553,57 +1573,7 @@ impl Default for FinitePrivateRuntimeDefaults {
             base_url: DEFAULT_FINITE_PRIVATE_BASE_URL.to_string(),
             model: DEFAULT_FINITE_PRIVATE_MODEL.to_string(),
             api_key_override: None,
-            specialization_bundle: None,
         }
-    }
-}
-
-fn specialization_bundle_for_finite_private_profile(
-    defaults: &FinitePrivateRuntimeDefaults,
-) -> Result<Option<SpecializationBundleRuntimeDefaults>, RunnerError> {
-    // This is a profile decision, never a host, customer, or agent-name decision.
-    if defaults.model != DEFAULT_FINITE_PRIVATE_MODEL {
-        return Ok(None);
-    }
-    defaults
-        .specialization_bundle
-        .clone()
-        .map(|mut specialization_bundle| {
-            if specialization_bundle.bundle_id != DEFAULT_FINITE_PRIVATE_SPECIALIZATION_BUNDLE {
-                return Err(RunnerError::InvalidRuntimeEnvironment(format!(
-                    "unsupported Finite Private specialization bundle {:?}",
-                    specialization_bundle.bundle_id
-                )));
-            }
-            specialization_bundle.worker_api_key =
-                specialization_bundle.worker_api_key.trim().to_owned();
-            if specialization_bundle.worker_api_key.is_empty()
-                || specialization_bundle.worker_api_key.len()
-                    > MAX_RUNTIME_SECRET_ENVIRONMENT_VALUE_BYTES
-            {
-                return Err(RunnerError::InvalidRuntimeEnvironment(
-                    "Finite Private specialization worker credential is empty or oversized"
-                        .to_string(),
-                ));
-            }
-            Ok(specialization_bundle)
-        })
-        .transpose()
-}
-
-#[derive(Clone, PartialEq, Eq)]
-pub struct SpecializationBundleRuntimeDefaults {
-    pub bundle_id: String,
-    pub worker_api_key: String,
-}
-
-impl std::fmt::Debug for SpecializationBundleRuntimeDefaults {
-    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        formatter
-            .debug_struct("SpecializationBundleRuntimeDefaults")
-            .field("bundle_id", &self.bundle_id)
-            .field("worker_api_key", &"<redacted>")
-            .finish()
     }
 }
 
@@ -1807,9 +1777,6 @@ pub struct FinitePrivateLaunchKey {
     pub base_url: String,
     pub model: String,
     pub revoke_on_launch_failure: bool,
-    /// Optional automatic profile activation. A missing host credential must
-    /// never prevent a normal Finite Private agent launch.
-    pub specialization_bundle: Option<SpecializationBundleRuntimeDefaults>,
 }
 
 fn provisioned_key_to_revoke(options: &RuntimeLaunchOptions) -> Option<String> {
@@ -2047,10 +2014,6 @@ fn reserved_runtime_environment_key(key: &str) -> bool {
             | "FINITECHAT_HERMES_PROVIDER"
             | "FINITECHAT_HERMES_BASE_URL"
             | "FINITECHAT_HERMES_API_MODE"
-            | "FINITE_SPECIALIZATION_BUNDLE"
-            | "FINITE_SPECIALIZATION_WORKER_API_KEY"
-            | "FBRAIN_EMBEDDING_ENDPOINT"
-            | "FBRAIN_EMBEDDING_BEARER_TOKEN"
             | "OPENAI_API_KEY"
     )
 }
@@ -2070,7 +2033,6 @@ impl std::fmt::Debug for FinitePrivateLaunchKey {
             .field("base_url", &self.base_url)
             .field("model", &self.model)
             .field("revoke_on_launch_failure", &self.revoke_on_launch_failure)
-            .field("specialization_bundle", &self.specialization_bundle)
             .finish()
     }
 }
@@ -2293,6 +2255,22 @@ impl AgentCreationQueue for CoreHttpAgentCreationQueue {
         input: RuntimeHealthReportRequest,
     ) -> Result<RuntimeHealthReportAck, RunnerError> {
         self.post_json("/api/core/v1/runtime-health-reports", &input)
+    }
+
+    fn list_runtime_health_targets(
+        &mut self,
+    ) -> Result<Option<RuntimeHealthTargetList>, RunnerError> {
+        let url = format!("{}/api/core/v1/runtime-health-targets", self.base_url);
+        let response = ureq::get(&url)
+            .set("authorization", &format!("Bearer {}", self.api_token))
+            .call();
+        match decode_core_response(response) {
+            Ok(listing) => Ok(Some(listing)),
+            // A Core without the listing route (N-1) is not an error: the
+            // poller has nothing to poll and reports nothing this cycle.
+            Err(RunnerError::CoreStatus { status: 404, .. }) => Ok(None),
+            Err(error) => Err(error),
+        }
     }
 }
 
@@ -2984,26 +2962,6 @@ fn docker_equivalent_runtime_env(
                 finite_private.raw_api_key.clone(),
             ),
         ]);
-        if let Some(specialization_bundle) = finite_private.specialization_bundle.as_ref() {
-            entries.extend([
-                (
-                    FINITE_SPECIALIZATION_BUNDLE_ENV.to_string(),
-                    specialization_bundle.bundle_id.clone(),
-                ),
-                (
-                    FINITE_SPECIALIZATION_WORKER_API_KEY_ENV.to_string(),
-                    specialization_bundle.worker_api_key.clone(),
-                ),
-                (
-                    FBRAIN_EMBEDDING_ENDPOINT_ENV.to_string(),
-                    DEFAULT_FBRAIN_EMBEDDING_ENDPOINT.to_string(),
-                ),
-                (
-                    FBRAIN_EMBEDDING_BEARER_TOKEN_ENV.to_string(),
-                    specialization_bundle.worker_api_key.clone(),
-                ),
-            ]);
-        }
     }
 
     entries.extend(
@@ -3869,45 +3827,8 @@ mod tests {
     };
     use std::collections::VecDeque;
 
-    fn specialization_bundle_defaults() -> SpecializationBundleRuntimeDefaults {
-        SpecializationBundleRuntimeDefaults {
-            bundle_id: DEFAULT_FINITE_PRIVATE_SPECIALIZATION_BUNDLE.to_owned(),
-            worker_api_key: "specialization-worker-secret".to_owned(),
-        }
-    }
-
     fn finite_private_defaults() -> FinitePrivateRuntimeDefaults {
-        FinitePrivateRuntimeDefaults {
-            specialization_bundle: Some(specialization_bundle_defaults()),
-            ..FinitePrivateRuntimeDefaults::default()
-        }
-    }
-
-    #[test]
-    fn specialization_bundle_is_scoped_only_to_the_canonical_finite_private_profile() {
-        let configured_profile = finite_private_defaults();
-        let bundle = specialization_bundle_for_finite_private_profile(&configured_profile)
-            .unwrap()
-            .expect("the canonical Finite Private profile should activate AEON");
-        assert_eq!(
-            bundle.bundle_id,
-            DEFAULT_FINITE_PRIVATE_SPECIALIZATION_BUNDLE
-        );
-
-        let other_finite_private_profile = FinitePrivateRuntimeDefaults {
-            model: "another-finite-private-model".to_owned(),
-            specialization_bundle: Some(SpecializationBundleRuntimeDefaults {
-                bundle_id: "not-validated-for-this-profile".to_owned(),
-                worker_api_key: "unused-for-noncanonical-profile".to_owned(),
-            }),
-            ..FinitePrivateRuntimeDefaults::default()
-        };
-        assert!(
-            specialization_bundle_for_finite_private_profile(&other_finite_private_profile)
-                .unwrap()
-                .is_none(),
-            "specialization admission must depend on the canonical Finite Private profile, not a runner host or user"
-        );
+        FinitePrivateRuntimeDefaults::default()
     }
 
     #[test]
@@ -4619,82 +4540,6 @@ mod tests {
     }
 
     #[test]
-    fn run_once_registers_a_standing_health_report_target_after_launch() {
-        let registry = tempfile::tempdir().unwrap();
-        let mut runner = AgentCreationRunner::new(
-            FakeQueue::with_lease(sample_lease("agent_request_123")),
-            FakeLauncher::ready(RuntimeLaunchFacts::sample()),
-            FixedLeaseTokens::new(["lease-1"]),
-            "runner-1",
-            300,
-        )
-        .unwrap()
-        .with_health_reports(Some(HealthReportConfig {
-            registry_dir: registry.path().to_path_buf(),
-            interval: Duration::from_secs(60),
-            http_timeout: Duration::from_millis(250),
-        }));
-
-        let outcome = runner.run_once().unwrap();
-
-        assert!(matches!(outcome, RunOnceOutcome::Launched { .. }));
-        // The email-less sample agent verifies no principal at launch, so the
-        // entry pins on the first contact answer (documented legacy fallback).
-        let entry: health_reports::HealthReportTarget = serde_json::from_slice(
-            &std::fs::read(registry.path().join("runtime-from-core.json")).unwrap(),
-        )
-        .unwrap();
-        assert_eq!(entry.contact_endpoint, "http://oslo-host-1/contact");
-        assert_eq!(entry.source_machine_id, "finite-agent_123");
-        assert_eq!(entry.agent_npub, None);
-    }
-
-    #[test]
-    fn run_once_deregisters_the_health_target_when_stop_completes() {
-        let registry = tempfile::tempdir().unwrap();
-        let config = HealthReportConfig {
-            registry_dir: registry.path().to_path_buf(),
-            interval: Duration::from_secs(60),
-            http_timeout: Duration::from_millis(250),
-        };
-        health_reports::record_target(
-            &config,
-            "runtime_123",
-            "oslo-agent-001",
-            // Nothing listens here; the pre-stop poll reports unreachable and
-            // the completion still deregisters the target.
-            Some("http://127.0.0.1:9/contact"),
-            None,
-        );
-        assert!(registry.path().join("runtime_123.json").exists());
-        let runtime_control =
-            sample_runtime_control_lease_with_kind("runtime_ctl_123", RuntimeControlKind::Stop);
-        let mut runner = AgentCreationRunner::new(
-            FakeQueue::with_runtime_control_lease(runtime_control.clone()),
-            FakeLauncher::ready(RuntimeLaunchFacts::sample()),
-            FixedLeaseTokens::new(["lease-1"]),
-            "runner-1",
-            300,
-        )
-        .unwrap()
-        .with_health_reports(Some(config));
-
-        let outcome = runner.run_once().unwrap();
-
-        assert_eq!(
-            outcome,
-            RunOnceOutcome::RuntimeStopped {
-                request_id: runtime_control.request.id.clone(),
-                runtime_id: runtime_control.runtime.id.clone(),
-            }
-        );
-        assert!(
-            !registry.path().join("runtime_123.json").exists(),
-            "a deliberately offline runtime must not be polled forever"
-        );
-    }
-
-    #[test]
     fn run_once_binds_canonical_agent_email_before_completion() {
         use std::sync::mpsc;
 
@@ -5173,20 +5018,7 @@ mod tests {
         assert_eq!(finite_private.raw_api_key, "fpk_live_test");
         assert_eq!(finite_private.base_url, DEFAULT_FINITE_PRIVATE_BASE_URL);
         assert_eq!(finite_private.model, DEFAULT_FINITE_PRIVATE_MODEL);
-        assert_eq!(finite_private.model, "deepseek-v4-flash-0731");
-        let specialization_bundle = finite_private
-            .specialization_bundle
-            .as_ref()
-            .expect("configured specialization should be passed to launcher");
-        assert_eq!(
-            specialization_bundle.bundle_id,
-            DEFAULT_FINITE_PRIVATE_SPECIALIZATION_BUNDLE
-        );
-        assert_eq!(
-            specialization_bundle.worker_api_key,
-            "specialization-worker-secret"
-        );
-        assert!(!format!("{finite_private:?}").contains("specialization-worker-secret"));
+        assert_eq!(finite_private.model, "glm-5-3-flash");
         assert_eq!(runner.queue.registered.len(), 1);
         assert_eq!(
             runner.queue.registered[0]
@@ -5280,66 +5112,6 @@ mod tests {
                 .is_none()
         );
         assert!(runner.queue.registered.is_empty());
-    }
-
-    #[test]
-    fn run_once_launches_without_specialization_when_credential_is_missing() {
-        let lease = sample_lease("agent_request_123");
-        let mut runner = AgentCreationRunner::new(
-            FakeQueue::with_lease(lease),
-            FakeLauncher::ready(RuntimeLaunchFacts::sample()),
-            FixedLeaseTokens::new(["lease-1"]),
-            "runner-1",
-            300,
-        )
-        .unwrap()
-        .with_default_finite_private_inference(FinitePrivateRuntimeDefaults::default());
-
-        let outcome = runner.run_once().unwrap();
-
-        assert!(matches!(outcome, RunOnceOutcome::Launched { .. }));
-        assert_eq!(runner.launcher.launch_count, 1);
-        assert_eq!(runner.queue.provisioned.len(), 1);
-        assert!(
-            runner.launcher.launch_options[0]
-                .finite_private
-                .as_ref()
-                .expect("Finite Private key should be passed to launcher")
-                .specialization_bundle
-                .is_none()
-        );
-        assert!(runner.queue.failed.is_empty());
-    }
-
-    #[test]
-    fn run_once_fails_closed_when_configured_specialization_is_invalid() {
-        let lease = sample_lease("agent_request_123");
-        let mut runner = AgentCreationRunner::new(
-            FakeQueue::with_lease(lease),
-            FakeLauncher::ready(RuntimeLaunchFacts::sample()),
-            FixedLeaseTokens::new(["lease-1"]),
-            "runner-1",
-            300,
-        )
-        .unwrap()
-        .with_default_finite_private_inference(FinitePrivateRuntimeDefaults {
-            specialization_bundle: Some(SpecializationBundleRuntimeDefaults {
-                bundle_id: DEFAULT_FINITE_PRIVATE_SPECIALIZATION_BUNDLE.to_owned(),
-                worker_api_key: " ".to_owned(),
-            }),
-            ..FinitePrivateRuntimeDefaults::default()
-        });
-
-        let outcome = runner.run_once().unwrap();
-
-        assert!(matches!(outcome, RunOnceOutcome::LaunchFailed { .. }));
-        assert_eq!(runner.launcher.launch_count, 0);
-        assert!(runner.queue.provisioned.is_empty());
-        assert!(
-            runner.queue.failed[0]
-                .failure_message
-                .contains("specialization worker credential is empty or oversized")
-        );
     }
 
     #[test]
@@ -5579,7 +5351,6 @@ mod tests {
                 base_url: DEFAULT_FINITE_PRIVATE_BASE_URL.to_string(),
                 model: DEFAULT_FINITE_PRIVATE_MODEL.to_string(),
                 revoke_on_launch_failure: true,
-                specialization_bundle: Some(specialization_bundle_defaults()),
             }),
             profile_picture_url: None,
             environment: BTreeMap::from([(
@@ -5605,58 +5376,25 @@ mod tests {
         assert_env(&env, "FINITECHAT_WORKSPACE", "/data/workspace");
         assert_env(&env, "FINITECHAT_HERMES_AGENT_DEVICE_ID", "agent");
         assert_env(&env, "FINITECHAT_HERMES_PROVIDER", "custom");
-        assert_env(&env, "FINITECHAT_HERMES_MODEL", "deepseek-v4-flash-0731");
-        assert_env(&env, "FINITE_PRIVATE_MODEL", "deepseek-v4-flash-0731");
+        assert_env(&env, "FINITECHAT_HERMES_MODEL", "glm-5-3-flash");
+        assert_env(&env, "FINITE_PRIVATE_MODEL", "glm-5-3-flash");
         assert_env(&env, "FINITE_PRIVATE_CONTEXT_LENGTH", "393216");
-        // The endpoint domain keeps the historical kimi name; the served model
-        // is DeepSeek V4 Flash 0731.
         assert_env(
             &env,
             "FINITECHAT_HERMES_BASE_URL",
-            "https://kimi-k2-6.finite.containers.tinfoil.dev/v1",
+            "https://finite-private.finite.containers.tinfoil.dev/v1",
+        );
+        assert_ne!(
+            DEFAULT_FINITE_PRIVATE_BASE_URL,
+            HISTORICAL_FINITE_PRIVATE_BASE_URL
         );
         assert_env(&env, "FINITE_PRIVATE_API_KEY", "fpk_live_test");
         assert_env(&env, "OPENAI_API_KEY", "fpk_live_test");
-        assert_env(
-            &env,
-            FINITE_SPECIALIZATION_BUNDLE_ENV,
-            DEFAULT_FINITE_PRIVATE_SPECIALIZATION_BUNDLE,
-        );
-        assert_env(
-            &env,
-            FINITE_SPECIALIZATION_WORKER_API_KEY_ENV,
-            "specialization-worker-secret",
-        );
-        assert_env(
-            &env,
-            FBRAIN_EMBEDDING_ENDPOINT_ENV,
-            DEFAULT_FBRAIN_EMBEDDING_ENDPOINT,
-        );
-        assert_env(
-            &env,
-            FBRAIN_EMBEDDING_BEARER_TOKEN_ENV,
-            "specialization-worker-secret",
-        );
-        let mut options_without_specialization = options.clone();
-        options_without_specialization
-            .finite_private
-            .as_mut()
-            .expect("Finite Private key should be present")
-            .specialization_bundle = None;
-        let env_without_specialization =
-            docker_runtime_env(&config, &plan, &lease, &options_without_specialization);
-        assert!(
-            env_without_specialization
-                .iter()
-                .all(|(key, _)| key != FINITE_SPECIALIZATION_BUNDLE_ENV)
-        );
-        assert!(
-            env_without_specialization
-                .iter()
-                .all(|(key, _)| key != FINITE_SPECIALIZATION_WORKER_API_KEY_ENV)
-        );
-        assert!(env_without_specialization.iter().all(|(key, _)| {
-            key != FBRAIN_EMBEDDING_ENDPOINT_ENV && key != FBRAIN_EMBEDDING_BEARER_TOKEN_ENV
+        assert!(env.iter().all(|(key, _)| {
+            key != "FINITE_SPECIALIZATION_BUNDLE"
+                && key != "FINITE_SPECIALIZATION_WORKER_API_KEY"
+                && key != "FBRAIN_EMBEDDING_ENDPOINT"
+                && key != "FBRAIN_EMBEDDING_BEARER_TOKEN"
         }));
         assert_env(&env, "FINITE_SITES_API", "http://192.168.64.1:18789");
         assert!(
@@ -5721,7 +5459,13 @@ mod tests {
             ..KataConfig::default()
         };
         config.validate().unwrap();
-        let lease = sample_lease("agent_request_ABC.123");
+        let mut lease = sample_lease("agent_request_ABC.123");
+        lease.request.runtime_spec = Some(sample_runtime_spec(
+            "agent_request_ABC.123",
+            RunnerClass::Kata,
+            BTreeMap::new(),
+            Vec::new(),
+        ));
         let options = RuntimeLaunchOptions {
             finite_private: Some(FinitePrivateLaunchKey {
                 api_key_id: "fp_key_prod".to_string(),
@@ -5729,7 +5473,6 @@ mod tests {
                 base_url: DEFAULT_FINITE_PRIVATE_BASE_URL.to_string(),
                 model: DEFAULT_FINITE_PRIVATE_MODEL.to_string(),
                 revoke_on_launch_failure: true,
-                specialization_bundle: Some(specialization_bundle_defaults()),
             }),
             profile_picture_url: Some("https://chat.finite.computer/blobs/profile".to_string()),
             environment: BTreeMap::from([(
@@ -5741,11 +5484,13 @@ mod tests {
                 "fal_must_never_reach_argv".to_string(),
             )]),
         };
-        let plan = kata::kata_launch_plan(&config, &lease);
+        let plan = kata::kata_launch_plan(&config, &lease).unwrap();
         assert_eq!(plan.container_name, "finite-kata-abc-123");
+        // The durable root is named by the durable state id (the runtime
+        // id), never by the container.
         assert_eq!(
             plan.state_root,
-            PathBuf::from("/var/lib/finite-saas-runner/kata/finite-kata-abc-123")
+            PathBuf::from("/var/lib/finite-saas-runner/kata/runtime_123")
         );
         assert_eq!(
             plan.env_file,
@@ -5772,7 +5517,7 @@ mod tests {
         assert!(args.windows(2).any(|pair| {
             pair == [
                 "--volume",
-                "/var/lib/finite-saas-runner/kata/finite-kata-abc-123:/data",
+                "/var/lib/finite-saas-runner/kata/runtime_123:/data",
             ]
         }));
         assert!(args.windows(2).any(|pair| {
@@ -5814,6 +5559,29 @@ mod tests {
                 .unwrap()
                 .contains("FINITE_PRIVATE_API_KEY=fpk_must_never_reach_argv")
         );
+    }
+
+    #[test]
+    fn kata_plan_without_a_durable_state_id_is_a_typed_error() {
+        // No Core-bound RuntimeSpec means no durable_state_id, and there is
+        // no machine-named fallback to derive a root from: a loud, typed
+        // refusal, not a plan that mounts a second copy of the agent's life.
+        let config = KataConfig {
+            source_host_id: "finite-lat-1".to_string(),
+            work_root: PathBuf::from("/var/lib/finite-saas-runner"),
+            ..KataConfig::default()
+        };
+        let error =
+            kata::kata_launch_plan(&config, &sample_lease("agent_request_ABC.123")).unwrap_err();
+        assert!(
+            matches!(
+                &error,
+                RunnerError::MissingDurableStateId { source_machine_id }
+                    if source_machine_id == "finite-kata-abc-123"
+            ),
+            "unexpected error: {error}"
+        );
+        assert!(error.to_string().contains("machine-named"));
     }
 
     #[test]
@@ -5985,7 +5753,6 @@ mod tests {
                 base_url: "http://192.168.64.1:18002/v1".to_string(),
                 model: DEFAULT_FINITE_PRIVATE_MODEL.to_string(),
                 revoke_on_launch_failure: true,
-                specialization_bundle: Some(specialization_bundle_defaults()),
             }),
             profile_picture_url: None,
             environment: BTreeMap::new(),
@@ -6084,7 +5851,6 @@ mod tests {
                 base_url: DEFAULT_FINITE_PRIVATE_BASE_URL.to_string(),
                 model: DEFAULT_FINITE_PRIVATE_MODEL.to_string(),
                 revoke_on_launch_failure: true,
-                specialization_bundle: Some(specialization_bundle_defaults()),
             }),
             profile_picture_url: None,
             environment: BTreeMap::new(),
@@ -6707,6 +6473,7 @@ mod tests {
                 target_source_host_id: None,
                 relocation: None,
                 profile_picture_url: None,
+                owner_chat_account_id: None,
                 status: AgentCreationRequestStatus::Launching,
                 requested_launch_code: Some("launch_code_record_123".to_string()),
                 agent_runtime_id: None,

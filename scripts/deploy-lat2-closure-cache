@@ -1,0 +1,505 @@
+#!/usr/bin/env bash
+# Activate an exact CI-built finite-lat-2 closure without building on a
+# production host. finite-lat-2 is the emergency replacement APP-PLANE host
+# (ADR 0007) and deliberately runs no Agent Runner: there is no runner timer
+# or worker unit to fence here.
+#
+# Two rollout shapes exist:
+#   - go-live (Gate E): the first activation of product units out of import
+#     mode. Pass --expect-startup; the dry-activation fence then allows
+#     exactly the declared app-plane unit set to start and requires the
+#     product health checks to pass after the switch.
+#   - steady state (post go-live): ordinary deploys. The fence allows only
+#     the declared app-plane unit set plus explicitly approved extras;
+#     anything else named by dry activation refuses the rollout.
+set -euo pipefail
+
+LAT2="${FINITE_LAT2_TARGET:-root@64.34.80.19}"
+mode="prepare"
+mode_seen=0
+expect_startup=0
+artifact_dir=""
+approved_extra_units=()
+
+# The declared app-plane unit set: exactly the units the import-mode gate
+# holds down (infra/nixos/hosts/finite-lat-2/default.nix). A dry activation
+# may only name these, plus extras approved with --allow-unit.
+expected_app_plane_units=(
+  caddy.service
+  finite-saas-core.service
+  finitechat-server.service
+  finitechat-hosted-device.service
+  finite-saas-sites.service
+  finite-brain-app.service
+  finite-identity.service
+  podman-finite-saas-dashboard.service
+  finite-healthcheck.service
+  finite-healthcheck.timer
+  finite-postgres-backup.service
+  finite-postgres-backup.timer
+  finite-litestream-finite-chat-server.service
+  finite-litestream-finite-brain.service
+  finite-litestream-health.service
+  finite-litestream-health.timer
+  finite-hosted-web-chat-snapshot.service
+  finite-hosted-web-chat-snapshot-health.service
+  finite-hosted-web-chat-snapshot-health.timer
+  finite-identity-backup.service
+  finite-identity-backup-health.service
+  finite-identity-backup-health.timer
+  borgbackup-job-finite-hosted-web-chat-offsite.service
+  finite-hosted-web-chat-offsite-health.service
+  finite-hosted-web-chat-offsite-health.timer
+  finite-runtime-metrics.service
+  finite-runtime-metrics.timer
+)
+
+usage() {
+  echo "usage: $0 [--validate-only|--prepare|--activate] [--expect-startup] [--allow-unit UNIT]... <lat2-closure-artifact-dir>" >&2
+}
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --validate-only|--prepare|--activate)
+      if [[ "$mode_seen" == 1 ]]; then
+        echo "choose exactly one rollout mode" >&2
+        usage
+        exit 64
+      fi
+      mode_seen=1
+      case "$1" in
+        --validate-only) mode="validate" ;;
+        --prepare) mode="prepare" ;;
+        --activate) mode="activate" ;;
+      esac
+      ;;
+    --expect-startup)
+      expect_startup=1
+      ;;
+    --allow-unit)
+      shift
+      if [[ $# -eq 0 || ! "$1" =~ ^[A-Za-z0-9@_.-]+\.(service|socket|timer|mount|target)$ ]]; then
+        echo "invalid explicitly approved unit" >&2
+        usage
+        exit 64
+      fi
+      approved_extra_units+=("$1")
+      ;;
+    -*) usage; exit 64 ;;
+    *)
+      if [[ -n "$artifact_dir" ]]; then
+        usage
+        exit 64
+      fi
+      artifact_dir="$1"
+      ;;
+  esac
+  shift
+done
+
+if [[ -z "$artifact_dir" ]]; then
+  usage
+  exit 64
+fi
+
+if [[ ! -d "$artifact_dir" ]]; then
+  echo "artifact directory does not exist: $artifact_dir" >&2
+  exit 66
+fi
+artifact_dir="$(cd "$artifact_dir" && pwd -P)"
+manifest="$artifact_dir/manifest.json"
+if [[ ! -f "$manifest" ]]; then
+  echo "artifact manifest is missing: $manifest" >&2
+  exit 66
+fi
+
+manifest_values_file="$(mktemp "${TMPDIR:-/tmp}/lat2-closure-manifest.XXXXXX")"
+dry_output_file="$(mktemp "${TMPDIR:-/tmp}/lat2-dry-activate.XXXXXX")"
+trap 'rm -f "$manifest_values_file" "$dry_output_file"' EXIT
+python3 - "$manifest" > "$manifest_values_file" <<'PY'
+import json
+import re
+import sys
+
+with open(sys.argv[1], encoding="utf-8") as fh:
+    data = json.load(fh)
+
+if data.get("schema") != "finite.lat2.nixos-closure.v2":
+    raise SystemExit(f"unexpected manifest schema: {data.get('schema')!r}")
+if data.get("host") != "finite-lat-2":
+    raise SystemExit(f"unexpected manifest host: {data.get('host')!r}")
+if data.get("repository") != "finitecomputer/finite-mono":
+    raise SystemExit(f"unexpected repository: {data.get('repository')!r}")
+
+rev = data.get("rev")
+system = data.get("system")
+disko = data.get("disko")
+kexec = data.get("kexec")
+cache = data.get("cache")
+if not isinstance(rev, str) or not re.fullmatch(r"[0-9a-f]{40}", rev):
+    raise SystemExit(f"invalid rev: {rev!r}")
+if not isinstance(system, str) or not re.fullmatch(
+    r"/nix/store/[0-9a-z]{32}-nixos-system-finite-lat-2-[^/\s]+", system
+):
+    raise SystemExit(f"invalid system path: {system!r}")
+if not isinstance(disko, str) or not re.fullmatch(r"/nix/store/[0-9a-z]{32}-disko", disko):
+    raise SystemExit(f"invalid disko path: {disko!r}")
+if not isinstance(kexec, str) or not re.fullmatch(r"/nix/store/[0-9a-z]{32}-kexec-tarball", kexec):
+    raise SystemExit(f"invalid kexec path: {kexec!r}")
+if cache != "nix-cache":
+    raise SystemExit(f"invalid cache directory: {cache!r}")
+
+print(rev)
+print(system)
+print(disko)
+print(kexec)
+print(cache)
+PY
+
+REV="$(sed -n '1p' "$manifest_values_file")"
+SYSTEM="$(sed -n '2p' "$manifest_values_file")"
+DISKO="$(sed -n '3p' "$manifest_values_file")"
+KEXEC="$(sed -n '4p' "$manifest_values_file")"
+CACHE_REL="$(sed -n '5p' "$manifest_values_file")"
+CACHE_DIR="$artifact_dir/$CACHE_REL"
+
+if [[ ! -d "$CACHE_DIR" || ! -f "$CACHE_DIR/nix-cache-info" ]]; then
+  echo "artifact cache is missing or incomplete: $CACHE_DIR" >&2
+  exit 66
+fi
+
+git fetch origin --prune
+git merge-base --is-ancestor "$REV" origin/main || {
+  echo "refusing: $REV is not on origin/main" >&2
+  exit 65
+}
+
+echo "==> validated finite-lat-2 closure artifact"
+echo "    rev=$REV"
+echo "    system=$SYSTEM"
+echo "    disko=$DISKO"
+echo "    kexec=$KEXEC"
+if [[ "$expect_startup" == 1 ]]; then
+  echo "    mode=go-live (import-mode -> product startup expected)"
+fi
+if [[ ${#approved_extra_units[@]} -gt 0 ]]; then
+  printf '    explicitly-approved-unit=%s\n' "${approved_extra_units[@]}"
+fi
+if [[ "$mode" == "validate" ]]; then
+  exit 0
+fi
+
+echo "==> verifying lat2 host-local monitoring secrets"
+ssh -o BatchMode=yes "$LAT2" 'bash -s' \
+  < infra/nixos/scripts/check-lat-monitoring-secrets
+
+echo "==> copying the prebuilt closure to finite-lat-2"
+nix copy --no-check-sigs --option builders '' \
+  --from "file://$CACHE_DIR" \
+  --to "ssh-ng://$LAT2" \
+  "$SYSTEM"
+
+echo "==> dry-activating the candidate closure"
+ssh -o BatchMode=yes "$LAT2" \
+  "$SYSTEM/bin/switch-to-configuration" dry-activate \
+  >"$dry_output_file" 2>&1
+cat "$dry_output_file"
+
+# App-plane fence: a rollout may only touch the declared app-plane unit set
+# (units starting for the first time at go-live, or ordinary restarts in
+# steady state). Anything else needs an explicit --allow-unit for this
+# attempt; the default remains fail closed.
+unexpected_units=""
+while IFS= read -r unit; do
+  approved=0
+  for expected_unit in "${expected_app_plane_units[@]}"; do
+    if [[ "$unit" == "$expected_unit" ]]; then
+      approved=1
+      break
+    fi
+  done
+  if [[ "$approved" == 0 ]]; then
+    for approved_unit in ${approved_extra_units[@]+"${approved_extra_units[@]}"}; do
+      if [[ "$unit" == "$approved_unit" ]]; then
+        approved=1
+        break
+      fi
+    done
+  fi
+  if [[ "$approved" == 0 ]]; then
+    unexpected_units+="${unit}"$'\n'
+  fi
+done < <({
+  grep -Eo '[A-Za-z0-9@_.-]+\.(service|socket|timer|mount|target)' "$dry_output_file" || true
+} | sort -u)
+unexpected_units="${unexpected_units%$'\n'}"
+if [[ -n "$unexpected_units" ]]; then
+  echo "refusing app-plane rollout: dry activation names units outside the" >&2
+  echo "declared app-plane set:" >&2
+  printf '%s\n' "$unexpected_units" >&2
+  exit 75
+fi
+
+if [[ "$mode" == "prepare" ]]; then
+  echo "==> PREPARED rev=$REV (no activation performed)"
+  exit 0
+fi
+
+echo "==> activating the fenced app-plane closure"
+# shellcheck disable=SC2034
+ssh -o BatchMode=yes "$LAT2" bash -s -- "$SYSTEM" "$expect_startup" "${approved_extra_units[@]+"${approved_extra_units[@]}"}" <<'LAT2'
+set -euo pipefail
+system="$1"
+expect_startup="$2"
+shift 2
+approved_units=("${@-}")
+[[ "$system" =~ ^/nix/store/[0-9a-z]{32}-nixos-system-finite-lat-2-[^/[:space:]]+$ ]] || exit 64
+test -x "$system/bin/switch-to-configuration"
+nix-store --check-validity "$system" >/dev/null
+
+previous_system="$(readlink -f /run/current-system)"
+previous_profile="$(readlink -f /nix/var/nix/profiles/system)"
+if [[ "$previous_system" != "$previous_profile" ]]; then
+  echo "refusing: current system and system profile already differ" >&2
+  exit 73
+fi
+
+# This host runs no Agent Runner by design (ADR 0007). Refuse when a runner
+# is LIVE on this host, or when the CANDIDATE closure would bring one. An
+# inert never-startable husk unit in the OUTGOING closure is explicitly
+# crossable: the 2026-08-29 finite-identity husk bug (#751) left exactly
+# that behind, and /etc/systemd/system resolves into the running closure's
+# read-only store path — so switching to a runner-free closure is the ONLY
+# way such a leftover can ever be removed.
+if systemctl is-active --quiet finite-saas-runner.service; then
+  echo "refusing: finite-saas-runner.service is active on the app-plane host" >&2
+  exit 74
+fi
+if ls "$system/etc/systemd/system/" | grep -qx "finite-saas-runner.service"; then
+  echo "refusing: candidate closure contains finite-saas-runner.service" >&2
+  exit 74
+fi
+if ls "$system/etc/systemd/system/" | grep -qx "finite-saas-runner-phala.service"; then
+  echo "refusing: candidate closure contains finite-saas-runner-phala.service" >&2
+  exit 74
+fi
+
+# Pre-mutation health gate. Steady state: the core product units must be
+# active BEFORE crossing the boundary — a steady-state deploy never runs
+# with the product down. Only --expect-startup permits down-before (the one
+# import-mode -> product startup at go-live).
+if [[ "$expect_startup" != "1" ]]; then
+  for unit in finite-saas-core.service finitechat-server.service caddy.service postgresql.service; do
+    systemctl is-active --quiet "$unit" || {
+      echo "refusing steady-state switch: $unit is down before the mutation boundary" >&2
+      exit 1
+    }
+  done
+fi
+
+containerd_pid="$(systemctl show containerd.service --property=MainPID --value)"
+networkd_pid="$(systemctl show systemd-networkd.service --property=MainPID --value)"
+
+# --- activation helpers (begin) ---------------------------------------------
+# Monitoring-only units: read-only probes and metric publishers. Per
+# infra/runbooks/platform-rollout.md a monitoring-only failure is NOT a
+# failure of the switch; a failed core/chat unit is. 2026-09-02 (#799):
+# finite-healthcheck.timer fired while app-plane units were mid-restart, its
+# oneshot failed, switch-to-configuration exited nonzero, and an automatic
+# ERR-trap revert put the OLD binary on the already-folded chat database —
+# the forbidden mixed-version edge. The timers are now held across the
+# boundary, the failed unit set is judged instead of the exit status alone,
+# and NOTHING reverts automatically any more (see activation_failed).
+monitoring_only_timers=(
+  finite-healthcheck.timer
+  finite-litestream-health.timer
+  finite-hosted-web-chat-snapshot-health.timer
+  finite-identity-backup-health.timer
+  finite-hosted-web-chat-offsite-health.timer
+  finite-runtime-metrics.timer
+  finite-storage-health.timer
+)
+# /etc/systemd/system resolves into the RUNNING closure, so only timers it
+# actually ships are touched; one the candidate adds or drops is no error.
+systemd_units_dir=/etc/systemd/system
+is_monitoring_only_unit() {
+  local unit="$1" timer
+  for timer in "${monitoring_only_timers[@]}"; do
+    if [[ "$unit" == "$timer" || "$unit" == "${timer%.timer}.service" ]]; then
+      return 0
+    fi
+  done
+  return 1
+}
+failed_units() {
+  systemctl --failed --plain --no-legend --no-pager | awk 'NF { print $1 }'
+}
+# Failed units that are NOT monitoring-only, one per line.
+failed_units_outside_monitoring() {
+  local unit
+  while IFS= read -r unit; do
+    is_monitoring_only_unit "$unit" || printf '%s\n' "$unit"
+  done < <(failed_units)
+}
+# `systemctl mask` refuses store-symlinked units; stop suffices.
+stop_monitoring_timers() {
+  local timer
+  for timer in "${monitoring_only_timers[@]}"; do
+    [[ -e "$systemd_units_dir/$timer" ]] || continue
+    systemctl stop "$timer" || echo "warning: could not stop $timer before the boundary" >&2
+  done
+}
+# Idempotent: activation_failed re-arms explicitly and the EXIT trap covers
+# every other exit (success, or an errexit before the failure path).
+monitoring_timers_rearmed=0
+start_monitoring_timers() {
+  local timer
+  [[ "$monitoring_timers_rearmed" == 0 ]] || return 0
+  monitoring_timers_rearmed=1
+  echo "==> re-arming monitoring timers"
+  for timer in "${monitoring_only_timers[@]}"; do
+    [[ -e "$systemd_units_dir/$timer" ]] || continue
+    systemctl start "$timer" || echo "warning: could not re-arm $timer after activation" >&2
+  done
+}
+# Returns 0 when the switch result is acceptable: exit 0, or a nonzero exit
+# whose ONLY failed units are monitoring-only (warned, never a failure of
+# the switch). A nonzero exit with no failed unit at all is a failure.
+switch_result_acceptable() {
+  local status="$1" failed_outside failed_all
+  [[ "$status" == 0 ]] && return 0
+  failed_outside="$(failed_units_outside_monitoring)"
+  failed_all="$(failed_units | tr '\n' ' ')"
+  if [[ -n "$failed_outside" || -z "$failed_all" ]]; then
+    echo "switch-to-configuration exited $status; failed units outside the monitoring-only allow-list:" >&2
+    printf '%s\n' "${failed_outside:-(none listed: the failure is not a unit failure)}" >&2
+    return 1
+  fi
+  echo "WARNING: switch-to-configuration exited $status but the only failed units are" >&2
+  echo "WARNING: monitoring-only (${failed_all% }); per platform-rollout.md this is NOT a" >&2
+  echo "WARNING: failure of the switch — continuing post-switch verification" >&2
+}
+# The candidate closure's own chat unit file names the binary and the
+# SQLite path, for the informational pre-switch fold verdict and for the
+# operator recipe. The default paths are only fallbacks for the recipe.
+chat_unit_file="$system/etc/systemd/system/finitechat-server.service"
+chat_binary=""
+chat_sqlite=""
+if [[ -e "$chat_unit_file" ]]; then
+  chat_exec_start="$(sed -n 's/^ExecStart=//p' "$chat_unit_file" | head -n 1)"
+  chat_binary="${chat_exec_start%% *}"
+  chat_sqlite="$(printf '%s\n' "$chat_exec_start" | sed -n 's/.*--sqlite \([^ ]*\).*/\1/p')"
+fi
+# Informational only: the operator sees the fold state BEFORE the switch.
+# The script never acts on it — `rollback_allowed: true` licenses restoring
+# the pre-fold BACKUP, never running an older binary on the folded database.
+log_chat_fold_verdict() {
+  local verdict status=0
+  if [[ ! -e "$chat_unit_file" ]]; then
+    echo "==> chat fold state: candidate closure ships no finitechat-server unit"
+    return 0
+  fi
+  if [[ -x "$chat_binary" && -n "$chat_sqlite" && -e "$chat_sqlite" ]]; then
+    verdict="$(timeout 60 "$chat_binary" rollback-check --sqlite "$chat_sqlite" 2>&1)" || status=$?
+    echo "==> chat fold state before the switch (rollback-check exit $status): ${verdict:-no output}"
+  else
+    echo "==> chat fold state: rollback-check unavailable (binary=${chat_binary:-?} sqlite=${chat_sqlite:-?})"
+  fi
+  echo "    informational only: a failed activation never reverts automatically"
+}
+# Failure path after the mutation boundary. It NEVER mutates the system:
+# the candidate generation stays current, the timers are re-armed, the
+# operator revert recipe is printed with its condition, and the script
+# exits nonzero. NixOS generations plus rollback-check are the revert,
+# driven by an operator, never by this script.
+activation_failed() {
+  local status="$1"
+  shift
+  {
+    echo "ACTIVATION FAILED (exit $status): $*"
+    echo "NO automatic revert: $system stays the current generation (previous: $previous_system)."
+    echo "Operator revert recipe — legal ONLY under this condition:"
+    echo "  1. ${chat_binary:-finitechat-server} rollback-check --sqlite ${chat_sqlite:-/var/lib/finite-chat/data/server.sqlite3}"
+    echo "     must exit 0. If it does not: ROLL FORWARD (fix, activate a newer closure)."
+    echo "  2. If it does: restore the pre-fold chat backup FIRST (stop finitechat-server,"
+    echo "     restore, per infra/runbooks/deploy-finitechat-server.md), and only then"
+    echo "  3. select the previous generation: nixos-rebuild switch --rollback"
+    echo "     (or nix-env --profile /nix/var/nix/profiles/system --switch-generation <N>"
+    echo "     && /nix/var/nix/profiles/system/bin/switch-to-configuration switch),"
+    echo "     then verify /run/current-system and re-run the product gates."
+  } >&2
+  start_monitoring_timers
+  exit "$status"
+}
+# --- activation helpers (end) -----------------------------------------------
+
+# Pre-boundary: a non-monitoring unit that is ALREADY failed would be
+# indistinguishable, after the switch, from one this activation broke.
+pre_failed="$(failed_units_outside_monitoring)"
+if [[ -n "$pre_failed" ]]; then
+  echo "refusing: non-monitoring units are already failed before the mutation boundary" >&2
+  echo "(investigate, then systemctl reset-failed):" >&2
+  printf '%s\n' "$pre_failed" >&2
+  exit 1
+fi
+
+log_chat_fold_verdict
+
+echo "==> mutation boundary: switching finite-lat-2 to $system"
+echo "==> holding monitoring timers across the boundary: ${monitoring_only_timers[*]}"
+stop_monitoring_timers
+trap start_monitoring_timers EXIT
+nix-env --option builders '' --profile /nix/var/nix/profiles/system --set "$system"
+switch_status=0
+"$system/bin/switch-to-configuration" switch || switch_status=$?
+switch_result_acceptable "$switch_status" \
+  || activation_failed "$switch_status" "switch-to-configuration exited $switch_status with non-monitoring failed units"
+[[ "$(readlink -f /run/current-system)" == "$system" ]] \
+  || activation_failed 1 "/run/current-system is not $system after the switch"
+[[ "$(readlink -f /nix/var/nix/profiles/system)" == "$system" ]] \
+  || activation_failed 1 "the system profile is not $system after the switch"
+
+# Infra units whose PID must survive the switch UNLESS the operator
+# explicitly approved restarting them via --allow-unit (the dry-activation
+# fence and this assertion must agree; the lat4 peer wiring legitimately
+# restarts networkd at the Gate E go-live).
+pid_unchanged_unless_approved() {
+  local unit="$1" before="$2" u now
+  for u in "${approved_units[@]-}"; do
+    [[ "$u" = "$unit" ]] && return 0
+  done
+  now="$(systemctl show "$unit" --property=MainPID --value)"
+  if [[ "$now" != "$before" ]]; then
+    echo "$unit restarted during activation (pid $before -> $now) without --allow-unit approval" >&2
+    return 1
+  fi
+}
+pid_unchanged_unless_approved containerd.service "$containerd_pid" \
+  || activation_failed 1 "containerd.service restarted without approval"
+pid_unchanged_unless_approved systemd-networkd.service "$networkd_pid" \
+  || activation_failed 1 "systemd-networkd.service restarted without approval"
+systemctl is-active --quiet containerd.service \
+  || activation_failed 1 "containerd.service is not active after the switch"
+systemctl is-active --quiet systemd-networkd.service \
+  || activation_failed 1 "systemd-networkd.service is not active after the switch"
+
+if [[ "$expect_startup" == "1" ]]; then
+  # Go-live: every core product unit must be up after the switch.
+  for unit in finite-saas-core.service finitechat-server.service caddy.service postgresql.service; do
+    systemctl is-active --quiet "$unit" \
+      || activation_failed 1 "$unit is not active after go-live activation"
+  done
+else
+  # Steady state: the units the pre-mutation gate required active must
+  # still be active after the switch.
+  for unit in finite-saas-core.service finitechat-server.service caddy.service postgresql.service; do
+    systemctl is-active --quiet "$unit" \
+      || activation_failed 1 "$unit was active before and is down after a steady-state switch"
+  done
+fi
+
+runner_check="$(systemctl cat finite-saas-runner.service >/dev/null 2>&1 && echo present || echo absent)"
+[[ "$runner_check" == "absent" ]] \
+  || activation_failed 1 "a runner unit appeared during activation"
+echo "==> DEPLOYED system=$system"
+LAT2

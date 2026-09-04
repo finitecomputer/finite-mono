@@ -55,7 +55,7 @@ it never starts, stops, replaces, or destroys the Agent Runtime itself.
 `deploy/finite-computer/images/runtime.Dockerfile` is the current first-class
 runtime image. It packages:
 
-- Hermes Agent 0.20.0 (v2026.8.3; installed from the root flake's pinned upstream Nix package) in the image's Nix store
+- Hermes Agent (from the root flake's pinned upstream Nix package) in the image's Nix store
 - pinned Google Workspace Python clients in the same Hermes virtualenv
 - Finite Chat CLI at `/runtime/bin/finitechat`
 - Finite Agent Daemon at `/runtime/bin/finite-agentd`

@@ -15,22 +15,18 @@ members = [
     "finitecomputer-v2/crates/finite-saas-core",
     "finitecomputer-v2/crates/finite-saas-local",
     "finitecomputer-v2/crates/finite-saas-runner",
-    "finitecomputer-v2/crates/finite-specialization-worker",
     "finitechat/crates/finitechat-blob",
     "finitechat/crates/finitechat-cli",
     "finitechat/crates/finitechat-client",
     "finitechat/crates/finitechat-core",
-    "finitechat/crates/finitechat-daemon",
     "finitechat/crates/finitechat-delivery",
     "finitechat/crates/finitechat-hermes",
     "finitechat/crates/finitechat-hosted-device",
     "finitechat/crates/finitechat-http",
     "finitechat/crates/finitechat-mls",
     "finitechat/crates/finitechat-proto",
-    "finitechat/crates/finitechat-rmp",
     "finitechat/crates/finitechat-server",
     "finitechat/crates/finitechat-transport",
-    "finitechat/uniffi-bindgen",
     "finite-sites/crates/finitesites-blob",
     "finite-sites/crates/finitesites-engine",
     "finite-sites/crates/finitesites-proto",
@@ -43,7 +39,7 @@ members = [
 edition = "2024"
 license = "MIT"
 repository = "https://github.com/finitecomputer/finite-mono"
-rust-version = "1.88"
+rust-version = "1.91.1"
 
 [workspace.dependencies]
 anyhow = "1"
@@ -98,7 +94,6 @@ tower = { version = "0.5", features = ["util"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 tar = "0.4"
-uniffi = "0.31"
 ureq = { version = "2.10", features = ["json"] }
 walkdir = "2"
 workos = "=3.0.0"

@@ -1,41 +1,43 @@
-# Identity Authority Operations
+# Identity Directory Operations
 
-The Identity Authority is the deployed Finite Identity service. It owns public
-identity state for Finite products: Finite VIP Email bindings, NIP-05 Names,
-Email Challenges, Native Principals, Email-Only Principals, Principal Links,
-Principal Resolution, and Disabled Bindings.
+The Identity Directory is the deployed Finite Identity service — the shrunken
+Identity Authority. It owns exactly two jobs: serving the Finite VIP Domain's
+NIP-05 names (what npub is `name@finite.vip`?) and name claiming (a human
+binds `name@finite.vip` to their key, or trusted provisioning registers a
+managed agent's name). Operator inspect/disable provides audit and takedown.
+Grant resolution, mailbox proofs, email-only principals, WorkOS account
+bindings, and the sites-notification relay were deleted: products answer
+"who is asking" against their own tables and never call the Directory at
+authorization time.
 
 The Local Identity Key remains non-custodial. Product CLIs load, generate, or
 import the user's local Nostr key with this crate, then prove key control to
-the Identity Authority with NIP-98. The Identity Authority stores public keys
-and audit metadata only; it never stores or returns user secret key material.
+the Identity Directory with NIP-98. The Directory stores public keys and
+audit metadata only; it never stores or returns user secret key material.
 
 ## Domain Language
 
-- **Identity Authority**: the HTTP service and identity-owned SQLite database.
+- **Identity Directory**: the HTTP service and identity-owned SQLite database.
+  The shrunken Identity Authority; "the Directory" and "the Identity
+  Authority" name the same deployment.
 - **Identity Contract**: the product-facing HTTP API exposed by the Identity
-  Authority.
+  Directory.
 - **Local Identity Key**: the user's local Nostr keypair stored under the
   `finite-identity` file contract.
 - **Finite VIP Email**: a Finite-controlled address on the Finite VIP Domain,
   currently `localpart@finite.vip`.
-- **NIP-05 Name**: the public Nostr name served by the Identity Authority. In
+- **NIP-05 Name**: the public Nostr name served by the Identity Directory. In
   v1 it is exactly the Finite VIP Email.
 - **Email Challenge**: an opaque, short-lived, single-use token delivered by
-  email and stored only as a hash by the Identity Authority.
+  email and stored only as a hash by the Identity Directory. Its sole
+  remaining purpose is proof-of-control for claiming a name; it proves
+  nothing to any other product.
 - **Binding Proof**: a valid Email Challenge plus a NIP-98-authenticated
   redeem request signed by the target Local Identity Key.
 - **Native Principal**: a Principal backed by a Nostr public key.
 - **Managed Agent Email**: a canonical Finite VIP Email assigned by Core and
   immutably registered to a hosted runtime's Native Principal by trusted
   provisioning.
-- **Email-Only Principal**: a Principal backed by verified control of an
-  Invited Email before that address is linked to a Native Principal.
-- **Principal Link**: a verified relationship from an email address to a
-  Native Principal.
-- **Product Grant**: a product-owned permission row. Products store grants as
-  entered and ask Principal Resolution whether the current caller satisfies
-  them.
 
 The full glossary lives in [CONTEXT.md](../CONTEXT.md). The decision log lives
 under [docs/adr](./adr).
@@ -91,7 +93,7 @@ when operator endpoints are needed. Never place it in argv or an Agent Runtime.
 
 ## HTTP Contract
 
-Products consume identity over HTTP. They must not read or mutate the
+Products consume the Directory over HTTP. They must not read or mutate the
 identity-owned SQLite database directly.
 
 ### Public NIP-05
@@ -122,11 +124,12 @@ Content-Type: application/json
 { "email": "alice@finite.vip" }
 ```
 
-Any valid Invited Email can request an Email Challenge. Addresses outside
-`finite.vip` can become Email-Only Principals but never create Finite-owned
-NIP-05 Names in v1.
+Any syntactically valid address can request an Email Challenge, but the token
+only has one use left: proving control of a Finite VIP Email when claiming
+its name. Only `finite.vip` addresses with a NIP-05-valid localpart can
+complete a claim.
 
-### Bind Finite VIP Email
+### Bind Finite VIP Email (claim a name)
 
 ```http
 POST /api/v1/vip-email-bindings/redeem
@@ -137,70 +140,11 @@ Content-Type: application/json
 ```
 
 The Email Challenge proves control of the Finite VIP Email. The NIP-98 header
-proves control of the Local Identity Key that will own the Native Principal.
-The binding is immutable in v1 except for idempotent re-proving with the same
-key. Rebinding to a different key is rejected.
+proves control of the Local Identity Key that will own the name. The binding
+is immutable in v1 except for idempotent re-proving with the same key.
+Rebinding to a different key is rejected.
 
-### Redeem Email-Only Principal
-
-```http
-POST /api/v1/email-only-principals/redeem
-Authorization: Nostr <nip98-event>
-Content-Type: application/json
-
-{ "email": "editor@example.com", "token": "<email-token>" }
-```
-
-This creates or refreshes an Email-Only Principal for the signed public key.
-If a Finite VIP Email later binds to a Native Principal, the native binding
-becomes authoritative for Product Grant satisfaction and the previous
-email-only rows for that Finite VIP Email are revoked for authorization.
-
-### Redeem and consume a Mailbox Proof
-
-`POST /api/v1/mailbox-proofs/redeem` uses the same Email Challenge plus an
-exact NIP-98 signer, but creates no Principal Link or NIP-05 binding. It returns
-a short-lived opaque proof. A product server calls
-`POST /api/v1/mailbox-proofs/consume` with that proof and the same signer
-pubkey; successful consumption is single-use. Finite Sites uses this boundary
-to manage its product-owned, revocable Authorized Key set without changing
-Chat routing or Brain encryption identity.
-
-### Principal Resolution
-
-```http
-POST /api/v1/principal-resolution/satisfies-grant
-Content-Type: application/json
-
-{
-  "grant": "alice@finite.vip",
-  "actor_pubkey": "<lowercase-hex-pubkey>"
-}
-```
-
-Products store Product Grants as entered, then call Principal Resolution at
-authorization time. Supported v1 grantees are:
-
-- raw lowercase or uppercase hex public keys
-- `npub1...` identifiers
-- email-shaped Invited Emails
-- Finite VIP NIP-05 Names, which are exactly `localpart@finite.vip`
-
-Third-party email-shaped identifiers are treated as Invited Emails only.
-Finite Identity does not perform or trust Third-Party NIP-05 resolution in v1.
-
-This endpoint is a pure resolution query: `actor_pubkey` is a claimed input and
-the answer never substitutes for actor authentication. On the public listener
-(`public_router`, proxied by the edge) the route requires a NIP-98 signature
-from `actor_pubkey` itself, so product callers prove control of the key they
-ask about and the endpoint cannot be used as an unauthenticated grant oracle.
-Trusted product services on loopback (the full router on 127.0.0.1:8790) keep
-the tokenless contract and must authenticate the actor some other way before
-relying on the answer.
-
-Products may keep short-lived Resolution Caches for latency, but the cache is
-never the source of truth. Missing, expired, or uncertain answers must fail
-closed.
+### Resolve a NIP-05 Name
 
 Resolve and classify a Finite NIP-05 Name before a typed CLI uses it:
 
@@ -214,18 +158,18 @@ Content-Type: application/json
 The response contains the canonical `name`, hex `pubkey`, `npub`, and a `kind`
 of `mailbox` or `managed_agent`. A Managed Agent NIP-05 is not deliverable and
 must be rejected by email-delivery flags. Unknown names return 404; names
-outside the Authority's Finite VIP Domain return 400.
+outside the Directory's Finite VIP Domain return 400.
 
 ### Operator Endpoints
 
-Operator endpoints require:
+Operator endpoints are loopback-only and require:
 
 ```http
 X-Finite-Operator-Token: <configured-token>
 ```
 
 Register a canonical Managed Agent NIP-05 after a runtime publishes its Agent
-Principal Key:
+Principal Key (Core's runner calls this at agent creation):
 
 ```http
 POST /api/v1/operator/agent-email-bindings
@@ -248,9 +192,10 @@ Content-Type: application/json
 { "identifier": "alice@finite.vip" }
 ```
 
-`identifier` may be a Finite VIP Email, Invited Email, raw hex pubkey, or
-`npub1...`. Responses expose public binding state and audit metadata only; no
-secret key material exists server-side.
+`identifier` may be an email address, raw hex pubkey, or `npub1...`. The
+response reports the Finite VIP binding (or every binding for the key) plus
+recent Email Challenge audit metadata. Responses expose public binding state
+and audit metadata only; no secret key material exists server-side.
 
 Disable a Finite VIP Email binding:
 
@@ -261,16 +206,30 @@ Content-Type: application/json
 { "email": "alice@finite.vip" }
 ```
 
-Disabling preserves audit history but suppresses NIP-05 serving and Principal
-Resolution. Operators cannot reassign a name, rotate a key, recover an
+Disabling preserves audit history but suppresses NIP-05 serving and name
+resolution. Operators cannot reassign a name, rotate a key, recover an
 account, or migrate product data in v1.
 
 ## Storage Ownership
 
 The SQLite database under `--data` is identity-owned state. Products must not
-read it directly, write it directly, or couple authorization behavior to table
-layout. The only production contract for Sites, Brain, and other products is
-the HTTP Identity Contract.
+read it directly, write it directly, or couple behavior to table layout. The
+only production contract for Sites, Brain, and other products is the HTTP
+Identity Contract.
+
+The Directory schema is four tables: `native_principals` (registry of known
+pubkeys), `vip_email_bindings` (the names), `managed_agent_nip05_bindings`
+(managed-agent name markers), and `email_challenges` (hashed, single-use
+claim tokens). Tables are created with plain `CREATE TABLE IF NOT EXISTS`
+execs; there is no migration mechanism.
+
+Databases created before the directory shrink still contain the retired
+`principal_links`, `workos_account_principals`, `email_only_principals`,
+`mailbox_proofs`, and `notification_deliveries` tables. The shrink
+deliberately adds no drop migration: those tables are never created, written,
+or read by current code, and the rows they hold are no longer load-bearing
+for any product. Operators may drop them by hand during routine maintenance
+if desired; nothing requires it.
 
 Identity-owned storage contains public identity state and challenge audit
 metadata, including hashed challenge tokens. It does not contain user secret
@@ -283,15 +242,14 @@ SQLite-safe backup procedures. A backup must preserve:
 
 - Finite VIP Email bindings
 - NIP-05 serving state
-- Email-Only Principal rows and revocation metadata
-- Principal Links
+- Managed Agent NIP-05 registrations
 - Disabled Bindings
 - Email Challenge audit metadata
 
-Restoring identity-owned storage restores the Authority's public state. It
-does not restore user Local Identity Keys because those are never stored by the
-Authority. V1 does not reassign Finite VIP Emails to replacement keys. It is
-therefore insufficient by itself for the SaaS Recoverability Contract: launch
+Restoring identity-owned storage restores the Directory's public state. It
+does not restore user Local Identity Keys because those are never stored by
+the Directory. V1 does not reassign Finite VIP Emails to replacement keys. It
+is therefore insufficient by itself for the SaaS Recoverability Contract: launch
 must add tested same-key recovery material or an explicit Identity Recovery
 flow that moves product grants and encrypted key access to a replacement key.
 
@@ -300,17 +258,12 @@ flow that moves product grants and encrypted key access to a replacement key.
 Products should:
 
 - use `finite_identity::client` helpers to load or generate the Local Identity
-  Key, request Email Challenges, and build NIP-98-authenticated redeem
+  Key, request Email Challenges, and build NIP-98-authenticated name-claim
   requests
-- store Product Grants exactly as entered by the product user
-- call Principal Resolution before permission-changing or sensitive access
-  decisions
-- fail closed when identity resolution is missing, stale, or rejected
-- keep only short-lived Resolution Caches
+- answer every authorization question against their own tables; the Directory
+  is a name lookup, never an authorization oracle
+- fail closed when a name does not resolve
 - own product permissions, product data, and product-specific audit trails
-- own, scope, audit, and revoke Email Access Delegations; pass only the
-  authenticated agent pubkey and relevant email-shaped Product Grant through
-  product authorization
 
 Products should not:
 
@@ -318,9 +271,11 @@ Products should not:
 - build their own NIP-05 JSON from product tables
 - hash, store, or redeem Email Challenge tokens outside Finite Identity
 - mutate identity-owned SQLite storage
-- treat third-party email-shaped grants as trusted Third-Party NIP-05 Names
-- represent a product Email Access Delegation as a Principal Link, NIP-05
-  binding, or globally reusable Principal Resolution result
+- treat third-party email-shaped identifiers as trusted Third-Party NIP-05
+  Names
+- ask the Directory whether a caller satisfies a grant, whether an email
+  controls a key, or which WorkOS account a key belongs to — those services
+  were deleted; keep membership and account bindings in product-local tables
 
 ## Explicit V1 Limits
 
@@ -335,10 +290,20 @@ The following are intentionally out of scope:
 - arbitrary alternate handles, display names, or non-`finite.vip` Finite VIP
   Domains
 
+Deleted with the directory shrink (do not rebuild on this service):
+
+- Principal Resolution / `satisfies-grant` (products check their own grants)
+- Mailbox Proofs and Email-Only Principals (email proof-of-control proves
+  nothing beyond a name claim)
+- Principal Links (email↔key equivalence claims)
+- WorkOS account→principal bindings (moves to Core, which already speaks
+  WorkOS)
+- the sites-notification relay (Sites sends its own first-publication and
+  access-request mail)
+
 These are v1 protocol limits, not permission to strand first-slice user data.
 Any product depending on a listed capability must remain non-durable preview or
 add a separately versioned and tested recovery contract before launch.
-- required product permission rewrites after linking
 
 These limits are product-facing behavior. Do not work around them in Sites or
 Brain without a new ADR.

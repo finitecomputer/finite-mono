@@ -9,6 +9,7 @@ import fcntl
 import json
 import os
 import platform as host_platform
+import re
 import subprocess
 import sys
 import tempfile
@@ -19,10 +20,13 @@ from typing import Any
 MONOREPO_ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(MONOREPO_ROOT))
 
-from scripts.hermes_nix_runtime import image_build_args, nix_system_for_platform, stage_runtime_closure  # noqa: E402
+from scripts.hermes_nix_runtime import (  # noqa: E402  (needs the sys.path shim above)
+    image_build_args,
+    nix_system_for_platform,
+    stage_runtime_closure,
+)
 
 DEFAULT_IMAGE_REF = "finitecomputer-v2-agent-runtime:local"
-DEFAULT_HERMES_AGENT_VERSION = "0.20.0"
 DEFAULT_IMAGE_ENGINE = "docker"
 IMAGE_ENGINES = ("docker", "depot", "apple-container")
 
@@ -76,6 +80,24 @@ def git_value(repo: Path, *args: str) -> str | None:
         return None
 
 
+def rust_toolchain_channel(repo: Path) -> str:
+    """The single Rust pin (rust-toolchain.toml channel) for the image build.
+
+    rust-toolchain.toml is the only Rust version string in the repo; the
+    runtime image builder base is parameterized on it via the
+    RUST_TOOLCHAIN build-arg instead of carrying its own pin.
+    """
+    path = repo / "rust-toolchain.toml"
+    try:
+        text = path.read_text(encoding="utf-8")
+    except OSError as error:
+        raise SystemExit(f"cannot read Rust toolchain pin {path}: {error}") from error
+    match = re.search(r'^channel\s*=\s*"([^"]+)"', text, re.MULTILINE)
+    if not match:
+        raise SystemExit(f"{path} declares no [toolchain] channel")
+    return match.group(1)
+
+
 def repo_metadata(name: str, repo: Path) -> dict[str, Any]:
     status = git_value(repo, "status", "--short") or ""
     return {
@@ -100,7 +122,9 @@ def stage_repo(source: Path, dest: Path) -> None:
 
 
 def docker_image_metadata(image: str) -> dict[str, Any]:
-    inspected = json.loads(run(["docker", "image", "inspect", image], timeout=60).stdout)[0]
+    inspected = json.loads(
+        run(["docker", "image", "inspect", image], timeout=60).stdout
+    )[0]
     repo_digests = inspected.get("RepoDigests") or []
     digest = inspected["Id"]
     if repo_digests and "@" in repo_digests[0]:
@@ -126,7 +150,9 @@ def docker_image_metadata(image: str) -> dict[str, Any]:
 
 
 def apple_image_metadata(image: str) -> dict[str, Any]:
-    payload = json.loads(run(["container", "image", "inspect", image], timeout=60).stdout)
+    payload = json.loads(
+        run(["container", "image", "inspect", image], timeout=60).stdout
+    )
     if not isinstance(payload, list) or not payload or not isinstance(payload[0], dict):
         raise SystemExit(f"unexpected Apple Container image inspect output for {image}")
 
@@ -187,7 +213,9 @@ def native_linux_platform() -> str:
         "x86_64": "amd64",
     }.get(machine)
     if architecture is None:
-        raise SystemExit(f"unsupported native architecture for container image build: {machine}")
+        raise SystemExit(
+            f"unsupported native architecture for container image build: {machine}"
+        )
     return f"linux/{architecture}"
 
 
@@ -222,18 +250,19 @@ def parse_args() -> argparse.Namespace:
         help=f"image reference to build, default: {DEFAULT_IMAGE_REF}",
     )
     parser.add_argument(
-        "--hermes-agent-version",
-        default=os.environ.get("FC_RUNTIME_HERMES_AGENT_VERSION", DEFAULT_HERMES_AGENT_VERSION),
-        help=f"hermes-agent package version, default: {DEFAULT_HERMES_AGENT_VERSION}",
-    )
-    parser.add_argument(
         "--context-dir",
         type=Path,
         help="optional persistent staged image build context",
     )
-    parser.add_argument("--platform", help="optional image build platform, e.g. linux/amd64")
-    parser.add_argument("--no-cache", action="store_true", help="disable the engine build cache")
-    parser.add_argument("--push", action="store_true", help="push image after a successful build")
+    parser.add_argument(
+        "--platform", help="optional image build platform, e.g. linux/amd64"
+    )
+    parser.add_argument(
+        "--no-cache", action="store_true", help="disable the engine build cache"
+    )
+    parser.add_argument(
+        "--push", action="store_true", help="push image after a successful build"
+    )
     parser.add_argument(
         "--save",
         action="store_true",
@@ -261,11 +290,8 @@ def build_image(
         context,
         system=nix_system_for_platform(platform),
     )
-    if hermes_runtime.version != args.hermes_agent_version:
-        raise SystemExit(
-            "Hermes Nix runtime version mismatch: "
-            f"expected {args.hermes_agent_version}, got {hermes_runtime.version}"
-        )
+    # hermes_runtime.version is evaluated from the flake.lock pin and is the
+    # only Hermes version input; it is stamped into the image build-args.
     print(
         "Staged "
         f"{hermes_runtime.attr} + {hermes_runtime.toolchain_attr} "
@@ -273,7 +299,12 @@ def build_image(
         flush=True,
     )
 
+    # The runtime-image contract greps this exact one-liner
+    # (check_runtime_image_contract.py), so keep it out of the formatter's
+    # reach.
+    # fmt: off
     dockerfile = context / "finitecomputer-v2/deploy/finite-computer/images/runtime.Dockerfile"
+    # fmt: on
     if args.engine == "docker":
         build = ["docker", "build"]
     elif args.engine == "depot":
@@ -286,12 +317,11 @@ def build_image(
             str(dockerfile),
             "--tag",
             args.image_ref,
-            *image_build_args(
-                hermes_runtime,
-                hermes_agent_version=args.hermes_agent_version,
-            ),
+            *image_build_args(hermes_runtime),
             "--build-arg",
             f"FINITE_MONO_REV={mono_sha}",
+            "--build-arg",
+            f"RUST_TOOLCHAIN={rust_toolchain_channel(MONOREPO_ROOT)}",
         ]
     )
     build.extend(["--platform", platform])
@@ -351,6 +381,7 @@ def build_image(
     if depot_build is not None:
         image_metadata["depot_build"] = depot_build
     image_metadata["hermes_nix_runtime"] = {
+        "version": hermes_runtime.version,
         "attr": hermes_runtime.attr,
         "python_attr": hermes_runtime.python_attr,
         "toolchain_attr": hermes_runtime.toolchain_attr,
@@ -385,11 +416,6 @@ def main() -> int:
     if not image_ref:
         raise SystemExit("--image-ref must not be empty")
     args.image_ref = image_ref
-    if args.hermes_agent_version != DEFAULT_HERMES_AGENT_VERSION:
-        raise SystemExit(
-            "--hermes-agent-version is release-pinned to "
-            f"{DEFAULT_HERMES_AGENT_VERSION}, got {args.hermes_agent_version}"
-        )
     if args.save and args.engine != "depot":
         raise SystemExit("--save is supported only with --engine depot")
     if args.save != bool(args.metadata_file):
@@ -406,14 +432,18 @@ def main() -> int:
         if args.context_dir:
             context = args.context_dir.expanduser().resolve()
             context.mkdir(parents=True, exist_ok=True)
-            image_metadata = build_image(args, context, mono_sha=mono_sha, platform=platform)
+            image_metadata = build_image(
+                args, context, mono_sha=mono_sha, platform=platform
+            )
         else:
             temp_parent = MONOREPO_ROOT / "target/runtime-image"
             temp_parent.mkdir(parents=True, exist_ok=True)
             with tempfile.TemporaryDirectory(dir=temp_parent) as tmp_value:
                 context = Path(tmp_value) / "ctx"
                 context.mkdir()
-                image_metadata = build_image(args, context, mono_sha=mono_sha, platform=platform)
+                image_metadata = build_image(
+                    args, context, mono_sha=mono_sha, platform=platform
+                )
 
     report = {
         "status": "built",
@@ -422,7 +452,6 @@ def main() -> int:
         "image": args.image_ref,
         "engine": args.engine,
         "mono_sha": mono_sha,
-        "hermes_agent_version": args.hermes_agent_version,
         "pushed": bool(args.push),
         "platform": platform,
         "source": source_facts,

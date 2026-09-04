@@ -11,7 +11,7 @@ For incidents. Host facts (services, ports, secrets locations) live in
 ## lat1 — finite-lat-1 (64.34.82.77) — THE app server, NixOS
 
 Since the 2026-07-09 cutover lat1 runs EVERYTHING (Core, dashboard, native
-Postgres, chat, sites, search) as NixOS. No k3s, no kubectl. Config is
+Postgres, chat, sites) as NixOS. No k3s, no kubectl. Config is
 `infra/nixos/`; routine deploy uses the service runbooks and the exact prebuilt
 closure. There is currently no accepted bare-metal rebuild procedure.
 
@@ -36,8 +36,6 @@ closure. There is currently no accepted bare-metal rebuild procedure.
   - `journalctl -u finite-saas-runner` — Kata agent-creation runner; its Nix
     timer is enabled, but live canary readiness must be verified. Phala remains
     a separate fast-follow adapter.
-  - search: `journalctl -u podman-searxng` (up); firecrawl API (:3002) is
-    currently DOWN — follow-up.
 - **Restart:**
   - `sudo systemctl restart caddy`
   - `sudo systemctl restart finite-saas-core` / `finite-saas-sites` /
@@ -50,29 +48,26 @@ closure. There is currently no accepted bare-metal rebuild procedure.
   `infra/nixos/` and re-deploy; land any emergency change back within a day
   (rule above). To roll config back fast: `nixos-rebuild switch --rollback`.
 
-## lat2 — finite-lat-2 (64.34.80.19) — decommission target (Ubuntu+nix)
+## lat2 — finite-lat-2 (64.34.80.19) — emergency replacement app server (ADR 0007)
 
-Post-cutover lat2 is no longer an app host. Its finite-saas-sites,
-finite-search, and finite-core-tunnel units are **DISABLED** (those services
-moved to lat1). Docker/image CI and production Nix closure builds now run
-through Depot-backed CI. Lat2 should be used only to execute the authorized
-archive/offload and wipe procedure in
-[`decommission-lat2.md`](decommission-lat2.md).
+lat2 is being cut over to replace lat1 (thermal failure). Until Gate C of
+[`lat2-replacement-cutover.md`](lat2-replacement-cutover.md) it is the old
+Ubuntu box; after install it is THE single app server (lat1's stack minus
+any Agent Runner) and the `wg-finite` overlay hub at `10.254.3.1`.
 
-- **Get on:** `ssh finite-lat-2` (user `ubuntu`).
-- **Logs:**
-  - `journalctl -u 'actions.runner.*'` — installed legacy Actions runners
-    before removal only; do not repair or restart them
-  - `journalctl -u caddy` — legacy edge, if still present
-- **Removal:** unregister runners and delete local directories only through
-  `infra/hosts/lat2/runners.md` and `decommission-lat2.md`.
-- **Note:** do NOT re-enable the migrated units here (sites/search/tunnel) —
-  they are authoritative on lat1 now; a second sites writer especially is a
-  split-brain risk.
-- **Do not build or deploy from here.** There is no supported lat2 fallback for
-  Docker/image CI, production Nix builds, or lat1 deploys.
-- **Trap:** `/tmp` is a 94G tmpfs — never park a backup or artifact there
+- **While Ubuntu (pre-Gate C):** `ssh finite-lat-2` (user `ubuntu`). Do not
+  build or deploy from here; there is no supported lat2 fallback for CI,
+  Nix builds, or deploys. `/tmp` is a 94G tmpfs — never park a backup there
   (`infra/hosts/lat2/backups.md`).
+- **While NixOS (post-Gate C):** `ssh root@64.34.80.19` (the SSH host key
+  changes at reinstall; expect a known_hosts break). Declarative like lat1:
+  fix forward in `infra/nixos/hosts/finite-lat-2/` and redeploy via
+  `just deploy-lat2-closure`; roll back with `nixos-rebuild switch
+  --rollback`. **Import mode**: while `finite.importMode.enable` is true the
+  product units stay down by design — bringing the product up means
+  deploying the go-live closure, never `systemctl start` by hand.
+- **lat1 is the frozen point-in-time record.** Do not boot it back into
+  service; a second writer on Postgres/chat/sites is split-brain.
 
 ## smoke — ovh-vps-smoke (15.204.56.61)
 

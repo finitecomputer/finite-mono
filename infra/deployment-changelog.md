@@ -16,12 +16,12 @@ Newest first. Never record a secret value.
 
 | Surface | Source of truth | How to read it |
 |---|---|---|
-| Dashboard image | `infra/nixos/modules/dashboard.nix` (`image = …@sha256:…`) | `git log -- infra/nixos/modules/dashboard.nix`; on lat1 `podman inspect finite-saas-dashboard --format '{{.ImageDigest}}'` |
-| Agent Runtime image for **new** launches | Core's promoted runtime-artifact record plus `FC_RUNNER_RUNTIME_ARTIFACT_ID` in `/etc/finite/runner.env` on each Kata host (lat1, lat3) | `scripts/finite-status` reports the pin per host; promotion per [`runbooks/runtime-image.md`](runbooks/runtime-image.md) |
+| Dashboard image | `infra/nixos/modules/dashboard.nix` (`image = …@sha256:…`) | `git log -- infra/nixos/modules/dashboard.nix`; on lat2 `podman inspect finite-saas-dashboard --format '{{.ImageDigest}}'` |
+| Agent Runtime image for **new** launches | Core's promoted runtime-artifact record plus `FC_RUNNER_RUNTIME_ARTIFACT_ID` in `/etc/finite/runner.env` on each Kata host (lat3, lat4) | `scripts/finite-status` reports the pin per host; promotion per [`runbooks/runtime-image.md`](runbooks/runtime-image.md) |
 | Agent Runtime image for **existing** Agents | Core's per-Runtime record — Agents pin at launch and never auto-update | `scripts/finite-status`; serial upgrades per [`runbooks/runtime-image.md`](runbooks/runtime-image.md) §4a |
 | CLI releases (`finitechat`, `fsite`, `fbrain`) | component-scoped source tags in finite-mono and public rolling alias releases in `finitecomputer/finite-releases` (`finitechat-latest`, `fsite-latest`, `fbrain-latest`) | `gh release list --repo finitecomputer/finite-releases`; `git tag -l 'finitechat/*' 'fsite/*' 'fbrain/*'` |
-| Server binaries on lat1 (Core, chat, Hosted Device, Sites, Brain, Identity) | the NixOS closure built from `infra/nixos/` at the deployed revision | `readlink -f /run/current-system` on the host; `scripts/finite-status` |
-| Finite Private (Tinfoil) | [`runbooks/finite-private-deepseek-production-update.md`](runbooks/finite-private-deepseek-production-update.md) and [`tinfoil/model-inventory.md`](tinfoil/model-inventory.md) | `just finite-private-deepseek-contract` |
+| Server binaries on lat2 (Core, chat, Hosted Device, Sites, Brain, Identity) | the NixOS closure built from `infra/nixos/` at the deployed revision | `readlink -f /run/current-system` on the host; `scripts/finite-status` |
+| Finite Private (Tinfoil) | [`tinfoil/model-inventory.md`](tinfoil/model-inventory.md) plus checked-in candidate configs under `infra/tinfoil/` | `just finite-private-deepseek-contract` |
 | Phala canary Runtime | `FC_RUNNER_RUNTIME_ARTIFACT_ID` in `infra/nixos/modules/finite-saas-phala-runner.nix` | the unit environment is the pin; [`runbooks/phala-confidential-runner.md`](runbooks/phala-confidential-runner.md) |
 
 Pending, not-yet-deployed work is tracked in
@@ -31,8 +31,7 @@ the sources above cannot carry lands here.
 ## Standing promises
 
 - The finitechat server keeps accepting every fielded CLI until a deprecation
-  is announced. The Electron experiment is on hold and is not part of the
-  current release path.
+  is announced.
 - Hosted Agents pin their Runtime image at launch and do **not** auto-update.
   Kata launches the immutable digest through a promoted Core artifact;
   existing Agents are rolled serially through Core's guarded same-volume
@@ -42,12 +41,159 @@ the sources above cannot carry lands here.
   Releases installed before the 2026-07-08 monorepo cut (`finitechat`
   v0.1.0–v0.1.3, `fsite` v0.3.1, `fbrain` v0.1.2–v0.1.3) came from legacy repo
   URLs; no live users depend on those URLs.
-- The historical `glm-5-2` request alias remains for mixed-version clients;
-  `deepseek-v4-flash-0731` is the canonical model label everywhere else.
+- The historical `glm-5-2` and `deepseek-v4-flash-0731` request aliases
+  remain for mixed-version clients; `glm-5-3-flash` is the canonical model
+  label. The dotted `glm-5.3-flash` spelling is a limiter alias only.
+- The historical `kimi-k2-6` Tinfoil hostname is retired; issued Runtime
+  readers still need the follow-up onto `finite-private`.
 - Runtime artifact ids promoted before 2026-08-05 (`2026-07-10.2` through
   `2026-07-22.1`) live only in Core's runtime-artifact table.
 
 ## Entries
+
+### 2026-09-02 — iOS client, Electron app, APNs push, and NIP-AB pairing deleted from source
+
+- **Source-only change** (branch `cleanup/delete-ios-platform`): the SwiftUI
+  iOS app, `finitechat-rmp`, the UniFFI pipeline, the Electron app, and the
+  `finitechatd` daemon are gone; the never-shipped push-wake/token surface is
+  removed from the chat server with idempotent `DROP TABLE` migrations for
+  `http_push_tokens`/`http_push_wakes`/`http_pairing_sessions` at next server
+  boot; the NIP-AB pairing rendezvous routes, the hosted-device device-link
+  admission surface, and the `nip_ab` pairing crypto module are gone with
+  them (every pairing client was iOS or Electron).
+- **Compat promises still live:** shipped Electron alphas (v0.1.4/v0.1.5,
+  `finitechat-electron-macos-aarch64.zip`) poll the `finitechat-latest`
+  generic update feed; those clients are now stranded by design — do not
+  repurpose the alias for a different artifact shape. `backfill_releases`
+  still filters electron assets because the old host's history contains them.
+- **Dashboard roll needed:** `/auth/ios/callback`, the Apple
+  app-site-association route, and the `/api/device-links/*` B-side are gone;
+  `FC_WORKOS_IOS_CLIENT_ID` is removed from the dashboard module env and the
+  lat1 configmap. Out-of-repo cleanup that remains: retire the Xcode Cloud
+  workflows in App Store Connect and remove the WorkOS iOS client redirect.
+
+### 2026-09-02 — Chat engine fold (#799) deployed; Agent Runtime `2026-09-02.1` (rekey lever, #809) fleet-rolled; six rewound-sender rooms rekeyed
+
+- **Server roll (lat2):** closure from `3ad21033` activated as `6blnfrw4…`.
+  First boot ran the one-time op-log fold (479 routes, 218,786 entries, 319
+  commit epochs, 547 directory rows; 32+32 sampled-verified) 14:30:24Z.
+  `rollback-check` reads clean (`fold_complete`, `pre_fold_head` 218786).
+  Canary room on a synthetic two-account bootstrap passed: create → commit →
+  welcome claim/ack → second-device sync, both directions decrypting.
+  Same switch shipped the finite-search retirement (`becd877e`, `08d3042d`):
+  podman-firecrawl-*/searxng stopped, healthcheck probes updated. Rollback
+  boundary recorded: borg `finite-lat-1-hosted-web-chat-2026-09-02T13:40:48`
+  (snapshot `20260902T133947Z`), Litestream drill ok (integrity ok),
+  `server.pre-799-fold-backup.sqlite3` beside the live DB.
+- **First activation attempt rolled back by the deploy script's ERR trap:**
+  `finite-healthcheck` fired mid-restart, failed, and made
+  `switch-to-configuration` nonzero; the trap reverted to the pre-fold binary
+  for ~3 min before an immediate roll-forward. Journal-verified: only read
+  traffic in that window (no appends accepted by the old binary on the folded
+  DB). Follow-ups filed: fence the healthcheck timer during activation, treat
+  monitoring-only unit failures as non-rollback, and fix the empty
+  `approved_extra_units` nounset bug in `deploy-lat2-closure-cache`.
+- **Agent Runtime `2026-09-02.1`**
+  (`ghcr.io/finitecomputer/agent-runtime:2026-09-02.1@sha256:c010ba961e4a8bb374a51e277abefb43e71f23b069b4af99004e692857dd7880`,
+  run 33637070107; carries the `finitechat hermes rekey` lever from #809)
+  registered and promoted in Core BEFORE host pins moved; lat3/lat4 pins went
+  `2026-08-27.2` → `2026-09-02.1` (closing the pin lag left by the 2026-08-29
+  waves). Canaries first (runtime_354cb67 lat3, runtime_60a635 lat4): exact
+  digest, `/contact` principal unchanged, rekey subcommand present, bridges
+  connected. Fleet: lat4 20/20 + canary skip; lat3 28/28 + canary skip
+  (runtime_ea5586fb excluded `provider_compute_absent` — see below).
+- **Six rooms rekeyed** (agent-driven MLS self-update commits, epoch 1→2;
+  every rehearsal replayed clean with zero skips and cursors at
+  `commit_seq`): room-5c6e775b3525f2ca@15896, room-d77d6dd515c3877f@1823,
+  room-7d54e212a523f83e@2627, room-dd874e437fdc7094@2594,
+  room-ed5dfe3a221e96d5@6589, room-0f7d2ebbb5f9de51@3381. This durably
+  heals the 2026-08-28 hosted-web restore rewind class ahead of the
+  client-side currency-gate roll.
+
+- **runtime_ea5586fb recovered same day** (dark since the 2026-08-29 roll):
+  the `.5` upgrade's Kata task record was unreadable while the VM itself
+  kept running orphaned; after the dead records were cleared the
+  state-manifest guard refused the first staging (source still changing),
+  the orphaned sandbox was torn down, and the runbook's absent-compute
+  cold-relocation variant rebinded the exact Runtime (same Runtime ID,
+  machine name, artifact, and Agent Principal, manifest `e09fc8bb…`) from
+  lat3 to lat4 (`agent_request_c70951c2…`), after which it was upgraded to
+  `2026-09-02.1` like the rest of the fleet. Core now records 51/51 active
+  Runtimes on `2026-09-02.1` (29 lat3 + 22 lat4).
+### 2026-08-29 — Chat-server unfreeze (#770) deployed; Agent Runtime `2026-08-29.4` promoted; lat4 rolled
+
+- Chat-authz stack merged 21:28Z (#710, #711, #712; NIP-98 auth included but off).
+- Chat-server closure deployed to lat2: configuration revision
+  `9788a9ad` (includes #770's boot reconciler and snapshot-cadence fix);
+  `finitechat-server` restarted 22:08:20Z. First serving boot runs the
+  frozen-projection reconciliation; outboxes drain via normal retry.
+- `finite-agent-runtime-2026-08-29.4` promoted 22:09Z:
+  `ghcr.io/finitecomputer/agent-runtime:2026-08-29.4@sha256:79d87f10ffc481c64ba8f53ad6e38574f8df0ef2757abd14c7458b6631a11ef6`
+  (sidecar fixes from `.3` plus the chat-authz stack). Core records all 51
+  active Runtimes (30 lat3 + 21 lat4) on `.4`. Fresh-launch pin evidence per
+  host still to be recorded; #773 covers the stale kimi-k2-6 launch overrides
+  in the live runner operator files; #776's quarantined-room hint livelock
+  fix ships in the next runtime image.
+
+### 2026-08-29 — Agent Runtime `2026-08-29.3` promoted; Waffle Prime canary
+
+- Published from `c94134c7` (PRs #765 + #768):
+  `ghcr.io/finitecomputer/agent-runtime:2026-08-29.3@sha256:5a18956266e9eb5556ddc621bb45640e1f4926f72815d79394741c18654da84e`
+  ([run 33265870329](https://github.com/finitecomputer/finite-mono/actions/runs/33265870329)).
+  Core artifact `finite-agent-runtime-2026-08-29.3` promoted 17:40Z.
+- Waffle Prime (`runtime_60a635e4c80b9cc9fd1b` on lat4) is the canary: exact
+  digest, `/contact` ready, sidecar `/readyz` store ok. A live chat consume
+  on this canary is still required as go/no-go before any host pin or fleet
+  roll. Host pins on lat3 and lat4 are still `finite-agent-runtime-2026-08-27.2`.
+  The other 50 active Runtimes remain on `2026-08-29.1`. Fleet roll is not
+  authorized by this record.
+
+### 2026-08-29 — Finite Private flash-5 restores usage-api admission
+
+- Replaced flash-4 with `v2026-08-28-glm-5-3-flash-5` on container
+  `acc651a6-9de6-4da5-9fdc-bb9888245962` (8xH200). Allowlist secret
+  unmounted; limiter reports `admissionMode: usage-api`. Reservation
+  traffic reaches Core through lat2 (malformed POST → 422, not a Vercel
+  307). First flash-5 GitHub release lacked Tinfoil measurement assets;
+  rolled back to flash-4, rebuilt via the measurement workflow, then
+  redeployed. Two ~29-minute reloads. Org-level
+  `FINITE_ADMISSION_ALLOWLIST` secret remains for later deletion.
+
+### 2026-08-29 — Finite Private GLM flash-4 (chunked prefill + 392k proof)
+
+- Replaced `v2026-08-28-glm-5-3-flash-3` with
+  `v2026-08-28-glm-5-3-flash-4` (`2aa4d230…`, 8xH200). Same overlay,
+  limiter `.6`, and DSA pair; added `--chunked-prefill-size 16384`.
+- 1-way TTFT 0.684s → 0.287s; 32-way aggregate 124.1 → 128.5 tok/s.
+  387,498-token needle retrieved correctly (cold 21.3s, warm 2.5s).
+- Wire name is hyphenated `glm-5-3-flash`. Dotted `glm-5.3-flash` is now
+  a limiter alias so copied docs/health names do not 400.
+
+### 2026-08-28 — Finite Private GLM flash-3 (H200 DSA auto + thinking high)
+
+- Replaced `v2026-08-28-glm-5-3-flash-2` with
+  `v2026-08-28-glm-5-3-flash-3` on the same host (`fa79c9b9…`, 8xH200).
+  Checkpoint and SGLang image unchanged. DSA backends are now
+  `flashmla_sparse`/`fa3`; limiter `2026-08-28.6` fills omitted
+  `reasoning_effort` with `high`. Degraded allowlist admission unchanged.
+- 32-way thinking-on TTFT stayed ~34s. Recipe notes:
+  [`docs/research/2026-08-28-glm-5-3-flash-h200-recipes.md`](../docs/research/2026-08-28-glm-5-3-flash-h200-recipes.md),
+  measurements:
+  [`docs/runs/glm-5-3-flash-degraded-admission.md`](../docs/runs/glm-5-3-flash-degraded-admission.md).
+
+### 2026-08-28 — Finite Private GLM-5.3-Flash live under temporary degraded admission
+
+- GPU container `finite-private` now serves GLM-5.3-Flash on 8xH200.
+  Release `v2026-08-28-glm-5-3-flash-2` (overlay
+  `tinfoil-config.glm-5.3-flash.degraded-allowlist.yml`). DeepSeek
+  `v2026-08-13-deepseek-v4-flash-0731-128-2048-1` remains the rollback tag.
+- Usage admission on `finite.computer` was missing
+  (`POST /internal/finite-private/v1/reservations` 307'd home), so the
+  limiter is in env-gated allowlist mode (PR #746): listed keys only, no
+  reservation or settlement. Full trade-off and revert:
+  [`docs/runs/glm-5-3-flash-degraded-admission.md`](../docs/runs/glm-5-3-flash-degraded-admission.md).
+- Historical `kimi-k2-6` hostname retired by operator decision; issued
+  Runtime readers still need a follow-up migration onto `finite-private`.
 
 ### 2026-08-27 — fbrain `v0.5.0` + Agent Runtime `2026-08-27.2` (same-day fast follow)
 
@@ -179,7 +325,8 @@ the sources above cannot carry lands here.
   `b0322ad6b2bb89f7971002c61868a9b4e53301e6d75a0762849fe06b0f0ee56b`.
 - Rollback: commit `e337db3606d67c53387113700362adec7b4dfdf7`, tag
   `v2026-08-05-deepseek-v4-flash-0731-retry-2-3`.
-- Procedure and gates: `runbooks/finite-private-deepseek-production-update.md`.
+- Candidate and deployment facts are preserved in this changelog and the
+  checked-in Finite Private candidate contract.
 
 ### 2026-08-11 — Agent Runtime `2026-08-11.1` and `fbrain` v0.2.2
 

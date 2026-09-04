@@ -53,23 +53,24 @@ gateway:
 ```
 
 Then `hermes gateway start` makes the Agent Principal reachable. The dashboard
-Hosted Web Device, Electron, or a native client starts the room independently.
+Hosted Web Device starts the room independently.
 
-## Native Hermes specialization profiles
+## Native Hermes capability profiles
 
 Finite Chat conveys authenticated attachments to Hermes without choosing a
 model, rewriting the channel prompt, or registering Finite-specific agent
-tools. Specializations are runtime configuration behind Hermes's existing
-tools. For example, an `auxiliary.vision` profile can route Hermes's built-in
-`vision_analyze` and `video_analyze` tools to the AEON worker while the main
-model remains responsible for deciding whether those tools are useful.
+tools. Auxiliary capabilities are runtime configuration behind Hermes's
+existing tools. For example, an `auxiliary.vision` profile can route Hermes's
+built-in `vision_analyze` and `video_analyze` tools to a dedicated
+OpenAI-compatible vision endpoint while the main model remains responsible
+for deciding whether those tools are useful.
 
 ```yaml
 auxiliary:
   vision:
     base_url: https://inference.example/v1
-    api_key: ${AEON_API_KEY}
-    model: nemotron-3-nano-omni-30b-a3b-reasoning-nvfp4-fast
+    api_key: ${VISION_API_KEY}
+    model: vision-capable-model-name
     timeout: 120
 platform_toolsets:
   finitechat:
@@ -83,7 +84,7 @@ catalog rather than extend it. Runtime admission should verify that the
 installed Hermes catalog actually contains `video_analyze`, since older Hermes
 images may not provide the native tool.
 
-The same rule applies to other specialization families: prefer a model or
+The same rule applies to other capability families: prefer a model or
 provider profile behind a Hermes-native capability. Add a new generic Hermes
 capability only when Hermes has no suitable surface; do not add product- or
 model-named tools to this transport plugin. Semantic audio interpretation is
@@ -144,11 +145,13 @@ its own.
   with no route fields is resolved by looking the original message up by
   `(room_id, message_id)`. An explicit Topic/Chat route still wins as an
   override; an unknown thread id falls back to the Home default with a loud
-  warning by default (an archived topic must never silently consume a message),
-  and the adapter releases the inbox entry instead of acking when that turn
-  could not deliver anything. Strict operators can restore the typed failure
-  with `FINITECHAT_HERMES_UNKNOWN_THREAD_ROUTE=error`; `home`/`default` spell
-  the fallback explicitly, never a *silent* Home fallback.
+  warning (an archived topic must never silently consume a message). There is
+  no policy switch: the fallback is the only behaviour.
+- **Error classification.** Core decides each failure's class and whether the
+  same request may be retried (`FiniteChatCoreError::classification`); the
+  sidecar's error envelope (`error_kind`, `retryable`, HTTP status) and the
+  daemon's status are derived from that one decision, and the adapter reads
+  those fields verbatim. Nothing on either side matches on error text.
 
 None of this changes the Rust inbox on-disk format, the CLI/service protocol
 (the `release` command and the optional `thread_id` request field are additive),
@@ -260,15 +263,6 @@ The canonical real-gateway acceptance is the monorepo
 `just dev saas-smoke` path. It packages the flake-pinned Nix Hermes runtime and
 this plugin in the one Runtime image and requires model-backed replies across independent
 chat-server, Hosted Web Device, and Runtime restarts.
-The iOS Simulator E2E writes
-`target/ios-hermes-agent-media-e2e/report.json`, drives the native app through
-the product harness, and proves that the app's encrypted local store contains
-the adapter text and image replies. It is still echo-handler transport coverage
-and requires a booted simulator or `IOS_SIMULATOR_UDID`.
-The physical-device variant is `scripts/ios-device-hermes-agent-media-e2e.sh`;
-it writes `target/ios-device-hermes-agent-media-e2e/report.json` after pulling
-the app's store from an installed, unlocked phone.
-
 For the canonical durable Docker packaging smoke used by the manual workflow:
 
 ```bash
@@ -402,7 +396,6 @@ After publish, build the redacted Tinfoil handoff report:
 ```bash
 scripts/hermes-tinfoil-handoff.py \
   --smoke-report target/hermes-docker-smoke/report.json \
-  --preflight-report target/hermes-docker-smoke/restic-preflight.json \
   --publish-report target/hermes-docker-smoke/image-publish.json \
   --handoff-report target/hermes-docker-smoke/tinfoil-handoff.json
 ```
@@ -410,13 +403,13 @@ scripts/hermes-tinfoil-handoff.py \
 It fails unless the smoke used `restic_backend=s3`, the image was actually
 published, and the published source image id matches the image proven by the
 Docker smoke.
-The handoff's restore section uses the runtime env names consumed by
-`/opt/agent-entrypoint.sh`: `FINITE_AGENT_RESTORE_ON_START=1`,
-`FINITE_AGENT_RESTORE_LATEST=1`, `FINITE_AGENT_BACKUP_ON_EXIT=1`,
-`FINITE_AGENT_RESTIC_REPOSITORY`, `FINITE_AGENT_RESTIC_BACKUP_TAG`, and
-`FINITE_AGENT_RESTIC_PASSWORD`. The generated Tinfoil config must point at the
-same per-agent restic repository proven by the S3-backed Docker smoke; it must
-not point at emulator buckets or local artifact paths.
+The handoff's restore section still carries the historical
+`FINITE_AGENT_RESTIC_*` env names; the entrypoint restic contract they targeted
+has been retired (no production launcher ever set it), and off-host retirement
+storage is the Borg lane (`docs/runs/runtime-retirement-readiness.md`). The
+generated Tinfoil config must point at the same per-agent restic repository
+proven by the S3-backed Docker smoke; it must not point at emulator buckets or
+local artifact paths.
 
 After a ready S3/published handoff, generate the Tinfoil canary config and
 runbook:

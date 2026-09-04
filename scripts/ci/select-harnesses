@@ -16,17 +16,22 @@ OUTPUT_NAMES = (
     "run_rust",
     "run_dashboard",
     "run_dashboard_browser",
-    "run_electron_alpha",
     "run_hermes_bridge",
     "run_nix_checks",
     "run_skills_check",
-    "run_search_check",
     "run_monitoring_nixos_contract",
     "run_finite_status_contract",
     "run_nix_service_packages",
     "run_devfinity_smoke",
     "run_brain_product_matrix",
 )
+
+# The nix service package build is the CI long pole on a cold cargoArtifacts
+# cache (~30 minutes of crane release builds for 15 packages). It is a landing
+# concern: the Rust workspace job has already compiled and tested the diff, and
+# the landing run rebuilds and repushes Cachix for the next PR. Pull requests
+# keep it only when the package derivations themselves changed (see
+# is_package_graph_path); everything else defers packaging to landing events.
 
 GLOBAL_EXACT_PATHS = {
     ".github/workflows/ci.yml",
@@ -74,10 +79,8 @@ RUNTIME_IMAGE_CONTRACT_PREFIX = "finitecomputer-v2/deploy/finite-computer/images
 IDENTITY_EDGE_CONTRACT_PREFIX = "finite-identity/scripts/"
 MOVED_NIX_CHECK_PATHS = {
     "scripts/check_runtime_image_contract.py",
-    "scripts/identity-edge-contract-gate.py",
     "scripts/check_stripe_price_contract.py",
     "scripts/tests/test_runtime_image_contract.py",
-    "scripts/tests/test_identity_edge_contract_gate.py",
 }
 STRIPE_PRICE_CONTRACT_PATHS = {
     "finitecomputer-v2/apps/dashboard/scripts/check_stripe_price_contract.py",
@@ -99,11 +102,18 @@ REMAINING_NIX_CHECK_PATHS = {
     "scripts/check_finite_private_deepseek_candidate.py",
     "scripts/check_lat1_secret_bootstrap.py",
     "scripts/ci/select-harnesses",
-    "scripts/production_deploy.py",
+    "scripts/build-lat1-nixos-closure-artifact",
     "scripts/deploy-lat1-closure-cache",
+    "scripts/publish-lat1-nixos-cachix-closure",
     "scripts/build-lat3-nixos-closure-artifact",
     "scripts/deploy-lat3-closure-cache",
+    "scripts/build-lat4-nixos-closure-artifact",
+    "scripts/deploy-lat4-closure-cache",
+    "scripts/install-lat4-from-artifact",
     "scripts/tests/test_ci_select_harnesses.py",
+    "scripts/build-lat2-nixos-closure-artifact",
+    "scripts/deploy-lat2-closure-cache",
+    "scripts/install-lat2-from-artifact",
     "scripts/tests/test_check_deepseek_v4_0731_quality.py",
     "scripts/tests/test_finite_private_deepseek_candidate.py",
     "scripts/tests/test_finite_private_ops.py",
@@ -112,14 +122,12 @@ REMAINING_NIX_CHECK_PATHS = {
     "scripts/tests/test_deploy_lat1_rollout.py",
     "scripts/tests/test_lat1_closure_artifact.py",
     "scripts/tests/test_lat3_closure_artifact.py",
+    "scripts/tests/test_lat2_closure_artifact.py",
+    "scripts/tests/test_lat4_closure_artifact.py",
     "infra/scripts/test-hosted-web-chat-restore",
     "infra/scripts/test-litestream-restore",
     "infra/nixos/hosts/finite-lat-1/secret-bootstrap-contract.json",
     "scripts/check_runbook_facts_contract.py",
-    "scripts/production_cd_setup.py",
-    "scripts/verify-production-cd-setup",
-    "scripts/tests/test_production_cd_setup.py",
-    "scripts/tests/test_production_deploy.py",
 }
 
 INFRA_JUSTFILE_PATH = "infra/justfile"
@@ -138,11 +146,9 @@ class HarnessSelection:
     run_rust: bool = False
     run_dashboard: bool = False
     run_dashboard_browser: bool = False
-    run_electron_alpha: bool = False
     run_hermes_bridge: bool = False
     run_nix_checks: bool = False
     run_skills_check: bool = False
-    run_search_check: bool = False
     run_monitoring_nixos_contract: bool = False
     run_finite_status_contract: bool = False
     run_nix_service_packages: bool = False
@@ -152,8 +158,6 @@ class HarnessSelection:
     def select_all(self) -> None:
         for field in fields(self):
             setattr(self, field.name, True)
-        # Electron CI remains disabled until the Electron surface is active.
-        self.run_electron_alpha = False
 
     def values(self) -> dict[str, str]:
         return {
@@ -189,7 +193,11 @@ def select_harnesses(args: argparse.Namespace) -> tuple[HarnessSelection, str, l
     if args.changed_files is not None:
         paths = changed_paths.normalized_paths(args.changed_files)
         selection = select_for_paths(paths)
-        return selection, "changed-file override", paths
+        reason = "changed-file override"
+        note = apply_pull_request_packaging_gate(args.event, selection, paths)
+        if note:
+            reason = f"{reason}; {note}"
+        return selection, reason, paths
 
     if args.event == "merge_group":
         selection = HarnessSelection()
@@ -202,10 +210,61 @@ def select_harnesses(args: argparse.Namespace) -> tuple[HarnessSelection, str, l
         print(f"failed to compute changed files; selecting every harness: {error}", file=sys.stderr)
         selection = HarnessSelection()
         selection.select_all()
+        # Conservative fallback: the changed path set is unknown, so packaging
+        # stays selected.
         return selection, "could not compute changed files", []
 
     selection = select_for_paths(paths)
-    return selection, "selected from changed paths", paths
+    reason = "selected from changed paths"
+    note = apply_pull_request_packaging_gate(args.event, selection, paths)
+    if note:
+        reason = f"{reason}; {note}"
+    return selection, reason, paths
+
+
+def is_package_graph_path(path: str) -> bool:
+    """Whether the path changes the nix service package derivations.
+
+    These are the inputs that make a PR-time package build the difference
+    between substituting warm cargoArtifacts from Cachix and paying the cold
+    ~30-minute crane build inside devfinity-smoke:
+
+    - Workspace manifests: crane's mkDummySrc scopes every mkCargoArtifacts
+      to the member Cargo.toml files and the root Cargo.lock (cargoVendorDir
+      also derives from the lock).
+    - rust-toolchain.toml: the single Rust pin, read by the flake via
+      fromRustupToolchainFile, part of every cargoArtifacts derivation.
+    - .cargo/ config: cargo invocation settings for those artifact builds.
+    - flake.nix / flake.lock: crane args, toolchain overlay, and inputs.
+    - infra/nixos/: the packaged closures themselves (packages.nix and the
+      NixOS modules) - the thing this job exists to validate.
+
+    Everything else (Rust source, protos, SQL, docs) only affects thin final
+    package derivations, which devfinity-smoke builds locally against warm
+    cargoArtifacts.
+    """
+    return (
+        path == "Cargo.lock"
+        or path == "Cargo.toml"
+        or path.endswith("/Cargo.toml")
+        or path == "rust-toolchain.toml"
+        or path.startswith(".cargo/")
+        or path in ("flake.nix", "flake.lock")
+        or path.startswith("infra/nixos/")
+    )
+
+
+def apply_pull_request_packaging_gate(
+    event: str, selection: HarnessSelection, paths: list[str]
+) -> str | None:
+    if event != "pull_request":
+        return None
+    if not selection.run_nix_service_packages:
+        return None
+    if any(is_package_graph_path(path) for path in paths):
+        return None
+    selection.run_nix_service_packages = False
+    return "nix service packages deferred to landing events"
 
 
 def changed_files_for_event(args: argparse.Namespace) -> list[str]:
@@ -317,10 +376,6 @@ def apply_path(selection: HarnessSelection, path: str) -> None:
 
     if path.startswith("finite-skills/"):
         selection.run_skills_check = True
-        return
-
-    if path.startswith("finite-search/"):
-        selection.run_search_check = True
         return
 
     if path.startswith("finitecomputer-v2/apps/dashboard/"):

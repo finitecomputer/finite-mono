@@ -14,28 +14,25 @@ spec.loader.exec_module(gate)
 
 
 class ExtractionTests(unittest.TestCase):
-    def test_real_sources_extract_exactly_the_manifest(self) -> None:
+    def test_real_sources_match_the_directory_surface(self) -> None:
         cli_routes = gate.extract_cli_identity_routes(
-            gate.CLI_API_SOURCE.read_text(encoding="utf-8"),
-            gate.IDENTITY_CLIENT_SOURCE.read_text(encoding="utf-8"),
+            gate.CLI_API_SOURCE.read_text(encoding="utf-8")
         )
-        self.assertEqual(cli_routes, set(gate.MANIFEST))
-
-    def test_real_public_router_covers_the_manifest(self) -> None:
+        self.assertLessEqual(cli_routes, set(gate.MANIFEST))
         public_paths = gate.extract_public_router_paths(
             gate.AUTHORITY_SOURCE.read_text(encoding="utf-8")
         )
-        self.assertLessEqual(set(gate.MANIFEST), public_paths)
-        self.assertFalse(
-            gate.static_failures(gate.MANIFEST, set(gate.MANIFEST), public_paths)
+        self.assertEqual(
+            public_paths, set(gate.MANIFEST) | set(gate.PUBLIC_GET_ROUTES)
         )
+        self.assertFalse(gate.static_failures(gate.MANIFEST, cli_routes, public_paths))
 
     def test_cli_direct_call_pattern_ignores_sites_api_paths(self) -> None:
         cli_api = """
         let url = format!("{}/api/v1/nip05-resolution", self.base_url);
         let sites = format!("{}{}", self.base_url, "/api/v1/projects/init");
         """
-        routes = gate.extract_cli_identity_routes(cli_api, "")
+        routes = gate.extract_cli_identity_routes(cli_api)
         self.assertEqual(routes, {"/api/v1/nip05-resolution"})
 
 
@@ -49,18 +46,18 @@ class StaticFailureTableTests(unittest.TestCase):
             "missing from MANIFEST",
         ),
         (
-            "manifest_lists_a_route_the_cli_no_longer_calls",
-            ["/api/v1/email-challenges", "/api/v1/retired"],
-            {"/api/v1/email-challenges"},
-            {"/api/v1/email-challenges", "/api/v1/retired"},
-            "no longer calls",
-        ),
-        (
-            "cli_called_route_missing_from_public_router",
+            "manifest_route_missing_from_public_router",
             ["/api/v1/email-challenges"],
             {"/api/v1/email-challenges"},
             set(),
             "missing from public_router",
+        ),
+        (
+            "public_router_adds_a_route_without_a_manifest_entry",
+            ["/api/v1/email-challenges"],
+            {"/api/v1/email-challenges"},
+            {"/api/v1/email-challenges", "/api/v1/sneaky-new-route"},
+            "outside the Directory surface",
         ),
         (
             "private_route_leaks_onto_the_public_surface",
@@ -70,10 +67,10 @@ class StaticFailureTableTests(unittest.TestCase):
             "private routes mounted",
         ),
         (
-            "mailbox_proof_consume_stays_loopback_only",
+            "internal_route_leaks_onto_the_public_surface",
             ["/api/v1/email-challenges"],
             {"/api/v1/email-challenges"},
-            {"/api/v1/email-challenges", "/api/v1/mailbox-proofs/consume"},
+            {"/api/v1/email-challenges", "/internal/v1/some-relay"},
             "private routes mounted",
         ),
     ]
@@ -89,8 +86,9 @@ class StaticFailureTableTests(unittest.TestCase):
 
     def test_consistent_inputs_pass(self) -> None:
         routes = {"/api/v1/email-challenges", "/api/v1/nip05-resolution"}
+        public = routes | set(gate.PUBLIC_GET_ROUTES)
         self.assertEqual(
-            gate.static_failures(sorted(routes), routes, routes),
+            gate.static_failures(sorted(routes), routes, public),
             [],
         )
 

@@ -1,13 +1,15 @@
 #!/usr/bin/env python3
-"""Verify both Kata Runner hosts share one runner-role declaration.
+"""Verify all Kata Runner hosts share one runner-role declaration.
 
-finite-lat-1 and finite-lat-3 import infra/nixos/modules/kata-runner-host.nix,
+finite-lat-1, finite-lat-3, and finite-lat-4 import
+infra/nixos/modules/kata-runner-host.nix,
 which renders the shared non-secret environment to
 /etc/finite/runner-shared.env and owns the finite-saas-runner unit shape. Host
 configs pass only the declared per-host inputs. This guard evaluates both
 nixosConfigurations and fails on any runner-role drift outside that declared
 per-host set, so a future hand-edit to one host breaks CI instead of
-production.
+production. (finite-lat-2 is the app-plane replacement host and deliberately
+runs no runner; the runner lane moves to finite-lat-4.)
 """
 
 from __future__ import annotations
@@ -17,15 +19,22 @@ import subprocess
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
-HOSTS = ["finite-lat-1", "finite-lat-3"]
+HOSTS = ["finite-lat-1", "finite-lat-3", "finite-lat-4"]
 
 EXPECTED_MAX_SANDBOXES = {
     "finite-lat-1": "12",
     "finite-lat-3": "42",
+    # finite-lat-4 mirrors lat3's owner-authorized ceiling; it is admitted
+    # drained (FC_RUNNER_DRAIN is operator env, not shared env).
+    "finite-lat-4": "42",
 }
 
 SHARED_ENV_PATH = "/etc/finite/runner-shared.env"
 OPERATOR_ENV_PATH = "/etc/finite/runner.env"
+OPERATOR_ENV_TEMPLATES = (
+    ROOT / "infra/nixos/hosts/finite-lat-3/runner.env.example",
+    ROOT / "infra/nixos/hosts/finite-lat-4/runner.env.example",
+)
 
 # Keys the host configs set through finite.kataRunnerHost.*. Everything else
 # in the rendered shared env must be identical across hosts.
@@ -42,14 +51,18 @@ PER_HOST_KEYS = {
 # shared module and asserted here.
 SHARED_STOP_TIMEOUT = "180"
 CANONICAL_FINITE_PRIVATE_BASE_URL = (
-    "https://kimi-k2-6.finite.containers.tinfoil.dev/v1"
+    "https://finite-private.finite.containers.tinfoil.dev/v1"
 )
-CANONICAL_FINITE_PRIVATE_MODEL = "deepseek-v4-flash-0731"
+CANONICAL_FINITE_PRIVATE_MODEL = "glm-5-3-flash"
 
 # The promoted Runtime artifact is an operator-managed pin in runner.env
 # (infra/runbooks/runtime-image.md). A rendered default was only ever a stale
 # shadow of it, so the shared env must not carry one.
 OPERATOR_ONLY_KEYS = {"FC_RUNNER_RUNTIME_ARTIFACT_ID"}
+NIX_OWNED_FINITE_PRIVATE_KEYS = {
+    "FC_RUNNER_FINITE_PRIVATE_BASE_URL",
+    "FC_RUNNER_FINITE_PRIVATE_MODEL",
+}
 
 # systemd.services.finite-saas-runner.environment key that is legitimately
 # per-host (loopback Authority on the Core host, overlay proxy on a remote
@@ -57,7 +70,9 @@ OPERATOR_ONLY_KEYS = {"FC_RUNNER_RUNTIME_ARTIFACT_ID"}
 PER_HOST_UNIT_ENV_KEYS = {"FINITE_IDENTITY_AUTHORITY"}
 
 
-def nix_eval(host: str, attribute: str, *, raw: bool = False, stringify: bool = False) -> str:
+def nix_eval(
+    host: str, attribute: str, *, raw: bool = False, stringify: bool = False
+) -> str:
     config = f".#nixosConfigurations.{host}.config"
     command = ["nix", "eval", "--raw" if raw else "--json"]
     if stringify:
@@ -112,16 +127,13 @@ def check_shared_env(envs: dict[str, dict[str, str]]) -> None:
             != CANONICAL_FINITE_PRIVATE_BASE_URL
         ):
             raise SystemExit(
-                f"{host}: Finite Private base URL is not the historical "
-                "compatibility route"
+                f"{host}: Finite Private base URL is not the live finite-private route"
             )
         if (
             envs[host].get("FC_RUNNER_FINITE_PRIVATE_MODEL")
             != CANONICAL_FINITE_PRIVATE_MODEL
         ):
-            raise SystemExit(
-                f"{host}: Finite Private model is not canonical DeepSeek"
-            )
+            raise SystemExit(f"{host}: Finite Private model is not canonical GLM-5.3-Flash")
 
     for host in others:
         keys_a, keys_b = set(envs[reference]), set(envs[host])
@@ -144,12 +156,26 @@ def check_shared_env(envs: dict[str, dict[str, str]]) -> None:
 
         per_host_present = (keys_a | keys_b) & PER_HOST_KEYS
         identical = sorted(
-            key for key in per_host_present if envs[reference].get(key) == envs[host].get(key)
+            key
+            for key in per_host_present
+            if envs[reference].get(key) == envs[host].get(key)
         )
         if identical:
             raise SystemExit(
                 f"per-host runner env keys no longer differ {reference} vs "
                 f"{host}: {identical}; move them to the shared module"
+            )
+
+
+def check_operator_env_templates() -> None:
+    for template in OPERATOR_ENV_TEMPLATES:
+        keys = set(parse_env(template.read_text(encoding="utf-8")))
+        shadowed = sorted(keys & NIX_OWNED_FINITE_PRIVATE_KEYS)
+        if shadowed:
+            raise SystemExit(
+                f"{template.relative_to(ROOT)} shadows Nix-owned Runner keys "
+                f"{shadowed}; keep the Finite Private route/model only in "
+                "infra/nixos/modules/kata-runner-host.nix"
             )
 
 
@@ -160,7 +186,9 @@ def check_unit_fragments() -> None:
     # finite-saas-core.service, and lat3 gates creation on the operator file.
     # The module-owned ordering entries are asserted separately below.
     comparable_attributes = {
-        "description": lambda host: nix_eval(host, "systemd.services.finite-saas-runner.description", raw=True),
+        "description": lambda host: nix_eval(
+            host, "systemd.services.finite-saas-runner.description", raw=True
+        ),
         "path": lambda host: json.loads(
             nix_eval(host, "systemd.services.finite-saas-runner.path", stringify=True)
         ),
@@ -232,6 +260,7 @@ def check_unit_fragments() -> None:
 
 
 def main() -> None:
+    check_operator_env_templates()
     envs = {
         host: parse_env(
             nix_eval(host, 'environment.etc."finite/runner-shared.env".text', raw=True)

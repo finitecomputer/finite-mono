@@ -504,69 +504,6 @@ impl BrainStore {
         Ok(mounts)
     }
 
-    /// List historical Mount access whose original ownership requires repair.
-    pub fn load_legacy_folder_access_source_repairs(
-        &self,
-    ) -> Result<Vec<LegacyFolderAccessSourceRepair>, StoreError> {
-        let mut statement = self.conn.prepare(
-            r#"
-            SELECT connection_id, brain_id, folder_id, user_id, reason, created_at
-            FROM legacy_folder_access_source_repairs
-            WHERE status = 'repair'
-            ORDER BY connection_id, user_id
-            "#,
-        )?;
-        let rows = statement.query_map([], |row| {
-            Ok(LegacyFolderAccessSourceRepair {
-                connection_id: row.get(0)?,
-                brain_id: BrainId::new(row.get::<_, String>(1)?)
-                    .map_err(to_from_sql_error(1, rusqlite::types::Type::Text))?,
-                folder_id: FolderId::new(row.get::<_, String>(2)?)
-                    .map_err(to_from_sql_error(2, rusqlite::types::Type::Text))?,
-                user_id: UserId::new(row.get::<_, String>(3)?)
-                    .map_err(to_from_sql_error(3, rusqlite::types::Type::Text))?,
-                reason: row.get(4)?,
-                created_at: row.get(5)?,
-            })
-        })?;
-        let mut repairs = Vec::new();
-        for row in rows {
-            repairs.push(row?);
-        }
-        Ok(repairs)
-    }
-
-    /// List historical Personal Mount rows that require explicit operator repair.
-    pub fn load_legacy_personal_mount_repairs(
-        &self,
-    ) -> Result<Vec<LegacyPersonalMountRepair>, StoreError> {
-        let mut statement = self.conn.prepare(
-            r#"
-            SELECT legacy_mount_id, destination_brain_id, reason, updated_at
-            FROM legacy_personal_mount_migrations
-            WHERE status = 'repair'
-            ORDER BY legacy_mount_id
-            "#,
-        )?;
-        let rows = statement.query_map([], |row| {
-            let destination_brain_id = row.get::<_, Option<String>>(1)?;
-            Ok(LegacyPersonalMountRepair {
-                legacy_mount_id: row.get(0)?,
-                destination_brain_id: destination_brain_id
-                    .map(BrainId::new)
-                    .transpose()
-                    .map_err(to_from_sql_error(1, rusqlite::types::Type::Text))?,
-                reason: row.get(2)?,
-                updated_at: row.get(3)?,
-            })
-        })?;
-        let mut repairs = Vec::new();
-        for row in rows {
-            repairs.push(row?);
-        }
-        Ok(repairs)
-    }
-
     /// Project Folder Mounts as client-visible source-backed Folders.
     pub fn mounted_folder_projection(
         &self,

@@ -14,7 +14,7 @@ This repo is for the product we are building now:
    preserved provider-durable state. Full Recovery Snapshot, key-backup, and
    empty-target restore support is an explicit post-MVP TODO, not a launch gate.
 6. A Finite Chat Hosted Web Device gives the dashboard the proven web-chat
-   experience; Electron and native apps can enroll later as additional Devices.
+   experience.
 7. Product features ship through their owning services, UI, stable CLIs, and
    skills. They do not expand Runtime Management into a feature control plane.
 8. The agent uses Finite Sites, Finite Brain, `finite-skills`, and Finite
@@ -52,9 +52,8 @@ and the active
   stack (image Dockerfiles and runtime template; the k8s manifests and systemd
   units moved to `../infra/hosts/lat1/`). These need renaming and pruning as
   the split hardens.
-- `../infra/hosts/lat1/scripts/deploy-finitechat-server.sh` and
-  `deploy/finite-chat/lat1`: hosted Finite Chat server deployment lane for the
-  SaaS stack.
+- `../infra/runbooks/deploy-finitechat-server.md`: hosted Finite Chat server
+  deployment lane for the SaaS stack.
 
 ## External Product Dependencies
 
@@ -103,9 +102,9 @@ compatibility targets.
 ## First Cleanup Targets
 
 See [docs/carry-over-manifest.md](docs/carry-over-manifest.md).
-See [docs/finite-stack-deployment.md](docs/finite-stack-deployment.md) for the
-current deploy ownership split, and
-[docs/hermes-runtime-test-matrix.md](docs/hermes-runtime-test-matrix.md) for the
+See [../infra/README.md](../infra/README.md) and
+[../infra/runbooks/](../infra/runbooks/) for the current deploy ownership split,
+and [docs/hermes-runtime-test-matrix.md](docs/hermes-runtime-test-matrix.md) for the
 Hermes local/Docker/Kata/Phala proof ladder.
 
 ## Local SaaS
@@ -171,6 +170,7 @@ FC_RUNNER_CLASS=enclavia
 FC_RUNNER_ENCLAVIA_ENCLAVE_ID=<enclave-uuid>
 ```
 
-See [docs/finite-stack-deployment.md](docs/finite-stack-deployment.md) and
+See [docs/runner-contract-v1.md](docs/runner-contract-v1.md),
+[docs/runtime-control-contract.md](docs/runtime-control-contract.md), and
 [../infra/hosts/lat1/systemd/runner.env.example](../infra/hosts/lat1/systemd/runner.env.example)
-for the live runner env, provider CLI prerequisites, and acceptance criteria.
+for the live runner env, provider prerequisites, and acceptance criteria.

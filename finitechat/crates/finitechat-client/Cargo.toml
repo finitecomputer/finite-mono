@@ -7,6 +7,7 @@ repository.workspace = true
 rust-version.workspace = true
 
 [dependencies]
+finite-nostr.workspace = true
 finitechat-transport.workspace = true
 finitechat-http = { path = "../finitechat-http" }
 finitechat-mls = { path = "../finitechat-mls" }
@@ -26,7 +27,14 @@ finitechat-delivery.workspace = true
 
 [dev-dependencies]
 axum.workspace = true
+finitechat-client = { path = ".", features = ["test-support"] }
 finitechat-server = { path = "../finitechat-server" }
 tempfile.workspace = true
 tokio.workspace = true
 tower.workspace = true
+
+[features]
+# Test-only escape hatch around the send currency gate
+# (`FiniteChatDevice::bypass_currency_gate_for_tests`). Never enable in a
+# shipped binary.
+test-support = []

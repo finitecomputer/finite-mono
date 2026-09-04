@@ -1,0 +1,131 @@
+# TEMPORARY overlay. Not the production-default candidate.
+#
+# Live tag: v2026-08-28-glm-5-3-flash-4 (container 2aa4d230…). Same GLM
+# checkpoint, SGLang image, DSA pair (flashmla_sparse / fa3), and limiter
+# 2026-08-28.6 as flash-3, plus --chunked-prefill-size 16384 from the LMSYS
+# 8xH200 A/B. Deltas from the candidate remain FINITE_ADMISSION_MODE=allowlist
+# and the FINITE_ADMISSION_ALLOWLIST secret. Usage admission on
+# finite.computer is still missing (POST /internal/finite-private/v1/reservations
+# redirects to the homepage).
+#
+# Trade-off, revert, and mature path:
+#   docs/runs/glm-5-3-flash-degraded-admission.md
+# Do not promote this file over the candidate. Revert by recreating the
+# container from v2026-08-28-glm-5-3-flash-3 (same overlay without the
+# chunked-prefill pin), from flash-1 (usage-api GLM), or from a later
+# measured release that omits FINITE_ADMISSION_MODE.
+cvm-version: 0.10.8
+cpus: 32
+memory: 524288
+gpus: 8
+
+models:
+  - name: "glm-5-3-flash"
+    repo: "zai-org/GLM-5.3-Flash@04c4e9e95c5da8862dced7e5056455116f83a7e0"
+    mpk: "54b2859aba423589c0d0d3bf48af25016c03d3b77db366a9061661e2df85ed79_328366215168_20a7ed6c-fd6a-54cb-98b4-8bfea86f829c"
+
+networks:
+  model-net: {}
+  core-api:
+    egress: allowlist
+    allow:
+      - finite.computer
+
+containers:
+  - name: "glm-5-3-flash"
+    image: "ghcr.io/finitecomputer/glm-5-3-flash-sglang:2026-08-28.3@sha256:91f614789cedf42a4d332fa8c4744eebf5067ba953b546823cec389169ee8008"
+    runtime: nvidia
+    gpus: all
+    ipc: host
+    restart: always
+    command:
+      [
+        "--model-path",
+        "/tinfoil/mpk/mpk-54b2859aba423589c0d0d3bf48af25016c03d3b77db366a9061661e2df85ed79",
+        "--served-model-name",
+        "glm-5-3-flash",
+        "--tp-size",
+        "8",
+        "--ep-size",
+        "8",
+        "--context-length",
+        "393216",
+        "--chunked-prefill-size",
+        "16384",
+        "--dsa-prefill-backend",
+        "flashmla_sparse",
+        "--dsa-decode-backend",
+        "fa3",
+        "--kv-cache-dtype",
+        "bfloat16",
+        "--moe-runner-backend",
+        "deep_gemm",
+        "--reasoning-parser",
+        "glm45",
+        "--tool-call-parser",
+        "glm47",
+        "--host",
+        "0.0.0.0",
+        "--port",
+        "8001",
+      ]
+    tmpfs:
+      /tmp: size=512m,mode=1777,exec
+      /root: size=20g,mode=0700,exec
+    networks: [model-net]
+    secrets:
+      # Historical secret name retained so the replacement can reuse the
+      # current sealed value. The wrapper passes it to SGLang's --api-key.
+      - VLLM_API_KEY
+    healthcheck:
+      test: ["CMD", "curl", "-sf", "http://localhost:8001/health"]
+      interval: 30s
+      timeout: 5s
+      start_period: 45m
+
+  - name: "finite-private-limiter"
+    image: "ghcr.io/finitecomputer/private-limiter:2026-08-28.6@sha256:4746398277eeb7eb96994c40affff34cd070721dd7753596bf7571604c823461"
+    restart: always
+    env:
+      # DEGRADED ADMISSION (temporary, revert when the usage API recovers):
+      # admits only keys listed in the FINITE_ADMISSION_ALLOWLIST secret, no
+      # reservation, settlement skipped, x-finite-admission header on every
+      # response. See docs/runs/glm-5-3-flash-degraded-admission.md.
+      - FINITE_ADMISSION_MODE: "allowlist"
+      - LISTEN_ADDR: "0.0.0.0:8002"
+      - FINITE_USAGE_API_URL: "https://finite.computer"
+      - UPSTREAM_BASE_URL: "http://glm-5-3-flash:8001"
+      - FINITE_PRIVATE_MODEL: "glm-5-3-flash"
+      - FINITE_PRIVATE_UPSTREAM_MODEL: "glm-5-3-flash"
+      # Existing issued Runtimes may send either historical label. The dotted
+      # Z.ai spelling is accepted as an alias; the served name stays hyphenated.
+      # The limiter canonicalizes only these names; any other model fails
+      # before reserve.
+      - FINITE_PRIVATE_MODEL_ALIASES: "deepseek-v4-flash-0731,glm-5-2,glm-5.3-flash"
+      - FINITE_PRIVATE_DEFAULT_REASONING_EFFORT: "high"
+      - FINITE_PRIVATE_DEFAULT_ENABLE_THINKING: "true"
+      - DASHBOARD_URL: "https://finite.computer/dashboard"
+      - READINESS_TIMEOUT_SECS: "5"
+      - FINITE_USAGE_API_TIMEOUT_SECS: "15"
+      - UPSTREAM_FIRST_BYTE_TIMEOUT_SECS: "120"
+      - UPSTREAM_BODY_TIMEOUT_SECS: "600"
+      - UPSTREAM_STREAM_IDLE_TIMEOUT_SECS: "600"
+    secrets:
+      - FINITE_USAGE_API_SERVICE_KEY
+      - VLLM_INTERNAL_API_KEY
+      - FINITE_ADMISSION_ALLOWLIST
+    networks: [model-net, core-api]
+    healthcheck:
+      test: ["CMD", "curl", "-sf", "http://localhost:8002/live"]
+      interval: 30s
+      timeout: 5s
+      start_period: 45m
+
+shim:
+  upstream-container: finite-private-limiter
+  upstream-port: 8002
+  authenticated: false
+  # Tinfoil requires a path declaration. Proxy every path so the limiter's
+  # Axum router remains the only public route authority.
+  paths:
+    - "/*"

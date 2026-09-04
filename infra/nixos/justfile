@@ -42,10 +42,76 @@ deploy-lat3-closure artifact_dir *args:
     cd "$repo_root"
     exec scripts/deploy-lat3-closure-cache "$@"
 
+# Build the finite-lat-2 system closure, disko script, and kexec installer on
+# an x86_64 Linux CI runner and package them as one file binary cache. The
+# artifact is the only build input for the lat2 bare-metal install runbook
+# and refuses to package a host whose storage identity is still uncaptured.
+nixos-build-lat2-closure rev out_dir="target/lat2-nixos-closure":
+    #!/usr/bin/env bash
+    set -euo pipefail
+    repo_root="$(cd ../.. && pwd)"
+    cd "$repo_root"
+    exec scripts/build-lat2-nixos-closure-artifact {{ quote(rev) }} {{ quote(out_dir) }}
+
+# Build the finite-lat-4 system closure, disko script, and kexec installer on
+# an x86_64 Linux CI runner and package them as one file binary cache. The
+# artifact is the only build input for the lat4 bare-metal install runbook
+# and refuses to package a host whose storage identity is still uncaptured.
+nixos-build-lat4-closure rev out_dir="target/lat4-nixos-closure":
+    #!/usr/bin/env bash
+    set -euo pipefail
+    repo_root="$(cd ../.. && pwd)"
+    cd "$repo_root"
+    exec scripts/build-lat4-nixos-closure-artifact {{ quote(rev) }} {{ quote(out_dir) }}
+
+# Validate, copy, dry-activate, or activate an exact CI-built finite-lat-2
+# closure. --prepare is the default and never crosses the mutation boundary;
+# the go-live activation adds --expect-startup.
+[positional-arguments]
+deploy-lat2-closure artifact_dir *args:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    repo_root="$(cd ../.. && pwd)"
+    cd "$repo_root"
+    exec scripts/deploy-lat2-closure-cache "$@"
+
+# Validate, copy, dry-activate, or activate an exact CI-built finite-lat-4
+# closure. --prepare is the default and never crosses the mutation boundary.
+[positional-arguments]
+deploy-lat4-closure artifact_dir *args:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    repo_root="$(cd ../.. && pwd)"
+    cd "$repo_root"
+    exec scripts/deploy-lat4-closure-cache "$@"
+
+# Drive the finite-lat-2 bare-metal install from a downloaded closure
+# artifact: validate the manifest, realize SYSTEM/DISKO/KEXEC from the
+# artifact cache, invoke the pinned nixos-anywhere. Nothing builds.
+[positional-arguments]
+install-lat2-from-artifact artifact_dir target_host *args:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    repo_root="$(cd ../.. && pwd)"
+    cd "$repo_root"
+    exec scripts/install-lat2-from-artifact "$artifact_dir" "$target_host" "$@"
+
+# Drive the artifact-driven bare-metal install for finite-lat-4 (Gate C of
+# infra/runbooks/lat4-nixos-runner-install.md). Validates the manifest,
+# realizes the install inputs from the artifact cache, and runs the pinned
+# nixos-anywhere against the rescue-mode host. Nothing is built.
+[positional-arguments]
+install-lat4-from-artifact artifact_dir target_host *args:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    repo_root="$(cd ../.. && pwd)"
+    cd "$repo_root"
+    exec scripts/install-lat4-from-artifact "$artifact_dir" "$target_host" "$@"
+
 # Static parsing, transport, ordering, and failure-propagation contract for the
 # optional existing-Runtime rollout appended to a lat1 deploy.
 lat1-rollout-contract:
-    cd ../.. && bash -n scripts/deploy-lat1-closure-cache scripts/build-lat1-nixos-closure-artifact scripts/rollout-lat1-runtime-artifact
+    cd ../.. && bash -n scripts/deploy-lat1-closure-cache scripts/build-lat1-nixos-closure-artifact scripts/publish-lat1-nixos-cachix-closure scripts/rollout-lat1-runtime-artifact
     cd ../.. && python3 -m unittest discover -s scripts/tests -p 'test_deploy_lat1_rollout.py'
     cd ../.. && python3 -m unittest scripts.tests.test_lat1_closure_artifact
     cd ../.. && python3 -m unittest scripts.tests.test_deploy_lat1_service_exes
@@ -55,6 +121,18 @@ lat1-rollout-contract:
 lat3-runner-rollout-contract:
     cd ../.. && bash -n scripts/build-lat3-nixos-closure-artifact scripts/deploy-lat3-closure-cache
     cd ../.. && python3 -m unittest scripts.tests.test_lat3_closure_artifact
+
+# Static manifest, install-input, build-host, dry-activation, app-plane
+# fence, and rollback contract for finite-lat-2 closure rollouts.
+lat2-runner-rollout-contract:
+    cd ../.. && bash -n scripts/build-lat2-nixos-closure-artifact scripts/deploy-lat2-closure-cache scripts/install-lat2-from-artifact
+    cd ../.. && python3 -m unittest scripts.tests.test_lat2_closure_artifact
+
+# Static manifest, install-input, build-host, dry-activation, Runner-fencing,
+# and rollback contract for finite-lat-4 closure rollouts.
+lat4-runner-rollout-contract:
+    cd ../.. && bash -n scripts/build-lat4-nixos-closure-artifact scripts/deploy-lat4-closure-cache scripts/install-lat4-from-artifact
+    cd ../.. && python3 -m unittest scripts.tests.test_lat4_closure_artifact
 
 # Evaluated systemd ordering plus synthetic transient/persistent endpoint
 # behavior for the aggregate production healthcheck.

@@ -60,18 +60,12 @@ use finite_brain_core::portability::{
     WorkingTreeObjectManifestEntry, WorkingTreeSyncState,
 };
 use finite_brain_core::{
-    AdminAccessAction, BrainApprovalPayload, BrainGrantIntent, BrainId, EmailInviteScopeError,
-    EmailInviteScopeFolder, FolderAccessMode, FolderId, FolderKey, bootstrap_organization_brain,
+    AdminAccessAction, BrainApprovalPayload, BrainId, FolderKey, bootstrap_organization_brain,
     bootstrap_organization_brain_with_requester, bootstrap_personal_brain,
-    brain_approval_event_template, derive_email_invite_scope, derive_safe_top_level_folder_path,
-    derive_stable_resource_id, open_folder_key_grant,
+    brain_approval_event_template, derive_safe_top_level_folder_path, derive_stable_resource_id,
 };
-use finite_nostr::{
-    GiftWrapValidation, NostrPublicKey, build_rumor, decrypt_nip44, encrypt_nip44, open_gift_wrap,
-    wrap_rumor,
-};
-use nostr::{Event, Keys, Kind, Tag};
-use sha2::{Digest, Sha256};
+use finite_nostr::{NostrPublicKey, decrypt_nip44, encrypt_nip44};
+use nostr::{Kind, Tag};
 
 pub(crate) const AGENT_STATE_VERSION: &str = "finitebrain-agent-state-v2";
 pub(crate) const BRAIN_DIRECTORY_VERSION: &str = "finite-brain-directory-v1";
@@ -153,15 +147,16 @@ where
         "admin" => admin(&args[1..], &env, json, output),
         "collaborator" => collaborators(&args[1..], &env, json, output),
         "invite" => invite(&args[1..], &env, json, output),
+        "invite-token" => invite_token(&args[1..], &env, json, output),
+        "invite-accept" => invite_accept(&args[1..], &env, json, output),
         "approvals" => approvals(&args[1..], &env, json, output),
         other => Err(CliError::InvalidCommand(other.to_owned())),
     }
 }
-
 fn help<W: Write>(output: &mut W) -> Result<(), CliError> {
     writeln!(
         output,
-        "fbrain [--config-dir <path>] doctor\nrepair\nauth status|import [--file <path>]|login <email>|redeem <email> <token>\nsigner status|public-key|sign|encrypt|decrypt\ndaemon status|start|stop|logs|tick|watch|supervise [--working-tree-root <path>]\nsync status|now [--summary]\nopen personal [path]\nopen <brain-id> [path]\nstatus [--json]\nconflicts\nresolve <id>\nsearch <query> [--folder <folder>...] [--limit <1-50>] [--lexical-only] [--json]\nsearch-index status [--folder <folder>...]|enable --folder <folder>|disable --folder <folder> [--json]\nactivity\nwiki check\naccess explain|list\nbrain list|create <personal|organization> <display-name>|bootstrap-personal|metadata|export\nfolder create <display-name>|list|delete\nmount offer create|list|inspect|revoke\nmount accept|list|inspect|revoke\nmount participant add|remove\nadmin member add|remove\nadmin role grant|revoke admin\nadmin folder-access grant|revoke --target <email|NIP-05|npub|hex>\nadmin ensure-access --brain <brain-id> --target <NIP-05|npub|email>\ncollaborator ensure-admin --brain <brain-id> --target <email|NIP-05|npub|hex>\ninvite brain create|list|inspect|accept|revoke\ninvite folder create|list|inspect|accept|claim|revoke\napprovals list [--brain <brain-id>] [--all]|approve --id <request-id> [--brain <brain-id>]|deny --id <request-id> [--brain <brain-id>]\n--skill print the self-contained agent guide"
+        "fbrain [--config-dir <path>] doctor\nrepair\nauth status|import [--file <path>]|login <email>|redeem <email> <token>\nsigner status|public-key|sign|encrypt|decrypt\ndaemon status|start|stop|logs|tick|watch|supervise [--working-tree-root <path>]\nsync status|now [--summary]\nopen personal [path]\nopen <brain-id> [path]\nstatus [--json]\nconflicts\nresolve <id>\nsearch <query> [--folder <folder>...] [--limit <1-50>] [--lexical-only] [--json]\nsearch-index status [--folder <folder>...]|enable --folder <folder>|disable --folder <folder> [--json]\nactivity\nwiki check\naccess explain|list\nbrain list|create <personal|organization> <display-name>|bootstrap-personal|metadata|export\nfolder create <display-name>|list|delete\nmount offer create|list|inspect|revoke\nmount accept|list|inspect|revoke\nmount participant add|remove\nadmin member add|remove\nadmin role grant|revoke admin\nadmin folder-access grant|revoke --target <email|NIP-05|npub|hex>\nadmin ensure-access --brain <brain-id> --target <NIP-05|npub|email>\ncollaborator ensure-admin --brain <brain-id> --target <email|NIP-05|npub|hex>\ninvite brain create|list|inspect|accept|revoke\ninvite folder create|list|inspect|accept|claim|revoke\ninvite-token create|list|revoke\ninvite-accept <url-or-token>\napprovals list [--brain <brain-id>] [--all]|approve --id <request-id> [--brain <brain-id>]|deny --id <request-id> [--brain <brain-id>]\n--skill print the self-contained agent guide"
     )?;
     Ok(())
 }
@@ -458,9 +453,6 @@ fn auth_email_redeem<W: Write>(
         writeln!(output, "pubkey: {}", report.pubkey)?;
         if let Some(nip05) = &report.nip05 {
             writeln!(output, "nip05: {nip05}")?;
-        }
-        if let Some(limitation) = &report.limitation {
-            writeln!(output, "note: {limitation}")?;
         }
         Ok(())
     }
@@ -2607,16 +2599,6 @@ fn brain<W: Write>(
             let response = signed_json_request(env, args, "GET", "/v1/brains", None)?;
             write_command_response(output, json, &response)
         }
-        "bootstrap-personal" => {
-            let response = signed_json_request(
-                env,
-                args,
-                "POST",
-                "/v1/personal-brain-bootstrap",
-                Some(serde_json::json!({})),
-            )?;
-            write_command_response(output, json, &response)
-        }
         "create" => {
             let values = positional_values(args);
             if args.iter().any(|argument| {
@@ -3833,32 +3815,6 @@ fn find_approval_request(
 /// and the adapter dedupes by request id. Best-effort by design: the filing
 /// itself is already durable server-side and `fbrain approvals list` remains
 /// the authoritative fallback.
-pub(crate) fn emit_approval_filing_marker(brain_id: &str, request_id: &str, json: bool) {
-    let marker = format!("finite-brain-approval-filed brain={brain_id} request={request_id}");
-    eprintln!("{marker}");
-    if !json {
-        // Human mode has no JSON on stdout to corrupt; repeating the marker
-        // there also survives stdout-only tool capture.
-        println!("{marker}");
-    }
-}
-
-/// Extract (brainId, requestId) from a filed-approval response and emit the
-/// adapter marker for it.
-pub(crate) fn append_approval_filing_notice(json: bool, response: &serde_json::Value) {
-    let Some(request_id) = response.get("id").and_then(|id| id.as_str()) else {
-        return;
-    };
-    let Some(brain_id) = response
-        .get("brainId")
-        .and_then(|id| id.as_str())
-        .or_else(|| response.get("brain_id").and_then(|id| id.as_str()))
-    else {
-        return;
-    };
-    emit_approval_filing_marker(brain_id, request_id, json);
-}
-
 fn list_approvals<W: Write>(
     args: &[String],
     env: &CliEnvironment,
@@ -4087,22 +4043,25 @@ fn brain_invites<W: Write>(
                     &expires_at,
                 )
             } else if invite_email_like(&raw_target) {
-                // The blessed email path: resolve the account into an
-                // invitation plan, then either commit it directly (the caller
-                // holds admin standing) or file an approval request for a
-                // human admin to sign. Emails without a Finite account fall
-                // back to the one-time email invitation.
-                write_plan_or_email_invite_create(
-                    output,
-                    json,
-                    env,
-                    args,
-                    &route,
-                    &brain_id,
-                    &raw_target,
-                    &folders,
-                    &expires_at,
-                )
+                // Emails resolve to an npub through public NIP-05 or not at
+                // all (auth kernel: grants name npubs, never emails). For
+                // anything unresolvable the capability Invite Token is the
+                // email-delivered path.
+                match resolve_identity_npub(env, args, &raw_target) {
+                    Ok(target) => write_npub_invite_create(
+                        output,
+                        json,
+                        env,
+                        args,
+                        &route,
+                        &target,
+                        &folders,
+                        &expires_at,
+                    ),
+                    Err(error) => Err(CliError::InvalidInput(format!(
+                        "{raw_target} does not resolve to an npub through public NIP-05 ({error}); invite by email with `fbrain invite-token create --brain {brain_id} --email {raw_target}` (the token link is the capability; email is delivery only)"
+                    ))),
+                }
             } else {
                 let target = resolve_identity_npub(env, args, &raw_target)?;
                 write_npub_invite_create(
@@ -4158,6 +4117,223 @@ fn brain_invites<W: Write>(
         Some(other) => Err(CliError::InvalidCommand(format!("invite brain {other}"))),
         None => Err(CliError::MissingArgument("invite brain command")),
     }
+}
+
+/// Capability Invite Tokens (auth kernel): a single-use, unguessable,
+/// revocable token that redeems to Brain Membership for whatever npub
+/// presents it. Email, when given, is delivery only — the link is the auth.
+fn invite_token<W: Write>(
+    args: &[String],
+    env: &CliEnvironment,
+    json: bool,
+    output: &mut W,
+) -> Result<(), CliError> {
+    match args.first().map(String::as_str) {
+        Some("create") => {
+            let brain_id = command_brain_id(args, env)?;
+            let role = option_value(args, "--role").unwrap_or_else(|| "member".to_owned());
+            if !matches!(role.as_str(), "member" | "admin") {
+                return Err(CliError::InvalidInput(format!(
+                    "unknown invite token role {role}"
+                )));
+            }
+            let email = option_value(args, "--email")
+                .map(|email| canonical_invite_email(&email))
+                .transpose()?;
+            let expires_at = invitation_expires_at(env, args)?;
+            let mut body = serde_json::json!({ "role": role, "expiresAt": expires_at });
+            if let Some(email) = email {
+                body["email"] = serde_json::Value::String(email);
+            }
+            let route = format!("/v1/brains/{brain_id}/invite-tokens");
+            let response = signed_json_request(env, args, "POST", &route, Some(body))?;
+            write_invite_token_create(output, json, &response)
+        }
+        Some("list") => {
+            let brain_id = command_brain_id(args, env)?;
+            let route = format!("/v1/brains/{brain_id}/invite-tokens");
+            let response = signed_json_request(env, args, "GET", &route, None)?;
+            write_invite_token_list(output, json, &response)
+        }
+        Some("revoke") => {
+            let brain_id = command_brain_id(args, env)?;
+            let token_id = required_option_or_positional(args, "--token-id", 1, "token-id")?;
+            let route = format!("/v1/brains/{brain_id}/invite-tokens/revoke");
+            let response = signed_json_request(
+                env,
+                args,
+                "POST",
+                &route,
+                Some(serde_json::json!({ "tokenId": token_id })),
+            )?;
+            write_command_response(output, json, &response)
+        }
+        Some(other) => Err(CliError::InvalidCommand(format!("invite-token {other}"))),
+        None => Err(CliError::MissingArgument("invite-token command")),
+    }
+}
+
+fn write_invite_token_create<W: Write>(
+    output: &mut W,
+    json: bool,
+    value: &serde_json::Value,
+) -> Result<(), CliError> {
+    if json {
+        return write_command_response(output, true, value);
+    }
+    let field = |name: &str| {
+        value
+            .get(name)
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or_default()
+    };
+    let url = field("url");
+    writeln!(
+        output,
+        "invite token created for brain {} (role {}, expires {})",
+        field("brainId"),
+        field("role"),
+        field("expiresAt")
+    )?;
+    writeln!(output, "token: {} (shown once)", field("token"))?;
+    writeln!(output, "url: {url}")?;
+    writeln!(output, "redeem: fbrain invite-accept {url}")?;
+    writeln!(output, "delivery: {}", field("deliveryStatus"))?;
+    Ok(())
+}
+
+fn write_invite_token_list<W: Write>(
+    output: &mut W,
+    json: bool,
+    value: &serde_json::Value,
+) -> Result<(), CliError> {
+    if json {
+        return write_command_response(output, true, value);
+    }
+    let tokens = value
+        .get("inviteTokens")
+        .and_then(serde_json::Value::as_array);
+    match tokens {
+        Some(tokens) if !tokens.is_empty() => {
+            for token in tokens {
+                let field = |name: &str| {
+                    token
+                        .get(name)
+                        .and_then(serde_json::Value::as_str)
+                        .unwrap_or_default()
+                };
+                writeln!(
+                    output,
+                    "invite-token {} role={} status={} inviter={} expires={}",
+                    field("tokenId"),
+                    field("role"),
+                    field("status"),
+                    field("inviterNpub"),
+                    field("expiresAt")
+                )?;
+                if !field("redeemedByNpub").is_empty() {
+                    writeln!(output, "  redeemed by {}", field("redeemedByNpub"))?;
+                }
+            }
+            Ok(())
+        }
+        _ => {
+            writeln!(output, "no invite tokens")?;
+            Ok(())
+        }
+    }
+}
+
+/// Accept a capability Invite Token from a URL (`<server>/v1/invite-tokens/
+/// redeem#<token>`) or a bare token (then `--server` or the saved server
+/// applies). The current Finite Home key redeems the token via NIP-98.
+fn invite_accept<W: Write>(
+    args: &[String],
+    env: &CliEnvironment,
+    json: bool,
+    output: &mut W,
+) -> Result<(), CliError> {
+    let input = positional_values(args)
+        .first()
+        .cloned()
+        .ok_or(CliError::MissingArgument("invite-url-or-token"))?;
+    let target = parse_invite_accept_input(&input)?;
+    let server_url = match target.server_url {
+        Some(server_url) => server_url,
+        None => server_url_for_command(env, args)?,
+    };
+    let response = signed_json_request_to_server(
+        env,
+        &server_url,
+        "POST",
+        "/v1/invite-tokens/redeem",
+        Some(serde_json::json!({ "token": target.token })),
+    )?;
+    if json {
+        return write_command_response(output, true, &response);
+    }
+    let field = |name: &str| {
+        response
+            .get(name)
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or_default()
+    };
+    let duplicate = response
+        .get("duplicateRedeem")
+        .and_then(serde_json::Value::as_bool)
+        .unwrap_or(false);
+    if duplicate {
+        writeln!(
+            output,
+            "already a member of brain {} ({}); this key already redeemed the token",
+            field("brainDisplayName"),
+            field("brainId")
+        )?;
+    } else {
+        writeln!(
+            output,
+            "joined brain {} ({}) with role {}; open it with `fbrain open {}`",
+            field("brainDisplayName"),
+            field("brainId"),
+            field("role"),
+            field("brainId")
+        )?;
+    }
+    Ok(())
+}
+
+struct InviteAcceptTarget {
+    server_url: Option<String>,
+    token: String,
+}
+
+fn parse_invite_accept_input(input: &str) -> Result<InviteAcceptTarget, CliError> {
+    let input = input.trim();
+    if input.is_empty() {
+        return Err(CliError::MissingArgument("invite-url-or-token"));
+    }
+    let (server_url, token) = if input.starts_with("http://") || input.starts_with("https://") {
+        let Some((base, fragment)) = input.split_once('#') else {
+            return Err(CliError::InvalidInput(
+                "invite link has no token fragment; expected <server>/v1/invite-tokens/redeem#<token>"
+                    .to_owned(),
+            ));
+        };
+        let origin_end = base.find("://").map(|scheme_end| {
+            let rest = &base[scheme_end + 3..];
+            scheme_end + 3 + rest.find('/').unwrap_or(rest.len())
+        });
+        let server_url = origin_end.map(|end| base[..end].to_owned());
+        (server_url, fragment.trim().to_owned())
+    } else {
+        (None, input.to_owned())
+    };
+    if !token.starts_with("fbit-") {
+        return Err(CliError::InvalidInput(format!(
+            "{token} is not an invite token; invite tokens start with fbit-"
+        )));
+    }
+    Ok(InviteAcceptTarget { server_url, token })
 }
 
 fn write_my_invitations<W: Write>(
@@ -4275,329 +4451,6 @@ fn reject_invite_code_as_invitation_id(id: &str) -> Result<(), CliError> {
     Ok(())
 }
 
-fn claim_email_folder_invitation<W: Write>(
-    args: &[String],
-    env: &CliEnvironment,
-    json: bool,
-    output: &mut W,
-) -> Result<(), CliError> {
-    let invite_code = required_option_or_positional(args, "--code", 1, "invite-code")?;
-    let email = canonical_invite_email(
-        &option_value(args, "--email").ok_or(CliError::MissingArgument("--email"))?,
-    )?;
-    if option_value(args, "--invite-secret").is_some() {
-        return Err(CliError::InvalidInput(
-            "use --invite-secret-file so the Invite Secret is not exposed in process arguments"
-                .to_owned(),
-        ));
-    }
-    let invite_secret_path = option_value(args, "--invite-secret-file")
-        .ok_or(CliError::MissingArgument("--invite-secret-file"))?;
-    let invite_secret_metadata = fs::symlink_metadata(&invite_secret_path).map_err(CliError::Io)?;
-    if !invite_secret_metadata.file_type().is_file() {
-        return Err(CliError::InvalidInput(
-            "Invite Secret path must be a regular file, not a symlink".to_owned(),
-        ));
-    }
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt as _;
-        if invite_secret_metadata.permissions().mode() & 0o077 != 0 {
-            return Err(CliError::InvalidInput(
-                "Invite Secret file must not be readable or writable by group or others".to_owned(),
-            ));
-        }
-    }
-    let invite_secret = fs::read_to_string(&invite_secret_path)
-        .map_err(CliError::Io)?
-        .trim()
-        .to_owned();
-    if invite_secret.is_empty() {
-        return Err(CliError::InvalidInput(
-            "Invite Secret file is empty".to_owned(),
-        ));
-    }
-    let email_proof_created_at = timestamp(env);
-    let bootstrap_route = format!("/v1/brain-invitation-links/{invite_code}/bootstrap");
-    let invitation = signed_json_request(
-        env,
-        args,
-        "POST",
-        &bootstrap_route,
-        Some(serde_json::json!({
-            "email": email,
-            "emailProofCreatedAt": email_proof_created_at,
-        })),
-    )?;
-    if invitation["folderOnly"] != true {
-        return Err(CliError::InvalidInput(
-            "invitation is not a Folder Email Invite Bootstrap".to_owned(),
-        ));
-    }
-    let brain_id = invitation["brainId"]
-        .as_str()
-        .ok_or_else(|| CliError::InvalidInput("invitation omitted Brain id".to_owned()))?;
-    let invite_unwrap_npub = invitation["inviteUnwrapNpub"]
-        .as_str()
-        .ok_or_else(|| CliError::InvalidInput("invitation omitted unwrap identity".to_owned()))?;
-    let payload_hash = invitation["bootstrapPayloadHash"]
-        .as_str()
-        .ok_or_else(|| CliError::InvalidInput("invitation omitted payload hash".to_owned()))?;
-    let wrapped_event_json = invitation["bootstrapWrappedEventJson"]
-        .as_str()
-        .ok_or_else(|| CliError::InvalidInput("invitation bootstrap is unavailable".to_owned()))?;
-    let unwrap_keys =
-        Keys::parse(&invite_secret).map_err(|error| CliError::InvalidSigner(error.to_string()))?;
-    let unwrap_recipient = NostrPublicKey::parse(invite_unwrap_npub)
-        .map_err(|error| CliError::InvalidSigner(error.to_string()))?;
-    if unwrap_keys.public_key() != unwrap_recipient.as_protocol() {
-        return Err(CliError::InvalidInput(
-            "Invite Secret does not match this Folder invitation".to_owned(),
-        ));
-    }
-    let wrapped = Event::from_json(wrapped_event_json).map_err(|error| {
-        CliError::InvalidInput(format!("bootstrap wrapper is invalid: {error}"))
-    })?;
-    let opened = open_gift_wrap(
-        &unwrap_keys,
-        &wrapped,
-        &GiftWrapValidation::new(unwrap_recipient),
-    )
-    .map_err(|error| CliError::InvalidInput(format!("bootstrap wrapper is invalid: {error}")))?;
-    let payload_json = opened.rumor.content;
-    let computed_hash = format!(
-        "sha256:{}",
-        hex_lower(Sha256::digest(payload_json.as_bytes()).as_slice())
-    );
-    if computed_hash != payload_hash {
-        return Err(CliError::InvalidInput(
-            "Email Invite Bootstrap payload hash mismatch".to_owned(),
-        ));
-    }
-    let payload: serde_json::Value = serde_json::from_str(&payload_json)?;
-    if payload["version"] != "finite-email-invite-bootstrap-payload-v1"
-        || payload["brainId"] != brain_id
-        || payload["invitedEmail"] != email
-        || payload["inviteUnwrapNpub"] != invite_unwrap_npub
-        || payload["folders"] != invitation["bootstrapScope"]
-    {
-        return Err(CliError::InvalidInput(
-            "Email Invite Bootstrap payload does not match invitation metadata".to_owned(),
-        ));
-    }
-    let auth = load_signer(env)?;
-    let mut claim_grants = Vec::new();
-    for entry in payload["grants"]
-        .as_array()
-        .ok_or_else(|| CliError::InvalidInput("bootstrap grants are invalid".to_owned()))?
-    {
-        let folder_id = entry["folderId"]
-            .as_str()
-            .ok_or_else(|| CliError::InvalidInput("bootstrap Folder id is invalid".to_owned()))?;
-        let grant = &entry["grant"];
-        let key_version = grant["keyVersion"]
-            .as_u64()
-            .and_then(|value| u32::try_from(value).ok())
-            .ok_or_else(|| CliError::InvalidInput("bootstrap key version is invalid".to_owned()))?;
-        let opened_grant = open_folder_key_grant(
-            &unwrap_keys,
-            &BrainGrantIntent {
-                purpose: "folder-key-grant".to_owned(),
-                brain_id: brain_id.to_owned(),
-                recipient_npub: invite_unwrap_npub.to_owned(),
-                folder_id: Some(folder_id.to_owned()),
-                key_version: Some(key_version),
-            },
-            grant["wrappedEventJson"]
-                .as_str()
-                .ok_or_else(|| CliError::InvalidInput("bootstrap grant is invalid".to_owned()))?,
-        )
-        .map_err(|error| CliError::InvalidInput(error.to_string()))?;
-        let folder_key = FolderKey::from_base64(&opened_grant.folder_key)
-            .map_err(|error| CliError::InvalidInput(error.to_string()))?;
-        claim_grants.push(serde_json::json!({
-            "folderId": folder_id,
-            "grant": folder_key_grant_request(
-                &auth,
-                brain_id,
-                folder_id,
-                key_version,
-                &auth.npub,
-                &folder_key,
-                env,
-            )?,
-        }));
-    }
-    let proof_content = serde_json::json!({
-        "version": "finite-email-invite-bootstrap-claim-proof-v1",
-        "brainId": brain_id,
-        "inviteCode": invite_code,
-        "invitedEmail": email,
-        "claimantNpub": auth.npub,
-        "bootstrapPayloadHash": payload_hash,
-        "emailProofCreatedAt": email_proof_created_at,
-    })
-    .to_string();
-    let proof = sign_event(
-        &unwrap_keys,
-        Kind::Custom(APP_SPECIFIC_KIND),
-        proof_content,
-        Vec::new(),
-        unix_timestamp(),
-        None,
-    )?;
-    let claim_route = format!("/v1/brain-invitation-links/{invite_code}/claim");
-    let claimed = signed_json_request(
-        env,
-        args,
-        "POST",
-        &claim_route,
-        Some(serde_json::json!({
-            "email": email,
-            "emailProofCreatedAt": email_proof_created_at,
-            "inviteUnwrapProofEventJson": proof.as_json(),
-            "grants": claim_grants,
-        })),
-    )?;
-    write_command_response(output, json, &claimed)
-}
-
-#[allow(clippy::too_many_arguments)]
-fn write_plan_or_email_folder_invite_create<W: Write>(
-    output: &mut W,
-    json: bool,
-    env: &CliEnvironment,
-    args: &[String],
-    brain_id: &str,
-    folder_id: &str,
-    raw_target: &str,
-    expires_at: &str,
-) -> Result<(), CliError> {
-    let classic_fallback = |output: &mut W| -> Result<(), CliError> {
-        let route = format!("/v1/brains/{brain_id}/folders/{folder_id}/invitations");
-        write_email_invite_create(
-            output,
-            json,
-            env,
-            args,
-            &route,
-            brain_id,
-            raw_target,
-            std::slice::from_ref(&folder_id.to_owned()),
-            expires_at,
-            true,
-        )
-    };
-    let email = canonical_invite_email(raw_target)?;
-    let preflight_route =
-        format!("/v1/brains/{brain_id}/folders/{folder_id}/invitations/preflight");
-    let plan = match signed_json_request(
-        env,
-        args,
-        "POST",
-        &preflight_route,
-        Some(serde_json::json!({ "target": email })),
-    ) {
-        Ok(plan) => plan,
-        Err(CliError::HttpStatus { status: 403, .. }) => {
-            return Err(CliError::HttpStatus {
-                status: 403,
-                body: "cohort Folder invitations require Brain admin standing (the key-holding                        committer); ask your admin, or wait for the chat approval card escalation"
-                    .to_owned(),
-            });
-        }
-        Err(CliError::HttpStatus { status: 502, .. })
-        | Err(CliError::HttpStatus { status: 503, .. }) => {
-            return classic_fallback(output);
-        }
-        Err(error) => return Err(error),
-    };
-    let mut principals: Vec<String> = Vec::new();
-    if let Some(human_npub) = plan
-        .get("human")
-        .and_then(|human| human.get("npub"))
-        .and_then(|npub| npub.as_str())
-        .filter(|npub| !npub.is_empty())
-    {
-        principals.push(human_npub.to_owned());
-    }
-    if let Some(agents) = plan.get("agents").and_then(|agents| agents.as_array()) {
-        for agent in agents {
-            if let Some(agent_npub) = agent.get("agentNpub").and_then(|v| v.as_str()) {
-                principals.push(agent_npub.to_owned());
-            }
-        }
-    }
-    if principals.is_empty() {
-        // No Finite account for this email: the one-time Folder invitation.
-        return classic_fallback(output);
-    }
-    let key_version = plan
-        .get("currentKeyVersion")
-        .and_then(|value| value.as_u64())
-        .and_then(|value| u32::try_from(value).ok())
-        .ok_or_else(|| CliError::HttpStatus {
-            status: 200,
-            body: "folder plan preflight response has no currentKeyVersion".to_owned(),
-        })?;
-    let session_keys = open_brain_session_folder_keys(env, args, brain_id)?;
-    let folder_key = opened_folder_key(&session_keys, brain_id, folder_id, key_version)?;
-    let auth = load_signer(env)?;
-    let mut participants = Vec::with_capacity(principals.len());
-    for target in &principals {
-        let event = admin_access_change_event(
-            env,
-            brain_id,
-            AdminAccessAction::GrantFolderAccess,
-            Some(folder_id),
-            Some(target),
-            Some(key_version),
-        )?;
-        let grant = folder_key_grant_request(
-            &auth,
-            brain_id,
-            folder_id,
-            key_version,
-            target,
-            &folder_key,
-            env,
-        )?;
-        participants.push(serde_json::json!({
-            "recipientNpub": target,
-            "grant": grant,
-            "accessChangeEvent": event,
-        }));
-    }
-    let commit_route = format!("/v1/brains/{brain_id}/folders/{folder_id}/invitations/commit");
-    let response = signed_json_request(
-        env,
-        args,
-        "POST",
-        &commit_route,
-        Some(serde_json::json!({
-            "planId": plan.get("planId").cloned().unwrap_or(serde_json::Value::Null),
-            "planHash": plan.get("planHash").cloned().unwrap_or(serde_json::Value::Null),
-            "expiresAt": expires_at,
-            "participants": participants,
-        })),
-    )?;
-    if json {
-        write_json(output, &response)
-    } else {
-        write_command_response(output, false, &response)?;
-        let invited = response
-            .get("invitations")
-            .and_then(|invitations| invitations.as_array())
-            .map(|invitations| invitations.len())
-            .unwrap_or_default();
-        writeln!(
-            output,
-            "invited {invited} principal(s) to folder {folder_id}; they accept with `fbrain invite folder accept --id <invitation-id>`"
-        )?;
-        Ok(())
-    }
-}
-
 fn folder_invites<W: Write>(
     args: &[String],
     env: &CliEnvironment,
@@ -4612,27 +4465,18 @@ fn folder_invites<W: Write>(
                 .ok_or(CliError::MissingArgument("--folder"))?;
             let raw_target = required_option_or_positional(args, "--target", 1, "target")?;
             let expires_at = invitation_expires_at(env, args)?;
-            let resolved_target = if invite_finite_vip_email(&raw_target) {
+            let resolved_target = if invite_email_like(&raw_target) {
                 match resolve_identity_npub(env, args, &raw_target) {
                     Ok(target) => Some(target),
-                    Err(CliError::HttpStatus { status: 404, .. }) => None,
-                    Err(error) => return Err(error),
+                    Err(error) => {
+                        return Err(CliError::InvalidInput(format!(
+                            "{raw_target} does not resolve to an npub through public NIP-05 ({error}); Folder guests are invited by npub, or invite them to the Brain with `fbrain invite-token create --brain {brain_id} --email {raw_target}`"
+                        )));
+                    }
                 }
             } else {
                 None
             };
-            if invite_email_like(&raw_target) && resolved_target.is_none() {
-                return write_plan_or_email_folder_invite_create(
-                    output,
-                    json,
-                    env,
-                    args,
-                    &brain_id,
-                    &folder_id,
-                    &raw_target,
-                    &expires_at,
-                );
-            }
             let target = resolved_target
                 .map(Ok)
                 .unwrap_or_else(|| resolve_identity_npub(env, args, &raw_target))?;
@@ -4699,7 +4543,6 @@ fn folder_invites<W: Write>(
             let response = signed_json_request(env, args, "POST", &route, None)?;
             write_command_response(output, json, &response)
         }
-        Some("claim") => claim_email_folder_invitation(args, env, json, output),
         Some("revoke") => {
             let id = required_option_or_positional(args, "--id", 1, "invitation-id")?;
             let route = format!("/v1/invitations/{id}");
@@ -4771,258 +4614,12 @@ fn write_npub_invite_create<W: Write>(
     write_command_response(output, json, &response)
 }
 
-#[allow(clippy::too_many_arguments)]
-fn write_plan_or_email_invite_create<W: Write>(
-    output: &mut W,
-    json: bool,
-    env: &CliEnvironment,
-    args: &[String],
-    route: &str,
-    brain_id: &str,
-    raw_target: &str,
-    folders: &[String],
-    expires_at: &str,
-) -> Result<(), CliError> {
-    let email = canonical_invite_email(raw_target)?;
-    let preflight_route = format!("/v1/brains/{brain_id}/invitations/preflight");
-    match signed_json_request(
-        env,
-        args,
-        "POST",
-        &preflight_route,
-        Some(serde_json::json!({ "target": email })),
-    ) {
-        Ok(plan) => {
-            let resolves_account = plan
-                .get("human")
-                .and_then(|human| human.get("npub"))
-                .and_then(|npub| npub.as_str())
-                .is_some_and(|npub| !npub.is_empty())
-                || plan
-                    .get("agents")
-                    .and_then(|agents| agents.as_array())
-                    .is_some_and(|agents| !agents.is_empty());
-            if !resolves_account {
-                // No Finite account for this email: the one-time invitation.
-                return write_email_invite_create(
-                    output, json, env, args, route, brain_id, raw_target, folders, expires_at,
-                    false,
-                );
-            }
-            commit_invitation_plan(output, json, env, args, brain_id, &plan)
-        }
-        Err(CliError::HttpStatus { status: 403, .. }) => {
-            // The caller lacks admin standing: request the human's approval
-            // for a server-resolved plan instead of committing directly.
-            let response = signed_json_request(
-                env,
-                args,
-                "POST",
-                &format!("/v1/brains/{brain_id}/approval-requests"),
-                Some(serde_json::json!({ "action": "invite-commit", "target": email })),
-            )?;
-            append_approval_filing_notice(json, &response);
-            if json {
-                write_json(output, &response)
-            } else {
-                write_command_response(output, false, &response)?;
-                writeln!(
-                    output,
-                    "approval requested: a Brain admin must approve this invite with `fbrain approvals approve --id <request-id>` or the chat approval card"
-                )?;
-                Ok(())
-            }
-        }
-        Err(CliError::HttpStatus { status: 502, .. })
-        | Err(CliError::HttpStatus { status: 503, .. }) => {
-            // Account enrichment is unreachable: degrade to the one-time
-            // email invitation, never the cryptography.
-            write_email_invite_create(
-                output, json, env, args, route, brain_id, raw_target, folders, expires_at, false,
-            )
-        }
-        Err(error) => Err(error),
-    }
-}
-
-fn commit_invitation_plan<W: Write>(
-    output: &mut W,
-    json: bool,
-    env: &CliEnvironment,
-    args: &[String],
-    brain_id: &str,
-    plan: &serde_json::Value,
-) -> Result<(), CliError> {
-    let commit_once = |plan: &serde_json::Value| -> Result<serde_json::Value, CliError> {
-        let plan_id = plan
-            .get("planId")
-            .and_then(|value| value.as_str())
-            .ok_or_else(|| CliError::HttpStatus {
-                status: 200,
-                body: "invitation plan response has no planId".to_owned(),
-            })?;
-        let plan_hash = plan
-            .get("planHash")
-            .and_then(|value| value.as_str())
-            .ok_or_else(|| CliError::HttpStatus {
-                status: 200,
-                body: "invitation plan response has no planHash".to_owned(),
-            })?;
-        signed_json_request(
-            env,
-            args,
-            "POST",
-            &format!("/v1/brains/{brain_id}/invitations/commit"),
-            Some(serde_json::json!({ "planId": plan_id, "planHash": plan_hash })),
-        )
-    };
-    let response = match commit_once(plan) {
-        Ok(response) => response,
-        Err(CliError::HttpStatus { status: 409, .. }) => {
-            // Roster drift superseded the preview: re-preflight once and
-            // commit the fresh plan instead of the stale one.
-            let fresh = signed_json_request(
-                env,
-                args,
-                "POST",
-                &format!("/v1/brains/{brain_id}/invitations/preflight"),
-                Some(serde_json::json!({ "target": plan_target_email(plan, brain_id) })),
-            )?;
-            commit_once(&fresh)?
-        }
-        Err(error) => return Err(error),
-    };
-    if json {
-        write_json(output, &response)
-    } else {
-        write_command_response(output, false, &response)?;
-        let invited = response
-            .get("invitations")
-            .and_then(|invitations| invitations.as_array())
-            .map(|invitations| invitations.len())
-            .unwrap_or_default();
-        writeln!(
-            output,
-            "invited {invited} principal(s); they accept with `fbrain invite brain accept`"
-        )?;
-        let deliveries: Vec<(String, String)> = response
-            .get("invitations")
-            .and_then(|invitations| invitations.as_array())
-            .map(|invitations| {
-                invitations
-                    .iter()
-                    .filter_map(|entry| {
-                        Some((
-                            entry.get("ref")?.as_str()?.to_owned(),
-                            entry
-                                .get("invitation")?
-                                .get("deliveryStatus")?
-                                .as_str()?
-                                .to_owned(),
-                        ))
-                    })
-                    .collect()
-            })
-            .unwrap_or_default();
-        if !deliveries.is_empty() {
-            let rendered = deliveries
-                .iter()
-                .map(|(ref_, status)| format!("{ref_}={status}"))
-                .collect::<Vec<_>>()
-                .join(", ");
-            writeln!(output, "delivery: {rendered}")?;
-            if deliveries.iter().any(|(_, status)| status == "failed") {
-                writeln!(
-                    output,
-                    "a courtesy email failed; the invitation is still committed and visible to the invitee in-app"
-                )?;
-            }
-        }
-        Ok(())
-    }
-}
-
-/// Recover the target email of a previewed plan for roster-drift re-preflight.
-fn plan_target_email(plan: &serde_json::Value, _brain_id: &str) -> String {
-    plan.get("human")
-        .and_then(|human| human.get("email"))
-        .and_then(|email| email.as_str())
-        .unwrap_or_default()
-        .to_owned()
-}
-
-#[allow(clippy::too_many_arguments)]
-fn write_email_invite_create<W: Write>(
-    output: &mut W,
-    json: bool,
-    env: &CliEnvironment,
-    args: &[String],
-    route: &str,
-    brain_id: &str,
-    raw_target: &str,
-    folders: &[String],
-    expires_at: &str,
-    folder_only: bool,
-) -> Result<(), CliError> {
-    let (body, invite_secret) = email_invite_create_body(
-        env,
-        args,
-        brain_id,
-        raw_target,
-        folders,
-        expires_at,
-        folder_only,
-    )?;
-    let server_url = server_url_for_command(env, args)?;
-    let mut response = signed_json_request_to_server(env, &server_url, "POST", route, Some(body))?;
-    if let Some(object) = response.as_object_mut() {
-        object.insert(
-            "inviteSecret".to_owned(),
-            serde_json::Value::String(invite_secret.clone()),
-        );
-        if let Some(accept_path) = object
-            .get("acceptPath")
-            .and_then(serde_json::Value::as_str)
-            .map(ToOwned::to_owned)
-        {
-            object.insert(
-                "inviteUrl".to_owned(),
-                serde_json::Value::String(format!(
-                    "{}{}#inviteSecret={}",
-                    server_url.trim_end_matches('/'),
-                    accept_path,
-                    invite_secret
-                )),
-            );
-        }
-    }
-    if json {
-        write_json(output, &response)
-    } else {
-        write_command_response(output, false, &response)?;
-        if let Some(invite_url) = response
-            .get("inviteUrl")
-            .and_then(serde_json::Value::as_str)
-        {
-            writeln!(output, "inviteUrl {invite_url}")?;
-        }
-        writeln!(output, "inviteSecret {invite_secret}")?;
-        Ok(())
-    }
-}
-
 fn invite_email_like(value: &str) -> bool {
     let value = value.trim();
     let Some((local, domain)) = value.split_once('@') else {
         return false;
     };
     !local.is_empty() && !domain.is_empty() && domain.contains('.')
-}
-
-fn invite_finite_vip_email(value: &str) -> bool {
-    canonical_invite_email(value)
-        .map(|email| email.ends_with("@finite.vip"))
-        .unwrap_or(false)
 }
 
 fn canonical_invite_email(value: &str) -> Result<String, CliError> {
@@ -5042,217 +4639,6 @@ fn canonical_invite_email(value: &str) -> Result<String, CliError> {
         ));
     }
     Ok(value)
-}
-
-fn email_invite_scope(
-    metadata: &BrainMetadataView,
-    selected_folders: &[String],
-    folder_only: bool,
-) -> Result<Vec<EmailInviteScopeFolder>, CliError> {
-    let folders = metadata
-        .folders
-        .iter()
-        .map(|folder| {
-            let access = match folder.access.as_str() {
-                "owner" => FolderAccessMode::Owner,
-                "admin_only" => FolderAccessMode::AdminOnly,
-                "all_members" => FolderAccessMode::AllMembers,
-                "restricted" => FolderAccessMode::Restricted,
-                other => {
-                    return Err(CliError::InvalidInput(format!(
-                        "unknown folder access mode {other}"
-                    )));
-                }
-            };
-            Ok(EmailInviteScopeFolder {
-                folder_id: FolderId::new(folder.id.clone())
-                    .map_err(|error| CliError::InvalidInput(error.to_string()))?,
-                access,
-                key_version: folder.current_key_version,
-            })
-        })
-        .collect::<Result<Vec<_>, _>>()?;
-    let selected = selected_folders
-        .iter()
-        .cloned()
-        .map(FolderId::new)
-        .collect::<Result<Vec<_>, _>>()
-        .map_err(|error| CliError::InvalidInput(error.to_string()))?;
-    derive_email_invite_scope(&folders, &selected, folder_only).map_err(|error| match error {
-        EmailInviteScopeError::MissingFolder { folder_id } => {
-            CliError::NotFound(format!("folder {folder_id}"))
-        }
-        other => CliError::InvalidInput(other.to_string()),
-    })
-}
-
-fn email_invite_scope_json(scope: &[EmailInviteScopeFolder]) -> Vec<serde_json::Value> {
-    scope
-        .iter()
-        .map(|item| {
-            serde_json::json!({
-                "folderId": item.folder_id,
-                "access": item.access,
-                "keyVersion": item.key_version,
-            })
-        })
-        .collect()
-}
-
-fn email_invite_create_body(
-    env: &CliEnvironment,
-    args: &[String],
-    brain_id: &str,
-    target_email: &str,
-    selected_folders: &[String],
-    expires_at: &str,
-    folder_only: bool,
-) -> Result<(serde_json::Value, String), CliError> {
-    let invited_email = canonical_invite_email(target_email)?;
-    let metadata = fetch_brain_metadata(env, args, brain_id)?;
-    let scope = email_invite_scope(&metadata, selected_folders, folder_only)?;
-    let auth = load_signer(env)?;
-    let session_keys = open_brain_session_folder_keys(env, args, brain_id)?;
-    let unwrap_keys = Keys::generate();
-    let invite_unwrap_npub = NostrPublicKey::from_protocol(unwrap_keys.public_key())
-        .to_npub()
-        .map_err(|error| CliError::InvalidSigner(error.to_string()))?;
-    let invite_secret = unwrap_keys.secret_key().to_secret_hex();
-
-    let mut bootstrap_grants = Vec::new();
-    for item in &scope {
-        let folder_key = opened_folder_key(
-            &session_keys,
-            brain_id,
-            item.folder_id.as_str(),
-            item.key_version,
-        )?;
-        bootstrap_grants.push(serde_json::json!({
-            "folderId": item.folder_id,
-            "grant": folder_key_grant_request(
-                &auth,
-                brain_id,
-                item.folder_id.as_str(),
-                item.key_version,
-                &invite_unwrap_npub,
-                &folder_key,
-                env,
-            )?,
-        }));
-    }
-
-    let scope_json = email_invite_scope_json(&scope);
-    let bootstrap_payload = serde_json::json!({
-        "version": "finite-email-invite-bootstrap-payload-v1",
-        "brainId": brain_id,
-        "invitedEmail": invited_email,
-        "inviteUnwrapNpub": invite_unwrap_npub,
-        "folders": scope_json,
-        "grants": bootstrap_grants,
-    });
-    let bootstrap_payload_json = serde_json::to_string(&bootstrap_payload)?;
-    let bootstrap_payload_hash = format!(
-        "sha256:{}",
-        hex_lower(Sha256::digest(bootstrap_payload_json.as_bytes()).as_slice())
-    );
-    let bootstrap_wrapped_event_json = wrap_email_invite_bootstrap_payload(
-        &auth,
-        brain_id,
-        &invite_unwrap_npub,
-        &bootstrap_payload_json,
-    )?;
-    let bootstrap_authorization_event_json = email_invite_authorization_event(
-        &auth,
-        brain_id,
-        &invited_email,
-        &invite_unwrap_npub,
-        &bootstrap_payload_hash,
-        expires_at,
-        &scope,
-    )?;
-
-    Ok((
-        serde_json::json!({
-            "target": invited_email,
-            "initialFolderAccess": selected_folders,
-            "expiresAt": expires_at,
-            "inviteUnwrapNpub": invite_unwrap_npub,
-            "bootstrapPayloadHash": bootstrap_payload_hash,
-            "bootstrapWrappedEventJson": bootstrap_wrapped_event_json,
-            "bootstrapAuthorizationEventJson": bootstrap_authorization_event_json,
-            "folderOnly": folder_only,
-        }),
-        invite_secret,
-    ))
-}
-
-fn wrap_email_invite_bootstrap_payload(
-    auth: &LocalSigner,
-    brain_id: &str,
-    invite_unwrap_npub: &str,
-    bootstrap_payload_json: &str,
-) -> Result<String, CliError> {
-    let recipient = NostrPublicKey::parse(invite_unwrap_npub)
-        .map_err(|error| CliError::InvalidSigner(error.to_string()))?;
-    let rumor = build_rumor(
-        NostrPublicKey::from_protocol(auth.keys.public_key()),
-        Kind::Custom(APP_SPECIFIC_KIND),
-        vec![
-            tag_vec(["d", &format!("finite-email-invite-bootstrap:{brain_id}")])?,
-            tag_vec(["brain", brain_id])?,
-        ],
-        bootstrap_payload_json.to_owned(),
-        unix_timestamp(),
-    );
-    let wrapped = wrap_rumor(&auth.keys, recipient, rumor)
-        .map_err(|error| CliError::InvalidSigner(error.to_string()))?;
-    Ok(wrapped.as_json())
-}
-
-fn email_invite_authorization_event(
-    auth: &LocalSigner,
-    brain_id: &str,
-    invited_email: &str,
-    invite_unwrap_npub: &str,
-    bootstrap_payload_hash: &str,
-    expires_at: &str,
-    scope: &[EmailInviteScopeFolder],
-) -> Result<String, CliError> {
-    let content = serde_json::json!({
-        "version": "finite-email-invite-bootstrap-authorization-v1",
-        "brainId": brain_id,
-        "invitedEmail": invited_email,
-        "inviteUnwrapNpub": invite_unwrap_npub,
-        "bootstrapPayloadHash": bootstrap_payload_hash,
-        "expiresAt": expires_at,
-        "folders": email_invite_scope_json(scope),
-    })
-    .to_string();
-    let event = sign_event(
-        &auth.keys,
-        Kind::Custom(APP_SPECIFIC_KIND),
-        content,
-        vec![
-            tag_vec([
-                "d",
-                &format!("finite-email-invite-bootstrap-authorization:{brain_id}:{invited_email}"),
-            ])?,
-            tag_vec(["brain", brain_id])?,
-            tag_vec(["email", invited_email])?,
-        ],
-        unix_timestamp(),
-        None,
-    )?;
-    Ok(event.as_json())
-}
-
-fn hex_lower(bytes: &[u8]) -> String {
-    let mut out = String::with_capacity(bytes.len() * 2);
-    for byte in bytes {
-        use std::fmt::Write as _;
-        write!(&mut out, "{byte:02x}").expect("write to string");
-    }
-    out
 }
 
 #[cfg(test)]
@@ -5277,6 +4663,43 @@ mod tests {
     use std::thread;
     use std::time::{Duration, Instant};
     use tempfile::TempDir;
+
+    #[test]
+    fn invite_accept_input_parses_url_fragment_and_bare_token() {
+        let target = parse_invite_accept_input(
+            "https://brain.finite.computer/v1/invite-tokens/redeem#fbit-abc123_-def456",
+        )
+        .unwrap();
+        assert_eq!(
+            target.server_url.as_deref(),
+            Some("https://brain.finite.computer")
+        );
+        assert_eq!(target.token, "fbit-abc123_-def456");
+
+        let bare = parse_invite_accept_input("fbit-abc123").unwrap();
+        assert_eq!(bare.server_url, None);
+        assert_eq!(bare.token, "fbit-abc123");
+
+        let loopback =
+            parse_invite_accept_input("http://127.0.0.1:3015/v1/invite-tokens/redeem#fbit-abc123")
+                .unwrap();
+        assert_eq!(
+            loopback.server_url.as_deref(),
+            Some("http://127.0.0.1:3015")
+        );
+    }
+
+    #[test]
+    fn invite_accept_input_rejects_missing_fragment_and_non_tokens() {
+        assert!(
+            parse_invite_accept_input("https://brain.finite.computer/v1/invite-tokens/redeem")
+                .is_err()
+        );
+        assert!(parse_invite_accept_input("invite-0123456789abcdef").is_err());
+        assert!(parse_invite_accept_input("invitation-0123456789").is_err());
+        assert!(parse_invite_accept_input("").is_err());
+        assert!(parse_invite_accept_input("  ").is_err());
+    }
 
     #[test]
     fn filesystem_hints_discover_new_working_trees_without_syncing_internal_churn() {
@@ -6584,127 +6007,6 @@ mod tests {
         })
     }
 
-    fn start_email_invite_server(
-        admin_npub: String,
-        export_grants: Vec<Value>,
-    ) -> (String, thread::JoinHandle<Vec<(String, String)>>) {
-        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
-        listener.set_nonblocking(true).unwrap();
-        let url = format!("http://{}", listener.local_addr().unwrap());
-        let handle = thread::spawn(move || {
-            let started = Instant::now();
-            let mut requests = Vec::new();
-            while requests.len() < 4 && started.elapsed() < Duration::from_secs(5) {
-                let Ok((mut stream, _)) = listener.accept() else {
-                    thread::sleep(Duration::from_millis(10));
-                    continue;
-                };
-                let (request_line, body) = read_http_request(&mut stream);
-                let response_body = if request_line.contains("/metadata") {
-                    serde_json::json!({
-                        "brainId": "acme",
-                        "kind": "organization",
-                        "name": "Acme",
-                        "ownerUserId": null,
-                        "members": [admin_npub],
-                        "admins": [admin_npub],
-                        "folders": [
-                            {
-                                "id": "getting-started",
-                                "name": "getting-started",
-                                "role": "general",
-                                "access": "all_members",
-                                "parentFolderId": null,
-                                "path": "getting-started",
-                                "accessUserIds": [],
-                                "currentKeyVersion": 1,
-                                "setupIncomplete": false
-                            },
-                            {
-                                "id": "restricted",
-                                "name": "restricted",
-                                "role": "folder",
-                                "access": "restricted",
-                                "parentFolderId": null,
-                                "path": "restricted",
-                                "accessUserIds": [],
-                                "currentKeyVersion": 1,
-                                "setupIncomplete": false
-                            }
-                        ],
-                        "mountedFolders": [],
-                        "grantCount": 2
-                    })
-                    .to_string()
-                } else if request_line.contains("/export") {
-                    serde_json::json!({
-                        "brain": {
-                            "id": "acme",
-                            "kind": "organization",
-                            "name": "Acme",
-                            "ownerUserId": null
-                        },
-                        "folders": [
-                            {
-                                "id": "getting-started",
-                                "path": "getting-started",
-                                "access": "all_members",
-                                "currentKeyVersion": 1,
-                                "accessible": true
-                            },
-                            {
-                                "id": "restricted",
-                                "path": "restricted",
-                                "access": "restricted",
-                                "currentKeyVersion": 1,
-                                "accessible": true
-                            }
-                        ],
-                        "keyGrants": export_grants,
-                        "accessState": {
-                            "members": [admin_npub],
-                            "admins": [admin_npub]
-                        }
-                    })
-                    .to_string()
-                } else {
-                    serde_json::json!({
-                        "id": "invitation-email",
-                        "brainId": "acme",
-                        "targetKind": "email_bootstrap",
-                        "userId": null,
-                        "invitedEmail": "friend@example.com",
-                        "inviteUnwrapNpub": null,
-                        "bootstrapPayloadHash": null,
-                        "bootstrapWrappedEventJson": null,
-                        "bootstrapAuthorizationEventJson": null,
-                        "bootstrapScope": [],
-                        "claimedByNpub": null,
-                        "identities": [],
-                        "status": "pending",
-                        "inviteCode": "invite-email",
-                        "acceptPath": "/v1/brain-invitation-links/invite-email/claim",
-                        "initialFolderAccess": ["getting-started", "restricted"],
-                        "expiresAt": "2026-06-30T00:00:00.000Z",
-                        "createdAt": "2026-06-23T00:00:00.000Z",
-                        "updatedAt": "2026-06-23T00:00:00.000Z",
-                        "acceptedAt": null,
-                        "duplicateAccept": false
-                    })
-                    .to_string()
-                };
-                requests.push((request_line, body));
-                let response = format!(
-                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{response_body}",
-                    response_body.len()
-                );
-                stream.write_all(response.as_bytes()).unwrap();
-            }
-            requests
-        });
-        (url, handle)
-    }
-
     fn start_metadata_listing_server(
         expected_requests: usize,
     ) -> (String, thread::JoinHandle<Vec<String>>) {
@@ -7490,7 +6792,6 @@ mod tests {
         assert_eq!(json["pubkey"], pubkey_hex_for_secret(TEST_SECRET_HEX));
         assert_eq!(json["principalKind"], "native");
         assert_eq!(json["nip05"], "paul@finite.vip");
-        assert_eq!(json["limitation"], Value::Null);
 
         let requests = server.join().unwrap();
         assert_eq!(requests.len(), 1);
@@ -7504,21 +6805,11 @@ mod tests {
     }
 
     #[test]
-    fn auth_redeem_external_email_reports_email_only_brain_limitation() {
+    fn auth_redeem_rejects_external_email_now_that_email_invites_are_gone() {
         let tmp = TempDir::new().unwrap();
         import_identity_secret(&tmp, TEST_SECRET_HEX);
-        let pubkey = pubkey_hex_for_secret(TEST_SECRET_HEX);
-        let (identity_authority_url, server) = start_identity_authority_server(serde_json::json!({
-            "email": "friend@example.com",
-            "pubkey": pubkey,
-            "principal": {
-                "kind": "email_only",
-                "email": "friend@example.com",
-                "pubkey": pubkey_hex_for_secret(TEST_SECRET_HEX)
-            }
-        }));
         let mut output = Vec::new();
-        run_with_env(
+        let error = run_with_env(
             [
                 "auth",
                 "redeem",
@@ -7526,25 +6817,16 @@ mod tests {
                 "token-456",
                 "--json",
             ],
-            env_with_identity_authority(&tmp, identity_authority_url),
+            env_with_identity_authority(&tmp, "http://127.0.0.1:9".to_owned()),
             &mut output,
         )
-        .unwrap();
-
-        let json: Value = serde_json::from_slice(&output).unwrap();
-        assert_eq!(json["email"], "friend@example.com");
-        assert_eq!(json["principalKind"], "email_only");
-        assert_eq!(json["nip05"], Value::Null);
-        assert!(json["limitation"].as_str().unwrap().contains("npub"));
-
-        let requests = server.join().unwrap();
-        assert_eq!(
-            requests[0].0,
-            "POST /api/v1/email-only-principals/redeem HTTP/1.1"
+        .unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("only name@finite.vip emails can be claimed"),
+            "{error}"
         );
-        let body: Value = serde_json::from_str(&requests[0].1).unwrap();
-        assert_eq!(body["email"], "friend@example.com");
-        assert_eq!(body["token"], "token-456");
     }
 
     #[test]
@@ -8803,39 +8085,6 @@ mod tests {
     }
 
     #[test]
-    fn brain_bootstrap_personal_uses_the_signed_agent_authority_route_without_owner_input() {
-        let tmp = TempDir::new().unwrap();
-        import_identity_secret(
-            &tmp,
-            "0000000000000000000000000000000000000000000000000000000000000001",
-        );
-        let (server_url, server) = start_ok_capture_server(1);
-
-        let mut output = Vec::new();
-        run_with_env(
-            [
-                "brain",
-                "bootstrap-personal",
-                "--server",
-                &server_url,
-                "--json",
-            ],
-            env_for(&tmp),
-            &mut output,
-        )
-        .unwrap();
-
-        let requests = server.join().unwrap();
-        assert_eq!(requests.len(), 1);
-        assert!(
-            requests[0]
-                .0
-                .starts_with("POST /v1/personal-brain-bootstrap ")
-        );
-        assert_eq!(requests[0].1, "{}");
-    }
-
-    #[test]
     fn brain_create_starts_personal_and_organization_brains_empty() {
         let cases = [
             ("personal", "personal-empty", "Personal empty"),
@@ -9327,147 +8576,6 @@ mod tests {
     }
 
     #[test]
-    fn invites_create_plan_commit_receipt_names_delivery() {
-        let tmp = TempDir::new().unwrap();
-        import_identity_secret(
-            &tmp,
-            "0000000000000000000000000000000000000000000000000000000000000001",
-        );
-        let target_npub =
-            npub_for_secret("0000000000000000000000000000000000000000000000000000000000000002");
-        // Preflight resolves an account-backed email, then the commit returns
-        // one human invitation that was emailed.
-        let (server_url, server) = start_scripted_capture_server(vec![
-            (
-                200,
-                serde_json::json!({
-                    "planId": "plan-1",
-                    "planHash": "hash-1",
-                    "human": { "email": "bob@example.com", "npub": target_npub },
-                    "agents": [],
-                    "exclusions": [],
-                })
-                .to_string(),
-            ),
-            (
-                200,
-                serde_json::json!({
-                    "status": "committed",
-                    "planId": "plan-1",
-                    "rosterRevision": 1,
-                    "invitations": [{
-                        "ref": "bob@example.com",
-                        "npub": target_npub,
-                        "invitation": {
-                            "id": "invitation-1",
-                            "status": "pending",
-                            "inviteCode": "invite-1",
-                            "deliveryStatus": "sent",
-                        },
-                    }],
-                    "skipped": [],
-                })
-                .to_string(),
-            ),
-        ]);
-
-        let mut output = Vec::new();
-        run_with_env(
-            [
-                "invite",
-                "brain",
-                "create",
-                "--brain",
-                "acme",
-                "--target",
-                "bob@example.com",
-                "--server",
-                &server_url,
-            ],
-            env_for(&tmp),
-            &mut output,
-        )
-        .unwrap();
-        let text = String::from_utf8(output).unwrap();
-        assert!(text.contains("invited 1 principal(s)"), "{text}");
-        assert!(
-            text.contains("delivery: bob@example.com=sent"),
-            "receipt must name per-principal delivery: {text}"
-        );
-
-        let requests = server.join().unwrap();
-        assert!(
-            requests[0]
-                .0
-                .starts_with("POST /v1/brains/acme/invitations/preflight")
-        );
-        assert!(
-            requests[1]
-                .0
-                .starts_with("POST /v1/brains/acme/invitations/commit")
-        );
-    }
-
-    #[test]
-    fn invite_create_without_standing_files_approval_request() {
-        let tmp = TempDir::new().unwrap();
-        import_identity_secret(
-            &tmp,
-            "0000000000000000000000000000000000000000000000000000000000000001",
-        );
-        // First response: preflight is forbidden (no admin standing). Second:
-        // the approval request is created and returned.
-        let (server_url, server) = start_scripted_capture_server(vec![
-            (
-                403,
-                r#"{"error":"approval signer does not hold brain admin standing"}"#.to_owned(),
-            ),
-            (
-                200,
-                r#"{"id":"approval-1","status":"pending","action":"invite-commit","payload":{"planId":"plan-1","nonce":"n1"}}"#
-                    .to_owned(),
-            ),
-        ]);
-
-        let mut output = Vec::new();
-        run_with_env(
-            [
-                "invite",
-                "brain",
-                "create",
-                "--brain",
-                "acme",
-                "--target",
-                "bob@example.com",
-                "--server",
-                &server_url,
-                "--json",
-            ],
-            env_for(&tmp),
-            &mut output,
-        )
-        .unwrap();
-        let json: Value = serde_json::from_slice(&output).unwrap();
-        assert_eq!(json["id"], "approval-1");
-        assert_eq!(json["status"], "pending");
-
-        let requests = server.join().unwrap();
-        assert!(
-            requests[0]
-                .0
-                .starts_with("POST /v1/brains/acme/invitations/preflight")
-        );
-        assert!(
-            requests[1]
-                .0
-                .starts_with("POST /v1/brains/acme/approval-requests")
-        );
-        let body: Value = serde_json::from_str(&requests[1].1).unwrap();
-        assert_eq!(body["action"], "invite-commit");
-        assert_eq!(body["target"], "bob@example.com");
-    }
-
-    #[test]
     fn approvals_approve_signs_and_submits_the_stored_payload() {
         let tmp = TempDir::new().unwrap();
         import_identity_secret(
@@ -9476,13 +8584,16 @@ mod tests {
         );
         let npub =
             npub_for_secret("0000000000000000000000000000000000000000000000000000000000000001");
+        let target_npub =
+            npub_for_secret("0000000000000000000000000000000000000000000000000000000000000002");
         // Brain list, then the request listing, then the artifact submission.
         let (server_url, server) = start_scripted_capture_server(vec![
             (200, r#"{"brains":[{"brainId":"acme"}]}"#.to_owned()),
             (
                 200,
-                r#"{"requests":[{"id":"approval-1","status":"pending","payload":{"version":"finite-brain-approval-v1","action":"invite-commit","brainId":"acme","planId":"plan-1","targetNpubs":[],"nonce":"00112233445566778899aabbccddeeff","expiresAt":9999999999}}]}"#
-                    .to_owned(),
+                format!(
+                    r#"{{"requests":[{{"id":"approval-1","status":"pending","payload":{{"version":"finite-brain-approval-v1","action":"delegation-grant","brainId":"acme","targetNpubs":["{target_npub}"],"nonce":"00112233445566778899aabbccddeeff","expiresAt":9999999999}}}}]}}"#
+                ),
             ),
             (200, r#"{"status":"applied"}"#.to_owned()),
         ]);
@@ -9524,7 +8635,7 @@ mod tests {
         let payload: Value = serde_json::from_str(event["content"].as_str().unwrap()).unwrap();
         assert_eq!(payload["humanNpub"], npub);
         assert_eq!(payload["nonce"], "00112233445566778899aabbccddeeff");
-        assert_eq!(payload["planId"], "plan-1");
+        assert_eq!(payload["targetNpubs"], serde_json::json!([target_npub]));
     }
 
     #[test]
@@ -9567,248 +8678,6 @@ mod tests {
         let body: Value = serde_json::from_str(body).unwrap();
         assert_eq!(body["targetNpub"], target);
         assert_eq!(body["initialFolderAccess"][0], "general");
-    }
-
-    #[test]
-    fn invites_create_email_bootstrap_uses_one_session_keyring_without_persisting_keys() {
-        let tmp = TempDir::new().unwrap();
-        let admin_secret = "0000000000000000000000000000000000000000000000000000000000000001";
-        import_identity_secret(&tmp, admin_secret);
-        let admin_npub = run(&tmp, &["signer", "public-key"]).trim().to_owned();
-        let getting_started_key = FolderKey::from_bytes([11; 32]);
-        let restricted_key = FolderKey::from_bytes([12; 32]);
-        let tree = tmp.path().join("org");
-        initialize_private_working_tree(&tree).unwrap();
-        write_agent_state(&tree, &AgentState::new("acme", "2026-06-24T20:46:36Z")).unwrap();
-
-        let mut env = env_for(&tmp);
-        env.cwd = tree.clone();
-        let export_grants = vec![
-            export_grant_for_test(
-                &env,
-                "acme",
-                "getting-started",
-                1,
-                &getting_started_key,
-                &admin_npub,
-            ),
-            export_grant_for_test(&env, "acme", "restricted", 1, &restricted_key, &admin_npub),
-        ];
-        let (server_url, server) = start_email_invite_server(admin_npub, export_grants);
-        let mut output = Vec::new();
-        run_with_env(
-            [
-                "invite",
-                "brain",
-                "create",
-                "--brain",
-                "acme",
-                "--target",
-                "friend@example.com",
-                "--folder",
-                "restricted",
-                "--expires-in",
-                "6d",
-                "--server",
-                &server_url,
-                "--json",
-            ],
-            env,
-            &mut output,
-        )
-        .unwrap();
-        let json: Value = serde_json::from_slice(&output).unwrap();
-        let invite_secret = json["inviteSecret"].as_str().unwrap();
-        assert!(
-            json["inviteUrl"]
-                .as_str()
-                .unwrap()
-                .contains(&format!("#inviteSecret={invite_secret}"))
-        );
-
-        let requests = server.join().unwrap();
-        assert_eq!(requests.len(), 4);
-        // The email path preflights the account first; the unregistered
-        // mailbox falls through to the classic one-time invitation.
-        assert!(
-            requests[0]
-                .0
-                .starts_with("POST /v1/brains/acme/invitations/preflight")
-        );
-        assert!(requests[1].0.contains("/v1/brains/acme/metadata"));
-        assert!(requests[2].0.contains("/v1/brains/acme/export"));
-        let (request, body) = &requests[3];
-        assert!(request.starts_with("POST /v1/brains/acme/invitations"));
-        assert!(
-            !body.contains(invite_secret),
-            "server-visible request body must not contain invite secret"
-        );
-        let body: Value = serde_json::from_str(body).unwrap();
-        assert_eq!(body["target"], "friend@example.com");
-        assert!(body.get("targetNpub").is_none());
-        assert_eq!(
-            body["initialFolderAccess"],
-            serde_json::json!(["restricted"])
-        );
-        assert!(
-            body["bootstrapPayloadHash"]
-                .as_str()
-                .unwrap()
-                .starts_with("sha256:")
-        );
-        let invite_unwrap_npub = body["inviteUnwrapNpub"].as_str().unwrap();
-        let wrapped = body["bootstrapWrappedEventJson"].as_str().unwrap();
-        let event = Event::from_json(wrapped).unwrap();
-        let unwrap_keys = Keys::parse(invite_secret).unwrap();
-        let recipient = NostrPublicKey::parse(invite_unwrap_npub).unwrap();
-        let opened =
-            open_gift_wrap(&unwrap_keys, &event, &GiftWrapValidation::new(recipient)).unwrap();
-        let payload: Value = serde_json::from_str(&opened.rumor.content).unwrap();
-        assert_eq!(payload["invitedEmail"], "friend@example.com");
-        assert_eq!(
-            payload["folders"]
-                .as_array()
-                .unwrap()
-                .iter()
-                .map(|folder| folder["folderId"].as_str().unwrap())
-                .collect::<Vec<_>>(),
-            vec!["getting-started", "restricted"]
-        );
-        let grants = payload["grants"].as_array().unwrap();
-        assert_eq!(
-            grant_plaintext_folder_key(&grants[0], invite_secret, invite_unwrap_npub),
-            getting_started_key.to_base64()
-        );
-        assert_eq!(
-            grant_plaintext_folder_key(&grants[1], invite_secret, invite_unwrap_npub),
-            restricted_key.to_base64()
-        );
-        let durable_state = fs::read_to_string(tree.join(".finitebrain/agent-state.json")).unwrap();
-        assert!(!durable_state.contains(&getting_started_key.to_base64()));
-        assert!(!durable_state.contains(&restricted_key.to_base64()));
-    }
-
-    #[test]
-    fn folder_invite_email_bootstrap_preserves_selected_native_access_mode() {
-        let tmp = TempDir::new().unwrap();
-        let admin_secret = "0000000000000000000000000000000000000000000000000000000000000001";
-        import_identity_secret(&tmp, admin_secret);
-        let admin_npub = run(&tmp, &["signer", "public-key"]).trim().to_owned();
-        let getting_started_key = FolderKey::from_bytes([11; 32]);
-        let restricted_key = FolderKey::from_bytes([12; 32]);
-        let tree = tmp.path().join("org");
-        initialize_private_working_tree(&tree).unwrap();
-        write_agent_state(&tree, &AgentState::new("acme", "2026-06-24T20:46:36Z")).unwrap();
-        let mut env = env_for(&tmp);
-        env.cwd = tree;
-        let export_grants = vec![
-            export_grant_for_test(
-                &env,
-                "acme",
-                "getting-started",
-                1,
-                &getting_started_key,
-                &admin_npub,
-            ),
-            export_grant_for_test(&env, "acme", "restricted", 1, &restricted_key, &admin_npub),
-        ];
-        let (server_url, server) = start_email_invite_server(admin_npub, export_grants);
-        let mut output = Vec::new();
-        run_with_env(
-            [
-                "invite",
-                "folder",
-                "create",
-                "--brain",
-                "acme",
-                "--folder",
-                "getting-started",
-                "--target",
-                "new-person@example.com",
-                "--server",
-                &server_url,
-                "--json",
-            ],
-            env,
-            &mut output,
-        )
-        .unwrap();
-
-        let response: Value = serde_json::from_slice(&output).unwrap_or_else(|error| {
-            panic!(
-                "output was: {:?} ({error})",
-                String::from_utf8_lossy(&output)
-            )
-        });
-        let invite_secret = response["inviteSecret"].as_str().unwrap();
-        let requests = server.join().unwrap();
-        // The email path folder-preflights the account first; the
-        // unregistered mailbox falls through to the classic one-time path.
-        assert!(
-            requests[0]
-                .0
-                .starts_with("POST /v1/brains/acme/folders/getting-started/invitations/preflight")
-        );
-        let (_, body) = &requests[3];
-        assert!(!body.contains(invite_secret));
-        let body: Value = serde_json::from_str(body).unwrap();
-        assert_eq!(body["target"], "new-person@example.com");
-        assert_eq!(body["folderOnly"], true);
-        assert_eq!(
-            body["initialFolderAccess"],
-            serde_json::json!(["getting-started"])
-        );
-        let event = Event::from_json(body["bootstrapWrappedEventJson"].as_str().unwrap()).unwrap();
-        let unwrap_keys = Keys::parse(invite_secret).unwrap();
-        let recipient = NostrPublicKey::parse(body["inviteUnwrapNpub"].as_str().unwrap()).unwrap();
-        let opened =
-            open_gift_wrap(&unwrap_keys, &event, &GiftWrapValidation::new(recipient)).unwrap();
-        let payload: Value = serde_json::from_str(&opened.rumor.content).unwrap();
-        assert_eq!(
-            payload["folders"]
-                .as_array()
-                .unwrap()
-                .iter()
-                .map(|folder| folder["folderId"].as_str().unwrap())
-                .collect::<Vec<_>>(),
-            vec!["getting-started"]
-        );
-        assert_eq!(payload["grants"].as_array().unwrap().len(), 1);
-        assert_eq!(
-            grant_plaintext_folder_key(
-                &payload["grants"][0],
-                invite_secret,
-                body["inviteUnwrapNpub"].as_str().unwrap()
-            ),
-            getting_started_key.to_base64()
-        );
-    }
-
-    #[test]
-    fn folder_invite_claim_rejects_an_invite_secret_in_process_arguments() {
-        let tmp = TempDir::new().unwrap();
-        let mut output = Vec::new();
-        let error = run_with_env(
-            [
-                "invite",
-                "folder",
-                "claim",
-                "invite-code",
-                "--email",
-                "guest@example.com",
-                "--invite-secret",
-                "must-not-appear-in-argv",
-            ],
-            env_for(&tmp),
-            &mut output,
-        )
-        .unwrap_err();
-        assert!(
-            error
-                .to_string()
-                .contains("Invite Secret is not exposed in process arguments")
-        );
-        assert!(output.is_empty());
     }
 
     #[test]
@@ -14259,7 +13128,7 @@ mod tests {
             "fbrain sync now --summary",
             "fbrain invite brain create",
             "fbrain invite brain accept --id",
-            "preflight",
+            "invite-token",
             "admin ensure-access",
             "llms.txt",
             "Provenance",

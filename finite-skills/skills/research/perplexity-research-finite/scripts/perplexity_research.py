@@ -42,7 +42,9 @@ def env_key(name: str) -> str:
     return value
 
 
-def post_json(url: str, body: dict[str, Any], *, headers: dict[str, str]) -> dict[str, Any]:
+def post_json(
+    url: str, body: dict[str, Any], *, headers: dict[str, str]
+) -> dict[str, Any]:
     request = Request(
         url,
         data=json.dumps(body).encode("utf-8"),
@@ -81,7 +83,9 @@ def render_search_markdown(payload: dict[str, Any], query: str) -> str:
         return "\n".join(lines)
 
     for index, result in enumerate(results, start=1):
-        title = result.get("title") or result.get("name") or result.get("url") or "Untitled"
+        title = (
+            result.get("title") or result.get("name") or result.get("url") or "Untitled"
+        )
         url = result.get("url") or ""
         lines.append(f"## {index}. {title}")
         if url:
@@ -244,28 +248,46 @@ def cmd_fetch(args: argparse.Namespace) -> int:
 
 
 def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(description="Perplexity + Firecrawl research helper")
+    parser = argparse.ArgumentParser(
+        description="Perplexity + Firecrawl research helper"
+    )
     subparsers = parser.add_subparsers(dest="command", required=True)
 
-    search = subparsers.add_parser("search", help="Return raw Perplexity search results")
+    search = subparsers.add_parser(
+        "search", help="Return raw Perplexity search results"
+    )
     search.add_argument("--query", required=True)
-    search.add_argument("--domain", action="append", default=[], help="Repeat to limit results to specific domains")
+    search.add_argument(
+        "--domain",
+        action="append",
+        default=[],
+        help="Repeat to limit results to specific domains",
+    )
     search.add_argument("--recency", choices=["day", "week", "month", "year"])
     search.add_argument("--region", help="Optional country code such as US")
     search.add_argument("--max-results", type=int, default=8)
     search.add_argument("--json", action="store_true")
     search.set_defaults(func=cmd_search)
 
-    brief = subparsers.add_parser("brief", help="Return a cited Sonar Pro brief plus source URLs")
+    brief = subparsers.add_parser(
+        "brief", help="Return a cited Sonar Pro brief plus source URLs"
+    )
     brief.add_argument("--query", required=True)
-    brief.add_argument("--domain", action="append", default=[], help="Repeat to limit results to specific domains")
+    brief.add_argument(
+        "--domain",
+        action="append",
+        default=[],
+        help="Repeat to limit results to specific domains",
+    )
     brief.add_argument("--recency", choices=["day", "week", "month", "year"])
     brief.add_argument("--search-mode", choices=["web", "academic"], default="web")
     brief.add_argument("--related-questions", action="store_true")
     brief.add_argument("--json", action="store_true")
     brief.set_defaults(func=cmd_brief)
 
-    fetch = subparsers.add_parser("fetch", help="Fetch exact source text with Firecrawl")
+    fetch = subparsers.add_parser(
+        "fetch", help="Fetch exact source text with Firecrawl"
+    )
     fetch.add_argument("--url", required=True)
     fetch.add_argument("--fresh", action="store_true", help="Bypass Firecrawl cache")
     fetch.add_argument("--json", action="store_true")

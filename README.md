@@ -6,17 +6,15 @@ and infrastructure definition in one tree.
 | Component | What it is |
 |---|---|
 | `finite-agentd/` | narrow agent-local platform daemon and process supervisor; never compute lifecycle |
-| `finitechat/` | finitechat CLI, server, iOS app, Electron app, Hermes agent bridge, agent runtime containers |
+| `finitechat/` | finitechat CLI, server, Hermes agent bridge, agent runtime containers |
 | `finitecomputer-v2/` | finite.computer SaaS: Core control plane, dashboard, Phala runner, Finite Private limiter |
 | `finite-sites/` | fsite CLI + finitesitesd (`*.finite.chat` hosting) |
 | `finite-brain/` | fbrain CLI + FiniteBrain server |
 | `finite-identity/`, `finite-nostr/` | active shared identity/protocol crates |
-| `finite-search/` | SearXNG/Firecrawl search stack + Tinfoil bundle |
 | `finite-skills/` | sole authored managed-skills baseline; immutable revisions hot-activate in compatible runtimes |
-| `finite-specialization/` | Hermes capability vocabulary and safe specialization config examples |
 | `devfinity/` | local integration harness (Fedimint devimint-style) |
 | `infra/` | **the single deploy root**: per-host config, images, runbooks |
-| `docs/` | doctrine, plan, migration log, architecture |
+| `docs/` | doctrine, ADRs, run records, postmortems, audits |
 
 Read [docs/monorepo-doctrine.md](docs/monorepo-doctrine.md) for the rules
 (single-repo model, component-scoped release tags, what deliberately stays
@@ -33,7 +31,7 @@ the fast web-design loop or the prerequisite-backed complete SaaS stack.
   (see the [local harness prerequisites](docs/local-integration-harness.md#prerequisites))
 - `just dev saas-smoke` — prove real launch, Hosted Web chat, and restart healing on macOS
 - `just dev smoke` — portable services-only smoke + teardown (Linux CI gate)
-- `just sites …`, `just search …`, `just skills …` — component modules
+- `just sites …`, `just skills …` — component modules
 
 ## Releases
 
@@ -49,6 +47,5 @@ reusing unchanged service, binary, and Runtime image digests.
 ## More
 
 - [Docs index](docs/README.md)
-- [Migration log](docs/monorepo-migration-log.md) · [import-sync provenance](scripts/import-sync.toml)
+- [import-sync provenance](scripts/import-sync.toml)
 - [Deploy root](infra/README.md)
-- [Fedimint structure analysis](docs/fedimint-monorepo-structure-analysis.md)

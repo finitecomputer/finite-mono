@@ -2992,6 +2992,7 @@ mod tests {
                 target_source_host_id: None,
                 relocation: None,
                 profile_picture_url: None,
+                owner_chat_account_id: None,
                 status: AgentCreationRequestStatus::Launching,
                 requested_launch_code: None,
                 agent_runtime_id: None,
@@ -3128,10 +3129,6 @@ mod tests {
                 base_url: "https://inference.example.invalid/v1".to_string(),
                 model: "fixture-model".to_string(),
                 revoke_on_launch_failure: true,
-                specialization_bundle: Some(crate::SpecializationBundleRuntimeDefaults {
-                    bundle_id: crate::DEFAULT_FINITE_PRIVATE_SPECIALIZATION_BUNDLE.to_owned(),
-                    worker_api_key: "fixture-plaintext-specialization-key".to_owned(),
-                }),
             }),
             profile_picture_url: None,
             environment: BTreeMap::new(),
@@ -3154,7 +3151,6 @@ mod tests {
         assert!(compose.contains("FAL_KEY: '${FAL_KEY:?FAL_KEY is required}'"));
         assert!(!compose.contains("fixture-plaintext-inference-key"));
         assert!(!compose.contains("fixture-plaintext-provider-key"));
-        assert!(!compose.contains("fixture-plaintext-specialization-key"));
         assert!(!compose.contains(FIXTURE_API_KEY));
         assert_eq!(
             phala_cvm_name_for_request_id(&lease.request.id),
@@ -3658,7 +3654,7 @@ mod tests {
         let mut journal = FakeProviderOperationJournal::default();
         let options = RuntimeLaunchOptions {
             secret_environment: BTreeMap::from([(
-                "FINITE_SPECIALIZATION_WORKER_API_KEY".to_string(),
+                "FAL_KEY".to_string(),
                 "never-send-this-plaintext".to_string(),
             )]),
             ..RuntimeLaunchOptions::default()

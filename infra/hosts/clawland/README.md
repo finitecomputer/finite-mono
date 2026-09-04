@@ -9,13 +9,11 @@
 > (its migration story is in
 > [`finitechat-server.md`](finitechat-server.md)).
 
-The current finite-mono deployment exceptions are the first-party AEON
-specialization request worker and the narrow `finite.vip` NIP-05 path proxy.
-Their manifests and rollback procedures are owned here in
-[`finite-specialization-worker.yaml`](finite-specialization-worker.yaml),
-[`finite-specialization-worker.md`](finite-specialization-worker.md), and
-[`finite-identity-nip05-route.yaml`](finite-identity-nip05-route.yaml). These
-exceptions do not make clawland a general finite-mono build or deploy host.
+The current finite-mono deployment exception is the narrow `finite.vip`
+NIP-05 path proxy. Its manifest is owned here in
+[`finite-identity-nip05-route.yaml`](finite-identity-nip05-route.yaml).
+This exception does not make clawland a general finite-mono build or
+deploy host.
 
 Legacy finite.vip fleet box, managed by the LEGACY `finitecomputer` repo
 (deliberately outside finite-mono). It **formerly hosted the live finitechat
@@ -53,7 +51,7 @@ hostname `clawland-ovh`, ssh alias `ovh-rescue`. Captured 2026-07-08.
 - oauth2-proxy for `.finite.vip` (Google).
 - ~50 per-user agent namespaces (statefulset `<user>-0`) plus published
   `*.finite.vip` apps; finitec relay/gateway pollers per agent.
-- matrix-synapse; finite-specialization-worker :18998.
+- matrix-synapse.
 - Namespace `smoke-finite` here is a finite.vip user workspace, unrelated to
   the `smoke.finite.computer` domain.
 - Leftover `/var/lib/caddy` (nothing runs it).

@@ -10,9 +10,8 @@
 
 ## Today's flow — DEPRECATED (build-on-box)
 
-Documented in full in `finite-sites/docs/deploy-finite-lat-2.md` (§3 box
-setup, §5a routine rollout); this is a summary, not a replacement. The flow
-produced the former v0.2.16 binaries:
+This is a historical summary of the former build-on-box flow that produced
+the v0.2.16 binaries:
 
 1. From a dev machine: `rsync -az --delete` the finite-sites source to
    `finite-lat-2:~/finite-sites/` (excluding `.git`, `target`, env files).

@@ -1,9 +1,16 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-readonly CANONICAL_FINITE_PRIVATE_MODEL="deepseek-v4-flash-0731"
-readonly LEGACY_FINITE_PRIVATE_MODEL="glm-5-2"
-readonly FINITE_PRIVATE_PRODUCT_BASE_URL="https://kimi-k2-6.finite.containers.tinfoil.dev/v1"
+readonly CANONICAL_FINITE_PRIVATE_MODEL="glm-5-3-flash"
+readonly FINITE_PRIVATE_PRODUCT_BASE_URL="https://finite-private.finite.containers.tinfoil.dev/v1"
+readonly HISTORICAL_FINITE_PRIVATE_BASE_URL="https://kimi-k2-6.finite.containers.tinfoil.dev/v1"
+
+is_legacy_finite_private_model() {
+    case "$1" in
+        glm-5-2|deepseek-v4-flash-0731|glm-5.3-flash) return 0 ;;
+        *) return 1 ;;
+    esac
+}
 
 agent_home="${FINITECHAT_HOME:-/data/agent}"
 hermes_home="${HERMES_HOME:-${agent_home}/hermes-home}"
@@ -17,9 +24,12 @@ if [[ "${FINITE_DEFAULT_INFERENCE_PROFILE:-}" == "finite-private" ]]; then
     model="${FINITECHAT_HERMES_MODEL:-${FINITE_PRIVATE_MODEL:-${CANONICAL_FINITE_PRIVATE_MODEL}}}"
     provider="${FINITECHAT_HERMES_PROVIDER:-custom}"
     base_url="${FINITECHAT_HERMES_BASE_URL:-${FINITE_PRIVATE_BASE_URL:-${FINITE_PRIVATE_PRODUCT_BASE_URL}}}"
-    if [[ "$model" == "$LEGACY_FINITE_PRIVATE_MODEL" \
-        && "$provider" == "custom" \
-        && "$base_url" == "$FINITE_PRIVATE_PRODUCT_BASE_URL" ]]; then
+    if [[ "$base_url" == "$HISTORICAL_FINITE_PRIVATE_BASE_URL" ]]; then
+        base_url="$FINITE_PRIVATE_PRODUCT_BASE_URL"
+    fi
+    if is_legacy_finite_private_model "$model" \
+        && [[ "$provider" == "custom" ]] \
+        && [[ "$base_url" == "$FINITE_PRIVATE_PRODUCT_BASE_URL" ]]; then
         model="$CANONICAL_FINITE_PRIVATE_MODEL"
     fi
     context_length="${FINITECHAT_HERMES_CONTEXT_LENGTH:-${FINITE_PRIVATE_CONTEXT_LENGTH:-393216}}"
@@ -58,13 +68,38 @@ export HERMES_HOME="$hermes_home"
 export FINITECHAT_BIN="$finitechat_bin"
 export FINITECHAT_HERMES_INBOUND_STREAM="${FINITECHAT_HERMES_INBOUND_STREAM:-1}"
 export FINITECHAT_HERMES_SERVICE_ADDR="$service_addr"
-# Finite Chat inbound arrives over the authenticated relay binding, so its
-# platform-scoped allow-all is the intended delegation to that upstream.
+# Chat admission: the sidecar's SQLite admission store is the single source
+# of truth for who may add this agent to rooms. Under agentd, `finitechat
+# hermes admission seed` has already run (agentd seeds once after prepare,
+# before starting any child process); this script only reads the store's
+# allowed-users mirror. Without agentd (standalone script mode) the seed runs
+# here best-effort so a manually launched gateway still sees current state.
+# FINITECHAT_ALLOWED_USERS entries are comma-separated 64-hex account ids,
+# compared verbatim against the finitechat adapter's source.user_id —
+# verified against the pinned hermes-agent (see flake.lock)
+# gateway/authz_mixin.py. The runner injects FINITECHAT_ALLOW_ALL_USERS=true
+# for old-image compatibility, so allowlist mode must actively unset it. The
+# mirror is read once at gateway process start; admission changes made after
+# that (chat.admission grants/revokes) apply at the next gateway restart.
 # GATEWAY_ALLOW_ALL_USERS must never be set here: it is the gateway-global
 # switch and silently authorized every stranger on every other platform
 # (Telegram DMs bypassed pairing entirely; found live 2026-07-14).
-export FINITECHAT_ALLOW_ALL_USERS="${FINITECHAT_ALLOW_ALL_USERS:-true}"
-unset FINITE_ALLOW_ALL_USERS GATEWAY_ALLOW_ALL_USERS
+allowed_users_file="${agent_home}/allowed-users"
+if [[ "${FINITE_AGENTD_SUPERVISED:-0}" != "1" ]]; then
+    "$finitechat_bin" hermes --agent-home "$agent_home" admission seed \
+        >/dev/null 2>&1 \
+        || echo "run_hermes_gateway: admission seed unavailable; using existing admission state" >&2
+fi
+if [[ -s "$allowed_users_file" ]]; then
+    export FINITECHAT_ALLOWED_USERS="$(paste -sd, "$allowed_users_file")"
+    unset FINITECHAT_ALLOW_ALL_USERS FINITE_ALLOW_ALL_USERS GATEWAY_ALLOW_ALL_USERS
+else
+    # No admission state (a brand-new agent with no seed and no rooms yet, or
+    # an explicitly allow-all store): the legacy platform-scoped allow-all
+    # delegation stands until the store's admission policy is seeded.
+    export FINITECHAT_ALLOW_ALL_USERS="${FINITECHAT_ALLOW_ALL_USERS:-true}"
+    unset FINITE_ALLOW_ALL_USERS GATEWAY_ALLOW_ALL_USERS
+fi
 export FINITE_AGENT_ID="${FINITE_AGENT_ID:-agent_${device_id}}"
 export FINITE_AGENT_NAME="$agent_name"
 
@@ -144,7 +179,7 @@ if [[ ! -f "${agent_home}/config.json" ]]; then
         echo "FINITE_AGENT_START_ERROR missing bundled Finite Skills at $bundled_skills_dir" >&2
         exit 64
     fi
-    "$finitechat_bin" hermes --home "$agent_home" init \
+    "$finitechat_bin" hermes --agent-home "$agent_home" init \
         --server "$server_url" \
         --device-id "$device_id" \
         --agent-name "$agent_name" \
@@ -153,7 +188,7 @@ if [[ ! -f "${agent_home}/config.json" ]]; then
 fi
 
 if [[ "$recover_boot" -ne 1 ]]; then
-    "$finitechat_bin" hermes --home "$agent_home" install \
+    "$finitechat_bin" hermes --agent-home "$agent_home" install \
         --plugins-dir "${hermes_home}/plugins" \
         --plugin-name "$plugin_name" \
         --finitechat-bin "$finitechat_bin" \

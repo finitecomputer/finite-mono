@@ -24,9 +24,8 @@ use finitesites_blob::BlobStore;
 use finitesites_engine::Engine;
 
 use crate::apps::Supervisor;
-use crate::identity::IdentityAuthority;
 use crate::limiter::{RateLimiter, WINDOW_SECONDS};
-use crate::mailer::{IdentityNotifier, Mailer};
+use crate::mailer::Mailer;
 use crate::{ServeOptions, api, git, sites};
 
 const SERVING_ENGINE_POOL_SIZE: usize = 8;
@@ -44,14 +43,12 @@ pub struct AppState {
     /// bytes across active versions.
     pub blobs: BlobStore,
     pub mailer: Box<dyn Mailer>,
-    pub identity_notifier: Option<IdentityNotifier>,
     /// Owns app isolation (the runner) plus the density policy: wake on
     /// request, stop when idle.
     pub apps: Supervisor,
     pub login_limiter: RateLimiter,
     pub api_url: String,
     pub git_base_url: String,
-    pub identity_authority: Option<IdentityAuthority>,
     pub viewer_session_service_token: Option<String>,
     pub base_domain: String,
     pub document_base_domain: String,
@@ -303,10 +300,6 @@ pub async fn serve_on(
     options: ServeOptions,
 ) -> Result<(), String> {
     crate::validate_viewer_session_service_token(options.viewer_session_service_token.as_deref())?;
-    crate::validate_identity_sites_notification_token(
-        options.identity_authority_url.as_deref(),
-        options.identity_sites_notification_token.as_deref(),
-    )?;
     git::preflight_git_dependency().map_err(|error| {
         format!(
             "Git dependency preflight failed: {error}. Install Git and make it available on PATH"
@@ -320,19 +313,10 @@ pub async fn serve_on(
         serving_engines,
         blobs,
         mailer,
-        identity_notifier: options
-            .identity_authority_url
-            .as_deref()
-            .zip(options.identity_sites_notification_token.clone())
-            .map(|(url, token)| IdentityNotifier::new(url, token)),
         apps,
         login_limiter: RateLimiter::new(WINDOW_SECONDS),
         api_url: options.api_url.clone(),
         git_base_url: options.git_base_url.clone(),
-        identity_authority: options
-            .identity_authority_url
-            .as_ref()
-            .map(IdentityAuthority::new),
         viewer_session_service_token: options.viewer_session_service_token.clone(),
         base_domain: options.base_domain.clone(),
         document_base_domain: options.document_base_domain.clone(),
@@ -408,9 +392,6 @@ fn reconcile_apps(state: &Arc<AppState>) {
 }
 
 fn deliver_pending_site_notifications(state: &Arc<AppState>) {
-    let Some(notifier) = state.identity_notifier.as_ref() else {
-        return;
-    };
     let pending = {
         let engine = state.engine.lock().expect("engine mutex never poisoned");
         let pending = match engine.pending_site_notifications(32) {
@@ -441,8 +422,7 @@ fn deliver_pending_site_notifications(state: &Arc<AppState>) {
     };
     for (notification, site_url) in pending {
         let result = match notification.kind.as_str() {
-            "first_publication" => notifier.send_first_publication(
-                &notification.idempotency_key,
+            "first_publication" => state.mailer.send_first_publication(
                 &notification.email,
                 &notification.site_name,
                 &site_url,

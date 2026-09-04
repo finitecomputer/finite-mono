@@ -1,13 +1,15 @@
 //! HTTP client for the Finite Sites API. Every request is signed with
 //! NIP-98 over the exact URL and method, with the body hash bound for
-//! requests that carry one.
+//! requests that carry one. The only Identity Directory call left is NIP-05
+//! name resolution; email proofs are daemon-local.
 
 use finitesites_proto::dto::{
-    ApiErrorBody, AuthRegisterResponse, EmailLoginResponse, EmailRedeemResponse, GitAuthRequest,
-    GitAuthResponse, ProjectGrantRequest, ProjectGrantResponse, ProjectInitRequest,
-    ProjectInitResponse, ProjectListResponse, ProjectOutputSharingResponse, ProjectRevokeRequest,
-    ProjectRevokeResponse, ProjectStatusResponse, SharingRequest,
-    SitesAuthorizedKeyRegisterRequest, SitesAuthorizedKeyResponse, SitesAuthorizedKeyRevokeRequest,
+    ApiErrorBody, AuthRegisterResponse, EmailLoginRequest, EmailLoginResponse, EmailRedeemRequest,
+    EmailRedeemResponse, GitAuthRequest, GitAuthResponse, ProjectGrantRequest,
+    ProjectGrantResponse, ProjectInitRequest, ProjectInitResponse, ProjectListResponse,
+    ProjectOutputSharingResponse, ProjectRevokeRequest, ProjectRevokeResponse,
+    ProjectStatusResponse, SharingRequest, SitesAuthorizedKeyRegisterRequest,
+    SitesAuthorizedKeyResponse, SitesAuthorizedKeyRevokeRequest,
 };
 use finitesites_proto::nip98;
 
@@ -42,9 +44,9 @@ fn now_unix() -> u64 {
     now as u64
 }
 
+/// The shrunken finite-identity is only a NIP-05 name directory for fsite.
 pub struct IdentityAuthorityClient {
     base_url: String,
-    client: finite_identity::client::IdentityClient,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Deserialize)]
@@ -55,21 +57,10 @@ pub struct Nip05Resolution {
     pub kind: String,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, serde::Deserialize)]
-pub struct MailboxProof {
-    pub proof: String,
-    pub email: String,
-    pub pubkey: String,
-    pub expires_at: u64,
-}
-
 impl IdentityAuthorityClient {
     pub fn from_env() -> Self {
         let base_url = identity_base_url_from_env_value(std::env::var(IDENTITY_AUTHORITY_ENV).ok());
-        Self {
-            client: finite_identity::client::IdentityClient::new(&base_url),
-            base_url,
-        }
+        Self { base_url }
     }
 
     pub fn resolve_nip05(&self, name: &str) -> Result<Option<Nip05Resolution>, CliError> {
@@ -84,123 +75,6 @@ impl IdentityAuthorityClient {
             }
         }
     }
-
-    pub fn satisfies_grant(
-        &self,
-        key: &KeyFile,
-        grant: &str,
-        actor_pubkey: &str,
-    ) -> Result<bool, CliError> {
-        let key = identity_key(key)?;
-        let request = self
-            .client
-            .satisfies_grant(&key, grant, actor_pubkey, now_unix())
-            .map_err(|error| CliError::Key(error.to_string()))?;
-        let value: serde_json::Value = self.send_signed_json(request)?;
-        value
-            .get("satisfied")
-            .and_then(serde_json::Value::as_bool)
-            .ok_or_else(|| {
-                CliError::Api("identity authority response missing satisfied".to_string())
-            })
-    }
-
-    pub fn request_email_challenge(&self, email: &str) -> Result<EmailLoginResponse, CliError> {
-        let body = self
-            .client
-            .email_challenge_body(email)
-            .map_err(|error| CliError::Key(error.to_string()))?;
-        let url = format!("{}/api/v1/email-challenges", self.base_url);
-        let response = ureq::post(&url)
-            .set("Content-Type", "application/json")
-            .send_json(body);
-        identity_response_json(response, "POST", "/api/v1/email-challenges")
-    }
-
-    pub fn redeem_email_only(
-        &self,
-        key: &KeyFile,
-        email: &str,
-        token: &str,
-    ) -> Result<EmailRedeemResponse, CliError> {
-        let key = identity_key(key)?;
-        let request = self
-            .client
-            .email_only_redeem(&key, email, token, now_unix())
-            .map_err(|error| CliError::Key(error.to_string()))?;
-        let response: serde_json::Value = self.send_signed_json(request)?;
-        let email = response
-            .get("email")
-            .and_then(serde_json::Value::as_str)
-            .ok_or_else(|| CliError::Api("identity authority response missing email".into()))?;
-        let pubkey = response
-            .get("pubkey")
-            .and_then(serde_json::Value::as_str)
-            .ok_or_else(|| CliError::Api("identity authority response missing pubkey".into()))?;
-        Ok(EmailRedeemResponse {
-            email: email.to_owned(),
-            pubkey: pubkey.to_owned(),
-            linked_to_native_principal: false,
-        })
-    }
-
-    pub fn redeem_vip_email(
-        &self,
-        key: &KeyFile,
-        email: &str,
-        token: &str,
-    ) -> Result<EmailRedeemResponse, CliError> {
-        let key = identity_key(key)?;
-        let request = self
-            .client
-            .vip_email_binding_redeem(&key, email, token, now_unix())
-            .map_err(|error| CliError::Key(error.to_string()))?;
-        let response: serde_json::Value = self.send_signed_json(request)?;
-        let email = response
-            .get("email")
-            .and_then(serde_json::Value::as_str)
-            .ok_or_else(|| CliError::Api("identity authority response missing email".into()))?;
-        let pubkey = response
-            .get("pubkey")
-            .and_then(serde_json::Value::as_str)
-            .ok_or_else(|| CliError::Api("identity authority response missing pubkey".into()))?;
-        Ok(EmailRedeemResponse {
-            email: email.to_owned(),
-            pubkey: pubkey.to_owned(),
-            linked_to_native_principal: true,
-        })
-    }
-
-    pub fn redeem_mailbox_proof(
-        &self,
-        key: &KeyFile,
-        email: &str,
-        token: &str,
-    ) -> Result<MailboxProof, CliError> {
-        let identity_key = identity_key(key)?;
-        let request = self
-            .client
-            .mailbox_proof_redeem(&identity_key, email, token, now_unix())
-            .map_err(|error| CliError::Key(error.to_string()))?;
-        self.send_signed_json(request)
-    }
-
-    fn send_signed_json<T: serde::de::DeserializeOwned>(
-        &self,
-        signed: finite_identity::client::SignedJsonRequest,
-    ) -> Result<T, CliError> {
-        let url = format!("{}{}", self.base_url, signed.path);
-        let response = ureq::request(&signed.method, &url)
-            .set("Content-Type", "application/json")
-            .set("Authorization", &signed.authorization)
-            .send_bytes(&signed.body);
-        identity_response_json(response, &signed.method, &signed.path)
-    }
-}
-
-fn identity_key(key: &KeyFile) -> Result<finite_identity::client::LocalIdentityKey, CliError> {
-    finite_identity::client::LocalIdentityKey::from_secret(key.secret)
-        .map_err(|error| CliError::Key(error.to_string()))
 }
 
 fn identity_response_json<T: serde::de::DeserializeOwned>(
@@ -314,13 +188,66 @@ impl Client {
         self.request(key, "POST", "/api/v1/auth/register", Some(&[]))
     }
 
+    /// Ask the daemon to email a one-time verification token. Anonymous by
+    /// design; the server rate-limits and the token is the proof.
+    pub fn request_email_login(&self, email: &str) -> Result<EmailLoginResponse, CliError> {
+        let body = serde_json::to_vec(&EmailLoginRequest {
+            email: email.to_string(),
+        })
+        .expect("request serializes");
+        // Anonymous by design, so this cannot use the signed helper; keep the
+        // Sites-client `"{}{}"` URL style so the Identity edge gate's
+        // direct-call pattern does not mistake this daemon-local route for a
+        // Directory call.
+        let url = format!("{}{}", self.base_url, "/api/v1/email-auth/request");
+        let response = ureq::post(&url)
+            .set("Content-Type", "application/json")
+            .send_bytes(&body);
+        match response {
+            Ok(response) => response
+                .into_json::<EmailLoginResponse>()
+                .map_err(|error| CliError::Api(format!("invalid response from server: {error}"))),
+            Err(ureq::Error::Status(code, response)) => {
+                let body = response.into_json::<ApiErrorBody>().ok();
+                Err(CliError::ApiStatus {
+                    method: "POST".to_string(),
+                    path: "/api/v1/email-auth/request".to_string(),
+                    status: code,
+                    code: body.as_ref().map(|body| body.error.clone()),
+                    message: body
+                        .map(|body| body.message)
+                        .unwrap_or_else(|| "no error details".to_string()),
+                })
+            }
+            Err(transport) => Err(CliError::Http(format!(
+                "POST {url} failed: {transport} (is finitesitesd running?)"
+            ))),
+        }
+    }
+
+    pub fn redeem_email_login(
+        &self,
+        key: &KeyFile,
+        email: &str,
+        token: &str,
+    ) -> Result<EmailRedeemResponse, CliError> {
+        let body = serde_json::to_vec(&EmailRedeemRequest {
+            email: email.to_string(),
+            token: token.to_string(),
+        })
+        .expect("request serializes");
+        self.request(key, "POST", "/api/v1/email-auth/redeem", Some(&body))
+    }
+
     pub fn register_sites_authorized_key(
         &self,
         key: &KeyFile,
-        mailbox_proof: &str,
+        email: &str,
+        token: &str,
     ) -> Result<SitesAuthorizedKeyResponse, CliError> {
         let body = serde_json::to_vec(&SitesAuthorizedKeyRegisterRequest {
-            mailbox_proof: mailbox_proof.to_string(),
+            email: email.to_string(),
+            token: token.to_string(),
         })
         .expect("request serializes");
         self.request(
@@ -334,11 +261,13 @@ impl Client {
     pub fn revoke_sites_authorized_key(
         &self,
         key: &KeyFile,
-        mailbox_proof: &str,
+        email: &str,
+        token: &str,
         target_npub: &str,
     ) -> Result<SitesAuthorizedKeyResponse, CliError> {
         let body = serde_json::to_vec(&SitesAuthorizedKeyRevokeRequest {
-            mailbox_proof: mailbox_proof.to_string(),
+            email: email.to_string(),
+            token: token.to_string(),
             target_npub: target_npub.to_string(),
         })
         .expect("request serializes");

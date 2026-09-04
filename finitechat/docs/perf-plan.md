@@ -2,8 +2,7 @@
 
 Date: 2026-06-11. Executes the Tier 1/Tier 2 findings from
 `docs/perf-audit.md` and queues the protocol decisions from
-`docs/feature-audit-marmot-pika.md`. The running measurement/observation
-ledger lives in `docs/perf-log.md`.
+`docs/feature-audit-marmot-pika.md`.
 
 ## Scale target for this phase
 
@@ -30,14 +29,14 @@ the product); the plan removes the work that is not the fsync.
 1. **Baseline first.** Ignored release-mode timing tests
    (`finitechat-server/tests/perf_baseline.rs`,
    `finitechat-client/tests/perf_baseline.rs`) capture numbers before any
-   change. Same harness re-runs after each phase. Numbers go in
-   `docs/perf-log.md`, not in test assertions (no flaky CI thresholds).
+   change. Same harness re-runs after each phase. Numbers belong in review
+   evidence, not in test assertions (no flaky CI thresholds).
 2. **Tests are the safety rail.** Every change must keep
    `cargo test --workspace`, clippy `-D warnings`, the Python suite, and the
    delivery conformance tests green. The crash matrices pin the
    durability semantics each optimization must preserve.
-3. **Log as we go.** Every measurement, surprise, deferred idea, and
-   redundant-validation observation goes in `docs/perf-log.md`.
+3. **Record durable findings.** Keep measurements in the change evidence and
+   promote only durable decisions back into current docs.
 
 ## Phases
 
@@ -85,7 +84,8 @@ the product); the plan removes the work that is not the fsync.
 
 ### Phase D — validation
 
-Re-run the harness; compare against baseline; record in `docs/perf-log.md`.
+Re-run the harness, compare against baseline, and record the evidence with the
+change.
 Full workspace verification. Ship.
 
 ### Phase E — queued next (not this turn)

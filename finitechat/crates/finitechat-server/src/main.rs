@@ -3,27 +3,22 @@ use std::fs;
 use std::net::SocketAddr;
 use std::path::Path;
 
-use finitechat_server::{HttpServerState, http_router};
-
-mod push;
+use finitechat_server::{
+    DEFAULT_RATE_LIMIT_PER_WINDOW, DEFAULT_RATE_LIMIT_WINDOW_SECONDS, HttpServerState, http_router,
+};
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let args = env::args().skip(1).collect::<Vec<_>>();
     match args.first().map(String::as_str) {
         Some("serve") => serve(&args[1..]).await,
-        Some("push-drain") => {
-            let command = push::parse_push_drain_command(&args[1..])?;
-            push::run_push_drain(command)?;
-            Ok(())
-        }
         Some("snapshot") => {
             let options = ServeOptions::parse(&args[1..])?;
             let Some(path) = options.sqlite_path else {
                 return Err("snapshot requires --sqlite PATH".into());
             };
-            // Boot (snapshot + op-log tail replay) and write a fresh durable
-            // snapshot, so an operator can compact a stopped server's store
+            // Boot and write a fresh room-state checkpoint, so an operator
+            // can compact a stopped server's boot tail.
             // without waiting for the op-interval trigger.
             let state = finitechat_server::HttpServerState::from_sqlite_path(&path)?;
             state
@@ -32,12 +27,29 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             println!("finitechat-server: state snapshot written to {path}");
             Ok(())
         }
+        Some("rollback-check") => {
+            let options = ServeOptions::parse(&args[1..])?;
+            let Some(path) = options.sqlite_path else {
+                return Err("rollback-check requires --sqlite PATH".into());
+            };
+            // Read-only verdict on whether restoring the pre-fold backup
+            // over this database can still rewind no client (chat store
+            // swap rollback window). Exit 0 only when it can.
+            let check = finitechat_server::rollback_check(Path::new(&path))?;
+            println!("{}", serde_json::to_string(&check)?);
+            if check.rollback_allowed {
+                Ok(())
+            } else {
+                eprintln!("finitechat-server: rollback refused: {}", check.reason);
+                std::process::exit(1)
+            }
+        }
         Some("smoke") | None => {
             smoke();
             Ok(())
         }
         Some(command) => Err(format!(
-            "unknown command '{command}'; expected 'serve [addr] [--sqlite PATH] [--public-url URL]', 'snapshot --sqlite PATH', 'push-drain [options]', or 'smoke'"
+            "unknown command '{command}'; expected 'serve [addr] [--sqlite PATH] [--public-url URL]', 'snapshot --sqlite PATH', 'rollback-check --sqlite PATH', or 'smoke'"
         )
         .into()),
     }
@@ -55,14 +67,30 @@ async fn serve(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
             create_sqlite_parent_dir(&path)?;
             HttpServerState::from_sqlite_path(path)?
         }
-        None => HttpServerState::default(),
+        None => {
+            // In-memory servers have no durable state to roll back, but the
+            // banner keeps the transitional window visible on every boot.
+            finitechat_server::print_engine_rollout_banner();
+            HttpServerState::new()
+        }
     };
     if let Some(public_url) = public_url {
         state = state.with_public_url(public_url)?;
     }
+    if options.require_signed_requests {
+        state = state.with_require_signed_requests(true);
+    }
+    state = state.with_rate_limit(
+        options.rate_limit_per_window,
+        options.rate_limit_window_seconds,
+    );
     let listener = tokio::net::TcpListener::bind(addr).await?;
     println!("finitechat-server: listening on http://{addr}");
-    axum::serve(listener, http_router(state)).await?;
+    axum::serve(
+        listener,
+        http_router(state).into_make_service_with_connect_info::<SocketAddr>(),
+    )
+    .await?;
     Ok(())
 }
 
@@ -92,6 +120,9 @@ struct ServeOptions {
     addr: String,
     sqlite_path: Option<String>,
     public_url: Option<String>,
+    require_signed_requests: bool,
+    rate_limit_per_window: u32,
+    rate_limit_window_seconds: u64,
 }
 
 impl ServeOptions {
@@ -131,8 +162,36 @@ impl ServeOptions {
             addr: addr.unwrap_or_else(|| "127.0.0.1:8787".to_owned()),
             sqlite_path,
             public_url,
+            // Mixed-version gate: old deployed clients send no NIP-98
+            // Authorization header, so signed requests are opt-in until the
+            // fleet upgrades.
+            require_signed_requests: env::var("FINITECHAT_REQUIRE_SIGNED_REQUESTS")
+                .map(|value| value.trim().eq_ignore_ascii_case("true") || value.trim() == "1")
+                .unwrap_or(false),
+            rate_limit_per_window: env_u32(
+                "FINITECHAT_RATE_LIMIT_PER_WINDOW",
+                DEFAULT_RATE_LIMIT_PER_WINDOW,
+            ),
+            rate_limit_window_seconds: env_u64(
+                "FINITECHAT_RATE_LIMIT_WINDOW_SECONDS",
+                DEFAULT_RATE_LIMIT_WINDOW_SECONDS,
+            ),
         })
     }
+}
+
+fn env_u32(name: &str, default: u32) -> u32 {
+    env::var(name)
+        .ok()
+        .and_then(|value| value.trim().parse().ok())
+        .unwrap_or(default)
+}
+
+fn env_u64(name: &str, default: u64) -> u64 {
+    env::var(name)
+        .ok()
+        .and_then(|value| value.trim().parse().ok())
+        .unwrap_or(default)
 }
 
 #[cfg(test)]

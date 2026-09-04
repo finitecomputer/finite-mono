@@ -1,21 +1,24 @@
 use axum::Router;
 use axum::body::{Body, to_bytes};
 use axum::http::{Method, Request, StatusCode};
+use finitechat_client::rejected_entry_diagnostic::RejectedEntryErrorClass;
 use finitechat_client::{
     AppliedLogEntry, ClientError, ClientStoreError, FiniteChatDevice, FiniteChatDeviceConfig,
     HttpRuntimeDelivery, HttpRuntimeDeliveryError, HttpRuntimeTransport, LinkFanoutRoomStatus,
     ReqwestHttpRuntimeTransport, ReqwestHttpRuntimeTransportError, RuntimeDelivery,
-    RuntimeLinkFanoutOptions, RuntimeSyncOptions, RuntimeWorkerError, SqliteClientStore,
-    SqliteClientStoreOptions, run_link_fanout_tick, run_runtime_sync_tick,
+    RuntimeLinkFanoutOptions, RuntimeRekeySkippedEntry, RuntimeSyncOptions, RuntimeWorkerError,
+    SqliteClientStore, SqliteClientStoreOptions, WelcomeAdmissionPolicy, run_link_fanout_tick,
+    run_runtime_rekey_room, run_runtime_sync_tick,
 };
 use finitechat_delivery::MAX_HTTP_SYNC_PAGE_ENTRIES;
 use finitechat_http::{SyncHintEvent, SyncStreamRequest, SyncWaitRoom};
 use finitechat_mls::{NOSTR_SECRET_KEY_BYTES, NostrSecretKey};
 use finitechat_proto::LogEntryKind;
 use finitechat_proto::{
-    AppendEventRequest, CreateRoomRequest, DurableAppEventKind, EventAccepted,
-    ListAccountRoomsRequest, RoomProtocol, RoomSyncProjection, WelcomeRecord, envelope,
-    lease_token_for,
+    AppendEventRequest, ClaimKeyPackageResult, CommitAccepted, CreateRoomRequest, DeviceRef,
+    DurableAppEventKind, EventAccepted, KeyPackageInventory, ListAccountRoomsPage,
+    ListAccountRoomsRequest, RoomProtocol, RoomSyncProjection, SubmitCommitRequest, SyncEventsPage,
+    UploadKeyPackageRequest, WelcomeRecord, envelope, lease_token_for,
 };
 use finitechat_server::{HttpServerState, http_router};
 use rusqlite::{Connection, params};
@@ -272,6 +275,53 @@ fn reqwest_http_runtime_delivery_claims_key_package_over_live_server() {
 }
 
 #[test]
+fn reqwest_http_runtime_delivery_signs_account_scoped_requests_over_live_server() {
+    let dir = tempfile::tempdir().unwrap();
+    let server_db = dir.path().join("finitechat-http-live-auth.sqlite3");
+    let state = HttpServerState::from_sqlite_path(&server_db)
+        .unwrap()
+        .with_require_signed_requests(true);
+    let server_url = spawn_live_http_server_with_state(state);
+    let alice = test_device(ALICE_ACCOUNT_SECRET_BYTES, "alice_http_live_auth");
+    let profile = finitechat_http::NostrProfileRecord {
+        account_id: alice.device_ref().account_id.clone(),
+        name: Some("alice".to_owned()),
+        display_name: None,
+        about: None,
+        picture: None,
+        bot: None,
+        finite_role: None,
+        metadata_json: None,
+        fetched_at_ms: 1_000,
+        expires_at_ms: 60_000,
+    };
+
+    // Without a signer the account-scoped route rejects the request.
+    let mut unsigned =
+        HttpRuntimeDelivery::new(ReqwestHttpRuntimeTransport::new(server_url.clone()));
+    let rejected = unsigned.put_nostr_profile(&profile);
+    assert!(
+        matches!(
+            rejected,
+            Err(HttpRuntimeDeliveryError::Transport(
+                ReqwestHttpRuntimeTransportError::Server {
+                    status: StatusCode::UNAUTHORIZED,
+                    ..
+                }
+            ))
+        ),
+        "unsigned request must be rejected: {rejected:?}"
+    );
+
+    // The signed transport authenticates as the account named in the body.
+    let mut signed = HttpRuntimeDelivery::new(
+        ReqwestHttpRuntimeTransport::new(server_url).with_signer(ALICE_ACCOUNT_SECRET_BYTES),
+    );
+    let saved = signed.put_nostr_profile(&profile).unwrap();
+    assert!(saved.saved);
+}
+
+#[test]
 fn reqwest_http_runtime_delivery_reads_sync_stream_hints_over_live_server() {
     let dir = tempfile::tempdir().unwrap();
     let server_db = dir.path().join("finitechat-http-live-sse.sqlite3");
@@ -443,6 +493,293 @@ fn runtime_sync_tick_claims_and_acks_welcomes_over_finitechat_http_routes() {
     assert_eq!(replay.claimed_welcomes, 0);
     assert_eq!(replay.activated_welcome_acks_sent, 0);
     delivery.ack_welcome("welcome_http_runtime_alice").unwrap();
+}
+
+#[test]
+fn runtime_sync_tick_admits_welcome_from_allowlisted_sender() {
+    let dir = tempfile::tempdir().unwrap();
+    let server_db = dir.path().join("finitechat-http.sqlite3");
+    let alice_config = test_config(ALICE_ACCOUNT_SECRET_BYTES, "alice_http_allowlisted_welcome");
+    let mut alice_store = sqlite_client_store(dir.path().join("alice.sqlite3"), &alice_config);
+    let mut alice = FiniteChatDevice::new(alice_config.clone()).unwrap();
+    let mut bob = test_device(BOB_ACCOUNT_SECRET_BYTES, "bob_http_allowlisted_sender");
+    let options = RuntimeSyncOptions {
+        key_package_target_available: 0,
+        max_sync_pages_per_room: 4,
+    };
+    alice_store.save_device_state(&alice).unwrap();
+    alice_store
+        .set_welcome_admission_policy(alice.device_ref(), WelcomeAdmissionPolicy::Allowlist)
+        .unwrap();
+    alice_store
+        .add_welcome_allowed_senders(alice.device_ref(), [bob.device_ref().account_id.clone()])
+        .unwrap();
+
+    let mut delivery = HttpRuntimeDelivery::from_sqlite_path(&server_db);
+    bob.create_group_state(ROOM_ID, MLS_GROUP_ID).unwrap();
+    delivery
+        .bootstrap_account_room(&CreateRoomRequest {
+            room_id: ROOM_ID.to_owned(),
+            mls_group_id: MLS_GROUP_ID.to_owned(),
+            creator: bob.device_ref().clone(),
+            protocol: RoomProtocol::default(),
+        })
+        .unwrap();
+    delivery
+        .upload_key_package(
+            alice
+                .upload_key_package_request("kp_http_allowlisted_alice")
+                .unwrap(),
+        )
+        .unwrap();
+    let claimed_key_package = delivery
+        .claim_key_package_for_device(alice.device_ref())
+        .unwrap()
+        .expect("alice package");
+    let prepared = bob
+        .prepare_add_member_commit(
+            ROOM_ID,
+            &claimed_key_package,
+            "welcome_http_allowlisted_alice",
+            "commit_http_allowlisted_alice",
+        )
+        .unwrap();
+    let accepted = delivery.submit_commit(prepared.request).unwrap();
+
+    let report =
+        run_runtime_sync_tick(&mut alice_store, &mut alice, &mut delivery, &options).unwrap();
+    assert_eq!(report.claimed_welcomes, 1);
+    assert_eq!(report.denied_welcomes, 0);
+    assert_eq!(report.activated_welcome_acks_sent, 1);
+    assert_eq!(alice.group_epoch(ROOM_ID).unwrap(), 1);
+    assert_eq!(alice.last_applied_seq(ROOM_ID).unwrap(), accepted.seq);
+    assert_eq!(alice.pending_welcome_count(), 0);
+    assert_eq!(alice.pending_welcome_ack_count(), 0);
+}
+
+#[test]
+fn runtime_sync_tick_denies_and_discards_welcome_from_unallowlisted_sender() {
+    let dir = tempfile::tempdir().unwrap();
+    let server_db = dir.path().join("finitechat-http.sqlite3");
+    let alice_config = test_config(ALICE_ACCOUNT_SECRET_BYTES, "alice_http_denied_welcome");
+    let mut alice_store = sqlite_client_store(dir.path().join("alice.sqlite3"), &alice_config);
+    let mut alice = FiniteChatDevice::new(alice_config.clone()).unwrap();
+    let mut bob = test_device(BOB_ACCOUNT_SECRET_BYTES, "bob_http_denied_sender");
+    let charlie = test_device(
+        CHARLIE_ACCOUNT_SECRET_BYTES,
+        "charlie_http_denied_bystander",
+    );
+    let options = RuntimeSyncOptions {
+        key_package_target_available: 0,
+        max_sync_pages_per_room: 4,
+    };
+    alice_store.save_device_state(&alice).unwrap();
+    // The allowlist names only Charlie; Bob's Welcome must be discarded.
+    alice_store
+        .set_welcome_admission_policy(alice.device_ref(), WelcomeAdmissionPolicy::Allowlist)
+        .unwrap();
+    alice_store
+        .add_welcome_allowed_senders(
+            alice.device_ref(),
+            [charlie.device_ref().account_id.clone()],
+        )
+        .unwrap();
+
+    let mut delivery = HttpRuntimeDelivery::from_sqlite_path(&server_db);
+    bob.create_group_state(ROOM_ID, MLS_GROUP_ID).unwrap();
+    delivery
+        .bootstrap_account_room(&CreateRoomRequest {
+            room_id: ROOM_ID.to_owned(),
+            mls_group_id: MLS_GROUP_ID.to_owned(),
+            creator: bob.device_ref().clone(),
+            protocol: RoomProtocol::default(),
+        })
+        .unwrap();
+    delivery
+        .upload_key_package(
+            alice
+                .upload_key_package_request("kp_http_denied_alice")
+                .unwrap(),
+        )
+        .unwrap();
+    let claimed_key_package = delivery
+        .claim_key_package_for_device(alice.device_ref())
+        .unwrap()
+        .expect("alice package");
+    let prepared = bob
+        .prepare_add_member_commit(
+            ROOM_ID,
+            &claimed_key_package,
+            "welcome_http_denied_alice",
+            "commit_http_denied_alice",
+        )
+        .unwrap();
+    delivery.submit_commit(prepared.request).unwrap();
+
+    let report =
+        run_runtime_sync_tick(&mut alice_store, &mut alice, &mut delivery, &options).unwrap();
+    assert_eq!(report.claimed_welcomes, 1);
+    assert_eq!(report.denied_welcomes, 1);
+    assert_eq!(report.activated_welcome_acks_sent, 0);
+    assert!(alice.group_epoch(ROOM_ID).is_err());
+    assert_eq!(alice.pending_welcome_count(), 0);
+    assert_eq!(alice.pending_welcome_ack_count(), 0);
+
+    // The discarded Welcome was claimed server-side, so the next tick does
+    // not re-deliver it (no redelivery loop) and still does not ack it.
+    let mut alice = alice_store.load_device(alice_config).unwrap();
+    let mut delivery = HttpRuntimeDelivery::from_sqlite_path(&server_db);
+    let replay =
+        run_runtime_sync_tick(&mut alice_store, &mut alice, &mut delivery, &options).unwrap();
+    assert_eq!(replay.claimed_welcomes, 0);
+    assert_eq!(replay.denied_welcomes, 0);
+    assert_eq!(replay.activated_welcome_acks_sent, 0);
+}
+
+#[test]
+fn runtime_sync_tick_admits_same_account_welcome_with_empty_allowlist() {
+    let dir = tempfile::tempdir().unwrap();
+    let server_db = dir.path().join("finitechat-http.sqlite3");
+    let phone_config = test_config(ALICE_ACCOUNT_SECRET_BYTES, "alice_http_allowlist_phone");
+    let mut phone_store = sqlite_client_store(dir.path().join("phone.sqlite3"), &phone_config);
+    let mut alice = test_device(ALICE_ACCOUNT_SECRET_BYTES, "alice_http_allowlist_desktop");
+    let mut alice_phone = FiniteChatDevice::new(phone_config.clone()).unwrap();
+    let options = RuntimeSyncOptions {
+        key_package_target_available: 0,
+        max_sync_pages_per_room: 4,
+    };
+    phone_store.save_device_state(&alice_phone).unwrap();
+    // Device-link regression guard: an allowlist policy with no entries must
+    // still admit a Welcome sent by the same account (linked device flow).
+    phone_store
+        .set_welcome_admission_policy(alice_phone.device_ref(), WelcomeAdmissionPolicy::Allowlist)
+        .unwrap();
+
+    let mut delivery = HttpRuntimeDelivery::from_sqlite_path(&server_db);
+    alice.create_group_state(ROOM_ID, MLS_GROUP_ID).unwrap();
+    delivery
+        .bootstrap_account_room(&CreateRoomRequest {
+            room_id: ROOM_ID.to_owned(),
+            mls_group_id: MLS_GROUP_ID.to_owned(),
+            creator: alice.device_ref().clone(),
+            protocol: RoomProtocol::default(),
+        })
+        .unwrap();
+    delivery
+        .upload_key_package(
+            alice_phone
+                .upload_key_package_request("kp_http_allowlist_phone")
+                .unwrap(),
+        )
+        .unwrap();
+    let claimed_key_package = delivery
+        .claim_key_package_for_device(alice_phone.device_ref())
+        .unwrap()
+        .expect("alice phone package");
+    let prepared = alice
+        .prepare_add_member_commit(
+            ROOM_ID,
+            &claimed_key_package,
+            "welcome_http_allowlist_phone",
+            "commit_http_allowlist_phone",
+        )
+        .unwrap();
+    delivery.submit_commit(prepared.request).unwrap();
+
+    let report =
+        run_runtime_sync_tick(&mut phone_store, &mut alice_phone, &mut delivery, &options).unwrap();
+    assert_eq!(report.claimed_welcomes, 1);
+    assert_eq!(report.denied_welcomes, 0);
+    assert_eq!(report.activated_welcome_acks_sent, 1);
+    assert_eq!(alice_phone.group_epoch(ROOM_ID).unwrap(), 1);
+    assert_eq!(alice_phone.pending_welcome_count(), 0);
+    assert_eq!(alice_phone.pending_welcome_ack_count(), 0);
+}
+
+#[test]
+fn welcome_allowlist_store_supports_list_and_remove() {
+    let dir = tempfile::tempdir().unwrap();
+    let alice_config = test_config(ALICE_ACCOUNT_SECRET_BYTES, "alice_allowlist_store");
+    let mut alice_store = sqlite_client_store(dir.path().join("alice.sqlite3"), &alice_config);
+    let bob = test_device(BOB_ACCOUNT_SECRET_BYTES, "bob_allowlist_store");
+    let owner = test_device(ALICE_ACCOUNT_SECRET_BYTES, "alice_allowlist_store")
+        .device_ref()
+        .clone();
+    let bob_account = bob.device_ref().account_id.clone();
+    let charlie_account = "c".repeat(64);
+
+    // No policy row: the configured probe is empty and the effective policy
+    // stays the legacy allow-all.
+    assert_eq!(
+        alice_store
+            .configured_welcome_admission_policy(&owner)
+            .unwrap(),
+        None
+    );
+    assert_eq!(
+        alice_store.welcome_admission_policy(&owner).unwrap(),
+        WelcomeAdmissionPolicy::AllowAll
+    );
+    assert_eq!(
+        alice_store.welcome_allowed_senders(&owner).unwrap(),
+        Vec::<String>::new()
+    );
+
+    alice_store
+        .set_welcome_admission_policy(&owner, WelcomeAdmissionPolicy::Allowlist)
+        .unwrap();
+    alice_store
+        .add_welcome_allowed_senders(&owner, [charlie_account.clone(), bob_account.clone()])
+        .unwrap();
+    assert_eq!(
+        alice_store
+            .configured_welcome_admission_policy(&owner)
+            .unwrap(),
+        Some(WelcomeAdmissionPolicy::Allowlist)
+    );
+    // Sorted for a stable mirror rendering.
+    assert_eq!(
+        alice_store.welcome_allowed_senders(&owner).unwrap(),
+        vec![bob_account.clone(), charlie_account.clone()]
+    );
+
+    assert!(
+        alice_store
+            .remove_welcome_allowed_sender(&owner, &bob_account)
+            .unwrap()
+    );
+    // A duplicate revoke is an idempotent no-op.
+    assert!(
+        !alice_store
+            .remove_welcome_allowed_sender(&owner, &bob_account)
+            .unwrap()
+    );
+    assert_eq!(
+        alice_store.welcome_allowed_senders(&owner).unwrap(),
+        vec![charlie_account.clone()]
+    );
+    assert!(
+        alice_store
+            .welcome_sender_allowed(&owner, &charlie_account)
+            .unwrap()
+    );
+    assert!(
+        !alice_store
+            .welcome_sender_allowed(&owner, &bob_account)
+            .unwrap()
+    );
+
+    // An explicit allow-all row is distinguishable from an absent row, so
+    // boot seeding never overwrites a deliberate operator choice.
+    alice_store
+        .set_welcome_admission_policy(&owner, WelcomeAdmissionPolicy::AllowAll)
+        .unwrap();
+    assert_eq!(
+        alice_store
+            .configured_welcome_admission_policy(&owner)
+            .unwrap(),
+        Some(WelcomeAdmissionPolicy::AllowAll)
+    );
 }
 
 #[test]
@@ -967,6 +1304,9 @@ fn runtime_removed_device_processes_removal_but_not_future_http_ciphertext() {
     let stale_charlie_state = charlie.export_state().unwrap();
     let mut stale_charlie =
         FiniteChatDevice::from_state(charlie_config, stale_charlie_state).unwrap();
+    // This test deliberately sends from a stale state to pin the server's
+    // membership rejection; step around the client-side currency gate.
+    stale_charlie.bypass_currency_gate_for_tests(room_id);
 
     let remove_charlie = bob
         .prepare_remove_member_commit(room_id, stale_charlie.device_ref(), "remove_charlie_http")
@@ -2304,6 +2644,976 @@ fn runtime_link_fanout_reprepares_after_http_same_epoch_loss() {
     assert_eq!(alice_phone.group_epoch(room_id).unwrap(), 3);
 }
 
+/// The sender-rewind incident class, end to end: a sender whose durable MLS
+/// state was restored from an older snapshot keeps having messages ACCEPTED
+/// by the server while the receiver quarantines every entry and freezes its
+/// room cursor. The receiver's frozen tick aborts on the first undecryptable
+/// entry and can never reach a later commit, so the heal requires the exact
+/// order proven here: fresh device mint (NEW device id) → owner re-admission
+/// commit (epoch bump re-derives everyone's secret trees at generation 0) →
+/// receiver cursor skip past the quarantined pre-commit backlog.
+#[test]
+fn rewound_sender_wedges_receiver_and_heals_via_readdmission_epoch_bump() {
+    let dir = tempfile::tempdir().unwrap();
+    let server_db = dir.path().join("finitechat-http-rewind-heal.sqlite3");
+
+    // Owner (alice) and agent (bob), both with durable stores.
+    let alice_config = test_config(ALICE_ACCOUNT_SECRET_BYTES, "alice_http_rewind_heal");
+    let mut alice_store =
+        sqlite_client_store(dir.path().join("rewind_alice.sqlite3"), &alice_config);
+    let mut alice = FiniteChatDevice::new(alice_config.clone()).unwrap();
+    let bob_config = test_config(BOB_ACCOUNT_SECRET_BYTES, "bob_http_rewind_heal");
+    let bob_db = dir.path().join("rewind_bob.sqlite3");
+    let mut bob_store = sqlite_client_store(bob_db.clone(), &bob_config);
+    let mut bob = FiniteChatDevice::new(bob_config.clone()).unwrap();
+    let options = RuntimeSyncOptions {
+        key_package_target_available: 0,
+        max_sync_pages_per_room: 8,
+    };
+
+    let mut delivery = HttpRuntimeDelivery::from_sqlite_path(&server_db);
+    let add_seq = create_group_room_with_member(
+        &mut delivery,
+        &mut alice,
+        &mut bob,
+        GroupMemberSetup {
+            room_id: ROOM_ID,
+            mls_group_id: MLS_GROUP_ID,
+            key_package_id: "kp_http_rewind_bob",
+            welcome_id: "welcome_http_rewind_bob",
+            idempotency_key: "commit_http_rewind_bob",
+        },
+    );
+    // create_group_room_with_member already claimed and activated bob's
+    // welcome (bob's group is at epoch 1); mirror alice's cursor advance so
+    // both devices start even.
+    bob_store.save_device_state(&bob).unwrap();
+    bob_store
+        .advance_room_cursor_and_save(&mut bob, ROOM_ID, add_seq)
+        .unwrap();
+    assert_eq!(bob.group_epoch(ROOM_ID).unwrap(), 1);
+    alice_store
+        .advance_room_cursor_and_save(&mut alice, ROOM_ID, add_seq)
+        .unwrap();
+
+    // Healthy traffic: bob sends, alice receives and decrypts.
+    let healthy_plaintext =
+        br#"{"type":"finitecomputer.command.v1","body":{"text":"rewind healthy"}}"#;
+    let healthy = bob
+        .create_application_request(ROOM_ID, healthy_plaintext, "app_rewind_healthy")
+        .unwrap();
+    let healthy = delivery
+        .append_event(&healthy, DurableAppEventKind::ChatMessage.delivery_policy())
+        .unwrap();
+    let healthy_report =
+        run_runtime_sync_tick(&mut alice_store, &mut alice, &mut delivery, &options).unwrap();
+    assert_eq!(healthy_report.applied_entries.len(), 1);
+    assert_eq!(alice.last_applied_seq(ROOM_ID).unwrap(), healthy.seq);
+
+    // Rewind: persist bob's durable state (T1), let the ratchet advance across
+    // several sends the receiver consumes, then restore the T1 store files —
+    // the file-level restore is the production mechanism.
+    bob_store.save_device_state(&bob).unwrap();
+    let t1_db = dir.path().join("rewind_bob_t1.sqlite3");
+    let t1_wal = dir.path().join("rewind_bob_t1.sqlite3-wal");
+    std::fs::copy(&bob_db, &t1_db).unwrap();
+    if bob_db
+        .parent()
+        .unwrap()
+        .join("rewind_bob.sqlite3-wal")
+        .exists()
+    {
+        std::fs::copy(
+            bob_db.parent().unwrap().join("rewind_bob.sqlite3-wal"),
+            &t1_wal,
+        )
+        .unwrap();
+    }
+    let advanced_seqs: Vec<u64> = (0..4)
+        .map(|i| {
+            let plaintext = format!(
+                "{{\"type\":\"finitecomputer.command.v1\",\"body\":{{\"text\":\"advance {i}\"}}}}"
+            )
+            .into_bytes();
+            let request = bob
+                .create_application_request(ROOM_ID, &plaintext, format!("app_rewind_advance_{i}"))
+                .unwrap();
+            delivery
+                .append_event(&request, DurableAppEventKind::ChatMessage.delivery_policy())
+                .unwrap()
+                .seq
+        })
+        .collect();
+    let advanced_report =
+        run_runtime_sync_tick(&mut alice_store, &mut alice, &mut delivery, &options).unwrap();
+    assert_eq!(advanced_report.applied_entries.len(), 4);
+    let frozen_cursor = alice.last_applied_seq(ROOM_ID).unwrap();
+    assert_eq!(frozen_cursor, *advanced_seqs.last().unwrap());
+
+    drop(bob_store);
+    std::fs::copy(&t1_db, &bob_db).unwrap();
+    if t1_wal.exists() {
+        std::fs::copy(
+            &t1_wal,
+            bob_db.parent().unwrap().join("rewind_bob.sqlite3-wal"),
+        )
+        .unwrap();
+    } else {
+        let _ = std::fs::remove_file(bob_db.parent().unwrap().join("rewind_bob.sqlite3-wal"));
+    }
+    let _ = std::fs::remove_file(bob_db.parent().unwrap().join("rewind_bob.sqlite3-shm"));
+    let bob_store = sqlite_client_store(bob_db.clone(), &bob_config);
+    let mut bob = bob_store.load_device(bob_config.clone()).unwrap();
+    // The currency gate would refuse this rewound sender (pinned by the
+    // currency-gate tests); this test pins the *receiver's* wedge and heal,
+    // so step around the gate deliberately.
+    bob.bypass_currency_gate_for_tests(ROOM_ID);
+
+    // Wedge: the rewound sender's message is accepted by the server (shape and
+    // membership checks only — the server cannot see secret-tree generations)
+    // but the receiver's tick aborts on it and the cursor stays frozen.
+    let poison_plaintext =
+        br#"{"type":"finitecomputer.command.v1","body":{"text":"rewind poison"}}"#;
+    let poison = bob
+        .create_application_request(ROOM_ID, poison_plaintext, "app_rewind_poison")
+        .unwrap();
+    let poison = delivery
+        .append_event(&poison, DurableAppEventKind::ChatMessage.delivery_policy())
+        .unwrap();
+    assert!(poison.seq > frozen_cursor);
+    let wedge = run_runtime_sync_tick(&mut alice_store, &mut alice, &mut delivery, &options);
+    let wedge_error = format!("{:?}", wedge.unwrap_err());
+    assert!(
+        wedge_error.contains("TooDistantInThePast")
+            || wedge_error.contains("SecretTree")
+            || wedge_error.contains("SecretReuse")
+            || wedge_error.contains("UnableToDecrypt"),
+        "unexpected wedge error class: {wedge_error}"
+    );
+    assert_eq!(alice.last_applied_seq(ROOM_ID).unwrap(), frozen_cursor);
+
+    // Heal 1 — fresh mint with a NEW device id (a fresh device reusing the old
+    // DeviceRef would be served the room's full history by the membership
+    // projection and re-wedge on entries it cannot decrypt), then owner
+    // re-admission: the add-member commit bumps the epoch and re-derives
+    // everyone's secret trees at generation 0.
+    let fresh_config = test_config(BOB_ACCOUNT_SECRET_BYTES, "bob_http_rewind_heal_r2");
+    let mut fresh_store =
+        sqlite_client_store(dir.path().join("rewind_bob_fresh.sqlite3"), &fresh_config);
+    let mut fresh_bob = FiniteChatDevice::new(fresh_config.clone()).unwrap();
+    fresh_store.save_device_state(&fresh_bob).unwrap();
+    fresh_store
+        .set_welcome_admission_policy(fresh_bob.device_ref(), WelcomeAdmissionPolicy::Allowlist)
+        .unwrap();
+    fresh_store
+        .add_welcome_allowed_senders(
+            fresh_bob.device_ref(),
+            [alice.device_ref().account_id.clone()],
+        )
+        .unwrap();
+    delivery
+        .upload_key_package(
+            fresh_bob
+                .upload_key_package_request("kp_http_rewind_bob_r2")
+                .unwrap(),
+        )
+        .unwrap();
+    let claimed = delivery
+        .claim_key_package_for_device(fresh_bob.device_ref())
+        .unwrap()
+        .expect("fresh bob key package");
+    let prepared = alice
+        .prepare_add_member_commit(
+            ROOM_ID,
+            &claimed,
+            "welcome_http_rewind_bob_r2",
+            "commit_http_rewind_bob_r2",
+        )
+        .unwrap();
+    let commit_accepted = delivery.submit_commit(prepared.request).unwrap();
+    let owner_page = delivery
+        .sync_events(ROOM_ID, alice.device_ref(), 0)
+        .unwrap();
+    alice
+        .merge_pending_commit_from_log(ROOM_ID, &owner_page.entries, &prepared.message_id)
+        .unwrap();
+    assert_eq!(alice.group_epoch(ROOM_ID).unwrap(), 2);
+
+    // Heal 2 — the fresh device joins at the new epoch and, thanks to the
+    // per-device membership projection, never sees the poison backlog at all.
+    let fresh_join =
+        run_runtime_sync_tick(&mut fresh_store, &mut fresh_bob, &mut delivery, &options).unwrap();
+    assert_eq!(fresh_join.activated_welcome_acks_sent, 1);
+    assert_eq!(fresh_bob.group_epoch(ROOM_ID).unwrap(), 2);
+    assert!(fresh_bob.last_applied_seq(ROOM_ID).unwrap() >= commit_accepted.seq);
+
+    // Heal 3 — the fresh sender's message is decryptable, but ONLY once the
+    // receiver's cursor has been repaired past the quarantined pre-commit
+    // backlog: the frozen tick still aborts on the poison entry first.
+    let healed_plaintext =
+        br#"{"type":"finitecomputer.command.v1","body":{"text":"rewind healed"}}"#;
+    let healed = fresh_bob
+        .create_application_request(ROOM_ID, healed_plaintext, "app_rewind_healed")
+        .unwrap();
+    let healed = delivery
+        .append_event(&healed, DurableAppEventKind::ChatMessage.delivery_policy())
+        .unwrap();
+    assert!(run_runtime_sync_tick(&mut alice_store, &mut alice, &mut delivery, &options).is_err());
+    alice_store
+        .advance_room_cursor_and_save(&mut alice, ROOM_ID, commit_accepted.seq)
+        .unwrap();
+    let healed_report =
+        run_runtime_sync_tick(&mut alice_store, &mut alice, &mut delivery, &options).unwrap();
+    assert_eq!(alice.group_epoch(ROOM_ID).unwrap(), 2);
+    assert_eq!(alice.last_applied_seq(ROOM_ID).unwrap(), healed.seq);
+    assert_eq!(
+        healed_report
+            .applied_entries
+            .last()
+            .map(|entry| &entry.entry),
+        Some(&AppliedLogEntry::Application {
+            plaintext: healed_plaintext.to_vec(),
+            sender: fresh_bob.device_ref().clone(),
+        })
+    );
+}
+
+/// Wedge device-a behind device-b's rewound ratchet: healthy traffic, a
+/// file-level rewind of device-b (the production mechanism), then `poison`
+/// sends the server accepts and device-a's tick aborts on. Returns the
+/// frozen cursor and the accepted poison entries.
+fn wedge_receiver_behind_rewound_sender(
+    dir: &tempfile::TempDir,
+    pair: &mut RekeyPair,
+    options: &RuntimeSyncOptions,
+    poison: usize,
+) -> (u64, Vec<EventAccepted>) {
+    // Healthy traffic: device-b sends, device-a receives and decrypts.
+    let healthy = pair.send_from_b(b"rekey healthy", "app_rekey_healthy");
+    let healthy_report = pair.sync_a(options).unwrap();
+    assert_eq!(healthy_report.applied_entries.len(), 1);
+    assert_eq!(pair.a.last_applied_seq(ROOM_ID).unwrap(), healthy.seq);
+
+    // Rewind device-b: persist (T1), advance its ratchet across sends the
+    // receiver consumes, then restore the T1 store files.
+    pair.b_store.save_device_state(&pair.b).unwrap();
+    let t1 = StoreFileSnapshot::take(dir, &pair.b_db, "b_t1");
+    for i in 0..4 {
+        pair.send_from_b(
+            format!("rekey advance {i}").as_bytes(),
+            &format!("app_rekey_advance_{i}"),
+        );
+    }
+    assert_eq!(pair.sync_a(options).unwrap().applied_entries.len(), 4);
+    let frozen_cursor = pair.a.last_applied_seq(ROOM_ID).unwrap();
+    pair.restore_b(&t1);
+    // The currency gate would refuse this rewound sender (pinned by the
+    // currency-gate tests); these tests pin the receiver's wedge and the
+    // rekey heal, so step around the gate deliberately.
+    pair.b.bypass_currency_gate_for_tests(ROOM_ID);
+
+    // Wedge: the rewound sender's entries are accepted by the server but
+    // the receiver's tick aborts on the first and the cursor stays frozen.
+    let poison = (0..poison)
+        .map(|i| {
+            pair.send_from_b(
+                format!("rekey poison {i}").as_bytes(),
+                &format!("app_rekey_poison_{i}"),
+            )
+        })
+        .collect::<Vec<_>>();
+    assert!(poison[0].seq > frozen_cursor);
+    assert!(pair.sync_a(options).is_err());
+    assert_eq!(pair.a.last_applied_seq(ROOM_ID).unwrap(), frozen_cursor);
+    (frozen_cursor, poison)
+}
+
+/// Operator rekey (self-update Commit) heals the receiver of a rewound
+/// sender without minting a new device: the epoch bump restarts every
+/// leaf's secret tree at generation 0. The receiver commits while its cursor
+/// is still frozen behind the quarantined entries. The rekey replays the
+/// backlog first: a third member's healthy sends interleaved with the
+/// poison are applied and stored, only the MLS-undecryptable poison is
+/// skipped (with sender and error class), the cursor lands on the commit
+/// seq, and normal sync carries on in both directions with no operator
+/// repair.
+#[test]
+fn rekey_room_heals_receiver_wedged_by_rewound_sender() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut pair = RekeyPair::new(&dir, "heal");
+    let options = pair.options();
+    let mut charlie = pair.admit_third_device("device_c_rekey_heal");
+    pair.sync_b(&options).unwrap();
+    assert_eq!(pair.b.group_epoch(ROOM_ID).unwrap(), 2);
+    let (frozen_cursor, poison) =
+        wedge_receiver_behind_rewound_sender(&dir, &mut pair, &options, 2);
+
+    // Above the freeze, the third member's healthy sends interleave with
+    // more poison; the frozen tick can reach none of them.
+    let healthy_1 = send_from(
+        &mut pair.delivery,
+        &mut charlie,
+        b"third healthy 1",
+        "app_third_1",
+    );
+    let poison_2 = pair.send_from_b(b"rekey poison 2", "app_rekey_poison_2");
+    let healthy_2 = send_from(
+        &mut pair.delivery,
+        &mut charlie,
+        b"third healthy 2",
+        "app_third_2",
+    );
+    let poison = [poison[0].clone(), poison[1].clone(), poison_2];
+
+    let report = run_runtime_rekey_room(
+        &mut pair.a_store,
+        &mut pair.a,
+        &mut pair.delivery,
+        ROOM_ID,
+        "rekey_http_heal",
+    )
+    .unwrap();
+    assert_eq!(report.room_id, ROOM_ID);
+    assert_eq!(report.previous_epoch, 2);
+    assert_eq!(report.new_epoch, 3);
+    assert_eq!(report.commit_seq, healthy_2.seq + 1);
+    assert_eq!(report.cursor_before, frozen_cursor);
+    assert_eq!(report.cursor_after, report.commit_seq);
+    assert_eq!(
+        report.applied, 2,
+        "the healthy entries are applied, not skipped"
+    );
+    assert_eq!(
+        report.skipped,
+        poison
+            .iter()
+            .map(|entry| RuntimeRekeySkippedEntry {
+                seq: entry.seq,
+                sender_account_id: pair.b.device_ref().account_id.clone(),
+                sender_device_id: pair.b.device_ref().device_id.clone(),
+                message_id: entry.message_id.clone(),
+                error_class: RejectedEntryErrorClass::MlsApplicationCiphertext,
+            })
+            .collect::<Vec<_>>(),
+        "exactly the poison entries, on evidence, attributed to the rewound sender"
+    );
+    assert_eq!(pair.a.group_epoch(ROOM_ID).unwrap(), 3);
+    assert!(!pair.a.has_pending_commit(ROOM_ID).unwrap());
+    assert_eq!(pair.a.last_applied_seq(ROOM_ID).unwrap(), report.commit_seq);
+    let durable_a = pair.a_store.load_device(pair.a_config.clone()).unwrap();
+    assert_eq!(durable_a.group_epoch(ROOM_ID).unwrap(), 3);
+    assert!(!durable_a.has_pending_commit(ROOM_ID).unwrap());
+    assert_eq!(
+        durable_a.last_applied_seq(ROOM_ID).unwrap(),
+        report.commit_seq
+    );
+    // The healthy entries were stored durably.
+    let stored = stored_plaintexts(&pair.a_store, pair.a.device_ref());
+    assert!(stored.contains(&(healthy_1.seq, b"third healthy 1".to_vec())));
+    assert!(stored.contains(&(healthy_2.seq, b"third healthy 2".to_vec())));
+    assert!(
+        !stored
+            .iter()
+            .any(|(seq, _)| poison.iter().any(|entry| entry.seq == *seq))
+    );
+
+    // The rewound sender's first sync re-pages its own pre-rewind entry and
+    // the currency gate records the rewind evidence (the tick fails); the
+    // next tick advances past own entries, applies the healing commit, and
+    // the epoch bump clears the evidence.
+    let behind = pair.sync_b(&options).unwrap_err();
+    assert!(
+        matches!(
+            behind,
+            RuntimeWorkerError::ClientStore(ClientStoreError::Client(
+                ClientError::DeviceStateBehindServer { .. }
+            ))
+        ),
+        "expected the currency gate to record the rewind, got {behind:?}"
+    );
+    let b_report = pair.sync_b(&options).unwrap();
+    assert_eq!(pair.b.group_epoch(ROOM_ID).unwrap(), 3);
+    assert!(b_report.applied_entries.iter().any(|entry| {
+        entry.seq == report.commit_seq
+            && matches!(entry.entry, AppliedLogEntry::Commit { epoch: 3, .. })
+    }));
+
+    // Its next send decrypts at the receiver directly: the cursor already
+    // sits on the commit seq, so no operator skip is needed.
+    let healed_plaintext = b"rekey healed";
+    let healed = pair.send_from_b(healed_plaintext, "app_rekey_healed");
+    let healed_report = pair.sync_a(&options).unwrap();
+    assert_eq!(pair.a.last_applied_seq(ROOM_ID).unwrap(), healed.seq);
+    assert_eq!(
+        healed_report
+            .applied_entries
+            .last()
+            .map(|entry| &entry.entry),
+        Some(&AppliedLogEntry::Application {
+            plaintext: healed_plaintext.to_vec(),
+            sender: pair.b.device_ref().clone(),
+        })
+    );
+
+    // And the receiver's send decrypts at the rewound sender.
+    let reply_plaintext = b"rekey reply";
+    let reply = pair
+        .a
+        .create_application_request(ROOM_ID, reply_plaintext, "app_rekey_reply")
+        .unwrap();
+    let reply = pair
+        .delivery
+        .append_event(&reply, DurableAppEventKind::ChatMessage.delivery_policy())
+        .unwrap();
+    let reply_report = pair.sync_b(&options).unwrap();
+    assert_eq!(pair.b.last_applied_seq(ROOM_ID).unwrap(), reply.seq);
+    assert_eq!(
+        reply_report
+            .applied_entries
+            .last()
+            .map(|entry| &entry.entry),
+        Some(&AppliedLogEntry::Application {
+            plaintext: reply_plaintext.to_vec(),
+            sender: pair.a.device_ref().clone(),
+        })
+    );
+}
+
+/// A device that is merely behind ordinary, decryptable traffic runs
+/// `rekey`: the unread message is applied and stored, nothing is skipped,
+/// and the epoch bumps. (Classifying by sender after the commit would have
+/// dropped it; the pre-commit replay is what makes the skip honest.)
+#[test]
+fn rekey_replays_ordinary_unread_traffic_instead_of_skipping_it() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut pair = RekeyPair::new(&dir, "unread");
+    let options = pair.options();
+    let unread_plaintext = b"ordinary unread message";
+    let unread = pair.send_from_b(unread_plaintext, "app_rekey_unread");
+    assert_eq!(pair.a.last_applied_seq(ROOM_ID).unwrap(), pair.add_seq);
+
+    let report = run_runtime_rekey_room(
+        &mut pair.a_store,
+        &mut pair.a,
+        &mut pair.delivery,
+        ROOM_ID,
+        "rekey_http_unread",
+    )
+    .unwrap();
+    assert_eq!(report.previous_epoch, 1);
+    assert_eq!(report.new_epoch, 2);
+    assert_eq!(report.commit_seq, unread.seq + 1);
+    assert_eq!(report.cursor_before, pair.add_seq);
+    assert_eq!(report.cursor_after, report.commit_seq);
+    assert_eq!(report.applied, 1);
+    assert!(
+        report.skipped.is_empty(),
+        "healthy traffic is never skipped"
+    );
+    assert_eq!(pair.a.last_applied_seq(ROOM_ID).unwrap(), report.commit_seq);
+    assert!(
+        stored_plaintexts(&pair.a_store, pair.a.device_ref())
+            .contains(&(unread.seq, unread_plaintext.to_vec())),
+        "the unread message is stored, not dropped"
+    );
+
+    pair.sync_b(&options).unwrap();
+    assert_eq!(pair.b.group_epoch(ROOM_ID).unwrap(), 2);
+    let next = pair.send_from_b(b"after the rekey", "app_rekey_unread_next");
+    let next_report = pair.sync_a(&options).unwrap();
+    assert_eq!(pair.a.last_applied_seq(ROOM_ID).unwrap(), next.seq);
+    assert_eq!(next_report.applied_entries.len(), 1);
+}
+
+/// The receiver's own application entry in the backlog is crossed the way
+/// the sync tick crosses it (own sends are not decryptable by their
+/// sender): it is neither applied nor skipped.
+#[test]
+fn rekey_crosses_an_own_entry_in_the_backlog_without_skipping_it() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut pair = RekeyPair::new(&dir, "own_entry");
+    let options = pair.options();
+    let (frozen_cursor, poison) =
+        wedge_receiver_behind_rewound_sender(&dir, &mut pair, &options, 1);
+    let own = pair
+        .a
+        .create_application_request(ROOM_ID, b"receiver reply while wedged", "app_own_entry")
+        .unwrap();
+    let own = pair
+        .delivery
+        .append_event(&own, DurableAppEventKind::ChatMessage.delivery_policy())
+        .unwrap();
+    assert!(own.seq > poison[0].seq);
+
+    let report = run_runtime_rekey_room(
+        &mut pair.a_store,
+        &mut pair.a,
+        &mut pair.delivery,
+        ROOM_ID,
+        "rekey_http_own_entry",
+    )
+    .unwrap();
+    assert_eq!(report.new_epoch, 2);
+    assert_eq!(report.commit_seq, own.seq + 1);
+    assert_eq!(report.cursor_before, frozen_cursor);
+    assert_eq!(report.cursor_after, report.commit_seq);
+    assert_eq!(report.applied, 0);
+    assert_eq!(
+        report
+            .skipped
+            .iter()
+            .map(|entry| entry.seq)
+            .collect::<Vec<_>>(),
+        vec![poison[0].seq]
+    );
+    assert_eq!(pair.a.last_applied_seq(ROOM_ID).unwrap(), report.commit_seq);
+}
+
+/// A Commit or Proposal in the backlog that fails to apply refuses the
+/// rekey entirely: a typed error naming the seq, no Commit submitted, and
+/// no durable change. The backlog is served through a delivery that
+/// relabels one poison entry's kind.
+#[test]
+fn rekey_refuses_when_the_backlog_holds_a_failing_commit_or_proposal() {
+    for (kind, tag) in [
+        (LogEntryKind::Commit, "backlog_commit"),
+        (LogEntryKind::Proposal, "backlog_proposal"),
+    ] {
+        let dir = tempfile::tempdir().unwrap();
+        let mut pair = RekeyPair::new(&dir, tag);
+        let options = pair.options();
+        let (frozen_cursor, poison) =
+            wedge_receiver_behind_rewound_sender(&dir, &mut pair, &options, 2);
+        let relabeled_seq = poison[1].seq;
+
+        let error = {
+            let mut delivery = TamperedSyncDelivery {
+                inner: &mut pair.delivery,
+                tamper: |page: &mut SyncEventsPage| {
+                    for entry in page.entries.iter_mut() {
+                        if entry.seq == relabeled_seq {
+                            entry.kind = kind;
+                            entry.envelope.kind = kind;
+                            entry.message_id = entry.envelope.message_id().unwrap();
+                        }
+                    }
+                },
+            };
+            run_runtime_rekey_room(
+                &mut pair.a_store,
+                &mut pair.a,
+                &mut delivery,
+                ROOM_ID,
+                format!("rekey_http_{tag}"),
+            )
+            .unwrap_err()
+        };
+        assert!(
+            matches!(
+                &error,
+                RuntimeWorkerError::Client(ClientError::RekeyBacklogNotReplayable {
+                    room_id,
+                    seq,
+                    kind: failed_kind,
+                    ..
+                }) if room_id == ROOM_ID && *seq == relabeled_seq && *failed_kind == kind
+            ),
+            "{tag}: unexpected error: {error}"
+        );
+        assert_eq!(pair.a.group_epoch(ROOM_ID).unwrap(), 1);
+        assert!(!pair.a.has_pending_commit(ROOM_ID).unwrap());
+        let durable_a = pair.a_store.load_device(pair.a_config.clone()).unwrap();
+        assert_eq!(durable_a.group_epoch(ROOM_ID).unwrap(), 1);
+        assert_eq!(durable_a.last_applied_seq(ROOM_ID).unwrap(), frozen_cursor);
+        assert!(!durable_a.has_pending_commit(ROOM_ID).unwrap());
+        let head = pair
+            .delivery
+            .sync_events(ROOM_ID, pair.a.device_ref(), relabeled_seq)
+            .unwrap();
+        assert!(
+            head.entries.is_empty(),
+            "{tag}: a refused rekey must not append"
+        );
+    }
+}
+
+/// A previous attempt that committed but never completed its cursor skip
+/// (a run on the older image, or a crash after acceptance) leaves this
+/// device's own merged Commit above the frozen cursor. The backlog below it
+/// can no longer be classified honestly (past-epoch secrets are gone), so
+/// a re-run refuses with a typed error naming `repair skip-entry`, submits
+/// nothing, and changes nothing; the sanctioned skip then completes the
+/// heal (crossing the merged Commit as a no-op advance).
+#[test]
+fn rekey_refuses_when_its_own_merged_commit_sits_above_a_frozen_cursor() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut pair = RekeyPair::new(&dir, "frozen_own_commit");
+    let options = pair.options();
+    let (frozen_cursor, _poison) =
+        wedge_receiver_behind_rewound_sender(&dir, &mut pair, &options, 2);
+    let first = run_runtime_rekey_room(
+        &mut pair.a_store,
+        &mut pair.a,
+        &mut pair.delivery,
+        ROOM_ID,
+        "rekey_http_frozen_first",
+    )
+    .unwrap();
+    assert_eq!(first.cursor_after, first.commit_seq);
+
+    // Simulate the half-done state: the Commit is merged and durable but
+    // the cursor is still frozen below the poison.
+    pair.a.rewind_room_cursor_for_tests(ROOM_ID, frozen_cursor);
+    pair.a_store.save_device_state(&pair.a).unwrap();
+    assert!(pair.sync_a(&options).is_err());
+
+    let error = run_runtime_rekey_room(
+        &mut pair.a_store,
+        &mut pair.a,
+        &mut pair.delivery,
+        ROOM_ID,
+        "rekey_http_frozen_second",
+    )
+    .unwrap_err();
+    assert!(
+        matches!(
+            &error,
+            RuntimeWorkerError::Client(ClientError::RekeyCursorBehindOwnCommit {
+                room_id,
+                cursor,
+                commit_seq,
+            }) if room_id == ROOM_ID && *cursor == frozen_cursor && *commit_seq == first.commit_seq
+        ),
+        "unexpected error: {error}"
+    );
+    assert!(error.to_string().contains("repair skip-entry"));
+    assert_eq!(pair.a.group_epoch(ROOM_ID).unwrap(), 2);
+    assert_eq!(pair.a.last_applied_seq(ROOM_ID).unwrap(), frozen_cursor);
+    let durable_a = pair.a_store.load_device(pair.a_config.clone()).unwrap();
+    assert_eq!(durable_a.last_applied_seq(ROOM_ID).unwrap(), frozen_cursor);
+    let head = pair
+        .delivery
+        .sync_events(ROOM_ID, pair.a.device_ref(), first.commit_seq)
+        .unwrap();
+    assert!(head.entries.is_empty(), "a refused rekey must not append");
+
+    // The sanctioned path: the operator's skip lands the cursor on the
+    // commit seq and traffic resumes.
+    pair.a_store
+        .advance_room_cursor_and_save(&mut pair.a, ROOM_ID, first.commit_seq)
+        .unwrap();
+    assert!(
+        pair.sync_b(&options).is_err(),
+        "currency gate records the rewind"
+    );
+    pair.sync_b(&options).unwrap();
+    assert_eq!(pair.b.group_epoch(ROOM_ID).unwrap(), 2);
+    let healed = pair.send_from_b(b"rekey frozen healed", "app_rekey_frozen_healed");
+    pair.sync_a(&options).unwrap();
+    assert_eq!(pair.a.last_applied_seq(ROOM_ID).unwrap(), healed.seq);
+}
+
+/// Local preconditions fail closed before any server call: a pending Commit
+/// or an unknown room is rejected with a typed error and no state change.
+#[test]
+fn rekey_room_refuses_pending_commit_without_calling_server() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut pair = RekeyPair::new(&dir, "pending");
+    let cursor = pair.a.last_applied_seq(ROOM_ID).unwrap();
+    pair.a
+        .prepare_self_update_commit(ROOM_ID, "commit_http_rekey_pending_local")
+        .unwrap();
+    assert!(pair.a.has_pending_commit(ROOM_ID).unwrap());
+
+    let mut never = NeverCalledDelivery;
+    let error = run_runtime_rekey_room(
+        &mut pair.a_store,
+        &mut pair.a,
+        &mut never,
+        ROOM_ID,
+        "rekey_http_pending",
+    )
+    .unwrap_err();
+    assert!(
+        matches!(
+            &error,
+            RuntimeWorkerError::Client(ClientError::PendingCommitExists(room_id))
+                if room_id == ROOM_ID
+        ),
+        "unexpected error: {error}"
+    );
+    assert_eq!(pair.a.group_epoch(ROOM_ID).unwrap(), 1);
+    assert!(pair.a.has_pending_commit(ROOM_ID).unwrap());
+    assert_eq!(pair.a.last_applied_seq(ROOM_ID).unwrap(), cursor);
+
+    let error = run_runtime_rekey_room(
+        &mut pair.a_store,
+        &mut pair.a,
+        &mut never,
+        "room_rekey_unknown",
+        "rekey_http_unknown",
+    )
+    .unwrap_err();
+    assert!(
+        matches!(
+            &error,
+            RuntimeWorkerError::Client(ClientError::GroupNotFound(room_id))
+                if room_id == "room_rekey_unknown"
+        ),
+        "unexpected error: {error}"
+    );
+}
+
+/// A device whose epoch is behind the server (another member committed
+/// first) is refused with a typed error and no local change when the
+/// backlog replay cannot see that Commit (served through a delivery that
+/// hides it, the shape of a Commit accepted between the replay and the
+/// epoch check); after it syncs the newer Commit the rekey succeeds and the
+/// other member applies it. When the Commit IS in the backlog, the replay
+/// applies it first (pinned by the third-member heal test).
+#[test]
+fn rekey_room_refuses_when_local_epoch_is_behind_server() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut pair = RekeyPair::new(&dir, "behind");
+    let options = pair.options();
+
+    let b_prepared = pair
+        .b
+        .prepare_self_update_commit(ROOM_ID, "commit_http_rekey_b_first")
+        .unwrap();
+    let b_accepted = pair.delivery.submit_commit(b_prepared.request).unwrap();
+    let b_page = pair
+        .delivery
+        .sync_events(ROOM_ID, pair.b.device_ref(), b_accepted.seq - 1)
+        .unwrap();
+    pair.b
+        .merge_pending_commit_from_log(ROOM_ID, &b_page.entries, &b_prepared.message_id)
+        .unwrap();
+    pair.b_store
+        .advance_room_cursor_and_save(&mut pair.b, ROOM_ID, b_accepted.seq)
+        .unwrap();
+    assert_eq!(pair.b.group_epoch(ROOM_ID).unwrap(), 2);
+
+    let cursor = pair.a.last_applied_seq(ROOM_ID).unwrap();
+    let hidden_seq = b_accepted.seq;
+    let error = {
+        let mut delivery = TamperedSyncDelivery {
+            inner: &mut pair.delivery,
+            tamper: |page: &mut SyncEventsPage| {
+                page.entries.retain(|entry| entry.seq != hidden_seq);
+                page.next_after_seq = page.next_after_seq.min(hidden_seq - 1);
+            },
+        };
+        run_runtime_rekey_room(
+            &mut pair.a_store,
+            &mut pair.a,
+            &mut delivery,
+            ROOM_ID,
+            "rekey_http_behind",
+        )
+        .unwrap_err()
+    };
+    assert!(
+        matches!(
+            &error,
+            RuntimeWorkerError::Client(ClientError::RekeyEpochMismatch {
+                room_id,
+                local_epoch: 1,
+                server_epoch: 2,
+            }) if room_id == ROOM_ID
+        ),
+        "unexpected error: {error}"
+    );
+    assert_eq!(pair.a.group_epoch(ROOM_ID).unwrap(), 1);
+    assert!(!pair.a.has_pending_commit(ROOM_ID).unwrap());
+    assert_eq!(pair.a.last_applied_seq(ROOM_ID).unwrap(), cursor);
+    let durable_a = pair.a_store.load_device(pair.a_config.clone()).unwrap();
+    assert_eq!(durable_a.group_epoch(ROOM_ID).unwrap(), 1);
+    assert!(!durable_a.has_pending_commit(ROOM_ID).unwrap());
+    let head = pair
+        .delivery
+        .sync_events(ROOM_ID, pair.a.device_ref(), b_accepted.seq)
+        .unwrap();
+    assert!(head.entries.is_empty(), "refused rekey must not append");
+
+    pair.sync_a(&options).unwrap();
+    assert_eq!(pair.a.group_epoch(ROOM_ID).unwrap(), 2);
+    let report = run_runtime_rekey_room(
+        &mut pair.a_store,
+        &mut pair.a,
+        &mut pair.delivery,
+        ROOM_ID,
+        "rekey_http_after_sync",
+    )
+    .unwrap();
+    assert_eq!(report.previous_epoch, 2);
+    assert_eq!(report.new_epoch, 3);
+    assert_eq!(report.commit_seq, b_accepted.seq + 1);
+    // Committed from the server head: the cursor advances across the
+    // device's own Commit, so the next sync does not re-apply it; there is
+    // nothing to replay and nothing to skip.
+    assert_eq!(pair.a.last_applied_seq(ROOM_ID).unwrap(), report.commit_seq);
+    assert_eq!(report.cursor_before, report.commit_seq - 1);
+    assert_eq!(report.cursor_after, report.commit_seq);
+    assert_eq!(report.applied, 0);
+    assert!(report.skipped.is_empty());
+    assert!(pair.sync_a(&options).unwrap().applied_entries.is_empty());
+    pair.sync_b(&options).unwrap();
+    assert_eq!(pair.b.group_epoch(ROOM_ID).unwrap(), 3);
+}
+
+/// A submit that never reaches acceptance leaves no pending Commit behind:
+/// the pre-rekey state is restored in memory and on disk, and a later rekey
+/// through a healthy transport succeeds.
+#[test]
+fn rekey_room_restores_state_when_submit_fails() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut pair = RekeyPair::new(&dir, "submit_fail");
+    let options = pair.options();
+    let cursor = pair.a.last_applied_seq(ROOM_ID).unwrap();
+
+    pair.delivery.transport_mut().fail_next_submit_before_accept = true;
+    let error = run_runtime_rekey_room(
+        &mut pair.a_store,
+        &mut pair.a,
+        &mut pair.delivery,
+        ROOM_ID,
+        "rekey_http_submit_fail",
+    )
+    .unwrap_err();
+    assert!(
+        matches!(&error, RuntimeWorkerError::Delivery(_)),
+        "unexpected error: {error}"
+    );
+    assert_eq!(pair.a.group_epoch(ROOM_ID).unwrap(), 1);
+    assert!(!pair.a.has_pending_commit(ROOM_ID).unwrap());
+    assert_eq!(pair.a.last_applied_seq(ROOM_ID).unwrap(), cursor);
+    let durable_a = pair.a_store.load_device(pair.a_config.clone()).unwrap();
+    assert_eq!(durable_a.group_epoch(ROOM_ID).unwrap(), 1);
+    assert!(!durable_a.has_pending_commit(ROOM_ID).unwrap());
+    let head = pair
+        .delivery
+        .sync_events(ROOM_ID, pair.a.device_ref(), pair.add_seq)
+        .unwrap();
+    assert!(head.entries.is_empty(), "failed submit must not append");
+
+    let report = run_runtime_rekey_room(
+        &mut pair.a_store,
+        &mut pair.a,
+        &mut pair.delivery,
+        ROOM_ID,
+        "rekey_http_after_submit_fail",
+    )
+    .unwrap();
+    assert_eq!(report.previous_epoch, 1);
+    assert_eq!(report.new_epoch, 2);
+    pair.sync_b(&options).unwrap();
+    assert_eq!(pair.b.group_epoch(ROOM_ID).unwrap(), 2);
+}
+
+/// Re-paging this device's own already-merged Commit (an older durable
+/// cursor: a restored backup, or a frozen cursor that completes a rekey
+/// heal) is a no-op advance, not an epoch error; a foreign Commit at a
+/// mismatched epoch still fails closed.
+#[test]
+fn repaging_an_already_merged_own_commit_is_a_no_op_advance() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut pair = RekeyPair::new(&dir, "repage");
+    let options = pair.options();
+
+    // Rekey from the server head: the cursor lands on the own Commit.
+    let report = run_runtime_rekey_room(
+        &mut pair.a_store,
+        &mut pair.a,
+        &mut pair.delivery,
+        ROOM_ID,
+        "rekey_http_repage",
+    )
+    .unwrap();
+    assert_eq!(pair.a.last_applied_seq(ROOM_ID).unwrap(), report.commit_seq);
+    assert_eq!(pair.a.group_epoch(ROOM_ID).unwrap(), 2);
+    pair.sync_b(&options).unwrap();
+    assert_eq!(pair.b.group_epoch(ROOM_ID).unwrap(), 2);
+    let after_plaintext = b"after the merged commit";
+    let after = pair.send_from_b(after_plaintext, "app_repage_after");
+
+    // Rewind the cursor below the merged Commit and tick: the Commit is
+    // satisfied (no epoch error, no phantom applied Commit), the cursor
+    // advances across it, and the entry behind it decrypts.
+    pair.a
+        .rewind_room_cursor_for_tests(ROOM_ID, report.commit_seq - 1);
+    let repaged = pair.sync_a(&options).unwrap();
+    assert_eq!(pair.a.last_applied_seq(ROOM_ID).unwrap(), after.seq);
+    assert_eq!(pair.a.group_epoch(ROOM_ID).unwrap(), 2);
+    assert!(!pair.a.has_pending_commit(ROOM_ID).unwrap());
+    assert_eq!(
+        repaged
+            .applied_entries
+            .iter()
+            .map(|entry| (entry.seq, entry.entry.clone()))
+            .collect::<Vec<_>>(),
+        vec![(
+            after.seq,
+            AppliedLogEntry::Application {
+                plaintext: after_plaintext.to_vec(),
+                sender: pair.b.device_ref().clone(),
+            }
+        )]
+    );
+
+    // The same rule holds for a direct apply of the merged own Commit.
+    let commit_page = pair
+        .delivery
+        .sync_events(ROOM_ID, pair.a.device_ref(), report.commit_seq - 1)
+        .unwrap();
+    let own_commit = commit_page
+        .entries
+        .iter()
+        .find(|entry| entry.seq == report.commit_seq)
+        .unwrap();
+    pair.a.apply_commit_entry(ROOM_ID, own_commit).unwrap();
+    assert_eq!(pair.a.group_epoch(ROOM_ID).unwrap(), 2);
+
+    // A foreign Commit at a mismatched epoch is still an error: the
+    // counterpart rekeys (2 -> 3), this device applies it, and re-paging it
+    // from a rewound cursor fails closed with the cursor unchanged.
+    let b_report = run_runtime_rekey_room(
+        &mut pair.b_store,
+        &mut pair.b,
+        &mut pair.delivery,
+        ROOM_ID,
+        "rekey_http_repage_b",
+    )
+    .unwrap();
+    pair.sync_a(&options).unwrap();
+    assert_eq!(pair.a.group_epoch(ROOM_ID).unwrap(), 3);
+    assert_eq!(
+        pair.a.last_applied_seq(ROOM_ID).unwrap(),
+        b_report.commit_seq
+    );
+    pair.a
+        .rewind_room_cursor_for_tests(ROOM_ID, b_report.commit_seq - 1);
+    let error = pair.sync_a(&options).unwrap_err();
+    assert!(
+        matches!(
+            &error,
+            RuntimeWorkerError::ClientStore(ClientStoreError::Client(
+                ClientError::UnexpectedCommitEpoch {
+                    room_id,
+                    current_epoch: 3,
+                    entry_epoch: 2,
+                }
+            )) if room_id == ROOM_ID
+        ),
+        "unexpected error: {error}"
+    );
+    assert_eq!(
+        pair.a.last_applied_seq(ROOM_ID).unwrap(),
+        b_report.commit_seq - 1
+    );
+    assert_eq!(pair.a.group_epoch(ROOM_ID).unwrap(), 3);
+}
+
 fn test_device(
     account_secret_bytes: [u8; NOSTR_SECRET_KEY_BYTES],
     device_id: &str,
@@ -2610,11 +3920,358 @@ impl std::fmt::Display for InProcessHttpTransportError {
 
 type TestHttpRuntimeDelivery = HttpRuntimeDelivery<InProcessHttpTransport>;
 
+/// Two durable devices (device-a owns the room, device-b was admitted by an
+/// add-member Commit) sharing one in-process server, both at epoch 1 with
+/// their cursors at the add Commit — the starting point of every rekey test.
+struct RekeyPair {
+    a: FiniteChatDevice,
+    a_store: SqliteClientStore,
+    a_config: FiniteChatDeviceConfig,
+    b: FiniteChatDevice,
+    b_store: SqliteClientStore,
+    b_config: FiniteChatDeviceConfig,
+    b_db: std::path::PathBuf,
+    delivery: TestHttpRuntimeDelivery,
+    add_seq: u64,
+}
+
+impl RekeyPair {
+    fn new(dir: &tempfile::TempDir, tag: &str) -> Self {
+        let server_db = dir
+            .path()
+            .join(format!("finitechat-http-rekey-{tag}.sqlite3"));
+        let a_config = test_config(ALICE_ACCOUNT_SECRET_BYTES, &format!("device_a_rekey_{tag}"));
+        let mut a_store =
+            sqlite_client_store(dir.path().join(format!("rekey_{tag}_a.sqlite3")), &a_config);
+        let mut a = FiniteChatDevice::new(a_config.clone()).unwrap();
+        let b_config = test_config(BOB_ACCOUNT_SECRET_BYTES, &format!("device_b_rekey_{tag}"));
+        let b_db = dir.path().join(format!("rekey_{tag}_b.sqlite3"));
+        let mut b_store = sqlite_client_store(b_db.clone(), &b_config);
+        let mut b = FiniteChatDevice::new(b_config.clone()).unwrap();
+        let mut delivery = HttpRuntimeDelivery::from_sqlite_path(&server_db);
+        let add_seq = create_group_room_with_member(
+            &mut delivery,
+            &mut a,
+            &mut b,
+            GroupMemberSetup {
+                room_id: ROOM_ID,
+                mls_group_id: MLS_GROUP_ID,
+                key_package_id: "kp_http_rekey_b",
+                welcome_id: "welcome_http_rekey_b",
+                idempotency_key: "commit_http_rekey_b",
+            },
+        );
+        b_store.save_device_state(&b).unwrap();
+        b_store
+            .advance_room_cursor_and_save(&mut b, ROOM_ID, add_seq)
+            .unwrap();
+        a_store.save_device_state(&a).unwrap();
+        a_store
+            .advance_room_cursor_and_save(&mut a, ROOM_ID, add_seq)
+            .unwrap();
+        Self {
+            a,
+            a_store,
+            a_config,
+            b,
+            b_store,
+            b_config,
+            b_db,
+            delivery,
+            add_seq,
+        }
+    }
+
+    fn options(&self) -> RuntimeSyncOptions {
+        RuntimeSyncOptions {
+            key_package_target_available: 0,
+            max_sync_pages_per_room: 8,
+        }
+    }
+
+    /// Device-a admits a third member (a fresh in-memory device on the
+    /// third account) with an add-member Commit that device-a applies from
+    /// the log; the caller syncs device-b. Returns the activated member.
+    fn admit_third_device(&mut self, device_id: &str) -> FiniteChatDevice {
+        let mut member = test_device(CHARLIE_ACCOUNT_SECRET_BYTES, device_id);
+        let key_package_id = format!("kp_{device_id}");
+        let welcome_id = format!("welcome_{device_id}");
+        self.delivery
+            .upload_key_package(member.upload_key_package_request(&key_package_id).unwrap())
+            .unwrap();
+        let claimed = self
+            .delivery
+            .claim_key_package_for_device(member.device_ref())
+            .unwrap()
+            .expect("third member key package");
+        let prepared = self
+            .a
+            .prepare_add_member_commit(
+                ROOM_ID,
+                &claimed,
+                &welcome_id,
+                format!("commit_{device_id}"),
+            )
+            .unwrap();
+        let accepted = self.delivery.submit_commit(prepared.request).unwrap();
+        let page = self
+            .delivery
+            .sync_events(ROOM_ID, self.a.device_ref(), accepted.seq - 1)
+            .unwrap();
+        self.a
+            .merge_pending_commit_from_log(ROOM_ID, &page.entries, &prepared.message_id)
+            .unwrap();
+        self.a_store
+            .advance_room_cursor_and_save(&mut self.a, ROOM_ID, accepted.seq)
+            .unwrap();
+        claim_and_activate(&mut self.delivery, &mut member, &welcome_id);
+        member
+    }
+
+    fn send_from_b(&mut self, plaintext: &[u8], idempotency_key: &str) -> EventAccepted {
+        let request = self
+            .b
+            .create_application_request(ROOM_ID, plaintext, idempotency_key)
+            .unwrap();
+        self.delivery
+            .append_event(&request, DurableAppEventKind::ChatMessage.delivery_policy())
+            .unwrap()
+    }
+
+    fn sync_a(
+        &mut self,
+        options: &RuntimeSyncOptions,
+    ) -> Result<
+        finitechat_client::RuntimeSyncReport,
+        RuntimeWorkerError<HttpRuntimeDeliveryError<InProcessHttpTransportError>>,
+    > {
+        run_runtime_sync_tick(&mut self.a_store, &mut self.a, &mut self.delivery, options)
+    }
+
+    fn sync_b(
+        &mut self,
+        options: &RuntimeSyncOptions,
+    ) -> Result<
+        finitechat_client::RuntimeSyncReport,
+        RuntimeWorkerError<HttpRuntimeDeliveryError<InProcessHttpTransportError>>,
+    > {
+        run_runtime_sync_tick(&mut self.b_store, &mut self.b, &mut self.delivery, options)
+    }
+
+    /// File-level restore of device-b's store (the production rewind
+    /// mechanism), then reload the device from the rewound files.
+    fn restore_b(&mut self, snapshot: &StoreFileSnapshot) {
+        let placeholder = sqlite_client_store(
+            self.b_db
+                .parent()
+                .unwrap()
+                .join("rekey_placeholder.sqlite3"),
+            &self.b_config,
+        );
+        let previous = std::mem::replace(&mut self.b_store, placeholder);
+        drop(previous);
+        snapshot.restore(&self.b_db);
+        self.b_store = sqlite_client_store(self.b_db.clone(), &self.b_config);
+        self.b = self.b_store.load_device(self.b_config.clone()).unwrap();
+    }
+}
+
+/// Copies of a SQLite store's main file and, when present, its WAL sidecar.
+struct StoreFileSnapshot {
+    db: std::path::PathBuf,
+    wal: std::path::PathBuf,
+}
+
+impl StoreFileSnapshot {
+    fn take(dir: &tempfile::TempDir, db: &std::path::Path, tag: &str) -> Self {
+        let snapshot = Self {
+            db: dir.path().join(format!("{tag}.sqlite3")),
+            wal: dir.path().join(format!("{tag}.sqlite3-wal")),
+        };
+        std::fs::copy(db, &snapshot.db).unwrap();
+        let wal = wal_path(db);
+        if wal.exists() {
+            std::fs::copy(&wal, &snapshot.wal).unwrap();
+        }
+        snapshot
+    }
+
+    fn restore(&self, db: &std::path::Path) {
+        std::fs::copy(&self.db, db).unwrap();
+        let wal = wal_path(db);
+        if self.wal.exists() {
+            std::fs::copy(&self.wal, &wal).unwrap();
+        } else {
+            let _ = std::fs::remove_file(&wal);
+        }
+        let _ = std::fs::remove_file(db.with_extension("sqlite3-shm"));
+    }
+}
+
+fn wal_path(db: &std::path::Path) -> std::path::PathBuf {
+    db.with_extension("sqlite3-wal")
+}
+
+/// A delivery that fails the test on any call: proves a refused rekey never
+/// reaches the server.
+struct NeverCalledDelivery;
+
+impl RuntimeDelivery for NeverCalledDelivery {
+    type Error = String;
+
+    fn key_package_inventory(&mut self, _: &DeviceRef) -> Result<KeyPackageInventory, String> {
+        panic!("refused rekey must not call key_package_inventory");
+    }
+
+    fn upload_key_package(&mut self, _: UploadKeyPackageRequest) -> Result<(), String> {
+        panic!("refused rekey must not call upload_key_package");
+    }
+
+    fn claim_key_package_for_device(
+        &mut self,
+        _: &DeviceRef,
+    ) -> Result<Option<ClaimKeyPackageResult>, String> {
+        panic!("refused rekey must not call claim_key_package_for_device");
+    }
+
+    fn claim_key_package_for_account(
+        &mut self,
+        _: &str,
+    ) -> Result<Option<ClaimKeyPackageResult>, String> {
+        panic!("refused rekey must not call claim_key_package_for_account");
+    }
+
+    fn submit_commit(&mut self, _: SubmitCommitRequest) -> Result<CommitAccepted, String> {
+        panic!("refused rekey must not call submit_commit");
+    }
+
+    fn list_account_rooms(
+        &mut self,
+        _: ListAccountRoomsRequest,
+    ) -> Result<ListAccountRoomsPage, String> {
+        panic!("refused rekey must not call list_account_rooms");
+    }
+
+    fn claim_welcomes(&mut self, _: &DeviceRef) -> Result<Vec<WelcomeRecord>, String> {
+        panic!("refused rekey must not call claim_welcomes");
+    }
+
+    fn ack_welcome(&mut self, _: &str) -> Result<(), String> {
+        panic!("refused rekey must not call ack_welcome");
+    }
+
+    fn sync_events(&mut self, _: &str, _: &DeviceRef, _: u64) -> Result<SyncEventsPage, String> {
+        panic!("refused rekey must not call sync_events");
+    }
+}
+
+/// Delegates to the in-process delivery but lets a test rewrite every sync
+/// page (relabel an entry's kind, hide an entry) to shape the backlog the
+/// rekey sees. A tamper that hides entries must keep `next_after_seq`
+/// consistent, as a real server does.
+struct TamperedSyncDelivery<'a, F: FnMut(&mut SyncEventsPage)> {
+    inner: &'a mut TestHttpRuntimeDelivery,
+    tamper: F,
+}
+
+impl<F: FnMut(&mut SyncEventsPage)> RuntimeDelivery for TamperedSyncDelivery<'_, F> {
+    type Error = HttpRuntimeDeliveryError<InProcessHttpTransportError>;
+
+    fn key_package_inventory(
+        &mut self,
+        owner: &DeviceRef,
+    ) -> Result<KeyPackageInventory, Self::Error> {
+        self.inner.key_package_inventory(owner)
+    }
+
+    fn upload_key_package(&mut self, request: UploadKeyPackageRequest) -> Result<(), Self::Error> {
+        self.inner.upload_key_package(request)
+    }
+
+    fn claim_key_package_for_device(
+        &mut self,
+        owner: &DeviceRef,
+    ) -> Result<Option<ClaimKeyPackageResult>, Self::Error> {
+        self.inner.claim_key_package_for_device(owner)
+    }
+
+    fn claim_key_package_for_account(
+        &mut self,
+        account_id: &str,
+    ) -> Result<Option<ClaimKeyPackageResult>, Self::Error> {
+        self.inner.claim_key_package_for_account(account_id)
+    }
+
+    fn submit_commit(
+        &mut self,
+        request: SubmitCommitRequest,
+    ) -> Result<CommitAccepted, Self::Error> {
+        self.inner.submit_commit(request)
+    }
+
+    fn list_account_rooms(
+        &mut self,
+        request: ListAccountRoomsRequest,
+    ) -> Result<ListAccountRoomsPage, Self::Error> {
+        self.inner.list_account_rooms(request)
+    }
+
+    fn claim_welcomes(&mut self, device: &DeviceRef) -> Result<Vec<WelcomeRecord>, Self::Error> {
+        self.inner.claim_welcomes(device)
+    }
+
+    fn ack_welcome(&mut self, welcome_id: &str) -> Result<(), Self::Error> {
+        self.inner.ack_welcome(welcome_id)
+    }
+
+    fn sync_events(
+        &mut self,
+        room_id: &str,
+        requester: &DeviceRef,
+        after_seq: u64,
+    ) -> Result<SyncEventsPage, Self::Error> {
+        let mut page = self.inner.sync_events(room_id, requester, after_seq)?;
+        (self.tamper)(&mut page);
+        Ok(page)
+    }
+}
+
+/// Send one application message from `device` through the shared delivery.
+fn send_from(
+    delivery: &mut TestHttpRuntimeDelivery,
+    device: &mut FiniteChatDevice,
+    plaintext: &[u8],
+    idempotency_key: &str,
+) -> EventAccepted {
+    let request = device
+        .create_application_request(ROOM_ID, plaintext, idempotency_key)
+        .unwrap();
+    delivery
+        .append_event(&request, DurableAppEventKind::ChatMessage.delivery_policy())
+        .unwrap()
+}
+
+/// `(seq, plaintext)` of every stored application message the store holds
+/// for `owner` in the shared room.
+fn stored_plaintexts(store: &SqliteClientStore, owner: &DeviceRef) -> Vec<(u64, Vec<u8>)> {
+    store
+        .load_app_messages(owner, 100)
+        .unwrap()
+        .into_iter()
+        .filter(|message| message.room_id == ROOM_ID)
+        .map(|message| (message.seq, message.plaintext))
+        .collect()
+}
+
 fn spawn_live_http_server(path: &std::path::Path) -> String {
+    spawn_live_http_server_with_state(HttpServerState::from_sqlite_path(path).unwrap())
+}
+
+fn spawn_live_http_server_with_state(state: HttpServerState) -> String {
     let listener = std::net::TcpListener::bind(("127.0.0.1", 0)).unwrap();
     listener.set_nonblocking(true).unwrap();
     let addr = listener.local_addr().unwrap();
-    let app = http_router(HttpServerState::from_sqlite_path(path).unwrap());
+    let app = http_router(state);
     std::thread::spawn(move || {
         let runtime = tokio::runtime::Runtime::new().unwrap();
         runtime.block_on(async move {
@@ -2751,4 +4408,548 @@ fn assert_application_acceptance(accepted: &EventAccepted, sent_plaintexts: &[Se
         .map(|message| message.seq + 1)
         .unwrap_or(2);
     assert_eq!(accepted.seq, expected_seq);
+}
+
+// ---------------------------------------------------------------------------
+// Currency gate: a device state that is behind the server must not send.
+//
+// The 2026-08-28 incident placed WAL-less file copies of agent stores into
+// service fleet-wide; every copy was a rewound MLS sender. These tests pin
+// the client-side gate that refuses such a store before it can consume a
+// generation the server already saw.
+
+struct CurrencyFixture {
+    dir: tempfile::TempDir,
+    delivery: TestHttpRuntimeDelivery,
+    alice: FiniteChatDevice,
+    alice_store: SqliteClientStore,
+    bob_config: FiniteChatDeviceConfig,
+    bob_db: std::path::PathBuf,
+    bob_store: SqliteClientStore,
+    bob: FiniteChatDevice,
+    options: RuntimeSyncOptions,
+}
+
+/// Owner (alice) and agent (bob), both durable, one room, both cursors at
+/// the add commit and both verified by one sync tick.
+fn currency_fixture(tag: &str) -> CurrencyFixture {
+    let dir = tempfile::tempdir().unwrap();
+    let server_db = dir
+        .path()
+        .join(format!("finitechat-http-currency-{tag}.sqlite3"));
+    let alice_config = test_config(ALICE_ACCOUNT_SECRET_BYTES, &format!("alice_currency_{tag}"));
+    let mut alice_store = sqlite_client_store(
+        dir.path().join(format!("currency_{tag}_alice.sqlite3")),
+        &alice_config,
+    );
+    let mut alice = FiniteChatDevice::new(alice_config.clone()).unwrap();
+    let bob_config = test_config(BOB_ACCOUNT_SECRET_BYTES, &format!("bob_currency_{tag}"));
+    let bob_db = dir.path().join(format!("currency_{tag}_bob.sqlite3"));
+    let mut bob_store = sqlite_client_store(bob_db.clone(), &bob_config);
+    let mut bob = FiniteChatDevice::new(bob_config.clone()).unwrap();
+    let options = RuntimeSyncOptions {
+        key_package_target_available: 0,
+        max_sync_pages_per_room: 8,
+    };
+    let mut delivery = HttpRuntimeDelivery::from_sqlite_path(&server_db);
+    let add_seq = create_group_room_with_member(
+        &mut delivery,
+        &mut alice,
+        &mut bob,
+        GroupMemberSetup {
+            room_id: ROOM_ID,
+            mls_group_id: MLS_GROUP_ID,
+            key_package_id: &format!("kp_currency_{tag}"),
+            welcome_id: &format!("welcome_currency_{tag}"),
+            idempotency_key: &format!("commit_currency_{tag}"),
+        },
+    );
+    bob_store.save_device_state(&bob).unwrap();
+    bob_store
+        .advance_room_cursor_and_save(&mut bob, ROOM_ID, add_seq)
+        .unwrap();
+    alice_store
+        .advance_room_cursor_and_save(&mut alice, ROOM_ID, add_seq)
+        .unwrap();
+    run_runtime_sync_tick(&mut bob_store, &mut bob, &mut delivery, &options).unwrap();
+    run_runtime_sync_tick(&mut alice_store, &mut alice, &mut delivery, &options).unwrap();
+    CurrencyFixture {
+        dir,
+        delivery,
+        alice,
+        alice_store,
+        bob_config,
+        bob_db,
+        bob_store,
+        bob,
+        options,
+    }
+}
+
+/// The production send shape: encrypt, append, record the accept, save.
+fn send_recorded(
+    delivery: &mut TestHttpRuntimeDelivery,
+    device: &mut FiniteChatDevice,
+    store: Option<&mut SqliteClientStore>,
+    text: &str,
+    idempotency_key: &str,
+) -> EventAccepted {
+    let plaintext = format!(r#"{{"type":"finitecomputer.command.v1","body":{{"text":"{text}"}}}}"#)
+        .into_bytes();
+    let request = device
+        .create_application_request(ROOM_ID, &plaintext, idempotency_key)
+        .unwrap();
+    let accepted = delivery
+        .append_event(&request, DurableAppEventKind::ChatMessage.delivery_policy())
+        .unwrap();
+    device
+        .record_own_send_accepted(ROOM_ID, accepted.seq, &accepted.message_id)
+        .unwrap();
+    if let Some(store) = store {
+        store.save_device_state(device).unwrap();
+    }
+    accepted
+}
+
+fn room_cursor(device: &FiniteChatDevice) -> finitechat_client::RoomSyncCursor {
+    device
+        .room_sync_cursors()
+        .into_iter()
+        .find(|cursor| cursor.room_id == ROOM_ID)
+        .expect("fixture room cursor")
+}
+
+/// Fold the WAL into the main database file so a later main-file-only copy
+/// carries exactly this state (the incident's copy shape).
+fn checkpoint_wal(db_path: &std::path::Path) {
+    Connection::open(db_path)
+        .unwrap()
+        .execute_batch("PRAGMA wal_checkpoint(TRUNCATE);")
+        .unwrap();
+}
+
+/// The incident mechanism: copy the main database file and nothing else.
+fn raw_copy_without_wal(src: &std::path::Path, dst: &std::path::Path) {
+    std::fs::copy(src, dst).unwrap();
+    for suffix in ["-wal", "-shm"] {
+        let _ = std::fs::remove_file(dst.with_file_name(format!(
+            "{}{suffix}",
+            dst.file_name().unwrap().to_string_lossy()
+        )));
+    }
+}
+
+/// The correct mechanism: SQLite's online backup API folds the WAL in.
+fn backup_api_copy(src: &std::path::Path, dst: &std::path::Path) {
+    let src = Connection::open(src).unwrap();
+    let mut dst = Connection::open(dst).unwrap();
+    let backup = rusqlite::backup::Backup::new(&src, &mut dst).unwrap();
+    backup
+        .run_to_completion(64, std::time::Duration::from_millis(5), None)
+        .unwrap();
+}
+
+fn behind_server_evidence_in<E: std::fmt::Debug>(
+    error: &RuntimeWorkerError<E>,
+) -> Option<(u64, u64)> {
+    match error {
+        RuntimeWorkerError::Client(ClientError::DeviceStateBehindServer {
+            local_mark,
+            observed_seq,
+            ..
+        })
+        | RuntimeWorkerError::ClientStore(ClientStoreError::Client(
+            ClientError::DeviceStateBehindServer {
+                local_mark,
+                observed_seq,
+                ..
+            },
+        )) => Some((*local_mark, *observed_seq)),
+        _ => None,
+    }
+}
+
+fn assert_send_refused_behind_server(device: &mut FiniteChatDevice, key: &str) {
+    let refused = device
+        .create_application_request(ROOM_ID, b"must not encrypt", key)
+        .unwrap_err();
+    assert!(
+        matches!(refused, ClientError::DeviceStateBehindServer { .. }),
+        "expected DeviceStateBehindServer, got {refused:?}"
+    );
+}
+
+/// T1 — the raw-copy regression pin. A main-file-only copy taken after a
+/// checkpoint but before later sends is behind the server: its first sync
+/// tick trips on the device's own later entry, the evidence is durable,
+/// and sends are refused. A backup-API copy of the same live store is
+/// current: it syncs clean and sends.
+#[test]
+fn currency_gate_refuses_wal_less_file_copy_but_allows_backup_api_copy() {
+    let mut f = currency_fixture("t1");
+    let first = send_recorded(
+        &mut f.delivery,
+        &mut f.bob,
+        Some(&mut f.bob_store),
+        "t1 first",
+        "t1_first",
+    );
+    checkpoint_wal(&f.bob_db);
+    let mut later = Vec::new();
+    for index in 0..3 {
+        later.push(
+            send_recorded(
+                &mut f.delivery,
+                &mut f.bob,
+                Some(&mut f.bob_store),
+                &format!("t1 later {index}"),
+                &format!("t1_later_{index}"),
+            )
+            .seq,
+        );
+    }
+    let owner_report = run_runtime_sync_tick(
+        &mut f.alice_store,
+        &mut f.alice,
+        &mut f.delivery,
+        &f.options,
+    )
+    .unwrap();
+    assert_eq!(owner_report.applied_entries.len(), 4);
+
+    // Raw copy (main file only): the checkpointed state, i.e. mark == first.
+    let raw_db = f.dir.path().join("t1_bob_raw.sqlite3");
+    raw_copy_without_wal(&f.bob_db, &raw_db);
+    let mut raw_store = sqlite_client_store(&raw_db, &f.bob_config);
+    let mut raw_bob = raw_store.load_device(f.bob_config.clone()).unwrap();
+    let before = room_cursor(&raw_bob);
+    assert_eq!(before.own_send_high_water_seq, first.seq);
+    assert!(before.currency_initialized);
+    assert!(!before.currency_verified);
+    assert!(before.behind_server.is_none());
+
+    let tripped = run_runtime_sync_tick(&mut raw_store, &mut raw_bob, &mut f.delivery, &f.options)
+        .unwrap_err();
+    assert_eq!(
+        behind_server_evidence_in(&tripped),
+        Some((first.seq, later[0])),
+        "unexpected tick error: {tripped:?}"
+    );
+    // The cursor stops short of the evidence entry.
+    assert_eq!(raw_bob.last_applied_seq(ROOM_ID).unwrap(), first.seq);
+    assert_send_refused_behind_server(&mut raw_bob, "t1_raw_refused_in_memory");
+
+    // Durable: a fresh load of the copy still carries the evidence.
+    let mut reloaded = raw_store.load_device(f.bob_config.clone()).unwrap();
+    let evidence = room_cursor(&reloaded)
+        .behind_server
+        .expect("rewind evidence persisted with the device state");
+    assert_eq!(evidence.local_mark, first.seq);
+    assert_eq!(evidence.observed_seq, later[0]);
+    assert_eq!(evidence.evidence_epoch, 1);
+    assert_eq!(evidence.observed_at, NOW);
+    assert_send_refused_behind_server(&mut reloaded, "t1_raw_refused_reloaded");
+    // Re-syncing does not re-trip (the flag is sticky, the tick proceeds)
+    // and does not lift the flag either.
+    run_runtime_sync_tick(&mut raw_store, &mut reloaded, &mut f.delivery, &f.options).unwrap();
+    assert!(room_cursor(&reloaded).behind_server.is_some());
+    assert_send_refused_behind_server(&mut reloaded, "t1_raw_refused_after_resync");
+
+    // Backup-API copy of the same live store: current, syncs clean, sends.
+    let backup_db = f.dir.path().join("t1_bob_backup.sqlite3");
+    backup_api_copy(&f.bob_db, &backup_db);
+    let mut backup_store = sqlite_client_store(&backup_db, &f.bob_config);
+    let mut backup_bob = backup_store.load_device(f.bob_config.clone()).unwrap();
+    assert_eq!(
+        room_cursor(&backup_bob).own_send_high_water_seq,
+        *later.last().unwrap()
+    );
+    run_runtime_sync_tick(
+        &mut backup_store,
+        &mut backup_bob,
+        &mut f.delivery,
+        &f.options,
+    )
+    .unwrap();
+    let cursor = room_cursor(&backup_bob);
+    assert!(cursor.behind_server.is_none());
+    assert!(cursor.currency_verified);
+    let healthy = send_recorded(
+        &mut f.delivery,
+        &mut backup_bob,
+        Some(&mut backup_store),
+        "t1 from backup copy",
+        "t1_backup_send",
+    );
+    let owner_report = run_runtime_sync_tick(
+        &mut f.alice_store,
+        &mut f.alice,
+        &mut f.delivery,
+        &f.options,
+    )
+    .unwrap();
+    assert_eq!(owner_report.applied_entries.len(), 1);
+    assert_eq!(owner_report.applied_entries[0].seq, healthy.seq);
+    assert!(matches!(
+        &owner_report.applied_entries[0].entry,
+        AppliedLogEntry::Application { sender, .. } if *sender == *backup_bob.device_ref()
+    ));
+}
+
+/// T2 — two current copies of one store: the moment one sends, the other
+/// is behind the server; its next sync trips and its sends are refused.
+#[test]
+fn currency_gate_trips_second_current_copy_after_first_copy_sends() {
+    let mut f = currency_fixture("t2");
+    let first = send_recorded(
+        &mut f.delivery,
+        &mut f.bob,
+        Some(&mut f.bob_store),
+        "t2 before fork",
+        "t2_before_fork",
+    );
+    let a_db = f.dir.path().join("t2_bob_a.sqlite3");
+    let b_db = f.dir.path().join("t2_bob_b.sqlite3");
+    backup_api_copy(&f.bob_db, &a_db);
+    backup_api_copy(&f.bob_db, &b_db);
+    let mut a_store = sqlite_client_store(&a_db, &f.bob_config);
+    let mut a = a_store.load_device(f.bob_config.clone()).unwrap();
+    let mut b_store = sqlite_client_store(&b_db, &f.bob_config);
+    let mut b = b_store.load_device(f.bob_config.clone()).unwrap();
+    run_runtime_sync_tick(&mut a_store, &mut a, &mut f.delivery, &f.options).unwrap();
+    run_runtime_sync_tick(&mut b_store, &mut b, &mut f.delivery, &f.options).unwrap();
+    assert!(room_cursor(&a).currency_verified);
+    assert!(room_cursor(&b).currency_verified);
+
+    let from_a = send_recorded(
+        &mut f.delivery,
+        &mut a,
+        Some(&mut a_store),
+        "t2 from a",
+        "t2_a",
+    );
+
+    let tripped =
+        run_runtime_sync_tick(&mut b_store, &mut b, &mut f.delivery, &f.options).unwrap_err();
+    assert_eq!(
+        behind_server_evidence_in(&tripped),
+        Some((first.seq, from_a.seq)),
+        "unexpected tick error: {tripped:?}"
+    );
+    assert_send_refused_behind_server(&mut b, "t2_b_refused");
+    let mut b_reloaded = b_store.load_device(f.bob_config.clone()).unwrap();
+    assert_send_refused_behind_server(&mut b_reloaded, "t2_b_refused_reloaded");
+
+    // The copy that actually sent stays current.
+    run_runtime_sync_tick(&mut a_store, &mut a, &mut f.delivery, &f.options).unwrap();
+    assert!(room_cursor(&a).behind_server.is_none());
+    send_recorded(
+        &mut f.delivery,
+        &mut a,
+        Some(&mut a_store),
+        "t2 from a again",
+        "t2_a_2",
+    );
+}
+
+/// T3 — upgrade bootstrap. A store written by the previous release kept no
+/// own-send mark: the first sync after the upgrade initializes the mark
+/// from the device's own entries instead of tripping, flips the room to
+/// enforcement, and the very next rewind trips.
+#[test]
+fn currency_gate_bootstraps_pre_mark_snapshot_then_enforces() {
+    let mut f = currency_fixture("t3");
+    let _first = send_recorded(&mut f.delivery, &mut f.bob, None, "t3 first", "t3_first");
+    let second = send_recorded(&mut f.delivery, &mut f.bob, None, "t3 second", "t3_second");
+    // Persist in the pre-gate layout: mark and pending ids are dropped.
+    f.bob_store
+        .save_device_state_as_pre_currency_gate_snapshot_for_tests(&f.bob)
+        .unwrap();
+    drop(f.bob_store);
+    let mut bob_store = sqlite_client_store(&f.bob_db, &f.bob_config);
+    let mut legacy_bob = bob_store.load_device(f.bob_config.clone()).unwrap();
+    let cursor = room_cursor(&legacy_bob);
+    assert!(!cursor.currency_initialized);
+    assert_eq!(cursor.own_send_high_water_seq, 0);
+    assert!(!cursor.currency_verified);
+    assert!(cursor.behind_server.is_none());
+
+    // Initialization pass: own entries above 0 raise the mark, no trip.
+    run_runtime_sync_tick(&mut bob_store, &mut legacy_bob, &mut f.delivery, &f.options).unwrap();
+    let cursor = room_cursor(&legacy_bob);
+    assert!(cursor.currency_initialized);
+    assert_eq!(cursor.own_send_high_water_seq, second.seq);
+    assert!(cursor.currency_verified);
+    assert!(cursor.behind_server.is_none());
+    // ...and the graduation is durable.
+    let cursor = room_cursor(&bob_store.load_device(f.bob_config.clone()).unwrap());
+    assert!(cursor.currency_initialized);
+    assert_eq!(cursor.own_send_high_water_seq, second.seq);
+
+    // Enforcement: the next rewind (raw copy before a later send) trips.
+    checkpoint_wal(&f.bob_db);
+    let third = send_recorded(
+        &mut f.delivery,
+        &mut legacy_bob,
+        Some(&mut bob_store),
+        "t3 third",
+        "t3_third",
+    );
+    let raw_db = f.dir.path().join("t3_bob_raw.sqlite3");
+    raw_copy_without_wal(&f.bob_db, &raw_db);
+    let mut raw_store = sqlite_client_store(&raw_db, &f.bob_config);
+    let mut raw_bob = raw_store.load_device(f.bob_config.clone()).unwrap();
+    assert!(room_cursor(&raw_bob).currency_initialized);
+    let tripped = run_runtime_sync_tick(&mut raw_store, &mut raw_bob, &mut f.delivery, &f.options)
+        .unwrap_err();
+    assert_eq!(
+        behind_server_evidence_in(&tripped),
+        Some((second.seq, third.seq)),
+        "unexpected tick error: {tripped:?}"
+    );
+    assert_send_refused_behind_server(&mut raw_bob, "t3_raw_refused");
+}
+
+/// T4 — unverified until synced. A freshly opened store cannot send until
+/// one sync tick has completed for the room in this process.
+#[test]
+fn currency_gate_refuses_sends_until_one_sync_tick_verifies_the_open() {
+    let mut f = currency_fixture("t4");
+    drop(f.bob_store);
+    let mut bob_store = sqlite_client_store(&f.bob_db, &f.bob_config);
+    let mut reopened = bob_store.load_device(f.bob_config.clone()).unwrap();
+    assert!(!room_cursor(&reopened).currency_verified);
+    let refused = reopened
+        .create_application_request(ROOM_ID, b"too early", "t4_too_early")
+        .unwrap_err();
+    assert!(
+        matches!(&refused, ClientError::CurrencyUnverified { room_id } if room_id == ROOM_ID),
+        "expected CurrencyUnverified, got {refused:?}"
+    );
+    run_runtime_sync_tick(&mut bob_store, &mut reopened, &mut f.delivery, &f.options).unwrap();
+    assert!(room_cursor(&reopened).currency_verified);
+    let sent = send_recorded(
+        &mut f.delivery,
+        &mut reopened,
+        Some(&mut bob_store),
+        "t4 after sync",
+        "t4_after_sync",
+    );
+    // A reload through the same store handle keeps the verification the
+    // process already earned (the runtime reloads after failed room ticks).
+    let reloaded = bob_store.load_device(f.bob_config.clone()).unwrap();
+    assert!(room_cursor(&reloaded).currency_verified);
+    assert_eq!(room_cursor(&reloaded).own_send_high_water_seq, sent.seq);
+}
+
+/// T5 — clearing. A flagged room heals only when a Commit moves the epoch
+/// past the evidence epoch: the counterpart's self-update re-derives every
+/// secret tree, the rewound copy's next tick clears the flag, and its
+/// sends are decryptable again.
+#[test]
+fn currency_gate_clears_when_counterpart_commit_advances_the_epoch() {
+    let mut f = currency_fixture("t5");
+    let first = send_recorded(
+        &mut f.delivery,
+        &mut f.bob,
+        Some(&mut f.bob_store),
+        "t5 first",
+        "t5_first",
+    );
+    checkpoint_wal(&f.bob_db);
+    let later = send_recorded(
+        &mut f.delivery,
+        &mut f.bob,
+        Some(&mut f.bob_store),
+        "t5 later",
+        "t5_later",
+    );
+    run_runtime_sync_tick(
+        &mut f.alice_store,
+        &mut f.alice,
+        &mut f.delivery,
+        &f.options,
+    )
+    .unwrap();
+
+    let raw_db = f.dir.path().join("t5_bob_raw.sqlite3");
+    raw_copy_without_wal(&f.bob_db, &raw_db);
+    let mut raw_store = sqlite_client_store(&raw_db, &f.bob_config);
+    let mut raw_bob = raw_store.load_device(f.bob_config.clone()).unwrap();
+    let tripped = run_runtime_sync_tick(&mut raw_store, &mut raw_bob, &mut f.delivery, &f.options)
+        .unwrap_err();
+    assert_eq!(
+        behind_server_evidence_in(&tripped),
+        Some((first.seq, later.seq))
+    );
+    let mut raw_bob = raw_store.load_device(f.bob_config.clone()).unwrap();
+    assert_eq!(
+        room_cursor(&raw_bob)
+            .behind_server
+            .as_ref()
+            .map(|e| e.evidence_epoch),
+        Some(1)
+    );
+    assert_send_refused_behind_server(&mut raw_bob, "t5_refused");
+
+    // Counterpart rekey: alice self-updates, epoch 1 -> 2.
+    let prepared = f
+        .alice
+        .prepare_self_update_commit(ROOM_ID, "t5_alice_self_update")
+        .unwrap();
+    let commit_accepted = f.delivery.submit_commit(prepared.request).unwrap();
+    let alice_page = f
+        .delivery
+        .sync_events(
+            ROOM_ID,
+            f.alice.device_ref(),
+            f.alice.last_applied_seq(ROOM_ID).unwrap(),
+        )
+        .unwrap();
+    f.alice
+        .merge_pending_commit_from_log(ROOM_ID, &alice_page.entries, &prepared.message_id)
+        .unwrap();
+    f.alice_store
+        .advance_room_cursor_and_save(&mut f.alice, ROOM_ID, commit_accepted.seq)
+        .unwrap();
+    assert_eq!(f.alice.group_epoch(ROOM_ID).unwrap(), 2);
+
+    // The flagged copy's tick now passes its own later entry (sticky flag,
+    // no re-trip), applies the Commit, and the epoch advance clears it.
+    run_runtime_sync_tick(&mut raw_store, &mut raw_bob, &mut f.delivery, &f.options).unwrap();
+    assert_eq!(raw_bob.group_epoch(ROOM_ID).unwrap(), 2);
+    let cursor = room_cursor(&raw_bob);
+    assert!(
+        cursor.behind_server.is_none(),
+        "flag should clear: {cursor:?}"
+    );
+    assert!(cursor.currency_verified);
+    assert!(cursor.own_send_high_water_seq >= later.seq);
+    assert!(
+        room_cursor(&raw_store.load_device(f.bob_config.clone()).unwrap())
+            .behind_server
+            .is_none()
+    );
+
+    let healed = send_recorded(
+        &mut f.delivery,
+        &mut raw_bob,
+        Some(&mut raw_store),
+        "t5 healed",
+        "t5_healed",
+    );
+    let owner_report = run_runtime_sync_tick(
+        &mut f.alice_store,
+        &mut f.alice,
+        &mut f.delivery,
+        &f.options,
+    )
+    .unwrap();
+    assert_eq!(owner_report.applied_entries.len(), 1);
+    assert_eq!(owner_report.applied_entries[0].seq, healed.seq);
+    assert!(matches!(
+        &owner_report.applied_entries[0].entry,
+        AppliedLogEntry::Application { plaintext, .. }
+            if plaintext == br#"{"type":"finitecomputer.command.v1","body":{"text":"t5 healed"}}"#
+    ));
 }

@@ -66,7 +66,7 @@ revision, and opening or wrapping an appropriately scoped Folder Key Grant.
 FiniteBrain retains ownership of Brain, Folder, content-crypto, and grant
 policy. It also owns its own hosted-now/native-later adapter. The contract
 never exposes a raw identity secret or generic sign/decrypt operation to
-Product Client code. Hosted, Electron, and iOS adapters may implement the same
+Product Client code. Hosted and future native adapters may implement the same
 contract for one User Nostr Identity despite their different custody models.
 Finite Identity supplies key-storage and lifecycle primitives; it does not own
 a universal product adapter. The adapter opens a validated Folder Key Grant,
@@ -139,21 +139,29 @@ _Avoid_: Limited Member, External Member.
 
 A pending, single-recipient, single-use offer to become a Member of a Brain. It
 may be sent from either a Personal Brain or an Organization Brain, but only the
-addressed email or Member Identity may accept it. It expires if unused and
+addressed Member Identity may accept it. It expires if unused and
 acceptance never transfers Personal Brain ownership or implicitly grants an
 Organization Brain admin role. Cancellation applies only while pending;
 acceptance consumes the invitation and later membership removal is a separate
 administrative operation. _Avoid_: Brain Share.
 
+Superseded (auth kernel cut, 2026-08): email-addressed Brain Invitations and
+their identity-proof claim flow are removed. Email is delivery only — an
+unguessable capability Invite Token link — and grants name npubs or resolve
+through public NIP-05.
+
 ### Folder Invitation
 
 A pending, single-recipient, single-use offer of Folder Access Readiness for one
 Folder. It may be sent from either a Personal Brain or an Organization Brain,
-only the addressed email or Member Identity may accept it, creates a Guest
+only the addressed Member Identity may accept it, creates a Guest
 relationship when needed, expires if unused, and does not create a relationship
 with another Brain. Cancellation applies only while pending; acceptance consumes
 the invitation and later Folder Access Revocation is a separate administrative
 operation. _Avoid_: Share Link, Folder Share.
+
+Superseded (auth kernel cut, 2026-08): email-addressed Folder Invitations
+(Email Invite Bootstrap) are removed; Folder guests are invited by npub.
 
 ### Pending Grant Wrap
 
@@ -226,11 +234,10 @@ unready Folder and remains safe to retry. _Avoid_: Admin Sharing, Brain Access.
 
 ### User Nostr Identity
 
-The human-controlled Nostr `npub` used across Hosted Web, Electron, and iOS.
+The human-controlled Nostr `npub` used across Hosted Web surfaces.
 In FiniteBrain it is a Member Identity and receives the appropriate Brain
 ownership or membership, Folder Access, and Folder Key Grants. Hosted Web uses
-it through a server-held Brain Identity Provider; Electron and iOS use the same
-identity from protected local storage. The custody difference does not create
+it through a server-held Brain Identity Provider. The custody difference does not create
 another Brain identity. Account Auth may authorize a Hosted Web session but does
 not grant Brain access. A User Nostr Identity remains distinct from every Agent
 Principal Key. In the first hosted phase, the Finite Chat Hosted Device is the
@@ -241,6 +248,12 @@ creates another User Nostr Identity. This is a Greenfield boundary: Brain
 carries no legacy Brain or user-key migration path into the first release.
 
 ### Organization Brain Requester
+
+Superseded (auth kernel cut, 2026-08): the Brain server no longer verifies the
+requester against any account authority. `requestingUserNpub` is accepted as
+declared provenance from the Agent Runtime's turn-scoped lease; creator and
+requester become initial admins, exactly what a direct admin could grant
+anyway. The description below is historical.
 
 The authenticated human whose direct request causes an Agent Principal to
 create an Organization Brain on the human's behalf. Organization Brain
@@ -287,6 +300,15 @@ its Managed Agent Email used as the readable display identity where Brain
 already shows history; Brain does not impersonate the human owner.
 
 ### Personal Agent
+
+Superseded (auth kernel cut, 2026-08): the account-bound registration paths
+(agent-first bootstrap, owner-side managed-email selection, and the
+key-rotating replacement route) are removed with the Core/Identity
+coordination machinery; existing Personal Agent relationships keep working.
+Automatic revocation on Core-agent departure was never built into Brain and
+the departure-fact consumer is removed — revocation is an explicit admin or
+owner action (or a future external offboarding workflow). The description
+below is historical.
 
 The product role of an Agent Principal added by the owner or established during
 account-bound agent bootstrap in a Personal Brain. A Personal Agent has full
@@ -342,6 +364,11 @@ pending invitations. Invitations are reserved for adding a Member Identity
 after a Brain already exists.
 
 ### Agent Bootstrap Authority
+
+Superseded (auth kernel cut, 2026-08): removed. The Brain server keeps no
+Core or Finite Identity wiring, so nothing here can be resolved or enforced
+server-side; the account-bound agent bootstrap story is re-homed to Finite
+Core. The description below is historical.
 
 The standing authority of an authenticated account-bound Agent Principal to
 create its user's single Personal Brain and atomically establish itself in that

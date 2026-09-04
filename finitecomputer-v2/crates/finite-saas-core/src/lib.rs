@@ -65,7 +65,11 @@ pub const CORE_SCHEMA_SQL: &str = concat!(
     "\n",
     include_str!("../migrations/0021_runtime_lifecycle.sql"),
     "\n",
-    include_str!("../migrations/0022_runtime_health_reports.sql")
+    include_str!("../migrations/0022_runtime_health_reports.sql"),
+    "\n",
+    include_str!("../migrations/0023_agent_creation_owner_chat_account_id.sql"),
+    "\n",
+    include_str!("../migrations/0024_runtime_status_pending_first_report_remap.sql")
 );
 pub const RUNTIME_UPGRADE_ROLLBACK_RESCUE_SQL: &str =
     include_str!("../migrations/runtime_upgrade_rollback_rescue.sql");
@@ -117,6 +121,53 @@ macro_rules! wire_enum {
             }
         }
     };
+    // Forward-tolerant form: an unrecognised wire string parses as the named
+    // fallback variant instead of failing, so an N-1 reader survives the next
+    // added variant. Only for enums with a variant whose documented meaning
+    // is already "not known" — never for enums where a wrong guess would be
+    // acted on.
+    (
+        $(#[doc = $doc:literal])*
+        $name:ident { $($variant:ident => $wire:literal),+ $(,)? }
+        parse: $parse:ident
+        fallback: $fallback:ident
+    ) => {
+        $(#[doc = $doc])*
+        #[derive(Debug, Clone, Copy, Serialize, PartialEq, Eq)]
+        pub enum $name {
+            $(
+                #[serde(rename = $wire)]
+                $variant,
+            )+
+        }
+
+        impl $name {
+            pub fn as_str(self) -> &'static str {
+                match self {
+                    $(Self::$variant => $wire,)+
+                }
+            }
+        }
+
+        impl<'de> serde::Deserialize<'de> for $name {
+            fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+            where
+                D: serde::Deserializer<'de>,
+            {
+                let value = <String as serde::Deserialize>::deserialize(deserializer)?;
+                Ok($parse(&value).unwrap_or(Self::$fallback))
+            }
+        }
+
+        /// Never `None`: an unrecognised string is the fallback variant. The
+        /// `Option` return keeps the shape of every other `parse_*`.
+        pub fn $parse(value: &str) -> Option<$name> {
+            match value {
+                $($wire => Some($name::$variant),)+
+                _ => Some($name::$fallback),
+            }
+        }
+    };
 }
 
 wire_enum! {
@@ -150,6 +201,17 @@ wire_enum! {
 }
 
 wire_enum! {
+/// A Runtime's lifecycle-latched summary. `Online`/`Offline` are the last
+/// successful up-/down-bound lifecycle outcomes, `Stale` is a failed control,
+/// and `Unknown` is registered-but-unconfirmed. Every completion that brings
+/// compute up latches `Online` and clears the stored health report, so the
+/// user-facing status (never this latch verbatim: see
+/// `derive_runtime_summary_status`) reads `unknown` until the runner's
+/// standing poller first reports on the new incarnation.
+///
+/// Parsing is forward-tolerant: an unrecognised string reads as `Unknown`
+/// (registered-but-unconfirmed), so a reader one release behind survives a
+/// newly added variant.
     RuntimeSummaryStatus {
     Online => "online",
     Offline => "offline",
@@ -157,6 +219,7 @@ wire_enum! {
     Unknown => "unknown",
     }
     parse: parse_runtime_summary_status
+    fallback: Unknown
 }
 
 wire_enum! {
@@ -673,12 +736,16 @@ pub enum CoreError {
     MissingAgentCreationIdempotencyKey,
     #[error("agent profile picture URL is invalid")]
     InvalidAgentProfilePictureUrl,
+    #[error("owner chat account id must be 64 lowercase hex characters")]
+    InvalidOwnerChatAccountId,
     #[error("runtime contact endpoint is invalid")]
     InvalidRuntimeContactEndpoint,
     #[error("agent runtime id is required")]
     MissingAgentRuntimeId,
     #[error("runtime health report is invalid or out of bounds")]
     InvalidRuntimeHealthReport,
+    #[error("runtime health report presents a different Agent Principal than the one on record")]
+    RuntimeHealthReportPrincipalMismatch,
     #[error("provider runtime handle does not match the persisted placement")]
     ProviderRuntimeHandlePlacementMismatch,
     #[error("provider operation correlation id is required or invalid")]
@@ -929,117 +996,6 @@ pub struct Project {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "camelCase")]
-pub struct BrainAgentAccount {
-    pub workos_user_id: String,
-    pub managed_agent_email: String,
-    pub verified_email: String,
-    pub status: String,
-}
-
-/// Account lookup for the Brain roster endpoint (ADR-0046): any one of the
-/// WorkOS user id, the verified human mailbox, or a Managed Agent Email
-/// resolves the account. Lookup precedence is the field order below.
-#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "camelCase")]
-pub struct BrainAccountRosterLookup {
-    pub workos_user_id: Option<String>,
-    pub email: Option<String>,
-    pub managed_agent_email: Option<String>,
-}
-
-impl BrainAccountRosterLookup {
-    pub fn is_empty(&self) -> bool {
-        self.workos_user_id.is_none() && self.email.is_none() && self.managed_agent_email.is_none()
-    }
-}
-
-/// One account-owned, identity-provisioned agent on the roster. Temporary
-/// runtime health never removes an agent; only a Permanent Departure does.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "camelCase")]
-pub struct BrainAccountAgentRosterEntry {
-    pub managed_agent_email: String,
-    /// Core does not durably store the Agent Principal npub today; the field
-    /// stays in the contract so Brain can consume it once Core learns it.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub agent_npub: Option<String>,
-    pub status: String,
-    pub placement_runner_class: RunnerClass,
-}
-
-/// The authoritative account agent roster: who owns which agents, plus a
-/// per-account monotonic revision bumped on every membership change.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "camelCase")]
-pub struct BrainAccountAgentRoster {
-    pub workos_user_id: String,
-    pub human_mailbox: String,
-    pub roster_revision: i64,
-    pub agents: Vec<BrainAccountAgentRosterEntry>,
-    /// Permanent departures are replayed through the departure-facts endpoint
-    /// with a last-applied-revision cursor; the roster itself never inlines
-    /// them, so this is always empty.
-    pub departed: Vec<BrainAgentDepartureFact>,
-}
-
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case")]
-pub enum BrainDeparturePrincipalKind {
-    Human,
-    Agent,
-}
-
-impl BrainDeparturePrincipalKind {
-    pub fn as_str(self) -> &'static str {
-        match self {
-            Self::Human => "human",
-            Self::Agent => "agent",
-        }
-    }
-}
-
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case")]
-pub enum BrainDepartureReason {
-    Retired,
-    Deleted,
-    Unlinked,
-}
-
-impl BrainDepartureReason {
-    pub fn as_str(self) -> &'static str {
-        match self {
-            Self::Retired => "retired",
-            Self::Deleted => "deleted",
-            Self::Unlinked => "unlinked",
-        }
-    }
-}
-
-/// One durable, replayable Permanent Departure Fact (ADR-0046). `revision` is
-/// the global monotonic cursor Brain stores as last-applied.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "camelCase")]
-pub struct BrainAgentDepartureFact {
-    pub revision: i64,
-    pub account_id: String,
-    pub principal_kind: BrainDeparturePrincipalKind,
-    pub principal_ref: String,
-    pub departed_at: String,
-    pub reason: BrainDepartureReason,
-}
-
-/// A cursor page of departure facts plus the global maximum revision, so a
-/// consumer with no new facts still learns how far the log has advanced.
-#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "camelCase")]
-pub struct BrainAgentDepartureFactsPage {
-    pub facts: Vec<BrainAgentDepartureFact>,
-    pub max_revision: i64,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct AgentRuntime {
     pub id: String,
     pub project_id: String,
@@ -1096,6 +1052,7 @@ wire_enum! {
     RuntimeHealthStatus {
     Ready => "ready",
     NotReady => "not_ready",
+    Stale => "stale",
     Unknown => "unknown",
     }
     parse: parse_runtime_health_status
@@ -1123,31 +1080,55 @@ pub struct RuntimeHealthProjection {
     pub reported_at: Option<String>,
     pub observed_at: Option<String>,
     pub agent_npub: Option<String>,
+    /// The reporter's poll cadence as stored (clamped to the accepted range);
+    /// `None` until a report has been recorded.
+    #[serde(default)]
+    pub report_interval_seconds: Option<i64>,
 }
 
-/// Project standing readiness from the latest stored report. Reports only
-/// speak for runtimes Core considers `online`; an intentionally offline
-/// runtime carries no standing readiness claim and projects `unknown`.
-/// Freshness is measured from `reported_at` (Core's receive clock), never the
-/// runner's `observed_at`, so runner clock skew cannot extend freshness.
+impl RuntimeHealthProjection {
+    /// The projection of a runtime that has never been reported on.
+    pub fn unreported() -> Self {
+        Self {
+            status: RuntimeHealthStatus::Unknown,
+            reason: None,
+            reported_at: None,
+            observed_at: None,
+            agent_npub: None,
+            report_interval_seconds: None,
+        }
+    }
+}
+
+/// Project standing readiness from the latest stored report. Reports do not
+/// speak for a runtime that is intentionally `offline`. Every completion that
+/// brings compute up clears the stored report, so a report never speaks for
+/// a previous incarnation. Freshness is measured from `reported_at` (Core's
+/// receive clock), never the runner's `observed_at`, so runner clock skew
+/// cannot extend freshness. A report older than
+/// `RUNTIME_HEALTH_REPORT_STALE_MULTIPLIER` intervals is the named `stale`
+/// state; no report at all is `unknown`.
 pub fn project_runtime_health(
     runtime_status: RuntimeSummaryStatus,
     health: &StoredRuntimeHealth,
     now: &str,
 ) -> CoreResult<RuntimeHealthProjection> {
-    let status = if runtime_status != RuntimeSummaryStatus::Online {
+    let interval_seconds = health.report_interval_seconds.map(|interval| {
+        interval.clamp(
+            RUNTIME_HEALTH_REPORT_MIN_INTERVAL_SECONDS,
+            RUNTIME_HEALTH_REPORT_MAX_INTERVAL_SECONDS,
+        )
+    });
+    let reports_speak = runtime_status != RuntimeSummaryStatus::Offline;
+    let status = if !reports_speak {
         RuntimeHealthStatus::Unknown
     } else if let (Some(ready), Some(reported_at)) = (health.ready, health.reported_at.as_deref()) {
-        let interval_seconds = health
-            .report_interval_seconds
+        let deadline_seconds = interval_seconds
             .unwrap_or(RUNTIME_HEALTH_REPORT_DEFAULT_INTERVAL_SECONDS)
-            .clamp(
-                RUNTIME_HEALTH_REPORT_MIN_INTERVAL_SECONDS,
-                RUNTIME_HEALTH_REPORT_MAX_INTERVAL_SECONDS,
-            );
+            * RUNTIME_HEALTH_REPORT_STALE_MULTIPLIER;
         let age = parse_time(now)? - parse_time(reported_at)?;
-        if age > Duration::seconds(interval_seconds * RUNTIME_HEALTH_REPORT_STALE_MULTIPLIER) {
-            RuntimeHealthStatus::Unknown
+        if age > Duration::seconds(deadline_seconds) {
+            RuntimeHealthStatus::Stale
         } else if ready {
             RuntimeHealthStatus::Ready
         } else {
@@ -1162,7 +1143,68 @@ pub fn project_runtime_health(
         reported_at: health.reported_at.clone(),
         observed_at: health.observed_at.clone(),
         agent_npub: health.reporting_npub.clone(),
+        report_interval_seconds: interval_seconds,
     })
+}
+
+/// The one user-facing summary rule: what a runtime's status *is* derives
+/// from report freshness, never from the last lifecycle outcome alone.
+///
+/// - an intentionally stopped runtime (`offline` latch) stays `offline`;
+/// - otherwise a fresh `ready` report is `online`, a fresh not-ready report
+///   is `offline` (nobody answers, or the guest says it is not ready), a
+///   report past the freshness deadline is `stale`, and a runtime that has
+///   not been reported on since its compute last came up is `unknown`.
+///
+/// The latched lifecycle fact stays visible to operators under its own
+/// field; this value is what the summary status wire fields carry.
+pub fn derive_runtime_summary_status(
+    lifecycle_status: RuntimeSummaryStatus,
+    health: &RuntimeHealthProjection,
+) -> RuntimeSummaryStatus {
+    match lifecycle_status {
+        RuntimeSummaryStatus::Offline => RuntimeSummaryStatus::Offline,
+        RuntimeSummaryStatus::Online
+        | RuntimeSummaryStatus::Stale
+        | RuntimeSummaryStatus::Unknown => match health.status {
+            RuntimeHealthStatus::Ready => RuntimeSummaryStatus::Online,
+            RuntimeHealthStatus::NotReady => RuntimeSummaryStatus::Offline,
+            RuntimeHealthStatus::Stale => RuntimeSummaryStatus::Stale,
+            RuntimeHealthStatus::Unknown => RuntimeSummaryStatus::Unknown,
+        },
+    }
+}
+
+/// One runtime the runner's standing-health poller should poll, as listed by
+/// Core for the runner credential's host each cycle: every live runtime on
+/// that host whose lifecycle latch is not `offline`. Core is the only source
+/// of the target set; the runner keeps no registry.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct RuntimeHealthTarget {
+    pub agent_runtime_id: String,
+    pub source_machine_id: String,
+    /// The contact endpoint Core holds for the runtime; `None` for rows that
+    /// never recorded one (the runner cannot poll those).
+    pub contact_endpoint: Option<String>,
+    /// The Agent Principal npub Core holds for the runtime, if any — seeded
+    /// from the launch-verified principal when its compute last came up, or
+    /// from its first report. The runner attributes answers to it only when
+    /// they present this principal, and Core rejects reports that carry
+    /// another, so a reallocated port cannot wear this runtime's name.
+    #[serde(default)]
+    pub agent_npub: Option<String>,
+    pub lifecycle_status: RuntimeSummaryStatus,
+    /// The cadence the latest stored report declared, if any.
+    #[serde(default)]
+    pub report_interval_seconds: Option<i64>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct RuntimeHealthTargetList {
+    pub source_host_id: String,
+    pub targets: Vec<RuntimeHealthTarget>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -1252,6 +1294,12 @@ pub struct AgentCreationRequest {
     #[serde(default)]
     pub relocation: Option<RuntimeRelocationEnvelope>,
     pub profile_picture_url: Option<String>,
+    /// Owner hosted-chat account id (64 lowercase hex), submitted by the
+    /// dashboard at creation time. Injected into the lease-time runtime spec
+    /// environment as `FINITECHAT_OWNER_NPUBS`; absent keeps the legacy
+    /// allow-all chat admission for pre-existing requests.
+    #[serde(default)]
+    pub owner_chat_account_id: Option<String>,
     pub status: AgentCreationRequestStatus,
     pub requested_launch_code: Option<String>,
     pub agent_runtime_id: Option<String>,
@@ -1731,6 +1779,10 @@ pub struct AgentCreationConfiguration {
     /// agent state; provider placement remains Core-owned.
     pub requested_hosting_tier: Option<HostingTier>,
     pub profile_picture_url: Option<String>,
+    /// Owner hosted-chat account id (64 hex), pre-minted and submitted by the
+    /// dashboard so the lease-time runtime spec can carry
+    /// `FINITECHAT_OWNER_NPUBS`. Absent keeps legacy allow-all chat admission.
+    pub owner_chat_account_id: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -1909,7 +1961,11 @@ pub struct AdminRuntimeOverview {
     pub source_machine_id: String,
     pub runtime_artifact_id: Option<String>,
     pub runtime_artifact_version_label: Option<String>,
+    /// Derived at read time from `runtime_health` freshness
+    /// (`derive_runtime_summary_status`); never the lifecycle latch verbatim.
     pub runtime_status: RuntimeSummaryStatus,
+    /// The raw lifecycle-latched fact (last control outcome), for operators.
+    pub lifecycle_status: RuntimeSummaryStatus,
     pub last_heartbeat_at: Option<String>,
     pub status_updated_at: Option<String>,
     pub runtime_updated_at: String,
@@ -1921,8 +1977,8 @@ pub struct AdminRuntimeOverview {
     #[serde(default)]
     pub offboarding_phase: Option<OffboardingPhase>,
     /// Runner-ferried standing readiness, projected at read time. `unknown`
-    /// until the runner's standing poller first reports (and whenever reports
-    /// go stale), so this never displays a frozen last-known `ready`.
+    /// until the runner's standing poller first reports and `stale` once
+    /// reports lapse, so this never displays a frozen last-known `ready`.
     pub runtime_health: RuntimeHealthProjection,
 }
 
@@ -2550,6 +2606,11 @@ pub struct CompleteAgentCreationRequestInput {
     pub active_inference_profile: Option<String>,
     pub hermes_available: Option<bool>,
     pub published_app_urls: Vec<String>,
+    /// The Agent Principal npub the launch path verified at `/contact`, when
+    /// it did. Seeds the standing-health attribution pin. Additive: an N-1
+    /// runner omits it and the pin is then taken from the first report.
+    #[serde(default)]
+    pub agent_npub: Option<String>,
     pub now: Option<String>,
 }
 
@@ -2736,13 +2797,16 @@ pub(crate) fn validate_runtime_relocation_registration(
         return Ok(());
     };
     let existing_runtime = existing_runtime.ok_or(CoreError::RuntimeSpecMismatch)?;
-    // `offline` is the cleanly-stopped case; `stale` is acceptable only when
-    // the envelope itself was minted under the operator's compute-absent
-    // attestation (a failed control marks a runtime stale, and absent
-    // compute can never produce the stop receipt that would make it
-    // offline).
+    // `offline` is the cleanly-stopped case; `stale` and `online` are
+    // acceptable only when the envelope itself was minted under the
+    // operator's compute-absent attestation (a failed control marks a
+    // runtime stale, and absent compute can never produce the stop
+    // receipt that would make it offline; `online` is the pre-death last
+    // report, equally frozen once the operator attests the compute is
+    // absent — keep in sync with the enqueue gate in store.rs).
     let source_status_frozen = match existing_runtime.host_facts.runtime_status {
         RuntimeSummaryStatus::Offline => true,
+        RuntimeSummaryStatus::Online => relocation.source_compute_absent,
         RuntimeSummaryStatus::Stale => relocation.source_compute_absent,
         _ => false,
     };
@@ -2951,9 +3015,14 @@ pub(crate) fn runtime_operation_spec_v1(
     } else {
         current.secret_references.clone()
     };
-    let environment = refreshed_environment
-        .cloned()
-        .unwrap_or_else(|| current.environment.clone());
+    // No carry-forward of `OWNER_CHAT_NPUBS_ENV` here: the value is only a
+    // birth-time seed. The sidecar's SQLite store consumes it once into the
+    // Welcome admission policy on first boot, so an upgrade-time environment
+    // refresh that drops it cannot reopen admission after that first boot.
+    let environment = match refreshed_environment {
+        Some(configured) => configured.clone(),
+        None => current.environment.clone(),
+    };
     build_runtime_spec_v1(
         identity,
         desired_artifact,
@@ -3108,6 +3177,32 @@ pub(crate) fn normalize_profile_picture_url(value: Option<&str>) -> CoreResult<O
         return Err(CoreError::InvalidAgentProfilePictureUrl);
     }
     Ok(Some(value))
+}
+
+/// Lease-time spec-environment key carrying the owner chat account id list
+/// (comma-separated 64-hex account ids). The runtime image derives the Hermes
+/// adapter allowlist and the sidecar Welcome allowlist from it. Deliberately
+/// not a reserved key: it is Core-managed per-request spec state, not
+/// Core-global operator configuration.
+pub(crate) const OWNER_CHAT_NPUBS_ENV: &str = "FINITECHAT_OWNER_NPUBS";
+
+/// The dashboard submits the hosted-device `identity.account_id`, which is the
+/// account's 64-hex public key; the Hermes adapter's `user_id` and the chat
+/// sidecar Welcome allowlist both consume that same hex form, so Core stores
+/// the canonical lowercase hex and accepts nothing else.
+pub(crate) fn normalize_owner_chat_account_id(value: Option<&str>) -> CoreResult<Option<String>> {
+    let Some(value) = trim_to_option(value) else {
+        return Ok(None);
+    };
+    let normalized = value.to_ascii_lowercase();
+    if normalized.len() != 64
+        || !normalized
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+    {
+        return Err(CoreError::InvalidOwnerChatAccountId);
+    }
+    Ok(Some(normalized))
 }
 
 pub(crate) fn normalize_runtime_contact_endpoint(
@@ -3927,13 +4022,14 @@ mod tests {
     }
 
     #[test]
-    fn runtime_health_projection_names_stale_and_missing_reports_unknown() {
+    fn runtime_health_projection_names_stale_and_missing_reports() {
         let now = "2026-08-24T12:00:00Z";
         // 181s old at a 60s cadence is past the 3x staleness deadline: the
-        // "died at 3am, shows ready forever" gap closes as `unknown`.
+        // "died at 3am, shows ready forever" gap closes as `stale`.
         let stale = stored_health(true, "2026-08-24T11:56:59Z", 60);
         let projected = project_runtime_health(RuntimeSummaryStatus::Online, &stale, now).unwrap();
-        assert_eq!(projected.status, RuntimeHealthStatus::Unknown);
+        assert_eq!(projected.status, RuntimeHealthStatus::Stale);
+        assert_eq!(projected.report_interval_seconds, Some(60));
 
         // Just inside the deadline still projects the report.
         let edge = stored_health(true, "2026-08-24T11:57:00Z", 60);
@@ -3954,24 +4050,143 @@ mod tests {
         )
         .unwrap();
         assert_eq!(projected.status, RuntimeHealthStatus::Unknown);
+        assert_eq!(projected.report_interval_seconds, None);
     }
 
     #[test]
-    fn runtime_health_projection_only_answers_for_online_runtimes() {
+    fn runtime_health_projection_is_silent_for_offline_runtimes() {
         let now = "2026-08-24T12:00:00Z";
         let fresh = stored_health(true, "2026-08-24T11:59:30Z", 60);
+        let projected = project_runtime_health(RuntimeSummaryStatus::Offline, &fresh, now).unwrap();
+        assert_eq!(
+            projected.status,
+            RuntimeHealthStatus::Unknown,
+            "a stopped runtime carries no standing readiness claim"
+        );
+        // A failed control (`stale` latch) or an unconfirmed registration
+        // does not silence a fresh report: freshness is the truth.
+        for status in [RuntimeSummaryStatus::Stale, RuntimeSummaryStatus::Unknown] {
+            let projected = project_runtime_health(status, &fresh, now).unwrap();
+            assert_eq!(projected.status, RuntimeHealthStatus::Ready);
+        }
+    }
+
+    #[test]
+    fn derived_summary_status_follows_report_freshness() {
+        let now = "2026-08-24T12:00:00Z";
+        let project = |lifecycle: RuntimeSummaryStatus, health: &StoredRuntimeHealth| {
+            let projection = project_runtime_health(lifecycle, health, now).unwrap();
+            derive_runtime_summary_status(lifecycle, &projection)
+        };
+        let fresh_ready = stored_health(true, "2026-08-24T11:59:30Z", 60);
+        let fresh_not_ready = stored_health(false, "2026-08-24T11:59:30Z", 60);
+        let lapsed = stored_health(true, "2026-08-24T11:00:00Z", 60);
+        let never = StoredRuntimeHealth::default();
+
+        // The table: (lifecycle latch, stored report) => user-facing status.
+        let table = [
+            (
+                RuntimeSummaryStatus::Online,
+                &fresh_ready,
+                RuntimeSummaryStatus::Online,
+            ),
+            (
+                RuntimeSummaryStatus::Online,
+                &fresh_not_ready,
+                RuntimeSummaryStatus::Offline,
+            ),
+            (
+                RuntimeSummaryStatus::Online,
+                &lapsed,
+                RuntimeSummaryStatus::Stale,
+            ),
+            (
+                RuntimeSummaryStatus::Online,
+                &never,
+                RuntimeSummaryStatus::Unknown,
+            ),
+            // A failed control does not hide a live runtime, and does not
+            // invent one either.
+            (
+                RuntimeSummaryStatus::Stale,
+                &fresh_ready,
+                RuntimeSummaryStatus::Online,
+            ),
+            (
+                RuntimeSummaryStatus::Stale,
+                &lapsed,
+                RuntimeSummaryStatus::Stale,
+            ),
+            (
+                RuntimeSummaryStatus::Stale,
+                &never,
+                RuntimeSummaryStatus::Unknown,
+            ),
+            (
+                RuntimeSummaryStatus::Unknown,
+                &fresh_ready,
+                RuntimeSummaryStatus::Online,
+            ),
+            // Deliberately stopped stays offline whatever the last report said.
+            (
+                RuntimeSummaryStatus::Offline,
+                &fresh_ready,
+                RuntimeSummaryStatus::Offline,
+            ),
+            (
+                RuntimeSummaryStatus::Offline,
+                &never,
+                RuntimeSummaryStatus::Offline,
+            ),
+        ];
+        for (lifecycle, health, expected) in table {
+            assert_eq!(
+                project(lifecycle, health),
+                expected,
+                "{lifecycle:?} / {health:?}"
+            );
+        }
+    }
+
+    /// No summary status value exists that a runner one release behind does
+    /// not already parse, and a reader one release behind survives the next
+    /// added variant anyway.
+    #[test]
+    fn runtime_summary_status_wire_is_n_minus_one_safe_and_forward_tolerant() {
+        const N_MINUS_ONE_KNOWN: [&str; 4] = ["online", "offline", "stale", "unknown"];
         for status in [
+            RuntimeSummaryStatus::Online,
             RuntimeSummaryStatus::Offline,
             RuntimeSummaryStatus::Stale,
             RuntimeSummaryStatus::Unknown,
         ] {
-            let projected = project_runtime_health(status, &fresh, now).unwrap();
-            assert_eq!(
-                projected.status,
-                RuntimeHealthStatus::Unknown,
-                "an intentionally not-online runtime carries no standing readiness claim"
+            assert!(
+                N_MINUS_ONE_KNOWN.contains(&status.as_str()),
+                "{status:?} would not parse on an N-1 runner"
             );
         }
+        // An unrecognised string parses as `unknown`, via both surfaces.
+        assert_eq!(
+            parse_runtime_summary_status("pending_second_report"),
+            Some(RuntimeSummaryStatus::Unknown)
+        );
+        assert_eq!(
+            serde_json::from_str::<RuntimeSummaryStatus>("\"pending_second_report\"").unwrap(),
+            RuntimeSummaryStatus::Unknown
+        );
+        // Known strings still parse precisely, and the wire shape is unchanged.
+        assert_eq!(
+            serde_json::from_str::<RuntimeSummaryStatus>("\"stale\"").unwrap(),
+            RuntimeSummaryStatus::Stale
+        );
+        assert_eq!(
+            serde_json::to_string(&RuntimeSummaryStatus::Stale).unwrap(),
+            "\"stale\""
+        );
+        assert!(serde_json::from_str::<RuntimeSummaryStatus>("7").is_err());
+        // Enums without a safe fallback stay strict.
+        assert_eq!(parse_runtime_health_status("bogus"), None);
+        assert!(serde_json::from_str::<RuntimeHealthStatus>("\"bogus\"").is_err());
     }
 
     /// `wire_enum!` now generates serde, `as_str`, and `parse_*` from one
@@ -4031,6 +4246,7 @@ mod tests {
             parse_runtime_health_status,
             RuntimeHealthStatus::Ready,
             RuntimeHealthStatus::NotReady,
+            RuntimeHealthStatus::Stale,
             RuntimeHealthStatus::Unknown,
         );
 
@@ -4975,6 +5191,7 @@ mod tests {
                         profile_picture_url: Some(
                             "https://chat.finite.computer/v1/blobs/profile".to_string(),
                         ),
+                        owner_chat_account_id: None,
                     },
                 )
                 .await
@@ -5698,6 +5915,7 @@ mod tests {
                     active_inference_profile: None,
                     hermes_available: Some(true),
                     published_app_urls: Vec::new(),
+                    agent_npub: None,
                     now: Some("2098-01-01T00:02:00Z".to_string()),
                 })
                 .await
@@ -5886,6 +6104,7 @@ mod tests {
                     active_inference_profile: Some("finite-private".to_string()),
                     hermes_available: Some(true),
                     published_app_urls: Vec::new(),
+                    agent_npub: None,
                     now: Some("2026-05-25T13:02:00Z".to_string()),
                 }).await
                 .unwrap();
@@ -6227,6 +6446,7 @@ mod tests {
                 active_inference_profile: Some("finite-private".to_string()),
                 hermes_available: Some(true),
                 published_app_urls: Vec::new(),
+                agent_npub: None,
                 now: Some("2026-05-25T13:02:00Z".to_string()),
             };
             let mut mismatched_completion = completion_input.clone();
@@ -7239,6 +7459,7 @@ mod tests {
                     active_inference_profile: None,
                     hermes_available: None,
                     published_app_urls: Vec::new(),
+                    agent_npub: None,
                     now: Some("2026-05-25T13:03:00Z".to_string()),
                 })
                 .await
@@ -7657,6 +7878,7 @@ mod tests {
                     active_inference_profile: Some("finite-private".to_string()),
                     hermes_available: Some(true),
                     published_app_urls: vec!["https://paid-agent.example.com/contact".to_string()],
+                    agent_npub: None,
                     now: Some("2026-05-25T13:03:00Z".to_string()),
                 })
                 .await
@@ -9537,10 +9759,13 @@ mod tests {
                 now: Some(now.to_string()),
             };
 
-            // The attestation is not a bypass: an online runtime stays
-            // unrelocatable even with the flag set.
+            // Without the attestation an online runtime may still be
+            // running, so the exact relocation must refuse; the
+            // attested-online acceptance and its survival of the
+            // registration-time validation are pinned by the sibling
+            // test below.
             let online = db
-                .admin_request_runtime_relocate_exact(relocate_input(true, "2026-08-12T13:01:00Z"))
+                .admin_request_runtime_relocate_exact(relocate_input(false, "2026-08-12T13:01:00Z"))
                 .await
                 .unwrap_err();
             assert!(matches!(online, CoreError::RuntimeControlUnsupported));
@@ -9600,7 +9825,7 @@ mod tests {
                 .find(|overview| overview.agent_runtime_id == runtime_id)
                 .unwrap();
             assert_eq!(
-                stale_overview.runtime_status,
+                stale_overview.lifecycle_status,
                 db.agent_runtime(&runtime_id)
                     .await
                     .unwrap()
@@ -9634,6 +9859,173 @@ mod tests {
             let envelope = relocation.relocation.as_ref().unwrap().v1();
             assert!(envelope.source_compute_absent);
             assert_eq!(envelope.source_machine_id, "finite-kata-absent");
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn cold_relocation_with_absent_compute_accepts_attested_online_through_registration() {
+        with_isolated_postgres(|db| async move {
+            promote_runtime_artifact(&db).await;
+            let runtime_id = complete_self_serve_agent(
+                &db,
+                "online-case@finite.vip",
+                "workos-online-case",
+                "absent-online-create",
+                "finite-kata-absent-online",
+                "artifact-v1",
+                "2026-08-12T14:00:00Z",
+            )
+            .await;
+            let project_id = db
+                .agent_runtime(&runtime_id)
+                .await
+                .unwrap()
+                .project_id
+                .clone();
+            let relocate_input = |absent: bool, now: &str| AdminRuntimeRelocateExactInput {
+                admin_verified_email: "admin@finite.vip".to_string(),
+                admin_workos_user_id: "workos-admin".to_string(),
+                project_id: project_id.clone(),
+                expected_agent_runtime_id: runtime_id.clone(),
+                expected_source_host_id: "oslo-host-1".to_string(),
+                expected_source_machine_id: "finite-kata-absent-online".to_string(),
+                target_source_host_id: "oslo-host-3".to_string(),
+                expected_agent_npub: format!("npub1{}", "q".repeat(58)),
+                durable_state_manifest_sha256: "c".repeat(64),
+                operator_observed_compute_absent: absent,
+                now: Some(now.to_string()),
+            };
+
+            // Without the attestation the pre-death `online` report is not
+            // frozen: the runtime may still be running, so refuse.
+            let unattested = db
+                .admin_request_runtime_relocate_exact(relocate_input(false, "2026-08-12T14:01:00Z"))
+                .await
+                .unwrap_err();
+            assert!(matches!(unattested, CoreError::RuntimeControlUnsupported));
+
+            // Under the attestation `online` is exactly as frozen as the
+            // attested `stale` in the test above: the attestation rides the
+            // envelope for the target runner's lease-time and
+            // registration/completion-time validation.
+            let relocation = db
+                .admin_request_runtime_relocate_exact(relocate_input(true, "2026-08-12T14:02:00Z"))
+                .await
+                .unwrap();
+            assert_eq!(
+                relocation.agent_runtime_id.as_deref(),
+                Some(runtime_id.as_str())
+            );
+            assert_eq!(
+                relocation.target_source_host_id.as_deref(),
+                Some("oslo-host-3")
+            );
+            let envelope = relocation.relocation.as_ref().unwrap().v1();
+            assert!(envelope.source_compute_absent);
+            assert_eq!(envelope.source_machine_id, "finite-kata-absent-online");
+
+            let capacity = RunnerLeaseCapacity {
+                runner_classes: vec![RunnerClass::Kata],
+                runtime_capabilities: Some(kata_runtime_capabilities()),
+                ..RunnerLeaseCapacity::default()
+            };
+            assert!(
+                db.lease_agent_creation_request(LeaseAgentCreationRequestInput {
+                    runner_id: "runner-oslo-1".to_string(),
+                    lease_token: "wrong-host".to_string(),
+                    lease_seconds: Some(300),
+                    runner_capacity: Some(capacity.clone()),
+                    source_host_id: Some("oslo-host-1".to_string()),
+                    now: Some("2026-08-12T14:03:00Z".to_string()),
+                })
+                .await
+                .unwrap()
+                .is_none()
+            );
+            let lease = db
+                .lease_agent_creation_request(LeaseAgentCreationRequestInput {
+                    runner_id: "runner-oslo-3".to_string(),
+                    lease_token: "relocate-online-lease".to_string(),
+                    lease_seconds: Some(300),
+                    runner_capacity: Some(capacity),
+                    source_host_id: Some("oslo-host-3".to_string()),
+                    now: Some("2026-08-12T14:03:30Z".to_string()),
+                })
+                .await
+                .unwrap()
+                .unwrap();
+            assert_eq!(lease.request.id, relocation.id);
+
+            // Registration on the target re-validates the envelope while the
+            // source is still `online`: only the recorded attestation keeps
+            // that status frozen. Registration stays non-mutating, so the
+            // source binding survives untouched.
+            db.register_agent_creation_runtime(RegisterAgentCreationRuntimeInput {
+                request_id: relocation.id.clone(),
+                runner_id: "runner-oslo-3".to_string(),
+                lease_token: "relocate-online-lease".to_string(),
+                source_host_id: "oslo-host-3".to_string(),
+                source_machine_id: "finite-kata-absent-online".to_string(),
+                runtime_artifact_id: Some("artifact-v1".to_string()),
+                state_schema_version: Some("db-v1".to_string()),
+                provider_runtime_handle: None,
+                contact_endpoint: Some("http://oslo-host-3:4201/contact".to_string()),
+                runtime_capabilities: Some(kata_runtime_capabilities()),
+                display_name: None,
+                hostname: None,
+                runtime_host: Some("http://oslo-host-3:4201".to_string()),
+                runtime_status: Some(RuntimeSummaryStatus::Unknown),
+                active_inference_profile: Some("finite-private".to_string()),
+                hermes_available: Some(true),
+                published_app_urls: Vec::new(),
+                now: Some("2026-08-12T14:04:00Z".to_string()),
+            })
+            .await
+            .unwrap();
+            let still_source = db.agent_runtime(&runtime_id).await.unwrap();
+            assert_eq!(still_source.source_host_id, "oslo-host-1");
+            assert_eq!(
+                still_source.host_facts.runtime_status,
+                RuntimeSummaryStatus::Online
+            );
+
+            // Completion re-validates the same envelope a second time and is
+            // the single transaction that replaces the source binding.
+            let completed = db
+                .complete_agent_creation_request(CompleteAgentCreationRequestInput {
+                    request_id: relocation.id.clone(),
+                    runner_id: "runner-oslo-3".to_string(),
+                    lease_token: "relocate-online-lease".to_string(),
+                    source_host_id: "oslo-host-3".to_string(),
+                    source_machine_id: "finite-kata-absent-online".to_string(),
+                    runtime_artifact_id: Some("artifact-v1".to_string()),
+                    state_schema_version: Some("db-v1".to_string()),
+                    provider_runtime_handle: None,
+                    contact_endpoint: Some("http://oslo-host-3:4201/contact".to_string()),
+                    runtime_capabilities: Some(kata_runtime_capabilities()),
+                    display_name: None,
+                    hostname: None,
+                    runtime_host: Some("http://oslo-host-3:4201".to_string()),
+                    runtime_status: Some(RuntimeSummaryStatus::Online),
+                    active_inference_profile: Some("finite-private".to_string()),
+                    hermes_available: Some(true),
+                    published_app_urls: Vec::new(),
+                    agent_npub: None,
+                    now: Some("2026-08-12T14:05:00Z".to_string()),
+                })
+                .await
+                .unwrap();
+            assert_eq!(
+                completed.request.status,
+                AgentCreationRequestStatus::Running
+            );
+            let relocated = db.agent_runtime(&runtime_id).await.unwrap();
+            assert_eq!(relocated.source_host_id, "oslo-host-3");
+            assert_eq!(
+                relocated.host_facts.runtime_status,
+                RuntimeSummaryStatus::Online
+            );
         })
         .await;
     }
@@ -9847,72 +10239,11 @@ mod tests {
                     && event.actor == "admin@finite.vip"
             }));
 
-            // The departure is recorded as a retirement exactly once; a rerun
-            // fails closed on the inactive link and appends nothing.
-            let facts = db.brain_agent_departure_facts(0, 100).await.unwrap();
-            assert_eq!(facts.facts.len(), 1);
-            assert_eq!(facts.facts[0].reason, BrainDepartureReason::Retired);
+            // A rerun fails closed on the inactive link.
             assert!(matches!(
                 db.admin_offboard_retired_runtime(input(true)).await,
                 Err(CoreError::ProjectRuntimeNotFound)
             ));
-            assert_eq!(
-                db.brain_agent_departure_facts(0, 100)
-                    .await
-                    .unwrap()
-                    .facts
-                    .len(),
-                1
-            );
-        })
-        .await;
-    }
-
-    #[tokio::test]
-    async fn offboard_retired_runtime_does_not_duplicate_an_existing_departure_fact() {
-        with_isolated_postgres(|db| async move {
-            let (project_id, runtime_id, destroy_id) = stage_retired_offboard_anomaly(
-                &db,
-                "owner@finite.vip",
-                "user_workos_owner_offboard_dup",
-                "offboard-dup-submit",
-                "retired-agent-002",
-            )
-            .await;
-            // A partially applied older offboarding already recorded the
-            // retirement fact; the repair must not append a second one.
-            let agent_email = db.row("projects", &project_id).await.unwrap()["agent_email"]
-                .as_str()
-                .unwrap()
-                .to_string();
-            db.exec(&format!(
-                "INSERT INTO brain_agent_departure_facts (
-                   account_id, principal_kind, principal_ref, departed_at, reason
-                 ) VALUES (
-                   'user_workos_owner_offboard_dup', 'agent', '{agent_email}',
-                   '2026-07-21T20:04:00Z', 'retired'
-                 )"
-            ))
-            .await;
-            let receipt = db
-                .admin_offboard_retired_runtime(AdminOffboardRetiredRuntimeInput {
-                    admin_verified_email: "admin@finite.vip".to_string(),
-                    admin_workos_user_id: "user_workos_admin_offboard".to_string(),
-                    project_id: project_id.clone(),
-                    expected_agent_runtime_id: runtime_id.clone(),
-                    expected_source_host_id: "oslo-host-1".to_string(),
-                    expected_source_machine_id: "retired-agent-002".to_string(),
-                    expected_owner_email: "owner@finite.vip".to_string(),
-                    operator_observed_compute_absent: true,
-                    now: Some("2026-07-21T20:10:00Z".to_string()),
-                })
-                .await
-                .unwrap();
-            assert_eq!(receipt.retirement_request_id, destroy_id);
-            assert!(db.active_runtime_for_project(&project_id).await.is_none());
-            let facts = db.brain_agent_departure_facts(0, 100).await.unwrap();
-            assert_eq!(facts.facts.len(), 1);
-            assert_eq!(facts.facts[0].reason, BrainDepartureReason::Retired);
         })
         .await;
     }
@@ -10155,7 +10486,11 @@ mod tests {
                 overview.runtime_artifact_version_label.as_deref(),
                 Some("v1")
             );
-            assert_eq!(overview.runtime_status, RuntimeSummaryStatus::Online);
+            // The launch latched `online`; nothing has reported on the box
+            // yet, so the user-facing status is the named unknown state.
+            assert_eq!(overview.lifecycle_status, RuntimeSummaryStatus::Online);
+            assert_eq!(overview.runtime_status, RuntimeSummaryStatus::Unknown);
+            assert_eq!(overview.runtime_health.status, RuntimeHealthStatus::Unknown);
             assert_eq!(overview.hermes_available, Some(true));
             assert_eq!(overview.active_finite_private_key_count, 1);
             assert!(overview.runtime_link_active);
@@ -10186,6 +10521,7 @@ mod tests {
                         placement: Some(RuntimePlacement::for_hosting_tier(HostingTier::Standard)),
                         requested_hosting_tier: None,
                         profile_picture_url: None,
+                        owner_chat_account_id: None,
                     },
                 ).await
                 .unwrap();
@@ -10223,6 +10559,7 @@ mod tests {
                     active_inference_profile: Some("finite-private".to_string()),
                     hermes_available: Some(true),
                     published_app_urls: vec!["http://127.0.0.1:41001/contact".to_string()],
+                    agent_npub: None,
                     now: Some("2026-05-25T13:02:00Z".to_string()),
                 }).await
                 .unwrap();
@@ -10435,10 +10772,17 @@ mod tests {
                 Some("artifact-v2")
             );
             let synthesized_upgrade_spec = lease.runtime_spec.as_ref().unwrap();
+            // The Runner half of this pin is finite-saas-runner's
+            // `legacy_runtime_migrates_by_container_name_and_the_probe_agrees`
+            // (same machine id, same `agent_runtime_id != source_machine_id`
+            // shape): the machine-named directory is discovered by container
+            // name and renamed to the runtime-id root, never planned from
+            // the spec.
+            assert_ne!(runtime_id, "finite-kata-upgrade");
             assert_eq!(
                 runtime_spec_v1(synthesized_upgrade_spec).durable_state_id,
-                "finite-kata-upgrade",
-                "legacy synthesis preserves the source-machine /data directory"
+                runtime_id,
+                "legacy synthesis names the durable root by the Agent Runtime id, never the source machine"
             );
             assert_eq!(
                 runtime_spec_v1(synthesized_upgrade_spec).operation_id,
@@ -10724,6 +11068,7 @@ mod tests {
                 active_inference_profile: Some("finite-private".to_string()),
                 hermes_available: Some(true),
                 published_app_urls: Vec::new(),
+                agent_npub: None,
                 now: Some(now.to_string()),
             })
             .await

@@ -1,6 +1,9 @@
 # ADR-0046 Hands-On Test: Hosted-Signed Invite + CLI Accept, Both Directions
 
-Status: active runbook for the ADR-0046 principal-grants slice.
+Status: **retired 2026-08 (auth kernel cut).** The invitation-plan flow this
+runbook exercises is deleted, and its automated drivers are removed. Retained
+for history; the surviving invite flows are npub-targeted invitations and
+capability Invite Tokens.
 
 Two roles, one Mac:
 
@@ -9,19 +12,16 @@ Two roles, one Mac:
   deleted and a human Brain UI returns with the brain-surface viewer plan).
 - **Bob** drives a terminal (the `fbrain` CLI with his own identity).
 
-The automated proof of this exact flow is
-`scripts/devfinity-adr46-slice` (run via
-`scripts/with-dev-env scripts/devfinity-adr46-slice-up`); this runbook is the
-human-driven version of the same story.
+The automated proof drivers were deleted with the auth-kernel cut. This
+runbook is a historical transcript, not a supported local workflow.
 
 ## 0. Boot the stack
 
-```sh
-ADR46_HANDS_ON=1 scripts/with-dev-env scripts/devfinity-adr46-slice-up
-```
+No supported boot command remains for this retired flow.
 
-This boots the disposable devfinity stack (Alice the fixture customer
-`devfinity@finite.computer`, Bob the second fixture user `bob@finite.vip`),
+Historically, the removed driver booted the disposable devfinity stack (Alice
+the fixture customer `devfinity@finite.computer`, Bob the second fixture user
+`bob@finite.vip`),
 launches Alice's real managed agent runtime, bootstraps Alice's Personal Brain
 with a shared Folder and a seeded note, and provisions Bob's account, hosted
 identity, and agent roster. It then stops **before** the automated acts and
@@ -30,7 +30,7 @@ waits.
 Cold runs build the Rust workspace and the runtime image; expect tens of
 minutes the first time. State and logs land in `.local-state/adr46-slice-<ts>/`.
 
-When the stack is ready, the boot log prints a summary block with
+When the stack was ready, the boot log printed a summary block with
 `dashboard:  http://127.0.0.1:<port>/dashboard` (plus brain, core, and other
 service URLs), and the hands-on gate prints:
 

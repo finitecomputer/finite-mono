@@ -1604,8 +1604,7 @@ fn auth_sites_key(args: &[String]) -> Result<(), CliError> {
             };
             let email = MailboxAddress::parse(email, "MAILBOX")?;
             reject_managed_agent_email(&email)?;
-            let response =
-                api::IdentityAuthorityClient::from_env().request_email_challenge(email.as_str())?;
+            let response = api::Client::from_env().request_email_login(email.as_str())?;
             println!("sent Sites key verification for {}", response.email);
             println!(
                 "next: fsite auth sites-key add {} TOKEN_FROM_EMAIL --output json",
@@ -1621,18 +1620,11 @@ fn auth_sites_key(args: &[String]) -> Result<(), CliError> {
             let email = MailboxAddress::parse(email, "MAILBOX")?;
             reject_managed_agent_email(&email)?;
             let key = keys::load_or_generate_user_key()?;
-            let proof = api::IdentityAuthorityClient::from_env().redeem_mailbox_proof(
+            let response = api::Client::from_env().register_sites_authorized_key(
                 &key,
                 email.as_str(),
                 token,
             )?;
-            if proof.pubkey != key.pubkey {
-                return Err(CliError::Api(
-                    "Identity Authority returned a mailbox proof for a different npub".to_string(),
-                ));
-            }
-            let response =
-                api::Client::from_env().register_sites_authorized_key(&key, &proof.proof)?;
             print_sites_authorized_key_response(&response, output_json)
         }
         "revoke" => {
@@ -1644,19 +1636,10 @@ fn auth_sites_key(args: &[String]) -> Result<(), CliError> {
             reject_managed_agent_email(&email)?;
             let target_npub = NativeNpub::parse(target_npub, "NPUB")?;
             let key = keys::load_or_generate_user_key()?;
-            let proof = api::IdentityAuthorityClient::from_env().redeem_mailbox_proof(
+            let response = api::Client::from_env().revoke_sites_authorized_key(
                 &key,
                 email.as_str(),
                 token,
-            )?;
-            if proof.pubkey != key.pubkey {
-                return Err(CliError::Api(
-                    "Identity Authority returned a mailbox proof for a different npub".to_string(),
-                ));
-            }
-            let response = api::Client::from_env().revoke_sites_authorized_key(
-                &key,
-                &proof.proof,
                 target_npub.as_str(),
             )?;
             print_sites_authorized_key_response(&response, output_json)
@@ -1740,8 +1723,7 @@ fn auth_link_email(args: &[String]) -> Result<(), CliError> {
     let identity = keys::load_or_generate_user_key()?;
     let display =
         npub::encode_npub(&identity.pubkey).map_err(|error| CliError::Key(error.to_string()))?;
-    let response =
-        api::IdentityAuthorityClient::from_env().request_email_challenge(email.as_str())?;
+    let response = api::Client::from_env().request_email_login(email.as_str())?;
     keys::write_pending_email_link(&response.email, &identity.pubkey)?;
     if output_json {
         let value = serde_json::json!({
@@ -1771,22 +1753,17 @@ fn auth_git(args: &[String]) -> Result<(), CliError> {
         return print_help(auth_git_help());
     }
     let options = parse_auth_git_args(args)?;
-    let identity_authority = api::IdentityAuthorityClient::from_env();
     let (key, request_email) = match (&options.email, &options.nip05, &options.npub) {
         (None, None, None) => (keys::load_or_generate_user_key()?, None),
         (Some(email), None, None) => {
             reject_managed_agent_email(email)?;
-            let native = keys::load_or_generate_user_key()?;
-            let key =
-                if identity_authority.satisfies_grant(&native, email.as_str(), &native.pubkey)? {
-                    native
-                } else {
-                    keys::load_or_create_email_key(email.as_str())?
-                };
-            (key, Some(email.as_str().to_string()))
+            (
+                keys::load_or_generate_user_key()?,
+                Some(email.as_str().to_string()),
+            )
         }
         (None, Some(nip05), None) => {
-            let resolution = identity_authority
+            let resolution = api::IdentityAuthorityClient::from_env()
                 .resolve_nip05(nip05.as_str())?
                 .ok_or_else(|| {
                     CliError::Usage(format!(
@@ -1821,13 +1798,33 @@ fn auth_git(args: &[String]) -> Result<(), CliError> {
         _ => unreachable!("auth git parser accepts at most one target"),
     };
     let client = api::Client::from_env();
-    let response = client.auth_git(
+    let response = match client.auth_git(
         &key,
         &options.project,
         &GitAuthRequest {
-            email: request_email,
+            email: request_email.clone(),
         },
-    )?;
+    ) {
+        Ok(response) => response,
+        Err(error) => {
+            // A 403 with an email target means this Finite Home's native key
+            // has no Sites-local proof for the mailbox (no Email Link, Sites
+            // Authorized Key, or Email Key). Fall back to the mailbox-scoped
+            // Email Key, which a plain `fsite auth redeem` created.
+            let (Some(email), CliError::ApiStatus { status: 403, .. }) = (&options.email, &error)
+            else {
+                return Err(error);
+            };
+            let email_key = keys::load_or_create_email_key(email.as_str())?;
+            client.auth_git(
+                &email_key,
+                &options.project,
+                &GitAuthRequest {
+                    email: Some(email.as_str().to_string()),
+                },
+            )?
+        }
+    };
     if options.store {
         store_git_credential(&response)?;
     }
@@ -2418,8 +2415,7 @@ fn auth_login(args: &[String]) -> Result<(), CliError> {
     };
     let email = MailboxAddress::parse(email, "EMAIL")?;
     reject_managed_agent_email(&email)?;
-    let response =
-        api::IdentityAuthorityClient::from_env().request_email_challenge(email.as_str())?;
+    let response = api::Client::from_env().request_email_login(email.as_str())?;
     println!("sent email login for {}", response.email);
     println!("run the fsite auth redeem command from the email to verify this machine");
     Ok(())
@@ -2446,13 +2442,7 @@ fn auth_redeem(args: &[String]) -> Result<(), CliError> {
             "pending email link belongs to a different local User Key; run `fsite auth link-email EMAIL` again from the machine that should own this email".to_string(),
         ));
     }
-    let identity_authority = api::IdentityAuthorityClient::from_env();
-    let response = if (link_native || pending_link_pubkey.is_some()) && is_finite_vip_email(&email)
-    {
-        identity_authority.redeem_vip_email(&key, &email, &token)?
-    } else {
-        identity_authority.redeem_email_only(&key, &email, &token)?
-    };
+    let response = api::Client::from_env().redeem_email_login(&key, &email, &token)?;
     if pending_link_pubkey.is_some() {
         keys::clear_pending_email_link(&email)?;
     }
@@ -2475,10 +2465,6 @@ fn print_email_redeem_response(
         }
     }
     Ok(())
-}
-
-fn is_finite_vip_email(email: &str) -> bool {
-    email.trim().to_ascii_lowercase().ends_with("@finite.vip")
 }
 
 fn parse_redeem_args(args: &[String]) -> Result<(String, String, bool, bool), CliError> {

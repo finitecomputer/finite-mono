@@ -7,38 +7,42 @@ from urllib.error import HTTPError
 from urllib.request import Request, urlopen
 
 API_BASE = "https://places.googleapis.com/v1"
-SEARCH_FIELDS = ",".join([
-    "places.id",
-    "places.displayName",
-    "places.formattedAddress",
-    "places.googleMapsUri",
-    "places.location",
-    "places.rating",
-    "places.userRatingCount",
-    "places.businessStatus",
-    "places.websiteUri",
-    "places.nationalPhoneNumber",
-    "places.priceLevel",
-    "places.primaryTypeDisplayName",
-    "places.regularOpeningHours.openNow",
-    "places.regularOpeningHours.weekdayDescriptions",
-])
-DETAIL_FIELDS = ",".join([
-    "id",
-    "displayName",
-    "formattedAddress",
-    "googleMapsUri",
-    "location",
-    "rating",
-    "userRatingCount",
-    "businessStatus",
-    "websiteUri",
-    "nationalPhoneNumber",
-    "priceLevel",
-    "primaryTypeDisplayName",
-    "regularOpeningHours.openNow",
-    "regularOpeningHours.weekdayDescriptions",
-])
+SEARCH_FIELDS = ",".join(
+    [
+        "places.id",
+        "places.displayName",
+        "places.formattedAddress",
+        "places.googleMapsUri",
+        "places.location",
+        "places.rating",
+        "places.userRatingCount",
+        "places.businessStatus",
+        "places.websiteUri",
+        "places.nationalPhoneNumber",
+        "places.priceLevel",
+        "places.primaryTypeDisplayName",
+        "places.regularOpeningHours.openNow",
+        "places.regularOpeningHours.weekdayDescriptions",
+    ]
+)
+DETAIL_FIELDS = ",".join(
+    [
+        "id",
+        "displayName",
+        "formattedAddress",
+        "googleMapsUri",
+        "location",
+        "rating",
+        "userRatingCount",
+        "businessStatus",
+        "websiteUri",
+        "nationalPhoneNumber",
+        "priceLevel",
+        "primaryTypeDisplayName",
+        "regularOpeningHours.openNow",
+        "regularOpeningHours.weekdayDescriptions",
+    ]
+)
 
 
 def api_key() -> str:
@@ -49,7 +53,9 @@ def api_key() -> str:
     return key
 
 
-def request_json(method: str, url: str, *, body: dict | None = None, field_mask: str) -> dict:
+def request_json(
+    method: str, url: str, *, body: dict | None = None, field_mask: str
+) -> dict:
     data = None
     headers = {
         "X-Goog-Api-Key": api_key(),
@@ -109,7 +115,9 @@ def print_search_results(payload: dict) -> None:
         opening = (place.get("regularOpeningHours") or {}).get("openNow")
         if opening is not None:
             print(f"   Open now: {opening}")
-        weekday = (place.get("regularOpeningHours") or {}).get("weekdayDescriptions") or []
+        weekday = (place.get("regularOpeningHours") or {}).get(
+            "weekdayDescriptions"
+        ) or []
         if weekday:
             print("   Hours:")
             for line in weekday:
@@ -154,7 +162,10 @@ def main() -> int:
             body["regionCode"] = args.region_code
         if any(v is not None for v in (args.lat, args.lon, args.radius_meters)):
             if None in (args.lat, args.lon, args.radius_meters):
-                print("--lat, --lon, and --radius-meters must be provided together.", file=sys.stderr)
+                print(
+                    "--lat, --lon, and --radius-meters must be provided together.",
+                    file=sys.stderr,
+                )
                 return 2
             body["locationBias"] = {
                 "circle": {

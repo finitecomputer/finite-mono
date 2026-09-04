@@ -2,7 +2,11 @@
 # finitecomputer-v2/scripts/build_runtime_image.py. Rust artifacts are built
 # together from the one root workspace and lockfile.
 
-FROM rust:1.88-trixie AS finite-rust-builder
+# The Rust version comes from rust-toolchain.toml (the repo's single Rust
+# pin), parsed and passed as RUST_TOOLCHAIN by build_runtime_image.py; this
+# Dockerfile carries no version string of its own.
+ARG RUST_TOOLCHAIN
+FROM rust:${RUST_TOOLCHAIN}-trixie AS finite-rust-builder
 WORKDIR /build
 RUN apt-get update \
     && apt-get install -y --no-install-recommends git ca-certificates \
@@ -24,7 +28,8 @@ RUN cargo build --locked --release \
       --package finite-brain-cli
 
 FROM python:3.13-slim-trixie
-ARG HERMES_AGENT_VERSION=0.20.0
+# No default: build_runtime_image.py stamps this from the flake.lock pin.
+ARG HERMES_AGENT_VERSION
 ARG HERMES_AGENT_STORE_PATH
 ARG HERMES_AGENT_PYTHON_PATH
 ARG HERMES_AGENT_NIX_ATTR
@@ -160,10 +165,10 @@ ENV FINITE_BRAIN_SERVER_URL=https://brain.finite.computer
 ENV FINITE_BRAIN_PUBLIC_BASE_URL=https://brain.finite.computer
 ENV FINITE_REQUIRE_BUNDLED_SKILLS=1
 ENV FINITE_DEFAULT_INFERENCE_PROFILE=finite-private
-# The limiter domain is historical; it now serves DeepSeek V4 Flash 0731.
-ENV FINITE_PRIVATE_BASE_URL=https://kimi-k2-6.finite.containers.tinfoil.dev/v1
+# Live Finite Private route after the 2026-08-28 GLM cutover.
+ENV FINITE_PRIVATE_BASE_URL=https://finite-private.finite.containers.tinfoil.dev/v1
 ENV FINITE_PRIVATE_CONTROL_URL=https://finite.computer/api/core/v1/finite-private
-ENV FINITE_PRIVATE_MODEL=deepseek-v4-flash-0731
+ENV FINITE_PRIVATE_MODEL=glm-5-3-flash
 ENV FINITE_PRIVATE_CONTEXT_LENGTH=393216
 ENV FINITECHAT_HERMES_INBOUND_STREAM=1
 ENV FINITE_AGENTD_REQUIRED=1

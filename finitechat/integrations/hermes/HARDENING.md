@@ -3,21 +3,21 @@
 ## Problem Statement
 
 The Finite Chat Hermes adapter should be boring in production: a human can join
-from the iOS app, send messages and attachments, receive replies, survive local
-process restarts, and avoid duplicate agent turns when acks or local bridge
-calls are flaky.
+from a chat client, send messages and attachments, receive replies, survive
+local process restarts, and avoid duplicate agent turns when acks or local
+bridge calls are flaky.
 
 This track is independent of Tinfoil. Tinfoil should only add deployment and
 persistence constraints, not hide basic adapter defects.
 
 For the repeated human canary flow "fresh Hermes instance -> Paul's physical
-phone -> real multi-turn chat", use
-[../../docs/hermes-phone-canary-loop.md](../../docs/hermes-phone-canary-loop.md).
-That runbook is the promotion policy for local Mac, remote Docker, and Tinfoil.
+phone -> real multi-turn chat", use `scripts/hermes-phone-canary.py`.
+Provider promotion policy lives with the runtime test matrix and current
+deployment runbooks.
 
 ## Acceptance Criteria
 
-- Hermes 0.17 gateway can chat with Finite Chat iOS through the `finite`
+- Hermes 0.17 gateway can chat with a Finite Chat client through the `finite`
   platform plugin.
 - The same flow works through `finitechat hermes serve`, not only CLI-per-call.
 - A handled inbound event is not dispatched twice in one adapter process even
@@ -30,7 +30,7 @@ That runbook is the promotion policy for local Mac, remote Docker, and Tinfoil.
   have focused tests. Agent-local attachments are bounded and promoted to
   encrypted durable blob references before append; path/read/upload failure
   appends no media row, and no local path survives in the room log.
-- Docker acceptance proves the real runtime image can chat with iOS before any
+- Docker acceptance proves the real runtime image can chat before any
   Tinfoil deployment attempt.
 
 ## Constraints
@@ -395,19 +395,12 @@ prove cursor catch-up without duplicate dispatch.
 Current local smoke:
 
 ```bash
-cargo run -q -p finitechat-rmp -- test ios-simulator --json
 just chat-reliability-fast
 scripts/hermes-sidecar-smoke.sh
 scripts/hermes-agent-media-e2e.sh
 scripts/hermes-real-gateway-admission-smoke.py
-scripts/ios-hermes-agent-media-e2e.sh
 ```
 
-The RMP simulator test command erases the dedicated simulator, runs the full
-native `FiniteChat` test scheme with `.state/xcode-derived-data`, replaces its
-explicit `.state/xcode-results/FiniteChatTests.xcresult`, and shuts the
-simulator down after the run. This is the default unit-suite gate before any
-visible app or Hermes E2E proof.
 The smoke commands write `target/hermes-adapter-regressions/report.json`,
 `target/hermes-sidecar-smoke/report.json`, and
 `target/hermes-agent-media-e2e/report.json`.
@@ -416,13 +409,10 @@ The smoke commands write `target/hermes-adapter-regressions/report.json`,
 that Hermes 0.17 `gateway run --replace` admits a normal invite/PIN join through
 the installed `finitechat` plugin with no direct adapter import and no echo
 handler.
-The iOS Simulator script writes
-`target/ios-hermes-agent-media-e2e/report.json`; it requires a booted
-simulator or `IOS_SIMULATOR_UDID`.
 Together they prove finitechat-server, the direct `finitechat hermes` CLI,
 encrypted client stores, resident `finitechat hermes serve` and
-`/v1/hermes/inbound` NDJSON through the media E2E, adapter
-redelivery/ack/fallback/filter/group/receipt regressions, and native iOS app
+`/v1/hermes/inbound` NDJSON through the media E2E, and adapter
+redelivery/ack/fallback/filter/group/receipt regressions
 runtime plumbing. The historically named `hermes-sidecar-smoke.sh` proves only
 the direct CLI round trip and explicitly records that it does not cover the
 resident service, NDJSON stream, or ack/drain. These checks do not, by
@@ -478,15 +468,12 @@ endpoint and runs the existing Docker smoke with `FINITE_DOCKER_RESTIC_BACKEND=s
 against it. This proves the runtime/restic S3 path without real object-storage
 credentials, but the audit marks it separately as `docker_runtime_s3_emulator_smoke`
 and still requires a non-emulated S3 report for the actual Latitude/GitHub gate.
-The restic preflight fails before the image build when S3 env is incomplete,
-requires an explicit non-default backup encryption secret for remote repos, and writes a JSON
-report that is uploaded alongside the Docker smoke report. The hardening audit
-does not accept a status-only S3/preflight report: the Docker report must show
+The GitHub CI preflight fails before the slow workflow when required S3 secret
+or variable names are absent. The hardening audit does not accept status-only
+S3 evidence: the Docker report must show
 the entrypoint-created encrypted restic backup, matching repository metadata,
 a latest-tagged snapshot rooted at the full `/data` recovery root, a restored
-`/data/workspace` probe, and a non-emulated S3 backend; the
-preflight report must show the derived `s3:` repository plus required password
-and AWS credential env presence.
+`/data/workspace` probe, and a non-emulated S3 backend.
 Passing this Hermes hardening audit is deliberately narrower than Agent Runtime
 Recovery Readiness. Every generated smoke, handoff, canary, and audit report
 keeps the application-consistent snapshot barrier, independently recoverable
@@ -531,8 +518,8 @@ Current CI shape:
   focused reliability gate fails, so the missing, skipped, or failed boundary
   and its asserted dispatch/ack/completion/restart contract remain inspectable.
 - The Docker runtime smoke runs on `main`, tags, or manual dispatch with
-  `docker_smoke=true`; it uploads `target/hermes-docker-smoke/report.json` and
-  `target/hermes-docker-smoke/restic-preflight.json`, plus the local encrypted
+  `docker_smoke=true`; it uploads `target/hermes-docker-smoke/report.json`,
+  plus the local encrypted
   restic repository when the default local backend is used. The report includes
   the local Docker image ID, image metadata, restic backend, restic snapshot
   metadata, repository metadata, encrypted backup flag, snapshot tag, and
@@ -570,8 +557,7 @@ Current CI shape:
   The hardening audit rejects a placeholder publish-gate `{"status":"passed"}`
   report: it requires the dispatched run id/URL, successful watch/download
   exits, a local audit refresh, and copied canonical artifacts for the Docker
-  smoke, restic preflight, image publish report, Tinfoil handoff, and canary
-  summary.
+  smoke, image publish report, Tinfoil handoff, and canary summary.
   After the S3-backed smoke passes, it logs into GHCR, tags the exact
   `facts.image_id` from the passing smoke report as
   `ghcr.io/<owner>/finite-chat-hermes-runtime:<commit-sha>`, pushes it, and
@@ -636,11 +622,11 @@ Tinfoil canary runbook draft:
    `scripts/hermes-tinfoil-canary-artifacts.py`.
 5. Create one manually controlled Tinfoil container from the public config repo
    and release tag. The config should pin `image.digest`, expose `/healthz` on
-   port 8080, set `FINITE_AGENT_RESTORE_ON_START=1`,
-   `FINITE_AGENT_RESTORE_LATEST=1`, `FINITE_AGENT_BACKUP_ON_EXIT=1`,
-   `FINITE_AGENT_RESTIC_REPOSITORY`, `FINITE_AGENT_RESTIC_BACKUP_TAG`,
-   `FINITE_SERVER_URL=https://chat.finite.computer`,
+   port 8080, set `FINITE_SERVER_URL=https://chat.finite.computer`,
    `FINITECHAT_HERMES_INBOUND_STREAM=1`, and AWS-style object-storage secrets.
+   The entrypoint restic restore/backup env names formerly listed here were
+   retired; off-host retirement storage is the Borg lane
+   (`docs/runs/runtime-retirement-readiness.md`).
 6. Start from empty local disk, let the runtime entrypoint restore the latest
    restic snapshot tagged `finite-agent-state`, and fetch invite URL/PIN from
    the runtime endpoint. Before handing the invite to a human, run the

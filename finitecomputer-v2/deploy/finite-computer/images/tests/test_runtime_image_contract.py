@@ -1,18 +1,34 @@
 from __future__ import annotations
 
 import importlib.util
+import re
 import sys
 import tempfile
 import unittest
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[5]
-CHECKER = ROOT / "finitecomputer-v2/deploy/finite-computer/images/scripts/check_runtime_image_contract.py"
+CHECKER = (
+    ROOT
+    / "finitecomputer-v2/deploy/finite-computer/images/scripts/check_runtime_image_contract.py"
+)
 spec = importlib.util.spec_from_file_location("check_runtime_image_contract", CHECKER)
 assert spec is not None and spec.loader is not None
 check_runtime_image_contract = importlib.util.module_from_spec(spec)
 sys.modules[spec.name] = check_runtime_image_contract
 spec.loader.exec_module(check_runtime_image_contract)
+
+BUILDER_SCRIPT = ROOT / "finitecomputer-v2/scripts/build_runtime_image.py"
+builder_spec = importlib.util.spec_from_file_location(
+    "build_runtime_image_for_contract_tests", BUILDER_SCRIPT
+)
+assert builder_spec is not None and builder_spec.loader is not None
+build_runtime_image = importlib.util.module_from_spec(builder_spec)
+sys.modules[builder_spec.name] = build_runtime_image
+builder_spec.loader.exec_module(build_runtime_image)
+
+rust_toolchain_channel = build_runtime_image.rust_toolchain_channel
+MONOREPO_ROOT = build_runtime_image.MONOREPO_ROOT
 
 CANONICAL_BUILDER = check_runtime_image_contract.CANONICAL_BUILDER
 CANONICAL_DOCKERFILE = check_runtime_image_contract.CANONICAL_DOCKERFILE
@@ -31,7 +47,8 @@ class RuntimeImageContractTests(unittest.TestCase):
         self.write(CANONICAL_DOCKERFILE, "\n".join(CANONICAL_DOCKERFILE_ANCHORS))
         self.write(
             CANONICAL_BUILDER,
-            'dockerfile = context / "finitecomputer-v2/deploy/finite-computer/images/runtime.Dockerfile"',
+            'dockerfile = context / "finitecomputer-v2/deploy/finite-computer/images/runtime.Dockerfile"\n'
+            '--build-arg f"RUST_TOOLCHAIN={rust_toolchain_channel(MONOREPO_ROOT)}"',
         )
         self.write(
             CANONICAL_WORKFLOW,
@@ -66,6 +83,38 @@ class RuntimeImageContractTests(unittest.TestCase):
 
         self.assertNotIn("legacy_hermes_migration.py", dockerfile)
         self.assertNotIn("/opt/legacy-hermes-migration", dockerfile)
+
+    def test_rust_version_flows_from_the_single_toolchain_pin(self) -> None:
+        dockerfile = (ROOT / CANONICAL_DOCKERFILE).read_text(encoding="utf-8")
+        self.assertIn(
+            "FROM rust:${RUST_TOOLCHAIN}-trixie AS finite-rust-builder", dockerfile
+        )
+        self.assertIsNone(re.search(r"FROM rust:\d", dockerfile))
+
+        pin = (ROOT / "rust-toolchain.toml").read_text(encoding="utf-8")
+        pin_match = re.search(r'^channel\s*=\s*"([^"]+)"', pin, re.MULTILINE)
+        self.assertIsNotNone(pin_match)
+        self.assertEqual(rust_toolchain_channel(ROOT), pin_match.group(1))
+
+        builder = (ROOT / CANONICAL_BUILDER).read_text(encoding="utf-8")
+        self.assertIn("RUST_TOOLCHAIN=", builder)
+
+    def test_literal_rust_pin_in_dockerfile_fails(self) -> None:
+        self.write(
+            CANONICAL_DOCKERFILE,
+            "\n".join(CANONICAL_DOCKERFILE_ANCHORS).replace(
+                "FROM rust:${RUST_TOOLCHAIN}-trixie AS finite-rust-builder",
+                "FROM rust:1.88-trixie AS finite-rust-builder",
+            ),
+        )
+        self.assertTrue(any("RUST_TOOLCHAIN" in item for item in self.violations()))
+
+    def test_builder_without_rust_toolchain_arg_fails(self) -> None:
+        self.write(
+            CANONICAL_BUILDER,
+            'dockerfile = context / "finitecomputer-v2/deploy/finite-computer/images/runtime.Dockerfile"',
+        )
+        self.assertTrue(any("RUST_TOOLCHAIN" in item for item in self.violations()))
 
     def test_second_phala_dockerfile_fails(self) -> None:
         self.write("deploy/phala/Dockerfile", "FROM canonical-but-forked")
@@ -159,7 +208,9 @@ class RuntimeImageContractTests(unittest.TestCase):
 
 
 BUILDER_SCRIPT = ROOT / "finitecomputer-v2/scripts/build_runtime_image.py"
-builder_spec = importlib.util.spec_from_file_location("build_runtime_image", BUILDER_SCRIPT)
+builder_spec = importlib.util.spec_from_file_location(
+    "build_runtime_image", BUILDER_SCRIPT
+)
 assert builder_spec is not None and builder_spec.loader is not None
 build_runtime_image = importlib.util.module_from_spec(builder_spec)
 sys.modules[builder_spec.name] = build_runtime_image
@@ -186,7 +237,9 @@ class RuntimeImageBuildContextTests(unittest.TestCase):
             source.mkdir()
             (source / ".dockerignore").write_text("**/node_modules\n", encoding="utf-8")
             (source / "apps/web/node_modules/leftpad").mkdir(parents=True)
-            (source / "apps/web/node_modules/leftpad/index.js").write_text("//\n", encoding="utf-8")
+            (source / "apps/web/node_modules/leftpad/index.js").write_text(
+                "//\n", encoding="utf-8"
+            )
             (source / "package.json").write_text("{}\n", encoding="utf-8")
 
             build_runtime_image.stage_repo(source, context)

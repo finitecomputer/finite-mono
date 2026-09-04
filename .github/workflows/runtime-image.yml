@@ -16,7 +16,6 @@ concurrency:
   group: agent-runtime-image-${{ inputs.version }}
 env:
   CACHIX_CACHE_NAME: finite
-  HERMES_AGENT_VERSION: "0.20.0"
   USER: runner
 jobs:
   publish:
@@ -24,6 +23,7 @@ jobs:
     permissions:
       contents: read
       id-token: write
+      packages: write
     steps:
       - uses: actions/checkout@v4
       - uses: depot/setup-action@v1
@@ -68,7 +68,6 @@ jobs:
           fi
           finitecomputer-v2/scripts/build_runtime_image.py \
             --image-ref "$version_ref" \
-            --hermes-agent-version "$HERMES_AGENT_VERSION" \
             --platform linux/amd64 \
             --save \
             --metadata-file finitecomputer-v2/runtime-image-depot.json \
@@ -79,10 +78,13 @@ jobs:
           test "$(docker image inspect "$version_ref" --format '{{index .Config.Labels "org.opencontainers.image.revision"}}')" = "$GITHUB_SHA"
           test "$(python3 -c 'import json; print(json.load(open("finitecomputer-v2/runtime-image-report.json"))["mono_sha"])')" = "$GITHUB_SHA"
           test "$(python3 -c 'import json; print(json.load(open("finitecomputer-v2/runtime-image-report.json"))["image_metadata"]["id"])')" = "$local_image_id"
-          docker run --rm --entrypoint /bin/sh "$version_ref" -ec '
+          # The label is the lock-derived stamp; the running Hermes must equal it.
+          hermes_label="$(docker image inspect "$version_ref" --format '{{index .Config.Labels "computer.finite.runtime.hermes-agent-version"}}')"
+          test -n "$hermes_label"
+          docker run --rm --entrypoint /bin/sh -e "HERMES_AGENT_VERSION=$hermes_label" "$version_ref" -ec '
             test -n "$HERMES_AGENT_STORE_PATH"
             test -n "$HERMES_AGENT_PYTHON_PATH"
-            test "$(python3 -c '\''import importlib.metadata; print(importlib.metadata.version("hermes-agent"))'\'')" = "0.20.0"
+            test "$(python3 -c '\''import importlib.metadata; print(importlib.metadata.version("hermes-agent"))'\'')" = "$HERMES_AGENT_VERSION"
             test "$(command -v hermes)" = "$HERMES_AGENT_STORE_PATH/bin/hermes"
             test "$(command -v python3)" = "$HERMES_AGENT_PYTHON_PATH/bin/python3"
             test -n "$AGENT_RUNTIME_TOOLCHAIN_PATH"
@@ -137,8 +139,8 @@ jobs:
           echo "image=$IMAGE" >> "$GITHUB_OUTPUT"
       - name: Log in to GHCR for canary publication
         env:
-          GHCR_TOKEN: ${{ secrets.FINITE_GHCR_TOKEN }}
-          GHCR_USERNAME: ${{ secrets.FINITE_GHCR_USERNAME }}
+          GHCR_TOKEN: ${{ github.token }}
+          GHCR_USERNAME: ${{ github.actor }}
         run: echo "$GHCR_TOKEN" | docker login ghcr.io -u "$GHCR_USERNAME" --password-stdin
       - name: Publish and verify the non-production canary
         id: canary
@@ -176,8 +178,8 @@ jobs:
           BUILD_ID: ${{ steps.build.outputs.build_id }}
           SOURCE_DIGEST: ${{ steps.canary.outputs.digest }}
           DEPOT_PROJECT_ID: ${{ steps.build.outputs.project_id }}
-          GHCR_TOKEN: ${{ secrets.FINITE_GHCR_TOKEN }}
-          GHCR_USERNAME: ${{ secrets.FINITE_GHCR_USERNAME }}
+          GHCR_TOKEN: ${{ github.token }}
+          GHCR_USERNAME: ${{ github.actor }}
         run: |
           echo "$GHCR_TOKEN" | docker login ghcr.io -u "$GHCR_USERNAME" --password-stdin
           version_ref="$IMAGE:$VERSION"
@@ -226,3 +228,4 @@ jobs:
             echo "Production promotion: \`$PRODUCTION\`" >> "$GITHUB_STEP_SUMMARY"
           else
             echo "Production promotion remained disabled." >> "$GITHUB_STEP_SUMMARY"
+          fi

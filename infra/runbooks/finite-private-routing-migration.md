@@ -3,14 +3,27 @@
 Status: design and preparation only. No DNS, custom-domain, container, or
 production state mutation is authorized by this file.
 
+The GLM-5.3-Flash cutover adopted `finite-private` in one window. The
+temporary CPU-only bridge at the historical generated name was created,
+failed platform healthchecks, and was deleted by operator decision the
+same evening. The historical `kimi-k2-6` hostname is dark. Issued Runtime
+readers still need a follow-up onto
+`https://finite-private.finite.containers.tinfoil.dev`. This file's
+preferred custom-domain migration (`inference.finite.computer`) remains
+the durable route plan and is still unattached. See
+`finite-private-glm-5.3-flash-production-cutover.md` for the bounded
+deployment and rollback contract.
+
 ## Decision
 
 The stable service identity is **Finite Private**, not a model name. Use:
 
 - container name: `finite-private`;
 - preferred custom route: `inference.finite.computer`;
-- current model: `deepseek-v4-flash-0731`;
-- mixed-version model alias: `glm-5-2`.
+- current generated route: `finite-private.finite.containers.tinfoil.dev`;
+- current model: `glm-5-3-flash`;
+- mixed-version model aliases: `deepseek-v4-flash-0731`, `glm-5-2`, and
+  dotted `glm-5.3-flash`.
 
 Do not rename the container to `deepseek-*`. Finite Private has already served
 Kimi, GLM, and DeepSeek, and a model-specific infrastructure name recreates the
@@ -57,7 +70,7 @@ enablement and the allowed suffix remain explicit prerequisites.
 All three phases below are TODO because no custom domain was registered as of
 the last read-only inventory and this migration has not been exercised.
 
-### TODO: Phase 1 — introduce the stable route
+### TODO: Phase 1, introduce the stable route
 
 1. TODO: Register and verify `inference.finite.computer` using the exact TXT and
    CNAME values returned by Tinfoil. Keep Cloudflare proxying disabled for the
@@ -67,7 +80,7 @@ the last read-only inventory and this migration has not been exercised.
 3. TODO: Prove attestation, health, authentication, inference, accounting, and the
    old generated route. Both routes must work before changing any reader.
 
-### TODO: Phase 2 — migrate readers
+### TODO: Phase 2, migrate readers
 
 1. TODO: Change the repository base-URL constant to the stable custom route and
    publish one canonical Runtime image.
@@ -79,7 +92,7 @@ the last read-only inventory and this migration has not been exercised.
 5. TODO: Hold at least one normal observation window with zero reads of the old
    generated hostname.
 
-### TODO: Phase 3 — replace the container identity
+### TODO: Phase 3, replace the container identity
 
 TODO: Only after phase 2 is complete, create `finite-private` with `--replace` using
 the exact approved release, host, custom domain, variable set, and secret-name

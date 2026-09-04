@@ -7,9 +7,8 @@
 #            deleted sub-workspace Cargo.toml/Cargo.lock, path-dep retargets)
 #   theirs = source tree at origin/main (or --source-path HEAD)
 #
-# Clean merge: the result is written back into the mono directory, the manifest
-# SHA is advanced, and a migration-log entry is appended. Review with git diff,
-# then commit yourself.
+# Clean merge: the result is written back into the mono directory and the
+# manifest SHA is advanced. Review with git diff, then commit yourself.
 #
 # Conflicts: the temp merge repo is left in place with conflict markers; resolve
 # and `git commit` there, then re-run with --finish to write the result back.
@@ -24,7 +23,6 @@ set -euo pipefail
 
 MONO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 MANIFEST="$MONO_ROOT/scripts/import-sync.toml"
-LOG="$MONO_ROOT/docs/monorepo-migration-log.md"
 WORK_ROOT="${IMPORT_SYNC_WORK:-$MONO_ROOT/.import-sync}"
 
 NAME="${1:-}"; shift || true
@@ -64,16 +62,7 @@ text = open(path).read()
 pat = re.compile(r'(\[' + re.escape(name) + r'\][^\[]*last_import_sha = ")[0-9a-f]+(")')
 open(path, 'w').write(pat.sub(lambda m: m.group(1) + sha + m.group(2), text))
 EOF
-  {
-    echo ""
-    echo "## import-sync: \`$NAME\` ($(date -u +%Y-%m-%d))"
-    echo ""
-    echo "- Source: $SOURCE_URL"
-    echo "- Base (previous import): \`$BASE_SHA\`"
-    echo "- Synced to: \`$src_sha\`"
-    echo "- Method: three-way merge via scripts/import-sync (mono-side edits preserved)."
-  } >> "$LOG"
-  echo "Wrote merged tree into $MONO_DIR/, advanced manifest to $src_sha, appended log entry."
+  echo "Wrote merged tree into $MONO_DIR/ and advanced manifest to $src_sha."
   echo "Review: git status && git diff; then update root Cargo.toml members if crates changed, run 'just check', and commit."
   rm -rf "$TMP"
 }

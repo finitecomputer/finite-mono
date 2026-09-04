@@ -39,7 +39,9 @@ class SnapshotSqliteTests(unittest.TestCase):
         connection.close()
 
         connection = sqlite3.connect(live_database)
-        self.assertEqual(connection.execute("PRAGMA journal_mode=WAL").fetchone()[0], "wal")
+        self.assertEqual(
+            connection.execute("PRAGMA journal_mode=WAL").fetchone()[0], "wal"
+        )
         connection.execute("PRAGMA wal_autocheckpoint=0")
         connection.execute("INSERT INTO evidence VALUES ('uncheckpointed')")
         connection.commit()
@@ -121,7 +123,9 @@ class SnapshotSqliteTests(unittest.TestCase):
 
     def test_helper_copies_manifested_shm_and_rejects_other_paths(self) -> None:
         _, database = self.make_wal_snapshot(include_shm=True)
-        query = self.run_helper("query", str(database), "SELECT count(*) FROM evidence;")
+        query = self.run_helper(
+            "query", str(database), "SELECT count(*) FROM evidence;"
+        )
         self.assertEqual(query.returncode, 0, query.stderr)
         self.assertEqual(query.stdout, "1\n")
 

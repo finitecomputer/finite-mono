@@ -1,7 +1,7 @@
 # finite-lat-2 — 64.34.80.19 (Latitude.sh)
 
 > **ROLE CHANGE 2026-08-12 — lat2 is a decommission target.** The
-> consolidation cutover **migrated finitesitesd (sites), finite-search, and the
+> consolidation cutover **migrated finitesitesd (sites) and the
 > finite-core-tunnel to lat1**; those services are **DISABLED** here. Docker
 > and image CI moved to Depot. Lat1 NixOS closure builds moved to the
 > `Lat1 NixOS Closure` CI artifact workflow. Remaining private historical or
@@ -9,11 +9,12 @@
 > [`decommission-lat2.md`](../../runbooks/decommission-lat2.md), then runner
 > registrations, credentials, and local data are removed. The Services / Ports
 > / Secrets tables below are the **pre-cutover** capture; the
-> sites/search/tunnel rows are historical.
+> sites/tunnel rows are historical. (The finite-search rows were removed when
+> the self-hosted search stack was retired 2026-08-29; see git history.)
 
-Formerly the dedicated sites + search + CI-runner box; now a host to archive,
+Formerly the dedicated sites + CI-runner box; now a host to archive,
 credential-clean, and repurpose or release. Captured read-only 2026-07-08
-(before the sites/search/tunnel migration and the later Docker/Nix build
+(before the sites/tunnel migration and the later Docker/Nix build
 migrations to Depot-backed CI).
 
 - Hardware: Supermicro AS-3015MR-H10TNR. Ubuntu 26.04 LTS, kernel
@@ -31,7 +32,6 @@ migrations to Depot-backed CI).
 |---|---|---|
 | `finite-saas-sites.service` **(DISABLED — migrated to lat1)** | finitesitesd **v0.2.16** (`/usr/local/bin/finitesitesd`, fsite v0.2.16 alongside). Registry, publishing API, Git smart HTTP, and site serving for `*.finite.chat` on 127.0.0.1:8787. `--app-runner kata`: tier-2 apps run as **Kata Containers 3.31.0 microVMs on cloud-hypervisor** (`[hypervisor.clh]`, `/etc/kata-containers/configuration.toml`), driven via `sudo nerdctl` (2.3.1) + containerd. Data: `/var/lib/finite-sites`. | `systemd/finite-saas-sites.service` + `systemd/finite-saas-sites-kata.conf` drop-in, `systemd/finite-app@.service` (template for the non-Kata systemd runner; no instances running), `systemd/50-finite-sites.rules` (polkit), `systemd/finite-sites-nerdctl-sudoers` |
 | `caddy.service` **(DISABLED — `*.finite.chat` edge migrated to lat1)** | Caddy **2.6.2** (distro unit at `/usr/lib/systemd/system/caddy.service`). Three vhosts — `api.finite.chat`, `*.finite.chat`, `*.docs.finite.chat` — all reverse_proxy → 127.0.0.1:8787. TLS via **Cloudflare Origin CA cert** (no ACME, no API token on box); Cloudflare proxies the zone in Full (strict). | `caddy/Caddyfile` |
-| finite-search **(DISABLED — migrated to lat1)** | Two Docker Compose projects under `/home/ubuntu/finite-search/`: SearXNG on 127.0.0.1:8080, Firecrawl (upstream checkout + Finite override) on 127.0.0.1:3002. Loopback-only. | `search.md` (compose sources live in `finite-search/compose/`) |
 | `finite-core-tunnel.service` **(DISABLED — Core is native on lat1 now)** | **Previously undocumented.** Persistent SSH `-L 127.0.0.1:14200 → 10.43.237.180:4200` (finite-saas-core ClusterIP inside lat1's k3s) via `ubuntu@64.34.82.77`, key `/home/ubuntu/.ssh/finite-lat2-core-tunnel`. Enabled, running. | `systemd/finite-core-tunnel.service` |
 | `finite-saas-runner.service` + `.timer` | **Previously undocumented, DORMANT.** "Finite agent creation runner": oneshot every 20s from the build-on-box checkout `/opt/finite/finitecomputer`. Timer is disabled and absent from `list-timers`. Stale `After=k3s.service` (no k3s here); depends on the core tunnel via drop-in. | `systemd/finite-saas-runner.service`, `.timer`, `systemd/finite-saas-runner-10-core-tunnel.conf` |
 | GitHub Actions runners **(removal inventory)** | `finite-lat-2-mono` (registered against finite-mono) **plus** the 3 legacy-repo runners (v2.335.1, `User=ubuntu`, under `/srv/github-runner/`, registered to finitechat / finitecomputer / finitecomputer-v2). Current workflows use Depot and should not target these runners; they are to be unregistered during decommission. | `runners.md` |
@@ -43,8 +43,6 @@ migrations to Depot-backed CI).
 | 0.0.0.0 / [::] | 22 | sshd | public |
 | * | 80, 443 | caddy | public; Cloudflare-proxied zone |
 | 127.0.0.1 | 8787 | finitesitesd | all three Caddy vhosts proxy here |
-| 127.0.0.1 | 8080 | docker-proxy → SearXNG | |
-| 127.0.0.1 | 3002 | docker-proxy → Firecrawl api | |
 | 127.0.0.1 | 14200 | ssh (finite-core-tunnel) | → lat1 ClusterIP 10.43.237.180:4200 |
 | 127.0.0.1 | 2019 | caddy admin API | |
 | 127.0.0.1 | 41943 | containerd | ephemeral |
@@ -56,8 +54,6 @@ migrations to Depot-backed CI).
 | `/etc/finite-saas/sites.env` (0640) | exactly one var: `RESEND_API_KEY`. (`systemd/sites.env.example` also documents optional `FINITE_IDENTITY_AUTHORITY`, not set live.) | finite-saas-sites.service |
 | `/etc/finite-saas/certs/finite-chat-origin.pem` (0644 root:root) / `.key` (0640 root:caddy) | Cloudflare Origin CA cert pair for `finite.chat, *.finite.chat, docs.finite.chat, *.docs.finite.chat`; regenerated 2026-07-02 | Caddy |
 | `/etc/finite-computer/runner.env` (0600 root) | 18 `FC_*` vars: `FC_CORE_URL`, `FC_CORE_API_TOKEN`, `FC_RUNNER_ID`, `FC_RUNNER_SOURCE_HOST_ID`, `FC_RUNNER_RELAY_URL`, `FC_RUNNER_RUNTIME_ARTIFACT_ID`, `FC_RUNNER_RUNTIME_ARTIFACT_KIND`, `FC_RUNNER_RUNTIME_ARTIFACT_REFERENCE`, `FC_RUNNER_RUNTIME_STATE_SCHEMA_VERSION`, `FC_RUNNER_WORK_ROOT`, `FC_RUNNER_MSB_BIN`, `FC_RUNNER_MSB_MEMORY`, `FC_RUNNER_MSB_CPUS`, `FC_RUNNER_RUNTIME_READY_TIMEOUT_SECS`, `FC_RUNNER_RUNTIME_READY_INTERVAL_MS`, `FC_RUNNER_COMMAND_TIMEOUT_SECS`, `FC_RUNNER_RUNTIME_TEMPLATE_ROOT`, `FC_RUNNER_MAX_SANDBOXES` | finite-saas-runner.service (dormant) |
-| `/home/ubuntu/finite-search/searxng/.env` | `SEARXNG_BIND`, `SEARXNG_PORT`, `SEARXNG_BASE_URL`, `SEARXNG_LIMITER`, `SEARXNG_SECRET` | SearXNG compose |
-| `/home/ubuntu/finite-search/firecrawl-upstream/.env` | `PORT`, `HOST`, `USE_DB_AUTHENTICATION`, `BULL_AUTH_KEY`, `POSTGRES_USER`, `POSTGRES_PASSWORD`, `POSTGRES_DB`, `MAX_CPU`, `MAX_RAM` | Firecrawl compose |
 | `/var/lib/finite-sites/cookie-secret` (64 bytes) | finitesitesd session secret | finitesitesd |
 | `/srv/github-runner/*/.credentials`, `.credentials_rsaparams` | runner registration credentials (never captured) | Actions runners |
 | `/opt/finite/finitecomputer/secrets/` (0700 root) | unenumerated by design (root-only) | legacy runner tooling |
@@ -74,7 +70,6 @@ migrations to Depot-backed CI).
 - `caddy/Caddyfile` — deployed at `/etc/caddy/Caddyfile`.
 - `runners.md` — runner removal inventory for the lat2 decommission.
 - `backups.md` — backup reality and the proposed timer.
-- `search.md` — how finite-search runs; points at `finite-search/compose/`.
 - `deploy.md` — current (deprecated) manual sites deploy and the target flow.
 
 ## Captured-state appendix — on-host reality that is not (yet) code

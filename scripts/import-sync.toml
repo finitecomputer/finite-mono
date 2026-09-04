@@ -1,8 +1,8 @@
 # Import-sync manifest: source-of-record for every repo imported into finite-mono.
 # `last_import_sha` is the source commit whose tree is fully reflected in the mono
-# directory (modulo the deliberate mono-side edits listed in
-# docs/monorepo-migration-log.md: sub-workspace Cargo.toml/Cargo.lock removed,
-# path-dep retargets, etc.). scripts/import-sync updates this file after each sync.
+# directory (modulo deliberate mono-side edits such as removed sub-workspace
+# Cargo.toml/Cargo.lock files and path-dep retargets). scripts/import-sync
+# updates this file after each sync.
 #
 # Once a source repo is archived (post-cutover), its entry stays here as the
 # permanent provenance record.
@@ -37,17 +37,7 @@ mono_dir = "finite-nostr"
 source_url = "https://github.com/finitecomputer/finite-nostr"
 last_import_sha = "fefd22b3f3c39481225a28000bba0b2b9354d1ce"
 
-[finite-search]
-mono_dir = "finite-search"
-source_url = "https://github.com/finitecomputer/finite-search"
-last_import_sha = "02d7628922e418405c059753ceaf3449e40a24e7"
-
 [finite-skills]
 mono_dir = "finite-skills"
 source_url = "https://github.com/finitecomputer/finite-skills"
 last_import_sha = "80ada39d477d645eaaacb624e89e0010d3e4aedc"
-
-[finite-specialization]
-mono_dir = "finite-specialization"
-source_url = "https://github.com/finitecomputer/finite-specialization"
-last_import_sha = "5d4fc416cbc65538924398d817f006949012f92b"

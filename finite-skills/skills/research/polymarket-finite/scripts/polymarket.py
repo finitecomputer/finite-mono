@@ -16,7 +16,9 @@ DATA = "https://data-api.polymarket.com"
 
 
 def get_json(url: str) -> dict[str, Any] | list[Any]:
-    request = urllib.request.Request(url, headers={"User-Agent": "finite-polymarket-finite/1.0"})
+    request = urllib.request.Request(
+        url, headers={"User-Agent": "finite-polymarket-finite/1.0"}
+    )
     with urllib.request.urlopen(request, timeout=20) as response:
         return json.loads(response.read().decode("utf-8"))
 
@@ -68,7 +70,9 @@ def render_market(market: dict[str, Any], *, prefix: str = "") -> list[str]:
             formatted.append(f"{label}: {fmt_pct(price)}")
         if formatted:
             lines.append(f"{prefix}  {' / '.join(formatted)}")
-    lines.append(f"{prefix}  volume={fmt_volume(market.get('volume', 0))} active={market.get('active', '?')} closed={market.get('closed', '?')}")
+    lines.append(
+        f"{prefix}  volume={fmt_volume(market.get('volume', 0))} active={market.get('active', '?')} closed={market.get('closed', '?')}"
+    )
     if market.get("slug"):
         lines.append(f"{prefix}  slug={market['slug']}")
     if market.get("conditionId"):
@@ -89,7 +93,9 @@ def cmd_search(args: argparse.Namespace) -> int:
     print(f'Found {total} results for "{args.query}":\n')
     for event in events[: args.limit]:
         print(f"=== {event.get('title', '?')} ===")
-        print(f"slug={event.get('slug', '')} volume={fmt_volume(event.get('volume', 0))}")
+        print(
+            f"slug={event.get('slug', '')} volume={fmt_volume(event.get('volume', 0))}"
+        )
         for market in (event.get("markets") or [])[: args.market_limit]:
             print("\n".join(render_market(market, prefix="  ")))
         print("")
@@ -105,7 +111,9 @@ def cmd_trending(args: argparse.Namespace) -> int:
         return 0
     for index, event in enumerate(payload, start=1):
         print(f"{index}. {event.get('title', '?')}")
-        print(f"   slug={event.get('slug', '')} volume={fmt_volume(event.get('volume', 0))} markets={len(event.get('markets') or [])}")
+        print(
+            f"   slug={event.get('slug', '')} volume={fmt_volume(event.get('volume', 0))} markets={len(event.get('markets') or [])}"
+        )
         for market in (event.get("markets") or [])[: args.market_limit]:
             print("\n".join(render_market(market, prefix="   ")))
         print("")
@@ -122,7 +130,9 @@ def cmd_event(args: argparse.Namespace) -> int:
         return 1
     event = payload[0]
     print(f"{event.get('title', '?')}")
-    print(f"slug={event.get('slug', '')} volume={fmt_volume(event.get('volume', 0))} liquidity={fmt_volume(event.get('liquidity', 0))}")
+    print(
+        f"slug={event.get('slug', '')} volume={fmt_volume(event.get('volume', 0))} liquidity={fmt_volume(event.get('liquidity', 0))}"
+    )
     description = event.get("description")
     if description:
         print(f"\n{description}\n")
@@ -149,7 +159,9 @@ def cmd_market(args: argparse.Namespace) -> int:
 
 
 def cmd_price(args: argparse.Namespace) -> int:
-    payload = get_json(f"{CLOB}/price?token_id={urllib.parse.quote(args.token_id)}&side={urllib.parse.quote(args.side)}")
+    payload = get_json(
+        f"{CLOB}/price?token_id={urllib.parse.quote(args.token_id)}&side={urllib.parse.quote(args.side)}"
+    )
     if args.json:
         print(json.dumps(payload, indent=2))
         return 0
@@ -164,7 +176,9 @@ def cmd_book(args: argparse.Namespace) -> int:
         print(json.dumps(payload, indent=2))
         return 0
     print(f"Orderbook for {args.token_id}")
-    print(f"last_trade={fmt_pct(payload.get('last_trade_price'))} tick_size={payload.get('tick_size', '?')}")
+    print(
+        f"last_trade={fmt_pct(payload.get('last_trade_price'))} tick_size={payload.get('tick_size', '?')}"
+    )
     print("\nBids:")
     for bid in (payload.get("bids") or [])[: args.limit]:
         print(f"  {fmt_pct(bid.get('price')):>7}  size={bid.get('size')}")
@@ -186,7 +200,9 @@ def cmd_history(args: argparse.Namespace) -> int:
         print("No price history available.")
         return 0
     for point in history:
-        timestamp = datetime.fromtimestamp(point["t"], tz=timezone.utc).strftime("%Y-%m-%d %H:%M")
+        timestamp = datetime.fromtimestamp(point["t"], tz=timezone.utc).strftime(
+            "%Y-%m-%d %H:%M"
+        )
         print(f"{timestamp}  {fmt_pct(point.get('p'))}")
     return 0
 
@@ -221,7 +237,9 @@ def build_parser() -> argparse.ArgumentParser:
     search.add_argument("--json", action="store_true")
     search.set_defaults(func=cmd_search)
 
-    trending = subparsers.add_parser("trending", help="List top active events by volume")
+    trending = subparsers.add_parser(
+        "trending", help="List top active events by volume"
+    )
     trending.add_argument("--limit", type=int, default=10)
     trending.add_argument("--market-limit", type=int, default=3)
     trending.add_argument("--json", action="store_true")
@@ -249,9 +267,13 @@ def build_parser() -> argparse.ArgumentParser:
     book.add_argument("--json", action="store_true")
     book.set_defaults(func=cmd_book)
 
-    history = subparsers.add_parser("history", help="Fetch price history by condition ID")
+    history = subparsers.add_parser(
+        "history", help="Fetch price history by condition ID"
+    )
     history.add_argument("--condition-id", required=True)
-    history.add_argument("--interval", default="all", choices=["all", "1d", "1w", "1m", "3m", "6m", "1y"])
+    history.add_argument(
+        "--interval", default="all", choices=["all", "1d", "1w", "1m", "3m", "6m", "1y"]
+    )
     history.add_argument("--fidelity", type=int, default=50)
     history.add_argument("--json", action="store_true")
     history.set_defaults(func=cmd_history)

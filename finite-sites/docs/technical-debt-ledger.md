@@ -8,10 +8,9 @@ delete condition is unfinished design, not accepted debt.
 
 `HttpMailer` (Resend, via the shared `finite-mail` transport) ships behind
 the `Mailer` trait, selected with `--mailer` + `--mail-from`, key via env
-var. Remaining work is
-configuration, tracked in `docs/deploy-finite-lat-2.md` (domain
-verification + a real-inbox validation gate). Local and Devfinity select
-the dev mailer with `--mailer dev`; omitting the flag is an error.
+var. Remaining work is configuration: domain verification plus a real-inbox
+validation gate in the current Sites deploy authority. Local and Devfinity
+select the dev mailer with `--mailer dev`; omitting the flag is an error.
 
 ## 2. Login-link rate limiting only; no platform-wide limits
 
@@ -84,8 +83,8 @@ the dev mailer with `--mailer dev`; omitting the flag is an error.
 passed on 2026-06-09 and later updated to the Project Repository flow:
 project init plus git push from a remote machine through Cloudflare
 succeeded against finite-lat-2. The residual behavior (a
-misconfigured `--api-url` fails closed with "url mismatch") is documented
-in `docs/deploy-finite-lat-2.md` along with the on-box smoke procedure.
+misconfigured `--api-url` fails closed with "url mismatch") remains the
+expected signed-call behavior.
 
 ## 8. RESOLVED — tier-2 runs in Kata microVMs
 
@@ -151,3 +150,22 @@ startup. Tests cover real `git clone`/`git push`, ignored non-deploy refs,
 missing output failure, restart reconciliation after a ref update before
 deploy, and idempotent replay after Version creation before event
 acknowledgement.
+
+## 13. RETIRED — `reconcile-identity` one-shot migration command
+
+- **Source**: the mailbox-grant → native-Principal reconciliation was a
+  completed one-shot migration. Its optional Core cross-check called
+  `/api/core/v1/brain/agent-account`, which the auth-kernel stack deleted
+  (its only consumers are gone).
+- **Risk**: none from removal — the migration already ran; durable grants
+  were rewritten additively and the command was never part of startup.
+  The store-layer reconciliation helpers stay because the engine and store
+  test fixtures still exercise their local invariants (e.g. automated
+  evidence never resurrects a revoked key).
+- **Proof**: `finitesitesd reconcile-identity`, its Directory/Core clients
+  (`crates/finitesitesd/src/identity.rs`), and the devfinity smoke
+  operator-boundary check are deleted; the daemon no longer reads
+  `FINITE_IDENTITY_AUTHORITY` / `FC_CORE_API_*` anywhere.
+- **Delete condition**: this entry is the permanent record; remove the
+  store-layer helpers only with a dedicated store cleanup that rewrites the
+  fixtures that use them.

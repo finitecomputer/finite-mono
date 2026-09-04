@@ -2,6 +2,8 @@ name: CI
 
 on:
   pull_request:
+    branches:
+      - main
   merge_group:
     types: [checks_requested]
   push:
@@ -18,6 +20,12 @@ permissions:
 
 env:
   CACHIX_CACHE_NAME: finite
+  # Authenticate Nix `github:` flake fetches so shared runner egress does not
+  # burn the unauthenticated GitHub API quota. Hermes itself is pinned to a
+  # direct archive URL below, but the rest of the flake graph still contains
+  # normal GitHub inputs such as nixpkgs, crane, disko, and flake-utils.
+  NIX_CONFIG: |
+    access-tokens = github.com=${{ github.token }}
 
 jobs:
   changes:
@@ -27,11 +35,9 @@ jobs:
       run_rust: ${{ steps.detect.outputs.run_rust }}
       run_dashboard: ${{ steps.detect.outputs.run_dashboard }}
       run_dashboard_browser: ${{ steps.detect.outputs.run_dashboard_browser }}
-      run_electron_alpha: ${{ steps.detect.outputs.run_electron_alpha }}
       run_hermes_bridge: ${{ steps.detect.outputs.run_hermes_bridge }}
       run_nix_checks: ${{ steps.detect.outputs.run_nix_checks }}
       run_skills_check: ${{ steps.detect.outputs.run_skills_check }}
-      run_search_check: ${{ steps.detect.outputs.run_search_check }}
       run_monitoring_nixos_contract: ${{ steps.detect.outputs.run_monitoring_nixos_contract }}
       run_finite_status_contract: ${{ steps.detect.outputs.run_finite_status_contract }}
       run_nix_service_packages: ${{ steps.detect.outputs.run_nix_service_packages }}
@@ -67,17 +73,39 @@ jobs:
         with:
           fetch-depth: 0
       - uses: DeterminateSystems/nix-installer-action@v16
+      - name: Configure Cachix read-only cache
+        uses: cachix/cachix-action@v17
+        with:
+          name: ${{ env.CACHIX_CACHE_NAME }}
+          skipPush: true
+
+      - name: Resolve pinned Rust channel
+        id: rust_pin
+        run: |
+          # Parse the channel out of rust-toolchain.toml — the single Rust
+          # pin — so the install below can never float. The dtolnay action
+          # does NOT read the toml itself: with no toolchain input it
+          # installs its branch name (floating stable), which is exactly
+          # what this repo must not do.
+          channel="$(sed -n 's/^channel[[:space:]]*=[[:space:]]*"\(.*\)"/\1/p' "$GITHUB_WORKSPACE/rust-toolchain.toml")"
+          if [[ -z "$channel" ]]; then
+            echo "::error::rust-toolchain.toml declares no channel" >&2
+            exit 1
+          fi
+          echo "channel=$channel" >> "$GITHUB_OUTPUT"
 
       - name: Install Rust
-        # Pinned to 1.93.1: 1.88's clippy trips uninlined_format_args on v2
-        # crates, and floating stable (1.96 today) trips new let-chain lints
-        # in devfinity. 1.93.1 is verified clean across the whole workspace.
-        # Bump deliberately (run clippy locally first), don't float.
-        # MSRV (rust-version 1.88) is still exercised by the release builds.
+        # Toolchain is the channel parsed from rust-toolchain.toml above —
+        # the single build pin shared with Nix shells, release builds, and
+        # dev hosts. Bump deliberately (run clippy locally first), don't
+        # float: 1.88's clippy trips uninlined_format_args on v2 crates and
+        # floating stable trips new let-chain lints. The workspace
+        # rust-version floor stays at the oldest rustc that must still build
+        # the tree (nixpkgs-25.11's 1.91.1, used by the devfinity package).
         uses: dtolnay/rust-toolchain@stable
         with:
-          toolchain: "1.93.1"
-          components: rustfmt, clippy
+          toolchain: ${{ steps.rust_pin.outputs.channel }}
+          components: clippy, rustfmt
 
       - uses: Swatinem/rust-cache@v2
 
@@ -148,50 +176,6 @@ jobs:
       - name: Build dashboard
         run: pnpm run build
 
-  electron-alpha:
-    name: Electron production-dashboard alpha
-    needs: changes
-    if: needs.changes.outputs.run_electron_alpha == 'true'
-    # This job builds and tests its own Rust daemon on macOS, so it consumes
-    # no artifacts from the Rust workspace or Dashboard jobs.
-    runs-on: macos-14
-    steps:
-      - uses: actions/checkout@v4
-      - uses: DeterminateSystems/nix-installer-action@v16
-      - uses: Swatinem/rust-cache@v2
-
-      - name: Device parity and Electron boundary gates
-        run: nix develop --command just chat-device-parity
-
-      - name: Build ad-hoc-signed internal alpha
-        run: nix develop --command just chat-electron-package
-
-      - name: Inspect packaged daemon and production-dashboard boundary
-        run: |
-          app="finitechat/apps/electron-chat/release/Finite Chat.app"
-          test -x "$app/Contents/Resources/finitechatd"
-          test -f "$app/Contents/Resources/app/electron/main.cjs"
-          test -f "$app/Contents/Resources/app/electron/preload.cjs"
-          test ! -e "$app/Contents/Resources/app/dist"
-          grep -n 'https://finite\.computer' "$app/Contents/Resources/app/electron/main.cjs"
-          ! grep -R -n -E 'spawn\("cargo"|cargo run' "$app/Contents/Resources/app/electron"
-          ! otool -L "$app/Contents/Resources/finitechatd" | grep -F '/nix/store/'
-          "$app/Contents/Resources/finitechatd" --help >/dev/null
-          codesign --verify --deep --strict --verbose=2 "$app"
-
-      - name: Archive internal alpha
-        run: |
-          ditto -c -k --sequesterRsrc --keepParent \
-            "finitechat/apps/electron-chat/release/Finite Chat.app" \
-            finitechat/apps/electron-chat/release/finite-chat-electron-alpha.zip
-
-      - name: Publish internal alpha
-        uses: actions/upload-artifact@v4
-        with:
-          name: finite-chat-electron-alpha-macos-${{ runner.arch }}
-          path: finitechat/apps/electron-chat/release/finite-chat-electron-alpha.zip
-          if-no-files-found: error
-
   hermes-bridge:
     name: finitechat Hermes bridge
     needs: changes
@@ -201,10 +185,12 @@ jobs:
       run:
         working-directory: finitechat
     env:
-      FINITE_HERMES_AGENT_VERSION: "0.20.0"
-      LEGACY_HERMES_AGENT_REV: "a91a57fa5a13d516c38b07a141a9ce8a3daabeb0"
-      # PyPI channel was retired upstream in v0.20.0; use the pinned upstream
-      # Nix package instead of downloading GitHub archives during CI.
+      # The upstream PyPI channel is retired; use the pinned upstream Nix
+      # package instead of downloading GitHub archives during CI. The pin
+      # lives in flake.lock (hermes-agent, fetched over git smart HTTP —
+      # not the api.github.com or codeload archive endpoints, which share
+      # GitHub's per-IP secondary rate limit and 429 from shared runner
+      # egress; see flake.nix); no live getFlake fetches here.
       HERMES_AGENT_NIX_ATTR: ".#packages.x86_64-linux.hermes-agent-runtime"
       HERMES_AGENT_PYTHON_NIX_ATTR: ".#packages.x86_64-linux.hermes-agent-runtime-python"
       NIX_CONFIG: |
@@ -216,10 +202,26 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - name: Resolve pinned Rust channel
+        id: rust_pin
+        run: |
+          # Same contract as the Rust workspace job: parse the channel from
+          # rust-toolchain.toml rather than letting the action default to
+          # its floating stable branch name. This job's run working-directory
+          # is finitechat/, so anchor the path at the checkout root.
+          channel="$(sed -n 's/^channel[[:space:]]*=[[:space:]]*"\(.*\)"/\1/p' "$GITHUB_WORKSPACE/rust-toolchain.toml")"
+          if [[ -z "$channel" ]]; then
+            echo "::error::rust-toolchain.toml declares no channel" >&2
+            exit 1
+          fi
+          echo "channel=$channel" >> "$GITHUB_OUTPUT"
+
       - name: Install Rust
+        # Toolchain is the channel parsed from rust-toolchain.toml — the
+        # same pin the Rust workspace job and release builds use.
         uses: dtolnay/rust-toolchain@stable
         with:
-          toolchain: "1.88"
+          toolchain: ${{ steps.rust_pin.outputs.channel }}
 
       - uses: Swatinem/rust-cache@v2
 
@@ -287,7 +289,6 @@ jobs:
           BUILD_PLAN: ${{ runner.temp }}/hermes-agent-runtime-build-plan
           HERMES_AGENT_RUNTIME_OUTPUT: ${{ runner.temp }}/hermes-agent-runtime-output
           HERMES_AGENT_PYTHON_OUTPUT: ${{ runner.temp }}/hermes-agent-runtime-python-output
-          LEGACY_HERMES_AGENT_PYTHON_OUTPUT: ${{ runner.temp }}/legacy-hermes-agent-python-output
         run: |
           set -euo pipefail
 
@@ -302,13 +303,9 @@ jobs:
             "$HERMES_AGENT_NIX_ATTR" | tee "$HERMES_AGENT_RUNTIME_OUTPUT"
           nix build --no-link --print-build-logs --print-out-paths --option builders '' \
             "$HERMES_AGENT_PYTHON_NIX_ATTR" | tee "$HERMES_AGENT_PYTHON_OUTPUT"
-          legacy_hermes_expr="(builtins.getFlake \"github:NousResearch/hermes-agent/$LEGACY_HERMES_AGENT_REV\").packages.x86_64-linux.default.hermesVenv"
-          nix build --no-link --print-build-logs --print-out-paths --option builders '' \
-            --expr "$legacy_hermes_expr" | tee "$LEGACY_HERMES_AGENT_PYTHON_OUTPUT"
 
           hermes_agent_runtime="$(grep -E '^/nix/store/' "$HERMES_AGENT_RUNTIME_OUTPUT" | tail -n 1)"
           hermes_agent_python="$(grep -E '^/nix/store/' "$HERMES_AGENT_PYTHON_OUTPUT" | tail -n 1)"
-          legacy_hermes_agent_python="$(grep -E '^/nix/store/' "$LEGACY_HERMES_AGENT_PYTHON_OUTPUT" | tail -n 1)"
           if [[ -z "$hermes_agent_runtime" || ! -x "$hermes_agent_runtime/bin/hermes" ]]; then
             echo "::error::Hermes Agent Nix runtime did not produce an executable hermes"
             exit 1
@@ -317,28 +314,19 @@ jobs:
             echo "::error::Hermes Agent Nix environment did not produce an executable python3"
             exit 1
           fi
-          if [[ -z "$legacy_hermes_agent_python" || ! -x "$legacy_hermes_agent_python/bin/python3" ]]; then
-            echo "::error::Legacy Hermes Agent Nix environment did not produce an executable python3"
-            exit 1
-          fi
 
-          "$hermes_agent_python/bin/python3" - <<'PY'
+          "$hermes_agent_python/bin/python3" - "$(nix eval --raw --option builders '' .#packages.x86_64-linux.hermes-agent.version)" <<'PY'
           import importlib.metadata
+          import sys
           import gateway.config
           import hermes_cli.plugins
-          assert importlib.metadata.version("hermes-agent") == "0.20.0"
-          PY
-          "$legacy_hermes_agent_python/bin/python3" - <<'PY'
-          import importlib.metadata
-          assert importlib.metadata.version("hermes-agent") == "0.14.0"
+          assert importlib.metadata.version("hermes-agent") == sys.argv[1]
           PY
 
           {
             echo "path=$hermes_agent_runtime"
             echo "python_path=$hermes_agent_python"
             echo "python=$hermes_agent_python/bin/python3"
-            echo "legacy_python_path=$legacy_hermes_agent_python"
-            echo "legacy_python=$legacy_hermes_agent_python/bin/python3"
           } >> "$GITHUB_OUTPUT"
 
       - name: Push Hermes Agent runtime closure
@@ -394,16 +382,6 @@ jobs:
         run: |
           "$HERMES_AGENT_PYTHON" -m unittest discover -s tests -p '*test*.py'
 
-      - name: Legacy Hermes mixed-version migration tests
-        working-directory: ${{ github.workspace }}
-        env:
-          HERMES_AGENT_PYTHON: ${{ steps.hermes_agent_runtime.outputs.python }}
-          LEGACY_HERMES_AGENT_PYTHON: ${{ steps.hermes_agent_runtime.outputs.legacy_python }}
-        run: |
-          "$HERMES_AGENT_PYTHON" -m unittest \
-            scripts.tests.test_legacy_hermes_migration \
-            finitechat.tests.hermes.test_legacy_hermes_migration
-
   skills-check:
     name: Skills static check
     needs: changes
@@ -412,19 +390,13 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: DeterminateSystems/nix-installer-action@v16
+      - name: Configure Cachix read-only cache
+        uses: cachix/cachix-action@v17
+        with:
+          name: ${{ env.CACHIX_CACHE_NAME }}
+          skipPush: true
       - name: Skills check
         run: nix develop --command just skills check
-
-  search-check:
-    name: Search static check
-    needs: changes
-    if: needs.changes.outputs.run_search_check == 'true'
-    runs-on: depot-ubuntu-24.04
-    steps:
-      - uses: actions/checkout@v4
-      - uses: DeterminateSystems/nix-installer-action@v16
-      - name: Search check
-        run: nix develop --command just search check
 
   monitoring-nixos-contract:
     name: Monitoring NixOS contract
@@ -434,6 +406,11 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: DeterminateSystems/nix-installer-action@v16
+      - name: Configure Cachix read-only cache
+        uses: cachix/cachix-action@v17
+        with:
+          name: ${{ env.CACHIX_CACHE_NAME }}
+          skipPush: true
       - name: Monitoring NixOS contract
         run: nix develop --command just monitoring-nixos-contract
 
@@ -445,6 +422,11 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: DeterminateSystems/nix-installer-action@v16
+      - name: Configure Cachix read-only cache
+        uses: cachix/cachix-action@v17
+        with:
+          name: ${{ env.CACHIX_CACHE_NAME }}
+          skipPush: true
       - name: Finite status contract
         run: nix develop --command just finite-status-contract
 
@@ -459,6 +441,11 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: DeterminateSystems/nix-installer-action@v16
+      - name: Configure Cachix read-only cache
+        uses: cachix/cachix-action@v17
+        with:
+          name: ${{ env.CACHIX_CACHE_NAME }}
+          skipPush: true
       - name: Brain product language check
         run: nix develop --command just brain-language-check
       - name: Canonical Runtime image contract
@@ -469,6 +456,9 @@ jobs:
         run: nix develop --command just lat1-rollout-contract
       - name: lat3 Runner-only closure rollout contract
         run: nix develop --command just lat3-runner-rollout-contract
+
+      - name: lat4 Runner-only closure rollout contract
+        run: nix develop --command just lat4-runner-rollout-contract
       - name: lat1 healthcheck activation contract
         run: nix develop --command just lat1-healthcheck-contract
       - name: Kata Runner host anti-drift contract
@@ -485,11 +475,16 @@ jobs:
         run: nix develop --command just lat1-secret-bootstrap-contract
       - name: Runbook facts contract
         run: nix develop --command just runbook-facts-contract
-      - name: Production deploy contract
-        run: nix develop --command just production-deploy-contract
       - name: Evaluate production NixOS configuration
-        run: nix eval .#nixosConfigurations.finite-lat-1.config.system.build.toplevel.drvPath
+        run: nix eval .#nixosConfigurations.finite-lat-2.config.system.build.toplevel.drvPath
 
+  # Landing gate: builds the 15 scoped service packages through crane and
+  # repopulates Cachix. select-harnesses defers this to landing events
+  # (push / merge_group) except when a PR changes the package derivations
+  # themselves: the workspace manifests / Cargo.lock / .cargo config that
+  # scope cargoArtifacts, rust-toolchain.toml, the flake graph, or
+  # infra/nixos/. A cold cargoArtifacts build here costs ~30 minutes and
+  # the Rust workspace job has already compiled and tested the PR diff.
   nix-service-packages:
     name: Nix service packages
     needs: changes
@@ -565,14 +560,12 @@ jobs:
             ".#packages.x86_64-linux.finitechat-server"
             ".#packages.x86_64-linux.finitechat-hosted-device"
             ".#packages.x86_64-linux.finite-agentd"
-            ".#packages.x86_64-linux.finite-specialization-worker"
             ".#packages.x86_64-linux.finitesitesd"
             ".#packages.x86_64-linux.finite-brain"
             ".#packages.x86_64-linux.finite-identity"
             ".#packages.x86_64-linux.fsite"
             ".#packages.x86_64-linux.fbrain"
             ".#packages.x86_64-linux.finitechat"
-            ".#packages.x86_64-linux.finitechat-rmp"
           )
 
           cargo_artifacts=()
@@ -610,8 +603,8 @@ jobs:
 
           artifact_count="$(wc -l < "$CARGO_ARTIFACT_OUTPUTS" | tr -d '[:space:]')"
           package_count="$(wc -l < "$PACKAGE_OUTPUTS" | tr -d '[:space:]')"
-          if [[ "$artifact_count" -ne 9 ]]; then
-            echo "::error::expected 9 distinct Cargo dependency artifacts for the 15 scoped packages; got $artifact_count"
+          if [[ "$artifact_count" -ne 8 ]]; then
+            echo "::error::expected 8 distinct Cargo dependency artifacts for the scoped packages; got $artifact_count"
             exit 1
           fi
           {
@@ -705,10 +698,16 @@ jobs:
 
   devfinity-smoke:
     name: devfinity services-only smoke
+    # Packaging runs on landing events only (and flake-graph PRs); on other
+    # pull requests this job proceeds while the packaging job is skipped:
+    # warm cargoArtifacts substitute from Cachix and only the thin final
+    # packages build locally from the PR tree. `!cancelled()` overrides the
+    # default "skip when a dependency is skipped" without losing the wait for
+    # the Cachix push on landing runs.
     needs:
       - changes
       - nix-service-packages
-    if: needs.changes.outputs.run_devfinity_smoke == 'true'
+    if: ${{ !cancelled() && needs.changes.outputs.run_devfinity_smoke == 'true' && needs['nix-service-packages'].result != 'failure' }}
     runs-on: depot-ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
@@ -775,10 +774,8 @@ jobs:
       - changes
       - rust
       - dashboard
-      - electron-alpha
       - hermes-bridge
       - skills-check
-      - search-check
       - monitoring-nixos-contract
       - finite-status-contract
       - nix-checks
@@ -793,14 +790,10 @@ jobs:
       RUN_DASHBOARD: ${{ needs.changes.outputs.run_dashboard }}
       RUN_DASHBOARD_BROWSER: ${{ needs.changes.outputs.run_dashboard_browser }}
       RESULT_DASHBOARD: ${{ needs.dashboard.result }}
-      RUN_ELECTRON_ALPHA: ${{ needs.changes.outputs.run_electron_alpha }}
-      RESULT_ELECTRON_ALPHA: ${{ needs['electron-alpha'].result }}
       RUN_HERMES_BRIDGE: ${{ needs.changes.outputs.run_hermes_bridge }}
       RESULT_HERMES_BRIDGE: ${{ needs['hermes-bridge'].result }}
       RUN_SKILLS_CHECK: ${{ needs.changes.outputs.run_skills_check }}
       RESULT_SKILLS_CHECK: ${{ needs['skills-check'].result }}
-      RUN_SEARCH_CHECK: ${{ needs.changes.outputs.run_search_check }}
-      RESULT_SEARCH_CHECK: ${{ needs['search-check'].result }}
       RUN_MONITORING_NIXOS_CONTRACT: ${{ needs.changes.outputs.run_monitoring_nixos_contract }}
       RESULT_MONITORING_NIXOS_CONTRACT: ${{ needs['monitoring-nixos-contract'].result }}
       RUN_FINITE_STATUS_CONTRACT: ${{ needs.changes.outputs.run_finite_status_contract }}
@@ -848,10 +841,8 @@ jobs:
 
           check_selected "Rust workspace" "$RUN_RUST" "$RESULT_RUST"
           check_selected "Dashboard" "$RUN_DASHBOARD" "$RESULT_DASHBOARD"
-          check_selected "Electron alpha" "$RUN_ELECTRON_ALPHA" "$RESULT_ELECTRON_ALPHA"
           check_selected "Hermes bridge" "$RUN_HERMES_BRIDGE" "$RESULT_HERMES_BRIDGE"
           check_selected "Skills check" "$RUN_SKILLS_CHECK" "$RESULT_SKILLS_CHECK"
-          check_selected "Search check" "$RUN_SEARCH_CHECK" "$RESULT_SEARCH_CHECK"
           check_selected "Monitoring NixOS contract" "$RUN_MONITORING_NIXOS_CONTRACT" "$RESULT_MONITORING_NIXOS_CONTRACT"
           check_selected "Finite status contract" "$RUN_FINITE_STATUS_CONTRACT" "$RESULT_FINITE_STATUS_CONTRACT"
           check_selected "Nix checks" "$RUN_NIX_CHECKS" "$RESULT_NIX_CHECKS"

@@ -13,48 +13,47 @@ use crate::{
     AdminRuntimeRetireExactInput, AdminRuntimeUpgradeExactInput, AdminRuntimeUpgradeInput,
     AgentCreationConfiguration, AgentCreationEntitlement, AgentCreationLease, AgentCreationRequest,
     AgentCreationRequestStatus, AgentRuntime, ApproveFinitePrivateGrantInput, BillingClass,
-    BillingOverview, BrainAccountAgentRoster, BrainAccountAgentRosterEntry,
-    BrainAccountRosterLookup, BrainAgentAccount, BrainAgentDepartureFact,
-    BrainAgentDepartureFactsPage, BrainDeparturePrincipalKind, BrainDepartureReason,
-    CORE_SCHEMA_SQL, CancelAgentCreationRequestInput, CompleteAgentCreationRequestInput,
-    CompleteRuntimeControlRequestInput, CoreError, CoreResult, CoreUser, CustomerBillingAccount,
-    CustomerOrganization, FINITE_PRIVATE_SECRET_REFERENCE, FailAgentCreationRequestInput,
-    FailRuntimeControlRequestInput, FinitePrivateAdminAccount, FinitePrivateAdminAuditEvent,
-    FinitePrivateAdminProject, FinitePrivateAdminState, FinitePrivateApiKey,
-    FinitePrivateApiKeyStatus, FinitePrivateDailyResetResult, FinitePrivateGrant,
-    FinitePrivateGrantStatus, FinitePrivateLimitProfile, FinitePrivateReservation,
-    FinitePrivateReservationStatus, FinitePrivateUsageDecision, FinitePrivateUsageNotice,
-    FinitePrivateUsageStatus, HostOwnedRuntimeFacts, HostingTier, IssueFinitePrivateApiKeyInput,
-    IssueFinitePrivateFriendKeyInput, IssuedFinitePrivateFriendKey, LeaseAgentCreationRequestInput,
-    LeaseRuntimeControlRequestInput, LinkStripeCustomerInput, LinkVerifiedUserInput,
-    MAX_RUNTIME_HEALTH_REPORT_REASON_CHARS, OffboardingPhase, Project, ProjectMembershipRole,
-    ProviderOperationEnvelope, ProviderOperationTransition, ProviderOperationTransitionRecord,
-    ProviderOperationV1, ProvisionFinitePrivateRuntimeKeyInput,
-    ProvisionFinitePrivateRuntimeKeyResult, RUNTIME_HEALTH_REPORT_MAX_INTERVAL_SECONDS,
-    RUNTIME_HEALTH_REPORT_MIN_INTERVAL_SECONDS, RecordProviderOperationTransitionInput,
-    RecordRuntimeHealthReportInput, RegisterAgentCreationRuntimeInput,
-    RenewRuntimeControlRequestInput, RequestAgentCreationInput, RequestAgentCreationResult,
-    RequestRuntimeDestroyInput, RequestRuntimeRecoverKnownGoodChatInput,
-    RequestRuntimeRestartInput, RequestRuntimeStopInput, ReserveFinitePrivateUsageInput,
-    ResetFinitePrivateUsageWindowInput, RetiredRuntimeOffboardReceipt,
-    RetryRuntimeControlRequestInput, RevokeFinitePrivateApiKeyInput, RevokeFinitePrivateGrantInput,
-    RotateFinitePrivateApiKeyInput, RuntimeArtifact, RuntimeBootIntent,
-    RuntimeCapabilitiesEnvelope, RuntimeControlCompletion, RuntimeControlExpectedBinding,
-    RuntimeControlKind, RuntimeControlLease, RuntimeControlRequest, RuntimeControlRequestStatus,
-    RuntimeHealthReportAck, RuntimeLifecycleStage, RuntimePlacement, RuntimeRelocationEnvelope,
-    RuntimeRelocationV1, RuntimeRetirementSnapshot, RuntimeRetirementSnapshotReceipt,
-    RuntimeSpecEnvelope, RuntimeSpecIdentity, RuntimeSummaryStatus,
-    SettleFinitePrivateReservationInput, SettleFinitePrivateReservationResult, StoreErrorDetail,
-    StoredRuntimeHealth, SyncStripeSubscriptionInput, UnrecoverableRuntimeArchiveReceipt,
-    UpsertRuntimeArtifactInput, agent_creation_entitlement_id_for,
-    append_provider_operation_transition, bound_runtime_capabilities_to_artifact,
-    build_runtime_spec_v1, canonical_agent_email, chat_identity_id_for_user, current_time_iso,
+    BillingOverview, CORE_SCHEMA_SQL, CancelAgentCreationRequestInput,
+    CompleteAgentCreationRequestInput, CompleteRuntimeControlRequestInput, CoreError, CoreResult,
+    CoreUser, CustomerBillingAccount, CustomerOrganization, FINITE_PRIVATE_SECRET_REFERENCE,
+    FailAgentCreationRequestInput, FailRuntimeControlRequestInput, FinitePrivateAdminAccount,
+    FinitePrivateAdminAuditEvent, FinitePrivateAdminProject, FinitePrivateAdminState,
+    FinitePrivateApiKey, FinitePrivateApiKeyStatus, FinitePrivateDailyResetResult,
+    FinitePrivateGrant, FinitePrivateGrantStatus, FinitePrivateLimitProfile,
+    FinitePrivateReservation, FinitePrivateReservationStatus, FinitePrivateUsageDecision,
+    FinitePrivateUsageNotice, FinitePrivateUsageStatus, HostOwnedRuntimeFacts, HostingTier,
+    IssueFinitePrivateApiKeyInput, IssueFinitePrivateFriendKeyInput, IssuedFinitePrivateFriendKey,
+    LeaseAgentCreationRequestInput, LeaseRuntimeControlRequestInput, LinkStripeCustomerInput,
+    LinkVerifiedUserInput, MAX_RUNTIME_HEALTH_REPORT_REASON_CHARS, OWNER_CHAT_NPUBS_ENV,
+    OffboardingPhase, Project, ProjectMembershipRole, ProviderOperationEnvelope,
+    ProviderOperationTransition, ProviderOperationTransitionRecord, ProviderOperationV1,
+    ProvisionFinitePrivateRuntimeKeyInput, ProvisionFinitePrivateRuntimeKeyResult,
+    RUNTIME_HEALTH_REPORT_MAX_INTERVAL_SECONDS, RUNTIME_HEALTH_REPORT_MIN_INTERVAL_SECONDS,
+    RecordProviderOperationTransitionInput, RecordRuntimeHealthReportInput,
+    RegisterAgentCreationRuntimeInput, RenewRuntimeControlRequestInput, RequestAgentCreationInput,
+    RequestAgentCreationResult, RequestRuntimeDestroyInput,
+    RequestRuntimeRecoverKnownGoodChatInput, RequestRuntimeRestartInput, RequestRuntimeStopInput,
+    ReserveFinitePrivateUsageInput, ResetFinitePrivateUsageWindowInput,
+    RetiredRuntimeOffboardReceipt, RetryRuntimeControlRequestInput, RevokeFinitePrivateApiKeyInput,
+    RevokeFinitePrivateGrantInput, RotateFinitePrivateApiKeyInput, RuntimeArtifact,
+    RuntimeBootIntent, RuntimeCapabilitiesEnvelope, RuntimeControlCompletion,
+    RuntimeControlExpectedBinding, RuntimeControlKind, RuntimeControlLease, RuntimeControlRequest,
+    RuntimeControlRequestStatus, RuntimeHealthProjection, RuntimeHealthReportAck,
+    RuntimeHealthTarget, RuntimeHealthTargetList, RuntimeLifecycleStage, RuntimePlacement,
+    RuntimeRelocationEnvelope, RuntimeRelocationV1, RuntimeRetirementSnapshot,
+    RuntimeRetirementSnapshotReceipt, RuntimeSpecEnvelope, RuntimeSpecIdentity,
+    RuntimeSummaryStatus, SettleFinitePrivateReservationInput,
+    SettleFinitePrivateReservationResult, StoreErrorDetail, StoredRuntimeHealth,
+    SyncStripeSubscriptionInput, UnrecoverableRuntimeArchiveReceipt, UpsertRuntimeArtifactInput,
+    agent_creation_entitlement_id_for, append_provider_operation_transition,
+    bound_runtime_capabilities_to_artifact, build_runtime_spec_v1, canonical_agent_email,
+    chat_identity_id_for_user, current_time_iso, derive_runtime_summary_status,
     finite_private_api_key_id_for, finite_private_grant_id_for_user,
     generate_finite_private_api_key, hash_finite_private_api_key, merge_provider_runtime_handle,
     merge_runtime_capabilities, new_agent_creation_request_id, new_agent_runtime_id,
     new_customer_org_id, new_self_service_project_id, new_user_id, normalize_id_part,
-    normalize_idempotency_key, normalize_owner_email, normalize_profile_picture_url,
-    normalize_runtime_contact_endpoint, normalize_source_host_id,
+    normalize_idempotency_key, normalize_owner_chat_account_id, normalize_owner_email,
+    normalize_profile_picture_url, normalize_runtime_contact_endpoint, normalize_source_host_id,
     parse_agent_creation_request_status, parse_billing_class, parse_finite_private_api_key_status,
     parse_finite_private_grant_status, parse_finite_private_reservation_status, parse_hosting_tier,
     parse_offboarding_phase, parse_runner_class, parse_runtime_artifact_kind,
@@ -115,6 +114,10 @@ struct FinitePrivateAdminAuditInsert<'a> {
 pub struct VisibleProject {
     pub project: Project,
     pub runtime: Option<AgentRuntime>,
+    /// The runtime's standing readiness projected at read time; present
+    /// exactly when `runtime` is.
+    #[serde(default)]
+    pub runtime_health: Option<RuntimeHealthProjection>,
     pub active_runtime_control: Option<RuntimeControlRequest>,
 }
 
@@ -205,27 +208,6 @@ impl CoreStore {
             .batch_execute(CORE_SCHEMA_SQL)
             .await
             .map_err(store_error)
-    }
-
-    /// The authoritative account agent roster for the Brain enrichment layer
-    /// (ADR-0046). Routine Brain authorization never calls this.
-    pub async fn brain_account_agent_roster(
-        &self,
-        lookup: &BrainAccountRosterLookup,
-    ) -> CoreResult<Option<BrainAccountAgentRoster>> {
-        let lookup = normalize_brain_roster_lookup(lookup);
-        let client = self.connection().await?;
-        postgres_brain_account_agent_roster(&**client, &lookup).await
-    }
-
-    /// One replayable cursor page of Permanent Departure Facts (ADR-0046).
-    pub async fn brain_agent_departure_facts(
-        &self,
-        after_revision: i64,
-        limit: i64,
-    ) -> CoreResult<BrainAgentDepartureFactsPage> {
-        let client = self.connection().await?;
-        postgres_brain_agent_departure_facts(&**client, after_revision, limit).await
     }
 
     pub async fn issue_launch_code_batch(
@@ -648,33 +630,6 @@ impl CoreStore {
         postgres_visible_projects_for_workos_user(&**client, workos_user_id).await
     }
 
-    pub async fn brain_agent_account(
-        &self,
-        managed_agent_email: &str,
-    ) -> CoreResult<Option<BrainAgentAccount>> {
-        let email = managed_agent_email.trim().to_ascii_lowercase();
-        let client = self.connection().await?;
-        client
-            .query_opt(
-                "SELECT u.workos_user_id, u.normalized_email, p.agent_email
-                 FROM projects p
-                 JOIN users u ON u.id = p.owner_user_id
-                 WHERE p.agent_email = $1 AND u.workos_user_id IS NOT NULL",
-                &[&email],
-            )
-            .await
-            .map_err(store_error)?
-            .map(|row| {
-                Ok(BrainAgentAccount {
-                    workos_user_id: row.get("workos_user_id"),
-                    managed_agent_email: row.get("agent_email"),
-                    verified_email: row.get("normalized_email"),
-                    status: "active".to_owned(),
-                })
-            })
-            .transpose()
-    }
-
     pub async fn agent_creation_requests_for_workos_user(
         &self,
         workos_user_id: &str,
@@ -780,6 +735,16 @@ impl CoreStore {
     pub async fn admin_runtime_overviews(&self) -> CoreResult<Vec<AdminRuntimeOverview>> {
         let client = self.connection().await?;
         postgres_admin_runtime_overviews(&**client).await
+    }
+
+    /// The standing-health poll targets for one host, for the runner's
+    /// startup registry reconcile.
+    pub async fn runtime_health_targets_for_host(
+        &self,
+        source_host_id: &str,
+    ) -> CoreResult<RuntimeHealthTargetList> {
+        let client = self.connection().await?;
+        postgres_runtime_health_targets_for_host(&**client, source_host_id).await
     }
 
     pub async fn record_runtime_health_report(
@@ -1075,6 +1040,8 @@ where
         .ok_or(CoreError::MissingAgentCreationIdempotencyKey)?;
     let profile_picture_url =
         normalize_profile_picture_url(configuration.profile_picture_url.as_deref())?;
+    let owner_chat_account_id =
+        normalize_owner_chat_account_id(configuration.owner_chat_account_id.as_deref())?;
     let launch_code = trim_to_option(Some(&input.launch_code));
     let billing_class = if launch_code.is_some() {
         BillingClass::Sponsored
@@ -1252,6 +1219,7 @@ where
         target_source_host_id: None,
         relocation: None,
         profile_picture_url,
+        owner_chat_account_id,
         status: AgentCreationRequestStatus::Requested,
         requested_launch_code: locked_launch_code.map(|locked| locked.record.id),
         agent_runtime_id: None,
@@ -1527,6 +1495,7 @@ where
                        request.placement_runner_class, request.runtime_resource_class,
                        request.desired_runtime_artifact_id, request.runtime_spec, request.target_source_host_id, request.relocation_spec,
                        request.profile_picture_url,
+                       request.owner_chat_account_id,
                        request.status, request.requested_launch_code, request.agent_runtime_id,
                        request.runner_id, request.lease_token, core_rfc3339(request.lease_expires_at) AS lease_expires_at,
                        request.failure_message, core_rfc3339(request.created_at) AS created_at, core_rfc3339(request.updated_at) AS updated_at",
@@ -1596,6 +1565,17 @@ where
             }
             None => select_latest_launchable_runtime_artifact(client).await?,
         };
+        // The owner chat identity is per-request state, so it joins the
+        // Core-global environment only here, at spec-build time. A request
+        // without it keeps the exact legacy environment (allow-all chat
+        // admission owned by the runtime image).
+        let mut environment = runtime_environment.clone();
+        if let Some(owner_chat_account_id) = request.owner_chat_account_id.as_deref() {
+            environment.insert(
+                OWNER_CHAT_NPUBS_ENV.to_string(),
+                owner_chat_account_id.to_string(),
+            );
+        }
         let runtime_spec = build_runtime_spec_v1(
             RuntimeSpecIdentity {
                 operation_id: &request.id,
@@ -1605,7 +1585,7 @@ where
             },
             &artifact,
             &runtime_id,
-            runtime_environment.clone(),
+            environment,
             runtime_secret_references,
             RuntimeBootIntent::Normal,
         )?;
@@ -2011,6 +1991,17 @@ where
         provider_operation.clone()
     };
     upsert_agent_runtime_row(client, &runtime).await?;
+    // Compute came up (a fresh launch, or the relocated incarnation on its
+    // new host): whatever report is stored spoke for the previous one. The
+    // pin is the principal this completion knows — the relocation's expected
+    // principal, else the one the launch path verified.
+    let seed_npub = request
+        .relocation
+        .as_ref()
+        .map(|relocation| relocation.v1().expected_agent_npub.clone())
+        .or_else(|| trim_to_option(input.agent_npub.as_deref()))
+        .filter(|npub| valid_agent_npub(npub));
+    reset_runtime_health(client, &runtime.id, HealthPin::Seed(seed_npub)).await?;
     if let Some(relocation) = request
         .relocation
         .as_ref()
@@ -2042,12 +2033,6 @@ where
     activate_project_runtime_link(client, &project.id, &runtime_id, &now).await?;
     let request =
         update_agent_creation_completed(client, &input.request_id, &runtime_id, &now).await?;
-    // Roster membership change: a freshly completed (non-relocation) creation
-    // adds the agent to the owner's roster.
-    if request.relocation.is_none() {
-        postgres_bump_account_roster_revision_for_user(client, &request.owner_user_id, &now)
-            .await?;
-    }
     Ok(AgentCreationLease {
         project,
         request,
@@ -2124,6 +2109,7 @@ where
                        display_name, runner_class, hosting_tier, placement_runner_class,
                        runtime_resource_class, desired_runtime_artifact_id, runtime_spec, target_source_host_id, relocation_spec,
                        profile_picture_url,
+                       owner_chat_account_id,
                        status, requested_launch_code, agent_runtime_id,
                        runner_id, lease_token, core_rfc3339(lease_expires_at) AS lease_expires_at, failure_message,
                        core_rfc3339(created_at) AS created_at, core_rfc3339(updated_at) AS updated_at",
@@ -2201,6 +2187,7 @@ where
                        display_name, runner_class, hosting_tier, placement_runner_class,
                        runtime_resource_class, desired_runtime_artifact_id, runtime_spec, target_source_host_id, relocation_spec,
                        profile_picture_url,
+                       owner_chat_account_id,
                        status, requested_launch_code, agent_runtime_id,
                        runner_id, lease_token, core_rfc3339(lease_expires_at) AS lease_expires_at, failure_message,
                        core_rfc3339(created_at) AS created_at, core_rfc3339(updated_at) AS updated_at",
@@ -2370,6 +2357,7 @@ async fn postgres_visible_projects_for_user<C>(
 where
     C: GenericClient + Sync,
 {
+    let now = current_time_iso()?;
     let rows = client
         .query(
             "SELECT project.id AS project_id, project.customer_org_id, project.owner_user_id,
@@ -2387,6 +2375,10 @@ where
                     runtime.contact_endpoint, runtime.runtime_capabilities,
                     runtime.host_facts, core_rfc3339(runtime.created_at) AS runtime_created_at,
                     core_rfc3339(runtime.updated_at) AS runtime_updated_at,
+                    core_rfc3339(runtime.health_reported_at) AS health_reported_at,
+                    core_rfc3339(runtime.health_observed_at) AS health_observed_at,
+                    runtime.health_ready, runtime.health_reason,
+                    runtime.health_report_interval_seconds, runtime.health_reporting_npub,
                     control.id AS control_id, control.project_id AS control_project_id,
                     control.agent_runtime_id AS control_agent_runtime_id,
                     control.source_host_id AS control_source_host_id,
@@ -2490,6 +2482,16 @@ where
                     })
                 })
                 .transpose()?;
+            let runtime_health = runtime
+                .as_ref()
+                .map(|runtime| {
+                    project_runtime_health(
+                        runtime.host_facts.runtime_status,
+                        &stored_runtime_health_from_row(&row),
+                        &now,
+                    )
+                })
+                .transpose()?;
             let active_runtime_control = row
                 .get::<_, Option<String>>("control_id")
                 .map(|id| {
@@ -2536,6 +2538,7 @@ where
             Ok(VisibleProject {
                 project,
                 runtime,
+                runtime_health,
                 active_runtime_control,
             })
         })
@@ -2557,6 +2560,7 @@ where
                     request.placement_runner_class, request.runtime_resource_class,
                     request.desired_runtime_artifact_id, request.runtime_spec, request.target_source_host_id, request.relocation_spec,
                     request.profile_picture_url,
+                    request.owner_chat_account_id,
                     request.status, request.requested_launch_code, request.agent_runtime_id,
                     request.runner_id, request.lease_token, core_rfc3339(request.lease_expires_at) AS lease_expires_at,
                     request.failure_message, core_rfc3339(request.created_at) AS created_at, core_rfc3339(request.updated_at) AS updated_at
@@ -2695,6 +2699,7 @@ fn agent_creation_request_from_row(row: &Row) -> CoreResult<AgentCreationRequest
             .transpose()
             .map_err(json_error)?,
         profile_picture_url: row.get("profile_picture_url"),
+        owner_chat_account_id: row.get("owner_chat_account_id"),
         status: parse_agent_creation_request_status(&status).ok_or_else(|| {
             CoreError::Store(format!("invalid agent creation request status {status}"))
         })?,
@@ -2896,6 +2901,7 @@ where
                     display_name, runner_class, hosting_tier, placement_runner_class,
                     runtime_resource_class, desired_runtime_artifact_id, runtime_spec, target_source_host_id, relocation_spec,
                     profile_picture_url,
+                    owner_chat_account_id,
                     status, requested_launch_code, agent_runtime_id,
                     runner_id, lease_token, core_rfc3339(lease_expires_at) AS lease_expires_at, failure_message,
                     core_rfc3339(created_at) AS created_at, core_rfc3339(updated_at) AS updated_at
@@ -2922,6 +2928,7 @@ where
                     display_name, runner_class, hosting_tier, placement_runner_class,
                     runtime_resource_class, desired_runtime_artifact_id, runtime_spec, target_source_host_id, relocation_spec,
                     profile_picture_url,
+                    owner_chat_account_id,
                     status, requested_launch_code, agent_runtime_id,
                     runner_id, lease_token, core_rfc3339(lease_expires_at) AS lease_expires_at, failure_message,
                     core_rfc3339(created_at) AS created_at, core_rfc3339(updated_at) AS updated_at
@@ -3419,14 +3426,14 @@ where
                runner_class, hosting_tier, placement_runner_class, runtime_resource_class,
                desired_runtime_artifact_id, runtime_spec, target_source_host_id,
                relocation_spec,
-               profile_picture_url, status, requested_launch_code,
+               profile_picture_url, owner_chat_account_id, status, requested_launch_code,
                agent_runtime_id, runner_id, lease_token,
                lease_expires_at, failure_message, created_at, updated_at
              )
              VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12::jsonb,
-                     $13, $14::jsonb, $15, $16, $17, $18, $19, $20,
-                     $21::text::timestamptz, $22, $23::text::timestamptz,
-                     $24::text::timestamptz)
+                     $13, $14::jsonb, $15, $16, $17, $18, $19, $20, $21,
+                     $22::text::timestamptz, $23, $24::text::timestamptz,
+                     $25::text::timestamptz)
              ON CONFLICT (id) DO UPDATE SET
                status = EXCLUDED.status,
                display_name = EXCLUDED.display_name,
@@ -3439,6 +3446,7 @@ where
                target_source_host_id = EXCLUDED.target_source_host_id,
                relocation_spec = EXCLUDED.relocation_spec,
                profile_picture_url = EXCLUDED.profile_picture_url,
+               owner_chat_account_id = EXCLUDED.owner_chat_account_id,
                agent_runtime_id = EXCLUDED.agent_runtime_id,
                runner_id = EXCLUDED.runner_id,
                lease_token = EXCLUDED.lease_token,
@@ -3461,6 +3469,7 @@ where
                 &request.target_source_host_id,
                 &relocation,
                 &request.profile_picture_url,
+                &request.owner_chat_account_id,
                 &request.status.as_str(),
                 &request.requested_launch_code,
                 &request.agent_runtime_id,
@@ -4096,6 +4105,7 @@ where
                        display_name, runner_class, hosting_tier, placement_runner_class,
                        runtime_resource_class, desired_runtime_artifact_id, runtime_spec, target_source_host_id, relocation_spec,
                        profile_picture_url,
+                       owner_chat_account_id,
                        status, requested_launch_code, agent_runtime_id,
                        runner_id, lease_token, core_rfc3339(lease_expires_at) AS lease_expires_at, failure_message,
                        core_rfc3339(created_at) AS created_at, core_rfc3339(updated_at) AS updated_at",
@@ -4129,6 +4139,7 @@ where
                        display_name, runner_class, hosting_tier, placement_runner_class,
                        runtime_resource_class, desired_runtime_artifact_id, runtime_spec, target_source_host_id, relocation_spec,
                        profile_picture_url,
+                       owner_chat_account_id,
                        status, requested_launch_code, agent_runtime_id,
                        runner_id, lease_token, core_rfc3339(lease_expires_at) AS lease_expires_at, failure_message,
                        core_rfc3339(created_at) AS created_at, core_rfc3339(updated_at) AS updated_at",
@@ -4614,15 +4625,6 @@ where
         Some(&admin_email),
     )
     .await?;
-    // Archiving an owner-acknowledged unrecoverable runtime is a permanent
-    // departure without a retirement snapshot: recorded as a deletion.
-    postgres_record_agent_departure(
-        client,
-        &input.project_id,
-        &now,
-        BrainDepartureReason::Deleted,
-    )
-    .await?;
     set_offboarding_phase(client, &agent_runtime_id, OffboardingPhase::Archived, &now).await?;
     let revoked_finite_private_key_count = revoked_api_key_ids.len();
     insert_finite_private_admin_audit_event(
@@ -4794,19 +4796,6 @@ where
         Some(&admin_email),
     )
     .await?;
-    // The retirement receipt proves this is a retirement, not a deletion. The
-    // facts log is append-only with no uniqueness constraint, so a partially
-    // applied older offboarding must not gain a second fact for the same
-    // departure.
-    if !postgres_agent_departure_fact_exists(client, &input.project_id).await? {
-        postgres_record_agent_departure(
-            client,
-            &input.project_id,
-            &now,
-            BrainDepartureReason::Retired,
-        )
-        .await?;
-    }
     set_offboarding_phase(client, &agent_runtime_id, OffboardingPhase::Archived, &now).await?;
     let revoked_finite_private_key_count = revoked_api_key_ids.len();
     let retirement_locator = snapshot.receipt.locator.clone();
@@ -5009,11 +4998,18 @@ where
     }
     let placement = runtime.placement.ok_or(CoreError::RuntimeSpecMismatch)?;
     // `offline` is the cleanly-stopped precondition. Under the operator's
-    // compute-absent attestation, `stale` is also frozen: a failed control
-    // marks a runtime stale, and absent compute can never reach `offline`
-    // because the stop that would record it fails by definition.
+    // compute-absent attestation, `stale` AND `online` are also frozen: a
+    // failed control marks a runtime stale, and absent compute can never
+    // reach `offline` because the stop that would record it fails by
+    // definition. `online` is the last runner report before the source
+    // host died — under the attestation nothing could have updated it
+    // since (the dead host's runner is gone, so no control can lease and
+    // no report can arrive), making it exactly as frozen as `stale`.
+    // Without the attestation `online` stays movable-only-by-nothing: an
+    // operator must not relocate a runtime that may still be running.
     let source_status_frozen = match runtime.host_facts.runtime_status {
         RuntimeSummaryStatus::Offline => true,
+        RuntimeSummaryStatus::Online => input.operator_observed_compute_absent,
         RuntimeSummaryStatus::Stale => input.operator_observed_compute_absent,
         _ => false,
     };
@@ -5021,7 +5017,16 @@ where
         return Err(CoreError::RuntimeControlUnsupported);
     }
     let target_source_host_id = normalize_source_host_id(&input.target_source_host_id)?;
-    if target_source_host_id == runtime.source_host_id {
+    // A same-host relocation is the recovery lane for a Runtime whose
+    // container is gone from a host that is still up: a restart requires the
+    // container to exist, so recreating compute against the durable tree
+    // where it already lives is a relocation whose source and target host
+    // coincide. Only the compute-absent attestation gives that shape a
+    // meaning; without it a same-host "relocation" would be a restart under
+    // another name and is refused as before. The target Runner proves the
+    // absence for itself (no provider record binds the tree, nothing writes
+    // into it) before it launches.
+    if target_source_host_id == runtime.source_host_id && !input.operator_observed_compute_absent {
         return Err(CoreError::RuntimeSpecMismatch);
     }
     let expected_agent_npub = input.expected_agent_npub.trim().to_string();
@@ -5101,6 +5106,7 @@ where
                display_name, runner_class, hosting_tier, placement_runner_class,
                runtime_resource_class, desired_runtime_artifact_id, runtime_spec,
                target_source_host_id, relocation_spec, profile_picture_url,
+               owner_chat_account_id,
                status, requested_launch_code, agent_runtime_id,
                runner_id, lease_token, lease_expires_at::text, failure_message,
                created_at::text, updated_at::text
@@ -5130,6 +5136,7 @@ where
                     display_name, runner_class, hosting_tier, placement_runner_class,
                     runtime_resource_class, desired_runtime_artifact_id, runtime_spec,
                     target_source_host_id, relocation_spec, profile_picture_url,
+                    owner_chat_account_id,
                     status, requested_launch_code, agent_runtime_id,
                     runner_id, lease_token, lease_expires_at::text, failure_message,
                     created_at::text, updated_at::text
@@ -5145,6 +5152,17 @@ where
         .map_err(store_error)?
         .ok_or(CoreError::RuntimeSpecMismatch)?;
     let current_creation = agent_creation_request_from_row(&current_row)?;
+    let current_spec = repair_persisted_runtime_spec(
+        client,
+        &runtime,
+        &current_creation.id,
+        current_creation
+            .runtime_spec
+            .clone()
+            .ok_or(CoreError::RuntimeSpecMismatch)?,
+        &now,
+    )
+    .await?;
     let artifact_id = runtime
         .runtime_artifact_id
         .as_deref()
@@ -5154,10 +5172,7 @@ where
         .ok_or(CoreError::RuntimeArtifactNotFound)?;
     let request_id = new_agent_creation_request_id()?;
     let runtime_spec = runtime_operation_spec_v1(
-        current_creation
-            .runtime_spec
-            .as_ref()
-            .ok_or(CoreError::RuntimeSpecMismatch)?,
+        &current_spec,
         RuntimeSpecIdentity {
             operation_id: &request_id,
             project_id: &project.id,
@@ -5189,6 +5204,7 @@ where
         target_source_host_id: Some(target_source_host_id),
         relocation: Some(relocation),
         profile_picture_url: current_creation.profile_picture_url,
+        owner_chat_account_id: current_creation.owner_chat_account_id,
         status: AgentCreationRequestStatus::Requested,
         requested_launch_code: None,
         agent_runtime_id: Some(runtime.id.clone()),
@@ -5221,6 +5237,61 @@ where
     )
     .await?;
     Ok(request)
+}
+
+/// Repair a persisted RuntimeSpec that names the durable root by the source
+/// machine instead of the Agent Runtime.
+///
+/// Expand-generation synthesis for a pre-RuntimeSpec Kata runtime once
+/// persisted `source_machine_id` as the durable state id, and every operation
+/// spec since carried it forward (`runtime_operation_spec_v1` copies the
+/// current id). The Runner derives a runtime's durable root from that id
+/// alone (work_root/kata/<durable_state_id>) and migrates a machine-named
+/// directory it discovers by container name; a spec that names the machine
+/// plans the machine-named path as the root, so the one-time migration never
+/// runs for exactly the runtime it exists for, and the lifecycle probe reads
+/// that bind as a mismatch. The durable state id is the Agent Runtime id, as
+/// for every spec Core builds itself.
+///
+/// The repair happens where the persisted spec is next read into a control
+/// lease or a relocation envelope, and is written back in the same
+/// transaction so every later read (upgrade and destroy completion, the
+/// retirement receipt check) sees the value the Runner was handed. Only the
+/// known-wrong shape is touched: an id that is neither the runtime id nor the
+/// source machine is not this repair's to guess at and is left as persisted.
+async fn repair_persisted_runtime_spec<C>(
+    client: &C,
+    runtime: &AgentRuntime,
+    creation_id: &str,
+    spec: RuntimeSpecEnvelope,
+    now: &str,
+) -> CoreResult<RuntimeSpecEnvelope>
+where
+    C: GenericClient + Sync,
+{
+    let persisted = runtime_spec_v1(&spec);
+    if persisted.durable_state_id == runtime.id
+        || persisted.durable_state_id != runtime.source_machine_id
+    {
+        return Ok(spec);
+    }
+    let repaired = match spec {
+        RuntimeSpecEnvelope::V1(mut spec) => {
+            spec.durable_state_id = runtime.id.clone();
+            RuntimeSpecEnvelope::V1(spec)
+        }
+    };
+    let value = serde_json::to_value(&repaired).map_err(json_error)?;
+    client
+        .execute(
+            "UPDATE agent_creation_requests
+             SET runtime_spec = $2, updated_at = $3::text::timestamptz
+             WHERE id = $1",
+            &[&creation_id, &value, &now],
+        )
+        .await
+        .map_err(store_error)?;
+    Ok(repaired)
 }
 
 /// Partitioned claim: a runner leases only requests routable to it. When the
@@ -5411,7 +5482,10 @@ where
                 .await?
                 .ok_or(CoreError::RuntimeArtifactNotFound)?;
             let current_spec = if let Some(value) = row.get::<_, Option<Value>>("runtime_spec") {
-                serde_json::from_value(value).map_err(json_error)?
+                let creation_id: String = row.get("id");
+                let persisted = serde_json::from_value(value).map_err(json_error)?;
+                repair_persisted_runtime_spec(client, &runtime, &creation_id, persisted, &now)
+                    .await?
             } else {
                 let creation_id: String = row.get("id");
                 let creation_project_id: String = row.get("project_id");
@@ -5437,11 +5511,18 @@ where
                         placement,
                     },
                     &current_artifact,
-                    // Pre-RuntimeSpec Kata launches used source_machine_id as
-                    // their durable-state directory. Preserve that proven
-                    // mount identity instead of inventing the Core surrogate
-                    // Runtime id during expand-generation synthesis.
-                    &runtime.source_machine_id,
+                    // Pre-RuntimeSpec Kata launches mounted a directory named
+                    // by source_machine_id. That name is NOT a spec input: the
+                    // Runner derives a runtime's durable root from its durable
+                    // state id alone (work_root/kata/<durable_state_id>) and
+                    // treats a machine-named directory as a migration
+                    // candidate it discovers by container name and renames,
+                    // once, to the runtime-id root. Synthesizing the machine
+                    // name here would make the machine-named path the planned
+                    // root, so that migration would never run for exactly the
+                    // runtime it exists for. The durable state id is the Agent
+                    // Runtime id, as for every persisted spec.
+                    &runtime.id,
                     runtime_environment.clone(),
                     vec![FINITE_PRIVATE_SECRET_REFERENCE.to_string()],
                     RuntimeBootIntent::Normal,
@@ -5634,7 +5715,57 @@ where
         }
         runtime.updated_at = now.to_string();
         upsert_agent_runtime_row(client, &runtime).await?;
+        if status == RuntimeSummaryStatus::Online {
+            // Compute came up again: the stored report spoke for the previous
+            // incarnation. The principal is the same runtime's, so the
+            // attribution pin stays.
+            reset_runtime_health(client, agent_runtime_id, HealthPin::Keep).await?;
+        }
     }
+    Ok(())
+}
+
+/// What happens to the standing-health attribution pin when a completion
+/// brings compute up.
+enum HealthPin {
+    /// Same runtime, same principal (restart, recovery, upgrade).
+    Keep,
+    /// A new incarnation whose principal the completion knows (a launch that
+    /// verified it, or a relocation's expected principal); `None` when the
+    /// completing runner did not say, in which case the first report pins.
+    Seed(Option<String>),
+}
+
+/// Clear the stored health report so the derived status reads `unknown`
+/// until the runner's standing poller first reports on the incarnation that
+/// just came up, and seed or keep the attribution pin. Runs in the same
+/// transaction as the completion it follows.
+async fn reset_runtime_health<C>(
+    client: &C,
+    agent_runtime_id: &str,
+    pin: HealthPin,
+) -> CoreResult<()>
+where
+    C: GenericClient + Sync,
+{
+    let (keep_pin, seed) = match pin {
+        HealthPin::Keep => (true, None),
+        HealthPin::Seed(seed) => (false, seed),
+    };
+    client
+        .execute(
+            "UPDATE agent_runtimes
+             SET health_reported_at = NULL,
+                 health_observed_at = NULL,
+                 health_ready = NULL,
+                 health_reason = NULL,
+                 health_report_interval_seconds = NULL,
+                 health_reporting_npub = CASE WHEN $2 THEN health_reporting_npub ELSE $3 END
+             WHERE id = $1",
+            &[&agent_runtime_id, &keep_pin, &seed],
+        )
+        .await
+        .map_err(store_error)?;
     Ok(())
 }
 
@@ -6074,311 +6205,6 @@ where
     Ok(request)
 }
 
-fn normalize_brain_roster_lookup(lookup: &BrainAccountRosterLookup) -> BrainAccountRosterLookup {
-    BrainAccountRosterLookup {
-        workos_user_id: trim_to_option(lookup.workos_user_id.as_deref()),
-        email: normalize_owner_email(lookup.email.as_deref()),
-        managed_agent_email: trim_to_option(lookup.managed_agent_email.as_deref())
-            .map(|email| email.to_ascii_lowercase()),
-    }
-}
-
-/// Bump the account's monotonic roster revision (ADR-0046) inside the calling
-/// transaction. `account_id` is the owner's WorkOS user id.
-async fn postgres_bump_account_roster_revision<C>(
-    client: &C,
-    account_id: &str,
-    now: &str,
-) -> CoreResult<()>
-where
-    C: GenericClient + Sync,
-{
-    client
-        .execute(
-            "INSERT INTO brain_account_roster_revisions (account_id, roster_revision, updated_at)
-             VALUES ($1, 1, $2::text::timestamptz)
-             ON CONFLICT (account_id) DO UPDATE
-             SET roster_revision = brain_account_roster_revisions.roster_revision + 1,
-                 updated_at = EXCLUDED.updated_at",
-            &[&account_id, &now],
-        )
-        .await
-        .map_err(store_error)?;
-    Ok(())
-}
-
-async fn postgres_bump_account_roster_revision_for_user<C>(
-    client: &C,
-    user_id: &str,
-    now: &str,
-) -> CoreResult<()>
-where
-    C: GenericClient + Sync,
-{
-    let account_id = client
-        .query_opt(
-            "SELECT workos_user_id FROM users WHERE id = $1",
-            &[&user_id],
-        )
-        .await
-        .map_err(store_error)?
-        .and_then(|row| row.get::<_, Option<String>>("workos_user_id"));
-    if let Some(account_id) = account_id {
-        postgres_bump_account_roster_revision(client, &account_id, now).await?;
-    }
-    Ok(())
-}
-
-/// Append a Permanent Departure Fact for the project's agent and bump the
-/// owner's roster revision inside the calling transaction (ADR-0046).
-/// Projects without a provisioned identity (`agent_email`) or an unlinked
-/// owner have no account roster, so there is nothing to record.
-async fn postgres_record_agent_departure<C>(
-    client: &C,
-    project_id: &str,
-    now: &str,
-    reason: BrainDepartureReason,
-) -> CoreResult<()>
-where
-    C: GenericClient + Sync,
-{
-    let Some(row) = client
-        .query_opt(
-            "SELECT u.workos_user_id, p.agent_email
-             FROM projects p
-             JOIN users u ON u.id = p.owner_user_id
-             WHERE p.id = $1",
-            &[&project_id],
-        )
-        .await
-        .map_err(store_error)?
-    else {
-        return Ok(());
-    };
-    let account_id: Option<String> = row.get("workos_user_id");
-    let agent_email: Option<String> = row.get("agent_email");
-    let (Some(account_id), Some(agent_email)) = (account_id, agent_email) else {
-        return Ok(());
-    };
-    client
-        .execute(
-            "INSERT INTO brain_agent_departure_facts (
-               account_id, principal_kind, principal_ref, departed_at, reason
-             ) VALUES ($1, $2, $3, $4::text::timestamptz, $5)",
-            &[
-                &account_id,
-                &BrainDeparturePrincipalKind::Agent.as_str(),
-                &agent_email,
-                &now,
-                &reason.as_str(),
-            ],
-        )
-        .await
-        .map_err(store_error)?;
-    postgres_bump_account_roster_revision(client, &account_id, now).await
-}
-
-/// True when a Permanent Departure Fact already exists for the project's
-/// agent. `brain_agent_departure_facts` is append-only with no uniqueness
-/// constraint, so repair paths that complete a partially applied offboarding
-/// must check before appending a second fact for the same departure.
-async fn postgres_agent_departure_fact_exists<C>(client: &C, project_id: &str) -> CoreResult<bool>
-where
-    C: GenericClient + Sync,
-{
-    let exists = client
-        .query_opt(
-            "SELECT 1
-             FROM projects p
-             JOIN users u ON u.id = p.owner_user_id
-             JOIN brain_agent_departure_facts AS fact
-               ON fact.account_id = u.workos_user_id
-              AND fact.principal_kind = 'agent'
-              AND fact.principal_ref = p.agent_email
-             WHERE p.id = $1
-             LIMIT 1",
-            &[&project_id],
-        )
-        .await
-        .map_err(store_error)?
-        .is_some();
-    Ok(exists)
-}
-
-/// The authoritative account agent roster (ADR-0046): account-owned,
-/// identity-provisioned agents whose creation completed and whose runtime
-/// link is still active, regardless of temporary runtime health.
-async fn postgres_brain_account_agent_roster<C>(
-    client: &C,
-    lookup: &BrainAccountRosterLookup,
-) -> CoreResult<Option<BrainAccountAgentRoster>>
-where
-    C: GenericClient + Sync,
-{
-    let account = if let Some(workos_user_id) = lookup.workos_user_id.as_deref() {
-        client
-            .query_opt(
-                "SELECT id, workos_user_id, normalized_email
-                 FROM users WHERE workos_user_id = $1",
-                &[&workos_user_id],
-            )
-            .await
-            .map_err(store_error)?
-    } else if let Some(email) = lookup.email.as_deref() {
-        client
-            .query_opt(
-                "SELECT id, workos_user_id, normalized_email
-                 FROM users WHERE normalized_email = $1",
-                &[&email],
-            )
-            .await
-            .map_err(store_error)?
-    } else if let Some(managed_agent_email) = lookup.managed_agent_email.as_deref() {
-        client
-            .query_opt(
-                "SELECT u.id, u.workos_user_id, u.normalized_email
-                 FROM projects p
-                 JOIN users u ON u.id = p.owner_user_id
-                 WHERE p.agent_email = $1",
-                &[&managed_agent_email],
-            )
-            .await
-            .map_err(store_error)?
-    } else {
-        None
-    };
-    let Some(account) = account else {
-        return Ok(None);
-    };
-    let workos_user_id: Option<String> = account.get("workos_user_id");
-    let Some(workos_user_id) = workos_user_id else {
-        return Ok(None);
-    };
-    let user_id: String = account.get("id");
-    let human_mailbox: String = account.get("normalized_email");
-    let rows = client
-        .query(
-            "SELECT p.agent_email, r.runner_class
-             FROM projects p
-             JOIN agent_creation_requests r ON r.project_id = p.id
-             WHERE p.owner_user_id = $1
-               AND p.agent_email IS NOT NULL
-               AND r.status = 'running'
-               AND EXISTS (
-                 SELECT 1 FROM project_runtime_links l
-                 WHERE l.project_id = p.id AND l.active
-               )
-             ORDER BY p.agent_email",
-            &[&user_id],
-        )
-        .await
-        .map_err(store_error)?;
-    let mut agents = Vec::with_capacity(rows.len());
-    for row in rows {
-        let runner_class: String = row.get("runner_class");
-        let placement_runner_class = parse_runner_class(&runner_class).ok_or_else(|| {
-            CoreError::Store(format!("invalid agent runner class {runner_class}"))
-        })?;
-        agents.push(BrainAccountAgentRosterEntry {
-            managed_agent_email: row.get("agent_email"),
-            agent_npub: None,
-            status: "active".to_owned(),
-            placement_runner_class,
-        });
-    }
-    let roster_revision = client
-        .query_opt(
-            "SELECT roster_revision FROM brain_account_roster_revisions WHERE account_id = $1",
-            &[&workos_user_id],
-        )
-        .await
-        .map_err(store_error)?
-        .map(|row| row.get::<_, i64>("roster_revision"))
-        .unwrap_or(0);
-    Ok(Some(BrainAccountAgentRoster {
-        workos_user_id,
-        human_mailbox,
-        roster_revision,
-        agents,
-        departed: Vec::new(),
-    }))
-}
-
-fn brain_departure_fact_from_row(row: &Row) -> CoreResult<BrainAgentDepartureFact> {
-    let principal_kind: &str = row.get("principal_kind");
-    let principal_kind = match principal_kind {
-        "human" => BrainDeparturePrincipalKind::Human,
-        "agent" => BrainDeparturePrincipalKind::Agent,
-        other => {
-            return Err(CoreError::Store(format!(
-                "invalid departure principal kind {other}"
-            )));
-        }
-    };
-    let reason: &str = row.get("reason");
-    let reason = match reason {
-        "retired" => BrainDepartureReason::Retired,
-        "deleted" => BrainDepartureReason::Deleted,
-        "unlinked" => BrainDepartureReason::Unlinked,
-        other => {
-            return Err(CoreError::Store(format!(
-                "invalid departure reason {other}"
-            )));
-        }
-    };
-    Ok(BrainAgentDepartureFact {
-        revision: row.get("revision"),
-        account_id: row.get("account_id"),
-        principal_kind,
-        principal_ref: row.get("principal_ref"),
-        departed_at: row.get("departed_at"),
-        reason,
-    })
-}
-
-/// Replayable cursor page of Permanent Departure Facts (ADR-0046), ordered by
-/// revision, plus the global maximum revision so a consumer with no new facts
-/// still learns how far the log has advanced.
-async fn postgres_brain_agent_departure_facts<C>(
-    client: &C,
-    after_revision: i64,
-    limit: i64,
-) -> CoreResult<BrainAgentDepartureFactsPage>
-where
-    C: GenericClient + Sync,
-{
-    let limit = limit.clamp(0, 1000);
-    let sql = format!(
-        "SELECT revision, account_id, principal_kind, principal_ref,
-                {departed_at} AS departed_at, reason
-         FROM brain_agent_departure_facts
-         WHERE revision > $1
-         ORDER BY revision ASC
-         LIMIT $2",
-        departed_at = rfc3339_col("departed_at"),
-    );
-    let rows = client
-        .query(&sql, &[&after_revision, &limit])
-        .await
-        .map_err(store_error)?;
-    let mut facts = Vec::with_capacity(rows.len());
-    for row in &rows {
-        facts.push(brain_departure_fact_from_row(row)?);
-    }
-    let max_revision = client
-        .query_one(
-            "SELECT COALESCE(MAX(revision), 0) AS max_revision FROM brain_agent_departure_facts",
-            &[],
-        )
-        .await
-        .map_err(store_error)?
-        .get::<_, i64>("max_revision");
-    Ok(BrainAgentDepartureFactsPage {
-        facts,
-        max_revision,
-    })
-}
-
 /// Read the runtime's recorded offboarding phase. The callers that mutate
 /// phases already hold the runtime row locked inside their transaction.
 async fn postgres_offboarding_phase<C>(
@@ -6477,15 +6303,6 @@ where
         now,
         "finite_private.runtime.destroy_revoke_keys",
         None,
-    )
-    .await?;
-    // Runtime Retirement is the destroy flow: every destroy completion carries
-    // a verified retirement snapshot, so the departure is a retirement.
-    postgres_record_agent_departure(
-        client,
-        &request.project_id,
-        now,
-        BrainDepartureReason::Retired,
     )
     .await?;
     set_offboarding_phase(
@@ -6760,6 +6577,81 @@ where
     runtime_artifact_from_row(&row)
 }
 
+/// Read the latest stored health report columns off a runtime row that
+/// selected them (`health_*`, with the timestamps passed through
+/// `core_rfc3339`).
+fn stored_runtime_health_from_row(row: &Row) -> StoredRuntimeHealth {
+    StoredRuntimeHealth {
+        reported_at: row.get("health_reported_at"),
+        observed_at: row.get("health_observed_at"),
+        ready: row.get("health_ready"),
+        reason: row.get("health_reason"),
+        report_interval_seconds: row
+            .get::<_, Option<i32>>("health_report_interval_seconds")
+            .map(i64::from),
+        reporting_npub: row.get("health_reporting_npub"),
+    }
+}
+
+/// The runtimes a host's runner polls for standing health each cycle: every
+/// live (not offboarding) runtime on that host whose lifecycle latch is not
+/// `offline`. Scoped by the runner credential's host, like reports.
+async fn postgres_runtime_health_targets_for_host<C>(
+    client: &C,
+    source_host_id: &str,
+) -> CoreResult<RuntimeHealthTargetList>
+where
+    C: GenericClient + Sync,
+{
+    let source_host_id =
+        trim_to_option(Some(source_host_id)).ok_or(CoreError::MissingSourceHostId)?;
+    let rows = client
+        .query(
+            "SELECT id AS agent_runtime_id, source_machine_id, contact_endpoint, host_facts,
+                    health_reporting_npub, health_report_interval_seconds
+             FROM agent_runtimes
+             WHERE source_host_id = $1
+               AND offboarding_phase IS NULL
+               AND COALESCE(host_facts->>'runtime_status', '') <> $2
+             ORDER BY id",
+            &[&source_host_id, &RuntimeSummaryStatus::Offline.as_str()],
+        )
+        .await
+        .map_err(store_error)?;
+    let targets = rows
+        .iter()
+        .map(|row| {
+            let host_facts: HostOwnedRuntimeFacts = json_column(row, "host_facts")?;
+            let contact_endpoint = normalize_runtime_contact_endpoint(
+                row.get::<_, Option<String>>("contact_endpoint").as_deref(),
+            )
+            .ok()
+            .flatten()
+            .or_else(|| {
+                host_facts
+                    .published_app_urls
+                    .iter()
+                    .find(|url| url.ends_with("/contact"))
+                    .cloned()
+            });
+            Ok(RuntimeHealthTarget {
+                agent_runtime_id: row.get("agent_runtime_id"),
+                source_machine_id: row.get("source_machine_id"),
+                contact_endpoint,
+                agent_npub: row.get("health_reporting_npub"),
+                lifecycle_status: host_facts.runtime_status,
+                report_interval_seconds: row
+                    .get::<_, Option<i32>>("health_report_interval_seconds")
+                    .map(i64::from),
+            })
+        })
+        .collect::<CoreResult<Vec<_>>>()?;
+    Ok(RuntimeHealthTargetList {
+        source_host_id,
+        targets,
+    })
+}
+
 async fn postgres_admin_runtime_overviews<C>(client: &C) -> CoreResult<Vec<AdminRuntimeOverview>>
 where
     C: GenericClient + Sync,
@@ -6819,16 +6711,7 @@ where
             let project_display_name: Option<String> = row.get("project_display_name");
             let runtime_health = project_runtime_health(
                 host_facts.runtime_status,
-                &StoredRuntimeHealth {
-                    reported_at: row.get("health_reported_at"),
-                    observed_at: row.get("health_observed_at"),
-                    ready: row.get("health_ready"),
-                    reason: row.get("health_reason"),
-                    report_interval_seconds: row
-                        .get::<_, Option<i32>>("health_report_interval_seconds")
-                        .map(i64::from),
-                    reporting_npub: row.get("health_reporting_npub"),
-                },
+                &stored_runtime_health_from_row(row),
                 &now,
             )?;
             Ok(AdminRuntimeOverview {
@@ -6841,7 +6724,11 @@ where
                 source_machine_id: row.get("source_machine_id"),
                 runtime_artifact_id: row.get("runtime_artifact_id"),
                 runtime_artifact_version_label: row.get("runtime_artifact_version_label"),
-                runtime_status: host_facts.runtime_status,
+                runtime_status: derive_runtime_summary_status(
+                    host_facts.runtime_status,
+                    &runtime_health,
+                ),
+                lifecycle_status: host_facts.runtime_status,
                 // runtime_status_snapshots has no writer; the wire fields stay
                 // serialized as null for dashboard compatibility until the
                 // gated table drop and wire-type change land together.
@@ -6905,6 +6792,31 @@ where
         .map(i32::try_from)
         .transpose()
         .map_err(|_| CoreError::InvalidRuntimeHealthReport)?;
+    // The attribution pin: a report speaks for the runtime only when it
+    // presents the principal on record (seeded at completion from the
+    // launch-verified principal, or by the first report when the completing
+    // runner did not say). Anything else is a reallocated port wearing this
+    // runtime's name, and is refused rather than recorded.
+    let pinned = client
+        .query_opt(
+            "SELECT health_reporting_npub FROM agent_runtimes
+             WHERE id = $1 AND source_host_id = $2",
+            &[&agent_runtime_id, &source_host_id],
+        )
+        .await
+        .map_err(store_error)?
+        .ok_or(CoreError::ProjectRuntimeNotFound)?
+        .get::<_, Option<String>>("health_reporting_npub");
+    if let Some(pinned) = pinned.as_deref()
+        && agent_npub.as_deref() != Some(pinned)
+    {
+        eprintln!(
+            "warning: rejecting health report for runtime {agent_runtime_id} on host \
+             {source_host_id}: it presents {} but the Agent Principal on record is {pinned}",
+            agent_npub.as_deref().unwrap_or("no principal")
+        );
+        return Err(CoreError::RuntimeHealthReportPrincipalMismatch);
+    }
     let row = client
         .query_opt(
             "UPDATE agent_runtimes
@@ -6913,7 +6825,7 @@ where
                  health_ready = $5,
                  health_reason = $6,
                  health_report_interval_seconds = $7,
-                 health_reporting_npub = $8
+                 health_reporting_npub = COALESCE(health_reporting_npub, $8)
              WHERE id = $1 AND source_host_id = $2
              RETURNING id",
             &[
@@ -8446,7 +8358,7 @@ impl CoreStore {
                         display_name, runner_class, hosting_tier, placement_runner_class,
                         runtime_resource_class, desired_runtime_artifact_id, runtime_spec,
                         target_source_host_id, relocation_spec,
-                        profile_picture_url, status, requested_launch_code, agent_runtime_id,
+                        profile_picture_url, owner_chat_account_id, status, requested_launch_code, agent_runtime_id,
                         runner_id, lease_token, core_rfc3339(lease_expires_at) AS lease_expires_at, failure_message,
                         core_rfc3339(created_at) AS created_at, core_rfc3339(updated_at) AS updated_at
                  FROM agent_creation_requests WHERE id = $1",
@@ -9038,6 +8950,7 @@ mod tests {
                         }),
                         requested_hosting_tier: Some(HostingTier::Standard),
                         profile_picture_url: None,
+                        owner_chat_account_id: None,
                     },
                 )
                 .await
@@ -9110,6 +9023,148 @@ mod tests {
 
             drop(raw);
             connection.abort();
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn postgres_owner_chat_account_id_persists_and_lease_injects_spec_environment() {
+        with_isolated_postgres(|store| async move {
+            store
+                .upsert_runtime_artifact(UpsertRuntimeArtifactInput {
+                    id: "artifact-owner-npub-v1".to_string(),
+                    kind: RuntimeArtifactKind::OciImage,
+                    reference: format!(
+                        "ghcr.io/finitecomputer/agent-runtime:owner-npub-v1@sha256:{}",
+                        "5".repeat(64)
+                    ),
+                    version_label: "owner-npub-v1".to_string(),
+                    source_git_sha: None,
+                    finitec_version: None,
+                    hermes_source_ref: None,
+                    finite_platform_plugin_ref: None,
+                    state_schema_version: "state-v1".to_string(),
+                    base_image: None,
+                    recover_known_good_chat: false,
+                    promoted: true,
+                    now: None,
+                })
+                .await
+                .unwrap();
+
+            // Malformed owner chat identities are rejected before any durable
+            // state is minted; an npub is not accepted because the Hermes
+            // adapter allowlist and this column both speak 64-hex account ids.
+            let malformed = store
+                .request_agent_creation_configured(
+                    RequestAgentCreationInput {
+                        verified_email: "owner-npub-bad@finite.vip".to_string(),
+                        workos_user_id: "workos_owner_npub_bad".to_string(),
+                        display_name: "Owner Npub Bad".to_string(),
+                        launch_code: issue_test_launch_code(&store, "2026-08-27T12:00:00Z").await,
+                        idempotency_key: "owner-npub-bad-submit".to_string(),
+                        now: None,
+                    },
+                    AgentCreationConfiguration {
+                        owner_chat_account_id: Some(format!("npub1{}", "q".repeat(58))),
+                        ..AgentCreationConfiguration::default()
+                    },
+                )
+                .await
+                .unwrap_err();
+            assert!(matches!(malformed, CoreError::InvalidOwnerChatAccountId));
+
+            let owner_account_id = "a".repeat(64);
+            let created = store
+                .request_agent_creation_configured(
+                    RequestAgentCreationInput {
+                        verified_email: "owner-npub@finite.vip".to_string(),
+                        workos_user_id: "workos_owner_npub".to_string(),
+                        display_name: "Owner Npub Agent".to_string(),
+                        launch_code: issue_test_launch_code(&store, "2026-08-27T12:00:01Z").await,
+                        idempotency_key: "owner-npub-submit".to_string(),
+                        now: None,
+                    },
+                    AgentCreationConfiguration {
+                        owner_chat_account_id: Some(owner_account_id.clone()),
+                        ..AgentCreationConfiguration::default()
+                    },
+                )
+                .await
+                .unwrap();
+            assert_eq!(
+                created.request.owner_chat_account_id.as_deref(),
+                Some(owner_account_id.as_str())
+            );
+            let persisted = store
+                .agent_creation_request(&created.request.id)
+                .await
+                .unwrap();
+            assert_eq!(
+                persisted.owner_chat_account_id.as_deref(),
+                Some(owner_account_id.as_str())
+            );
+
+            let lease = store
+                .lease_agent_creation_request(LeaseAgentCreationRequestInput {
+                    runner_id: "owner-npub-runner".to_string(),
+                    lease_token: "owner-npub-lease".to_string(),
+                    lease_seconds: Some(300),
+                    runner_capacity: Some(RunnerLeaseCapacity {
+                        runner_classes: vec![RunnerClass::Kata],
+                        ..RunnerLeaseCapacity::default()
+                    }),
+                    source_host_id: None,
+                    now: None,
+                })
+                .await
+                .unwrap()
+                .unwrap();
+            let RuntimeSpecEnvelope::V1(spec) = lease.request.runtime_spec.as_ref().unwrap();
+            assert_eq!(
+                spec.environment.get("FINITECHAT_OWNER_NPUBS"),
+                Some(&owner_account_id)
+            );
+
+            // A request without the owner identity leases with the exact
+            // legacy environment: no FINITECHAT_OWNER_NPUBS key.
+            let legacy = store
+                .request_agent_creation_configured(
+                    RequestAgentCreationInput {
+                        verified_email: "owner-npub-absent@finite.vip".to_string(),
+                        workos_user_id: "workos_owner_npub_absent".to_string(),
+                        display_name: "Owner Npub Absent".to_string(),
+                        launch_code: issue_test_launch_code(&store, "2026-08-27T12:00:02Z").await,
+                        idempotency_key: "owner-npub-absent-submit".to_string(),
+                        now: None,
+                    },
+                    AgentCreationConfiguration::default(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(legacy.request.owner_chat_account_id, None);
+            let legacy_lease = store
+                .lease_agent_creation_request(LeaseAgentCreationRequestInput {
+                    runner_id: "owner-npub-runner".to_string(),
+                    lease_token: "owner-npub-legacy-lease".to_string(),
+                    lease_seconds: Some(300),
+                    runner_capacity: Some(RunnerLeaseCapacity {
+                        runner_classes: vec![RunnerClass::Kata],
+                        ..RunnerLeaseCapacity::default()
+                    }),
+                    source_host_id: None,
+                    now: None,
+                })
+                .await
+                .unwrap()
+                .unwrap();
+            let RuntimeSpecEnvelope::V1(legacy_spec) =
+                legacy_lease.request.runtime_spec.as_ref().unwrap();
+            assert!(
+                !legacy_spec
+                    .environment
+                    .contains_key("FINITECHAT_OWNER_NPUBS")
+            );
         })
         .await;
     }
@@ -10184,6 +10239,7 @@ mod tests {
                         )),
                         requested_hosting_tier: None,
                         profile_picture_url: None,
+                        owner_chat_account_id: None,
                     },
                 )
                 .await
@@ -10222,6 +10278,7 @@ mod tests {
                     active_inference_profile: Some("finite-private".to_string()),
                     hermes_available: Some(true),
                     published_app_urls: Vec::new(),
+                    agent_npub: None,
                     now: None,
                 })
                 .await
@@ -10441,6 +10498,7 @@ mod tests {
                     active_inference_profile: Some("finite-private".to_string()),
                     hermes_available: Some(true),
                     published_app_urls: Vec::new(),
+                    agent_npub: None,
                     now: None,
                 })
                 .await
@@ -10494,6 +10552,627 @@ mod tests {
 
             drop(raw);
             connection.abort();
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn postgres_cold_relocation_accepts_online_source_only_under_absence_attestation() {
+        with_isolated_postgres(|store| async move {
+            let run = "cold-relocate-online";
+            let source_host = "relocate-online-source";
+            let target_host = "relocate-online-target";
+            let machine = "finite-kata-relocate-online";
+            let email = format!("{run}@finite.vip");
+            let workos = format!("workos-{run}");
+            let launch_code = issue_test_launch_code(&store, "2026-07-25T12:00:00Z").await;
+
+            store
+                .upsert_runtime_artifact(UpsertRuntimeArtifactInput {
+                    id: "artifact-relocate-v1".to_string(),
+                    kind: RuntimeArtifactKind::OciImage,
+                    reference: format!(
+                        "ghcr.io/finitecomputer/agent-runtime:relocate-v1@sha256:{}",
+                        "4".repeat(64)
+                    ),
+                    version_label: "relocate-v1".to_string(),
+                    source_git_sha: None,
+                    finitec_version: None,
+                    hermes_source_ref: None,
+                    finite_platform_plugin_ref: None,
+                    state_schema_version: "state-v1".to_string(),
+                    base_image: None,
+                    recover_known_good_chat: false,
+                    promoted: true,
+                    now: None,
+                })
+                .await
+                .unwrap();
+            store
+                .request_agent_creation_configured(
+                    RequestAgentCreationInput {
+                        verified_email: email.clone(),
+                        workos_user_id: workos.clone(),
+                        display_name: "Online Relocation Canary".to_string(),
+                        launch_code,
+                        idempotency_key: format!("{run}-create"),
+                        now: None,
+                    },
+                    AgentCreationConfiguration {
+                        placement: Some(RuntimePlacement::for_hosting_tier(HostingTier::Standard)),
+                        requested_hosting_tier: None,
+                        profile_picture_url: None,
+                        owner_chat_account_id: None,
+                    },
+                )
+                .await
+                .unwrap();
+            let created = store
+                .lease_agent_creation_request(LeaseAgentCreationRequestInput {
+                    runner_id: format!("runner-{source_host}"),
+                    source_host_id: Some(source_host.to_string()),
+                    lease_token: "create-lease".to_string(),
+                    lease_seconds: Some(300),
+                    runner_capacity: Some(RunnerLeaseCapacity {
+                        runner_classes: vec![RunnerClass::Kata],
+                        runtime_capabilities: Some(kata_runtime_capabilities()),
+                        ..RunnerLeaseCapacity::default()
+                    }),
+                    now: None,
+                })
+                .await
+                .unwrap()
+                .unwrap();
+            let completed = store
+                .complete_agent_creation_request(CompleteAgentCreationRequestInput {
+                    request_id: created.request.id,
+                    runner_id: format!("runner-{source_host}"),
+                    lease_token: "create-lease".to_string(),
+                    source_host_id: source_host.to_string(),
+                    source_machine_id: machine.to_string(),
+                    runtime_artifact_id: Some("artifact-relocate-v1".to_string()),
+                    state_schema_version: Some("state-v1".to_string()),
+                    provider_runtime_handle: None,
+                    contact_endpoint: Some("http://127.0.0.1:4203/contact".to_string()),
+                    runtime_capabilities: Some(kata_runtime_capabilities()),
+                    display_name: Some("Online Relocation Canary".to_string()),
+                    hostname: None,
+                    runtime_host: Some(source_host.to_string()),
+                    runtime_status: Some(RuntimeSummaryStatus::Online),
+                    active_inference_profile: Some("finite-private".to_string()),
+                    hermes_available: Some(true),
+                    published_app_urls: Vec::new(),
+                    agent_npub: None,
+                    now: None,
+                })
+                .await
+                .unwrap();
+            let project_id = completed.project.id;
+            let runtime_id = completed.request.agent_runtime_id.unwrap();
+
+            // Without the operator's compute-absent attestation an online
+            // source is NOT frozen: it may still be running, so the exact
+            // relocation must refuse.
+            let unattested = store
+                .admin_request_runtime_relocate_exact(AdminRuntimeRelocateExactInput {
+                    admin_verified_email: "relocate-admin@finite.vip".to_string(),
+                    admin_workos_user_id: "workos-relocate-admin".to_string(),
+                    project_id: project_id.clone(),
+                    expected_agent_runtime_id: runtime_id.clone(),
+                    expected_source_host_id: source_host.to_string(),
+                    expected_source_machine_id: machine.to_string(),
+                    target_source_host_id: target_host.to_string(),
+                    expected_agent_npub: format!("npub1{}", "q".repeat(58)),
+                    durable_state_manifest_sha256: "b".repeat(64),
+                    operator_observed_compute_absent: false,
+                    now: None,
+                })
+                .await;
+            assert!(matches!(
+                unattested,
+                Err(CoreError::RuntimeControlUnsupported)
+            ));
+
+            // Under the attestation the pre-death `online` report is exactly
+            // as frozen as `stale`: the dead host's runner can neither lease
+            // a control nor file a fresh report, so nothing could have moved
+            // the runtime since the host died.
+            let relocation = store
+                .admin_request_runtime_relocate_exact(AdminRuntimeRelocateExactInput {
+                    admin_verified_email: "relocate-admin@finite.vip".to_string(),
+                    admin_workos_user_id: "workos-relocate-admin".to_string(),
+                    project_id: project_id.clone(),
+                    expected_agent_runtime_id: runtime_id.clone(),
+                    expected_source_host_id: source_host.to_string(),
+                    expected_source_machine_id: machine.to_string(),
+                    target_source_host_id: target_host.to_string(),
+                    expected_agent_npub: format!("npub1{}", "q".repeat(58)),
+                    durable_state_manifest_sha256: "b".repeat(64),
+                    operator_observed_compute_absent: true,
+                    now: None,
+                })
+                .await
+                .unwrap();
+            assert_eq!(relocation.status, AgentCreationRequestStatus::Requested);
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn postgres_same_host_relocation_recreates_compute_only_under_absence_attestation() {
+        with_isolated_postgres(|store| async move {
+            let run = "cold-relocate-same-host";
+            let host = "relocate-same-host";
+            let machine = "finite-kata-relocate-same-host";
+            let email = format!("{run}@finite.vip");
+            let workos = format!("workos-{run}");
+            let launch_code = issue_test_launch_code(&store, "2026-07-25T12:00:00Z").await;
+            let capacity = RunnerLeaseCapacity {
+                runner_classes: vec![RunnerClass::Kata],
+                runtime_capabilities: Some(kata_runtime_capabilities()),
+                ..RunnerLeaseCapacity::default()
+            };
+
+            store
+                .upsert_runtime_artifact(UpsertRuntimeArtifactInput {
+                    id: "artifact-relocate-v1".to_string(),
+                    kind: RuntimeArtifactKind::OciImage,
+                    reference: format!(
+                        "ghcr.io/finitecomputer/agent-runtime:relocate-v1@sha256:{}",
+                        "4".repeat(64)
+                    ),
+                    version_label: "relocate-v1".to_string(),
+                    source_git_sha: None,
+                    finitec_version: None,
+                    hermes_source_ref: None,
+                    finite_platform_plugin_ref: None,
+                    state_schema_version: "state-v1".to_string(),
+                    base_image: None,
+                    recover_known_good_chat: false,
+                    promoted: true,
+                    now: None,
+                })
+                .await
+                .unwrap();
+            store
+                .request_agent_creation_configured(
+                    RequestAgentCreationInput {
+                        verified_email: email.clone(),
+                        workos_user_id: workos.clone(),
+                        display_name: "Same-Host Relocation Canary".to_string(),
+                        launch_code,
+                        idempotency_key: format!("{run}-create"),
+                        now: None,
+                    },
+                    AgentCreationConfiguration {
+                        placement: Some(RuntimePlacement::for_hosting_tier(HostingTier::Standard)),
+                        requested_hosting_tier: None,
+                        profile_picture_url: None,
+                        owner_chat_account_id: None,
+                    },
+                )
+                .await
+                .unwrap();
+            let created = store
+                .lease_agent_creation_request(LeaseAgentCreationRequestInput {
+                    runner_id: format!("runner-{host}"),
+                    source_host_id: Some(host.to_string()),
+                    lease_token: "create-lease".to_string(),
+                    lease_seconds: Some(300),
+                    runner_capacity: Some(capacity.clone()),
+                    now: None,
+                })
+                .await
+                .unwrap()
+                .unwrap();
+            // A cleanly stopped runtime: the strongest precondition a
+            // cross-host relocation accepts. Same-host still needs more.
+            let completed = store
+                .complete_agent_creation_request(CompleteAgentCreationRequestInput {
+                    request_id: created.request.id,
+                    runner_id: format!("runner-{host}"),
+                    lease_token: "create-lease".to_string(),
+                    source_host_id: host.to_string(),
+                    source_machine_id: machine.to_string(),
+                    runtime_artifact_id: Some("artifact-relocate-v1".to_string()),
+                    state_schema_version: Some("state-v1".to_string()),
+                    provider_runtime_handle: None,
+                    contact_endpoint: Some("http://127.0.0.1:4204/contact".to_string()),
+                    runtime_capabilities: Some(kata_runtime_capabilities()),
+                    display_name: Some("Same-Host Relocation Canary".to_string()),
+                    hostname: None,
+                    runtime_host: Some(host.to_string()),
+                    runtime_status: Some(RuntimeSummaryStatus::Offline),
+                    active_inference_profile: Some("finite-private".to_string()),
+                    hermes_available: Some(true),
+                    published_app_urls: Vec::new(),
+                    agent_npub: None,
+                    now: None,
+                })
+                .await
+                .unwrap();
+            let project_id = completed.project.id;
+            let runtime_id = completed.request.agent_runtime_id.unwrap();
+            let relocate_input = |absent: bool| AdminRuntimeRelocateExactInput {
+                admin_verified_email: "relocate-admin@finite.vip".to_string(),
+                admin_workos_user_id: "workos-relocate-admin".to_string(),
+                project_id: project_id.clone(),
+                expected_agent_runtime_id: runtime_id.clone(),
+                expected_source_host_id: host.to_string(),
+                expected_source_machine_id: machine.to_string(),
+                target_source_host_id: host.to_string(),
+                expected_agent_npub: format!("npub1{}", "q".repeat(58)),
+                durable_state_manifest_sha256: "d".repeat(64),
+                operator_observed_compute_absent: absent,
+                now: None,
+            };
+
+            // Source and target host coincide: without the compute-absent
+            // attestation that is a restart under another name, refused
+            // exactly as before, even for a cleanly stopped source.
+            let unattested = store
+                .admin_request_runtime_relocate_exact(relocate_input(false))
+                .await;
+            assert!(matches!(unattested, Err(CoreError::RuntimeSpecMismatch)));
+
+            // Under the attestation the container is gone and a restart has
+            // nothing to restart; the same-host relocation is the lane that
+            // recreates compute against the durable tree where it lives.
+            let relocation = store
+                .admin_request_runtime_relocate_exact(relocate_input(true))
+                .await
+                .unwrap();
+            assert_eq!(relocation.status, AgentCreationRequestStatus::Requested);
+            assert_eq!(relocation.target_source_host_id.as_deref(), Some(host));
+            let envelope = relocation.relocation.as_ref().unwrap().v1();
+            assert_eq!(envelope.source_host_id, host);
+            assert_eq!(envelope.target_source_host_id, host);
+            assert_eq!(envelope.source_machine_id, machine);
+            assert!(envelope.source_compute_absent);
+            assert_eq!(
+                runtime_spec_v1(relocation.runtime_spec.as_ref().unwrap()).durable_state_id,
+                runtime_id,
+                "the recreated compute mounts the runtime-id durable root"
+            );
+
+            // The same host's Runner leases it, registers (non-mutating) and
+            // completes under the same machine name: the runtime keeps its
+            // binding and comes back online with no second runtime row.
+            let lease = store
+                .lease_agent_creation_request(LeaseAgentCreationRequestInput {
+                    runner_id: format!("runner-{host}"),
+                    source_host_id: Some(host.to_string()),
+                    lease_token: "relocate-lease".to_string(),
+                    lease_seconds: Some(300),
+                    runner_capacity: Some(capacity),
+                    now: None,
+                })
+                .await
+                .unwrap()
+                .unwrap();
+            assert_eq!(lease.request.id, relocation.id);
+            store
+                .register_agent_creation_runtime(RegisterAgentCreationRuntimeInput {
+                    request_id: relocation.id.clone(),
+                    runner_id: format!("runner-{host}"),
+                    lease_token: "relocate-lease".to_string(),
+                    source_host_id: host.to_string(),
+                    source_machine_id: machine.to_string(),
+                    runtime_artifact_id: Some("artifact-relocate-v1".to_string()),
+                    state_schema_version: Some("state-v1".to_string()),
+                    provider_runtime_handle: None,
+                    contact_endpoint: Some("http://127.0.0.1:4204/contact".to_string()),
+                    runtime_capabilities: Some(kata_runtime_capabilities()),
+                    display_name: None,
+                    hostname: None,
+                    runtime_host: Some(host.to_string()),
+                    runtime_status: Some(RuntimeSummaryStatus::Unknown),
+                    active_inference_profile: Some("finite-private".to_string()),
+                    hermes_available: Some(true),
+                    published_app_urls: Vec::new(),
+                    now: None,
+                })
+                .await
+                .unwrap();
+            let registered = store.agent_runtime(&runtime_id).await.unwrap();
+            assert_eq!(
+                registered.host_facts.runtime_status,
+                RuntimeSummaryStatus::Offline
+            );
+            let completed = store
+                .complete_agent_creation_request(CompleteAgentCreationRequestInput {
+                    request_id: relocation.id.clone(),
+                    runner_id: format!("runner-{host}"),
+                    lease_token: "relocate-lease".to_string(),
+                    source_host_id: host.to_string(),
+                    source_machine_id: machine.to_string(),
+                    runtime_artifact_id: Some("artifact-relocate-v1".to_string()),
+                    state_schema_version: Some("state-v1".to_string()),
+                    provider_runtime_handle: None,
+                    contact_endpoint: Some("http://127.0.0.1:4204/contact".to_string()),
+                    runtime_capabilities: Some(kata_runtime_capabilities()),
+                    display_name: None,
+                    hostname: None,
+                    runtime_host: Some(host.to_string()),
+                    runtime_status: Some(RuntimeSummaryStatus::Online),
+                    active_inference_profile: Some("finite-private".to_string()),
+                    hermes_available: Some(true),
+                    published_app_urls: Vec::new(),
+                    agent_npub: None,
+                    now: None,
+                })
+                .await
+                .unwrap();
+            // The relocated incarnation latches `online` with no standing
+            // report of its own (the old host's last report must not project
+            // as its status) and its attribution pin is the relocation's
+            // expected principal, so the first report must present it.
+            let relocated = store
+                .admin_runtime_overviews()
+                .await
+                .unwrap()
+                .into_iter()
+                .find(|overview| overview.agent_runtime_id == runtime_id)
+                .unwrap();
+            assert_eq!(relocated.lifecycle_status, RuntimeSummaryStatus::Online);
+            assert_eq!(relocated.runtime_status, RuntimeSummaryStatus::Unknown);
+            assert_eq!(
+                relocated.runtime_health,
+                crate::RuntimeHealthProjection {
+                    agent_npub: Some(format!("npub1{}", "q".repeat(58))),
+                    ..crate::RuntimeHealthProjection::unreported()
+                },
+                "no report survives the relocation; the pin is the expected principal"
+            );
+            let relocated_target = store
+                .runtime_health_targets_for_host(host)
+                .await
+                .unwrap()
+                .targets
+                .into_iter()
+                .find(|target| target.agent_runtime_id == runtime_id)
+                .unwrap();
+            assert_eq!(
+                relocated_target.agent_npub.as_deref(),
+                Some(format!("npub1{}", "q".repeat(58)).as_str())
+            );
+            assert_eq!(
+                completed.request.status,
+                AgentCreationRequestStatus::Running
+            );
+            assert_eq!(
+                completed.request.agent_runtime_id.as_deref(),
+                Some(runtime_id.as_str())
+            );
+            let relocated = store.agent_runtime(&runtime_id).await.unwrap();
+            assert_eq!(relocated.source_host_id, host);
+            assert_eq!(relocated.source_machine_id, machine);
+            assert_eq!(
+                relocated.host_facts.runtime_status,
+                RuntimeSummaryStatus::Online
+            );
+            let runtime_rows = store
+                .query_json(
+                    "SELECT to_jsonb(id) FROM agent_runtimes WHERE project_id = $1",
+                    &[&project_id],
+                )
+                .await;
+            assert_eq!(runtime_rows, vec![serde_json::json!(runtime_id)]);
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn postgres_persisted_machine_named_durable_state_id_is_repaired_on_read() {
+        with_isolated_postgres(|store| async move {
+            let run = "machine-named-spec";
+            let host = "machine-named-host";
+            let target_host = "machine-named-target";
+            let machine = "finite-kata-machine-named";
+            let email = format!("{run}@finite.vip");
+            let workos = format!("workos-{run}");
+            let launch_code = issue_test_launch_code(&store, "2026-07-25T12:00:00Z").await;
+            let capacity = RunnerLeaseCapacity {
+                runner_classes: vec![RunnerClass::Kata],
+                runtime_capabilities: Some(kata_runtime_capabilities()),
+                ..RunnerLeaseCapacity::default()
+            };
+
+            store
+                .upsert_runtime_artifact(UpsertRuntimeArtifactInput {
+                    id: "artifact-machine-named-v1".to_string(),
+                    kind: RuntimeArtifactKind::OciImage,
+                    reference: format!(
+                        "ghcr.io/finitecomputer/agent-runtime:machine-named-v1@sha256:{}",
+                        "5".repeat(64)
+                    ),
+                    version_label: "machine-named-v1".to_string(),
+                    source_git_sha: None,
+                    finitec_version: None,
+                    hermes_source_ref: None,
+                    finite_platform_plugin_ref: None,
+                    state_schema_version: "state-v1".to_string(),
+                    base_image: None,
+                    recover_known_good_chat: false,
+                    promoted: true,
+                    now: None,
+                })
+                .await
+                .unwrap();
+            store
+                .request_agent_creation_configured(
+                    RequestAgentCreationInput {
+                        verified_email: email.clone(),
+                        workos_user_id: workos.clone(),
+                        display_name: "Machine-Named Spec Canary".to_string(),
+                        launch_code,
+                        idempotency_key: format!("{run}-create"),
+                        now: None,
+                    },
+                    AgentCreationConfiguration {
+                        placement: Some(RuntimePlacement::for_hosting_tier(HostingTier::Standard)),
+                        requested_hosting_tier: None,
+                        profile_picture_url: None,
+                        owner_chat_account_id: None,
+                    },
+                )
+                .await
+                .unwrap();
+            let created = store
+                .lease_agent_creation_request(LeaseAgentCreationRequestInput {
+                    runner_id: format!("runner-{host}"),
+                    source_host_id: Some(host.to_string()),
+                    lease_token: "create-lease".to_string(),
+                    lease_seconds: Some(300),
+                    runner_capacity: Some(capacity.clone()),
+                    now: None,
+                })
+                .await
+                .unwrap()
+                .unwrap();
+            let completed = store
+                .complete_agent_creation_request(CompleteAgentCreationRequestInput {
+                    request_id: created.request.id.clone(),
+                    runner_id: format!("runner-{host}"),
+                    lease_token: "create-lease".to_string(),
+                    source_host_id: host.to_string(),
+                    source_machine_id: machine.to_string(),
+                    runtime_artifact_id: Some("artifact-machine-named-v1".to_string()),
+                    state_schema_version: Some("state-v1".to_string()),
+                    provider_runtime_handle: None,
+                    contact_endpoint: Some("http://127.0.0.1:4205/contact".to_string()),
+                    runtime_capabilities: Some(kata_runtime_capabilities()),
+                    display_name: Some("Machine-Named Spec Canary".to_string()),
+                    hostname: None,
+                    runtime_host: Some(host.to_string()),
+                    runtime_status: Some(RuntimeSummaryStatus::Online),
+                    active_inference_profile: Some("finite-private".to_string()),
+                    hermes_available: Some(true),
+                    published_app_urls: Vec::new(),
+                    agent_npub: None,
+                    now: None,
+                })
+                .await
+                .unwrap();
+            let project_id = completed.project.id;
+            let runtime_id = completed.request.agent_runtime_id.unwrap();
+            let creation_id = created.request.id;
+            assert_ne!(runtime_id, machine);
+            async fn persisted_durable_state_id(store: &TestDb, creation_id: &str) -> Value {
+                store
+                    .query_json(
+                        "SELECT runtime_spec->'spec'->'durableStateId'
+                         FROM agent_creation_requests WHERE id = $1",
+                        &[&creation_id],
+                    )
+                    .await
+                    .pop()
+                    .unwrap()
+            }
+            // The production shape this repair exists for: a spec synthesized
+            // before the durable root was named by the runtime id, persisted
+            // with the source machine as its durable state id.
+            async fn poison(store: &TestDb, creation_id: &str, machine: &str) -> Vec<Value> {
+                store
+                    .query_json(
+                        "UPDATE agent_creation_requests
+                         SET runtime_spec = jsonb_set(
+                             runtime_spec, '{spec,durableStateId}', to_jsonb($2::text))
+                         WHERE id = $1
+                         RETURNING runtime_spec->'spec'->'durableStateId'",
+                        &[&creation_id, &machine],
+                    )
+                    .await
+            }
+            assert_eq!(
+                persisted_durable_state_id(&store, &creation_id).await,
+                serde_json::json!(runtime_id)
+            );
+            assert_eq!(
+                poison(&store, &creation_id, machine).await,
+                vec![serde_json::json!(machine)]
+            );
+
+            // A control lease hands the Runner the runtime-id root and writes
+            // the repaired spec back in the same transaction.
+            let restart = store
+                .request_runtime_restart(RequestRuntimeRestartInput {
+                    verified_email: email.clone(),
+                    workos_user_id: workos.clone(),
+                    project_id: project_id.clone(),
+                    now: None,
+                })
+                .await
+                .unwrap();
+            let restart_lease = store
+                .lease_runtime_control_request(LeaseRuntimeControlRequestInput {
+                    runner_id: format!("runner-{host}"),
+                    lease_token: "restart-lease".to_string(),
+                    lease_seconds: Some(60),
+                    source_host_id: Some(host.to_string()),
+                    runner_capacity: Some(capacity.clone()),
+                    now: None,
+                })
+                .await
+                .unwrap()
+                .expect("restart should lease");
+            assert_eq!(restart_lease.request.id, restart.id);
+            assert_eq!(
+                runtime_spec_v1(restart_lease.runtime_spec.as_ref().unwrap()).durable_state_id,
+                runtime_id,
+                "the lease names the durable root by the Agent Runtime id, never the source machine"
+            );
+            assert_eq!(
+                persisted_durable_state_id(&store, &creation_id).await,
+                serde_json::json!(runtime_id),
+                "the repair is persisted, not re-derived on every read"
+            );
+            store
+                .complete_runtime_control_request(CompleteRuntimeControlRequestInput {
+                    request_id: restart.id.clone(),
+                    runner_id: format!("runner-{host}"),
+                    lease_token: "restart-lease".to_string(),
+                    runtime_artifact_id: None,
+                    state_schema_version: None,
+                    runtime_capabilities: None,
+                    runtime_host: None,
+                    published_app_urls: None,
+                    retirement_snapshot: None,
+                    now: None,
+                })
+                .await
+                .unwrap();
+
+            // A relocation envelope is minted from the repaired spec too, and
+            // the current creation row is repaired alongside it.
+            assert_eq!(
+                poison(&store, &creation_id, machine).await,
+                vec![serde_json::json!(machine)]
+            );
+            let relocation = store
+                .admin_request_runtime_relocate_exact(AdminRuntimeRelocateExactInput {
+                    admin_verified_email: "relocate-admin@finite.vip".to_string(),
+                    admin_workos_user_id: "workos-relocate-admin".to_string(),
+                    project_id: project_id.clone(),
+                    expected_agent_runtime_id: runtime_id.clone(),
+                    expected_source_host_id: host.to_string(),
+                    expected_source_machine_id: machine.to_string(),
+                    target_source_host_id: target_host.to_string(),
+                    expected_agent_npub: format!("npub1{}", "q".repeat(58)),
+                    durable_state_manifest_sha256: "e".repeat(64),
+                    operator_observed_compute_absent: true,
+                    now: None,
+                })
+                .await
+                .unwrap();
+            assert_eq!(
+                runtime_spec_v1(relocation.runtime_spec.as_ref().unwrap()).durable_state_id,
+                runtime_id
+            );
+            assert_eq!(
+                persisted_durable_state_id(&store, &creation_id).await,
+                serde_json::json!(runtime_id)
+            );
         })
         .await;
     }
@@ -10915,6 +11594,7 @@ mod tests {
                     active_inference_profile: None,
                     hermes_available: Some(true),
                     published_app_urls: Vec::new(),
+                    agent_npub: None,
                     now: None,
                 })
                 .await
@@ -11250,6 +11930,7 @@ mod tests {
                     active_inference_profile: Some("finite-private".to_string()),
                     hermes_available: Some(true),
                     published_app_urls: Vec::new(),
+                    agent_npub: None,
                     now: Some("2026-05-28T12:03:00Z".to_string()),
                 })
                 .await
@@ -11274,181 +11955,6 @@ mod tests {
                 .unwrap();
             assert_eq!(requests.len(), 1);
             assert_eq!(requests[0].status, AgentCreationRequestStatus::Running);
-        })
-        .await;
-    }
-
-    /// ADR-0046 Permanent Departure Facts against Postgres: a completed
-    /// creation joins the roster at revision 1, an owner-acknowledged archive
-    /// emits a durable 'deleted' fact and bumps the roster transactionally,
-    /// and the cursor page replays deterministically.
-    #[tokio::test]
-    async fn postgres_brain_departure_facts_emit_on_archive_and_replay_with_cursor() {
-        with_isolated_postgres(|store| async move {
-            let launch_code = issue_test_launch_code(&store, "2026-05-25T12:00:00Z").await;
-            store
-                .upsert_runtime_artifact(UpsertRuntimeArtifactInput {
-                    id: "artifact-departure-v1".to_string(),
-                    kind: RuntimeArtifactKind::OciImage,
-                    reference: format!(
-                        "ghcr.io/finitecomputer/finite-agent-runtime:departure-v1@sha256:{}",
-                        "2".repeat(64)
-                    ),
-                    version_label: "departure-v1".to_string(),
-                    source_git_sha: None,
-                    finitec_version: None,
-                    hermes_source_ref: None,
-                    finite_platform_plugin_ref: None,
-                    state_schema_version: "state-v1".to_string(),
-                    base_image: Some("python:3.11-trixie".to_string()),
-                    recover_known_good_chat: false,
-                    promoted: true,
-                    now: Some("2026-05-28T12:00:00Z".to_string()),
-                })
-                .await
-                .unwrap();
-            let created = store
-                .request_agent_creation(RequestAgentCreationInput {
-                    verified_email: "departure-owner@finite.vip".to_string(),
-                    workos_user_id: "workos_departure_owner".to_string(),
-                    display_name: "Departure Agent".to_string(),
-                    launch_code: launch_code.clone(),
-                    idempotency_key: "browser-submit-departure".to_string(),
-                    now: Some("2026-05-28T12:01:00Z".to_string()),
-                })
-                .await
-                .unwrap();
-            let lease = store
-                .lease_agent_creation_request(LeaseAgentCreationRequestInput {
-                    runner_id: "runner-departure-1".to_string(),
-                    source_host_id: None,
-                    lease_token: "lease-departure-1".to_string(),
-                    lease_seconds: Some(300),
-                    runner_capacity: None,
-                    now: Some("2026-05-28T12:02:00Z".to_string()),
-                })
-                .await
-                .unwrap()
-                .expect("departure request should lease");
-            store
-                .register_agent_creation_runtime(RegisterAgentCreationRuntimeInput {
-                    request_id: lease.request.id.clone(),
-                    runner_id: "runner-departure-1".to_string(),
-                    lease_token: "lease-departure-1".to_string(),
-                    source_host_id: "departure-host".to_string(),
-                    source_machine_id: "departure-agent-001".to_string(),
-                    runtime_artifact_id: Some("artifact-departure-v1".to_string()),
-                    state_schema_version: Some("state-v1".to_string()),
-                    provider_runtime_handle: None,
-                    contact_endpoint: None,
-                    runtime_capabilities: Some(kata_runtime_capabilities()),
-                    display_name: Some("Departure Agent".to_string()),
-                    hostname: None,
-                    runtime_host: Some("departure-host".to_string()),
-                    runtime_status: Some(RuntimeSummaryStatus::Unknown),
-                    active_inference_profile: Some("finite-private".to_string()),
-                    hermes_available: Some(true),
-                    published_app_urls: Vec::new(),
-                    now: Some("2026-05-28T12:02:30Z".to_string()),
-                })
-                .await
-                .unwrap();
-            store
-                .complete_agent_creation_request(CompleteAgentCreationRequestInput {
-                    request_id: lease.request.id.clone(),
-                    runner_id: "runner-departure-1".to_string(),
-                    lease_token: "lease-departure-1".to_string(),
-                    source_host_id: "departure-host".to_string(),
-                    source_machine_id: "departure-agent-001".to_string(),
-                    runtime_artifact_id: Some("artifact-departure-v1".to_string()),
-                    state_schema_version: Some("state-v1".to_string()),
-                    provider_runtime_handle: None,
-                    contact_endpoint: None,
-                    runtime_capabilities: Some(kata_runtime_capabilities()),
-                    display_name: Some("Departure Agent".to_string()),
-                    hostname: None,
-                    runtime_host: Some("departure-host".to_string()),
-                    runtime_status: Some(RuntimeSummaryStatus::Online),
-                    active_inference_profile: Some("finite-private".to_string()),
-                    hermes_available: Some(true),
-                    published_app_urls: Vec::new(),
-                    now: Some("2026-05-28T12:03:00Z".to_string()),
-                })
-                .await
-                .unwrap();
-            let _ = created;
-            let runtime_id = store
-                .visible_projects_for_workos_user("workos_departure_owner")
-                .await
-                .unwrap()
-                .into_iter()
-                .next()
-                .and_then(|project| project.runtime)
-                .expect("completed creation exposes its runtime")
-                .id;
-
-            let lookup = BrainAccountRosterLookup {
-                workos_user_id: Some("workos_departure_owner".to_string()),
-                ..BrainAccountRosterLookup::default()
-            };
-            let roster = store
-                .brain_account_agent_roster(&lookup)
-                .await
-                .unwrap()
-                .expect("completed creation joins the roster");
-            assert_eq!(roster.roster_revision, 1);
-            assert_eq!(roster.agents.len(), 1);
-            let agent_email = roster.agents[0].managed_agent_email.clone();
-
-            // The archive hook emits a durable 'deleted' departure fact and
-            // bumps the roster revision in the same transaction.
-            let archive = store
-                .admin_archive_unrecoverable_runtime(AdminArchiveUnrecoverableRuntimeInput {
-                    admin_verified_email: "ops@finite.vip".to_string(),
-                    admin_workos_user_id: "workos_departure_ops".to_string(),
-                    project_id: lease.request.project_id.clone(),
-                    expected_agent_runtime_id: runtime_id.clone(),
-                    expected_source_host_id: "departure-host".to_string(),
-                    expected_source_machine_id: "departure-agent-001".to_string(),
-                    expected_owner_email: "departure-owner@finite.vip".to_string(),
-                    operator_observed_compute_absent: true,
-                    operator_observed_durable_state_absent: true,
-                    owner_acknowledged_unrecoverable: true,
-                    now: None,
-                })
-                .await
-                .unwrap();
-            assert_eq!(archive.agent_runtime_id, runtime_id);
-
-            let page = store.brain_agent_departure_facts(0, 100).await.unwrap();
-            assert_eq!(page.max_revision, 1);
-            assert_eq!(page.facts.len(), 1);
-            let fact = &page.facts[0];
-            assert_eq!(fact.revision, 1);
-            assert_eq!(fact.account_id, "workos_departure_owner");
-            assert_eq!(fact.principal_kind, BrainDeparturePrincipalKind::Agent);
-            assert_eq!(fact.principal_ref, agent_email);
-            assert_eq!(fact.reason, BrainDepartureReason::Deleted);
-            assert!(!fact.departed_at.is_empty());
-
-            // The roster revision moved with the departure; the departed
-            // agent left the roster.
-            let roster = store
-                .brain_account_agent_roster(&lookup)
-                .await
-                .unwrap()
-                .expect("account still resolves");
-            assert_eq!(roster.roster_revision, 2);
-            assert!(roster.agents.is_empty());
-            assert!(roster.departed.is_empty());
-
-            // Cursor replay is deterministic: nothing new after revision 1,
-            // and the full page replays identically from 0.
-            let empty = store.brain_agent_departure_facts(1, 100).await.unwrap();
-            assert!(empty.facts.is_empty());
-            assert_eq!(empty.max_revision, 1);
-            let replay = store.brain_agent_departure_facts(0, 100).await.unwrap();
-            assert_eq!(replay, page);
         })
         .await;
     }
@@ -11761,6 +12267,7 @@ mod tests {
                     active_inference_profile: Some("finite-private".to_string()),
                     hermes_available: Some(true),
                     published_app_urls: Vec::new(),
+                    agent_npub: None,
                     now: None,
                 })
                 .await
@@ -12135,6 +12642,7 @@ mod tests {
                     active_inference_profile: None,
                     hermes_available: Some(true),
                     published_app_urls: Vec::new(),
+                    agent_npub: None,
                     now: None,
                 })
                 .await
@@ -12201,7 +12709,7 @@ mod tests {
             assert_eq!(health.reason.as_deref(), Some("model endpoint 503"));
 
             // A report recorded long ago (runner stopped reporting) crosses
-            // the 3x cadence deadline and projects unknown again.
+            // the 3x cadence deadline and projects the named stale state.
             store
                 .record_runtime_health_report(report(
                     true,
@@ -12212,7 +12720,68 @@ mod tests {
                 .await
                 .unwrap();
             let health = overview_health(&store, &runtime_id).await;
-            assert_eq!(health.status, crate::RuntimeHealthStatus::Unknown);
+            assert_eq!(health.status, crate::RuntimeHealthStatus::Stale);
+            assert_eq!(health.report_interval_seconds, Some(60));
+
+            // Existing state written by the previous Core: a row latched
+            // `pending_first_report` alongside a fresh ready report from the
+            // incarnation before the control. Migration 0024 rewrites it to
+            // the current representation in one statement — `online` with
+            // the report cleared — so the derived status is `unknown` until
+            // the poller reports, never `online` off the old report. The
+            // pin stays (same runtime, same principal).
+            let (raw, connection) = tokio_postgres::connect(&store.url, NoTls).await.unwrap();
+            let raw_handle = tokio::spawn(async move {
+                let _ = connection.await;
+            });
+            raw.execute(
+                "UPDATE agent_runtimes
+                 SET host_facts = jsonb_set(host_facts, '{runtime_status}',
+                                            to_jsonb('pending_first_report'::text)),
+                     health_reported_at = now(),
+                     health_observed_at = now(),
+                     health_ready = TRUE,
+                     health_reason = NULL,
+                     health_report_interval_seconds = 60
+                 WHERE id = $1",
+                &[&runtime_id],
+            )
+            .await
+            .unwrap();
+            raw.batch_execute(include_str!(
+                "../migrations/0024_runtime_status_pending_first_report_remap.sql"
+            ))
+            .await
+            .unwrap();
+            // Reapplying (every Core startup does) is a no-op.
+            raw.batch_execute(include_str!(
+                "../migrations/0024_runtime_status_pending_first_report_remap.sql"
+            ))
+            .await
+            .unwrap();
+            drop(raw);
+            raw_handle.abort();
+            let migrated = store
+                .admin_runtime_overviews()
+                .await
+                .unwrap()
+                .into_iter()
+                .find(|overview| overview.agent_runtime_id == runtime_id)
+                .unwrap();
+            assert_eq!(migrated.lifecycle_status, RuntimeSummaryStatus::Online);
+            assert_eq!(migrated.runtime_status, RuntimeSummaryStatus::Unknown);
+            assert_eq!(
+                migrated.runtime_health,
+                crate::RuntimeHealthProjection {
+                    agent_npub: Some(format!("npub1{}", "q".repeat(58))),
+                    ..crate::RuntimeHealthProjection::unreported()
+                }
+            );
+            assert!(
+                CORE_SCHEMA_SQL
+                    .contains("WHERE host_facts->>'runtime_status' = 'pending_first_report'"),
+                "the remap must ship in the startup schema concat"
+            );
 
             // Scope: the credential's host guards the write. Another host's
             // runtime id and an unknown id both fail closed as not-found.
@@ -12385,6 +12954,7 @@ mod tests {
                     active_inference_profile: Some("finite-private".to_string()),
                     hermes_available: Some(true),
                     published_app_urls: vec!["http://127.0.0.1:41002/contact".to_string()],
+                    agent_npub: None,
                     now: None,
                 })
                 .await
@@ -12600,13 +13170,7 @@ mod tests {
                     && event.target_id == runtime_id
             }));
 
-            // The departure is recorded as a retirement exactly once, and a
-            // second run fails closed on the inactive link without adding a
-            // second fact.
-            let facts = store.brain_agent_departure_facts(0, 100).await.unwrap();
-            assert_eq!(facts.facts.len(), 1);
-            assert_eq!(facts.facts[0].reason, BrainDepartureReason::Retired);
-            assert_eq!(facts.facts[0].account_id, format!("workos_{run}_owner"));
+            // A repair rerun fails closed on the inactive link.
             assert!(matches!(
                 store
                     .admin_offboard_retired_runtime(input(true))
@@ -12614,8 +13178,6 @@ mod tests {
                     .unwrap_err(),
                 CoreError::ProjectRuntimeNotFound
             ));
-            let facts_after_rerun = store.brain_agent_departure_facts(0, 100).await.unwrap();
-            assert_eq!(facts_after_rerun.facts.len(), 1);
         })
         .await;
     }
@@ -12696,6 +13258,7 @@ mod tests {
                 active_inference_profile: Some("finite-private".to_string()),
                 hermes_available: Some(true),
                 published_app_urls: vec!["http://127.0.0.1:41004/contact".to_string()],
+                agent_npub: None,
                 now: None,
             })
             .await
@@ -13137,6 +13700,7 @@ mod tests {
                     active_inference_profile: Some("finite-private".to_string()),
                     hermes_available: Some(true),
                     published_app_urls: Vec::new(),
+                    agent_npub: None,
                     now: None,
                 })
                 .await
@@ -13261,6 +13825,7 @@ mod tests {
                     active_inference_profile: Some("finite-private".to_string()),
                     hermes_available: Some(true),
                     published_app_urls: vec!["http://127.0.0.1:41006/contact".to_string()],
+                    agent_npub: None,
                     now: None,
                 })
                 .await
@@ -13394,6 +13959,7 @@ mod tests {
                     active_inference_profile: Some("finite-private".to_string()),
                     hermes_available: Some(true),
                     published_app_urls: vec!["http://127.0.0.1:41003/contact".to_string()],
+                    agent_npub: None,
                     now: None,
                 })
                 .await
@@ -13641,6 +14207,7 @@ mod tests {
                         placement: Some(RuntimePlacement::for_hosting_tier(HostingTier::Standard)),
                         requested_hosting_tier: None,
                         profile_picture_url: None,
+                        owner_chat_account_id: None,
                     },
                 )
                 .await
@@ -13688,6 +14255,7 @@ mod tests {
                     active_inference_profile: None,
                     hermes_available: Some(true),
                     published_app_urls: vec!["http://127.0.0.1:41001/contact".to_string()],
+                    agent_npub: None,
                     now: None,
                 })
                 .await
@@ -13858,6 +14426,33 @@ mod tests {
                 .unwrap()
                 .expect("draining host runner should still lease its own control request");
             assert_eq!(control_lease.request.id, restart.id);
+            // The running incarnation reports ready before the restart; the
+            // completion below must clear that report (it spoke for the
+            // previous incarnation) while keeping the principal it pinned.
+            store
+                .record_runtime_health_report(RecordRuntimeHealthReportInput {
+                    source_host_id: host.to_string(),
+                    agent_runtime_id: runtime_id.clone(),
+                    ready: true,
+                    reason: None,
+                    observed_at: current_time_iso().unwrap(),
+                    agent_npub: Some(format!("npub1{}", "q".repeat(58))),
+                    report_interval_seconds: Some(60),
+                    now: None,
+                })
+                .await
+                .unwrap();
+            assert_eq!(
+                store
+                    .admin_runtime_overviews()
+                    .await
+                    .unwrap()
+                    .into_iter()
+                    .find(|o| o.agent_runtime_id == runtime_id)
+                    .unwrap()
+                    .runtime_status,
+                RuntimeSummaryStatus::Online
+            );
             store
                 .complete_runtime_control_request(CompleteRuntimeControlRequestInput {
                     request_id: restart.id.clone(),
@@ -13880,9 +14475,21 @@ mod tests {
                 .into_iter()
                 .find(|o| o.agent_runtime_id == runtime_id)
                 .unwrap();
-            assert_eq!(overview_online.runtime_status, RuntimeSummaryStatus::Online);
+            // Completion is the runner's bounded readiness wait, not a
+            // standing observation: the lifecycle latch says the restart
+            // succeeded, the stored report is cleared, and the user-facing
+            // status stays the named unknown state until the poller reports.
+            assert_eq!(overview_online.lifecycle_status, RuntimeSummaryStatus::Online);
             assert_eq!(
-                overview_online.runtime_status,
+                overview_online.runtime_health,
+                crate::RuntimeHealthProjection {
+                    agent_npub: Some(format!("npub1{}", "q".repeat(58))),
+                    ..crate::RuntimeHealthProjection::unreported()
+                },
+                "the pre-restart report is cleared; the pinned principal is kept"
+            );
+            assert_eq!(
+                overview_online.lifecycle_status,
                 store
                     .agent_runtime(&runtime_id)
                     .await
@@ -13890,7 +14497,76 @@ mod tests {
                     .host_facts
                     .runtime_status
             );
+            assert_eq!(overview_online.runtime_status, RuntimeSummaryStatus::Unknown);
             assert!(overview_online.runtime_link_active);
+            // The restarted runtime is a standing-health target for its own
+            // host's runner (and for nobody else's).
+            let targets = store.runtime_health_targets_for_host(host).await.unwrap();
+            assert_eq!(targets.source_host_id, host);
+            let target = targets
+                .targets
+                .iter()
+                .find(|target| target.agent_runtime_id == runtime_id)
+                .expect("restarted runtime should be a health target");
+            assert_eq!(target.source_machine_id, machine);
+            assert_eq!(target.lifecycle_status, RuntimeSummaryStatus::Online);
+            assert_eq!(
+                target.agent_npub.as_deref(),
+                Some(format!("npub1{}", "q".repeat(58)).as_str()),
+                "the attribution pin survives a restart of the same runtime"
+            );
+            assert!(
+                store
+                    .runtime_health_targets_for_host("someotherhost")
+                    .await
+                    .unwrap()
+                    .targets
+                    .is_empty()
+            );
+            // A report presenting another principal is refused, not recorded:
+            // a reallocated port never wears this runtime's name.
+            assert!(matches!(
+                store
+                    .record_runtime_health_report(RecordRuntimeHealthReportInput {
+                        source_host_id: host.to_string(),
+                        agent_runtime_id: runtime_id.clone(),
+                        ready: true,
+                        reason: None,
+                        observed_at: current_time_iso().unwrap(),
+                        agent_npub: Some(format!("npub1{}", "z".repeat(58))),
+                        report_interval_seconds: Some(60),
+                        now: None,
+                    })
+                    .await,
+                Err(CoreError::RuntimeHealthReportPrincipalMismatch)
+            ));
+            // A fresh ready report is what makes the derived status online.
+            store
+                .record_runtime_health_report(RecordRuntimeHealthReportInput {
+                    source_host_id: host.to_string(),
+                    agent_runtime_id: runtime_id.clone(),
+                    ready: true,
+                    reason: None,
+                    observed_at: current_time_iso().unwrap(),
+                    agent_npub: Some(format!("npub1{}", "q".repeat(58))),
+                    report_interval_seconds: Some(60),
+                    now: None,
+                })
+                .await
+                .unwrap();
+            let overview_online = store
+                .admin_runtime_overviews()
+                .await
+                .unwrap()
+                .into_iter()
+                .find(|o| o.agent_runtime_id == runtime_id)
+                .unwrap();
+            assert_eq!(overview_online.lifecycle_status, RuntimeSummaryStatus::Online);
+            assert_eq!(overview_online.runtime_status, RuntimeSummaryStatus::Online);
+            assert_eq!(
+                overview_online.runtime_health.status,
+                crate::RuntimeHealthStatus::Ready
+            );
 
             // Upgrade: target is an explicit promoted, digest-pinned artifact;
             // the lease carries it and completion updates artifact/endpoint
@@ -14141,6 +14817,41 @@ mod tests {
                 })
                 .await
                 .unwrap();
+            // The upgrade latched `online` (health cleared, nothing reported
+            // yet). A runtime that dies in exactly this state is today's
+            // recovery shape: it must be relocatable under the operator's
+            // compute-absent attestation, and only under it.
+            let relocate = |attested: bool| AdminRuntimeRelocateExactInput {
+                admin_verified_email: format!("admin-{run}@finite.vip"),
+                admin_workos_user_id: format!("admin-workos-{run}"),
+                project_id: project_id.clone(),
+                expected_agent_runtime_id: runtime_id.clone(),
+                expected_source_host_id: host.to_string(),
+                expected_source_machine_id: machine.to_string(),
+                target_source_host_id: format!("{host}-target"),
+                expected_agent_npub: format!("npub1{}", "q".repeat(58)),
+                durable_state_manifest_sha256: "b".repeat(64),
+                operator_observed_compute_absent: attested,
+                now: None,
+            };
+            assert!(matches!(
+                store.admin_request_runtime_relocate_exact(relocate(false)).await,
+                Err(CoreError::RuntimeControlUnsupported)
+            ));
+            let relocation = store
+                .admin_request_runtime_relocate_exact(relocate(true))
+                .await
+                .expect("a dead just-upgraded runtime relocates under attestation");
+            assert_eq!(relocation.status, AgentCreationRequestStatus::Requested);
+            // Withdraw it again: the rest of this test exercises the runtime
+            // in place.
+            store
+                .cancel_agent_creation_request(CancelAgentCreationRequestInput {
+                    request_id: relocation.id,
+                    now: None,
+                })
+                .await
+                .unwrap();
             let refreshed_capabilities: Value = raw
                 .query_one(
                     "SELECT runtime_capabilities FROM agent_runtimes WHERE id = $1",
@@ -14165,10 +14876,11 @@ mod tests {
                 refreshed_contact_endpoint.as_deref(),
                 Some("http://127.0.0.1:41002/contact")
             );
+            // The creation request (not the cancelled relocation above).
             let upgraded_spec: Value = raw
                 .query_one(
                     "SELECT runtime_spec FROM agent_creation_requests
-                     WHERE agent_runtime_id = $1",
+                     WHERE agent_runtime_id = $1 AND relocation_spec IS NULL",
                     &[&runtime_id],
                 )
                 .await
@@ -14183,9 +14895,10 @@ mod tests {
                 upgraded_spec["spec"]["environment"]["FINITE_BRAIN_SERVER_URL"],
                 "https://brain.finite.computer"
             );
+            assert_ne!(runtime_id, machine);
             assert_eq!(
-                upgraded_spec["spec"]["durableStateId"], machine,
-                "legacy synthesis preserves the source-machine /data directory"
+                upgraded_spec["spec"]["durableStateId"], runtime_id,
+                "legacy synthesis names the durable root by the Agent Runtime id, never the source machine"
             );
             drop(raw);
             raw_connection.abort();
@@ -14830,6 +15543,7 @@ mod tests {
                     active_inference_profile: Some("finite-private".to_string()),
                     hermes_available: Some(true),
                     published_app_urls: Vec::new(),
+                    agent_npub: None,
                     now: None,
                 })
                 .await

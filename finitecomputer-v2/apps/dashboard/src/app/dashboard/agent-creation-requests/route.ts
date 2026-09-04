@@ -24,6 +24,7 @@ import { getAccountAuthContext } from "@/lib/dashboard-auth";
 import {
   hostedDeviceAuthorizeAgentBinding,
   hostedDeviceConfig,
+  hostedDeviceOwnerChatAccountId,
   hostedDeviceProfileImage,
 } from "@/lib/hosted-web-device";
 import { stripeCheckoutAvailable } from "@/lib/stripe-billing";
@@ -174,12 +175,20 @@ async function launchDraft(
   account: Awaited<ReturnType<typeof getAccountAuthContext>>,
   launchCode = ""
 ) {
+  // Pre-mint the owner's hosted chat identity and hand its account id to Core
+  // so the lease-time runtime spec can scope chat admission to the owner.
+  // Fail-open: a hosted-device outage must never block agent creation.
+  const ownerChatAccountId = await hostedDeviceOwnerChatAccountId(
+    hostedDeviceConfig(),
+    account
+  );
   const creation = await requestCoreAgentCreation({
     displayName: draft.displayName,
     launchCode,
     idempotencyKey: draft.idempotencyKey,
     hostingTier: draft.hostingTier,
     profilePictureUrl: draft.profilePictureUrl,
+    ownerChatAccountId,
   });
   if (creation.project.id !== creation.request.project_id) {
     throw new Error("Agent creation returned inconsistent project identity.");
