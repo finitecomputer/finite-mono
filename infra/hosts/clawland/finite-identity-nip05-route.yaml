@@ -3,7 +3,8 @@ kind: Namespace
 metadata:
   name: fc-identity-edge
 ---
-# This selectorless service targets the canonical Authority edge on lat1.
+# This selectorless service targets the canonical Authority edge on the
+# app-plane host.
 # It exists only so the legacy finite.vip apex can serve the standard NIP-05
 # path without moving the apex or wildcard away from the legacy fleet.
 apiVersion: v1
@@ -24,7 +25,7 @@ metadata:
   namespace: fc-identity-edge
 subsets:
   - addresses:
-      - ip: 64.34.82.77
+      - ip: 64.34.80.19
     ports:
       - name: https
         port: 443

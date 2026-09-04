@@ -11,7 +11,8 @@
 SELECT CAST('blocked_cross_account_handoff_not_ready' AS integer);
 \endif
 
--- One-time, exact production operation for 2026-09-02.
+-- One-time, exact FiKnight production operation, refreshed on 2026-09-03
+-- after the Runtime advanced from the paused attempt's .1 artifact to .2.
 -- Run from the operator workstation; do not install this file on a host.
 -- This stage is additive for Chat access: Austin remains a room member until
 -- scripts/ops/fiknight-account-transfer-finalize.sql is run after acceptance.
@@ -92,7 +93,7 @@ BEGIN
       AND runtime.id = 'runtime_d8ceb9b4f4e9bacb85b0'
       AND runtime.source_host_id = 'finite-lat-3'
       AND runtime.source_machine_id = 'finite-kata-9edb9d1d2e2ce1c9073f'
-      AND runtime.runtime_artifact_id = 'finite-agent-runtime-2026-09-02.1'
+      AND runtime.runtime_artifact_id = 'finite-agent-runtime-2026-09-02.2'
       AND runtime.state_schema_version = 'runtime-state-v1'
   ) THEN
     RAISE EXCEPTION 'Exact active Runtime binding changed';

@@ -117,6 +117,61 @@ Either path also requires refreshing the exact Runtime artifact fence, rerunning
 stage/replay/rollback/finalize against the fresh Core dump, confirming current
 Room/account membership, and obtaining new explicit production authorization.
 
+## Resumed production-cutover checkpoint — 2026-09-03 CDT
+
+Austin authorized resuming the FiKnight production cutover, including the
+previously described platform-wide Chat outage and 30-minute rollback window.
+This authorization remains limited to FiKnight; it does not authorize R2D2 or
+either additional candidate Agent. On resumption, Austin also required a fresh,
+explicit confirmation immediately before any shared writer is stopped; online
+preparation and the separate apex-route repair do not cross that boundary.
+
+The required online preflight was repeated from current state:
+
+- canonical `finite-status --json` at `2026-09-04T02:22:43Z` found Chat, host
+  health, recovery boundaries, and rollout state green; the aggregate remained
+  red only for the pre-existing stale `Smoke Studio` Core row. The private raw
+  report SHA-256 is
+  `34db582ac978ee4dd93d78513dcfc7f3b544cc9ad62b2786fee2d5ee2cb7229b`;
+- Core still had the exact Austin-owned Project and creation request, active
+  Austin owner membership, archived FiKnight owner membership, Austin-scoped
+  Finite Private grant, no other FiKnight-owned Project, and no in-flight
+  Runtime control request;
+- the exact active Runtime remained on `finite-lat-3` machine
+  `finite-kata-9edb9d1d2e2ce1c9073f`, but now used
+  `finite-agent-runtime-2026-09-02.2`; its live `/contact` was ready and
+  returned the unchanged Agent Principal;
+- the SQL fence and synthetic fixture were refreshed from `.1` to `.2`.
+  Synthetic stage/replay/rollback/finalize passed, then the same lifecycle
+  passed against the fresh production dump below;
+- the corrected Core handoff streams the local reviewed SQL into remote
+  `psql` over stdin. The `postgres` process never opens a root-only remote SQL
+  path, eliminating the first live attempt's failure mode.
+
+The new coordinated Recovery Snapshot is
+`/data/recovery-snapshots/hosted-web-chat/20260904T022527Z`. Its sealed v3
+manifest and snapshot-health unit passed, the encrypted off-host Borg job
+completed successfully at `2026-09-04T02:30:20Z`, and all fenced services
+returned active. SHA-256 evidence:
+
+- manifest: `3bd3eee691b69de51622f217e0c1688acdbab50c9abf16e2b7cc6b788409da5c`
+- Core dump: `90e79e0048876b778cf99e654bda06b6a30b9e8be09cba67d5f1e76abfa4a1c6`
+- Finite Identity database: `b84f041978d69a353e23f1c5109d72a74e318a894d655032f834e7bb8f490fb5`
+- Room server: `b6b4ed7c53c027fe0f3224c18c7542df7b31710c528a7340c381688f1b541b4a`
+- Austin hosted store: `d1c1b5612148a8f8bd397f56f8add2c35e17c2adabaf6224ebc30f2f4f3ed682`
+- FiKnight hosted store: `01dc6f4093e9e499b5bc68939df79cc2a2232ea411237a3887bd0338d26c6135`
+- FiKnight sealed binding: `144a40ca67af479750b51c3512443fbca52ca270a5628cc992b40d0311f11d60`
+
+One separate pre-existing acceptance blocker was discovered. The direct
+`identity.finite.vip` NIP-05 route is healthy and reports `fiknight` unbound,
+but the canonical `finite.vip` apex route returns HTTP 502. Read-only evidence
+from clawland proved its checked-in and live selectorless Endpoint still names
+the retired `64.34.82.77`; that address is unreachable, while the replacement
+app-plane address `64.34.80.19` returns byte-identical Authority output when
+called from clawland with the pinned TLS server name. Repair this exact
+Endpoint under a separate recorded mutation and require both public origins to
+pass before binding the durable FiKnight NIP-05.
+
 ### Writer-fenced local-to-production procedure
 
 1. Stop the dashboard, Core, Hosted Device, and Room server. Confirm no process
@@ -161,7 +216,8 @@ deployed.
 - Project: `project_b7e3a5beaf06095c6465`
 - Runtime: `runtime_d8ceb9b4f4e9bacb85b0`
 - machine: `finite-kata-9edb9d1d2e2ce1c9073f` on `finite-lat-3`
-- Runtime artifact: `finite-agent-runtime-2026-09-02.1`
+- Runtime artifact: `finite-agent-runtime-2026-09-02.2` (refreshed from the
+  paused attempt's `.1` fence on 2026-09-03)
 - state schema: `runtime-state-v1`
 - Agent Principal: `npub1r83u6s59v5956l5gd6my6vjqk9x0rkjef78ntchs494m5y6tq4dqychqrv`
 - source account: `austin@finite.vip`

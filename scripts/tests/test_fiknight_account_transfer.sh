@@ -156,7 +156,7 @@ INSERT INTO projects VALUES (
 INSERT INTO agent_runtimes VALUES (
   'runtime_d8ceb9b4f4e9bacb85b0', 'project_b7e3a5beaf06095c6465',
   'finite-lat-3', 'finite-kata-9edb9d1d2e2ce1c9073f',
-  'finite-agent-runtime-2026-09-02.1', 'runtime-state-v1'
+  'finite-agent-runtime-2026-09-02.2', 'runtime-state-v1'
 );
 INSERT INTO project_runtime_links VALUES (
   'link-fixture', 'project_b7e3a5beaf06095c6465',
