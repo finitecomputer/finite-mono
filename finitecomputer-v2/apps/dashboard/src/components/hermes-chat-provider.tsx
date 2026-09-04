@@ -44,13 +44,18 @@ import type {
 } from "@/lib/hosted-web-device";
 import type { HostedChatRetryAttempt } from "@/lib/hosted-web-chat-retry";
 import type { PendingChatRefreshTarget } from "@/lib/hosted-web-chat-refresh";
+import { HOME_TOPIC_ID } from "@/lib/hosted-web-chat-topics";
 
 const GATEWAY_WS_URL =
   process.env.NEXT_PUBLIC_HERMES_GATEWAY_WS_URL || "ws://127.0.0.1:9120/api/ws";
 const GATEWAY_TOKEN = process.env.NEXT_PUBLIC_HERMES_GATEWAY_TOKEN || "";
 
 const ROOM_ID = "hermes";
-const RECENTS_TOPIC_ID = "recents";
+// The flat bucket for sessions no project claims IS the Home topic: the
+// sidebar's New-chat affordances key off HOME_TOPIC_ID, and a fresh gateway
+// (no projects yet) must still offer New chat. New chats sent from Home get
+// no explicit cwd; hermes categorizes them on the first prompt.
+const RECENTS_TOPIC_ID = HOME_TOPIC_ID;
 const MY_ACCOUNT = "me";
 const AGENT_ACCOUNT = "hermes-agent";
 const AGENT_NAME = "Hermes";
@@ -257,13 +262,13 @@ export function HermesChatProvider({ children }: { children: ReactNode }) {
       } else if (type === "reasoning.delta") {
         if (chat.streaming) {
           chat.streaming.reasoning += String(event.payload?.text ?? "");
-          replaceStreamingMessage(chatId, chat.streaming);
+          replaceStreamingMessage(chatId, chat.topicId, chat.streaming);
           publish();
         }
       } else if (type === "message.delta") {
         if (chat.streaming) {
           chat.streaming.answer += String(event.payload?.text ?? "");
-          replaceStreamingMessage(chatId, chat.streaming);
+          replaceStreamingMessage(chatId, chat.topicId, chat.streaming);
           publish();
         }
       } else if (type === "message.complete") {
@@ -272,7 +277,7 @@ export function HermesChatProvider({ children }: { children: ReactNode }) {
         typingRef.current = false;
         const messages = transcriptRef.current.get(chatId) ?? [];
         const streamingIndex = messages.findIndex((message) => message.status === "running");
-        const finalMessage = gatewayMessage("assistant", text, chatId, false);
+        const finalMessage = gatewayMessage("assistant", text, chatId, chat.topicId, false);
         if (streamingIndex >= 0) messages.splice(streamingIndex, 1, finalMessage);
         else messages.push(finalMessage);
         transcriptRef.current.set(chatId, messages);
@@ -374,6 +379,7 @@ export function HermesChatProvider({ children }: { children: ReactNode }) {
           chatId: chat_id,
         };
         const entry = chatsRef.current.get(chat_id);
+        if (entry) entry.topicId = action.OpenChat.topic_id;
         if (entry && !chat_id.startsWith("draft:") && !transcriptRef.current.has(chat_id)) {
           const resumed = (await call("session.resume", { session_id: chat_id })) as {
             session_id: string;
@@ -383,7 +389,7 @@ export function HermesChatProvider({ children }: { children: ReactNode }) {
           transcriptRef.current.set(
             chat_id,
             (resumed?.messages ?? []).map((message) =>
-              gatewayMessage(message.role, message.text, chat_id, true)
+              gatewayMessage(message.role, message.text, chat_id, entry.topicId, true)
             )
           );
         }
@@ -430,10 +436,56 @@ export function HermesChatProvider({ children }: { children: ReactNode }) {
         return currentState();
       }
 
-      if ("SendMessage" in action) {
-        const { text } = action.SendMessage;
-        const chatId = selectedRef.current.chatId;
-        const entry = chatId ? chatsRef.current.get(chatId) : null;
+      // The real composer sends SendChatMessage when a chat is selected,
+      // SendTopicMessage when only a topic is, and SendMessage for bare
+      // rooms — all three land on prompt.submit here.
+      if ("SendChatMessage" in action || "SendTopicMessage" in action || "SendMessage" in action) {
+        const chatScoped = "SendChatMessage" in action ? action.SendChatMessage : null;
+        const text =
+          chatScoped?.text
+          ?? ("SendTopicMessage" in action
+            ? action.SendTopicMessage.text
+            : "SendMessage" in action
+              ? action.SendMessage.text
+              : "");
+        const explicitChatId = chatScoped?.chat_id ?? null;
+        const chatId = explicitChatId ?? selectedRef.current.chatId;
+        let entry = chatId ? chatsRef.current.get(chatId) ?? null : null;
+        const topicId = chatScoped?.topic_id
+          ?? ("SendTopicMessage" in action ? action.SendTopicMessage.topic_id : null);
+        if (!entry && (chatId || topicId)) {
+          // Topic-only send: open a fresh draft inside that topic first.
+          const project = topicId
+            ? projectsRef.current.find(
+                (candidate) => topicIdForProject(candidate) === topicId
+              )
+            : undefined;
+          const created = (await call("session.create", {
+            source: "gateway",
+            cols: 100,
+            ...(project?.path ? { cwd: project.path } : {}),
+          })) as { session_id: string } | null;
+          const draftId = `draft:${created?.session_id ?? crypto.randomUUID()}`;
+          entry = {
+            summary: {
+              chat_id: draftId,
+              title: "New chat",
+              last_message_preview: "",
+              unread_count: 0,
+              message_count: 0,
+              started_seq: 0,
+              updated_seq: seqRef.current++,
+              active: true,
+              archived: false,
+            },
+            handleId: created?.session_id ?? "",
+            topicId: topicId ?? RECENTS_TOPIC_ID,
+            streaming: null,
+          };
+          chatsRef.current.set(draftId, entry);
+          transcriptRef.current.set(draftId, []);
+          selectedRef.current = { topicId: entry.topicId, chatId: draftId };
+        }
         if (!entry || !chatId) throw new Error("no chat selected");
         let handle = entry.handleId;
         if (!handle) {
@@ -445,8 +497,11 @@ export function HermesChatProvider({ children }: { children: ReactNode }) {
           entry.handleId = handle;
         }
         const messages = transcriptRef.current.get(chatId) ?? [];
-        messages.push(gatewayMessage("user", text, chatId, true));
+        messages.push(gatewayMessage("user", text, chatId, entry.topicId, true));
         transcriptRef.current.set(chatId, messages);
+        // Publish the optimistic user message BEFORE awaiting the turn so a
+        // slow gateway can never freeze the composer.
+        publish();
         await call("prompt.submit", { session_id: handle, text });
         entry.streaming = { reasoning: "", answer: "" };
         typingRef.current = true;
@@ -538,10 +593,14 @@ export function HermesChatProvider({ children }: { children: ReactNode }) {
     );
   }
 
-  function replaceStreamingMessage(chatId: string, streaming: { reasoning: string; answer: string }) {
+  function replaceStreamingMessage(
+    chatId: string,
+    topicId: string,
+    streaming: { reasoning: string; answer: string }
+  ) {
     const messages = transcriptRef.current.get(chatId) ?? [];
     const text = streaming.answer || streaming.reasoning || "…";
-    const running = gatewayMessage("assistant", text, chatId, false, "running");
+    const running = gatewayMessage("assistant", text, chatId, topicId, false, "running");
     const index = messages.findIndex((message) => message.status === "running");
     if (index >= 0) messages.splice(index, 1, running);
     else messages.push(running);
@@ -607,8 +666,8 @@ function topicsFrom(
   topics.push({
     room_id: ROOM_ID,
     topic_id: RECENTS_TOPIC_ID,
-    title: "Recents",
-    description: "Sessions no project claims",
+    title: "Home",
+    description: "Sessions no project claims yet; hermes files them on first prompt",
     last_message_preview: recentsChats[0]?.last_message_preview ?? "",
     unread_count: 0,
     message_count: recentsChats.length,
@@ -625,6 +684,7 @@ function gatewayMessage(
   role: string,
   text: string,
   chatId: string,
+  topicId: string,
   historical: boolean,
   status: "running" | "complete" = "complete"
 ): HostedChatMessage {
@@ -634,7 +694,9 @@ function gatewayMessage(
     room_id: ROOM_ID,
     seq: 0,
     message_id: `${chatId}:${role}:${seconds}:${Math.random().toString(36).slice(2, 8)}`,
-    conversation_id: null,
+    // The real transcript renders only messages whose conversation_id
+    // matches the selected topic's id.
+    conversation_id: topicId,
     chat_id: chatId,
     sender_account_id: mine ? MY_ACCOUNT : AGENT_ACCOUNT,
     sender_device_id: mine ? "web-gateway" : "gateway",

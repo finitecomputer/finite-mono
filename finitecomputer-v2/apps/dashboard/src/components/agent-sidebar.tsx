@@ -112,16 +112,22 @@ export function AgentSidebar({
       const navigatesAfterSuccess =
         "CreateTopic" in action || "StartTopicChatIntent" in action;
       const preservesMobileSidebar = "CreateTopic" in action;
+      // Stay on whichever chat surface is active: the finitechat surface
+      // (/chat) or the spike's hermes-gateway surface (/gateway-chat).
+      const onChatSurface = pathname.endsWith("/chat") || pathname.endsWith("/gateway-chat");
+      const chatPath = `/dashboard/machines/${encodeURIComponent(machineId)}${
+        pathname.endsWith("/gateway-chat") ? "/gateway-chat" : "/chat"
+      }`;
       const pending = dispatch(action);
-      if (canNavigateImmediately && !pathname.endsWith("/chat")) {
-        router.push(`/dashboard/machines/${encodeURIComponent(machineId)}/chat`);
+      if (canNavigateImmediately && !onChatSurface) {
+        router.push(chatPath);
       }
       if (canNavigateImmediately) onMobileOpenChange(false);
       const next = await pending;
       setActionError(null);
       if (navigatesAfterSuccess) {
-        if (!pathname.endsWith("/chat")) {
-          router.push(`/dashboard/machines/${encodeURIComponent(machineId)}/chat`);
+        if (!onChatSurface) {
+          router.push(chatPath);
         }
         if (!preservesMobileSidebar) onMobileOpenChange(false);
       }
