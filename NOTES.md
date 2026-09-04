@@ -91,7 +91,54 @@ the next full `up` after `inference-key` skips straight to booting.
 One-time per worktree: `direnv allow .` at the worktree root, or
 `scripts/with-dev-env` silently no-ops.
 
-## Integration point for the swap
+## Parity probe: side-by-side sidebar (landed 2026-09-04)
+
+The sidebar now renders both transports next to each other:
+
+    TOPICS                ← finitechat hosted-device (fixture data)
+      General / Design review
+    HERMES · API/WS       ← tui_gateway session.list over /api/ws
+      Friendly greeting   (real hermes session history)
+
+Pieces:
+
+- `src/lib/hermes-gateway.ts` — one-shot JSON-RPC over a short-lived
+  WebSocket (Node global WebSocket; no new deps). `hermesSessionsTopic()`
+  folds `session.list` into `HostedChatTopic`/`HostedChatSummary` so the
+  renderer shape is identical across transports.
+- `src/app/api/chat/gateway/sessions/route.ts` — GET returns the topic JSON
+  (502 + readable error when the gateway is down or the token is wrong).
+- `components/agent-sidebar.tsx` — `HermesGatewaySection`: read-only rows
+  styled with the same `finite-chat__*` classes, reload button, error line.
+- `scripts/web-design-fixture.ts` — allowlists HERMES_GATEWAY_WS_URL /
+  HERMES_GATEWAY_TOKEN through to the dashboard child.
+
+Boot: `HERMES_GATEWAY_TOKEN=$(cat .local-state/hermes-session-token) \
+../../scripts/with-dev-env pnpm run design` from the dashboard dir (token
+also rides ?token= like hermes' own web UI).
+
+### Feature-by-feature backlog (existing chat behavior → gateway equivalent)
+
+| Existing (finitechat) | Gateway protocol mapping | Status |
+|---|---|---|
+| Chat list | `session.list` | ✅ read-only |
+| Open chat → transcript | `session.history` (rows by `row_id`) | next |
+| Send message | `prompt.submit` | — |
+| Streaming reply | `message.delta` (coalesced ~30fps) + `message.complete` | needs live subscription |
+| New chat | `session.create` (+ `session.activate`) | — |
+| Rename chat | `session.title` | — |
+| Archive | no direct analogue — closest is `session.close` | gap to name |
+| Unread counts | no analogue (server-side read state is finitechat MLS) | gap to name |
+| Rewind/edit | `prompt.submit` + `truncate_before_row_id` | — |
+| Approvals | `approval.request` / `approval.respond` events | — |
+| Topics/rooms | no first-class analogue — gateway is flat sessions | structural gap: decide mapping (one topic = N sessions? hermes projects?) |
+
+Hermes pin: v2026.8.3. Checked v2026.8.3..v2026.8.31 — gateway changes are
+fixes (compute-host interrupt forwarding, clarify relay, per-profile PID
+isolation) and wire-neutral refactors; nothing that eases ws integration.
+No bump needed for the spike.
+
+## Integration point for the deeper swap
 
 `src/lib/hosted-web-device.ts` is the seam: everything above it
 (hosted-web-chat.ts orchestration + API routes) is finitechat-specific

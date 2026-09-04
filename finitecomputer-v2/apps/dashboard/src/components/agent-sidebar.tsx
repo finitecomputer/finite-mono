@@ -1,7 +1,7 @@
 "use client";
 
 import type { CSSProperties, FormEvent, ReactNode } from "react";
-import { useCallback, useMemo, useState, useSyncExternalStore } from "react";
+import { useCallback, useEffect, useMemo, useState, useSyncExternalStore } from "react";
 import { usePathname, useRouter } from "next/navigation";
 import {
   ArchiveIcon,
@@ -406,6 +406,7 @@ export function AgentSidebar({
               </div>
             );
           })}
+          <HermesGatewaySection />
         </nav>
 
         <button
@@ -557,6 +558,94 @@ const TOPIC_COLORS = [
   ["#9f1239", "#ffe4e6"],
   ["#0f766e", "#ccfbf1"],
 ] as const;
+
+/**
+ * Spike: the hermes half of the side-by-side parity probe. Read-only view of
+ * tui_gateway sessions over /api/ws, rendered with the same classes as the
+ * finitechat topics above so the two transports can be compared visually.
+ * Opening/renaming/archiving arrive feature-by-feature against this list.
+ */
+function HermesGatewaySection() {
+  const [state, setState] = useState<{
+    chats: { chat_id: string; title: string; last_message_preview: string; message_count: number }[];
+    error: null | string;
+    loading: boolean;
+  }>({ chats: [], error: null, loading: true });
+
+  const reload = useCallback(() => {
+    setState((current) => ({ ...current, loading: true, error: null }));
+    fetch("/api/chat/gateway/sessions", { cache: "no-store" })
+      .then(async (response) => {
+        const body = (await response.json()) as {
+          topic?: { chats: typeof state.chats };
+          error?: string;
+        };
+        if (!response.ok || !body.topic) {
+          throw new Error(body.error ?? `gateway route returned ${response.status}`);
+        }
+        setState({ chats: body.topic.chats, error: null, loading: false });
+      })
+      .catch((caught: unknown) => {
+        setState({
+          chats: [],
+          error: caught instanceof Error ? caught.message : "hermes gateway is unreachable",
+          loading: false,
+        });
+      });
+  }, []);
+
+  useEffect(() => {
+    reload();
+  }, [reload]);
+
+  return (
+    <>
+      <div className="finite-chat__sidebar-section-row">
+        <span className="finite-chat__sidebar-section">Hermes · api/ws</span>
+        <button
+          type="button"
+          className="ocean-icon-button"
+          aria-label="Reload hermes sessions"
+          title="Reload hermes sessions"
+          onClick={reload}
+        >
+          <RotateCcwIcon className="size-3.5" />
+        </button>
+      </div>
+      {state.loading ? (
+        <p className="finite-agent-sidebar__status">Loading hermes sessions…</p>
+      ) : null}
+      {state.error ? (
+        <div className="finite-agent-sidebar__error">
+          <span>{state.error}</span>
+        </div>
+      ) : null}
+      {!state.loading && !state.error ? (
+        <div className="finite-chat__folder">
+          <div className="finite-chat__folder-body">
+            {state.chats.map((chat) => (
+              <div
+                className="finite-chat__thread-row"
+                key={chat.chat_id}
+                title={`${chat.last_message_preview}\n${chat.message_count} messages · via tui_gateway session.list`}
+              >
+                <div className="finite-chat__thread-open">
+                  <span className="finite-chat__thread-indicator" aria-hidden />
+                  <span className="finite-chat__thread-main">
+                    <span className="finite-chat__thread-title">{chat.title}</span>
+                  </span>
+                </div>
+              </div>
+            ))}
+            {state.chats.length === 0 ? (
+              <p className="finite-agent-sidebar__status">No hermes sessions yet.</p>
+            ) : null}
+          </div>
+        </div>
+      ) : null}
+    </>
+  );
+}
 
 function topicColorStyle(title: string): CSSProperties {
   let hash = 0;
