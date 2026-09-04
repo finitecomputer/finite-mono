@@ -162,15 +162,26 @@ returned active. SHA-256 evidence:
 - FiKnight hosted store: `01dc6f4093e9e499b5bc68939df79cc2a2232ea411237a3887bd0338d26c6135`
 - FiKnight sealed binding: `144a40ca67af479750b51c3512443fbca52ca270a5628cc992b40d0311f11d60`
 
-One separate pre-existing acceptance blocker was discovered. The direct
-`identity.finite.vip` NIP-05 route is healthy and reports `fiknight` unbound,
-but the canonical `finite.vip` apex route returns HTTP 502. Read-only evidence
-from clawland proved its checked-in and live selectorless Endpoint still names
-the retired `64.34.82.77`; that address is unreachable, while the replacement
-app-plane address `64.34.80.19` returns byte-identical Authority output when
-called from clawland with the pinned TLS server name. Repair this exact
-Endpoint under a separate recorded mutation and require both public origins to
-pass before binding the durable FiKnight NIP-05.
+One separate pre-existing acceptance blocker was discovered and repaired under
+its own rollback boundary. The direct `identity.finite.vip` NIP-05 route was
+healthy and reported `fiknight` unbound, but the canonical `finite.vip` apex
+route returned HTTP 502. Read-only evidence from clawland proved its
+selectorless Endpoint named the retired `64.34.82.77`; that address was
+unreachable, while the replacement app-plane address `64.34.80.19` returned
+byte-identical Authority output when called from clawland with the pinned TLS
+server name.
+
+Austin authorized this separate online repair on 2026-09-03. Commit `940e1420`
+changed only the checked-in Endpoint from `64.34.82.77` to `64.34.80.19`;
+server-side dry-run passed and `kubectl diff` showed only that IP change. The
+live apply preserved Endpoint UID `99edd2cb-23ad-4cbf-9210-667d84d1667b` and
+advanced it to resource version `37486600`. Both public origins then returned
+HTTP 200 and byte-identical empty `names` objects for an unbound sentinel and
+for `fiknight`; the durable FiKnight name remains unbound. The post-repair
+`finite-status` at `2026-09-04T02:41:54Z` retained SHA-256
+`3b6df628f59b62ebfef275993eeb8809fedd5d9eecff8baaec5d781f6e7c952e` and
+showed Chat, host health, recovery, and rollout state green, with only the
+accepted stale `Smoke Studio` row keeping aggregate fleet convergence red.
 
 ### Writer-fenced local-to-production procedure
 
