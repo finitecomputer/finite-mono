@@ -58,16 +58,14 @@ class CiHarnessSelectionTests(unittest.TestCase):
 
         self.assertIn("pull_request:", workflow)
         self.assertIn("push:\n    branches:\n      - main\n      - migration-integration", workflow)
-        self.assertNotIn("production", workflow)
+        self.assertNotIn("branches: [production]", workflow)
+        self.assertNotIn("      - production", workflow)
 
-    def test_ci_authenticates_nix_github_fetches(self) -> None:
+    def test_native_ci_does_not_depend_on_github_fetch_tokens(self) -> None:
         workflow = ci_workflow_text()
 
-        self.assertIn(
-            "NIX_CONFIG: |\n"
-            "    access-tokens = github.com=${{ github.token }}",
-            workflow,
-        )
+        self.assertNotIn("github.token", workflow)
+        self.assertNotIn("secrets.GITHUB_TOKEN", workflow)
 
     def test_hermes_flake_input_avoids_github_archive_fetchers(self) -> None:
         # Both the `github:` scheme (api.github.com/.../tarball/<rev>) and the

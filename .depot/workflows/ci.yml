@@ -14,8 +14,6 @@ permissions:
   contents: read
 env:
   CACHIX_CACHE_NAME: finite
-  NIX_CONFIG: |
-    access-tokens = github.com=${{ github.token }}
   # Depot CI sandboxes do not populate USER. Actions run as the unprivileged
   # runner account, so Cachix must target that account's Nix configuration.
   USER: runner
@@ -225,7 +223,7 @@ jobs:
             "$HERMES_AGENT_NIX_ATTR" | tee "$HERMES_AGENT_RUNTIME_OUTPUT"
           nix build --no-link --print-build-logs --print-out-paths --option builders '' \
             "$HERMES_AGENT_PYTHON_NIX_ATTR" | tee "$HERMES_AGENT_PYTHON_OUTPUT"
-          legacy_hermes_expr="(builtins.getFlake \"github:NousResearch/hermes-agent/$LEGACY_HERMES_AGENT_REV\").packages.x86_64-linux.default.hermesVenv"
+          legacy_hermes_expr="(builtins.getFlake \"git+https://github.com/NousResearch/hermes-agent?rev=$LEGACY_HERMES_AGENT_REV&shallow=1\").packages.x86_64-linux.default.hermesVenv"
           nix build --no-link --print-build-logs --print-out-paths --option builders '' \
             --expr "$legacy_hermes_expr" | tee "$LEGACY_HERMES_AGENT_PYTHON_OUTPUT"
 
