@@ -1,6 +1,6 @@
-# Deploying finite-brain on lat1
+# Deploying finite-brain on lat2
 
-Finite Brain runs as `finite-brain-app.service` on finite-lat-1, bound only to
+Finite Brain runs as `finite-brain-app.service` on finite-lat-2, bound only to
 `127.0.0.1:3015`. Caddy exposes its canonical signing/API origin at
 `https://brain.finite.computer`. The dashboard also proxies the embedded
 Product Client under `https://finite.computer/client`, where WorkOS protects
@@ -20,32 +20,33 @@ does not replace the stop-the-world Recovery Snapshot.
 
 - The exact mono commit is pushed and its production NixOS configuration
   evaluates successfully.
-- The reviewed revision has a successful `Lat1 NixOS Closure` workflow artifact
-  and the deploy operator can SSH to `root@64.34.82.77`. Do not evaluate or
+- The reviewed revision has a successful `Lat2 NixOS Closure` workflow artifact
+  and the deploy operator can SSH to `root@64.34.80.19`. Do not evaluate or
   build the production closure on the Mac, clawland, lat1, or lat2.
 - `finite.computer` dashboard auth is healthy and `brain.finite.computer`
-  resolves to lat1.
+  resolves to lat2.
 - A consistent SQLite backup has been copied from the current source and its
   size plus SHA-256 recorded outside the database contents.
 - The previous NixOS generation and source Brain service remain available for
-  rollback until the lat1 Product Client and `fbrain` proofs pass.
+  rollback until the app-plane Product Client and `fbrain` proofs pass.
 
-## First migration from smoke
+## Historical first migration from smoke
 
 1. On smoke, make a SQLite online backup (or briefly stop the service if the
    installed SQLite lacks `.backup`), then restart it immediately. Do not move
    the live file while the service is writing.
-2. Copy the backup to a root-only staging path on lat1 and record its SHA-256.
+2. Copy the backup to a root-only staging path on the destination app-plane
+   host and record its SHA-256.
 3. Deploy the pinned mono revision. Let systemd create the DynamicUser state
    directory and an empty database if necessary.
-4. Stop `finite-brain-app` on lat1, keep a rollback copy of any destination
-   database, replace it with the staged backup, match the destination file's
-   owner/mode, and start the service.
+4. Stop `finite-brain-app`, keep a rollback copy of any destination database,
+   replace it with the staged backup, match the destination file's owner/mode,
+   and start the service.
 5. Leave smoke unchanged until verification completes.
 
 ## Normal deploy
 
-Build and download the reviewed revision's `lat1-nixos-closure-REV` artifact
+Build and download the reviewed revision's `lat2-nixos-closure-REV` artifact
 with the shared procedure in [deploy-core.md](deploy-core.md#steps). `REV`
 must be exactly 40 lowercase hex characters on `origin/main`, not a tag,
 branch, abbreviation, or dirty tree.
@@ -53,13 +54,16 @@ branch, abbreviation, or dirty tree.
 Deploy that artifact with:
 
 ```sh
-just deploy-lat1-closure "$ARTIFACT_DIR"
+just deploy-lat2-closure "$ARTIFACT_DIR" --prepare
+scripts/finite-status
+just deploy-lat2-closure "$ARTIFACT_DIR" --activate
 ```
 
 The script validates the manifest, copies the prebuilt file binary cache to
-lat1, activates it in a transient systemd unit, and proves
-`/run/current-system` equals the artifact's exact `SYSTEM` path. It does not
-evaluate or build on lat1 or lat2. Brain is built with the rest of the
+lat2, dry-activates during `--prepare`, activates only on the explicit
+`--activate` boundary, and proves `/run/current-system` equals the artifact's
+exact `SYSTEM` path. It does not evaluate or build on lat1 or lat2. Brain is
+built with the rest of the
 monorepo from that revision; no source tarball or legacy-repo deploy is part of
 the path.
 
@@ -67,8 +71,8 @@ the path.
 
 ```sh
 set -euo pipefail
-ssh root@64.34.82.77 systemctl is-active finite-brain-app
-ssh root@64.34.82.77 curl -fsS http://127.0.0.1:3015/health
+ssh root@64.34.80.19 systemctl is-active finite-brain-app
+ssh root@64.34.80.19 curl -fsS http://127.0.0.1:3015/health
 curl -fsS https://brain.finite.computer/health
 curl -fsS -o /dev/null -w '%{http_code}\n' https://brain.finite.computer/client
 curl -fsS -o /dev/null -w '%{http_code}\n' https://finite.computer/client
@@ -94,10 +98,10 @@ then revoke both disposable invitations after verification.
 
 ## Rollback
 
-1. Switch lat1 to the previous NixOS generation and record the resulting
+1. Switch lat2 to the previous NixOS generation and record the resulting
    `/run/current-system`; for a deliberate rollback, build/download/deploy the
-   previous known-good rev's exact closure artifact and verify that path.
-2. If Brain data was written on lat1, preserve that database before restoring
+   previous known-good rev's exact lat2 closure artifact and verify that path.
+2. If Brain data was written on lat2, preserve that database before restoring
    the pre-migration rollback copy; do not discard either side.
 3. Keep or restore the smoke service as the temporary endpoint while deciding
    how to reconcile post-cutover writes.

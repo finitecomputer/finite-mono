@@ -102,7 +102,6 @@ REMAINING_NIX_CHECK_PATHS = {
     "scripts/check_finite_private_deepseek_candidate.py",
     "scripts/check_lat1_secret_bootstrap.py",
     "scripts/ci/select-harnesses",
-    "scripts/production_deploy.py",
     "scripts/build-lat1-nixos-closure-artifact",
     "scripts/deploy-lat1-closure-cache",
     "scripts/publish-lat1-nixos-cachix-closure",
@@ -129,10 +128,6 @@ REMAINING_NIX_CHECK_PATHS = {
     "infra/scripts/test-litestream-restore",
     "infra/nixos/hosts/finite-lat-1/secret-bootstrap-contract.json",
     "scripts/check_runbook_facts_contract.py",
-    "scripts/production_cd_setup.py",
-    "scripts/verify-production-cd-setup",
-    "scripts/tests/test_production_cd_setup.py",
-    "scripts/tests/test_production_deploy.py",
 }
 
 INFRA_JUSTFILE_PATH = "infra/justfile"

@@ -475,10 +475,8 @@ jobs:
         run: nix develop --command just lat1-secret-bootstrap-contract
       - name: Runbook facts contract
         run: nix develop --command just runbook-facts-contract
-      - name: Production deploy contract
-        run: nix develop --command just production-deploy-contract
       - name: Evaluate production NixOS configuration
-        run: nix eval .#nixosConfigurations.finite-lat-1.config.system.build.toplevel.drvPath
+        run: nix eval .#nixosConfigurations.finite-lat-2.config.system.build.toplevel.drvPath
 
   # Landing gate: builds the 15 scoped service packages through crane and
   # repopulates Cachix. select-harnesses defers this to landing events

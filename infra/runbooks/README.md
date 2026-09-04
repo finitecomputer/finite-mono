@@ -12,20 +12,14 @@ policy).
 Every runbook states PRECONDITIONS, STEPS, VERIFY, ROLLBACK. Steps that have
 not been exercised yet are marked `TODO:` with what must be learned.
 
-> **Topology as of the 2026-08-28 emergency cutover**
+> **Topology after the 2026-08-29 emergency cutover**
 > ([lat2-replacement-cutover.md](lat2-replacement-cutover.md)): finite-lat-1
-> is DOWN (thermal); finite-lat-2 is being reinstalled as the replacement
-> single app server (ADR 0007) via the `Lat2 NixOS Closure` artifact
-> workflow. Until that cutover's Gate E completes, the product is in full
-> outage; lat3 is up but its runner path is dead with lat1. Production Nix
-> closures are built by CI artifact workflows (`Lat1`, `Lat3`, `Lat2 NixOS
-> Closure`); Docker/image CI uses Depot; smoke is the Brain rollback source
-> during migration; clawland is legacy.
-> **The topology runbooks below
-> (deploy-core / deploy-sites / deploy-finitechat-server /
-> postgres-backup-restore / break-glass) still describe the lat1
-> deployment and are superseded for the lat2 cutover window by
-> [lat2-replacement-cutover.md](lat2-replacement-cutover.md).**
+> is retired after thermal failure; finite-lat-2 is the replacement single app
+> server (ADR 0007), deployed through the `Lat2 NixOS Closure` artifact
+> workflow. Production Nix closures are built by CI artifact workflows; Docker
+> and image CI uses Depot; finite-lat-3 and finite-lat-4 are the active Kata
+> Runner hosts; smoke is the Brain rollback source only when named explicitly;
+> clawland is legacy.
 
 ## Index
 
@@ -33,28 +27,27 @@ not been exercised yet are marked `TODO:` with what must be learned.
 |---|---|
 | [lat1-nixos-reinstall.md](lat1-nixos-reinstall.md) | **Historical 2026-07-09 lat1 cutover evidence** — destructive reuse is paused; retain its MD / NIC-by-MAC / ACME findings while the finite-lat-3 plan produces a replacement |
 | [release-cli.md](release-cli.md) | Cutting finitechat / fsite / fbrain releases (component tags, rolling aliases, field-install verify) |
-| [postgres-backup-restore.md](postgres-backup-restore.md) | **The restore drill** for lat1 native Postgres — highest-priority runbook in this tree |
+| [postgres-backup-restore.md](postgres-backup-restore.md) | **The restore drill** for app-plane native Postgres — highest-priority runbook in this tree |
 | [hosted-web-chat-recovery.md](hosted-web-chat-recovery.md) | Coordinated Hosted Web Device + Finite Chat + SaaS Core snapshot and empty-target drill |
 | [litestream-chat-replication.md](litestream-chat-replication.md) | Continuous chat + Brain SQLite replication to Latitude object storage + restore drill (DR-only) |
 | [chats-appear-missing.md](chats-appear-missing.md) | Read-only-first continuity incident diagnosis; never creates replacement state |
 | [platform-rollout.md](platform-rollout.md) | **The manual cross-component wave** — ordering (runners before Core), gates, layered verify ritual, and lifecycle-rollback sequencing across the deploy runbooks below |
-| [production-cd.md](production-cd.md) | Protected GitHub Actions production deploy bootstrap, setup verification, enablement, and first deploy flow |
-| [deploy-core.md](deploy-core.md) | finite-saas-core + dashboard on lat1 (NixOS: systemd core + podman dashboard, `nixos-rebuild`) |
-| [deploy-sites.md](deploy-sites.md) | finitesitesd on lat1 (NixOS `nixos-rebuild`; flags the KATA / `--app-runner none` gap) |
-| [deploy-finitechat-server.md](deploy-finitechat-server.md) | Chat server on lat1 (:8788) + the single-writer doctrine |
-| [deploy-brain.md](deploy-brain.md) | finite-brain on lat1 at `brain.finite.computer`, with the dashboard-embedded WorkOS client; SQLite migration and rollback |
+| [deploy-core.md](deploy-core.md) | finite-saas-core + dashboard on lat2 (NixOS: systemd core + podman dashboard, `Lat2 NixOS Closure` prepare/activate) |
+| [deploy-sites.md](deploy-sites.md) | finitesitesd on lat2 (NixOS closure prepare/activate; stateful App Outputs through the Kata app-runner profile) |
+| [deploy-finitechat-server.md](deploy-finitechat-server.md) | Chat server on lat2 (:8788) + the single-writer doctrine |
+| [deploy-brain.md](deploy-brain.md) | finite-brain on lat2 at `brain.finite.computer`, with the dashboard-embedded WorkOS client; SQLite migration and rollback |
 | [decommission-lat2.md](decommission-lat2.md) | **Superseded for the emergency** — legacy credential rotation and runner-removal inventory only; the wipe is Gate A of the cutover |
 | [lat2-replacement-cutover.md](lat2-replacement-cutover.md) | **THE emergency runbook** — wipe, storage capture, artifact-driven install, lat1 state import, go-live, and DNS cutover for finite-lat-2 as the replacement app server (ADR 0007) |
 | [lat4-nixos-runner-install.md](lat4-nixos-runner-install.md) | **ADR 0007 model, third Runner host** — pre-wipe verification, CI-artifact bare-metal install, drained bring-up, and the admission decision for finite-lat-4 |
 | [stripe-billing.md](stripe-billing.md) | Live Stripe readiness, webhook/Core reconciliation, dunning, cancellation/refund, and secret rotation |
-| [runtime-image.md](runtime-image.md) | Building and promoting the agent runtime image for the Kata runner on lat1 |
+| [runtime-image.md](runtime-image.md) | Building and promoting the agent runtime image for the Kata runners on lat3/lat4 |
 | [runner-finite-private-route.md](runner-finite-private-route.md) | Guarded removal of stale host-local Finite Private route/model overrides on the active Kata Runners |
 | [finite-private-routing-migration.md](finite-private-routing-migration.md) | Staged migration from the historical Kimi container/hostname to the stable `finite-private` identity without breaking issued Runtime readers |
 | [runtime-cold-relocation.md](runtime-cold-relocation.md) | Operator-only stopped Kata Runtime move between exact hosts, with state-manifest and Agent Principal fencing |
 | [legacy-hermes-box1-to-lat3.md](legacy-hermes-box1-to-lat3.md) | Versioned, identity-fenced migration of one box1 Hermes bot into a new lat3 Runtime; Austin is the first canary |
 | [finite-private-limiter-mono-switch.md](finite-private-limiter-mono-switch.md) | Planned-downtime switch from the legacy limiter image to a mono-built limiter plus upstream GLM 5.2 v0.0.17 |
 | [phala-confidential-runner.md](phala-confidential-runner.md) | Dark, separately fenced Phala worker and API-only preflight/lifecycle/recovery/inventory/cost procedures; no CLI or delete path |
-| [break-glass.md](break-glass.md) | Getting on each box, logs, restarts (lat1 NixOS, lat2 decommission target, smoke rollback source, clawland legacy) |
+| [break-glass.md](break-glass.md) | Getting on each box, logs, restarts (lat2 app plane, lat3/lat4 runners, retired lat1, smoke rollback source, clawland legacy) |
 
 ## Release checklist discipline
 
@@ -67,7 +60,7 @@ Two rules apply to **every** release and promotion, no exceptions:
    `FC_RUNNER_RUNTIME_ARTIFACT_ID` in `/etc/finite/runner.env` on each Kata
    host for the Agent Runtime image (existing Agents keep their launch-time
    image); the NixOS closure — `infra/nixos/modules/dashboard.nix` for the
-   dashboard digest — for everything on lat1. Stranding a fielded artifact
+   dashboard digest — for everything on the app-plane host. Stranding a fielded artifact
    must be a deliberate, reviewed act in that source, never an accident.
    Anything the source cannot express (why a version shipped, when a fleet
    roll completed, a live compatibility promise) goes in
@@ -107,11 +100,11 @@ Two rules apply to **every** release and promotion, no exceptions:
   Core, systemd, or Borg operation. If an incident tempts you to type an ad-hoc
   probe, that probe becomes a PR to `finite-status` and its contract test.
 
-  Until the reviewed revision is installed on lat1 through the normal NixOS
-  deployment, run it from a read-only checkout on the host or collect its
+  Until the reviewed revision is installed on lat2 through the normal NixOS
+  deployment, run it from a read-only checkout on the app-plane host or collect its
   output after an operator installs the two `scripts/finite-status` and
   `scripts/finite_status.py` files together. Once installed, remote observation
-  is simply `ssh -T root@64.34.82.77 finite-status --json`. Adding a systemd
+  is simply `ssh -T root@64.34.80.19 finite-status --json`. Adding a systemd
   timer/page-on-red policy and applying the revision to production are explicit
   operator steps, outside the implementation PR.
 

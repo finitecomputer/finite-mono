@@ -211,18 +211,6 @@ class CiHarnessSelectionTests(unittest.TestCase):
             {"run_nix_checks"},
         )
 
-    def test_production_cd_setup_files_run_nix_checks(self) -> None:
-        self.assertEqual(
-            selected(
-                "scripts/production_cd_setup.py",
-                "scripts/verify-production-cd-setup",
-                "scripts/tests/test_production_cd_setup.py",
-                "scripts/production_deploy.py",
-                "scripts/tests/test_production_deploy.py",
-            ),
-            {"run_nix_checks"},
-        )
-
     def test_ci_workflow_selects_every_active_harness(self) -> None:
         values = selection_for(".github/workflows/ci.yml")
 
@@ -231,7 +219,7 @@ class CiHarnessSelectionTests(unittest.TestCase):
 
     def test_non_ci_workflow_selects_nix_checks(self) -> None:
         self.assertEqual(
-            selected(".github/workflows/production-deploy.yml"),
+            selected(".github/workflows/lat2-nixos-closure.yml"),
             {"run_nix_checks"},
         )
 
@@ -389,11 +377,11 @@ class CiHarnessSelectionTests(unittest.TestCase):
 
     def test_changed_file_workflow_path_selects_nix_checks(self) -> None:
         args = argparse.Namespace(
-            changed_files=[".github/workflows/production-deploy.yml"], event=""
+            changed_files=[".github/workflows/lat2-nixos-closure.yml"], event=""
         )
         selection, _reason, paths = select_harnesses.select_harnesses(args)
 
-        self.assertEqual(paths, [".github/workflows/production-deploy.yml"])
+        self.assertEqual(paths, [".github/workflows/lat2-nixos-closure.yml"])
         self.assertEqual(
             {key for key, value in selection.values().items() if value == "true"},
             {"run_nix_checks"},

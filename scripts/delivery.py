@@ -812,17 +812,6 @@ def verify_image_index(
         raise DeliveryError("published image index is missing an attestation manifest")
 
 
-def require_production_disabled(manifest_path: Path) -> None:
-    try:
-        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError) as error:
-        raise DeliveryError(f"cannot read production manifest: {error}") from error
-    if manifest.get("environment") != "production":
-        raise DeliveryError("expected the production deployment manifest")
-    if manifest.get("mutation_enabled") is not False:
-        raise DeliveryError("production mutation must remain disabled during migration")
-
-
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
     commands = parser.add_subparsers(dest="command", required=True)
@@ -845,9 +834,6 @@ def build_parser() -> argparse.ArgumentParser:
     image = commands.add_parser("verify-image-promotion")
     image.add_argument("--source-digest", required=True)
     image.add_argument("--destination-digest", required=True)
-
-    production = commands.add_parser("require-production-disabled")
-    production.add_argument("--manifest", type=Path, required=True)
 
     publish = commands.add_parser("publish-release")
     publish.add_argument("--component", required=True, choices=sorted(COMPONENTS))
@@ -894,8 +880,6 @@ def main(argv: Sequence[str] | None = None) -> int:
             )
         elif args.command == "verify-image-promotion":
             verify_image_promotion(args.source_digest, args.destination_digest)
-        elif args.command == "require-production-disabled":
-            require_production_disabled(args.manifest)
         elif args.command == "publish-release":
             publish_release(
                 component=args.component,
