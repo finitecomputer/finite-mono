@@ -249,6 +249,21 @@ with existing RPCs:
 Conceptual mapping for users: finitechat "topics" (MLS rooms) ≠ hermes
 "projects" (cwd folders) — on cutover, topics BECOME projects.
 
+New-chat defaults (decided 2026-09-04): the web client is DESKTOP-CLASS —
+a remote UI with no launch folder of its own, exactly like hermes
+desktop. Creates send source "desktop" (a client-declared provenance
+label, not an auth claim; the session-list deny-list only filters
+kanban/tool) so unpicked chats stamp no workspace and join the Home
+(no-project) bucket; a cwd is passed only when the user picked a real
+project topic. The sidebar FAB targets the SELECTED topic first,
+including Home. hermes also has projects.set_active — an "active
+project" new work files under — available as a slicker dispatch
+primitive later if wanted. Also fixed the long-standing horizontal
+overflow: the messages grid used auto tracks (max-content sizing), so
+one unbreakable child forced the track past the viewport — now
+minmax(0, 1fr) + clamped markdown code blocks + overflow-x hidden on
+the scroll container.
+
 "Home" decoded (remote sandbox): it is hermes' NO-PROJECT bucket —
 projects.tree emits it as {label: "Home", isNoProject: true, path: null}
 (the __no_project__ id in project_tree.py). The 21 old sessions were

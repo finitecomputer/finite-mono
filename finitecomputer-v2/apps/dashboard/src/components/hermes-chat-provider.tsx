@@ -530,8 +530,14 @@ export function HermesChatProvider({ children }: { children: ReactNode }) {
         const project = projectsRef.current.find(
           (candidate) => topicIdForProject(candidate) === topic_id
         );
+        // source "desktop" is the client class we actually are: a remote UI
+        // with no launch folder of its own, exactly like the desktop app.
+        // hermes stamps no workspace on unpicked desktop-class creates, so
+        // they join the Home (no-project) bucket instead of inheriting the
+        // gateway's launch directory. A cwd is passed only when the user
+        // picked a real project topic.
         const created = (await call("session.create", {
-          source: "gateway",
+          source: "desktop",
           cols: 100,
           ...(project?.path ? { cwd: project.path } : {}),
         })) as { session_id: string; stored_session_id?: string } | null;
@@ -590,7 +596,7 @@ export function HermesChatProvider({ children }: { children: ReactNode }) {
               )
             : undefined;
           const created = (await call("session.create", {
-            source: "gateway",
+            source: "desktop",
             cols: 100,
             ...(project?.path ? { cwd: project.path } : {}),
           })) as { session_id: string; stored_session_id?: string } | null;
@@ -620,7 +626,7 @@ export function HermesChatProvider({ children }: { children: ReactNode }) {
         let handle = entry.handleId;
         if (!handle) {
           const created = (await call("session.create", {
-            source: "gateway",
+            source: "desktop",
             cols: 100,
           })) as { session_id: string; stored_session_id?: string } | null;
           handle = created?.session_id ?? "";

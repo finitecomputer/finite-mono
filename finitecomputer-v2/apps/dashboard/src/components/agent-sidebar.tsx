@@ -103,14 +103,11 @@ export function AgentSidebar({
   );
   const selectedTopicId = state?.selected_topic_id ?? null;
   const selectedChatId = state?.selected_chat_id ?? null;
-  // New-chat target: Home when the transport has one (finitechat always
-  // does); otherwise the topic the user is working in, else the first topic.
-  // Gateway transports have no Home, and an unpicked create inherits the
-  // gateway's launch directory — preferring the open topic keeps new chats
-  // where the user is looking instead.
+  // New chat lands in the topic the user is working in — including Home.
+  // Falls back to the transport's canonical topic, then the first topic.
   const defaultNewChatTopic =
-    canonicalNewChatTopic(topics)
-    ?? topics.find((topic) => topic.topic_id === selectedTopicId)
+    topics.find((topic) => topic.topic_id === selectedTopicId)
+    ?? canonicalNewChatTopic(topics)
     ?? topics[0]
     ?? null;
 
