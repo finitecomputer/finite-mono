@@ -122,6 +122,58 @@ real stack's own dashboard at 14002 (main-checkout code, no hermes
 section), worktree dashboard at 13003 (real finitechat half + live
 hermes section).
 
+## Public agent gateways: agents.finite.computer (captured 2026-09-04, design only)
+
+Strategic frame: if every Finite agent's hermes gateway is reachable at a
+stable public URL speaking VERBATIM tui_gateway JSON-RPC, then hermes
+desktop (and TUI, and hermes' own web UI) can operate a Finite bot
+directly — a whole client surface for free, inherited by pinning. Our web
+chat becomes just one client. Hard constraint this buys: we never invent
+protocol; anything our UI needs must be something a hermes-native client
+could also do.
+
+Domain + routing:
+
+- `agents.finite.computer` at the edge. Recommended shape: per-agent
+  wildcard subdomains, `wss://<agent-id>.agents.finite.computer/api/ws` —
+  verbatim proxying (no path surgery), normal Host semantics for hermes'
+  auth/Origin checks, wildcard TLS via the edge. Cheaper start (fine for
+  a first cut): path-based `agents.finite.computer/<agent-id>/…` with
+  prefix-strip at the edge.
+- Doctrine fit: the edge proxies, never filters — Caddy forwards the
+  agent listener verbatim; auth is enforced by the gateway itself
+  (ticket/token, see the defense-in-depth note) and by gated issuance in
+  the dashboard.
+- Connections screen: add a "Hermes connection" card (the dashboard
+  already has /dashboard/machines/[id]/connections) showing the
+  per-agent ws URL + credential so users can paste it into hermes
+  desktop.
+
+THE open infra question — edge → gateway reachability: agent gateways
+live inside Kata containers on runner hosts (lat2/3/4). The public edge
+needs a path to the right container: per-agent host-port allocation,
+a runner-host tunnel/relay, or routing through Core. This is the next
+design decision; everything above depends on it.
+
+Desktop credentialing without upstream hermes work (options, all
+config-level):
+
+1. Per-agent static session token (env-injected at spawn, displayed in
+   the connections card, rotatable on redeploy) — simplest, full-trust,
+   no revocation granularity.
+2. Hermes gated mode with a per-agent password (auth providers are
+   existing config) — per-agent scoped, browser-grade login flow for
+   desktop.
+3. Hermes OAuth provider pointed at WorkOS-as-OIDC, IF WorkOS can serve
+   that role — one identity everywhere, but still cannot express
+   account-owns-agent; only layer-1 hygiene, keep the broker anyway.
+
+Compat cautions: verify hermes' Origin/host guards accept browser
+cross-origin WS from our dashboard origin and desktop's no-Origin
+connects; verify ws ticket flow works through the edge (upgrade
+pass-through). Bumping the pin inherits new hermes client features —
+and pins us to their protocol choices, which is the point.
+
 ## Defense in depth: gating the ws connection (captured 2026-09-04, design only)
 
 Goal: reaching an agent's gateway requires BOTH (1) a real connection
