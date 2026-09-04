@@ -115,9 +115,7 @@ snapshot suspend deferred (stop/start already gets idle RAM to ~0).
   daemon still runs as the unprivileged finite-sites user.
 - **Proof**: `infra/nixos/modules/finitesitesd.nix` declares the relaxed unit,
   exact Nix-store nerdctl command, and passwordless rule for only the
-  `finite-sites` user. Historical lat2 proof remains in
-  `infra/hosts/lat2/systemd/finite-saas-sites-kata.conf` and
-  `finite-sites-nerdctl-sudoers`.
+  `finite-sites` user.
 - **Delete condition**: drive containerd via its gRPC API from the daemon
   (no nerdctl, no sudo) with a privilege-separated networking helper, if
   the daemon's own attack surface ever warrants it.
