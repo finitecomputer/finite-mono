@@ -15,6 +15,7 @@ import { useOptionalHostedChat } from "@/components/hosted-chat-provider";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import type { AgentConnectionAction, AgentConnectionsStatus } from "@/lib/hosted-agent-controls";
+import { OPENROUTER_DEFAULT_MODEL } from "@/lib/openrouter";
 
 export const CONNECTIONS_REQUEST_TIMEOUT_MS = 20_000;
 export const CONNECTIONS_MUTATION_TIMEOUT_MS = 60_000;
@@ -24,9 +25,11 @@ export const CONNECTIONS_TIMEOUT_MESSAGE =
 export function ConnectionsPanel({
   machineId,
   googleConfigured,
+  openRouterResult,
 }: {
   machineId: string;
   googleConfigured: boolean;
+  openRouterResult: string | null;
 }) {
   const [status, setStatus] = useState<AgentConnectionsStatus | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -105,7 +108,13 @@ export function ConnectionsPanel({
         description="Choose the service your agent uses to think."
         icon={<CpuIcon className="size-5" />}
       >
-        <InferenceControls status={status} busy={busy} mutate={mutate} />
+        <InferenceControls
+          machineId={machineId}
+          openRouterResult={openRouterResult}
+          status={status}
+          busy={busy}
+          mutate={mutate}
+        />
       </ConnectionCard>
 
       <ConnectionCard
@@ -206,17 +215,33 @@ export function ConnectionsPanel({
 }
 
 function InferenceControls({
+  machineId,
+  openRouterResult,
   status,
   busy,
   mutate,
 }: {
+  machineId: string;
+  openRouterResult: string | null;
   status: AgentConnectionsStatus | null;
   busy: string | null;
   mutate: (label: string, action: AgentConnectionAction) => Promise<void>;
 }) {
   const [showOpenRouter, setShowOpenRouter] = useState(false);
+  const notice = openRouterNotice(openRouterResult);
   return (
     <div className="flex min-w-0 flex-wrap items-center justify-end gap-2">
+      {notice ? (
+        <p
+          className={
+            notice.tone === "error"
+              ? "w-full text-right text-sm text-destructive"
+              : "w-full text-right text-sm text-muted-foreground"
+          }
+        >
+          {notice.message}
+        </p>
+      ) : null}
       {status?.inference.profile !== "finite_private" ? (
         <Button
           variant="outline"
@@ -226,6 +251,18 @@ function InferenceControls({
           {busy === "inference" ? "Switching…" : "Use Finite Private"}
         </Button>
       ) : null}
+      {status ? (
+        <Button asChild disabled={Boolean(busy)}>
+          <a href={`/openrouter/start?machineId=${encodeURIComponent(machineId)}`}>
+            Sign in with OpenRouter
+            <ExternalLinkIcon />
+          </a>
+        </Button>
+      ) : (
+        <Button variant="outline" disabled>
+          Sign in with OpenRouter
+        </Button>
+      )}
       {showOpenRouter ? (
         <form
           className="flex min-w-0 flex-wrap justify-end gap-2"
@@ -253,7 +290,7 @@ function InferenceControls({
             defaultValue={
               status?.inference.profile === "openrouter"
                 ? status.inference.model
-                : "anthropic/claude-sonnet-4.6"
+                : OPENROUTER_DEFAULT_MODEL
             }
             aria-label="OpenRouter model"
             className="w-60"
@@ -417,6 +454,19 @@ function submitTelegramToken(
     action: "telegram_connect",
     token: String(form.get("token") ?? ""),
   });
+}
+
+function openRouterNotice(result: string | null) {
+  if (result === "connected") {
+    return { tone: "ok" as const, message: "OpenRouter connected." };
+  }
+  if (result === "failed") {
+    return { tone: "error" as const, message: "OpenRouter sign-in did not complete. Try again." };
+  }
+  if (result === "unavailable") {
+    return { tone: "error" as const, message: "OpenRouter sign-in is unavailable right now." };
+  }
+  return null;
 }
 
 function inferenceLabel(status: AgentConnectionsStatus) {
