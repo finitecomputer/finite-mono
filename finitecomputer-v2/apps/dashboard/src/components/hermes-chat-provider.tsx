@@ -592,12 +592,47 @@ export function HermesChatProvider({ children }: { children: ReactNode }) {
 
       // MarkRoomRead, SetTyping, SetChatArchived and the profile/group flows
       // have no gateway analogue yet; they stay quiet no-ops so the shared UI
-      // keeps working. Gaps are tracked in NOTES.md.
-      publish();
+      // keeps working. They must NOT publish: a publish mints a fresh state
+      // object, and effects keyed on state that dispatch (read receipts,
+      // typing) would loop forever. Gaps are tracked in NOTES.md.
       return currentState();
     },
     [publish, refreshLists]
   );
+
+  const load = useCallback(async (): Promise<HostedChatRetryAttempt> => {
+    try {
+      await refreshLists();
+      setTransportError(null);
+      return "succeeded";
+    } catch {
+      setTransportError(`gateway unreachable at ${GATEWAY_WS_URL}`);
+      return "stop";
+    }
+  }, [refreshLists]);
+
+  const claimOwner = useCallback(
+    async (): Promise<HostedChatRetryAttempt> => "succeeded",
+    []
+  );
+  const recoverBinding = useCallback(
+    async (): Promise<HostedChatRetryAttempt> => "succeeded",
+    []
+  );
+  const dispatchQuiet = useCallback(async (action: HostedChatAction) => {
+    try {
+      return await dispatch(action);
+    } catch {
+      return null;
+    }
+  }, [dispatch]);
+  const refreshPendingChat = useCallback(
+    async (_target: PendingChatRefreshTarget) => false,
+    []
+  );
+  const uploadAttachments = useCallback(async (): Promise<HostedChatState> => {
+    throw new Error("attachments are not wired to the gateway yet");
+  }, []);
 
   const value = useMemo<HostedChatContextValue>(
     () => ({
@@ -609,33 +644,16 @@ export function HermesChatProvider({ children }: { children: ReactNode }) {
       ownerClaimed: true,
       bindingRecoveryRequired: false,
       selectionPending: false,
-      load: async () => {
-        try {
-          await refreshLists();
-          setTransportError(null);
-          return "succeeded" satisfies HostedChatRetryAttempt;
-        } catch {
-          setTransportError(`gateway unreachable at ${GATEWAY_WS_URL}`);
-          return "stop" satisfies HostedChatRetryAttempt;
-        }
-      },
-      claimOwner: async () => "succeeded" as HostedChatRetryAttempt,
-      recoverBinding: async () => "succeeded" as HostedChatRetryAttempt,
+      load,
+      claimOwner,
+      recoverBinding,
       dispatch,
-      dispatchQuiet: async (action: HostedChatAction) => {
-        try {
-          return await dispatch(action);
-        } catch {
-          return null;
-        }
-      },
-      refreshPendingChat: async (_target: PendingChatRefreshTarget) => false,
-      uploadAttachments: async () => {
-        throw new Error("attachments are not wired to the gateway yet");
-      },
+      dispatchQuiet,
+      refreshPendingChat,
+      uploadAttachments,
       attachmentUrl: () => "#",
     }),
-    [dispatch, refreshLists, state, streamConnected, transportError]
+    [claimOwner, dispatch, dispatchQuiet, load, recoverBinding, refreshPendingChat, state, streamConnected, transportError, uploadAttachments]
   );
 
   function currentState(): HostedChatState {
