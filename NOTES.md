@@ -148,6 +148,26 @@ HostedWebChat, the whole tree) render UNCHANGED over the hermes gateway:
   flow itself (earlier passes). Interactive loop in the real components:
   open http://127.0.0.1:13002/dashboard/machines/runtime_web_design/gateway-chat.
 
+## Truth-sourcing rules for the provider (2026-09-04, fourth pass)
+
+If hermes states it, the provider sources it; the provider invents nothing:
+
+- Topics are EXACTLY projects.tree projects. The invented "Home" topic is
+  gone — Recents (hermes' own scoped_session_ids bucket, what its desktop
+  renders) is always present so New chat has a target; drafts pin to the
+  top of it. canonicalNewChatTopic now falls back to the first topic, so
+  transports without a Home topic still get a working New-chat FAB.
+- Draft lifecycle mirrors hermes: session.create reports stored_session_id
+  up front; the provider keeps drafts keyed by it and, the moment the
+  stored id materializes in session.list (after the first prompt), swaps
+  the draft row for hermes' row (auto-title, project placement) while
+  carrying selection, handle, transcript, and stream state across.
+  session.reclaimed (ws_orphan_reap) deletes a draft's row.
+- Sidebar rows dedupe by chat id: local entries (live handles) win,
+  previewSessions fill the rest.
+- Known hot-reload artifact: heavy provider edits under Next fast refresh
+  keep stale ref state (duplicate rows); a page reload resets it.
+
 ## Local gateway hygiene (learned the hard way, 2026-09-04)
 
 The spike's first gateway borrowed the desktop-owned ~/.hermes home and

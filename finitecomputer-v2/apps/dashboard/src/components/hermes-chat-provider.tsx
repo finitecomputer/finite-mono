@@ -44,18 +44,17 @@ import type {
 } from "@/lib/hosted-web-device";
 import type { HostedChatRetryAttempt } from "@/lib/hosted-web-chat-retry";
 import type { PendingChatRefreshTarget } from "@/lib/hosted-web-chat-refresh";
-import { HOME_TOPIC_ID } from "@/lib/hosted-web-chat-topics";
 
 const GATEWAY_WS_URL =
   process.env.NEXT_PUBLIC_HERMES_GATEWAY_WS_URL || "ws://127.0.0.1:9120/api/ws";
 const GATEWAY_TOKEN = process.env.NEXT_PUBLIC_HERMES_GATEWAY_TOKEN || "";
 
 const ROOM_ID = "hermes";
-// The flat bucket for sessions no project claims IS the Home topic: the
-// sidebar's New-chat affordances key off HOME_TOPIC_ID, and a fresh gateway
-// (no projects yet) must still offer New chat. New chats sent from Home get
-// no explicit cwd; hermes categorizes them on the first prompt.
-const RECENTS_TOPIC_ID = HOME_TOPIC_ID;
+// hermes' own sidebar model: projects.tree claims sessions (scoped_session_ids)
+// and everything left belongs in a flat Recents bucket. Rendered even when
+// empty so New chat always has a home; new chats sent from Recents carry no
+// cwd and hermes categorizes them on the first prompt.
+const RECENTS_TOPIC_ID = "recents";
 const MY_ACCOUNT = "me";
 const AGENT_ACCOUNT = "hermes-agent";
 const AGENT_NAME = "Hermes";
@@ -99,6 +98,8 @@ type ChatEntry = {
   summary: HostedChatSummary;
   /** Short gateway handle for RPCs; drafts keep their session.create id. */
   handleId: string;
+  /** The stored id session.create reports for drafts; null once persisted. */
+  storedId: string | null;
   /** Project id whose cwd spawned it (drives StartTopicChatIntent). */
   topicId: string;
   /** Present while a turn is streaming onto this chat. */
@@ -224,20 +225,40 @@ export function HermesChatProvider({ children }: { children: ReactNode }) {
     scopedRef.current = new Set(tree?.scoped_session_ids ?? []);
     const sessions = list?.sessions ?? [];
     sessionsRef.current = sessions;
-    // Adopt persisted sessions; drop local drafts that have materialized.
+    // Adopt persisted sessions, each under the project that claims it.
     for (const session of sessions) {
       const existing = chatsRef.current.get(session.id);
       chatsRef.current.set(session.id, {
         summary: summaryFromSession(session),
         handleId: existing?.handleId ?? "",
-        topicId: existing?.topicId ?? topicIdForSession(session.id, scopedRef.current),
+        storedId: null,
+        topicId: topicOfSession(session, projectsRef.current),
         streaming: existing?.streaming ?? null,
       });
     }
-    for (const [chatId, entry] of chatsRef.current) {
-      if (chatId.startsWith("draft:") && !entry.streaming) {
-        // Drafts stay until their first prompt materializes a stored row.
-        continue;
+    // Reconcile drafts: the moment a draft's stored id materializes as a
+    // real session, replace the local row with hermes' row (title, project)
+    // and carry selection, handle, transcript, and stream state across.
+    for (const [chatId, entry] of [...chatsRef.current]) {
+      if (!chatId.startsWith("draft:") || !entry.storedId) continue;
+      const real = sessions.find((session) => session.id === entry.storedId);
+      if (!real) continue;
+      chatsRef.current.delete(chatId);
+      const transcript = transcriptRef.current.get(chatId);
+      if (transcript) {
+        transcriptRef.current.set(real.id, transcript);
+        transcriptRef.current.delete(chatId);
+      }
+      const topicId = topicOfSession(real, projectsRef.current);
+      chatsRef.current.set(real.id, {
+        summary: summaryFromSession(real),
+        handleId: entry.handleId,
+        storedId: null,
+        topicId,
+        streaming: entry.streaming,
+      });
+      if (selectedRef.current.chatId === chatId) {
+        selectedRef.current = { topicId, chatId: real.id };
       }
     }
     publish();
@@ -248,6 +269,22 @@ export function HermesChatProvider({ children }: { children: ReactNode }) {
       const type = event.type ?? "";
       if (type === "sessions.changed") {
         void refreshLists().catch(() => undefined);
+        return;
+      }
+      if (type === "session.reclaimed") {
+        // hermes reaped an orphaned draft; drop our local row for it.
+        const stored = String(event.payload?.stored_session_id ?? "");
+        if (!stored) return;
+        for (const [chatId, entry] of [...chatsRef.current]) {
+          if (entry.storedId === stored) {
+            chatsRef.current.delete(chatId);
+            transcriptRef.current.delete(chatId);
+            if (selectedRef.current.chatId === chatId) {
+              selectedRef.current = { topicId: null, chatId: null };
+            }
+          }
+        }
+        publish();
         return;
       }
       const chat = [...chatsRef.current.values()].find(
@@ -406,7 +443,7 @@ export function HermesChatProvider({ children }: { children: ReactNode }) {
           source: "gateway",
           cols: 100,
           ...(project?.path ? { cwd: project.path } : {}),
-        })) as { session_id: string } | null;
+        })) as { session_id: string; stored_session_id?: string } | null;
         const draftId = `draft:${created?.session_id ?? crypto.randomUUID()}`;
         chatsRef.current.set(draftId, {
           summary: {
@@ -421,6 +458,7 @@ export function HermesChatProvider({ children }: { children: ReactNode }) {
             archived: false,
           },
           handleId: created?.session_id ?? "",
+          storedId: created?.stored_session_id ?? null,
           topicId: topic_id,
           streaming: null,
         });
@@ -464,7 +502,7 @@ export function HermesChatProvider({ children }: { children: ReactNode }) {
             source: "gateway",
             cols: 100,
             ...(project?.path ? { cwd: project.path } : {}),
-          })) as { session_id: string } | null;
+          })) as { session_id: string; stored_session_id?: string } | null;
           const draftId = `draft:${created?.session_id ?? crypto.randomUUID()}`;
           entry = {
             summary: {
@@ -479,6 +517,7 @@ export function HermesChatProvider({ children }: { children: ReactNode }) {
               archived: false,
             },
             handleId: created?.session_id ?? "",
+            storedId: created?.stored_session_id ?? null,
             topicId: topicId ?? RECENTS_TOPIC_ID,
             streaming: null,
           };
@@ -492,7 +531,7 @@ export function HermesChatProvider({ children }: { children: ReactNode }) {
           const created = (await call("session.create", {
             source: "gateway",
             cols: 100,
-          })) as { session_id: string } | null;
+          })) as { session_id: string; stored_session_id?: string } | null;
           handle = created?.session_id ?? "";
           entry.handleId = handle;
         }
@@ -610,6 +649,18 @@ export function HermesChatProvider({ children }: { children: ReactNode }) {
   return <HostedChatContext.Provider value={value}>{children}</HostedChatContext.Provider>;
 }
 
+// chatsRef entries and hermes' previewSessions describe the same sessions;
+// local entries win (they carry live handles) and hermes' rows fill the rest.
+function uniqueChats(...sources: HostedChatSummary[][]): HostedChatSummary[] {
+  const byId = new Map<string, HostedChatSummary>();
+  for (const source of sources) {
+    for (const summary of source) {
+      if (!byId.has(summary.chat_id)) byId.set(summary.chat_id, summary);
+    }
+  }
+  return [...byId.values()];
+}
+
 function summaryFromSession(session: GatewaySession): HostedChatSummary {
   return {
     chat_id: session.id,
@@ -628,8 +679,11 @@ function topicIdForProject(project: GatewayProject): string {
   return `project:${project.id}`;
 }
 
-function topicIdForSession(sessionId: string, scoped: Set<string>): string {
-  return scoped.has(sessionId) ? "" : RECENTS_TOPIC_ID;
+function topicOfSession(session: GatewaySession, projects: GatewayProject[]): string {
+  const project = projects.find((candidate) =>
+    candidate.previewSessions.some((candidateSession) => candidateSession.id === session.id)
+  );
+  return project ? topicIdForProject(project) : RECENTS_TOPIC_ID;
 }
 
 function topicsFrom(
@@ -650,24 +704,24 @@ function topicsFrom(
     updated_seq: 0,
     archived: false,
     active_chat_id: null,
-    chats: [
-      ...project.previewSessions.map(summaryFromSession),
-      ...[...chats.values()]
+    chats: uniqueChats(
+      [...chats.values()]
         .filter((entry) => entry.topicId === topicIdForProject(project))
         .map((entry) => entry.summary),
-    ],
+      project.previewSessions.map(summaryFromSession)
+    ),
   }));
-  const recentsChats = [
-    ...sessions.filter((session) => !scoped.has(session.id)).map(summaryFromSession),
-    ...[...chats.values()]
+  const recentsChats = uniqueChats(
+    [...chats.values()]
       .filter((entry) => entry.topicId === RECENTS_TOPIC_ID)
       .map((entry) => entry.summary),
-  ];
+    sessions.filter((session) => !scoped.has(session.id)).map(summaryFromSession)
+  );
   topics.push({
     room_id: ROOM_ID,
     topic_id: RECENTS_TOPIC_ID,
-    title: "Home",
-    description: "Sessions no project claims yet; hermes files them on first prompt",
+    title: "Recents",
+    description: "Sessions no project claims",
     last_message_preview: recentsChats[0]?.last_message_preview ?? "",
     unread_count: 0,
     message_count: recentsChats.length,
