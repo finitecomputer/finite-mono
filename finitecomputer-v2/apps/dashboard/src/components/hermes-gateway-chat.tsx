@@ -12,25 +12,32 @@
  *   NEXT_PUBLIC_HERMES_GATEWAY_WS_URL   ws://127.0.0.1:9119/api/ws
  *   NEXT_PUBLIC_HERMES_GATEWAY_TOKEN    HERMES_DASHBOARD_SESSION_TOKEN the
  *                                       `hermes serve` process was launched
- *                                       with (rides ?token=, same as hermes'
- *                                       own web UI). In a real deployment the
- *                                       token becomes per-viewer and this is
+ *                                       with (rides ?token=). In a real
+ *                                       deployment the per-viewer token is
  *                                       the ONE injection point to change.
  *
- * Protocol facts this relies on (verified against hermes v2026.8.3):
- * - newline-delimited JSON-RPC; `gateway.ready` event on connect.
- * - Lists are PULL (`projects.tree`, `session.list`); turns are PUSH
- *   (`message.delta`/`message.complete`, `tool.*`, approvals). There is no
- *   session-list-change push: refresh after actions that change the list.
- * - `projects.tree` is hermes' own authoritative sidebar grouping: projects
- *   (≈ topics) → repos → lanes with preview sessions, plus the set of session
- *   ids claimed by projects so the rest render flat as Recents.
- * - A freshly created session is an in-memory draft with NO DB row — it is
- *   invisible to `session.list` until its first `prompt.submit`.
+ * Verified protocol contract (hermes v2026.8.3, captured live):
+ * - newline-delimited JSON-RPC; `gateway.ready` on connect.
+ * - Lists pull, turns push. `sessions.changed` (no session_id) is the
+ *   broadcast that the session list moved — refetch on it.
+ * - Sidebar: `projects.tree` (projects ≈ topics, by session cwd) +
+ *   `session.list`; sessions claimed by a project are excluded from flat
+ *   Recents by `scoped_session_ids`.
+ * - Opening a stored session: `session.resume {session_id}` returns a FRESH
+ *   short gateway id plus the transcript inline (cold `session.history`
+ *   without resume is "session not found").
+ * - New chat: `session.create` returns a draft id; drafts have NO DB row and
+ *   are invisible to lists until the first `prompt.submit`, and get reaped
+ *   (`session.reclaimed` / ws_orphan_reap) if their connection dies first.
+ * - A turn: `message.start` → `thinking.delta` (indicator) → `reasoning.delta`
+ *   (stream) → `message.delta` (answer stream) → `message.complete`
+ *   {text, usage, status, reasoning}. `prompt.submit` acks with
+ *   {"status":"streaming"} immediately.
  */
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { ChevronRightIcon, HashIcon, RotateCcwIcon } from "lucide-react";
+import { createPortal } from "react-dom";
+import { ChevronRightIcon, HashIcon, PlusIcon, RotateCcwIcon, XIcon } from "lucide-react";
 
 const GATEWAY_WS_URL =
   process.env.NEXT_PUBLIC_HERMES_GATEWAY_WS_URL || "ws://127.0.0.1:9119/api/ws";
@@ -40,9 +47,15 @@ type GatewayInbound = {
   jsonrpc: "2.0";
   id?: number;
   method?: string;
-  params?: { type?: string } & Record<string, unknown>;
+  params?: GatewayEvent;
   result?: unknown;
   error?: { code?: number; message?: string };
+};
+
+type GatewayEvent = {
+  type?: string;
+  session_id?: string;
+  payload?: Record<string, unknown>;
 };
 
 type GatewaySession = {
@@ -67,23 +80,33 @@ type GatewayTree = {
   scoped_session_ids: string[];
 };
 
-export type GatewayConnection =
-  | { state: "connecting" }
-  | { state: "ready" }
-  | { state: "error"; message: string };
+type GatewayMessage = { role: string; text: string };
 
-/** One WebSocket, JSON-RPC correlation by id, auto-reconnect. */
-function useHermesGateway() {
-  const [connection, setConnection] = useState<GatewayConnection>({
-    state: "connecting",
-  });
+type ActiveChat = {
+  /** Short gateway id used for RPCs (draft id, or the one session.resume returned). */
+  handleId: string;
+  /** Stored id shown in lists; null while the chat is still an unprompted draft. */
+  storedId: string | null;
+  title: string;
+  transcript: GatewayMessage[];
+};
+
+type Streaming = { reasoning: string; answer: string };
+
+/** One WebSocket, JSON-RPC correlation by id, event dispatch, auto-reconnect. */
+function useHermesGateway(onEvent: (event: GatewayEvent) => void) {
+  const [connection, setConnection] = useState<"connecting" | "ready" | "error">("connecting");
+  const [connectionError, setConnectionError] = useState<string | null>(null);
   const [tree, setTree] = useState<GatewayTree>({ projects: [], scoped_session_ids: [] });
   const [sessions, setSessions] = useState<GatewaySession[]>([]);
+
   const socketRef = useRef<WebSocket | null>(null);
   const nextIdRef = useRef(1);
   const pendingRef = useRef(
     new Map<number, { resolve: (value: unknown) => void; reject: (reason: Error) => void }>()
   );
+  const onEventRef = useRef(onEvent);
+  onEventRef.current = onEvent;
 
   const call = useCallback(
     (method: string, params: Record<string, unknown> = {}) =>
@@ -124,7 +147,7 @@ function useHermesGateway() {
 
     const connect = () => {
       if (disposed) return;
-      setConnection({ state: "connecting" });
+      setConnection("connecting");
       const target = GATEWAY_TOKEN
         ? `${GATEWAY_WS_URL}?token=${encodeURIComponent(GATEWAY_TOKEN)}`
         : GATEWAY_WS_URL;
@@ -133,7 +156,8 @@ function useHermesGateway() {
 
       socket.addEventListener("open", () => {
         retryMs = 500;
-        setConnection({ state: "ready" });
+        setConnection("ready");
+        setConnectionError(null);
         void refreshRef.current().catch(() => undefined);
       });
 
@@ -144,8 +168,16 @@ function useHermesGateway() {
         } catch {
           return;
         }
-        // Events (method === "event") are the turn stream; the parity probe's
-        // transcript view will subscribe here. Responses correlate by id.
+        if (message.method === "event" && message.params?.type) {
+          // The list-moved broadcast is a list concern: refetch right here so
+          // event consumers only ever see turn activity.
+          if (message.params.type === "sessions.changed") {
+            void refreshRef.current().catch(() => undefined);
+            return;
+          }
+          onEventRef.current(message.params);
+          return;
+        }
         if (message.id == null) return;
         const pending = pendingRef.current.get(message.id);
         if (!pending) return;
@@ -165,7 +197,8 @@ function useHermesGateway() {
           pending.reject(new Error("gateway connection lost"));
         }
         pendingRef.current.clear();
-        setConnection({ state: "error", message: `gateway unreachable at ${GATEWAY_WS_URL}` });
+        setConnection("error");
+        setConnectionError(`gateway unreachable at ${GATEWAY_WS_URL}`);
         retryTimer = setTimeout(connect, retryMs);
         retryMs = Math.min(retryMs * 2, 10_000);
       };
@@ -181,31 +214,180 @@ function useHermesGateway() {
     };
   }, []);
 
-  return { connection, tree, sessions, refresh };
+  return { connection, connectionError, tree, sessions, call, refresh };
 }
 
 /**
- * The hermes half of the side-by-side parity probe: projects (≈ topics) with
- * their sessions, then flat Recents for sessions no project claims — the same
- * split hermes' own desktop renders, from the same authoritative RPC.
+ * The hermes half of the parity probe: sidebar section (projects ≈ topics,
+ * then flat Recents) plus a portal-rendered chat pane — new blank chat, send,
+ * stream, and watch the session get categorized once it says something.
  */
 export function HermesGatewayChat() {
-  const { connection, tree, sessions, refresh } = useHermesGateway();
-  const [collapsed, setCollapsed] = useState<Set<string>>(() => new Set());
+  const [active, setActive] = useState<ActiveChat | null>(null);
+  const [streaming, setStreaming] = useState<Streaming | null>(null);
+  const [draft, setDraft] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [chatError, setChatError] = useState<string | null>(null);
+
+  const activeRef = useRef<ActiveChat | null>(null);
+  activeRef.current = active;
+
+  const handleEvent = useCallback((event: GatewayEvent) => {
+    const activeChat = activeRef.current;
+    if (!activeChat || event.session_id !== activeChat.handleId) return;
+    const type = event.type ?? "";
+    if (type === "message.start") {
+      setStreaming({ reasoning: "", answer: "" });
+    } else if (type === "reasoning.delta") {
+      setStreaming((current) =>
+        current ? { ...current, reasoning: current.reasoning + String(event.payload?.text ?? "") } : current
+      );
+    } else if (type === "message.delta") {
+      setStreaming((current) =>
+        current ? { ...current, answer: current.answer + String(event.payload?.text ?? "") } : current
+      );
+    } else if (type === "message.complete") {
+      const text = String(event.payload?.text ?? "");
+      setActive((current) =>
+        current
+          ? { ...current, transcript: [...current.transcript, { role: "assistant", text }] }
+          : current
+      );
+      setStreaming(null);
+    }
+  }, []);
+
+  const gateway = useHermesGateway(handleEvent);
 
   const recents = useMemo(
-    () => sessions.filter((session) => !tree.scoped_session_ids.includes(session.id)),
-    [sessions, tree.scoped_session_ids]
+    () => gateway.sessions.filter((session) => !gateway.tree.scoped_session_ids.includes(session.id)),
+    [gateway.sessions, gateway.tree.scoped_session_ids]
   );
-
-  // projects.tree includes hermes' zero-session "discovery tier" — every repo
-  // it has ever seen a cwd for. The chat sidebar only cares about projects
-  // that actually hold conversations.
   const projects = useMemo(
-    () => tree.projects.filter((project) => project.sessionCount > 0),
-    [tree.projects]
+    () => gateway.tree.projects.filter((project) => project.sessionCount > 0),
+    [gateway.tree.projects]
   );
 
+  async function openSession(session: GatewaySession) {
+    setBusy(true);
+    setChatError(null);
+    setStreaming(null);
+    try {
+      const result = (await gateway.call("session.resume", { session_id: session.id })) as {
+        session_id: string;
+        messages?: GatewayMessage[];
+      } | null;
+      if (!result?.session_id) throw new Error("session.resume returned no handle");
+      setActive({
+        handleId: result.session_id,
+        storedId: session.id,
+        title: session.title || session.preview || "Untitled session",
+        transcript: result.messages ?? [],
+      });
+    } catch (caught) {
+      setChatError(caught instanceof Error ? caught.message : "could not open session");
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function newChat() {
+    setBusy(true);
+    setChatError(null);
+    setStreaming(null);
+    try {
+      const result = (await gateway.call("session.create", { source: "gateway", cols: 100 })) as {
+        session_id: string;
+      } | null;
+      if (!result?.session_id) throw new Error("session.create returned no draft id");
+      setActive({
+        handleId: result.session_id,
+        storedId: null,
+        title: "New chat",
+        transcript: [],
+      });
+    } catch (caught) {
+      setChatError(caught instanceof Error ? caught.message : "could not create chat");
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function send() {
+    const text = draft.trim();
+    if (!text || !active || busy) return;
+    setBusy(true);
+    setChatError(null);
+    setDraft("");
+    try {
+      await gateway.call("prompt.submit", { session_id: active.handleId, text });
+      setActive((current) =>
+        current ? { ...current, transcript: [...current.transcript, { role: "user", text }] } : current
+      );
+      setStreaming({ reasoning: "", answer: "" });
+    } catch (caught) {
+      setChatError(caught instanceof Error ? caught.message : "could not send");
+      setDraft(text);
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return (
+    <>
+      <SidebarSection
+        connection={gateway.connection}
+        connectionError={gateway.connectionError}
+        projects={projects}
+        recents={recents}
+        activeStoredId={active?.storedId ?? null}
+        busy={busy}
+        onRefresh={() => void gateway.refresh().catch(() => undefined)}
+        onNewChat={() => void newChat()}
+        onOpen={(session) => void openSession(session)}
+        error={chatError}
+      />
+      {active ? createPortal(<ChatPane
+        active={active}
+        streaming={streaming}
+        draft={draft}
+        busy={busy}
+        error={chatError}
+        onDraftChange={setDraft}
+        onSend={() => void send()}
+        onClose={() => {
+          setActive(null);
+          setStreaming(null);
+        }}
+      />, document.body) : null}
+    </>
+  );
+}
+
+function SidebarSection({
+  connection,
+  connectionError,
+  projects,
+  recents,
+  activeStoredId,
+  busy,
+  onRefresh,
+  onNewChat,
+  onOpen,
+  error,
+}: {
+  connection: "connecting" | "ready" | "error";
+  connectionError: string | null;
+  projects: GatewayProject[];
+  recents: GatewaySession[];
+  activeStoredId: string | null;
+  busy: boolean;
+  onRefresh: () => void;
+  onNewChat: () => void;
+  onOpen: (session: GatewaySession) => void;
+  error: string | null;
+}) {
+  const [collapsed, setCollapsed] = useState<Set<string>>(() => new Set());
   const toggle = (key: string) =>
     setCollapsed((current) => {
       const next = new Set(current);
@@ -213,7 +395,6 @@ export function HermesGatewayChat() {
       else next.add(key);
       return next;
     });
-
   const rowTitle = (session: GatewaySession) =>
     session.title || session.preview || "Untitled session";
 
@@ -224,22 +405,37 @@ export function HermesGatewayChat() {
         <button
           type="button"
           className="ocean-icon-button"
+          aria-label="New hermes chat"
+          title="New hermes chat"
+          disabled={busy}
+          onClick={onNewChat}
+        >
+          <PlusIcon className="size-3.5" />
+        </button>
+        <button
+          type="button"
+          className="ocean-icon-button"
           aria-label="Reload hermes sessions"
           title="Reload hermes sessions"
-          onClick={() => void refresh().catch(() => undefined)}
+          onClick={onRefresh}
         >
           <RotateCcwIcon className="size-3.5" />
         </button>
       </div>
-      {connection.state === "connecting" ? (
+      {connection === "connecting" ? (
         <p className="finite-agent-sidebar__status">Connecting to hermes gateway…</p>
       ) : null}
-      {connection.state === "error" ? (
+      {connection === "error" ? (
         <div className="finite-agent-sidebar__error">
-          <span>{connection.message}</span>
+          <span>{connectionError}</span>
         </div>
       ) : null}
-      {connection.state === "ready" ? (
+      {error ? (
+        <div className="finite-agent-sidebar__error">
+          <span>{error}</span>
+        </div>
+      ) : null}
+      {connection === "ready" ? (
         <>
           {projects.map((project) => {
             const isCollapsed = collapsed.has(project.id);
@@ -271,6 +467,8 @@ export function HermesGatewayChat() {
                       key={session.id}
                       session={session}
                       title={rowTitle(session)}
+                      active={session.id === activeStoredId}
+                      onOpen={() => onOpen(session)}
                     />
                   ))}
                 </div>
@@ -293,7 +491,13 @@ export function HermesGatewayChat() {
             </div>
             <div className="finite-chat__folder-body" hidden={collapsed.has("__recents")}>
               {recents.map((session) => (
-                <GatewaySessionRow key={session.id} session={session} title={rowTitle(session)} />
+                <GatewaySessionRow
+                  key={session.id}
+                  session={session}
+                  title={rowTitle(session)}
+                  active={session.id === activeStoredId}
+                  onOpen={() => onOpen(session)}
+                />
               ))}
               {recents.length === 0 ? (
                 <p className="finite-agent-sidebar__status">No unprojected sessions.</p>
@@ -309,21 +513,125 @@ export function HermesGatewayChat() {
 function GatewaySessionRow({
   session,
   title,
+  active,
+  onOpen,
 }: {
   session: GatewaySession;
   title: string;
+  active: boolean;
+  onOpen: () => void;
 }) {
   return (
-    <div
-      className="finite-chat__thread-row"
-      title={`${session.preview}\n${session.message_count} messages · ${session.source || "unknown source"} · via tui_gateway`}
-    >
-      <div className="finite-chat__thread-open">
+    <div className={`finite-chat__thread-row ${active ? "is-active" : ""}`}>
+      <button
+        type="button"
+        className="finite-chat__thread-open"
+        aria-current={active ? "page" : undefined}
+        title={`${session.preview}\n${session.message_count} messages · ${session.source || "unknown source"} · via tui_gateway`}
+        onClick={onOpen}
+      >
         <span className="finite-chat__thread-indicator" aria-hidden />
         <span className="finite-chat__thread-main">
           <span className="finite-chat__thread-title">{title}</span>
         </span>
+      </button>
+    </div>
+  );
+}
+
+/**
+ * Portal overlay standing in for the main chat pane, so no existing chat
+ * component is touched. Bare Tailwind on purpose: this pane is throwaway
+ * scaffolding until the cutover makes it the real pane.
+ */
+function ChatPane({
+  active,
+  streaming,
+  draft,
+  busy,
+  error,
+  onDraftChange,
+  onSend,
+  onClose,
+}: {
+  active: ActiveChat;
+  streaming: Streaming | null;
+  draft: string;
+  busy: boolean;
+  error: string | null;
+  onDraftChange: (value: string) => void;
+  onSend: () => void;
+  onClose: () => void;
+}) {
+  const bottomRef = useRef<HTMLDivElement | null>(null);
+  useEffect(() => {
+    bottomRef.current?.scrollIntoView({ block: "end" });
+  }, [active.transcript.length, streaming?.answer, streaming?.reasoning]);
+
+  return (
+    <div className="fixed inset-0 left-[224px] z-50 flex flex-col bg-[#0b0e14] text-[#e7e9ee]">
+      <header className="flex items-center gap-3 border-b border-white/10 px-5 py-3">
+        <span className="text-sm font-medium">{active.title}</span>
+        <span className="rounded bg-white/10 px-2 py-0.5 text-[11px] uppercase tracking-wide text-white/60">
+          hermes · tui_gateway
+        </span>
+        {!active.storedId ? (
+          <span className="text-[11px] text-amber-300/80">
+            draft — invisible to the sidebar until it sends its first message
+          </span>
+        ) : null}
+        <button
+          type="button"
+          className="ml-auto rounded p-1 text-white/60 hover:bg-white/10"
+          aria-label="Close hermes chat"
+          onClick={onClose}
+        >
+          <XIcon className="size-4" />
+        </button>
+      </header>
+      <div className="flex-1 space-y-4 overflow-y-auto px-5 py-4">
+        {active.transcript.map((message, index) => (
+          <div
+            key={index}
+            className={
+              message.role === "user"
+                ? "ml-auto max-w-[70%] rounded-2xl bg-blue-600/80 px-4 py-2 text-sm"
+                : "mr-auto max-w-[70%] whitespace-pre-wrap rounded-2xl bg-white/10 px-4 py-2 text-sm"
+            }
+          >
+            {message.text}
+          </div>
+        ))}
+        {streaming ? (
+          <div className="mr-auto max-w-[70%] space-y-2">
+            {streaming.reasoning ? (
+              <div className="whitespace-pre-wrap rounded-2xl border border-white/10 px-4 py-2 text-xs text-white/50">
+                {streaming.reasoning}
+              </div>
+            ) : null}
+            <div className="whitespace-pre-wrap rounded-2xl bg-white/10 px-4 py-2 text-sm">
+              {streaming.answer || "…"}
+            </div>
+          </div>
+        ) : null}
+        <div ref={bottomRef} />
       </div>
+      {error ? <div className="px-5 pb-2 text-xs text-red-400">{error}</div> : null}
+      <footer className="border-t border-white/10 px-5 py-3">
+        <textarea
+          className="min-h-[64px] w-full resize-none rounded-xl bg-white/10 px-3 py-2 text-sm outline-none placeholder:text-white/40"
+          placeholder={active.storedId ? "Message hermes…" : "Send a first message to create this chat…"}
+          value={draft}
+          disabled={busy && streaming == null}
+          onChange={(event) => onDraftChange(event.target.value)}
+          onKeyDown={(event) => {
+            if (event.key === "Enter" && !event.shiftKey) {
+              event.preventDefault();
+              onSend();
+            }
+          }}
+        />
+      </footer>
     </div>
   );
 }

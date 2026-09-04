@@ -42,7 +42,9 @@
     ".next-browser-stripe-test/types/**/*.ts",
     ".next-browser-stripe-test/dev/types/**/*.ts",
     ".next-web-design/types/**/*.ts",
-    ".next-web-design/dev/types/**/*.ts"
+    ".next-web-design/dev/types/**/*.ts",
+    "/Users/futurepaul/dev/finite/finite-mono-worktrees/hermes-gateway-spike/.local-state/next-dist-realstack/types/**/*.ts",
+    "/Users/futurepaul/dev/finite/finite-mono-worktrees/hermes-gateway-spike/.local-state/next-dist-realstack/dev/types/**/*.ts"
   ],
   "exclude": [
     "node_modules",

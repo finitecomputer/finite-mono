@@ -91,6 +91,37 @@ the next full `up` after `inference-key` skips straight to booting.
 One-time per worktree: `direnv allow .` at the worktree root, or
 `scripts/with-dev-env` silently no-ops.
 
+## Real finitechat for parity testing (working, 2026-09-04)
+
+The devfinity inference-key gate only consumes the key on the runtime
+profile; services-only writes nothing. A dummy override boots the REAL
+chat stack (postgres, core, finitechat server, hosted-web-device,
+identity, brain, sites — no mocks) without any secret:
+
+    DEVFINITY_PORT_OFFSET=1000 \
+    FC_RUNNER_FINITE_PRIVATE_API_KEY_OVERRIDE=dev-parity-dummy-no-inference \
+      just dev up --headless --services-only
+
+Ports land at +1000: core 15200, finitechat 19787, hosted-web-device
+39918, dashboard 14002. `DEVFINITY_PORT_OFFSET` exists for exactly this.
+Caveat: agent REPLIES still need the runtime + a real key
+(`just dev inference-key`); chat mechanics (topics, chats, history,
+MLS) are fully real. Check with `just dev status` under the same env.
+
+The spike worktree dashboard serves BOTH real halves side by side:
+
+    source .local-state/realstack-env.sh   # generated from the run dir:
+    #   process-compose.yaml dashboard env + secrets/dashboard-auth.sh
+    #   (NEXT_TSCONFIG_PATH dropped — it names a main-checkout file) +
+    #   NEXT_PUBLIC_HERMES_GATEWAY_* + isolated NEXT_DIST_DIR
+    cd finitecomputer-v2/apps/dashboard
+    ../../scripts/with-dev-env pnpm run dev --hostname 127.0.0.1 --port 13003
+
+Currently running: fixture+hermes at 13002 (finitechat half is MOCK),
+real stack's own dashboard at 14002 (main-checkout code, no hermes
+section), worktree dashboard at 13003 (real finitechat half + live
+hermes section).
+
 ## Architecture (decided 2026-09-04, second pass)
 
 **Browser → gateway, direct.** No Next API routes, no server-side client, no
@@ -121,41 +152,44 @@ plus one line.
   them. Parity note: the existing web chat shows empty new chats; hermes
   hides them until they say something.
 - Lists are pull, turns are push: `session.list`/`projects.tree` are
-  queries; `message.delta`/`message.complete`/`tool.*`/approvals stream as
-  events. There is no session-list-change push — refresh the list after
-  actions that change it.
-- `prompt.submit` returns `{"status":"streaming"}` immediately; the reply
-  arrives as events on the same socket.
-- Titles: `session.list` showed an empty title for the test session (the
-  create-time title had not materialized at list time; hermes auto-titles
-  from the first turn, and `session.title` sets explicitly). UI falls back
+  queries; the turn streams as events. `sessions.changed` (session_id
+  "") IS the list-moved broadcast — refetch lists on it and the sidebar
+  live-updates when any client creates/completes/reaps a session.
+- A turn, captured live: `session.info` (model/provider/effort/tools) →
+  `message.start` → `thinking.delta` (deliberating indicator) →
+  `reasoning.delta` (reasoning stream) → `message.delta` (answer
+  stream) → `reasoning.available` → `message.complete`
+  {text, usage, status, reasoning}. `prompt.submit` acks with
+  `{"status":"streaming"}` immediately.
+- Opening a stored session: `session.resume {session_id}` returns a
+  FRESH short gateway handle plus the transcript inline. Cold
+  `session.history` without resume is "session not found".
+- Auto-titling: hermes titles the session from its first turn
+  ("Identifying the chat model" for a model question) — no client-side
+  naming needed for parity with auto-titled chats.
+- Titles: `session.list` can show an empty title briefly after
+  materialization; `session.title` sets explicitly. UI falls back
   title → preview.
 
-## Parity probe: side-by-side sidebar (landed 2026-09-04)
+## Parity probe: side-by-side sidebar + basic chat (landed 2026-09-04)
 
-The sidebar now renders both transports next to each other:
+Everything below landed in `components/hermes-gateway-chat.tsx` (the
+server-side client and /api route from the first pass are DELETED):
 
-    TOPICS                ← finitechat hosted-device (fixture data)
-      General / Design review
-    HERMES · API/WS       ← tui_gateway session.list over /api/ws
-      Friendly greeting   (real hermes session history)
-
-Pieces:
-
-- `src/lib/hermes-gateway.ts` — one-shot JSON-RPC over a short-lived
-  WebSocket (Node global WebSocket; no new deps). `hermesSessionsTopic()`
-  folds `session.list` into `HostedChatTopic`/`HostedChatSummary` so the
-  renderer shape is identical across transports.
-- `src/app/api/chat/gateway/sessions/route.ts` — GET returns the topic JSON
-  (502 + readable error when the gateway is down or the token is wrong).
-- `components/agent-sidebar.tsx` — `HermesGatewaySection`: read-only rows
-  styled with the same `finite-chat__*` classes, reload button, error line.
-- `scripts/web-design-fixture.ts` — allowlists HERMES_GATEWAY_WS_URL /
-  HERMES_GATEWAY_TOKEN through to the dashboard child.
-
-Boot: `HERMES_GATEWAY_TOKEN=$(cat .local-state/hermes-session-token) \
-../../scripts/with-dev-env pnpm run design` from the dashboard dir (token
-also rides ?token= like hermes' own web UI).
+- Sidebar section: projects (topics) + flat Recents, from
+  `projects.tree`/`session.list`, refreshed live on `sessions.changed`.
+- Session rows open a portal chat pane (no existing chat component is
+  touched): transcript hydrated via `session.resume`, composer sends
+  `prompt.submit`, reasoning + answer stream live, `message.complete`
+  finalizes.
+- "+" button: new blank chat (`session.create` draft); the pane says the
+  draft is invisible until its first message; after the first turn the
+  sidebar live-updates with hermes' auto-title, filed under the project
+  matching the session's cwd.
+- Verified end-to-end in the browser: "Hello from the direct-ws web
+  chat! Which model are you?" → streamed "I'm Hermes Agent, running on
+  the GLM model trained by Z.ai." → sidebar gained "Identifying the
+  chat model" under finite-mono.
 
 ### Feature-by-feature backlog (existing chat behavior → gateway equivalent)
 
@@ -163,7 +197,7 @@ also rides ?token= like hermes' own web UI).
 |---|---|---|
 | Chat list | `session.list` + `projects.tree` | ✅ read-only, grouped by project |
 | Open chat → transcript | `session.history` (rows by `row_id`) | next |
-| Send message | `prompt.submit` | — |
+| Send message | `prompt.submit` | ✅ streams live |
 | Streaming reply | `message.delta` (coalesced ~30fps) + `message.complete` | needs live subscription |
 | New chat | `session.create` (+ `session.activate`) | — |
 | Rename chat | `session.title` | — |
