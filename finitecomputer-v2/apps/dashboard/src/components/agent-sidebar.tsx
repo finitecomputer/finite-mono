@@ -103,7 +103,13 @@ export function AgentSidebar({
   );
   const selectedTopicId = state?.selected_topic_id ?? null;
   const selectedChatId = state?.selected_chat_id ?? null;
-  const defaultNewChatTopic = canonicalNewChatTopic(topics);
+  // New chat lands in the topic the user is working in — including Home.
+  // Falls back to the transport's canonical topic, then the first topic.
+  const defaultNewChatTopic =
+    topics.find((topic) => topic.topic_id === selectedTopicId)
+    ?? canonicalNewChatTopic(topics)
+    ?? topics[0]
+    ?? null;
 
   const act = useCallback(async (action: HostedChatAction) => {
     setBusy(true);
@@ -112,16 +118,22 @@ export function AgentSidebar({
       const navigatesAfterSuccess =
         "CreateTopic" in action || "StartTopicChatIntent" in action;
       const preservesMobileSidebar = "CreateTopic" in action;
+      // Stay on whichever chat surface is active: the finitechat surface
+      // (/chat) or the spike's hermes-gateway surface (/gateway-chat).
+      const onChatSurface = pathname.endsWith("/chat") || pathname.endsWith("/gateway-chat");
+      const chatPath = `/dashboard/machines/${encodeURIComponent(machineId)}${
+        pathname.endsWith("/gateway-chat") ? "/gateway-chat" : "/chat"
+      }`;
       const pending = dispatch(action);
-      if (canNavigateImmediately && !pathname.endsWith("/chat")) {
-        router.push(`/dashboard/machines/${encodeURIComponent(machineId)}/chat`);
+      if (canNavigateImmediately && !onChatSurface) {
+        router.push(chatPath);
       }
       if (canNavigateImmediately) onMobileOpenChange(false);
       const next = await pending;
       setActionError(null);
       if (navigatesAfterSuccess) {
-        if (!pathname.endsWith("/chat")) {
-          router.push(`/dashboard/machines/${encodeURIComponent(machineId)}/chat`);
+        if (!onChatSurface) {
+          router.push(chatPath);
         }
         if (!preservesMobileSidebar) onMobileOpenChange(false);
       }

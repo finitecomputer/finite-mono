@@ -26,9 +26,10 @@ import {
 import { AgentSidebar } from "@/components/agent-sidebar";
 import { FiniteBrand } from "@/components/finite-brand";
 import { HostedChatProvider } from "@/components/hosted-chat-provider";
+import { HermesChatProvider } from "@/components/hermes-chat-provider";
 import { SignOutLink } from "@/components/sign-out-link";
 import type { CoreRuntimeStatus } from "@/lib/core-client";
-import { dashboardChatMachineIdFromPath } from "@/lib/dashboard-chat-route";
+import { dashboardChatMachineIdFromPath, dashboardGatewayChatFromPath } from "@/lib/dashboard-chat-route";
 import { dashboardMachineStatusPresentation } from "@/lib/dashboard-machine-status";
 import { cn } from "@/lib/utils";
 import "@/styles/ocean-shell.css";
@@ -373,6 +374,25 @@ function OnboardingAppSection({
   );
 }
 
+function ChatProviderWrapper({
+  children,
+  isGatewayChat,
+  machineId,
+}: {
+  children: React.ReactNode;
+  isGatewayChat: boolean;
+  machineId: string;
+}) {
+  if (isGatewayChat) {
+    return <HermesChatProvider key={machineId}>{children}</HermesChatProvider>;
+  }
+  return (
+    <HostedChatProvider key={machineId} machineId={machineId}>
+      {children}
+    </HostedChatProvider>
+  );
+}
+
 function AgentAppSection({
   children,
   isChatSurface,
@@ -387,6 +407,11 @@ function AgentAppSection({
   viewerEmail?: string | null;
 }) {
   const pathname = usePathname() ?? "";
+  // Spike: the gateway-chat surface swaps the chat backend — the SAME
+  // components render over the hermes tui_gateway WebSocket instead of the
+  // finitechat hosted device.
+  const isGatewayChat = dashboardGatewayChatFromPath(pathname);
+  const ChatProvider = isGatewayChat ? HermesChatProvider : HostedChatProvider;
   const scrollRef = useRef<HTMLElement>(null);
   const [collapsed, setCollapsed] = useState(false);
   const [mobileOpen, setMobileOpen] = useState(false);
@@ -404,7 +429,7 @@ function AgentAppSection({
   }, []);
 
   return (
-    <HostedChatProvider key={machine.id} machineId={machine.id}>
+    <ChatProviderWrapper isGatewayChat={isGatewayChat} machineId={machine.id}>
       <div className={`finite-agent-shell ${collapsed ? "is-sidebar-collapsed" : ""}`}>
         <AgentSidebar
           collapsed={collapsed}
@@ -441,7 +466,7 @@ function AgentAppSection({
           {isChatSurface ? children : <div className="ocean-app-content">{children}</div>}
         </main>
       </div>
-    </HostedChatProvider>
+    </ChatProviderWrapper>
   );
 }
 
