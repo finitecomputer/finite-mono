@@ -6,9 +6,9 @@ use finite_nostr::verify_event_integrity;
 use finitechat_core::{AppAction, FiniteChatRuntime, OpenOptions, npub_from_account_id};
 use finitechat_hosted_device::{
     HostedDeviceConfig, MAX_HOSTED_ATTACHMENT_BYTES, MAX_HOSTED_ATTACHMENTS_PER_MESSAGE,
-    MAX_HOSTED_MULTIPART_BODY_BYTES, WORKOS_USER_HEADER, app,
+    MAX_HOSTED_MULTIPART_BODY_BYTES, OneTimeHostedAgentRebindIntent, WORKOS_USER_HEADER, app,
     app_with_final_agent_binding_persist_failures, app_with_profile_bootstrap_room_create_failures,
-    app_with_profile_bootstrap_submit_failures,
+    app_with_profile_bootstrap_submit_failures, one_time_rebind_hosted_agent_on_scratch,
 };
 use finitechat_proto::{
     DecryptedApplicationEventV1, DurableAppEventKind, RuntimeCommandJsonPayloadV1,
@@ -1890,6 +1890,148 @@ async fn new_agent_binding_stays_unchanged_across_duplicate_selection_and_restar
         serde_json::json!([duplicate_room])
     );
     assert_eq!(fs::read(binding_path).unwrap(), original_sealed_binding);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn one_time_scratch_rebind_replaces_only_the_exact_empty_room_binding_and_replays() {
+    let root = TempDir::new().unwrap();
+    let server_db = root.path().join("one-time-rebind-server.sqlite3");
+    let (server_url, _, server_task) = spawn_chat_server(&server_db, None).await;
+    let agent = FiniteChatRuntime::open(OpenOptions {
+        data_dir: root
+            .path()
+            .join("one-time-rebind-agent")
+            .display()
+            .to_string(),
+        server_url: server_url.clone(),
+        device_id: "agent".to_owned(),
+        account_secret_hex: None,
+        now_unix_seconds: None,
+    })
+    .unwrap();
+    let agent_account_id = agent
+        .dispatch_and_wait(AppAction::StartRuntime)
+        .unwrap()
+        .identity
+        .account_id;
+    let agent_npub = npub_from_account_id(agent_account_id.clone()).unwrap();
+    let config = HostedDeviceConfig {
+        data_root: root.path().join("one-time-rebind-hosted"),
+        server_url: server_url.clone(),
+        public_url: PUBLIC_SERVER_URL.to_owned(),
+        api_token: TOKEN.to_owned(),
+    };
+    let hosted = app(config.clone());
+    let user_id = "one-time-rebind-user";
+    action_for(
+        hosted.clone(),
+        user_id,
+        serde_json::json!({ "StartRuntime": null }),
+    )
+    .await;
+    binding_for(
+        hosted.clone(),
+        user_id,
+        "/v1/app/agent-bindings/authorize-bootstrap",
+        serde_json::json!({
+            "project_id": "project-rebind",
+            "creation_request_id": "create-project-rebind"
+        }),
+    )
+    .await;
+    let ensured = binding_for(
+        hosted.clone(),
+        user_id,
+        "/v1/app/agent-bindings/ensure",
+        serde_json::json!({
+            "project_id": "project-rebind",
+            "agent_npub": agent_npub,
+            "display_name": "Empty bootstrap residue"
+        }),
+    )
+    .await;
+    let old_room_id = ensured["hosted_agent_binding"]["canonical_room_id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let human_account_id = ensured["identity"]["account_id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    agent.dispatch_and_wait(AppAction::StartRuntime).unwrap();
+    let replacement = action_for(
+        hosted.clone(),
+        user_id,
+        serde_json::json!({
+            "StartGroupChat": {
+                "profiles": [{
+                    "account_id": agent_account_id,
+                    "npub": agent_npub,
+                    "display_name": "Binding Agent",
+                    "about": null,
+                    "picture": null,
+                    "stale": false,
+                    "is_agent": true
+                }],
+                "display_name": "Recovered historical room"
+            }
+        }),
+    )
+    .await;
+    let new_room_id = replacement["selected_room_id"].as_str().unwrap().to_owned();
+    assert_ne!(old_room_id, new_room_id);
+    drop(hosted);
+
+    let user_root = config
+        .data_root
+        .join("users")
+        .join(hex::encode(sha2::Sha256::digest(user_id.as_bytes())));
+    let intent = OneTimeHostedAgentRebindIntent {
+        version: 1,
+        migration_id: "migration-rebind-test".to_owned(),
+        workos_user_id: user_id.to_owned(),
+        project_id: "project-rebind".to_owned(),
+        expected_human_account_id: human_account_id,
+        expected_agent_account_id: agent_account_id,
+        expected_agent_npub: agent_npub,
+        expected_old_canonical_room_id: old_room_id.clone(),
+        new_canonical_room_id: new_room_id.clone(),
+    };
+    let unmarked =
+        one_time_rebind_hosted_agent_on_scratch(config.clone(), intent.clone()).unwrap_err();
+    assert!(unmarked.to_string().contains("scratch marker"));
+    fs::write(
+        user_root.join(".finitechat-one-time-room-handoff-scratch"),
+        b"migration-rebind-test\n",
+    )
+    .unwrap();
+    let mut wrong_old_room = intent.clone();
+    wrong_old_room.expected_old_canonical_room_id = "room-aaaaaaaaaaaaaaaa".to_owned();
+    let wrong_binding =
+        one_time_rebind_hosted_agent_on_scratch(config.clone(), wrong_old_room).unwrap_err();
+    assert!(wrong_binding.to_string().contains("does not exactly match"));
+    let first = one_time_rebind_hosted_agent_on_scratch(config.clone(), intent.clone()).unwrap();
+    assert!(!first.exact_replay);
+    let replay = one_time_rebind_hosted_agent_on_scratch(config.clone(), intent).unwrap();
+    assert!(replay.exact_replay);
+
+    let reopened = binding_for(
+        app(config),
+        user_id,
+        "/v1/app/agent-bindings/open",
+        serde_json::json!({ "project_id": "project-rebind" }),
+    )
+    .await;
+    assert_eq!(
+        reopened["hosted_agent_binding"]["canonical_room_id"],
+        new_room_id
+    );
+    assert_eq!(
+        reopened["hosted_agent_binding"]["associated_room_ids"],
+        serde_json::json!([old_room_id])
+    );
+    assert_eq!(reopened["selected_room_id"], new_room_id);
+    server_task.abort();
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

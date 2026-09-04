@@ -1,0 +1,106 @@
+{
+  "schema": "finite.fiknight-pause-status.v1",
+  "generated_at": "2026-09-03T16:44:53.092427Z",
+  "collector": "scripts/finite-status --json",
+  "collector_host": "finite-lat-2",
+  "raw_report_sha256": "d95bb2471c79951691cd91a2950db41f9da0c93df02c4cbd3567ce2788bd1c6f",
+  "raw_report_retention": "private local operator evidence; not committed because it contains unrelated fleet inventory",
+  "overall_status": "red",
+  "overall_status_reason": "pre-existing stale Smoke Studio fleet row only",
+  "sections": {
+    "host_health": "green",
+    "chat_plane": "green",
+    "recovery_boundary": "green",
+    "rollout_state": "green",
+    "fleet_convergence": "red"
+  },
+  "services": [
+    {
+      "unit": "finite-saas-core.service",
+      "active_state": "active",
+      "sub_state": "running",
+      "status": "green"
+    },
+    {
+      "unit": "podman-finite-saas-dashboard.service",
+      "active_state": "active",
+      "sub_state": "running",
+      "status": "green"
+    },
+    {
+      "unit": "finitechat-server.service",
+      "active_state": "active",
+      "sub_state": "running",
+      "status": "green"
+    },
+    {
+      "unit": "finitechat-hosted-device.service",
+      "active_state": "active",
+      "sub_state": "running",
+      "status": "green"
+    },
+    {
+      "unit": "finite-brain-app.service",
+      "active_state": "active",
+      "sub_state": "running",
+      "status": "green"
+    },
+    {
+      "unit": "finite-saas-sites.service",
+      "active_state": "active",
+      "sub_state": "running",
+      "status": "green"
+    },
+    {
+      "unit": "prometheus-node-exporter.service",
+      "active_state": "active",
+      "sub_state": "running",
+      "status": "green"
+    }
+  ],
+  "http_probes": {
+    "finite-saas-core": "green",
+    "dashboard": "green",
+    "finitechat-server": "green",
+    "hosted-web-device": "green",
+    "finite-brain": "green",
+    "finitesitesd": "green",
+    "node-exporter": "green"
+  },
+  "chat_server_watermark": {
+    "status": "green",
+    "ops_head": 220659,
+    "snapshot_watermark": 220061,
+    "gap_ops": 598,
+    "gap_red_ops": 8192
+  },
+  "recovery": {
+    "status": "green",
+    "snapshot": {
+      "name": "20260902T214218Z",
+      "created_at": "2026-09-02T21:42:18Z",
+      "manifest_valid": true,
+      "manifest_entries": 21563,
+      "manifest_failures": []
+    },
+    "litestream": "green",
+    "borg": "green"
+  },
+  "accepted_exception": {
+    "source_host_id": "smoke",
+    "agent_name": "Smoke Studio",
+    "status": "red",
+    "disposition": "pre-existing stale Core row; unrelated to FiKnight cutover"
+  },
+  "runtime_drift": {
+    "promoted_target": "finite-agent-runtime-2026-09-02.2",
+    "recorded_transfer_fence": "finite-agent-runtime-2026-09-02.1",
+    "effect": "future cutover blocked pending refreshed fence and rehearsal"
+  },
+  "migration_state": {
+    "status": "paused",
+    "writer_fence_active": false,
+    "services_restored": true,
+    "attempt_artifacts_reusable": false
+  }
+}

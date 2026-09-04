@@ -1,4 +1,4 @@
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeSet, HashMap, HashSet};
 use std::convert::Infallible;
 use std::fs;
 use std::io::Write;
@@ -98,6 +98,34 @@ pub struct HostedDeviceConfig {
     /// Canonical public chat server identity bound into encrypted device links.
     pub public_url: String,
     pub api_token: String,
+}
+
+/// Exact inputs for the unmerged, local-only repair that replaces the empty
+/// bootstrap Room with the verified pre-existing Room after a cross-account
+/// handoff. This is deliberately not exposed by the HTTP router.
+#[doc(hidden)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct OneTimeHostedAgentRebindIntent {
+    pub version: u16,
+    pub migration_id: String,
+    pub workos_user_id: String,
+    pub project_id: String,
+    pub expected_human_account_id: String,
+    pub expected_agent_account_id: String,
+    pub expected_agent_npub: String,
+    pub expected_old_canonical_room_id: String,
+    pub new_canonical_room_id: String,
+}
+
+#[doc(hidden)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct OneTimeHostedAgentRebindReport {
+    pub migration_id: String,
+    pub project_id: String,
+    pub old_canonical_room_id: String,
+    pub new_canonical_room_id: String,
+    pub exact_replay: bool,
 }
 
 #[derive(Clone)]
@@ -329,6 +357,136 @@ struct HealthResponse {
 
 pub fn app(config: HostedDeviceConfig) -> Router {
     app_with_test_options(config, 0, 0, 0)
+}
+
+/// Local-only migration seam. It authenticates and replaces one exact sealed
+/// binding on a marked scratch copy; production has no route to this function.
+#[doc(hidden)]
+pub fn one_time_rebind_hosted_agent_on_scratch(
+    config: HostedDeviceConfig,
+    intent: OneTimeHostedAgentRebindIntent,
+) -> Result<OneTimeHostedAgentRebindReport, HostedDeviceError> {
+    if intent.version != 1
+        || intent.migration_id.trim().is_empty()
+        || intent.workos_user_id.trim().is_empty()
+    {
+        return Err(HostedDeviceError::AgentBindingInvalid(
+            "one-time rebind intent is invalid".to_owned(),
+        ));
+    }
+    if !(config.server_url.starts_with("http://127.0.0.1:")
+        || config.server_url.starts_with("http://localhost:"))
+    {
+        return Err(HostedDeviceError::AgentBindingInvalid(
+            "one-time rebind only accepts a loopback Room server".to_owned(),
+        ));
+    }
+    let state = HostedDeviceState {
+        config,
+        runtimes: Arc::new(Mutex::new(HashMap::new())),
+        agent_binding_locks: Arc::new(Mutex::new(HashMap::new())),
+        fail_final_agent_binding_persists: Arc::new(AtomicUsize::new(0)),
+        fail_profile_bootstrap_room_creates_after_server_acceptance: Arc::new(AtomicUsize::new(0)),
+        fail_profile_bootstrap_submits_after_device_save: Arc::new(AtomicUsize::new(0)),
+    };
+    let user_root = state.user_root(&intent.workos_user_id);
+    let marker = user_root.join(".finitechat-one-time-room-handoff-scratch");
+    let marker_value = fs::read_to_string(&marker).map_err(|error| {
+        HostedDeviceError::AgentBindingInvalid(format!(
+            "scratch marker {} could not be read: {error}",
+            marker.display()
+        ))
+    })?;
+    if marker_value.trim() != intent.migration_id {
+        return Err(HostedDeviceError::AgentBindingInvalid(
+            "scratch marker does not match the exact migration id".to_owned(),
+        ));
+    }
+    let runtime = state.runtime_for(&intent.workos_user_id)?;
+    let identity = runtime.state()?.identity;
+    if identity.account_id != intent.expected_human_account_id {
+        return Err(HostedDeviceError::AgentBindingInvalid(
+            "the scratch Hosted Device identity does not match the rebind intent".to_owned(),
+        ));
+    }
+    let existing =
+        load_agent_binding(&state, &intent.workos_user_id, &intent.project_id, &runtime)?
+            .ok_or(HostedDeviceError::AgentBindingNotFound)?;
+    let replacement = HostedAgentBindingV1 {
+        version: AGENT_BINDING_VERSION,
+        project_id: intent.project_id.clone(),
+        human_account_id: intent.expected_human_account_id.clone(),
+        agent_account_id: intent.expected_agent_account_id.clone(),
+        agent_npub: intent.expected_agent_npub.clone(),
+        canonical_room_id: intent.new_canonical_room_id.clone(),
+        associated_room_ids: vec![intent.expected_old_canonical_room_id.clone()],
+    };
+    if existing == replacement {
+        open_validated_agent_binding(&runtime, &replacement)?;
+        return Ok(one_time_rebind_report(intent, true));
+    }
+    if existing.version != AGENT_BINDING_VERSION
+        || existing.project_id != intent.project_id
+        || existing.human_account_id != intent.expected_human_account_id
+        || existing.agent_account_id != intent.expected_agent_account_id
+        || !existing
+            .agent_npub
+            .eq_ignore_ascii_case(&intent.expected_agent_npub)
+        || existing.canonical_room_id != intent.expected_old_canonical_room_id
+        || !existing.associated_room_ids.is_empty()
+    {
+        return Err(HostedDeviceError::AgentBindingInvalid(
+            "the current sealed binding does not exactly match the recorded empty-room residue"
+                .to_owned(),
+        ));
+    }
+    let room_ids = runtime.profile_chat_room_ids(intent.expected_agent_account_id.clone())?;
+    let expected_room_ids = [
+        intent.expected_old_canonical_room_id.clone(),
+        intent.new_canonical_room_id.clone(),
+    ]
+    .into_iter()
+    .collect::<BTreeSet<_>>();
+    if room_ids.into_iter().collect::<BTreeSet<_>>() != expected_room_ids {
+        return Err(HostedDeviceError::AgentBindingInvalid(
+            "the target and Agent do not share exactly the old residue and new canonical Rooms"
+                .to_owned(),
+        ));
+    }
+    let encoded = seal_agent_binding_record(
+        &intent.workos_user_id,
+        &intent.project_id,
+        &replacement,
+        &runtime,
+        AgentBindingRecordKind::Binding,
+    )?;
+    write_atomic_durable_replace(
+        &state.agent_binding_path(&intent.workos_user_id, &intent.project_id),
+        &encoded,
+    )?;
+    let installed =
+        load_agent_binding(&state, &intent.workos_user_id, &intent.project_id, &runtime)?
+            .ok_or(HostedDeviceError::AgentBindingNotFound)?;
+    if installed != replacement {
+        return Err(HostedDeviceError::AgentBindingInvalid(
+            "the replacement sealed binding did not verify after its durable write".to_owned(),
+        ));
+    }
+    open_validated_agent_binding(&runtime, &installed)?;
+    Ok(one_time_rebind_report(intent, false))
+}
+
+fn one_time_rebind_report(
+    intent: OneTimeHostedAgentRebindIntent,
+    exact_replay: bool,
+) -> OneTimeHostedAgentRebindReport {
+    OneTimeHostedAgentRebindReport {
+        migration_id: intent.migration_id,
+        project_id: intent.project_id,
+        old_canonical_room_id: intent.expected_old_canonical_room_id,
+        new_canonical_room_id: intent.new_canonical_room_id,
+        exact_replay,
+    }
 }
 
 /// Test seam for proving recovery when the final binding write fails after its

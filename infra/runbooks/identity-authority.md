@@ -1,4 +1,4 @@
-# Finite Identity Authority on finite-lat-1
+# Finite Identity Authority on the app-plane host
 
 This runbook covers the production `finite-identity.service`, its public edge,
 the shared managed-agent provisioning credential, and recovery of its
@@ -52,10 +52,10 @@ bindings, brain resolution, and the sites-notification relay. A public request
 to any of those must return `404`.
 
 `identity.finite.vip` currently belongs to the legacy `*.finite.vip` DNS
-shape. Before public acceptance, replace only its exact A record with
-`64.34.82.77`. Do not move the `finite.vip` apex or wildcard: those still
-address the legacy fleet. The exact record must resolve to lat1 before Caddy
-can obtain its public certificate.
+shape. Its exact A record resolves to the replacement app-plane host at
+`64.34.80.19`. Do not move the `finite.vip` apex or wildcard: those still
+address the legacy fleet. The exact record must resolve to the app-plane host
+before Caddy can obtain its public certificate.
 
 NIP-05 discovery for managed addresses is canonical at
 `https://finite.vip/.well-known/nostr.json`. The apex remains on clawland, so

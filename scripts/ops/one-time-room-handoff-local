@@ -1,0 +1,221 @@
+#!/usr/bin/env bash
+set -euo pipefail
+umask 077
+
+# This driver mutates only a private local working copy. Its /tmp path,
+# owner-only permissions, fresh output names, intent markers, and executable
+# hashes are all fail-closed gates; never point it at a deployed data root.
+
+usage() {
+  echo "usage: $0 CUTOVER_ROOT WORKING_SUBDIR OUTPUT_PREFIX PORT INTENT_BASENAME REBIND_BASENAME SOURCE_STORE TARGET_STORE" >&2
+  exit 64
+}
+
+[ "$#" -eq 8 ] || usage
+
+cutover_root=$1
+working_subdir=$2
+output_prefix=$3
+port=$4
+intent_basename=$5
+rebind_basename=$6
+source_store=$7
+target_store=$8
+
+[[ "$cutover_root" =~ ^/tmp/[a-zA-Z0-9._-]+-production-cutover-[a-zA-Z0-9._-]+$ ]] || {
+  echo "CUTOVER_ROOT must be one exact production cutover directory under /tmp" >&2
+  exit 64
+}
+[ -d "$cutover_root" ] && [ ! -L "$cutover_root" ] || {
+  echo "CUTOVER_ROOT must be a real directory, not a symlink" >&2
+  exit 66
+}
+for component in "$working_subdir" "$output_prefix" "$intent_basename" \
+  "$rebind_basename"; do
+  case "$component" in
+    *[!a-zA-Z0-9._-]*|'') echo "path names must be one component" >&2; exit 64 ;;
+  esac
+done
+case "$port" in
+  *[!0-9]*|'') echo "PORT must be numeric" >&2; exit 64 ;;
+esac
+for store in "$source_store" "$target_store"; do
+  [[ "$store" =~ ^[0-9a-f]{64}$ ]] || {
+    echo "hosted store IDs must be 64 lowercase hexadecimal characters" >&2
+    exit 64
+  }
+done
+[ -z "$(find "$cutover_root" -perm -007 -print -quit)" ] || {
+  echo "cutover root contains group- or other-accessible paths" >&2
+  exit 77
+}
+
+repo_root=$(git rev-parse --show-toplevel)
+room_handoff="$repo_root/target/release/examples/one_time_room_handoff"
+agent_rebind="$repo_root/target/release/examples/one_time_agent_rebind"
+server_bin="$repo_root/target/release/finitechat-server"
+
+intent="$cutover_root/$intent_basename"
+rebind="$cutover_root/$rebind_basename"
+working="$cutover_root/$working_subdir"
+server_db="$working/finite-chat/server.sqlite3"
+source_root="$working/hosted-device/users/$source_store"
+target_root="$working/hosted-device/users/$target_store"
+server_url="http://127.0.0.1:$port"
+[ -z "$(lsof -nP -iTCP:"$port" -sTCP:LISTEN 2>/dev/null || true)" ] || {
+  echo "PORT already has a listener: $port" >&2
+  exit 69
+}
+
+for executable in "$server_bin" "$room_handoff" "$agent_rebind"; do
+  [ -f "$executable" ] && [ ! -L "$executable" ] && [ -x "$executable" ] || {
+    echo "missing or symlinked executable: $executable" >&2
+    exit 66
+  }
+done
+binary_manifest="$cutover_root/local-binary-sha256.txt"
+[ -f "$binary_manifest" ] || { echo "missing binary hash manifest" >&2; exit 66; }
+(cd "$repo_root" && shasum -a 256 -c "$binary_manifest") >/dev/null
+for root in "$working" "$source_root" "$target_root"; do
+  [ -d "$root" ] && [ ! -L "$root" ] || {
+    echo "missing or symlinked input directory: $root" >&2
+    exit 66
+  }
+done
+for file in "$intent" "$rebind" "$server_db" \
+  "$source_root/chat/client.sqlite3" "$target_root/chat/client.sqlite3"; do
+  [ -f "$file" ] && [ ! -L "$file" ] || {
+    echo "missing or symlinked input: $file" >&2
+    exit 66
+  }
+done
+
+migration_id=$(jq -er '.migration_id' "$intent")
+[ "$(jq -er '.migration_id' "$rebind")" = "$migration_id" ]
+room_id=$(jq -er '.room_id' "$intent")
+target_account_id=$(jq -er '.target.account_id' "$intent")
+agent_account_id=$(jq -er '.expected_agent_account_id' "$rebind")
+[ "$(jq -er '.new_canonical_room_id' "$rebind")" = "$room_id" ]
+for root in "$source_root" "$target_root"; do
+  marker="$root/.finitechat-one-time-room-handoff-scratch"
+  [ -f "$marker" ]
+  [ "$(tr -d '\n' < "$marker")" = "$migration_id" ]
+done
+
+evidence="$cutover_root/$output_prefix-evidence.json"
+removal="$cutover_root/$output_prefix-removal.json"
+inspect="$cutover_root/$output_prefix-inspect.json"
+join="$cutover_root/$output_prefix-join.json"
+plan="$cutover_root/$output_prefix-plan.json"
+apply="$cutover_root/$output_prefix-apply.json"
+replay="$cutover_root/$output_prefix-replay.json"
+prepare_remove="$cutover_root/$output_prefix-prepare-remove.json"
+submit_remove="$cutover_root/$output_prefix-submit-remove.json"
+rebind_receipt="$cutover_root/$output_prefix-rebind.json"
+rebind_replay="$cutover_root/$output_prefix-rebind-replay.json"
+verify="$cutover_root/$output_prefix-verify.json"
+server_log="$cutover_root/$output_prefix-server.log"
+
+for output in "$evidence" "$removal" "$inspect" "$join" "$plan" "$apply" \
+  "$replay" "$prepare_remove" "$submit_remove" "$rebind_receipt" \
+  "$rebind_replay" "$verify" "$server_log"; do
+  [ ! -e "$output" ] || { echo "refusing to overwrite: $output" >&2; exit 73; }
+done
+
+server_pid=
+cleanup() {
+  status=$?
+  if [ -n "$server_pid" ] && kill -0 "$server_pid" 2>/dev/null; then
+    kill "$server_pid" 2>/dev/null || true
+    wait "$server_pid" 2>/dev/null || true
+  fi
+  exit "$status"
+}
+trap cleanup EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
+
+"$server_bin" serve "127.0.0.1:$port" --sqlite "$server_db" \
+  --public-url "$server_url" >"$server_log" 2>&1 &
+server_pid=$!
+
+ready=0
+for _ in $(seq 1 600); do
+  if curl --fail --silent --max-time 1 "$server_url/readyz" >/dev/null; then
+    ready=1
+    break
+  fi
+  kill -0 "$server_pid" 2>/dev/null || {
+    echo "loopback Room server exited during startup; inspect $server_log" >&2
+    exit 70
+  }
+  sleep 0.1
+done
+[ "$ready" -eq 1 ] || { echo "loopback Room server did not become ready" >&2; exit 70; }
+kill -0 "$server_pid"
+
+run_room_phase() {
+  phase=$1
+  output=$2
+  "$room_handoff" "$phase" "$intent" "$evidence" "$removal" \
+    "$source_root" "$target_root" "$server_url" >"$output"
+}
+
+run_room_phase inspect "$inspect"
+run_room_phase join "$join"
+run_room_phase plan "$plan"
+run_room_phase apply "$apply"
+run_room_phase apply "$replay"
+run_room_phase prepare-remove "$prepare_remove"
+run_room_phase submit-remove "$submit_remove"
+"$agent_rebind" "$rebind" "$working/hosted-device" "$server_url" \
+  >"$rebind_receipt"
+"$agent_rebind" "$rebind" "$working/hosted-device" "$server_url" \
+  >"$rebind_replay"
+run_room_phase verify "$verify"
+
+kill "$server_pid"
+wait "$server_pid" 2>/dev/null || true
+server_pid=
+for database in "$server_db" "$source_root/chat/client.sqlite3" \
+  "$target_root/chat/client.sqlite3"; do
+  [ -z "$(lsof "$database" 2>/dev/null || true)" ]
+done
+
+jq -se 'all(.[]; .exact_replay == false)' "$apply" "$rebind_receipt" >/dev/null
+jq -se 'all(.[]; .exact_replay == true)' "$replay" "$rebind_replay" >/dev/null
+jq -e \
+  --arg migration_id "$migration_id" \
+  --arg room_id "$room_id" \
+  --arg target_account_id "$target_account_id" \
+  --arg agent_account_id "$agent_account_id" '
+  .migration_id == $migration_id
+  and .room_id == $room_id
+  and .paired_agent.agent_account_id == $agent_account_id
+  and .paired_agent.canonical_room_id == $room_id
+  and .projected_chat_message_count > 0
+  and (.member_account_ids | sort) == ([
+    $agent_account_id,
+    $target_account_id
+  ] | sort)
+' "$verify" >/dev/null
+
+jq -n \
+  --arg migration_id "$migration_id" \
+  --argjson evidence "$(jq -c . "$evidence")" \
+  --argjson verify "$(jq -c . "$verify")" \
+  '{
+    migration_id: $migration_id,
+    through_seq: $evidence.through_seq,
+    history_event_count: $evidence.history_event_count,
+    source_cached_application_row_count: $evidence.source_cached_application_row_count,
+    projected_chat_message_count: $verify.projected_chat_message_count,
+    chunk_count: $evidence.chunk_count,
+    history_sha256: $evidence.history_sha256,
+    manifest_sha256: $evidence.manifest_sha256,
+    member_account_ids: $verify.member_account_ids,
+    canonical_room_id: $verify.paired_agent.canonical_room_id,
+    apply_exact_replay: false,
+    rebind_exact_replay: false,
+    replay_checks_passed: true
+  }'

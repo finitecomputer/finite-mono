@@ -4188,6 +4188,33 @@ impl SqliteClientStore {
         })
     }
 
+    /// One-time operator migration seam for importing one explicitly selected
+    /// Room into a different Chat account. This is intentionally separate from
+    /// normal Device linking: normal callers must retain the same-account
+    /// invariant enforced by [`Self::stage_device_link_bootstrap_chunk`].
+    #[doc(hidden)]
+    pub fn stage_one_time_cross_account_room_handoff_chunk(
+        &mut self,
+        owner: &DeviceRef,
+        source: &DeviceRef,
+        history_cutoff_seq: u64,
+        bootstrap: &DeviceLinkBootstrapV2,
+    ) -> Result<DeviceLinkBootstrapStageOutcome, ClientStoreError> {
+        validate_cross_account_room_handoff_for_owner(owner, source, bootstrap)?;
+        let encryption_key = self.options.encryption_key.clone();
+        self.with_transaction(|tx| {
+            stage_device_link_bootstrap_chunk_tx_with_policy(
+                tx,
+                &encryption_key,
+                owner,
+                source,
+                history_cutoff_seq,
+                bootstrap,
+                BootstrapAccountPolicy::RequireDifferentAccount,
+            )
+        })
+    }
+
     /// Load every receiving transfer directly from encrypted staging.
     ///
     /// This is deliberately unrelated to the application-event cursor or its
@@ -4225,6 +4252,45 @@ impl SqliteClientStore {
         let encryption_key = self.options.encryption_key.clone();
         self.with_transaction(|tx| {
             commit_device_link_bootstrap_tx(tx, &encryption_key, owner, expected, room, profiles)
+        })
+    }
+
+    /// Atomic publication half of the one-time cross-account Room handoff.
+    /// The staged transfer remains invisible unless the complete manifest and
+    /// every ordered history chunk validate in this same transaction.
+    #[doc(hidden)]
+    pub fn commit_one_time_cross_account_room_handoff_atomically(
+        &mut self,
+        owner: &DeviceRef,
+        expected: &StoredDeviceLinkBootstrapReceipt,
+        room: &StoredAppRoom,
+        profiles: &[StoredAppProfile],
+    ) -> Result<DeviceLinkBootstrapCommitOutcome, ClientStoreError> {
+        validate_app_message_owner(owner)?;
+        validate_device_link_bootstrap_receipt(expected)?;
+        if expected.source.account_id == owner.account_id {
+            return Err(ClientStoreError::DeviceLinkBootstrapReceiptMismatch {
+                stage: "cross_account_source",
+            });
+        }
+        room.validate_limits()?;
+        if room.room_id != expected.room_id {
+            return Err(ClientStoreError::DeviceLinkBootstrapRoomMismatch {
+                expected: expected.room_id.clone(),
+                actual: room.room_id.clone(),
+            });
+        }
+        let encryption_key = self.options.encryption_key.clone();
+        self.with_transaction(|tx| {
+            commit_device_link_bootstrap_tx_with_policy(
+                tx,
+                &encryption_key,
+                owner,
+                expected,
+                room,
+                profiles,
+                BootstrapAccountPolicy::RequireDifferentAccount,
+            )
         })
     }
 
@@ -8514,6 +8580,36 @@ fn validate_device_link_bootstrap_for_owner(
     Ok(())
 }
 
+fn validate_cross_account_room_handoff_for_owner(
+    owner: &DeviceRef,
+    source: &DeviceRef,
+    bootstrap: &DeviceLinkBootstrapV2,
+) -> Result<(), ClientStoreError> {
+    validate_app_message_owner(owner)?;
+    source.validate_limits().map_err(ClientError::from)?;
+    bootstrap.validate_limits().map_err(ClientError::from)?;
+    if source.account_id == owner.account_id || bootstrap.target != *owner {
+        return Err(ClientStoreError::DeviceLinkBootstrapReceiptMismatch {
+            stage: "cross_account_owner_binding",
+        });
+    }
+    let encoded = serde_json::to_vec(bootstrap)
+        .map_err(|_| ClientStoreError::EncodeDeviceLinkBootstrapChunk)?;
+    validate_bytes_len(
+        "device_link_bootstrap.payload",
+        encoded.len(),
+        finitechat_proto::MAX_DEVICE_LINK_BOOTSTRAP_PAYLOAD_BYTES,
+    )
+    .map_err(ClientError::from)?;
+    Ok(())
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum BootstrapAccountPolicy {
+    RequireSameAccount,
+    RequireDifferentAccount,
+}
+
 fn validate_device_link_bootstrap_manifest_fields(
     source: &DeviceRef,
     bootstrap: &DeviceLinkBootstrapV2,
@@ -8816,7 +8912,34 @@ fn stage_device_link_bootstrap_chunk_tx(
     envelope_seq: u64,
     bootstrap: &DeviceLinkBootstrapV2,
 ) -> Result<DeviceLinkBootstrapStageOutcome, ClientStoreError> {
-    validate_device_link_bootstrap_for_owner(owner, source, bootstrap)?;
+    stage_device_link_bootstrap_chunk_tx_with_policy(
+        tx,
+        encryption_key,
+        owner,
+        source,
+        envelope_seq,
+        bootstrap,
+        BootstrapAccountPolicy::RequireSameAccount,
+    )
+}
+
+fn stage_device_link_bootstrap_chunk_tx_with_policy(
+    tx: &Transaction<'_>,
+    encryption_key: &ClientStoreEncryptionKey,
+    owner: &DeviceRef,
+    source: &DeviceRef,
+    envelope_seq: u64,
+    bootstrap: &DeviceLinkBootstrapV2,
+    account_policy: BootstrapAccountPolicy,
+) -> Result<DeviceLinkBootstrapStageOutcome, ClientStoreError> {
+    match account_policy {
+        BootstrapAccountPolicy::RequireSameAccount => {
+            validate_device_link_bootstrap_for_owner(owner, source, bootstrap)?
+        }
+        BootstrapAccountPolicy::RequireDifferentAccount => {
+            validate_cross_account_room_handoff_for_owner(owner, source, bootstrap)?
+        }
+    }
     let manifest = StoredDeviceLinkBootstrapManifestV2::from_bootstrap(source, bootstrap)?;
     let receipt = manifest.receipt()?;
     let identity = device_link_bootstrap_identity_from_receipt(owner, &receipt);
@@ -9282,6 +9405,26 @@ fn commit_device_link_bootstrap_tx(
     room: &StoredAppRoom,
     profiles: &[StoredAppProfile],
 ) -> Result<DeviceLinkBootstrapCommitOutcome, ClientStoreError> {
+    commit_device_link_bootstrap_tx_with_policy(
+        tx,
+        encryption_key,
+        owner,
+        expected,
+        room,
+        profiles,
+        BootstrapAccountPolicy::RequireSameAccount,
+    )
+}
+
+fn commit_device_link_bootstrap_tx_with_policy(
+    tx: &Transaction<'_>,
+    encryption_key: &ClientStoreEncryptionKey,
+    owner: &DeviceRef,
+    expected: &StoredDeviceLinkBootstrapReceipt,
+    room: &StoredAppRoom,
+    profiles: &[StoredAppProfile],
+    account_policy: BootstrapAccountPolicy,
+) -> Result<DeviceLinkBootstrapCommitOutcome, ClientStoreError> {
     let identity = device_link_bootstrap_identity_from_receipt(owner, expected);
     let Some(row) = load_device_link_bootstrap_transfer_row(tx, encryption_key, identity)? else {
         return Ok(DeviceLinkBootstrapCommitOutcome::Incomplete);
@@ -9303,8 +9446,16 @@ fn commit_device_link_bootstrap_tx(
         DEVICE_LINK_BOOTSTRAP_STATE_RECEIVING => {}
         state => return Err(ClientStoreError::InvalidDeviceLinkBootstrapState { state }),
     }
+    let source_account_matches = match account_policy {
+        BootstrapAccountPolicy::RequireSameAccount => {
+            expected.source.account_id == owner.account_id
+        }
+        BootstrapAccountPolicy::RequireDifferentAccount => {
+            expected.source.account_id != owner.account_id
+        }
+    };
     if expected.target != *owner
-        || expected.source.account_id != owner.account_id
+        || !source_account_matches
         || room.display_name != row.manifest.room.display_name
         || room.picture != row.manifest.room.picture
     {

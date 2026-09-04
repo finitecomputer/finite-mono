@@ -80,7 +80,7 @@ for source in "$database" "$database-wal" "$database-shm"; do
   cp -p -- "$source" "$scratch/$(basename "$source")"
 done
 for copy in "$scratch_database" "$scratch_database-wal" "$scratch_database-shm"; do
-  [ ! -e "$copy" ] || chmod u+w -- "$copy"
+  [ ! -e "$copy" ] || chmod -- u+w "$copy"
 done
 
 sqlite=(sqlite3 -safe -readonly -batch -init /dev/null)
