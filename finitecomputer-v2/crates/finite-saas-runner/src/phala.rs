@@ -3994,7 +3994,7 @@ mod tests {
 
     #[test]
     fn readonly_workflow_pins_identity_fences_and_the_typed_command() {
-        let workflow = include_str!("../../../../.github/workflows/phala-readonly-preflight.yml");
+        let workflow = include_str!("../../../../.depot/workflows/phala-readonly-preflight.yml");
         for required in [
             "FC_RUNNER_PHALA_EXPECTED_WORKSPACE_ID",
             "FC_RUNNER_PHALA_EXPECTED_WORKSPACE_SLUG",

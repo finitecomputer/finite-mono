@@ -2,7 +2,8 @@
 
 This is THE Finite company repository — all first-party code, apps, protocols,
 and infrastructure definitions live here. `docs/monorepo-doctrine.md` is the
-constitution.
+constitution. `docs/adr/0007-github-is-the-source-authority-and-depot-is-ci.md`
+defines the GitHub/Depot CI boundary.
 
 ## Ground rules
 
@@ -77,11 +78,13 @@ constitution.
 
 ## CI and quality gates
 
-`.github/workflows/ci.yml` runs on every PR: rustfmt, clippy (`-D warnings`),
-`cargo test --workspace --locked` against real Postgres, dashboard
-lint/test/build, the finitechat Hermes bridge suite, and skills/search static
-checks. Release and image workflows are described in `infra/images/README.md`
-and the workflow files themselves.
+`.depot/workflows/ci.yml` runs in native Depot CI on every GitHub PR: rustfmt,
+clippy (`-D warnings`), `cargo test --workspace --locked` against real
+Postgres, dashboard lint/test/build, the finitechat Hermes bridge suite, and
+skills/search static checks. Release and image workflows are described in
+`infra/images/README.md` and the workflow files themselves. GitHub remains the
+source, pull-request, branch, tag, and issue authority; Depot is the CI
+execution and check-reporting control plane.
 
 ## Agent skills
 

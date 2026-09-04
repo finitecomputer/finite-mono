@@ -3,7 +3,7 @@
 # and adapted for the finite-mono root build context (the old COPY paths
 # assumed finitecomputer-v2 was the repo root; the crate now builds from the
 # root workspace). Build context: repo root. Built ONLY by
-# .github/workflows/service-images.yml — never on a prod box.
+# .depot/workflows/service-images.yml — never on a prod box.
 
 FROM rust:bookworm AS builder
 

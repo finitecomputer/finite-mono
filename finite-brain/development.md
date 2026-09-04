@@ -188,7 +188,7 @@ cargo build --locked --release --package finite-brain-cli --bin fbrain
 ## Release Shape
 
 Component tags named `fbrain/vX.Y.Z` trigger
-`.github/workflows/release-fbrain.yml` from the monorepo root. The workflow
+`.depot/workflows/release-fbrain.yml` from the monorepo root. The workflow
 publishes the versioned release and refreshes the `fbrain-latest` rolling alias.
 
 The release workflow currently packages:

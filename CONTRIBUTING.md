@@ -10,15 +10,15 @@ Everything is pinned by Nix — do not install Rust/Node/Postgres yourself.
 
 1. Install Nix (with flakes enabled) — https://nixos.org/download
 2. Install direnv — https://direnv.net
-3. `git clone https://github.com/finitecomputer/finite-mono && cd finite-mono`
+3. After receiving repository access, run
+   `gh repo clone finitecomputer/finite-mono && cd finite-mono`
 4. `direnv allow` — the flake dev shell provides rustc/cargo, just,
    process-compose, Postgres, and friends.
 
-The flake advertises Finite's public Cachix cache. On first use, Nix may ask
-you to accept the cache config for `https://finite.cachix.org`; accepting lets
-Nix substitute cached Finite-built packages instead of rebuilding them locally.
-If your Nix install does not accept flake cache config, run `cachix use finite`
-once or add the substituter and public key from `flake.nix` to your Nix config.
+To substitute cached Finite-built packages instead of rebuilding them locally,
+configure Finite's public Cachix cache once with `cachix use finite`. Depot CI
+configures the same cache explicitly in each Nix job; the flake does not request
+repository-controlled cache trust.
 
 No direnv? Prefix commands with `scripts/with-dev-env`.
 
@@ -118,13 +118,14 @@ just dev smoke       # portable services-only integration smoke (Linux CI)
 just dev saas-smoke  # real Apple Runtime + Hosted Web chat + restart healing
 ```
 
-CI (`.github/workflows/ci.yml`) runs fmt/clippy/tests against real Postgres,
-dashboard lint/test/build, the finitechat Hermes bridge suite, and
-skills/search checks on every PR.
+Native Depot CI (`.depot/workflows/ci.yml`) runs fmt/clippy/tests against real
+Postgres, dashboard lint/test/build, the finitechat Hermes bridge suite, and
+skills/search checks on every GitHub PR.
 
 ## Rules worth repeating
 
 - **Never commit a secret value.** Names and locations only (`infra/README.md`
-  explains the secrets model).
+  explains the secrets model); public release surfaces make this boundary
+  especially important.
 - Release asset names and install URL shapes are product contracts.
 - Deploy changes go in `infra/`, not in shell history.

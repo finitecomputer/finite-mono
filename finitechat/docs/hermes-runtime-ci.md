@@ -8,8 +8,7 @@ test layer or scheduling Docker builds on `finite-lat-2`.
 
 ## Acceptance Criteria
 
-- The Docker runtime smoke builds with Depot remote builders from GitHub
-  Actions.
+- The Docker runtime smoke runs in native Depot CI from GitHub events.
 - The runtime image is built once before the Docker smoke.
 - The Docker smoke uses that prebuilt image instead of rebuilding inside the
   test.
@@ -24,9 +23,9 @@ test layer or scheduling Docker builds on `finite-lat-2`.
 Current runtime image proof lives in `finite-mono`:
 
 - Build-only source preflight:
-  `.github/workflows/hermes-runtime-smoke.yml`
+  `.depot/workflows/hermes-runtime-smoke.yml`
 - Build-once promotion path:
-  `.github/workflows/runtime-image.yml`
+  `.depot/workflows/runtime-image.yml`
 - Runner: `depot-ubuntu-24.04`
 - Builder: `depot build` through `depot/setup-action` OIDC
 - Project id: `DEPOT_RUNTIME_IMAGE_PROJECT_ID` or shared `DEPOT_PROJECT_ID`
@@ -49,38 +48,35 @@ removed.
 
 ## Dispatch
 
-Use the publish gate when proving a Tinfoil-bound image:
+Dispatch the build-once runtime image canary at an explicit GitHub revision:
 
 ```sh
-scripts/hermes-github-publish-gate.py \
-  --ref <branch> \
-  --branch <branch> \
-  --restic-prefix agent-runtimes/<canary>/ci-smoke/restic \
-  --tinfoil-release-tag <tag>
-```
-
-For a raw workflow dispatch:
-
-```sh
-gh workflow run runtime-image.yml \
-  -R finitecomputer/finite-mono \
-  --ref <branch> \
-  -f version=<date-based-version>
+depot ci dispatch \
+  --org scthc5h66g \
+  --repo finitecomputer/finite-mono \
+  --workflow runtime-image.yml \
+  --ref <github-branch-or-sha> \
+  --input version=<date-based-version> \
+  --input publish_production=false
 ```
 
 Use the Phala durable-home gate when proving the current hosted-agent runtime:
 
 ```sh
-gh workflow run hermes-runtime-smoke.yml \
-  -R finitecomputer/finite-mono \
-  --ref <branch> \
-  -f durable_home_docker_smoke=true \
-  -f chat_interruption_smoke=true
+depot ci dispatch \
+  --org scthc5h66g \
+  --repo finitecomputer/finite-mono \
+  --workflow hermes-runtime-smoke.yml \
+  --ref <github-branch-or-sha> \
+  --input durable_home_docker_smoke=true \
+  --input chat_interruption_smoke=true
 ```
 
 ## Current Caveat
 
-The Tinfoil backup/restore Docker smoke is no longer the default `main` gate.
-It remains available for explicit Tinfoil dispatches only. The current
-hosted-agent lane is the Phala-shaped durable `/home/node` smoke, matching the
+The Tinfoil backup/restore Docker smoke is not a current CI lane. Its old
+GitHub Actions dispatch helpers were removed during the Depot CI migration. If
+that work resumes, it must consume the canonical digest proved by the Depot
+runtime-image workflow rather than restoring a parallel publication path. The
+current hosted-agent lane is the Phala-shaped durable `/home/node` smoke, matching the
 runner contract proven in finitecomputer's Phala runtime spike.

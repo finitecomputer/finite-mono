@@ -307,13 +307,15 @@ scripts/hermes-publish-proven-image.py \
   --publish-report target/hermes-docker-smoke/image-publish.json
 ```
 
-Add `--push` only after logging in to the registry. In GitHub Actions this is
-available as the manual `publish_runtime_image` input, which pushes the image
-ID recorded in the passing smoke report and uploads `image-publish.json`.
-Publishing requires the manual `restic_backend=s3` path. The workflow can use a
-full `restic_repository` dispatch input, or derive it from
-`latitude_storage_bucket`, `latitude_object_endpoint`, and `restic_prefix`.
-For hands-free dispatches, set these repository variables or secrets:
+Do not use this parked local publisher for a production or current canary. The
+GitHub Actions workflow and its three `hermes-github-*` operator helpers were
+removed during the GitHub/Depot CI cutover. Current publication builds once in
+`.depot/workflows/runtime-image.yml`, promotes that saved build to a run-scoped
+GHCR canary, verifies the digest and anonymous pull, and leaves production
+promotion closed unless its separate gate is enabled.
+
+The names below are retained only as archaeology for the parked recovery
+experiment:
 
 - `FINITE_LATITUDE_STORAGE_BUCKET`
 - `FINITE_LATITUDE_OBJECT_ENDPOINT`, optional when using the default
@@ -329,34 +331,8 @@ Configure these repository secrets before using the publish gate:
 - `FINITE_DOCKER_RESTIC_AWS_SESSION_TOKEN` if using temporary credentials
 - `FINITE_DOCKER_RESTIC_AWS_REGION` if the provider requires one
 
-If the values are present in `.env`, the current process environment, or the
-standard AWS shared credentials/config files, install the GitHub
-secrets/variables without printing secret values:
-
-```bash
-scripts/hermes-github-secrets-setup.py \
-  --repo finitecomputer/finitechat \
-  --env-file .env \
-  --apply
-```
-
-Pass `--aws-profile PROFILE` when the object-storage key lives outside the
-default AWS profile.
-Omit `--apply` for a redacted dry run. Existing GitHub secret or variable names
-are preserved, so the script only requires local values for names that are not
-already configured remotely.
-
-Check that the GitHub-side names are configured before starting the slow manual
-publish workflow:
-
-```bash
-scripts/hermes-github-ci-preflight.py --repo finitecomputer/finitechat
-```
-
-This writes `target/hermes-github-ci-preflight.json` and reports missing secret
-or variable names without reading or printing secret values.
-
-Before dispatching CI, check that the local branch is publishable:
+The provider-neutral local branch classifier remains useful before any future
+rewrite of this experiment:
 
 ```bash
 scripts/hermes-branch-publication-readiness.py \
@@ -371,25 +347,10 @@ changes to publish. A clean worktree reports `status: clean` instead of
 `blocked`, because that means there is nothing local to stage. It does not
 stage, commit, or push anything.
 
-Once preflight is green, run the S3 smoke, publish, handoff, canary-artifact
-generation, and artifact download path from one local command:
-
-```bash
-scripts/hermes-github-publish-gate.py \
-  --repo finitecomputer/finitechat \
-  --ref codex/hermes-sidecar-hardening
-```
-
-That command dispatches the manual CI workflow with `docker_smoke=true`,
-`publish_runtime_image=true`, and `restic_backend=s3`, watches the run, downloads
-artifacts into `target/hermes-github-publish-gate/artifacts`, and writes
-`target/hermes-github-publish-gate/report.json`. On a passing workflow it also
-copies the downloaded reports back into their canonical `target/...` paths and
-reruns `scripts/hermes-hardening-audit.py`, so local audit state reflects the CI
-evidence. Use `--dry-run` to inspect the exact `gh` commands without starting
-the workflow. The non-dry-run path fails before dispatch when the local worktree
-has uncommitted changes or the requested branch does not exist on GitHub; CI can
-only prove the pushed ref, not local edits.
+There is no current remote dispatch for the parked S3/Tinfoil experiment. A
+future implementation must use an explicit GitHub revision and native Depot
+artifacts; it may not reintroduce GitHub Actions as a competing execution
+authority.
 
 After publish, build the redacted Tinfoil handoff report:
 

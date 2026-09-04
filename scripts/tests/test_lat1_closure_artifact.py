@@ -173,6 +173,13 @@ exit 0
         self.assertEqual(result.returncode, 66)
         self.assertIn("artifact cache is missing or incomplete", result.stderr)
 
+    def test_validate_only_stops_before_any_remote_operation(self) -> None:
+        source = DEPLOY.read_text(encoding="utf-8")
+        validation_exit = source.index('if [[ "$mode" == "validate" ]]')
+
+        self.assertLess(validation_exit, source.index("ssh -o BatchMode=yes"))
+        self.assertLess(validation_exit, source.index("nix copy --no-check-sigs"))
+
     def test_cachix_manifest_realises_on_host_without_file_binary_cache(self) -> None:
         system = "/nix/store/" + "b" * 32 + "-nixos-system-finite-lat-1-26.05.test"
         with tempfile.TemporaryDirectory() as temp:

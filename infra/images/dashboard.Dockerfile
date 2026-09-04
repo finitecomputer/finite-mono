@@ -1,7 +1,7 @@
 # finite-saas-dashboard image (Next.js standalone).
 # Moved from finitecomputer-v2/deploy/finite-computer/images/. Build context is
 # the mono root because the dashboard consumes the shared Finite Chat UI
-# package. Built ONLY by .github/workflows/service-images.yml.
+# package. Built ONLY by .depot/workflows/service-images.yml.
 
 FROM node:22-bookworm-slim AS deps
 

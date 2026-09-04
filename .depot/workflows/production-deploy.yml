@@ -1,0 +1,76 @@
+name: Production validation
+on:
+  push:
+    branches: [production]
+  workflow_dispatch:
+concurrency:
+  group: production-validation
+  cancel-in-progress: false
+env:
+  CACHIX_CACHE_NAME: finite
+  # Depot CI sandboxes do not populate USER; Cachix needs the runner account.
+  USER: runner
+jobs:
+  validate:
+    name: Validate production without mutation
+    runs-on: depot-ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 0
+      - uses: DeterminateSystems/nix-installer-action@v16
+      - name: Configure Cachix read-only cache
+        uses: cachix/cachix-action@v17
+        with:
+          name: ${{ env.CACHIX_CACHE_NAME }}
+          skipPush: true
+      - name: Resolve source and comparison commits
+        id: inputs
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          PUSH_BEFORE: ${{ github.event.before }}
+        run: |
+          source_sha="$(git rev-parse HEAD)"
+          if [[ "$EVENT_NAME" == push && "$PUSH_BEFORE" =~ ^[0-9a-f]{40}$ && "$PUSH_BEFORE" != 0000000000000000000000000000000000000000 ]]; then
+            base_sha="$PUSH_BEFORE"
+          else
+            base_sha="$(git rev-parse HEAD^ 2>/dev/null || git rev-parse HEAD)"
+          fi
+          echo "source_sha=$source_sha" >> "$GITHUB_OUTPUT"
+          echo "base_sha=$base_sha" >> "$GITHUB_OUTPUT"
+      - name: Build and guard deployment plan
+        run: |
+          mkdir -p target/production-deploy
+          python3 scripts/production_deploy.py plan \
+            --base "${{ steps.inputs.outputs.base_sha }}" \
+            --head "${{ steps.inputs.outputs.source_sha }}" \
+            --output target/production-deploy/deployment-plan.json \
+            --summary target/production-deploy/deployment-plan.md
+          python3 scripts/delivery.py require-production-disabled \
+            --manifest target/production-deploy/deployment-plan.json
+      - name: Build lat1 closure artifact
+        run: |
+          scripts/build-lat1-nixos-closure-artifact \
+            "${{ steps.inputs.outputs.source_sha }}" \
+            target/lat1-nixos-closure
+      - name: Record the closed mutation boundary
+        run: |
+          python3 scripts/production_deploy.py record \
+            --plan target/production-deploy/deployment-plan.json \
+            --output target/production-deploy/deployment-record.json \
+            --outcome dry_run_blocked_before_mutation
+      - name: Upload validation evidence
+        uses: actions/upload-artifact@v4
+        with:
+          name: production-validation-${{ steps.inputs.outputs.source_sha }}
+          path: |
+            target/production-deploy/deployment-plan.json
+            target/production-deploy/deployment-plan.md
+            target/production-deploy/deployment-record.json
+            target/lat1-nixos-closure/manifest.json
+            target/lat1-nixos-closure/nix-cache
+            target/lat1-nixos-closure/store-paths.txt
+            target/lat1-nixos-closure/closure-size.txt
+          if-no-files-found: error
+          retention-days: 14

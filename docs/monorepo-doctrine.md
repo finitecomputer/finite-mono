@@ -6,6 +6,10 @@ workspace AGENTS.md, WORKSPACE_INVENTORY.md, and finitecomputer-v2's
 README/AGENTS/service-dependencies docs. Those statements described the
 pre-mono world and are void.
 
+The GitHub/Depot CI boundary was adopted 2026-08-25 in ADR-0007. GitHub remains
+the Source Authority while Depot is the CI execution and check-reporting
+control plane.
+
 ## Product safety maxims
 
 1. **Don't Break Chat!** Chat availability and durable history are Finite's
@@ -29,9 +33,9 @@ These maxims are the standing review frame for production changes.
 
 ## The doctrine
 
-1. **finite-mono is the single company repository.** All first-party code —
-   product CLIs, servers, the SaaS control plane, apps (dashboard, iOS,
-   protocols, skills, and infrastructure definitions — lives here.
+1. **finite-mono on GitHub is the single company repository and Source
+   Authority.** All first-party code — product CLIs, servers, the SaaS control
+   plane, apps, protocols, skills, and infrastructure definitions — lives here.
    Work lands here first; there is no "sync back to the source repo."
 2. **The old per-component repos are import provenance, not homes.** Each was
    snapshot-imported (no git history; SHAs recorded in
@@ -42,17 +46,15 @@ These maxims are the standing review frame for production changes.
 3. **Releases are component-scoped tags on this repo**: `finitechat/vX.Y.Z`,
    `fsite/vX.Y.Z`, `fbrain/vX.Y.Z`, plus dispatch-versioned images
    (`finite-agent-runtime`, `finite-saas-core`, `finite-saas-dashboard`,
-   `finite-private-limiter`). One repo, many independently versioned
-   artifacts. Release asset names are product contracts — never rename them.
-4. **finite-releases is the public release host.** Source authority remains in
-   finite-mono through component-scoped tags, while public binary downloads are
-   published to `finitecomputer/finite-releases` so releases stay
-   unauthenticated if finite-mono is private. Because one release repository
-   hosts many components, `releases/latest` is meaningless — installers use
-   per-component rolling alias releases (`finitechat-latest`, `fsite-latest`,
-   `fbrain-latest`) that the release workflows refresh on every versioned
-   release. The release repository carries release metadata and artifacts, not
-   product source.
+   `finite-private-limiter`). The public `finitecomputer/finite-releases`
+   repository receives release-only tags and assets; it is not a source
+   repository. Release asset names are product contracts — never rename them.
+4. **finite-releases is the public release host.** Because one release
+   repository hosts many components, `releases/latest` is meaningless —
+   installers use per-component rolling alias releases (`finitechat-latest`,
+   `fsite-latest`, `fbrain-latest`) that Depot refreshes only after immutable
+   versioned assets are verified. The release repository carries release
+   metadata and artifacts, not product source.
 5. **`infra/` is the single deploy root.** Nothing is built on a prod box;
    images are CI-built and digest-pinned; deploys are scripts/runbooks in this
    tree. See `infra/README.md`.

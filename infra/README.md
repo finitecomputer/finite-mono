@@ -149,11 +149,11 @@ smoke/clawland. Each host README documents which secrets each service needs —
 variable **names** and where the value lives, never the value. If you find a
 secret value committed here, rotate it first, then delete it.
 
-CI-only operational secrets live as GitHub Actions repository or organization
-secrets. `CACHIX_AUTH_TOKEN` is the Cachix write token for the `finite` binary
-cache used by CI Nix service package jobs and production closure
-publication. The cache must remain readable without that token for forked pull
-requests and production hosts to substitute from it.
+CI-only operational secrets live in Depot CI with the narrowest repository and
+workflow scope that supports the lane. `CACHIX_AUTH_TOKEN` is the Cachix write
+token for the `finite` binary cache used by CI Nix service package jobs and
+production closure publication. The cache must remain readable without that
+token for forked pull requests and production hosts to substitute from it.
 
 ## Images
 
