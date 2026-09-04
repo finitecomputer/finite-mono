@@ -1736,7 +1736,7 @@ button.ocean-pill-button {
   margin-top: 0.25rem;
 }
 
-.finite-chat__markdown a {
+.ocean-shell .finite-chat__markdown a {
   color: var(--accent-blue);
   text-decoration: underline;
   text-decoration-color: color-mix(in srgb, var(--accent-blue), transparent 45%);
