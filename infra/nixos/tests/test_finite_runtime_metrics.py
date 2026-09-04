@@ -5,6 +5,7 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 ROOT = Path(__file__).resolve().parents[3]
 if str(ROOT) not in sys.path:
@@ -166,6 +167,28 @@ class FiniteRuntimeMetricsTests(unittest.TestCase):
             self.assertEqual(output.read_text(encoding="utf-8"), "new\n")
             self.assertEqual(output.stat().st_mode & 0o777, 0o640)
             self.assertEqual(list(output.parent.glob("*.tmp.*")), [])
+
+    def test_collection_failure_retains_last_file_and_its_age(self) -> None:
+        # This is the deployed writer's compatibility contract. The slots
+        # dashboard must gate on file age even while node_exporter scrapes it.
+        with tempfile.TemporaryDirectory() as directory:
+            output = Path(directory) / "finite-runtime.prom"
+            output.write_text("previous sample\n")
+            modified = output.stat().st_mtime_ns
+            with (
+                patch.object(sys, "argv", ["finite-runtime-metrics", str(output)]),
+                patch.object(
+                    finite_runtime_metrics.finite_status,
+                    "collect_core",
+                    side_effect=finite_runtime_metrics.finite_status.CollectionError(
+                        "synthetic collection failure"
+                    ),
+                ),
+                self.assertRaises(finite_runtime_metrics.finite_status.CollectionError),
+            ):
+                finite_runtime_metrics.main()
+            self.assertEqual(output.read_text(), "previous sample\n")
+            self.assertEqual(output.stat().st_mtime_ns, modified)
 
 
 if __name__ == "__main__":

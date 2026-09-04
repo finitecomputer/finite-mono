@@ -2,8 +2,8 @@
   "annotations": {
     "list": []
   },
-  "description": "Operator dashboard for Agent Runtime slot usage on the Kata Runner hosts finite-lat-3 and finite-lat-4.",
-  "editable": true,
+  "description": "Core-recorded Agent Runtime occupancy estimates on lat3/lat4, gated by the age of the app-plane export. Not an admission-capacity signal.",
+  "editable": false,
   "fiscalYearStartMonth": 0,
   "graphTooltip": 0,
   "id": null,
@@ -13,17 +13,17 @@
     {
       "id": 1,
       "type": "text",
-      "title": "Draft data contract",
-      "description": "This panel prevents the draft from looking production-ready before provisioning is approved.",
+      "title": "How to read these estimates",
+      "description": "Core-recorded occupancy is not the Runner admission decision.",
       "gridPos": {
-        "h": 3,
-        "w": 24,
+        "h": 8,
+        "w": 18,
         "x": 0,
         "y": 0
       },
       "options": {
         "mode": "markdown",
-        "content": "This dashboard is a draft. It is not yet provisioned to production Grafana. Slot usage comes from the live `finite_runtime_artifact_active_agents` metric (exported from Core by `finite-runtime-metrics`). The 42-slot ceiling per host is the operator-pinned `FC_RUNNER_MAX_SANDBOXES` value guarded by `scripts/check_runner_host_contract.py`, not a live metric. A host with zero active runtimes and a stalled exporter both render `No data`; use the MVP dashboard's host scrape health to distinguish them. Runner drain (currently lat4) is operator env state and is not visible here."
+        "content": "**Recorded occupancy, not admission capacity.** Counts include Core-linked active Runtimes with known artifact identity on lat3/lat4. Runtimes with incomplete artifact identity are excluded, so unused slots can be overstated. Runner drain, reservations and host readiness are not measured here; check `scripts/finite-status` before admission or capacity decisions.\n\n**Unused slots (estimate)** = the 42-slot `FC_RUNNER_MAX_SANDBOXES` ceiling minus recorded Runtimes. The ceiling is a query constant guarded by `scripts/check_runner_host_contract.py`, not live configuration.\n\nCore collection runs every 5 minutes; this page refreshes every 2 minutes. Counts are hidden when the source file is missing, future-dated or at least 10 minutes old. **Unknown / No data** also covers a host with no counted Runtimes; it never implies zero usage or 42 available slots. Source age measures the last successful Core export, not scrape health."
       },
       "pluginVersion": "13.0.2"
     },
@@ -32,7 +32,81 @@
         "type": "prometheus",
         "uid": "finite-prometheus"
       },
-      "description": "Active Agent Runtimes on finite-lat-3. Red means the host is at its slot ceiling.",
+      "description": "Age of the last successful Core export on finite-lat-2. Collection runs every 5 minutes. At 10 minutes, or for a future-dated or missing file, occupancy estimates are hidden.",
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "thresholds"
+          },
+          "decimals": 0,
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "red",
+                "value": null
+              },
+              {
+                "color": "green",
+                "value": 0
+              },
+              {
+                "color": "yellow",
+                "value": 300
+              },
+              {
+                "color": "red",
+                "value": 600
+              }
+            ]
+          },
+          "unit": "s",
+          "noValue": "Unknown"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 6,
+        "x": 18,
+        "y": 0
+      },
+      "id": 8,
+      "options": {
+        "colorMode": "value",
+        "graphMode": "none",
+        "justifyMode": "auto",
+        "orientation": "auto",
+        "reduceOptions": {
+          "calcs": [
+            "last"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "textMode": "name_and_value",
+        "wideLayout": true
+      },
+      "pluginVersion": "13.0.2",
+      "targets": [
+        {
+          "editorMode": "code",
+          "expr": "time() - max(node_textfile_mtime_seconds{instance=\"finite-lat-2\",job=\"finite-internal-health\",file=\"/run/finite-monitoring/finite-runtime.prom\"})",
+          "instant": true,
+          "legendFormat": "__auto",
+          "range": false,
+          "refId": "A"
+        }
+      ],
+      "title": "Core Sample Age",
+      "type": "stat"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "finite-prometheus"
+      },
+      "description": "Core-recorded active Runtimes with known artifact identity. Only the live app-plane collector (finite-lat-2) is accepted. Samples at least 10 minutes old, future-dated or missing are hidden.",
       "fieldConfig": {
         "defaults": {
           "color": {
@@ -53,7 +127,8 @@
               }
             ]
           },
-          "unit": "short"
+          "unit": "short",
+          "noValue": "Unknown"
         },
         "overrides": []
       },
@@ -61,7 +136,7 @@
         "h": 5,
         "w": 6,
         "x": 0,
-        "y": 3
+        "y": 8
       },
       "id": 2,
       "options": {
@@ -71,7 +146,7 @@
         "orientation": "auto",
         "reduceOptions": {
           "calcs": [
-            "lastNotNull"
+            "last"
           ],
           "fields": "",
           "values": false
@@ -83,14 +158,14 @@
       "targets": [
         {
           "editorMode": "code",
-          "expr": "sum(finite_runtime_artifact_active_agents{source_host_id=\"finite-lat-3\"})",
+          "expr": "(sum(finite_runtime_artifact_active_agents{instance=\"finite-lat-2\",job=\"finite-internal-health\",source_host_id=\"finite-lat-3\"})) and on() ((time() - max(node_textfile_mtime_seconds{instance=\"finite-lat-2\",job=\"finite-internal-health\",file=\"/run/finite-monitoring/finite-runtime.prom\"}) >= 0) and (time() - max(node_textfile_mtime_seconds{instance=\"finite-lat-2\",job=\"finite-internal-health\",file=\"/run/finite-monitoring/finite-runtime.prom\"}) < 600))",
           "instant": true,
           "legendFormat": "__auto",
           "range": false,
           "refId": "A"
         }
       ],
-      "title": "lat3 Slots Used",
+      "title": "lat3 Recorded Runtimes",
       "type": "stat"
     },
     {
@@ -98,14 +173,13 @@
         "type": "prometheus",
         "uid": "finite-prometheus"
       },
-      "description": "Unoccupied Agent Runtime slots on finite-lat-3 (42 ceiling). Red means no free slots.",
+      "description": "42 minus recorded Runtimes; an upper estimate, not available admission capacity. Drain, reservations, host readiness and incomplete artifact identity are not included. Only the live app-plane collector (finite-lat-2) is accepted. Samples at least 10 minutes old, future-dated or missing are hidden.",
       "fieldConfig": {
         "defaults": {
           "color": {
             "mode": "thresholds"
           },
           "decimals": 0,
-          "min": 0,
           "thresholds": {
             "mode": "absolute",
             "steps": [
@@ -119,7 +193,8 @@
               }
             ]
           },
-          "unit": "short"
+          "unit": "short",
+          "noValue": "Unknown"
         },
         "overrides": []
       },
@@ -127,7 +202,7 @@
         "h": 5,
         "w": 6,
         "x": 6,
-        "y": 3
+        "y": 8
       },
       "id": 3,
       "options": {
@@ -137,7 +212,7 @@
         "orientation": "auto",
         "reduceOptions": {
           "calcs": [
-            "lastNotNull"
+            "last"
           ],
           "fields": "",
           "values": false
@@ -149,14 +224,14 @@
       "targets": [
         {
           "editorMode": "code",
-          "expr": "42 - sum(finite_runtime_artifact_active_agents{source_host_id=\"finite-lat-3\"})",
+          "expr": "(42 - sum(finite_runtime_artifact_active_agents{instance=\"finite-lat-2\",job=\"finite-internal-health\",source_host_id=\"finite-lat-3\"})) and on() ((time() - max(node_textfile_mtime_seconds{instance=\"finite-lat-2\",job=\"finite-internal-health\",file=\"/run/finite-monitoring/finite-runtime.prom\"}) >= 0) and (time() - max(node_textfile_mtime_seconds{instance=\"finite-lat-2\",job=\"finite-internal-health\",file=\"/run/finite-monitoring/finite-runtime.prom\"}) < 600))",
           "instant": true,
           "legendFormat": "__auto",
           "range": false,
           "refId": "A"
         }
       ],
-      "title": "lat3 Slots Free",
+      "title": "lat3 Unused Slots (estimate)",
       "type": "stat"
     },
     {
@@ -164,7 +239,7 @@
         "type": "prometheus",
         "uid": "finite-prometheus"
       },
-      "description": "Active Agent Runtimes on finite-lat-4. Red means the host is at its slot ceiling.",
+      "description": "Core-recorded active Runtimes with known artifact identity. Only the live app-plane collector (finite-lat-2) is accepted. Samples at least 10 minutes old, future-dated or missing are hidden.",
       "fieldConfig": {
         "defaults": {
           "color": {
@@ -185,7 +260,8 @@
               }
             ]
           },
-          "unit": "short"
+          "unit": "short",
+          "noValue": "Unknown"
         },
         "overrides": []
       },
@@ -193,7 +269,7 @@
         "h": 5,
         "w": 6,
         "x": 12,
-        "y": 3
+        "y": 8
       },
       "id": 4,
       "options": {
@@ -203,7 +279,7 @@
         "orientation": "auto",
         "reduceOptions": {
           "calcs": [
-            "lastNotNull"
+            "last"
           ],
           "fields": "",
           "values": false
@@ -215,14 +291,14 @@
       "targets": [
         {
           "editorMode": "code",
-          "expr": "sum(finite_runtime_artifact_active_agents{source_host_id=\"finite-lat-4\"})",
+          "expr": "(sum(finite_runtime_artifact_active_agents{instance=\"finite-lat-2\",job=\"finite-internal-health\",source_host_id=\"finite-lat-4\"})) and on() ((time() - max(node_textfile_mtime_seconds{instance=\"finite-lat-2\",job=\"finite-internal-health\",file=\"/run/finite-monitoring/finite-runtime.prom\"}) >= 0) and (time() - max(node_textfile_mtime_seconds{instance=\"finite-lat-2\",job=\"finite-internal-health\",file=\"/run/finite-monitoring/finite-runtime.prom\"}) < 600))",
           "instant": true,
           "legendFormat": "__auto",
           "range": false,
           "refId": "A"
         }
       ],
-      "title": "lat4 Slots Used",
+      "title": "lat4 Recorded Runtimes",
       "type": "stat"
     },
     {
@@ -230,14 +306,13 @@
         "type": "prometheus",
         "uid": "finite-prometheus"
       },
-      "description": "Unoccupied Agent Runtime slots on finite-lat-4 (42 ceiling). Red means no free slots.",
+      "description": "42 minus recorded Runtimes; an upper estimate, not available admission capacity. Drain, reservations, host readiness and incomplete artifact identity are not included. Only the live app-plane collector (finite-lat-2) is accepted. Samples at least 10 minutes old, future-dated or missing are hidden.",
       "fieldConfig": {
         "defaults": {
           "color": {
             "mode": "thresholds"
           },
           "decimals": 0,
-          "min": 0,
           "thresholds": {
             "mode": "absolute",
             "steps": [
@@ -251,7 +326,8 @@
               }
             ]
           },
-          "unit": "short"
+          "unit": "short",
+          "noValue": "Unknown"
         },
         "overrides": []
       },
@@ -259,7 +335,7 @@
         "h": 5,
         "w": 6,
         "x": 18,
-        "y": 3
+        "y": 8
       },
       "id": 5,
       "options": {
@@ -269,7 +345,7 @@
         "orientation": "auto",
         "reduceOptions": {
           "calcs": [
-            "lastNotNull"
+            "last"
           ],
           "fields": "",
           "values": false
@@ -281,14 +357,14 @@
       "targets": [
         {
           "editorMode": "code",
-          "expr": "42 - sum(finite_runtime_artifact_active_agents{source_host_id=\"finite-lat-4\"})",
+          "expr": "(42 - sum(finite_runtime_artifact_active_agents{instance=\"finite-lat-2\",job=\"finite-internal-health\",source_host_id=\"finite-lat-4\"})) and on() ((time() - max(node_textfile_mtime_seconds{instance=\"finite-lat-2\",job=\"finite-internal-health\",file=\"/run/finite-monitoring/finite-runtime.prom\"}) >= 0) and (time() - max(node_textfile_mtime_seconds{instance=\"finite-lat-2\",job=\"finite-internal-health\",file=\"/run/finite-monitoring/finite-runtime.prom\"}) < 600))",
           "instant": true,
           "legendFormat": "__auto",
           "range": false,
           "refId": "A"
         }
       ],
-      "title": "lat4 Slots Free",
+      "title": "lat4 Unused Slots (estimate)",
       "type": "stat"
     },
     {
@@ -296,7 +372,7 @@
         "type": "prometheus",
         "uid": "finite-prometheus"
       },
-      "description": "Active Agent Runtimes per Runner host over time.",
+      "description": "Core-recorded active Runtimes with known artifact identity. Only the live app-plane collector (finite-lat-2) is accepted. Samples at least 10 minutes old, future-dated or missing are hidden.",
       "fieldConfig": {
         "defaults": {
           "color": {
@@ -312,7 +388,8 @@
             "spanNulls": false
           },
           "min": 0,
-          "unit": "short"
+          "unit": "short",
+          "noValue": "Unknown"
         },
         "overrides": []
       },
@@ -320,15 +397,12 @@
         "h": 8,
         "w": 12,
         "x": 0,
-        "y": 8
+        "y": 13
       },
       "id": 6,
       "options": {
         "legend": {
-          "calcs": [
-            "lastNotNull",
-            "max"
-          ],
+          "calcs": [],
           "displayMode": "table",
           "placement": "bottom",
           "showLegend": true
@@ -343,14 +417,14 @@
       "targets": [
         {
           "editorMode": "code",
-          "expr": "sum by (source_host_id) (finite_runtime_artifact_active_agents{source_host_id=~\"finite-lat-3|finite-lat-4\"})",
+          "expr": "(sum by (source_host_id)(finite_runtime_artifact_active_agents{instance=\"finite-lat-2\",job=\"finite-internal-health\",source_host_id=~\"finite-lat-3|finite-lat-4\"})) and on() ((time() - max(node_textfile_mtime_seconds{instance=\"finite-lat-2\",job=\"finite-internal-health\",file=\"/run/finite-monitoring/finite-runtime.prom\"}) >= 0) and (time() - max(node_textfile_mtime_seconds{instance=\"finite-lat-2\",job=\"finite-internal-health\",file=\"/run/finite-monitoring/finite-runtime.prom\"}) < 600))",
           "instant": false,
           "legendFormat": "{{source_host_id}}",
           "range": true,
           "refId": "A"
         }
       ],
-      "title": "Active Agent Runtimes",
+      "title": "Recorded Runtimes",
       "type": "timeseries"
     },
     {
@@ -358,7 +432,7 @@
         "type": "prometheus",
         "uid": "finite-prometheus"
       },
-      "description": "Unoccupied Agent Runtime slots per Runner host over time (42 ceiling per host).",
+      "description": "42 minus recorded Runtimes; an upper estimate, not available admission capacity. Drain, reservations, host readiness and incomplete artifact identity are not included. Only the live app-plane collector (finite-lat-2) is accepted. Samples at least 10 minutes old, future-dated or missing are hidden.",
       "fieldConfig": {
         "defaults": {
           "color": {
@@ -373,8 +447,8 @@
             "showPoints": "never",
             "spanNulls": false
           },
-          "min": 0,
-          "unit": "short"
+          "unit": "short",
+          "noValue": "Unknown"
         },
         "overrides": []
       },
@@ -382,15 +456,12 @@
         "h": 8,
         "w": 12,
         "x": 12,
-        "y": 8
+        "y": 13
       },
       "id": 7,
       "options": {
         "legend": {
-          "calcs": [
-            "lastNotNull",
-            "max"
-          ],
+          "calcs": [],
           "displayMode": "table",
           "placement": "bottom",
           "showLegend": true
@@ -405,21 +476,22 @@
       "targets": [
         {
           "editorMode": "code",
-          "expr": "42 - sum by (source_host_id) (finite_runtime_artifact_active_agents{source_host_id=~\"finite-lat-3|finite-lat-4\"})",
+          "expr": "(42 - sum by (source_host_id)(finite_runtime_artifact_active_agents{instance=\"finite-lat-2\",job=\"finite-internal-health\",source_host_id=~\"finite-lat-3|finite-lat-4\"})) and on() ((time() - max(node_textfile_mtime_seconds{instance=\"finite-lat-2\",job=\"finite-internal-health\",file=\"/run/finite-monitoring/finite-runtime.prom\"}) >= 0) and (time() - max(node_textfile_mtime_seconds{instance=\"finite-lat-2\",job=\"finite-internal-health\",file=\"/run/finite-monitoring/finite-runtime.prom\"}) < 600))",
           "instant": false,
           "legendFormat": "{{source_host_id}}",
           "range": true,
           "refId": "A"
         }
       ],
-      "title": "Free Slots",
+      "title": "Unused Slots (estimate)",
       "type": "timeseries"
     }
   ],
   "refresh": "2m",
   "schemaVersion": 41,
   "tags": [
-    "draft"
+    "finite",
+    "runtimes"
   ],
   "templating": {
     "list": []
@@ -432,6 +504,6 @@
   "timezone": "browser",
   "title": "Agent Runtime Slots (lat3 / lat4)",
   "uid": "finite-agent-runtime-slots",
-  "version": 1,
+  "version": 2,
   "weekStart": ""
 }

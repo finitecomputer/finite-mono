@@ -494,52 +494,65 @@ def check_agent_runtime_slots_dashboard_contract() -> None:
 
     panels_by_title = {panel["title"]: panel for panel in panels}
     required_titles = (
-        "Draft data contract",
-        "lat3 Slots Used",
-        "lat3 Slots Free",
-        "lat4 Slots Used",
-        "lat4 Slots Free",
-        "Active Agent Runtimes",
-        "Free Slots",
+        "How to read these estimates",
+        "Core Sample Age",
+        "lat3 Recorded Runtimes",
+        "lat3 Unused Slots (estimate)",
+        "lat4 Recorded Runtimes",
+        "lat4 Unused Slots (estimate)",
+        "Recorded Runtimes",
+        "Unused Slots (estimate)",
     )
     for title in required_titles:
         require(title in panels_by_title, f"slots dashboard missing panel {title!r}")
 
-    notice = panels_by_title["Draft data contract"]
-    require(notice["type"] == "text", "draft notice must stay a text panel")
+    require(set(panels_by_title) == set(required_titles), "slots panel set drifted")
+    notice = panels_by_title["How to read these estimates"]
+    require(notice["type"] == "text", "slots explanation must stay a text panel")
     rendered_notice = notice["options"]["content"]
     for fragment in (
-        "not yet provisioned",
-        "finite_runtime_artifact_active_agents",
+        "not admission capacity",
+        "incomplete artifact identity",
+        "Runner drain",
         "FC_RUNNER_MAX_SANDBOXES",
         "check_runner_host_contract.py",
-        "No data",
+        "scripts/finite-status",
+        "10 minutes",
+        "Unknown",
     ):
-        require_contains(rendered_notice, fragment, "slots dashboard draft notice")
+        require_contains(rendered_notice, fragment, "slots explanation")
 
     capacity = runner_slot_capacity()
     require(
         capacity["finite-lat-3"] == capacity["finite-lat-4"],
         "the combined slots chart assumes equal ceilings on both Runner hosts",
     )
-    expected_exprs: set[str] = set()
+    # Core collection runs every 5 minutes and retains its file on failure.
+    # Scrape timestamps/up therefore cannot establish collection freshness.
+    source = 'instance="finite-lat-2",job="finite-internal-health"'
+    age = (
+        "time() - max(node_textfile_mtime_seconds{"
+        + source
+        + ',file="/run/finite-monitoring/finite-runtime.prom"})'
+    )
+    gate = f" and on() (({age} >= 0) and ({age} < 600))"
+    expected_exprs = {age}
     for host in SLOTS_HOSTS:
-        ceiling = capacity[host]
-        expected_exprs.add(
-            f'sum(finite_runtime_artifact_active_agents{{source_host_id="{host}"}})'
+        count = (
+            "sum(finite_runtime_artifact_active_agents{"
+            + source
+            + f',source_host_id="{host}"'
+            + "})"
         )
-        expected_exprs.add(
-            f'{ceiling} - sum(finite_runtime_artifact_active_agents{{source_host_id="{host}"}})'
-        )
-    expected_exprs.add(
-        "sum by (source_host_id) (finite_runtime_artifact_active_agents"
-        '{source_host_id=~"finite-lat-3|finite-lat-4"})'
+        expected_exprs.add(f"({count})" + gate)
+        expected_exprs.add(f"({capacity[host]} - {count})" + gate)
+    count = (
+        "sum by (source_host_id)(finite_runtime_artifact_active_agents{"
+        + source
+        + ',source_host_id=~"finite-lat-3|finite-lat-4"})'
     )
-    expected_exprs.add(
-        f"{capacity['finite-lat-3']} - "
-        "sum by (source_host_id) (finite_runtime_artifact_active_agents"
-        '{source_host_id=~"finite-lat-3|finite-lat-4"})'
-    )
+    expected_exprs.add(f"({count})" + gate)
+    expected_exprs.add(f"({capacity['finite-lat-3']} - {count})" + gate)
 
     actual_exprs: set[str] = set()
     for title in required_titles:
@@ -550,6 +563,31 @@ def check_agent_runtime_slots_dashboard_contract() -> None:
             panel["datasource"]["uid"] == "finite-prometheus",
             f"{title} must use the finite-prometheus datasource",
         )
+        require(
+            panel["fieldConfig"]["defaults"]["noValue"] == "Unknown",
+            f"{title} must distinguish missing data from zero",
+        )
+        if panel["type"] == "stat":
+            require(
+                panel["options"]["reduceOptions"]["calcs"] == ["last"],
+                f"{title} must not reuse an old non-null sample",
+            )
+            require(
+                all(
+                    t.get("instant") and not t.get("range")
+                    for t in panel_targets(panel)
+                ),
+                f"{title} must display only the current instant",
+            )
+        else:
+            require(
+                panel["fieldConfig"]["defaults"]["custom"]["spanNulls"] is False,
+                f"{title} must show collection gaps",
+            )
+            require(
+                panel["options"]["legend"]["calcs"] == [],
+                f"{title} must not label historical values as current capacity",
+            )
         for target in panel_targets(panel):
             expression = target["expr"]
             actual_exprs.add(expression)
@@ -567,12 +605,23 @@ def check_agent_runtime_slots_dashboard_contract() -> None:
         "slots dashboard query expressions drifted from the pinned contract",
     )
 
-    rendered_dashboard = json.dumps(dashboard)
-    metric_tokens = set(re.findall(r"finite_[a-z_]+", rendered_dashboard))
-    unexpected = metric_tokens - {"finite_runtime_artifact_active_agents"}
     require(
-        not unexpected,
-        f"slots dashboard references metrics outside its contract: {sorted(unexpected)}",
+        panels_by_title["Core Sample Age"]["fieldConfig"]["defaults"]["thresholds"][
+            "steps"
+        ]
+        == [
+            {"color": "red", "value": None},
+            {"color": "green", "value": 0},
+            {"color": "yellow", "value": 300},
+            {"color": "red", "value": 600},
+        ],
+        "sample age colors must match the freshness gate",
+    )
+    metric_tokens = set(re.findall(r"(?:finite|node)_[a-z_]+", json.dumps(dashboard)))
+    require(
+        metric_tokens
+        == {"finite_runtime_artifact_active_agents", "node_textfile_mtime_seconds"},
+        "slots dashboard must use only existing count and textfile-age metrics",
     )
 
 
