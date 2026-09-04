@@ -195,6 +195,28 @@ export function HermesChatProvider({ children }: { children: ReactNode }) {
 
   const stateRef = useRef<HostedChatState | null>(null);
 
+  // Dispatch callers get the freshest published snapshot.
+  const currentState = useCallback(
+    (): HostedChatState =>
+      stateRef.current ?? {
+        rev: 0,
+        identity: { account_id: MY_ACCOUNT, device_id: "web-gateway" },
+        rooms: [],
+        topics: [],
+        selected_room_id: null,
+        selected_topic_id: null,
+        selected_chat_id: null,
+        status: "ok",
+        messages: [],
+        profiles: [],
+        devices: [],
+        typing_members: [],
+        hosted_agent_binding: null,
+        flow: { notice_busy: false, scan_in_flight: false, scan_result: "" },
+      },
+    []
+  );
+
   const publish = useCallback(() => {
     const topics = topicsFrom(
       projectsRef.current,
@@ -283,6 +305,69 @@ export function HermesChatProvider({ children }: { children: ReactNode }) {
     setState(next);
   }, []);
 
+
+  /**
+   * Live turn rows: the reasoning stream rides a kind:"tool" message so the
+   * shared transcript groups it into the collapsed ToolRollup ("Working ·
+   * N steps", expandable, auto-open while running) and the reply is the
+   * only prose bubble — the two can never bleed into each other. Stable
+   * per-turn ids let React reconcile updates in place.
+   */
+  const upsertStreamingMessages = useCallback((chatId: string, topicId: string, streaming: Streaming) => {
+    const messages = transcriptRef.current.get(chatId) ?? [];
+    const upsert = (message: HostedChatMessage) => {
+      const index = messages.findIndex(
+        (candidate) => candidate.message_id === message.message_id
+      );
+      if (index >= 0) messages.splice(index, 1, message);
+      else messages.push(message);
+    };
+    if (streaming.reasoning) {
+      upsert({
+        ...gatewayMessage("assistant", streaming.reasoning, chatId, topicId, false, "running"),
+        message_id: `${chatId}:think:${streaming.turnKey}`,
+        kind: "tool",
+        display_content: streaming.reasoning,
+      });
+    }
+    if (streaming.answer) {
+      upsert({
+        ...gatewayMessage("assistant", streaming.answer, chatId, topicId, false, "running"),
+        message_id: `${chatId}:reply:${streaming.turnKey}`,
+      });
+    }
+    transcriptRef.current.set(chatId, messages);
+  }, []);
+
+  // hermes is authoritative once a draft materializes: refetch its transcript
+  // instead of trusting the local display buffer. A turn still in flight
+  // keeps its streaming tail after the fetched history.
+  const hydrateTranscript = useCallback(async (chatId: string, topicId: string) => {
+    const call = callRef.current;
+    if (!call) return;
+    try {
+      const resumed = (await call("session.resume", { session_id: chatId })) as {
+        session_id: string;
+        messages?: GatewayMessage[];
+      } | null;
+      const current = transcriptRef.current.get(chatId) ?? [];
+      const history = historyMessageRows(resumed?.messages ?? [], chatId, topicId);
+      const streamingIndex = current.findIndex((message) => message.status === "running");
+      transcriptRef.current.set(
+        chatId,
+        streamingIndex >= 0 ? [...history, ...current.slice(streamingIndex)] : history
+      );
+      const entry = chatsRef.current.get(chatId);
+      if (entry && resumed?.session_id && !entry.handleId) {
+        entry.handleId = resumed.session_id;
+      }
+      publish();
+    } catch {
+      // The local transcript stays as-is; hermes remains authoritative on
+      // the next open.
+    }
+  }, [publish]);
+
   const refreshLists = useCallback(async () => {
     const call = callRef.current;
     if (!call) return;
@@ -337,7 +422,7 @@ export function HermesChatProvider({ children }: { children: ReactNode }) {
       void hydrateTranscript(real.id, topicId);
     }
     publish();
-  }, [publish]);
+  }, [hydrateTranscript, publish]);
 
   const handleEvent = useCallback(
     (event: GatewayEvent) => {
@@ -401,7 +486,7 @@ export function HermesChatProvider({ children }: { children: ReactNode }) {
         publish();
       }
     },
-    [publish, refreshLists]
+    [publish, refreshLists, upsertStreamingMessages]
   );
 
   useEffect(() => {
@@ -666,7 +751,7 @@ export function HermesChatProvider({ children }: { children: ReactNode }) {
       // typing) would loop forever. Gaps are tracked in NOTES.md.
       return currentState();
     },
-    [publish, refreshLists]
+    [publish, refreshLists, upsertStreamingMessages]
   );
 
   const load = useCallback(async (): Promise<HostedChatRetryAttempt> => {
@@ -725,86 +810,6 @@ export function HermesChatProvider({ children }: { children: ReactNode }) {
     [claimOwner, dispatch, dispatchQuiet, load, recoverBinding, refreshPendingChat, state, streamConnected, transportError, uploadAttachments]
   );
 
-  function currentState(): HostedChatState {
-    // Dispatch callers only need the freshest published snapshot.
-    return (
-      stateRef.current ?? {
-        rev: 0,
-        identity: { account_id: MY_ACCOUNT, device_id: "web-gateway" },
-        rooms: [],
-        topics: [],
-        selected_room_id: null,
-        selected_topic_id: null,
-        selected_chat_id: null,
-        status: "ok",
-        messages: [],
-        profiles: [],
-        devices: [],
-        typing_members: [],
-        hosted_agent_binding: null,
-        flow: { notice_busy: false, scan_in_flight: false, scan_result: "" },
-      }
-    );
-  }
-
-  async function hydrateTranscript(chatId: string, topicId: string) {
-    const call = callRef.current;
-    if (!call) return;
-    try {
-      const resumed = (await call("session.resume", { session_id: chatId })) as {
-        session_id: string;
-        messages?: GatewayMessage[];
-      } | null;
-      const current = transcriptRef.current.get(chatId) ?? [];
-      const history = historyMessageRows(resumed?.messages ?? [], chatId, topicId);
-      const streamingIndex = current.findIndex((message) => message.status === "running");
-      transcriptRef.current.set(
-        chatId,
-        streamingIndex >= 0 ? [...history, ...current.slice(streamingIndex)] : history
-      );
-      const entry = chatsRef.current.get(chatId);
-      if (entry && resumed?.session_id && !entry.handleId) {
-        entry.handleId = resumed.session_id;
-      }
-      publish();
-    } catch {
-      // The local transcript stays as-is; hermes remains authoritative on
-      // the next open.
-    }
-  }
-
-  /**
-   * Live turn rows: the reasoning stream rides a kind:"tool" message so the
-   * shared transcript groups it into the collapsed ToolRollup ("Working ·
-   * N steps", expandable, auto-open while running) and the reply is the
-   * only prose bubble — the two can never bleed into each other. Stable
-   * per-turn ids let React reconcile updates in place.
-   */
-  function upsertStreamingMessages(chatId: string, topicId: string, streaming: Streaming) {
-    const messages = transcriptRef.current.get(chatId) ?? [];
-    const upsert = (message: HostedChatMessage) => {
-      const index = messages.findIndex(
-        (candidate) => candidate.message_id === message.message_id
-      );
-      if (index >= 0) messages.splice(index, 1, message);
-      else messages.push(message);
-    };
-    if (streaming.reasoning) {
-      upsert({
-        ...gatewayMessage("assistant", streaming.reasoning, chatId, topicId, false, "running"),
-        message_id: `${chatId}:think:${streaming.turnKey}`,
-        kind: "tool",
-        display_content: streaming.reasoning,
-      });
-    }
-    if (streaming.answer) {
-      upsert({
-        ...gatewayMessage("assistant", streaming.answer, chatId, topicId, false, "running"),
-        message_id: `${chatId}:reply:${streaming.turnKey}`,
-      });
-    }
-    transcriptRef.current.set(chatId, messages);
-  }
 
   return <HostedChatContext.Provider value={value}>{children}</HostedChatContext.Provider>;
 }
