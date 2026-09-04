@@ -93,6 +93,8 @@ type GatewayProject = {
 
 type GatewayMessage = { role: string; text: string };
 
+type Streaming = { turnKey: number; reasoning: string; answer: string };
+
 /** A chat the UI knows about: a persisted gateway session or a local draft. */
 type ChatEntry = {
   summary: HostedChatSummary;
@@ -103,7 +105,7 @@ type ChatEntry = {
   /** Project id whose cwd spawned it (drives StartTopicChatIntent). */
   topicId: string;
   /** Present while a turn is streaming onto this chat. */
-  streaming: { reasoning: string; answer: string } | null;
+  streaming: Streaming | null;
 };
 
 type GatewayCall = (method: string, params?: Record<string, unknown>) => Promise<unknown>;
@@ -125,6 +127,7 @@ export function HermesChatProvider({ children }: { children: ReactNode }) {
     chatId: null,
   });
   const typingRef = useRef(false);
+  const turnKeyRef = useRef(0);
   const socketRef = useRef<WebSocket | null>(null);
   const nextIdRef = useRef(1);
   const pendingRef = useRef(
@@ -307,19 +310,17 @@ export function HermesChatProvider({ children }: { children: ReactNode }) {
       if (!chat) return;
       const chatId = chat.summary.chat_id;
       if (type === "message.start") {
-        chat.streaming = { reasoning: "", answer: "" };
+        chat.streaming = { turnKey: ++turnKeyRef.current, reasoning: "", answer: "" };
         typingRef.current = true;
         publish();
-      } else if (type === "reasoning.delta") {
+      } else if (type === "reasoning.delta" || type === "message.delta") {
         if (chat.streaming) {
-          chat.streaming.reasoning += String(event.payload?.text ?? "");
-          replaceStreamingMessage(chatId, chat.topicId, chat.streaming);
-          publish();
-        }
-      } else if (type === "message.delta") {
-        if (chat.streaming) {
-          chat.streaming.answer += String(event.payload?.text ?? "");
-          replaceStreamingMessage(chatId, chat.topicId, chat.streaming);
+          if (type === "reasoning.delta") {
+            chat.streaming.reasoning += String(event.payload?.text ?? "");
+          } else {
+            chat.streaming.answer += String(event.payload?.text ?? "");
+          }
+          upsertStreamingMessages(chatId, chat.topicId, chat.streaming);
           publish();
         }
       } else if (type === "message.complete") {
@@ -327,10 +328,17 @@ export function HermesChatProvider({ children }: { children: ReactNode }) {
         chat.streaming = null;
         typingRef.current = false;
         const messages = transcriptRef.current.get(chatId) ?? [];
-        const streamingIndex = messages.findIndex((message) => message.status === "running");
+        // The reply row is replaced by the final text; every live rollup row
+        // (the thinking trace) settles to complete.
+        const replyIndex = messages.findIndex(
+          (message) => message.status === "running" && message.kind !== "tool"
+        );
         const finalMessage = gatewayMessage("assistant", text, chatId, chat.topicId, false);
-        if (streamingIndex >= 0) messages.splice(streamingIndex, 1, finalMessage);
+        if (replyIndex >= 0) messages.splice(replyIndex, 1, finalMessage);
         else messages.push(finalMessage);
+        for (const message of messages) {
+          if (message.status === "running") message.status = "complete";
+        }
         transcriptRef.current.set(chatId, messages);
         publish();
       }
@@ -556,7 +564,7 @@ export function HermesChatProvider({ children }: { children: ReactNode }) {
         // slow gateway can never freeze the composer.
         publish();
         await call("prompt.submit", { session_id: handle, text });
-        entry.streaming = { reasoning: "", answer: "" };
+        entry.streaming = { turnKey: ++turnKeyRef.current, reasoning: "", answer: "" };
         typingRef.current = true;
         // The draft will be replaced by its stored row once it materializes;
         // keep the local entry selected until then so the view does not jump.
@@ -674,17 +682,36 @@ export function HermesChatProvider({ children }: { children: ReactNode }) {
     }
   }
 
-  function replaceStreamingMessage(
-    chatId: string,
-    topicId: string,
-    streaming: { reasoning: string; answer: string }
-  ) {
+  /**
+   * Live turn rows: the reasoning stream rides a kind:"tool" message so the
+   * shared transcript groups it into the collapsed ToolRollup ("Working ·
+   * N steps", expandable, auto-open while running) and the reply is the
+   * only prose bubble — the two can never bleed into each other. Stable
+   * per-turn ids let React reconcile updates in place.
+   */
+  function upsertStreamingMessages(chatId: string, topicId: string, streaming: Streaming) {
     const messages = transcriptRef.current.get(chatId) ?? [];
-    const text = streaming.answer || streaming.reasoning || "…";
-    const running = gatewayMessage("assistant", text, chatId, topicId, false, "running");
-    const index = messages.findIndex((message) => message.status === "running");
-    if (index >= 0) messages.splice(index, 1, running);
-    else messages.push(running);
+    const upsert = (message: HostedChatMessage) => {
+      const index = messages.findIndex(
+        (candidate) => candidate.message_id === message.message_id
+      );
+      if (index >= 0) messages.splice(index, 1, message);
+      else messages.push(message);
+    };
+    if (streaming.reasoning) {
+      upsert({
+        ...gatewayMessage("assistant", streaming.reasoning, chatId, topicId, false, "running"),
+        message_id: `${chatId}:think:${streaming.turnKey}`,
+        kind: "tool",
+        display_content: streaming.reasoning,
+      });
+    }
+    if (streaming.answer) {
+      upsert({
+        ...gatewayMessage("assistant", streaming.answer, chatId, topicId, false, "running"),
+        message_id: `${chatId}:reply:${streaming.turnKey}`,
+      });
+    }
     transcriptRef.current.set(chatId, messages);
   }
 

@@ -168,6 +168,16 @@ If hermes states it, the provider sources it; the provider invents nothing:
 - Known hot-reload artifact: heavy provider edits under Next fast refresh
   keep stale ref state (duplicate rows); a page reload resets it.
 
+Thinking traces (fixed): reasoning deltas ride a kind:"tool" message, so
+the shared transcript groups them into the existing collapsed ToolRollup
+("Working · N steps" auto-open while running, "Worked through N steps"
+collapsed after, expandable <pre> body). The answer stream is the only
+prose bubble; the two can never bleed. Stable per-turn message ids
+(chat:think:turnKey / chat:reply:turnKey) let React reconcile in place.
+After the turn, hermes history (session.resume) carries no reasoning, so
+reopening a stored chat shows just the exchange — matches hermes' own
+persistence.
+
 First-message disappearance (fixed): the real transcript filters messages
 by conversation_id === selectedTopic.topic_id. The first message was sent
 while the chat was a draft in Recents, so it carried conversation_id
