@@ -192,7 +192,7 @@ transcript is REPLACED by hermes' authoritative history (session.resume
 returns it inline; an in-flight stream keeps its tail after the fetched
 rows). The local transcript is a display buffer, never truth.
 
-## Remote gateways + gated mode (staged 2026-09-04; sandbox was offline)
+## Remote gateways + gated mode (VERIFIED end to end 2026-09-04)
 
 Pointing the dashboard at a REMOTE hermes (e.g. a bot on the tailnet) is an
 env flip once the host is up:
@@ -217,6 +217,14 @@ Three facts drive the shape (read from hermes source + probed):
 - Zero-code alternative: restart the remote gateway with
   HERMES_DASHBOARD_SESSION_TOKEN=<secret> and use the static ?token= path
   (full-trust; fine for sandboxes).
+
+Verified against the live sandbox: login → ws-ticket → ws (through the
+same-origin rewrite) → 21 real sessions rendered under the bot's own
+"Home" project (plus a live-created "workspace" project), and the
+253-message session opened with its real history: prose bubbles plus
+collapsed tool rollups ("Worked through N steps") exactly as stored.
+Fixture gotcha: the web-design fixture allowlists env into the next dev
+child — the gated-mode vars and the proxy target had to be added there.
 
 Recents note: on any gateway, sessions are claimed by the project matching
 their cwd, so Recents stays empty unless a session's cwd matches no known
