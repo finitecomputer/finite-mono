@@ -307,6 +307,37 @@ now; if hermes gated-mode password is added for DESKTOP clients, the web
 dashboard never prompts for it — web rides brokered single-use tickets
 (see defense-in-depth note).
 
+## Desktop-connectable milestone (2026-09-04, landed)
+
+The Connections page now carries a "Hermes Gateway" card: the agent's
+public connection URL + credential (token, or username/password in
+gated mode) with copy actions, masked reveal for secrets, and a live
+reachability probe (ws connect → session.list → "N sessions reachable").
+Env-driven (NEXT_PUBLIC_HERMES_GATEWAY_PUBLIC_URL, falling back to the
+ws URL; prod shape: per-agent URL + credential from the runtime config
+via Core). Verified in-browser: card renders, probe green, and a
+desktop-equivalent NON-BROWSER client (direct connect, token auth, no
+proxy) reaches session.list — the exact handshake hermes desktop
+performs. Non-browser clients need no CORS/proxy work at all; the
+same-origin rewrite in next.config.ts exists purely for OUR browser UI.
+
+Edge config for agents.finite.computer (captured; verbatim proxy per the
+edge doctrine — the gateway owns auth, the edge never filters):
+
+    # Caddy — per-agent wildcard, on-demand TLS
+    *.agents.finite.computer {
+      tls {
+        on_demand
+      }
+      # wss://<agent-id>.agents.finite.computer/api/ws → that agent's
+      # gateway listener (runner-host relay; reachability TBD below)
+      reverse_proxy --transport http --read-buffer 65536         {$AGENT_UPSTREAM_<agent-id>}
+    }
+
+The open infra question stands: routing from the edge to gateways inside
+Kata containers on runner hosts (per-agent host ports vs runner relay vs
+through-Core).
+
 ## Public agent gateways: agents.finite.computer (captured 2026-09-04, design only)
 
 Strategic frame: if every Finite agent's hermes gateway is reachable at a

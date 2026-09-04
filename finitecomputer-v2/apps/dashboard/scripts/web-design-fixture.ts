@@ -69,6 +69,7 @@ function localChildEnvironment(): NodeJS.ProcessEnv {
     "NEXT_PUBLIC_HERMES_GATEWAY_TOKEN",
     "NEXT_PUBLIC_HERMES_GATEWAY_USERNAME",
     "NEXT_PUBLIC_HERMES_GATEWAY_PASSWORD",
+    "NEXT_PUBLIC_HERMES_GATEWAY_PUBLIC_URL",
     "HERMES_GATEWAY_PROXY_TARGET",
   ]) {
     const value = process.env[key];
