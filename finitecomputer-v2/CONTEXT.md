@@ -114,6 +114,22 @@ _Avoid_: User Nostr Identity, Account Auth, shared fleet key
 A revocable product-owned authorization connecting one verified email Principal to one Agent Principal inside exactly one Finite product.
 _Avoid_: Principal Link, Google account sharing, agent impersonation
 
+**Account Key Link**:
+A revocable dashboard-ceremony binding of one root user-held Nostr public key to one Account Auth identity.
+_Avoid_: whitelist entry, silent key mint, identity equivalence, Managed Agent NIP-05
+
+**Key Attestation**:
+A signature by one Account-Linked Key naming another Nostr public key as covered under the same Account, with the signer as its provenance.
+_Avoid_: delegation, web-of-trust edge, product grant
+
+**Sponsorship**:
+A Key Attestation naming a Nostr public key controlled by someone outside the attesting Account.
+_Avoid_: invite, referral, web-of-trust edge
+
+**Account-Linked Key**:
+Any Nostr public key whose membership resolves to one Account Auth identity: a root Account Key Link, a Key Attestation, or a hosted Agent Principal Key through its Project.
+_Avoid_: whitelist entry, verified user, brain member
+
 **User Recovery Key**:
 A user-controlled Recovery Authority intended to unlock Recovery Snapshots without relying on Finite operator custody.
 _Avoid_: Routine restart unlock, dashboard password, Finite recovery key
@@ -253,6 +269,19 @@ _Avoid_: Purge User Data, subscription cancellation, provider destroy
   separate, explicit Runtime Operation only after that operation is designed.
 - **Account Auth** owns dashboard access and billing; **User Nostr Identity**
   owns the human's cryptographic chat identity.
+- An **Account Key Link** records a binding, never custody: Account Auth
+  approval does not copy, derive, replace, or silently mint the linked key.
+- A hosted **Agent Principal Key** is account-linked through its **Project**;
+  self-minted user, agent, and device keys join through **Key Attestations**,
+  not direct **Account Key Links**.
+- Revoking an **Account Key Link** denies every **Key Attestation** beneath it;
+  denial blocks access and mutation but never purges user data.
+- A **Key Attestation** is exactly one hop: an attested key never attests, so
+  no coverage or **Sponsorship** extends past a root **Account Key Link**.
+- **Sponsorship** consumption is attributed to the sponsoring Account, and
+  every resolution of a sponsored key carries its sponsor as provenance.
+- **Account-Linked Keys** hold platform membership, not product authority:
+  every product still applies its own grants to decide what a key may do.
 - **Core** verifies the standard Account Auth credential on every user-scoped
   request; dashboard identity headers and Runner credentials cannot assert a
   user or administrator.
@@ -383,3 +412,6 @@ _Avoid_: Purge User Data, subscription cancellation, provider destroy
   copied into a new Agent Runtime, visible to Hermes, or explicitly synced.
   Name the bundled or locally synced **Finite Skills Revision** without
   implying Core desired state or automatic fleet rollout.
+- Whether the **Hosted Web Device** can sign with the user's **User Nostr
+  Identity** (enabling one-click dashboard approval of **Key Attestations**)
+  or only holds its own device key is unresolved; do not assume either.

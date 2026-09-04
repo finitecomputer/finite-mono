@@ -57,6 +57,15 @@ with exactly these meanings.
 - **Authorized Sites Key**: a revocable native npub allowed to exercise one
   Sites Email Principal's grants without making the key and mailbox the same
   Principal. Older documents call this an Email Access Delegation.
+- **Auth Gate**: the deployment-configured redirect target where a human
+  proves an email. Sites verifies its vouches against a pinned public key
+  and never learns which identity backend it uses.
+  _Avoid: WorkOS, OIDC provider, dashboard login._
+- **Vouch**: a signed, short-lived, single-use Auth Gate statement naming a
+  verified email and the output origin it was issued for. Sites' only
+  browser-facing proof; the cookie it buys is a session into the revocable
+  share table.
+  _Avoid: magic link, session token, email challenge._
 - **Project Repository**: the editable git history for a project. It may begin
   with data, grow logic around that data, and later produce one or more Project
   Outputs. A Project Repository may exist before any public-facing UI exists.
