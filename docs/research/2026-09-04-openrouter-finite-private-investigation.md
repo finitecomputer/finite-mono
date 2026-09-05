@@ -5,7 +5,58 @@ authorized end-to-end execution of the narrowed, surgical procedure. The
 execution below occurred September 4 Central / September 5 UTC. Historical
 planning and investigation text follows the execution record.
 
-## Executed: 23 main-chat switches, three deferred
+## Completed follow-up: all 26 original candidates migrated
+
+The owner subsequently authorized resolving the three missing-credential
+deferrals. At approximately `2026-09-05T04:56Z`, **`alexlwn`, `aurelio`, and
+`charlie` were also switched and verified**, completing the original 26-bot
+cohort. The final box1 target inventory found no running OpenRouter main-model
+configuration. Retired Iherbs remained stopped.
+
+Their exact configured identities were `alexlwn@finite.vip`,
+`aurelio@finite.vip`, and `charlie@finite.vip`. Alex already had a Core user
+record but no grant; the other two had neither a matching user record nor a
+grant. The deployed Core operator CLI's supported
+`finite-private-friend-key-issue` path created each missing grant and one key,
+using the same `finite-private-generous-v2` profile as the earlier cohort.
+Dry runs passed first, and absence of a grant was rechecked before issuance,
+so existing grants, windows, and keys were not reset or replaced. Standard
+issuance created the two missing Core user records. No Project or Runtime
+binding was invented for these legacy bots.
+
+For each bot, the key was added to its per-bot mounted `hermes.env` and durable
+`.hermes/.env`, after backing up the original bytes, hashes, owner, and mode.
+The deployed startup path composes the durable environment from the mounted
+inputs; connection overlays were checked for conflicting key assignments.
+Synthetic append-preservation/refusal checks passed, and installation guarded
+both source hashes. The ordinary model-only switch and gateway restart then
+ran one bot at a time. Every gateway loaded its newly issued account key and
+resolved the current GLM route. Persistent input hashes were verified after
+the restarts.
+
+All three isolated conversation-continuation/tool tests passed. Each key had
+two requests settled with actual usage and no reserved verification requests:
+**six additional successful requests, 54 across both migration waves**. Final
+audit covered all 26 original configs/backups and confirmed unchanged
+StatefulSet/PVC/pod/container identities and connected gateway states. No
+rollback was needed. Final app-plane chat, host health, recovery, and rollout
+checks were green; the pre-existing Smoke Studio convergence finding remained.
+The earlier Cornelius normal-traffic accounting observation below was not
+repaired by this credential follow-up.
+
+Model backups use the same box1 `/root/finite-box1-fp-20260905/<bot>/`
+directories described below. Additional credential-input backups and hashes
+are at `/root/finite-box1-fp-20260905/credential-inputs/<bot>/`; restoring those
+requires matching the installed hashes before replacement and reloading the
+gateway. Newly issued keys can be individually revoked through the supported
+Core key-revocation command if an issuance must be abandoned; never delete
+user/grant/history rows to undo credential delivery. Protected issuance
+responses are on lat2 at `/root/finite-box1-fp-final-three/`. Raw keys were
+transferred in memory over SSH, installed into the intended credential files,
+and never printed or committed. Private follow-up evidence is in the main
+worktree's ignored `.local-state/box1-fp-final-three/` directory.
+
+## Initial wave: 23 main-chat switches, three deferred
 
 **All 23 credential-ready box1 candidates were switched to Finite Private
 `glm-5-3-flash`.** Final configuration/identity audit and app-plane status were
