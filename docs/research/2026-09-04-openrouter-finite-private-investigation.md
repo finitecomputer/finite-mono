@@ -5,7 +5,44 @@ authorized end-to-end execution of the narrowed, surgical procedure. The
 execution below occurred September 4 Central / September 5 UTC. Historical
 planning and investigation text follows the execution record.
 
-## Completed follow-up: all 26 original candidates migrated
+## Final main-chat inventory: all 41 active box1 bots on Finite Private
+
+A subsequent three-host check identified two active box1 bots outside the
+original OpenRouter cohort. The owner authorized switching these remaining
+main routes too. At approximately `2026-09-05T05:03Z`, **all 41 active box1
+bots were configured with main model `glm-5-3-flash`, provider `custom`, and
+the current Finite Private endpoint**.
+
+| Additional bot | Previous main provider/model | Credential action |
+| --- | --- | --- |
+| `lavender` | OpenAI Codex / `gpt-5.5` | Created its missing grant and key under configured identity `lavender@finite.vip`; installed the key in both persistent per-bot inputs |
+| `smoke-finite` | OpenCode Zen / `claude-sonnet-4-6` | Reused its existing active key under configured identity `test@finite.vip` |
+
+Lavender's issuance used the same deployed Core CLI, dry-run checks, allowance,
+credential backups, and guarded installation as the prior follow-up. The
+model preparation explicitly matched these two source configurations and
+proved preservation of fallback/auxiliary fields and exact config rollback.
+Both gateways were switched individually and passed route/key resolution,
+isolated synthetic continuation/tool checks, and actual usage settlement:
+**four further verification requests, 58 successfully settled across all
+three waves**. No rollback was needed.
+
+The final audit verified original configs/backups, StatefulSet/PVC/pod/container
+identities, and connected gateway states for all **28 bots changed during this
+operation**. Thirteen other active box1 bots already had Finite Private main
+configurations. Iherbs stayed stopped. Final app-plane chat, host health,
+recovery, and rollout checks were green; Smoke Studio's known convergence
+finding remained. Existing auxiliary/delegation settings and Lavender's
+OpenRouter fallback were preserved: this completes the active box1 main-chat
+configuration migration, not an exclusive-Finite-Private inference guarantee.
+
+Backups follow the same `/root/finite-box1-fp-20260905/<bot>/` layout, including
+Lavender's `credential-inputs/lavender/` backup. Its protected issuance response
+is on lat2 under `/root/finite-box1-fp-last-two/`. Private evidence is in the
+main worktree's ignored `.local-state/box1-fp-last-two/`. The earlier Cornelius
+accounting observation remains a separately recorded follow-up.
+
+## Earlier follow-up: all 26 original candidates migrated
 
 The owner subsequently authorized resolving the three missing-credential
 deferrals. At approximately `2026-09-05T04:56Z`, **`alexlwn`, `aurelio`, and
