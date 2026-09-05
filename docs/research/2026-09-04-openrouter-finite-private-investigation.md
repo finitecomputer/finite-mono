@@ -266,12 +266,14 @@ These are recorded GLM-5.3-Flash load results and should be reused. The open
 question is qualification of the combined workload, not whether GLM was ever
 load-tested.
 
-## Prepared first concurrency sanity check (not executed)
+## Prepared first concurrency sanity check
 
 The next proposed step is a small diagnostic against the current GLM-5.3-Flash
-service, before considering a provider switch. Preparation is authorized;
-production inference traffic is still pending authorization. This section
-does not change the full-fleet acceptance requirements above.
+service, before considering a provider switch. At preparation time, production
+inference traffic was pending authorization. The user subsequently authorized
+the live test through 32 concurrent requests with normal users still able to
+use the service. Results are recorded below. This section does not change the
+full-fleet acceptance requirements above.
 
 ### Bounded workload
 
@@ -386,3 +388,78 @@ client requests under the ambient load at test time. Client concurrency is
 not proof that all requests decoded simultaneously on the GPUs. It does not
 establish 107-bot capacity, long-history behavior, sustained load, model quality,
 or permission to switch the fleet.
+
+
+## Executed live sanity check: September 4 Central / September 5 UTC
+
+**Passed through 32 concurrent test requests.** The user explicitly authorized
+this test on the live service with normal user access left enabled. Test traffic
+ran from 2026-09-05T04:07:44Z through approximately 04:13:29Z. No Agents were
+switched, no Production Deploy occurred, and no user traffic was paused.
+
+The endpoint served `v2026-08-28-glm-5-3-flash-5` on the existing eight H200s.
+The test used the prepared settings: short synthetic prompts, high thinking,
+256 completion tokens, one repetition per tier, zero warmups/retries, and the
+public limiter with normal `usage-api` admission. Each tier used the explicit
+small-tier thresholds above; the 120-way acceptance gate was not run.
+
+| Concurrent requests | Successful / sent | p95 first output (s) | Median decode tok/s/request | Aggregate output tok/s | Burst wall time (s) |
+| ---: | ---: | ---: | ---: | ---: | ---: |
+| 1 | 1/1 | 0.409 | 93.546 | 81.387 | 3.145 |
+| 4 | 4/4 | 0.621 | 83.393 | 277.424 | 3.691 |
+| 8 | 8/8 | 0.666 | 76.022 | 508.621 | 4.027 |
+| 16 | 16/16 | 0.709 | 56.979 | 783.282 | 5.229 |
+| 32 | 32/32 | 0.825 | 59.097 | 1581.419 | 5.180 |
+
+All 65 requests, including four recovery probes, returned output, positive
+usage, and terminal `[DONE]`, with zero transport/HTTP/stream errors. Total
+reported completion tokens were 16,640. The 32-way tier's p10 decode speed was
+58.806 tok/s/request, also above the diagnostic minimum of 10.
+
+After at least 60 seconds without test traffic following each multi-request
+tier, single-request first-output times were 0.372, 0.372, 0.377, and 0.368
+seconds. All passed both the ordinary diagnostic thresholds and the recovery
+comparison against the 0.409-second initial baseline.
+
+### Accounting and service observations
+
+- The existing dedicated canary key and grant were active. Its profile was
+  `finite-private-generous-v2`, with a 100,000,000-unit burst allowance and no
+  weekly cap. Its previous window had expired. The inspected profile and
+  admission implementation have no separate concurrent-request count limit;
+  admission serializes reservations against the grant's usage allowance.
+- Final key-scoped settlement evidence: **65 settled with actual usage, zero
+  test-era reserved rows**. The 50 preexisting reserved rows remained 50.
+  No key, grant, allowance, or accounting repair was performed.
+- Endpoint readiness and canonical host/chat/recovery checks were green before
+  and after the test. Tinfoil still reported the same container and tag, ready
+  on eight GPUs, with no update or error reported.
+- Canonical fleet status was red both before and after due to existing artifact
+  convergence evidence, including a smoke-host straggler. It was not an
+  inference failure. No active Runtime Operations appeared in the preflight
+  Core snapshot. The status script was executed unchanged via SSH stdin using
+  an already-installed Nix-store Python because the command was not installed
+  in the host PATH; no production files were installed or edited. Local
+  rollout-file absence is not global proof that no operator work exists.
+- Tinfoil resource metrics were retained. Two-minute buckets and reporting lag
+  cannot resolve these roughly 3–5-second bursts. A latest available bucket
+  reached 85% maximum GPU utilization; this does not establish saturation,
+  spare capacity, restart absence, or an OOM-free process history.
+
+### Meaning and retained evidence
+
+This is fresh evidence that the current GLM service handled 32 additional
+short requests at once while normal production access remained enabled, with
+fast first output and successful accounting. We did not measure the exact
+number or timing of other users' simultaneous requests. Service health and
+recovery probes are not per-user latency measurements. TTFT includes reasoning
+output, so it is not time to a useful visible answer. This run does not prove
+long-history, sustained, 107-Agent, or 120-concurrent capacity.
+
+Raw JSONL, timestamps, command settings, exit codes, health/status snapshots,
+settlement summaries, and resource metrics remain locally under
+`.local-state/glm53-sanity-20260905T040552Z/` in the main `finite-mono` worktree.
+The Markdown table preserves the measured results in git; private raw evidence
+and the temporary single-tier launcher are not committed. The unchanged
+capacity checker came from commit `d14015387951dbf535db681732194292ed5f793d`,
+SHA-256 `9f6fffafe42fbffdf2f09ed3e1547c4bf51ea5cbf85f6f84ea2c13c6b4915951`.
