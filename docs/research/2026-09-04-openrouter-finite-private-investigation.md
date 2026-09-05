@@ -98,3 +98,119 @@ Related repository context:
 
 The historical degraded-admission record is context, not evidence that its
 temporary mode was still active on September 4.
+
+## Follow-up: blast radius and full-load qualification
+
+This follow-up adds read-only Tinfoil inspection on September 4 Central
+(September 5 UTC). No inference load, production edits, or provisioning was
+performed. The earlier fleet inventory was reanalyzed, not recollected.
+
+### Shared exposure
+
+Joining runtime directories to both active Runtime IDs and their assigned
+hosts avoids counting stale copies on another host. The saved inventory has
+66 existing Finite Private main-chat consumers: 13 on box1, 31 on lat3, and 22
+on lat4. Adding the 41 OpenRouter main-chat bots gives **107 main-chat
+consumers**, about 62% more than the existing 66. This is a configured-instance
+count, not unique people, simultaneous requests, or a measured traffic increase.
+The 10 auxiliary/fallback users overlap this population; they must not simply
+be added again. Other API clients and parallel subagents are not bounded by
+this inventory.
+
+| Boundary | Potential effect |
+| --- | --- |
+| Individual bot configuration and restart | Failed authentication, lost in-flight reply, changed model behavior, broken tools or vision; at least 51 bots require settings review |
+| Shared GLM scheduler and GPU allocation | Queueing, slow first tokens, timeouts, or model unavailability can affect all existing and newly migrated Finite Private consumers |
+| Limiter, Core admission, and Postgres settlement | Every admitted call depends on the accounting path; GPU health alone cannot establish end-to-end capacity |
+| Shared launch defaults | Incorrect defaults can affect later launches and recreations, including onboarding |
+| Model-container replacement | Service-wide inference downtime; separate from changing one bot's endpoint |
+
+An endpoint/configuration switch does not require moving chat databases or
+identities. Preserve those boundaries and keep stopped copies stopped. A
+gateway rollback restores that bot's previous route; replacing the shared
+model is a different, broader rollback.
+
+### What is verified now
+
+- Tinfoil lists one container in the organization: `finite-private`, ready on
+  `control.inf9.tinfoil.sh`, with eight H200s, 32 CPUs, and 524,288 MiB RAM.
+  It serves `v2026-08-28-glm-5-3-flash-5`. The released configuration was
+  fetched from the satellite tag and is byte-identical to the checked-in
+  [candidate configuration](../../infra/tinfoil/confidential-finite-private/tinfoil-config.glm-5.3-flash.candidate.yml).
+  TP8/EP8 uses the eight GPUs together for one model-serving deployment; this
+  is not eight independently redundant replicas.
+- The live `/health` response reports GLM, thinking enabled with high reasoning
+  effort by default, `usage-api` admission, and healthy upstream and usage API.
+- The 24-hour metrics response contains 30 buckets spanning
+  `2026-09-04T03:55Z` to `2026-09-05T03:07Z`. The arithmetic mean of reported
+  average GPU-utilization buckets is 17.8%; the highest average bucket is 64%,
+  and the highest reported maximum is 96%. GPU memory utilization is 90% in
+  every bucket. These coarse metrics do not establish request capacity or
+  free KV-cache capacity. Preallocated model/cache memory also prevents
+  interpreting 90% memory use as 90% of request capacity consumed.
+- The accessible host list contains only `control.inf9.tinfoil.sh`, allowing
+  an eight-GPU allocation. This is host eligibility, not proof of a spare
+  eight-H200 allocation. No standby container appeared in the organization.
+
+Resource metrics are retrieved with Tinfoil's documented
+[read-only metrics command](https://docs.tinfoil.sh/containers/cli#resource-metrics).
+Its [lifecycle documentation](https://docs.tinfoil.sh/containers/cli#managing-in-progress-updates)
+also states that multi-GPU relaunches have downtime and replace the current
+deployment. The deployment changelog records roughly 29-minute GLM reloads;
+do not treat shared-model rollback as instantaneous.
+
+### Required proof before calling the full fleet ready
+
+The retained GLM tests are warning signs, not a fresh benchmark of flash-5.
+Flash-3 at 32 concurrent requests with high thinking recorded 33.8-second p95
+time to first token and 215 aggregate output tok/s. Flash-4's short,
+thinking-off 32-way test recorded 15.13-second median time to first byte and
+128.5 aggregate tok/s. Different token budgets and concurrency make these
+diagnostic results unsuitable for extrapolating 120-way throughput. No passing
+120-way GLM run or matching soak was found in the inspected retained evidence.
+See the [historical measurements](../runs/glm-5-3-flash-degraded-admission.md)
+and local `capacity-flash3-1-32-thinking-on.jsonl` and
+`load-canary-flash4-32.log` under
+`.local-state/glm53-cutover-2026-08-28-attempt2/`.
+
+**Capacity remains unproven. Do not approve an all-fleet switch on the existing
+evidence.** A useful proof needs a defined workload and pass/fail envelope:
+
+1. Measure aggregate current and incoming peak request rate, in-flight
+   requests, prompt/context lengths, output and reasoning lengths, tool-loop
+   amplification, auxiliary calls, retries, and scheduled bursts. Use metadata
+   and synthetic representative prompts without exporting private chats.
+   Include other API clients and establish per-agent parallelism bounds.
+   The limiter's current [`/metrics` implementation](../../finitecomputer-v2/crates/finite-private-limiter/src/lib.rs)
+   exports only liveness, so the metrics inspected here cannot supply this
+   demand profile. Missing fleet probes belong in `scripts/finite-status`.
+2. Qualify the exact model, GPU type/count, serving configuration, limiter, and
+   admission/settlement path on separately authorized isolated capacity. Test
+   multiple synthetic accounts/grants and shared-grant contention. Isolation
+   must cover admission/accounting load as well as GPUs; a second GPU endpoint
+   alone does not isolate a shared production Core database.
+3. Pass the existing 120-concurrent-request gate three times and the documented
+   35-minute soak: 120/120 terminal streams, zero errors, p50 decode at least
+   20 tok/s, p10 at least 10 tok/s, aggregate at least 2,400 tok/s, and p95 time
+   to first token at most 10 seconds. The
+   [capacity checker](../../scripts/check_finite_private_glm53_capacity.py)
+   is a short-prompt synthetic burst, not a complete fleet simulation.
+4. Additionally test realistic long histories, cold/warm caches, high thinking,
+   long answers, tool loops, auxiliary traffic, synchronized bursts, and
+   sustained arrivals. Measure time to useful visible text and complete replies,
+   queue growth/drain, errors, memory pressure, and settlement completion.
+   Reasoning-token speed does not establish useful-answer latency or quality.
+   Verify image handling and existing conversations through representative
+   gateway versions. Preserve existing-user latency under the added load.
+5. Establish headroom beyond the measured combined peak. A proposed 50% burst
+   margin is a planning target, not an existing acceptance contract; 107 single
+   calls would round up to 161 simultaneous calls at that margin. Actual
+   concurrency may be higher once parallel agents and other clients are counted.
+   Record overload/retry behavior and recovery after the burst; do not lower
+   the existing acceptance thresholds to fit a failed result.
+
+Spare capacity and its cost/availability need confirmation before an isolated
+test can be scheduled. If qualification fails, investigate a separately
+measured serving configuration or additional replicas, then repeat the gates.
+Fleet migration and any production load testing remain separately authorized
+work. No guarantee of full-load readiness is made by this note.
