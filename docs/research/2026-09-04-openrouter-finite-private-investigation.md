@@ -1,11 +1,115 @@
-# Box1 OpenRouter to Finite Private: migration plan and evidence
+# Box1 OpenRouter to Finite Private: execution record and evidence
 
-Recorded September 4, 2026 from the read-only fleet investigation that day.
-This is a snapshot for discussion, not an approved migration plan or executable
-runbook. The draft PR can remain unmerged as a record of these findings. It
-does not authorize production changes, a deployment, or a migration tonight.
+Investigation and planning began September 4, 2026. The owner subsequently
+authorized end-to-end execution of the narrowed, surgical procedure. The
+execution below occurred September 4 Central / September 5 UTC. Historical
+planning and investigation text follows the execution record.
 
-## Current plan: surgical box1 main-chat switch
+## Executed: 23 main-chat switches, three deferred
+
+**All 23 credential-ready box1 candidates were switched to Finite Private
+`glm-5-3-flash`.** Final configuration/identity audit and app-plane status were
+captured at approximately `2026-09-05T04:45Z`. No bot required rollback.
+
+| Outcome | Bots |
+| --- | --- |
+| Switched and checked | `arctic`, `arsh`, `bahman`, `celine`, `cornelius`, `dimsum`, `ella`, `fall`, `frankie`, `genie`, `jarbas`, `javier`, `kevin`, `micro`, `paul-finite`, `praxis`, `roberto`, `rocky`, `roshna`, `shelter`, `spencer`, `veral`, `wilfred` |
+| Deferred: per-bot Finite Private credential absent | `alexlwn`, `aurelio`, `charlie` |
+| Retired copy excluded | box1 `iherbs`, still at zero replicas |
+
+The only edited live configuration was each eligible bot's durable
+`.hermes/config.yaml` model mapping, using the six fields below. Existing keys
+were reused after matching their hashes to active Core keys/grants under the
+expected accounts. Cross-host checks found no matching Telegram tokens for
+these candidates. Credentials were neither issued nor edited.
+
+Each gateway was checked idle, its existing supervisor was briefly paused,
+and its child received the launcher's supported SIGTERM lifecycle restart.
+The operator waited for the child to exit, rechecked the source config hash,
+atomically replaced the model mapping with original owner/mode, and resumed
+the same supervisor. The supervisor sourced `.hermes/.env` for its new child.
+All original StatefulSet/PVC/pod identities, container IDs, and container
+restart counts were unchanged in the final audit. The runtime image was
+unchanged, with Kubernetes image ID
+`sha256:6f2efdb34f4ea2cccbbe50e5dec5c49f11b766970a693f99bb7bf0cf02dd90db`.
+This differs from the earlier Iherbs rehearsal image; the currently deployed
+Hermes 0.14 package and gateway resolver were checked directly.
+
+### Verification and limits
+
+- Arctic was the initial canary, followed by explicitly named groups of at
+  most three, executed one bot at a time. Every bot passed its checks before
+  the next bot's change.
+- Synthetic preservation/refusal/exact-config-rollback checks passed using
+  the deployed dependencies. Every candidate was parsed and proved to differ
+  semantically only in `model`; ambiguous mappings were refused. Final live
+  hashes matched the prepared candidates and all original backups matched
+  their recorded hashes.
+- Every restarted gateway loaded the expected account key, and the deployed
+  gateway provider resolver selected the current Finite Private URL, `custom`,
+  `chat_completions`, and `glm-5-3-flash`.
+- Every bot passed an isolated Hermes conversation continuing synthetic prior
+  tool history, making one harmless echo-tool call, and returning the exact
+  expected response. Probes used temporary homes, disabled memory/context
+  loading, and no external channel adapters. **All 48 verification requests
+  settled with actual usage**: four for Arctic, two for each other bot.
+- All gateways reported their configured platforms connected, with no new
+  post-start channel/authentication exceptions in the per-bot inspected logs.
+  Conversation stores were not edited or restored by the migration. These
+  isolated checks are not a claim of a newly delivered real-user reply for
+  every bot; no operator test messages were sent into customer chats.
+- Cornelius supplied additional normal-traffic evidence: an existing Telegram
+  session continued on GLM with tool calls, completed a text response, and
+  reached gateway response sending at `04:35:49Z`. Its scratch-copied chat
+  database passed `quick_check`. Private conversation content is not retained
+  in this document.
+- App-plane `finite-status` chat, host health, recovery, and rollout sections
+  remained green at the final check. Fleet convergence retained the known
+  Smoke Studio red finding. Box1 itself has no canonical host profile and
+  reports unknown for unsupported sections; target-level identity and gateway
+  checks supply the box1 evidence. One pre-change sample read a Litestream
+  success stamp one second newer than its collection timestamp and stopped
+  progression. A fresh sample of that same stamp was green; no repair or
+  bypass was made.
+
+### Open accounting observation
+
+Final key-scoped inspection found **52 settled requests and one reserved
+request** since `04:26Z` across the migrated keys. The 48 verification requests
+were all settled; the extra requests came from Cornelius's normal turn.
+Reservation `fp_reservation_ea0f1e0afe54be76c9d9`, created at
+`2026-09-05T04:35:18.009437Z`, remained reserved in the follow-up inspection even
+though the client logged stream completion and a final response. The cause is
+unresolved. This is an accounting follow-up, not proof that the conversation
+failed. No ledger repair, key change, or speculative configuration rollback
+was performed. The historical inventory had already reported older unsettled
+reservations; that does not establish the cause of this new observation.
+
+### Retained backups and rollback boundary
+
+Exact original/candidate configs and metadata are protected on **box1** under
+`/root/finite-box1-fp-20260905/<bot>/`. Each directory includes
+`config-before.yaml`, `config-candidate.yaml`, and `metadata.json` with hashes,
+original owner/mode, source identities, and prior gateway state. Existing
+OpenRouter credentials remain available.
+
+Rollback remains per-bot and config-only: first establish that the current
+config still matches the recorded candidate and the bot/volume identities
+match, wait for active work to finish, use the same controlled gateway stop,
+atomically restore `config-before.yaml` with its recorded owner/mode, resume
+the existing supervisor, and verify its prior route. An intervening user edit
+requires inspection; never overwrite it blindly. Never restore a home volume
+or chat database to undo this model selection.
+
+Private execution scripts, hashes, per-bot results, resolver checks, settlement
+reports, and canonical status snapshots are retained in the main worktree's
+ignored, mode-0700 `.local-state/box1-fp-migration/`. The final target inventory
+showed exactly these 23 changes; the three deferred bots and retired Iherbs
+matched their initial inventory. Auxiliary/delegation/fallback fields were
+preserved. `auto` can follow the main model; this is a main-chat migration,
+not certification of a complete OpenRouter exit or all auxiliary capabilities.
+
+## Historical plan: surgical box1 main-chat switch
 
 Switch the main conversation model of the eligible, running box1 OpenRouter
 bots to Finite Private GLM-5.3-Flash through small per-bot configuration edits.
