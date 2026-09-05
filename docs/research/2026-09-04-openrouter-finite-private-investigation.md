@@ -1,9 +1,221 @@
-# OpenRouter to Finite Private: investigation notes
+# Box1 OpenRouter to Finite Private: migration plan and evidence
 
 Recorded September 4, 2026 from the read-only fleet investigation that day.
 This is a snapshot for discussion, not an approved migration plan or executable
 runbook. The draft PR can remain unmerged as a record of these findings. It
 does not authorize production changes, a deployment, or a migration tonight.
+
+## Current planning decision: box1 main-chat migration
+
+The user has confirmed concurrency was proved in another thread and asked to
+cement the box1 migration plan. Accept that as the planning premise; do not
+repeat the capacity investigation as a prerequisite to drafting this plan.
+The executed GLM sanity check at the end of this document is linked evidence
+available here. Attach any additional result from the other thread to the
+execution handoff without inventing its workload or broadening what the
+recorded 32-way result proves. Earlier capacity warnings below describe the
+investigation at that time; they are not the current box1 planning decision.
+
+**Proposed outcome:** each eligible, actively served box1 OpenRouter Agent
+continues its existing conversations using GLM-5.3-Flash through Finite Private,
+with working tools, correct account charging, and the same history, Device
+identity, channels, host, PVC, and runtime image. This is a main-conversation
+provider/model switch. Host migration, runtime upgrades, shared inference
+deployment changes, and a complete OpenRouter exit are separate work.
+
+This section is a proposed plan, not an executable or approved production
+runbook. All execution steps remain TODO. Preparing and reviewing the bounded
+runbook and its evidence comes before requesting production authorization.
+
+### Scope from the saved September 4 inventory
+
+| Box1 population / attribute | Count | Planning consequence |
+| --- | ---: | --- |
+| Running OpenRouter main-chat Agents | 26 | Initial candidate set; refresh before selecting a batch |
+| Matching active Finite Private key and grant | 23 | Potential first cohort; key ownership and effective environment precedence still need verification |
+| No matching credential in checked files | 3 | Separate credential-preparation cohort; do not borrow a shared or another account's key |
+| Claude Sonnet 4.6 / Claude Opus 4.6 defaults | 25 / 1 | Explicitly record model behavior change; include the Opus case in compatibility review |
+| Candidates with a recorded Telegram credential | 19 | Cross-host channel-consumer ownership check required |
+| Candidates with explicit OpenRouter delegation | 2 | Record as retained exceptions or hold for separate delegation work |
+| Candidates with auxiliary configuration | 26 | Resolve `auto` and explicit routes against the deployed Hermes version |
+
+All 26 saved candidates referenced `fc-agent-runtime:main-015rdv4dc6hz`.
+A shared tag is not digest or behavior proof. The inventory parsed saved
+configuration, not every session's effective route; it found no explicit
+fallback block in these 26. Another nine running box1 Agents outside this
+cohort had explicit OpenRouter references and belong to a later exit audit.
+Counts are Agent instances, not unique accounts. TRF, smoke, and lat3/lat4
+Agents are outside the mutation scope, but active replacements and shared
+service health must be checked across hosts.
+
+### TODO 1: freeze the eligible roster and exact change surface
+
+Prepare a protected local execution manifest from fresh read-only evidence.
+For each candidate, record:
+
+- Account/Project attribution where applicable, namespace, StatefulSet UID and
+  resource version, desired/ready replicas, pod UID, image digest, Hermes
+  version, PVC UID/path, and authoritative durable home.
+- Config hash, model block, session override locations, environment sources
+  and precedence, key record/grant/profile identifiers and status, allowance,
+  and whether the effective key belongs to the intended account/Project.
+  Record secret locations and presence only; never publish key values.
+- Active channel owners on every relevant host, stopped/replacement copies,
+  and any unresolved externally managed consumer. Use protected token
+  fingerprints for equality checks without exposing tokens. A newer creation
+  timestamp, selected row, or matching name does not choose the authority.
+- Current main, auxiliary/title/vision, delegation, fallback, scheduled-job,
+  and session routes; record which will change implicitly when `auto` follows
+  the main model. Exclude a candidate if a needed capability would regress.
+- Named config rollback files, a verified Recovery Set and empty-target restore
+  evidence for the durable state, existing health findings, and batch assignment.
+
+An earlier Iherbs attempt demonstrated the ownership failure: starting its
+legacy box1 copy caused Telegram polling conflicts with its active lat3
+replacement. The operator restored the original box1 config and zero-replica
+state; the replacement already used Finite Private. Keep that retired source
+excluded. This lesson comes from the local Iherbs investigation retained in
+the main worktree (`infra/runbooks/iherbs-finite-private.md`, untracked at plan
+preparation) and must be rechecked against live state for any candidate.
+
+Use `scripts/finite-status --json` as the platform/fleet status authority.
+The inspected command lacks the complete box1 provider/credential/channel
+inventory required here. Implement missing read-only probes there, with
+unknown/ambiguous results that block selection; do not promote the temporary
+inventory script into another operator status command. Saved rows alone do
+not constitute the execution roster.
+
+### TODO 2: prove the configuration path and prepare rollback
+
+The production through-line to verify against each deployed digest is:
+
+| Writer / authority | Reader / effect | Required proof |
+| --- | --- | --- |
+| Per-Agent mounted environment sources and legacy entrypoint | Generated durable `.hermes/.env`, then gateway child | Correct key wins after startup and ordinary recreation; editing only a generated file is insufficient |
+| Operator's guarded edit of durable `.hermes/config.yaml`; Hermes/user settings writers | Entrypoint reconciliation and deployed Hermes model loader | Edit only the approved model fields; reject stale hashes, duplicate keys, unexpected shapes, and concurrent edits |
+| Saved session/model overrides and auxiliary/delegation configuration | Hermes request selection for each request class | Existing conversations reach the intended route; preserved exceptions remain explicit |
+| Existing gateway and channel adapters | Finite Chat and external channel services | Exactly one authorized consumer; prior conversation and Device identity continue |
+| Existing Finite Private limiter and Core key/grant records | Admission, GLM inference, and Core settlement | Correct account attribution, successful terminal response, actual usage settled |
+| Hermes and chat services | Durable session/message stores and transcripts | Original IDs/content preserved; new replies append without resetting history |
+
+Current mono reconciliation deliberately preserves user model selections
+outside narrow Finite-owned migrations. A shared default is therefore not an
+existing-Agent migration. Nor does testing current mono prove legacy box1
+behavior. Inspect the entrypoint/environment composition and Hermes readers
+from the actual deployed image, including user model commands, session state,
+cron requests, and restart/recreation behavior.
+
+Prepare this intended model mapping, subject to exact-image validation:
+
+```yaml
+model:
+  default: glm-5-3-flash
+  provider: custom
+  base_url: https://finite-private.finite.containers.tinfoil.dev/v1
+  api_mode: chat_completions
+  context_length: 393216
+  api_key: ${FINITE_PRIVATE_API_KEY}
+```
+
+Prove on synthetic state using the deployed legacy image and current service
+contract: existing Claude histories with tool messages; resumed session
+selection; harmless tool round trip; long-history compaction within the
+configured limit; auxiliary/title/vision behavior; and exact configuration
+rollback after startup. Run the gateway rehearsal with external adapters and
+schedulers fenced so it cannot become a second live consumer. A successful
+HTTP request alone is insufficient. Tests requiring production inference or
+external messages belong to the later explicitly authorized execution.
+
+For the three credential gaps, first resolve intended account/grant and the
+established credential-management path. Prepare the exact issuance or delivery
+action for review, including every durable input needed to survive startup.
+Do not issue keys, change allowance, or edit shared secrets in planning. A
+matched active key alone does not establish ownership or sufficient allowance.
+
+Retain per-Agent root-only backups outside the writable home of every file
+that will change, including ownership/mode and hashes. Verify the existing
+Recovery Set can restore onto an empty target; a config backup is not a chat
+backup. Inspect snapshot SQLite only via `scripts/snapshot-sqlite` or a scratch
+copy. Preserve Recovery Authorities and keep recovery material after rollout.
+
+### TODO 3: execute staged batches after explicit authorization
+
+Proposed batching, conditional on the refreshed roster: **1 canary → 3 → 7 →
+remaining ready Agents** (12 if all 23 credential-matched candidates qualify).
+Choose the canary by verified ownership and representative legacy behavior,
+not by row order; do not reuse retired Iherbs. Handle the three credential-gap
+Agents afterward as **1 → remaining 2**, once their prerequisites pass.
+Any excluded Agent stays pending with a named reason, rather than being
+silently counted as migrated. The execution handoff names the exact canary
+and batches, maximum pause, and stop/rollback authority.
+
+For each Agent, sequentially within each batch:
+
+1. Capture canonical status and the expected source identity/config versions.
+   Recheck absence of a conflicting rollout or channel owner. Block on new or
+   unexplained chat/recovery/admission failures; retain and explain unrelated
+   baseline findings rather than calling a red status green.
+2. Wait for in-flight conversation/tool work to complete. Use the proven
+   Agent-local lifecycle operation to quiesce its gateway; do not pause box1
+   or shared services. If work cannot drain within the agreed window, defer
+   that Agent. Record replica/image/PVC state and preserve inbound work.
+3. Check the source hash again and atomically apply only the reviewed config
+   and, where required, per-Agent credential-source change, preserving file
+   owner/mode. Refuse changes by another writer. Resume only the exact fenced
+   Agent using the same image, PVC, and identity.
+4. Verify effective route/model/key, useful visible reply, one harmless tool
+   round trip, continuation of synthetic prior history, channel connectivity,
+   and completed actual usage settlement. Verify existing history IDs/content
+   on a consistent scratch snapshot and confirm no duplicate consumers or
+   unrelated pod restarts. An authorized channel canary is required before
+   calling that channel verified; connection status alone is insufficient.
+5. Capture canonical status again. Observe at least 30 minutes after the
+   first canary and 15 minutes after each later batch, with no new auth/429/5xx,
+   stuck test reservations, polling conflicts, or chat regressions. These are
+   proposed minimum observation windows, not statistical capacity proof;
+   sparse traffic requires explicit verification. Keep a 24-hour follow-up
+   after the final batch for scheduled behavior and user-reported regressions.
+
+Proposed diagnostic stop threshold: a synthetic chat canary fails to produce
+useful visible text within 30 seconds or a complete bounded reply within 120
+seconds; the harmless tool canary fails to finish within 120 seconds; or a
+canary reservation remains unsettled after 15 minutes. Confirm these thresholds
+in exact-image rehearsal and record them before authorization. First reasoning
+output is not useful visible text. Also stop on any new history/identity
+mismatch, account misattribution, restart loop, duplicate consumer, or shared
+service degradation. Do not retry repeatedly or loosen thresholds mid-rollout.
+
+### TODO 4: rollback and completion
+
+On a per-Agent failure, stop expansion and quiesce only that Agent. Restore
+the exact backed-up config and any changed per-Agent environment input using
+guarded atomic replacement, then restore its pre-change lifecycle state.
+Verify the prior provider, continued conversation, and canonical status.
+Keep the original OpenRouter credential valid during the observation window.
+Do not restore the whole home/PVC to undo routing: that would discard new
+messages. If a concurrent user edit makes rollback ambiguous, stop for
+reconciliation instead of overwriting it. A newly issued key remains recorded
+for later cleanup until its exclusive ownership/use is established.
+
+If degradation is shared, halt all batches and assess rollback of the changed
+cohort; per-Agent rollback may reduce added demand but does not guarantee
+recovery of a failing shared service. Do not restart or replace Tinfoil as an
+automatic migration rollback. That is a separately authorized incident action.
+
+Completion evidence must account for every refreshed candidate as migrated,
+rolled back, or held; show correct account settlement and effective main-chat
+routing; preserve history/identity; and pass the observation windows. Record
+retained auxiliary/delegation/vision OpenRouter use explicitly. Main-chat
+completion does not authorize deleting OpenRouter keys or claiming all
+inference is private. New-account defaults and box1-to-lat3 moves remain
+separate; verify ordinary recreation of the migrated Agent preserves its
+selection as part of rehearsal.
+
+**Next deliverable:** a reviewed box1 execution runbook with the fresh private
+roster, canonical inventory probes, exact-image rehearsal results, credential
+actions, recovery references, and named first batch. Request authorization
+only once that concrete packet is ready. No production action was taken while
+preparing this plan.
 
 ## Findings
 
