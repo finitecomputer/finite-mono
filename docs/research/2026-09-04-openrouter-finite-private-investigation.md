@@ -214,3 +214,29 @@ test can be scheduled. If qualification fails, investigate a separately
 measured serving configuration or additional replicas, then repeat the gates.
 Fleet migration and any production load testing remain separately authorized
 work. No guarantee of full-load readiness is made by this note.
+
+### Existing high-concurrency evidence to reuse
+
+We do have strong historical eight-H200 load evidence for **DeepSeek V4 Flash
+0731**, the previous model. The
+[August 7 isolated optimization record](2026-08-07-deepseek-v4-eight-h200-optimization.md)
+reports 1,024/1,024 successful short-prompt, 128-output-token reasoning requests,
+8,373.44 aggregate output tok/s, and 4.045-second p95 time to first token.
+A longer 1,024-output-token run also completed 1,024/1,024 with zero errors,
+10,756.55 aggregate tok/s, and 3.944-second p95 time to first token. That run
+lasted 97.483 seconds; the record explicitly distinguishes it from the
+35-minute stability gate and from concurrent maximum-length contexts.
+
+This is valuable evidence for that hardware class and exact DeepSeek/vLLM
+recipe, and a baseline to reuse. It does not qualify the current GLM/SGLang
+recipe, whose model, cache layout, and parallelism differ. The
+[GLM cutover ledger](../runs/glm-5-3-flash-production-cutover-ledger.md)
+explicitly records unmet capacity thresholds for flash-4. Its statements about
+missing usage admission were superseded by flash-5; do not read the whole
+ledger as current operational status.
+
+A follow-up checked these records and GLM PRs #721, #747, and #748 without
+finding newer full-load qualification. The available `fbrain` identity could
+reach the server but listed no accessible Brains, so organization Brain
+content was not searched successfully. This remains a search limitation, not
+proof that no other record exists.
