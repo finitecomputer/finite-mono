@@ -1,27 +1,35 @@
-# One-time OpenClaw migration to Hermes on lat4
+# One-time OpenClaw migration to Hermes: execution record
 
-Status: planning record, 2026-09-04. Investigation baseline: `529c1c63`.
-Execution has not started. The draft PR records this plan; it does not authorize
-production changes.
+Status: scoped import completed on lat3, 2026-09-05 UTC (September 4 locally).
+Investigation baseline: `529c1c63`. The original filename retains the initially
+planned lat4 destination. The owner authorized lat3, the September 4 export
+cutoff, the source persona/profile, and inactive external integrations.
+Telegram was requested afterward and remains a separate blocked handoff.
+This document records the procedure and execution evidence; it grants no new
+production authorization.
 
 ## Scope and outcome
 
-Migrate `~/Downloads/OpenClaw-Complete-Export-2026-09-04` from the operator Mac
-into one fresh, Core-owned Hermes Agent Runtime on lat4. The result must retain
-the complete export, make historical conversations searchable in Hermes, and
-provide the portable workspace, projects, documents, media, persona, and memory.
+The received `~/Downloads/OpenClaw-Complete-Export-2026-09-04` was imported from
+the operator Mac into one fresh, Core-owned Hermes Agent Runtime. The selected
+destination was lat3, accepted after normal Core creation placed the Agent there.
+The result retains the complete export, makes historical conversations
+searchable in Hermes, and provides the portable workspace, projects, documents,
+media, persona, and memory.
 The new Agent keeps its own Finite identity and genuine Chat history.
 
 Run custom conversion and database preparation locally. Use existing Core
 lifecycle commands, SSH, and file-transfer tools for server operations. Temporary
 scripts, private evidence, staging, and execution reports stay in the worktree's
-ignored `.local-state/openclaw-import/` directory. Only this plan enters Git.
+ignored `.local-state/openclaw-import/` directory. Only this sanitized record enters Git.
 There is no migration framework, reusable installer, new API, runtime image
 change, or other product implementation in this work.
 
 ## Established facts
 
-These are inspection results from September 4, not a completed migration rehearsal.
+These are the September 4 inspection results. Later rehearsal and production
+verification are recorded under Execution evidence below; pending statements in
+this baseline table describe the prerequisites at inspection time.
 
 | Evidence | Consequence |
 | --- | --- |
@@ -95,7 +103,7 @@ Hermes implementation locally remains a rehearsal gap to resolve before cutover.
 
 Record the owner, Agent, Runtime, host, provider handle, durable-state root,
 image digest, and Hermes version privately from authoritative Core/Runner state.
-Use an identified fresh lat4 Runtime, or establish placement through existing
+Use the owner-accepted fresh Runtime, or establish placement through existing
 creation/relocation procedures. Normal creation has no exact-host selector;
 [cold relocation][relocation] requires admission coordination. Do not force
 placement with SQL, host-directory creation, or a temporary fleet drain.
@@ -104,9 +112,12 @@ Run `scripts/finite-status` before server changes and after each rollout. The
 September 4 report at approximately `22:34:49Z` showed 22 ready lat4 Runtimes and
 about 1.56 TiB free on `/data`, but stale inference launch overrides. The overall
 report was not green, and existing readiness did not prove fresh admission or
-backup coverage. Recheck this evidence. If the stale overrides remain, use the
-[existing reconciliation procedure][runner-route] with scoped authorization and
-its rollback boundary. Report any prerequisite needing platform code as separate
+backup coverage. Recheck effective application configuration, not just raw
+environment values. The installed launcher already normalizes historical
+inference overrides; those values did not require a lat3 repair. Use the
+[existing reconciliation procedure][runner-route] only for an evidenced,
+separately authorized configuration change with its rollback boundary.
+Report any prerequisite needing platform code as separate
 work rather than adding it to this migration.
 
 Once authorized, create/prepare the exact target and prove enrollment/admission,
@@ -175,19 +186,135 @@ Hermes/workspace data only where preservation of new writes is proved; a wider
 restore requires reconciliation. Returning an integration to the source also
 requires fencing the target consumer first.
 
-## Inputs still needed before execution
+## Execution evidence
 
-- Exact Finite owner/Agent and a proven fresh lat4 target binding.
-- Acceptance of the supplied snapshot cutoff, or a final source refresh.
-- Required external integrations and their handoff scope.
-- Completed local rehearsal, source/target restore proofs, current target
-  readiness, and authorization for the concrete cutover.
+All results below were captured during execution on September 4–5, 2026.
+They are observations at that time, not a claim about current fleet status.
+Raw records remain private in `.local-state/openclaw-import/`; the filenames
+below identify evidence without committing transcripts, profiles, credentials,
+account details, or runtime identity keys.
 
-This draft records the procedure. Conversion, rehearsal, target creation,
-production repair, and import remain unperformed.
+### Destination and accepted scope
+
+Core enrollment, sponsored admission, launch, and a real Finite Chat response
+passed before import. The exact owner/Project/Runtime/provider-handle binding
+was recorded privately and rechecked at cutover. Core selected lat3; the owner
+accepted it. No relocation, shared Runner drain, or identity rewrite occurred.
+
+The deployed artifact was `finite-agent-runtime-2026-09-02.2`, schema
+`runtime-state-v1`, image digest
+`sha256:c7f1ec6a8d4454d8e7b40fbeadfcfd789eea27304a511800aae0716d49e2328e`.
+Installed Hermes matched revision `3c27eb6234bf91b8ceee9e9071591b31e9b148cb`.
+The target used SQLite 3.53.3; local preparation used the repo-pinned Python
+with SQLite 3.50.4. Candidates were prepared without concurrent writers,
+checkpointed and closed; the installed target subsequently passed live checks.
+
+Raw inference environment values initially led to an incorrect repair
+recommendation. Inspection of the installed launcher and effective Hermes
+configuration confirmed that the existing normalization fix was working.
+No inference repair was required on lat3. An earlier authorized lat4 cleanup
+removed stale overrides, but was not established as necessary for this image.
+
+### Data conversion and preservation
+
+| Check | Observed result | Private evidence |
+| --- | --- | --- |
+| Source accounting | 31 transcripts, 4,390 events and all 4,066 original messages retained. Branch expansion produced 33 sessions and 5,754 rows, including 1,688 repeated context rows. | `history-conversion-report.json` |
+| Exact installed import implementation | Compared all 5,754 rows, including content, roles, timestamps, tool links, reasoning and ancestry. Verified 78 native image blocks after branch expansion. | `history-rehearsal-report.json` |
+| Failure and recovery rehearsal | Oversize/malformed rejection, duplicate behavior, preserved synthetic baseline, SQLite integrity/FK checks, empty restore and interrupted-install recovery passed. | `history-rehearsal-report.json` |
+| Actual stopped baseline | Preserved the existing Hermes session and its three messages, plus eight other tables, when preparing the final candidate from a scratch copy of the stopped backup. | `stopped-candidate-report.json` |
+| Portable payload | 1,379 files / 278,425,043 bytes staged and hash-verified. Original instruction files and Git metadata retained as source material; executable bits removed. Sensitive and nonportable material remained in protected recovery storage. | `portable-staging-report.json`, `portable-file-map.json` |
+| Approved active profile | Existing managed SOUL prefix retained. Bounded user memory and general memory loaded successfully and matched candidate hashes in the live Runtime. Full originals and notes retained. | `profile-option-report.json`, `running-import-check.json` |
+| Scoped installation | Full stopped-tree comparison verified 3,015 installed entries and 1,184 protected original entries with no unexpected changes. | `installed-stopped-verification.json` |
+| Production readers | Live SQLite integrity/FK checks passed; all 33 imported sessions / 4,066 unique source messages remained present. User, assistant and tool history search passed. | `running-import-check.json` |
+| Finite Chat continuity | Original Room/message IDs and Agent Principal preserved. Real Chat searched imported history; a fresh Chat read the approved active memory. Final Chat answered after the last restart. | `chat-binding-before.json`, `fresh-chat-memory-verification.json`, `final-chat-verification.json` |
+
+Installation used normal Core Stop and Restart operations. The existing
+per-Runtime operation lock and Chat writer lease fenced the stopped backup
+and installation. Only the approved Hermes history/profile paths and the new
+portable workspace tree changed. The locks were released before restart.
+
+### Recovery evidence
+
+| Recovery copy | Verification |
+| --- | --- |
+| Complete source archive | Empty local restore verified 232,036 manifest-listed files and 284,365 metadata entries, including 16,461 symlinks. A separate compressed copy on lat3 decompressed to the original SHA-256. |
+| Full pre-import target archive | Copies on lat3 and off-host. Empty remote restore matched the stopped Runtime state manifest; local file/link verification passed. |
+| Installed, still-stopped target archive | Full copy on lat3 and off-host, used for the scoped-install comparison before the first restart. |
+| Final post-import archive | Normal Core stop succeeded. State manifests before/after capture and after empty remote restore matched. Off-host empty restore verified 3,017 entries; scratch-copy SQLite integrity/FK checks and preservation of all pre-backup Chat message IDs passed. |
+
+Archive SHA-256 values:
+
+```text
+source-recovery.tar
+54dfd57da5cb6f0d800983f81d9bb3a49b8dc0efc7c2c807812f7b3f84131730
+target-preimport.tar
+97e3ae950adfde7717f5eb6326c97d763fa840da3a5ef367ef6f8d606ce003c2
+target-final.tar
+12016755f5dfb52dcc67fe13bb8ba703aa60fb199d0bbb6e206f31f45a8aa626
+```
+
+Evidence: `source-restore-report.json`, `final-backup-result.txt`, and
+`final-restore-report.json`. Source Mac quarantine/provenance attributes remain
+in the archive but were not asserted as restored by GNU tar. Target ownership
+was checked in the remote restore; local verification covered bytes, modes and
+links. These are one-time recovery proofs, not a new scheduled-backup guarantee.
+The final archive includes the import verification conversations made before
+its capture; the last post-restart Chat check is later than that snapshot.
+Source and recovery copies remain retained. No source decommissioning occurred.
+
+### Verification-command incident and resolution
+
+After the first restart, Chat continued to work but `nerdctl` status/exec reads
+timed out. The deployed lifecycle probe reported `orphaned_task`. Live process
+and Kata state inspection showed that the same VM was still running; that
+probe result was not evidence of absent compute.
+
+The abandoned read-only verifier, launched with `nerdctl exec -i ... python3 -`,
+remained on the host after its local SSH client was canceled. It held the write
+end of the exact exec input FIFO. TERM did not end that client. After checking
+its identity and FIFO again, ending only the verifier with KILL immediately
+restored status reads; the VM PID was unchanged. No shim, VM, shared containerd
+service, or host was restarted to clear the blockage.
+
+Kata's [`CloseIO` implementation][kata-close-io] waits for input completion while holding the service mutex,
+consistent with the observed behavior. An internal stack dump was unavailable,
+so this record does not claim a complete internal deadlock trace. The same
+verification passed using `python3 -c` without interactive stdin. The full
+lifecycle probe then reported `operable`; normal Core stop/restart and the
+final recovery test also passed.
+
+Separate maintenance finding: [containerd 2.3.0 task listing][containerd-task-list] skips entries whose
+state reads fail. The Runner probe incorrectly treats a missing list entry as
+proven absence. That diagnostic defect was recorded, not patched or deployed
+by this migration. Evidence: `exec-pipes-private.txt`, `recovered-lifecycle-probe.json`,
+`running-import-check.json`, and `completed-import-lifecycle.json`.
+
+### Completion and remaining handoff
+
+The scoped import is complete. Final canonical status reported all 30 active
+lat3 Runtimes and all 22 active lat4 Runtimes health-ready, with no active
+controls. The unrelated Smoke Studio fleet exception remained red; global green
+status was not claimed. Davy's final lifecycle probe was operable, and Chat
+responded after restart. Evidence: `completed-import-status.json` and
+`final-chat-verification.json`.
+
+External integrations were intentionally inactive at import acceptance. The
+owner subsequently requested Telegram. The original bot token was recovered
+privately and validated with Telegram; the new Runtime remains disconnected.
+The source Mac is online on the tailnet, but ordinary SSH authentication failed,
+the Tailscale browser console offered SSH setup rather than an active terminal,
+and Screen Sharing failed. No source consumer was stopped or proved inactive.
+No bot token was entered into the target, rotated, or committed, and no second
+consumer was enabled. Handoff remains blocked on source access or confirmation
+that the source Telegram consumer is stopped. Pairing and bidirectional message
+verification remain required afterward. Google Workspace activation and source
+retirement are also separate work, not completed migration steps.
 
 [openclaw-migration]: https://github.com/NousResearch/hermes-agent/blob/3c27eb6234bf91b8ceee9e9071591b31e9b148cb/optional-skills/migration/openclaw-migration/scripts/openclaw_to_hermes.py
 [hermes-import]: https://github.com/NousResearch/hermes-agent/blob/3c27eb6234bf91b8ceee9e9071591b31e9b148cb/hermes_state_portability.py
 [legacy-contract]: ../../finitecomputer-v2/docs/legacy-hermes-migration-contract.md
 [relocation]: ../../infra/runbooks/runtime-cold-relocation.md
 [runner-route]: ../../infra/runbooks/runner-finite-private-route.md
+[kata-close-io]: https://github.com/kata-containers/kata-containers/blob/3.29.0/src/runtime/pkg/containerd-shim-v2/service.go
+[containerd-task-list]: https://github.com/containerd/containerd/blob/v2.3.0/plugins/services/tasks/local.go
