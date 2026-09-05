@@ -240,3 +240,28 @@ finding newer full-load qualification. The available `fbrain` identity could
 reach the server but listed no accessible Brains, so organization Brain
 content was not searched successfully. This remains a search limitation, not
 proof that no other record exists.
+
+### Raw GLM result location and meaning of "passed"
+
+The raw GLM records were located in the separate sibling worktree
+`finite-mono-glm-5-3-flash-cutover/.local-state/glm53-cutover-2026-08-28-attempt2/`,
+not this checkout's `.local-state`. Direct inspection confirms:
+
+- `capacity-flash3-1-32-thinking-on.jsonl`: 32/32 successful terminal streams,
+  zero errors, 59.448 median decode tok/s per request, 215.096 aggregate
+  tok/s, and 33.772-second p95 time to first token.
+- That file reports `passed: true` against explicitly overridden diagnostic
+  thresholds: concurrency 32, one repetition, maximum p95 first-token time
+  120 seconds, and minimum aggregate/p10/p50 throughput each 1 tok/s.
+  It is a real passing diagnostic result, not a pass of the documented
+  120-request production acceptance gate.
+- `load-canary-64.log`: 64 requests, 64 completion tokens per request,
+  69.606 median decode tok/s per request, 237.393 aggregate tok/s, and
+  16.297-second p95 time to first byte.
+- `load-canary-flash4-32.log`: 32 requests, 64 completion tokens per request,
+  81.928 median decode tok/s per request, 128.526 aggregate tok/s, and
+  15.132-second p95 time to first byte.
+
+These are recorded GLM-5.3-Flash load results and should be reused. The open
+question is qualification of the combined workload, not whether GLM was ever
+load-tested.
