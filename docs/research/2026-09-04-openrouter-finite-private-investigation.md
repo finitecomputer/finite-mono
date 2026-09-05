@@ -1,9 +1,98 @@
-# Box1 OpenRouter to Finite Private: execution record and evidence
+# Hosted bot main-chat migration to Finite Private: execution record and evidence
 
 Investigation and planning began September 4, 2026. The owner subsequently
 authorized end-to-end execution of the narrowed, surgical procedure. The
-execution below occurred September 4 Central / September 5 UTC. Historical
+execution below spanned September 4–5 Central (September 5 UTC). Historical
 planning and investigation text follows the execution record.
+
+## Fleet completion: 110 active main-chat routes on Finite Private
+
+The owner extended authorization to TRF and the remaining active hosted bots.
+At approximately `2026-09-05T05:32Z`, the fresh legacy-host inventory and Core
+active-runtime-link join found **110 active bots**, all with main model
+`glm-5-3-flash`, provider `custom`, and the current Finite Private endpoint.
+This counts bots, not unique people; stopped copies and retired lat1 are excluded.
+
+| Host | Active bots with Finite Private main configuration | Changed in this follow-up |
+| --- | ---: | ---: |
+| box1 | 41 | 0 |
+| TRF | 13 | 13 |
+| smoke | 3 | 3 |
+| lat3 | 31 | 0 |
+| lat4 | 22 | 0 |
+| **Total** | **110** | **16** |
+
+TRF targets were `alvaro`, `andy`, `caroline`, `grant`, `jeremy`, `laura`,
+`max`, `mimi`, `nia`, `rene`, `tim`, `traci`, and `valeria`. Smoke targets were
+`finite-brain-bot`, `skyler-smoke`, and `smoke-studio`. Fifteen main routes
+previously used OpenRouter; Rene used OpenAI Codex. Existing channel-token
+hashes showed no duplicate target consumers across the inspected host homes.
+
+All 16 lacked a Finite Private key in their persistent runtime inputs. The
+configured per-bot email was matched before credential installation. Supported
+Core operator CLI issuance created 14 missing grants using
+`finite-private-generous-v2`, plus one new key for each bot. Finite Brain Bot
+and Smoke Studio instead received new keys under their existing active
+`austin@finite.vip` and `test@finite.vip` grants. Those grants' ownership,
+profile, window start, and reset epoch were preserved. Their 11 pre-existing
+keys retained identical ownership and status. No runtime or project binding
+was invented for these legacy credentials. Dry runs were checked for absence
+of persisted keys/grants before commit.
+
+The operation retained each deployed image. TRF used
+`fc-agent-runtime:main-w8jmj3mlzl5q`, image ID
+`sha256:b78c69dbd5bb9508fec47ab8835685e915639675d55cacc1151e6521964d28a6`;
+smoke used `fc-agent-runtime:main-n7x95lykhnpf`, image digest
+`sha256:916905c148908a23537159dbac5faa55b0743f1663555bd9e4cdc51648e2caf7`.
+Both deployed Hermes packages passed an isolated synthetic continuation/tool
+rehearsal before their host's first main-model switch. The deployed launchers
+reload the durable environment for a new gateway child. TRF's older gateway
+uses its supported `SIGUSR1` draining restart; smoke's launcher enables the
+`SIGTERM` draining restart used on box1. Only the relevant supervisor was
+paused around the guarded config replacement; pods were not recreated.
+
+Every bot passed actual gateway-process key checks, main-route resolution,
+connected channel checks, an isolated synthetic conversation with prior tool
+history and a harmless echo tool, and actual usage settlement. **All 36
+verification requests settled successfully**: 32 after the individual
+switches and four from the two host rehearsals. Verification did not select
+or rewrite customer conversations or send an external test message. Final
+per-host audits confirmed unchanged StatefulSet, PVC, pod, container IDs and
+restart counts, exact retained config backups, and intact credential inputs.
+
+Two routine guard findings were handled without widening the production
+change. Jeremy's new process took longer than the initial four-second check
+while its existing Monday integration retried. The batch stopped; guarded
+rollback refused the incomplete startup state without modifying config. The
+new gateway subsequently connected and passed verification. Readiness checks
+were then bounded to 180 seconds, which also accommodated Rene's startup.
+Rene's preparation first refused an extra empty `model.api_key` field omitted
+by the inventory summary; its exact baseline was inspected and corrected
+before changing the model. **No model rollback was applied.**
+
+Final app-plane chat, host health, recovery, and rollout checks were green.
+The pre-existing Smoke Studio fleet-convergence finding remained. A broader
+accounting sweep found **nine later normal-traffic reservations still
+reserved: eight for Alvaro and one for Jeremy**. Each was created after that
+bot's completed migration verification. At the recorded sweep, 64 requests
+under the 16 new keys were settled with actual usage, including the 36
+verification requests. Both affected gateways were running and idle; this is
+not proof that those later reservations settled or that the corresponding
+background work completed. They remain an accounting follow-up, alongside
+the earlier Cornelius observation. No ledger repair was attempted.
+
+Backups on TRF and smoke are under
+`/root/finite-fp-remaining-20260905/<bot>/`, with separate persistent-input
+backups in `credential-inputs/<bot>/`. Original bytes, hashes, ownership and
+modes are retained; rollback remains a guarded config/input restoration that
+preserves newer messages. Protected issuance responses are on lat2 under
+`/root/finite-fp-remaining-20260905-keys/`. Private evidence is in the main
+worktree's ignored `.local-state/fp-remaining-hosts/` directory. No secret
+values are included here.
+
+This completes the known active fleet's **main-chat configuration migration**.
+Auxiliary, delegation, and fallback settings were preserved; it is not a
+claim that every inference request exclusively uses Finite Private.
 
 ## Final main-chat inventory: all 41 active box1 bots on Finite Private
 
