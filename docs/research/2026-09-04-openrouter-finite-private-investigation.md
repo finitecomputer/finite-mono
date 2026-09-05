@@ -265,3 +265,124 @@ not this checkout's `.local-state`. Direct inspection confirms:
 These are recorded GLM-5.3-Flash load results and should be reused. The open
 question is qualification of the combined workload, not whether GLM was ever
 load-tested.
+
+## Prepared first concurrency sanity check (not executed)
+
+The next proposed step is a small diagnostic against the current GLM-5.3-Flash
+service, before considering a provider switch. Preparation is authorized;
+production inference traffic is still pending authorization. This section
+does not change the full-fleet acceptance requirements above.
+
+### Bounded workload
+
+- Use the existing capacity checker through the public Finite Private limiter
+  and normal `usage-api` admission, with an existing dedicated canary key.
+  Do not use a customer's key, issue a key, bypass accounting, or raise limits.
+- Run **1, 4, 8, 16, then 32** concurrent requests, one tier at a time. Review
+  each result and recovery before manually starting the next tier. No automatic
+  sweep, retries, or warmups. Hold 64/120-way tests for a later decision.
+- Use synthetic short prompts, `glm-5-3-flash`, thinking on, reasoning effort
+  high, and a 256-token completion budget per request. The checker requests
+  `ignore_eos` to exercise the budget; it is not a useful-answer quality test.
+- After each successful tier above 1, allow at least 60 seconds without test
+  traffic, confirm readiness, then run one single-request recovery probe using
+  the same checker/settings. Compare it with the initial single-request result.
+  Wait for settlement before advancing.
+- The complete first stage is **65 requests maximum**: 61 tier requests plus
+  four recovery probes, requesting at most **16,640 completion tokens** if the
+  server honors the per-request cap. Prompt tokens and normal service charges
+  are additional. These calls create usage/accounting state but no bot chats.
+
+### Preflight and stop conditions
+
+Immediately before execution, save `scripts/finite-status --json` from the
+production host context, endpoint health, and the current Tinfoil release and
+GPU allocation in a private local evidence directory. Confirm GLM-5.3-Flash,
+eight H200s, healthy upstream/usage admission, and no concurrent rollout or
+known chat incident. Record the actual release, rather than assuming flash-5
+is still deployed. Confirm the dedicated canary key's entitlement, available
+budget, and concurrency allowance for 32 calls; an admission rejection is not
+a GPU capacity result. A missing or ambiguous prerequisite means do not start.
+
+Use these conservative **diagnostic progression** criteria for every tier and
+recovery probe: all requests succeed, all streams contain output and terminal
+`[DONE]`, positive completion usage is returned, p95 first-output latency is at
+most 10 seconds, p10 decode is at least 10 tok/s and p50 at least 20 tok/s.
+Record aggregate throughput, but do not apply the 2,400 tok/s full-capacity
+threshold to these small tiers. A diagnostic `passed: true` is only a pass of
+the explicit small-tier criteria, not the 120-way gate.
+
+Stop issuing test traffic on any failed tier, timeout, 429/5xx, readiness
+failure, restart/OOM evidence, new unsettled test reservations, or observed
+existing-user degradation. Also stop if a recovery probe's first-output time
+exceeds twice the initial baseline plus one second. Do not retry a failed
+burst or send a recovery inference probe into an unhealthy service. Observe
+health and settlement without inference, save evidence, and investigate.
+
+The existing checker evaluates only after a tier finishes; it cannot cancel
+the other in-flight requests on the first failure. Its `--timeout` is a socket
+timeout, not a total wall-clock deadline. If a tier is still running at 120
+seconds, the operator interrupts the foreground command and starts no further
+requests. Client cancellation does not prove GPU work or reservations have
+already drained. Recovery consists of stopping test traffic and observing the
+service; this check has no relaunch, configuration rollback, or ledger repair.
+
+### Prepared command
+
+Run from the repository root in Bash after authorization and preflight. Load
+only the existing canary credential into `FINITE_PRIVATE_CANARY_API_KEY` using
+the established secret workflow (`secrets/finite-private-canary.env`); never
+print it or paste it into arguments. Set `FP_SANITY_EVIDENCE` to a new private
+directory under `.local-state` and `FP_SANITY_RUN` to a unique UTC run label.
+Save the start timestamp, actual deployment identity, script commit/hash, and
+settings alongside results. This function defines one bounded invocation;
+defining it sends no traffic.
+
+```bash
+fp_sanity_tier() (
+  set -euo pipefail
+  umask 077
+  : "${FINITE_PRIVATE_CANARY_API_KEY:?Load the dedicated canary key first}"
+  : "${FP_SANITY_EVIDENCE:?Set a new private local evidence directory}"
+  : "${FP_SANITY_RUN:?Set a unique UTC run label}"
+  local tier="${1:?Specify one tier}" label="${2:?Specify a unique label}"
+  case "$tier" in 1|4|8|16|32) ;; *) return 64 ;; esac
+  case "$label" in ''|*[!a-zA-Z0-9_-]*) return 64 ;; esac
+  mkdir -p "$FP_SANITY_EVIDENCE"
+  set -o noclobber
+  export FINITE_PRIVATE_CANARY_API_KEY
+  scripts/with-dev-env python3 scripts/check_finite_private_glm53_capacity.py \
+    --url https://finite-private.finite.containers.tinfoil.dev \
+    --model glm-5-3-flash \
+    --api-key-env FINITE_PRIVATE_CANARY_API_KEY \
+    --concurrency "$tier" --required-concurrency "$tier" \
+    --repetitions 1 --warmup 0 --output-tokens 256 --timeout 60 \
+    --thinking on --reasoning-effort high \
+    --minimum-p10-output-tok-s 10 --minimum-p50-output-tok-s 20 \
+    --minimum-aggregate-output-tok-s 0 --maximum-p95-ttft-s 10 \
+    --tag "$FP_SANITY_RUN-$label" \
+    > "$FP_SANITY_EVIDENCE/$label.jsonl" \
+    2> "$FP_SANITY_EVIDENCE/$label.stderr"
+)
+```
+
+After approval, the first invocation is `fp_sanity_tier 1 baseline`. Inspect
+its exit status, JSONL and stderr before continuing. Subsequent tier labels
+are `tier4`, `tier8`, `tier16`, and `tier32`; recovery probes use concurrency
+1 and distinct labels such as `recovery4`. No loop is supplied intentionally.
+The URL is the origin **without `/v1`**: despite the CLI help wording, the
+checker itself appends `/v1/chat/completions`.
+
+Retain raw reports locally: HTTP error bodies may appear in `first_error`, so
+review/redact before sharing. Publish only release identity, workload settings,
+counts/errors, latency/throughput, recovery and settlement conclusions. Use
+the existing `finite-private-ops.sh settlement-status SINCE_UTC` for this
+canary key, with the exact pre-test UTC timestamp and correct Core host;
+record success of the settlements as well as the absence of reserved rows.
+Capture final canonical fleet status, health, and available GPU metrics.
+
+A passing result establishes short-burst service behavior up to 32 additional
+client requests under the ambient load at test time. Client concurrency is
+not proof that all requests decoded simultaneously on the GPUs. It does not
+establish 107-bot capacity, long-history behavior, sustained load, model quality,
+or permission to switch the fleet.
