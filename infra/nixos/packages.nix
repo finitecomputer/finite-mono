@@ -420,10 +420,10 @@ rec {
   };
   finitesitesd-legacy-canonical = pkgs.stdenvNoCC.mkDerivation {
     pname = "finitesitesd-legacy-canonical";
-    version = "0.5.2";
+    version = "0.5.3";
     src = pkgs.fetchurl {
-      url = "https://github.com/finitecomputer/finite-releases/releases/download/fsite/v0.5.2/finitesitesd-linux-x86_64.tar.gz";
-      hash = "sha256-GDenHRZ/A1EEOxDpK23vMjjKbTjmoC9ItI18Xl8vo74=";
+      url = "https://github.com/finitecomputer/finite-releases/releases/download/fsite/v0.5.3/finitesitesd-linux-x86_64.tar.gz";
+      hash = "sha256-uw2RFWLzGRRJuVFGoMWlrc0wUt0AorQ4vTfS2tcbbx8=";
     };
     dontUnpack = true;
     installPhase = ''
@@ -432,8 +432,11 @@ rec {
       chmod 0555 "$out/bin/finitesitesd"
     '';
     passthru = {
-      sourceTag = "fsite/v0.5.2";
-      sourceSha = "841eb99b3ab0f3814a44765c65fb951c5c106c2a";
+      sourceTag = "fsite/v0.5.3";
+      # Release-prep commit on release/fsite-0.5.3: the deploy-2 revision
+      # 7c04a681 plus the 0.5.3 version bump. v0.5.2 predates the Aug-31
+      # daemon-local email-proof change (dfa765f3) that canonical lat2 runs.
+      sourceSha = "662f837ed5875de4cbf55acd1d1adfe288e762a1";
     };
     meta = {
       mainProgram = "finitesitesd";
