@@ -21,9 +21,18 @@
     environment = {
       FINITECHAT_HOSTED_BIND = "127.0.0.1:38918";
       FINITECHAT_HOSTED_DATA_ROOT = "/var/lib/finitechat-hosted-device";
-      # Keep HTTP transport on loopback while encrypted Device Link payloads
-      # bind the canonical URL that the joining Device is configured to trust.
-      FINITECHAT_SERVER_URL = "http://127.0.0.1:8788";
+      # The client signs the URL it dials (NIP-98 binding in
+      # finitechat-client's ReqwestHttpRuntimeTransport) and the server
+      # validates that URL against FINITECHAT_PUBLIC_URL, so the dial target
+      # must be the canonical public origin — a loopback value made every
+      # hosted-device signed request fail authz URL validation (2026-08-29
+      # authz deploy; ~2,800 "Nostr auth URL mismatch" lines/2h for all 81
+      # hosted users, advisory-only while FINITECHAT_REQUIRE_SIGNED_REQUESTS
+      # is unset). On this box chat.finite.computer resolves to the host's
+      # own address and Caddy (modules/caddy.nix) proxies it right back to
+      # 127.0.0.1:8788 — the same edge path every external client already
+      # takes — so the hairpin dial is local transport, not a new public hop.
+      FINITECHAT_SERVER_URL = "https://chat.finite.computer";
       FINITECHAT_PUBLIC_URL = "https://chat.finite.computer";
     };
 
