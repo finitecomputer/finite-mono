@@ -1,9 +1,0 @@
-#!/usr/bin/env bash
-set -euo pipefail
-repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-simplex_store="$(nix build "$repo_root#simplex-chat" --no-link --print-out-paths)"
-hermes_store="$(nix build "$repo_root#hermes-agent" --no-link --print-out-paths)"
-python_store="$(nix build "$repo_root#hermes-agent-runtime-python" --no-link --print-out-paths)"
-export PATH="$simplex_store/bin:$PATH"
-export HERMES_BUNDLED_PLUGINS="$hermes_store/share/hermes-agent/plugins"
-exec "$python_store/bin/python3" "$repo_root/finite-agentd/simplex_smoke.py"

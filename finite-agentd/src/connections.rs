@@ -256,24 +256,6 @@ impl ConnectionManager {
         Ok(())
     }
 
-    pub(crate) fn approve_simplex(
-        &self,
-        request: PairingApproveRequest,
-    ) -> Result<(), AgentdError> {
-        let code = request.code.trim().to_ascii_uppercase();
-        if code.len() != 8
-            || !code
-                .bytes()
-                .all(|b| b"ABCDEFGHJKLMNPQRSTUVWXYZ23456789".contains(&b))
-        {
-            return Err(AgentdError::InvalidPayload(
-                "Enter the eight-character pairing code from SimpleX".to_owned(),
-            ));
-        }
-        crate::simplex::control(&self.agent_home, &self.hermes_home, "approve", Some(&code))?;
-        Ok(())
-    }
-
     pub(crate) fn inference_plan(
         &self,
         request_id: &str,

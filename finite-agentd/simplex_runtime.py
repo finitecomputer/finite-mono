@@ -276,7 +276,6 @@ async def finish_reset():
     clear_simplex_sessions(home)
     if state_dir().exists():
         shutil.rmtree(state_dir())
-    (state_dir().parent / "pairing.png").unlink(missing_ok=True)
     reset_marker().unlink()
 
 
@@ -407,7 +406,6 @@ def main():
             "status",
             "address",
             "gateway",
-            "approve",
             "approve-request",
             "prepare-reset",
             "wait-reset",
@@ -436,20 +434,6 @@ def main():
                 if PairingStore().approve_request("simplex", request_id) is None:
                     raise RuntimeError(
                         "This connection request expired or was already handled. Refresh and try again."
-                    )
-                result = {"approved": True}
-            elif operation == "approve":
-                from gateway.pairing import PairingStore
-
-                if reset_marker().exists():
-                    raise RuntimeError("SimpleX disconnect is unfinished")
-                code = sys.stdin.read(64).strip().upper()
-                if len(code) != 8 or any(c not in "ABCDEFGHJKLMNPQRSTUVWXYZ23456789" for c in code):
-                    raise RuntimeError("Enter the eight-character pairing code from SimpleX")
-                approved = PairingStore().approve_code("simplex", code)
-                if approved is None:
-                    raise RuntimeError(
-                        "Pairing code is invalid, expired, or temporarily locked. Request a new code and try again."
                     )
                 result = {"approved": True}
             else:

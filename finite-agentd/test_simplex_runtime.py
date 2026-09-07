@@ -159,53 +159,6 @@ class PairingTests(unittest.TestCase):
             )
             self.assertEqual(verify.returncode, 0, verify.stderr)
 
-    def test_released_hermes_grants_only_the_approved_contact(self):
-        with tempfile.TemporaryDirectory() as home:
-            env = {**os.environ, "HERMES_HOME": home}
-            create = subprocess.run(
-                [
-                    sys.executable,
-                    "-c",
-                    "from gateway.pairing import PairingStore; print(PairingStore().generate_code('simplex', '3', 'Test owner'))",
-                ],
-                env=env,
-                capture_output=True,
-                text=True,
-                check=True,
-            )
-            code = create.stdout.strip()
-            helper = str(Path(__file__).with_name("simplex_runtime.py"))
-            invalid = "AAAAAAAA" if code != "AAAAAAAA" else "BBBBBBBB"
-            result = subprocess.run(
-                [sys.executable, helper, "approve"],
-                input=invalid,
-                env=env,
-                capture_output=True,
-                text=True,
-            )
-            self.assertNotEqual(result.returncode, 0)
-            self.assertIn("invalid", json.loads(result.stdout)["error"])
-            result = subprocess.run(
-                [sys.executable, helper, "approve"],
-                input=code,
-                env=env,
-                capture_output=True,
-                text=True,
-                check=True,
-            )
-            self.assertEqual(json.loads(result.stdout), {"approved": True})
-            verify = subprocess.run(
-                [
-                    sys.executable,
-                    "-c",
-                    "from gateway.pairing import PairingStore; s=PairingStore(); assert s.is_approved('simplex', '3'); assert not s.is_approved('simplex', '4'); assert not s.is_approved('telegram', '3')",
-                ],
-                env=env,
-                capture_output=True,
-                text=True,
-            )
-            self.assertEqual(verify.returncode, 0, verify.stderr)
-
 
 class ResetTests(unittest.TestCase):
     def test_reset_is_isolated_and_recoverable(self):

@@ -480,13 +480,6 @@ impl CommandExecutor {
                     .await
                     .map_err(|error| AgentdError::Config(error.to_string()))?
             }
-            "agent.simplex.disconnect" => {
-                parse_body::<EmptyRequest>(request, EMPTY_REQUEST_SCHEMA)?;
-                let offer = self
-                    .connection_manager
-                    .simplex_offer(&request.request_id, false)?;
-                self.apply_config_offer(offer).await
-            }
             "agent.simplex.approve_request" => {
                 let body = parse_body::<crate::connections::SimplexApproveRequest>(
                     request,
@@ -494,17 +487,6 @@ impl CommandExecutor {
                 )?;
                 let manager = self.connection_manager.clone();
                 tokio::task::spawn_blocking(move || manager.approve_simplex_request(body))
-                    .await
-                    .map_err(|error| AgentdError::Config(error.to_string()))??;
-                Ok(json!({ "approved": true }))
-            }
-            "agent.simplex.approve" => {
-                let body = parse_body::<PairingApproveRequest>(
-                    request,
-                    "finite.agent.simplex.approve.v1",
-                )?;
-                let manager = self.connection_manager.clone();
-                tokio::task::spawn_blocking(move || manager.approve_simplex(body))
                     .await
                     .map_err(|error| AgentdError::Config(error.to_string()))??;
                 Ok(json!({ "approved": true }))

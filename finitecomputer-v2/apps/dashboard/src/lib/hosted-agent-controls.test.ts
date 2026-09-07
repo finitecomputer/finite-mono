@@ -63,10 +63,11 @@ test("connection actions reject unknown inference and oversized secrets", () => 
 });
 
 test("SimpleX exposes pairing actions without arbitrary daemon commands", () => {
-  for (const action of ["simplex_connect", "simplex_disconnect", "simplex_reset"]) {
+  for (const action of ["simplex_connect", "simplex_reset"]) {
     assert.deepEqual(parseAgentConnectionAction({ action }), { action });
   }
-  assert.deepEqual(parseAgentConnectionAction({ action: "simplex_approve", code: "ABCD2345" }), { action: "simplex_approve", code: "ABCD2345" });
+  assert.throws(() => parseAgentConnectionAction({ action: "simplex_approve", code: "ABCD2345" }));
+  assert.throws(() => parseAgentConnectionAction({ action: "simplex_disconnect" }));
   assert.throws(() => parseAgentConnectionAction({ action: "simplex_command", command: "/sql" }));
 });
 

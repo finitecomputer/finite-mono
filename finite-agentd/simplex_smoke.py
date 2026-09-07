@@ -1,6 +1,6 @@
 """Opt-in real relay test; uses two disposable identities, no inference or real users.
 
-Run scripts/simplex-smoke. This proves adapter routing, not gateway authorization,
+Run just computer simplex-smoke. This proves adapter routing, not gateway authorization,
 inference, phone UX, or messages arriving during a gateway outage.
 """
 

@@ -55,8 +55,7 @@ export type AgentConnectionAction =
       apiKey?: string;
       model?: string;
     }
-  | { action: "simplex_connect" | "simplex_disconnect" | "simplex_reset" }
-  | { action: "simplex_approve"; code: string }
+  | { action: "simplex_connect" | "simplex_reset" }
   | { action: "simplex_approve_request"; request_id: string }
   | { action: "telegram_connect"; token: string }
   | { action: "telegram_approve"; code: string }
@@ -123,7 +122,6 @@ export function parseAgentConnectionAction(payload: unknown): AgentConnectionAct
     case "status":
     case "telegram_disconnect":
     case "simplex_connect":
-    case "simplex_disconnect":
     case "simplex_reset":
     case "google_disconnect":
       return { action };
@@ -146,7 +144,6 @@ export function parseAgentConnectionAction(payload: unknown): AgentConnectionAct
       if (!/^[a-f0-9]{16}$/.test(request_id)) throw new HostedAgentControlError("Invalid connection request.", 400);
       return { action, request_id };
     }
-    case "simplex_approve":
     case "telegram_approve":
       return { action, code: boundedString(record.code, "code", 16) };
     case "telegram_home":
@@ -303,12 +300,8 @@ function commandForAction(action: Exclude<AgentConnectionAction, { action: "stat
       return { command: "agent.simplex.connect", schema: EMPTY_SCHEMA, body: {} };
     case "simplex_reset":
       return { command: "agent.simplex.reset", schema: "finite.agent.simplex.reset.v1", body: {} };
-    case "simplex_disconnect":
-      return { command: "agent.simplex.disconnect", schema: EMPTY_SCHEMA, body: {} };
     case "simplex_approve_request":
       return { command: "agent.simplex.approve_request", schema: "finite.agent.simplex.approve-request.v1", body: { request_id: action.request_id } };
-    case "simplex_approve":
-      return { command: "agent.simplex.approve", schema: "finite.agent.simplex.approve.v1", body: { code: action.code } };
     case "telegram_connect":
       return {
         command: "agent.telegram.connect",
