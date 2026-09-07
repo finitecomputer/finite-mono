@@ -53,7 +53,6 @@ export function SimplexConnection({ status, loaded, busy, mutate, refresh }: {
           </div>)}
         </> : <p className="text-sm text-muted-foreground">No pending requests. Connect in SimpleX and send a message; your request will appear here.</p>}
       </div>
-      <p className="text-xs text-muted-foreground">Disconnect pauses SimpleX. Your identity, contacts, and history are retained.</p>
     </div> : null}
   >
     <Button variant={status?.enabled ? "outline" : "default"} disabled={busy || !status}
