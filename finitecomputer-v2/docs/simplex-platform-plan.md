@@ -33,7 +33,7 @@ active Hermes turn; it is not a zero-interruption operation.
 - simplex-chat: exclusively opens/writes its databases. One daemon per Runtime,
   local-only WebSocket at 127.0.0.1:5225, outbound public SMP/XFTP relays.
 - The lifecycle helper bootstraps an unexposed identity before enabling Hermes,
-  saves the address atomically, then supervises the daemon independently. The
+  enables daemon-native /auto_accept on, saves the address atomically, then supervises the daemon independently. The
   gateway wrapper exports SIMPLEX_WS_URL, SIMPLEX_AUTO_ACCEPT=true,
   SIMPLEX_ALLOW_ALL_USERS=false, SIMPLEX_ALLOWED_USERS="", and
   SIMPLEX_GROUP_ALLOWED="" for the managed configuration only. Authorization is
@@ -48,6 +48,23 @@ runtime download. Candidate Hermes pin is v2026.8.31 / 0.21.0 (29112bef), replac
 v2026.8.3 / 0.20.0. SimpleX release assets are pinned to v7.0.2 with SHA-256 hashes.
 The official macOS asset reports its internal version as 7.0.0.12. Its OpenSSL
 reference is rewritten to Nix-managed OpenSSL; no Homebrew dependency is added.
+
+## Contact acceptance compatibility
+
+The v2026.8.31 Hermes adapter handles `contactRequest` and sends `/accept <id>`.
+SimpleX v7 emits `receivedContactRequest` and its numeric API is `/_accept <id>`.
+The adapter can process the contact request's introductory text before a usable
+connection exists: it generates a pairing code that cannot be delivered, then
+rate-limits another attempt. The initial phone trial exposed this mismatch.
+
+New identities now enable SimpleX's built-in `/auto_accept on` during bootstrap,
+before publishing the QR. This establishes the transport while Hermes still
+requires explicit owner approval to run the agent. No Hermes patch is needed.
+The smoke test now uses a reusable address and daemon auto-accept, rather than
+an invitation link that bypasses the request/accept path. It passes with the
+unmodified released adapter. Existing saved identities are not silently adopted
+or changed; the local trial was repaired with the daemon stopped, a private
+backup, official CLI commands, and its one undeliverable challenge cleared.
 
 ## Critical correction to the field reports
 

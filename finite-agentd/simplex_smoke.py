@@ -109,16 +109,10 @@ async def run():
                 peer = Peer(p)
                 await peer.open()
                 peers.append(peer)
-            invitation = await peers[0].cmd("/connect")
-            link = invitation["connLinkInvitation"]["connShortLink"]
-            result = await peers[1].cmd("/connect " + link)
-            assert result["type"] != "chatCmdError", result["type"]
-            connected = await peers[0].until(
-                lambda e: e.get("type") == "contactConnected"
-            )
-            other = await peers[1].until(lambda e: e.get("type") == "contactConnected")
-            bot_contact = str(connected["contact"]["contactId"])
-            human_contact = str(other["contact"]["contactId"])
+            invitation = await peers[0].cmd("/address")
+            link = invitation["connLinkContact"]["connShortLink"]
+            acceptance = await peers[0].cmd("/auto_accept on")
+            assert acceptance["type"] == "userContactLinkUpdated"
             await peers[0].close()
             adapter = mod.SimplexAdapter(
                 PlatformConfig(
@@ -134,13 +128,17 @@ async def run():
             adapter.set_message_handler(handle)
             assert await adapter.connect()
             await asyncio.sleep(0.5)
+            result = await peers[1].cmd("/connect " + link)
+            assert result["type"] != "chatCmdError", result["type"]
+            other = await peers[1].until(lambda e: e.get("type") == "contactConnected")
+            human_contact = str(other["contact"]["contactId"])
             msg = json.dumps(
                 [{"msgContent": {"type": "text", "text": "synthetic inbound"}}]
             )
             response = await peers[1].cmd(f"/_send @{human_contact} json {msg}")
             assert response["type"] != "chatCmdError", response["type"]
             event = await asyncio.wait_for(incoming.get(), 30)
-            assert event.source.chat_id == bot_contact
+            assert event.source.chat_id.isdecimal()
             assert event.text == "synthetic inbound"
 
             def reply(e):

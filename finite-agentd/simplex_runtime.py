@@ -158,6 +158,12 @@ async def create_address():
                 break
             await asyncio.sleep(0.25)
         address = address_from(await command("/address", timeout=20))
+        # v7 emits receivedContactRequest, which the released Hermes adapter's
+        # legacy contactRequest handler misses. Let the daemon accept transport
+        # connections; Hermes still gates every DM with explicit owner pairing.
+        accepted = await command("/auto_accept on", timeout=20)
+        if accepted.get("type") != "userContactLinkUpdated":
+            raise RuntimeError("SimpleX could not enable contact acceptance")
         # Atomically persist before enabling Hermes or exposing the address.
         temporary = home / "address.json.tmp"
         with temporary.open("w") as out:
