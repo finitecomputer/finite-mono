@@ -120,6 +120,12 @@ struct GoogleMetadata {
     email: String,
 }
 
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct SimplexApproveRequest {
+    pub request_id: String,
+}
+
 impl ConnectionManager {
     pub(crate) fn new(
         agent_home: impl Into<PathBuf>,
@@ -175,6 +181,10 @@ impl ConnectionManager {
             address,
             qr,
             approved: self.platform_people("simplex", "approved"),
+            pending: state
+                .get("pending")
+                .cloned()
+                .and_then(|v| serde_json::from_value(v).ok()),
         }))
     }
 
@@ -213,6 +223,25 @@ impl ConnectionManager {
 
     pub(crate) fn simplex_address(&self) -> Result<Value, AgentdError> {
         crate::simplex::control(&self.agent_home, &self.hermes_home, "address", None)
+    }
+
+    pub(crate) fn approve_simplex_request(
+        &self,
+        request: SimplexApproveRequest,
+    ) -> Result<(), AgentdError> {
+        let id = request.request_id.trim().to_ascii_lowercase();
+        if id.len() != 16 || !id.bytes().all(|b| b.is_ascii_hexdigit()) {
+            return Err(AgentdError::InvalidPayload(
+                "Invalid SimpleX connection request".to_owned(),
+            ));
+        }
+        crate::simplex::control(
+            &self.agent_home,
+            &self.hermes_home,
+            "approve-request",
+            Some(&id),
+        )?;
+        Ok(())
     }
 
     pub(crate) fn approve_simplex(

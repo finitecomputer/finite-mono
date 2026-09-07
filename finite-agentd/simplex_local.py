@@ -105,7 +105,7 @@ async def run(root, config):
             f"Native Hermes + SimpleX running. QR: {root / 'pairing.png'}", flush=True
         )
         print(
-            "Scan, send a message, then approve its code with scripts/simplex-local approve CODE.",
+            "Scan, send a message, then approve your pending request in dashboard Connections.",
             flush=True,
         )
         print("Ctrl-C stops both processes and retains test state.", flush=True)
@@ -136,7 +136,14 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
         "operation",
-        choices=["run", "status", "approve", "dashboard-status", "disable"],
+        choices=[
+            "run",
+            "status",
+            "approve",
+            "dashboard-status",
+            "approve-request",
+            "disable",
+        ],
         default="run",
         nargs="?",
     )
@@ -155,6 +162,7 @@ def main():
         from gateway.pairing import PairingStore
 
         state = asyncio.run(runtime.status())
+        state["pending"] = runtime.pending_requests()
         state["qr"] = []
         if state["address"]:
             qr = qrcode.QRCode(border=0)
@@ -189,7 +197,7 @@ def main():
     else:
         code = args.code or input("SimpleX pairing code: ")
         result = subprocess.run(
-            [sys.executable, str(Path(runtime.__file__)), "approve"],
+            [sys.executable, str(Path(runtime.__file__)), args.operation],
             input=code,
             text=True,
         )

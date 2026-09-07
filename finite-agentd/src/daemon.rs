@@ -465,6 +465,17 @@ impl CommandExecutor {
                     .simplex_offer(&request.request_id, false)?;
                 self.apply_config_offer(offer).await
             }
+            "agent.simplex.approve_request" => {
+                let body = parse_body::<crate::connections::SimplexApproveRequest>(
+                    request,
+                    "finite.agent.simplex.approve-request.v1",
+                )?;
+                let manager = self.connection_manager.clone();
+                tokio::task::spawn_blocking(move || manager.approve_simplex_request(body))
+                    .await
+                    .map_err(|error| AgentdError::Config(error.to_string()))??;
+                Ok(json!({ "approved": true }))
+            }
             "agent.simplex.approve" => {
                 let body = parse_body::<PairingApproveRequest>(
                     request,

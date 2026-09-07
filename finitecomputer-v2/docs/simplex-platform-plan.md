@@ -7,11 +7,14 @@ No Hermes fork, plugin override, or adapter patches.
 ## Product flow
 
 Connections → SimpleX → Connect bootstraps a private per-runtime identity and
-shows a locally rendered QR plus copy/open links. The user connects in SimpleX,
-sends a message, then enters the eight-character Hermes pairing code in
-Connections. Scanning the QR alone does not authorize agent use. Other contacts
-remain denied; groups are disabled. Disconnect pauses the integration and keeps
-identity, contacts, attachments, and pairing records. Reconnect reuses them.
+shows a locally rendered QR plus copy/open links. Connect on the phone and send
+a message; Connections automatically refreshes pending requests. The owner sees
+the contact name, numeric contact ID, and request age, then explicitly approves
+that exact request. Display names are not identity proof; the UI tells the owner
+to approve only the request they just made. No request is selected or approved
+automatically, and no delivered code is required. Unknown contacts remain denied.
+Groups are disabled. Disconnect retains identity, contacts, attachments, and
+pairing records; reconnect reuses them.
 
 Connecting/disconnecting applies Hermes configuration through the existing
 agentd configuration offer and gateway restart path. This can interrupt an
@@ -28,8 +31,10 @@ active Hermes turn; it is not a zero-interruption operation.
   the fixed-operation lifecycle helper. Old runtimes omit SimpleX status;
   the new dashboard leaves their other Connections controls usable.
 - Hermes: owns DM authorization, pairing files, inference, and the messaging
-  adapter. Pairing approval delegates to its existing PairingStore API. The CLI returns
-  exit zero even for invalid codes, so the helper checks the API result instead.
+  adapter. Pairing approval delegates to PairingStore.list_pending and approve_request.
+  Browser actions carry the exact server-side request ID; expired or stale IDs
+  fail. The previous code-based command is retained for compatibility, but is
+  no longer the dashboard flow. Codes/hashes/salts are never returned in status.
 - simplex-chat: exclusively opens/writes its databases. One daemon per Runtime,
   local-only WebSocket at 127.0.0.1:5225, outbound public SMP/XFTP relays.
 - The lifecycle helper bootstraps an unexposed identity before enabling Hermes,
@@ -75,13 +80,15 @@ challenge before a usable outbound connection existed. No outgoing chat item
 was retained, and the next real message was suppressed by the ten-minute
 pairing request rate limit. Both processes were alive throughout.
 
-This is a shipping blocker for the fresh-start UX. The released adapter's
+The dashboard now bypasses code delivery with upstream pending-request approval.
+The released adapter's
 fire-and-forget send treats socket write as success, with no contact-readiness
 queue or delivery failure recovery. Current upstream main inspected on September
 7 still has no contactConnected handler. The address-based transport smoke test
 waits for contactConnected before sending and therefore does not cover this race.
 Do not claim that test proves fresh phone pairing or replace the missing delivery
-contract with an arbitrary delay. A no-fork solution is still required.
+contract with an arbitrary delay. Pending-request approval removes code delivery
+from the authorization path, but does not add general outbound delivery guarantees.
 
 For the active local trial only, the undelivered challenge and its contact-scoped
 rate-limit entry were backed up and cleared after the connection became ready.
@@ -123,13 +130,13 @@ Hermes adapter. Preserve the mounted state when disabling or reverting code.
 
 - Passed: 34 agentd tests and clippy, including private config validation,
   independent supervision, existing configuration rollback, and command replay.
-- Passed: eight control tests exercising real local WebSocket correlation,
+- Passed: nine control tests exercising real local WebSocket correlation,
   command rejection, stalled sockets, both address response shapes, and upstream
-  PairingStore approval. Invalid codes fail; a valid code grants only the matching
-  SimpleX contact, with a different contact and platform remaining unapproved.
+  PairingStore approval. Invalid codes and stale request IDs fail; approving an
+  exact request grants only its contact, with other contacts/platforms unapproved.
 - Passed: real managed daemon bootstrap and two restarts preserve both identity
   databases and the cached address; repeated address retrieval is idempotent.
-- Passed: 270 dashboard tests, typecheck, scoped lint, and production build.
+- Passed: 271 dashboard tests, typecheck, scoped lint, and production build.
   Tests include typed actions and QR/link validation. Static render review at
   desktop and 390px phone widths found no horizontal overflow; this is not an
   interactive full-stack browser test.
@@ -138,7 +145,7 @@ Hermes adapter. Preserve the mounted state when disabling or reverting code.
   numeric-contact inbound/reply delivery, without inference or real users.
 - Passed: all 19 existing Finite Chat bridge regression scenarios against the
   candidate Hermes. This does not qualify every unrelated upstream platform.
-- Required before shipping: local full-stack owner pairing and phone text/voice
+- Required before shipping: local full-stack owner request approval and phone text/voice
   round trip, unauthorized contact denial at the live gateway, empty-target
   restoration of the complete Recovery Set, and the canonical Linux image build.
 - Linux packaging/image verification is assigned to CI, per the user. It does
@@ -160,7 +167,7 @@ This runs the real Next.js Connections page and production dashboard action
 parsing. The existing web-design harness supplies the test account and runtime
 shell; its opt-in native transport connects SimpleX buttons to the real local
 Hermes/daemon helper. Connect starts the trial, the page renders the real QR,
-approval uses the real Hermes pairing store, and Disconnect stops the trial
+approval uses the real Hermes pending-request API, and Disconnect stops the trial
 while retaining its identity. It does not prove production owner authorization,
 Agent Platform Channel transport, or agentd's config-offer journal.
 
@@ -171,7 +178,9 @@ connection mutations deliberately fail in this trial. The local servers bind
 FC_WEB_DESIGN_PORT if necessary. Do not run the standalone trial simultaneously.
 
 Verified in the browser: Connect reveals the real QR and pairing form; invalid
-code approval is rejected by Hermes. Phone pairing is performed by the user.
+code approval was rejected by Hermes in the earlier flow. Request approval is
+now tested against isolated real pairing stores; the phone acceptance pass is
+performed by the user.
 Connection mutation errors now remain visible after status has loaded.
 
 ## Standalone native trial (optional)
@@ -188,7 +197,8 @@ test home's model/auth settings or provide the provider's environment variable.
 The existing local Hermes home is not modified.
 
 Scan `~/.finite-simplex-test/pairing.png` with your phone, send a message, then
-run `scripts/simplex-local approve CODE` with the code received in SimpleX.
+approve the pending request on the dashboard (recommended), or use the legacy
+`scripts/simplex-local approve CODE` command if running without the dashboard.
 `scripts/simplex-local status` reads cached state without consuming events.
 Ctrl-C stops the native trial and keeps its identity for the next run. Runtime
 logs are private at `~/.finite-simplex-test/gateway.log`. The home path is short

@@ -111,6 +111,65 @@ class AddressTests(unittest.TestCase):
 
 
 class PairingTests(unittest.TestCase):
+    def test_request_approval_is_exact_and_stale_requests_fail(self):
+        with tempfile.TemporaryDirectory() as home:
+            env = {**os.environ, "HERMES_HOME": home}
+            created = subprocess.run(
+                [
+                    sys.executable,
+                    "-c",
+                    "import json; from gateway.pairing import PairingStore; s=PairingStore(); s.generate_code('simplex','3','Owner'); s.generate_code('simplex','4','Another contact'); print(json.dumps(s.list_pending('simplex')))",
+                ],
+                env=env,
+                capture_output=True,
+                text=True,
+                check=True,
+            )
+            pending = json.loads(created.stdout)
+            request_id = next(
+                row["request_id"] for row in pending if row["user_id"] == "3"
+            )
+            self.assertTrue(
+                all("hash" not in row and "salt" not in row for row in pending)
+            )
+            helper = str(Path(__file__).with_name("simplex_runtime.py"))
+            invalid = subprocess.run(
+                [sys.executable, helper, "approve-request"],
+                input="0" * 16,
+                env=env,
+                capture_output=True,
+                text=True,
+            )
+            self.assertNotEqual(invalid.returncode, 0)
+            approved = subprocess.run(
+                [sys.executable, helper, "approve-request"],
+                input=request_id,
+                env=env,
+                capture_output=True,
+                text=True,
+                check=True,
+            )
+            self.assertEqual(json.loads(approved.stdout), {"approved": True})
+            replay = subprocess.run(
+                [sys.executable, helper, "approve-request"],
+                input=request_id,
+                env=env,
+                capture_output=True,
+                text=True,
+            )
+            self.assertNotEqual(replay.returncode, 0)
+            verify = subprocess.run(
+                [
+                    sys.executable,
+                    "-c",
+                    "from gateway.pairing import PairingStore; s=PairingStore(); assert s.is_approved('simplex','3'); assert not s.is_approved('simplex','4'); assert not s.is_approved('telegram','3'); assert len(s.list_pending('simplex')) == 1",
+                ],
+                env=env,
+                capture_output=True,
+                text=True,
+            )
+            self.assertEqual(verify.returncode, 0, verify.stderr)
+
     def test_released_hermes_grants_only_the_approved_contact(self):
         with tempfile.TemporaryDirectory() as home:
             env = {**os.environ, "HERMES_HOME": home}

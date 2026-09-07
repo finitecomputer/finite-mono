@@ -35,7 +35,10 @@ export type AgentConnectionsStatus = {
   };
 };
 
+export type PendingSimplexContact = { request_id: string; user_id: string; name: string; age_minutes: number };
+
 export type SimplexConnectionStatus = {
+  pending?: PendingSimplexContact[];
   enabled: boolean;
   ready: boolean;
   address?: string | null;
@@ -53,6 +56,7 @@ export type AgentConnectionAction =
     }
   | { action: "simplex_connect" | "simplex_disconnect" }
   | { action: "simplex_approve"; code: string }
+  | { action: "simplex_approve_request"; request_id: string }
   | { action: "telegram_connect"; token: string }
   | { action: "telegram_approve"; code: string }
   | { action: "telegram_home"; userId: string; name?: string }
@@ -135,6 +139,11 @@ export function parseAgentConnectionAction(payload: unknown): AgentConnectionAct
     }
     case "telegram_connect":
       return { action, token: boundedString(record.token, "token", 256) };
+    case "simplex_approve_request": {
+      const request_id = boundedString(record.request_id, "request_id", 16);
+      if (!/^[a-f0-9]{16}$/.test(request_id)) throw new HostedAgentControlError("Invalid connection request.", 400);
+      return { action, request_id };
+    }
     case "simplex_approve":
     case "telegram_approve":
       return { action, code: boundedString(record.code, "code", 16) };
@@ -292,6 +301,8 @@ function commandForAction(action: Exclude<AgentConnectionAction, { action: "stat
       return { command: "agent.simplex.connect", schema: EMPTY_SCHEMA, body: {} };
     case "simplex_disconnect":
       return { command: "agent.simplex.disconnect", schema: EMPTY_SCHEMA, body: {} };
+    case "simplex_approve_request":
+      return { command: "agent.simplex.approve_request", schema: "finite.agent.simplex.approve-request.v1", body: { request_id: action.request_id } };
     case "simplex_approve":
       return { command: "agent.simplex.approve", schema: "finite.agent.simplex.approve.v1", body: { code: action.code } };
     case "telegram_connect":
@@ -401,5 +412,18 @@ export function parseSimplexStatus(value: unknown): SimplexConnectionStatus {
     address,
     qr,
     approved: parsePeople(status.approved),
+    pending: status.pending === undefined ? undefined : parseSimplexPending(status.pending),
   };
+}
+
+function parseSimplexPending(value: unknown): PendingSimplexContact[] {
+  if (!Array.isArray(value)) throw new HostedAgentControlError("Invalid SimpleX requests.", 502);
+  return value.slice(0, 32).map(entry => {
+    const row = objectRecord(entry);
+    const request_id = boundedString(row.request_id, "request_id", 16);
+    if (!/^[a-f0-9]{16}$/.test(request_id) || typeof row.age_minutes !== "number" || !Number.isInteger(row.age_minutes) || row.age_minutes < 0) {
+      throw new HostedAgentControlError("Invalid SimpleX request.", 502);
+    }
+    return { request_id, user_id: boundedString(row.user_id, "contact ID", 64), name: optionalString(row.name, "contact name", 128) ?? "", age_minutes: row.age_minutes };
+  });
 }

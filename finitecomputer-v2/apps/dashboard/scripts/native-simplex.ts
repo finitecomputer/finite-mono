@@ -64,6 +64,13 @@ export class NativeSimplex {
         await this.call("disable");
         return {};
       }
+      case "agent.simplex.approve_request": {
+        const body = request.body as { request_id?: unknown } | undefined;
+        if (typeof body?.request_id !== "string" || !/^[a-f0-9]{16}$/.test(body.request_id)) {
+          throw new Error("Invalid SimpleX connection request.");
+        }
+        return this.call("approve-request", body.request_id);
+      }
       case "agent.simplex.approve": {
         const body = request.body as { code?: unknown } | undefined;
         if (typeof body?.code !== "string" || !/^[ABCDEFGHJKLMNPQRSTUVWXYZ23456789]{8}$/.test(body.code)) {

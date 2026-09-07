@@ -36,12 +36,12 @@ export function ConnectionsPanel({
   const refreshedChatDevicesRef = useRef(false);
   const endpoint = `/api/connections/machines/${encodeURIComponent(machineId)}`;
 
-  const refresh = useCallback(async () => {
-    setError(null);
+  const refresh = useCallback(async (quiet = false) => {
+    if (!quiet) setError(null);
     try {
       setStatus(await connectionRequest(endpoint));
     } catch (requestError) {
-      setError(connectionErrorMessage(requestError));
+      if (!quiet) setError(connectionErrorMessage(requestError));
     }
   }, [endpoint]);
 
@@ -60,6 +60,17 @@ export function ConnectionsPanel({
     refreshedChatDevicesRef.current = true;
     void chat.dispatchQuiet({ RefreshDevices: null });
   }, [chat]);
+
+  useEffect(() => {
+    if (!status?.simplex?.enabled || busy) return;
+    let inFlight = false;
+    const timer = window.setInterval(async () => {
+      if (inFlight || document.hidden) return;
+      inFlight = true;
+      try { await refresh(true); } finally { inFlight = false; }
+    }, 3000);
+    return () => window.clearInterval(timer);
+  }, [status?.simplex?.enabled, busy, refresh]);
 
   async function mutate(label: string, action: AgentConnectionAction) {
     setBusy(label);

@@ -77,3 +77,15 @@ test("SimpleX rejects executable links and malformed QR matrices", () => {
   assert.throws(() => parseSimplexStatus({ ...status, qr: ["10", "1"] }));
   assert.throws(() => parseSimplexStatus({ ...status, qr: ["<svg>"] }));
 });
+
+
+test("SimpleX pending requests retain exact IDs and reject invalid metadata", () => {
+  const request = { request_id: "abcdef0123456789", user_id: "3", name: "Owner", age_minutes: 2 };
+  const status = { enabled: true, ready: true, qr: [], approved: [], pending: [request] };
+  assert.deepEqual(parseSimplexStatus(status).pending, [request]);
+  assert.equal(parseSimplexStatus({ ...status, pending: undefined }).pending, undefined);
+  assert.deepEqual(parseAgentConnectionAction({ action: "simplex_approve_request", request_id: request.request_id }), { action: "simplex_approve_request", request_id: request.request_id });
+  assert.throws(() => parseAgentConnectionAction({ action: "simplex_approve_request", request_id: "Owner" }));
+  assert.throws(() => parseSimplexStatus({ ...status, pending: [{ ...request, request_id: "Owner" }] }));
+  assert.throws(() => parseSimplexStatus({ ...status, pending: [{ ...request, age_minutes: -1 }] }));
+});

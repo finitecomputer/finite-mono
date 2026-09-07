@@ -236,10 +236,34 @@ def gateway():
     os.execvp("hermes", ["hermes", "gateway", "run", "--replace"])
 
 
+def pending_requests():
+    from gateway.pairing import PairingStore
+
+    return [
+        {
+            "request_id": row["request_id"],
+            "user_id": str(row["user_id"]),
+            "name": (row.get("user_name") or "")[:128],
+            "age_minutes": max(0, row["age_minutes"]),
+        }
+        for row in PairingStore().list_pending("simplex")
+        if PairingStore.looks_like_request_id(row.get("request_id", ""))
+        and row.get("user_id")
+    ]
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument(
-        "operation", choices=["supervise", "status", "address", "gateway", "approve"]
+        "operation",
+        choices=[
+            "supervise",
+            "status",
+            "address",
+            "gateway",
+            "approve",
+            "approve-request",
+        ],
     )
     operation = parser.parse_args().operation
     os.umask(0o077)
@@ -249,7 +273,18 @@ def main():
         asyncio.run(supervise())
     else:
         try:
-            if operation == "approve":
+            if operation == "approve-request":
+                from gateway.pairing import PairingStore
+
+                request_id = sys.stdin.read(64).strip().lower()
+                if not PairingStore.looks_like_request_id(request_id):
+                    raise RuntimeError("Invalid SimpleX connection request")
+                if PairingStore().approve_request("simplex", request_id) is None:
+                    raise RuntimeError(
+                        "This connection request expired or was already handled. Refresh and try again."
+                    )
+                result = {"approved": True}
+            elif operation == "approve":
                 from gateway.pairing import PairingStore
 
                 code = sys.stdin.read(64).strip().upper()
@@ -269,6 +304,8 @@ def main():
                 result = asyncio.run(
                     status() if operation == "status" else create_address()
                 )
+            if operation == "status":
+                result["pending"] = pending_requests()
             print(json.dumps(result))
         except Exception as error:
             # Only our fixed RuntimeError messages are user-visible; never

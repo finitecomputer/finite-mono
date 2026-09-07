@@ -1,5 +1,5 @@
 use crate::AgentdError;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::io::Write;
 use std::path::PathBuf;
@@ -11,8 +11,18 @@ pub(crate) fn script_path() -> PathBuf {
         .unwrap_or_else(|| PathBuf::from("/opt/simplex_runtime.py"))
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub(crate) struct PendingSimplexContact {
+    pub request_id: String,
+    pub user_id: String,
+    pub name: String,
+    pub age_minutes: u64,
+}
+
 #[derive(Debug, Clone, Serialize)]
 pub(crate) struct SimplexStatus {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub pending: Option<Vec<PendingSimplexContact>>,
     pub enabled: bool,
     pub ready: bool,
     pub address: Option<String>,
