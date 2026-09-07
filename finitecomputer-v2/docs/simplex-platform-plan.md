@@ -92,39 +92,61 @@ path proof.
 - Manual native trial validated QR → pending approval → private conversation and
   confirmed reset. Dashboard screenshots document that UI, not platform auth.
 
-Before rollout: qualify the canonical Runtime image, full owner-authorized
-Agent Platform Channel flow, live unauthorized-contact denial, voice/attachments,
-and restore of the complete Recovery Set onto an empty target. Hermes upgrade
-coverage and persistence migration/downgrade require separate review; the adapter
-regression suite alone is not proof of upstream compatibility. Do not assume an
-old Hermes image can read state migrated by the new release.
+## Hermes upgrade qualification
 
-## Hermes upgrade contract review
+Local checks use the actual old 0.20.0 and candidate 0.21.0 packages where
+specified. Stand-in adapter tests remain regression coverage, not upstream
+compatibility proof. Full local Python discovery ran 236 tests: 235 passed,
+with the gated media test skipped. The separate media attempt is recorded below.
 
-The exact pinned upgrade changes schema 25 → 26 and private gateway behavior.
-These are qualification targets, not confirmed breaking regressions:
-
-| Surface Finite depends on | Existing evidence | Gap before rollout |
+| Contract | Local evidence | Remaining boundary |
 | --- | --- | --- |
-| `state.db`, sessions, routing, JSON mirror | Candidate-store reset tests; same-image durable-home smoke | Old-written home → candidate → resume; establish rollback using pre-upgrade recovery copy unless downgrade is proven |
-| Private adapter lifecycle and inbox settlement | Adapter regression scenarios plus pinned busy/clarification tests | Real-base cancellation, failed delivery/retry, reconstruction, and exactly one durable settlement |
-| Session turn leases and restart | Pinned busy-session test | Candidate lease contention must not acknowledge rejected input or strand the Finite inbox after restart |
-| Requester identity and terminal tools | Pinned ContextVar/plugin-hook tests | Model-backed terminal turn and restart using existing Finite Private/custom-provider config |
-| Config, plugins, other connections | Reconciler tests and pinned imports | Existing YAML/env interpretation, runtime plugin discovery, Telegram approval CLI outcomes, Google setup |
-| Media and full image | Opt-in media E2E and dispatch-only runtime smoke | Execute the existing canonical-image media/durability/recovery lanes on the candidate |
+| Persisted state | New opt-in test runs old → candidate → old → candidate, retaining three distinct routes, transcripts, approvals, pending requests, config and credentials; schema 25 → 26 integrity checks pass | Synthetic text state only; no concurrent writers or interrupted migration |
+| Recovery | Stopped-writer baseline home restored into an empty target and reopened by old Hermes | Not the complete production Recovery Set or storage transport |
+| Adapter lifecycle | Eight actual pinned tests pass, including cancellation/redelivery, handler failure and retry-before-ack; three new cases also pass on old Hermes | Sidecar boundary is stubbed; full process/inbox persistence still needs runtime smoke |
+| Provider interpretation | Actual candidate config loader/provider resolver accepts Finite Private model, endpoint, environment-key reference and chat-completions mode | No model request or credential refresh in this check |
+| Turn leases | Actual candidate store/lease registry rejects overlapping alias sessions and accepts retry after release | Full runner execution remains a canary check |
+| Media lane | Nix binaries build; existing opt-in test fails before media on removed `finitechat hermes invite` command | Stale test cannot qualify media; real exchange required in canary |
+| Telegram approval | Invalid code prints rejection but exits zero on both pins | Pre-existing agentd exit-code-only check can report false success; do not count a success toast as approval proof |
 
-The 19 adapter regression scenarios use stand-in gateway/base classes. Running
-them with candidate Python is not upstream compatibility proof. The five tests
-in `finitechat/tests/hermes/test_pinned_hermes_sender_context.py` use real pinned
-Hermes and passed locally after the walkback, but do not exercise full startup
-or old-version persisted state. New turn-lease admission has a default five-second
-wait; Finite's separate durable inbox lease makes rejection/settlement a contract
-to test explicitly. Schema additions appearing additive do not prove downgrade.
+Reproduce the migration test with `HERMES_BASELINE_PYTHON` set to the old pinned
+interpreter and run `finitechat/tests/hermes/test_pinned_hermes_upgrade_state.py`
+using candidate Python. It explicitly skips without a baseline. This proves
+narrow sequential downgrade compatibility, not rollback of candidate-only state;
+the old runtime does not support SimpleX. Keep the pre-upgrade Recovery Set.
 
-Relevant upstream changes: `hermes_state_common.py`, `hermes_state_schema.py`,
-`gateway/session.py`, `gateway/turn_lease.py`, `gateway/platforms/base.py`,
-`gateway/run.py`, and terminal/provider config code. Retain the upgrade, but keep
-this PR draft until its required qualification scope is resolved.
+### Canary acceptance
+
+Use one existing canary agent plus a fresh agent, with the canonical candidate
+Runtime image. Stop the previous writer before changing images. Run
+`scripts/finite-status` before and after the authorized rollout.
+
+1. **Existing chat and restart:** continue an old conversation, verify prior
+   history and routing, send a queued follow-up during a long turn, then restart
+   during another turn. Confirm recovery completes without missing input,
+   duplicated replies, stuck processing, or replies landing in another chat.
+   Run the existing durable-home and interruption runtime smoke lanes.
+2. **Inference and identity:** retain the existing Finite Private/custom config;
+   request a terminal tool action and repeat after restart. Exercise two
+   authenticated requesters and verify the tool runs under the correct requester.
+3. **SimpleX and onboarding:** on the fresh agent, use the real dashboard QR,
+   send a message, approve the exact request, and exchange replies. A second,
+   unapproved contact must not invoke the agent. Confirm disconnect, reconnect
+   with a fresh flow, and verify other chat history/connections remain intact.
+4. **Media and other connections:** send an image/file and voice input and check
+   meaningful model responses and outbound attachments. Verify existing Telegram
+   chat and valid/invalid/expired approval outcomes from actual authorization
+   state. Exercise Google setup and an already-connected Google tool.
+5. **Shared-session contention, if used:** `/resume` the same session from two
+   chats, overlap turns, and verify a visible resend notice followed by a
+   successful retry and coherent history. Hermes waits five seconds by default;
+   this notice is treated as a terminal response by the Finite inbox.
+6. **Recovery:** restore the complete pre-upgrade Recovery Set onto an empty
+   canary target and prove chat availability. Do not run old and new writers
+   concurrently or equate a successful same-volume restart with recovery proof.
+
+Keep the PR draft until the required canonical-image checks are resolved. These
+checks preserve the upgrade without claiming every upstream change is covered.
 
 ## References
 

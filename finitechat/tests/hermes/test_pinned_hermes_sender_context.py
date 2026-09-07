@@ -508,5 +508,126 @@ class PinnedHermesClarificationTests(unittest.IsolatedAsyncioTestCase):
             await owner
 
 
+class PinnedHermesSettlementTests(unittest.IsolatedAsyncioTestCase):
+    """Run actual upstream dispatch/hooks; stub only the external sidecar boundary."""
+
+    async def asyncSetUp(self):
+        self.home = tempfile.TemporaryDirectory()
+        self.addCleanup(self.home.cleanup)
+        self.adapter = PinnedHermesClarificationTests._adapter(self.home.name)
+        self.addAsyncCleanup(self.adapter.cancel_background_tasks)
+        self.calls = []
+
+        async def bridge(action, payload, *, timeout):
+            self.calls.append((action, payload))
+            return PINNED_ADAPTER_MODULE._FiniteChatResult(
+                True, {"message_id": "synthetic-reply"}, None, False
+            )
+
+        self.adapter._finitechat_json = bridge
+        # Quota lookup is an unrelated external service, never access credentials.
+        self.usage = patch.object(
+            PINNED_ADAPTER_MODULE, "_finite_private_control_request", return_value=None
+        )
+        self.usage.start()
+        self.addCleanup(self.usage.stop)
+        self.event = PinnedHermesClarificationTests._text_event(
+            segment_id="settlement-chat", seq=91, message_id="settlement-message", text="hello"
+        )
+
+    def settlements(self):
+        return [(action, payload) for action, payload in self.calls if action in {"ack", "release"}]
+
+    async def dispatch(self, handler):
+        self.adapter.set_message_handler(handler)
+        await self.adapter._handle_finitechat_event(self.event)
+        self.assertEqual(len(self.adapter._session_tasks), 1)
+        return next(iter(self.adapter._session_tasks.values()))
+
+    async def test_shutdown_releases_inbox_lease_and_reconstructed_adapter_can_finish_redelivery(
+        self,
+    ):
+        started = asyncio.Event()
+
+        async def blocked_handler(event):
+            started.set()
+            await asyncio.Event().wait()
+
+        task = await self.dispatch(blocked_handler)
+        await asyncio.wait_for(started.wait(), timeout=2)
+        self.assertEqual(self.settlements(), [])
+        await self.adapter.cancel_background_tasks()
+        self.assertTrue(task.cancelled())
+        self.assertEqual([action for action, _ in self.settlements()], ["release"])
+        self.assertEqual(self.settlements()[0][1]["message_id"], "settlement-message")
+        self.assertEqual(self.adapter._inflight_admissions, set())
+
+        # Sidecar redelivery is simulated explicitly: this does not claim to
+        # prove the Rust inbox's on-disk lease recovery.
+        restarted = PinnedHermesClarificationTests._adapter(self.home.name)
+        restarted._finitechat_json = self.adapter._finitechat_json
+        self.adapter = restarted
+        self.addAsyncCleanup(restarted.cancel_background_tasks)
+        handled = []
+
+        async def completed_handler(event):
+            handled.append(event.text)
+            return ""
+
+        await asyncio.wait_for(await self.dispatch(completed_handler), timeout=5)
+        self.assertEqual(handled, ["hello"])
+        self.assertEqual([action for action, _ in self.settlements()], ["release", "ack"])
+
+    async def test_handler_exception_settles_once_and_sends_error_in_original_chat(self):
+        handled = []
+
+        async def failing_handler(event):
+            handled.append(event.text)
+            raise RuntimeError("synthetic handler failure")
+
+        await asyncio.wait_for(await self.dispatch(failing_handler), timeout=5)
+        self.assertEqual(handled, ["hello"])
+        self.assertEqual([action for action, _ in self.settlements()], ["ack"])
+        sends = [payload for action, payload in self.calls if action == "send"]
+        self.assertEqual(len(sends), 1)
+        self.assertIn("synthetic handler failure", sends[0]["text"])
+        self.assertEqual(sends[0]["thread_id"], "settlement-chat")
+        self.assertEqual(self.adapter._inflight_admissions, set())
+
+    async def test_retryable_send_does_not_ack_until_delivery_retry_finishes(self):
+        retry_started = asyncio.Event()
+        finish_retry = asyncio.Event()
+        send_count = 0
+        original_bridge = self.adapter._finitechat_json
+
+        async def bridge(action, payload, *, timeout):
+            nonlocal send_count
+            if action == "send":
+                send_count += 1
+                if send_count == 1:
+                    self.calls.append((action, payload))
+                    return PINNED_ADAPTER_MODULE._FiniteChatResult(
+                        False, {}, "synthetic transient failure", True
+                    )
+                retry_started.set()
+                await finish_retry.wait()
+            return await original_bridge(action, payload, timeout=timeout)
+
+        async def handler(event):
+            return "Synthetic reply"
+
+        self.adapter._finitechat_json = bridge
+        task = await self.dispatch(handler)
+        try:
+            await asyncio.wait_for(retry_started.wait(), timeout=5)
+            self.assertEqual(self.settlements(), [])
+            finish_retry.set()
+            await asyncio.wait_for(task, timeout=5)
+            self.assertEqual(send_count, 2)
+            self.assertEqual([action for action, _ in self.settlements()], ["ack"])
+        finally:
+            finish_retry.set()
+
+
 if __name__ == "__main__":
     unittest.main()
