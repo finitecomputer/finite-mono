@@ -1613,6 +1613,7 @@ button.ocean-pill-button {
 }
 
 .finite-chat__scroll {
+  overflow-x: hidden;
   min-height: 0;
   flex: 1;
   overflow-y: auto;
@@ -1621,6 +1622,10 @@ button.ocean-pill-button {
 
 .finite-chat__messages {
   display: grid;
+  /* minmax(0, 1fr): grid auto tracks size to max-content, so one long
+     unbreakable child (a URL, a code line) blew the track out past the
+     viewport and forced horizontal scrolling on narrow screens. */
+  grid-template-columns: minmax(0, 1fr);
   width: min(100%, 760px);
   margin: 0 auto;
   gap: 1rem;
@@ -1699,6 +1704,15 @@ button.ocean-pill-button {
 .finite-chat__markdown blockquote,
 .finite-chat__table-scroll {
   margin: 0 0 0.75rem;
+  min-width: 0;
+  max-width: 100%;
+}
+
+.finite-chat__markdown pre,
+.finite-chat__code-block {
+  overflow-x: auto;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
 }
 
 .finite-chat__markdown p:last-child,
