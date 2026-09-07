@@ -11,6 +11,10 @@ The active receiver config is `infra/monitoring/ubuntu/`. It runs:
 - Blackbox HTTP probes for the narrow public uptime dashboard
 - Caddy as the only public edge
 
+The Agent Runtime slots dashboard has a separate
+[dashboard-only deployment and rollback](runtime-slots.md). It uses existing
+metrics and does not require the full receiver deploy or Tinfoil collector.
+
 Prometheus, Loki, Grafana, and blackbox exporter bind only to loopback. Caddy
 terminates TLS and protects the metrics/log ingest routes with separate basic
 auth credentials.

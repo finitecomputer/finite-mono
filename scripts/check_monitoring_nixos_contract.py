@@ -3,7 +3,6 @@
 
 from __future__ import annotations
 
-import importlib.util
 import json
 import re
 import subprocess
@@ -17,7 +16,6 @@ MVP_DASHBOARD = ROOT / "infra/monitoring/grafana/dashboards/finite-production-mv
 SLOTS_DASHBOARD = (
     ROOT / "infra/monitoring/grafana/dashboards/finite-agent-runtime-slots.json"
 )
-SLOTS_HOSTS = ("finite-lat-3", "finite-lat-4")
 TINFOIL_DASHBOARD = ROOT / "infra/monitoring/grafana/dashboards/finite-tinfoil-gpu.json"
 TINFOIL_COLLECTOR = ROOT / "infra/monitoring/tinfoil/tinfoil-usage-collector"
 TINFOIL_CONTAINER_NAME = "finite-private"
@@ -456,124 +454,48 @@ def check_mvp_dashboard_contract() -> None:
     )
 
 
-def runner_slot_capacity() -> dict[str, str]:
-    """Import the operator-pinned slot ceiling from the runner host contract.
-
-    The Agent Runtime slots dashboard renders the per-host
-    FC_RUNNER_MAX_SANDBOXES ceiling as a query constant because no live
-    metric carries it. Importing the same mapping that
-    scripts/check_runner_host_contract.py enforces against the rendered
-    runner env keeps the dashboard and the hosts on one pinned value; a
-    ceiling change must update both or CI fails.
-    """
-    path = ROOT / "scripts/check_runner_host_contract.py"
-    spec = importlib.util.spec_from_file_location("check_runner_host_contract", path)
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
-    return module.EXPECTED_MAX_SANDBOXES
-
-
 def check_agent_runtime_slots_dashboard_contract() -> None:
     dashboard = json.loads(SLOTS_DASHBOARD.read_text(encoding="utf-8"))
     require(
         dashboard["uid"] == "finite-agent-runtime-slots", "unexpected dashboard uid"
     )
     require(dashboard["refresh"] == "2m", "slots dashboard must refresh every 2m")
+    check_dashboard_layout(dashboard, "slots dashboard")
     panels = dashboard["panels"]
-    panel_ids = [panel["id"] for panel in panels]
-    require(
-        len(panel_ids) == len(set(panel_ids)),
-        "slots dashboard panel IDs must be unique",
+    notice = " ".join(
+        panel["options"]["content"] for panel in panels if panel["type"] == "text"
     )
-    for index, left in enumerate(panels):
-        for right in panels[index + 1 :]:
-            require(
-                not overlaps(left, right),
-                f"slots dashboard panels overlap: {left['title']!r} and {right['title']!r}",
-            )
-
-    panels_by_title = {panel["title"]: panel for panel in panels}
-    required_titles = (
-        "Draft data contract",
-        "lat3 Slots Used",
-        "lat3 Slots Free",
-        "lat4 Slots Used",
-        "lat4 Slots Free",
-        "Active Agent Runtimes",
-        "Free Slots",
-    )
-    for title in required_titles:
-        require(title in panels_by_title, f"slots dashboard missing panel {title!r}")
-
-    notice = panels_by_title["Draft data contract"]
-    require(notice["type"] == "text", "draft notice must stay a text panel")
-    rendered_notice = notice["options"]["content"]
     for fragment in (
-        "not yet provisioned",
-        "finite_runtime_artifact_active_agents",
-        "FC_RUNNER_MAX_SANDBOXES",
-        "check_runner_host_contract.py",
-        "No data",
+        "estimate",
+        "incomplete artifact identity",
+        "Runner drain",
+        "Unknown",
     ):
-        require_contains(rendered_notice, fragment, "slots dashboard draft notice")
+        require_contains(notice, fragment, "slots explanation")
 
-    capacity = runner_slot_capacity()
-    require(
-        capacity["finite-lat-3"] == capacity["finite-lat-4"],
-        "the combined slots chart assumes equal ceilings on both Runner hosts",
-    )
-    expected_exprs: set[str] = set()
-    for host in SLOTS_HOSTS:
-        ceiling = capacity[host]
-        expected_exprs.add(
-            f'sum(finite_runtime_artifact_active_agents{{source_host_id="{host}"}})'
-        )
-        expected_exprs.add(
-            f'{ceiling} - sum(finite_runtime_artifact_active_agents{{source_host_id="{host}"}})'
-        )
-    expected_exprs.add(
-        "sum by (source_host_id) (finite_runtime_artifact_active_agents"
-        '{source_host_id=~"finite-lat-3|finite-lat-4"})'
-    )
-    expected_exprs.add(
-        f"{capacity['finite-lat-3']} - "
-        "sum by (source_host_id) (finite_runtime_artifact_active_agents"
-        '{source_host_id=~"finite-lat-3|finite-lat-4"})'
-    )
-
-    actual_exprs: set[str] = set()
-    for title in required_titles:
-        panel = panels_by_title[title]
+    # Prometheus evaluates every shipped query in test_runtime_slots_promql.py.
+    # These checks cover rendering that could conceal missing/stale samples.
+    for panel in panels:
         if panel["type"] == "text":
             continue
+        title = panel["title"]
         require(
             panel["datasource"]["uid"] == "finite-prometheus",
             f"{title} must use the finite-prometheus datasource",
         )
-        for target in panel_targets(panel):
-            expression = target["expr"]
-            actual_exprs.add(expression)
+        if panel["type"] == "stat":
             require(
-                "or vector(" not in expression,
-                f"{title} must fail closed on missing data, not substitute a constant",
+                all(
+                    t.get("instant") and not t.get("range")
+                    for t in panel_targets(panel)
+                ),
+                f"{title} must display only the current instant",
             )
+        else:
             require(
-                "up{" not in expression,
-                f"{title} must not gate on scrape health",
+                panel["fieldConfig"]["defaults"]["custom"]["spanNulls"] is False,
+                f"{title} must show collection gaps",
             )
-
-    require(
-        actual_exprs == expected_exprs,
-        "slots dashboard query expressions drifted from the pinned contract",
-    )
-
-    rendered_dashboard = json.dumps(dashboard)
-    metric_tokens = set(re.findall(r"finite_[a-z_]+", rendered_dashboard))
-    unexpected = metric_tokens - {"finite_runtime_artifact_active_agents"}
-    require(
-        not unexpected,
-        f"slots dashboard references metrics outside its contract: {sorted(unexpected)}",
-    )
 
 
 def check_tinfoil_dashboard_contract() -> None:

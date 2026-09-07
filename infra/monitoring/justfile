@@ -8,5 +8,6 @@ default:
 monitoring-nixos-contract:
     cd ../.. && python3 scripts/check_monitoring_nixos_contract.py
     cd ../.. && python3 -m unittest discover -s infra/nixos/tests -p 'test_finite_runtime_metrics.py'
+    cd ../.. && nix shell --inputs-from . nixpkgs#prometheus.cli --command python3 infra/monitoring/tests/test_runtime_slots_promql.py
     cd ../.. && bash -n infra/monitoring/tinfoil/tinfoil-usage-collector
     cd ../.. && infra/monitoring/tinfoil/tinfoil-usage-collector selftest
