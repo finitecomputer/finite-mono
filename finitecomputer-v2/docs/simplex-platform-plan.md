@@ -66,6 +66,27 @@ unmodified released adapter. Existing saved identities are not silently adopted
 or changed; the local trial was repaired with the daemon stopped, a private
 backup, official CLI commands, and its one undeliverable challenge cleared.
 
+## Unresolved first-message pairing race
+
+The second fresh phone trial connected automatically but still lost its first
+pairing reply. The introductory contact message reached Hermes at 22:08:24 UTC;
+SimpleX's contact connection became ready at 22:08:28. Hermes created a pending
+challenge before a usable outbound connection existed. No outgoing chat item
+was retained, and the next real message was suppressed by the ten-minute
+pairing request rate limit. Both processes were alive throughout.
+
+This is a shipping blocker for the fresh-start UX. The released adapter's
+fire-and-forget send treats socket write as success, with no contact-readiness
+queue or delivery failure recovery. Current upstream main inspected on September
+7 still has no contactConnected handler. The address-based transport smoke test
+waits for contactConnected before sending and therefore does not cover this race.
+Do not claim that test proves fresh phone pairing or replace the missing delivery
+contract with an arbitrary delay. A no-fork solution is still required.
+
+For the active local trial only, the undelivered challenge and its contact-scoped
+rate-limit entry were backed up and cleared after the connection became ready.
+The contact remained unapproved; the user requests and approves a fresh code.
+
 ## Critical correction to the field reports
 
 SimpleX v7.0.2 does NOT broadcast events to every WebSocket client. Its server
