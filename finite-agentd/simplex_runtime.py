@@ -242,7 +242,10 @@ def atomic_json(path, value):
 
 
 def prepare_reset():
-    if settings().get("extra", {}).get("finite_managed") is not True or managed_enabled():
+    if (
+        settings().get("extra", {}).get("finite_managed") is not True
+        or managed_enabled()
+    ):
         raise RuntimeError("Disable managed SimpleX before disconnecting")
     # Durable intent survives interruption. Never bootstrap or approve while set.
     if not reset_marker().exists():
@@ -263,7 +266,7 @@ async def finish_reset():
     for _ in range(60):
         if not (state_dir() / "daemon.pid").exists() and not await tcp_ready():
             break
-        await asyncio.sleep(.25)
+        await asyncio.sleep(0.25)
     else:
         raise RuntimeError("SimpleX did not stop; disconnect has not cleared its data")
     home = Path(os.environ["HERMES_HOME"])
@@ -275,9 +278,15 @@ async def finish_reset():
         limits = folder / "_rate_limits.json"
         if limits.exists():
             values = json.loads(limits.read_text())
-            atomic_json(limits, {k: v for k, v in values.items()
-                                if not k.startswith("simplex:")
-                                and k not in ("_lockout:simplex", "_failures:simplex")})
+            atomic_json(
+                limits,
+                {
+                    k: v
+                    for k, v in values.items()
+                    if not k.startswith("simplex:")
+                    and k not in ("_lockout:simplex", "_failures:simplex")
+                },
+            )
     clear_simplex_sessions(home)
     if state_dir().exists():
         shutil.rmtree(state_dir())
@@ -295,6 +304,7 @@ def clear_simplex_sessions(home):
     sessions = load_gateway_config().sessions_dir
     mirror = sessions / "sessions.json"
     entries = json.loads(mirror.read_text()) if mirror.exists() else {}
+
     def is_simplex(entry):
         # Hermes writes _README metadata and tolerates non-record sentinels.
         if not isinstance(entry, dict):
@@ -303,7 +313,10 @@ def clear_simplex_sessions(home):
         return entry.get("platform") == "simplex" or (
             isinstance(origin, dict) and origin.get("platform") == "simplex"
         )
-    selected = {k: v for k, v in entries.items() if not k.startswith("_") and is_simplex(v)}
+
+    selected = {
+        k: v for k, v in entries.items() if not k.startswith("_") and is_simplex(v)
+    }
     plan = json.loads(reset_marker().read_text())
     ids = set(plan.get("session_ids", []))
     ids.update(v["session_id"] for v in selected.values())
@@ -320,17 +333,29 @@ def clear_simplex_sessions(home):
                     ids.add(entry["session_id"])
             offset = 0
             while True:
-                rows = db.list_sessions_rich(source="simplex", limit=100, offset=offset,
-                    include_children=True, include_archived=True, include_hidden=True,
-                    project_compression_tips=False, compact_rows=True)
+                rows = db.list_sessions_rich(
+                    source="simplex",
+                    limit=100,
+                    offset=offset,
+                    include_children=True,
+                    include_archived=True,
+                    include_hidden=True,
+                    project_compression_tips=False,
+                    compact_rows=True,
+                )
                 if not rows:
                     break
                 roots.extend(row["id"] for row in rows)
                 offset += len(rows)
             for sid in roots:
                 ids.update(db.get_session_delete_targets(sid))
-        if any(not isinstance(sid, str) or not re.fullmatch(r"[A-Za-z0-9_-]+", sid) for sid in ids):
-            raise RuntimeError("SimpleX session metadata needs review before disconnecting")
+        if any(
+            not isinstance(sid, str) or not re.fullmatch(r"[A-Za-z0-9_-]+", sid)
+            for sid in ids
+        ):
+            raise RuntimeError(
+                "SimpleX session metadata needs review before disconnecting"
+            )
         plan["session_ids"] = sorted(ids)
         atomic_json(reset_marker(), plan)
         if db:
@@ -352,7 +377,7 @@ async def wait_reset():
     for _ in range(100):
         if not reset_marker().exists():
             return {"disconnected": True}
-        await asyncio.sleep(.25)
+        await asyncio.sleep(0.25)
     raise RuntimeError("SimpleX disconnect is unfinished; retry Disconnect")
 
 

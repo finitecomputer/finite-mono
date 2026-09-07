@@ -360,6 +360,11 @@ jobs:
           HERMES_AGENT_PYTHON: ${{ steps.hermes_agent_runtime.outputs.python }}
         run: nix develop "$GITHUB_WORKSPACE#hermes-bridge-ci" --command basedpyright --pythonpath "$HERMES_AGENT_PYTHON"
 
+      - name: Build Linux SimpleX daemon
+        run: |
+          simplex_store="$(nix build --option builders '' "$GITHUB_WORKSPACE#simplex-chat" --no-link --print-out-paths)"
+          "$simplex_store/bin/simplex-chat" --version
+
       - name: Managed SimpleX lint
         run: |
           nix develop "$GITHUB_WORKSPACE#hermes-bridge-ci" --command ruff format --check "$GITHUB_WORKSPACE/finite-agentd/"

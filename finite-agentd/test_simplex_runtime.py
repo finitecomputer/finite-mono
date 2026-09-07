@@ -217,9 +217,10 @@ class PairingTests(unittest.TestCase):
             )
             self.assertEqual(verify.returncode, 0, verify.stderr)
 
+
 class ResetTests(unittest.TestCase):
     def test_reset_is_isolated_and_recoverable(self):
-        script = r'''
+        script = r"""
 import asyncio, json, os
 from pathlib import Path
 from unittest.mock import AsyncMock, patch
@@ -258,7 +259,23 @@ assert (r.state_dir()/'identity_chat.db').exists()
 try: asyncio.run(r.create_address())
 except RuntimeError: pass
 else: raise AssertionError('bootstrapped during reset')
+# Simulate a filesystem failure after SQLite deletion. The durable plan must
+# retain transcript IDs even after the source records have disappeared.
+original_unlink = Path.unlink
+def fail_transcript(path, *args, **kwargs):
+    if path.name == 'simplex-synthetic.jsonl':
+        raise PermissionError('synthetic transient file failure')
+    return original_unlink(path, *args, **kwargs)
 with patch.object(r,'tcp_ready',new=AsyncMock(return_value=False)):
+    with patch.object(Path, 'unlink', fail_transcript):
+        try: asyncio.run(r.finish_reset())
+        except PermissionError: pass
+        else: raise AssertionError('reported success while transcript remained')
+    assert r.reset_marker().exists()
+    assert (sessions/'simplex-synthetic.jsonl').exists()
+    before=r.reset_marker().read_text()
+    r.prepare_reset()
+    assert r.reset_marker().read_text()==before
     asyncio.run(r.finish_reset()); asyncio.run(r.finish_reset())
 assert not r.state_dir().exists() and not r.reset_marker().exists()
 s=PairingStore()
@@ -274,12 +291,19 @@ assert list(json.loads((sessions/'sessions.json').read_text()))==['_README','inv
 assert not (sessions/'simplex-synthetic.jsonl').exists()
 assert (sessions/'telegram-synthetic.jsonl').exists()
 db.close()
-'''
+"""
         with tempfile.TemporaryDirectory() as root:
-            result = subprocess.run([sys.executable, '-c', script],
+            result = subprocess.run(
+                [sys.executable, "-c", script],
                 cwd=Path(__file__).parent,
-                env={**os.environ, 'HERMES_HOME': root+'/hermes', 'FINITECHAT_HOME': root},
-                capture_output=True, text=True)
+                env={
+                    **os.environ,
+                    "HERMES_HOME": root + "/hermes",
+                    "FINITECHAT_HOME": root,
+                },
+                capture_output=True,
+                text=True,
+            )
             self.assertEqual(result.returncode, 0, result.stderr)
 
 

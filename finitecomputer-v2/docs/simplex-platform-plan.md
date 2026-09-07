@@ -71,31 +71,14 @@ requires explicit owner approval to run the agent. No Hermes patch is needed.
 The smoke test now uses a reusable address and daemon auto-accept, rather than
 an invitation link that bypasses the request/accept path. It passes with the
 unmodified released adapter. Existing saved identities are not silently adopted
-or changed; the local trial was repaired with the daemon stopped, a private
-backup, official CLI commands, and its one undeliverable challenge cleared.
+or changed.
 
-## Unresolved first-message pairing race
-
-The second fresh phone trial connected automatically but still lost its first
-pairing reply. The introductory contact message reached Hermes at 22:08:24 UTC;
-SimpleX's contact connection became ready at 22:08:28. Hermes created a pending
-challenge before a usable outbound connection existed. No outgoing chat item
-was retained, and the next real message was suppressed by the ten-minute
-pairing request rate limit. Both processes were alive throughout.
-
-The dashboard now bypasses code delivery with upstream pending-request approval.
-The released adapter's
-fire-and-forget send treats socket write as success, with no contact-readiness
-queue or delivery failure recovery. Current upstream main inspected on September
-7 still has no contactConnected handler. The address-based transport smoke test
-waits for contactConnected before sending and therefore does not cover this race.
-Do not claim that test proves fresh phone pairing or replace the missing delivery
-contract with an arbitrary delay. Pending-request approval removes code delivery
-from the authorization path, but does not add general outbound delivery guarantees.
-
-For the active local trial only, the undelivered challenge and its contact-scoped
-rate-limit entry were backed up and cleared after the connection became ready.
-The contact remained unapproved; the user requests and approves a fresh code.
+The released adapter can generate a pairing reply before the new contact is
+ready to receive it, then suppress retries through the pairing rate limit.
+Dashboard pending-request approval removes delivered codes from authorization.
+It does not add outbound delivery guarantees: the released adapter treats a
+socket write as send success. The transport smoke waits for contactConnected
+before sending, so it does not prove first-introduction delivery.
 
 ## Critical correction to the field reports
 
@@ -133,7 +116,7 @@ Hermes adapter. Preserve the mounted state when disabling or reverting code.
 
 - Passed: 34 agentd tests and clippy, including private config validation,
   independent supervision, existing configuration rollback, and command replay.
-- Passed: nine control tests exercising real local WebSocket correlation,
+- Passed: ten control tests exercising real local WebSocket correlation,
   command rejection, stalled sockets, both address response shapes, and upstream
   PairingStore approval. Invalid codes and stale request IDs fail; approving an
   exact request grants only its contact, with other contacts/platforms unapproved.
@@ -148,8 +131,12 @@ Hermes adapter. Preserve the mounted state when disabling or reverting code.
   numeric-contact inbound/reply delivery, without inference or real users.
 - Passed: all 19 existing Finite Chat bridge regression scenarios against the
   candidate Hermes. This does not qualify every unrelated upstream platform.
-- Required before shipping: local full-stack owner request approval and phone text/voice
-  round trip, unauthorized contact denial at the live gateway, empty-target
+- Passed manually: the user scanned the actual dashboard QR, approved the
+  pending request, and confirmed private conversation success with native Hermes.
+  Confirmed disconnect was repaired and completed; a new QR was generated.
+- Required before shipping: full platform owner authorization and Agent Platform
+  Channel round trip, phone voice/attachment qualification, unauthorized contact
+  denial at the live gateway, empty-target
   restoration of the complete Recovery Set, and the canonical Linux image build.
 - Linux packaging/image verification is assigned to CI, per the user. It does
   not block the native phone trial. The retired pika-build machine is not a
@@ -180,11 +167,10 @@ connection mutations deliberately fail in this trial. The local servers bind
 127.0.0.1. Port 13012 avoids the usual web-design harness on port 13002; override
 FC_WEB_DESIGN_PORT if necessary. Do not run the standalone trial simultaneously.
 
-Verified in the browser: Connect reveals the real QR and pairing form; invalid
-code approval was rejected by Hermes in the earlier flow. Request approval is
-now tested against isolated real pairing stores; the phone acceptance pass is
-performed by the user.
-Connection mutation errors now remain visible after status has loaded.
+The user completed the QR/request approval/private conversation flow in this
+harness. Mutation errors remain visible after status loads. This manual pass
+complements isolated upstream pairing and reset tests; it is not a production
+Agent Platform Channel authorization test.
 
 ## Standalone native trial (optional)
 
@@ -260,4 +246,6 @@ Reset regression coverage uses synthetic identities and real pinned upstream
 PairingStore/SessionDB: refuses cleanup while the daemon is live, preserves
 Telegram grants/pending requests/transcripts/routes and inference credentials,
 clears both pairing layouts, permits immediate pairing with a reused numeric
-contact ID, and makes repeated completed cleanup a no-op.
+contact ID, and makes repeated completed cleanup a no-op. A simulated transcript deletion
+failure verifies that the persisted reset plan survives retry after database
+records have already been deleted. Hermes metadata sentinels are preserved.
