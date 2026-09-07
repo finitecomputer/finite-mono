@@ -37,7 +37,7 @@ images come from whatever was on the box.
 
 Minimal change to the same box and mechanisms; no new tooling:
 
-1. CI (GitHub Actions in finite-mono) builds the core and dashboard images at
+1. Native Depot CI builds the core and dashboard images at
    a git SHA from the Dockerfiles defined in `infra/images/`, tags them with
    the SHA, and pushes to GHCR.
 2. Deploys reference the image **by digest**

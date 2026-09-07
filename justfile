@@ -85,6 +85,12 @@ deploy-lat4-closure artifact_dir *args:
 install-lat4-from-artifact artifact_dir target_host *args:
     just nixos install-lat4-from-artifact "$artifact_dir" "$target_host" "$@"
 
+depot-workflow-contract:
+    python3 -m unittest \
+        scripts.tests.test_ci_select_harnesses \
+        scripts.tests.test_depot_workflows \
+        scripts.tests.test_nix_service_package_handoff
+
 finite-private-deepseek-contract:
     just computer finite-private-deepseek-contract
 

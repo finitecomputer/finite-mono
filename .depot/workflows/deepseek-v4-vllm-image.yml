@@ -1,18 +1,14 @@
-name: Service Images
-run-name: Build ${{ inputs.image }} ${{ inputs.version }}
+name: DeepSeek V4 vLLM Image
+run-name: Build DeepSeek V4 vLLM ${{ inputs.version }}
 on:
   workflow_dispatch:
     inputs:
-      image:
-        description: Which image to build
+      rev:
+        description: Exact reviewed commit on GitHub main to build
         required: true
-        type: choice
-        options:
-          - core
-          - dashboard
-          - private-limiter
+        type: string
       version:
-        description: Image version tag, for example 2026-07-08.1
+        description: "Immutable candidate version, for example 0.25.1-0731-reasoning.1"
         required: true
         type: string
       publish_production:
@@ -21,16 +17,28 @@ on:
         default: false
         type: boolean
 concurrency:
-  group: service-image-${{ inputs.image }}-${{ inputs.version }}
+  group: deepseek-v4-vllm-image-${{ inputs.version }}
+env:
+  SOURCE_REV: ${{ inputs.rev }}
 jobs:
   publish:
     runs-on: depot-ubuntu-24.04
     permissions:
       contents: read
       id-token: write
-      packages: write
     steps:
       - uses: actions/checkout@v4
+        with:
+          path: deepseek-v4-vllm-${{ github.run_id }}-${{ github.run_attempt }}
+          ref: ${{ inputs.rev }}
+          fetch-depth: 0
+      - name: Verify exact source revision
+        working-directory: deepseek-v4-vllm-${{ github.run_id }}-${{ github.run_attempt }}
+        run: |
+          [[ "$SOURCE_REV" =~ ^[0-9a-f]{40}$ ]]
+          test "$(git rev-parse HEAD)" = "$SOURCE_REV"
+          git fetch --no-tags origin main
+          git merge-base --is-ancestor "$SOURCE_REV" origin/main
       - uses: depot/setup-action@v1
         with:
           oidc: true
@@ -39,51 +47,29 @@ jobs:
         run: |
           echo "::error::FINITE_GHCR_PRODUCTION_PUBLISH_ENABLED is not true"
           exit 1
-      - name: Resolve image parameters
-        id: params
-        run: |
-          case "${{ inputs.image }}" in
-            core)
-              echo "name=finite-saas-core" >> "$GITHUB_OUTPUT"
-              echo "dockerfile=infra/images/core.Dockerfile" >> "$GITHUB_OUTPUT"
-              echo "context=." >> "$GITHUB_OUTPUT"
-              echo "build_args=" >> "$GITHUB_OUTPUT"
-              ;;
-            dashboard)
-              echo "name=finite-saas-dashboard" >> "$GITHUB_OUTPUT"
-              echo "dockerfile=infra/images/dashboard.Dockerfile" >> "$GITHUB_OUTPUT"
-              echo "context=." >> "$GITHUB_OUTPUT"
-              echo "build_args=" >> "$GITHUB_OUTPUT"
-              ;;
-            private-limiter)
-              echo "name=private-limiter" >> "$GITHUB_OUTPUT"
-              echo "dockerfile=infra/images/private-limiter.Dockerfile" >> "$GITHUB_OUTPUT"
-              echo "context=." >> "$GITHUB_OUTPUT"
-              echo "build_args=FINITE_MONO_REV=$GITHUB_SHA" >> "$GITHUB_OUTPUT"
-              ;;
-          esac
       - name: Log in to GHCR for canary publication
         env:
-          GHCR_TOKEN: ${{ github.token }}
-          GHCR_USERNAME: ${{ github.actor }}
+          GHCR_TOKEN: ${{ secrets.FINITE_GHCR_TOKEN }}
+          GHCR_USERNAME: ${{ secrets.FINITE_GHCR_USERNAME }}
         run: echo "$GHCR_TOKEN" | docker login ghcr.io -u "$GHCR_USERNAME" --password-stdin
-      - name: Build and save
+      - name: Build and save the source-pinned compatibility image
         id: build
         uses: depot/build-push-action@v1
         with:
-          project: ${{ vars.DEPOT_SERVICE_IMAGES_PROJECT_ID || secrets.DEPOT_SERVICE_IMAGES_PROJECT_ID || vars.DEPOT_PROJECT_ID || secrets.DEPOT_PROJECT_ID }}
-          context: ${{ steps.params.outputs.context }}
-          file: ${{ steps.params.outputs.dockerfile }}
+          project: ${{ vars.DEPOT_DEEPSEEK_VLLM_PROJECT_ID || secrets.DEPOT_DEEPSEEK_VLLM_PROJECT_ID || vars.DEPOT_PROJECT_ID || secrets.DEPOT_PROJECT_ID }}
+          context: deepseek-v4-vllm-${{ github.run_id }}-${{ github.run_attempt }}
+          file: deepseek-v4-vllm-${{ github.run_id }}-${{ github.run_attempt }}/infra/images/deepseek-v4-vllm.Dockerfile
           platforms: linux/amd64
-          build-args: ${{ steps.params.outputs.build_args }}
+          build-args: FINITE_MONO_REV=${{ inputs.rev }}
           provenance: true
           save: true
       - name: Publish and verify the non-production canary
         id: canary
+        working-directory: deepseek-v4-vllm-${{ github.run_id }}-${{ github.run_attempt }}
         env:
-          IMAGE: ghcr.io/finitecomputer/${{ steps.params.outputs.name }}
           BUILD_ID: ${{ steps.build.outputs.build-id }}
           SOURCE_DIGEST: ${{ steps.build.outputs.digest }}
+          IMAGE: ghcr.io/finitecomputer/deepseek-v4-vllm
           DEPOT_PROJECT_ID: ${{ steps.build.outputs.project-id }}
         run: |
           canary_ref="$IMAGE:canary-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT"
@@ -104,11 +90,22 @@ jobs:
             --manifest image-index.json \
             --platform linux/amd64 \
             --require-attestation
-          if [ "${{ inputs.image }}" = "private-limiter" ]; then
-            test "$(docker image inspect "$IMAGE@$destination_digest" --format '{{index .Config.Labels "org.opencontainers.image.revision"}}')" = "$GITHUB_SHA"
-          fi
           echo "digest=$destination_digest" >> "$GITHUB_OUTPUT"
           echo "pinned=$IMAGE@$destination_digest" >> "$GITHUB_OUTPUT"
+      - name: Verify the canary contract
+        working-directory: deepseek-v4-vllm-${{ github.run_id }}-${{ github.run_attempt }}
+        env:
+          PINNED: ${{ steps.canary.outputs.pinned }}
+        run: |
+          test "$(docker image inspect "$PINNED" --format '{{index .Config.Labels "org.opencontainers.image.revision"}}')" = "$SOURCE_REV"
+          test "$(docker image inspect "$PINNED" --format '{{index .Config.Labels "ai.finite.vllm.upstream-fix"}}')" = "77434861904a9f01ea4818fe9f0c7b2a5c05686e"
+          test "$(docker image inspect "$PINNED" --format '{{index .Config.Labels "ai.finite.vllm.rust-frontend-fix"}}')" = "77434861904a9f01ea4818fe9f0c7b2a5c05686e"
+          docker run --rm --entrypoint python3 "$PINNED" \
+            -c 'import importlib.metadata; assert importlib.metadata.version("vllm") == "0.25.1"'
+          docker run --rm --entrypoint python3 "$PINNED" \
+            /usr/local/libexec/patch_vllm_deepseek_v4_0731.py check
+          docker run --rm --entrypoint python3 "$PINNED" -c \
+            'import pathlib, vllm; b=(pathlib.Path(vllm.__path__[0])/"vllm-rs").read_bytes(); assert b"Beyond maximum" in b and b"Absolute maximum" in b'
       - name: Prove anonymous GHCR pull
         env:
           PINNED: ${{ steps.canary.outputs.pinned }}
@@ -119,18 +116,19 @@ jobs:
       - name: Promote the same saved build to production tags
         id: production
         if: inputs.publish_production == true && vars.FINITE_GHCR_PRODUCTION_PUBLISH_ENABLED == 'true'
+        working-directory: deepseek-v4-vllm-${{ github.run_id }}-${{ github.run_attempt }}
         env:
-          IMAGE: ghcr.io/finitecomputer/${{ steps.params.outputs.name }}
-          VERSION: ${{ inputs.version }}
           BUILD_ID: ${{ steps.build.outputs.build-id }}
           SOURCE_DIGEST: ${{ steps.canary.outputs.digest }}
+          IMAGE: ghcr.io/finitecomputer/deepseek-v4-vllm
+          VERSION: ${{ inputs.version }}
           DEPOT_PROJECT_ID: ${{ steps.build.outputs.project-id }}
-          GHCR_TOKEN: ${{ github.token }}
-          GHCR_USERNAME: ${{ github.actor }}
+          GHCR_TOKEN: ${{ secrets.FINITE_GHCR_TOKEN }}
+          GHCR_USERNAME: ${{ secrets.FINITE_GHCR_USERNAME }}
         run: |
           echo "$GHCR_TOKEN" | docker login ghcr.io -u "$GHCR_USERNAME" --password-stdin
           version_ref="$IMAGE:$VERSION"
-          sha_ref="$IMAGE:sha-${GITHUB_SHA::12}"
+          sha_ref="$IMAGE:sha-${SOURCE_REV::12}"
           depot push --project "$DEPOT_PROJECT_ID" --tag "$version_ref" --tag "$sha_ref" "$BUILD_ID"
           for ref in "$version_ref" "$sha_ref"; do
             docker pull "$ref" >/dev/null
@@ -148,4 +146,3 @@ jobs:
             echo "Production promotion: \`$PRODUCTION\`" >> "$GITHUB_STEP_SUMMARY"
           else
             echo "Production promotion remained disabled." >> "$GITHUB_STEP_SUMMARY"
-          fi

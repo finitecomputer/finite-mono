@@ -19,6 +19,7 @@ OUTPUT_NAMES = (
     "run_hermes_bridge",
     "run_nix_checks",
     "run_skills_check",
+    "run_search_check",
     "run_monitoring_nixos_contract",
     "run_finite_status_contract",
     "run_nix_service_packages",
@@ -34,6 +35,7 @@ OUTPUT_NAMES = (
 # is_package_graph_path); everything else defers packaging to landing events.
 
 GLOBAL_EXACT_PATHS = {
+    ".depot/workflows/ci.yml",
     ".github/workflows/ci.yml",
     "Cargo.lock",
     "Cargo.toml",
@@ -45,6 +47,7 @@ GLOBAL_EXACT_PATHS = {
 GLOBAL_PREFIXES = (
     ".cargo/",
     ".github/actions/",
+    ".depot/workflows/",
 )
 
 GLOBAL_SUFFIXES = (
@@ -95,6 +98,11 @@ FINITE_STATUS_PATHS = {
     "scripts/tests/fixtures/finite_status_aug1.json",
 }
 
+NIX_SERVICE_PACKAGE_HANDOFF_PATHS = {
+    "scripts/ci/nix-service-package-handoff",
+    "scripts/tests/test_nix_service_package_handoff.py",
+}
+
 REMAINING_NIX_CHECK_PATHS = {
     "scripts/check-brain-product-language.py",
     "scripts/check_runner_host_contract.py",
@@ -105,6 +113,7 @@ REMAINING_NIX_CHECK_PATHS = {
     "scripts/build-lat1-nixos-closure-artifact",
     "scripts/deploy-lat1-closure-cache",
     "scripts/publish-lat1-nixos-cachix-closure",
+    "scripts/fetch_depot_nixos_closure.py",
     "scripts/build-lat3-nixos-closure-artifact",
     "scripts/deploy-lat3-closure-cache",
     "scripts/build-lat4-nixos-closure-artifact",
@@ -124,6 +133,7 @@ REMAINING_NIX_CHECK_PATHS = {
     "scripts/tests/test_lat3_closure_artifact.py",
     "scripts/tests/test_lat2_closure_artifact.py",
     "scripts/tests/test_lat4_closure_artifact.py",
+    "scripts/tests/test_depot_closure_artifact.py",
     "infra/scripts/test-hosted-web-chat-restore",
     "infra/scripts/test-litestream-restore",
     "infra/nixos/hosts/finite-lat-1/secret-bootstrap-contract.json",
@@ -149,6 +159,7 @@ class HarnessSelection:
     run_hermes_bridge: bool = False
     run_nix_checks: bool = False
     run_skills_check: bool = False
+    run_search_check: bool = False
     run_monitoring_nixos_contract: bool = False
     run_finite_status_contract: bool = False
     run_nix_service_packages: bool = False
@@ -370,12 +381,21 @@ def apply_path(selection: HarnessSelection, path: str) -> None:
         selection.run_finite_status_contract = True
         return
 
+    if path in NIX_SERVICE_PACKAGE_HANDOFF_PATHS:
+        selection.run_devfinity_smoke = True
+        selection.run_nix_checks = True
+        return
+
     if path in STRIPE_PRICE_CONTRACT_PATHS:
         selection.run_nix_checks = True
         return
 
     if path.startswith("finite-skills/"):
         selection.run_skills_check = True
+        return
+
+    if path.startswith("finite-search/"):
+        selection.run_search_check = True
         return
 
     if path.startswith("finitecomputer-v2/apps/dashboard/"):

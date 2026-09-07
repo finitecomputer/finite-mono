@@ -9,11 +9,21 @@ TRANSPORT_OVERRIDE="${FINITE_LAT1_DEPLOY_TRANSPORT:-}"
 DEPLOY_MODE="${FINITE_LAT1_DEPLOY_MODE:-activate}"
 
 usage() {
-  echo "usage: $0 <lat1-closure-artifact-dir> [runtime rollout options]" >&2
+  echo "usage: $0 [--validate-only] <lat1-closure-artifact-dir> [runtime rollout options]" >&2
   echo "       FINITE_LAT1_DEPLOY_TRANSPORT=(cachix|file-cache) may override the manifest" >&2
   echo "       FINITE_LAT1_DEPLOY_MODE=(activate|realise-only) controls whether activation runs" >&2
 }
 
+if [[ $# -lt 1 ]]; then
+  usage
+  exit 64
+fi
+
+mode="deploy"
+if [[ "$1" == "--validate-only" ]]; then
+  mode="validate"
+  shift
+fi
 if [[ $# -lt 1 ]]; then
   usage
   exit 64
@@ -57,7 +67,9 @@ with open(path, encoding="utf-8") as fh:
 expected_schema = "finite.lat1.nixos-closure.v1"
 if data.get("schema") != expected_schema:
     raise SystemExit(f"unexpected manifest schema: {data.get('schema')!r}")
-if data.get("repository") != "finitecomputer/finite-mono":
+if data.get("repository") not in {
+    "finitecomputer/finite-mono",
+}:
     raise SystemExit(f"unexpected repository: {data.get('repository')!r}")
 
 rev = data.get("rev")
@@ -193,6 +205,10 @@ echo "    transport=$DEPLOY_TRANSPORT"
 
 if [[ "$DEPLOY_TRANSPORT" == "cachix" ]]; then
   echo "    cachix=$CACHIX_CACHE ($CACHIX_SUBSTITUTER)"
+fi
+
+if [[ "$mode" == "validate" ]]; then
+  exit 0
 fi
 
 if git cat-file -e "$REV:infra/nixos/modules/metrics.nix" 2>/dev/null \

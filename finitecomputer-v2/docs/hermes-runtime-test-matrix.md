@@ -22,7 +22,7 @@ Every rung must exercise the same product shape:
   versions, the one canonical Runtime image digest, and the Finite Skills
   baseline bundled for fresh agents; no test lane supplies an independent
   default;
-- `.github/workflows/runtime-image.yml` and
+- `.depot/workflows/runtime-image.yml` and
   `scripts/build_runtime_image.py` are the single image build path; every
   provider rung consumes the resulting digest rather than rebuilding a variant;
 - normal Hermes delivery uses the resident Rust `finitechat hermes serve`

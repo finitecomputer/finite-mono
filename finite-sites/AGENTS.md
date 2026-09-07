@@ -88,5 +88,5 @@ git clone https://git.finite.chat/PROJECT.git
 
 The monorepo publishes `fsite` binaries from component tags named
 `fsite/vX.Y.Z`. Keep README install commands and generated `/llms.txt`
-instructions in sync with `.github/workflows/release-fsite.yml` and the public
+instructions in sync with `.depot/workflows/release-fsite.yml` and the public
 `finitecomputer/finite-releases` download host.

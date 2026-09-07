@@ -1,0 +1,236 @@
+#!/usr/bin/env python3
+"""Move the exact devfinity Nix closure between isolated CI jobs."""
+
+from __future__ import annotations
+
+import json
+import os
+import re
+import subprocess
+import sys
+from datetime import UTC, datetime
+from pathlib import Path
+
+
+SCHEMA = "finite.ci.devfinity-nix-handoff.v1"
+REPOSITORY = "finitecomputer/finite-mono"
+REVISION_PATTERN = re.compile(r"^[0-9a-f]{40}$")
+DEVFINITY_PATTERN = re.compile(r"^/nix/store/[0-9a-z]{32}-devfinity$")
+
+
+class HandoffError(Exception):
+    def __init__(self, message: str, exit_code: int = 65) -> None:
+        super().__init__(message)
+        self.exit_code = exit_code
+
+
+def command_output(command: list[str]) -> str:
+    completed = subprocess.run(
+        command,
+        check=True,
+        stdout=subprocess.PIPE,
+        text=True,
+    )
+    return completed.stdout.strip()
+
+
+def run_command(command: list[str]) -> None:
+    subprocess.run(command, check=True)
+
+
+def require_revision(value: str) -> str:
+    if not REVISION_PATTERN.fullmatch(value):
+        raise HandoffError(f"invalid source revision: {value!r}", 64)
+    return value
+
+
+def require_checkout_revision(expected: str) -> None:
+    actual = command_output(["git", "rev-parse", "HEAD"])
+    if actual != expected:
+        raise HandoffError(
+            f"checkout revision {actual} does not match handoff revision {expected}"
+        )
+
+
+def require_repository() -> None:
+    actual = os.environ.get("GITHUB_REPOSITORY")
+    if actual and actual != REPOSITORY:
+        raise HandoffError(
+            f"repository {actual!r} does not match handoff repository {REPOSITORY!r}"
+        )
+
+
+def devfinity_output(package_outputs: Path) -> str:
+    if not package_outputs.is_file():
+        raise HandoffError(f"Nix package output list is missing: {package_outputs}", 66)
+    matches = [
+        line.strip()
+        for line in package_outputs.read_text(encoding="utf-8").splitlines()
+        if DEVFINITY_PATTERN.fullmatch(line.strip())
+    ]
+    if len(matches) != 1:
+        raise HandoffError(
+            "expected exactly one devfinity output in "
+            f"{package_outputs}; found {len(matches)}"
+        )
+    return matches[0]
+
+
+def prepare_destination(destination: Path) -> tuple[Path, Path]:
+    if destination.exists():
+        if not destination.is_dir():
+            raise HandoffError(f"handoff destination is not a directory: {destination}")
+        if any(destination.iterdir()):
+            raise HandoffError(f"handoff destination is not empty: {destination}")
+    destination.mkdir(parents=True, exist_ok=True)
+    destination = destination.resolve()
+    cache = destination / "nix-cache"
+    cache.mkdir()
+    return destination, cache
+
+
+def pack(revision: str, package_outputs: Path, destination: Path) -> None:
+    revision = require_revision(revision)
+    require_repository()
+    require_checkout_revision(revision)
+    output = devfinity_output(package_outputs)
+    run_command(["nix", "path-info", output])
+
+    destination, cache = prepare_destination(destination)
+    closure_paths = command_output(["nix", "path-info", "--recursive", output])
+    paths = sorted(set(closure_paths.splitlines()))
+    if output not in paths:
+        raise HandoffError("devfinity output is absent from its recursive closure")
+    (destination / "store-paths.txt").write_text(
+        "".join(f"{path}\n" for path in paths), encoding="utf-8"
+    )
+
+    run_command(
+        [
+            "nix",
+            "copy",
+            "--option",
+            "builders",
+            "",
+            "--to",
+            f"file://{cache}",
+            output,
+        ]
+    )
+    if not (cache / "nix-cache-info").is_file():
+        raise HandoffError(f"Nix did not create a complete file cache at {cache}")
+
+    manifest: dict[str, object] = {
+        "cache": "nix-cache",
+        "closure_path_count": len(paths),
+        "created_utc": datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ"),
+        "devfinity": output,
+        "repository": REPOSITORY,
+        "rev": revision,
+        "schema": SCHEMA,
+    }
+    for name in ("GITHUB_RUN_ID", "GITHUB_RUN_ATTEMPT"):
+        value = os.environ.get(name)
+        if value:
+            manifest[name.lower()] = value
+    (destination / "manifest.json").write_text(
+        json.dumps(manifest, indent=2, sort_keys=True) + "\n",
+        encoding="utf-8",
+    )
+    print(f"Packed devfinity closure {output} ({len(paths)} paths)")
+
+
+def read_manifest(artifact: Path, revision: str) -> tuple[str, Path]:
+    manifest_path = artifact / "manifest.json"
+    try:
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    except (FileNotFoundError, json.JSONDecodeError) as error:
+        raise HandoffError(f"invalid handoff manifest: {manifest_path}", 66) from error
+    expected = {
+        "schema": SCHEMA,
+        "repository": REPOSITORY,
+        "rev": revision,
+        "cache": "nix-cache",
+    }
+    for key, value in expected.items():
+        if manifest.get(key) != value:
+            raise HandoffError(
+                f"handoff manifest {key} is {manifest.get(key)!r}; expected {value!r}"
+            )
+    output = manifest.get("devfinity")
+    if not isinstance(output, str) or not DEVFINITY_PATTERN.fullmatch(output):
+        raise HandoffError(f"invalid devfinity store path in handoff: {output!r}")
+    cache = artifact / "nix-cache"
+    if not (cache / "nix-cache-info").is_file():
+        raise HandoffError(f"handoff file cache is missing or incomplete: {cache}", 66)
+    return output, cache.resolve()
+
+
+def restore(revision: str, artifact: Path) -> None:
+    revision = require_revision(revision)
+    require_repository()
+    require_checkout_revision(revision)
+    output, cache = read_manifest(artifact, revision)
+    evaluated = command_output(
+        [
+            "nix",
+            "eval",
+            "--raw",
+            ".#packages.x86_64-linux.devfinity.outPath",
+        ]
+    )
+    if evaluated != output:
+        raise HandoffError(
+            f"checkout evaluates devfinity to {evaluated}; handoff contains {output}"
+        )
+    run_command(
+        [
+            "nix",
+            "copy",
+            "--no-check-sigs",
+            "--option",
+            "builders",
+            "",
+            "--from",
+            f"file://{cache}",
+            output,
+        ]
+    )
+    run_command(["nix", "path-info", output])
+    print(f"Restored devfinity closure {output}")
+
+
+def usage() -> None:
+    print(
+        "usage: nix-service-package-handoff "
+        "pack <revision> <package-outputs> <artifact-dir>\n"
+        "       nix-service-package-handoff restore <revision> <artifact-dir>",
+        file=sys.stderr,
+    )
+
+
+def main(argv: list[str]) -> int:
+    try:
+        if len(argv) == 5 and argv[1] == "pack":
+            pack(argv[2], Path(argv[3]), Path(argv[4]))
+        elif len(argv) == 4 and argv[1] == "restore":
+            restore(argv[2], Path(argv[3]))
+        else:
+            usage()
+            return 64
+    except HandoffError as error:
+        print(f"nix-service-package-handoff: {error}", file=sys.stderr)
+        return error.exit_code
+    except subprocess.CalledProcessError as error:
+        rendered = " ".join(str(part) for part in error.cmd)
+        print(
+            f"nix-service-package-handoff: command failed "
+            f"({error.returncode}): {rendered}",
+            file=sys.stderr,
+        )
+        return error.returncode or 1
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main(sys.argv))

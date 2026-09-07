@@ -16,8 +16,8 @@ definitions map: `infra/images/README.md`. Rung-ladder discipline: see
 
 ## PRECONDITIONS
 
-- Depot-managed GitHub Actions runner access is available for the
-  `depot-ubuntu-24.04` label. Set `DEPOT_RUNTIME_IMAGE_PROJECT_ID` or the
+- Native Depot CI access is available for the `depot-ubuntu-24.04` runner.
+  Set `DEPOT_RUNTIME_IMAGE_PROJECT_ID` or the
   shared `DEPOT_PROJECT_ID` repository variable or secret for Depot remote
   container builds. The workflow authenticates through `depot/setup-action`
    OIDC. Image builds run in CI on ephemeral Depot runners/builders; the
@@ -25,14 +25,14 @@ definitions map: `infra/images/README.md`. Rung-ladder discipline: see
 - The tree state you are building is on the ref you dispatch (the single
   checkout SHA pins finitechat + finite-sites + finite-brain + finite-skills
   together; that is the whole point of the mono adaptation — see the header in
-  `.github/workflows/runtime-image.yml`).
+  `.depot/workflows/runtime-image.yml`).
 
 ## STEPS
 
 ### 1. Optional preflight of the source revision
 
 Dispatch **Hermes runtime smoke**
-(`.github/workflows/hermes-runtime-smoke.yml`) on the revision to promote. It
+(`.depot/workflows/hermes-runtime-smoke.yml`) on the revision to promote. It
 is test-only and builds the same canonical monorepo Agent Runtime Dockerfile as
 the publication path; it cannot publish a second Hermes-only image. This is a
 useful early source-level failure detector, but because it performs a separate
@@ -41,12 +41,36 @@ build it is not the promotion proof for the final digest.
 ### 2. Build and publish the one runtime image
 
 1. On the reviewed revision, dispatch **Agent Runtime Image**
-   (`.github/workflows/runtime-image.yml`) with
+   (`.depot/workflows/runtime-image.yml`) with
    `version=<date-based, e.g. 2026-07-08.1>`. Hermes is pinned once through the
    root flake (`flake.lock`); the build stamps that pin's version into the
    image label and every smoke lane asserts the running Hermes against it. For
    future upgrades, move the reviewed flake pin alone; do not add a
    dispatch-time override.
+
+   After the GitHub/Depot CI cutover, dispatch the production publisher directly
+   through Depot. Confirm that the run's resolved source revision is the
+   reviewed GitHub `main` revision before promoting its digest:
+
+   ```sh
+   git fetch origin --prune
+   REV="$(git rev-parse HEAD)"
+   [[ "$REV" =~ ^[0-9a-f]{40}$ ]]
+   git merge-base --is-ancestor "$REV" origin/main
+   depot ci dispatch \
+     --org scthc5h66g \
+     --repo finitecomputer/finite-mono \
+     --workflow runtime-image.yml \
+     --ref main \
+     --input rev="$REV" \
+     --input version=2026-07-08.1 \
+     --input publish_production=true \
+     --output json
+   ```
+
+   This publishes a verified, digest-pinned image to GHCR. It does not change
+   the artifact selected by Core, edit a host, restart a runner, or roll an
+   existing Runtime; those are separate, explicit steps below.
 2. The publication workflow builds exactly once via
    `finitecomputer-v2/scripts/build_runtime_image.py` from one staged
    finite-mono checkout and root Cargo lockfile, embeds the Finite Skills

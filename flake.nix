@@ -1,15 +1,6 @@
 {
   description = "Finite monorepo development environment";
 
-  nixConfig = {
-    extra-substituters = [
-      "https://finite.cachix.org"
-    ];
-    extra-trusted-public-keys = [
-      "finite.cachix.org-1:Sg/y/5ax+IxMrPXS4moFro6YFdqa+a2gzDYAesRcVsk="
-    ];
-  };
-
   inputs = {
     nixpkgs.url = "github:nixos/nixpkgs/nixos-25.11";
     crane.url = "github:ipetkov/crane/v0.23.4";

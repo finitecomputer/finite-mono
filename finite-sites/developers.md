@@ -173,7 +173,7 @@ the current deploy runbook.
 ## Release Shape
 
 Component tags named `fsite/vX.Y.Z` trigger
-`.github/workflows/release-fsite.yml` from the monorepo root.
+`.depot/workflows/release-fsite.yml` in native Depot CI from the monorepo root.
 
 The release workflow currently packages:
 

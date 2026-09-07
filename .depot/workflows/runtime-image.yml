@@ -3,6 +3,10 @@ run-name: Build agent runtime ${{ inputs.version }}
 on:
   workflow_dispatch:
     inputs:
+      rev:
+        description: Exact reviewed commit on GitHub main to build
+        required: true
+        type: string
       version:
         description: Image version tag, for example 2026-07-08.1
         required: true
@@ -16,6 +20,7 @@ concurrency:
   group: agent-runtime-image-${{ inputs.version }}
 env:
   CACHIX_CACHE_NAME: finite
+  SOURCE_REV: ${{ inputs.rev }}
   USER: runner
 jobs:
   publish:
@@ -23,9 +28,17 @@ jobs:
     permissions:
       contents: read
       id-token: write
-      packages: write
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.rev }}
+          fetch-depth: 0
+      - name: Verify exact source revision
+        run: |
+          [[ "$SOURCE_REV" =~ ^[0-9a-f]{40}$ ]]
+          test "$(git rev-parse HEAD)" = "$SOURCE_REV"
+          git fetch --no-tags origin main
+          git merge-base --is-ancestor "$SOURCE_REV" origin/main
       - uses: depot/setup-action@v1
         with:
           oidc: true
@@ -40,7 +53,7 @@ jobs:
           CACHIX_AUTH_TOKEN: ${{ secrets.CACHIX_AUTH_TOKEN }}
         run: |
           if [ -z "$CACHIX_AUTH_TOKEN" ]; then
-            echo "::error::set CACHIX_AUTH_TOKEN for this GitHub Actions workflow"
+            echo "::error::set CACHIX_AUTH_TOKEN in Depot CI"
             exit 1
           fi
       - uses: cachix/cachix-action@v17
@@ -63,7 +76,7 @@ jobs:
           version_ref="$IMAGE:$VERSION"
           test -z "$(git status --porcelain)"
           if [ -z "$DEPOT_PROJECT_ID" ]; then
-            echo "::error::set DEPOT_RUNTIME_IMAGE_PROJECT_ID or DEPOT_PROJECT_ID for this GitHub Actions workflow"
+            echo "::error::set DEPOT_RUNTIME_IMAGE_PROJECT_ID or DEPOT_PROJECT_ID in Depot CI"
             exit 1
           fi
           finitecomputer-v2/scripts/build_runtime_image.py \
@@ -75,16 +88,13 @@ jobs:
 
           local_image_id="$(docker image inspect "$version_ref" --format '{{.Id}}')"
           test -n "$local_image_id"
-          test "$(docker image inspect "$version_ref" --format '{{index .Config.Labels "org.opencontainers.image.revision"}}')" = "$GITHUB_SHA"
-          test "$(python3 -c 'import json; print(json.load(open("finitecomputer-v2/runtime-image-report.json"))["mono_sha"])')" = "$GITHUB_SHA"
+          test "$(docker image inspect "$version_ref" --format '{{index .Config.Labels "org.opencontainers.image.revision"}}')" = "$SOURCE_REV"
+          test "$(python3 -c 'import json; print(json.load(open("finitecomputer-v2/runtime-image-report.json"))["mono_sha"])')" = "$SOURCE_REV"
           test "$(python3 -c 'import json; print(json.load(open("finitecomputer-v2/runtime-image-report.json"))["image_metadata"]["id"])')" = "$local_image_id"
-          # The label is the lock-derived stamp; the running Hermes must equal it.
-          hermes_label="$(docker image inspect "$version_ref" --format '{{index .Config.Labels "computer.finite.runtime.hermes-agent-version"}}')"
-          test -n "$hermes_label"
-          docker run --rm --entrypoint /bin/sh -e "HERMES_AGENT_VERSION=$hermes_label" "$version_ref" -ec '
+          docker run --rm --entrypoint /bin/sh "$version_ref" -ec '
             test -n "$HERMES_AGENT_STORE_PATH"
             test -n "$HERMES_AGENT_PYTHON_PATH"
-            test "$(python3 -c '\''import importlib.metadata; print(importlib.metadata.version("hermes-agent"))'\'')" = "$HERMES_AGENT_VERSION"
+            test "$(python3 -c '\''import importlib.metadata; print(importlib.metadata.version("hermes-agent"))'\'')" = "0.20.0"
             test "$(command -v hermes)" = "$HERMES_AGENT_STORE_PATH/bin/hermes"
             test "$(command -v python3)" = "$HERMES_AGENT_PYTHON_PATH/bin/python3"
             test -n "$AGENT_RUNTIME_TOOLCHAIN_PATH"
@@ -139,8 +149,8 @@ jobs:
           echo "image=$IMAGE" >> "$GITHUB_OUTPUT"
       - name: Log in to GHCR for canary publication
         env:
-          GHCR_TOKEN: ${{ github.token }}
-          GHCR_USERNAME: ${{ github.actor }}
+          GHCR_TOKEN: ${{ secrets.FINITE_GHCR_TOKEN }}
+          GHCR_USERNAME: ${{ secrets.FINITE_GHCR_USERNAME }}
         run: echo "$GHCR_TOKEN" | docker login ghcr.io -u "$GHCR_USERNAME" --password-stdin
       - name: Publish and verify the non-production canary
         id: canary
@@ -178,12 +188,12 @@ jobs:
           BUILD_ID: ${{ steps.build.outputs.build_id }}
           SOURCE_DIGEST: ${{ steps.canary.outputs.digest }}
           DEPOT_PROJECT_ID: ${{ steps.build.outputs.project_id }}
-          GHCR_TOKEN: ${{ github.token }}
-          GHCR_USERNAME: ${{ github.actor }}
+          GHCR_TOKEN: ${{ secrets.FINITE_GHCR_TOKEN }}
+          GHCR_USERNAME: ${{ secrets.FINITE_GHCR_USERNAME }}
         run: |
           echo "$GHCR_TOKEN" | docker login ghcr.io -u "$GHCR_USERNAME" --password-stdin
           version_ref="$IMAGE:$VERSION"
-          sha_ref="$IMAGE:sha-${GITHUB_SHA::12}"
+          sha_ref="$IMAGE:sha-${SOURCE_REV::12}"
           depot push --project "$DEPOT_PROJECT_ID" --tag "$version_ref" --tag "$sha_ref" "$BUILD_ID"
           for ref in "$version_ref" "$sha_ref"; do
             docker pull "$ref" >/dev/null
@@ -228,4 +238,3 @@ jobs:
             echo "Production promotion: \`$PRODUCTION\`" >> "$GITHUB_STEP_SUMMARY"
           else
             echo "Production promotion remained disabled." >> "$GITHUB_STEP_SUMMARY"
-          fi

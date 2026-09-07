@@ -276,10 +276,12 @@ nix develop ..#hermes-bridge-ci --command bash -lc \
 ### Releases
 
 Pushing a `finitechat/vX.Y.Z` tag runs
-`.github/workflows/release-finitechat.yml`, which builds the CLI archives for
-linux-x86_64, macos-aarch64, and macos-x86_64 and publishes them to
-`finitecomputer/finite-releases`. The install block at the top of this README
-consumes the refreshed `finitechat-latest` alias from the release repository.
+`.depot/workflows/release-finitechat.yml`, which builds the
+`finitechat` binary for linux-x86_64, macos-aarch64, and macos-x86_64 and
+attaches `finitechat-<platform>.tar.gz` plus `.sha256` checksums to the
+public `finitecomputer/finite-releases` release. The install block at the top
+of this README consumes the refreshed `finitechat-latest` alias from the
+release repository.
 
 ### Publish Safety
 

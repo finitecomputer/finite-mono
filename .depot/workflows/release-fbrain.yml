@@ -1,7 +1,7 @@
-name: Release fsite
+name: Release fbrain
 on:
   push:
-    tags: ["fsite/v*"]
+    tags: ["fbrain/v*"]
   workflow_dispatch:
     inputs:
       publish:
@@ -14,84 +14,78 @@ on:
         required: true
         default: false
         type: boolean
+      canary_publish:
+        description: Allow the bounded cutover canary while normal publication remains disabled
+        required: true
+        default: false
+        type: boolean
       release_tag:
         description: Historical component tag for alias-only promotion; leave blank for a normal release
         required: false
         default: ""
-permissions:
-  contents: read
 concurrency:
-  group: release-fsite
+  group: release-fbrain
   cancel-in-progress: false
 env:
   CARGO_TERM_COLOR: always
 jobs:
   build:
     if: github.event_name != 'workflow_dispatch' || inputs.alias_only != true
-    runs-on: ${{ matrix.runs_on }}
+    runs-on: depot-ubuntu-24.04
     strategy:
       fail-fast: false
+      # Native Depot CI has no macOS runner. Restore the Darwin rows only with
+      # a dedicated macOS execution lane; do not cross-build them on Linux.
       matrix:
         include:
-          - runs_on: ubuntu-latest
-            asset_name: fsite-linux-x86_64
+          - asset_name: fbrain-linux-x86_64
             target: x86_64-unknown-linux-gnu
-          - runs_on: macos-14
-            asset_name: fsite-macos-aarch64
-            target: aarch64-apple-darwin
-          - runs_on: macos-14
-            asset_name: fsite-macos-x86_64
-            target: x86_64-apple-darwin
     steps:
       - uses: actions/checkout@v4
       - name: Validate component version
         run: |
           case "$GITHUB_REF_NAME" in
-            fsite/v*) version="${GITHUB_REF_NAME#fsite/v}" ;;
-            *) echo "::error::release workflow must run at an fsite/v* tag"; exit 1 ;;
+            fbrain/v*) version="${GITHUB_REF_NAME#fbrain/v}" ;;
+            *) echo "::error::release workflow must run at an fbrain/v* tag"; exit 1 ;;
           esac
-          python3 scripts/delivery.py verify-component-version --component fsite --version "$version"
+          python3 scripts/delivery.py verify-component-version --component fbrain --version "$version"
       - name: Install Rust
         run: |
           rustup toolchain install 1.88.0 --profile minimal
           rustup default 1.88.0
           rustup target add "${{ matrix.target }}"
-      - name: Build fsite
-        run: cargo build --locked --release --target "${{ matrix.target }}" --package fsite-cli --bin fsite
-      - name: Package fsite
+      - name: Build fbrain
+        run: cargo build --locked --release --target "${{ matrix.target }}" --package finite-brain-cli --bin fbrain
+      - name: Package fbrain
         env:
           ASSET_NAME: ${{ matrix.asset_name }}
           TARGET: ${{ matrix.target }}
         run: |
           mkdir -p dist
-          cp "target/$TARGET/release/fsite" dist/fsite
-          tar -C dist -czf "$ASSET_NAME.tar.gz" fsite
-          if command -v sha256sum >/dev/null 2>&1; then
-            sha256sum "$ASSET_NAME.tar.gz" > "$ASSET_NAME.tar.gz.sha256"
-          else
-            shasum -a 256 "$ASSET_NAME.tar.gz" > "$ASSET_NAME.tar.gz.sha256"
-          fi
-      - name: Build finitesitesd
+          cp "target/$TARGET/release/fbrain" dist/fbrain
+          tar --sort=name --mtime='UTC 1970-01-01' --owner=0 --group=0 --numeric-owner -C dist -czf "$ASSET_NAME.tar.gz" fbrain
+          sha256sum "$ASSET_NAME.tar.gz" > "$ASSET_NAME.tar.gz.sha256"
+      - name: Build finite-brain server
         if: matrix.target == 'x86_64-unknown-linux-gnu'
         run: |
-          cargo build --locked --release --target x86_64-unknown-linux-gnu --package finitesitesd --bin finitesitesd
-          mkdir -p dist-daemon
-          cp target/x86_64-unknown-linux-gnu/release/finitesitesd dist-daemon/finitesitesd
-          tar -C dist-daemon -czf finitesitesd-linux-x86_64.tar.gz finitesitesd
-          sha256sum finitesitesd-linux-x86_64.tar.gz > finitesitesd-linux-x86_64.tar.gz.sha256
+          cargo build --locked --release --target x86_64-unknown-linux-gnu --package finite-brain-app --bin finite-brain
+          mkdir -p dist-server
+          cp target/x86_64-unknown-linux-gnu/release/finite-brain dist-server/finite-brain
+          tar --sort=name --mtime='UTC 1970-01-01' --owner=0 --group=0 --numeric-owner -C dist-server -czf finite-brain-linux-x86_64.tar.gz finite-brain
+          sha256sum finite-brain-linux-x86_64.tar.gz > finite-brain-linux-x86_64.tar.gz.sha256
       - uses: actions/upload-artifact@v4
         with:
           name: ${{ matrix.asset_name }}
           path: |
             ${{ matrix.asset_name }}.tar.gz
             ${{ matrix.asset_name }}.tar.gz.sha256
-            finitesitesd-linux-x86_64.tar.gz
-            finitesitesd-linux-x86_64.tar.gz.sha256
+            finite-brain-linux-x86_64.tar.gz
+            finite-brain-linux-x86_64.tar.gz.sha256
           if-no-files-found: ignore
   publish:
     needs: build
-    if: vars.FINITE_RELEASE_PUBLISH_ENABLED == 'true' && (github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && inputs.publish == true && inputs.alias_only != true))
-    runs-on: ubuntu-latest
+    if: (vars.FINITE_RELEASE_PUBLISH_ENABLED == 'true' || (github.event_name == 'workflow_dispatch' && vars.FINITE_RELEASE_CANARY_PUBLISH_ENABLED == 'true' && inputs.canary_publish == true)) && (github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && inputs.publish == true && inputs.alias_only != true))
+    runs-on: depot-ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
       - uses: actions/download-artifact@v4
@@ -102,18 +96,18 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.FINITE_RELEASES_GITHUB_TOKEN }}
         run: |
-          version="${GITHUB_REF_NAME#fsite/v}"
+          version="${GITHUB_REF_NAME#fbrain/v}"
           source_sha="$(git rev-parse HEAD)"
           python3 scripts/delivery.py publish-release \
-            --component fsite \
+            --component fbrain \
             --version "$version" \
             --source-sha "$source_sha" \
             --run-id "$GITHUB_RUN_ID" \
             --assets-dir release-assets \
             --repository finitecomputer/finite-releases
   promote-alias:
-    if: github.event_name == 'workflow_dispatch' && inputs.publish == true && inputs.alias_only == true && vars.FINITE_RELEASE_PUBLISH_ENABLED == 'true'
-    runs-on: ubuntu-latest
+    if: github.event_name == 'workflow_dispatch' && inputs.publish == true && inputs.alias_only == true && (vars.FINITE_RELEASE_PUBLISH_ENABLED == 'true' || (vars.FINITE_RELEASE_CANARY_PUBLISH_ENABLED == 'true' && inputs.canary_publish == true))
+    runs-on: depot-ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
       - name: Repoint rolling alias from verified immutable assets
@@ -122,13 +116,13 @@ jobs:
           RELEASE_TAG: ${{ inputs.release_tag }}
         run: |
           case "$RELEASE_TAG" in
-            fsite/v*) version="${RELEASE_TAG#fsite/v}" ;;
-            *) echo "::error::release_tag must be an fsite/v* tag"; exit 1 ;;
+            fbrain/v*) version="${RELEASE_TAG#fbrain/v}" ;;
+            *) echo "::error::release_tag must be an fbrain/v* tag"; exit 1 ;;
           esac
           git fetch --no-tags origin "refs/tags/$RELEASE_TAG:refs/tags/$RELEASE_TAG"
           source_sha="$(git rev-parse "$RELEASE_TAG^{commit}")"
           python3 scripts/delivery.py promote-release-alias \
-            --component fsite \
+            --component fbrain \
             --version "$version" \
             --expected-source-sha "$source_sha" \
             --repository finitecomputer/finite-releases

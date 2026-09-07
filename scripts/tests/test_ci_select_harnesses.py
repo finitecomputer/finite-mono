@@ -33,7 +33,7 @@ def selected(*paths: str) -> set[str]:
 
 
 def ci_workflow_text() -> str:
-    return (ROOT / ".github/workflows/ci.yml").read_text(encoding="utf-8")
+    return (ROOT / ".depot" / "workflows" / "ci.yml").read_text(encoding="utf-8")
 
 
 def ci_job_block(job_id: str) -> str:
@@ -46,20 +46,26 @@ def ci_job_block(job_id: str) -> str:
 
 
 class CiHarnessSelectionTests(unittest.TestCase):
-    def test_ci_pull_request_trigger_is_scoped_to_main(self) -> None:
+    def test_depot_ci_does_not_reference_parked_electron_harness(self) -> None:
         workflow = ci_workflow_text()
 
-        self.assertIn("pull_request:\n    branches:\n      - main", workflow)
+        self.assertNotIn("electron-alpha", workflow)
+        self.assertNotIn("run_electron_alpha", workflow)
+        self.assertNotIn("runs-on: macos-", workflow)
+
+    def test_ci_push_trigger_excludes_production(self) -> None:
+        workflow = ci_workflow_text()
+
+        self.assertIn("pull_request:", workflow)
+        self.assertIn("push:\n    branches:\n      - main\n      - migration-integration", workflow)
         self.assertNotIn("branches: [production]", workflow)
+        self.assertNotIn("      - production", workflow)
 
-    def test_ci_authenticates_nix_github_fetches(self) -> None:
+    def test_native_ci_does_not_depend_on_github_fetch_tokens(self) -> None:
         workflow = ci_workflow_text()
 
-        self.assertIn(
-            "NIX_CONFIG: |\n"
-            "    access-tokens = github.com=${{ github.token }}",
-            workflow,
-        )
+        self.assertNotIn("github.token", workflow)
+        self.assertNotIn("secrets.GITHUB_TOKEN", workflow)
 
     def test_hermes_flake_input_avoids_github_archive_fetchers(self) -> None:
         # Both the `github:` scheme (api.github.com/.../tarball/<rev>) and the
@@ -124,11 +130,14 @@ class CiHarnessSelectionTests(unittest.TestCase):
         # that regular CI already pushes to Cachix at the same rev; without
         # the read-only step every dispatch rebuilds the Rust services from
         # source (~30-45 min instead of minutes).
-        for host in ("lat1", "lat2", "lat3", "lat4"):
-            with self.subTest(workflow=host):
-                text = (
-                    ROOT / f".github/workflows/{host}-nixos-closure.yml"
-                ).read_text(encoding="utf-8")
+        for path in (
+            ".depot/workflows/lat1-nixos-closure.yml",
+            ".github/workflows/lat2-nixos-closure.yml",
+            ".depot/workflows/lat3-nixos-closure.yml",
+            ".github/workflows/lat4-nixos-closure.yml",
+        ):
+            with self.subTest(workflow=path):
+                text = (ROOT / path).read_text(encoding="utf-8")
                 self.assertIn(
                     "uses: DeterminateSystems/nix-installer-action@v16", text
                 )
@@ -211,8 +220,36 @@ class CiHarnessSelectionTests(unittest.TestCase):
             {"run_nix_checks"},
         )
 
+    def test_depot_closure_fetcher_runs_nix_checks(self) -> None:
+        self.assertEqual(
+            selected(
+                "scripts/fetch_depot_nixos_closure.py",
+                "scripts/tests/test_depot_closure_artifact.py",
+            ),
+            {"run_nix_checks"},
+        )
+
+    def test_nix_service_handoff_runs_package_smoke_and_contract_lanes(self) -> None:
+        self.assertEqual(
+            selected(
+                "scripts/ci/nix-service-package-handoff",
+                "scripts/tests/test_nix_service_package_handoff.py",
+            ),
+            {
+                "run_devfinity_smoke",
+                "run_nix_checks",
+                "run_nix_service_packages",
+            },
+        )
+
     def test_ci_workflow_selects_every_active_harness(self) -> None:
         values = selection_for(".github/workflows/ci.yml")
+
+        for key, value in values.items():
+            self.assertEqual(value, "true", key)
+
+    def test_depot_ci_workflow_selects_every_active_harness(self) -> None:
+        values = selection_for(".depot/workflows/ci.yml")
 
         for key, value in values.items():
             self.assertEqual(value, "true", key)
@@ -265,6 +302,12 @@ class CiHarnessSelectionTests(unittest.TestCase):
         self.assertEqual(
             selected("finite-skills/README.md"),
             set(),
+        )
+
+    def test_search_path_runs_search_check(self) -> None:
+        self.assertEqual(
+            selected("finite-search/src/lib.rs"),
+            {"run_search_check"},
         )
 
     def test_monitoring_script_runs_only_monitoring_contract(self) -> None:
@@ -386,6 +429,14 @@ class CiHarnessSelectionTests(unittest.TestCase):
             {key for key, value in selection.values().items() if value == "true"},
             {"run_nix_checks"},
         )
+
+    def test_changed_file_depot_workflow_path_selects_every_active_harness(self) -> None:
+        args = argparse.Namespace(changed_files=[".depot/workflows/README.md"], event="")
+        selection, _reason, paths = select_harnesses.select_harnesses(args)
+
+        self.assertEqual(paths, [".depot/workflows/README.md"])
+        for key, value in selection.values().items():
+            self.assertEqual(value, "true", key)
 
     def test_changed_file_dot_slash_prefix_matches_bare_path(self) -> None:
         prefixed = argparse.Namespace(changed_files=["./justfile"], event="")
