@@ -23,66 +23,42 @@ pub(crate) fn run<W: Write>(args: AppArgs, output: &mut W) -> Result<(), CliErro
     // read is the operator's non-mutating look at a resident service's home
     // (no writer lease, no dispatch — the smoke-mystery incident class),
     // while writer commands acquire the store's single-writer lease.
-    let runtime = FiniteChatRuntime::open_for_class(options, args.command.command_class())
-        .map_err(map_core_error)?;
+    let runtime = FiniteChatRuntime::open_for_class(options, args.command.command_class())?;
 
     match args.command {
-        AppCommand::Identity => {
-            write_pretty_json(output, &runtime.state().map_err(map_core_error)?.identity)
-        }
+        AppCommand::Identity => write_pretty_json(output, &runtime.state()?.identity),
         AppCommand::State {
             start_runtime,
             wait_update_ms,
             room_id,
         } => {
             let mut state = if start_runtime {
-                runtime
-                    .dispatch_and_wait(AppAction::StartRuntime)
-                    .map_err(map_core_error)?
+                runtime.dispatch_and_wait(AppAction::StartRuntime)?
             } else {
-                runtime.state().map_err(map_core_error)?
+                runtime.state()?
             };
             if let Some(timeout_millis) = wait_update_ms {
-                state = runtime
-                    .wait_for_update(timeout_millis)
-                    .map_err(map_core_error)?;
+                state = runtime.wait_for_update(timeout_millis)?;
             }
             if let Some(room_id) = room_id {
-                state = runtime
-                    .dispatch_and_wait(AppAction::OpenRoom { room_id })
-                    .map_err(map_core_error)?;
+                state = runtime.dispatch_and_wait(AppAction::OpenRoom { room_id })?;
             }
             write_pretty_json(output, &state)
         }
-        AppCommand::Start => write_state(
-            output,
-            runtime
-                .dispatch_and_wait(AppAction::StartRuntime)
-                .map_err(map_core_error)?,
-        ),
-        AppCommand::Wait { timeout_ms } => write_state(
-            output,
-            runtime
-                .wait_for_update(timeout_ms)
-                .map_err(map_core_error)?,
-        ),
-        AppCommand::Stop => write_state(
-            output,
-            runtime
-                .dispatch_and_wait(AppAction::StopRuntime)
-                .map_err(map_core_error)?,
-        ),
+        AppCommand::Start => {
+            write_state(output, runtime.dispatch_and_wait(AppAction::StartRuntime)?)
+        }
+        AppCommand::Wait { timeout_ms } => {
+            write_state(output, runtime.wait_for_update(timeout_ms)?)
+        }
+        AppCommand::Stop => write_state(output, runtime.dispatch_and_wait(AppAction::StopRuntime)?),
         AppCommand::OpenRoom { room_id } => write_state(
             output,
-            runtime
-                .dispatch_and_wait(AppAction::OpenRoom { room_id })
-                .map_err(map_core_error)?,
+            runtime.dispatch_and_wait(AppAction::OpenRoom { room_id })?,
         ),
         AppCommand::CreateRoom { display_name } => write_state(
             output,
-            runtime
-                .dispatch_and_wait(AppAction::CreateRoom { display_name })
-                .map_err(map_core_error)?,
+            runtime.dispatch_and_wait(AppAction::CreateRoom { display_name })?,
         ),
         AppCommand::AddMember {
             room_id,
@@ -106,19 +82,15 @@ pub(crate) fn run<W: Write>(args: AppArgs, output: &mut W) -> Result<(), CliErro
             };
             write_state(
                 output,
-                runtime
-                    .dispatch_and_wait(AppAction::AddRoomMembers {
-                        room_id,
-                        profiles: vec![profile],
-                    })
-                    .map_err(map_core_error)?,
+                runtime.dispatch_and_wait(AppAction::AddRoomMembers {
+                    room_id,
+                    profiles: vec![profile],
+                })?,
             )
         }
         AppCommand::Scan { value } => write_state(
             output,
-            runtime
-                .dispatch_and_wait(AppAction::ScanTarget { value })
-                .map_err(map_core_error)?,
+            runtime.dispatch_and_wait(AppAction::ScanTarget { value })?,
         ),
         AppCommand::Send {
             room_id,
@@ -126,33 +98,23 @@ pub(crate) fn run<W: Write>(args: AppArgs, output: &mut W) -> Result<(), CliErro
             metadata_json,
         } => write_state(
             output,
-            runtime
-                .dispatch_and_wait(AppAction::SendMessage {
-                    room_id,
-                    text,
-                    metadata_json,
-                })
-                .map_err(map_core_error)?,
+            runtime.dispatch_and_wait(AppAction::SendMessage {
+                room_id,
+                text,
+                metadata_json,
+            })?,
         ),
         AppCommand::MarkRead { room_id } => write_state(
             output,
-            runtime
-                .dispatch_and_wait(AppAction::MarkRoomRead { room_id })
-                .map_err(map_core_error)?,
+            runtime.dispatch_and_wait(AppAction::MarkRoomRead { room_id })?,
         ),
         AppCommand::RefreshDevices => write_state(
             output,
-            runtime
-                .dispatch_and_wait(AppAction::RefreshDevices)
-                .map_err(map_core_error)?,
+            runtime.dispatch_and_wait(AppAction::RefreshDevices)?,
         ),
     }
 }
 
 fn write_state<W: Write>(output: &mut W, state: AppState) -> Result<(), CliError> {
     write_pretty_json(output, &state)
-}
-
-fn map_core_error(error: finitechat_core::FiniteChatCoreError) -> CliError {
-    CliError::Runtime(error.to_string())
 }

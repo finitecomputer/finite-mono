@@ -26,7 +26,13 @@ export function waitForHostedChatRetry(delayMs: number, signal: AbortSignal) {
   });
 }
 
-export function shouldRetryHostedChatRequest(status: number | null) {
+export function shouldRetryHostedChatRequest(
+  status: number | null,
+  retryable?: boolean | null
+) {
+  // A hosted-device envelope carries the core's own retry decision; the
+  // status heuristic only covers responses that have none.
+  if (typeof retryable === "boolean") return retryable;
   return status === null || status === 408 || status === 429 || status >= 500;
 }
 

@@ -121,19 +121,6 @@ Runtime, or production service. The fixture backs the canonical dashboard
 components and routes; it is not a second UI and does not prove runtime
 acceptance.
 
-To exercise the same hosted fixture inside the Electron security boundary,
-leave `just dev web-design` running and start:
-
-```bash
-cd finitechat/apps/electron-chat
-npm run dev:electron:fixture
-```
-
-This development-only mode uses an isolated Electron profile and deliberately
-omits the local-device bridge because the deterministic hosted fixture does not
-run a local encrypted chat daemon. Packaged builds always expose and require
-that bridge.
-
 The fixture is intentionally scoped to chat, the machine overview, restart
 presentation, and bounded recovery states. Runtime-owned Stop and Connections
 behavior require the complete devfinity stack. The fixture and devfinity both

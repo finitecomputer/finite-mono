@@ -1,10 +1,10 @@
-# Litestream SQLite replication (chat + Brain → Latitude object storage)
+# Litestream SQLite replication (chat + Brain -> Latitude object storage)
 
 ## Scope
 
-One `finite-litestream-<name>.service` instance per enrolled database on
-finite-lat-1 continuously replicates its SQLite file to the Latitude.sh
-S3-compatible bucket `finite-lat-1-litestream`
+One `finite-litestream-<name>.service` instance per enrolled database on the
+live app-plane host, finite-lat-2, continuously replicates its SQLite file to
+the Latitude.sh S3-compatible bucket `finite-lat-2-litestream`
 (`https://objects.chi.storage.sh`, path-style; chi measured nearest to lat1
 at 29 ms vs nyc's 48 ms, 2026-08-12):
 
@@ -34,7 +34,7 @@ while another writer holds the same role. Restores go to a scratch path
 never next to a live server.
 
 Config: `infra/nixos/modules/finite-litestream.nix` (module),
-`infra/nixos/hosts/finite-lat-1/default.nix` (`finite.litestream.*`). Each
+`infra/nixos/hosts/finite-lat-2/default.nix` (`finite.litestream.*`). Each
 instance runs from its own single-db config in the Nix store;
 `/etc/litestream.yml` renders the combined view of all enrolled databases
 for on-host CLI work (`litestream restore` / `litestream ltx`) — never run
@@ -45,10 +45,10 @@ services. Credentials:
 
 ## PRECONDITIONS
 
-- Bucket `finite-lat-1-litestream` exists at Latitude.sh with a scoped
+- Bucket `finite-lat-2-litestream` exists at Latitude.sh with a scoped
   credential (this bucket only). Custody: regenerate at the provider; copy in
   the team password manager.
-- `/etc/finite/litestream-latitude.env` installed on lat1, root:root 0600,
+- `/etc/finite/litestream-latitude.env` installed on lat2, root:root 0600,
   containing `LITESTREAM_ACCESS_KEY_ID` and `LITESTREAM_SECRET_ACCESS_KEY`.
   `sudo scripts/check-lat1-secret-bootstrap` passes.
 - `finitechat-server.service` and `finite-brain-app.service` are running
@@ -62,7 +62,7 @@ services. Credentials:
    enabling closure is deployed: replicate a scratch SQLite into the bucket
    and `litestream restore` it back. This proves Latitude↔litestream-0.5
    compatibility independent of production.
-   **EXERCISED 2026-08-12** from lat1 itself: scratch WAL db replicated to
+   **HISTORICAL LAT1 EXERCISE 2026-08-12**: scratch WAL db replicated to
    `s3://finite-lat-1-litestream/smoke-test` via
    `https://objects.chi.storage.sh` (path-style) with litestream 0.5.11 from
    the platform pin, restored, `PRAGMA integrity_check` = ok, content
@@ -70,8 +70,10 @@ services. Credentials:
    tiny `smoke-test/` prefix left in the bucket may be deleted from the
    dashboard at any time.
 2. Deploy the enabling closure via the normal CI-built artifact chain:
-   build or download `lat1-nixos-closure-REV`, then run
-   `just deploy-lat1-closure ARTIFACT_DIR`.
+   build or download `lat2-nixos-closure-REV`, then run
+   `just deploy-lat2-closure ARTIFACT_DIR --prepare`, review fresh
+   `scripts/finite-status` evidence, and run
+   `just deploy-lat2-closure ARTIFACT_DIR --activate`.
 3. Watch the initial snapshot uploads:
    `journalctl -fu finite-litestream-finite-chat-server -fu finite-litestream-finite-brain`.
    Chat (`curl -s http://127.0.0.1:8788/health`)
@@ -98,7 +100,7 @@ services. Credentials:
 
 ## VERIFY (restore-parity drill — run at activation and after any migration that swaps the database file)
 
-On lat1 (or any host with the secret and litestream 0.5):
+On lat2 (or any host with the secret and litestream 0.5):
 
 ```sh
 sudo -i
@@ -132,8 +134,9 @@ replication start, not by the documented-but-inert 168 h window. Revisit if
 Latitude ever offers a delete-capable credential or a safe bucket lifecycle
 rule.
 
-**EXERCISED 2026-08-13** (post-#490-deploy verification): full restore from
-the chi bucket to `/data/tmp` in **35 s**, `PRAGMA integrity_check` = ok,
+**HISTORICAL LAT1 EXERCISE 2026-08-13** (post-#490-deploy verification):
+full restore from the chi bucket to `/data/tmp` in **35 s**,
+`PRAGMA integrity_check` = ok,
 `MAX(seq)` in `http_delivery_ops` identical to the live database at drill
 time (147575 == 147575), blob counts identical (764 == 764). Replicator had
 been running since 2026-08-12 22:25 UTC with `txid.replica == txid.db`
@@ -141,18 +144,17 @@ throughout. One defect found and fixed in the same pass: the health unit's
 freshness bound false-alarmed on a quiet database (write recency ≠
 replication lag) — corrected to a txid-convergence check in this branch.
 
-## REAL DR RESTORE (lat1 lost)
+## REAL DR RESTORE (app-plane host lost)
 
-1. Provision the replacement host with the lat1 closure (see
-   `lat1-nixos-reinstall.md` caveats) but do NOT start `finitechat-server` or
-   `finite-brain-app`.
+1. Provision the replacement host from an accepted replacement-host runbook,
+   but do NOT start `finitechat-server` or `finite-brain-app`.
 2. Install `/etc/finite/litestream-latitude.env` from the password manager.
 3. Restore each enrolled database to a scratch path, then into the matching
    StateDirectory **while that service is stopped**:
    - chat: `litestream restore -o /root/server.sqlite3 /var/lib/private/finite-chat/data/server.sqlite3`
-     (or `-replica-url s3://finite-lat-1-litestream/finite-chat-server`)
+     (or `-replica-url s3://finite-lat-2-litestream/finite-chat-server`)
    - Brain: `litestream restore -o /root/finite-brain.sqlite3 /var/lib/private/finitebrain/finite-brain.sqlite3`
-     (or `-replica-url s3://finite-lat-1-litestream/finite-brain`)
+     (or `-replica-url s3://finite-lat-2-litestream/finite-brain`)
 4. `PRAGMA integrity_check` = ok on each file, then place it into the
    service's fresh StateDirectory and remove any root-owned `-wal`/`-shm`
    siblings so the DynamicUser service is the first opener (PR #477 lesson).
@@ -164,7 +166,7 @@ replication lag) — corrected to a txid-convergence check in this branch.
 ## ROLLBACK
 
 Remove `finite.litestream.enable` (or the module import) from
-`hosts/finite-lat-1/default.nix` and redeploy. Replica data stays in the
+`hosts/finite-lat-2/default.nix` and redeploy. Replica data stays in the
 bucket under its retention; the secret file may remain installed. Chat and
 Brain keep serving in either direction — the replicator is read-only toward
 the databases apart from litestream's own checkpointing.

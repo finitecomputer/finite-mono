@@ -287,40 +287,52 @@ fn hash_named_persist_for_a_different_container_id_is_stale() {
 }
 
 #[test]
-fn own_machine_named_legacy_root_is_operable_with_loud_evidence() {
-    // Pre-runtime-id-era runtimes (one live case in the fleet) keep their durable root
-    // named by the source machine id, and same-volume upgrades preserve that
-    // bind forever. The container's OWN machine-named root is therefore a
-    // legitimate durable root when the runtime-id root does not exist; the
-    // acceptance must be loud in the evidence, never silent.
+fn own_machine_named_root_is_a_mismatch_even_when_the_runtime_id_root_is_absent() {
+    // The durable root has exactly one name: the runtime id. A container
+    // bound to its OWN machine-named root — the pre-runtime-id-era layout —
+    // is a mismatch even while the runtime-id root does not exist yet. The
+    // Runner migrates that root in place; the probe never accepts a second
+    // name for the same data, and never records one as legitimate.
     let fixture = new_fixture();
     let machine_named_root = fixture.config.work_root.join("kata").join(MACHINE);
     fixture.add_container(MACHINE, "running", PROJECT, MACHINE, &machine_named_root);
     fixture.add_task(&container_id(), "RUNNING");
     fixture.write_persist(&container_id(), Some(4242));
     fixture.add_vmm_comm(4242, "qemu-system-x86");
+    assert!(!fixture.state_root().exists());
 
     let report = fixture.probe();
-    assert_verdict(&report, LifecycleVerdict::Operable);
+    assert_verdict(&report, LifecycleVerdict::Inoperable);
+    assert_eq!(report.reason.as_deref(), Some("provider_handle_mismatch"));
     let canonical = fixture.check(&report, "canonical_handle");
-    assert_eq!(
-        canonical.evidence["legacy_machine_named_root"],
-        true,
-        "legacy acceptance must be recorded; full report:\n{}",
+    assert_eq!(canonical.evidence["durable_bind_ok"], false);
+    assert!(
+        canonical.evidence["expected_state_root"]
+            .as_str()
+            .unwrap()
+            .ends_with(&format!("kata/{RUNTIME}")),
+        "expected the runtime-id root in evidence; full report:\n{}",
         serde_json::to_string_pretty(&report).unwrap()
     );
     assert_eq!(
-        canonical.evidence["state_root"].as_str(),
+        canonical.evidence["observed_data_mounts"][0].as_str(),
         Some(machine_named_root.to_str().unwrap())
+    );
+    assert!(
+        canonical
+            .evidence
+            .get("legacy_machine_named_root")
+            .is_none(),
+        "no legacy acceptance may be recorded; full report:\n{}",
+        serde_json::to_string_pretty(&report).unwrap()
     );
     fixture.assert_nothing_mutated();
 }
 
 #[test]
 fn machine_named_root_is_a_mismatch_when_the_runtime_id_root_exists() {
-    // The legacy path stops being valid the moment the runtime-id root
-    // exists on disk: a container still bound to the machine-named root
-    // while the canonical root is present must fail closed.
+    // Same bind, runtime-id root present on disk: still a mismatch, and the
+    // evidence names the root the container should have been bound to.
     let fixture = new_fixture();
     let machine_named_root = fixture.config.work_root.join("kata").join(MACHINE);
     fixture.add_container(MACHINE, "running", PROJECT, MACHINE, &machine_named_root);
@@ -364,6 +376,32 @@ fn foreign_machine_named_root_is_still_a_mismatch() {
     let canonical = fixture.check(&report, "canonical_handle");
     assert_eq!(canonical.evidence["durable_bind_ok"], false);
     fixture.assert_nothing_mutated();
+}
+
+#[test]
+fn empty_runtime_id_is_unknown_and_never_derives_a_machine_named_root() {
+    // No runtime id means no durable root to check. The probe must not fall
+    // back to the container name, and it must not touch the provider at all.
+    let fixture = new_fixture();
+    fixture.make_healthy();
+    let report = probe_runtime_lifecycle(
+        &fixture.config,
+        &LifecycleProbeRequest {
+            project_id: PROJECT.to_string(),
+            agent_runtime_id: "   ".to_string(),
+            source_machine_id: MACHINE.to_string(),
+        },
+    );
+    assert_verdict(&report, LifecycleVerdict::Unknown);
+    assert_eq!(report.reason.as_deref(), Some("runtime_id_missing"));
+    assert_eq!(
+        fixture.check(&report, "containerd_task").status,
+        CheckStatus::Skip
+    );
+    assert!(
+        !fixture.state.join("commands.log").exists(),
+        "the probe must not consult the provider without a runtime id"
+    );
 }
 
 #[test]

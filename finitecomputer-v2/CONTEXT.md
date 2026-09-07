@@ -260,8 +260,8 @@ _Avoid_: Purge User Data, subscription cancellation, provider destroy
   finer capability permissions are a customer-run concern.
 - **Account Auth** authorizes access to one **Hosted Web Device**, but that
   device has its own revocable Finite Chat key and durable store.
-- A **Hosted Web Device** is a user device alongside Electron or native
-  devices; it is not an **Agent Principal Key** or room authority.
+- A **Hosted Web Device** is a user device; it is not an **Agent Principal
+  Key** or room authority.
 - A **Canonical Agent Room** binding is product navigation metadata, not Finite
   Chat membership or delivery state. Restart reopens a valid binding and each
   Device resumes normal durable sync for Rooms it already joined. Missing
@@ -349,9 +349,6 @@ _Avoid_: Purge User Data, subscription cancellation, provider destroy
 
 > **Dev:** "Should onboarding send `phala` when the user buys confidential hosting?"
 > **Domain expert:** "No. The user selects a Hosting Tier. Core resolves that product promise to a Runner and Runtime Resource Class without exposing provider placement to the dashboard."
-
-> **Dev:** "Does opening Electron replace the Hosted Web Device?"
-> **Domain expert:** "No. Account Auth enrolls another Finite Chat Device, and each Device heals independently from the canonical Room log."
 
 > **Dev:** "Does fsite sign as the human because it runs inside their agent?"
 > **Domain expert:** "No. It signs with that Agent Runtime's Agent Principal Key; human access is granted separately."

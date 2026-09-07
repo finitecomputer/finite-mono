@@ -5,7 +5,6 @@ metadata:
   namespace: finite-system
 data:
   FC_WORKOS_AUTH_ENABLED: "true"
-  FC_WORKOS_IOS_CLIENT_ID: "client_01KYA32JRWEE23J7QW1F882DVA"
   FC_DASHBOARD_RUNTIME_MODE: "canary"
   FC_CORE_BASE_URL: "http://finite-saas-core:4200"
   FC_CHAT_RELAY_TIMEOUT_MS: "30000"

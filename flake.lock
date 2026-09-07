@@ -89,16 +89,17 @@
       "locked": {
         "lastModified": 1785776243,
         "narHash": "sha256-S6TSGgpf37N8YgbTv70dT+LaPiiaQ4/lJV+js2hnCPk=",
-        "owner": "NousResearch",
-        "repo": "hermes-agent",
+        "ref": "refs/heads/main",
         "rev": "3c27eb6234bf91b8ceee9e9071591b31e9b148cb",
-        "type": "github"
+        "shallow": true,
+        "type": "git",
+        "url": "https://github.com/NousResearch/hermes-agent"
       },
       "original": {
-        "owner": "NousResearch",
-        "ref": "v2026.8.3",
-        "repo": "hermes-agent",
-        "type": "github"
+        "rev": "3c27eb6234bf91b8ceee9e9071591b31e9b148cb",
+        "shallow": true,
+        "type": "git",
+        "url": "https://github.com/NousResearch/hermes-agent"
       }
     },
     "hermes-nixpkgs": {

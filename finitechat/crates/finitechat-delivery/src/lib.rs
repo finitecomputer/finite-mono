@@ -146,6 +146,73 @@ pub struct HttpClaimedKeyPackage {
     pub key_package: KeyPackage,
 }
 
+/// Read-only view of one delivery route, produced by
+/// [`HttpDeliveryService::route_snapshots`] for durable seeding and
+/// engine-vs-engine replay diffs.
+#[derive(Clone, Debug)]
+pub struct HttpRouteSnapshot {
+    pub plane: HttpDeliveryPlane,
+    pub route_key: Vec<u8>,
+    /// The full queue, dense from seq 1 in seq order.
+    pub entries: Vec<HttpQueuedDelivery>,
+    /// Source epochs that already admitted a commit on this route, sorted.
+    pub accepted_commit_epochs: Vec<EpochId>,
+}
+
+/// Read-only view of one core KeyPackage record, produced by
+/// [`HttpDeliveryService::key_package_snapshots`].
+#[derive(Clone, Debug)]
+pub struct HttpKeyPackageSeed {
+    pub key_package_id: HttpKeyPackageId,
+    pub owner: MemberId,
+    pub key_package: KeyPackage,
+    pub consumed: bool,
+}
+
+/// Private helper so [`HttpDeliveryService::route_snapshots`] can enumerate
+/// group and inbox routes uniformly.
+trait RouteKey {
+    fn route_key_bytes(&self) -> &[u8];
+}
+
+impl RouteKey for GroupId {
+    fn route_key_bytes(&self) -> &[u8] {
+        self.as_slice()
+    }
+}
+
+impl RouteKey for MemberId {
+    fn route_key_bytes(&self) -> &[u8] {
+        self.as_slice()
+    }
+}
+
+/// Enumerate one plane's queues as route snapshots, sorted by route key.
+fn plane_route_snapshots<K: RouteKey + std::hash::Hash + Eq>(
+    plane: HttpDeliveryPlane,
+    queues: &HashMap<K, DeliveryQueue>,
+) -> Vec<HttpRouteSnapshot> {
+    let mut keys = queues.keys().collect::<Vec<_>>();
+    keys.sort_by(|left, right| left.route_key_bytes().cmp(right.route_key_bytes()));
+    let mut routes = Vec::with_capacity(keys.len());
+    for key in keys {
+        let queue = &queues[key];
+        let mut epochs = queue
+            .accepted_commit_epochs
+            .iter()
+            .copied()
+            .collect::<Vec<_>>();
+        epochs.sort_unstable();
+        routes.push(HttpRouteSnapshot {
+            plane,
+            route_key: key.route_key_bytes().to_vec(),
+            entries: queue.entries.clone(),
+            accepted_commit_epochs: epochs,
+        });
+    }
+    routes
+}
+
 pub fn prove_http_delivery_core_orders_commit_then_message()
 -> Result<Vec<MessageId>, HttpServerError> {
     let mut service = HttpDeliveryService::default();
@@ -472,6 +539,41 @@ impl HttpDeliveryService {
             return Ok(empty_sync_page(after_seq));
         };
         Ok(sync_page(&inbox.entries, after_seq, limit))
+    }
+
+    /// Read-only snapshot of one route's queue for durable seeding and
+    /// engine-vs-engine replay diffs. Group routes are enumerated first (sorted
+    /// by route key), then inbox routes, so the output is deterministic.
+    pub fn route_snapshots(&self) -> Vec<HttpRouteSnapshot> {
+        let mut routes = Vec::with_capacity(self.groups.len() + self.inboxes.len());
+        routes.extend(plane_route_snapshots(
+            HttpDeliveryPlane::Group,
+            &self.groups,
+        ));
+        routes.extend(plane_route_snapshots(
+            HttpDeliveryPlane::Inbox,
+            &self.inboxes,
+        ));
+        routes
+    }
+
+    /// Read-only snapshot of the core KeyPackage inventory (id, owner, bytes,
+    /// provenance, consumed flag) for durable seeding and replay diffs.
+    /// Sorted by key-package id so the output is deterministic.
+    pub fn key_package_snapshots(&self) -> Vec<HttpKeyPackageSeed> {
+        let mut ids = self.key_packages.keys().collect::<Vec<_>>();
+        ids.sort_by(|left, right| left.as_slice().cmp(right.as_slice()));
+        ids.into_iter()
+            .map(|key_package_id| {
+                let record = &self.key_packages[key_package_id];
+                HttpKeyPackageSeed {
+                    key_package_id: key_package_id.clone(),
+                    owner: record.owner.clone(),
+                    key_package: record.key_package.clone(),
+                    consumed: matches!(record.state, KeyPackageState::Consumed),
+                }
+            })
+            .collect()
     }
 
     pub fn publish_key_package(

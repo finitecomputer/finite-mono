@@ -4,7 +4,7 @@ import test from "node:test";
 import {
   activityLeaseIsFresh,
   activitiesForChat,
-  attachmentSendError,
+  sendError,
   beginPendingChatTurn,
   chatContentIsRenderable,
   isAskForInputToolMessage,
@@ -309,13 +309,28 @@ test("append-only tools remain interspersed around assistant commentary", () => 
 
 test("a swallowed Core attachment failure remains a composer error", () => {
   assert.equal(
-    attachmentSendError({
+    sendError({
       status: "attachment unavailable",
       toast: "Attachment upload failed: blob service unavailable",
     }),
     "Attachment upload failed: blob service unavailable"
   );
-  assert.equal(attachmentSendError({ status: "sent", toast: null }), null);
+  assert.equal(sendError({ status: "sent", toast: null }), null);
+});
+
+test("a currency-gate refusal renders the projection's toast for a text send", () => {
+  const behind =
+    "This device's chat state is behind the server; sending is paused until the room is re-keyed";
+  assert.equal(sendError({ status: "sending paused", toast: behind }), behind);
+  assert.equal(
+    sendError({ status: "waiting for sync", toast: "Waiting for the first sync before sending" }),
+    "Waiting for the first sync before sending"
+  );
+  // A refusal status without its toast still reads as a refusal, not silence.
+  assert.equal(
+    sendError({ status: "sending paused", toast: null }),
+    "Sending is paused until this device's chat state catches up with the server."
+  );
 });
 
 function appState(): AppState {

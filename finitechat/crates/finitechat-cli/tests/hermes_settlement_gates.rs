@@ -12,13 +12,10 @@
 //!   reply scope" under the new owner (no adapter route table exists anymore);
 //! - an edit with no route fields is scoped from the running-turn file across
 //!   process invocations — "outbound edit route";
-//! - route behavior for a `thread_id` that resolves nowhere is pinned to the
-//!   EXPLICIT `FINITECHAT_HERMES_UNKNOWN_THREAD_ROUTE` value only — `home`
-//!   and `default` quietly route to Core's Home default ("intentional
-//!   unscoped Home send stays quiet", and the warned variant of "unknown
-//!   reply route warns before Home fallback"), any other set value fails
-//!   with the typed error (the strict half of that layer) — never the unset
-//!   default, whose semantics are owned by the sidecar, not by this suite;
+//! - a `thread_id` that resolves nowhere routes to Core's Home default
+//!   without adopting the inbound thread's scope ("unknown reply route warns
+//!   before Home fallback"), and a send with no thread at all stays a quiet,
+//!   deliberate Home message ("intentional unscoped Home send stays quiet");
 //! - after an ack, a cursor rewind plus full durable recovery never
 //!   resurrects the acked entry — "restart after processing before ack
 //!   suppresses duplicate turn" (the recently-acked ring owning what the
@@ -28,7 +25,7 @@
 //! - the sidecar's warning text when an unknown thread routes to the Home
 //!   default goes to process stderr, which a parallel test binary cannot
 //!   capture safely — it is pinned by inspection only (`hermes.rs`'s
-//!   `UnknownThreadRoutePolicy::HomeDefault` arm);
+//!   `resolve_route_fields`);
 //! - the adapter-side route-table seams the deleted layers used to exercise
 //!   no longer exist (the adapter owns no state store), so these gates pin
 //!   the surviving sidecar-side behavior instead.
@@ -539,51 +536,19 @@ fn edit_without_route_fields_resolves_scope_from_the_running_turn_file() {
 }
 
 /// Gate ("unknown reply route warns before Home fallback" / "intentional
-/// unscoped Home send stays quiet"), pinned against EXPLICIT env values only:
-/// `home` and `default` route a nowhere-resolving `thread_id` to Core's Home
-/// default quietly (and never let it adopt the inbound thread's scope), while
-/// any other set value — spelled here as `error` — is the strict typed
-/// failure. The UNSET default is deliberately never asserted: it belongs to
-/// the sidecar's product policy (a sibling change flips it from strict error
-/// to home fallback), and this suite must hold on either side of that flip.
-/// This test solely owns the process-global policy env var; no other test in
-/// this binary depends on the policy (their threads always resolve).
+/// unscoped Home send stays quiet"): a nowhere-resolving `thread_id` routes to
+/// Core's Home default and never adopts the inbound thread's scope, a known
+/// thread keeps resolving to its conversation, and a send carrying no thread
+/// at all is deliberate Home traffic. One behaviour, no policy switch.
 #[test]
-fn unknown_thread_route_follows_the_explicit_env_policy_never_an_unset_default() {
+fn unknown_thread_routes_to_the_home_default_without_adopting_the_inbound_scope() {
     ensure_test_finite_home();
     let dir = tempfile::tempdir().unwrap();
     let now = test_now();
     let mut fixture = open_settlement_fixture(dir.path(), now);
     let (inbound_topic, _inbound_chat, inbound) = routed_inbound_event(&mut fixture, "route me");
     let known_thread = inbound["source"]["thread_id"].as_str().unwrap().to_owned();
-    const POLICY_ENV: &str = "FINITECHAT_HERMES_UNKNOWN_THREAD_ROUTE";
-    let unknown_thread_send = |text: &str| {
-        // SAFETY: single-threaded ownership of a test-only environment
-        // variable; callers below restore or overwrite it around each phase.
-        unsafe { std::env::set_var(POLICY_ENV, "error") };
-        let refused = finitechat_cli::run(
-            [
-                "hermes".to_owned(),
-                "--agent-home".to_owned(),
-                fixture.agent_home.clone(),
-                "send".to_owned(),
-                "--request-json".to_owned(),
-                send_request(&fixture, json!("chat-does-not-exist-anywhere"), text),
-            ],
-            &mut Vec::new(),
-        )
-        .expect_err("strict policy (`=error`) must fail an unknown thread closed");
-        let refusal = refused.to_string();
-        assert!(
-            refusal.contains("unknown thread_id"),
-            "refusal names the unknown thread, got: {refusal}"
-        );
-    };
 
-    // Strict policy spelled explicitly: the same unknown thread fails with a
-    // typed error naming it... while the KNOWN thread keeps resolving under
-    // the identical policy value.
-    unknown_thread_send("must not deliver");
     let resolved = cli_json(&[
         "hermes",
         "--agent-home",
@@ -594,10 +559,6 @@ fn unknown_thread_route_follows_the_explicit_env_policy_never_an_unset_default()
     ]);
     assert!(resolved["message_id"].as_str().is_some());
 
-    // An intentional unscoped send carries no thread at all and stays quiet
-    // EVEN under the strict policy: Core's default only ever sees deliberate
-    // Home traffic.
-    unsafe { std::env::set_var(POLICY_ENV, "error") };
     let quiet_home = cli_json(&[
         "hermes",
         "--agent-home",
@@ -608,43 +569,27 @@ fn unknown_thread_route_follows_the_explicit_env_policy_never_an_unset_default()
     ]);
     assert!(quiet_home["message_id"].as_str().is_some());
 
-    // Opted-in fallback, both accepted spellings: the very same unknown
-    // thread quietly routes to the Home default under `home`...
-    for policy in ["home", "default"] {
-        unsafe { std::env::set_var(POLICY_ENV, policy) };
-        let home_routed = cli_json(&[
-            "hermes",
-            "--agent-home",
-            &fixture.agent_home,
-            "send",
-            "--request-json",
-            &send_request(
-                &fixture,
-                json!("chat-does-not-exist-anywhere"),
-                if policy == "home" {
-                    "quietly home"
-                } else {
-                    "default spelling too"
-                },
-            ),
-        ]);
-        assert!(
-            home_routed["message_id"].as_str().is_some(),
-            "`{policy}` must route the unknown thread to the Home default"
-        );
-    }
-    // ...and back under the explicit strict policy the unknown thread fails
-    // again, proving the routing followed the env VALUE, not a one-way latch.
-    unknown_thread_send("still refused");
-
-    // SAFETY: restoring the pre-test state after this test owns-it window.
-    unsafe { std::env::remove_var(POLICY_ENV) };
+    let home_routed = cli_json(&[
+        "hermes",
+        "--agent-home",
+        &fixture.agent_home,
+        "send",
+        "--request-json",
+        &send_request(
+            &fixture,
+            json!("chat-does-not-exist-anywhere"),
+            "quietly home",
+        ),
+    ]);
+    assert!(
+        home_routed["message_id"].as_str().is_some(),
+        "an unknown thread routes to the Home default instead of failing the reply"
+    );
 
     // Ground truth in the user's DURABLE decrypted event log (projections
     // are a UI view; delivery is the contract): the known-thread reply
-    // resolves to the inbound's conversation, each Home-default delivery
-    // arrives WITHOUT adopting the refused thread's conversation, and the
-    // strictly-refused sends exist nowhere at all.
+    // resolves to the inbound's conversation and each Home-default delivery
+    // arrives WITHOUT adopting the unknown thread's conversation.
     fixture
         .user
         .dispatch_and_wait(AppAction::StartRuntime)
@@ -659,9 +604,9 @@ fn unknown_thread_route_follows_the_explicit_env_policy_never_an_unset_default()
     assert_eq!(
         scope_of("scoped ok").1.as_deref(),
         Some(inbound_topic.as_str()),
-        "the known thread still resolves to its conversation under the strict policy"
+        "the known thread resolves to its conversation"
     );
-    for text in ["quietly home", "default spelling too", "home base chatter"] {
+    for text in ["quietly home", "home base chatter"] {
         let (_, conversation_id, _) = scope_of(text);
         assert_ne!(
             conversation_id.as_deref(),
@@ -669,13 +614,6 @@ fn unknown_thread_route_follows_the_explicit_env_policy_never_an_unset_default()
             "{text:?} must not inherit the inbound thread's conversation"
         );
     }
-    assert!(
-        deliveries.iter().all(
-            |(delivered_text, _, _)| delivered_text != "must not deliver"
-                && delivered_text != "still refused"
-        ),
-        "the refused thread's messages must not exist anywhere"
-    );
 }
 
 /// Idempotency gate ("restart after processing before ack suppresses

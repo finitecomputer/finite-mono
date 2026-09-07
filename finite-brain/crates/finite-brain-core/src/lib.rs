@@ -3880,7 +3880,7 @@ mod tests {
     /// the canonical JSON serialization, tag profile, kind, event-id
     /// derivation, and signature for a fixed key, payload, and created_at.
     /// Every client that signs or verifies Brain approvals (Rust server, CLI,
-    /// hosted device, and future native Swift/Electron implementations) must
+    /// and hosted device) must
     /// reproduce these bytes exactly. If a deliberate protocol change breaks
     /// one of these assertions, version the format (`-v2`) rather than
     /// silently reordering fields — existing artifacts are durable and must

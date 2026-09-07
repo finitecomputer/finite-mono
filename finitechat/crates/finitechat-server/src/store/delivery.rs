@@ -59,8 +59,204 @@ impl SqlDelivery {
         Self { store, limits }
     }
 
-    pub(crate) fn limits(&self) -> HttpDeliveryLimits {
-        self.limits
+    /// Access the underlying store so the server layer can compose delivery
+    /// appends with derived room-state writes in ONE transaction.
+    pub(crate) fn store(&self) -> &Store {
+        &self.store
+    }
+
+    /// Read-only admission plan for a batch of publishes: predicted receipts
+    /// (fresh or digest-exact duplicate replay) plus the route head each
+    /// prediction was made against. Callers that hold the server's delivery
+    /// ordering lock across plan and commit see those heads confirmed by
+    /// [`append_plan_in_tx`]; anything else is an invariant violation.
+    pub(crate) fn plan_batch(
+        &self,
+        requests: &[finitechat_http::PublishMessageRequest],
+    ) -> Result<Vec<SqlPublishPlan>, StoreWriteError> {
+        self.store.read(|conn| {
+            let mut plans = Vec::with_capacity(requests.len());
+            for request in requests {
+                validate_transport_message(&request.message)?;
+                validate_target_matches_message(&request.target, &request.message)?;
+                let digest = digest_transport_message(&request.message);
+                let (plane, route_key, commit_admission) = match &request.target {
+                    HttpPublishTarget::Group {
+                        group_id,
+                        transport_group_id,
+                        commit_admission,
+                    } => {
+                        validate_group_id(group_id)?;
+                        validate_transport_group_id(transport_group_id)?;
+                        (
+                            HttpDeliveryPlane::Group,
+                            group_id.as_slice(),
+                            *commit_admission,
+                        )
+                    }
+                    HttpPublishTarget::Inbox { recipient } => {
+                        validate_member_id("recipient", recipient)?;
+                        (HttpDeliveryPlane::Inbox, recipient.as_slice(), None)
+                    }
+                };
+                let plane_str = match plane {
+                    HttpDeliveryPlane::Group => PLANE_GROUP,
+                    HttpDeliveryPlane::Inbox => PLANE_INBOX,
+                };
+                let route = lookup_route(conn, plane_str, route_key)?;
+                let expected_head = route.as_ref().map_or(0, |route| route.last_seq);
+                if let Some(route) = &route
+                    && let Some(receipt) =
+                        replay_or_reject_duplicate(conn, route, plane, &request.message.id, digest)?
+                {
+                    plans.push(SqlPublishPlan {
+                        target: request.target.clone(),
+                        message: request.message.clone(),
+                        expected_head,
+                        receipt,
+                        fresh: false,
+                    });
+                    continue;
+                }
+                if let Some(admission) = commit_admission
+                    && let Some(route) = &route
+                {
+                    let taken: Option<i64> = conn
+                        .query_row(
+                            "SELECT seq FROM group_commit_epochs
+                             WHERE route_id = ?1 AND source_epoch = ?2",
+                            params![route.route_id, u64_to_db(admission.source_epoch.0)?],
+                            |row| row.get(0),
+                        )
+                        .optional()
+                        .map_err(StoreTxError::Sqlite)?;
+                    if taken.is_some() {
+                        return Err(HttpServerError::StaleEpoch {
+                            source_epoch: admission.source_epoch,
+                        }
+                        .into());
+                    }
+                }
+                if let Some(route) = &route {
+                    ensure_queue_has_space(
+                        plane,
+                        route.last_seq,
+                        self.limits.max_queue_entries_per_route,
+                    )?;
+                } else {
+                    let plane_count = count_routes(conn, plane_str)?;
+                    let cap = match plane {
+                        HttpDeliveryPlane::Group => self.limits.max_groups,
+                        HttpDeliveryPlane::Inbox => self.limits.max_recipient_inboxes,
+                    };
+                    if plane_count >= cap as u64 {
+                        return Err(match plane {
+                            HttpDeliveryPlane::Group => {
+                                HttpServerError::GroupLimitExceeded { max: cap }
+                            }
+                            HttpDeliveryPlane::Inbox => {
+                                HttpServerError::InboxLimitExceeded { max: cap }
+                            }
+                        }
+                        .into());
+                    }
+                }
+                plans.push(SqlPublishPlan {
+                    target: request.target.clone(),
+                    message: request.message.clone(),
+                    expected_head,
+                    receipt: HttpPublishReceipt {
+                        message_id: request.message.id.clone(),
+                        plane,
+                        seq: expected_head + 1,
+                        duplicate: false,
+                    },
+                    fresh: true,
+                });
+            }
+            Ok(plans)
+        })
+    }
+
+    /// Append the fresh legs of a planned batch inside an existing write
+    /// transaction. Every fresh plan's route head is re-checked under the
+    /// write lock: a mismatch means the plan was made without the ordering
+    /// lock held (a server-layer bug), and the whole transaction aborts
+    /// instead of silently re-sequencing.
+    pub(crate) fn append_plan_in_tx(
+        tx: &mut rusqlite::Transaction<'_>,
+        plans: &[SqlPublishPlan],
+    ) -> Result<Vec<HttpPublishReceipt>, StoreTxError> {
+        let mut receipts = Vec::with_capacity(plans.len());
+        for plan in plans {
+            if !plan.fresh {
+                receipts.push(plan.receipt.clone());
+                continue;
+            }
+            let digest = digest_transport_message(&plan.message);
+            let (plane_str, route_key, commit_admission) = match &plan.target {
+                HttpPublishTarget::Group {
+                    group_id,
+                    commit_admission,
+                    ..
+                } => (PLANE_GROUP, group_id.as_slice(), *commit_admission),
+                HttpPublishTarget::Inbox { recipient } => (PLANE_INBOX, recipient.as_slice(), None),
+            };
+            let route = match lookup_route(tx, plane_str, route_key)? {
+                Some(route) => {
+                    if route.last_seq != plan.expected_head {
+                        return Err(rusqlite::Error::ToSqlConversionFailure(Box::new(
+                            PlanHeadMoved {
+                                plane: plan.receipt.plane,
+                                expected_head: plan.expected_head,
+                                actual_head: route.last_seq,
+                            },
+                        ))
+                        .into());
+                    }
+                    route
+                }
+                None => {
+                    if plan.expected_head != 0 {
+                        return Err(rusqlite::Error::ToSqlConversionFailure(Box::new(
+                            PlanHeadMoved {
+                                plane: plan.receipt.plane,
+                                expected_head: plan.expected_head,
+                                actual_head: 0,
+                            },
+                        ))
+                        .into());
+                    }
+                    create_route(tx, plane_str, route_key)?
+                }
+            };
+            let seq = route.last_seq + 1;
+            if plan.receipt.seq != seq {
+                return Err(
+                    rusqlite::Error::ToSqlConversionFailure(Box::new(PlanHeadMoved {
+                        plane: plan.receipt.plane,
+                        expected_head: plan.expected_head,
+                        actual_head: route.last_seq,
+                    }))
+                    .into(),
+                );
+            }
+            insert_entry(tx, route.route_id, seq, &plan.message, digest)?;
+            if let Some(admission) = commit_admission {
+                tx.execute(
+                    "INSERT INTO group_commit_epochs (route_id, source_epoch, seq) VALUES (?1, ?2, ?3)",
+                    params![
+                        route.route_id,
+                        u64_to_db(admission.source_epoch.0)?,
+                        u64_to_db(seq)?
+                    ],
+                )
+                .map_err(StoreTxError::Sqlite)?;
+            }
+            bump_route_head(tx, route.route_id, seq)?;
+            receipts.push(plan.receipt.clone());
+        }
+        Ok(receipts)
     }
 
     pub(crate) fn publish(
@@ -304,6 +500,43 @@ struct Route {
     last_seq: HttpSequence,
 }
 
+/// One planned publish: the predicted receipt, the route head the prediction
+/// was made against, and whether the entry still needs appending.
+#[derive(Clone, Debug)]
+pub(crate) struct SqlPublishPlan {
+    pub(crate) target: HttpPublishTarget,
+    pub(crate) message: TransportMessage,
+    /// Route head observed at planning time (0 for a route that does not
+    /// exist yet). [`SqlDelivery::append_plan_in_tx`] refuses to append when
+    /// the head moved in between.
+    pub(crate) expected_head: HttpSequence,
+    pub(crate) receipt: HttpPublishReceipt,
+    pub(crate) fresh: bool,
+}
+
+/// A publish plan's route head moved between planning and the write
+/// transaction: the server layer did not hold its delivery ordering lock
+/// across both, which is a bug, never a retryable race.
+#[derive(Debug)]
+struct PlanHeadMoved {
+    plane: HttpDeliveryPlane,
+    expected_head: HttpSequence,
+    actual_head: HttpSequence,
+}
+
+impl std::fmt::Display for PlanHeadMoved {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "delivery route head moved between plan and commit on {:?} plane: planned at {}, found {} \
+             (the delivery ordering lock was not held across plan and commit)",
+            self.plane, self.expected_head, self.actual_head
+        )
+    }
+}
+
+impl std::error::Error for PlanHeadMoved {}
+
 fn publish_group(
     tx: &Transaction<'_>,
     limits: HttpDeliveryLimits,
@@ -456,8 +689,8 @@ fn lookup_route(
     }
 }
 
-fn count_routes(tx: &Transaction<'_>, plane: &str) -> Result<u64, StoreTxError> {
-    let count: i64 = tx
+fn count_routes(conn: &Connection, plane: &str) -> Result<u64, StoreTxError> {
+    let count: i64 = conn
         .query_row(
             "SELECT COUNT(*) FROM delivery_routes WHERE plane = ?1",
             [plane],
@@ -503,13 +736,13 @@ fn ensure_queue_has_space(
 /// Digest-exact duplicates replay the original receipt; a different digest
 /// under the same id is a conflict (D:724-742).
 fn replay_or_reject_duplicate(
-    tx: &Transaction<'_>,
+    conn: &Connection,
     route: &Route,
     plane: HttpDeliveryPlane,
     message_id: &MessageId,
     digest: [u8; 32],
 ) -> Result<Option<HttpPublishReceipt>, StoreTxError> {
-    let existing: Option<(i64, Vec<u8>)> = tx
+    let existing: Option<(i64, Vec<u8>)> = conn
         .query_row(
             "SELECT seq, digest FROM delivery_entries
              WHERE route_id = ?1 AND message_id = ?2",
@@ -536,7 +769,7 @@ fn replay_or_reject_duplicate(
     }
 }
 
-fn insert_entry(
+pub(crate) fn insert_entry(
     tx: &Transaction<'_>,
     route_id: i64,
     seq: HttpSequence,
@@ -642,7 +875,9 @@ fn sync_route(
 /// Reconstruct a stored [`TransportMessage`]: `envelope_kind` 0 is a
 /// GroupMessage whose `envelope_ref` is the transport group id, 1 is a
 /// Welcome whose `envelope_ref` is the recipient member id.
-fn row_to_queued_delivery(row: &rusqlite::Row<'_>) -> rusqlite::Result<HttpQueuedDelivery> {
+pub(super) fn row_to_queued_delivery(
+    row: &rusqlite::Row<'_>,
+) -> rusqlite::Result<HttpQueuedDelivery> {
     let seq: i64 = row.get(0)?;
     let message_id: Vec<u8> = row.get(1)?;
     let payload: Vec<u8> = row.get(2)?;

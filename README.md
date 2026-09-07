@@ -6,7 +6,7 @@ and infrastructure definition in one tree.
 | Component | What it is |
 |---|---|
 | `finite-agentd/` | narrow agent-local platform daemon and process supervisor; never compute lifecycle |
-| `finitechat/` | finitechat CLI, server, iOS app, Electron app, Hermes agent bridge, agent runtime containers |
+| `finitechat/` | finitechat CLI, server, Hermes agent bridge, agent runtime containers |
 | `finitecomputer-v2/` | finite.computer SaaS: Core control plane, dashboard, Phala runner, Finite Private limiter |
 | `finite-sites/` | fsite CLI + finitesitesd (`*.finite.chat` hosting) |
 | `finite-brain/` | fbrain CLI + FiniteBrain server |

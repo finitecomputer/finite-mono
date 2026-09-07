@@ -1,4 +1,4 @@
-//! Request validation helpers (blobs, profiles, pairing, sync, ids).
+//! Request validation helpers (blobs, profiles, sync, ids).
 
 use std::collections::{BTreeSet, HashSet};
 
@@ -6,8 +6,8 @@ use axum::http::{HeaderMap, header};
 use finitechat_blob::{BLOB_CIPHERTEXT_CONTENT_TYPE, BlobPutRequest};
 use finitechat_delivery::{MAX_HTTP_ID_BYTES, MAX_HTTP_SYNC_PAGE_ENTRIES};
 use finitechat_http::{
-    GetEphemeralActivitiesRequest, HttpPairingSessionRecord, HttpPairingSessionState,
-    NostrProfileRecord, ObserveDeviceLivenessRequest, SyncStreamRequest, SyncWaitRequest,
+    GetEphemeralActivitiesRequest, NostrProfileRecord, ObserveDeviceLivenessRequest,
+    SyncStreamRequest, SyncWaitRequest,
 };
 use finitechat_proto::{
     AppendEphemeralActivityRequest, AppendEventRequest, LogEntryKind,
@@ -16,16 +16,13 @@ use finitechat_proto::{
     validate_string_bytes,
 };
 use finitechat_transport::MemberId;
-use nostr::{Event as NostrEvent, Kind as NostrKind, PublicKey as NostrPublicKey};
 use sha2::{Digest, Sha256};
 
 use crate::{
     HttpServerConfigurationError, MAX_HTTP_ACCOUNT_ROOM_ID_BYTES,
     MAX_KEY_PACKAGE_AVAILABILITY_BATCH, MAX_NOSTR_PROFILE_ABOUT_BYTES, MAX_NOSTR_PROFILE_BATCH,
     MAX_NOSTR_PROFILE_METADATA_JSON_BYTES, MAX_NOSTR_PROFILE_NAME_BYTES,
-    MAX_NOSTR_PROFILE_PICTURE_BYTES, MAX_PAIRING_EVENT_BYTES, MAX_PAIRING_EVENTS,
-    MAX_PUBLIC_IMAGE_BLOB_BYTES, PAIRING_EVENT_KIND, PAIRING_PROTOCOL_VERSION,
-    PAIRING_SESSION_TTL_SECONDS, ServerHttpError,
+    MAX_NOSTR_PROFILE_PICTURE_BYTES, MAX_PUBLIC_IMAGE_BLOB_BYTES, ServerHttpError,
 };
 
 pub(crate) fn blob_content_type(headers: &HeaderMap) -> Result<&str, ServerHttpError> {
@@ -572,118 +569,6 @@ fn validate_optional_profile_text(
     {
         return Err(ServerHttpError::InvalidNostrProfileRequest {
             reason: format!("{field} must be at most {max_bytes} bytes"),
-        });
-    }
-    Ok(())
-}
-
-pub(crate) fn pairing_invalid(reason: impl Into<String>) -> ServerHttpError {
-    ServerHttpError::InvalidPairingSessionRequest {
-        reason: reason.into(),
-    }
-}
-
-pub(crate) fn pairing_corrupt(reason: impl Into<String>) -> ServerHttpError {
-    pairing_invalid(reason)
-}
-
-pub(crate) fn pairing_conflict(
-    pairing_session_id: &str,
-    reason: impl Into<String>,
-) -> ServerHttpError {
-    ServerHttpError::PairingSessionConflict {
-        pairing_session_id: pairing_session_id.to_owned(),
-        reason: reason.into(),
-    }
-}
-
-pub(crate) fn validate_pairing_session_id(pairing_session_id: &str) -> Result<(), ServerHttpError> {
-    validate_string_bytes(
-        "pairing_session_id",
-        pairing_session_id,
-        MAX_OBJECT_ID_BYTES,
-    )
-    .map_err(|error| pairing_invalid(error.to_string()))
-}
-
-pub(crate) fn validate_pairing_device_id(target_device_id: &str) -> Result<(), ServerHttpError> {
-    validate_string_bytes(
-        "pairing_session.target_device_id",
-        target_device_id,
-        MAX_OBJECT_ID_BYTES,
-    )
-    .map_err(|error| pairing_invalid(error.to_string()))
-}
-
-pub(crate) fn validate_pairing_public_key(value: &str) -> Result<NostrPublicKey, ServerHttpError> {
-    validate_string_bytes("pairing_public_key", value, 64)
-        .map_err(|error| pairing_invalid(error.to_string()))?;
-    let key = NostrPublicKey::from_hex(value)
-        .map_err(|_| pairing_invalid("pairing public key must be canonical 32-byte hex"))?;
-    if key.to_hex() != value {
-        return Err(pairing_invalid(
-            "pairing public key must use canonical lowercase hex",
-        ));
-    }
-    Ok(key)
-}
-
-pub(crate) fn validate_pairing_event(bytes: &[u8]) -> Result<NostrEvent, ServerHttpError> {
-    validate_bytes_len("pairing_event", bytes.len(), MAX_PAIRING_EVENT_BYTES)
-        .map_err(|error| pairing_invalid(error.to_string()))?;
-    let event: NostrEvent =
-        serde_json::from_slice(bytes).map_err(|_| pairing_invalid("invalid Nostr event JSON"))?;
-    event
-        .verify()
-        .map_err(|_| pairing_invalid("invalid Nostr event signature"))?;
-    if event.kind != NostrKind::Custom(PAIRING_EVENT_KIND) {
-        return Err(pairing_invalid("unexpected Nostr event kind"));
-    }
-    if event.created_at.as_secs().abs_diff(pairing_now()) > PAIRING_SESSION_TTL_SECONDS {
-        return Err(pairing_invalid(
-            "pairing event timestamp is outside the allowed window",
-        ));
-    }
-    if event.content.is_empty() || event.content.len() > MAX_PAIRING_EVENT_BYTES as usize {
-        return Err(pairing_invalid(
-            "pairing event content is outside the allowed bounds",
-        ));
-    }
-    pairing_recipient(&event)?;
-    Ok(event)
-}
-
-pub(crate) fn pairing_recipient(event: &NostrEvent) -> Result<NostrPublicKey, ServerHttpError> {
-    let mut tags = event.tags.iter();
-    let values = tags
-        .next()
-        .ok_or_else(|| pairing_invalid("pairing event must have one recipient tag"))?
-        .as_slice();
-    if tags.next().is_some()
-        || values.len() != 2
-        || values.first().map(|value| value.as_str()) != Some("p")
-    {
-        return Err(pairing_invalid(
-            "pairing event must have exactly one canonical recipient tag",
-        ));
-    }
-    validate_pairing_public_key(values[1].as_str())
-}
-
-pub(crate) fn pairing_now() -> u64 {
-    nostr::Timestamp::now().as_secs()
-}
-
-pub(crate) fn ensure_pairing_session_open(
-    session: &HttpPairingSessionRecord,
-) -> Result<(), ServerHttpError> {
-    if session.version != PAIRING_PROTOCOL_VERSION
-        || session.events.len() > MAX_PAIRING_EVENTS
-        || session.state == HttpPairingSessionState::Expired
-        || pairing_now() > session.expires_at_unix_seconds
-    {
-        return Err(ServerHttpError::PairingSessionClosed {
-            pairing_session_id: session.pairing_session_id.clone(),
         });
     }
     Ok(())

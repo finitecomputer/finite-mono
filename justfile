@@ -59,12 +59,6 @@ brain-product-matrix:
 chat-device-parity:
     just chat chat-device-parity
 
-chat-electron-check:
-    just chat chat-electron-check
-
-chat-electron-package:
-    just chat chat-electron-package
-
 chat-history-stress:
     just chat chat-history-stress
 
@@ -74,6 +68,10 @@ chat-reliability-fast report="finitechat/target/hermes-adapter-regressions/repor
 [positional-arguments]
 deploy-lat1-closure artifact_dir *args:
     just nixos deploy-lat1-closure "$@"
+
+[positional-arguments]
+deploy-lat2-closure artifact_dir *args:
+    just nixos deploy-lat2-closure "$@"
 
 [positional-arguments]
 deploy-lat3-closure artifact_dir *args:
@@ -111,9 +109,6 @@ identity-conformance:
 identity-edge-contract:
     just identity identity-edge-contract
 
-ios-cloud-preflight:
-    just chat ios-cloud-preflight
-
 lat1-healthcheck-contract:
     just nixos lat1-healthcheck-contract
 
@@ -141,6 +136,9 @@ monitoring-nixos-contract:
 nixos-build-lat1-closure rev out_dir="target/lat1-nixos-closure":
     just nixos nixos-build-lat1-closure {{ quote(rev) }} {{ quote(out_dir) }}
 
+nixos-build-lat2-closure rev out_dir="target/lat2-nixos-closure":
+    just nixos nixos-build-lat2-closure {{ quote(rev) }} {{ quote(out_dir) }}
+
 nixos-build-lat3-closure rev out_dir="target/lat3-nixos-closure":
     just nixos nixos-build-lat3-closure {{ quote(rev) }} {{ quote(out_dir) }}
 
@@ -149,9 +147,6 @@ nixos-build-lat4-closure rev out_dir="target/lat4-nixos-closure":
 
 runbook-facts-contract:
     just infra runbook-facts-contract
-
-production-deploy-contract:
-    just infra production-deploy-contract
 
 runner-host-contract:
     just nixos runner-host-contract

@@ -30,7 +30,7 @@ use std::path::{Path, PathBuf};
 
 use finitechat_client::rejected_entry_diagnostic::{
     CapturedRoomLog, CapturedRoomLogFile, RejectedEntryDiagnosticRequest, RejectedEntryErrorClass,
-    RejectedEntryKind, ReplayOutcome, run_rejected_entry_diagnostic,
+    RejectedEntryKind, ReplayOutcome, is_skippable_rejection, run_rejected_entry_diagnostic,
 };
 use finitechat_client::{FiniteChatDeviceConfig, SqliteClientStore, SqliteClientStoreOptions};
 use serde::Serialize;
@@ -112,12 +112,46 @@ struct AuditSummaryLine<'a> {
     skips: usize,
 }
 
-struct AuditLog {
+/// Sibling of the skip-entry audit lines, written by `hermes rekey` to the
+/// same JSONL surface: one line per rekey run (`record: "rekey"`, phase
+/// "applied" or "refused") recording the evidence-backed skips the
+/// pre-commit backlog replay made — each with its sender and error class —
+/// or the refusal, so an operator can always find what was dropped.
+#[derive(Serialize)]
+pub(crate) struct RekeyAuditLine<'a> {
+    pub(crate) schema_version: u32,
+    pub(crate) record: &'static str,
+    pub(crate) phase: &'static str,
+    pub(crate) room_id: &'a str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) previous_epoch: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) new_epoch: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) commit_seq: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) cursor_before: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) cursor_after: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) applied: Option<u64>,
+    pub(crate) skipped: &'a [finitechat_core::AppRekeySkippedEntry],
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) refusal: Option<String>,
+    pub(crate) recorded_at_unix_seconds: u64,
+}
+
+/// Schema version of [`RekeyAuditLine`]. Bump on any field change.
+pub(crate) const REKEY_AUDIT_SCHEMA_VERSION: u32 = 1;
+
+/// Append-only JSONL audit writer shared by `repair skip-entry` and
+/// `hermes rekey` (created mode 0600, fsync per line).
+pub(crate) struct AuditLog {
     file: std::fs::File,
 }
 
 impl AuditLog {
-    fn open(path: &Path) -> Result<Self, CliError> {
+    pub(crate) fn open(path: &Path) -> Result<Self, CliError> {
         let mut options = std::fs::OpenOptions::new();
         options.create(true).append(true);
         #[cfg(unix)]
@@ -134,7 +168,7 @@ impl AuditLog {
         Ok(Self { file })
     }
 
-    fn append<T: Serialize>(&mut self, line: &T) -> Result<(), CliError> {
+    pub(crate) fn append<T: Serialize>(&mut self, line: &T) -> Result<(), CliError> {
         serde_json::to_writer(&mut self.file, line).map_err(CliError::Serialize)?;
         writeln!(self.file).map_err(CliError::Output)?;
         self.file.sync_data().map_err(CliError::Output)
@@ -418,12 +452,11 @@ fn rehearse(
             }
             ReplayOutcome::Rejected => {
                 let rejected = record.rejected;
+                // The one skip rule, shared with the rekey's backlog replay.
                 let skippable = rejected
                     .as_ref()
-                    .map(|entry| entry.kind == RejectedEntryKind::Application)
-                    .unwrap_or(false)
-                    && record.error_class
-                        == Some(RejectedEntryErrorClass::MlsApplicationCiphertext);
+                    .zip(record.error_class)
+                    .is_some_and(|(entry, class)| is_skippable_rejection(entry.kind, class));
                 if !skippable {
                     return Ok(Rehearsal {
                         cursor_before,

@@ -31,7 +31,7 @@ These maxims are the standing review frame for production changes.
 
 1. **finite-mono is the single company repository.** All first-party code —
    product CLIs, servers, the SaaS control plane, apps (dashboard, iOS,
-   Electron), protocols, skills, and infrastructure definitions — lives here.
+   protocols, skills, and infrastructure definitions — lives here.
    Work lands here first; there is no "sync back to the source repo."
 2. **The old per-component repos are import provenance, not homes.** Each was
    snapshot-imported (no git history; SHAs recorded in

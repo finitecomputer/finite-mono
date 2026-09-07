@@ -201,6 +201,12 @@ pub(crate) fn apply_room_membership_delta(
     validate_membership_adds_for_projection(projection, &membership_delta.adds)?;
 
     for remove in &membership_delta.removes {
+        // Close the newest open interval even when it is still PENDING
+        // (added but not yet welcome-acked). The live path usually removes
+        // active members, but a boot-time tail replay replays the add
+        // before the removal — with the pending interval skipped here, the
+        // later welcome activation would resurrect a removed device and
+        // the removal would be silently lost.
         if let Some(membership) = projection
             .membership
             .get_mut(&DeviceMembership::key(&remove.device))
@@ -208,7 +214,7 @@ pub(crate) fn apply_room_membership_delta(
                 .intervals
                 .iter_mut()
                 .rev()
-                .find(|interval| interval.active && interval.end_seq.is_none())
+                .find(|interval| interval.end_seq.is_none())
         {
             interval.end_seq = Some(accepted_seq);
         }

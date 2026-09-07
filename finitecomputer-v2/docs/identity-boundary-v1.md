@@ -18,7 +18,7 @@ code and one key per Finite Home—not a secret shared between a human and agent
 | Account Auth | WorkOS session linked to Core | Gates personal dashboard, billing, Hosted Web Device access, and user-facing SaaS operations |
 | User Nostr Identity | Human-controlled Finite Chat account; generated or imported by the human | Human participation in Finite Chat and Nostr-native user operations |
 | Hosted Web Device | Finite-operated, separately revocable Device under the user's chat account | Trusted-server dashboard web chat; not browser E2EE |
-| Electron/native Device | Local device key and durable store | Local-custody access to the same Finite Chat account and Rooms |
+
 | Agent Principal Key | One key under the Agent Runtime's Finite Home on durable `/data` | Signs agent operations across Finite Chat, Finite Sites, and Finite Brain |
 | Runtime Credential | Core-issued, runtime-scoped secret injected by Runner | Authenticates the narrow Runtime Management Pipe only |
 
@@ -139,7 +139,7 @@ human-agent signer.
   Finite tools report the same agent npub.
 - A second Agent Runtime for the same WorkOS user creates a different npub.
 - Importing a human nsec into Finite Chat never changes an agent identity.
-- Hosted Web and Electron Devices join the same user account while retaining
+- Hosted Web Devices join the same user account while retaining
   independent device stores.
 - WorkOS logout blocks dashboard/Hosted Web access without revoking agent keys
   or stopping Nostr-authenticated agent operations.

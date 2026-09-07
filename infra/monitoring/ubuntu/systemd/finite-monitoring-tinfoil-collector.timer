@@ -1,0 +1,11 @@
+[Unit]
+Description=Run the Tinfoil usage collector every minute
+
+[Timer]
+OnBootSec=30s
+OnUnitActiveSec=60s
+AccuracySec=5s
+Unit=finite-monitoring-tinfoil-collector.service
+
+[Install]
+WantedBy=timers.target

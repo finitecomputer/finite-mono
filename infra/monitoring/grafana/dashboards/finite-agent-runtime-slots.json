@@ -1,0 +1,509 @@
+{
+  "annotations": {
+    "list": []
+  },
+  "description": "Core-recorded Agent Runtime occupancy estimates on lat3/lat4, gated by the age of the app-plane export. Not an admission-capacity signal.",
+  "editable": true,
+  "fiscalYearStartMonth": 0,
+  "graphTooltip": 0,
+  "id": null,
+  "links": [],
+  "liveNow": false,
+  "panels": [
+    {
+      "id": 1,
+      "type": "text",
+      "title": "How to read these estimates",
+      "description": "Core-recorded occupancy is not the Runner admission decision.",
+      "gridPos": {
+        "h": 6,
+        "w": 18,
+        "x": 0,
+        "y": 0
+      },
+      "options": {
+        "mode": "markdown",
+        "content": "**Unused slots are estimates, not admission capacity.** 42 minus Core-recorded active Runtimes. Runtimes with incomplete artifact identity are excluded. Runner drain, reservations and host readiness are not measured; check `scripts/finite-status` before capacity decisions.\n\nCore exports every 5 minutes. Missing, future-dated or at least 10-minute-old exports hide counts. **Unknown / No data** can also mean no counted Runtimes; it never means 42 available slots. The 42-slot ceiling is pinned configuration, not a live metric."
+      },
+      "pluginVersion": "13.0.2"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "finite-prometheus"
+      },
+      "description": "Age of the last successful Core export on finite-lat-2. Collection runs every 5 minutes. At 10 minutes, or for a future-dated or missing file, occupancy estimates are hidden.",
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "thresholds"
+          },
+          "decimals": 0,
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "red",
+                "value": null
+              },
+              {
+                "color": "green",
+                "value": 0
+              },
+              {
+                "color": "yellow",
+                "value": 300
+              },
+              {
+                "color": "red",
+                "value": 600
+              }
+            ]
+          },
+          "unit": "s",
+          "noValue": "Unknown"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 6,
+        "w": 6,
+        "x": 18,
+        "y": 0
+      },
+      "id": 8,
+      "options": {
+        "colorMode": "value",
+        "graphMode": "none",
+        "justifyMode": "auto",
+        "orientation": "auto",
+        "reduceOptions": {
+          "calcs": [
+            "last"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "textMode": "name_and_value",
+        "wideLayout": true
+      },
+      "pluginVersion": "13.0.2",
+      "targets": [
+        {
+          "editorMode": "code",
+          "expr": "time() - max(node_textfile_mtime_seconds{instance=\"finite-lat-2\",job=\"finite-internal-health\",file=\"/run/finite-monitoring/finite-runtime.prom\"})",
+          "instant": true,
+          "legendFormat": "__auto",
+          "range": false,
+          "refId": "A"
+        }
+      ],
+      "title": "Core Sample Age",
+      "type": "stat"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "finite-prometheus"
+      },
+      "description": "Core-linked active Runtimes with known artifact identity.",
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "thresholds"
+          },
+          "decimals": 0,
+          "min": 0,
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": 0
+              },
+              {
+                "color": "red",
+                "value": 42
+              }
+            ]
+          },
+          "unit": "short",
+          "noValue": "Unknown"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 5,
+        "w": 6,
+        "x": 0,
+        "y": 6
+      },
+      "id": 2,
+      "options": {
+        "colorMode": "value",
+        "graphMode": "none",
+        "justifyMode": "auto",
+        "orientation": "auto",
+        "reduceOptions": {
+          "calcs": [
+            "last"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "textMode": "name_and_value",
+        "wideLayout": true
+      },
+      "pluginVersion": "13.0.2",
+      "targets": [
+        {
+          "editorMode": "code",
+          "expr": "(sum(finite_runtime_artifact_active_agents{instance=\"finite-lat-2\",job=\"finite-internal-health\",source_host_id=\"finite-lat-3\"})) and on() ((time() - max(node_textfile_mtime_seconds{instance=\"finite-lat-2\",job=\"finite-internal-health\",file=\"/run/finite-monitoring/finite-runtime.prom\"}) >= 0) and (time() - max(node_textfile_mtime_seconds{instance=\"finite-lat-2\",job=\"finite-internal-health\",file=\"/run/finite-monitoring/finite-runtime.prom\"}) < 600))",
+          "instant": true,
+          "legendFormat": "__auto",
+          "range": false,
+          "refId": "A"
+        }
+      ],
+      "title": "lat3 Recorded Runtimes",
+      "type": "stat"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "finite-prometheus"
+      },
+      "description": "42 minus recorded Runtimes; see the estimate limits above.",
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "thresholds"
+          },
+          "decimals": 0,
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "red",
+                "value": 0
+              },
+              {
+                "color": "green",
+                "value": 1
+              }
+            ]
+          },
+          "unit": "short",
+          "noValue": "Unknown"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 5,
+        "w": 6,
+        "x": 6,
+        "y": 6
+      },
+      "id": 3,
+      "options": {
+        "colorMode": "value",
+        "graphMode": "none",
+        "justifyMode": "auto",
+        "orientation": "auto",
+        "reduceOptions": {
+          "calcs": [
+            "last"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "textMode": "name_and_value",
+        "wideLayout": true
+      },
+      "pluginVersion": "13.0.2",
+      "targets": [
+        {
+          "editorMode": "code",
+          "expr": "(42 - sum(finite_runtime_artifact_active_agents{instance=\"finite-lat-2\",job=\"finite-internal-health\",source_host_id=\"finite-lat-3\"})) and on() ((time() - max(node_textfile_mtime_seconds{instance=\"finite-lat-2\",job=\"finite-internal-health\",file=\"/run/finite-monitoring/finite-runtime.prom\"}) >= 0) and (time() - max(node_textfile_mtime_seconds{instance=\"finite-lat-2\",job=\"finite-internal-health\",file=\"/run/finite-monitoring/finite-runtime.prom\"}) < 600))",
+          "instant": true,
+          "legendFormat": "__auto",
+          "range": false,
+          "refId": "A"
+        }
+      ],
+      "title": "lat3 Unused Slots (estimate)",
+      "type": "stat"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "finite-prometheus"
+      },
+      "description": "Core-linked active Runtimes with known artifact identity.",
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "thresholds"
+          },
+          "decimals": 0,
+          "min": 0,
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": 0
+              },
+              {
+                "color": "red",
+                "value": 42
+              }
+            ]
+          },
+          "unit": "short",
+          "noValue": "Unknown"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 5,
+        "w": 6,
+        "x": 12,
+        "y": 6
+      },
+      "id": 4,
+      "options": {
+        "colorMode": "value",
+        "graphMode": "none",
+        "justifyMode": "auto",
+        "orientation": "auto",
+        "reduceOptions": {
+          "calcs": [
+            "last"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "textMode": "name_and_value",
+        "wideLayout": true
+      },
+      "pluginVersion": "13.0.2",
+      "targets": [
+        {
+          "editorMode": "code",
+          "expr": "(sum(finite_runtime_artifact_active_agents{instance=\"finite-lat-2\",job=\"finite-internal-health\",source_host_id=\"finite-lat-4\"})) and on() ((time() - max(node_textfile_mtime_seconds{instance=\"finite-lat-2\",job=\"finite-internal-health\",file=\"/run/finite-monitoring/finite-runtime.prom\"}) >= 0) and (time() - max(node_textfile_mtime_seconds{instance=\"finite-lat-2\",job=\"finite-internal-health\",file=\"/run/finite-monitoring/finite-runtime.prom\"}) < 600))",
+          "instant": true,
+          "legendFormat": "__auto",
+          "range": false,
+          "refId": "A"
+        }
+      ],
+      "title": "lat4 Recorded Runtimes",
+      "type": "stat"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "finite-prometheus"
+      },
+      "description": "42 minus recorded Runtimes; see the estimate limits above.",
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "thresholds"
+          },
+          "decimals": 0,
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "red",
+                "value": 0
+              },
+              {
+                "color": "green",
+                "value": 1
+              }
+            ]
+          },
+          "unit": "short",
+          "noValue": "Unknown"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 5,
+        "w": 6,
+        "x": 18,
+        "y": 6
+      },
+      "id": 5,
+      "options": {
+        "colorMode": "value",
+        "graphMode": "none",
+        "justifyMode": "auto",
+        "orientation": "auto",
+        "reduceOptions": {
+          "calcs": [
+            "last"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "textMode": "name_and_value",
+        "wideLayout": true
+      },
+      "pluginVersion": "13.0.2",
+      "targets": [
+        {
+          "editorMode": "code",
+          "expr": "(42 - sum(finite_runtime_artifact_active_agents{instance=\"finite-lat-2\",job=\"finite-internal-health\",source_host_id=\"finite-lat-4\"})) and on() ((time() - max(node_textfile_mtime_seconds{instance=\"finite-lat-2\",job=\"finite-internal-health\",file=\"/run/finite-monitoring/finite-runtime.prom\"}) >= 0) and (time() - max(node_textfile_mtime_seconds{instance=\"finite-lat-2\",job=\"finite-internal-health\",file=\"/run/finite-monitoring/finite-runtime.prom\"}) < 600))",
+          "instant": true,
+          "legendFormat": "__auto",
+          "range": false,
+          "refId": "A"
+        }
+      ],
+      "title": "lat4 Unused Slots (estimate)",
+      "type": "stat"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "finite-prometheus"
+      },
+      "description": "Core-linked active Runtimes with known artifact identity.",
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "drawStyle": "line",
+            "fillOpacity": 12,
+            "lineInterpolation": "stepAfter",
+            "lineWidth": 1,
+            "pointSize": 3,
+            "showPoints": "never",
+            "spanNulls": false
+          },
+          "min": 0,
+          "unit": "short",
+          "noValue": "Unknown"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 11
+      },
+      "id": 6,
+      "options": {
+        "legend": {
+          "calcs": [],
+          "displayMode": "table",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "hideZeros": false,
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "pluginVersion": "13.0.2",
+      "targets": [
+        {
+          "editorMode": "code",
+          "expr": "(sum by (source_host_id)(finite_runtime_artifact_active_agents{instance=\"finite-lat-2\",job=\"finite-internal-health\",source_host_id=~\"finite-lat-3|finite-lat-4\"})) and on() ((time() - max(node_textfile_mtime_seconds{instance=\"finite-lat-2\",job=\"finite-internal-health\",file=\"/run/finite-monitoring/finite-runtime.prom\"}) >= 0) and (time() - max(node_textfile_mtime_seconds{instance=\"finite-lat-2\",job=\"finite-internal-health\",file=\"/run/finite-monitoring/finite-runtime.prom\"}) < 600))",
+          "instant": false,
+          "legendFormat": "{{source_host_id}}",
+          "range": true,
+          "refId": "A"
+        }
+      ],
+      "title": "Recorded Runtimes",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "finite-prometheus"
+      },
+      "description": "42 minus recorded Runtimes; see the estimate limits above.",
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "drawStyle": "line",
+            "fillOpacity": 12,
+            "lineInterpolation": "stepAfter",
+            "lineWidth": 1,
+            "pointSize": 3,
+            "showPoints": "never",
+            "spanNulls": false
+          },
+          "unit": "short",
+          "noValue": "Unknown"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 11
+      },
+      "id": 7,
+      "options": {
+        "legend": {
+          "calcs": [],
+          "displayMode": "table",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "hideZeros": false,
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "pluginVersion": "13.0.2",
+      "targets": [
+        {
+          "editorMode": "code",
+          "expr": "(42 - sum by (source_host_id)(finite_runtime_artifact_active_agents{instance=\"finite-lat-2\",job=\"finite-internal-health\",source_host_id=~\"finite-lat-3|finite-lat-4\"})) and on() ((time() - max(node_textfile_mtime_seconds{instance=\"finite-lat-2\",job=\"finite-internal-health\",file=\"/run/finite-monitoring/finite-runtime.prom\"}) >= 0) and (time() - max(node_textfile_mtime_seconds{instance=\"finite-lat-2\",job=\"finite-internal-health\",file=\"/run/finite-monitoring/finite-runtime.prom\"}) < 600))",
+          "instant": false,
+          "legendFormat": "{{source_host_id}}",
+          "range": true,
+          "refId": "A"
+        }
+      ],
+      "title": "Unused Slots (estimate)",
+      "type": "timeseries"
+    }
+  ],
+  "refresh": "2m",
+  "schemaVersion": 41,
+  "tags": [
+    "finite",
+    "runtimes"
+  ],
+  "templating": {
+    "list": []
+  },
+  "time": {
+    "from": "now-24h",
+    "to": "now"
+  },
+  "timepicker": {},
+  "timezone": "browser",
+  "title": "Agent Runtime Slots (lat3 / lat4)",
+  "uid": "finite-agent-runtime-slots",
+  "version": 2,
+  "weekStart": ""
+}

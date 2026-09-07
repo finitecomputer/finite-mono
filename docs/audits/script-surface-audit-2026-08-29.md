@@ -59,10 +59,10 @@ after this initial scan.
 
 | Owner area | Count | Role |
 | --- | ---: | --- |
-| Root command surface | 71 | Platform, fleet, CI harness, deployment, recovery, and local-dev commands |
+| Root command surface | 68 | Platform, fleet, CI harness, deployment, recovery, and local-dev commands |
 | `finitechat` | 39 | Hermes proofs, Electron/iOS packaging, runtime container behavior |
 | `finite-skills` | 35 | Managed-skill static checks and product helper scripts |
-| GitHub Actions | 17 | CI, release, image, closure, and production-deploy workflows |
+| GitHub Actions | 15 | CI, release, image, and closure workflows |
 | `finite-search` | 14 | Search stack smoke tests, local probes, and static checks |
 | `finitecomputer-v2` | 12 | Dashboard, Stripe readiness, runtime-image checks |
 | `infra/nixos` | 5 | Host and NixOS operational support |
@@ -102,7 +102,7 @@ cleanup and maintenance.
 | Lifecycle category | Count | Meaning |
 | --- | ---: | --- |
 | Current command facade | 18 | Preferred human/agent command entrypoints. |
-| Current CI/release automation | 17 | GitHub Actions workflows that run CI, release, image, closure, or production automation. |
+| Current CI/release automation | 15 | GitHub Actions workflows that run CI, release, image, or closure automation. |
 | Current operational/deploy/recovery | 52 | Manual or automated operations touching hosts, releases, credentials, status, or recovery. |
 | Current component check/smoke/package | 43 | Component-owned validation, smoke, contract, canary, or packaging commands. |
 | Current runtime/image/container support | 12 | Scripts copied into or executed by runtime images, containers, Xcode Cloud, or templates. |
@@ -154,10 +154,7 @@ than repo-level command facades.
 | `.github/workflows/lat2-nixos-closure.yml` | workflow | workflow entrypoint |
 | `.github/workflows/lat3-nixos-closure.yml` | workflow | workflow entrypoint |
 | `.github/workflows/lat4-nixos-closure.yml` | workflow | workflow entrypoint |
-| `.github/workflows/open-production-deploy-pr.yml` | workflow | workflow entrypoint |
 | `.github/workflows/phala-readonly-preflight.yml` | workflow | workflow entrypoint |
-| `.github/workflows/production-deploy-plan.yml` | workflow | workflow entrypoint |
-| `.github/workflows/production-deploy.yml` | workflow | workflow entrypoint |
 | `.github/workflows/release-fbrain.yml` | workflow | workflow entrypoint |
 | `.github/workflows/release-finitechat.yml` | workflow | workflow entrypoint |
 | `.github/workflows/release-fsite.yml` | workflow | workflow entrypoint |
@@ -213,13 +210,10 @@ than repo-level command facades.
 | `scripts/nixos_sops_operator_key.py` | Python | ops, release, host, or recovery path |
 | `scripts/nixos_sops_test_decrypt.py` | Python | ops, release, host, or recovery path |
 | `scripts/nixos_sops_updatekeys.py` | Python | ops, release, host, or recovery path |
-| `scripts/production_cd_setup.py` | Python | ops, release, host, or recovery path |
-| `scripts/production_deploy.py` | Python | ops, release, host, or recovery path |
 | `scripts/publish-lat1-nixos-cachix-closure` | Shell | ops, release, host, or recovery path |
 | `scripts/rollout-lat1-runtime-artifact` | Shell | ops, release, host, or recovery path |
 | `scripts/rollout_preflight.py` | Python | ops, release, host, or recovery path |
 | `scripts/snapshot-sqlite` | Shell | ops, release, host, or recovery path |
-| `scripts/verify-production-cd-setup` | Shell | ops, release, host, or recovery path |
 
 #### Current Component Check/Smoke/Package
 
@@ -690,7 +684,6 @@ platform assumptions.
 | `scripts/finite-status` / `scripts/finite_status.py` | Canonical fleet-state command | Read-only subprocess wrapper, contract-tested constants, mutating SQL rejection |
 | `scripts/deploy-lat*-closure-cache` | Host activation path | Manifest validation, target host checks, expected unit checks |
 | `scripts/rollout-lat1-runtime-artifact` | Agent Runtime rollout path | Prepare/execute split, exact plan hash, host and artifact validation |
-| `scripts/production_deploy.py` | Production deploy planning | Structured manifest validation and risky-change classification |
 | `scripts/snapshot-sqlite` | Snapshot DB inspection boundary | Scratch copy, manifest sidecar checks, read-only SQLite |
 | `infra/scripts/restore-hosted-web-chat-snapshot` | Recovery-set validation | Format gates, manifest checks, empty target requirement, SQLite helper |
 | `infra/runbooks/finite-private-ops.sh` | Finite Private operational canaries and relaunch | Explicit env approvals for load sweep and relaunch |

@@ -266,7 +266,7 @@ both `GET /api/core/v1/finite-private/usage` and
 `POST /api/core/v1/finite-private/usage/reset` must reach Core and return 401,
 not an edge 404. After completion, inspect the one canonical Runtime and any
 operation-scoped helper containers: exactly one running container may mount
-that Runtime's `/data`, the old rollback helper must be stopped, `/contact`
+that Runtime's `/data` and no `Created`-state candidate may remain bound to it (upgrade completion and interrupted-upgrade reconcile now sweep never-started candidates from any request id; a running one is left in place and reported), the old rollback helper must be stopped, `/contact`
 must report the unchanged Agent Principal, and the runtime must successfully
 reach the status control route after a successful turn. Exact notice routing
 at synthetic 25%/10% thresholds is a Core/adapter integration-test gate; do not
@@ -311,8 +311,9 @@ Verify after completion:
 
 1. Core's admin Runtime overview reports the target artifact id and `online`.
 2. `nerdctl --namespace finite inspect <source-machine-id>` reports the target
-   digest and the unchanged `/var/lib/finite-saas-runner/kata/<source-machine-id>:/data`
-   bind.
+   digest and the unchanged `/var/lib/finite-saas-runner/kata/<durable-state-id>:/data`
+   bind (the durable state id is the Agent Runtime id; the durable root is
+   never named by the source machine id).
 3. `/contact` reports the pre-upgrade Agent Principal, and existing chat,
    attachments, workspace, Sites state, and agentd ledger remain accessible.
 

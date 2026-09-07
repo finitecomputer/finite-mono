@@ -67,3 +67,15 @@ test("chat recovery does not retry a terminal response", async () => {
   assert.equal(result, "stop");
   assert.equal(attempts, 1);
 });
+
+test("a hosted-device envelope's retry decision beats the status heuristic", () => {
+  // Behind-server is a 409 the core marks not retryable; unverified is a
+  // 503 it marks retryable; transport failures stay retryable.
+  assert.equal(shouldRetryHostedChatRequest(409, false), false);
+  assert.equal(shouldRetryHostedChatRequest(503, true), true);
+  assert.equal(shouldRetryHostedChatRequest(503, false), false);
+  assert.equal(shouldRetryHostedChatRequest(409, true), true);
+  // Without an envelope the status heuristic still decides.
+  assert.equal(shouldRetryHostedChatRequest(503, undefined), true);
+  assert.equal(shouldRetryHostedChatRequest(409, null), false);
+});

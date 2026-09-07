@@ -149,8 +149,7 @@ Then `hermes gateway start` brings the agent onto Finite Chat.
 The agent publishes its Agent Principal `npub`; it does not create a room or
 an invite session at gateway startup. A user Device scans/selects that profile,
 publishes its KeyPackage, and starts the room through the normal MLS
-Add/Welcome flow. Hosted Web, Electron, and native clients are independent
-Devices using that same contract.
+Add/Welcome flow. Hosted Web clients are independent Devices using that same contract.
 
 For the full agent integration surface (message polling, sending, the
 supervised `hermes serve` bridge, smoke tests, and hardening evidence), see
@@ -160,10 +159,9 @@ supervised `hermes serve` bridge, smoke tests, and hardening evidence), see
 
 Everything below is for understanding, running, or modifying Finite Chat
 itself. Rust owns protocol state, persistence, networking, and product
-policy; SwiftUI renders the Rust-owned app state and dispatches typed
-actions.
+policy.
 
-The v1 product shape is a phone chat app for people and agents:
+The v1 product shape is a chat product for people and agents:
 
 - Nostr keys provide portable account identity and profile discovery.
 - OpenMLS protects room contents and membership truth.
@@ -175,41 +173,20 @@ The v1 product shape is a phone chat app for people and agents:
 
 ### Repository Map
 
-- `crates/finitechat-core` - Rust app/runtime facade used by CLI and iOS.
+- `crates/finitechat-core` - Rust app/runtime facade used by the CLI and device binaries.
 - `crates/finitechat-client` - device state machine and encrypted local store.
 - `crates/finitechat-server` - Axum HTTP delivery server with SQLite durability.
 - `crates/finitechat-proto` / `finitechat-http` - wire DTOs and route contracts.
 - `crates/finitechat-mls` - OpenMLS helpers and finite device credentials.
 - `crates/finitechat-cli` - the `finitechat` binary: auth, Hermes bridge, and
   server calls.
-- `crates/finitechat-rmp` - UniFFI, XCFramework, Xcode, and simulator helper.
-- `ios` - SwiftUI app shell for `computer.finite.finitechat`.
 - `integrations/hermes/finitechat` - Hermes platform plugin adapter.
 - `docs/adr` and `docs/protocol-v1.md` - current product/protocol decisions.
-
-### iOS Product Slice
-
-iOS is intentionally a single-agent client. A fresh install links an existing
-Finite account through the WorkOS-protected dashboard, lets the human choose
-one connected agent, and opens on Home. A Home submission creates a new Chat
-in the agent Room's `home` Topic and sends the first message through one
-idempotent Rust intent. Home shows the three most recent Chats; the retained
-chat screen exposes the full Topic/Chat list in an overlay drawer.
-
-There are no iOS room, people, group, scanner, profile, or manual-key-login
-products and no migration path from the pre-release app. See
-`docs/adr/0013-ios-single-agent-client.md`.
 
 ### Local Loop
 
 The production/default app server is `https://chat.finite.computer`. Local
 server URLs are explicit development and test overrides only.
-
-For a friend self-building the native app on their own Mac and phone, start
-with `docs/friends-alpha-self-build.md`. That runbook covers branch checkout,
-generated iOS bindings/project files, Apple signing, clean physical-device
-install, and confirming the app is using the deployed server instead of a local
-development override.
 
 For server iteration or local automated testing, start a local delivery server:
 
@@ -229,49 +206,11 @@ FINITECHAT_PUBLIC_URL=https://chat.example.com \
 `--public-url URL` is the equivalent command-line option. The value must be a
 bare `http` or `https` origin, without a path, query, credentials, or fragment.
 
-For normal local iOS product and UX iteration, run the blessed Devfinity
-workflow from the monorepo root:
-
-```sh
-just dev ios-local-agent
-```
-
-The command launches the app against loopback-only services, creates one
-`Local Agent` chat, and leaves the stack running until Control-C. In the app,
-tap **Continue with Finite**, then choose **Local Agent**. The development
-dashboard automatically approves the same bounded device-link request that
-Electron uses; there is no separate approval page. No deployment or production
-account is involved. Logs stay under
-`finitechat/.state/ios-local-agent/`.
-
-Because both configured origins are loopback HTTP URLs, the app intentionally
-skips hosted WorkOS AuthKit and its HTTPS/AASA callback. The bypass fails closed
-for mixed, non-loopback, and deployed origins, so hosted builds still require
-normal authentication.
-
-To audit interactive performance in the same local loop, enable the opt-in
-performance probes:
-
-```sh
-FINITECHAT_IOS_PERFORMANCE_PROBES=1 just dev ios-local-agent
-```
-
-The native app emits Instruments signpost intervals for Rust dispatch, runtime
-snapshot application, chat projection rebuilding, transcript-host updates, and
-composer measurement. The probes also log when composer input waits longer
-than one 60 Hz frame for the next main-queue turn or when a measured main-thread
-operation exceeds its budget. Message text and identifiers are never included.
-Use the simulator warnings for the fast local loop; use the SwiftUI and Time
-Profiler instruments on a Release build on a physical device before shipping.
-
 For low-level server or build troubleshooting, the primitives can still run
-independently. They do not create the complete local account-link fixture; use
-the Devfinity workflow above when the app needs to chat:
+independently:
 
 ```sh
 cargo run -p finitechat-server -- serve 127.0.0.1:8787 --sqlite .state/finitechat.sqlite3
-FINITECHAT_SERVER_URL=http://127.0.0.1:8787 \
-  cargo run -p finitechat-rmp -- run ios
 ```
 
 To isolate the real Hermes gateway without the rest of the product loop, use
@@ -311,15 +250,6 @@ on later runs with that persisted agent. Physical-phone and remote-Docker
 scripts remain historical/manual experiments until rewritten against the same
 Agent Principal + Welcome-first contract; they are not promotion gates.
 
-The focused iOS app flow is:
-
-1. Authenticate the Finite account and link this iPhone through the existing
-   automatic encrypted Device-link protocol.
-2. Choose one connected Agent Room. The choice can be changed in Settings.
-3. Start a chat from Home in the `home` Topic, reopen one of the three most
-   recent chats, or switch chats through the in-chat sidebar. Rust owns send
-   state, retry state, delivery projection, and attachment download decisions.
-
 ### Checks
 
 Fast Rust/server checks:
@@ -332,20 +262,6 @@ cargo test -p finitechat-server --test http_routes
 cargo test -p finitechat-server --test http_persistence
 cargo test -p finitechat-server --test http_conformance
 ```
-
-iOS checks:
-
-```sh
-cargo run -p finitechat-rmp -- doctor
-cargo run -p finitechat-rmp -- bindings swift
-cargo run -p finitechat-rmp -- test ios-simulator
-```
-
-`finitechat-rmp test ios-simulator` owns the simulator test lifecycle: it
-creates or reuses a dedicated RMP simulator, shuts it down, erases it, runs the
-full `FiniteChat` test scheme with isolated derived data and `.xcresult` output
-under `.state`, then terminates and shuts the simulator down. Use `--json` when
-automation needs the resolved UDID and result bundle path.
 
 Hermes/Python checks:
 
@@ -362,8 +278,7 @@ nix develop ..#hermes-bridge-ci --command bash -lc \
 Pushing a `finitechat/vX.Y.Z` tag runs
 `.github/workflows/release-finitechat.yml`, which builds the CLI archives for
 linux-x86_64, macos-aarch64, and macos-x86_64 and publishes them to
-`finitecomputer/finite-releases`. The Electron experiment is on hold and is not
-part of this release workflow. The install block at the top of this README
+`finitecomputer/finite-releases`. The install block at the top of this README
 consumes the refreshed `finitechat-latest` alias from the release repository.
 
 ### Publish Safety
@@ -373,9 +288,7 @@ The repo is intended to publish as `finitecomputer/finitechat`.
 Tracked source excludes local and generated state:
 
 - `.env`, key files, SQLite stores, and `.state/` are ignored.
-- `target/`, generated Xcode projects, Swift bindings, and XCFrameworks are
-  ignored.
-- iOS signing uses `ios/project.yml`; the generated `.xcodeproj` is local.
+- `target/` is ignored.
 
 Before pushing, verify the GitHub target is the new repo. If
 `finitecomputer/finitechat` resolves to `finitecomputer/finitechat-old`, do not
@@ -389,9 +302,8 @@ for `https://chat.finite.computer`. Hosted Finite Computer SaaS rollout
 mechanics belong in `../finitecomputer-v2`, which owns the current chat-server
 deploy lane, stack deploy coordination, and hosted runtime matrix. The legacy
 `../finitecomputer` repo remains for box1/TRF users while they are unmigrated.
-Do not ship a native app/TestFlight build that depends on server behavior until
-the deployed chat server has been verified against the finite-chat commit being
-shipped.
+Do not cut a release that depends on server behavior until the deployed chat
+server has been verified against the finite-chat commit being shipped.
 
 The production health endpoint must identify the deployed server build:
 
@@ -421,6 +333,3 @@ It returns 503 when either shared seam is unavailable or the one-second server
 budget is exceeded. The probe never creates a Room, Device, Message, or other
 user-visible history, and results are cached for thirty seconds so a
 public caller cannot amplify the probe's durable write rate.
-
-For iOS beta distribution, see `docs/testflight-runbook.md`. Finite Chat uses
-bundle ID `computer.finite.finitechat`.

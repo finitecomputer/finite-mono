@@ -3,9 +3,9 @@
 ## Problem Statement
 
 The Finite Chat Hermes adapter should be boring in production: a human can join
-from the iOS app, send messages and attachments, receive replies, survive local
-process restarts, and avoid duplicate agent turns when acks or local bridge
-calls are flaky.
+from a chat client, send messages and attachments, receive replies, survive
+local process restarts, and avoid duplicate agent turns when acks or local
+bridge calls are flaky.
 
 This track is independent of Tinfoil. Tinfoil should only add deployment and
 persistence constraints, not hide basic adapter defects.
@@ -17,7 +17,7 @@ deployment runbooks.
 
 ## Acceptance Criteria
 
-- Hermes 0.17 gateway can chat with Finite Chat iOS through the `finite`
+- Hermes 0.17 gateway can chat with a Finite Chat client through the `finite`
   platform plugin.
 - The same flow works through `finitechat hermes serve`, not only CLI-per-call.
 - A handled inbound event is not dispatched twice in one adapter process even
@@ -30,7 +30,7 @@ deployment runbooks.
   have focused tests. Agent-local attachments are bounded and promoted to
   encrypted durable blob references before append; path/read/upload failure
   appends no media row, and no local path survives in the room log.
-- Docker acceptance proves the real runtime image can chat with iOS before any
+- Docker acceptance proves the real runtime image can chat before any
   Tinfoil deployment attempt.
 
 ## Constraints
@@ -395,19 +395,12 @@ prove cursor catch-up without duplicate dispatch.
 Current local smoke:
 
 ```bash
-cargo run -q -p finitechat-rmp -- test ios-simulator --json
 just chat-reliability-fast
 scripts/hermes-sidecar-smoke.sh
 scripts/hermes-agent-media-e2e.sh
 scripts/hermes-real-gateway-admission-smoke.py
-scripts/ios-hermes-agent-media-e2e.sh
 ```
 
-The RMP simulator test command erases the dedicated simulator, runs the full
-native `FiniteChat` test scheme with `.state/xcode-derived-data`, replaces its
-explicit `.state/xcode-results/FiniteChatTests.xcresult`, and shuts the
-simulator down after the run. This is the default unit-suite gate before any
-visible app or Hermes E2E proof.
 The smoke commands write `target/hermes-adapter-regressions/report.json`,
 `target/hermes-sidecar-smoke/report.json`, and
 `target/hermes-agent-media-e2e/report.json`.
@@ -416,13 +409,10 @@ The smoke commands write `target/hermes-adapter-regressions/report.json`,
 that Hermes 0.17 `gateway run --replace` admits a normal invite/PIN join through
 the installed `finitechat` plugin with no direct adapter import and no echo
 handler.
-The iOS Simulator script writes
-`target/ios-hermes-agent-media-e2e/report.json`; it requires a booted
-simulator or `IOS_SIMULATOR_UDID`.
 Together they prove finitechat-server, the direct `finitechat hermes` CLI,
 encrypted client stores, resident `finitechat hermes serve` and
-`/v1/hermes/inbound` NDJSON through the media E2E, adapter
-redelivery/ack/fallback/filter/group/receipt regressions, and native iOS app
+`/v1/hermes/inbound` NDJSON through the media E2E, and adapter
+redelivery/ack/fallback/filter/group/receipt regressions
 runtime plumbing. The historically named `hermes-sidecar-smoke.sh` proves only
 the direct CLI round trip and explicitly records that it does not cover the
 resident service, NDJSON stream, or ack/drain. These checks do not, by

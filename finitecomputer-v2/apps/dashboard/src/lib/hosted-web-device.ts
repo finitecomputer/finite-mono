@@ -10,7 +10,11 @@ export type HostedRequesterContext = {
 export class HostedDeviceRequestError extends Error {
   constructor(
     message: string,
-    readonly status: number
+    readonly status: number,
+    /** `error_kind` from a hosted-device core error envelope, when one was sent. */
+    readonly kind?: string,
+    /** The core's own retry decision; absent when the response carried no envelope. */
+    readonly retryable?: boolean
   ) {
     super(message);
     this.name = "HostedDeviceRequestError";
@@ -302,57 +306,6 @@ export type HostedRuntimeCommandResponse = {
   error?: { code: string; message: string } | null;
 };
 
-export type HostedDeviceLinkRequest = {
-  pairing_session_id: string;
-  target_device_id: string;
-};
-
-export type HostedDeviceEnrollmentRequest = HostedDeviceLinkRequest & {
-  enrollment_user_id: string;
-  enrollment_capability_hex: string;
-};
-
-export type HostedDeviceLinkStatus =
-  | "awaiting_offer"
-  | "awaiting_key_package"
-  | "joining_rooms"
-  | "ready"
-  | "expired";
-
-export type HostedDeviceLinkResponse = HostedDeviceLinkRequest & {
-  status: HostedDeviceLinkStatus;
-  expires_at_unix_seconds: number;
-  room_count: number;
-  active_room_count: number;
-  bootstrap_manifests: {
-    bootstrap_id: string;
-    room_id: string;
-    manifest_sha256: string;
-  }[];
-  source_descriptor?: {
-    version: number;
-    source_public_key: string;
-    session_secret_hex: string;
-    expires_at_unix_seconds: number;
-  };
-};
-
-export type HostedDeviceReconcileRequest = {
-  project_id: string;
-  target_device_id: string;
-};
-
-export type HostedDeviceReconcileStatus =
-  | "awaiting_key_package"
-  | "joining_rooms"
-  | "ready";
-
-export type HostedDeviceReconcileResponse = HostedDeviceReconcileRequest & {
-  status: HostedDeviceReconcileStatus;
-  room_count: number;
-  active_room_count: number;
-};
-
 export function hostedDeviceConfig(
   env: Record<string, string | undefined> = process.env
 ): HostedDeviceConfig | null {
@@ -447,7 +400,7 @@ export async function hostedDeviceBrainIdentityProvider(
     signal: AbortSignal.timeout(HOSTED_DEVICE_TIMEOUT_MS),
   });
   if (!response.ok) {
-    throw new HostedDeviceRequestError(await responseError(response), response.status);
+    throw await hostedDeviceRequestError(response);
   }
   return response.json() as Promise<BrainIdentityProviderResponse>;
 }
@@ -472,7 +425,7 @@ export async function hostedDeviceSitesIdentityProvider(
     signal: AbortSignal.timeout(HOSTED_DEVICE_TIMEOUT_MS),
   });
   if (!response.ok) {
-    throw new HostedDeviceRequestError(await responseError(response), response.status);
+    throw await hostedDeviceRequestError(response);
   }
   return response.json() as Promise<SitesIdentityProviderResponse>;
 }
@@ -568,78 +521,6 @@ export async function hostedDeviceRuntimeCommand(
   );
 }
 
-export async function hostedDeviceApproveLink(
-  config: HostedDeviceConfig,
-  account: AccountAuthContext,
-  input: HostedDeviceLinkRequest
-) {
-  const result = await hostedDeviceJson<unknown>(
-    config,
-    account,
-    "/v1/device-links/approve",
-    {
-      method: "POST",
-      body: JSON.stringify(input),
-    }
-  );
-  return parseHostedDeviceLinkResponse(result, input);
-}
-
-export async function hostedDeviceLinkStatus(
-  config: HostedDeviceConfig,
-  account: AccountAuthContext,
-  input: HostedDeviceLinkRequest
-) {
-  const result = await hostedDeviceJson<unknown>(
-    config,
-    account,
-    "/v1/device-links/status",
-    {
-      method: "POST",
-      body: JSON.stringify(input),
-    }
-  );
-  return parseHostedDeviceLinkResponse(result, input);
-}
-
-export async function hostedDeviceResumeEnrollment(
-  config: HostedDeviceConfig,
-  input: HostedDeviceEnrollmentRequest
-) {
-  const response = await fetch(`${config.baseUrl}/v1/device-links/enroll`, {
-    method: "POST",
-    cache: "no-store",
-    headers: {
-      accept: "application/json",
-      authorization: `Bearer ${config.apiToken}`,
-      "content-type": "application/json",
-    },
-    body: JSON.stringify(input),
-    signal: AbortSignal.timeout(HOSTED_DEVICE_TIMEOUT_MS),
-  });
-  if (!response.ok) {
-    throw new HostedDeviceRequestError(await responseError(response), response.status);
-  }
-  return parseHostedDeviceLinkResponse(await response.json(), input);
-}
-
-export async function hostedDeviceReconcileDevice(
-  config: HostedDeviceConfig,
-  account: AccountAuthContext,
-  input: HostedDeviceReconcileRequest
-) {
-  const result = await hostedDeviceJson<unknown>(
-    config,
-    account,
-    "/v1/device-links/reconcile",
-    {
-      method: "POST",
-      body: JSON.stringify(input),
-    }
-  );
-  return parseHostedDeviceReconcileResponse(result, input);
-}
-
 export async function hostedDeviceUpdates(
   config: HostedDeviceConfig,
   account: AccountAuthContext,
@@ -682,7 +563,7 @@ export async function hostedDeviceProfileImage(
     signal: AbortSignal.timeout(HOSTED_DEVICE_TIMEOUT_MS),
   });
   if (!response.ok) {
-    throw new HostedDeviceRequestError(await responseError(response), response.status);
+    throw await hostedDeviceRequestError(response);
   }
   const result = (await response.json()) as { image_url?: unknown };
   if (typeof result.image_url !== "string" || !result.image_url.trim()) {
@@ -745,7 +626,7 @@ async function hostedDeviceJson<T>(
       status: response.status,
       errorClass: "downstream_http",
     });
-    throw new HostedDeviceRequestError(await responseError(response), response.status);
+    throw await hostedDeviceRequestError(response);
   }
   return response.json() as Promise<T>;
 }
@@ -754,9 +635,6 @@ export function hostedDeviceDiagnosticPath(path: string) {
   const pathname = path.split("?", 1)[0];
   if (pathname.startsWith("/v1/app/attachments/")) {
     return "/v1/app/attachments/:room/:message/:attachment";
-  }
-  if (pathname.startsWith("/v1/device-links/")) {
-    return "/v1/device-links/:operation";
   }
   if (
     new Set([
@@ -781,162 +659,27 @@ export function hostedDeviceDiagnosticPath(path: string) {
   return "/unknown";
 }
 
-function parseHostedDeviceLinkResponse(
-  value: unknown,
-  expected: HostedDeviceLinkRequest
-): HostedDeviceLinkResponse {
-  if (!value || typeof value !== "object") {
-    throw new Error("Device-link service returned an invalid response.");
-  }
-  const record = value as Record<string, unknown>;
-  const statuses = new Set<HostedDeviceLinkStatus>([
-    "awaiting_offer",
-    "awaiting_key_package",
-    "joining_rooms",
-    "ready",
-    "expired",
-  ]);
-  const status = record.status;
-  const expiresAt = record.expires_at_unix_seconds;
-  const roomCount = record.room_count;
-  const activeRoomCount = record.active_room_count;
-  const bootstrapManifests =
-    record.bootstrap_manifests === undefined ? [] : record.bootstrap_manifests;
-  const manifestKeys = Array.isArray(bootstrapManifests)
-    ? bootstrapManifests.map((manifest) => {
-        if (!manifest || typeof manifest !== "object" || Array.isArray(manifest)) {
-          return "";
-        }
-        const item = manifest as Record<string, unknown>;
-        return `${String(item.bootstrap_id)}\u0000${String(item.room_id)}`;
-      })
-    : [];
-  const descriptor = parsePairingSourceDescriptor(record.source_descriptor);
-  if (
-    record.pairing_session_id !== expected.pairing_session_id ||
-    record.target_device_id !== expected.target_device_id ||
-    typeof status !== "string" ||
-    !statuses.has(status as HostedDeviceLinkStatus) ||
-    !Number.isSafeInteger(expiresAt) ||
-    (expiresAt as number) < 0 ||
-    !Number.isSafeInteger(roomCount) ||
-    (roomCount as number) < 0 ||
-    !Number.isSafeInteger(activeRoomCount) ||
-    (activeRoomCount as number) < 0 ||
-    (activeRoomCount as number) > (roomCount as number) ||
-    !Array.isArray(bootstrapManifests) ||
-    bootstrapManifests.some((manifest) => {
-      if (!manifest || typeof manifest !== "object" || Array.isArray(manifest)) {
-        return true;
-      }
-      const item = manifest as Record<string, unknown>;
-      return (
-        Object.keys(item).sort().join(",") !==
-          "bootstrap_id,manifest_sha256,room_id" ||
-        typeof item.bootstrap_id !== "string" ||
-        item.bootstrap_id.length === 0 ||
-        typeof item.room_id !== "string" ||
-        item.room_id.length === 0 ||
-        typeof item.manifest_sha256 !== "string" ||
-        !/^[0-9a-f]{64}$/u.test(item.manifest_sha256)
-      );
-    }) ||
-    new Set(manifestKeys).size !== manifestKeys.length ||
-    (status === "ready" && bootstrapManifests.length !== roomCount)
-  ) {
-    throw new Error("Device-link service returned an invalid response.");
-  }
-  // Project an exact allowlist. Even an accidentally expanded internal
-  // response can never forward encrypted or signer material to the browser.
-  return {
-    pairing_session_id: expected.pairing_session_id,
-    target_device_id: expected.target_device_id,
-    status: status as HostedDeviceLinkStatus,
-    expires_at_unix_seconds: expiresAt as number,
-    room_count: roomCount as number,
-    active_room_count: activeRoomCount as number,
-    bootstrap_manifests: bootstrapManifests as HostedDeviceLinkResponse["bootstrap_manifests"],
-    ...(descriptor ? { source_descriptor: descriptor } : {}),
-  };
-}
-
-function parsePairingSourceDescriptor(value: unknown) {
-  if (value === undefined) return undefined;
-  if (!value || typeof value !== "object" || Array.isArray(value)) {
-    throw new Error("Device-link service returned an invalid source descriptor.");
-  }
-  const record = value as Record<string, unknown>;
-  const keys = Object.keys(record).sort();
-  if (
-    keys.join(",") !==
-      "expires_at_unix_seconds,session_secret_hex,source_public_key,version" ||
-    record.version !== 1 ||
-    typeof record.source_public_key !== "string" ||
-    !/^[0-9a-f]{64}$/u.test(record.source_public_key) ||
-    typeof record.session_secret_hex !== "string" ||
-    !/^[0-9a-f]{64}$/u.test(record.session_secret_hex) ||
-    !Number.isSafeInteger(record.expires_at_unix_seconds) ||
-    (record.expires_at_unix_seconds as number) < 0
-  ) {
-    throw new Error("Device-link service returned an invalid source descriptor.");
-  }
-  return {
-    version: 1,
-    source_public_key: record.source_public_key,
-    session_secret_hex: record.session_secret_hex,
-    expires_at_unix_seconds: record.expires_at_unix_seconds as number,
-  };
-}
-
-function parseHostedDeviceReconcileResponse(
-  value: unknown,
-  expected: HostedDeviceReconcileRequest
-): HostedDeviceReconcileResponse {
-  if (!value || typeof value !== "object" || Array.isArray(value)) {
-    throw new Error("Device reconciliation service returned an invalid response.");
-  }
-  const record = value as Record<string, unknown>;
-  const statuses = new Set<HostedDeviceReconcileStatus>([
-    "awaiting_key_package",
-    "joining_rooms",
-    "ready",
-  ]);
-  const status = record.status;
-  const roomCount = record.room_count;
-  const activeRoomCount = record.active_room_count;
-  if (
-    record.project_id !== expected.project_id ||
-    record.target_device_id !== expected.target_device_id ||
-    typeof status !== "string" ||
-    !statuses.has(status as HostedDeviceReconcileStatus) ||
-    !Number.isSafeInteger(roomCount) ||
-    (roomCount as number) < 0 ||
-    !Number.isSafeInteger(activeRoomCount) ||
-    (activeRoomCount as number) < 0 ||
-    (activeRoomCount as number) > (roomCount as number)
-  ) {
-    throw new Error("Device reconciliation service returned an invalid response.");
-  }
-  // Project an exact allowlist so internal signer or recovery material can
-  // never cross the dashboard boundary if the service response expands.
-  return {
-    project_id: expected.project_id,
-    target_device_id: expected.target_device_id,
-    status: status as HostedDeviceReconcileStatus,
-    room_count: roomCount as number,
-    active_room_count: activeRoomCount as number,
-  };
-}
-
-async function responseError(response: Response) {
+async function hostedDeviceRequestError(response: Response) {
   const text = await response.text();
   try {
-    const parsed = JSON.parse(text) as { error?: unknown };
+    const parsed = JSON.parse(text) as {
+      error?: unknown;
+      error_kind?: unknown;
+      retryable?: unknown;
+    };
     if (typeof parsed.error === "string" && parsed.error.trim()) {
-      return parsed.error;
+      return new HostedDeviceRequestError(
+        parsed.error,
+        response.status,
+        typeof parsed.error_kind === "string" ? parsed.error_kind : undefined,
+        typeof parsed.retryable === "boolean" ? parsed.retryable : undefined
+      );
     }
   } catch {
     // Preserve the bounded plain-text response below.
   }
-  return text.slice(0, 500) || "Chat is unavailable right now.";
+  return new HostedDeviceRequestError(
+    text.slice(0, 500) || "Chat is unavailable right now.",
+    response.status
+  );
 }

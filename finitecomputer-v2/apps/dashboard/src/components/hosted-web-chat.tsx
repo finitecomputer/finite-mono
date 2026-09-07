@@ -63,7 +63,6 @@ import type {
   HostedChatTopic,
 } from "@/lib/hosted-web-device";
 import { chatPreviewUrls } from "@/lib/chat-preview-urls";
-import { electronDeviceLinkPresentation } from "@/lib/electron-chat-runtime";
 import { directHostedImageUrl } from "@/lib/hosted-chat-attachment-url";
 import {
   BrainApprovalCards,
@@ -95,7 +94,7 @@ import {
 import {
   activityLeaseIsFresh,
   beginPendingChatTurn,
-  attachmentSendError,
+  sendError,
   chatContentIsRenderable,
   isAskForInputToolMessage,
   liveActivityLabel as sharedLiveActivityLabel,
@@ -146,23 +145,26 @@ export function HostedWebChat({
     transportError,
     claimError,
     bindingRecoveryRequired,
-    localDeviceRecoveryRequired,
-    deviceLinkStatus,
     selectionPending,
     streamConnected,
     ownerClaimed,
     load,
     claimOwner,
     recoverBinding,
-    recoverLocalDevice,
     dispatch,
     dispatchQuiet,
     refreshPendingChat,
     uploadAttachments,
     attachmentUrl,
   } = useHostedChat();
-  const deviceLinkPresentation = electronDeviceLinkPresentation(deviceLinkStatus);
   const [actionError, setActionError] = useState<string | null>(null);
+  // A refused text send answers over HTTP with the raw core reason while the
+  // projection's status/toast arrive on the stream; the toast is the copy
+  // people should read, so it replaces whatever the request itself said.
+  const sendRefusal = state ? sendError(state) : null;
+  useEffect(() => {
+    if (sendRefusal) setActionError(sendRefusal);
+  }, [sendRefusal]);
   const [sending, setSending] = useState(false);
   const [draft, setDraft] = useState(initialDraft ?? "");
   const [attachments, setAttachments] = useState<PendingAttachment[]>([]);
@@ -606,11 +608,11 @@ export function HostedWebChat({
         formData.set("caption", text);
         for (const attachment of attachments) formData.append("files", attachment.file);
         next = await uploadAttachments(formData);
-        const uploadError = attachmentSendError(next);
-        if (uploadError) throw new Error(uploadError);
       } else {
         next = await dispatch(messageAction(selectedRoom.room_id, text, selectedTopic, selectedChat));
       }
+      const refusal = sendError(next);
+      if (refusal) throw new Error(refusal);
       setDraft("");
       setAttachments((current) => {
         current.forEach(revokeAttachmentPreview);
@@ -960,10 +962,7 @@ export function HostedWebChat({
                 }}
               >
                 {!state && !transportError ? (
-                  <ChatLoading
-                    label={deviceLinkPresentation.label}
-                    detail={deviceLinkPresentation.detail}
-                  />
+                  <ChatLoading label="Opening your chat…" />
                 ) : null}
                 {state && !selectedRoom ? (
                   <EmptyChat title="Connecting to your agent" body="Your chat is getting ready." />
@@ -1080,11 +1079,9 @@ export function HostedWebChat({
                     size="sm"
                     onClick={() => {
                       if (transportError) {
-                        void (localDeviceRecoveryRequired
-                          ? recoverLocalDevice()
-                          : bindingRecoveryRequired
-                            ? recoverBinding()
-                            : load(true));
+                        void (bindingRecoveryRequired
+                          ? recoverBinding()
+                          : load(true));
                       } else if (claimError) {
                         void claimOwner();
                       } else {
@@ -1094,11 +1091,9 @@ export function HostedWebChat({
                   >
                     {transportError || claimError ? <RotateCcwIcon /> : null}
                     {transportError
-                      ? localDeviceRecoveryRequired
-                        ? "Relink this Mac"
-                        : bindingRecoveryRequired
-                          ? "Finish chat setup"
-                          : "Retry load"
+                      ? bindingRecoveryRequired
+                        ? "Finish chat setup"
+                        : "Retry load"
                       : claimError
                         ? "Retry claim"
                         : "Dismiss"}

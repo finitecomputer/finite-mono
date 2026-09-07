@@ -10,7 +10,8 @@
 use finitechat_client::rejected_entry_diagnostic::CapturedRoomLogFile;
 use finitechat_client::{
     FiniteChatDevice, FiniteChatDeviceConfig, HttpRuntimeDelivery, ReqwestHttpRuntimeTransport,
-    RuntimeDelivery, SqliteClientStore, SqliteClientStoreOptions,
+    RuntimeDelivery, RuntimeSyncOptions, SqliteClientStore, SqliteClientStoreOptions,
+    run_runtime_sync_tick,
 };
 use finitechat_mls::{NOSTR_SECRET_KEY_BYTES, NostrSecretKey};
 use finitechat_proto::{
@@ -263,6 +264,7 @@ fn corrupt_payload(entry: &mut RoomLogEntry) {
 }
 
 struct RepairFixture {
+    server_url: String,
     hosted_config: FiniteChatDeviceConfig,
     hosted_secret_hex: String,
     hosted_store_path: std::path::PathBuf,
@@ -283,6 +285,12 @@ enum FixtureShape {
     WrongErrorClass,
     /// join, two valid messages; the replay advances without any skip.
     Healthy,
+    /// join, one valid message the hosted device applied, `poison` owner
+    /// application entries it cannot decrypt, then the hosted device's own
+    /// rekey Commit, already merged into its store while its cursor stayed
+    /// frozen below the poison (the pre-fix rekey lever's store shape, or
+    /// an older cursor restored from backup).
+    MergedOwnCommit { poison: usize },
 }
 
 fn build_fixture(dir: &std::path::Path, shape: FixtureShape) -> RepairFixture {
@@ -299,12 +307,62 @@ fn build_fixture(dir: &std::path::Path, shape: FixtureShape) -> RepairFixture {
     let mut hosted_store = sqlite_client_store(&hosted_store_path, &hosted_config);
     let join_seq =
         create_room_with_hosted_member(&mut delivery, &mut hosted_store, &mut alice, &mut hosted);
-    drop(hosted_store);
 
     let mut entries;
     let mut poison_seqs = Vec::new();
     let mut poison_sha256 = None;
     match shape {
+        FixtureShape::MergedOwnCommit { poison } => {
+            let applied_seq = append_alice_message(
+                &mut delivery,
+                &mut alice,
+                b"valid message the hosted device applied",
+                "repair-merged-own-commit-valid",
+            );
+            assert_eq!(applied_seq, join_seq + 1);
+            run_runtime_sync_tick(
+                &mut hosted_store,
+                &mut hosted,
+                &mut delivery,
+                &RuntimeSyncOptions {
+                    key_package_target_available: 0,
+                    max_sync_pages_per_room: 8,
+                },
+            )
+            .unwrap();
+            assert_eq!(hosted.last_applied_seq(ROOM_ID).unwrap(), applied_seq);
+            // The owner's next sends are undecryptable for the hosted
+            // device once it has moved to the next epoch (its previous
+            // epoch secret tree is gone), which is the same class the
+            // production rewound-sender poison rejects with.
+            for index in 0..poison {
+                poison_seqs.push(append_alice_message(
+                    &mut delivery,
+                    &mut alice,
+                    format!("poison {index}").as_bytes(),
+                    &format!("repair-merged-own-commit-poison-{index}"),
+                ));
+            }
+            // The hosted device rekeys with the primitives the rekey lever
+            // is built from, merging its own Commit while the cursor stays
+            // frozen at `applied_seq`.
+            let prepared = hosted
+                .prepare_self_update_commit(ROOM_ID, "repair-merged-own-commit-rekey")
+                .unwrap();
+            hosted_store.save_device_state(&hosted).unwrap();
+            let accepted = delivery.submit_commit(prepared.request).unwrap();
+            let page = delivery
+                .sync_events(ROOM_ID, hosted.device_ref(), accepted.seq - 1)
+                .unwrap();
+            hosted
+                .merge_pending_commit_from_log(ROOM_ID, &page.entries, &prepared.message_id)
+                .unwrap();
+            hosted_store.save_device_state(&hosted).unwrap();
+            assert_eq!(hosted.group_epoch(ROOM_ID).unwrap(), 2);
+            assert_eq!(hosted.last_applied_seq(ROOM_ID).unwrap(), applied_seq);
+            assert_eq!(accepted.seq, applied_seq + poison as u64 + 1);
+            entries = capture_room_log(&mut delivery, &alice);
+        }
         FixtureShape::TailPoison { count } => {
             let valid_seq = append_alice_message(
                 &mut delivery,
@@ -389,6 +447,7 @@ fn build_fixture(dir: &std::path::Path, shape: FixtureShape) -> RepairFixture {
             entries = capture_room_log(&mut delivery, &alice);
         }
     }
+    drop(hosted_store);
     let head_seq = entries.iter().map(|entry| entry.seq).max().unwrap();
 
     let capture_path = dir.join("room-log-capture.json");
@@ -404,6 +463,7 @@ fn build_fixture(dir: &std::path::Path, shape: FixtureShape) -> RepairFixture {
     std::fs::write(&capture_path, serde_json::to_vec_pretty(&capture).unwrap()).unwrap();
 
     RepairFixture {
+        server_url,
         hosted_config,
         hosted_secret_hex: hex_lower(&HOSTED_ACCOUNT_SECRET_BYTES),
         hosted_store_path,
@@ -711,6 +771,84 @@ fn healthy_capture_applies_zero_skips_without_touching_the_store() {
     assert_eq!(audit.len(), 1);
     assert_eq!(audit[0]["phase"], "apply");
     assert_eq!(audit[0]["skips"], 0);
+}
+
+/// A capture whose tail is the hosted device's own already-merged rekey
+/// Commit (the store shape the pre-fix rekey lever left behind): the
+/// rehearsal replay derives exactly the owner poison entries below the
+/// Commit, the Commit itself is a no-op advance rather than a refusal, and
+/// the durable cursor lands on the Commit seq.
+#[test]
+fn skips_owner_poison_below_an_already_merged_own_commit() {
+    let dir = tempfile::tempdir().unwrap();
+    let fixture = build_fixture(dir.path(), FixtureShape::MergedOwnCommit { poison: 3 });
+    let frozen_cursor = fixture.join_seq + 1;
+    assert_eq!(durable_cursor(&fixture), frozen_cursor);
+    assert_eq!(fixture.poison_seqs.len(), 3);
+    assert_eq!(
+        fixture.head_seq,
+        frozen_cursor + 4,
+        "the own Commit is the capture head"
+    );
+    let audit_path = dir.path().join("audit.jsonl");
+
+    let stdout =
+        run_repair(&fixture, &dir.path().join("work"), &audit_path, &[]).expect("repair runs");
+    let record: Value = serde_json::from_str(&stdout).unwrap();
+
+    // The rehearsal replay reached the capture head: the merged own Commit
+    // was a no-op advance, not a refusal. Phase 2 writes only the derived
+    // skips, so the durable cursor lands on the last poison entry and the
+    // device crosses its own Commit on its next sync.
+    assert_eq!(record["repair_disposition"], "applied");
+    assert_eq!(record["rehearsal_outcome"], "advanced");
+    assert_eq!(record["cursor_before"], frozen_cursor);
+    assert_eq!(record["cursor_after"], fixture.head_seq - 1);
+    assert!(record.get("refusal_reason").is_none());
+    let skipped = record["skipped"].as_array().expect("skipped list");
+    assert_eq!(
+        skipped
+            .iter()
+            .map(|entry| entry["seq"].as_u64().unwrap())
+            .collect::<Vec<_>>(),
+        fixture.poison_seqs,
+        "only the owner poison entries below the Commit are skipped"
+    );
+    for entry in skipped {
+        assert_eq!(entry["kind"], "application");
+        assert_eq!(entry["error_class"], "mls_application_ciphertext");
+    }
+
+    let audit = read_audit_lines(&audit_path);
+    assert_eq!(audit.len(), 4);
+    let summary = &audit[3];
+    assert_eq!(summary["phase"], "apply");
+    assert_eq!(summary["cursor_before"], frozen_cursor);
+    assert_eq!(summary["cursor_after"], fixture.head_seq - 1);
+    assert_eq!(summary["skips"], 3);
+    assert_eq!(durable_cursor(&fixture), fixture.head_seq - 1);
+
+    // The restarted device's next sync crosses the merged own Commit
+    // without error and lands on the capture head.
+    let mut store = sqlite_client_store(&fixture.hosted_store_path, &fixture.hosted_config);
+    let mut device = store.load_device(fixture.hosted_config.clone()).unwrap();
+    let mut delivery = test_delivery(&fixture.server_url);
+    let report = run_runtime_sync_tick(
+        &mut store,
+        &mut device,
+        &mut delivery,
+        &RuntimeSyncOptions {
+            key_package_target_available: 0,
+            max_sync_pages_per_room: 8,
+        },
+    )
+    .expect("the next sync crosses the merged own Commit");
+    assert!(report.applied_entries.is_empty());
+    assert_eq!(device.last_applied_seq(ROOM_ID).unwrap(), fixture.head_seq);
+    assert_eq!(device.group_epoch(ROOM_ID).unwrap(), 2);
+    assert!(!device.has_pending_commit(ROOM_ID).unwrap());
+    drop(store);
+    assert_eq!(durable_cursor(&fixture), fixture.head_seq);
 }
 
 #[test]

@@ -1,5 +1,0 @@
-This is the focused Finite companion app for people who already have a provisioned Finite agent.
-
-Please test Sign in with Apple, automatic device linking, opening existing chats, starting a new text chat, photo/file attachments, voice transcription, notifications, backgrounding and relaunch, and sign out followed by relinking.
-
-Please report any authentication loop, false-ready pairing state, missing chat history, lost draft, UI stall, or message that does not resume after a temporary network interruption.

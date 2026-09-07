@@ -259,6 +259,9 @@ pub struct FiniteEnvelope {
     pub payload: Vec<u8>,
 }
 
+/// Retained only for compatibility with persisted application-delivery
+/// effects written by earlier builds; no runtime code distinguishes its
+/// values since the push-wake path was removed.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum PushPolicy {
@@ -311,10 +314,6 @@ impl ApplicationDeliveryPolicy {
         unread: UnreadPolicy::Never,
         command_inbox: CommandInboxPolicy::Never,
     };
-
-    pub fn creates_push(self) -> bool {
-        self.push == PushPolicy::Default
-    }
 
     pub fn creates_unread(self) -> bool {
         self.unread == UnreadPolicy::Default
@@ -812,7 +811,6 @@ pub enum ProductTrustModeV1 {
 pub enum ProductClientKindV1 {
     HostedWebBridge,
     NativeDevice,
-    ElectronDaemon,
     RuntimeDevice,
     PlaintextArchive,
 }
@@ -1361,7 +1359,7 @@ impl ProductClientKindV1 {
     pub fn secret_location(self) -> DeviceSecretLocationV1 {
         match self {
             Self::HostedWebBridge => DeviceSecretLocationV1::TrustedHostedServer,
-            Self::NativeDevice | Self::ElectronDaemon => DeviceSecretLocationV1::UserDevice,
+            Self::NativeDevice => DeviceSecretLocationV1::UserDevice,
             Self::RuntimeDevice => DeviceSecretLocationV1::RuntimeHost,
             Self::PlaintextArchive => DeviceSecretLocationV1::None,
         }
@@ -1370,7 +1368,7 @@ impl ProductClientKindV1 {
     pub fn product_trust_mode(self) -> Option<ProductTrustModeV1> {
         match self {
             Self::HostedWebBridge => Some(ProductTrustModeV1::HostedTrustedServerClient),
-            Self::NativeDevice | Self::ElectronDaemon => Some(ProductTrustModeV1::LocalDeviceE2ee),
+            Self::NativeDevice => Some(ProductTrustModeV1::LocalDeviceE2ee),
             Self::PlaintextArchive => Some(ProductTrustModeV1::PlaintextArchive),
             // Runtime devices are chat participants, not user-facing product
             // surfaces. Their secrets stay on the runtime host and product copy
@@ -3556,11 +3554,6 @@ mod tests {
         assert!(
             DurableAppEventKind::ChatMessage
                 .delivery_policy()
-                .creates_push()
-        );
-        assert!(
-            DurableAppEventKind::ChatMessage
-                .delivery_policy()
                 .creates_unread()
         );
         assert!(
@@ -3572,11 +3565,6 @@ mod tests {
             !DurableAppEventKind::RuntimeStateSnapshot
                 .delivery_policy()
                 .creates_command_inbox_work()
-        );
-        assert!(
-            !DurableAppEventKind::RuntimeCommandResult
-                .delivery_policy()
-                .creates_push()
         );
     }
 
@@ -3636,7 +3624,6 @@ mod tests {
             kind.delivery_policy(),
             ApplicationDeliveryPolicy::NON_NOTIFYING
         );
-        assert!(!kind.delivery_policy().creates_push());
         assert!(!kind.delivery_policy().creates_unread());
 
         let empty = ChatRenameV1 {
@@ -3675,7 +3662,6 @@ mod tests {
             kind.delivery_policy(),
             ApplicationDeliveryPolicy::NON_NOTIFYING
         );
-        assert!(!kind.delivery_policy().creates_push());
         assert!(!kind.delivery_policy().creates_unread());
 
         let empty_topic = ChatArchiveV1 {
@@ -6248,10 +6234,6 @@ mod tests {
             DeviceSecretLocationV1::UserDevice
         );
         assert_eq!(
-            ProductClientKindV1::ElectronDaemon.secret_location(),
-            DeviceSecretLocationV1::UserDevice
-        );
-        assert_eq!(
             ProductClientKindV1::RuntimeDevice.secret_location(),
             DeviceSecretLocationV1::RuntimeHost
         );
@@ -6262,22 +6244,18 @@ mod tests {
     }
 
     #[test]
-    fn native_and_electron_modes_keep_device_secrets_on_user_device() {
-        for client_kind in [
-            ProductClientKindV1::NativeDevice,
-            ProductClientKindV1::ElectronDaemon,
-        ] {
-            let trust_mode = client_kind.product_trust_mode().unwrap();
-            let disclosure = ProductTrustDisclosureV1::for_mode(trust_mode);
+    fn native_mode_keeps_device_secrets_on_user_device() {
+        let client_kind = ProductClientKindV1::NativeDevice;
+        let trust_mode = client_kind.product_trust_mode().unwrap();
+        let disclosure = ProductTrustDisclosureV1::for_mode(trust_mode);
 
-            assert_eq!(
-                client_kind.secret_location(),
-                DeviceSecretLocationV1::UserDevice
-            );
-            assert_eq!(trust_mode, ProductTrustModeV1::LocalDeviceE2ee);
-            assert!(disclosure.may_claim_e2ee);
-            assert!(disclosure.stores_device_secrets_on_user_device);
-        }
+        assert_eq!(
+            client_kind.secret_location(),
+            DeviceSecretLocationV1::UserDevice
+        );
+        assert_eq!(trust_mode, ProductTrustModeV1::LocalDeviceE2ee);
+        assert!(disclosure.may_claim_e2ee);
+        assert!(disclosure.stores_device_secrets_on_user_device);
     }
 
     #[test]

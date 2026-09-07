@@ -1,7 +1,7 @@
 import {
   dispatchHostedWebChatAction,
   HostedWebChatError,
-  hostedWebChatErrorMessage,
+  hostedWebChatErrorResponse,
 } from "@/lib/hosted-web-chat";
 
 export async function POST(
@@ -15,12 +15,12 @@ export async function POST(
       { headers: { "cache-control": "no-store" } }
     );
   } catch (error) {
-    const status = error instanceof HostedWebChatError ? error.status : 502;
+    const { status, body } = hostedWebChatErrorResponse(error);
     if (!(error instanceof HostedWebChatError)) {
       console.warn("Hosted web chat action failed", {
         error: error instanceof Error ? error.message : String(error),
       });
     }
-    return Response.json({ error: hostedWebChatErrorMessage(error) }, { status });
+    return Response.json(body, { status });
   }
 }

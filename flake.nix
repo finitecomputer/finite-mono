@@ -16,7 +16,19 @@
     # Hermes Agent's PyPI channel was retired in v0.20.0. Keep every repo-owned
     # Hermes runtime path on the upstream Nix package instead of ad hoc archives.
     hermes-nixpkgs.url = "github:NixOS/nixpkgs/0954f7ee2f6bb3dc7d4e3d0d8bcb8fd4bde4cfc5";
-    hermes-agent.url = "github:NousResearch/hermes-agent/v2026.8.3";
+    # Fetch Hermes over git smart HTTP (rev-pinned), never a GitHub archive:
+    # `github:` inputs resolve to api.github.com/repos/.../tarball/<rev> and
+    # the codeload archive URL (github.com/.../archive/<rev>.tar.gz) is the
+    # other front door to the same archive service. Both share GitHub's
+    # per-IP secondary rate limit, which shared CI runner egress IPs trip
+    # (HTTP 429) — chronically, even after the move to the archive endpoint.
+    # The smart-HTTP git fetch (`git+https`) is not behind that limit. Same
+    # upstream flake, same tag/rev, identical source tree (the lock's narHash
+    # is unchanged by the switch). `shallow=1` keeps the fresh-runner clone
+    # to the pinned commit (~60 MB) instead of full history (~500 MB); it
+    # locks to the same rev/narHash. Bumps edit the rev here and re-lock.
+    # Current pin: v2026.8.3 (rev 3c27eb62).
+    hermes-agent.url = "git+https://github.com/NousResearch/hermes-agent?rev=3c27eb6234bf91b8ceee9e9071591b31e9b148cb&shallow=1";
     hermes-agent.inputs.nixpkgs.follows = "hermes-nixpkgs";
     # finite-lat-3 qualified this NixOS 26.05 platform pin. finite-lat-1 uses
     # the same pin for its platform-only upgrade while retaining its existing
@@ -207,31 +219,35 @@
         ];
       };
 
+      # Hermes attrs are deliberately lazy: nothing below forces the hermes
+      # inputs until a consumer actually requests a hermes package (or enters
+      # the hermes-bridge-ci shell), so `nix develop .#rust-ci`-style
+      # evaluations never download hermes — hermes fetches were the recurring
+      # CI 429 blocker on shared runner IPs. The trade: requesting a hermes
+      # attr on a system upstream does not package (x86_64-darwin) errors at
+      # that point instead of the attribute simply being absent.
       hermesPackagesFor =
         system:
-        if builtins.hasAttr system hermes-agent.packages then
-          let
-            # Same pin as hermes-agent so toolchain ELFs share that glibc.
-            hermesPkgs = import hermes-nixpkgs { inherit system; };
-            hermesAgentPackage = hermes-agent.packages.${system}.default;
-            hermesAgentMinimal = hermes-agent.packages.${system}.minimal;
-          in
-          {
-            hermes-agent = hermesAgentPackage;
-            hermes-agent-runtime = hermesAgentPackage;
-            hermes-agent-runtime-python = hermesAgentPackage.hermesVenv;
-            hermes-agent-minimal = hermesAgentMinimal;
-            hermes-agent-minimal-runtime = hermesAgentMinimal.hermesVenv;
-            hermes-agent-python = hermesAgentMinimal.hermesVenv;
-            agent-runtime-toolchains =
-              hermesPkgs.callPackage
-                ./finitecomputer-v2/deploy/finite-computer/images/agent-runtime-toolchains.nix
-                {
-                  hermesAgent = hermesAgentPackage;
-                };
-          }
-        else
-          { };
+        let
+          # Same pin as hermes-agent so toolchain ELFs share that glibc.
+          hermesPkgs = import hermes-nixpkgs { inherit system; };
+          hermesAgentPackage = hermes-agent.packages.${system}.default;
+          hermesAgentMinimal = hermes-agent.packages.${system}.minimal;
+        in
+        {
+          hermes-agent = hermesAgentPackage;
+          hermes-agent-runtime = hermesAgentPackage;
+          hermes-agent-runtime-python = hermesAgentPackage.hermesVenv;
+          hermes-agent-minimal = hermesAgentMinimal;
+          hermes-agent-minimal-runtime = hermesAgentMinimal.hermesVenv;
+          hermes-agent-python = hermesAgentMinimal.hermesVenv;
+          agent-runtime-toolchains =
+            hermesPkgs.callPackage
+            ./finitecomputer-v2/deploy/finite-computer/images/agent-runtime-toolchains.nix
+            {
+              hermesAgent = hermesAgentPackage;
+            };
+        };
 
       systemOutputs = flake-utils.lib.eachDefaultSystem (
         system:
@@ -262,14 +278,8 @@
           # rustup on dev hosts, the CI workflows, and these Nix shells).
           # Cached Cargo artifacts stay reusable between clippy, Nix-shell
           # test commands, and image builds because they all read the same
-          # file. The iOS std targets below are local-Darwin extras layered
-          # on top; the file itself stays platform-neutral.
-          rustToolchain = (pkgs.rust-bin.fromRustupToolchainFile ./rust-toolchain.toml).override {
-            targets = pkgs.lib.optionals pkgs.stdenv.isDarwin [
-              "aarch64-apple-ios"
-              "aarch64-apple-ios-sim"
-            ];
-          };
+          # file.
+          rustToolchain = pkgs.rust-bin.fromRustupToolchainFile ./rust-toolchain.toml;
           rustCiToolchain = pkgs.rust-bin.fromRustupToolchainFile ./rust-toolchain.toml;
           rustBasePackages = with pkgs; [
             curl
@@ -293,7 +303,6 @@
               pnpm
               rustCiToolchain
             ]);
-          hermesSupported = builtins.hasAttr system hermes-agent.packages;
         in
         {
           packages = (hermesPackagesFor system) // finitePackages;
@@ -317,9 +326,8 @@
                     sqlite
                     xxd
                     rustToolchain
-                  ])
-                  ++ pkgs.lib.optionals pkgs.stdenv.isDarwin [ pkgs.xcodegen ]
-                  ++ pkgs.lib.optionals pkgs.stdenv.isLinux [ pkgs.chromium ];
+                ])
+                ++ pkgs.lib.optionals pkgs.stdenv.isLinux [ pkgs.chromium ];
 
                 RUST_SRC_PATH = "${rustToolchain}/lib/rustlib/src/rust/library";
               };
@@ -331,14 +339,16 @@
               devfinity-ci = pkgs.mkShell {
                 packages = devfinityCiPackages;
               };
-            }
-            // pkgs.lib.optionalAttrs hermesSupported (
-              let
-                hermesAgentRuntime = hermes-agent.packages.${system}.default;
-                hermesAgentRuntimePython = hermesAgentRuntime.hermesVenv;
-              in
-              {
-                hermes-bridge-ci = pkgs.mkShell {
+
+              # Entering this shell is one of the few things that forces the
+              # hermes inputs (see hermesPackagesFor) — the shells above stay
+              # hermes-free so unrelated CI jobs never fetch hermes.
+              hermes-bridge-ci =
+                let
+                  hermesAgentRuntime = hermes-agent.packages.${system}.default;
+                  hermesAgentRuntimePython = hermesAgentRuntime.hermesVenv;
+                in
+                pkgs.mkShell {
                   packages = [
                     hermesAgentRuntime
                     hermesAgentRuntimePython
@@ -349,8 +359,7 @@
                   HERMES_AGENT_RUNTIME_PYTHON = "${hermesAgentRuntimePython}/bin/python3";
                   HERMES_AGENT_PYTHON = "${hermesAgentRuntimePython}/bin/python3";
                 };
-              }
-            );
+            };
 
           formatter = pkgs.nixfmt-rfc-style;
         }

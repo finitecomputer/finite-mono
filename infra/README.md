@@ -47,8 +47,7 @@ What the 2026-07-09 lat1 consolidation cutover changed:
   `kubectl apply` + on-host `podman build` (lat1), systemd + Kata (lat2), Nix
   fleet `just host-deploy` (smoke/clawland), and the hand-run finitechat script
   — are **resolved for the coupled cluster**: one NixOS closure for
-  `finite-lat-1`, built by CI, published to the `finite` Cachix cache, and
-  switched by `scripts/deploy-lat1-closure-cache` from an exact manifest-pinned
+  `finite-lat-1`, built by CI, and switched from an exact manifest-pinned
   system path. On-host `podman build` is gone;
   first-party images are CI-built and digest-pinned (`infra/images/`).
 
@@ -70,11 +69,12 @@ digest-pinned upgrades of existing healthy Kata Agents. The exact deployed
 checkpoint and future regression gates are recorded in
 [`docs/runs/production-baseline-2026-07-15.md`](../docs/runs/production-baseline-2026-07-15.md).
 
-`scripts/deploy-lat1-closure-cache ARTIFACT_DIR` switches infrastructure only.
-An Agent Runtime image rollout is a separate two-command prepare/execute
-operation: it names an exact promoted artifact and either explicit Project ids
-or `--roll-all` plus an already-target canary, then requires the prepared plan
-hash before mutation. Never infer a bot rollout from the word “deploy.”
+`just deploy-lat2-closure ARTIFACT_DIR --activate` switches app-plane
+infrastructure only. An Agent Runtime image rollout is a separate two-command
+prepare/execute operation: it names an exact promoted artifact and either
+explicit Project ids or `--roll-all` plus an already-target canary, then
+requires the prepared plan hash before mutation. Never infer a bot rollout from
+the word “deploy.”
 
 Merged work not yet known to be released or deployed is tracked by surface in
 [`deployment-queue.md`](deployment-queue.md). The queue is a handoff, not
@@ -176,12 +176,10 @@ validates usage against Core on the app-plane host (lat2;
 
 1. **Each NixOS host = exact NixOS closure activation from a release rev.**
    The rev that
-   tagged the binaries is the rev the host runs. CI builds the closure, pushes
-   it to the `finite` Cachix cache, and the host substitutes only trusted store
-   paths before activating the recorded `SYSTEM` path. This is how lat2, lat3,
-   and lat4 deploy (`scripts/deploy-lat1-closure-cache` retains its name for
-   the tooling history but its current use targets the active fleet; source of
-   truth: `infra/nixos/`). Rollback:
+   tagged the binaries is the rev the host runs. CI builds the closure and
+   packages or publishes trusted store paths before activating the recorded
+   `SYSTEM` path. The active fleet uses host-specific helpers for lat2, lat3,
+   and lat4; source of truth: `infra/nixos/`. Rollback:
    `nixos-rebuild --rollback` on the host, or pin the previous rev. The old
    bare-metal transcript in
    `infra/runbooks/lat1-nixos-reinstall.md` is historical and not current wipe

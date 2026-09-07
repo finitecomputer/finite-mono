@@ -138,16 +138,6 @@ class DeliveryTests(unittest.TestCase):
                     require_attestation=True,
                 )
 
-    def test_production_guard_rejects_enabled_mutation(self) -> None:
-        with tempfile.TemporaryDirectory() as directory:
-            manifest = Path(directory) / "production.json"
-            manifest.write_text(
-                json.dumps({"environment": "production", "mutation_enabled": True}),
-                encoding="utf-8",
-            )
-            with self.assertRaisesRegex(delivery.DeliveryError, "disabled"):
-                delivery.require_production_disabled(manifest)
-
     def test_release_retry_rejects_changed_versioned_asset(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

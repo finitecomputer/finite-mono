@@ -1,39 +1,11 @@
-//! The unknown-thread reply-route policy: by default an unresolvable
-//! `thread_id` falls back to the Home default (with a loud warning) so a topic
-//! archived mid-session never silently consumes the user's message; the strict
-//! typed error stays opt-in via `FINITECHAT_HERMES_UNKNOWN_THREAD_ROUTE` and is
-//! classified non-retryable (`error_kind: "hermes"`, HTTP 409 from the
-//! resident service).
+//! An unresolvable `thread_id` falls back to the Home default (with a loud
+//! warning) so a topic archived mid-session never silently consumes the
+//! user's message. There is one behaviour and no policy switch.
 
 use finitechat_server::{HttpServerState, http_router};
 use serde_json::{Value, json};
 use std::path::Path;
-use std::sync::Mutex;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
-
-const HERMES_UNKNOWN_THREAD_ROUTE_ENV: &str = "FINITECHAT_HERMES_UNKNOWN_THREAD_ROUTE";
-
-/// Every route-policy state lives in one process-global environment variable,
-/// and the integration tests in this binary share the process, so tests that
-/// read or set the variable serialize on this lock.
-static ROUTE_ENV_LOCK: Mutex<()> = Mutex::new(());
-
-fn lock_route_env() -> std::sync::MutexGuard<'static, ()> {
-    ROUTE_ENV_LOCK
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner())
-}
-
-/// Restores "env var unset" when dropped, including on assertion failure.
-struct RouteEnvGuard;
-
-impl Drop for RouteEnvGuard {
-    fn drop(&mut self) {
-        // SAFETY: removing a test-owned environment variable before the test
-        // binary's remaining threads re-acquire ROUTE_ENV_LOCK.
-        unsafe { std::env::remove_var(HERMES_UNKNOWN_THREAD_ROUTE_ENV) };
-    }
-}
 
 fn test_now() -> u64 {
     SystemTime::now()
@@ -131,39 +103,28 @@ fn setup_agent_room() -> (String, String) {
     (agent_home, room_id)
 }
 
-fn send_with_unknown_thread(home: &str, room_id: &str) -> Result<Value, finitechat_cli::CliError> {
-    ensure_test_finite_home();
-    let mut output = Vec::new();
-    let result = finitechat_cli::run(
-        [
-            "hermes".to_owned(),
-            "--agent-home".to_owned(),
-            home.to_owned(),
-            "send".to_owned(),
-            "--request-json".to_owned(),
-            json!({
-                "room_id": room_id,
-                "conversation_id": null,
-                "segment_id": null,
-                "thread_id": "topic-archived-mid-session",
-                "text": "reply that must not vanish",
-                "kind": "message",
-                // `running` makes the sidecar record the resolved route fields
-                // in hermes-running.json where the assertions can read them.
-                "status": "running",
-                "reply_to_message_id": null,
-                "metadata": {},
-            })
-            .to_string(),
-        ],
-        &mut output,
-    );
-    match result {
-        Err(error) => Err(error),
-        Ok(()) => serde_json::from_slice(&output).map_err(|error| {
-            finitechat_cli::CliError::Hermes(format!("invalid send JSON: {error}"))
-        }),
-    }
+fn send_with_unknown_thread(home: &str, room_id: &str) -> Value {
+    cli_json(&[
+        "hermes",
+        "--agent-home",
+        home,
+        "send",
+        "--request-json",
+        &json!({
+            "room_id": room_id,
+            "conversation_id": null,
+            "segment_id": null,
+            "thread_id": "topic-archived-mid-session",
+            "text": "reply that must not vanish",
+            "kind": "message",
+            // `running` makes the sidecar record the resolved route fields
+            // in hermes-running.json where the assertions can read them.
+            "status": "running",
+            "reply_to_message_id": null,
+            "metadata": {},
+        })
+        .to_string(),
+    ])
 }
 
 fn recorded_running_route(home: &str) -> (String, Value, Value) {
@@ -181,15 +142,12 @@ fn recorded_running_route(home: &str) -> (String, Value, Value) {
 }
 
 #[test]
-fn unknown_thread_resolves_to_home_fallback_fields_by_default() {
-    let _env_lock = lock_route_env();
-    let _guard = RouteEnvGuard;
+fn unknown_thread_resolves_to_home_fallback_fields() {
     let (agent_home, room_id) = setup_agent_room();
 
-    // Unset env var = deliverable-by-default: an unknown thread id must fall
-    // back to the Home default instead of failing the reply.
-    let sent =
-        send_with_unknown_thread(&agent_home, &room_id).expect("fallback send succeeds by default");
+    // Deliverable by default: an unknown thread id falls back to the Home
+    // default instead of failing the reply.
+    let sent = send_with_unknown_thread(&agent_home, &room_id);
 
     let (message_id, conversation_id, segment_id) = recorded_running_route(&agent_home);
     assert_eq!(
@@ -207,39 +165,4 @@ fn unknown_thread_resolves_to_home_fallback_fields_by_default() {
         Value::Null,
         "unknown thread falls back to Core's Home default (no explicit segment)"
     );
-}
-
-#[test]
-fn strict_policy_unknown_thread_is_typed_non_retryable_error() {
-    let _env_lock = lock_route_env();
-    // SAFETY: serialized by ROUTE_ENV_LOCK; restored by RouteEnvGuard.
-    unsafe { std::env::set_var(HERMES_UNKNOWN_THREAD_ROUTE_ENV, "error") };
-    let _guard = RouteEnvGuard;
-    let (agent_home, room_id) = setup_agent_room();
-
-    let error =
-        send_with_unknown_thread(&agent_home, &room_id).expect_err("strict mode fails closed");
-    assert!(
-        matches!(error, finitechat_cli::CliError::Hermes(_)),
-        "typed hermes error, got: {error:?}"
-    );
-    assert_eq!(error.kind(), "hermes");
-    assert!(
-        !error.retryable(),
-        "the resident service maps this to HTTP 409 with retryable=false"
-    );
-    assert!(
-        error.to_string().contains("unknown thread_id"),
-        "the typed error names the thread: {error}"
-    );
-
-    // Strict stays opt-in: explicitly selecting the fallback delivers.
-    // SAFETY: serialized by ROUTE_ENV_LOCK; restored by RouteEnvGuard.
-    unsafe { std::env::set_var(HERMES_UNKNOWN_THREAD_ROUTE_ENV, "home") };
-    let sent = send_with_unknown_thread(&agent_home, &room_id)
-        .expect("explicit home policy keeps replies deliverable");
-    let (_, conversation_id, segment_id) = recorded_running_route(&agent_home);
-    assert!(sent["message_id"].as_str().is_some());
-    assert_eq!(conversation_id, Value::Null);
-    assert_eq!(segment_id, Value::Null);
 }

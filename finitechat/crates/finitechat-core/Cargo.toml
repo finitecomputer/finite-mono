@@ -7,7 +7,7 @@ repository.workspace = true
 rust-version.workspace = true
 
 [lib]
-crate-type = ["cdylib", "staticlib", "rlib"]
+crate-type = ["rlib"]
 
 [dependencies]
 finite-identity.workspace = true
@@ -31,8 +31,6 @@ sha2.workspace = true
 thiserror.workspace = true
 time.workspace = true
 tokio.workspace = true
-uniffi.workspace = true
-workos.workspace = true
 zeroize.workspace = true
 
 [dev-dependencies]

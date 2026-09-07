@@ -34,16 +34,10 @@ const PUBLIC_WORKOS_PATHS = new Set([
 const WORKOS_PROXY_BYPASS_PATHS = new Set([
   "/callback",
   "/health",
-  "/api/device-links/enroll",
   "/api/stripe/webhook",
   "/login",
   "/logout",
   "/signup",
-]);
-
-const NATIVE_DEVICE_LINK_BEARER_PATHS = new Set([
-  "/api/device-links/approve",
-  "/api/device-links/status",
 ]);
 
 
@@ -90,20 +84,6 @@ export function workosProtectedPath(pathname: string) {
 
 export function workosProxyBypassPath(pathname: string) {
   return WORKOS_PROXY_BYPASS_PATHS.has(pathname);
-}
-
-export function workosProxyBypassRequest(
-  pathname: string,
-  headers: Pick<Headers, "get">
-) {
-  if (workosProxyBypassPath(pathname)) {
-    return true;
-  }
-
-  return (
-    NATIVE_DEVICE_LINK_BEARER_PATHS.has(pathname) &&
-    headers.get("authorization")?.startsWith("Bearer ") === true
-  );
 }
 
 export function workosSessionCookieName(env: EnvSource = process.env) {

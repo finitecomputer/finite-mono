@@ -31,8 +31,7 @@ the sources above cannot carry lands here.
 ## Standing promises
 
 - The finitechat server keeps accepting every fielded CLI until a deprecation
-  is announced. The Electron experiment is on hold and is not part of the
-  current release path.
+  is announced.
 - Hosted Agents pin their Runtime image at launch and do **not** auto-update.
   Kata launches the immutable digest through a promoted Core artifact;
   existing Agents are rolled serially through Core's guarded same-volume
@@ -52,6 +51,75 @@ the sources above cannot carry lands here.
 
 ## Entries
 
+### 2026-09-02 — iOS client, Electron app, APNs push, and NIP-AB pairing deleted from source
+
+- **Source-only change** (branch `cleanup/delete-ios-platform`): the SwiftUI
+  iOS app, `finitechat-rmp`, the UniFFI pipeline, the Electron app, and the
+  `finitechatd` daemon are gone; the never-shipped push-wake/token surface is
+  removed from the chat server with idempotent `DROP TABLE` migrations for
+  `http_push_tokens`/`http_push_wakes`/`http_pairing_sessions` at next server
+  boot; the NIP-AB pairing rendezvous routes, the hosted-device device-link
+  admission surface, and the `nip_ab` pairing crypto module are gone with
+  them (every pairing client was iOS or Electron).
+- **Compat promises still live:** shipped Electron alphas (v0.1.4/v0.1.5,
+  `finitechat-electron-macos-aarch64.zip`) poll the `finitechat-latest`
+  generic update feed; those clients are now stranded by design — do not
+  repurpose the alias for a different artifact shape. `backfill_releases`
+  still filters electron assets because the old host's history contains them.
+- **Dashboard roll needed:** `/auth/ios/callback`, the Apple
+  app-site-association route, and the `/api/device-links/*` B-side are gone;
+  `FC_WORKOS_IOS_CLIENT_ID` is removed from the dashboard module env and the
+  lat1 configmap. Out-of-repo cleanup that remains: retire the Xcode Cloud
+  workflows in App Store Connect and remove the WorkOS iOS client redirect.
+
+### 2026-09-02 — Chat engine fold (#799) deployed; Agent Runtime `2026-09-02.1` (rekey lever, #809) fleet-rolled; six rewound-sender rooms rekeyed
+
+- **Server roll (lat2):** closure from `3ad21033` activated as `6blnfrw4…`.
+  First boot ran the one-time op-log fold (479 routes, 218,786 entries, 319
+  commit epochs, 547 directory rows; 32+32 sampled-verified) 14:30:24Z.
+  `rollback-check` reads clean (`fold_complete`, `pre_fold_head` 218786).
+  Canary room on a synthetic two-account bootstrap passed: create → commit →
+  welcome claim/ack → second-device sync, both directions decrypting.
+  Same switch shipped the finite-search retirement (`becd877e`, `08d3042d`):
+  podman-firecrawl-*/searxng stopped, healthcheck probes updated. Rollback
+  boundary recorded: borg `finite-lat-1-hosted-web-chat-2026-09-02T13:40:48`
+  (snapshot `20260902T133947Z`), Litestream drill ok (integrity ok),
+  `server.pre-799-fold-backup.sqlite3` beside the live DB.
+- **First activation attempt rolled back by the deploy script's ERR trap:**
+  `finite-healthcheck` fired mid-restart, failed, and made
+  `switch-to-configuration` nonzero; the trap reverted to the pre-fold binary
+  for ~3 min before an immediate roll-forward. Journal-verified: only read
+  traffic in that window (no appends accepted by the old binary on the folded
+  DB). Follow-ups filed: fence the healthcheck timer during activation, treat
+  monitoring-only unit failures as non-rollback, and fix the empty
+  `approved_extra_units` nounset bug in `deploy-lat2-closure-cache`.
+- **Agent Runtime `2026-09-02.1`**
+  (`ghcr.io/finitecomputer/agent-runtime:2026-09-02.1@sha256:c010ba961e4a8bb374a51e277abefb43e71f23b069b4af99004e692857dd7880`,
+  run 33637070107; carries the `finitechat hermes rekey` lever from #809)
+  registered and promoted in Core BEFORE host pins moved; lat3/lat4 pins went
+  `2026-08-27.2` → `2026-09-02.1` (closing the pin lag left by the 2026-08-29
+  waves). Canaries first (runtime_354cb67 lat3, runtime_60a635 lat4): exact
+  digest, `/contact` principal unchanged, rekey subcommand present, bridges
+  connected. Fleet: lat4 20/20 + canary skip; lat3 28/28 + canary skip
+  (runtime_ea5586fb excluded `provider_compute_absent` — see below).
+- **Six rooms rekeyed** (agent-driven MLS self-update commits, epoch 1→2;
+  every rehearsal replayed clean with zero skips and cursors at
+  `commit_seq`): room-5c6e775b3525f2ca@15896, room-d77d6dd515c3877f@1823,
+  room-7d54e212a523f83e@2627, room-dd874e437fdc7094@2594,
+  room-ed5dfe3a221e96d5@6589, room-0f7d2ebbb5f9de51@3381. This durably
+  heals the 2026-08-28 hosted-web restore rewind class ahead of the
+  client-side currency-gate roll.
+
+- **runtime_ea5586fb recovered same day** (dark since the 2026-08-29 roll):
+  the `.5` upgrade's Kata task record was unreadable while the VM itself
+  kept running orphaned; after the dead records were cleared the
+  state-manifest guard refused the first staging (source still changing),
+  the orphaned sandbox was torn down, and the runbook's absent-compute
+  cold-relocation variant rebinded the exact Runtime (same Runtime ID,
+  machine name, artifact, and Agent Principal, manifest `e09fc8bb…`) from
+  lat3 to lat4 (`agent_request_c70951c2…`), after which it was upgraded to
+  `2026-09-02.1` like the rest of the fleet. Core now records 51/51 active
+  Runtimes on `2026-09-02.1` (29 lat3 + 22 lat4).
 ### 2026-08-29 — Chat-server unfreeze (#770) deployed; Agent Runtime `2026-08-29.4` promoted; lat4 rolled
 
 - Chat-authz stack merged 21:28Z (#710, #711, #712; NIP-98 auth included but off).

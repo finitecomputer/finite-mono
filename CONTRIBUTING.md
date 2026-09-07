@@ -104,9 +104,6 @@ Pick a product surface:
   server hot-reloads inside the stack.
 - **CLI** (`finitechat`, `fsite`, `fbrain`): `cargo run -p finitechat-cli --bin finitechat -- --help`
 - **Server** (core / chat / sites): edit, then restart the stack.
-- **iOS**: see `finitechat/ios/` + `finitechat-rmp` (XcodeGen; run from
-  `finitechat/` so `rmp.toml` resolves).
-- **Electron**: see `finitechat/` Electron app docs.
 
 ## 4. Gates before you push
 

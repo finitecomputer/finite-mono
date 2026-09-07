@@ -21,8 +21,7 @@ skills. They do not become Runtime Management Pipe commands or status fields.
 - A user can create a hosted agent from the dashboard.
 - Core records the provider runtime handle, image/runtime artifact, and Finite
   Private grant/key state.
-- Dashboard web chat uses a Hosted Web Device; Electron and native clients can
-  enroll as additional independent Finite Chat Devices.
+- Dashboard web chat uses a Hosted Web Device.
 - Dashboard-owned runtime controls are limited to the exact operations in
   Core's persisted Runtime capability envelope. Missing capabilities expose no
   controls. Purge User Data is a separate retention/export workflow, not a
@@ -128,15 +127,23 @@ dies at 3am with no operation in flight (the frozen-`succeeded` gap). Closing
 that is runner-ferried standing readiness (2026-08 audit synthesis, H1 slice
 3; migration `0022_runtime_health_reports.sql`):
 
-- The Runner holds an on-disk registry of poll targets — written when a launch
-  or cold relocation completes, moved to the new contact endpoint when an
-  upgrade completes, removed when a stop/destroy completes. Each entry is
-  pinned to the launch-verified Agent Principal npub where the launch path
-  verifies identity (and to the retained principal for relocations); entries
-  without a launch pin lock onto the first presented principal and enforce it
-  thereafter. A response presenting any other principal is dropped: ports are
-  reallocated across stops, and a squatter's health must never wear this
-  runtime's name.
+- Core names the poll targets. Every cycle the Runner fetches the
+  runner-authed, host-scoped `GET /api/core/v1/runtime-health-targets`
+  listing — every live runtime on the credential's host whose lifecycle latch
+  is not `offline`, with its contact endpoint, `source_machine_id`, the Agent
+  Principal npub Core last observed for it, and its declared report cadence —
+  and polls exactly those. The Runner keeps no registry of its own: launches,
+  upgrades, relocations, stops and destroys are already Core facts. The only
+  runner-side state is the per-runtime poll throttle, in memory, reset on
+  process start. A Core without the listing route (N-1) turns reporting off
+  for that process with one log line; a listing transport failure skips the
+  cycle; a 404 on an individual report is logged and ignored, and the next
+  listing decides whether the runtime is still this host's.
+- Attribution is pinned to the Agent Principal Core has on record (the npub
+  the runtime's earlier reports carried); a runtime with none on record
+  reports the first presented principal, which Core then lists as the pin. A
+  response presenting any other principal is dropped: ports are reallocated
+  across stops, and a squatter's health must never wear this runtime's name.
 - Once per poll interval per runtime (default 60s), the Runner reads the
   guest's bounded `/contact` document and posts one
   `POST /api/core/v1/runtime-health-reports` report. The endpoint is
@@ -145,8 +152,8 @@ that is runner-ferried standing readiness (2026-08 audit synthesis, H1 slice
 - **Transport failure is reported, not skipped.** When nobody answers, the
   Runner posts `ready: false` with reason `unreachable`, so a dead runtime
   reads `not_ready` immediately. Staleness then means exactly one thing — the
-  Runner stopped reporting — and reads `unknown`. The two failure classes stay
-  distinguishable.
+  Runner stopped reporting — and reads `stale` (never reported reads
+  `unknown`). The two failure classes stay distinguishable.
 - Core stores only the latest report on the runtime row and projects at read
   time (no sweeper, no history table): `ready` iff the latest report says
   ready and is fresher than 3x the reported poll cadence; a fresh `not_ready`

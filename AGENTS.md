@@ -68,7 +68,12 @@ constitution.
   Rust, Node, Postgres, OpenSSL, or other repo dependencies on the user
   system to satisfy project commands.
 - Recommended local workflow: Direnv loads the repo flake via `.envrc`
-  (`use flake`); run `direnv allow` at the repo root.
+  (`use flake`); run `direnv allow` at the repo root. Direnv must load
+  nix-direnv so the dev shell is cached (`nix profile install nixpkgs#nix-direnv`,
+  then `source $HOME/.nix-profile/share/nix-direnv/direnvrc` from
+  `~/.config/direnv/direnvrc`): stdlib `use flake` re-runs `nix print-dev-env`
+  on every re-evaluation, which trips direnv's slow-load warning; with
+  nix-direnv the shell reloads only when `flake.nix`/`flake.lock` change.
 - Prefer root `just` commands; recipes enter the pinned dev environment via
   `scripts/dev-shell`. For direct commands not in a justfile, use
   `scripts/with-dev-env` unless `IN_NIX_SHELL` is already set.
