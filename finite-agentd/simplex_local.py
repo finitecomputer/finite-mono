@@ -6,13 +6,14 @@ Run scripts/simplex-local; stop with Ctrl-C. No production platform changes.
 
 import argparse
 import asyncio
+import contextlib
 import json
 import os
-from pathlib import Path
 import shutil
 import signal
 import subprocess
 import sys
+from pathlib import Path
 
 import qrcode
 import yaml
@@ -101,19 +102,15 @@ async def run(root, config):
                 stderr=log,
                 start_new_session=True,
             )
-        print(
-            f"Native Hermes + SimpleX running. QR: {root / 'pairing.png'}", flush=True
-        )
+        print(f"Native Hermes + SimpleX running. QR: {root / 'pairing.png'}", flush=True)
         print(
             "Scan, send a message, then approve your pending request in dashboard Connections.",
             flush=True,
         )
         print("Ctrl-C stops both processes and retains test state.", flush=True)
         while not stop.is_set() and gateway.returncode is None:
-            try:
+            with contextlib.suppress(TimeoutError):
                 await asyncio.wait_for(stop.wait(), 1)
-            except TimeoutError:
-                pass
         if gateway.returncode is not None:
             raise RuntimeError(f"Hermes stopped; inspect {root / 'gateway.log'}")
     finally:
@@ -125,10 +122,8 @@ async def run(root, config):
                 os.killpg(gateway.pid, signal.SIGKILL)
                 await gateway.wait()
         supervisor.cancel()
-        try:
+        with contextlib.suppress(asyncio.CancelledError):
             await supervisor
-        except asyncio.CancelledError:
-            pass
 
 
 def main():
@@ -172,9 +167,7 @@ def main():
             qr = qrcode.QRCode(border=0)
             qr.add_data(state["address"])
             qr.make(fit=True)
-            state["qr"] = [
-                "".join("1" if cell else "0" for cell in row) for row in qr.get_matrix()
-            ]
+            state["qr"] = ["".join("1" if cell else "0" for cell in row) for row in qr.get_matrix()]
         store = PairingStore()
         state["approved"] = [
             {"user_id": record["user_id"], "name": record.get("user_name", "")}

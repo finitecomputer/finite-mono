@@ -1,13 +1,14 @@
 import json
 import os
-from pathlib import Path
 import subprocess
 import sys
 import tempfile
 import unittest
+from pathlib import Path
 from unittest.mock import AsyncMock, patch
 
 import websockets
+
 import simplex_runtime as runtime
 
 
@@ -15,12 +16,8 @@ class ControlTests(unittest.IsolatedAsyncioTestCase):
     async def test_correlates_response_and_ignores_broadcast(self):
         async def server(ws):
             request = json.loads(await ws.recv())
-            await ws.send(
-                json.dumps({"resp": {"type": "newChatItems", "chatItems": []}})
-            )
-            await ws.send(
-                json.dumps({"corrId": "someone-else", "resp": {"type": "cmdOk"}})
-            )
+            await ws.send(json.dumps({"resp": {"type": "newChatItems", "chatItems": []}}))
+            await ws.send(json.dumps({"corrId": "someone-else", "resp": {"type": "cmdOk"}}))
             await ws.send(
                 json.dumps(
                     {
@@ -39,16 +36,16 @@ class ControlTests(unittest.IsolatedAsyncioTestCase):
         async def server(ws):
             request = json.loads(await ws.recv())
             await ws.send(
-                json.dumps(
-                    {"corrId": request["corrId"], "resp": {"type": "chatCmdError"}}
-                )
+                json.dumps({"corrId": request["corrId"], "resp": {"type": "chatCmdError"}})
             )
 
         async with websockets.serve(server, "127.0.0.1", 0) as service:
             port = service.sockets[0].getsockname()[1]
-            with patch.object(runtime, "WS_URL", f"ws://127.0.0.1:{port}"):
-                with self.assertRaises(RuntimeError):
-                    await runtime.command("/address")
+            with (
+                patch.object(runtime, "WS_URL", f"ws://127.0.0.1:{port}"),
+                self.assertRaises(RuntimeError),
+            ):
+                await runtime.command("/address")
 
     async def test_open_socket_without_command_response_times_out(self):
         async def server(ws):
@@ -57,9 +54,11 @@ class ControlTests(unittest.IsolatedAsyncioTestCase):
 
         async with websockets.serve(server, "127.0.0.1", 0) as service:
             port = service.sockets[0].getsockname()[1]
-            with patch.object(runtime, "WS_URL", f"ws://127.0.0.1:{port}"):
-                with self.assertRaises(TimeoutError):
-                    await runtime.command("/chats", timeout=0.05)
+            with (
+                patch.object(runtime, "WS_URL", f"ws://127.0.0.1:{port}"),
+                self.assertRaises(TimeoutError),
+            ):
+                await runtime.command("/chats", timeout=0.05)
 
     async def test_disabled_connection_does_not_contact_daemon(self):
         with patch.object(runtime, "managed_enabled", return_value=False):
@@ -71,15 +70,11 @@ class ControlTests(unittest.IsolatedAsyncioTestCase):
     async def test_live_status_never_opens_a_websocket(self):
         with (
             patch.object(runtime, "managed_enabled", return_value=True),
-            patch.object(
-                runtime, "saved_address", return_value="https://smp.example/a#synthetic"
-            ),
+            patch.object(runtime, "saved_address", return_value="https://smp.example/a#synthetic"),
             patch.object(
                 runtime,
                 "command",
-                new=AsyncMock(
-                    side_effect=AssertionError("must not consume live events")
-                ),
+                new=AsyncMock(side_effect=AssertionError("must not consume live events")),
             ),
         ):
             result = await runtime.status()
@@ -92,9 +87,7 @@ class AddressTests(unittest.TestCase):
             "connShortLink": "https://smp.example/a#synthetic",
             "connFullLink": "simplex:/contact#synthetic",
         }
-        self.assertEqual(
-            runtime.address_from({"connLinkContact": link}), link["connShortLink"]
-        )
+        self.assertEqual(runtime.address_from({"connLinkContact": link}), link["connShortLink"])
         self.assertEqual(
             runtime.address_from({"contactLink": {"connLinkContact": link}}),
             link["connShortLink"],
@@ -126,12 +119,8 @@ class PairingTests(unittest.TestCase):
                 check=True,
             )
             pending = json.loads(created.stdout)
-            request_id = next(
-                row["request_id"] for row in pending if row["user_id"] == "3"
-            )
-            self.assertTrue(
-                all("hash" not in row and "salt" not in row for row in pending)
-            )
+            request_id = next(row["request_id"] for row in pending if row["user_id"] == "3")
+            self.assertTrue(all("hash" not in row and "salt" not in row for row in pending))
             helper = str(Path(__file__).with_name("simplex_runtime.py"))
             invalid = subprocess.run(
                 [sys.executable, helper, "approve-request"],

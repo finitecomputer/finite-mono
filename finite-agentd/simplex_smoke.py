@@ -12,8 +12,8 @@ import socket
 import sys
 import tempfile
 from pathlib import Path
-import websockets
 
+import websockets
 
 BIN = "simplex-chat"
 PLUGINS = Path(os.environ["HERMES_BUNDLED_PLUGINS"])
@@ -32,11 +32,9 @@ class Peer:
         self.pending = {}
 
     async def open(self):
-        for i in range(40):
+        for _ in range(40):
             try:
-                self.ws = await websockets.connect(
-                    f"ws://127.0.0.1:{self.port}", max_size=2**22
-                )
+                self.ws = await websockets.connect(f"ws://127.0.0.1:{self.port}", max_size=2**22)
                 break
             except OSError:
                 await asyncio.sleep(0.25)
@@ -115,9 +113,7 @@ async def run():
             assert acceptance["type"] == "userContactLinkUpdated"
             await peers[0].close()
             adapter = mod.SimplexAdapter(
-                PlatformConfig(
-                    enabled=True, extra={"ws_url": f"ws://127.0.0.1:{ports[0]}"}
-                )
+                PlatformConfig(enabled=True, extra={"ws_url": f"ws://127.0.0.1:{ports[0]}"})
             )
             incoming = asyncio.Queue()
 
@@ -132,9 +128,7 @@ async def run():
             assert result["type"] != "chatCmdError", result["type"]
             other = await peers[1].until(lambda e: e.get("type") == "contactConnected")
             human_contact = str(other["contact"]["contactId"])
-            msg = json.dumps(
-                [{"msgContent": {"type": "text", "text": "synthetic inbound"}}]
-            )
+            msg = json.dumps([{"msgContent": {"type": "text", "text": "synthetic inbound"}}])
             response = await peers[1].cmd(f"/_send @{human_contact} json {msg}")
             assert response["type"] != "chatCmdError", response["type"]
             event = await asyncio.wait_for(incoming.get(), 30)
@@ -142,14 +136,9 @@ async def run():
             assert event.text == "synthetic inbound"
 
             def reply(e):
-                items = (
-                    e.get("chatItems", []) if e.get("type") == "newChatItems" else []
-                )
+                items = e.get("chatItems", []) if e.get("type") == "newChatItems" else []
                 return any(
-                    i.get("chatItem", {})
-                    .get("content", {})
-                    .get("msgContent", {})
-                    .get("text")
+                    i.get("chatItem", {}).get("content", {}).get("msgContent", {}).get("text")
                     == "synthetic adapter reply"
                     for i in items
                 )

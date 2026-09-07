@@ -11,11 +11,11 @@ import contextlib
 import json
 import os
 import re
-from pathlib import Path
-import signal
 import shutil
+import signal
 import sys
 import uuid
+from pathlib import Path
 
 import websockets
 import yaml
@@ -31,19 +31,14 @@ def settings():
 
 def managed_enabled():
     cfg = settings()
-    return (
-        cfg.get("enabled") is True
-        and cfg.get("extra", {}).get("finite_managed") is True
-    )
+    return cfg.get("enabled") is True and cfg.get("extra", {}).get("finite_managed") is True
 
 
 async def command(text, timeout=5):
     # Require our response, not the first unsolicited broadcast on the socket.
     corr = "finite-" + uuid.uuid4().hex
     async with asyncio.timeout(timeout):
-        async with websockets.connect(
-            WS_URL, max_size=2**20, open_timeout=timeout
-        ) as ws:
+        async with websockets.connect(WS_URL, max_size=2**20, open_timeout=timeout) as ws:
             await ws.send(json.dumps({"corrId": corr, "cmd": text}))
             async for raw in ws:
                 event = json.loads(raw)
@@ -87,9 +82,7 @@ async def tcp_ready():
     # Deliberately no WebSocket handshake: additional WS clients steal events
     # from the daemon's shared queue. TCP liveness is not message-path health.
     try:
-        _, writer = await asyncio.wait_for(
-            asyncio.open_connection("127.0.0.1", 5225), 1
-        )
+        _, writer = await asyncio.wait_for(asyncio.open_connection("127.0.0.1", 5225), 1)
         writer.close()
         await writer.wait_closed()
         return True
@@ -120,9 +113,7 @@ async def start_child(home):
         folder.mkdir(mode=0o700, parents=True, exist_ok=True)
         os.chmod(folder, 0o700)
     profile_args = (
-        []
-        if (home / "identity_chat.db").exists()
-        else ["--user-display-name", "FiniteAgent"]
+        [] if (home / "identity_chat.db").exists() else ["--user-display-name", "FiniteAgent"]
     )
     return await asyncio.create_subprocess_exec(
         "simplex-chat",
@@ -149,16 +140,14 @@ async def create_address():
     if (home / "address.json").exists():
         return {"address": saved_address()}
     if managed_enabled() or any(home.glob("identity*")):
-        raise RuntimeError(
-            "Retained SimpleX state has no saved address; review before setup"
-        )
+        raise RuntimeError("Retained SimpleX state has no saved address; review before setup")
     if await tcp_ready():
         raise RuntimeError("SimpleX port is occupied by an existing daemon")
     # Bootstrap only a brand-new, unexposed identity. No owner can have paired
     # yet, and Hermes has not been enabled. Never open this control WS again.
     child = await start_child(home)
     try:
-        for attempt in range(20):
+        for _ in range(20):
             if child.returncode is not None:
                 raise RuntimeError("SimpleX could not start")
             if await tcp_ready():
@@ -242,10 +231,7 @@ def atomic_json(path, value):
 
 
 def prepare_reset():
-    if (
-        settings().get("extra", {}).get("finite_managed") is not True
-        or managed_enabled()
-    ):
+    if settings().get("extra", {}).get("finite_managed") is not True or managed_enabled():
         raise RuntimeError("Disable managed SimpleX before disconnecting")
     # Durable intent survives interruption. Never bootstrap or approve while set.
     if not reset_marker().exists():
@@ -314,9 +300,7 @@ def clear_simplex_sessions(home):
             isinstance(origin, dict) and origin.get("platform") == "simplex"
         )
 
-    selected = {
-        k: v for k, v in entries.items() if not k.startswith("_") and is_simplex(v)
-    }
+    selected = {k: v for k, v in entries.items() if not k.startswith("_") and is_simplex(v)}
     plan = json.loads(reset_marker().read_text())
     ids = set(plan.get("session_ids", []))
     ids.update(v["session_id"] for v in selected.values())
@@ -349,13 +333,8 @@ def clear_simplex_sessions(home):
                 offset += len(rows)
             for sid in roots:
                 ids.update(db.get_session_delete_targets(sid))
-        if any(
-            not isinstance(sid, str) or not re.fullmatch(r"[A-Za-z0-9_-]+", sid)
-            for sid in ids
-        ):
-            raise RuntimeError(
-                "SimpleX session metadata needs review before disconnecting"
-            )
+        if any(not isinstance(sid, str) or not re.fullmatch(r"[A-Za-z0-9_-]+", sid) for sid in ids):
+            raise RuntimeError("SimpleX session metadata needs review before disconnecting")
         plan["session_ids"] = sorted(ids)
         atomic_json(reset_marker(), plan)
         if db:
@@ -415,8 +394,7 @@ def pending_requests():
             "age_minutes": max(0, row["age_minutes"]),
         }
         for row in PairingStore().list_pending("simplex")
-        if PairingStore.looks_like_request_id(row.get("request_id", ""))
-        and row.get("user_id")
+        if PairingStore.looks_like_request_id(row.get("request_id", "")) and row.get("user_id")
     ]
 
 
@@ -466,12 +444,8 @@ def main():
                 if reset_marker().exists():
                     raise RuntimeError("SimpleX disconnect is unfinished")
                 code = sys.stdin.read(64).strip().upper()
-                if len(code) != 8 or any(
-                    c not in "ABCDEFGHJKLMNPQRSTUVWXYZ23456789" for c in code
-                ):
-                    raise RuntimeError(
-                        "Enter the eight-character pairing code from SimpleX"
-                    )
+                if len(code) != 8 or any(c not in "ABCDEFGHJKLMNPQRSTUVWXYZ23456789" for c in code):
+                    raise RuntimeError("Enter the eight-character pairing code from SimpleX")
                 approved = PairingStore().approve_code("simplex", code)
                 if approved is None:
                     raise RuntimeError(
@@ -479,9 +453,7 @@ def main():
                     )
                 result = {"approved": True}
             else:
-                result = asyncio.run(
-                    status() if operation == "status" else create_address()
-                )
+                result = asyncio.run(status() if operation == "status" else create_address())
             if operation == "status":
                 result["pending"] = pending_requests()
             print(json.dumps(result))
