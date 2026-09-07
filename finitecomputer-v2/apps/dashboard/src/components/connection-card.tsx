@@ -17,7 +17,7 @@ export function ConnectionCard({
 }: {
   account?: string | null;
   children: ReactNode;
-  description: string;
+  description: ReactNode;
   error?: string | null;
   footer?: ReactNode;
   icon: ReactNode;

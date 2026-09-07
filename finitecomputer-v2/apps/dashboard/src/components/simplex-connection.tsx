@@ -20,7 +20,7 @@ export function SimplexConnection({ status, loaded, busy, mutate, refresh }: {
   const canDisconnect = status?.enabled || status?.reset_pending;
   return <ConnectionCard
     name="SimpleX"
-    description={paired ? "A private conversation with your agent." : "A private conversation with your agent. Pair your phone to get started."}
+    description={<>A private conversation with your agent, powered by <a href="https://simplex.chat/" target="_blank" rel="noreferrer" className="underline underline-offset-4 hover:text-foreground">SimpleX</a>.</>}
     icon={<LockKeyholeIcon className="size-5" />}
     state={!status ? "unavailable" : status.enabled && status.ready && paired ? "connected" : "disconnected"}
     account={status?.enabled ? paired ? status.approved.map(p => p.name || `Contact ${p.user_id}`).join(", ") : "Waiting for approval" : null}
@@ -29,7 +29,7 @@ export function SimplexConnection({ status, loaded, busy, mutate, refresh }: {
       {status.address ? <div className="flex flex-col gap-5 sm:flex-row sm:items-center">
         <SimplexQr rows={status.qr} />
         <div className="space-y-3 text-sm">
-          <p>Scan with SimpleX, connect, then send your agent a message.</p>
+          <p>Scan with SimpleX, connect, then send your agent a message. Return here to approve the request.</p>
           <div className="flex flex-wrap gap-2">
             <Button asChild variant="outline" size="sm"><a href={status.address} target="_blank" rel="noreferrer">Open in SimpleX</a></Button>
             <Button variant="outline" size="sm" onClick={async () => {
@@ -37,7 +37,6 @@ export function SimplexConnection({ status, loaded, busy, mutate, refresh }: {
               catch { setCopied(false); }
             }}>{copied ? "Copied" : "Copy link"}</Button>
           </div>
-          <p className="text-muted-foreground">Return here to approve your connection request. No pairing code is needed.</p>
         </div>
       </div> : <Button disabled={busy} onClick={() => void mutate("simplex", { action: "simplex_connect" })}>Get pairing QR</Button>}
       <div className="space-y-3">
@@ -54,7 +53,7 @@ export function SimplexConnection({ status, loaded, busy, mutate, refresh }: {
             </div>
             <Button disabled={busy || !status.ready} onClick={() => void mutate("simplex", { action: "simplex_approve_request", request_id: request.request_id })}>Approve contact {request.user_id}</Button>
           </div>)}
-        </> : <p className="text-sm text-muted-foreground">No pending requests. Connect in SimpleX and send a message; your request will appear here.</p>}
+        </> : <p className="text-sm text-muted-foreground">No pending requests.</p>}
       </div>
     </div> : null}
   >
