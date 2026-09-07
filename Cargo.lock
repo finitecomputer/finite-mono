@@ -1670,7 +1670,7 @@ dependencies = [
 
 [[package]]
 name = "fsite-cli"
-version = "0.5.2"
+version = "0.5.3"
 dependencies = [
  "finite-identity",
  "finitesites-proto",
