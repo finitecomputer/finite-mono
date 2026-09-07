@@ -46,9 +46,6 @@ component `CONTEXT.md`, ADRs, and runbooks instead of stale navigation layers.
 - [Artifact identity and manual drift audit](audits/artifact-identity-and-drift-2026-08-02.md):
   automatic package fingerprints, confirmed compatibility-record drift, and
   the boundary between intentional pins and redundant release bookkeeping.
-- [Script surface audit](audits/script-surface-audit-2026-08-29.md):
-  inventory of scripts, command facades, workflows, safety patterns, drift
-  risks, and recommended script hardening passes.
 
 ## Repo-Local Docs
 

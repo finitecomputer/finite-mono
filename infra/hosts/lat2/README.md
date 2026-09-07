@@ -21,7 +21,7 @@ migrations to Depot-backed CI).
   7.0.0-15-generic, x86-64.
 - Disks at the dated capture: /dev/md0 439G root (24% used); /dev/md1 1.8T at
   `/data` (essentially empty). `/data` is not an Agent placement or recovery
-  target; the historical proposal in `backups.md` is superseded.
+  target; the old same-chassis backup proposal was superseded.
 - Network: 64.34.80.19/31 + IPv6. Public exposure is exactly 22 (sshd) and
   80/443 (Caddy); everything else binds loopback. `/tmp` is a 94G tmpfs
   (matters for backups — see appendix).
@@ -30,10 +30,10 @@ migrations to Depot-backed CI).
 
 | Service | What | Config in this tree |
 |---|---|---|
-| `finite-saas-sites.service` **(DISABLED — migrated to lat1)** | finitesitesd **v0.2.16** (`/usr/local/bin/finitesitesd`, fsite v0.2.16 alongside). Registry, publishing API, Git smart HTTP, and site serving for `*.finite.chat` on 127.0.0.1:8787. `--app-runner kata`: tier-2 apps run as **Kata Containers 3.31.0 microVMs on cloud-hypervisor** (`[hypervisor.clh]`, `/etc/kata-containers/configuration.toml`), driven via `sudo nerdctl` (2.3.1) + containerd. Data: `/var/lib/finite-sites`. | `systemd/finite-saas-sites.service` + `systemd/finite-saas-sites-kata.conf` drop-in, `systemd/finite-app@.service` (template for the non-Kata systemd runner; no instances running), `systemd/50-finite-sites.rules` (polkit), `systemd/finite-sites-nerdctl-sudoers` |
-| `caddy.service` **(DISABLED — `*.finite.chat` edge migrated to lat1)** | Caddy **2.6.2** (distro unit at `/usr/lib/systemd/system/caddy.service`). Three vhosts — `api.finite.chat`, `*.finite.chat`, `*.docs.finite.chat` — all reverse_proxy → 127.0.0.1:8787. TLS via **Cloudflare Origin CA cert** (no ACME, no API token on box); Cloudflare proxies the zone in Full (strict). | `caddy/Caddyfile` |
-| `finite-core-tunnel.service` **(DISABLED — Core is native on lat1 now)** | **Previously undocumented.** Persistent SSH `-L 127.0.0.1:14200 → 10.43.237.180:4200` (finite-saas-core ClusterIP inside lat1's k3s) via `ubuntu@64.34.82.77`, key `/home/ubuntu/.ssh/finite-lat2-core-tunnel`. Enabled, running. | `systemd/finite-core-tunnel.service` |
-| `finite-saas-runner.service` + `.timer` | **Previously undocumented, DORMANT.** "Finite agent creation runner": oneshot every 20s from the build-on-box checkout `/opt/finite/finitecomputer`. Timer is disabled and absent from `list-timers`. Stale `After=k3s.service` (no k3s here); depends on the core tunnel via drop-in. | `systemd/finite-saas-runner.service`, `.timer`, `systemd/finite-saas-runner-10-core-tunnel.conf` |
+| `finite-saas-sites.service` **(DISABLED — migrated to lat1)** | finitesitesd **v0.2.16** (`/usr/local/bin/finitesitesd`, fsite v0.2.16 alongside). Registry, publishing API, Git smart HTTP, and site serving for `*.finite.chat` on 127.0.0.1:8787. `--app-runner kata`: tier-2 apps run as **Kata Containers 3.31.0 microVMs on cloud-hypervisor** (`[hypervisor.clh]`, `/etc/kata-containers/configuration.toml`), driven via `sudo nerdctl` (2.3.1) + containerd. Data: `/var/lib/finite-sites`. | Pre-cutover unit captures removed from the active tree; use git history only for forensic reconstruction. |
+| `caddy.service` **(DISABLED — `*.finite.chat` edge migrated to lat1)** | Caddy **2.6.2** (distro unit at `/usr/lib/systemd/system/caddy.service`). Three vhosts — `api.finite.chat`, `*.finite.chat`, `*.docs.finite.chat` — all reverse_proxy -> 127.0.0.1:8787. TLS via **Cloudflare Origin CA cert** (no ACME, no API token on box); Cloudflare proxies the zone in Full (strict). | Pre-cutover Caddy capture removed from the active tree. |
+| `finite-core-tunnel.service` **(DISABLED — Core is native on lat1 now)** | **Previously undocumented.** Persistent SSH `-L 127.0.0.1:14200 -> 10.43.237.180:4200` (finite-saas-core ClusterIP inside lat1's k3s) via `ubuntu@64.34.82.77`, key `/home/ubuntu/.ssh/finite-lat2-core-tunnel`. Enabled, running. | Pre-cutover unit capture removed from the active tree. |
+| `finite-saas-runner.service` + `.timer` | **Previously undocumented, DORMANT.** "Finite agent creation runner": oneshot every 20s from the build-on-box checkout `/opt/finite/finitecomputer`. Timer is disabled and absent from `list-timers`. Stale `After=k3s.service` (no k3s here); depends on the core tunnel via drop-in. | Pre-cutover unit captures removed from the active tree. |
 | GitHub Actions runners **(removal inventory)** | `finite-lat-2-mono` (registered against finite-mono) **plus** the 3 legacy-repo runners (v2.335.1, `User=ubuntu`, under `/srv/github-runner/`, registered to finitechat / finitecomputer / finitecomputer-v2). Current workflows use Depot and should not target these runners; they are to be unregistered during decommission. | `runners.md` |
 
 ## Ports
@@ -51,7 +51,7 @@ migrations to Depot-backed CI).
 
 | Location | Contents | Consumer |
 |---|---|---|
-| `/etc/finite-saas/sites.env` (0640) | exactly one var: `RESEND_API_KEY`. (`systemd/sites.env.example` also documents optional `FINITE_IDENTITY_AUTHORITY`, not set live.) | finite-saas-sites.service |
+| `/etc/finite-saas/sites.env` (0640) | exactly one var: `RESEND_API_KEY`. Historical captures also mentioned optional `FINITE_IDENTITY_AUTHORITY`, not set live. | finite-saas-sites.service |
 | `/etc/finite-saas/certs/finite-chat-origin.pem` (0644 root:root) / `.key` (0640 root:caddy) | Cloudflare Origin CA cert pair for `finite.chat, *.finite.chat, docs.finite.chat, *.docs.finite.chat`; regenerated 2026-07-02 | Caddy |
 | `/etc/finite-computer/runner.env` (0600 root) | 18 `FC_*` vars: `FC_CORE_URL`, `FC_CORE_API_TOKEN`, `FC_RUNNER_ID`, `FC_RUNNER_SOURCE_HOST_ID`, `FC_RUNNER_RELAY_URL`, `FC_RUNNER_RUNTIME_ARTIFACT_ID`, `FC_RUNNER_RUNTIME_ARTIFACT_KIND`, `FC_RUNNER_RUNTIME_ARTIFACT_REFERENCE`, `FC_RUNNER_RUNTIME_STATE_SCHEMA_VERSION`, `FC_RUNNER_WORK_ROOT`, `FC_RUNNER_MSB_BIN`, `FC_RUNNER_MSB_MEMORY`, `FC_RUNNER_MSB_CPUS`, `FC_RUNNER_RUNTIME_READY_TIMEOUT_SECS`, `FC_RUNNER_RUNTIME_READY_INTERVAL_MS`, `FC_RUNNER_COMMAND_TIMEOUT_SECS`, `FC_RUNNER_RUNTIME_TEMPLATE_ROOT`, `FC_RUNNER_MAX_SANDBOXES` | finite-saas-runner.service (dormant) |
 | `/var/lib/finite-sites/cookie-secret` (64 bytes) | finitesitesd session secret | finitesitesd |
@@ -61,16 +61,11 @@ migrations to Depot-backed CI).
 
 ## Files here
 
-- `systemd/` — unit files, drop-ins, polkit rule, sudoers, env example.
-  Deployed-vs-repo drift check on 2026-07-08: **byte-identical** for
-  Caddyfile, finite-saas-sites.service, kata.conf, finite-app@.service,
-  nerdctl sudoers (these were moved here from
-  `finite-sites/deploy/finite-lat-2/`). Files headed "Captured from host"
-  or "PROPOSED" are new to any repo.
-- `caddy/Caddyfile` — deployed at `/etc/caddy/Caddyfile`.
 - `runners.md` — runner removal inventory for the lat2 decommission.
-- `backups.md` — backup reality and the proposed timer.
-- `deploy.md` — current (deprecated) manual sites deploy and the target flow.
+
+The old pre-cutover unit, Caddy, deploy, and proposed backup captures were
+removed from the active tree. Git history remains the archive for that dated
+evidence.
 
 ## Captured-state appendix — on-host reality that is not (yet) code
 
@@ -99,12 +94,10 @@ migrations to Depot-backed CI).
    `/var/lib/finite-sites` is `/var/backups/finite-sites/finite-sites-20260617T215714Z.tar.gz`
    (2026-06-17). A newer tarball,
    `/tmp/finite-sites-20260702T145453Z.tar.gz` (2026-07-02), sits in `/tmp`
-   — **a tmpfs; it evaporates on reboot**. `/data` (1.8T) is empty. See
-   `backups.md`.
+   — **a tmpfs; it evaporates on reboot**. `/data` (1.8T) is empty.
 6. `/etc/sudoers.d/finite-sites` (systemctl start/stop/restart/is-active for
    `finite-app@*`) exists on the host but in no repo — likely superseded by
-   the polkit rule (`systemd/50-finite-sites.rules`), which the deploy doc
-   says exists precisely because sudo cannot work under NoNewPrivileges.
+   the later NixOS service model.
 7. Runner labels were recovered from config-time `_diag` logs; the
    authoritative label list lives on the GitHub side. Firecrawl compose
    reports one service `exited(1)` (identity not chased). No kata runtime
