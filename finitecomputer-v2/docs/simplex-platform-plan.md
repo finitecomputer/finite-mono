@@ -103,11 +103,10 @@ Hermes adapter. Preserve the mounted state when disabling or reverting code.
 - Required before shipping: local full-stack owner pairing and phone text/voice
   round trip, unauthorized contact denial at the live gateway, empty-target
   restoration of the complete Recovery Set, and the canonical Linux image build.
-- Current local blockers: no Finite Private inference key found in the standard
-  devfinity cache or environment; the configured x86 Linux Nix builder pika-build
-  fails hostname resolution. The macOS daemon package builds and runs; Linux
-  packaging remains unverified. Resolve builder access before expecting the
-  canonical local Runtime image build to succeed.
+- Linux packaging/image verification is assigned to CI, per the user. It does
+  not block the native phone trial. The retired pika-build machine is not a
+  prerequisite for this feature.
+
 
 Upstream limitations remain: text sends return success after socket write,
 attachment sends accept any correlated response as success, automatic read
@@ -115,14 +114,35 @@ receipts are absent, and messages arriving during gateway outages are not proven
 replayed. Standalone `hermes send` can open a competing socket; do not recommend
 it as a live diagnostic. Fixes should land upstream, not as a Finite adapter fork.
 
-## Local test
+## Native local phone test
 
-Use this worktree. `scripts/simplex-smoke` needs outbound relay access but no
-inference key. For the real dashboard/phone trial, cache an existing Finite
-Private key with `just dev inference-key`, then run `just dev up --headless`.
-Devfinity builds the canonical candidate Runtime image locally. Use its displayed
-local dashboard URL and local test account, create a test agent, and open
-Connections. Do not point this trial at either existing production bot.
+From this worktree, run `scripts/simplex-local`. It builds native Nix packages
+for this machine and runs released Hermes plus the same managed daemon helper,
+without Docker, devfinity, a Linux builder, or a platform inference key.
+
+On first run it copies your local Hermes model configuration and auth store
+into a separate private test home at `~/.finite-simplex-test`. It does not copy
+existing platform configuration, conversations, or plugins, and it never links
+writable authentication stores. For environment-based credentials, configure the
+test home's model/auth settings or provide the provider's environment variable.
+The existing local Hermes home is not modified.
+
+Scan `~/.finite-simplex-test/pairing.png` with your phone, send a message, then
+run `scripts/simplex-local approve CODE` with the code received in SimpleX.
+`scripts/simplex-local status` reads cached state without consuming events.
+Ctrl-C stops the native trial and keeps its identity for the next run. Runtime
+logs are private at `~/.finite-simplex-test/gateway.log`. The home path is short
+because Hermes uses Unix sockets with macOS path-length limits.
+
+`FINITE_SIMPLEX_LOCAL_HOME` can select a different short, private test home.
+Only one daemon may occupy localhost:5225. This is a real gateway trial using
+real inference credentials; it does not prove the full dashboard/agentd control
+path. The no-inference `scripts/simplex-smoke` still tests the released adapter
+with two disposable daemons through public relays.
+
+For a later full platform trial, use `just dev inference-key` and
+`just dev up --headless`; that path builds the canonical Linux Runtime image.
+Do not point either trial at an existing production bot.
 
 ## References
 
