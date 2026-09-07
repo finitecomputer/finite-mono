@@ -10,8 +10,10 @@ import asyncio
 import contextlib
 import json
 import os
+import re
 from pathlib import Path
 import signal
+import shutil
 import sys
 import uuid
 
@@ -97,6 +99,9 @@ async def tcp_ready():
 
 async def status():
     result = {"enabled": managed_enabled(), "ready": False, "address": None}
+    if reset_marker().exists():
+        result["reset_pending"] = True
+        return result
     if result["enabled"]:
         result["address"] = saved_address()
         try:
@@ -138,6 +143,8 @@ async def start_child(home):
 
 
 async def create_address():
+    if reset_marker().exists():
+        raise RuntimeError("SimpleX disconnect is unfinished; retry Disconnect first")
     home = state_dir()
     if (home / "address.json").exists():
         return {"address": saved_address()}
@@ -221,7 +228,137 @@ async def supervise():
         pid_file.unlink(missing_ok=True)
 
 
+def reset_marker():
+    return state_dir().parent / "simplex-reset.json"
+
+
+def atomic_json(path, value):
+    temporary = path.with_suffix(path.suffix + ".tmp")
+    with temporary.open("w") as out:
+        json.dump(value, out)
+        out.flush()
+        os.fsync(out.fileno())
+    temporary.replace(path)
+
+
+def prepare_reset():
+    if settings().get("extra", {}).get("finite_managed") is not True or managed_enabled():
+        raise RuntimeError("Disable managed SimpleX before disconnecting")
+    # Durable intent survives interruption. Never bootstrap or approve while set.
+    if not reset_marker().exists():
+        atomic_json(reset_marker(), {"reset": True})
+    return {"reset_pending": True}
+
+
+async def finish_reset():
+    """Run only in the gateway wrapper, after the old gateway has stopped.
+
+    Native trials call this after joining their gateway child. No live database
+    is removed, and the SimpleX supervisor observes disabled config before this.
+    """
+    if not reset_marker().exists():
+        return
+    if managed_enabled():
+        raise RuntimeError("SimpleX disconnect is unfinished; keep it disabled")
+    for _ in range(60):
+        if not (state_dir() / "daemon.pid").exists() and not await tcp_ready():
+            break
+        await asyncio.sleep(.25)
+    else:
+        raise RuntimeError("SimpleX did not stop; disconnect has not cleared its data")
+    home = Path(os.environ["HERMES_HOME"])
+    # Clear both layouts: Hermes can merge the legacy directory back on startup.
+    # The old gateway is stopped, so no other adapter can race the shared file.
+    for folder in (home / "pairing", home / "platforms" / "pairing"):
+        for suffix in ("pending", "approved"):
+            (folder / f"simplex-{suffix}.json").unlink(missing_ok=True)
+        limits = folder / "_rate_limits.json"
+        if limits.exists():
+            values = json.loads(limits.read_text())
+            atomic_json(limits, {k: v for k, v in values.items()
+                                if not k.startswith("simplex:")
+                                and k not in ("_lockout:simplex", "_failures:simplex")})
+    clear_simplex_sessions(home)
+    if state_dir().exists():
+        shutil.rmtree(state_dir())
+    (state_dir().parent / "pairing.png").unlink(missing_ok=True)
+    reset_marker().unlink()
+
+
+def clear_simplex_sessions(home):
+    # Use pinned upstream APIs; never rewrite shared SQLite tables. Journal
+    # transcript IDs before deletion so a file error can be retried after its
+    # database row is gone. The marker is also the interrupted-reset barrier.
+    from gateway.config import load_gateway_config
+    from hermes_state import SessionDB
+
+    sessions = load_gateway_config().sessions_dir
+    mirror = sessions / "sessions.json"
+    entries = json.loads(mirror.read_text()) if mirror.exists() else {}
+    def is_simplex(entry):
+        return entry.get("platform") == "simplex" or (entry.get("origin") or {}).get("platform") == "simplex"
+    selected = {k: v for k, v in entries.items() if is_simplex(v)}
+    plan = json.loads(reset_marker().read_text())
+    ids = set(plan.get("session_ids", []))
+    ids.update(v["session_id"] for v in selected.values())
+    db = SessionDB() if (home / "state.db").exists() else None
+    try:
+        scope = str(sessions.resolve())
+        keys = []
+        roots = []
+        if db:
+            for key, raw in db.load_gateway_routing_entries(scope=scope).items():
+                entry = json.loads(raw)
+                if is_simplex(entry):
+                    keys.append(key)
+                    ids.add(entry["session_id"])
+            offset = 0
+            while True:
+                rows = db.list_sessions_rich(source="simplex", limit=100, offset=offset,
+                    include_children=True, include_archived=True, include_hidden=True,
+                    project_compression_tips=False, compact_rows=True)
+                if not rows:
+                    break
+                roots.extend(row["id"] for row in rows)
+                offset += len(rows)
+            for sid in roots:
+                ids.update(db.get_session_delete_targets(sid))
+        if any(not isinstance(sid, str) or not re.fullmatch(r"[A-Za-z0-9_-]+", sid) for sid in ids):
+            raise RuntimeError("SimpleX session metadata needs review before disconnecting")
+        plan["session_ids"] = sorted(ids)
+        atomic_json(reset_marker(), plan)
+        if db:
+            db.delete_gateway_routing_entries(keys, scope=scope)
+            db.delete_sessions(roots, sessions_dir=sessions)
+        if mirror.exists():
+            atomic_json(mirror, {k: v for k, v in entries.items() if k not in selected})
+        for sid in ids:
+            for suffix in (".json", ".jsonl"):
+                (sessions / (sid + suffix)).unlink(missing_ok=True)
+            for path in sessions.glob(f"request_dump_{sid}_*.json"):
+                path.unlink()
+    finally:
+        if db:
+            db.close()
+
+
+async def wait_reset():
+    for _ in range(100):
+        if not reset_marker().exists():
+            return {"disconnected": True}
+        await asyncio.sleep(.25)
+    raise RuntimeError("SimpleX disconnect is unfinished; retry Disconnect")
+
+
 def gateway():
+    try:
+        asyncio.run(finish_reset())
+    except Exception:
+        # A failed SimpleX cleanup must not take other chat platforms offline.
+        # Keep durable intent for retry; managed config is already disabled.
+        if managed_enabled():
+            raise
+        print("SimpleX disconnect is unfinished; retry Disconnect", file=sys.stderr)
     # This only exports the managed platform configuration. User-installed
     # adapters/profiles remain untouched. No daemon URL is exported by default.
     if settings().get("extra", {}).get("finite_managed") is True:
@@ -263,6 +400,8 @@ def main():
             "gateway",
             "approve",
             "approve-request",
+            "prepare-reset",
+            "wait-reset",
         ],
     )
     operation = parser.parse_args().operation
@@ -273,9 +412,15 @@ def main():
         asyncio.run(supervise())
     else:
         try:
-            if operation == "approve-request":
+            if operation == "prepare-reset":
+                result = prepare_reset()
+            elif operation == "wait-reset":
+                result = asyncio.run(wait_reset())
+            elif operation == "approve-request":
                 from gateway.pairing import PairingStore
 
+                if reset_marker().exists():
+                    raise RuntimeError("SimpleX disconnect is unfinished")
                 request_id = sys.stdin.read(64).strip().lower()
                 if not PairingStore.looks_like_request_id(request_id):
                     raise RuntimeError("Invalid SimpleX connection request")
@@ -287,6 +432,8 @@ def main():
             elif operation == "approve":
                 from gateway.pairing import PairingStore
 
+                if reset_marker().exists():
+                    raise RuntimeError("SimpleX disconnect is unfinished")
                 code = sys.stdin.read(64).strip().upper()
                 if len(code) != 8 or any(
                     c not in "ABCDEFGHJKLMNPQRSTUVWXYZ23456789" for c in code

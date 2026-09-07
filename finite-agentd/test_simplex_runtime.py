@@ -217,6 +217,71 @@ class PairingTests(unittest.TestCase):
             )
             self.assertEqual(verify.returncode, 0, verify.stderr)
 
+class ResetTests(unittest.TestCase):
+    def test_reset_is_isolated_and_recoverable(self):
+        script = r'''
+import asyncio, json, os
+from pathlib import Path
+from unittest.mock import AsyncMock, patch
+import yaml
+import simplex_runtime as r
+from gateway.pairing import PairingStore
+from hermes_state import SessionDB
+home=Path(os.environ['HERMES_HOME']); home.mkdir(exist_ok=True)
+(home/'config.yaml').write_text(yaml.safe_dump({'gateway': {'platforms': {'simplex': {'enabled': False, 'extra': {'finite_managed': True}}}}}))
+(home/'.env').write_text('UNRELATED_CREDENTIAL=synthetic\n')
+r.state_dir().mkdir()
+for name in ['identity_chat.db','identity_agent.db','address.json']:
+    (r.state_dir()/name).write_text('synthetic old identity')
+s=PairingStore()
+for platform in ['simplex','telegram']:
+    code=s.generate_code(platform,'3','Owner'); s.approve_code(platform,code)
+    s.generate_code(platform,'4','Pending')
+legacy=home/'pairing'; legacy.mkdir(exist_ok=True)
+(legacy/'simplex-approved.json').write_text(json.dumps({'8': {'user_name':'Legacy'}}))
+sessions=home/'sessions'; sessions.mkdir(exist_ok=True)
+entries={}; db=SessionDB()
+for platform in ['simplex','telegram']:
+    sid=platform+'-synthetic'; key='agent:'+platform+':dm:3'
+    db.create_session(sid, platform, session_key=key)
+    entry={'session_id':sid,'platform':platform,'origin':None}
+    entries[key]=entry
+    db.save_gateway_routing_entry(key,json.dumps(entry),scope=str(sessions.resolve()))
+    (sessions/(sid+'.jsonl')).write_text('synthetic transcript')
+(sessions/'sessions.json').write_text(json.dumps(entries)); db.close()
+r.prepare_reset()
+with patch.object(r,'tcp_ready',new=AsyncMock(return_value=True)), patch.object(r.asyncio,'sleep',new=AsyncMock()):
+    try: asyncio.run(r.finish_reset())
+    except RuntimeError: pass
+    else: raise AssertionError('deleted live state')
+assert (r.state_dir()/'identity_chat.db').exists()
+try: asyncio.run(r.create_address())
+except RuntimeError: pass
+else: raise AssertionError('bootstrapped during reset')
+with patch.object(r,'tcp_ready',new=AsyncMock(return_value=False)):
+    asyncio.run(r.finish_reset()); asyncio.run(r.finish_reset())
+assert not r.state_dir().exists() and not r.reset_marker().exists()
+s=PairingStore()
+assert not s.list_approved('simplex') and not s.list_pending('simplex')
+assert s.is_approved('telegram','3') and s.list_pending('telegram')
+assert s.generate_code('simplex','3','New owner')
+assert (home/'.env').read_text()=='UNRELATED_CREDENTIAL=synthetic\n'
+db=SessionDB()
+assert db.get_session('simplex-synthetic') is None
+assert db.get_session('telegram-synthetic') is not None
+assert list(db.load_gateway_routing_entries(scope=str(sessions.resolve())))==['agent:telegram:dm:3']
+assert list(json.loads((sessions/'sessions.json').read_text()))==['agent:telegram:dm:3']
+assert not (sessions/'simplex-synthetic.jsonl').exists()
+assert (sessions/'telegram-synthetic.jsonl').exists()
+db.close()
+'''
+        with tempfile.TemporaryDirectory() as root:
+            result = subprocess.run([sys.executable, '-c', script],
+                cwd=Path(__file__).parent,
+                env={**os.environ, 'HERMES_HOME': root+'/hermes', 'FINITECHAT_HOME': root},
+                capture_output=True, text=True)
+            self.assertEqual(result.returncode, 0, result.stderr)
+
 
 if __name__ == "__main__":
     unittest.main()

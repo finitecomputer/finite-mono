@@ -38,6 +38,7 @@ export type AgentConnectionsStatus = {
 export type PendingSimplexContact = { request_id: string; user_id: string; name: string; age_minutes: number };
 
 export type SimplexConnectionStatus = {
+  reset_pending?: boolean;
   pending?: PendingSimplexContact[];
   enabled: boolean;
   ready: boolean;
@@ -54,7 +55,7 @@ export type AgentConnectionAction =
       apiKey?: string;
       model?: string;
     }
-  | { action: "simplex_connect" | "simplex_disconnect" }
+  | { action: "simplex_connect" | "simplex_disconnect" | "simplex_reset" }
   | { action: "simplex_approve"; code: string }
   | { action: "simplex_approve_request"; request_id: string }
   | { action: "telegram_connect"; token: string }
@@ -123,6 +124,7 @@ export function parseAgentConnectionAction(payload: unknown): AgentConnectionAct
     case "telegram_disconnect":
     case "simplex_connect":
     case "simplex_disconnect":
+    case "simplex_reset":
     case "google_disconnect":
       return { action };
     case "inference": {
@@ -299,6 +301,8 @@ function commandForAction(action: Exclude<AgentConnectionAction, { action: "stat
       };
     case "simplex_connect":
       return { command: "agent.simplex.connect", schema: EMPTY_SCHEMA, body: {} };
+    case "simplex_reset":
+      return { command: "agent.simplex.reset", schema: "finite.agent.simplex.reset.v1", body: {} };
     case "simplex_disconnect":
       return { command: "agent.simplex.disconnect", schema: EMPTY_SCHEMA, body: {} };
     case "simplex_approve_request":
@@ -407,6 +411,7 @@ export function parseSimplexStatus(value: unknown): SimplexConnectionStatus {
     throw new HostedAgentControlError("The agent returned an invalid SimpleX QR code.", 502);
   }
   return {
+    reset_pending: status.reset_pending === true,
     enabled: status.enabled === true,
     ready: status.ready === true,
     address,

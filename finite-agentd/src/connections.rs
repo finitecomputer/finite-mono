@@ -177,6 +177,10 @@ impl ConnectionManager {
                 .get("enabled")
                 .and_then(Value::as_bool)
                 .unwrap_or(false),
+            reset_pending: state
+                .get("reset_pending")
+                .and_then(Value::as_bool)
+                .unwrap_or(false),
             ready: state.get("ready").and_then(Value::as_bool).unwrap_or(false),
             address,
             qr,
@@ -219,6 +223,14 @@ impl ConnectionManager {
             SIMPLEX_CONFIG_PATH,
             simplex_config_value(enabled),
         ))
+    }
+
+    pub(crate) fn prepare_simplex_reset(&self) -> Result<Value, AgentdError> {
+        crate::simplex::control(&self.agent_home, &self.hermes_home, "prepare-reset", None)
+    }
+
+    pub(crate) fn wait_simplex_reset(&self) -> Result<Value, AgentdError> {
+        crate::simplex::control(&self.agent_home, &self.hermes_home, "wait-reset", None)
     }
 
     pub(crate) fn simplex_address(&self) -> Result<Value, AgentdError> {

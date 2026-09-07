@@ -59,6 +59,11 @@ export class NativeSimplex {
         }
         throw new Error("SimpleX is still starting. Refresh to check again.");
       }
+      case "agent.simplex.reset": {
+        await this.stop();
+        await this.call("reset");
+        return {};
+      }
       case "agent.simplex.disconnect": {
         await this.stop();
         await this.call("disable");

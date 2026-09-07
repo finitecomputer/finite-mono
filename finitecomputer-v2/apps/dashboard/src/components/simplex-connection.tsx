@@ -3,6 +3,7 @@
 import { useState } from "react";
 import { LockKeyholeIcon } from "lucide-react";
 import { ConnectionCard } from "@/components/connection-card";
+import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogDescription, DialogFooter } from "@/components/ui/dialog";
 import { Button } from "@/components/ui/button";
 import type { AgentConnectionAction, SimplexConnectionStatus } from "@/lib/hosted-agent-controls";
 
@@ -14,14 +15,16 @@ export function SimplexConnection({ status, loaded, busy, mutate, refresh }: {
   refresh: () => Promise<void>;
 }) {
   const [copied, setCopied] = useState(false);
+  const [confirmDisconnect, setConfirmDisconnect] = useState(false);
   const paired = Boolean(status?.approved.length);
+  const canDisconnect = status?.enabled || status?.reset_pending;
   return <ConnectionCard
     name="SimpleX"
     description={paired ? "A private conversation with your agent." : "A private conversation with your agent. Pair your phone to get started."}
     icon={<LockKeyholeIcon className="size-5" />}
     state={!status ? "unavailable" : status.enabled && status.ready && paired ? "connected" : "disconnected"}
     account={status?.enabled ? paired ? status.approved.map(p => p.name || `Contact ${p.user_id}`).join(", ") : "Waiting for approval" : null}
-    error={loaded && !status ? "Update your agent runtime to set up SimpleX." : status?.enabled && !status.ready ? "SimpleX is starting or temporarily unavailable. Refresh to check again." : null}
+    error={status?.reset_pending ? "Disconnect is unfinished. Retry to finish clearing this connection." : loaded && !status ? "Update your agent runtime to set up SimpleX." : status?.enabled && !status.ready ? "SimpleX is starting or temporarily unavailable. Refresh to check again." : null}
     footer={status?.enabled && !paired ? <div className="space-y-4">
       {status.address ? <div className="flex flex-col gap-5 sm:flex-row sm:items-center">
         <SimplexQr rows={status.qr} />
@@ -55,10 +58,25 @@ export function SimplexConnection({ status, loaded, busy, mutate, refresh }: {
       </div>
     </div> : null}
   >
-    <Button variant={status?.enabled ? "outline" : "default"} disabled={busy || !status}
-      onClick={() => void mutate("simplex", { action: status?.enabled ? "simplex_disconnect" : "simplex_connect" })}>
-      {status?.enabled ? "Disconnect" : "Connect"}
+    <Button variant={canDisconnect ? "outline" : "default"} disabled={busy || !status}
+      onClick={() => canDisconnect ? setConfirmDisconnect(true) : void mutate("simplex", { action: "simplex_connect" })}>
+      {canDisconnect ? "Disconnect" : "Connect"}
     </Button>
+    <Dialog open={confirmDisconnect} onOpenChange={setConfirmDisconnect}>
+      <DialogContent>
+        <DialogHeader>
+          <DialogTitle>Disconnect SimpleX?</DialogTitle>
+          <DialogDescription>This deletes your agent’s SimpleX identity, contacts, approvals, and SimpleX conversation history. Messages on your phone remain. You’ll need to pair again to reconnect.</DialogDescription>
+        </DialogHeader>
+        <DialogFooter>
+          <Button variant="outline" onClick={() => setConfirmDisconnect(false)}>Cancel</Button>
+          <Button variant="destructive" disabled={busy} onClick={() => {
+            setConfirmDisconnect(false);
+            void mutate("simplex", { action: "simplex_reset" });
+          }}>Disconnect</Button>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
   </ConnectionCard>;
 }
 

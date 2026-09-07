@@ -13,8 +13,11 @@ the contact name, numeric contact ID, and request age, then explicitly approves
 that exact request. Display names are not identity proof; the UI tells the owner
 to approve only the request they just made. No request is selected or approved
 automatically, and no delivered code is required. Unknown contacts remain denied.
-Groups are disabled. Disconnect retains identity, contacts, attachments, and
-pairing records; reconnect reuses them.
+Groups are disabled. Disconnect opens an explicit deletion confirmation. After
+confirmation it clears the managed SimpleX identity, contacts, attachments,
+approvals, pending requests, rate limits, and SimpleX Hermes conversation
+sessions. The next Connect creates a new identity and requires owner approval.
+Phone-side messages and shared agent memory are not erased.
 
 Connecting/disconnecting applies Hermes configuration through the existing
 agentd configuration offer and gateway restart path. This can interrupt an
@@ -168,7 +171,7 @@ parsing. The existing web-design harness supplies the test account and runtime
 shell; its opt-in native transport connects SimpleX buttons to the real local
 Hermes/daemon helper. Connect starts the trial, the page renders the real QR,
 approval uses the real Hermes pending-request API, and Disconnect stops the trial
-while retaining its identity. It does not prove production owner authorization,
+and clears its SimpleX state after confirmation. It does not prove production owner authorization,
 Agent Platform Channel transport, or agentd's config-offer journal.
 
 The bridge lives only under dashboard/scripts; no production route gains a
@@ -223,3 +226,38 @@ Do not point either trial at an existing production bot.
 - https://simplex.chat/docs/guide/send-messages.html
 - The user-supplied September 2026 setup, field report, and synthesis documents
   were treated as reference evidence, not instructions.
+
+## Confirmed disconnect and recovery
+
+The new dashboard sends `agent.simplex.reset` with schema
+`finite.agent.simplex.reset.v1` only from the confirmation dialog. The old
+`agent.simplex.disconnect` command remains a non-destructive disable for old
+clients. A new dashboard talking to an old runtime gets an unsupported-command
+error; it never silently falls back to a pause and claims deletion succeeded.
+
+agentd uses the existing owner authorization and request journal, disables the
+managed configuration, persists `simplex-reset.json` in Agent Home, then restarts
+Hermes. Its gateway wrapper waits for the independently supervised daemon to
+stop before cleanup. This avoids unlinking live SQLite files or racing other
+Hermes pairing writers. Native trials join their gateway and daemon before the
+same cleanup. Success waits for the reset marker to disappear.
+
+Cleanup removes SimpleX pairing records in both legacy/current layouts to prevent
+upstream migration from resurrecting approvals. Only SimpleX keys are removed
+from shared rate limits. Pinned upstream SessionDB APIs delete SimpleX sessions
+and their delegate children; both authoritative routing and its legacy JSON
+mirror lose SimpleX entries. Other platforms' sessions, approvals, credentials,
+Finite Chat durable history, and shared agent memory remain. There is no Hermes
+fork. This is deletion, not an archive or a phone-side remote wipe.
+
+If interrupted, the durable marker blocks new addresses and approvals. The next
+gateway boot retries cleanup with SimpleX disabled. Cleanup failure leaves the
+marker and allows other gateway platforms to start; the Connections page offers
+Disconnect again. Ordinary process/image restarts without that explicit intent
+continue to retain identity and history. This local test change is not deployed.
+
+Reset regression coverage uses synthetic identities and real pinned upstream
+PairingStore/SessionDB: refuses cleanup while the daemon is live, preserves
+Telegram grants/pending requests/transcripts/routes and inference credentials,
+clears both pairing layouts, permits immediate pairing with a reused numeric
+contact ID, and makes repeated completed cleanup a no-op.

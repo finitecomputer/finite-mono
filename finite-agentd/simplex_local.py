@@ -143,6 +143,7 @@ def main():
             "dashboard-status",
             "approve-request",
             "disable",
+            "reset",
         ],
         default="run",
         nargs="?",
@@ -153,10 +154,13 @@ def main():
     config = prepare(root)
     if args.operation == "run":
         asyncio.run(run(root, config))
-    elif args.operation == "disable":
+    elif args.operation in ("disable", "reset"):
         doc = yaml.safe_load(config.read_text())
         doc["gateway"]["platforms"]["simplex"]["enabled"] = False
         config.write_text(yaml.safe_dump(doc))
+        if args.operation == "reset":
+            runtime.prepare_reset()
+            asyncio.run(runtime.finish_reset())
         print("{}")
     elif args.operation == "dashboard-status":
         from gateway.pairing import PairingStore

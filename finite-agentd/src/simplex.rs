@@ -23,6 +23,7 @@ pub(crate) struct PendingSimplexContact {
 pub(crate) struct SimplexStatus {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub pending: Option<Vec<PendingSimplexContact>>,
+    pub reset_pending: bool,
     pub enabled: bool,
     pub ready: bool,
     pub address: Option<String>,

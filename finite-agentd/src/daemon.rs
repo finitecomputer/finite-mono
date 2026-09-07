@@ -458,6 +458,28 @@ impl CommandExecutor {
                     .map_err(|error| AgentdError::Config(error.to_string()))??;
                 self.apply_config_offer(offer).await
             }
+            "agent.simplex.reset" => {
+                parse_body::<EmptyRequest>(request, "finite.agent.simplex.reset.v1")?;
+                let offer = self
+                    .connection_manager
+                    .simplex_offer(&request.request_id, false)?;
+                let config = self.config_manager.clone();
+                let home = self.hermes_home.clone();
+                let connections = self.connection_manager.clone();
+                tokio::task::spawn_blocking(move || {
+                    config.apply(&offer, || validate_hermes_config(&home))?;
+                    connections.prepare_simplex_reset()
+                })
+                .await
+                .map_err(|error| AgentdError::Config(error.to_string()))??;
+                // Even already-disabled connections need cleanup. The wrapper
+                // completes durable reset intent before the next gateway starts.
+                self.supervisor.restart_hermes().await?;
+                let connections = self.connection_manager.clone();
+                tokio::task::spawn_blocking(move || connections.wait_simplex_reset())
+                    .await
+                    .map_err(|error| AgentdError::Config(error.to_string()))?
+            }
             "agent.simplex.disconnect" => {
                 parse_body::<EmptyRequest>(request, EMPTY_REQUEST_SCHEMA)?;
                 let offer = self
