@@ -22,6 +22,7 @@ export type AgentConnectionsStatus = {
     provider: string;
     model: string;
   };
+  simplex?: SimplexConnectionStatus;
   telegram: {
     connected: boolean;
     home_channel?: string | null;
@@ -34,6 +35,14 @@ export type AgentConnectionsStatus = {
   };
 };
 
+export type SimplexConnectionStatus = {
+  enabled: boolean;
+  ready: boolean;
+  address?: string | null;
+  qr: string[];
+  approved: Array<{ user_id: string; name: string }>;
+};
+
 export type AgentConnectionAction =
   | { action: "status" }
   | {
@@ -42,6 +51,8 @@ export type AgentConnectionAction =
       apiKey?: string;
       model?: string;
     }
+  | { action: "simplex_connect" | "simplex_disconnect" }
+  | { action: "simplex_approve"; code: string }
   | { action: "telegram_connect"; token: string }
   | { action: "telegram_approve"; code: string }
   | { action: "telegram_home"; userId: string; name?: string }
@@ -106,6 +117,8 @@ export function parseAgentConnectionAction(payload: unknown): AgentConnectionAct
   switch (action) {
     case "status":
     case "telegram_disconnect":
+    case "simplex_connect":
+    case "simplex_disconnect":
     case "google_disconnect":
       return { action };
     case "inference": {
@@ -122,6 +135,7 @@ export function parseAgentConnectionAction(payload: unknown): AgentConnectionAct
     }
     case "telegram_connect":
       return { action, token: boundedString(record.token, "token", 256) };
+    case "simplex_approve":
     case "telegram_approve":
       return { action, code: boundedString(record.code, "code", 16) };
     case "telegram_home":
@@ -274,6 +288,12 @@ function commandForAction(action: Exclude<AgentConnectionAction, { action: "stat
           model: action.model,
         },
       };
+    case "simplex_connect":
+      return { command: "agent.simplex.connect", schema: EMPTY_SCHEMA, body: {} };
+    case "simplex_disconnect":
+      return { command: "agent.simplex.disconnect", schema: EMPTY_SCHEMA, body: {} };
+    case "simplex_approve":
+      return { command: "agent.simplex.approve", schema: "finite.agent.simplex.approve.v1", body: { code: action.code } };
     case "telegram_connect":
       return {
         command: "agent.telegram.connect",
@@ -314,6 +334,7 @@ function parseConnectionsStatus(value: unknown): AgentConnectionsStatus {
       provider: boundedString(inference.provider, "inference provider", 128),
       model: boundedString(inference.model, "inference model", 256),
     },
+    simplex: root.simplex == null ? undefined : parseSimplexStatus(root.simplex),
     telegram: {
       connected: telegram.connected === true,
       home_channel: optionalString(telegram.home_channel, "Telegram chat", 256),
@@ -359,4 +380,26 @@ function optionalString(value: unknown, field: string, max: number) {
     return undefined;
   }
   return boundedString(value, field, max);
+}
+
+export function parseSimplexStatus(value: unknown): SimplexConnectionStatus {
+  const status = objectRecord(value);
+  const address = optionalString(status.address, "SimpleX address", 4096);
+  if (address) {
+    const url = new URL(address);
+    if (url.protocol !== "https:" && url.protocol !== "simplex:") {
+      throw new HostedAgentControlError("The agent returned an invalid SimpleX address.", 502);
+    }
+  }
+  const qr = status.qr;
+  if (!Array.isArray(qr) || qr.length > 177 || qr.some(row => typeof row !== "string" || row.length !== qr.length || !/^[01]+$/u.test(row))) {
+    throw new HostedAgentControlError("The agent returned an invalid SimpleX QR code.", 502);
+  }
+  return {
+    enabled: status.enabled === true,
+    ready: status.ready === true,
+    address,
+    qr,
+    approved: parsePeople(status.approved),
+  };
 }

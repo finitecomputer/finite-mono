@@ -21,7 +21,7 @@ use tokio::sync::mpsc;
 use crate::AgentdError;
 use crate::config::{ConfigManager, HermesConfigOfferV1, HermesConfigRollbackV1};
 use crate::connections::{
-    ConnectionManager, GoogleApplyRequest, InferenceApplyRequest, TelegramApproveRequest,
+    ConnectionManager, GoogleApplyRequest, InferenceApplyRequest, PairingApproveRequest,
     TelegramConnectRequest, TelegramHomeRequest,
 };
 use crate::ledger::{CommandDecision, Ledger};
@@ -212,6 +212,7 @@ pub async fn run_daemon(config: DaemonConfig) -> Result<(), AgentdError> {
         sidecar_spec(&config),
         health_spec(&config),
         hermes_spec(&config),
+        simplex_spec(&config),
     );
     spawn_status_writer(
         config.status_path(),
@@ -433,7 +434,11 @@ impl CommandExecutor {
             }
             "agent.connections.status" => {
                 parse_body::<EmptyRequest>(request, EMPTY_REQUEST_SCHEMA)?;
-                Ok(serde_json::to_value(self.connection_manager.status()?)?)
+                let manager = self.connection_manager.clone();
+                let status = tokio::task::spawn_blocking(move || manager.status())
+                    .await
+                    .map_err(|error| AgentdError::Config(error.to_string()))??;
+                Ok(serde_json::to_value(status)?)
             }
             "agent.inference.apply" => {
                 let body = parse_body::<InferenceApplyRequest>(request, INFERENCE_APPLY_SCHEMA)?;
@@ -441,6 +446,35 @@ impl CommandExecutor {
                     .connection_manager
                     .inference_plan(&request.request_id, body)?;
                 self.apply_inference_plan(plan).await
+            }
+            "agent.simplex.connect" => {
+                parse_body::<EmptyRequest>(request, EMPTY_REQUEST_SCHEMA)?;
+                let offer = self
+                    .connection_manager
+                    .simplex_offer(&request.request_id, true)?;
+                let manager = self.connection_manager.clone();
+                tokio::task::spawn_blocking(move || manager.simplex_address())
+                    .await
+                    .map_err(|error| AgentdError::Config(error.to_string()))??;
+                self.apply_config_offer(offer).await
+            }
+            "agent.simplex.disconnect" => {
+                parse_body::<EmptyRequest>(request, EMPTY_REQUEST_SCHEMA)?;
+                let offer = self
+                    .connection_manager
+                    .simplex_offer(&request.request_id, false)?;
+                self.apply_config_offer(offer).await
+            }
+            "agent.simplex.approve" => {
+                let body = parse_body::<PairingApproveRequest>(
+                    request,
+                    "finite.agent.simplex.approve.v1",
+                )?;
+                let manager = self.connection_manager.clone();
+                tokio::task::spawn_blocking(move || manager.approve_simplex(body))
+                    .await
+                    .map_err(|error| AgentdError::Config(error.to_string()))??;
+                Ok(json!({ "approved": true }))
             }
             "agent.telegram.connect" => {
                 let body = parse_body::<TelegramConnectRequest>(request, TELEGRAM_CONNECT_SCHEMA)?;
@@ -450,7 +484,7 @@ impl CommandExecutor {
                 self.apply_config_offer(offer).await
             }
             "agent.telegram.approve" => {
-                let body = parse_body::<TelegramApproveRequest>(request, TELEGRAM_APPROVE_SCHEMA)?;
+                let body = parse_body::<PairingApproveRequest>(request, TELEGRAM_APPROVE_SCHEMA)?;
                 let manager = self.connection_manager.clone();
                 tokio::task::spawn_blocking(move || manager.approve_telegram(body))
                     .await
@@ -755,6 +789,25 @@ fn sidecar_spec(config: &DaemonConfig) -> ProcessSpec {
         ],
         environment,
     }
+}
+
+fn simplex_spec(config: &DaemonConfig) -> Option<ProcessSpec> {
+    let script = crate::simplex::script_path();
+    script.is_file().then(|| ProcessSpec {
+        name: "simplex",
+        program: config.health_python.clone(),
+        args: vec![script.display().to_string(), "supervise".to_owned()],
+        environment: BTreeMap::from([
+            (
+                "HERMES_HOME".to_owned(),
+                config.hermes_home.display().to_string(),
+            ),
+            (
+                "FINITECHAT_HOME".to_owned(),
+                config.agent_home.display().to_string(),
+            ),
+        ]),
+    })
 }
 
 fn health_spec(config: &DaemonConfig) -> ProcessSpec {

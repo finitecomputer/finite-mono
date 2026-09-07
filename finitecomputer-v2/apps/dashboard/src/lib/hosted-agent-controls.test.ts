@@ -5,6 +5,7 @@ import {
   HostedAgentControlError,
   agentOwnerClaimCommand,
   parseAgentConnectionAction,
+  parseSimplexStatus,
 } from "@/lib/hosted-agent-controls";
 
 test("Connections reuses the durable successful owner claim", () => {
@@ -59,4 +60,20 @@ test("connection actions reject unknown inference and oversized secrets", () => 
       }),
     HostedAgentControlError
   );
+});
+
+test("SimpleX exposes pairing actions without arbitrary daemon commands", () => {
+  for (const action of ["simplex_connect", "simplex_disconnect"]) {
+    assert.deepEqual(parseAgentConnectionAction({ action }), { action });
+  }
+  assert.deepEqual(parseAgentConnectionAction({ action: "simplex_approve", code: "ABCD2345" }), { action: "simplex_approve", code: "ABCD2345" });
+  assert.throws(() => parseAgentConnectionAction({ action: "simplex_command", command: "/sql" }));
+});
+
+test("SimpleX rejects executable links and malformed QR matrices", () => {
+  const status = { enabled: true, ready: true, address: "https://smp.example/a#synthetic", qr: ["10", "01"], approved: [] };
+  assert.equal(parseSimplexStatus(status).address, status.address);
+  assert.throws(() => parseSimplexStatus({ ...status, address: "javascript:alert(1)" }));
+  assert.throws(() => parseSimplexStatus({ ...status, qr: ["10", "1"] }));
+  assert.throws(() => parseSimplexStatus({ ...status, qr: ["<svg>"] }));
 });

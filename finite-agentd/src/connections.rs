@@ -33,6 +33,8 @@ pub(crate) struct ConnectionsStatus {
     pub inference: InferenceStatus,
     pub telegram: TelegramStatus,
     pub google: GoogleStatus,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub simplex: Option<crate::simplex::SimplexStatus>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -46,12 +48,12 @@ pub(crate) struct InferenceStatus {
 pub(crate) struct TelegramStatus {
     pub connected: bool,
     pub home_channel: Option<String>,
-    pub pending: Vec<TelegramPerson>,
-    pub approved: Vec<TelegramPerson>,
+    pub pending: Vec<PairedContact>,
+    pub approved: Vec<PairedContact>,
 }
 
 #[derive(Debug, Clone, Serialize)]
-pub(crate) struct TelegramPerson {
+pub(crate) struct PairedContact {
     pub user_id: String,
     pub name: String,
 }
@@ -89,7 +91,7 @@ pub(crate) struct TelegramConnectRequest {
 
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub(crate) struct TelegramApproveRequest {
+pub(crate) struct PairingApproveRequest {
     pub code: String,
 }
 
@@ -136,7 +138,99 @@ impl ConnectionManager {
             inference: self.inference_status()?,
             telegram: self.telegram_status()?,
             google: self.google_status(),
+            simplex: self.simplex_status()?,
         })
+    }
+
+    fn simplex_status(&self) -> Result<Option<crate::simplex::SimplexStatus>, AgentdError> {
+        if !crate::simplex::script_path().is_file() {
+            return Ok(None);
+        }
+        let state = crate::simplex::control(&self.agent_home, &self.hermes_home, "status", None)
+            .unwrap_or_else(|_| {
+                // A SimpleX failure must not hide Telegram or other controls.
+                let enabled = self
+                    .config
+                    .current_value(crate::config::SIMPLEX_CONFIG_PATH)
+                    .ok()
+                    .and_then(|v| v.get("enabled").and_then(Value::as_bool))
+                    .unwrap_or(false);
+                json!({ "enabled": enabled, "ready": false, "address": null })
+            });
+        let address = state
+            .get("address")
+            .and_then(Value::as_str)
+            .map(str::to_owned);
+        let qr = address
+            .as_deref()
+            .map(crate::simplex::qr_rows)
+            .transpose()?
+            .unwrap_or_default();
+        Ok(Some(crate::simplex::SimplexStatus {
+            enabled: state
+                .get("enabled")
+                .and_then(Value::as_bool)
+                .unwrap_or(false),
+            ready: state.get("ready").and_then(Value::as_bool).unwrap_or(false),
+            address,
+            qr,
+            approved: self.platform_people("simplex", "approved"),
+        }))
+    }
+
+    pub(crate) fn simplex_offer(
+        &self,
+        request_id: &str,
+        enabled: bool,
+    ) -> Result<HermesConfigOfferV1, AgentdError> {
+        use crate::config::{SIMPLEX_CONFIG_PATH, simplex_config_value};
+        if !crate::simplex::script_path().is_file() {
+            return Err(AgentdError::Config(
+                "This runtime needs an update before connecting SimpleX".to_owned(),
+            ));
+        }
+        let current = self.config.current_value(SIMPLEX_CONFIG_PATH)?;
+        if current.is_null()
+            && read_dotenv_value(&self.hermes_home.join(".env"), "SIMPLEX_WS_URL")?.is_some()
+        {
+            return Err(AgentdError::ConfigConflict(
+                "SimpleX is already configured in Hermes .env; review it before managed setup"
+                    .to_owned(),
+            ));
+        }
+        if !current.is_null()
+            && current != simplex_config_value(true)
+            && current != simplex_config_value(false)
+        {
+            return Err(AgentdError::ConfigConflict("An existing SimpleX configuration is user-managed; it must be reviewed before enabling managed setup".to_owned()));
+        }
+        Ok(approved_offer(
+            request_id,
+            SIMPLEX_CONFIG_PATH,
+            simplex_config_value(enabled),
+        ))
+    }
+
+    pub(crate) fn simplex_address(&self) -> Result<Value, AgentdError> {
+        crate::simplex::control(&self.agent_home, &self.hermes_home, "address", None)
+    }
+
+    pub(crate) fn approve_simplex(
+        &self,
+        request: PairingApproveRequest,
+    ) -> Result<(), AgentdError> {
+        let code = request.code.trim().to_ascii_uppercase();
+        if code.len() != 8
+            || !code
+                .bytes()
+                .all(|b| b"ABCDEFGHJKLMNPQRSTUVWXYZ23456789".contains(&b))
+        {
+            return Err(AgentdError::InvalidPayload(
+                "Enter the eight-character pairing code from SimpleX".to_owned(),
+            ));
+        }
+        crate::simplex::control(&self.agent_home, &self.hermes_home, "approve", Some(&code))?;
+        Ok(())
     }
 
     pub(crate) fn inference_plan(
@@ -320,7 +414,7 @@ impl ConnectionManager {
 
     pub(crate) fn approve_telegram(
         &self,
-        request: TelegramApproveRequest,
+        request: PairingApproveRequest,
     ) -> Result<(), AgentdError> {
         let code = request.code.trim().to_ascii_uppercase();
         if code.len() != 8
@@ -466,8 +560,8 @@ impl ConnectionManager {
         Ok(TelegramStatus {
             connected,
             home_channel,
-            pending: self.telegram_people("pending"),
-            approved: self.telegram_people("approved"),
+            pending: self.platform_people("telegram", "pending"),
+            approved: self.platform_people("telegram", "approved"),
         })
     }
 
@@ -492,14 +586,14 @@ impl ConnectionManager {
         }
     }
 
-    fn telegram_people(&self, suffix: &str) -> Vec<TelegramPerson> {
+    fn platform_people(&self, platform: &str, suffix: &str) -> Vec<PairedContact> {
         let mut people = Vec::new();
         let mut seen = BTreeSet::new();
         for directory in [
             self.hermes_home.join("platforms/pairing"),
             self.hermes_home.join("pairing"),
         ] {
-            let path = directory.join(format!("telegram-{suffix}.json"));
+            let path = directory.join(format!("{platform}-{suffix}.json"));
             let Ok(Value::Object(entries)) = fs::read(&path)
                 .ok()
                 .and_then(|bytes| serde_json::from_slice::<Value>(&bytes).ok())
@@ -530,7 +624,7 @@ impl ConnectionManager {
                     .chars()
                     .take(128)
                     .collect();
-                people.push(TelegramPerson { user_id, name });
+                people.push(PairedContact { user_id, name });
             }
         }
         people

@@ -943,6 +943,7 @@ dependencies = [
  "clap",
  "finitechat-proto",
  "futures-util",
+ "qrcode",
  "reqwest",
  "rusqlite",
  "rustix",

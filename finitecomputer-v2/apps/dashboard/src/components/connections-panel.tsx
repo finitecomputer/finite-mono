@@ -10,6 +10,7 @@ import {
   UnplugIcon,
 } from "lucide-react";
 
+import { SimplexConnection } from "@/components/simplex-connection";
 import { ConnectionCard } from "@/components/connection-card";
 import { useOptionalHostedChat } from "@/components/hosted-chat-provider";
 import { Button } from "@/components/ui/button";
@@ -107,6 +108,8 @@ export function ConnectionsPanel({
       >
         <InferenceControls status={status} busy={busy} mutate={mutate} />
       </ConnectionCard>
+
+      <SimplexConnection status={status?.simplex} loaded={Boolean(status)} busy={Boolean(busy)} mutate={mutate} refresh={refresh} />
 
       <ConnectionCard
         name="Telegram"
