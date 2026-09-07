@@ -63,20 +63,17 @@ RAID preserves availability through one disk failure but does not provide an
 independent backup. The authoritative sequence and dated evidence are in
 `docs/runs/finite-lat-capacity-and-redundancy.md`.
 
-## finite-lat-2, the replacement app server (in progress)
+## finite-lat-2, the replacement app server
 
-`nixosConfigurations.finite-lat-2` carries finite-lat-1's service stack
-(Core, Postgres, chat, hosted-device, sites, Brain, Identity, dashboard,
-search, Caddy, backups, litestream) on the lat3-qualified storage chassis,
-for the ADR 0007 emergency cutover off the thermally failed lat1. It runs
-no Agent Runner — the runner lane moves to a future host. The host boots in
-declarative import mode (`modules/import-mode.nix`): product units stay
-down while lat1's state is imported and verified. Its `storage-ids.nix`
-and networking carry `captured = false` placeholders until
-`scripts/capture-lat2-host-evidence` has run against the physical machine;
-`scripts/build-lat2-nixos-closure-artifact` refuses to package a closure
-before that capture. Authority: `docs/adr/0007-finite-lat-2-emergency-app-plane-cutover.md`
-and `../runbooks/lat2-replacement-cutover.md`.
+`nixosConfigurations.finite-lat-2` is the live app-plane host after the
+2026-08-29 ADR 0007 emergency cutover from thermally failed lat1. It carries
+Core, Postgres, chat, hosted-device, canonical Sites, Brain, Identity,
+dashboard, search, Caddy, backups, and litestream on the storage-qualified
+chassis. It runs no Agent Runner. Routine deploys consume a CI-built
+`Lat2 NixOS Closure` artifact; do not evaluate or build production closures on
+the host. Authority:
+`docs/adr/0007-finite-lat-2-emergency-app-plane-cutover.md` and
+`../runbooks/lat2-replacement-cutover.md`.
 
 ## finite-lat-4, the third storage-qualified Runner (in progress)
 
@@ -206,6 +203,7 @@ All root-owned, 0600 unless noted. Names only; sources are the old hosts.
 | `/var/lib/finitecomputer/backups/rsync-net/{id_ed25519,known_hosts,borg-passphrase}` | existing finitecomputer Borg SSH private key, pinned rsync.net host key, and repository passphrase | copy the established root-only credential bundle from an existing finitecomputer host; the off-host passphrase copy already lives in the ignored `../finitecomputer/workspaces/trf/secrets/` tree. Do not generate a parallel credential set or put values in this repo. Verify the destination restriction before claiming append-only protection. |
 | `/etc/finite-saas/sites.env` | `RESEND_API_KEY` | migrated from lat2 `/etc/finite-saas/sites.env`; systemd reads the root:root 0600 file before dropping privileges, and Sites, Identity, and Brain reuse the existing send-only Resend credential without copying its value |
 | `/etc/finite-saas/certs/finite-chat-origin.pem` (0644) / `.key` (0640 root:caddy) | — | copied from lat2 at cutover (Cloudflare Origin CA pair; host-agnostic, covers the zone) |
+| `/etc/finite-saas/certs/finite-sites-v2-origin.pem` (0644) / `.key` (0640 root:caddy) | — | Cloudflare Origin CA pair for `v2.finite.chat` and `*.v2.finite.chat` on the dedicated Sites v2 validation host |
 | `/etc/finite/litestream-latitude.env` | `LITESTREAM_ACCESS_KEY_ID`, `LITESTREAM_SECRET_ACCESS_KEY` | generate a scoped credential for the `finite-lat-2-litestream` bucket at Latitude.sh object storage; store a copy in the team password manager. If the file is absent, every per-database `finite-litestream-*` replicator unit is condition-skipped (chat and Brain keep serving) and `finite-litestream-health` fails loudly every five minutes until it exists (`infra/runbooks/litestream-chat-replication.md`). |
 | Postgres role password | — | `ALTER ROLE finite WITH PASSWORD '<POSTGRES_PASSWORD>';` before the restore (`modules/postgres.nix` header) |
 
@@ -316,11 +314,14 @@ that final operation read-only unless the tester explicitly intends a write.
 | 18790 | 10.254.3.1 (WireGuard) | private proxy to Identity Authority :8790 | Runner hosts only |
 | dynamic 32768-60999 | Runner WireGuard address | Kata Runtime contact/health | app-plane peer only |
 
-Caddy vhost → backend: `finite.computer` → 4200 for
+Caddy vhost → backend: `finite.computer` -> 4200 for
 `/internal/finite-private/*` and the exact API-key usage/reset paths under
-`/api/core/v1/finite-private/`, else 3000; `chat.finite.computer` → 8788; `api./*.finite.chat` +
-`*.docs.finite.chat` → 8787 (Cloudflare Origin CA);
-`identity.finite.vip` public identity routes → 8791. Brain has no independent
+`/api/core/v1/finite-private/`, else 3000; `chat.finite.computer` -> 8788;
+`api.finite.chat`, `*.finite.chat`, and `*.docs.finite.chat` -> 8787
+(Cloudflare Origin CA); `identity.finite.vip` public identity routes -> 8791.
+The ADR 0028 validation service is a separate `finite-sites-v2` host serving
+`v2.finite.chat` and `*.v2.finite.chat`, not a replacement vhost on the
+consolidated app-plane box. Brain has no independent
 edge: authenticated `/client` and `/_admin/*` requests go through the dashboard
 to loopback :3015, then Brain applies its Nostr authorization.
 
@@ -345,10 +346,8 @@ by-id), gateways/resolvers, root ssh key, dashboard image digest. Still open:
   degraded rebuild before a separately authorized lat1 reprovision.
 - **Runner fast-follow** — Kata is the production adapter; Phala must pass the
   same provider-neutral contract before it is enabled.
-- **Sites App Outputs** (`modules/finitesitesd.nix`): stateful apps use the
-  existing Kata runner with a dedicated Cloud Hypervisor profile (1 vCPU,
-  512 MiB). This is separate from the QEMU 4-vCPU/8-GiB profile used by hosted
-  Agent Runtimes on the same containerd host. Production activation must follow
-  `runbooks/deploy-sites.md`, including the coordinated v3 snapshot and a
-  named disposable state-survival canary.
+- **Finite Sites v2 validation** (`hosts/finite-sites-v2/default.nix`):
+  static-only Sites runs as its own NixOS service/edge before canonical
+  `finite.chat` DNS moves. Keep the local snapshot and restore-check timers
+  green, then add an off-host copy before carrying production traffic.
 - Dead-man's-switch ping (`modules/monitoring.nix`).

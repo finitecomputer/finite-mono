@@ -149,7 +149,7 @@ in
       }
       {
         component = "finite-saas-sites";
-        version = finitePackages.finitesitesd.version;
+        version = config.finite.sites.package.version;
         gitSha = revision;
         source = "nix";
       }

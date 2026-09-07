@@ -16,20 +16,18 @@ use axum::http::header::{AUTHORIZATION, CONTENT_TYPE, HeaderName, HeaderValue, W
 use axum::http::{HeaderMap, Method, StatusCode};
 use axum::response::{IntoResponse, Response};
 use base64::Engine as _;
-use flate2::Compression;
-use flate2::write::GzEncoder;
 
 use finitesites_proto::limits::{
-    MAX_APP_BUNDLE_BYTES, MAX_APP_BUNDLE_FILES, MAX_APP_BUNDLE_UNPACKED_BYTES,
     MAX_GIT_HTTP_BODY_BYTES, MAX_GIT_REF_NAME_BYTES, MAX_GIT_REF_UPDATES_PER_PUSH,
 };
-use finitesites_proto::project_config::{parse_project_config_toml, validate_project_slug};
+use finitesites_proto::project_config::{
+    ProjectOutputKind, parse_project_config_toml, validate_project_slug,
+};
 use finitesites_proto::{ManifestFile, hex};
 use finitesites_store::Store;
 use sha2::{Digest, Sha256};
 
 use crate::server::{AppState, now_unix};
-use crate::tar_safety::resolved_archive_link_path;
 
 pub fn router(state: Arc<AppState>) -> Router {
     Router::new()
@@ -268,12 +266,11 @@ async fn handle_git(
                 let project_id = auth.project_id().to_string();
                 let reconcile = tokio::task::spawn_blocking(move || {
                     let mut engine = state.engine.lock().expect("engine mutex never poisoned");
-                    reconcile_pending_events_with_apps(
+                    reconcile_pending_events(
                         &mut engine,
                         &state.data_dir,
                         Some(&project_id),
                         now_unix(),
-                        Some(&state.apps),
                     )
                 })
                 .await;
@@ -420,16 +417,6 @@ pub fn reconcile_pending_events(
     project_id: Option<&str>,
     now: u64,
 ) -> Result<u32, String> {
-    reconcile_pending_events_with_apps(engine, data_dir, project_id, now, None)
-}
-
-pub fn reconcile_pending_events_with_apps(
-    engine: &mut finitesites_engine::Engine,
-    data_dir: &Path,
-    project_id: Option<&str>,
-    now: u64,
-    apps: Option<&crate::apps::Supervisor>,
-) -> Result<u32, String> {
     let events = engine
         .pending_git_ref_events(project_id)
         .map_err(|error| error.to_string())?;
@@ -437,7 +424,7 @@ pub fn reconcile_pending_events_with_apps(
     // Bounded by pending registry events.
     for event in events {
         let repo = project_root(data_dir).join(format!("{}.git", event.project_id));
-        reconcile_ref_event(engine, &repo, &event, now, apps)?;
+        reconcile_ref_event(engine, &repo, &event, now)?;
         processed += 1;
     }
     Ok(processed)
@@ -448,7 +435,6 @@ fn reconcile_ref_event(
     repo: &Path,
     event: &finitesites_store::GitRefEventRecord,
     now: u64,
-    apps: Option<&crate::apps::Supervisor>,
 ) -> Result<(), String> {
     let event_id = event.id;
     let project_id = event.project_id.as_str();
@@ -474,104 +460,65 @@ fn reconcile_ref_event(
             .map_err(|error| error.to_string())?;
         return Ok(());
     }
+    if branch_outputs.len() > 1 {
+        let message = "static-only project has multiple sites on this branch";
+        let _ = engine.mark_git_ref_event_failed(event_id, message, now);
+        return Err(message.to_string());
+    }
     let config = read_project_config_at(repo, new_sha)?;
-    let mut last_deployed: Option<(String, String)> = None;
-    // Bounded by MAX_PROJECT_OUTPUTS through finite.toml validation.
-    for output_record in branch_outputs {
-        let output_config = match config.outputs.get(&output_record.output_id) {
-            Some(output_config) => output_config,
-            None => {
-                let message = "finite.toml is missing the registry output for this branch";
-                let _ = engine.mark_git_ref_event_failed(event_id, message, now);
-                return Err(message.to_string());
-            }
-        };
-        if output_config.kind != output_record.kind
-            || output_config
-                .routing_name()
-                .map_err(|error| error.to_string())?
-                != output_record.site_name.as_str()
-            || output_config.branch != output_record.branch
-            || output_config.path != output_record.path
-            || output_config.normalized_entry().map(str::to_string) != output_record.entry
-            || output_config.normalized_start().map(str::to_string) != output_record.start_command
-        {
-            let message = "finite.toml output config does not match the registry";
+    let output_record = branch_outputs
+        .into_iter()
+        .next()
+        .expect("branch outputs is nonempty");
+    let site_config = match config
+        .normalized_site()
+        .map_err(|error| error.to_string())?
+    {
+        Some(site_config) if site_config.branch == output_record.branch => site_config,
+        _ => {
+            let message = "finite.toml is missing the registry site for this branch";
             let _ = engine.mark_git_ref_event_failed(event_id, message, now);
             return Err(message.to_string());
         }
-        // SPA fallback is Version state, not immutable Project Output identity.
-        // The pushed config is recorded by the Version commit below, so a
-        // Project Output can switch routing modes without registry mutation.
-        let outcome = if output_config.kind.as_str() == "app" {
-            let bundle = match app_bundle_from_git_archive(repo, new_sha, &output_config.path) {
-                Ok(bundle) => bundle,
-                Err(error) => {
-                    let _ =
-                        engine.mark_git_ref_event_failed(event_id, &truncate_error(&error), now);
-                    return Err(error);
-                }
-            };
-            let start = output_config
-                .normalized_start()
-                .expect("project config validated app start");
-            engine.commit_project_app_version_for_git_event(
-                &output_record.site_id,
-                Some(event_id),
-                bundle,
-                start,
-                now,
-            )
-        } else {
-            let files = match files_from_git_archive(
-                repo,
-                new_sha,
-                &output_config.path,
-                output_config.kind.as_str(),
-            ) {
-                Ok(files) => files,
-                Err(error) => {
-                    let _ =
-                        engine.mark_git_ref_event_failed(event_id, &truncate_error(&error), now);
-                    return Err(error);
-                }
-            };
-            engine.commit_project_output_version_for_git_event(
-                &output_record.site_id,
-                Some(event_id),
-                files,
-                output_config.spa,
-                now,
-            )
-        };
-        match outcome {
-            Ok(outcome) => {
-                if let Some(deploy) = outcome.app.as_ref()
-                    && let Some(apps) = apps
-                {
-                    let bundle_path = engine.blob_file_path(&deploy.bundle_sha256);
-                    // Infrastructure failures are left pending so reconcile
-                    // can retry; the Version row is already durable.
-                    apps.deploy(deploy, &bundle_path, now)
-                        .map_err(|error| format!("app deploy failed: {error}"))?;
-                    engine
-                        .mark_first_publication_notification_ready(&deploy.site_id, now)
-                        .map_err(|error| error.to_string())?;
-                }
-                last_deployed = Some((output_record.id.clone(), outcome.version_id));
-            }
-            Err(error) => {
-                let message = truncate_error(&error.to_string());
-                let _ = engine.mark_git_ref_event_failed(event_id, &message, now);
-                return Err(error.to_string());
-            }
+    };
+    if output_record.kind != ProjectOutputKind::Site
+        || output_record.output_id != "site"
+        || site_config.name != output_record.site_name
+        || site_config.branch != output_record.branch
+        || site_config.path != output_record.path
+        || output_record.entry.is_some()
+        || output_record.start_command.is_some()
+    {
+        let message = "finite.toml site config does not match the registry";
+        let _ = engine.mark_git_ref_event_failed(event_id, message, now);
+        return Err(message.to_string());
+    };
+    // SPA fallback is Version state, not immutable Project Site identity. The
+    // pushed config is recorded by the Version commit below, so a Project Site
+    // can switch routing modes without registry mutation.
+    let files = match files_from_git_archive(repo, new_sha, &site_config.path) {
+        Ok(files) => files,
+        Err(error) => {
+            let _ = engine.mark_git_ref_event_failed(event_id, &truncate_error(&error), now);
+            return Err(error);
         }
-    }
-    let Some((project_output_id, version_id)) = last_deployed else {
-        return Err("deploy branch matched no outputs".to_string());
+    };
+    let outcome = match engine.commit_project_output_version_for_git_event(
+        &output_record.site_id,
+        Some(event_id),
+        files,
+        site_config.spa,
+        now,
+    ) {
+        Ok(outcome) => outcome,
+        Err(error) => {
+            let message = truncate_error(&error.to_string());
+            let _ = engine.mark_git_ref_event_failed(event_id, &message, now);
+            return Err(error.to_string());
+        }
     };
     engine
-        .mark_git_ref_event_deployed(event_id, &project_output_id, &version_id, now)
+        .mark_git_ref_event_deployed(event_id, &output_record.id, &outcome.version_id, now)
         .map_err(|error| error.to_string())?;
     Ok(())
 }
@@ -602,16 +549,9 @@ fn files_from_git_archive(
     repo: &Path,
     commit: &str,
     output_path: &str,
-    output_kind: &str,
 ) -> Result<Vec<(ManifestFile, Vec<u8>)>, String> {
-    match git_object_type(repo, commit, output_path)? {
-        GitObjectType::Blob => {
-            if output_kind != "document" {
-                return Err("file output paths are only supported for documents".to_string());
-            }
-            return file_from_git_blob(repo, commit, output_path);
-        }
-        GitObjectType::Tree => {}
+    if git_object_type(repo, commit, output_path)? != GitObjectType::Tree {
+        return Err("static site path must be a directory".to_string());
     }
     let mut command = Command::new("git");
     command
@@ -667,122 +607,9 @@ fn files_from_git_archive(
         ));
     }
     if files.is_empty() {
-        return Err("configured output path contains no deployable files".to_string());
+        return Err("configured site path contains no deployable files".to_string());
     }
     Ok(files)
-}
-
-fn app_bundle_from_git_archive(
-    repo: &Path,
-    commit: &str,
-    output_path: &str,
-) -> Result<Vec<u8>, String> {
-    if git_object_type(repo, commit, output_path)? != GitObjectType::Tree {
-        return Err("app output path must be a directory".to_string());
-    }
-    let mut command = Command::new("git");
-    command
-        .arg("--git-dir")
-        .arg(repo)
-        .arg("archive")
-        .arg("--format=tar")
-        .arg(commit);
-    if output_path != "." {
-        command.arg(output_path);
-    }
-    let output = command
-        .output()
-        .map_err(|error| format!("cannot archive app output path: {error}"))?;
-    if !output.status.success() {
-        return Err(format!(
-            "cannot archive app output path `{output_path}`: {}",
-            String::from_utf8_lossy(&output.stderr)
-        ));
-    }
-
-    let encoder = GzEncoder::new(Vec::new(), Compression::default());
-    let mut builder = tar::Builder::new(encoder);
-    let mut archive = tar::Archive::new(output.stdout.as_slice());
-    let entries = archive
-        .entries()
-        .map_err(|error| format!("cannot read app archive: {error}"))?;
-    let mut file_count: u32 = 0;
-    let mut unpacked_bytes: u64 = 0;
-    // Bounded by MAX_APP_BUNDLE_FILES.
-    for entry in entries {
-        let mut entry = entry.map_err(|error| format!("cannot read app archive entry: {error}"))?;
-        let entry_type = entry.header().entry_type();
-        if !entry_type.is_file() && !entry_type.is_symlink() {
-            continue;
-        }
-        let path = entry
-            .path()
-            .map_err(|error| format!("cannot read app archive path: {error}"))?
-            .into_owned();
-        let relative = relative_archive_path(&path, output_path)?;
-        if should_skip_app_bundle_file(&relative) {
-            continue;
-        }
-        file_count += 1;
-        if file_count > MAX_APP_BUNDLE_FILES {
-            return Err("app bundle contains too many files".to_string());
-        }
-
-        if entry_type.is_symlink() {
-            let link_name = entry
-                .link_name()
-                .map_err(|error| format!("cannot read app symlink target: {error}"))?
-                .ok_or_else(|| "app bundle symlink is missing a target".to_string())?;
-            let resolved_target = resolved_archive_link_path(Path::new(&relative), &link_name)
-                .map_err(|error| format!("unsafe app bundle symlink `{relative}`: {error}"))?;
-            let resolved_target = resolved_target
-                .to_str()
-                .ok_or_else(|| "app bundle symlink target is not utf8".to_string())?;
-            if should_skip_app_bundle_file(resolved_target) {
-                return Err(format!(
-                    "app bundle symlink `{relative}` points at a private path"
-                ));
-            }
-
-            let mut header = tar::Header::new_gnu();
-            header.set_entry_type(tar::EntryType::Symlink);
-            header.set_size(0);
-            header.set_mode(entry.header().mode().unwrap_or(0o777));
-            builder
-                .append_link(&mut header, Path::new(&relative), link_name.as_ref())
-                .map_err(|error| format!("cannot write app bundle symlink: {error}"))?;
-            continue;
-        }
-
-        let mut bytes = Vec::new();
-        entry
-            .read_to_end(&mut bytes)
-            .map_err(|error| format!("cannot read app archive file: {error}"))?;
-        unpacked_bytes = unpacked_bytes.saturating_add(bytes.len() as u64);
-        if unpacked_bytes > MAX_APP_BUNDLE_UNPACKED_BYTES {
-            return Err("app bundle unpacked size is too large".to_string());
-        }
-
-        let mut header = tar::Header::new_gnu();
-        header.set_size(bytes.len() as u64);
-        header.set_mode(entry.header().mode().unwrap_or(0o644));
-        builder
-            .append_data(&mut header, Path::new(&relative), bytes.as_slice())
-            .map_err(|error| format!("cannot write app bundle entry: {error}"))?;
-    }
-    if file_count == 0 {
-        return Err("configured app output path contains no deployable files".to_string());
-    }
-    let encoder = builder
-        .into_inner()
-        .map_err(|error| format!("cannot finish app tar bundle: {error}"))?;
-    let bundle = encoder
-        .finish()
-        .map_err(|error| format!("cannot finish app gzip bundle: {error}"))?;
-    if bundle.len() as u64 > MAX_APP_BUNDLE_BYTES {
-        return Err("app bundle exceeds max compressed size".to_string());
-    }
-    Ok(bundle)
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -817,40 +644,6 @@ fn git_object_type(repo: &Path, commit: &str, output_path: &str) -> Result<GitOb
     }
 }
 
-fn file_from_git_blob(
-    repo: &Path,
-    commit: &str,
-    output_path: &str,
-) -> Result<Vec<(ManifestFile, Vec<u8>)>, String> {
-    if !output_path.ends_with(".md") {
-        return Err("single-file document output path must end with .md".to_string());
-    }
-    let spec = format!("{commit}:{output_path}");
-    let output = Command::new("git")
-        .arg("--git-dir")
-        .arg(repo)
-        .arg("show")
-        .arg(spec)
-        .output()
-        .map_err(|error| format!("cannot read document file: {error}"))?;
-    if !output.status.success() {
-        return Err(format!(
-            "cannot read document file `{output_path}`: {}",
-            String::from_utf8_lossy(&output.stderr)
-        ));
-    }
-    let bytes = output.stdout;
-    let sha256 = hex::encode(&Sha256::digest(&bytes));
-    Ok(vec![(
-        ManifestFile {
-            path: "/index.md".to_string(),
-            sha256,
-            size: bytes.len() as u64,
-        },
-        bytes,
-    )])
-}
-
 fn relative_archive_path(path: &Path, output_path: &str) -> Result<String, String> {
     let relative = if output_path == "." {
         path
@@ -872,17 +665,6 @@ fn should_skip_project_file(relative: &str) -> bool {
         .split('/')
         .any(|part| part.starts_with('.') || matches!(part, "node_modules" | "target" | "dist"))
         && relative != "index.html"
-}
-
-fn should_skip_app_bundle_file(relative: &str) -> bool {
-    if relative == "finite.toml" {
-        return true;
-    }
-    relative.split('/').any(|part| {
-        matches!(part, ".git" | ".finite" | ".direnv")
-            || part == ".env"
-            || part.starts_with(".env.")
-    })
 }
 
 fn truncate_error(error: &str) -> String {
@@ -1055,7 +837,6 @@ fn unauthorized_git() -> Response {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::collections::BTreeMap;
 
     fn run_test_git(args: &[&str], cwd: &Path) -> std::process::Output {
         let output = Command::new("git")
@@ -1181,14 +962,15 @@ mod tests {
     }
 
     #[test]
-    fn single_file_output_paths_are_only_document_markdown() {
+    fn static_site_path_must_be_directory() {
         let dir = tempfile::tempdir().unwrap();
         let repo = dir.path().join("repo");
         std::fs::create_dir(&repo).unwrap();
         run_test_git(&["init"], &repo);
+        std::fs::create_dir(repo.join("public")).unwrap();
+        std::fs::write(repo.join("public/index.html"), "<h1>Hello</h1>\n").unwrap();
         std::fs::write(repo.join("note.md"), "# Note\n").unwrap();
-        std::fs::write(repo.join("note.txt"), "not markdown\n").unwrap();
-        run_test_git(&["add", "note.md", "note.txt"], &repo);
+        run_test_git(&["add", "public/index.html", "note.md"], &repo);
         run_test_git(
             &[
                 "-c",
@@ -1197,7 +979,7 @@ mod tests {
                 "user.name=Agent",
                 "commit",
                 "-m",
-                "Add document files",
+                "Add static site files",
             ],
             &repo,
         );
@@ -1205,182 +987,19 @@ mod tests {
         let commit = String::from_utf8(commit.stdout).unwrap();
         let git_dir = repo.join(".git");
 
-        let files = files_from_git_archive(&git_dir, commit.trim(), "note.md", "document").unwrap();
+        let files = files_from_git_archive(&git_dir, commit.trim(), "public").unwrap();
         assert_eq!(files.len(), 1);
-        assert_eq!(files[0].0.path, "/index.md");
-        assert_eq!(files[0].1, b"# Note\n");
+        assert_eq!(files[0].0.path, "/index.html");
+        assert_eq!(files[0].1, b"<h1>Hello</h1>\n");
 
-        let root_files = files_from_git_archive(&git_dir, commit.trim(), ".", "site").unwrap();
+        let root_files = files_from_git_archive(&git_dir, commit.trim(), ".").unwrap();
         let root_paths: Vec<_> = root_files
             .iter()
             .map(|(manifest, _)| manifest.path.as_str())
             .collect();
-        assert_eq!(root_paths, vec!["/note.md", "/note.txt"]);
+        assert_eq!(root_paths, vec!["/note.md", "/public/index.html"]);
 
-        let site_error =
-            files_from_git_archive(&git_dir, commit.trim(), "note.md", "site").unwrap_err();
-        assert_eq!(
-            site_error,
-            "file output paths are only supported for documents"
-        );
-        let markdown_error =
-            files_from_git_archive(&git_dir, commit.trim(), "note.txt", "document").unwrap_err();
-        assert_eq!(
-            markdown_error,
-            "single-file document output path must end with .md"
-        );
-    }
-
-    #[test]
-    fn app_bundle_strips_output_prefix_and_excludes_private_files() {
-        let dir = tempfile::tempdir().unwrap();
-        let repo = dir.path().join("repo");
-        std::fs::create_dir(&repo).unwrap();
-        run_test_git(&["init"], &repo);
-        std::fs::create_dir_all(repo.join("app/.next")).unwrap();
-        std::fs::create_dir_all(repo.join("app/.finite")).unwrap();
-        std::fs::create_dir_all(repo.join("app/node_modules/.pnpm/next/node_modules/next"))
-            .unwrap();
-        std::fs::create_dir_all(repo.join("app/node_modules/.pnpm/react/node_modules/react"))
-            .unwrap();
-        std::fs::create_dir_all(repo.join(
-            "app/node_modules/.pnpm/@img+sharp-darwin-arm64@0.34.5/node_modules/@img/sharp-darwin-arm64/lib",
-        ))
-        .unwrap();
-        std::fs::write(
-            repo.join("app/server.ts"),
-            "Bun.serve({ port: Bun.env.PORT })",
-        )
-        .unwrap();
-        std::fs::write(repo.join("app/.next/server.js"), "console.log('built')").unwrap();
-        std::fs::write(
-            repo.join("app/node_modules/.pnpm/next/node_modules/next/index.js"),
-            "module.exports = {}",
-        )
-        .unwrap();
-        std::fs::write(
-            repo.join("app/node_modules/.pnpm/react/node_modules/react/index.js"),
-            "module.exports = {}",
-        )
-        .unwrap();
-        std::fs::write(
-            repo.join(
-                "app/node_modules/.pnpm/@img+sharp-darwin-arm64@0.34.5/node_modules/@img/sharp-darwin-arm64/lib/index.js",
-            ),
-            "module.exports = {}",
-        )
-        .unwrap();
-        #[cfg(unix)]
-        {
-            std::os::unix::fs::symlink(
-                ".pnpm/next/node_modules/next",
-                repo.join("app/node_modules/next"),
-            )
-            .unwrap();
-            std::os::unix::fs::symlink(
-                "../../react/node_modules/react",
-                repo.join("app/node_modules/.pnpm/next/node_modules/react"),
-            )
-            .unwrap();
-        }
-        std::fs::write(repo.join("app/.env.local"), "SECRET=1\n").unwrap();
-        std::fs::write(repo.join("app/.finite/key"), "private\n").unwrap();
-        std::fs::write(repo.join("app/finite.toml"), "not deploy config\n").unwrap();
-        std::fs::write(repo.join("README.md"), "# source\n").unwrap();
-        run_test_git(&["add", "."], &repo);
-        run_test_git(
-            &[
-                "-c",
-                "user.email=agent@example.com",
-                "-c",
-                "user.name=Agent",
-                "commit",
-                "-m",
-                "Add app files",
-            ],
-            &repo,
-        );
-        let commit = run_test_git(&["rev-parse", "HEAD"], &repo);
-        let commit = String::from_utf8(commit.stdout).unwrap();
-        let git_dir = repo.join(".git");
-
-        let bundle = app_bundle_from_git_archive(&git_dir, commit.trim(), "app").unwrap();
-        let decoder = flate2::read::GzDecoder::new(bundle.as_slice());
-        let mut archive = tar::Archive::new(decoder);
-        let mut files = BTreeMap::new();
-        let mut links = BTreeMap::new();
-        let entries = archive.entries().unwrap();
-        // Bounded by the fixture contents.
-        for entry in entries {
-            let mut entry = entry.unwrap();
-            let path = entry.path().unwrap().to_string_lossy().to_string();
-            if entry.header().entry_type().is_file() {
-                let mut text = String::new();
-                entry.read_to_string(&mut text).unwrap();
-                files.insert(path, text);
-            } else if entry.header().entry_type().is_symlink() {
-                let link_name = entry
-                    .link_name()
-                    .unwrap()
-                    .unwrap()
-                    .to_string_lossy()
-                    .to_string();
-                links.insert(path, link_name);
-            }
-        }
-
-        assert_eq!(files.len(), 5);
-        assert!(files.contains_key(".next/server.js"));
-        assert!(files.contains_key(
-            "node_modules/.pnpm/@img+sharp-darwin-arm64@0.34.5/node_modules/@img/sharp-darwin-arm64/lib/index.js"
-        ));
-        assert!(files.contains_key("node_modules/.pnpm/next/node_modules/next/index.js"));
-        assert!(files.contains_key("node_modules/.pnpm/react/node_modules/react/index.js"));
-        assert!(files.contains_key("server.ts"));
-        assert!(!files.contains_key(".env.local"));
-        assert!(!files.contains_key(".finite/key"));
-        assert!(!files.contains_key("finite.toml"));
-        #[cfg(unix)]
-        {
-            assert_eq!(
-                links.get("node_modules/next").map(String::as_str),
-                Some(".pnpm/next/node_modules/next")
-            );
-            assert_eq!(
-                links
-                    .get("node_modules/.pnpm/next/node_modules/react")
-                    .map(String::as_str),
-                Some("../../react/node_modules/react")
-            );
-        }
-
-        let file_output =
-            app_bundle_from_git_archive(&git_dir, commit.trim(), "app/server.ts").unwrap_err();
-        assert_eq!(file_output, "app output path must be a directory");
-
-        #[cfg(unix)]
-        {
-            std::os::unix::fs::symlink("../README.md", repo.join("app/escape")).unwrap();
-            run_test_git(&["add", "app/escape"], &repo);
-            run_test_git(
-                &[
-                    "-c",
-                    "user.email=agent@example.com",
-                    "-c",
-                    "user.name=Agent",
-                    "commit",
-                    "-m",
-                    "Add escaping symlink",
-                ],
-                &repo,
-            );
-            let commit = run_test_git(&["rev-parse", "HEAD"], &repo);
-            let commit = String::from_utf8(commit.stdout).unwrap();
-            let error = app_bundle_from_git_archive(&git_dir, commit.trim(), "app").unwrap_err();
-            assert_eq!(
-                error,
-                "unsafe app bundle symlink `escape`: link target escapes bundle root"
-            );
-        }
+        let site_error = files_from_git_archive(&git_dir, commit.trim(), "note.md").unwrap_err();
+        assert_eq!(site_error, "static site path must be a directory");
     }
 }

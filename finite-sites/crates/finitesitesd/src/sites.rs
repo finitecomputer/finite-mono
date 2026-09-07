@@ -24,11 +24,10 @@ use finitesites_engine::{EngineError, ViewAccess};
 use finitesites_proto::dto::NativeViewerSessionRequest;
 use finitesites_proto::limits::{MAX_NATIVE_VIEWER_AUTH_BODY_BYTES, VIEWER_COOKIE_TTL_SECONDS};
 use finitesites_proto::nip98;
-use finitesites_store::{SiteKind, SiteRecord, SiteStatus};
+use finitesites_store::{SiteRecord, SiteStatus};
 
 use crate::content_type::content_type_for_path;
 use crate::pages;
-use crate::proxy;
 use crate::server::{AppState, now_unix, site_label};
 
 const VIEWER_COOKIE_NAME: &str = "finite_site_auth";
@@ -57,8 +56,7 @@ pub fn router(state: Arc<AppState>) -> Router {
             get(confirm_access).post(approve_access),
         )
         .route("/_finite/logout", get(logout))
-        // Any method: app sites proxy POST/PUT/etc.; static handling
-        // rejects non-GET itself.
+        // Any method reaches the fallback; static handling rejects non-GET.
         .fallback(serve_path)
         .with_state(state)
 }
@@ -195,17 +193,14 @@ async fn resolve_request_site(
         .get(HOST)
         .and_then(|value| value.to_str().ok())
         .unwrap_or("");
-    let output_label = site_label(host, &state.base_domain)
-        .map(|label| ("site", label))
-        .or_else(|| site_label(host, &state.document_base_domain).map(|label| ("document", label)));
-    let Some((output_kind, label)) = output_label else {
+    let Some(label) = site_label(host, &state.base_domain) else {
         // The dispatcher only routes here for site hosts; a missing label
         // means the Host header changed between routing and handling.
         return Ok(None);
     };
     state
         .serving_engines
-        .run(move |engine| engine.resolve_output(output_kind, &label))
+        .run(move |engine| engine.resolve_site(&label))
         .await?
         .map_err(|error| error.to_string())
 }
@@ -284,11 +279,7 @@ async fn serve_path(
         return html_response(StatusCode::OK, pages::placeholder(&site.name));
     }
 
-    let llms_request_path = if matches!(
-        site.kind,
-        SiteKind::Static | SiteKind::Document | SiteKind::App
-    ) && (method == Method::GET || method == Method::HEAD)
-    {
+    let llms_request_path = if method == Method::GET || method == Method::HEAD {
         decode_request_path(uri.path())
     } else {
         None
@@ -310,15 +301,12 @@ async fn serve_path(
                     let git_remote_url = format!("{git_base_url}/{}.git", project.slug);
                     Ok(Some(crate::llms::generated_project_llms_txt(
                         &llms_site.name,
-                        &engine.output_url_for_site(&llms_site),
+                        &engine.site_url_for_site(&llms_site),
                         &api_url,
                         &project.slug,
                         &git_remote_url,
-                        &output.output_id,
-                        output.kind.as_str(),
                         &output.branch,
                         &output.path,
-                        output.start_command.as_deref(),
                     )))
                 })
                 .await;
@@ -357,115 +345,6 @@ async fn serve_path(
             eprintln!("finitesitesd access task error: {error}");
             return internal_page();
         }
-    }
-
-    // App sites: wake the app (start it if idle-reaped), then hand the
-    // whole request to it — behind the same visibility gate static sites
-    // get. Wake is the density mechanism: idle apps are stopped and cost
-    // ~0 memory until the first request brings them back.
-    if site.kind == SiteKind::App {
-        let app_site_id = site.id.clone();
-        let deploy = state
-            .serving_engines
-            .run(move |engine| engine.app_deploy_for(&app_site_id))
-            .await;
-        let deploy = match deploy {
-            Ok(Ok(Some(deploy))) => deploy,
-            Ok(Ok(None)) => {
-                eprintln!("finitesitesd: app site {} is not deployable", site.id);
-                return internal_page();
-            }
-            Ok(Err(error)) => {
-                eprintln!("finitesitesd: cannot load app {}: {error}", site.id);
-                return internal_page();
-            }
-            Err(error) => {
-                eprintln!(
-                    "finitesitesd: app metadata task failed for {}: {error}",
-                    site.id
-                );
-                return internal_page();
-            }
-        };
-        // Runner calls are blocking; keep them off the async reactor.
-        let supervisor_state = state.clone();
-        let woken = tokio::task::spawn_blocking(move || {
-            supervisor_state
-                .apps
-                .note_request_and_start(&deploy, now_unix())
-        })
-        .await;
-        let target = match woken {
-            Ok(Ok(addr)) => addr,
-            Ok(Err(error)) => {
-                eprintln!("finitesitesd: cannot wake app {}: {error}", site.id);
-                return crate::proxy::app_unavailable_response();
-            }
-            Err(_join) => return internal_page(),
-        };
-        return match proxy::forward(request, target).await {
-            Ok(response) => response,
-            Err(_unreachable) => {
-                // Stale cache (crashed or externally stopped app): drop the
-                // endpoint so the next request re-wakes it.
-                state.apps.invalidate(&site.id);
-                eprintln!(
-                    "finitesitesd: app {} unreachable; cache invalidated",
-                    site.id
-                );
-                crate::proxy::app_unavailable_response()
-            }
-        };
-    }
-
-    if site.kind == SiteKind::Document {
-        let Some(request_path) = decode_request_path(uri.path()) else {
-            return html_response(StatusCode::NOT_FOUND, pages::not_found());
-        };
-        let document_site = site.clone();
-        let prepared = state
-            .serving_engines
-            .run(
-                move |engine| -> Result<_, finitesites_engine::EngineError> {
-                    let files = engine.active_version_files(&document_site)?;
-                    let entry = engine
-                        .project_output_for_site(&document_site)?
-                        .and_then(|(_, output)| output.entry);
-                    Ok((files, entry))
-                },
-            )
-            .await;
-        let prepared = match prepared {
-            Ok(Ok(prepared)) => prepared,
-            Ok(Err(error)) => {
-                eprintln!("finitesitesd document metadata error: {error}");
-                return internal_page();
-            }
-            Err(error) => {
-                eprintln!("finitesitesd document metadata task failed: {error}");
-                return internal_page();
-            }
-        };
-        let blobs = state.blobs.clone();
-        return match tokio::task::spawn_blocking(move || {
-            crate::documents::serve_document(
-                &blobs,
-                &site,
-                prepared.0,
-                prepared.1,
-                &request_path,
-                &headers,
-                &method,
-            )
-        })
-        .await
-        {
-            Ok(response) => response,
-            Err(error) => {
-                eprintln!("finitesitesd document render task failed: {error}");
-                internal_page()
-            }
-        };
     }
 
     if method != Method::GET && method != Method::HEAD {
@@ -816,7 +695,7 @@ async fn native_session(
             return internal_page();
         }
     };
-    let Some(expected_url) = absolute_output_request_url(&state, &headers, &uri) else {
+    let Some(expected_url) = absolute_site_request_url(&state, &headers, &uri) else {
         return bad_request_page();
     };
     let Some(auth_header) = headers
@@ -881,13 +760,9 @@ async fn native_session(
     }
 }
 
-fn absolute_output_request_url(state: &AppState, headers: &HeaderMap, uri: &Uri) -> Option<String> {
+fn absolute_site_request_url(state: &AppState, headers: &HeaderMap, uri: &Uri) -> Option<String> {
     let host = headers.get(HOST)?.to_str().ok()?;
-    let is_output_host = site_label(host, &state.base_domain).is_some()
-        || site_label(host, &state.document_base_domain).is_some();
-    if !is_output_host {
-        return None;
-    }
+    site_label(host, &state.base_domain)?;
     let scheme = {
         let engine = state.engine.lock().expect("engine mutex never poisoned");
         engine.config().site_url_scheme.clone()
@@ -957,10 +832,6 @@ mod tests {
         let serve_path = &source[start..end];
         assert!(!serve_path.contains("state.engine.lock"));
         assert!(serve_path.contains("serving_engines"));
-
-        let documents = include_str!("documents.rs");
-        assert!(!documents.contains("engine.read_blob"));
-        assert!(!documents.contains("use finitesites_engine::Engine"));
     }
 
     #[test]
@@ -981,8 +852,8 @@ mod tests {
     #[test]
     fn viewer_cookies_split_top_level_and_partitioned_preview_access() {
         assert!(secure_viewer_cookie_context(
-            "https://api.finite.chat",
-            "finite.chat"
+            "https://v2.finite.chat",
+            "v2.finite.chat"
         ));
         assert!(secure_viewer_cookie_context(
             "http://127.0.0.1:8787",
@@ -993,8 +864,12 @@ mod tests {
             "sites.internal"
         ));
 
-        let secure =
-            viewer_cookie_headers("signed-value", 60, "https://api.finite.chat", "finite.chat");
+        let secure = viewer_cookie_headers(
+            "signed-value",
+            60,
+            "https://v2.finite.chat",
+            "v2.finite.chat",
+        );
         assert_eq!(secure.len(), 2);
         assert_eq!(
             secure[0],

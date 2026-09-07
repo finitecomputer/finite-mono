@@ -155,6 +155,15 @@ in
         target = "https://uptime-probe.docs.finite.chat/";
         module = "http_404";
       })
+      (publicProbe {
+        name = "v2.finite.chat";
+        target = "https://v2.finite.chat/api/v2/healthz";
+      })
+      (publicProbe {
+        name = "uptime-probe.v2.finite.chat";
+        target = "https://uptime-probe.v2.finite.chat/";
+        module = "http_404";
+      })
     ];
   };
 

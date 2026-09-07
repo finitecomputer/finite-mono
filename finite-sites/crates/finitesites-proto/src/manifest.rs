@@ -26,14 +26,6 @@ impl PublishManifest {
     /// Validate every entry and the manifest-wide limits, with the static
     /// per-file ceiling.
     pub fn validate(&self) -> Result<(), ProtoError> {
-        self.validate_with_max_file(MAX_FILE_BYTES)
-    }
-
-    /// Validate with an explicit per-file ceiling. App-bundle manifests use
-    /// MAX_APP_BUNDLE_BYTES (one tar.gz far larger than any static asset);
-    /// everything else uses MAX_FILE_BYTES via `validate`.
-    pub fn validate_with_max_file(&self, max_file_bytes: u64) -> Result<(), ProtoError> {
-        assert!(max_file_bytes >= MAX_FILE_BYTES);
         if self.files.is_empty() {
             return Err(ProtoError::InvalidManifest("manifest has no files"));
         }
@@ -50,7 +42,7 @@ impl PublishManifest {
                     "sha256 must be 64 lowercase hex chars",
                 ));
             }
-            if file.size > max_file_bytes {
+            if file.size > MAX_FILE_BYTES {
                 return Err(ProtoError::InvalidManifest("file exceeds max size"));
             }
             total_bytes = total_bytes.saturating_add(file.size);
@@ -125,9 +117,6 @@ pub fn validate_manifest_path(path: &str) -> Result<(), ProtoError> {
     }
     Ok(())
 }
-
-/// The single manifest path used by app-bundle publishes (tier 2).
-pub const APP_BUNDLE_PATH: &str = "/app.tar.gz";
 
 #[cfg(test)]
 mod tests {
@@ -207,25 +196,6 @@ mod tests {
         assert_eq!(
             big_site.validate(),
             Err(ProtoError::InvalidManifest("site exceeds max total size"))
-        );
-    }
-
-    #[test]
-    fn app_bundles_may_exceed_the_static_file_ceiling() {
-        use crate::limits::MAX_APP_BUNDLE_BYTES;
-        let bundle = PublishManifest {
-            files: vec![file(APP_BUNDLE_PATH, "a", MAX_FILE_BYTES + 1)],
-        };
-        // Rejected under the static ceiling, accepted under the bundle one.
-        assert!(bundle.validate().is_err());
-        assert_eq!(bundle.validate_with_max_file(MAX_APP_BUNDLE_BYTES), Ok(()));
-        let too_big = PublishManifest {
-            files: vec![file(APP_BUNDLE_PATH, "a", MAX_APP_BUNDLE_BYTES + 1)],
-        };
-        assert!(
-            too_big
-                .validate_with_max_file(MAX_APP_BUNDLE_BYTES)
-                .is_err()
         );
     }
 

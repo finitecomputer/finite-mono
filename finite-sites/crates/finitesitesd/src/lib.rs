@@ -15,18 +15,14 @@
 //! cookie secret, and dev-mail outbox live under that directory.
 
 pub mod api;
-pub mod apps;
 pub mod content_type;
-pub mod documents;
 pub mod git;
 pub mod limiter;
 pub mod llms;
 pub mod mailer;
 pub mod pages;
-pub mod proxy;
 pub mod server;
 pub mod sites;
-mod tar_safety;
 
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
@@ -45,7 +41,6 @@ pub struct ServeOptions {
     pub data_dir: PathBuf,
     pub listen: SocketAddr,
     pub base_domain: String,
-    pub document_base_domain: String,
     pub api_url: String,
     pub git_base_url: String,
     /// Dedicated account-boundary credential for the internal viewer-session
@@ -61,27 +56,6 @@ pub struct ServeOptions {
     /// never from argv.
     pub mail_provider: Option<mailer::MailerKind>,
     pub mail_from: Option<String>,
-    /// How tier-2 apps are isolated and run.
-    pub app_runner_kind: AppRunnerKind,
-    /// Exact operator-owned sudo executable used only by the Kata app runner.
-    pub app_sudo_path: PathBuf,
-    /// Exact operator-owned nerdctl executable authorized by sudoers.
-    pub app_nerdctl_path: PathBuf,
-    /// Exact CNI plugin directory forwarded to nerdctl after sudo resets env.
-    pub app_cni_path: PathBuf,
-    /// Apps with no requests for this long are stopped to free memory and
-    /// woken on the next request (the density mechanism).
-    pub idle_timeout_seconds: u64,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum AppRunnerKind {
-    /// Record app publishes but run nothing (local dev, tests).
-    Disabled,
-    /// systemd DynamicUser sandbox — kernel isolation (ADR-0014).
-    Systemd,
-    /// Kata Containers microVM — hardware isolation (ADR-0015).
-    Kata,
 }
 
 pub fn run(args: Vec<String>) -> Result<(), String> {
@@ -113,14 +87,10 @@ pub fn run(args: Vec<String>) -> Result<(), String> {
 fn usage() -> String {
     "usage:\n  finitesitesd serve --data DIR [--listen 127.0.0.1:8787] \
      [--base-domain sites.localhost] [--api-url http://127.0.0.1:8787] \
-     [--document-base-domain docs.sites.localhost] \
      [--git-url http://git.sites.localhost:8787] \
      [--git-hook-helper PATH] [--git-auto-reconcile true|false] \
      [--site-scheme http] [--site-port PORT|none] \
-     --mailer dev|resend [--mail-from ADDR] \
-     [--app-runner none|systemd|kata] [--app-sudo-path PATH] \
-     [--app-nerdctl-path PATH] [--app-cni-path PATH] \
-     [--app-idle-timeout SECONDS]\n  \
+     --mailer dev|resend [--mail-from ADDR]\n  \
      finitesitesd allow --data DIR PUBKEY_OR_NPUB [--note TEXT]\n  \
      finitesitesd disallow --data DIR PUBKEY_OR_NPUB\n  \
      finitesitesd allowed --data DIR\n  \
@@ -202,15 +172,6 @@ fn parse_serve_options(args: &[String]) -> Result<ServeOptions, String> {
     if base_domain.is_empty() || base_domain.contains(':') || base_domain.contains('/') {
         return Err("--base-domain must be a bare domain".to_string());
     }
-    let document_base_domain = flag_value(&flags, "document-base-domain")
-        .map(str::to_string)
-        .unwrap_or_else(|| format!("docs.{base_domain}"));
-    if document_base_domain.is_empty()
-        || document_base_domain.contains(':')
-        || document_base_domain.contains('/')
-    {
-        return Err("--document-base-domain must be a bare domain".to_string());
-    }
     let api_url = flag_value(&flags, "api-url")
         .map(str::to_string)
         .unwrap_or_else(|| format!("http://{listen}"));
@@ -264,32 +225,10 @@ fn parse_serve_options(args: &[String]) -> Result<ServeOptions, String> {
             ));
         }
     };
-    let app_runner_kind = match flag_value(&flags, "app-runner") {
-        None | Some("none") => AppRunnerKind::Disabled,
-        Some("systemd") => AppRunnerKind::Systemd,
-        Some("kata") => AppRunnerKind::Kata,
-        Some(other) => {
-            return Err(format!(
-                "unknown --app-runner `{other}` (none|systemd|kata)"
-            ));
-        }
-    };
-    let app_sudo_path = nonempty_operator_path(&flags, "app-sudo-path", "sudo")?;
-    let app_nerdctl_path = nonempty_operator_path(&flags, "app-nerdctl-path", "nerdctl")?;
-    let app_cni_path = nonempty_operator_path(&flags, "app-cni-path", "/opt/cni/bin")?;
-    let idle_timeout_seconds = match flag_value(&flags, "app-idle-timeout") {
-        None => apps::DEFAULT_IDLE_TIMEOUT_SECONDS,
-        Some(raw) => raw
-            .parse::<u64>()
-            .ok()
-            .filter(|seconds| *seconds > 0)
-            .ok_or("--app-idle-timeout must be a positive number of seconds")?,
-    };
     Ok(ServeOptions {
         data_dir: PathBuf::from(data_dir),
         listen,
         base_domain,
-        document_base_domain,
         api_url,
         git_base_url,
         viewer_session_service_token,
@@ -299,24 +238,7 @@ fn parse_serve_options(args: &[String]) -> Result<ServeOptions, String> {
         site_url_port,
         mail_provider,
         mail_from,
-        app_runner_kind,
-        app_sudo_path,
-        app_nerdctl_path,
-        app_cni_path,
-        idle_timeout_seconds,
     })
-}
-
-fn nonempty_operator_path(
-    flags: &[(String, String)],
-    name: &str,
-    default: &str,
-) -> Result<PathBuf, String> {
-    let raw = flag_value(flags, name).unwrap_or(default);
-    if raw.trim().is_empty() {
-        return Err(format!("--{name} must not be empty"));
-    }
-    Ok(PathBuf::from(raw))
 }
 
 pub(crate) fn validate_viewer_session_service_token(token: Option<&str>) -> Result<(), String> {
@@ -366,7 +288,6 @@ fn serve(options: ServeOptions) -> Result<(), String> {
     let cookie_secret = load_cookie_secret(&options.data_dir)?;
     let engine_config = EngineConfig {
         base_domain: options.base_domain.clone(),
-        document_base_domain: options.document_base_domain.clone(),
         site_url_scheme: options.site_url_scheme.clone(),
         site_url_port: options.site_url_port,
     };
@@ -391,27 +312,9 @@ fn serve(options: ServeOptions) -> Result<(), String> {
         }
     };
 
-    let app_runner: Box<dyn apps::AppRunner> = match options.app_runner_kind {
-        AppRunnerKind::Disabled => Box::new(apps::DisabledRunner),
-        AppRunnerKind::Systemd => Box::new(
-            apps::SystemdAppRunner::new(options.data_dir.join("apps"))
-                .map_err(|error| format!("cannot set up systemd app runner: {error}"))?,
-        ),
-        AppRunnerKind::Kata => Box::new(
-            apps::KataAppRunner::new(
-                options.data_dir.join("apps"),
-                options.app_sudo_path.clone(),
-                options.app_nerdctl_path.clone(),
-                options.app_cni_path.clone(),
-            )
-            .map_err(|error| format!("cannot set up kata app runner: {error}"))?,
-        ),
-    };
-    let supervisor = apps::Supervisor::new(app_runner, options.idle_timeout_seconds);
-
     let runtime =
         tokio::runtime::Runtime::new().map_err(|error| format!("cannot start runtime: {error}"))?;
-    runtime.block_on(server::serve(engine, mail, supervisor, options))
+    runtime.block_on(server::serve(engine, mail, options))
 }
 
 fn allowlist_mutate(args: &[String], allow: bool) -> Result<(), String> {
@@ -583,7 +486,6 @@ fn reset_product_data(data_dir: &Path) -> Result<Vec<String>, String> {
         "registry.db-shm",
         "blobs",
         "outbox",
-        "apps",
         "git",
     ];
     let mut wiped = Vec::new();
@@ -821,30 +723,5 @@ mod tests {
             Err(error) => panic!("--mailer dev should select DevMailer, got {error}"),
         };
         assert!(options.mail_provider.is_none());
-    }
-
-    #[test]
-    fn kata_operator_paths_have_safe_nonempty_defaults_and_reject_empty_overrides() {
-        assert_eq!(
-            nonempty_operator_path(&[], "app-sudo-path", "sudo").unwrap(),
-            PathBuf::from("sudo")
-        );
-        assert_eq!(
-            nonempty_operator_path(&[], "app-nerdctl-path", "nerdctl").unwrap(),
-            PathBuf::from("nerdctl")
-        );
-        assert_eq!(
-            nonempty_operator_path(&[], "app-cni-path", "/opt/cni/bin").unwrap(),
-            PathBuf::from("/opt/cni/bin")
-        );
-        assert_eq!(
-            nonempty_operator_path(
-                &[("app-nerdctl-path".to_string(), "  ".to_string())],
-                "app-nerdctl-path",
-                "nerdctl"
-            )
-            .unwrap_err(),
-            "--app-nerdctl-path must not be empty"
-        );
     }
 }

@@ -1,12 +1,15 @@
 # Deploying finite-sites to finite-lat-2
 
-> **SUPERSEDED 2026-07-09 — DO NOT RUN.** Sites and its edge moved to
-> `finite-lat-1`; `finite-lat-2` is now a decommission target with historical
-> service captures. Current Sites deployment
-> authority is [`infra/runbooks/deploy-sites.md`](../../runbooks/deploy-sites.md).
-> Everything below is historical evidence of the former build-on-box flow,
-> including sections labelled “today” or “target.” Do not restart services,
-> install binaries, copy Caddy configuration, or delete captured paths on lat2.
+> **HISTORICAL 2026-07-08 CAPTURE — DO NOT RUN.** ADR 0007 moved the live
+> app-plane stack back onto `finite-lat-2` on 2026-08-29, but this file remains
+> evidence of the old pre-NixOS build-on-box Sites flow. Current canonical
+> Sites state is declared by `infra/nixos/hosts/finite-lat-2/` and stays pinned
+> to the released v1 daemon until a deliberate ADR 0028 cutover. The separate
+> static-only validation service is covered by
+> [`infra/runbooks/deploy-sites.md`](../../runbooks/deploy-sites.md). Everything
+> below is historical, including sections labelled “today” or “target.” Do not
+> restart services, install binaries, copy Caddy configuration, or delete
+> captured paths on lat2 from this document.
 
 ## Today's flow — DEPRECATED (build-on-box)
 
@@ -52,6 +55,7 @@ provenance is structurally absent, not just unrecorded.
 4. Rollback = `sudo install` the `.prev` binary back and restart, same as
    today.
 
-Config (units, Caddyfile, polkit, sudoers) deploys from this tree, not from
-the sites source checkout; the on-box `~/finite-sites` checkout stops being
-a deploy input entirely and can be deleted once the target flow lands.
+At the time this superseded flow was written, config units, Caddyfile, polkit,
+and sudoers deployed from this tree rather than from the sites source checkout.
+ADR 0028 later removed the Sites app-runner polkit/sudoers files from the
+current tree.

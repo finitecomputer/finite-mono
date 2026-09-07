@@ -1,7 +1,7 @@
 //! Control-plane and serving logic for Finite Sites.
 //!
-//! The engine owns every decision: who may create project outputs, which git
-//! pushes become versions, and who may view a site. The store persists, the
+//! The engine owns every decision: who may create Project Sites, which git
+//! pushes become Versions, and who may view a site. The store persists, the
 //! blob store holds bytes, and the HTTP layer above translates outcomes into
 //! responses.
 
@@ -18,23 +18,22 @@ use finitesites_proto::dto::{
     AuthRegisterResponse, GitAuthResponse, HostedRequesterAssertionRequest,
     HostedRequesterAssertionResponse, ProjectCollaboratorSummary, ProjectGrantRequest,
     ProjectGrantResponse, ProjectInitRequest, ProjectInitResponse, ProjectListItem,
-    ProjectListResponse, ProjectOutputSummary, ProjectRevokeRequest, ProjectRevokeResponse,
+    ProjectListResponse, ProjectRevokeRequest, ProjectRevokeResponse, ProjectSiteSummary,
     ProjectStatusResponse, SharingRequest, SharingResponse, SiteSummary,
     SitesAuthorizedKeyResponse,
 };
 use finitesites_proto::limits::{
-    LOGIN_TOKEN_TTL_SECONDS, MAX_APP_BUNDLE_BYTES, MAX_EMAIL_KEYS_PER_EMAIL,
-    MAX_EMAILS_PER_SHARING_REQUEST, MAX_FILE_BYTES, MAX_SHARES_PER_SITE, MAX_SITES_PER_OWNER,
-    NIP98_MAX_SKEW_SECONDS, VIEWER_COOKIE_TTL_SECONDS,
+    LOGIN_TOKEN_TTL_SECONDS, MAX_EMAIL_KEYS_PER_EMAIL, MAX_EMAILS_PER_SHARING_REQUEST,
+    MAX_FILE_BYTES, MAX_SHARES_PER_SITE, MAX_SITES_PER_OWNER, NIP98_MAX_SKEW_SECONDS,
+    VIEWER_COOKIE_TTL_SECONDS,
 };
-use finitesites_proto::manifest::APP_BUNDLE_PATH;
 use finitesites_proto::project_config::ProjectOutputKind;
 use finitesites_proto::{ManifestFile, ProtoError, PublishManifest, hex, ids, names, npub};
 use finitesites_store::{
     GitRefEventRecord, PendingSiteNotification, ProjectAccessRecord, ProjectCollaboratorApply,
     ProjectCollaboratorRecord, ProjectCollaboratorRole, ProjectCollaboratorTarget,
     ProjectInitStoreOutcome, ProjectOutputApply, ProjectOutputRecord, ProjectRecord,
-    ProjectVisibility, SiteKind, SiteRecord, SiteStatus, Store, StoreError, Visibility,
+    ProjectVisibility, SiteRecord, SiteStatus, Store, StoreError, Visibility,
 };
 use hmac::{Hmac, Mac};
 use sha2::{Digest, Sha256};
@@ -79,8 +78,6 @@ pub enum EngineError {
 pub struct EngineConfig {
     /// Domain under which sites live, e.g. `sites.localhost` or `finite.chat`.
     pub base_domain: String,
-    /// Domain under which document outputs live, e.g. `docs.finite.chat`.
-    pub document_base_domain: String,
     /// `http` for local development, `https` behind real TLS.
     pub site_url_scheme: String,
     /// Port to include in generated site URLs; `None` for default ports.
@@ -88,7 +85,7 @@ pub struct EngineConfig {
 }
 
 #[derive(Debug, Clone)]
-pub struct ProjectOutputSharingOutcome {
+pub struct ProjectSiteSharingOutcome {
     pub site_id: String,
     pub site_name: String,
     pub site_url: String,
@@ -99,18 +96,6 @@ impl EngineConfig {
     pub fn site_url(&self, name: &str) -> String {
         assert!(!name.is_empty());
         self.url_for_domain(name, &self.base_domain)
-    }
-
-    pub fn document_url(&self, name: &str) -> String {
-        assert!(!name.is_empty());
-        self.url_for_domain(name, &self.document_base_domain)
-    }
-
-    pub fn output_url(&self, kind: ProjectOutputKind, name: &str) -> String {
-        match kind {
-            ProjectOutputKind::Document => self.document_url(name),
-            ProjectOutputKind::Site | ProjectOutputKind::App => self.site_url(name),
-        }
     }
 
     fn url_for_domain(&self, name: &str, domain: &str) -> String {
@@ -134,8 +119,6 @@ pub struct FinalizeOutcome {
     pub version_number: u32,
     pub path_count: u32,
     pub total_bytes: u64,
-    /// Set for app sites: what the supervisor needs to (re)deploy.
-    pub app: Option<AppDeploy>,
 }
 
 #[derive(Debug, Clone)]
@@ -162,16 +145,6 @@ pub struct SiteAccessRequest {
 }
 
 const SITE_ACCESS_APPROVAL_TTL_SECONDS: u64 = 24 * 60 * 60;
-
-/// Everything the app supervisor needs to deploy one finalized version.
-#[derive(Debug, Clone)]
-pub struct AppDeploy {
-    pub site_id: String,
-    pub version_id: String,
-    pub bundle_sha256: String,
-    pub start_command: String,
-    pub port: u16,
-}
 
 /// A manifest entry resolved for serving.
 #[derive(Debug, Clone)]
@@ -226,7 +199,6 @@ impl Engine {
         config: EngineConfig,
     ) -> Engine {
         assert!(!config.base_domain.is_empty());
-        assert!(!config.document_base_domain.is_empty());
         Engine {
             store,
             blobs,
@@ -239,9 +211,8 @@ impl Engine {
         self.config.site_url(name)
     }
 
-    pub fn output_url_for_site(&self, site: &SiteRecord) -> String {
-        self.config
-            .output_url(site.kind.as_output_kind(), &site.name)
+    pub fn site_url_for_site(&self, site: &SiteRecord) -> String {
+        self.config.site_url(&site.name)
     }
 
     pub fn config(&self) -> &EngineConfig {
@@ -270,7 +241,7 @@ impl Engine {
             principal_id: registration.principal_id,
             grant_source: registration.grant_source.as_str().to_string(),
             registered: registration.registered,
-            output_limit: MAX_SITES_PER_OWNER,
+            site_limit: MAX_SITES_PER_OWNER,
         })
     }
 
@@ -289,7 +260,7 @@ impl Engine {
             return Err(EngineError::NotAllowlisted);
         }
         let finite_toml = request.config.to_toml_string()?;
-        let outputs = output_apply_inputs(request);
+        let outputs = output_apply_inputs(request)?;
         let requesting_user_pubkey = request
             .requesting_user_npub
             .as_deref()
@@ -370,8 +341,8 @@ impl Engine {
             None => Vec::new(),
         };
 
-        let mut output_summaries = Vec::with_capacity(outputs.len());
-        // Bounded by MAX_PROJECT_OUTPUTS, validated in Project Config.
+        let mut site_summary = None;
+        // Static-only Sites has at most one Project Site, validated in Project Config.
         for output in outputs {
             let existing = existing_outputs
                 .iter()
@@ -386,10 +357,10 @@ impl Engine {
                     || record.spa != output.spa
                 {
                     return Err(EngineError::Conflict(
-                        "project output config cannot change during init",
+                        "project site config cannot change during init",
                     ));
                 }
-                output_summaries.push(self.project_output_summary(
+                site_summary = Some(self.project_site_summary_from_record(
                     record,
                     false,
                     requesting_user_npub.is_some(),
@@ -398,28 +369,20 @@ impl Engine {
             }
             if self
                 .store
-                .site_by_output_name(output_claim_kind(output.kind), &output.site_name)?
+                .site_by_output_name("site", &output.site_name)?
                 .is_some()
             {
                 return Err(EngineError::NameTaken);
             }
-            let output_url = self.config.output_url(output.kind, &output.site_name);
-            output_summaries.push(ProjectOutputSummary {
-                output_id: output.output_id.clone(),
-                kind: output.kind.as_str().to_string(),
-                output_name: output.site_name.clone(),
-                output_url: output_url.clone(),
-                site_name: output.site_name.clone(),
-                document_name: document_name_for_output(output.kind, &output.site_name),
+            site_summary = Some(ProjectSiteSummary {
+                name: output.site_name.clone(),
+                url: self.config.site_url(&output.site_name),
                 site_id: None,
-                site_url: output_url,
                 status: "planned".to_string(),
                 visibility: "private".to_string(),
                 active_version: None,
                 branch: output.branch.clone(),
                 path: output.path.clone(),
-                entry: output.entry.clone(),
-                start: output.start_command.clone(),
                 spa: output.spa,
                 created: true,
                 requesting_user_shared: requesting_user_npub.is_some(),
@@ -438,7 +401,7 @@ impl Engine {
                 .to_string(),
             git_remote_url,
             finite_toml,
-            outputs: output_summaries,
+            site: site_summary,
             requesting_user_npub,
             owner_email,
         })
@@ -453,14 +416,9 @@ impl Engine {
         finite_toml: String,
         outcome: ProjectInitStoreOutcome,
     ) -> Result<ProjectInitResponse, EngineError> {
-        let mut outputs = Vec::with_capacity(outcome.outputs.len());
-        for output in &outcome.outputs {
-            outputs.push(self.project_output_summary(
-                &output.record,
-                output.created,
-                requesting_user_npub.is_some(),
-            )?);
-        }
+        let site = project_site_from_store_outcome(&outcome, |record, created| {
+            self.project_site_summary_from_record(record, created, requesting_user_npub.is_some())
+        })?;
         Ok(ProjectInitResponse {
             dry_run,
             project_id: Some(outcome.project.id),
@@ -469,7 +427,7 @@ impl Engine {
             project_visibility: outcome.project.visibility.as_str().to_string(),
             git_remote_url,
             finite_toml,
-            outputs,
+            site,
             requesting_user_npub,
             owner_email,
         })
@@ -561,7 +519,7 @@ impl Engine {
             .store
             .project_access_by_actor(actor_pubkey, project_slug)?
             .ok_or(EngineError::ProjectNotFound)?;
-        let outputs = self.project_output_summaries(&access.project.id)?;
+        let site = self.project_site_summary(&access.project.id)?;
         let collaborators = self.project_collaborator_summaries(&access.project.id)?;
         Ok(ProjectStatusResponse {
             project_id: access.project.id,
@@ -569,7 +527,7 @@ impl Engine {
             project_visibility: access.project.visibility.as_str().to_string(),
             git_remote_url,
             role: access.role.as_str().to_string(),
-            outputs,
+            site,
             collaborators,
         })
     }
@@ -599,7 +557,7 @@ impl Engine {
             project_visibility: access.project.visibility.as_str().to_string(),
             git_remote_url: format!("{git_remote_base_url}/{}.git", access.project.slug),
             role: access.role.as_str().to_string(),
-            outputs: self.project_output_summaries(&access.project.id)?,
+            site: self.project_site_summary(&access.project.id)?,
         })
     }
 
@@ -615,16 +573,20 @@ impl Engine {
         Ok(project)
     }
 
-    fn project_output_summaries(
+    fn project_site_summary(
         &self,
         project_id: &str,
-    ) -> Result<Vec<ProjectOutputSummary>, EngineError> {
+    ) -> Result<Option<ProjectSiteSummary>, EngineError> {
         let records = self.store.project_outputs(project_id)?;
-        let mut outputs = Vec::with_capacity(records.len());
-        for record in &records {
-            outputs.push(self.project_output_summary(record, false, false)?);
+        if records.len() > 1 {
+            return Err(EngineError::Conflict(
+                "static-only project has multiple sites",
+            ));
         }
-        Ok(outputs)
+        records
+            .first()
+            .map(|record| self.project_site_summary_from_record(record, false, false))
+            .transpose()
     }
 
     fn project_collaborator_summaries(
@@ -639,34 +601,27 @@ impl Engine {
         Ok(collaborators)
     }
 
-    fn project_output_summary(
+    fn project_site_summary_from_record(
         &self,
         record: &ProjectOutputRecord,
         created: bool,
         requesting_user_shared: bool,
-    ) -> Result<ProjectOutputSummary, EngineError> {
+    ) -> Result<ProjectSiteSummary, EngineError> {
         let site = self
             .store
             .site_by_id(&record.site_id)?
             .ok_or(StoreError::CorruptState(
                 "project output references missing site",
             ))?;
-        Ok(ProjectOutputSummary {
-            output_id: record.output_id.clone(),
-            kind: record.kind.as_str().to_string(),
-            output_name: record.site_name.clone(),
-            output_url: self.config.output_url(record.kind, &record.site_name),
-            site_name: record.site_name.clone(),
-            document_name: document_name_for_output(record.kind, &record.site_name),
+        Ok(ProjectSiteSummary {
+            name: record.site_name.clone(),
+            url: self.config.site_url(&record.site_name),
             site_id: Some(record.site_id.clone()),
-            site_url: self.config.output_url(record.kind, &record.site_name),
             status: site.status.as_str().to_string(),
             visibility: site.visibility.as_str().to_string(),
             active_version: site.active_version_number,
             branch: record.branch.clone(),
             path: record.path.clone(),
-            entry: record.entry.clone(),
-            start: record.start_command.clone(),
             spa: record.spa,
             created,
             requesting_user_shared,
@@ -946,9 +901,6 @@ impl Engine {
         if !self.store.has_publish_access(&site.owner_pubkey, now)? {
             return Err(EngineError::NotAllowlisted);
         }
-        if site.kind == SiteKind::App {
-            return Err(EngineError::Conflict("project output site is an app"));
-        }
         let manifest = PublishManifest {
             files: files.iter().map(|(file, _)| file.clone()).collect(),
         };
@@ -1007,94 +959,7 @@ impl Engine {
         )
     }
 
-    pub fn commit_project_app_version_for_git_event(
-        &mut self,
-        site_id: &str,
-        git_ref_event_id: Option<i64>,
-        bundle: Vec<u8>,
-        start_command: &str,
-        now: u64,
-    ) -> Result<FinalizeOutcome, EngineError> {
-        let site = self
-            .store
-            .site_by_id(site_id)?
-            .ok_or(EngineError::SiteNotFound)?;
-        if let Some(event_id) = git_ref_event_id
-            && let Some(version) = self
-                .store
-                .version_by_git_ref_event_id_for_site(event_id, &site.id)?
-        {
-            return self.finalize_outcome(
-                &site.id,
-                &version.version_id,
-                version.version_number,
-                version.path_count,
-                version.total_bytes,
-            );
-        }
-        if site.status == SiteStatus::Disabled || site.status == SiteStatus::Deleted {
-            return Err(EngineError::Conflict("site is disabled"));
-        }
-        if site.kind == SiteKind::Document {
-            return Err(EngineError::Conflict(
-                "document output cannot become an app",
-            ));
-        }
-        if !self.store.has_publish_access(&site.owner_pubkey, now)? {
-            return Err(EngineError::NotAllowlisted);
-        }
-
-        let bundle_sha256 = hex::encode(&Sha256::digest(&bundle));
-        let bundle_file = ManifestFile {
-            path: APP_BUNDLE_PATH.to_string(),
-            sha256: bundle_sha256.clone(),
-            size: bundle.len() as u64,
-        };
-        let manifest = PublishManifest {
-            files: vec![bundle_file.clone()],
-        };
-        manifest.validate_with_max_file(MAX_APP_BUNDLE_BYTES)?;
-
-        let publish_id = ids::new_id(ids::PUBLISH_ID_PREFIX);
-        self.store.create_publish(
-            &publish_id,
-            &site.id,
-            &manifest.files,
-            false,
-            Some(start_command),
-            now,
-        )?;
-        self.blobs
-            .put(&bundle_sha256, &bundle, MAX_APP_BUNDLE_BYTES)?;
-        self.store
-            .record_blob(&bundle_sha256, bundle.len() as u64, now)?;
-
-        let manifest_sha256 = manifest.digest();
-        let version_id = ids::new_id(ids::VERSION_ID_PREFIX);
-        let finalized = match self.store.finalize_publish_for_git_event(
-            &publish_id,
-            &version_id,
-            &manifest_sha256,
-            git_ref_event_id,
-            now,
-        ) {
-            Ok(finalized) => finalized,
-            Err(StoreError::Conflict("publish has missing blobs")) => {
-                return Err(EngineError::Conflict("publish has missing blobs"));
-            }
-            Err(other) => return Err(other.into()),
-        };
-        self.finalize_outcome(
-            &site.id,
-            &version_id,
-            finalized.version_number,
-            finalized.path_count,
-            finalized.total_bytes,
-        )
-    }
-
-    /// Build the outcome from committed state. Re-reads the site so app
-    /// fields (kind, port) reflect what finalize just wrote.
+    /// Build the outcome from committed state.
     fn finalize_outcome(
         &self,
         site_id: &str,
@@ -1107,55 +972,31 @@ impl Engine {
             .store
             .site_by_id(site_id)?
             .ok_or(StoreError::CorruptState("site missing after finalize"))?;
-        let app = if site.kind == SiteKind::App {
-            let port = site
-                .app_port
-                .ok_or(StoreError::CorruptState("app site has no port"))?;
-            let start_command = site
-                .active_version_start
-                .clone()
-                .ok_or(StoreError::CorruptState("app version has no start command"))?;
-            let (bundle_sha256, _size) = self
-                .store
-                .version_file(version_id, APP_BUNDLE_PATH)?
-                .ok_or(StoreError::CorruptState("app version has no bundle"))?;
-            Some(AppDeploy {
-                site_id: site.id.clone(),
-                version_id: version_id.to_string(),
-                bundle_sha256,
-                start_command,
-                port,
-            })
-        } else {
-            None
-        };
         Ok(FinalizeOutcome {
             site_id: site.id.clone(),
             name: site.name.clone(),
-            url: self.output_url_for_site(&site),
+            url: self.site_url_for_site(&site),
             version_id: version_id.to_string(),
             version_number,
             path_count,
             total_bytes,
-            app,
         })
     }
 
     // ---- sharing -------------------------------------------------------------
 
-    /// Update visibility and the shared-email ACL. Project collaborators edit
-    /// content through git; output visibility remains owner-controlled.
-    pub fn set_project_output_sharing(
+    /// Update visibility and the shared-email ACL for the Project Site.
+    /// Project collaborators edit content through git; Site visibility
+    /// remains owner-controlled.
+    pub fn set_project_site_sharing(
         &mut self,
         actor_pubkey: &str,
         project_slug: &str,
-        output_id: &str,
         request: &SharingRequest,
         now: u64,
-    ) -> Result<ProjectOutputSharingOutcome, EngineError> {
+    ) -> Result<ProjectSiteSharingOutcome, EngineError> {
         assert!(hex::is_hex32(actor_pubkey));
         finitesites_proto::project_config::validate_project_slug(project_slug)?;
-        finitesites_proto::project_config::validate_output_id(output_id)?;
         let access = self
             .store
             .project_access_by_actor(actor_pubkey, project_slug)?
@@ -1163,10 +1004,13 @@ impl Engine {
         if access.role != ProjectCollaboratorRole::Owner {
             return Err(EngineError::NotAuthorized);
         }
-        let output = self
-            .store
-            .project_output_by_output_id(&access.project.id, output_id)?
-            .ok_or(EngineError::OutputNotFound)?;
+        let mut outputs = self.store.project_outputs(&access.project.id)?;
+        if outputs.len() > 1 {
+            return Err(EngineError::Conflict(
+                "static-only project has multiple sites",
+            ));
+        }
+        let output = outputs.pop().ok_or(EngineError::SiteNotFound)?;
         let site = self
             .store
             .site_by_id(&output.site_id)?
@@ -1174,10 +1018,10 @@ impl Engine {
                 "project output references missing site",
             ))?;
         let response = self.set_site_sharing(actor_pubkey, &site, request, now)?;
-        Ok(ProjectOutputSharingOutcome {
+        Ok(ProjectSiteSharingOutcome {
             site_id: site.id.clone(),
             site_name: site.name.clone(),
-            site_url: self.output_url_for_site(&site),
+            site_url: self.site_url_for_site(&site),
             response,
         })
     }
@@ -1530,10 +1374,9 @@ impl Engine {
         Ok(SiteSummary {
             site_id: site.id.clone(),
             name: site.name.clone(),
-            url: self.output_url_for_site(site),
+            url: self.site_url_for_site(site),
             status: site.status.as_str().to_string(),
             visibility: site.visibility.as_str().to_string(),
-            kind: site.kind.as_str().to_string(),
             active_version: site.active_version_number,
             shared_emails: self.store.shares(&site.id)?,
             shared_npubs: native_npubs(&self.store.native_shares(&site.id)?)?,
@@ -1543,21 +1386,10 @@ impl Engine {
     // ---- serving ---------------------------------------------------------------
 
     pub fn resolve_site(&self, name: &str) -> Result<Option<SiteRecord>, EngineError> {
-        self.resolve_output("site", name)
-    }
-
-    pub fn resolve_output(
-        &self,
-        output_kind: &str,
-        name: &str,
-    ) -> Result<Option<SiteRecord>, EngineError> {
         if names::validate_site_name(name).is_err() {
             return Ok(None);
         }
-        if output_kind != "site" && output_kind != "document" {
-            return Ok(None);
-        }
-        Ok(self.store.site_by_output_name(output_kind, name)?)
+        Ok(self.store.site_by_output_name("site", name)?)
     }
 
     pub fn output_by_site_id(&self, site_id: &str) -> Result<Option<SiteRecord>, EngineError> {
@@ -1707,16 +1539,11 @@ impl Engine {
         Ok(out)
     }
 
-    /// A site gets platform-authored agent instructions only when it is a
-    /// Project Output and the user did not publish their own `/llms.txt`.
+    /// A site gets platform-authored agent instructions only when it is backed
+    /// by a Project Repository and the user did not publish their own
+    /// `/llms.txt`.
     pub fn should_generate_llms_txt(&self, site: &SiteRecord) -> Result<bool, EngineError> {
         if site.status != SiteStatus::Published {
-            return Ok(false);
-        }
-        if site.kind != SiteKind::Static
-            && site.kind != SiteKind::Document
-            && site.kind != SiteKind::App
-        {
             return Ok(false);
         }
         if self.lookup_exact_file(site, "/llms.txt")?.is_some() {
@@ -1784,20 +1611,6 @@ impl Engine {
         self.blobs.file_path(sha256)
     }
 
-    /// All app sites with an active version, for supervisor reconciliation
-    /// at startup. Returns the deploy info for each.
-    pub fn app_deploys(&self) -> Result<Vec<AppDeploy>, EngineError> {
-        let sites = self.store.app_sites()?;
-        let mut out = Vec::with_capacity(sites.len());
-        // Bounded by the number of app sites, which is bounded by the port range.
-        for site in sites {
-            if let Some(deploy) = self.deploy_for_site(&site)? {
-                out.push(deploy);
-            }
-        }
-        Ok(out)
-    }
-
     pub fn mark_first_publication_notification_ready(
         &mut self,
         site_id: &str,
@@ -1823,38 +1636,6 @@ impl Engine {
         self.store
             .mark_site_notification_delivered(idempotency_key, now)?;
         Ok(())
-    }
-
-    /// Deploy info for one app site by id, for waking it on a request.
-    pub fn app_deploy_for(&self, site_id: &str) -> Result<Option<AppDeploy>, EngineError> {
-        let Some(site) = self.store.site_by_id(site_id)? else {
-            return Ok(None);
-        };
-        self.deploy_for_site(&site)
-    }
-
-    fn deploy_for_site(&self, site: &SiteRecord) -> Result<Option<AppDeploy>, EngineError> {
-        if site.kind != SiteKind::App {
-            return Ok(None);
-        }
-        let Some(version_id) = site.active_version_id.as_deref() else {
-            return Ok(None);
-        };
-        let (port, start_command) = match (site.app_port, site.active_version_start.clone()) {
-            (Some(port), Some(start)) => (port, start),
-            _ => return Err(StoreError::CorruptState("app site missing port or start").into()),
-        };
-        let (bundle_sha256, _size) = self
-            .store
-            .version_file(version_id, APP_BUNDLE_PATH)?
-            .ok_or(StoreError::CorruptState("app version has no bundle"))?;
-        Ok(Some(AppDeploy {
-            site_id: site.id.clone(),
-            version_id: version_id.to_string(),
-            bundle_sha256,
-            start_command,
-            port,
-        }))
     }
 
     // ---- native viewer auth -------------------------------------------------
@@ -1895,7 +1676,7 @@ impl Engine {
         Ok(NativeViewerLink {
             url: format!(
                 "{}_finite/auth?native_token={token}",
-                self.output_url_for_site(site)
+                self.site_url_for_site(site)
             ),
         })
     }
@@ -2014,8 +1795,7 @@ impl Engine {
         )?;
         let url = format!(
             "{}_finite/auth?token={token}",
-            self.config
-                .output_url(site.kind.as_output_kind(), &site.name)
+            self.config.site_url(&site.name)
         );
         Ok(Some(LoginLink {
             site_name: site.name.clone(),
@@ -2100,9 +1880,7 @@ impl Engine {
             now + SITE_ACCESS_APPROVAL_TTL_SECONDS,
         )?;
         let approval_token = self.site_access_approval_token(&active_request_id);
-        let site_url = self
-            .config
-            .output_url(site.kind.as_output_kind(), &site.name);
+        let site_url = self.config.site_url(&site.name);
         Ok(SiteAccessRequest {
             site_id: site.id.clone(),
             idempotency_key: format!("sites:access-request:{active_request_id}"),
@@ -2171,25 +1949,41 @@ impl Engine {
     }
 }
 
-fn output_apply_inputs(request: &ProjectInitRequest) -> Vec<ProjectOutputApply> {
-    let mut outputs = Vec::with_capacity(request.config.outputs.len());
-    // Bounded by ProjectConfig::validate.
-    for (output_id, output) in &request.config.outputs {
-        let routing_name = output
-            .routing_name()
-            .expect("project config validated before output apply");
-        outputs.push(ProjectOutputApply {
-            output_id: output_id.clone(),
-            kind: output.kind,
-            site_name: routing_name.to_string(),
-            branch: output.branch.clone(),
-            path: output.path.clone(),
-            entry: output.normalized_entry().map(str::to_string),
-            start_command: output.normalized_start().map(str::to_string),
-            spa: output.spa,
-        });
+fn output_apply_inputs(
+    request: &ProjectInitRequest,
+) -> Result<Vec<ProjectOutputApply>, EngineError> {
+    let Some(site) = request.config.normalized_site()? else {
+        return Ok(Vec::new());
+    };
+    Ok(vec![ProjectOutputApply {
+        output_id: "site".to_string(),
+        kind: ProjectOutputKind::Site,
+        site_name: site.name,
+        branch: site.branch,
+        path: site.path,
+        entry: None,
+        start_command: None,
+        spa: site.spa,
+    }])
+}
+
+fn project_site_from_store_outcome<F>(
+    outcome: &ProjectInitStoreOutcome,
+    mut to_summary: F,
+) -> Result<Option<ProjectSiteSummary>, EngineError>
+where
+    F: FnMut(&ProjectOutputRecord, bool) -> Result<ProjectSiteSummary, EngineError>,
+{
+    if outcome.outputs.len() > 1 {
+        return Err(EngineError::Conflict(
+            "static-only project has multiple sites",
+        ));
     }
-    outputs
+    outcome
+        .outputs
+        .first()
+        .map(|output| to_summary(&output.record, output.created))
+        .transpose()
 }
 
 fn native_npubs(pubkeys: &[String]) -> Result<Vec<String>, EngineError> {
@@ -2197,21 +1991,6 @@ fn native_npubs(pubkeys: &[String]) -> Result<Vec<String>, EngineError> {
         .iter()
         .map(|pubkey| npub::encode_npub(pubkey).map_err(EngineError::from))
         .collect()
-}
-
-fn output_claim_kind(output_kind: ProjectOutputKind) -> &'static str {
-    match output_kind {
-        ProjectOutputKind::App => ProjectOutputKind::Site.as_str(),
-        other => other.as_str(),
-    }
-}
-
-fn document_name_for_output(kind: ProjectOutputKind, name: &str) -> Option<String> {
-    if kind == ProjectOutputKind::Document {
-        Some(name.to_string())
-    } else {
-        None
-    }
 }
 
 fn collaborator_apply_input(

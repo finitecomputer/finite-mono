@@ -43,12 +43,16 @@ const RESERVED_NAMES: &[&str] = &[
     "status",
     "support",
     "test",
+    "v2",
     "vip",
     "web",
     "www",
 ];
 
 pub fn validate_site_name(name: &str) -> Result<(), ProtoError> {
+    if RESERVED_NAMES.binary_search(&name).is_ok() {
+        return Err(ProtoError::InvalidSiteName("name is reserved"));
+    }
     if name.len() < MIN_NAME_LENGTH {
         return Err(ProtoError::InvalidSiteName("shorter than 3 characters"));
     }
@@ -68,9 +72,6 @@ pub fn validate_site_name(name: &str) -> Result<(), ProtoError> {
         return Err(ProtoError::InvalidSiteName(
             "may not start or end with a hyphen",
         ));
-    }
-    if RESERVED_NAMES.binary_search(&name).is_ok() {
-        return Err(ProtoError::InvalidSiteName("name is reserved"));
     }
     Ok(())
 }
@@ -111,7 +112,7 @@ mod tests {
 
     #[test]
     fn rejects_reserved_names() {
-        for name in ["api", "www", "admin", "finite"] {
+        for name in ["api", "www", "admin", "finite", "v2"] {
             assert_eq!(
                 validate_site_name(name),
                 Err(ProtoError::InvalidSiteName("name is reserved"))

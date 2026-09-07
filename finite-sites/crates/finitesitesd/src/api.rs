@@ -18,15 +18,15 @@ use finitesites_proto::dto::{
     HostedRequesterAssertionResponse, NativeViewerSessionExchangeRequest,
     NativeViewerSessionExchangeResponse, NativeViewerSessionRequest, ProjectGrantRequest,
     ProjectGrantResponse, ProjectInitRequest, ProjectInitResponse, ProjectListResponse,
-    ProjectOutputSharingResponse, ProjectRevokeRequest, ProjectRevokeResponse,
-    ProjectStatusResponse, SharingRequest, SitesAuthorizedKeyRegisterRequest,
-    SitesAuthorizedKeyResponse, SitesAuthorizedKeyRevokeRequest, VerifiedEmailViewerSessionRequest,
+    ProjectRevokeRequest, ProjectRevokeResponse, ProjectSiteSharingResponse, ProjectStatusResponse,
+    SharingRequest, SitesAuthorizedKeyRegisterRequest, SitesAuthorizedKeyResponse,
+    SitesAuthorizedKeyRevokeRequest, VerifiedEmailViewerSessionRequest,
     VerifiedEmailViewerSessionResponse,
 };
 use finitesites_proto::limits::{
     MAX_API_BODY_BYTES, MAX_AUTH_HEADER_BYTES, MAX_NATIVE_VIEWER_AUTH_BODY_BYTES,
     MAX_NATIVE_VIEWER_CLIENT_BYTES, MAX_NATIVE_VIEWER_NONCE_BYTES,
-    MAX_NATIVE_VIEWER_RETURN_TO_BYTES, MAX_OUTPUT_URL_BYTES, MAX_VIEWER_RETURN_TO_BYTES,
+    MAX_NATIVE_VIEWER_RETURN_TO_BYTES, MAX_SITE_URL_BYTES, MAX_VIEWER_RETURN_TO_BYTES,
     MAX_VIEWER_SESSION_BODY_BYTES, MIN_NATIVE_VIEWER_NONCE_BYTES,
 };
 use finitesites_proto::{ProtoError, nip98};
@@ -36,27 +36,27 @@ use crate::server::{AppState, now_unix};
 
 pub fn router(state: Arc<AppState>) -> Router {
     Router::new()
-        .route("/api/v1/healthz", get(healthz))
-        .route("/api/v1/auth/register", post(register_auth))
-        .route("/api/v1/email-auth/request", post(request_email_login))
-        .route("/api/v1/email-auth/redeem", post(redeem_email_login))
+        .route("/api/v2/healthz", get(healthz))
+        .route("/api/v2/auth/register", post(register_auth))
+        .route("/api/v2/email-auth/request", post(request_email_login))
+        .route("/api/v2/email-auth/redeem", post(redeem_email_login))
         .route(
-            "/api/v1/sites-authorized-keys/register",
+            "/api/v2/sites-authorized-keys/register",
             post(register_sites_authorized_key),
         )
         .route(
-            "/api/v1/sites-authorized-keys/revoke",
+            "/api/v2/sites-authorized-keys/revoke",
             post(revoke_sites_authorized_key),
         )
-        .route("/api/v1/projects", get(list_projects))
-        .route("/api/v1/projects/init", post(init_project))
-        .route("/api/v1/projects/{slug}", get(project_status))
-        .route("/api/v1/projects/{slug}/grant", post(grant_project))
-        .route("/api/v1/projects/{slug}/revoke", post(revoke_project))
-        .route("/api/v1/projects/{slug}/git-auth", post(auth_git))
+        .route("/api/v2/projects", get(list_projects))
+        .route("/api/v2/projects/init", post(init_project))
+        .route("/api/v2/projects/{slug}", get(project_status))
+        .route("/api/v2/projects/{slug}/grant", post(grant_project))
+        .route("/api/v2/projects/{slug}/revoke", post(revoke_project))
+        .route("/api/v2/projects/{slug}/git-auth", post(auth_git))
         .route(
-            "/api/v1/projects/{slug}/outputs/{output_id}/sharing",
-            post(share_project_output),
+            "/api/v2/projects/{slug}/site/sharing",
+            post(share_project_site),
         )
         .route(
             "/internal/v1/viewer-sessions",
@@ -236,7 +236,7 @@ async fn create_verified_email_viewer_session(
     }
 
     let mut engine = state.engine.lock().expect("engine mutex never poisoned");
-    let site = resolve_canonical_output_url(&state, &engine, &request.output_url)?
+    let site = resolve_canonical_site_url(&state, &engine, &request.site_url)?
         .ok_or_else(|| ApiError::forbidden("viewer access is unavailable"))?;
     if site.status != finitesites_store::SiteStatus::Published {
         return Err(ApiError::forbidden("viewer access is unavailable"));
@@ -301,9 +301,9 @@ async fn create_native_viewer_session(
     }
 
     let mut engine = state.engine.lock().expect("engine mutex never poisoned");
-    let site = resolve_canonical_output_url(&state, &engine, &request.output_url)?
+    let site = resolve_canonical_site_url(&state, &engine, &request.site_url)?
         .ok_or_else(|| ApiError::forbidden("viewer access is unavailable"))?;
-    let expected_url = format!("{}_finite/auth/native-session", request.output_url);
+    let expected_url = format!("{}_finite/auth/native-session", request.site_url);
     let now = now_unix();
     let signer_pubkey = nip98::verify_auth_header(
         &request.authorization,
@@ -397,48 +397,39 @@ fn constant_time_eq(left: &[u8], right: &[u8]) -> bool {
     difference == 0
 }
 
-fn resolve_canonical_output_url(
+fn resolve_canonical_site_url(
     state: &AppState,
     engine: &finitesites_engine::Engine,
-    output_url: &str,
+    site_url: &str,
 ) -> Result<Option<finitesites_store::SiteRecord>, ApiError> {
-    if output_url.is_empty() || output_url.len() > MAX_OUTPUT_URL_BYTES as usize {
-        return Err(ApiError::bad_request("invalid output URL"));
+    if site_url.is_empty() || site_url.len() > MAX_SITE_URL_BYTES as usize {
+        return Err(ApiError::bad_request("invalid site URL"));
     }
-    let uri = output_url
+    let uri = site_url
         .parse::<Uri>()
-        .map_err(|_| ApiError::bad_request("invalid output URL"))?;
+        .map_err(|_| ApiError::bad_request("invalid site URL"))?;
     let scheme = uri
         .scheme_str()
         .filter(|scheme| *scheme == "http" || *scheme == "https")
-        .ok_or_else(|| ApiError::bad_request("invalid output URL"))?;
+        .ok_or_else(|| ApiError::bad_request("invalid site URL"))?;
     let authority = uri
         .authority()
-        .ok_or_else(|| ApiError::bad_request("invalid output URL"))?;
+        .ok_or_else(|| ApiError::bad_request("invalid site URL"))?;
     if uri.path_and_query().map(|value| value.as_str()) != Some("/") {
-        return Err(ApiError::bad_request(
-            "output URL must be a canonical origin",
-        ));
+        return Err(ApiError::bad_request("site URL must be a canonical origin"));
     }
-    let output = crate::server::site_label(authority.as_str(), &state.base_domain)
-        .map(|label| ("site", label))
-        .or_else(|| {
-            crate::server::site_label(authority.as_str(), &state.document_base_domain)
-                .map(|label| ("document", label))
-        })
-        .ok_or_else(|| ApiError::bad_request("invalid output URL"))?;
-    let site = engine
-        .resolve_output(output.0, &output.1)
-        .map_err(|error| {
-            log_if_internal(&error);
-            ApiError::from(error)
-        })?;
+    let label = crate::server::site_label(authority.as_str(), &state.base_domain)
+        .ok_or_else(|| ApiError::bad_request("invalid site URL"))?;
+    let site = engine.resolve_site(&label).map_err(|error| {
+        log_if_internal(&error);
+        ApiError::from(error)
+    })?;
     let Some(site) = site else {
         return Ok(None);
     };
-    let canonical = engine.output_url_for_site(&site);
-    if canonical != output_url || !canonical.starts_with(&format!("{scheme}://")) {
-        return Err(ApiError::bad_request("output URL must be canonical"));
+    let canonical = engine.site_url_for_site(&site);
+    if canonical != site_url || !canonical.starts_with(&format!("{scheme}://")) {
+        return Err(ApiError::bad_request("site URL must be canonical"));
     }
     Ok(Some(site))
 }
@@ -873,14 +864,14 @@ fn git_remote_url(state: &AppState, slug: &str) -> String {
     format!("{}/{}.git", state.git_base_url, slug)
 }
 
-async fn share_project_output(
+async fn share_project_site(
     State(state): State<Arc<AppState>>,
-    Path((slug, output_id)): Path<(String, String)>,
+    Path(slug): Path<String>,
     Query(query): Query<InviteQuery>,
     original_uri: OriginalUri,
     headers: HeaderMap,
     body: Bytes,
-) -> Result<Json<ProjectOutputSharingResponse>, ApiError> {
+) -> Result<Json<ProjectSiteSharingResponse>, ApiError> {
     let actor = authenticate(&state, &headers, "POST", &original_uri, Some(&body))?;
     let request: SharingRequest = parse_json_body(&body)?;
     if query.send_invites && request.add_emails.is_empty() {
@@ -895,7 +886,7 @@ async fn share_project_output(
     }
     let mut engine = state.engine.lock().expect("engine mutex never poisoned");
     let outcome = engine
-        .set_project_output_sharing(&actor, &slug, &output_id, &request, now_unix())
+        .set_project_site_sharing(&actor, &slug, &request, now_unix())
         .map_err(|error| {
             log_if_internal(&error);
             ApiError::from(error)
@@ -915,7 +906,7 @@ async fn share_project_output(
                 Some(site) => site,
                 None => {
                     return Err(internal_error(
-                        "could not resolve shared output for invite email",
+                        "could not resolve shared site for invite email",
                     ));
                 }
             };
@@ -953,9 +944,10 @@ async fn share_project_output(
             })?;
     }
     response.invited_emails = invite_links.iter().map(|link| link.email.clone()).collect();
-    Ok(Json(ProjectOutputSharingResponse {
+    Ok(Json(ProjectSiteSharingResponse {
         project_slug: slug,
-        output_id,
+        site_name: outcome.site_name,
+        site_url: outcome.site_url,
         visibility: response.visibility,
         shared_emails: response.shared_emails,
         shared_npubs: response.shared_npubs,
@@ -993,7 +985,7 @@ fn send_project_collaborator_invite(
             api_url: &state.api_url,
             git_remote_url: &git_remote_url,
             email_login_token: &token.token,
-            outputs: &[],
+            site: None,
         })
         .map_err(|error| {
             eprintln!("finitesitesd project collaborator invite mail error: {error}");

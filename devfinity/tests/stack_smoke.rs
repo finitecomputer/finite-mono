@@ -24,7 +24,7 @@ fn dashboard_create_agent_flow_persists_request_in_core() -> Result<(), Box<dyn 
     )?;
     assert_http_contains(
         "finitesites",
-        &format!("{}/api/v1/healthz", env.finitesites_api_url),
+        &format!("{}/api/v2/healthz", env.finitesites_api_url),
         "\"ok\":true",
     )?;
     assert_http_contains("dashboard", &env.dashboard_url, "<html")?;

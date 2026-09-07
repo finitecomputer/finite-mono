@@ -1,178 +1,65 @@
 # Roadmap
 
-v1 (this repo, shipped): Project Repositories, Bare Project Repositories,
-static Project Outputs, NIP-98 auth, self-registered publish grants, sharing
-with magic links, local dev loop. This document sketches what comes next so v1
-decisions stay compatible with it.
+ADR 0028 is the current target architecture for Finite Sites. Older tiered
+hosting plans for document outputs, stateful app outputs, and Kata app runners
+are historical context only.
 
-## Production deploy (tier 1 on real metal)
+## Current Target
 
-A dedicated SaaS box, separate from user agent machines:
+Finite Sites is a static-only platform service:
 
-- DNS: `*.finite.chat` A record to the box; `api.finite.chat` for the
-  control plane.
-- Edge: Caddy (or Traefik) terminating TLS with one wildcard cert via
-  DNS-01, proxying everything to `finitesitesd` with the original Host
-  preserved. No per-site edge configuration, ever — the AI Lounge
-  postmortem rule. Run finitesitesd with
-  `--base-domain finite.chat --site-scheme https --site-port none
-  --api-url https://api.finite.chat`.
-- Storage: Garage for blobs (new `BlobStore` impl), Litestream replicating
-  `registry.db` to Garage.
-- Mail: Postmark or SES `Mailer` implementation.
-- Ledger items 1, 2, 4, 7 must close before this deploy.
-- Agent machines get the `fsite` binary and the publishing skill. `fsite auth
-  register` is the onboarding lever. Operator grants handle revocation/manual
-  override; Core-synced grants become the paid-entitlement path.
+- one independently deployed `finitesitesd` service;
+- one v2 control/API origin;
+- one wildcard static-site origin;
+- Project Repositories for source and collaboration;
+- zero-or-one Project Site per Project;
+- git pushes to the configured Deploy Branch create immutable static Versions;
+- Sites-owned auth, sharing, viewer sessions, email proofs, and project
+  collaborators;
+- finite-identity/core used only for facts Sites does not own, such as NIP-05
+  directory lookup.
 
-## Tier 2: stateful sites — SHIPPED, hardware-isolated (ADR-0014, ADR-0015)
+## Validation Service
 
-What exists in the runtime: one tar.gz bundle, stable port, proxied behind
-the same visibility gate. App output work must be Project-first before being
-advertised to agents. The runtime now runs in
-**Kata Containers microVMs** (Cloud Hypervisor), hardware-isolated, with a
-**wake-on-request Supervisor**: idle apps are stopped (RAM freed) and woken
-on the next request (~1.4s cold). Verified live on finite-lat-2 with
-Bun+SQLite, Next.js standalone, and FastHTML; per-app microVMs 8–87 MiB.
-The systemd runner (ADR-0014) remains for boxes without KVM. Remaining
-(ledger items 9–10): websockets, an `fsite logs` surface, and optionally a
-Firecracker snapshot tier for sub-second wake.
+The first production-like deployment is a single NixOS VPS/VM:
 
-The original sketch, kept for the microVM upgrade:
+- API and git smart HTTP: `https://v2.finite.chat`;
+- served sites: `https://{site}.v2.finite.chat/`;
+- state: `/var/lib/finite-sites`;
+- healthcheck: `GET /api/v2/healthz`;
+- backups and restore drills owned by the Sites service.
 
-- Project/share/auth surfaces are unchanged.
-- A tier-2 Project Output deploys an app bundle plus a small typed runspec
-  (entrypoint, port). Never raw compose/YAML from tenants — the control plane
-  translates a constrained spec.
-- Runtime: one container per app under gVisor (runsc), read-only rootfs
-  materialized from the blob store, one writable volume for the SQLite
-  file, CPU/mem/pids quotas, default-deny egress, sleep on idle / wake on
-  request from the serving plane.
-- One host-level Litestream 0.5 process replicates `*/data/*.db` to
-  Garage.
-- The router gains "proxy to tenant socket" alongside "serve blob".
+The validation service starts essentially empty except for reserved names and
+collision-protection data imported by a narrow operator process. There is no
+dual-write migration framework.
 
-The point: the exact Bun+SQLite app the agent ran on the user's Finite
-Computer ships unchanged. Getting sites off user machines must not require
-a rewrite.
+## Product Scope
 
-## Tier 3: finite machines (arbitrary containers)
+The active product contract is:
 
-- Kata Containers runtime class on k3s: every tenant pod a hardware
-  isolated microVM (~150–300ms starts).
-- Fly-Machines-style API in the control plane: create/start/stop/destroy,
-  image from a registry, per-machine volumes.
-- Same Principal and Agent Delegation auth, same sharing gate in front of HTTP
-  machines, same `fsite`-style CLI surface (`fsite machine ...`).
+- `fsite describe workflow publish-static-site --output json`;
+- `fsite project init --config finite.toml [--dry-run] --output json`;
+- `fsite auth git PROJECT --store --output json`;
+- `fsite project grant/revoke PROJECT ...`;
+- `fsite project share PROJECT ...`;
+- `fsite project status/list`;
+- `fsite view URL_OR_NAME`.
 
-## Project Repository collaboration milestones
+Finite Sites does not run builds. Agents build locally or in their own runtime,
+commit the static deploy bytes under `[site].path`, and push git.
 
-ADR-0019 makes Project-first git the collaboration model. The milestones
-below keep the full product shape visible while letting the first
-implementation stay focused.
+## Out Of Scope
 
-### Milestone 1: Project Git Spine
+These are not part of Finite Sites v2:
 
-- Pre-User Reset wipes product data so examples can be redeployed without
-  compatibility adapters.
-- Registry has final-shaped Principals, Agent Principal Keys, Projects, Project
-  Collaborators, Project Outputs, and Git Credentials.
-- `fsite auth register --output json` creates or replays a self-registered
-  Publishing Principal for the local Publishing Key.
-- `fsite project init --config finite.toml --dry-run --output json` creates a
-  Project with zero or more outputs. `[project]`-only configs create Bare
-  Project Repositories.
-- `fsite describe workflow publish-static-site --output json` gives agents
-  the static-site happy path before they guess at removed direct publish
-  commands.
-- `fsite describe workflow publish-stateful-app --output json` gives agents
-  the app happy path and the explicit `PORT`/`DATA_DIR` runtime contract.
-- `fsite describe workflow project-config --output json` documents the
-  `finite.toml` schema and example configs.
-- `fsite auth git PROJECT [--email MAILBOX | --nip05 NAME | --npub NPUB] --store --output json` mints a scoped HTTPS
-  Git Credential.
-- `fsite project grant PROJECT (--email MAILBOX | --nip05 NAME | --npub NPUB) --output json`
-  grants Project access through one explicitly typed target.
-- `fsite project revoke PROJECT (--email MAILBOX | --nip05 NAME | --npub NPUB) --output json`
-  removes Project access and revokes active Git Credentials for that Principal.
-- `fsite project share PROJECT OUTPUT ... --output json` manages viewer
-  access for one Project Output without falling back to site-first commands.
-- `git clone https://git.finite.chat/PROJECT.git` and `git push origin main`
-  work with standard git through `git-http-backend` behind Finite auth.
-- Pushing a branch with no configured output records source history and
-  creates no Version. Pushing the Deploy Branch for a configured output
-  creates immutable Versions from committed bytes selected by the root
-  `finite.toml`. The deploy system does not infer output paths; `fsite`
-  workflows generate config for happy paths.
-- Git `post-receive` records durable ref-change events; a reconciler creates
-  Versions outside the git protocol request.
-- Tests aggressively cover this chain: self-registration, successful
-  push/deploy, source-only push before outputs, ignored non-deploy refs,
-  invalid config failure, missing output failure, process crash after ref
-  update before deploy, crash after Version creation before event
-  acknowledgement, restart reconciliation, and idempotent replay.
-- Generated `/llms.txt` prefers the git flow.
-- Existing examples are redeployed through Project-first commands only:
-  project init, project grant/revoke/share, auth git, and git push.
+- app kinds;
+- document/PDF output kinds;
+- serverless functions;
+- framework detection or builders;
+- Kata/containerd app runners;
+- wake-on-request app supervisors;
+- direct upload publishing;
+- multi-output projects.
 
-### Milestone 2: Native Principals and Agent Delegations
-
-- Native Finite users are shared to by npub/Principal, not email.
-- Agents use distinct Agent Principal Keys and act as their own Native
-  Principals by default. Humans approve project-scoped Agent Delegations from
-  Finite Chat only when an agent needs to exercise the human Principal's
-  rights.
-- Audit records the actor Principal and any Agent Delegation used.
-- Email remains the External Principal bootstrap path for non-Finite users.
-- Email Links let an identity owner prove that an email and Native Principal
-  are the same Principal. They never equate a human and agent; access from a
-  human email grant to an Agent Principal uses an explicit, revocable Finite
-  Sites Email Access Delegation that grants no Brain authority.
-
-### Milestone 3: Multi-output Projects
-
-- Registry and serving state are cut over so Project Output, not Site, owns
-  visibility, shares, active versions, and version history.
-- Output routing names are namespaced by output kind and serving domain, so a
-  site, document, and PDF can share the same label on different domains.
-- `finite.toml` supports multiple Project Outputs.
-- `site` remains the first output kind. Document v0 is implemented as a narrow
-  Markdown renderer output: a single Markdown file or folder of Markdown files
-  selected by `finite.toml`, served through the same Project Repository and
-  sharing flow.
-- PDF outputs use the same Project Repository and Project Output versioning
-  model next; documents have proven the path.
-- Project Visibility remains independent from output Visibility.
-- Selected Finite-owned baseline Project Repositories can become public-read
-  for runtime sync, while customer/user/team repositories stay private by
-  default.
-- Output-level permissions exist only where they are truly needed.
-
-### Milestone 4: Safer Collaboration Layer
-
-- Rollback/redeploy previous Version becomes a first-class command.
-- Branch or review flows are added only after the auto-publish Deploy Branch
-  loop is working.
-- Project history, output status, and deploy errors become machine-readable
-  CLI workflows.
-
-### Milestone 5: Protocol Interop
-
-- Add GRASP/NIP-34 support only if Finite needs decentralized repository
-  announcements, patch/issue protocol objects, interoperable servers, or repo
-  migration across servers.
-- Do not invent GRASP-equivalent protocol layers inside Finite.
-
-## Later / optional
-
-- **nsite export**: publish kind 15128/35128 manifests + push blobs to
-  public Blossom servers as a censorship-resistance escape hatch; finite
-  stays the fast canonical host (re-uses finite-site's vendored tooling).
-- **Custom domains**: CNAME to the box + per-domain cert via Caddy
-  on-demand TLS, gated on a registry check.
-- **Billing**: BTCPay, Stripe, or agentic payments for non-VIP users. Payments
-  mint Core-owned publish grants synced to the Sites registry; operator grants
-  remain the VIP/comp lever.
-- **Rollback**: `fsite rollback NAME` — the registry already stores
-  immutable versions; this is a pointer flip plus contract questions
-  (finite-site deliberately deferred it).
+Future dynamic compute belongs in a separate product boundary, not as another
+Sites kind.

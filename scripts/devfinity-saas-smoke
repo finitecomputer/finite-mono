@@ -785,9 +785,8 @@ publish_private_requesting_user_site() {
         "[project]" \
         "slug = \"$DEVFINITY_SITES_SLUG\"" \
         "" \
-        "[outputs.site]" \
-        "kind = \"site\"" \
-        "site_name = \"$DEVFINITY_SITES_SLUG\"" \
+        "[site]" \
+        "name = \"$DEVFINITY_SITES_SLUG\"" \
         "branch = \"main\"" \
         "path = \"site\"" \
         "spa = false" >"$tree/finite.toml"
@@ -814,26 +813,24 @@ publish_private_requesting_user_site() {
 const fs = require("node:fs");
 const response = JSON.parse(fs.readFileSync(process.argv[2], "utf8"));
 const expectedSlug = process.argv[3];
-const output = response.outputs?.[0];
+const site = response.site;
 if (
   response.slug !== expectedSlug ||
   !response.requesting_user_npub?.startsWith("npub1") ||
-  !output?.requesting_user_shared ||
-  output.visibility !== "private" ||
-  typeof output.output_id !== "string" ||
-  typeof output.output_url !== "string" ||
+  !site?.requesting_user_shared ||
+  site.visibility !== "private" ||
+  typeof site.url !== "string" ||
   typeof response.git_remote_url !== "string"
 ) {
   throw new Error(`Project Init did not create the private requesting-user Share: ${JSON.stringify(response)}`);
 }
 process.stdout.write([
-  output.output_id,
-  output.output_url,
+  site.url,
   response.git_remote_url,
 ].join("\t"));
 JS
 )"
-  IFS=$'\t' read -r sites_output_id sites_url sites_git_remote <<<"$init_fields"
+  IFS=$'\t' read -r sites_url sites_git_remote <<<"$init_fields"
 
   runtime_exec \
     -e GIT_CONFIG_GLOBAL=/data/agent/gitconfig \
@@ -933,7 +930,7 @@ assert_site_unauthorized() {
 
 revoke_requesting_user_site() {
   runtime_exec -w "$sites_tree" "$container_machine_id" \
-    fsite project share "$sites_slug" "$sites_output_id" \
+    fsite project share "$sites_slug" \
       --remove-npub "$requesting_user_id" \
       --output json \
     >"$sites_revoke_json"
@@ -1119,7 +1116,7 @@ restart_process hosted-web-device
 wait_http "Hosted Web Device after restart" "$hosted_device_url/healthz" 120
 if [[ "${DEVFINITY_BRAIN_ONLY_SMOKE:-0}" == "0" ]]; then
   restart_process finitesites
-  wait_http "Finite Sites after restart" "$sites_api_url/api/v1/healthz" 120
+  wait_http "Finite Sites after restart" "$sites_api_url/api/v2/healthz" 120
 fi
 if [[ "${DEVFINITY_CHAT_SITES_ACCEPTANCE:-0}" != "1" && "${DEVFINITY_BRAIN_ONLY_SMOKE:-0}" == "0" ]]; then
   assert_site_cookie_works "$sites_cookie_jar_before"

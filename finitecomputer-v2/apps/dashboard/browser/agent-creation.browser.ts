@@ -2043,7 +2043,7 @@ async function startFakeSites() {
       const body = (await readJson(request)) as Record<string, unknown>;
       const exchange = {
         serviceAuthorization: singleHeader(request.headers.authorization),
-        outputUrl: String(body.output_url ?? ""),
+        outputUrl: String(body.output_url ?? body.site_url ?? ""),
         proofAuthorization: String(body.authorization ?? ""),
         signedBody: String(body.signed_body ?? ""),
       };

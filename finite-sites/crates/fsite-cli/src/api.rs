@@ -7,9 +7,9 @@ use finitesites_proto::dto::{
     ApiErrorBody, AuthRegisterResponse, EmailLoginRequest, EmailLoginResponse, EmailRedeemRequest,
     EmailRedeemResponse, GitAuthRequest, GitAuthResponse, ProjectGrantRequest,
     ProjectGrantResponse, ProjectInitRequest, ProjectInitResponse, ProjectListResponse,
-    ProjectOutputSharingResponse, ProjectRevokeRequest, ProjectRevokeResponse,
-    ProjectStatusResponse, SharingRequest, SitesAuthorizedKeyRegisterRequest,
-    SitesAuthorizedKeyResponse, SitesAuthorizedKeyRevokeRequest,
+    ProjectRevokeRequest, ProjectRevokeResponse, ProjectSiteSharingResponse, ProjectStatusResponse,
+    SharingRequest, SitesAuthorizedKeyRegisterRequest, SitesAuthorizedKeyResponse,
+    SitesAuthorizedKeyRevokeRequest,
 };
 use finitesites_proto::nip98;
 
@@ -20,7 +20,7 @@ pub struct Client {
     base_url: String,
 }
 
-const DEFAULT_API_URL: &str = "https://api.finite.chat";
+const DEFAULT_API_URL: &str = "https://v2.finite.chat";
 const DEFAULT_IDENTITY_AUTHORITY_URL: &str = "https://identity.finite.vip";
 const IDENTITY_AUTHORITY_ENV: &str = "FINITE_IDENTITY_AUTHORITY";
 
@@ -181,11 +181,11 @@ impl Client {
         request: &ProjectInitRequest,
     ) -> Result<ProjectInitResponse, CliError> {
         let body = serde_json::to_vec(request).expect("request serializes");
-        self.request(user, "POST", "/api/v1/projects/init", Some(&body))
+        self.request(user, "POST", "/api/v2/projects/init", Some(&body))
     }
 
     pub fn register_auth(&self, key: &KeyFile) -> Result<AuthRegisterResponse, CliError> {
-        self.request(key, "POST", "/api/v1/auth/register", Some(&[]))
+        self.request(key, "POST", "/api/v2/auth/register", Some(&[]))
     }
 
     /// Ask the daemon to email a one-time verification token. Anonymous by
@@ -199,7 +199,7 @@ impl Client {
         // Sites-client `"{}{}"` URL style so the Identity edge gate's
         // direct-call pattern does not mistake this daemon-local route for a
         // Directory call.
-        let url = format!("{}{}", self.base_url, "/api/v1/email-auth/request");
+        let url = format!("{}{}", self.base_url, "/api/v2/email-auth/request");
         let response = ureq::post(&url)
             .set("Content-Type", "application/json")
             .send_bytes(&body);
@@ -211,7 +211,7 @@ impl Client {
                 let body = response.into_json::<ApiErrorBody>().ok();
                 Err(CliError::ApiStatus {
                     method: "POST".to_string(),
-                    path: "/api/v1/email-auth/request".to_string(),
+                    path: "/api/v2/email-auth/request".to_string(),
                     status: code,
                     code: body.as_ref().map(|body| body.error.clone()),
                     message: body
@@ -236,7 +236,7 @@ impl Client {
             token: token.to_string(),
         })
         .expect("request serializes");
-        self.request(key, "POST", "/api/v1/email-auth/redeem", Some(&body))
+        self.request(key, "POST", "/api/v2/email-auth/redeem", Some(&body))
     }
 
     pub fn register_sites_authorized_key(
@@ -253,7 +253,7 @@ impl Client {
         self.request(
             key,
             "POST",
-            "/api/v1/sites-authorized-keys/register",
+            "/api/v2/sites-authorized-keys/register",
             Some(&body),
         )
     }
@@ -274,7 +274,7 @@ impl Client {
         self.request(
             key,
             "POST",
-            "/api/v1/sites-authorized-keys/revoke",
+            "/api/v2/sites-authorized-keys/revoke",
             Some(&body),
         )
     }
@@ -287,13 +287,13 @@ impl Client {
         self.request(
             key,
             "GET",
-            &format!("/api/v1/projects/{project_slug}"),
+            &format!("/api/v2/projects/{project_slug}"),
             None,
         )
     }
 
     pub fn project_list(&self, key: &KeyFile) -> Result<ProjectListResponse, CliError> {
-        self.request(key, "GET", "/api/v1/projects", None)
+        self.request(key, "GET", "/api/v2/projects", None)
     }
 
     pub fn grant_project(
@@ -308,7 +308,7 @@ impl Client {
             key,
             "POST",
             &format!(
-                "/api/v1/projects/{project_slug}/grant{}",
+                "/api/v2/projects/{project_slug}/grant{}",
                 invite_query(send_invite)
             ),
             Some(&body),
@@ -325,25 +325,24 @@ impl Client {
         self.request(
             key,
             "POST",
-            &format!("/api/v1/projects/{project_slug}/revoke"),
+            &format!("/api/v2/projects/{project_slug}/revoke"),
             Some(&body),
         )
     }
 
-    pub fn share_project_output(
+    pub fn share_project_site(
         &self,
         key: &KeyFile,
         project_slug: &str,
-        output_id: &str,
         request: &SharingRequest,
         send_invite: bool,
-    ) -> Result<ProjectOutputSharingResponse, CliError> {
+    ) -> Result<ProjectSiteSharingResponse, CliError> {
         let body = serde_json::to_vec(request).expect("request serializes");
         self.request(
             key,
             "POST",
             &format!(
-                "/api/v1/projects/{project_slug}/outputs/{output_id}/sharing{}",
+                "/api/v2/projects/{project_slug}/site/sharing{}",
                 invite_query(send_invite)
             ),
             Some(&body),
@@ -360,7 +359,7 @@ impl Client {
         self.request(
             key,
             "POST",
-            &format!("/api/v1/projects/{project_slug}/git-auth"),
+            &format!("/api/v2/projects/{project_slug}/git-auth"),
             Some(&body),
         )
     }
@@ -388,7 +387,7 @@ mod tests {
 
     #[test]
     fn production_api_is_the_default() {
-        assert_eq!(base_url_from_env_value(None), "https://api.finite.chat");
+        assert_eq!(base_url_from_env_value(None), "https://v2.finite.chat");
         assert_eq!(
             base_url_from_env_value(Some("http://127.0.0.1:8787/".to_string())),
             "http://127.0.0.1:8787"

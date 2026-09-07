@@ -7,17 +7,16 @@
 //!   fsite auth status [--output json]
 //!   fsite auth import [--file PATH] [--output json]
 //!   fsite describe workflow publish-static-site --output json
-//!   fsite describe workflow publish-stateful-app --output json
 //!   fsite auth register --output json
 //!   fsite project init --config finite.toml --dry-run --output json
 //!   fsite project grant PROJECT (--email MAILBOX | --nip05 NAME | --npub NPUB) --output json
-//!   fsite project share PROJECT OUTPUT --public --yes-public --output json
+//!   fsite project share PROJECT --public --yes-public --output json
 //!   fsite auth git PROJECT [--email MAILBOX | --nip05 NAME | --npub NPUB] [--store] [--output json]
 //!   fsite project status PROJECT --output json
 //!   fsite project list --output json
 //!   fsite view URL_OR_NAME --output json
 //!
-//! Server address comes from FINITE_SITES_API (default https://api.finite.chat).
+//! Server address comes from FINITE_SITES_API (default https://v2.finite.chat).
 
 mod api;
 mod identity_target;
@@ -140,19 +139,18 @@ fn usage() -> String {
      cloneable by collaborators but not served as ordinary web assets.\n\n\
      Agent quick start for a static site:\n  \
      fsite describe workflow publish-static-site --output json\n  \
-     fsite describe workflow publish-stateful-app --output json\n  \
      fsite auth register --output json\n  \
      fsite project init --config finite.toml --dry-run --output json\n  \
      fsite project init --config finite.toml --output json\n  \
      fsite auth git PROJECT --store --output json\n  \
-     git clone https://git.finite.chat/PROJECT.git\n  \
+     git clone RETURNED_GIT_REMOTE_URL\n  \
      # commit finite.toml plus deploy bytes, then push the Deploy Branch\n\n\
      Commands:\n  fsite whoami\n  \
      fsite describe [workflow NAME] [--output json]\n  \
      fsite project init --config finite.toml [--requesting-user-npub NPUB] [--dry-run] [--output json]\n  \
      fsite project grant PROJECT (--email MAILBOX | --nip05 NAME | --npub NPUB) [--role editor] [--send-invite] [--output json]\n  \
      fsite project revoke PROJECT (--email MAILBOX | --nip05 NAME | --npub NPUB) [--output json]\n  \
-     fsite project share PROJECT OUTPUT [--public --yes-public|--shared|--private] [--add-email MAILBOX]... [--remove-email MAILBOX]... [--add-nip05 NAME]... [--remove-nip05 NAME]... [--add-npub NPUB]... [--remove-npub NPUB]... [--send-invite] [--output json]\n  \
+     fsite project share PROJECT [--public --yes-public|--shared|--private] [--add-email MAILBOX]... [--remove-email MAILBOX]... [--add-nip05 NAME]... [--remove-nip05 NAME]... [--add-npub NPUB]... [--remove-npub NPUB]... [--send-invite] [--output json]\n  \
      fsite project status PROJECT [--output json]\n  \
      fsite project list [--output json]\n  \
      fsite auth status [--output json]\n  \
@@ -170,11 +168,11 @@ fn removed_site_first_command_help(command: &str) -> String {
     match command {
         "share" => {
             "`fsite share` is not part of the current Project Repository model.\n\n\
-             Use Project Output sharing instead:\n  \
+             Use Project Site sharing instead:\n  \
              fsite project status PROJECT --output json\n  \
-             fsite project share PROJECT OUTPUT --shared --add-email VIEWER_EMAIL --send-invite --output json\n  \
-             fsite project share PROJECT OUTPUT --public --yes-public --output json\n  \
-             fsite project share PROJECT OUTPUT --private --output json"
+             fsite project share PROJECT --shared --add-email VIEWER_EMAIL --send-invite --output json\n  \
+             fsite project share PROJECT --public --yes-public --output json\n  \
+             fsite project share PROJECT --private --output json"
                 .to_string()
         }
         "status" => {
@@ -199,12 +197,11 @@ fn removed_site_first_command_help(command: &str) -> String {
             "`fsite {command}` is not part of the current Project Repository model.\n\n\
              Use the explicit primitives instead:\n  \
              fsite describe workflow publish-static-site --output json\n  \
-             fsite describe workflow publish-stateful-app --output json\n  \
              fsite project init --config finite.toml --dry-run --output json\n  \
              fsite project init --config finite.toml --output json\n  \
              fsite project grant PROJECT --email EDITOR_EMAIL --send-invite --output json\n  \
              fsite auth git PROJECT --store --output json\n  \
-             git clone https://git.finite.chat/PROJECT.git\n  \
+             git clone RETURNED_GIT_REMOTE_URL\n  \
              # edit, commit, and push the configured Deploy Branch"
         ),
     }
@@ -223,15 +220,15 @@ fn auth_import_help() -> &'static str {
 }
 
 fn describe_help() -> &'static str {
-    "usage: fsite describe [workflow NAME] [--output json]\n\nMachine-readable command and workflow discovery. Workflows: register-and-publish, project-config, publish-static-site, publish-stateful-app, publish-document, edit-shared-project, share-output, grant-collaborator, revoke-collaborator."
+    "usage: fsite describe [workflow NAME] [--output json]\n\nMachine-readable command and workflow discovery. Workflows: register-and-publish, project-config, publish-static-site, edit-shared-project, share-site, grant-collaborator, revoke-collaborator."
 }
 
 fn project_help() -> &'static str {
-    "usage:\n  fsite project init --config finite.toml [--requesting-user-npub NPUB] [--dry-run] [--output json]\n  fsite project grant PROJECT (--email MAILBOX | --nip05 NAME | --npub NPUB) [--role editor] [--send-invite] [--output json]\n  fsite project revoke PROJECT (--email MAILBOX | --nip05 NAME | --npub NPUB) [--output json]\n  fsite project share PROJECT OUTPUT [--public --yes-public|--shared|--private] [--add-email MAILBOX]... [--remove-email MAILBOX]... [--add-nip05 NAME]... [--remove-nip05 NAME]... [--add-npub NPUB]... [--remove-npub NPUB]... [--send-invite] [--output json]\n  fsite project status PROJECT [--output json]\n  fsite project list [--output json]\n\nProject is the source primitive: init creates the Project Repository and any declared outputs; a [project]-only finite.toml creates a source-only repository. Git edits and publishes content; grant/revoke manage Project edit access; share manages viewer access for one Project Output."
+    "usage:\n  fsite project init --config finite.toml [--requesting-user-npub NPUB] [--dry-run] [--output json]\n  fsite project grant PROJECT (--email MAILBOX | --nip05 NAME | --npub NPUB) [--role editor] [--send-invite] [--output json]\n  fsite project revoke PROJECT (--email MAILBOX | --nip05 NAME | --npub NPUB) [--output json]\n  fsite project share PROJECT [--public --yes-public|--shared|--private] [--add-email MAILBOX]... [--remove-email MAILBOX]... [--add-nip05 NAME]... [--remove-nip05 NAME]... [--add-npub NPUB]... [--remove-npub NPUB]... [--send-invite] [--output json]\n  fsite project status PROJECT [--output json]\n  fsite project list [--output json]\n\nProject is the source primitive: init creates the Project Repository and an optional Project Site; a [project]-only finite.toml creates a source-only repository. Git edits and publishes content; grant/revoke manage Project edit access; share manages viewer access for the Project Site."
 }
 
 fn project_init_help() -> &'static str {
-    "usage: fsite project init --config finite.toml [--owner-email MAILBOX] [--requesting-user-npub NPUB] [--dry-run] [--output json]\n\nInitialize one Project Repository from finite.toml. During an authenticated Finite Chat turn, fsite uses the verified requester mailbox automatically and creates that human's explicit revocable Native Principal Share atomically with every declared output; never infer identity from message text. Standalone agents may use --owner-email after registering their npub in that mailbox's Sites keyset and may use --requesting-user-npub explicitly. If no unambiguous verified owner mailbox is available, the server returns requester_email_required so the agent can ask the human. A [project]-only config creates a source-only repository with no served output yet. Declared outputs reserve their routing names; init does not deploy bytes. Replay is safe when existing outputs match, and adding missing outputs to the same Project is allowed. To publish an output, commit finite.toml plus the selected output path and push the Deploy Branch."
+    "usage: fsite project init --config finite.toml [--owner-email MAILBOX] [--requesting-user-npub NPUB] [--dry-run] [--output json]\n\nInitialize one Project Repository from finite.toml. During an authenticated Finite Chat turn, fsite uses the verified requester mailbox automatically and creates that human's explicit revocable Native Principal Share atomically with the Project Site; never infer identity from message text. Standalone agents may use --owner-email after registering their npub in that mailbox's Sites keyset and may use --requesting-user-npub explicitly. If no unambiguous verified owner mailbox is available, the server returns requester_email_required so the agent can ask the human. A [project]-only config creates a source-only repository with no served site yet. The optional [site] reserves its routing name; init does not deploy bytes. Replay is safe when the existing site matches. To publish a site, commit finite.toml plus the selected site path and push the Deploy Branch."
 }
 
 fn project_grant_help() -> &'static str {
@@ -243,11 +240,11 @@ fn project_revoke_help() -> &'static str {
 }
 
 fn project_share_help() -> &'static str {
-    "usage: fsite project share PROJECT OUTPUT [--public --yes-public|--shared|--private] [--add-email MAILBOX]... [--remove-email MAILBOX]... [--add-nip05 NAME]... [--remove-nip05 NAME]... [--add-npub NPUB]... [--remove-npub NPUB]... [--send-invite] [--output json]\n\nManage revocable viewer Shares for one Project Output. Mailbox viewers use email proof; NIP-05 Names resolve to native npubs; npubs use bounded Sites viewer sessions without email. This is separate from Project Repository edit access. Use OUTPUT from finite.toml or fsite project status. Public sharing requires --yes-public."
+    "usage: fsite project share PROJECT [--public --yes-public|--shared|--private] [--add-email MAILBOX]... [--remove-email MAILBOX]... [--add-nip05 NAME]... [--remove-nip05 NAME]... [--add-npub NPUB]... [--remove-npub NPUB]... [--send-invite] [--output json]\n\nManage revocable viewer Shares for the Project Site. Mailbox viewers use email proof; NIP-05 Names resolve to native npubs; npubs use bounded Sites viewer sessions without email. This is separate from Project Repository edit access. Public sharing requires --yes-public."
 }
 
 fn project_status_help() -> &'static str {
-    "usage: fsite project status PROJECT [--output json]\n\nShow Project Repository control-plane state: git remote, actor role, repository visibility, declared outputs, output URLs, branch/path, output visibility, and active version."
+    "usage: fsite project status PROJECT [--output json]\n\nShow Project Repository control-plane state: git remote, actor role, repository visibility, optional site URL, branch/path, site visibility, and active version."
 }
 
 fn project_list_help() -> &'static str {
@@ -263,7 +260,7 @@ fn auth_sites_key_help() -> &'static str {
 }
 
 fn auth_register_help() -> &'static str {
-    "usage: fsite auth register [--output json]\n\nSelf-register the local User Key as a Publishing Principal. This creates or replays a self-registered publish grant with the default output limit."
+    "usage: fsite auth register [--output json]\n\nSelf-register the local User Key as a Publishing Principal. This creates or replays a self-registered publish grant with the default site limit."
 }
 
 fn auth_link_email_help() -> &'static str {
@@ -283,7 +280,7 @@ fn auth_redeem_help() -> &'static str {
 }
 
 fn view_help() -> &'static str {
-    "usage: fsite view URL_OR_NAME [--output json]\n\nInspect a served Project Output URL or routing name. This is read-only; project editing happens through git after fsite auth git."
+    "usage: fsite view URL_OR_NAME [--output json]\n\nInspect a served Project Site URL or routing name. This is read-only; project editing happens through git after fsite auth git."
 }
 
 fn describe(args: &[String]) -> Result<(), CliError> {
@@ -347,7 +344,7 @@ fn describe_commands() -> serde_json::Value {
         "commands": [
             {
                 "name": "project init",
-                "summary": "Initialize a Project Repository and any finite.toml-described outputs.",
+                "summary": "Initialize a Project Repository and optional finite.toml Project Site.",
                 "usage": "fsite project init --config finite.toml [--requesting-user-npub NPUB] [--dry-run] [--output json]"
             },
             {
@@ -362,12 +359,12 @@ fn describe_commands() -> serde_json::Value {
             },
             {
                 "name": "project share",
-                "summary": "Manage viewer access for one Project Output.",
-                "usage": "fsite project share PROJECT OUTPUT [--public --yes-public|--shared|--private] [--add-email MAILBOX]... [--remove-email MAILBOX]... [--add-nip05 NAME]... [--remove-nip05 NAME]... [--add-npub NPUB]... [--remove-npub NPUB]... [--send-invite] [--output json]"
+                "summary": "Manage viewer access for the Project Site.",
+                "usage": "fsite project share PROJECT [--public --yes-public|--shared|--private] [--add-email MAILBOX]... [--remove-email MAILBOX]... [--add-nip05 NAME]... [--remove-nip05 NAME]... [--add-npub NPUB]... [--remove-npub NPUB]... [--send-invite] [--output json]"
             },
             {
                 "name": "project status",
-                "summary": "Show Project Repository, output, and deploy state.",
+                "summary": "Show Project Repository, site, and deploy state.",
                 "usage": "fsite project status PROJECT [--output json]"
             },
             {
@@ -412,7 +409,7 @@ fn describe_commands() -> serde_json::Value {
             },
             {
                 "name": "view",
-                "summary": "Inspect a served Project Output URL or routing name without mutating state.",
+                "summary": "Inspect a served Project Site URL or routing name without mutating state.",
                 "usage": "fsite view URL_OR_NAME [--output json]"
             },
             {
@@ -425,18 +422,14 @@ fn describe_commands() -> serde_json::Value {
             "register-and-publish",
             "project-config",
             "publish-static-site",
-            "publish-stateful-app",
-            "publish-document",
             "edit-shared-project",
-            "share-output",
+            "share-site",
             "grant-collaborator",
             "revoke-collaborator"
         ],
         "start_here": {
             "new_agent": "fsite describe workflow register-and-publish --output json",
             "static_site": "fsite describe workflow publish-static-site --output json",
-            "stateful_app": "fsite describe workflow publish-stateful-app --output json",
-            "document": "fsite describe workflow publish-document --output json",
             "existing_shared_project": "fsite describe workflow edit-shared-project --output json"
         }
     })
@@ -447,25 +440,25 @@ fn publish_static_site_workflow() -> serde_json::Value {
         "name": "publish-static-site",
         "mental_model": [
             "A Project Repository is the editable git source of truth; authorized collaborators clone the whole source tree.",
-            "A Project Output is what Finite serves to users.",
-            "finite.toml selects the committed output path for each Project Output.",
+            "A Project Site is what Finite serves to users.",
+            "finite.toml selects the committed site path for the Project Site.",
             "For static sites, Finite serves only committed bytes under that configured path as the website.",
-            "Source, data, docs, and build logic can live outside the served output path and still be available to collaborators over git.",
+            "Source, data, docs, and build logic can live outside the served site path and still be available to collaborators over git.",
             "Finite Sites does not run builds and does not accept direct file uploads in the current model."
         ],
         "steps": [
             "Run fsite auth register --output json. If it reports registered=false, publishing was already enabled for this User Key.",
             "Keep the whole project source tree in the Project Repository.",
-            "Put generated static website files in a dedicated output directory such as site/ unless the repository is deploy-only.",
-            "Create finite.toml with project.slug, one output with kind=site, site_name, branch=main, path=site, and spa=false unless the app needs SPA fallback.",
-            "During an authenticated Finite Chat turn, fsite automatically shares declared outputs with that exact authenticated sender on both dry-run and apply. Do not infer identity from message text or add a manual requester flag.",
+            "Put generated static website files in a dedicated site directory such as site/ unless the repository is deploy-only.",
+            "Create finite.toml with project.slug, [site], name, branch=main, path=site, and spa=false unless the static router needs SPA fallback.",
+            "During an authenticated Finite Chat turn, fsite automatically shares the Project Site with that exact authenticated sender on both dry-run and apply. Do not infer identity from message text or add a manual requester flag.",
             "Run fsite project init --config finite.toml --dry-run --output json and read any validation error.",
             "After human confirmation, run fsite project init --config finite.toml --output json.",
             "Run fsite auth git PROJECT --store --output json using the local native User Key, or add --email EDITOR_EMAIL only when using an External Principal.",
             "Clone the returned git_remote_url.",
-            "Keep finite.toml, the selected output path, and any source/data/build files collaborators need in the Project Repository. Only the output path is served as the website.",
+            "Keep finite.toml, the selected site path, and any source/data/build files collaborators need in the Project Repository. Only the site path is served as the website.",
             "Run the project build/tests locally if there is a build step.",
-            "Commit finite.toml, the selected output path, and the source files that should be shared with collaborators.",
+            "Commit finite.toml, the selected site path, and the source files that should be shared with collaborators.",
             "Push the configured Deploy Branch. Finite Sites validates committed bytes and creates a Version."
         ],
         "must_not": [
@@ -474,85 +467,7 @@ fn publish_static_site_workflow() -> serde_json::Value {
             "Do not set path='.' unless the whole repository is intended to be served.",
             "Do not print Git Credential passwords; prefer --store."
         ],
-        "finite_toml_example": "[project]\nslug = \"my-project\"\n\n[outputs.site]\nkind = \"site\"\nsite_name = \"my-project\"\nbranch = \"main\"\npath = \"site\"\nspa = false\n"
-    })
-}
-
-fn publish_stateful_app_workflow() -> serde_json::Value {
-    serde_json::json!({
-        "name": "publish-stateful-app",
-        "mental_model": [
-            "A stateful app is still a Project Output backed by a Project Repository.",
-            "The Project Repository is the editable git source of truth; authorized collaborators clone the whole source tree.",
-            "finite.toml declares kind=app, the served site_name, the Deploy Branch, the app directory, and the explicit start command.",
-            "Finite Sites commits and versions the app directory as one runtime bundle; it does not run builds or infer generated output.",
-            "Finite Sites sets PORT and DATA_DIR when the process starts. The app must listen on 0.0.0.0:$PORT.",
-            "DATA_DIR is the only live mutable state location. It survives deploys, restarts, and wake/sleep. Deploys must not overwrite existing DATA_DIR contents.",
-            "Commit source, migrations, seed data, and explicit runtime payload to git. Write user/live state under DATA_DIR at runtime."
-        ],
-        "steps": [
-            "Run fsite auth register --output json. If it reports registered=false, publishing was already enabled for this User Key.",
-            "Put the app runtime files in a dedicated directory such as app/. The directory must contain everything the start command needs, or code that explicitly initializes dependencies under DATA_DIR at runtime.",
-            "Create finite.toml with project.slug, one output with kind=app, site_name, branch=main, path=app, and start=\"bun server.ts\" or another supported command beginning with node, bun, or uv.",
-            "During an authenticated Finite Chat turn, fsite automatically shares declared outputs with that exact authenticated sender on both dry-run and apply. Do not infer identity from message text or add a manual requester flag.",
-            "Run fsite project init --config finite.toml --dry-run --output json and read any validation error.",
-            "After human confirmation, run fsite project init --config finite.toml --output json.",
-            "Run fsite auth git PROJECT --store --output json using the local native User Key, or add --email EDITOR_EMAIL only when using an External Principal.",
-            "Clone the returned git_remote_url.",
-            "Commit finite.toml, app source, migrations, seed data, and any explicit runtime payload.",
-            "Push the configured Deploy Branch. Finite Sites validates the committed app directory, records an immutable Version, and deploys that bundle."
-        ],
-        "runtime_contract": {
-            "start": "Required for kind=app. One printable ASCII command line beginning with node, bun, or uv.",
-            "port": "Finite sets PORT. The app must listen on 0.0.0.0:$PORT.",
-            "data_dir": "Finite sets DATA_DIR. Live mutable state must be stored under DATA_DIR and must survive deploys/restarts/wake-sleep.",
-            "builds": "Finite Sites does not run builds. Build before commit or commit explicit runtime payload."
-        },
-        "must_not": [
-            "Do not look for a direct app upload command.",
-            "Do not rely on Finite Sites to run npm install, bun install, cargo build, or any other build step.",
-            "Do not write live mutable state into the committed app directory; that directory is versioned deploy input.",
-            "Do not commit .env, .env.*, .finite/, private keys, or build caches. Commit dependency directories only when they are intentionally required runtime payload for this app output.",
-            "Do not print Git Credential passwords; prefer --store."
-        ],
-        "finite_toml_example": "[project]\nslug = \"my-app\"\n\n[outputs.web]\nkind = \"app\"\nsite_name = \"my-app\"\nbranch = \"main\"\npath = \"app\"\nstart = \"bun server.ts\"\n"
-    })
-}
-
-fn publish_document_workflow() -> serde_json::Value {
-    serde_json::json!({
-        "name": "publish-document",
-        "mental_model": [
-            "A Document Output is rendered Markdown served from the Project Repository.",
-            "The Project Repository remains the collaboration source; authorized editors clone, edit Markdown, commit, and push.",
-            "The document is read-only in the browser for now. Future annotation/editing features must still write back through the Project Repository model.",
-            "Finite renders Markdown server-side and does not store generated HTML as the source."
-        ],
-        "steps": [
-            "Run fsite auth register --output json.",
-            "Create Markdown in one file or a directory such as docs/.",
-            "Create finite.toml with project.slug and one output with kind=document, document_name, branch=main, path=docs, and optional entry=index.md.",
-            "During an authenticated Finite Chat turn, fsite automatically shares declared outputs with that exact authenticated sender on both dry-run and apply. Do not infer identity from message text or add a manual requester flag.",
-            "Run fsite project init --config finite.toml --dry-run --output json and read any validation error.",
-            "Run fsite project init --config finite.toml --output json.",
-            "Run fsite auth git PROJECT --store --output json.",
-            "Clone the returned git_remote_url.",
-            "Commit finite.toml and the Markdown source files.",
-            "Push the configured Deploy Branch. Finite Sites stores the authored Markdown snapshot and renders it at the Document URL."
-        ],
-        "routes": [
-            "Document URLs use the document base domain, for example https://my-docs.docs.finite.chat/ in production.",
-            "The document root renders the configured entry, defaulting to index.md.",
-            "Markdown files get clean HTML routes, for example docs/guide.md becomes /guide.",
-            "Raw Markdown companion URLs append .md, for example /guide.md.",
-            "/llms.txt gives edit instructions and /llms-full.txt gives a bounded full Markdown snapshot after viewer auth."
-        ],
-        "must_not": [
-            "Do not commit generated HTML for a Document Output.",
-            "Do not use site_name for document outputs; use document_name.",
-            "Do not expect browser editing yet; edit through git."
-        ],
-        "finite_toml_example": "[project]\nslug = \"my-docs\"\n\n[outputs.doc]\nkind = \"document\"\ndocument_name = \"my-docs\"\nbranch = \"main\"\npath = \"docs\"\nentry = \"index.md\"\n"
+        "finite_toml_example": "[project]\nslug = \"my-project\"\n\n[site]\nname = \"my-project\"\nbranch = \"main\"\npath = \"site\"\nspa = false\n"
     })
 }
 
@@ -568,37 +483,29 @@ fn describe_workflow(name: &str) -> Result<serde_json::Value, CliError> {
             "steps": [
                 "Run fsite auth register --output json.",
                 "Optional: run fsite auth link-email EMAIL --output json, then fsite auth redeem EMAIL TOKEN_FROM_EMAIL --output json to pair that email with this npub. If you already have a token from an invite email, run fsite auth redeem EMAIL TOKEN_FROM_EMAIL --link-native --output json.",
-                "Create finite.toml. A source-only Project Repository may contain only [project]; a served website needs an [outputs.<id>] entry.",
-                "During an authenticated Finite Chat turn, fsite automatically shares declared outputs with that exact authenticated sender on both dry-run and apply. Do not infer identity from message text or add a manual requester flag.",
+                "Create finite.toml. A source-only Project Repository may contain only [project]; a served website needs one [site] entry.",
+                "During an authenticated Finite Chat turn, fsite automatically shares the Project Site with that exact authenticated sender on both dry-run and apply. Do not infer identity from message text or add a manual requester flag.",
                 "Run fsite project init --config finite.toml --dry-run --output json.",
                 "Run fsite project init --config finite.toml --output json.",
                 "Run fsite auth git PROJECT --store --output json.",
-                "Clone the returned Git Remote, commit source plus deploy bytes when there is an output, and push the Deploy Branch."
+                "Clone the returned Git Remote, commit source plus deploy bytes when there is a site, and push the Deploy Branch."
             ]
         }),
         "project-config" => serde_json::json!({
             "name": "project-config",
             "file": "finite.toml",
-            "source_only": "A config with only [project] creates a source-only Project Repository. Add outputs later by replaying project init with the same project.slug and new output entries.",
-            "project_visibility": "Project Repository clone/fetch visibility is private by default. Selected Finite-owned baseline repositories may be set public-read by an operator; this is separate from finite.toml and output visibility.",
+            "source_only": "A config with only [project] creates a source-only Project Repository. Add a site later by replaying project init with the same project.slug and one [site] entry.",
+            "project_visibility": "Project Repository clone/fetch visibility is private by default. Selected Finite-owned baseline repositories may be set public-read by an operator; this is separate from finite.toml and site visibility.",
             "schema": {
                 "project.slug": "lowercase DNS-label-shaped Project Slug",
-                "outputs.<id>.kind": "site, document, or app",
-                "outputs.<id>.site_name": "Finite Site name for kind=site or kind=app",
-                "outputs.<id>.document_name": "Document name for kind=document, served under the document domain",
-                "outputs.<id>.branch": "Deploy Branch, usually main",
-                "outputs.<id>.path": "relative directory containing committed deploy bytes or app runtime files, or one Markdown file for a single-file Document Output",
-                "outputs.<id>.entry": "optional Markdown entry file for kind=document",
-                "outputs.<id>.spa": "site-only boolean; true serves /index.html for unknown static paths",
-                "outputs.<id>.start": "required for kind=app; one printable ASCII command line beginning with node, bun, or uv"
+                "site.name": "optional Finite Site name; defaults to project.slug",
+                "site.branch": "Deploy Branch, usually main",
+                "site.path": "relative directory containing committed static deploy bytes",
+                "site.spa": "boolean; true serves /index.html for unknown static paths"
             },
-            "site_example": "[project]\nslug = \"finitechat-native\"\n\n[outputs.mockup]\nkind = \"site\"\nsite_name = \"finitechat-native-mockup\"\nbranch = \"main\"\npath = \".\"\nspa = false\n",
-            "document_example": "[project]\nslug = \"hermes-notes\"\n\n[outputs.doc]\nkind = \"document\"\ndocument_name = \"hermes\"\nbranch = \"main\"\npath = \"docs\"\nentry = \"index.md\"\n",
-            "app_example": "[project]\nslug = \"tiny-crm\"\n\n[outputs.web]\nkind = \"app\"\nsite_name = \"tiny-crm\"\nbranch = \"main\"\npath = \"app\"\nstart = \"bun server.ts\"\n"
+            "site_example": "[project]\nslug = \"finitechat-native\"\n\n[site]\nname = \"finitechat-native-mockup\"\nbranch = \"main\"\npath = \".\"\nspa = false\n"
         }),
         "publish-static-site" => publish_static_site_workflow(),
-        "publish-stateful-app" => publish_stateful_app_workflow(),
-        "publish-document" => publish_document_workflow(),
         "edit-shared-project" => serde_json::json!({
             "name": "edit-shared-project",
             "steps": [
@@ -620,19 +527,19 @@ fn describe_workflow(name: &str) -> Result<serde_json::Value, CliError> {
                 "Email-only fallback: the collaborator runs fsite auth redeem COLLABORATOR_EMAIL TOKEN_FROM_EMAIL --output json, then fsite auth git PROJECT --email COLLABORATOR_EMAIL --store --output json."
             ]
         }),
-        "share-output" => serde_json::json!({
-            "name": "share-output",
+        "share-site" => serde_json::json!({
+            "name": "share-site",
             "mental_model": [
-                "Project Repository edit access and Project Output viewer access are separate.",
+                "Project Repository edit access and Project Site viewer access are separate.",
                 "Use the Project owner identity to change viewer access.",
-                "OUTPUT is the output id from finite.toml or fsite project status, not the site DNS name."
+                "A project has at most one served site."
             ],
             "steps": [
-                "Run fsite project status PROJECT --output json and choose the output_id to share.",
-                "For public viewer access, run fsite project share PROJECT OUTPUT --public --yes-public --output json.",
-                "For email-gated viewer access, run fsite project share PROJECT OUTPUT --shared --add-email VIEWER_EMAIL --send-invite --output json.",
-                "For native Finite viewer access without email, run fsite project share PROJECT OUTPUT --add-npub VIEWER_NPUB --output json. Remove it with --remove-npub.",
-                "For private viewer access, run fsite project share PROJECT OUTPUT --private --output json."
+                "Run fsite project status PROJECT --output json and confirm the project has a site.",
+                "For public viewer access, run fsite project share PROJECT --public --yes-public --output json.",
+                "For email-gated viewer access, run fsite project share PROJECT --shared --add-email VIEWER_EMAIL --send-invite --output json.",
+                "For native Finite viewer access without email, run fsite project share PROJECT --add-npub VIEWER_NPUB --output json. Remove it with --remove-npub.",
+                "For private viewer access, run fsite project share PROJECT --private --output json."
             ]
         }),
         "revoke-collaborator" => serde_json::json!({
@@ -645,7 +552,7 @@ fn describe_workflow(name: &str) -> Result<serde_json::Value, CliError> {
         }),
         other => {
             return Err(CliError::Usage(format!(
-                "unknown workflow `{other}` (register-and-publish|project-config|publish-static-site|publish-stateful-app|publish-document|edit-shared-project|share-output|grant-collaborator|revoke-collaborator)"
+                "unknown workflow `{other}` (register-and-publish|project-config|publish-static-site|edit-shared-project|share-site|grant-collaborator|revoke-collaborator)"
             )));
         }
     };
@@ -789,18 +696,16 @@ fn project_init(args: &[String]) -> Result<(), CliError> {
         if let Some(npub) = &response.requesting_user_npub {
             println!("requesting user: {npub} (shared)");
         }
-        if response.outputs.is_empty() {
-            println!("outputs: none (source-only Project Repository)");
-        }
-        for output in &response.outputs {
+        if let Some(site) = &response.site {
             println!(
-                "output:  {} {} -> {} ({}:{})",
-                output.output_id,
-                output.kind,
-                display_output_url(output),
-                output.branch,
-                output.path
+                "site:    {} -> {} ({}:{})",
+                site.name,
+                display_site_url(site),
+                site.branch,
+                site.path
             );
+        } else {
+            println!("site:    none (source-only Project Repository)");
         }
         if response.dry_run {
             println!("dry-run: no server state changed");
@@ -809,9 +714,9 @@ fn project_init(args: &[String]) -> Result<(), CliError> {
                 "next:    fsite auth git {} --store --output json",
                 response.slug
             );
-            if response.outputs.is_empty() {
+            if response.site.is_none() {
                 println!(
-                    "source:  commit {} and project source, then push git normally; no output will serve until finite.toml declares one",
+                    "source:  commit {} and project source, then push git normally; no site will serve until finite.toml declares one",
                     config_path.display()
                 );
             } else {
@@ -1158,7 +1063,6 @@ fn project_revoke(args: &[String]) -> Result<(), CliError> {
 #[derive(Debug, PartialEq, Eq)]
 struct ProjectShareOptions {
     project: String,
-    output_id: String,
     visibility: Option<String>,
     confirm_public: bool,
     add_emails: Vec<MailboxAddress>,
@@ -1210,10 +1114,9 @@ fn project_share(args: &[String]) -> Result<(), CliError> {
     }
     let identity = keys::load_or_generate_user_key()?;
     let client = api::Client::from_env();
-    let response = client.share_project_output(
+    let response = client.share_project_site(
         &identity,
         &options.project,
-        &options.output_id,
         &SharingRequest {
             visibility: options.visibility,
             confirm_public: options.confirm_public,
@@ -1231,7 +1134,8 @@ fn project_share(args: &[String]) -> Result<(), CliError> {
         );
     } else {
         println!("project:    {}", response.project_slug);
-        println!("output:     {}", response.output_id);
+        println!("site:       {}", response.site_name);
+        println!("url:        {}", response.site_url);
         println!("visibility: {}", response.visibility);
         if response.shared_emails.is_empty() && response.shared_npubs.is_empty() {
             println!("shared with: none");
@@ -1346,7 +1250,7 @@ fn parse_project_share_args(args: &[String]) -> Result<ProjectShareOptions, CliE
             }
         }
     }
-    if positionals.len() != 2 {
+    if positionals.len() != 1 {
         return Err(CliError::Usage(project_share_help().to_string()));
     }
     if confirm_public && visibility.as_deref() != Some("public") {
@@ -1373,7 +1277,6 @@ fn parse_project_share_args(args: &[String]) -> Result<ProjectShareOptions, CliE
     }
     Ok(ProjectShareOptions {
         project: positionals.remove(0),
-        output_id: positionals.remove(0),
         visibility,
         confirm_public,
         add_emails,
@@ -1415,7 +1318,7 @@ fn project_status(args: &[String]) -> Result<(), CliError> {
         println!("role:    {}", response.role);
         println!("source:  {}", response.project_visibility);
         println!("git:     {}", response.git_remote_url);
-        print_project_outputs(&response.outputs);
+        print_project_site(response.site.as_ref());
         if !response.collaborators.is_empty() {
             println!("collaborators:");
             for collaborator in &response.collaborators {
@@ -1548,30 +1451,24 @@ fn parse_email_and_output_json(args: &[String], help: &str) -> Result<(String, b
     Ok((email, output_json))
 }
 
-fn print_project_outputs(outputs: &[finitesites_proto::dto::ProjectOutputSummary]) {
-    if outputs.is_empty() {
-        println!("outputs: none (source-only Project Repository)");
+fn print_project_site(site: Option<&finitesites_proto::dto::ProjectSiteSummary>) {
+    let Some(site) = site else {
+        println!("site:    none (source-only Project Repository)");
         return;
-    }
-    for output in outputs {
-        let version = output
-            .active_version
-            .map(|value| format!("v{value}"))
-            .unwrap_or_else(|| "unpublished".to_string());
-        println!(
-            "output:  {} {} {} {} {}:{}",
-            output.output_id, output.kind, output.visibility, version, output.branch, output.path
-        );
-        println!("url:     {}", display_output_url(output));
-    }
+    };
+    let version = site
+        .active_version
+        .map(|value| format!("v{value}"))
+        .unwrap_or_else(|| "unpublished".to_string());
+    println!(
+        "site:    {} {} {} {}:{}",
+        site.name, site.visibility, version, site.branch, site.path
+    );
+    println!("url:     {}", display_site_url(site));
 }
 
-fn display_output_url(output: &finitesites_proto::dto::ProjectOutputSummary) -> &str {
-    if output.output_url.is_empty() {
-        &output.site_url
-    } else {
-        &output.output_url
-    }
+fn display_site_url(site: &finitesites_proto::dto::ProjectSiteSummary) -> &str {
+    if site.url.is_empty() { "" } else { &site.url }
 }
 
 fn auth_command(args: &[String]) -> Result<(), CliError> {
@@ -1708,7 +1605,7 @@ fn auth_register(args: &[String]) -> Result<(), CliError> {
         println!("principal:  {}", response.principal_id);
         println!("grant:      {}", response.grant_source);
         println!("registered: {}", response.registered);
-        println!("limit:      {} outputs", response.output_limit);
+        println!("limit:      {} sites", response.site_limit);
     }
     Ok(())
 }
@@ -2550,7 +2447,7 @@ fn view(args: &[String]) -> Result<(), CliError> {
             Some(identity) => {
                 let key = keys::user_key_for(&identity)?;
                 match client.project_status(&key, &target) {
-                    Ok(project) => Some(served_output_url(&project, &target)?),
+                    Ok(project) => Some(served_site_url(&project)?),
                     Err(_) if client.uses_default_production() => None,
                     Err(error) => return Err(error),
                 }
@@ -2585,29 +2482,19 @@ fn view(args: &[String]) -> Result<(), CliError> {
     Ok(())
 }
 
-fn served_output_url(
+fn served_site_url(
     project: &finitesites_proto::dto::ProjectStatusResponse,
-    target: &str,
 ) -> Result<String, CliError> {
-    let output = project
-        .outputs
-        .iter()
-        .find(|output| {
-            output.output_id == target
-                || output.output_name == target
-                || output.site_name == target
-        })
-        .or_else(|| (project.outputs.len() == 1).then(|| &project.outputs[0]))
-        .ok_or_else(|| {
-            CliError::Api(format!(
-                "Project `{}` does not have one unambiguous served output; pass the output URL from `fsite project status {}`",
-                project.slug, project.slug
-            ))
-        })?;
-    let url = display_output_url(output).trim();
+    let site = project.site.as_ref().ok_or_else(|| {
+        CliError::Api(format!(
+            "Project `{}` does not have a served site; pass a site URL from another project or add [site] to finite.toml",
+            project.slug
+        ))
+    })?;
+    let url = display_site_url(site).trim();
     if url.is_empty() {
         return Err(CliError::Api(format!(
-            "Project `{}` returned an empty served output URL",
+            "Project `{}` returned an empty served site URL",
             project.slug
         )));
     }
@@ -2626,7 +2513,7 @@ fn view_target_url(target: &str, discovered_url: Option<&str>) -> String {
         }
         return format!("{value}/");
     }
-    format!("https://{target}.finite.chat/")
+    format!("https://{target}.v2.finite.chat/")
 }
 
 fn append_url_path(base: &str, path: &str) -> String {
@@ -2640,7 +2527,7 @@ mod tests {
     fn project_init_repository_failure_has_one_bounded_repair_replay() {
         let error = super::CliError::ApiStatus {
             method: "POST".to_string(),
-            path: "/api/v1/projects/init".to_string(),
+            path: "/api/v2/projects/init".to_string(),
             status: 503,
             code: Some(finitesites_proto::dto::ERROR_GIT_REPOSITORY_SETUP_FAILED.to_string()),
             message: "Project registry state was saved".to_string(),
@@ -2666,7 +2553,7 @@ mod tests {
     fn project_init_preflight_failure_does_not_claim_partial_state() {
         let error = super::CliError::ApiStatus {
             method: "POST".to_string(),
-            path: "/api/v1/projects/init".to_string(),
+            path: "/api/v2/projects/init".to_string(),
             status: 503,
             code: Some(finitesites_proto::dto::ERROR_GIT_UNAVAILABLE.to_string()),
             message: "Git publishing is temporarily unavailable".to_string(),
@@ -2801,14 +2688,15 @@ mod tests {
         assert!(text.contains("shares the whole source tree through a Project Repository"));
         assert!(text.contains("cloneable by collaborators but not served as ordinary web assets"));
         assert!(text.contains("fsite describe workflow publish-static-site --output json"));
-        assert!(text.contains("fsite describe workflow publish-stateful-app --output json"));
         assert!(text.contains("fsite project init --config finite.toml"));
         assert!(text.contains("fsite project grant"));
         assert!(text.contains("fsite project share"));
         assert!(text.contains("fsite project status"));
         assert!(text.contains("fsite auth register"));
         assert!(text.contains("fsite auth git"));
+        assert!(text.contains("git clone RETURNED_GIT_REMOTE_URL"));
         assert!(text.contains("fsite view"));
+        assert!(!text.contains("git clone https://git.finite.chat"));
         assert!(!text.contains("fsite email-login"));
         assert!(!text.contains("fsite project apply"));
         assert!(!text.contains("fsite share"));
@@ -2827,40 +2715,29 @@ mod tests {
         assert!(text.contains("fsite project init --config finite.toml --dry-run --output json"));
         assert!(text.contains("For static sites, Finite serves only committed bytes"));
         assert!(text.contains("Source, data, docs, and build logic can live outside"));
+        assert!(text.contains("[site]"));
+        assert!(text.contains("path = \\\"site\\\""));
         assert!(text.contains("Do not look for a direct publish/upload command"));
         assert!(text.contains("fsite auth git PROJECT --store --output json"));
     }
 
     #[test]
-    fn publish_stateful_app_workflow_documents_runtime_contract() {
-        let value = describe_workflow("publish-stateful-app").unwrap();
-        let text = serde_json::to_string(&value).unwrap();
-        assert!(text.contains("kind = \\\"app\\\""));
-        assert!(text.contains("start = \\\"bun server.ts\\\""));
-        assert!(text.contains("Finite Sites sets PORT and DATA_DIR"));
-        assert!(text.contains("0.0.0.0:$PORT"));
-        assert!(text.contains("Do not rely on Finite Sites to run npm install"));
-        assert!(text.contains("fsite auth git PROJECT --store --output json"));
-    }
+    fn describe_workflows_are_static_only() {
+        let commands = describe_commands();
+        let text = serde_json::to_string(&commands).unwrap();
+        assert!(text.contains("publish-static-site"));
+        assert!(text.contains("share-site"));
+        assert!(!text.contains("publish-stateful-app"));
+        assert!(!text.contains("publish-document"));
+        assert!(!text.contains("share-output"));
 
-    #[test]
-    fn project_config_workflow_documents_app_schema() {
         let value = describe_workflow("project-config").unwrap();
         let text = serde_json::to_string(&value).unwrap();
-        assert!(text.contains("site, document, or app"));
-        assert!(text.contains("outputs.<id>.start"));
-        assert!(text.contains("kind = \\\"app\\\""));
-        assert!(text.contains("start = \\\"bun server.ts\\\""));
-    }
-
-    #[test]
-    fn publish_document_workflow_documents_markdown_outputs() {
-        let value = describe_workflow("publish-document").unwrap();
-        let text = serde_json::to_string(&value).unwrap();
-        assert!(text.contains("kind = \\\"document\\\""));
-        assert!(text.contains("document_name = \\\"my-docs\\\""));
-        assert!(text.contains("Raw Markdown companion URLs append .md"));
-        assert!(text.contains("Do not commit generated HTML"));
+        assert!(text.contains("site.name"));
+        assert!(text.contains("[site]"));
+        assert!(!text.contains("outputs.<id>"));
+        assert!(!text.contains("kind = \\\"app\\\""));
+        assert!(!text.contains("kind = \\\"document\\\""));
     }
 
     #[test]
@@ -2869,20 +2746,19 @@ mod tests {
         let text = serde_json::to_string(&value).unwrap();
         assert!(text.contains("fsite auth register --output json"));
         assert!(text.contains("A source-only Project Repository may contain only [project]"));
-        assert!(text.contains("served website needs an [outputs.<id>] entry"));
-        assert!(text.contains("automatically shares declared outputs"));
+        assert!(text.contains("served website needs one [site] entry"));
+        assert!(text.contains("automatically shares the Project Site"));
         assert!(text.contains("Do not infer identity from message text"));
     }
 
     #[test]
     fn project_share_parser_requires_explicit_public_confirmation() {
         assert!(matches!(
-            parse_project_share_args(&args(&["demo", "site", "--public"])),
+            parse_project_share_args(&args(&["demo", "--public"])),
             Err(CliError::Usage(message)) if message.contains("--yes-public")
         ));
         let parsed = parse_project_share_args(&args(&[
             "demo",
-            "site",
             "--public",
             "--yes-public",
             "--output",
@@ -2890,7 +2766,6 @@ mod tests {
         ]))
         .unwrap();
         assert_eq!(parsed.project, "demo");
-        assert_eq!(parsed.output_id, "site");
         assert_eq!(parsed.visibility.as_deref(), Some("public"));
         assert!(parsed.confirm_public);
         assert!(parsed.output_json);
@@ -2901,7 +2776,6 @@ mod tests {
         assert!(matches!(
             parse_project_share_args(&args(&[
                 "demo",
-                "site",
                 "--private",
                 "--send-invite",
                 "--add-email",
@@ -2910,16 +2784,15 @@ mod tests {
             Err(CliError::Usage(message)) if message.contains("--shared")
         ));
         assert!(matches!(
-            parse_project_share_args(&args(&["demo", "site", "--shared", "--send-invite"])),
+            parse_project_share_args(&args(&["demo", "--shared", "--send-invite"])),
             Err(CliError::Usage(message)) if message.contains("--add-email")
         ));
         assert!(matches!(
-            parse_project_share_args(&args(&["demo", "site", "--shared", "--private"])),
+            parse_project_share_args(&args(&["demo", "--shared", "--private"])),
             Err(CliError::Usage(message)) if message.contains("only one visibility")
         ));
         let parsed = parse_project_share_args(&args(&[
             "demo",
-            "site",
             "--shared",
             "--add-email",
             "viewer@example.com",
@@ -2932,7 +2805,6 @@ mod tests {
 
         let native = parse_project_share_args(&args(&[
             "demo",
-            "site",
             "--add-npub",
             TEST_NPUB,
             "--remove-npub",
@@ -3000,8 +2872,8 @@ mod tests {
         assert!(matches!(
             run(&args(&["share"])),
             Err(CliError::Usage(message))
-                if message.contains("Project Output sharing")
-                    && message.contains("fsite project share PROJECT OUTPUT")
+                if message.contains("Project Site sharing")
+                    && message.contains("fsite project share PROJECT")
                     && !message.contains("fsite share SITE_NAME")
         ));
         assert!(matches!(
@@ -3184,23 +3056,12 @@ mod tests {
                 "finite-react-bun-spa",
                 include_str!("../../../examples/react-bun-spa/finite.toml"),
             ),
-            (
-                "finite-nextjs-demo",
-                include_str!("../../../examples/nextjs-demo/finite.toml"),
-            ),
-            (
-                "finite-fasthtml-demo",
-                include_str!("../../../examples/fasthtml-demo/finite.toml"),
-            ),
-            (
-                "finite-docs-demo",
-                include_str!("../../../examples/docs-demo/finite.toml"),
-            ),
         ];
         for (slug, raw) in examples {
             let config = parse_project_config_toml(raw).unwrap();
             assert_eq!(config.project.slug, slug);
-            assert_eq!(config.outputs.len(), 1);
+            assert!(config.site.is_some());
+            assert!(config.outputs.is_empty());
         }
     }
 
@@ -3208,7 +3069,7 @@ mod tests {
     fn view_target_url_supports_url_or_name() {
         assert_eq!(
             view_target_url("finitechat-native-mockup", None),
-            "https://finitechat-native-mockup.finite.chat/"
+            "https://finitechat-native-mockup.v2.finite.chat/"
         );
         assert_eq!(
             view_target_url(

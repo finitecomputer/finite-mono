@@ -253,14 +253,6 @@ pub fn access_approved(site_name: &str, email: &str) -> String {
     )
 }
 
-pub fn app_unavailable() -> String {
-    page(
-        "App unavailable",
-        "<h1>This app isn&rsquo;t responding</h1>\
-         <p>It may be starting up or restarting. Refresh in a few seconds.</p>",
-    )
-}
-
 pub fn not_found() -> String {
     page(
         "Not found",

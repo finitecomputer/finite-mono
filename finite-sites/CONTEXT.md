@@ -3,13 +3,85 @@
 Glossary for Finite Sites. Code, docs, and prompts should use these words
 with exactly these meanings.
 
+- **Sites Platform Service**: the Finite Sites product boundary that owns
+  publishing APIs, Git Remotes, Site serving, Sites authorization,
+  and Sites durability as one service. It may live in `finite-mono`, but other
+  Finite products depend on its service contracts rather than its internals.
+- **Dedicated Sites Host**: a Finite-operated VM or VPS whose primary role is
+  running the Sites Platform Service and its durable Sites state. It separates
+  Sites serving from the shared Finite control/app host and from Agent Runtime
+  hosts.
+- **Sites Service Boundary**: the versioned contracts by which other Finite
+  products and clients use the Sites Platform Service. The boundary includes
+  public control-plane APIs, Git Remotes, serving URLs, and narrowly scoped
+  internal APIs, but not registry tables or daemon implementation details.
+- **Static Sites API**: the Sites Service Boundary for the static-only target
+  model. It presents each Project Repository as having zero or one Project
+  Site, not a list of typed outputs, and uses Site vocabulary in public
+  request and response fields.
+- **Sites Component Release**: one versioned release of the Sites Platform
+  Service and its agent-facing CLI. Until the Sites Service Boundary is stable,
+  server and CLI behavior are shipped and reasoned about as one component.
+- **Validation Build**: an exact unreleased or pinned Sites Component build
+  used during the V2 Validation Phase. It is not promoted as the public
+  rolling CLI release until the default production endpoint can satisfy it.
+- **Sites Capability Check**: the client/server compatibility handshake that
+  tells an agent whether its CLI understands the Sites Service Boundary it is
+  contacting. It exists to fail clearly at the boundary, not to preserve every
+  older client behavior.
+- **Sites Hostname Boundary**: the public hostnames owned by the Sites Platform
+  Service: the Sites API origin, Git Remote origin, and one-label Site hosts
+  under the Site Base Domain. Finite application/dashboard/chat origins are not
+  Sites hostnames.
+- **Sites V2 Endpoint**: the minimal temporary or versioned Sites endpoint
+  needed for new `fsite` clients and selected agent runtimes to target the
+  Static Sites API before canonical Sites hostnames move. It may carry both
+  control API and Git Remote traffic on one origin; it does not imply
+  duplicating every production hostname plane.
+- **V2 Validation Phase**: the opt-in period where new `fsite` clients or
+  selected agent runtimes publish to the Sites V2 Endpoint while legacy Sites
+  production remains authoritative for canonical Sites hostnames.
+- **Validation Site Base Domain**: the temporary wildcard domain used to test
+  served Sites during the V2 Validation Phase. It is validation plumbing, not
+  the long-term public Site URL contract.
+- **Validation Site URL**: a served Site URL under the Validation Site Base
+  Domain. It may prove behavior during validation, but it is not a durable
+  public URL promise.
+- **Sites Dependency Fact**: a narrow non-authorizing fact that Sites obtains
+  from another Finite service, such as Identity Directory NIP-05 resolution or
+  a bounded SaaS account assertion for an already shared Site. It never
+  includes mailbox proof, publish-grant satisfaction, Share state, or other
+  Sites permission state; Sites answers those questions from its own tables.
+- **Sites Recovery Set**: the durable Sites-owned state required to restore
+  Project Repositories, Sites, versions, sharing, and audit history
+  without relying on another product's database as the source of truth.
+- **Sites Behavior Compatibility**: the migration promise that existing
+  `fsite` static-site workflows, Git Remotes, serving URLs, visibility, and
+  sharing keep their user-visible meaning while the hosting architecture
+  changes.
+- **Sites Cutover**: the operator-led move from the legacy Sites deployment to
+  the Sites Platform Service after the Sites V2 Endpoint has been proven.
+  Already-published Sites keep serving while publishing writes may be briefly
+  frozen, Sites state may be reconciled once, and canonical Sites hostnames
+  move.
+- **Publishing Write Freeze**: a bounded Sites Cutover period during which Git
+  pushes and publishing mutations are rejected or paused while already-published
+  Sites continue serving.
+- **Static Launch Check**: a pre-cutover check that protects the static-only
+  target model. Retired output kinds, multiple Project Sites for one Project
+  Repository, or retired Core grant state are not converted into target Sites
+  state; this is not a reusable migration framework.
+- **Static-Only Sites Service**: the target shape of the Sites Platform
+  Service: Project Repositories publish static Finite Sites only. There is no
+  output kind dimension, tenant app process, warm runtime path, or runtime
+  compatibility flag for retired output kinds.
 - **Finite Site**: one published website living at `{name}.{base domain}`,
   owned by one Publishing Principal, with an immutable version history.
 - **Principal**: the authorization subject permissions attach to. A Principal
   may be represented by an email address during bootstrap and by verified key
   identities once available.
 - **Publishing Principal**: a Principal allowed to create Project
-  Repositories and Project Outputs. A Publishing Principal may be established
+  Repositories and Sites. A Publishing Principal may be established
   through email bootstrap or through a native npub path; email is never
   required for the long-term identity model.
 - **Publishing Bootstrap Invite**: an email-delivered invitation that lets a
@@ -20,18 +92,18 @@ with exactly these meanings.
 - **Self-Registered Publish Grant**: the default v0 Publishing Principal
   bootstrap. A local Publishing Key signs `fsite auth register`, receives a
   self-sourced publish grant, and can create Project Repositories and Project
-  Outputs up to the Publishing Limit without an operator allowlist round trip.
+  Sites up to the Publishing Limit without an operator allowlist round trip.
 - **Publishing Limit**: the product meaning of "unlimited" publishing in v0:
-  a Publishing Principal may create up to 100 Project Outputs before an
-  operator or later billing policy changes the limit.
+  a Publishing Principal may create up to 100 Sites before an operator policy
+  changes the limit.
 - **Publishing Revocation**: an operator action that removes a Principal's
-  ability to create new Project Repositories or Project Outputs without
+  ability to create new Project Repositories or Sites without
   necessarily removing existing collaboration or viewing access.
 - **Publishing Ownership Recovery**: an audited transfer that restores control
-  of a Project Repository and its Outputs to a verified replacement Principal
+  of a Project Repository and its Site to a verified replacement Principal
   without changing or deleting their data.
-- **Output Disable**: an operator action that stops one or more Project
-  Outputs from serving while preserving source history and audit context.
+- **Site Disable**: an operator action that stops one or more Sites from
+  serving while preserving source history and audit context.
 - **Emergency Delete**: a manual operator action reserved for extreme abuse,
   where preserving source history or names is less important than removing
   harmful product data.
@@ -39,8 +111,8 @@ with exactly these meanings.
   as a chat participant. Native shares can target this Principal directly.
 - **Requesting User Share**: an explicit, revocable Share created atomically by
   an Agent Principal's signed Project Init for the authenticated human sender's
-  Native Principal. It grants view access to each declared Project Output; it
-  does not change Project ownership, collaboration, or Git access.
+  Native Principal. It grants view access to the Project Site; it does not
+  change Project ownership, collaboration, or Git access.
 - **External Principal**: a Principal identified by email because they are not
   yet a Finite user. External shares use email verification.
 - **Principal Link**: an explicit, approved relationship between Principals
@@ -58,119 +130,42 @@ with exactly these meanings.
   Sites Email Principal's grants without making the key and mailbox the same
   Principal. Older documents call this an Email Access Delegation.
 - **Project Repository**: the editable git history for a project. It may begin
-  with data, grow logic around that data, and later produce one or more Project
-  Outputs. A Project Repository may exist before any public-facing UI exists.
-- **Bare Project Repository**: a Project Repository with zero Project Outputs.
+  with data, grow logic around that data, and later produce zero or one Project
+  Site. A Project Repository may exist before any public-facing UI exists.
+- **Project Init**: the replay-safe control-plane mutation that creates or
+  verifies a Project Repository from Project Config and, when the config
+  declares a Project Site, creates or verifies that Project Site. It is the
+  canonical agent-facing setup flow for both source-only and served Projects,
+  including adding a Project Site to an existing source-only Project later.
+- **Bare Project Repository**: a Project Repository with no Project Site.
   It has a Project Slug, collaborators, Git Remote, Project Status, Project
   List entry, and git history, but no viewer URL, active Version, or served
   artifact. It is source-first state, not a failed publish.
 - **Project Status**: a control-plane query for one Project Repository. It
-  reports repository existence, Git Remote, Project Outputs, deploy branches
+  reports repository existence, Git Remote, Project Site, deploy branch
   and paths, current deploy/version status, and the actor's project permission
   when known.
 - **Project List**: a control-plane query listing Project Repositories the
-  actor owns or may edit. It is scoped to Project Repositories, not only sites
-  or other served outputs.
+  actor owns or may edit. It is scoped to Project Repositories, not only served
+  Sites.
 - **Project Slug**: the stable URL-safe identifier for a Project Repository.
-  It is separate from Site Name. Simple projects may use the same string for
-  Project Slug and Site Name, but the CLI must make that choice explicit
-  rather than inferring one from the other.
-- **Project Output**: a user-facing artifact produced from a Project
-  Repository, such as a Finite Site, Document Output, or PDF Output. Project
-  Outputs own serving visibility, sharing, active version pointers, and version
-  history.
-- **Output Routing Name**: the globally unique DNS label for a Project Output
-  within that output kind's serving namespace. Output Routing Names are not
-  global across all kinds; a site, document, and PDF may share the same label
-  because they live on different serving domains.
-- **Document Output**: a read-only Project Output whose source is authored as
-  Markdown in a Project Repository and viewed as a rendered document. It is for
-  collaborative writing and review, not only software documentation.
-- **Stateful App Output**: a Project Output whose source is an app runtime
-  directory in a Project Repository. It is declared with `kind = "app"` in
-  Project Config, served under the Site Base Domain by Site Name, and deployed
-  as one immutable app bundle plus an explicit App Start Command. It shares the
-  Site Name namespace with static Finite Sites.
-- **App Source Path**: the project-relative directory declared for a Stateful
-  App Output. Agents commit source, migrations, seed data, and explicit runtime
-  payload under this path; Finite Sites versions that directory as the app
-  bundle.
-- **App Start Command**: the explicit `start` command in Project Config for a
-  Stateful App Output. Finite Sites sets `PORT` and `DATA_DIR` before running
-  it; the app must listen on `0.0.0.0:$PORT`.
-- **App Data Directory**: the runtime `$DATA_DIR` provided to a Stateful App
-  Output. It is the only live mutable state location and survives deploys,
-  restarts, and wake/sleep. Deploys must not overwrite it.
-- **PDF Output**: a read-only Project Output whose served artifact is a PDF
-  committed to a Project Repository. An agent or user generates the PDF before
-  pushing; Finite Sites stores and serves the committed PDF bytes as immutable
-  output versions.
-- **PDF Name**: the globally unique, stable URL-safe identifier for a PDF
-  Output, served under the PDF base domain. It is separate from Site Name and
-  Document Name.
-- **PDF Base Domain**: the serving-plane wildcard domain under which PDF
-  Outputs live. It does not host Project Repository control-plane APIs.
-- **Document Visibility**: the Visibility of a Document Output. It uses the
-  same private, shared, and public meanings as other Project Outputs and is
-  independent from Project Visibility.
-- **Document Name**: the globally unique, stable URL-safe identifier for a
-  Document Output, served under the document base domain. It is separate from
-  Site Name.
-- **Document Base Domain**: the serving-plane wildcard domain under which
-  Document Outputs live, canonically `docs.finite.chat` in production. It does
-  not host Project Repository control-plane APIs.
-- **Document Source Path**: the project-relative path declared for a Document
-  Output. It points either to one Document Markdown file or to a Document Root
-  directory.
-- **Document Root**: the directory in a Project Repository that contains the
-  Markdown files for a directory-shaped Document Output.
-- **Document Entry**: the Markdown file inside a Document Root that opens when
-  a viewer visits the Document Output root URL. Directory Documents default to
-  `index.md`; Single-File Documents use the source file as the entry.
-- **Single-File Document**: a Document Output whose source is one Document
-  Markdown file. The file is the Document Entry and renders at the Document
-  Output root.
-- **Document Project Output Config**: the `finite.toml` output entry that
-  declares a Document Output. It uses the same Project Repository, Deploy
-  Branch, and collaborator model as other Project Outputs.
-- **Document Directory Index**: an optional `_index.md` file inside a
-  Document Root directory. It is ordinary Document Markdown and may provide
-  navigation or ordering hints for that directory, matching common llm-wiki
-  folder conventions; it is not required and is not a generated cache.
-- **Document Markdown**: the Markdown source for a Document Output. Finite
-  Sites stores the authored text and promises a strict Document Renderer
-  Subset; content outside that subset may render plainly or be ignored.
-- **Document Frontmatter**: optional YAML metadata at the top of a Document
-  Markdown file. Recognized fields may shape document presentation and
-  navigation; unknown fields remain source metadata and are ignored by the
-  renderer.
-- **Document Renderer Subset**: the bounded Markdown features the Rust
-  renderer must handle predictably for v0: headings, paragraphs, emphasis,
-  lists, blockquotes, code spans and fences, links, images, tables,
-  frontmatter, directory indexes, and Document Wikilinks. Raw HTML and richer
-  blocks are outside the subset until they become explicit Document
-  Components.
-- **Document Component**: an explicit, allowlisted rich block or inline element
-  in a Document Output. Document Components are product features, not arbitrary
-  raw HTML or JavaScript.
-- **Document Route**: the viewer-facing path for a Markdown file in a
-  Document Output. Document Routes are clean URLs derived from Markdown paths
-  inside the Document Root.
-- **Document Navigation**: the viewer navigation for a Document Output,
-  derived from the Document Snapshot unless a later document feature gives
-  authors explicit navigation control.
-- **Document Wikilink**: an Obsidian-style link inside Document Markdown,
-  such as `[[Page]]` or `[[Page|label]]`. Document Wikilinks are a
-  compatibility feature resolved within one Document Root; standard Markdown
-  links remain the canonical link format.
-- **Document Snapshot**: the exact authored Document Markdown selected for one
-  deployed Document Output version. Finite Sites renders from that Markdown;
-  rendered HTML is not the source of truth.
-- **Document Warning**: a non-blocking issue found in a Document Snapshot,
-  such as a broken internal link or unresolved Document Wikilink. Document
-  Warnings do not prevent a Document Output from being served.
-- **Deploy Output**: committed files selected from a Project Repository and
-  materialized as a Version. Agents produce Deploy Outputs; Finite Sites
+  It is separate from Site Name. When Project Config omits Site Name, the Site
+  Name defaults to the Project Slug.
+- **Project Site**: the optional served Finite Site produced by one Project
+  Repository. A Project Repository has zero or one Project Site. The Project
+  Site owns Site Name, Deploy Branch, Deploy Path, Visibility, Shares, active
+  Version pointer, and version history.
+- **Project Site Identity**: the immutable public identity of a Project Site in
+  v2: Site Name, Deploy Branch, and Deploy Path.
+- **Retired Output Kind**: a former served-artifact variant such as app,
+  document, or PDF. Remaining code or documents that depend on output kinds are
+  legacy removal work rather than target Sites contracts.
+- **Legacy Static Output Config**: the old `[outputs.<id>]` static-site Project
+  Config shape. Sites may accept it with a deprecation warning only when it
+  describes exactly one static Site; it does not preserve public output IDs or
+  output kinds in the target model.
+- **Deploy Tree**: committed files selected from a Project Repository and
+  materialized as a Version. Agents produce Deploy Trees; Finite Sites
   validates and serves them.
 - **One-Off Publishing**: a simple use of the Project Repository model where a
   user or agent creates a Project first, writes `finite.toml`, commits only the
@@ -180,24 +175,28 @@ with exactly these meanings.
 - **Deploy Branch**: the Project Repository branch whose pushed commits create
   new Versions automatically. Pushing to a Deploy Branch updates content but
   does not change visibility or permissions.
+- **Deploy Path**: the project-relative path within the Deploy Branch selected
+  as the Site's Deploy Tree.
 - **Project Visibility**: who may read, clone, or fetch a Project Repository.
-  It is private by default and independent from the Visibility of any Project
-  Output. Public-read Project Visibility means read-only Git access; it never
+  It is private by default and independent from Site Visibility. Public-read
+  Project Visibility means read-only Git access; it never
   grants push access.
 - **Managed Skills Repository**: a Project Repository whose `skills/` tree is
   consumed by finitecomputer runtimes. Finite-owned baseline skills may use
   public read-only Project Visibility. Customer, user, and team skills remain
   private by default and use normal Project Repository auth.
-- **Site Name**: the Output Routing Name for a Finite Site. It is a lowercase
-  DNS label (3–63 chars), globally unique within the Site Base Domain,
-  first-come, allocated by a Project Output before any Version is deployed.
-  Reserved names are rejected.
+- **Site Name**: the lowercase DNS label (3–63 chars) for a Finite Site,
+  globally unique within the Site Base Domain, first-come, and allocated before
+  any Version is deployed. Reserved names are rejected.
+- **Reserved Site Name**: a Site Name unavailable for new allocation because
+  it is owned by legacy Sites, reserved for a service label such as `v2`, set
+  aside by operator policy, or owned by another current Sites authority.
 - **Pre-User Reset**: a destructive operator action that wipes Finite Sites
   product state during pre-user development so examples can be redeployed
   through the current model without legacy adapters.
 - **Publishing Key / Owner**: the Nostr keypair (npub) of the human or agent
-  Publishing Principal. It owns Project Repositories, lists outputs, and may
-  change output sharing. The publish grant cache is keyed on it. It is the
+  Publishing Principal. It owns Project Repositories, lists Sites, and may
+  change Site sharing. The publish grant cache is keyed on it. It is the
   shared Finite identity within that principal's Finite Home: stored at
   `~/.finite/identity/identity.json` (`$FINITE_HOME/identity/identity.json` in
   hosted runtimes), minted by whichever Finite tool runs first in that home,
@@ -208,7 +207,7 @@ with exactly these meanings.
   durable user data.
 - **Project Collaborator**: an email address or key identity granted edit
   rights to a Project Repository. Project collaboration is the default edit
-  permission; individual Project Outputs may add narrower rules later.
+  permission; Site sharing controls served read access.
 - **Project Grant**: a control-plane mutation that gives a Principal edit
   access to a Project Repository, usually with role `editor`, and may send an
   invitation with agent-facing instructions.
@@ -234,8 +233,10 @@ with exactly these meanings.
   Sites audit records the delegation separately from actor identity.
 - **Git Remote**: the standard git clone/push endpoint for a Project
   Repository, canonically `https://git.finite.chat/{project}.git` in
-  production. Agents use normal git commands against it; Finite Sites maps
-  authenticated pushes to Project Repository permissions.
+  production. The server-returned Git Remote is authoritative, so validation
+  deployments may use the Sites V2 Endpoint before canonical hostnames move.
+  Agents use normal git commands against it; Finite Sites maps authenticated
+  pushes to Project Repository permissions.
 - **Git Credential**: a revocable, scoped HTTPS credential minted after an
   email verification or Key Challenge. It lets standard git clients clone or
   push one Project Repository according to the Principal's permissions.
@@ -243,6 +244,10 @@ with exactly these meanings.
   without out-of-band documentation. It provides structured input/output,
   dry-run validation, and machine-readable descriptions of available commands
   and workflows.
+- **Project Workflow Description**: an Agent-Safe CLI description of a current
+  Project Repository workflow. A workflow remains valid when its underlying
+  Project Init, Git Remote, and sharing steps remain valid; only references to
+  retired outputs or output kinds are legacy removal work.
 - **CLI Product Verb**: one of the primary agent-facing actions:
   `project`, `auth`, or `view`. Product verbs name real product
   primitives rather than aliases or wrappers around a second surface. If a
@@ -252,73 +257,62 @@ with exactly these meanings.
   step is missing and how to complete it before retrying the original Product
   Verb.
 - **Project Config**: a project-level configuration file, conventionally
-  `finite.toml`, describing Project Outputs such as sites or documents.
+  `finite.toml`, describing static Site publishing choices for a Project
+  Repository. Its target shape declares the Project and optionally one Project
+  Site.
 - **Key Challenge**: proof of control for a nostr key. The private key never
   leaves the user's machine; the actor signs a bounded challenge instead.
 - **Email Key**: a local nostr keypair verified for one email address by a
   single-use email token. It signs email-keyed project git credential requests
   without exposing npubs.
 - **Publish Grant Cache**: the local registry table deciding whether a
-  Publishing Key may create Projects, allocate Project Outputs, and deploy new
+  Publishing Key may create Projects, allocate Sites, and deploy new
   Versions.
-  Self-registered grants are the v0 default, operator grants remain the
-  manual override/revocation path, and Core grants become the paid-entitlement
-  path. If no active, unexpired grant exists, creating Projects or allocating
-  Project Outputs fails closed.
+  Self-registered grants are the v0 default, and operator grants remain the
+  manual override/revocation path. If no active, unexpired grant exists,
+  creating Projects or allocating Sites fails closed.
 - **Allowlist**: the deployed operator command surface for adding/removing
-  `operator` publish grants. De-allowlisting an owner only removes the
-  operator grant; a separate active Core grant can still allow publishing.
+  `operator` publish grants.
 - **Publish Session**: a pending upload: a validated manifest plus the set
   of blobs the server still needs. Finalizing it creates a Version.
 - **Manifest**: the list of `(path, sha256, size)` entries describing one
   complete site version. Paths are absolute and conservatively validated.
 - **Blob**: immutable bytes stored by sha256, deduplicated across all sites
   and versions. Uploads are verified against the hash they claim.
-- **Version**: an immutable Project Output snapshot created from a Deploy
-  Branch push. The Project Output serves its **Active Version**; the pointer
-  flip is atomic.
-- **Agent Handoff File**: `/llms.txt` on a Project Output. A user-authored
-  file is ordinary output content. If absent, the platform may synthesize one
-  for editable outputs so agents can discover the supported edit flow.
-- **Agent Full Context File**: `/llms-full.txt` on a Document Output. It is a
-  bounded Markdown concatenation of the Document Snapshot for agents that want
-  one fetch; oversized documents fall back to the Agent Handoff File index.
-- **Document Agent Links**: machine-discoverable links on a rendered Document
-  Route that point agents to the Agent Handoff File and to the page's
-  Markdown companion URL. Document Agent Links obey the Document Output's
-  Visibility.
-- **Markdown Companion URL**: the raw Document Markdown representation of a
-  Document Route, exposed by appending `.md` to the human-facing route shape
-  instead of using a separate platform namespace. It returns the exact authored
-  Document Markdown for that page. Directory index pages use the route-shaped
-  companion URL; the Document Output root uses `/index.md`.
+- **Version**: an immutable Site snapshot created from a Deploy Branch push.
+  The Site serves its **Active Version**; the pointer flip is atomic.
+- **Agent Handoff File**: `/llms.txt` on a Site. A user-authored
+  file is ordinary Site content. If absent, the platform may synthesize one
+  for editable Sites so agents can discover the supported edit flow.
 - **Visibility**: `private` (only explicitly shared Native Principals),
-  `shared` (explicit Native Principal or email Shares), or `public`. New
-  Project Outputs are private by default. Changing
-  Visibility is a Project Output sharing mutation. Making a Project Output
-  public requires an explicit confirmation from the human, relayed as
-  `confirm_public`.
-- **Share**: one `(Project Output, Principal)` row granting view access to a
-  served output. Removing it revokes access on the next request, even for live
+  `shared` (explicit Native Principal or email Shares), or `public`. New Sites
+  are private by default. Changing Visibility is a Site sharing mutation.
+  Making a Site public requires an explicit confirmation from the human,
+  relayed as `confirm_public`.
+- **Share**: one `(Site, Principal)` row granting view access to a served Site.
+  Removing it revokes access on the next request, even for live
   cookies.
+- **Site Share Mutation**: the Project-scoped command or API mutation that
+  changes viewer access for a Project Site. Because a Project Repository has
+  at most one Project Site, it is not scoped by an output identifier.
 - **Magic Link**: a reusable, 15-minute login token mailed to a shared email.
   Each redemption sets a Viewer Cookie on the site's own host.
-- **Viewer Cookie**: an HMAC-signed `(Project Output, Principal, expiry)`
-  proof, scoped to one Output host. Legacy email cookies retain their existing
-  wire shape. A cookie proves a bounded session; the Share table still decides
-  access on every request.
-- **Native Viewer Session**: a bounded NIP-98 proof for one exact Output-host
+- **Viewer Cookie**: an HMAC-signed `(Site, Principal, expiry)` proof, scoped
+  to one Site host. Legacy email cookies retain their existing wire shape. A
+  cookie proves a bounded session; the Share table still decides access on
+  every request.
+- **Native Viewer Session**: a bounded NIP-98 proof for one exact Site-host
   session endpoint, POST body, nonce, client, and same-origin return path. The
   signer must already have a Native Principal Share. Direct native clients
   receive Viewer Cookies immediately; Hosted Web redeems a single-use link for
   the same cookies. Proof never creates a Share.
 - **Verified Email Viewer Session**: a server-to-server exchange that accepts
   an email already verified by the SaaS account boundary and, only when that
-  email is already on a shared output's Share list, mints the existing
+  email is already on a shared Site's Share list, mints the existing
   reusable Magic Link. It never creates a Share. The browser redeems the link
-  on the output host and ordinary per-request Share checks preserve
+  on the Site host and ordinary per-request Share checks preserve
   immediate revocation. Issuance and durable outstanding links are bounded per
-  output/email. The ordinary cookie is top-level `SameSite=Lax`; a distinct
+  Site/email. The ordinary cookie is top-level `SameSite=Lax`; a distinct
   `Partitioned` cookie carries iframe access.
 - **Control Plane**: the NIP-98-authenticated API (Project Init, git auth,
   sharing, status). **Serving Plane**: anonymous-or-cookie HTTP on site

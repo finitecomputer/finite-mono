@@ -11,7 +11,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::limits::{
     MAX_PROJECT_BRANCH_BYTES, MAX_PROJECT_OUTPUT_ID_BYTES, MAX_PROJECT_OUTPUT_PATH_BYTES,
-    MAX_PROJECT_OUTPUTS, MAX_PROJECT_SLUG_BYTES, MAX_START_COMMAND_BYTES,
+    MAX_PROJECT_SLUG_BYTES,
 };
 use crate::{ProtoError, names};
 
@@ -19,7 +19,12 @@ use crate::{ProtoError, names};
 #[serde(deny_unknown_fields)]
 pub struct ProjectConfig {
     pub project: ProjectSection,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub site: Option<ProjectSiteConfig>,
+    /// Deprecated input-only compatibility for pre-static-only finite.toml
+    /// files. `parse_project_config_toml` canonicalizes one legacy static
+    /// output into `[site]`; v2 responses must serialize `[site]` only.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub outputs: BTreeMap<String, ProjectOutputConfig>,
 }
 
@@ -27,6 +32,25 @@ pub struct ProjectConfig {
 #[serde(deny_unknown_fields)]
 pub struct ProjectSection {
     pub slug: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ProjectSiteConfig {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+    pub branch: String,
+    pub path: String,
+    #[serde(default)]
+    pub spa: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NormalizedProjectSiteConfig {
+    pub name: String,
+    pub branch: String,
+    pub path: String,
+    pub spa: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -110,92 +134,147 @@ impl ProjectOutputConfig {
 impl ProjectConfig {
     pub fn validate(&self) -> Result<(), ProtoError> {
         validate_project_slug(&self.project.slug)?;
-        if self.outputs.len() > MAX_PROJECT_OUTPUTS as usize {
-            return Err(ProtoError::InvalidProjectConfig("too many outputs"));
-        }
-        // Bounded by MAX_PROJECT_OUTPUTS above.
-        for (output_id, output) in &self.outputs {
-            validate_output_id(output_id)?;
-            let routing_name = output.routing_name()?;
-            names::validate_site_name(routing_name)?;
-            match output.kind {
-                ProjectOutputKind::Site => {
-                    if output.document_name.is_some() {
-                        return Err(ProtoError::InvalidProjectConfig(
-                            "site output must not set document_name",
-                        ));
-                    }
-                    if output.entry.is_some() {
-                        return Err(ProtoError::InvalidProjectConfig(
-                            "site output must not set entry",
-                        ));
-                    }
-                    if output.start.is_some() {
-                        return Err(ProtoError::InvalidProjectConfig(
-                            "site output must not set start",
-                        ));
-                    }
-                }
-                ProjectOutputKind::Document => {
-                    if output.site_name.is_some() {
-                        return Err(ProtoError::InvalidProjectConfig(
-                            "document output must not set site_name",
-                        ));
-                    }
-                    if output.spa {
-                        return Err(ProtoError::InvalidProjectConfig(
-                            "document output must not set spa",
-                        ));
-                    }
-                    if let Some(entry) = output.entry.as_deref() {
-                        validate_document_entry(entry)?;
-                    }
-                    if output.start.is_some() {
-                        return Err(ProtoError::InvalidProjectConfig(
-                            "document output must not set start",
-                        ));
-                    }
-                }
-                ProjectOutputKind::App => {
-                    if output.document_name.is_some() {
-                        return Err(ProtoError::InvalidProjectConfig(
-                            "app output must not set document_name",
-                        ));
-                    }
-                    if output.entry.is_some() {
-                        return Err(ProtoError::InvalidProjectConfig(
-                            "app output must not set entry",
-                        ));
-                    }
-                    if output.spa {
-                        return Err(ProtoError::InvalidProjectConfig(
-                            "app output must not set spa",
-                        ));
-                    }
-                    let Some(start) = output.start.as_deref() else {
-                        return Err(ProtoError::InvalidProjectConfig("app output needs start"));
-                    };
-                    validate_start_command(start)?;
-                }
-            }
-            validate_branch_name(&output.branch)?;
-            validate_output_path(&output.path)?;
-        }
+        let _ = self.normalized_site()?;
         Ok(())
     }
 
     pub fn to_toml_string(&self) -> Result<String, ProtoError> {
         self.validate()?;
-        toml::to_string_pretty(self)
+        let normalized_site = self.normalized_site()?;
+        let site = normalized_site.map(|site| ProjectSiteConfig {
+            name: if site.name == self.project.slug {
+                None
+            } else {
+                Some(site.name)
+            },
+            branch: site.branch,
+            path: site.path,
+            spa: site.spa,
+        });
+        let canonical = CanonicalProjectConfig {
+            project: self.project.clone(),
+            site,
+        };
+        toml::to_string_pretty(&canonical)
             .map_err(|_| ProtoError::InvalidProjectConfig("cannot encode toml"))
+    }
+
+    pub fn normalized_site(&self) -> Result<Option<NormalizedProjectSiteConfig>, ProtoError> {
+        if self.site.is_some() && !self.outputs.is_empty() {
+            return Err(ProtoError::InvalidProjectConfig(
+                "project config cannot set both [site] and [outputs.*]",
+            ));
+        }
+        if let Some(site) = &self.site {
+            return normalize_site(&self.project.slug, site);
+        }
+        legacy_static_site_from_outputs(&self.project.slug, &self.outputs)
     }
 }
 
 pub fn parse_project_config_toml(input: &str) -> Result<ProjectConfig, ProtoError> {
-    let config: ProjectConfig = toml::from_str(input)
+    let mut config: ProjectConfig = toml::from_str(input)
         .map_err(|_| ProtoError::InvalidProjectConfig("toml does not match schema"))?;
     config.validate()?;
+    if !config.outputs.is_empty() {
+        let site = config
+            .normalized_site()?
+            .expect("nonempty legacy outputs produce one site");
+        config.site = Some(ProjectSiteConfig {
+            name: Some(site.name),
+            branch: site.branch,
+            path: site.path,
+            spa: site.spa,
+        });
+        config.outputs.clear();
+    }
     Ok(config)
+}
+
+#[derive(Serialize)]
+struct CanonicalProjectConfig {
+    project: ProjectSection,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    site: Option<ProjectSiteConfig>,
+}
+
+fn normalize_site(
+    project_slug: &str,
+    site: &ProjectSiteConfig,
+) -> Result<Option<NormalizedProjectSiteConfig>, ProtoError> {
+    let name = site
+        .name
+        .clone()
+        .unwrap_or_else(|| project_slug.to_string());
+    names::validate_site_name(&name)?;
+    validate_branch_name(&site.branch)?;
+    validate_site_path(&site.path)?;
+    Ok(Some(NormalizedProjectSiteConfig {
+        name,
+        branch: site.branch.clone(),
+        path: site.path.clone(),
+        spa: site.spa,
+    }))
+}
+
+fn legacy_static_site_from_outputs(
+    project_slug: &str,
+    outputs: &BTreeMap<String, ProjectOutputConfig>,
+) -> Result<Option<NormalizedProjectSiteConfig>, ProtoError> {
+    if outputs.is_empty() {
+        return Ok(None);
+    }
+    if outputs.len() > 1 {
+        return Err(ProtoError::InvalidProjectConfig(
+            "static-only Sites supports at most one Project Site",
+        ));
+    }
+    let (output_id, output) = outputs
+        .iter()
+        .next()
+        .expect("nonempty BTreeMap has one first item");
+    validate_output_id(output_id)?;
+    match output.kind {
+        ProjectOutputKind::Site => {}
+        ProjectOutputKind::Document => {
+            return Err(ProtoError::InvalidProjectConfig(
+                "static-only Sites does not support document outputs",
+            ));
+        }
+        ProjectOutputKind::App => {
+            return Err(ProtoError::InvalidProjectConfig(
+                "static-only Sites does not support app outputs",
+            ));
+        }
+    }
+    if output.document_name.is_some() {
+        return Err(ProtoError::InvalidProjectConfig(
+            "legacy site output must not set document_name",
+        ));
+    }
+    if output.entry.is_some() {
+        return Err(ProtoError::InvalidProjectConfig(
+            "legacy site output must not set entry",
+        ));
+    }
+    if output.start.is_some() {
+        return Err(ProtoError::InvalidProjectConfig(
+            "legacy site output must not set start",
+        ));
+    }
+    let name = output
+        .site_name
+        .clone()
+        .unwrap_or_else(|| project_slug.to_string());
+    names::validate_site_name(&name)?;
+    validate_branch_name(&output.branch)?;
+    validate_site_path(&output.path)?;
+    Ok(Some(NormalizedProjectSiteConfig {
+        name,
+        branch: output.branch.clone(),
+        path: output.path.clone(),
+        spa: output.spa,
+    }))
 }
 
 pub fn validate_project_slug(slug: &str) -> Result<(), ProtoError> {
@@ -264,31 +343,31 @@ fn validate_branch_name(branch: &str) -> Result<(), ProtoError> {
     Ok(())
 }
 
-fn validate_output_path(path: &str) -> Result<(), ProtoError> {
+fn validate_site_path(path: &str) -> Result<(), ProtoError> {
     if path.is_empty() {
-        return Err(ProtoError::InvalidProjectConfig("output path is empty"));
+        return Err(ProtoError::InvalidProjectConfig("site path is empty"));
     }
     if path.len() > MAX_PROJECT_OUTPUT_PATH_BYTES as usize {
-        return Err(ProtoError::InvalidProjectConfig("output path is too long"));
+        return Err(ProtoError::InvalidProjectConfig("site path is too long"));
     }
     if path == "." {
         return Ok(());
     }
     if path.starts_with('/') || path.ends_with('/') || path.contains('\\') {
         return Err(ProtoError::InvalidProjectConfig(
-            "output path must be relative",
+            "site path must be relative",
         ));
     }
     // Bounded by MAX_PROJECT_OUTPUT_PATH_BYTES.
     for component in path.split('/') {
         if component.is_empty() || component == "." || component == ".." {
             return Err(ProtoError::InvalidProjectConfig(
-                "output path contains an invalid component",
+                "site path contains an invalid component",
             ));
         }
         if matches!(component, ".git" | ".finite" | "node_modules") {
             return Err(ProtoError::InvalidProjectConfig(
-                "output path targets a forbidden directory",
+                "site path targets a forbidden directory",
             ));
         }
         let all_safe = component
@@ -296,54 +375,9 @@ fn validate_output_path(path: &str) -> Result<(), ProtoError> {
             .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_' | b'.'));
         if !all_safe {
             return Err(ProtoError::InvalidProjectConfig(
-                "output path contains unsupported characters",
+                "site path contains unsupported characters",
             ));
         }
-    }
-    Ok(())
-}
-
-fn validate_document_entry(entry: &str) -> Result<(), ProtoError> {
-    if entry.is_empty() {
-        return Err(ProtoError::InvalidProjectConfig("document entry is empty"));
-    }
-    if entry.starts_with('/') || entry.ends_with('/') || entry.contains('\\') {
-        return Err(ProtoError::InvalidProjectConfig(
-            "document entry must be a relative markdown path",
-        ));
-    }
-    if !entry.ends_with(".md") {
-        return Err(ProtoError::InvalidProjectConfig(
-            "document entry must end with .md",
-        ));
-    }
-    // Bounded by MAX_PROJECT_OUTPUT_PATH_BYTES because entry lives inside the
-    // same Project Output path namespace.
-    validate_output_path(entry)
-}
-
-fn validate_start_command(start: &str) -> Result<(), ProtoError> {
-    if start.is_empty() {
-        return Err(ProtoError::InvalidProjectConfig("app start is empty"));
-    }
-    if start.len() > MAX_START_COMMAND_BYTES as usize {
-        return Err(ProtoError::InvalidProjectConfig("app start is too long"));
-    }
-    if start.trim() != start {
-        return Err(ProtoError::InvalidProjectConfig(
-            "app start must not have leading or trailing whitespace",
-        ));
-    }
-    if !start.bytes().all(|byte| (0x20..=0x7e).contains(&byte)) {
-        return Err(ProtoError::InvalidProjectConfig(
-            "app start must be one printable ASCII command line",
-        ));
-    }
-    let first = start.split_whitespace().next().unwrap_or("");
-    if !matches!(first, "node" | "bun" | "uv") {
-        return Err(ProtoError::InvalidProjectConfig(
-            "app start must begin with node, bun, or uv",
-        ));
     }
     Ok(())
 }
@@ -353,30 +387,74 @@ mod tests {
     use super::*;
 
     fn valid_config() -> ProjectConfig {
-        let mut outputs = BTreeMap::new();
-        outputs.insert(
-            "mockup".to_string(),
-            ProjectOutputConfig {
-                kind: ProjectOutputKind::Site,
-                site_name: Some("finitechat-native-mockup".to_string()),
-                document_name: None,
-                branch: "main".to_string(),
-                path: ".".to_string(),
-                entry: None,
-                spa: false,
-                start: None,
-            },
-        );
         ProjectConfig {
             project: ProjectSection {
                 slug: "finitechat-native".to_string(),
             },
-            outputs,
+            site: Some(ProjectSiteConfig {
+                name: Some("finitechat-native-mockup".to_string()),
+                branch: "main".to_string(),
+                path: ".".to_string(),
+                spa: false,
+            }),
+            outputs: BTreeMap::new(),
         }
     }
 
     #[test]
-    fn parses_and_round_trips_minimal_schema() {
+    fn parses_and_round_trips_static_site_schema() {
+        let raw = r#"
+[project]
+slug = "finitechat-native"
+
+[site]
+name = "finitechat-native-mockup"
+branch = "main"
+path = "."
+spa = false
+"#;
+        let parsed = parse_project_config_toml(raw).unwrap();
+        assert_eq!(parsed, valid_config());
+        let encoded = parsed.to_toml_string().unwrap();
+        assert!(encoded.contains("[project]"));
+        assert!(encoded.contains("[site]"));
+        assert!(!encoded.contains("[outputs."));
+    }
+
+    #[test]
+    fn site_name_defaults_to_project_slug() {
+        let raw = r#"
+[project]
+slug = "finitechat-native"
+
+[site]
+branch = "main"
+path = "."
+"#;
+        let parsed = parse_project_config_toml(raw).unwrap();
+        assert_eq!(
+            parsed.normalized_site().unwrap().unwrap().name,
+            "finitechat-native"
+        );
+    }
+
+    #[test]
+    fn project_only_config_is_a_bare_project_repository() {
+        let raw = r#"
+[project]
+slug = "finite-skills"
+"#;
+        let parsed = parse_project_config_toml(raw).unwrap();
+        assert_eq!(parsed.project.slug, "finite-skills");
+        assert!(parsed.site.is_none());
+        let encoded = parsed.to_toml_string().unwrap();
+        assert!(encoded.contains("[project]"));
+        assert!(!encoded.contains("[site]"));
+        assert!(!encoded.contains("[outputs."));
+    }
+
+    #[test]
+    fn parses_legacy_static_output_as_deprecated_input() {
         let raw = r#"
 [project]
 slug = "finitechat-native"
@@ -390,74 +468,10 @@ spa = false
 "#;
         let parsed = parse_project_config_toml(raw).unwrap();
         assert_eq!(parsed, valid_config());
-        let encoded = parsed.to_toml_string().unwrap();
-        assert!(encoded.contains("[project]"));
-        assert!(encoded.contains("[outputs.mockup]"));
-    }
-
-    #[test]
-    fn project_only_config_is_a_bare_project_repository() {
-        let raw = r#"
-[project]
-slug = "finite-skills"
-"#;
-        let parsed = parse_project_config_toml(raw).unwrap();
-        assert_eq!(parsed.project.slug, "finite-skills");
         assert!(parsed.outputs.is_empty());
         let encoded = parsed.to_toml_string().unwrap();
-        assert!(encoded.contains("[project]"));
-        assert!(!encoded.contains("[outputs."));
-    }
-
-    #[test]
-    fn parses_document_output_schema() {
-        let raw = r#"
-[project]
-slug = "hermes-notes"
-
-[outputs.doc]
-kind = "document"
-document_name = "hermes"
-branch = "main"
-path = "docs"
-entry = "start.md"
-"#;
-        let parsed = parse_project_config_toml(raw).unwrap();
-        let output = parsed.outputs.get("doc").unwrap();
-        assert_eq!(output.kind, ProjectOutputKind::Document);
-        assert_eq!(output.routing_name().unwrap(), "hermes");
-        assert_eq!(output.normalized_entry(), Some("start.md"));
-        assert!(!output.spa);
-
-        let encoded = parsed.to_toml_string().unwrap();
-        assert!(encoded.contains("kind = \"document\""));
-        assert!(encoded.contains("document_name = \"hermes\""));
-    }
-
-    #[test]
-    fn parses_app_output_schema() {
-        let raw = r#"
-[project]
-slug = "tiny-crm"
-
-[outputs.web]
-kind = "app"
-site_name = "tiny-crm"
-branch = "main"
-path = "app"
-start = "bun server.ts"
-"#;
-        let parsed = parse_project_config_toml(raw).unwrap();
-        let output = parsed.outputs.get("web").unwrap();
-        assert_eq!(output.kind, ProjectOutputKind::App);
-        assert_eq!(output.routing_name().unwrap(), "tiny-crm");
-        assert_eq!(output.normalized_start(), Some("bun server.ts"));
-        assert_eq!(output.normalized_entry(), None);
-        assert!(!output.spa);
-
-        let encoded = parsed.to_toml_string().unwrap();
-        assert!(encoded.contains("kind = \"app\""));
-        assert!(encoded.contains("start = \"bun server.ts\""));
+        assert!(encoded.contains("[site]"));
+        assert!(!encoded.contains("[outputs.mockup]"));
     }
 
     #[test]
@@ -467,9 +481,8 @@ start = "bun server.ts"
 slug = "finitechat-native"
 extra = "nope"
 
-[outputs.mockup]
-kind = "site"
-site_name = "finitechat-native-mockup"
+[site]
+name = "finitechat-native-mockup"
 branch = "main"
 path = "."
 "#;
@@ -479,7 +492,7 @@ path = "."
         ));
 
         let mut config = valid_config();
-        config.outputs.get_mut("mockup").unwrap().branch = "../main".to_string();
+        config.site.as_mut().unwrap().branch = "../main".to_string();
         assert_eq!(
             config.validate(),
             Err(ProtoError::InvalidProjectConfig(
@@ -488,22 +501,11 @@ path = "."
         );
 
         let mut config = valid_config();
-        config.outputs.get_mut("mockup").unwrap().path = "node_modules".to_string();
+        config.site.as_mut().unwrap().path = "node_modules".to_string();
         assert_eq!(
             config.validate(),
             Err(ProtoError::InvalidProjectConfig(
-                "output path targets a forbidden directory"
-            ))
-        );
-
-        let mut config = valid_config();
-        let output = config.outputs.get_mut("mockup").unwrap();
-        output.kind = ProjectOutputKind::Document;
-        output.document_name = Some("hermes".to_string());
-        assert_eq!(
-            config.validate(),
-            Err(ProtoError::InvalidProjectConfig(
-                "document output must not set site_name"
+                "site path targets a forbidden directory"
             ))
         );
 
@@ -519,7 +521,9 @@ path = "app"
 "#;
         assert_eq!(
             parse_project_config_toml(raw),
-            Err(ProtoError::InvalidProjectConfig("app output needs start"))
+            Err(ProtoError::InvalidProjectConfig(
+                "static-only Sites does not support app outputs"
+            ))
         );
 
         let raw = r#"
@@ -536,7 +540,7 @@ start = "python app.py"
         assert_eq!(
             parse_project_config_toml(raw),
             Err(ProtoError::InvalidProjectConfig(
-                "app start must begin with node, bun, or uv"
+                "static-only Sites does not support app outputs"
             ))
         );
 
@@ -554,7 +558,30 @@ entry = "start.html"
         assert_eq!(
             parse_project_config_toml(raw),
             Err(ProtoError::InvalidProjectConfig(
-                "document entry must end with .md"
+                "static-only Sites does not support document outputs"
+            ))
+        );
+
+        let raw = r#"
+[project]
+slug = "multi"
+
+[outputs.one]
+kind = "site"
+site_name = "multi-one"
+branch = "main"
+path = "one"
+
+[outputs.two]
+kind = "site"
+site_name = "multi-two"
+branch = "main"
+path = "two"
+"#;
+        assert_eq!(
+            parse_project_config_toml(raw),
+            Err(ProtoError::InvalidProjectConfig(
+                "static-only Sites supports at most one Project Site"
             ))
         );
     }

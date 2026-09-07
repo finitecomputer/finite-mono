@@ -31,7 +31,7 @@ pub struct EmailRedeemResponse {
 }
 
 /// Sites Authorized Key mutations carry a fresh daemon-local email proof:
-/// the single-use token delivered by `/api/v1/email-auth/request`.
+/// the single-use token delivered by `/api/v2/email-auth/request`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SitesAuthorizedKeyRegisterRequest {
     pub email: String,
@@ -57,8 +57,8 @@ pub struct SitesAuthorizedKeyResponse {
 /// verified account email. This never creates or changes a Site share.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct VerifiedEmailViewerSessionRequest {
-    /// Exact canonical root URL of an existing Site or Document output.
-    pub output_url: String,
+    /// Exact canonical root URL of an existing Site.
+    pub site_url: String,
     /// Email verified by the calling account boundary.
     pub verified_email: String,
     /// Same-origin path to visit after the magic-link token is redeemed.
@@ -79,7 +79,7 @@ pub struct AuthRegisterResponse {
     pub principal_id: String,
     pub grant_source: String,
     pub registered: bool,
-    pub output_limit: u32,
+    pub site_limit: u32,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -112,9 +112,10 @@ pub struct SharingResponse {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ProjectOutputSharingResponse {
+pub struct ProjectSiteSharingResponse {
     pub project_slug: String,
-    pub output_id: String,
+    pub site_name: String,
+    pub site_url: String,
     pub visibility: String,
     pub shared_emails: Vec<String>,
     #[serde(default)]
@@ -130,9 +131,6 @@ pub struct SiteSummary {
     pub url: String,
     pub status: String,
     pub visibility: String,
-    /// "static" or "app". Defaulted for wire-compat with older peers.
-    #[serde(default)]
-    pub kind: String,
     pub active_version: Option<u32>,
     pub shared_emails: Vec<String>,
     #[serde(default)]
@@ -154,7 +152,9 @@ pub struct NativeViewerSessionRequest {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct NativeViewerSessionExchangeRequest {
-    pub output_url: String,
+    /// Deprecated wire alias: legacy dashboard deployments send `output_url`.
+    #[serde(alias = "output_url")]
+    pub site_url: String,
     pub authorization: String,
     pub signed_body: String,
 }
@@ -177,7 +177,7 @@ pub struct ProjectInitRequest {
     #[serde(default)]
     pub dry_run: bool,
     /// The authenticated human requester who should receive the initial,
-    /// revocable Native Principal viewer Share on every Project Output.
+    /// revocable Native Principal viewer Share on the Project Site.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub requesting_user_npub: Option<String>,
     /// Mailbox that owns the Sites Project. The server accepts it only when
@@ -232,7 +232,7 @@ pub struct ProjectInitResponse {
     pub project_visibility: String,
     pub git_remote_url: String,
     pub finite_toml: String,
-    pub outputs: Vec<ProjectOutputSummary>,
+    pub site: Option<ProjectSiteSummary>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub requesting_user_npub: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -240,32 +240,15 @@ pub struct ProjectInitResponse {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ProjectOutputSummary {
-    pub output_id: String,
-    pub kind: String,
-    /// Kind-scoped routing name. For `site` and `app`, this is the Site Name.
-    /// For `document`, this is the Document Name.
-    #[serde(default)]
-    pub output_name: String,
-    #[serde(default)]
-    pub output_url: String,
-    /// Backward-compatible alias for site/app outputs. For document outputs
-    /// this carries the Document Name until older agents move to output_name.
-    pub site_name: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub document_name: Option<String>,
+pub struct ProjectSiteSummary {
+    pub name: String,
+    pub url: String,
     pub site_id: Option<String>,
-    /// Backward-compatible alias for output_url.
-    pub site_url: String,
     pub status: String,
     pub visibility: String,
     pub active_version: Option<u32>,
     pub branch: String,
     pub path: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub entry: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub start: Option<String>,
     pub spa: bool,
     pub created: bool,
     #[serde(default)]
@@ -315,7 +298,7 @@ pub struct ProjectStatusResponse {
     pub project_visibility: String,
     pub git_remote_url: String,
     pub role: String,
-    pub outputs: Vec<ProjectOutputSummary>,
+    pub site: Option<ProjectSiteSummary>,
     pub collaborators: Vec<ProjectCollaboratorSummary>,
 }
 
@@ -331,7 +314,7 @@ pub struct ProjectListItem {
     pub project_visibility: String,
     pub git_remote_url: String,
     pub role: String,
-    pub outputs: Vec<ProjectOutputSummary>,
+    pub site: Option<ProjectSiteSummary>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

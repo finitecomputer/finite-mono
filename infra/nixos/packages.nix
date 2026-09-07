@@ -418,6 +418,28 @@ rec {
       "finite-sites/crates/finitesitesd"
     ];
   };
+  finitesitesd-legacy-canonical = pkgs.stdenvNoCC.mkDerivation {
+    pname = "finitesitesd-legacy-canonical";
+    version = "0.5.2";
+    src = pkgs.fetchurl {
+      url = "https://github.com/finitecomputer/finite-releases/releases/download/fsite/v0.5.2/finitesitesd-linux-x86_64.tar.gz";
+      hash = "sha256-GDenHRZ/A1EEOxDpK23vMjjKbTjmoC9ItI18Xl8vo74=";
+    };
+    dontUnpack = true;
+    installPhase = ''
+      mkdir -p "$out/bin"
+      tar -xzf "$src" -C "$out/bin" finitesitesd
+      chmod 0555 "$out/bin/finitesitesd"
+    '';
+    passthru = {
+      sourceTag = "fsite/v0.5.2";
+      sourceSha = "841eb99b3ab0f3814a44765c65fb951c5c106c2a";
+    };
+    meta = {
+      mainProgram = "finitesitesd";
+      platforms = [ "x86_64-linux" ];
+    };
+  };
   # Crate finite-brain-app; the installed bin is named finite-brain.
   finite-brain = mkWorkspaceCrate {
     pname = "finite-brain";

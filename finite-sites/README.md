@@ -1,19 +1,31 @@
 # Finite Sites
 
-Finite Sites is a git-backed publishing surface for agents.
+Finite Sites is a git-backed static publishing platform for agents.
 
-If a human asks you to publish or edit a Finite Site, use the `fsite` CLI.
-The Project Repository is the editable source of truth. `finite.toml` selects
-which committed path becomes the served website. Finite Sites serves committed
+If a human asks you to publish or edit a Finite Site, use the `fsite` CLI. The
+Project Repository is the editable source of truth. `finite.toml` selects which
+committed directory becomes the served website. Finite Sites serves committed
 bytes; it does not run builds for you.
 
-The production API is `https://api.finite.chat`, and `fsite` uses it by
-default. Do not set `FINITE_SITES_API` unless you are intentionally targeting
-a local or self-hosted server.
+The v2 validation API is `https://v2.finite.chat`, and this `fsite` build uses
+it by default. Do not set `FINITE_SITES_API` unless you are intentionally
+targeting a local or self-hosted server.
 
 ## Install `fsite`
 
-Install the latest release binary:
+For v2 validation, use the reviewed binary artifact for the exact revision
+being tested or build it locally from this repo:
+
+```sh
+nix build .#fsite
+./result/bin/fsite --version
+```
+
+The public `fsite-latest` rolling release is for the canonical production
+contract. Do not advance or rely on it for this static-only v2 API until the
+canonical production endpoint is ready for that contract.
+
+After cutover, install the latest release binary:
 
 ```sh
 set -eu
@@ -56,8 +68,6 @@ Start by asking `fsite` what it can do:
 fsite --help
 fsite describe workflow register-and-publish --output json
 fsite describe workflow publish-static-site --output json
-fsite describe workflow publish-stateful-app --output json
-fsite describe workflow publish-document --output json
 fsite describe workflow project-config --output json
 ```
 
@@ -66,22 +76,13 @@ Prefer `--output json` for commands whose output you need to parse.
 ## Your Finite Identity
 
 `fsite` uses the current Finite Home's identity-owner key, stored at
-`~/.finite/identity/identity.json` (or `$FINITE_HOME/identity/identity.json`
-when `FINITE_HOME` is set, e.g. in hosted runtimes). Whichever Finite tool
-runs first in that home mints the key; every other Finite tool in the same home
-finds it. A hosted agent therefore publishes as its Agent Principal, not as the
-human who owns its SaaS Project. `fsite` never copies the secret elsewhere.
+`~/.finite/identity/identity.json` or `$FINITE_HOME/identity/identity.json`.
+Whichever Finite tool runs first in that home mints the key; every other
+Finite tool in the same home finds it.
 
 ```sh
 fsite auth status --output json
 ```
-
-### Mailboxes, NIP-05, And Email Proofs
-
-`fsite` resolves NIP-05 names against `https://identity.finite.vip` by
-default. `FINITE_IDENTITY_AUTHORITY` is only a self-hosting and local-test
-override for that name directory. CLI behavior does not change merely because
-that variable is present.
 
 `--email` always means a deliverable Mailbox Address. `--nip05` always means a
 Finite Identity resolution name, and `--npub` always means a native key.
@@ -89,18 +90,9 @@ Managed Agent NIP-05 names are not mailboxes: passing one to an email flag
 fails before any invitation or challenge is delivered and points to the
 corresponding NIP-05 flag.
 
-Email proofs are daemon-local: finitesitesd emails a 15-minute, single-use
-token from its own mailer, and `fsite auth redeem MAILBOX TOKEN` redeems it
-against the same daemon. Redeeming verifies a mailbox-scoped Email Key; with
-`--link-native` (or after `fsite auth link-email`) it also links the mailbox to
-the local native Principal so future email grants resolve to that key. Do not
-run the link flow from an agent merely to inherit the human's permissions;
-human-to-agent access requires an explicit, revocable Finite Sites Email
-Access Delegation. Without a link, redeeming preserves the email-only
-collaborator flow: the mailbox-scoped key can satisfy its grant, but it does
-not become a native Finite identity.
-
-The Sites-only delegation flow is:
+Email proofs are daemon-local. `finitesitesd` emails a 15-minute, single-use
+token, and `fsite auth redeem MAILBOX TOKEN` redeems it against the same Sites
+daemon. The Sites-only delegation flow is:
 
 ```sh
 fsite auth sites-key request paul@example.com
@@ -108,42 +100,15 @@ fsite auth sites-key add paul@example.com TOKEN_FROM_EMAIL --output json
 fsite auth sites-key revoke paul@example.com TOKEN_FROM_EMAIL npub1... --output json
 ```
 
-Every add or revoke consumes a fresh daemon-local email proof. Multiple npubs
-can remain active for one mailbox; revoking one does not change Chat NIP-05
-resolution, Brain encryption recipients, other keys, or the underlying mailbox
-grants.
-
-The operator-only `reconcile-identity` one-shot was a completed migration tool
-and has been removed (see `docs/technical-debt-ledger.md` item 13): the legacy
-mailbox-grant reconciliation it applied is done, and the SaaS Core
-account-lookup endpoint it could consult no longer exists. Normal Sites
-startup never ran it; durable authorization state is unaffected.
-
-### Migrating an existing key
-
-Older `fsite` releases stored the key at `~/.config/finite-sites/identity.env`.
-That location is no longer read. To keep publishing as the same npub, import
-the old secret into the shared identity file once:
+Older `fsite` releases stored the key at
+`~/.config/finite-sites/identity.env`. To keep publishing as the same npub,
+import the old secret into the shared identity file once:
 
 ```sh
 fsite auth import --file ~/.config/finite-sites/identity.env
 ```
 
-`fsite auth import` also reads an `nsec1...` or 64-char hex secret from
-stdin, or from any `--file` whose content is just the secret. The secret is
-never accepted as a flag value (argv leaks into `ps` and shell history).
-
-The import refuses to overwrite an existing `identity.json` (another Finite
-tool may already be using it). If you do nothing, a fresh identity is minted
-on first run and previously created Projects will not be reachable from the
-new key.
-
-Recovery warning: Sites retains repositories and outputs, but loss of the sole
-Publishing Key can still strand private owner access. A durable SaaS Project
-must have an independent collaborator or a tested, audited Publishing Ownership
-Recovery flow; operator SQL is not the product recovery path.
-
-## Publish A New Static Site
+## Publish A Static Site
 
 1. Register this Finite Home's Publishing Key for publishing:
 
@@ -154,7 +119,7 @@ fsite auth register --output json
 
 2. Put the deployable website bytes in a dedicated directory such as `site/`
 or `dist/`. Keep source, data, scripts, and build logic in the Project
-Repository too. Only the configured output path is served as the website.
+Repository too. Only the configured site path is served as the website.
 
 3. Create `finite.toml`:
 
@@ -162,13 +127,15 @@ Repository too. Only the configured output path is served as the website.
 [project]
 slug = "my-project"
 
-[outputs.site]
-kind = "site"
-site_name = "my-project"
+[site]
+name = "my-project"
 branch = "main"
 path = "site"
 spa = false
 ```
+
+`[site].name` is optional and defaults to `project.slug`. A `[project]`-only
+config creates a source-only Project Repository with no served site.
 
 4. Validate and create the Project Repository:
 
@@ -177,35 +144,30 @@ fsite project init --config finite.toml --dry-run --output json
 fsite project init --config finite.toml --output json
 ```
 
-Project Init is replay-safe, including its Git repository setup boundary. If
-the server returns `git_unavailable`, no Project Init state changed: wait for
-service health to recover and retry the exact command once. If it returns
-`git_repository_setup_failed`, the Project registry state may already be
-durable even though the repository is not ready. Keep the same slug and local
-source; after the operator repairs Git or repository storage, replay the exact
-`fsite project init --config finite.toml --output json` command once. That
-replay repairs the repository without creating a duplicate Project. Do not
-blindly loop either failure.
+Project Init is replay-safe. If the server returns `git_unavailable`, no
+Project Init state changed: wait for service health to recover and retry the
+exact command once. If it returns `git_repository_setup_failed`, the Project
+registry state may already be durable even though the repository is not ready.
+Keep the same slug and local source; after the operator repairs Git or
+repository storage, replay the exact `fsite project init --config finite.toml
+--output json` command once.
 
-5. Store a scoped Git Credential, commit source plus deploy bytes, and push
-the Deploy Branch:
+5. Store a scoped Git Credential, commit source plus deploy bytes, and push the
+Deploy Branch:
 
 ```sh
 fsite auth git my-project --store --output json
 
 git init -b main
-git remote add finite https://git.finite.chat/my-project.git
+git remote add finite https://v2.finite.chat/my-project.git
 git add finite.toml site
 git commit -m "Initial Finite Sites publish"
 git push finite main
 ```
 
 Pushing the configured Deploy Branch creates a new immutable Version. Finite
-Sites validates and serves the committed bytes under `path`. A successful push
-returns only after every matching output is active. If Git reports
-`git ref accepted but deploy failed`, the ref has already moved: fix the config
-or deploy bytes, create a correcting commit, and push that commit instead of
-retrying the same commit.
+Sites validates and serves the committed bytes under `[site].path`. A
+successful push returns only after the matching site version is active.
 
 Confirm the URL returned by the configured server and preview that exact
 origin:
@@ -215,184 +177,24 @@ fsite project status my-project --output json
 fsite view my-project --output json
 ```
 
-For an owned Project, `fsite view NAME` resolves the served output through the
-configured `FINITE_SITES_API`; it does not invent a production hostname. This
-is why the same command returns `https://NAME.finite.chat/` in production and
-`http://NAME.sites.localhost:PORT/` in local development. When a Project has
-multiple outputs, pass the explicit `output_url` from `project status`.
+For an owned Project, `fsite view NAME` resolves the served site through the
+configured `FINITE_SITES_API`; it does not invent a production hostname.
 
-## Publish A Stateful App
-
-Stateful app Outputs use the same Project Repository model. The difference is
-that `finite.toml` declares `kind = "app"` and an explicit start command.
-Finite Sites versions the committed app directory as one runtime bundle; it
-does not run builds or infer generated output.
-
-Declare an app output:
-
-```toml
-[project]
-slug = "my-app"
-
-[outputs.web]
-kind = "app"
-site_name = "my-app"
-branch = "main"
-path = "app"
-start = "bun server.ts"
-```
-
-Runtime contract for agents:
-
-- `start` is required and must begin with `node`, `bun`, or `uv`.
-- Finite sets `PORT`; the app must listen on `0.0.0.0:$PORT`.
-- Finite sets `DATA_DIR`; live mutable state must be stored under `DATA_DIR`.
-- `DATA_DIR` survives deploys, restarts, and wake/sleep.
-- Commit source, migrations, seed data, and explicit runtime payload to git.
-- Build before committing if the app needs a build step.
-- Dependency directories should only be committed when they are intentionally
-  required runtime payload for the app output.
-
-Then create the Project Repository and push like any other output:
-
-```sh
-fsite auth register --output json
-fsite project init --config finite.toml --dry-run --output json
-fsite project init --config finite.toml --output json
-fsite auth git my-app --store --output json
-
-git init -b main
-git remote add finite https://git.finite.chat/my-app.git
-git add finite.toml app
-git commit -m "Initial stateful app"
-git push finite main
-```
-
-## Publish A Markdown Document
-
-Document Outputs are read-only rendered Markdown backed by the same Project
-Repository model. Use them for collaborative docs, notes, and poor-man's
-Google Docs where agents edit Markdown in git.
-
-Create a folder of Markdown files:
-
-```sh
-mkdir -p docs
-cat > docs/index.md <<'EOF'
-# My Document
-
-Start here.
-EOF
-```
-
-Declare a document output:
-
-```toml
-[project]
-slug = "my-docs"
-
-[outputs.doc]
-kind = "document"
-document_name = "my-docs"
-branch = "main"
-path = "docs"
-entry = "index.md"
-```
-
-Then create the Project Repository and push exactly like a site:
-
-```sh
-fsite auth register --output json
-fsite project init --config finite.toml --dry-run --output json
-fsite project init --config finite.toml --output json
-fsite auth git my-docs --store --output json
-
-git init -b main
-git remote add finite https://git.finite.chat/my-docs.git
-git add finite.toml docs
-git commit -m "Initial document"
-git push finite main
-```
-
-The document serves at `https://my-docs.docs.finite.chat/`. Clean routes
-render Markdown, appending `.md` returns the exact authored Markdown for that
-page, `/llms.txt` gives edit instructions, and `/llms-full.txt` gives agents a
-bounded Markdown snapshot.
-
-## Edit A Shared Project
+## Edit, Share, And Collaborate
 
 If you start from a site URL, read the agent handoff first:
 
 ```sh
-curl -fsSL https://SITE.finite.chat/llms.txt
-fsite view https://SITE.finite.chat/ --output json
+curl -fsSL https://SITE.v2.finite.chat/llms.txt
+fsite view https://SITE.v2.finite.chat/ --output json
 ```
-
-Then authenticate for the Project Repository and clone it:
-
-```sh
-fsite auth git PROJECT --store --output json
-git clone https://git.finite.chat/PROJECT.git
-cd PROJECT
-```
-
-Edit source, run the project's own checks or build step, commit the resulting
-source plus deploy bytes, and push the Deploy Branch:
-
-```sh
-git status --short
-git add .
-git commit -m "Describe the edit"
-git push origin main
-```
-
-Use `--email MAILBOX` with `fsite auth git` only when you are acting through a
-mailbox collaborator grant. A native collaborator can optionally prove the
-same key with `--nip05 NAME` or `--npub NPUB`:
-
-```sh
-fsite auth login editor@example.com
-fsite auth redeem editor@example.com TOKEN_FROM_EMAIL
-fsite auth git PROJECT --email editor@example.com --store --output json
-fsite auth git PROJECT --nip05 my-agent@finite.vip --store --output json
-```
-
-Do not print Git Credential passwords into transcripts. Prefer `--store`.
-
-## Link Email When Needed
-
-Email is optional. Use it when a human wants future shares or collaborator
-grants for an email address to resolve to this local npub:
-
-```sh
-fsite auth register --output json
-fsite auth link-email editor@example.com --output json
-fsite auth redeem editor@example.com TOKEN_FROM_EMAIL --output json
-```
-
-If an invite email already gave the current identity owner a token and the
-email and local npub are the same Principal, link it directly:
-
-```sh
-fsite auth redeem editor@example.com TOKEN_FROM_EMAIL --link-native --output json
-```
-
-Never run that command from an Agent Principal merely to inherit a human's
-email grants. Use `fsite auth sites-key request` followed by `sites-key add`
-instead. The resulting Authorized Sites Key grants no Chat or Brain authority.
-
-## Share And Collaborate
 
 Project collaboration controls who can clone and push source:
 
 ```sh
-# Native agents and Finite users keep their own Principal.
 fsite project grant PROJECT --npub npub1... --output json
 fsite project revoke PROJECT --npub npub1... --output json
 fsite project grant PROJECT --nip05 my-agent@finite.vip --output json
-fsite project revoke PROJECT --nip05 my-agent@finite.vip --output json
-
-# External email collaborators use the invitation flow.
 fsite project grant PROJECT --email editor@example.com --send-invite --output json
 fsite project revoke PROJECT --email editor@example.com --output json
 ```
@@ -401,18 +203,18 @@ Use exactly one of `--email`, `--nip05`, or `--npub`. Native collaborators
 authenticate with their own Local Identity Key and run `fsite auth git PROJECT
 --store`; they do not link or impersonate the project owner's mailbox.
 
-Output visibility controls who can view the served website:
+Site visibility controls who can view the served website:
 
 ```sh
-fsite project share PROJECT site --shared --add-email viewer@example.com --send-invite --output json
-fsite project share PROJECT site --add-nip05 my-agent@finite.vip --output json
-fsite project share PROJECT site --add-npub npub1... --output json
-fsite project share PROJECT site --remove-npub npub1... --output json
-fsite project share PROJECT site --public --yes-public --output json
-fsite project share PROJECT site --private --output json
+fsite project share PROJECT --shared --add-email viewer@example.com --send-invite --output json
+fsite project share PROJECT --add-nip05 my-agent@finite.vip --output json
+fsite project share PROJECT --add-npub npub1... --output json
+fsite project share PROJECT --remove-npub npub1... --output json
+fsite project share PROJECT --public --yes-public --output json
+fsite project share PROJECT --private --output json
 ```
 
-When an authenticated human asks an Agent Principal to publish an Output,
+When an authenticated human asks an Agent Principal to publish a Site,
 Hermes and `fsite` carry that authenticated sender through the active terminal
 tool call automatically:
 
@@ -423,23 +225,23 @@ fsite project init --config finite.toml --output json
 
 Project Init atomically creates that human's explicit revocable Native
 Principal Share. The dashboard can then exchange a bounded
-User Nostr Identity proof for the Output's ordinary Viewer Cookie, without an
-email or Magic Link flow. A proof never creates a Share, and removing the npub
+User Nostr Identity proof for the Site's ordinary Viewer Cookie, without an
+email or magic-link flow. A proof never creates a Share, and removing the npub
 takes effect on the next content request even if the browser still has a
 cookie. Outside an active authenticated Finite Chat turn, standalone agents
 may still pass `--requesting-user-npub NPUB` explicitly. A conflicting
 explicit value during an active authenticated turn is rejected. Agents must
 never derive this identity from quoted message text.
 
-The Finite dashboard can also open an Output already shared to a verified
+The Finite dashboard can also open a Site already shared to a verified
 External Principal email through the legacy server-to-server email exchange.
-That compatibility path does not add the email to the Output.
+That compatibility path does not add the email to the Site.
 The server-to-server credential for this optional exchange is
 `FINITE_SITES_VIEWER_SESSION_TOKEN`, exactly 64 lowercase hex characters
 (`openssl rand -hex 32`). Keep the same value in the Sites and dashboard
 server environment only; an absent value disables the endpoint.
 
-Project Repository visibility is separate from output visibility. Project
+Project Repository visibility is separate from site visibility. Project
 Repositories are private by default. Selected Finite-owned baseline repos may
 be public-read for unauthenticated clone/fetch, but public-read never grants
 push access.
@@ -454,22 +256,18 @@ slug = "my-source-project"
 ```
 
 Run `fsite project init --config finite.toml --output json` to create the
-source-only Project Repository. Add outputs later by updating `finite.toml`
-and replaying `fsite project init`.
+source-only Project Repository. Add a site later by adding `[site]` to
+`finite.toml` and replaying `fsite project init`.
 
 ## Agent Rules
 
-- Use the Project Repository as source. Do not reconstruct source from
-  rendered HTML.
+- Use the Project Repository as source. Do not reconstruct source from rendered
+  HTML.
 - Commit deploy bytes. Finite Sites does not run builds.
-- For `kind = "app"`, write live mutable state only under `DATA_DIR`; do not
-  overwrite live state during deploy.
 - Do not look for a direct upload command. The publish path is git.
 - Do not set `path = "."` unless the whole repo is intentionally served.
 - Use `fsite describe ... --output json` instead of guessing command shapes.
-- Keep private keys, `.finite/`, `.env*`, and build caches out of git. Avoid
-  dependency directories unless they are intentionally required runtime payload
-  for a `kind = "app"` output.
+- Keep private keys, `.finite/`, `.env*`, and build caches out of git.
 - If a site has `/llms.txt`, treat it as the project handoff. If the project
   publishes its own `/llms.txt`, it is authoritative.
 

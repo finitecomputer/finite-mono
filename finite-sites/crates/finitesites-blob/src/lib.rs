@@ -48,8 +48,7 @@ impl BlobStore {
 
     /// Store bytes, verifying they hash to `expected_sha256`. Idempotent:
     /// storing an existing blob succeeds without rewriting it. `max_bytes`
-    /// is the caller's ceiling: MAX_FILE_BYTES for static assets,
-    /// MAX_APP_BUNDLE_BYTES for app bundles.
+    /// is the caller's explicit ceiling.
     pub fn put(
         &self,
         expected_sha256: &str,
@@ -120,7 +119,7 @@ impl BlobStore {
     }
 
     /// Filesystem location of a stored blob, for callers that stream large
-    /// blobs (app bundle extraction) instead of loading them.
+    /// blobs instead of loading them.
     pub fn file_path(&self, sha256: &str) -> PathBuf {
         self.blob_path(sha256)
     }
