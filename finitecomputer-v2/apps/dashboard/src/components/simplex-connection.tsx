@@ -17,12 +17,12 @@ export function SimplexConnection({ status, loaded, busy, mutate, refresh }: {
   const paired = Boolean(status?.approved.length);
   return <ConnectionCard
     name="SimpleX"
-    description="A private conversation with your agent. Pair your phone to get started."
+    description={paired ? "A private conversation with your agent." : "A private conversation with your agent. Pair your phone to get started."}
     icon={<LockKeyholeIcon className="size-5" />}
     state={!status ? "unavailable" : status.enabled && status.ready && paired ? "connected" : "disconnected"}
     account={status?.enabled ? paired ? status.approved.map(p => p.name || `Contact ${p.user_id}`).join(", ") : "Waiting for approval" : null}
     error={loaded && !status ? "Update your agent runtime to set up SimpleX." : status?.enabled && !status.ready ? "SimpleX is starting or temporarily unavailable. Refresh to check again." : null}
-    footer={status?.enabled ? <div className="space-y-4">
+    footer={status?.enabled && !paired ? <div className="space-y-4">
       {status.address ? <div className="flex flex-col gap-5 sm:flex-row sm:items-center">
         <SimplexQr rows={status.qr} />
         <div className="space-y-3 text-sm">
@@ -53,7 +53,6 @@ export function SimplexConnection({ status, loaded, busy, mutate, refresh }: {
           </div>)}
         </> : <p className="text-sm text-muted-foreground">No pending requests. Connect in SimpleX and send a message; your request will appear here.</p>}
       </div>
-      {paired ? <p className="text-sm text-muted-foreground">Contact approved. Send another message in SimpleX to test the conversation.</p> : null}
       <p className="text-xs text-muted-foreground">Disconnect pauses SimpleX. Your identity, contacts, and history are retained.</p>
     </div> : null}
   >
