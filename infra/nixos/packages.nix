@@ -425,12 +425,23 @@ rec {
       url = "https://github.com/finitecomputer/finite-releases/releases/download/fsite/v0.5.3/finitesitesd-linux-x86_64.tar.gz";
       hash = "sha256-uw2RFWLzGRRJuVFGoMWlrc0wUt0AorQ4vTfS2tcbbx8=";
     };
+    # The release tarball is built on an Ubuntu runner and links against its
+    # glibc (interpreter /lib64/ld-linux-x86-64.so.2, libgcc_s/libc/libm),
+    # none of which exist on NixOS: the daemon exited 127 at first launch
+    # (2026-09-07). autoPatchelf rebinds the interpreter and library rpath
+    # into the nix store.
+    nativeBuildInputs = [ pkgs.autoPatchelfHook ];
+    buildInputs = [ pkgs.glibc pkgs.libgcc ];
     dontUnpack = true;
     installPhase = ''
       mkdir -p "$out/bin"
       tar -xzf "$src" -C "$out/bin" finitesitesd
       chmod 0555 "$out/bin/finitesitesd"
     '';
+    # Execute the binary at build time so a loader/linkage regression fails
+    # the build instead of the production unit.
+    doInstallCheck = true;
+    installCheckPhase = "$out/bin/finitesitesd --version";
     passthru = {
       sourceTag = "fsite/v0.5.3";
       # Release-prep commit on release/fsite-0.5.3: the deploy-2 revision
