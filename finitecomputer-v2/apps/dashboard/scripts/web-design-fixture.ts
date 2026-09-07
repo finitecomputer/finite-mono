@@ -3,6 +3,7 @@ import { once } from "node:events";
 import fs from "node:fs";
 import http, { type IncomingMessage, type ServerResponse } from "node:http";
 import path from "node:path";
+import { NativeSimplex } from "./native-simplex";
 
 const MACHINE_ID = "web-design-fixture";
 const RUNTIME_ID = "runtime_web_design";
@@ -79,6 +80,9 @@ function parseScenario(value: string | undefined): Scenario {
 function writeScenario(scenario: Scenario) {
   fs.writeFileSync(scenarioPath, `${scenario}\n`, { mode: 0o600 });
 }
+
+const nativeSimplex = process.env.FC_WEB_DESIGN_SIMPLEX_PYTHON
+  ? new NativeSimplex(repoRoot, process.env.FC_WEB_DESIGN_SIMPLEX_PYTHON) : null;
 
 const command = process.argv[2];
 if (command === "set-scenario") {
@@ -264,7 +268,7 @@ async function serve() {
 
   let shuttingDown = false;
   for (const signal of ["SIGINT", "SIGTERM"] as const) {
-    process.on(signal, () => shutdown(signal));
+    process.on(signal, () => { void nativeSimplex?.stop(); shutdown(signal); });
   }
   dashboard.on("exit", (code) => {
     if (!shuttingDown) {
@@ -405,6 +409,16 @@ async function handleHostedRequest(request: IncomingMessage, response: ServerRes
     saveState();
     writeJson(response, 200, appState());
     emitState();
+    return;
+  }
+  if (request.method === "POST" && requestPath === "/v1/app/runtime-commands" && nativeSimplex) {
+    const body = await readJson(request) as Record<string, unknown>;
+    try {
+      const result = await nativeSimplex.command(body);
+      writeJson(response, 200, { request_id: "native-simplex-command", status: "succeeded", body: result, error: null });
+    } catch (error) {
+      writeJson(response, 200, { request_id: "native-simplex-command", status: "failed", body: {}, error: { code: "local_trial", message: error instanceof Error ? error.message : "Local SimpleX operation failed" } });
+    }
     return;
   }
   if (request.method === "POST" && requestPath === "/v1/app/runtime-commands") {

@@ -135,7 +135,10 @@ def main():
     os.umask(0o077)
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
-        "operation", choices=["run", "status", "approve"], default="run", nargs="?"
+        "operation",
+        choices=["run", "status", "approve", "dashboard-status", "disable"],
+        default="run",
+        nargs="?",
     )
     parser.add_argument("code", nargs="?")
     args = parser.parse_args()
@@ -143,6 +146,44 @@ def main():
     config = prepare(root)
     if args.operation == "run":
         asyncio.run(run(root, config))
+    elif args.operation == "disable":
+        doc = yaml.safe_load(config.read_text())
+        doc["gateway"]["platforms"]["simplex"]["enabled"] = False
+        config.write_text(yaml.safe_dump(doc))
+        print("{}")
+    elif args.operation == "dashboard-status":
+        from gateway.pairing import PairingStore
+
+        state = asyncio.run(runtime.status())
+        state["qr"] = []
+        if state["address"]:
+            qr = qrcode.QRCode(border=0)
+            qr.add_data(state["address"])
+            qr.make(fit=True)
+            state["qr"] = [
+                "".join("1" if cell else "0" for cell in row) for row in qr.get_matrix()
+            ]
+        store = PairingStore()
+        state["approved"] = [
+            {"user_id": record["user_id"], "name": record.get("user_name", "")}
+            for record in store.list_approved("simplex")
+        ]
+        doc = yaml.safe_load(config.read_text())
+        model = doc.get("model", {})
+        print(
+            json.dumps(
+                {
+                    "simplex": state,
+                    "inference": {
+                        "profile": "finite_private",
+                        "provider": model.get("provider", "custom"),
+                        "model": model.get("default", "glm-5-3-flash"),
+                    },
+                    "telegram": {"connected": False, "pending": [], "approved": []},
+                    "google": {"connected": False},
+                }
+            )
+        )
     elif args.operation == "status":
         print(json.dumps(asyncio.run(runtime.status())))
     else:

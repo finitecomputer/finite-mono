@@ -85,6 +85,7 @@ export function ConnectionsPanel({
 
   return (
     <div className="space-y-4">
+      {status && error ? <p role="alert" className="text-sm text-destructive">{error}</p> : null}
       {!status ? (
         <div className="flex flex-wrap items-center justify-between gap-3 rounded-xl border border-border bg-white/[0.03] px-4 py-3 text-sm">
           <span>

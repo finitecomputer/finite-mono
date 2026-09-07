@@ -114,7 +114,29 @@ receipts are absent, and messages arriving during gateway outages are not proven
 replayed. Standalone `hermes send` can open a competing socket; do not recommend
 it as a live diagnostic. Fixes should land upstream, not as a Finite adapter fork.
 
-## Native local phone test
+## Local dashboard phone test
+
+Run `scripts/simplex-dashboard`, then open
+http://127.0.0.1:13012/dashboard/machines/runtime_web_design/connections.
+This runs the real Next.js Connections page and production dashboard action
+parsing. The existing web-design harness supplies the test account and runtime
+shell; its opt-in native transport connects SimpleX buttons to the real local
+Hermes/daemon helper. Connect starts the trial, the page renders the real QR,
+approval uses the real Hermes pairing store, and Disconnect stops the trial
+while retaining its identity. It does not prove production owner authorization,
+Agent Platform Channel transport, or agentd's config-offer journal.
+
+The bridge lives only under dashboard/scripts; no production route gains a
+local execution mode. It accepts only the fixed SimpleX operations. Other
+connection mutations deliberately fail in this trial. The local servers bind
+127.0.0.1. Port 13012 avoids the usual web-design harness on port 13002; override
+FC_WEB_DESIGN_PORT if necessary. Do not run the standalone trial simultaneously.
+
+Verified in the browser: Connect reveals the real QR and pairing form; invalid
+code approval is rejected by Hermes. Phone pairing is performed by the user.
+Connection mutation errors now remain visible after status has loaded.
+
+## Standalone native trial (optional)
 
 From this worktree, run `scripts/simplex-local`. It builds native Nix packages
 for this machine and runs released Hermes plus the same managed daemon helper,
