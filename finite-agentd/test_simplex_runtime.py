@@ -240,7 +240,7 @@ for platform in ['simplex','telegram']:
 legacy=home/'pairing'; legacy.mkdir(exist_ok=True)
 (legacy/'simplex-approved.json').write_text(json.dumps({'8': {'user_name':'Legacy'}}))
 sessions=home/'sessions'; sessions.mkdir(exist_ok=True)
-entries={}; db=SessionDB()
+entries={"_README": "Hermes metadata, not a session", "invalid": False}; db=SessionDB()
 for platform in ['simplex','telegram']:
     sid=platform+'-synthetic'; key='agent:'+platform+':dm:3'
     db.create_session(sid, platform, session_key=key)
@@ -270,7 +270,7 @@ db=SessionDB()
 assert db.get_session('simplex-synthetic') is None
 assert db.get_session('telegram-synthetic') is not None
 assert list(db.load_gateway_routing_entries(scope=str(sessions.resolve())))==['agent:telegram:dm:3']
-assert list(json.loads((sessions/'sessions.json').read_text()))==['agent:telegram:dm:3']
+assert list(json.loads((sessions/'sessions.json').read_text()))==['_README','invalid','agent:telegram:dm:3']
 assert not (sessions/'simplex-synthetic.jsonl').exists()
 assert (sessions/'telegram-synthetic.jsonl').exists()
 db.close()

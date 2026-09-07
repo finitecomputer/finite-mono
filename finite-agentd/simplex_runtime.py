@@ -296,8 +296,14 @@ def clear_simplex_sessions(home):
     mirror = sessions / "sessions.json"
     entries = json.loads(mirror.read_text()) if mirror.exists() else {}
     def is_simplex(entry):
-        return entry.get("platform") == "simplex" or (entry.get("origin") or {}).get("platform") == "simplex"
-    selected = {k: v for k, v in entries.items() if is_simplex(v)}
+        # Hermes writes _README metadata and tolerates non-record sentinels.
+        if not isinstance(entry, dict):
+            return False
+        origin = entry.get("origin")
+        return entry.get("platform") == "simplex" or (
+            isinstance(origin, dict) and origin.get("platform") == "simplex"
+        )
+    selected = {k: v for k, v in entries.items() if not k.startswith("_") and is_simplex(v)}
     plan = json.loads(reset_marker().read_text())
     ids = set(plan.get("session_ids", []))
     ids.update(v["session_id"] for v in selected.values())
