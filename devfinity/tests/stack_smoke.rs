@@ -77,6 +77,7 @@ fn dashboard_create_agent_flow_persists_request_in_core() -> Result<(), Box<dyn 
         .send_form(&[
             ("displayName", display_name.as_str()),
             ("access", "launch-code"),
+            ("hostingTier", "standard"),
             ("launchCode", launch_code),
             ("idempotencyKey", idempotency_key.as_str()),
         ])?;
@@ -169,7 +170,7 @@ impl DevfinityEnv {
             finitechat_url: trim_trailing_slash(env::var("FINITECHAT_SERVER_URL")?),
             hosted_web_device_url: trim_trailing_slash(env::var("FC_HOSTED_WEB_DEVICE_URL")?),
             finitesites_api_url: trim_trailing_slash(env::var("FINITE_SITES_API")?),
-            auth_gate_url: trim_trailing_slash(env::var("FINITE_SITES_AUTH_GATE_URL")?),
+            auth_gate_url: trim_trailing_slash(env::var("FC_SITES_AUTH_GATE_URL")?),
             operator_access_token: read_nonempty_token(fixture_dir.join("operator.jwt"))?,
             customer_access_token: read_nonempty_token(fixture_dir.join("dashboard-customer.jwt"))?,
             profile: env::var("DEVFINITY_PROFILE")?,

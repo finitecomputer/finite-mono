@@ -534,7 +534,6 @@ cargo test -p finitechat-client --locked --lib \
   tests::sqlite_client_store_loads_metadata_written_before_paired_agent_field \
   -- --exact
 cargo test -p devfinity --locked --test stack_smoke \
-  native_device_pairing_crosses_dashboard_hosted_and_authority \
-  -- --ignored --exact --nocapture
+  -- --ignored --nocapture
 
 echo "devfinity smoke passed"
