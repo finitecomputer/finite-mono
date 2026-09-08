@@ -76,21 +76,21 @@ it never replaces Brain's Nostr authorization or Folder Key Grants.
 
 ## Sites account preview boundary
 
-Set `FC_SITES_UPSTREAM_URL` to the internal Finite Sites origin and give the
-dashboard and `finitesitesd` the same dedicated
-`FINITE_SITES_VIEWER_SESSION_TOKEN`. The dashboard may exchange a signed-in,
-verified account email for Sites' existing one-time viewer link only after
-Core confirms that account can access the selected Agent Runtime. Sites still
-owns the share list and viewer cookie: the exchange never adds a share, and
-removing the email from the output revokes the cookie on the next request.
+New `finite.site` URLs use `FC_SITES_AUTH_GATE_URL` and the server-only
+`FINITE_GATE_ACCOUNT_TOKEN`. `/site-auth` validates the existing WorkOS session;
+the gate signs its verified email and Sites checks its own shares. Embedded
+previews use the same call before loading the site redemption URL. Visitors
+need no Agent provisioning. The token is never a browser or runtime credential.
 
-The service token is server-only. It must not use a `NEXT_PUBLIC_` name, enter
-a browser response, or be shared with an Agent Runtime.
+The retained `finite.chat` native exchange and `FC_SITES_UPSTREAM_URL` serve the
+pinned legacy deployment until coordinated cutover. The latter also supplies
+hosted requester assertions for publishing, authenticated by
+`FINITE_SITES_VIEWER_SESSION_TOKEN`; that contract remains active in v2.
+See the [Sites cutover runbook](../../../infra/runbooks/deploy-sites.md).
 
-Local `http://*.sites.localhost` previews are disabled by default. Local
-development may set `FC_SITES_ALLOW_LOCAL_OUTPUTS=1`; production ignores that
-flag so chat content cannot turn the dashboard into an iframe for a service on
-the user's own machine.
+Devfinity sets `FC_SITES_GATE_BASE_DOMAIN=sites.localhost` and uses the same
+account-to-gate API with the local account fixture. Local HTTP is rejected in
+production. No independent gate development login exists.
 
 ## Run locally
 

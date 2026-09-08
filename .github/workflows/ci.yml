@@ -169,6 +169,15 @@ jobs:
       - name: Test dashboard
         run: pnpm test
 
+      - uses: DeterminateSystems/nix-installer-action@v16
+        if: needs.changes.outputs.run_dashboard_browser == 'true'
+      - uses: Swatinem/rust-cache@v2
+        if: needs.changes.outputs.run_dashboard_browser == 'true'
+      - name: Build real Sites browser-test services
+        if: needs.changes.outputs.run_dashboard_browser == 'true'
+        working-directory: .
+        run: nix develop .#devfinity-ci --command cargo build --locked -p finite-gated -p finitesitesd
+
       - name: Test dashboard product flows
         if: needs.changes.outputs.run_dashboard_browser == 'true'
         run: pnpm run test:browser
@@ -577,6 +586,7 @@ jobs:
             ".#packages.x86_64-linux.finitechat-hosted-device"
             ".#packages.x86_64-linux.finite-agentd"
             ".#packages.x86_64-linux.finitesitesd"
+            ".#packages.x86_64-linux.finite-gated"
             ".#packages.x86_64-linux.finite-brain"
             ".#packages.x86_64-linux.finite-identity"
             ".#packages.x86_64-linux.fsite"

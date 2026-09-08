@@ -295,25 +295,16 @@ with exactly these meanings.
 - **Site Share Mutation**: the Project-scoped command or API mutation that
   changes viewer access for a Project Site. Because a Project Repository has
   at most one Project Site, it is not scoped by an output identifier.
-- **Magic Link**: a reusable, 15-minute login token mailed to a shared email.
-  Each redemption sets a Viewer Cookie on the site's own host.
+- **Auth Gate**: the standalone signer of short-lived, exact-origin verified
+  email vouches. Its configured account boundary owns login sessions; the gate
+  owns no permission or account mirror. See ADR 0029.
 - **Viewer Cookie**: an HMAC-signed `(Site, Principal, expiry)` proof, scoped
-  to one Site host. Legacy email cookies retain their existing wire shape. A
-  cookie proves a bounded session; the Share table still decides access on
-  every request.
-- **Native Viewer Session**: a bounded NIP-98 proof for one exact Site-host
-  session endpoint, POST body, nonce, client, and same-origin return path. The
-  signer must already have a Native Principal Share. Direct native clients
-  receive Viewer Cookies immediately; Hosted Web redeems a single-use link for
-  the same cookies. Proof never creates a Share.
-- **Verified Email Viewer Session**: a server-to-server exchange that accepts
-  an email already verified by the SaaS account boundary and, only when that
-  email is already on a shared Site's Share list, mints the existing
-  reusable Magic Link. It never creates a Share. The browser redeems the link
-  on the Site host and ordinary per-request Share checks preserve
-  immediate revocation. Issuance and durable outstanding links are bounded per
-  Site/email. The ordinary cookie is top-level `SameSite=Lax`; a distinct
-  `Partitioned` cookie carries iframe access.
+  to one Site host. Existing cookies retain their wire shape. Email shares and
+  publisher permissions are rechecked on every content request. A separate
+  partitioned cookie supports embedded previews.
+- **Legacy Viewer Exchange**: the native/magic-link authentication path retained
+  only by the pinned finite.chat server and its clients until coordinated
+  finite.site cutover. It is not a v2 daemon authentication mode.
 - **Control Plane**: the NIP-98-authenticated API (Project Init, git auth,
   sharing, status). **Serving Plane**: anonymous-or-cookie HTTP on site
   subdomains. One process serves both in v1, split by Host header.

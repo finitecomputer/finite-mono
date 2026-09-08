@@ -27,6 +27,25 @@ fn dashboard_create_agent_flow_persists_request_in_core() -> Result<(), Box<dyn 
         &format!("{}/api/v2/healthz", env.finitesites_api_url),
         "\"ok\":true",
     )?;
+    assert_http_contains(
+        "finite-gate",
+        &format!("{}/healthz", env.auth_gate_url),
+        "ok",
+    )?;
+    let output_origin = format!(
+        "http://smoke.sites.localhost:{}",
+        env.finitesites_api_url.rsplit_once(':').unwrap().1
+    );
+    let proof: Value = ureq::post(&format!("{}/vouch", env.auth_gate_url))
+        .set("authorization", &format!("Bearer {}", env::var("FINITE_GATE_ACCOUNT_TOKEN")?))
+        .send_json(serde_json::json!({"output": output_origin, "return_to": "/", "email": "dev@finite.computer"}))?
+        .into_json()?;
+    assert!(
+        proof["redeem_url"]
+            .as_str()
+            .unwrap()
+            .starts_with(&format!("{output_origin}/_finite/auth?gate_code="))
+    );
     assert_http_contains("dashboard", &env.dashboard_url, "<html")?;
 
     let run_id = smoke_run_id();
@@ -135,6 +154,7 @@ struct DevfinityEnv {
     finitechat_url: String,
     hosted_web_device_url: String,
     finitesites_api_url: String,
+    auth_gate_url: String,
     operator_access_token: String,
     customer_access_token: String,
     profile: String,
@@ -149,6 +169,7 @@ impl DevfinityEnv {
             finitechat_url: trim_trailing_slash(env::var("FINITECHAT_SERVER_URL")?),
             hosted_web_device_url: trim_trailing_slash(env::var("FC_HOSTED_WEB_DEVICE_URL")?),
             finitesites_api_url: trim_trailing_slash(env::var("FINITE_SITES_API")?),
+            auth_gate_url: trim_trailing_slash(env::var("FINITE_SITES_AUTH_GATE_URL")?),
             operator_access_token: read_nonempty_token(fixture_dir.join("operator.jwt"))?,
             customer_access_token: read_nonempty_token(fixture_dir.join("dashboard-customer.jwt"))?,
             profile: env::var("DEVFINITY_PROFILE")?,

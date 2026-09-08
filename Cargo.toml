@@ -8,6 +8,8 @@ members = [
     "finite-brain/crates/finite-brain-core",
     "finite-brain/crates/finite-brain-server",
     "finite-brain/crates/finite-brain-store",
+    "finite-gate/crates/finite-authn",
+    "finite-gate/crates/finite-gated",
     "finite-identity",
     "finite-mail",
     "finite-nostr",

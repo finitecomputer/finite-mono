@@ -1,9 +1,10 @@
 //! Wire-level protocol types for Finite Sites.
 //!
 //! This crate owns everything both the server and the CLI must agree on:
-//! nostr event encoding and signature verification, NIP-98 request
-//! authorization, site name rules, publish manifests, request/response DTOs,
-//! and the explicit limits that bound every loop and payload in the system.
+//! nostr event encoding and signature verification (via the shared
+//! `finite-authn` crate), NIP-98 request authorization, site name rules,
+//! publish manifests, request/response DTOs, and the explicit limits that
+//! bound every loop and payload in the system.
 
 pub mod dto;
 pub mod event;
@@ -45,4 +46,19 @@ pub enum ProtoError {
     InvalidManifest(&'static str),
     #[error("invalid project config: {0}")]
     InvalidProjectConfig(&'static str),
+}
+
+impl From<finite_authn::AuthnError> for ProtoError {
+    fn from(error: finite_authn::AuthnError) -> ProtoError {
+        match error {
+            finite_authn::AuthnError::InvalidHex(reason) => ProtoError::InvalidHex(reason),
+            finite_authn::AuthnError::InvalidEvent(reason) => ProtoError::InvalidEvent(reason),
+            finite_authn::AuthnError::InvalidSignature => ProtoError::InvalidSignature,
+            finite_authn::AuthnError::InvalidAuthHeader(reason) => {
+                ProtoError::InvalidAuthHeader(reason)
+            }
+            finite_authn::AuthnError::AuthRejected(reason) => ProtoError::AuthRejected(reason),
+            finite_authn::AuthnError::InvalidVouch(reason) => ProtoError::AuthRejected(reason),
+        }
+    }
 }

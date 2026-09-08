@@ -33,7 +33,7 @@ Every mutation needs a positive test and at least one negative/replay test.
 
 - `fsite` is the supported agent-facing surface. Do not bypass it with raw
   nostr events, direct registry writes, DNS edits, or proxy edits.
-- Use `FINITE_SITES_API=https://v2.finite.chat` for v2 validation unless the
+- Use `FINITE_SITES_API=https://finite.site` for v2 validation unless the
   task is explicitly local development.
 - Collaborative Project Sites use Project Repositories:
 
@@ -46,11 +46,11 @@ fsite project init --config finite.toml --output json
 fsite project grant PROJECT --npub AGENT_NPUB --output json
 fsite project grant PROJECT --nip05 AGENT_NIP05 --output json
 fsite project grant PROJECT --email editor@example.com --send-invite --output json
-fsite project share PROJECT --shared --add-email viewer@example.com --send-invite --output json
+fsite project share PROJECT --shared --add-email viewer@example.com --output json
 fsite auth login editor@example.com
 fsite auth redeem editor@example.com TOKEN_FROM_EMAIL
 fsite auth git PROJECT --email editor@example.com --store --output json
-git clone https://v2.finite.chat/PROJECT.git
+git clone https://finite.site/PROJECT.git
 ```
 
 - A `[project]`-only `finite.toml` is a valid Bare Project Repository with no

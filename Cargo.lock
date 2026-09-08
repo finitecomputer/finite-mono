@@ -711,6 +711,7 @@ dependencies = [
  "axum",
  "base64",
  "clap",
+ "finite-authn",
  "finitechat-core",
  "getrandom 0.3.4",
  "jsonwebtoken",
@@ -957,6 +958,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "finite-authn"
+version = "0.1.0"
+dependencies = [
+ "base64",
+ "secp256k1",
+ "serde",
+ "serde_json",
+ "sha2 0.10.9",
+ "thiserror",
+]
+
+[[package]]
 name = "finite-brain-app"
 version = "0.5.0"
 dependencies = [
@@ -1040,6 +1053,22 @@ dependencies = [
  "sha2 0.10.9",
  "tempfile",
  "time",
+]
+
+[[package]]
+name = "finite-gated"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "axum",
+ "finite-authn",
+ "getrandom 0.3.4",
+ "serde",
+ "serde_json",
+ "subtle",
+ "tokio",
+ "tower",
+ "url",
 ]
 
 [[package]]
@@ -1439,6 +1468,7 @@ version = "0.2.16"
 dependencies = [
  "base64",
  "bech32",
+ "finite-authn",
  "getrandom 0.3.4",
  "secp256k1",
  "serde",
@@ -1464,6 +1494,7 @@ version = "0.2.16"
 dependencies = [
  "axum",
  "base64",
+ "finite-authn",
  "finite-mail",
  "finitesites-blob",
  "finitesites-engine",

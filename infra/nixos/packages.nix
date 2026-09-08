@@ -259,9 +259,7 @@ let
     pname = "finitechat-group";
     version = crateVersion "finitechat/crates/finitechat-hosted-device";
     sourcePaths = lib.unique (
-      finitechatServerSourcePaths
-      ++ finitechatHostedDeviceSourcePaths
-      ++ finitechatCliSourcePaths
+      finitechatServerSourcePaths ++ finitechatHostedDeviceSourcePaths ++ finitechatCliSourcePaths
     );
     cargoExtraArgs = "--offline -p finitechat-server";
     cargoBuildArgs = [
@@ -304,7 +302,10 @@ rec {
   devfinity-unwrapped = mkWorkspaceCrate {
     pname = "devfinity";
     dir = "devfinity";
-    sourcePaths = [ "devfinity" ];
+    sourcePaths = [
+      "devfinity"
+      "finite-gate/crates/finite-authn"
+    ];
     dummySourceAttrs.cleanCargoTomlFilter =
       path:
       craneLib.filters.cargoTomlDefault path
@@ -331,6 +332,7 @@ rec {
         finitechat-server
         finitechat-hosted-device
         finitesitesd
+        finite-gated
         finite-identity
         finite-brain
         fsite
@@ -410,6 +412,7 @@ rec {
     pname = "finitesitesd";
     dir = "finite-sites/crates/finitesitesd";
     sourcePaths = [
+      "finite-gate/crates/finite-authn"
       "finite-mail"
       "finite-sites/crates/finitesites-blob"
       "finite-sites/crates/finitesites-engine"
@@ -431,7 +434,10 @@ rec {
     # (2026-09-07). autoPatchelf rebinds the interpreter and library rpath
     # into the nix store.
     nativeBuildInputs = [ pkgs.autoPatchelfHook ];
-    buildInputs = [ pkgs.glibc pkgs.libgcc ];
+    buildInputs = [
+      pkgs.glibc
+      pkgs.libgcc
+    ];
     dontUnpack = true;
     installPhase = ''
       mkdir -p "$out/bin"
@@ -453,6 +459,14 @@ rec {
       mainProgram = "finitesitesd";
       platforms = [ "x86_64-linux" ];
     };
+  };
+  finite-gated = mkWorkspaceCrate {
+    pname = "finite-gated";
+    dir = "finite-gate/crates/finite-gated";
+    sourcePaths = [
+      "finite-gate/crates/finite-authn"
+      "finite-gate/crates/finite-gated"
+    ];
   };
   # Crate finite-brain-app; the installed bin is named finite-brain.
   finite-brain = mkWorkspaceCrate {
@@ -479,6 +493,7 @@ rec {
     crate = "fsite-cli";
     dir = "finite-sites/crates/fsite-cli";
     sourcePaths = [
+      "finite-gate/crates/finite-authn"
       "finite-identity"
       "finite-mail"
       "finite-sites/crates/finitesites-proto"

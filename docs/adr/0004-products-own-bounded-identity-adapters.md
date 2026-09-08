@@ -123,3 +123,12 @@ product's adapter to the client environment.
 - Moving Brain's Folder Key Grant, content-crypto, or access policy into
   Finite Identity merely because an adapter uses identity keys.
 - Making Finite Sites a Brain client in order to reuse identity behavior.
+
+Amendment (2026-09-08, Sites v2): browser identity is a gate-signed verified
+email proof. The existing account boundary validates its WorkOS session and
+submits email over an authenticated server-to-server call to the standalone
+gate. The gate owns no login session or permission mirror. Sites verifies the
+proof offline and checks its own email shares and publisher identity on every
+request. Legacy hosted/native preview clients remain solely for the pinned
+finite.chat deployment until the coordinated finite.site cutover; see the
+Sites cutover runbook and technical debt ledger. Brain adapters are unchanged.
