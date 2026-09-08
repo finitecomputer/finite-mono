@@ -113,8 +113,9 @@ with exactly these meanings.
   an Agent Principal's signed Project Init for the authenticated human sender's
   Native Principal. It grants view access to the Project Site; it does not
   change Project ownership, collaboration, or Git access.
-- **External Principal**: a Principal identified by email because they are not
-  yet a Finite user. External shares use email verification.
+- **External Principal**: the existing email-identified authorization subject.
+  Email evidence can come from the guest challenge or a verified Finite account
+  session; the subject name does not imply the person lacks a Finite account.
 - **Principal Link**: an explicit, approved relationship between Principals
   that represent the same user or agent across identity paths. Finite Sites
   does not infer a Principal Link merely because an External Principal and a
@@ -306,14 +307,15 @@ with exactly these meanings.
   signer must already have a Native Principal Share. Direct native clients
   receive Viewer Cookies immediately; Hosted Web redeems a single-use link for
   the same cookies. Proof never creates a Share.
-- **Verified Email Viewer Session**: a server-to-server exchange that accepts
-  an email already verified by the SaaS account boundary and, only when that
-  email is already on a shared Site's Share list, mints the existing
-  reusable Magic Link. It never creates a Share. The browser redeems the link
-  on the Site host and ordinary per-request Share checks preserve
-  immediate revocation. Issuance and durable outstanding links are bounded per
-  Site/email. The ordinary cookie is top-level `SameSite=Lax`; a distinct
-  `Partitioned` cookie carries iframe access.
+- **Verified Email Viewer Session**: the existing server-to-server exchange
+  accepting email verified by the account boundary. It issues a Site-bound,
+  single-use, 60-second handoff to the existing email Viewer Cookie. The Site
+  evaluates its current publisher and sharing authority on redemption and every
+  content read; issuance never creates a Share. Unshared visitors can request
+  access or use the guest email challenge. Direct visits and dashboard previews
+  share the account adapter without Hosted Chat signing (ADR 0029). Issuance
+  and outstanding tokens remain bounded per Site/email. The ordinary cookie is
+  top-level `SameSite=Lax`; a distinct `Partitioned` cookie carries iframe access.
 - **Control Plane**: the NIP-98-authenticated API (Project Init, git auth,
   sharing, status). **Serving Plane**: anonymous-or-cookie HTTP on site
   subdomains. One process serves both in v1, split by Host header.
