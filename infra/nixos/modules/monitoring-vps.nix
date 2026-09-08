@@ -156,12 +156,12 @@ in
         module = "http_404";
       })
       (publicProbe {
-        name = "finite.site";
-        target = "https://finite.site/api/v2/healthz";
+        name = "v2.finite.chat";
+        target = "https://v2.finite.chat/api/v2/healthz";
       })
       (publicProbe {
-        name = "uptime-probe.finite.site";
-        target = "https://uptime-probe.finite.site/";
+        name = "uptime-probe.v2.finite.chat";
+        target = "https://uptime-probe.v2.finite.chat/";
         module = "http_404";
       })
     ];

@@ -16,7 +16,6 @@ const TRUTHY_ENV_VALUES = new Set(["1", "true", "yes", "on"]);
 const PROTECTED_WORKOS_PATH_PREFIXES = [
   "/api",
   "/dashboard",
-  "/site-auth",
   "/dev",
 ] as const;
 

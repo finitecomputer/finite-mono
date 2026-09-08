@@ -21,7 +21,6 @@ let
 in
 {
   imports = [
-    ../../modules/finite-gated.nix
     ../../modules/finitesitesd.nix
     ../../modules/caddy-sites-v2.nix
     ../../modules/finite-sites-v2-backups.nix
@@ -42,9 +41,9 @@ in
   finite.sites = {
     mode = "static-v2";
     package = finitePackages.finitesitesd;
-    baseDomain = "finite.site";
-    apiUrl = "https://finite.site";
-    gitUrl = "https://finite.site";
+    baseDomain = "v2.finite.chat";
+    apiUrl = "https://v2.finite.chat";
+    gitUrl = "https://v2.finite.chat";
   };
   finite.sitesV2Backup.enable = true;
 

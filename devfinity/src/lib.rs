@@ -57,7 +57,6 @@ enum ManagedProcess {
     FiniteChat,
     HostedWebDevice,
     FiniteSites,
-    FiniteGate,
     FiniteIdentity,
     FiniteBrain,
     RuntimeImage,
@@ -70,7 +69,7 @@ enum ManagedProcess {
 }
 
 impl ManagedProcess {
-    const ALL: [Self; 18] = [
+    const ALL: [Self; 17] = [
         Self::ProcessCompose,
         Self::WorkosFixture,
         Self::ServiceBinaries,
@@ -79,7 +78,6 @@ impl ManagedProcess {
         Self::FiniteChat,
         Self::HostedWebDevice,
         Self::FiniteSites,
-        Self::FiniteGate,
         Self::FiniteIdentity,
         Self::FiniteBrain,
         Self::RuntimeImage,
@@ -101,7 +99,6 @@ impl ManagedProcess {
             Self::FiniteChat => "finitechat",
             Self::HostedWebDevice => "hosted-web-device",
             Self::FiniteSites => "finitesites",
-            Self::FiniteGate => "finite-gate",
             Self::FiniteIdentity => "finite-identity",
             Self::FiniteBrain => "finite-brain",
             Self::RuntimeImage => "runtime-image",
@@ -380,9 +377,6 @@ pub struct Stack {
     core_token: String,
     hosted_web_device_token: String,
     sites_viewer_session_token: String,
-    /// Local-only dev signing key for the Auth Gate. Its public key is what
-    /// finitesitesd pins as FINITE_SITES_AUTH_GATE_PUBKEY in dev.
-    gate_signing_key: [u8; 32],
     profile: StackProfile,
     fresh_services_state: bool,
     inference_mode: InferenceMode,
@@ -401,7 +395,6 @@ struct Ports {
     finitechat: u16,
     hosted_web_device: u16,
     finitesites: u16,
-    finite_gate: u16,
     finite_identity: u16,
     finite_identity_public: u16,
     finite_brain: u16,
@@ -454,7 +447,6 @@ impl Stack {
                 finitechat: offset_port(18787, port_offset)?,
                 hosted_web_device: offset_port(38918, port_offset)?,
                 finitesites: offset_port(18789, port_offset)?,
-                finite_gate: offset_port(18791, port_offset)?,
                 finite_identity: offset_port(18788, port_offset)?,
                 finite_identity_public: offset_port(8791, port_offset)?,
                 finite_brain: offset_port(18790, port_offset)?,
@@ -467,7 +459,6 @@ impl Stack {
             hosted_web_device_token: "devfinity-hosted-web-device-token".to_string(),
             sites_viewer_session_token:
                 "dededededededededededededededededededededededededededededededede".to_string(),
-            gate_signing_key: [0x5a; 32],
             profile: StackProfile::AppleSaas,
             fresh_services_state: false,
             inference_mode,
@@ -815,7 +806,6 @@ impl Stack {
         println!("  chat:       {}", self.finitechat_url());
         println!("  web device: {}", self.hosted_web_device_url());
         println!("  sites api:  {}", self.finitesites_api_url());
-        println!("  auth gate:  {}", self.finite_gate_url_with_port());
         println!("  brain:      {}", self.finite_brain_url());
         println!(
             "  sites base: http://*.sites.localhost:{}",
@@ -1264,7 +1254,6 @@ impl Stack {
         self.write_finitechat(&mut yaml);
         self.write_hosted_web_device(&mut yaml);
         self.write_finitesites(&mut yaml);
-        self.write_finite_gate(&mut yaml);
         self.write_finite_identity(&mut yaml);
         self.write_finite_brain(&mut yaml);
         if self.profile.includes_runtime() {
@@ -1306,7 +1295,6 @@ impl Stack {
             "finitechat-server",
             "finitechat-hosted-device",
             "finitesitesd",
-            "finite-gated",
             "finite-identityd",
             "finite-brain",
         ];
@@ -1694,63 +1682,15 @@ wait "$postgres_pid"
         self.write_managed_command(yaml, process, &[format!("exec {command}")], &[]);
         self.write_environment(
             yaml,
-            &[
-                (
-                    "FINITE_SITES_VIEWER_SESSION_TOKEN",
-                    self.sites_viewer_session_token.clone(),
-                ),
-                (
-                    "FINITE_SITES_AUTH_GATE_URL",
-                    self.finite_gate_url_with_port(),
-                ),
-                ("FINITE_SITES_AUTH_GATE_PUBKEY", self.finite_gate_pubkey()),
-            ],
+            &[(
+                "FINITE_SITES_VIEWER_SESSION_TOKEN",
+                self.sites_viewer_session_token.clone(),
+            )],
         );
         let _ = writeln!(yaml, "    depends_on:");
         let _ = writeln!(yaml, "      {}:", ManagedProcess::ServiceBinaries);
         let _ = writeln!(yaml, "        condition: process_completed_successfully");
         self.write_http_probe(yaml, "/api/v2/healthz", self.ports.finitesites, 1, 2, 3, 45);
-    }
-
-    fn write_finite_gate(&self, yaml: &mut String) {
-        // Same account-to-gate contract as production, using local credentials.
-        let process = ManagedProcess::FiniteGate;
-        let _ = writeln!(yaml, "  {process}:");
-        self.write_process_header(yaml, "Local Finite Auth Gate", &self.repo_root, process);
-        self.write_managed_command(yaml, process, &["exec finite-gated".to_string()], &[]);
-        self.write_environment(
-            yaml,
-            &[
-                (
-                    "FINITE_GATE_LISTEN",
-                    format!("127.0.0.1:{}", self.ports.finite_gate),
-                ),
-                (
-                    "FINITE_GATE_PUBLIC_URL",
-                    format!("http://auth.sites.localhost:{}", self.ports.finite_gate),
-                ),
-                (
-                    "FINITE_GATE_ACCOUNT_URL",
-                    format!("{}/site-auth", self.dashboard_origin()),
-                ),
-                (
-                    "FINITE_GATE_ACCOUNT_TOKEN",
-                    self.sites_viewer_session_token.clone(),
-                ),
-                (
-                    "FINITE_GATE_SITE_BASE_DOMAIN",
-                    "sites.localhost".to_string(),
-                ),
-                (
-                    "FINITE_GATE_SIGNING_KEY",
-                    finite_authn::hex::encode(&self.gate_signing_key),
-                ),
-            ],
-        );
-        let _ = writeln!(yaml, "    depends_on:");
-        let _ = writeln!(yaml, "      {}:", ManagedProcess::ServiceBinaries);
-        let _ = writeln!(yaml, "        condition: process_completed_successfully");
-        self.write_http_probe(yaml, "/healthz", self.ports.finite_gate, 1, 2, 3, 45);
     }
 
     fn write_finite_brain(&self, yaml: &mut String) {
@@ -2245,15 +2185,6 @@ wait "$postgres_pid"
                 format!("http://127.0.0.1:{}", self.ports.finitesites),
             ),
             ("FC_SITES_ALLOW_LOCAL_OUTPUTS", "1".to_string()),
-            ("FC_SITES_GATE_BASE_DOMAIN", "sites.localhost".to_string()),
-            (
-                "FC_SITES_AUTH_GATE_URL",
-                format!("http://localhost:{}", self.ports.finite_gate),
-            ),
-            (
-                "FINITE_GATE_ACCOUNT_TOKEN",
-                self.sites_viewer_session_token.clone(),
-            ),
             (
                 "FINITE_SITES_VIEWER_SESSION_TOKEN",
                 self.sites_viewer_session_token.clone(),
@@ -2914,7 +2845,6 @@ wait "$postgres_pid"
                         String::from("finitesitesd"),
                         self.finitesites_dir().display().to_string(),
                     ],
-                    ManagedProcess::FiniteGate => vec![String::from("finite-gated")],
                     ManagedProcess::FiniteIdentity => {
                         vec![String::from("finite-identityd"), String::from("serve")]
                     }
@@ -3265,17 +3195,6 @@ wait "$postgres_pid"
             "http://{}:{}",
             self.apple_host_access.runtime_host, self.ports.finite_brain
         )
-    }
-
-    /// The gate origin spelled for browsers (dev hosts resolve
-    /// *.sites.localhost to loopback).
-    fn finite_gate_url_with_port(&self) -> String {
-        format!("http://auth.sites.localhost:{}", self.ports.finite_gate)
-    }
-
-    fn finite_gate_pubkey(&self) -> String {
-        finite_authn::gate_pubkey_for_secret(&self.gate_signing_key)
-            .expect("dev gate signing key is valid")
     }
 
     fn finitesites_api_url(&self) -> String {
@@ -3648,24 +3567,10 @@ wait "$postgres_pid"
                 format!("http://127.0.0.1:{}", self.ports.finitesites),
             ),
             ("FC_SITES_ALLOW_LOCAL_OUTPUTS", "1".to_string()),
-            ("FC_SITES_GATE_BASE_DOMAIN", "sites.localhost".to_string()),
-            (
-                "FC_SITES_AUTH_GATE_URL",
-                format!("http://localhost:{}", self.ports.finite_gate),
-            ),
-            (
-                "FINITE_GATE_ACCOUNT_TOKEN",
-                self.sites_viewer_session_token.clone(),
-            ),
             (
                 "FINITE_SITES_VIEWER_SESSION_TOKEN",
                 self.sites_viewer_session_token.clone(),
             ),
-            (
-                "FINITE_SITES_AUTH_GATE_URL",
-                self.finite_gate_url_with_port(),
-            ),
-            ("FINITE_SITES_AUTH_GATE_PUBKEY", self.finite_gate_pubkey()),
             ("FINITE_BRAIN_URL", self.finite_brain_url()),
             ("FINITE_IDENTITY_AUTHORITY", self.finite_identity_url()),
             ("FINITE_HOME", self.finite_home_dir().display().to_string()),
@@ -4960,7 +4865,6 @@ mod tests {
                 "finitechat-server",
                 "finitechat-hosted-device",
                 "finitesitesd",
-                "finite-gated",
                 "finite-identityd",
                 "finite-brain",
                 "finite-saas-local",
