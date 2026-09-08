@@ -29,7 +29,7 @@ its missing Nix source closure). There is no new service, crate, secret, custom
 signature protocol, account store, or grant synchronization.
 
 The final production-source diff (excluding tests) is approximately 382 lines
-added and 258 removed, net +124. This fits the 300–500 added-line budget but
+added and 299 removed, net +83. This fits the 300–500 added-line budget but
 misses the net-zero target; most total diff growth is compatibility/browser
 proof and documentation, not new runtime subsystems.
 
