@@ -5,6 +5,7 @@ import {
   HostedAgentControlError,
   agentOwnerClaimCommand,
   parseAgentConnectionAction,
+  parseSimplexStatus,
 } from "@/lib/hosted-agent-controls";
 
 test("Connections reuses the durable successful owner claim", () => {
@@ -59,4 +60,33 @@ test("connection actions reject unknown inference and oversized secrets", () => 
       }),
     HostedAgentControlError
   );
+});
+
+test("SimpleX exposes pairing actions without arbitrary daemon commands", () => {
+  for (const action of ["simplex_connect", "simplex_reset"]) {
+    assert.deepEqual(parseAgentConnectionAction({ action }), { action });
+  }
+  assert.throws(() => parseAgentConnectionAction({ action: "simplex_approve", code: "ABCD2345" }));
+  assert.throws(() => parseAgentConnectionAction({ action: "simplex_disconnect" }));
+  assert.throws(() => parseAgentConnectionAction({ action: "simplex_command", command: "/sql" }));
+});
+
+test("SimpleX rejects executable links and malformed QR matrices", () => {
+  const status = { enabled: true, ready: true, address: "https://smp.example/a#synthetic", qr: ["10", "01"], approved: [] };
+  assert.equal(parseSimplexStatus(status).address, status.address);
+  assert.throws(() => parseSimplexStatus({ ...status, address: "javascript:alert(1)" }));
+  assert.throws(() => parseSimplexStatus({ ...status, qr: ["10", "1"] }));
+  assert.throws(() => parseSimplexStatus({ ...status, qr: ["<svg>"] }));
+});
+
+
+test("SimpleX pending requests retain exact IDs and reject invalid metadata", () => {
+  const request = { request_id: "abcdef0123456789", user_id: "3", name: "Owner", age_minutes: 2 };
+  const status = { enabled: true, ready: true, qr: [], approved: [], pending: [request] };
+  assert.deepEqual(parseSimplexStatus(status).pending, [request]);
+  assert.equal(parseSimplexStatus({ ...status, pending: undefined }).pending, undefined);
+  assert.deepEqual(parseAgentConnectionAction({ action: "simplex_approve_request", request_id: request.request_id }), { action: "simplex_approve_request", request_id: request.request_id });
+  assert.throws(() => parseAgentConnectionAction({ action: "simplex_approve_request", request_id: "Owner" }));
+  assert.throws(() => parseSimplexStatus({ ...status, pending: [{ ...request, request_id: "Owner" }] }));
+  assert.throws(() => parseSimplexStatus({ ...status, pending: [{ ...request, age_minutes: -1 }] }));
 });

@@ -12,6 +12,7 @@ use crate::ledger::{Ledger, hex_digest};
 
 pub const VISION_CONFIG_PATH: &str = "auxiliary.vision";
 pub const MODEL_CONFIG_PATH: &str = "model";
+pub const SIMPLEX_CONFIG_PATH: &str = "gateway.platforms.simplex";
 pub const TELEGRAM_CONFIG_PATH: &str = "gateway.platforms.telegram";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -284,6 +285,7 @@ fn validate_offer(offer: &HermesConfigOfferV1) -> Result<(), AgentdError> {
         VISION_CONFIG_PATH => validate_vision_value(&offer.value),
         MODEL_CONFIG_PATH => validate_model_value(&offer.value),
         TELEGRAM_CONFIG_PATH => validate_telegram_value(&offer.value),
+        SIMPLEX_CONFIG_PATH => validate_simplex_value(&offer.value),
         _ => Err(AgentdError::UnsupportedConfigPath(offer.path.clone())),
     }
 }
@@ -677,5 +679,54 @@ mod tests {
             ),
             Err(AgentdError::ConfigConflict(_))
         ));
+    }
+}
+
+fn validate_simplex_value(value: &Value) -> Result<(), AgentdError> {
+    let enabled = value
+        .get("enabled")
+        .and_then(Value::as_bool)
+        .ok_or_else(|| AgentdError::Config("SimpleX enabled state is required".to_owned()))?;
+    let expected = simplex_config_value(enabled);
+    if *value != expected {
+        return Err(AgentdError::Config(
+            "Only the managed, private SimpleX configuration is supported".to_owned(),
+        ));
+    }
+    Ok(())
+}
+
+pub(crate) fn simplex_config_value(enabled: bool) -> Value {
+    json!({
+        "enabled": enabled,
+        "extra": {
+            "finite_managed": true,
+            "ws_url": "ws://127.0.0.1:5225",
+            "auto_accept": true,
+            "dm_policy": "pairing",
+            "group_policy": "disabled",
+            "group_allowed": ""
+        }
+    })
+}
+
+#[cfg(test)]
+mod simplex_tests {
+    use super::*;
+
+    #[test]
+    fn managed_simplex_rejects_remote_urls_and_open_authorization() {
+        for enabled in [true, false] {
+            assert!(validate_simplex_value(&simplex_config_value(enabled)).is_ok());
+        }
+        for (key, bad) in [
+            ("ws_url", "ws://remote:5225"),
+            ("dm_policy", "open"),
+            ("group_allowed", "*"),
+        ] {
+            let mut value = simplex_config_value(true);
+            value["extra"][key] = json!(bad);
+            assert!(validate_simplex_value(&value).is_err());
+        }
     }
 }

@@ -202,6 +202,7 @@ pub fn start_supervisor(
     sidecar: ProcessSpec,
     health: ProcessSpec,
     hermes: ProcessSpec,
+    simplex: Option<ProcessSpec>,
 ) -> SupervisorHandle {
     let status = Arc::new(RwLock::new(SupervisorStatus::default()));
     let (sidecar_tx, sidecar_rx) = mpsc::channel(4);
@@ -212,9 +213,15 @@ pub fn start_supervisor(
     tokio::spawn(supervise_process(health, health_rx, Arc::clone(&status)));
     tokio::spawn(supervise_process(hermes, hermes_rx, Arc::clone(&status)));
 
+    let mut all_txs = vec![sidecar_tx, health_tx, hermes_tx.clone()];
+    if let Some(spec) = simplex {
+        let (tx, rx) = mpsc::channel(4);
+        tokio::spawn(supervise_process(spec, rx, Arc::clone(&status)));
+        all_txs.push(tx);
+    }
     SupervisorHandle {
         hermes_tx: hermes_tx.clone(),
-        all_txs: Arc::new(vec![sidecar_tx, health_tx, hermes_tx]),
+        all_txs: Arc::new(all_txs),
         status,
     }
 }
@@ -392,11 +399,42 @@ mod tests {
     use super::*;
 
     #[tokio::test]
+    async fn hermes_restart_leaves_simplex_running_and_shutdown_stops_it() {
+        let handle = start_supervisor(
+            sleeping_process("sidecar"),
+            sleeping_process("health"),
+            sleeping_process("hermes"),
+            Some(sleeping_process("simplex")),
+        );
+        let simplex_pid = wait_for_running(&handle, "simplex").await.pid();
+        handle.restart_hermes().await.unwrap();
+        assert_eq!(
+            handle.status().await.processes["simplex"].pid(),
+            simplex_pid
+        );
+        handle.shutdown().await;
+        tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                if matches!(
+                    handle.status().await.processes["simplex"].state,
+                    ProcessState::Stopped
+                ) {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        })
+        .await
+        .unwrap();
+    }
+
+    #[tokio::test]
     async fn restart_hermes_waits_for_a_new_running_process() {
         let handle = start_supervisor(
             sleeping_process("sidecar"),
             sleeping_process("health"),
             sleeping_process("hermes"),
+            None,
         );
         let original_pid = wait_for_running(&handle, "hermes").await.pid().unwrap();
 
@@ -441,6 +479,7 @@ mod tests {
             },
             sleeping_process("health"),
             sleeping_process("hermes"),
+            None,
         );
         wait_for_running(&handle, "finitechat").await;
         // Let the script arm its trap before signalling.
@@ -493,6 +532,7 @@ mod tests {
                 args: Vec::new(),
                 environment: BTreeMap::new(),
             },
+            None,
         );
         wait_for_running(&handle, "hermes").await;
         let grandchild = tokio::time::timeout(Duration::from_secs(5), async {

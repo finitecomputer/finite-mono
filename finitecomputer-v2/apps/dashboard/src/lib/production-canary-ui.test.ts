@@ -57,7 +57,11 @@ test("Connections initial render keeps truthful disabled controls inspectable", 
   assert.match(html, /Use Finite Private/u);
   assert.match(html, /Telegram/u);
   assert.match(html, /Google Workspace/u);
-  assert.doesNotMatch(html, /<a\b/u, "no external connection flow is live before status loads");
+  const links = [...html.matchAll(/<a\b[^>]*href="([^"]*)"/gu)].map(match => match[1]);
+  assert.deepEqual(links, ["https://simplex.chat/"], "only informational attribution is linked before status loads");
+  for (const [button] of html.matchAll(/<button\b[^>]*>/gu)) {
+    assert.match(button, /\bdisabled/u, "connection actions stay disabled until status loads");
+  }
   assert.match(html, /<button[^>]+disabled/u);
 });
 

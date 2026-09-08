@@ -16,6 +16,7 @@ path = "src/main.rs"
 
 [dependencies]
 clap.workspace = true
+qrcode.workspace = true
 finitechat-proto = { path = "../finitechat/crates/finitechat-proto" }
 futures-util.workspace = true
 reqwest = { workspace = true, features = ["stream"] }

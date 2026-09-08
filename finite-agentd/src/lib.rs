@@ -2,6 +2,7 @@ mod config;
 mod connections;
 mod daemon;
 mod ledger;
+mod simplex;
 mod supervisor;
 mod transport;
 

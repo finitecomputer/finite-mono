@@ -21,7 +21,7 @@ use tokio::sync::mpsc;
 use crate::AgentdError;
 use crate::config::{ConfigManager, HermesConfigOfferV1, HermesConfigRollbackV1};
 use crate::connections::{
-    ConnectionManager, GoogleApplyRequest, InferenceApplyRequest, TelegramApproveRequest,
+    ConnectionManager, GoogleApplyRequest, InferenceApplyRequest, PairingApproveRequest,
     TelegramConnectRequest, TelegramHomeRequest,
 };
 use crate::ledger::{CommandDecision, Ledger};
@@ -212,6 +212,7 @@ pub async fn run_daemon(config: DaemonConfig) -> Result<(), AgentdError> {
         sidecar_spec(&config),
         health_spec(&config),
         hermes_spec(&config),
+        simplex_spec(&config),
     );
     spawn_status_writer(
         config.status_path(),
@@ -433,7 +434,11 @@ impl CommandExecutor {
             }
             "agent.connections.status" => {
                 parse_body::<EmptyRequest>(request, EMPTY_REQUEST_SCHEMA)?;
-                Ok(serde_json::to_value(self.connection_manager.status()?)?)
+                let manager = self.connection_manager.clone();
+                let status = tokio::task::spawn_blocking(move || manager.status())
+                    .await
+                    .map_err(|error| AgentdError::Config(error.to_string()))??;
+                Ok(serde_json::to_value(status)?)
             }
             "agent.inference.apply" => {
                 let body = parse_body::<InferenceApplyRequest>(request, INFERENCE_APPLY_SCHEMA)?;
@@ -441,6 +446,50 @@ impl CommandExecutor {
                     .connection_manager
                     .inference_plan(&request.request_id, body)?;
                 self.apply_inference_plan(plan).await
+            }
+            "agent.simplex.connect" => {
+                parse_body::<EmptyRequest>(request, EMPTY_REQUEST_SCHEMA)?;
+                let offer = self
+                    .connection_manager
+                    .simplex_offer(&request.request_id, true)?;
+                let manager = self.connection_manager.clone();
+                tokio::task::spawn_blocking(move || manager.simplex_address())
+                    .await
+                    .map_err(|error| AgentdError::Config(error.to_string()))??;
+                self.apply_config_offer(offer).await
+            }
+            "agent.simplex.reset" => {
+                parse_body::<EmptyRequest>(request, "finite.agent.simplex.reset.v1")?;
+                let offer = self
+                    .connection_manager
+                    .simplex_offer(&request.request_id, false)?;
+                let config = self.config_manager.clone();
+                let home = self.hermes_home.clone();
+                let connections = self.connection_manager.clone();
+                tokio::task::spawn_blocking(move || {
+                    config.apply(&offer, || validate_hermes_config(&home))?;
+                    connections.prepare_simplex_reset()
+                })
+                .await
+                .map_err(|error| AgentdError::Config(error.to_string()))??;
+                // Even already-disabled connections need cleanup. The wrapper
+                // completes durable reset intent before the next gateway starts.
+                self.supervisor.restart_hermes().await?;
+                let connections = self.connection_manager.clone();
+                tokio::task::spawn_blocking(move || connections.wait_simplex_reset())
+                    .await
+                    .map_err(|error| AgentdError::Config(error.to_string()))?
+            }
+            "agent.simplex.approve_request" => {
+                let body = parse_body::<crate::connections::SimplexApproveRequest>(
+                    request,
+                    "finite.agent.simplex.approve-request.v1",
+                )?;
+                let manager = self.connection_manager.clone();
+                tokio::task::spawn_blocking(move || manager.approve_simplex_request(body))
+                    .await
+                    .map_err(|error| AgentdError::Config(error.to_string()))??;
+                Ok(json!({ "approved": true }))
             }
             "agent.telegram.connect" => {
                 let body = parse_body::<TelegramConnectRequest>(request, TELEGRAM_CONNECT_SCHEMA)?;
@@ -450,7 +499,7 @@ impl CommandExecutor {
                 self.apply_config_offer(offer).await
             }
             "agent.telegram.approve" => {
-                let body = parse_body::<TelegramApproveRequest>(request, TELEGRAM_APPROVE_SCHEMA)?;
+                let body = parse_body::<PairingApproveRequest>(request, TELEGRAM_APPROVE_SCHEMA)?;
                 let manager = self.connection_manager.clone();
                 tokio::task::spawn_blocking(move || manager.approve_telegram(body))
                     .await
@@ -755,6 +804,25 @@ fn sidecar_spec(config: &DaemonConfig) -> ProcessSpec {
         ],
         environment,
     }
+}
+
+fn simplex_spec(config: &DaemonConfig) -> Option<ProcessSpec> {
+    let script = crate::simplex::script_path();
+    script.is_file().then(|| ProcessSpec {
+        name: "simplex",
+        program: config.health_python.clone(),
+        args: vec![script.display().to_string(), "supervise".to_owned()],
+        environment: BTreeMap::from([
+            (
+                "HERMES_HOME".to_owned(),
+                config.hermes_home.display().to_string(),
+            ),
+            (
+                "FINITECHAT_HOME".to_owned(),
+                config.agent_home.display().to_string(),
+            ),
+        ]),
+    })
 }
 
 fn health_spec(config: &DaemonConfig) -> ProcessSpec {

@@ -27,8 +27,8 @@
     # is unchanged by the switch). `shallow=1` keeps the fresh-runner clone
     # to the pinned commit (~60 MB) instead of full history (~500 MB); it
     # locks to the same rev/narHash. Bumps edit the rev here and re-lock.
-    # Current pin: v2026.8.3 (rev 3c27eb62).
-    hermes-agent.url = "git+https://github.com/NousResearch/hermes-agent?rev=3c27eb6234bf91b8ceee9e9071591b31e9b148cb&shallow=1";
+    # Current pin: v2026.8.31 (rev 29112bef).
+    hermes-agent.url = "git+https://github.com/NousResearch/hermes-agent?rev=29112bef099274229cadff79cdff7bf7b99c4b77&shallow=1";
     hermes-agent.inputs.nixpkgs.follows = "hermes-nixpkgs";
     # finite-lat-3 qualified this NixOS 26.05 platform pin. finite-lat-1 uses
     # the same pin for its platform-only upgrade while retaining its existing
@@ -245,6 +245,7 @@
           hermesAgentMinimal = hermes-agent.packages.${system}.minimal;
         in
         {
+          simplex-chat = hermesPkgs.callPackage ./finitecomputer-v2/deploy/finite-computer/images/simplex-chat.nix {};
           hermes-agent = hermesAgentPackage;
           hermes-agent-runtime = hermesAgentPackage;
           hermes-agent-runtime-python = hermesAgentPackage.hermesVenv;
@@ -256,6 +257,7 @@
               ./finitecomputer-v2/deploy/finite-computer/images/agent-runtime-toolchains.nix
               {
                 hermesAgent = hermesAgentPackage;
+                simplexChat = hermesPkgs.callPackage ./finitecomputer-v2/deploy/finite-computer/images/simplex-chat.nix {};
               };
         };
 

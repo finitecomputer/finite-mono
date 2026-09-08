@@ -1,0 +1,3 @@
+# Keep helper checks consistent from the repo root and the Hermes CI directory.
+extend = "../finitechat/pyproject.toml"
+target-version = "py312"

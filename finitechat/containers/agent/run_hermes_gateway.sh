@@ -227,4 +227,8 @@ if [[ "${FINITE_AGENTD_SUPERVISED:-0}" != "1" ]]; then
 fi
 
 echo "FINITE_AGENT_RUNTIME real_hermes_gateway=true hermes_home=${hermes_home} agent_home=${agent_home}"
+simplex_helper="${FINITE_AGENTD_SIMPLEX_SCRIPT:-/opt/simplex_runtime.py}"
+if [[ -f "$simplex_helper" ]]; then
+    exec python "$simplex_helper" gateway
+fi
 exec hermes gateway run --replace

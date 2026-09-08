@@ -10,6 +10,7 @@ import {
   UnplugIcon,
 } from "lucide-react";
 
+import { SimplexConnection } from "@/components/simplex-connection";
 import { ConnectionCard } from "@/components/connection-card";
 import { useOptionalHostedChat } from "@/components/hosted-chat-provider";
 import { Button } from "@/components/ui/button";
@@ -35,12 +36,12 @@ export function ConnectionsPanel({
   const refreshedChatDevicesRef = useRef(false);
   const endpoint = `/api/connections/machines/${encodeURIComponent(machineId)}`;
 
-  const refresh = useCallback(async () => {
-    setError(null);
+  const refresh = useCallback(async (quiet = false) => {
+    if (!quiet) setError(null);
     try {
       setStatus(await connectionRequest(endpoint));
     } catch (requestError) {
-      setError(connectionErrorMessage(requestError));
+      if (!quiet) setError(connectionErrorMessage(requestError));
     }
   }, [endpoint]);
 
@@ -59,6 +60,17 @@ export function ConnectionsPanel({
     refreshedChatDevicesRef.current = true;
     void chat.dispatchQuiet({ RefreshDevices: null });
   }, [chat]);
+
+  useEffect(() => {
+    if (!status?.simplex?.enabled || busy) return;
+    let inFlight = false;
+    const timer = window.setInterval(async () => {
+      if (inFlight || document.hidden) return;
+      inFlight = true;
+      try { await refresh(true); } finally { inFlight = false; }
+    }, 3000);
+    return () => window.clearInterval(timer);
+  }, [status?.simplex?.enabled, busy, refresh]);
 
   async function mutate(label: string, action: AgentConnectionAction) {
     setBusy(label);
@@ -84,6 +96,7 @@ export function ConnectionsPanel({
 
   return (
     <div className="space-y-4">
+      {status && error ? <p role="alert" className="text-sm text-destructive">{error}</p> : null}
       {!status ? (
         <div className="flex flex-wrap items-center justify-between gap-3 rounded-xl border border-border bg-white/[0.03] px-4 py-3 text-sm">
           <span>
@@ -107,6 +120,8 @@ export function ConnectionsPanel({
       >
         <InferenceControls status={status} busy={busy} mutate={mutate} />
       </ConnectionCard>
+
+      <SimplexConnection status={status?.simplex} loaded={Boolean(status)} busy={Boolean(busy)} mutate={mutate} refresh={refresh} />
 
       <ConnectionCard
         name="Telegram"

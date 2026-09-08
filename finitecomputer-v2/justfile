@@ -30,3 +30,23 @@ finite-private-glm53-contract:
 # Promotion-time form: all three GLM image/MPK stop markers must be replaced.
 finite-private-glm53-release-contract:
     cd .. && python3 scripts/check_finite_private_glm53_candidate.py --release-ready
+
+# Real relay round trip with disposable identities and the pinned Hermes adapter.
+simplex-smoke:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    repo_root="$(cd .. && pwd)"
+    simplex_store="$(nix build "$repo_root#simplex-chat" --no-link --print-out-paths)"
+    hermes_store="$(nix build "$repo_root#hermes-agent" --no-link --print-out-paths)"
+    python_store="$(nix build "$repo_root#hermes-agent-runtime-python" --no-link --print-out-paths)"
+    export PATH="$simplex_store/bin:$PATH"
+    export HERMES_BUNDLED_PLUGINS="$hermes_store/share/hermes-agent/plugins"
+    exec "$python_store/bin/python3" "$repo_root/finite-agentd/simplex_smoke.py"
+
+# Offline managed SimpleX control and destructive-reset regression tests.
+simplex-test:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    repo_root="$(cd .. && pwd)"
+    python_store="$(nix build "$repo_root#hermes-agent-runtime-python" --no-link --print-out-paths)"
+    exec "$python_store/bin/python3" -m unittest discover -s "$repo_root/finite-agentd" -p test_simplex_runtime.py
