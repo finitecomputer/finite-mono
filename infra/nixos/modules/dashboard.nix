@@ -4,11 +4,11 @@
 { ... }:
 {
   virtualisation.oci-containers.containers.finite-saas-dashboard = {
-    # 2026-09-07.1, pinned 2026-09-07 (chat link underlines #842, mobile
-    # overflow fix #843; iOS/device-link surface removed with #837).
+    # 2026-09-08.1, pinned 2026-09-08 (managed SimpleX Connections UI #851;
+    # agent capability rolls separately via runtime image 2026-09-07.1).
     # This line is the dashboard's deployment record; there is no ledger to
     # update alongside it (infra/deployment-changelog.md holds narrative only).
-    image = "ghcr.io/finitecomputer/finite-saas-dashboard@sha256:c83e11c846b5d338b86d6237e1b5e21e400f31d6dd340705d3a0e135b2bb246b";
+    image = "ghcr.io/finitecomputer/finite-saas-dashboard@sha256:90423bd903f582ed025839397e190bcad44a79f148a79a29bc034316b6412333";
 
     # Host networking: the dashboard must reach core on the HOST loopback
     # (127.0.0.1:4200) and itself bind 127.0.0.1:3000 (HOSTNAME below). With
