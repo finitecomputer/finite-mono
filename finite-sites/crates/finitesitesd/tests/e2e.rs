@@ -169,6 +169,7 @@ impl TestServer {
             api_url,
             git_base_url,
             viewer_session_service_token: viewer_session_service_token.map(str::to_string),
+            account_login_url: None,
             git_hook_helper_path: hook_helper_path(),
             git_auto_reconcile,
             site_url_scheme: "http".to_string(),
@@ -1460,7 +1461,7 @@ async fn verified_email_viewer_session_endpoint_is_disabled_without_its_service_
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn verified_email_viewer_session_reuses_login_and_revokes_immediately() {
+async fn verified_email_viewer_session_is_single_use_and_revokes_immediately() {
     let user_pubkey = finitesites_proto::event::pubkey_for_secret(&user_secret()).unwrap();
     let server = TestServer::start(&user_pubkey).await;
     let port = server.port();
@@ -1607,15 +1608,10 @@ async fn verified_email_viewer_session_reuses_login_and_revokes_immediately() {
                 .status(),
             303
         );
-        assert_eq!(
-            server
-                .agent
-                .get(&latest_redeem_url)
-                .call()
-                .unwrap()
-                .status(),
-            303
-        );
+        assert!(matches!(
+            server.agent.get(&latest_redeem_url).call(),
+            Err(ureq::Error::Status(400, _))
+        ));
 
         let mut second_project = project_init_request(false);
         second_project.config.project.slug = "second-preview-project".into();
@@ -1663,7 +1659,7 @@ async fn verified_email_viewer_session_reuses_login_and_revokes_immediately() {
         assert!(
             session
                 .redeem_url
-                .starts_with(&format!("{site_base}/_finite/auth?token="))
+                .starts_with(&format!("{site_base}/_finite/auth?session_token="))
         );
         assert!(
             session
@@ -1699,15 +1695,10 @@ async fn verified_email_viewer_session_reuses_login_and_revokes_immediately() {
             .unwrap()
             .to_string();
 
-        assert_eq!(
-            server
-                .agent
-                .get(&session.redeem_url)
-                .call()
-                .unwrap()
-                .status(),
-            303
-        );
+        assert!(matches!(
+            server.agent.get(&session.redeem_url).call(),
+            Err(ureq::Error::Status(400, _))
+        ));
         let clean_agent = agent_for(SocketAddr::from(([127, 0, 0, 1], port)));
         let page = clean_agent
             .get(&format!("{site_base}/"))

@@ -1485,6 +1485,7 @@ dependencies = [
  "tokio",
  "tower",
  "ureq",
+ "url",
 ]
 
 [[package]]

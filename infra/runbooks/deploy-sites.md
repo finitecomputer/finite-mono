@@ -12,8 +12,8 @@ cutover PR changes that boundary deliberately.
 
 ## Topology
 
-- API and git smart HTTP: `https://v2.finite.chat`
-- Served sites: `https://{site}.v2.finite.chat/`
+- API and git smart HTTP: `https://finite.site`
+- Served sites: `https://{site}.finite.site/`
 - Daemon listener: `127.0.0.1:8787`
 - State: `/var/lib/finite-sites`
 - Healthcheck: `GET /api/v2/healthz`
@@ -36,15 +36,55 @@ tarball onto the box.
 - The finitesitesd source change is merged to `main`.
 - The deploy artifact is built from the exact reviewed monorepo revision; do
   not build on the production host.
-- DNS has `v2.finite.chat` and `*.v2.finite.chat` pointed at the validation
+- DNS has `finite.site` and `*.finite.site` pointed at the validation
   host or edge.
 - The host has a Cloudflare Origin CA cert/key at
   `/etc/finite-saas/certs/finite-sites-v2-origin.{pem,key}` covering
-  `v2.finite.chat` and `*.v2.finite.chat`.
+  `finite.site` and `*.finite.site`.
 - The validation host has the mail secrets documented by name in
   `infra/README.md`; do not write secret values into git.
 - The local backup timers from `finite-sites-v2-backups.nix` are enabled, and
   an off-host copy plan exists before real production traffic moves.
+
+## Account bridge and coordinated cutover
+
+The dashboard must serve `/site-auth` before enabling
+`FINITE_SITES_ACCOUNT_LOGIN_URL=https://finite.computer/site-auth` on Sites.
+The dedicated host definition enables that URL. Its existing
+`/etc/finite-saas/sites-viewer-session.env` and dashboard must agree on
+`FINITE_SITES_VIEWER_SESSION_TOKEN`; the dashboard's `FC_SITES_UPSTREAM_URL`
+must point to the serving Sites API. These are existing credentials, not new
+ones. The bridge retains guest email challenge and never writes shares.
+
+Coordinate this order; none of these production steps is performed by the PR:
+
+1. Provision the dedicated host from the reviewed Nix closure. Run
+   `scripts/finite-status` before and after each rollout.
+2. Point `finite.site` and `*.finite.site` at it, with the matching TLS names.
+3. Before moving real sites, inventory the actual source daemon version and
+   data. Preserve a recoverable, consistent backup of registry, blobs, Git
+   repositories, cookie key, and remaining service state. Stop source writes
+   for the final copy; retain the source and backup until destination restore
+   and access checks succeed. Never reconstruct email grants from npubs.
+4. Restore onto an empty destination and prove stable Site IDs, URLs/slugs,
+   active content, publisher-email ownership, and allowlisted guest access.
+   The synthetic v0.5.3 fixture covers one supported old writer; it is not
+   evidence that every production source is compatible. Unsupported outputs
+   require an explicit migration decision before routing their traffic.
+5. Verify the account bridge on the actual finite.computer and finite.site
+   domains: authorized WorkOS session, anonymous guest challenge, unshared
+   email, changed/revoked share, direct URL, and dashboard iframe. Then enable
+   the destination auth model for traffic.
+6. Only after those checks, release the CLI whose default is `finite.site`.
+   Existing clients can explicitly select their old API during the cutover.
+
+Old-site redirects are a separate edge cutover. Redirect only known migrated
+Site document/asset URLs, preserving path and query. Do not blanket-redirect
+API, Git, or `/_finite/` auth URLs: old-host tokens/cookies cannot establish a
+new-host session. Keep the original host available until old clients, email
+links, and redirects have been checked. A registry rollback must account for
+any writes accepted by the destination; restoring an old backup over live
+state is not a routine rollback.
 
 ## Deploy
 
@@ -59,9 +99,9 @@ tarball onto the box.
    finitesitesd serve \
      --data /var/lib/finite-sites \
      --listen 127.0.0.1:8787 \
-     --base-domain v2.finite.chat \
-     --api-url https://v2.finite.chat \
-     --git-url https://v2.finite.chat \
+     --base-domain finite.site \
+     --api-url https://finite.site \
+     --git-url https://finite.site \
      --site-scheme https \
      --site-port none \
      --mailer resend \
@@ -74,11 +114,11 @@ tarball onto the box.
 ## Verify
 
 1. `systemctl status finite-saas-sites` is active.
-2. `curl -fsS https://v2.finite.chat/api/v2/healthz` succeeds.
+2. `curl -fsS https://finite.site/api/v2/healthz` succeeds.
 3. `systemctl start finite-sites-v2-snapshot.service` succeeds, then
    `systemctl start finite-sites-v2-restore-check.service` succeeds.
 4. `fsite auth register --output json` works with
-   `FINITE_SITES_API=https://v2.finite.chat`.
+   `FINITE_SITES_API=https://finite.site`.
 5. `fsite project init --config finite.toml --dry-run --output json` returns a
    `site` object or `site: null`, never `outputs`.
 6. Create an operator-owned disposable static project, push the configured

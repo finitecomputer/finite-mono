@@ -16,7 +16,7 @@
 //!   fsite project list --output json
 //!   fsite view URL_OR_NAME --output json
 //!
-//! Server address comes from FINITE_SITES_API (default https://v2.finite.chat).
+//! Server address comes from FINITE_SITES_API (default https://finite.site).
 
 mod api;
 mod identity_target;
@@ -2513,7 +2513,7 @@ fn view_target_url(target: &str, discovered_url: Option<&str>) -> String {
         }
         return format!("{value}/");
     }
-    format!("https://{target}.v2.finite.chat/")
+    format!("https://{target}.finite.site/")
 }
 
 fn append_url_path(base: &str, path: &str) -> String {
@@ -3069,7 +3069,7 @@ mod tests {
     fn view_target_url_supports_url_or_name() {
         assert_eq!(
             view_target_url("finitechat-native-mockup", None),
-            "https://finitechat-native-mockup.v2.finite.chat/"
+            "https://finitechat-native-mockup.finite.site/"
         );
         assert_eq!(
             view_target_url(

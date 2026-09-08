@@ -1,7 +1,7 @@
 # Dedicated Finite Sites v2 validation edge.
 #
-# TLS uses a Cloudflare Origin CA cert pair for v2.finite.chat and
-# *.v2.finite.chat. Cloudflare proxies the names in Full (strict); the VPS does
+# TLS uses a Cloudflare Origin CA cert pair for finite.site and
+# *.finite.site. Cloudflare proxies the names in Full (strict); the VPS does
 # not need ACME or a Cloudflare API token.
 { ... }:
 let
@@ -14,11 +14,11 @@ in
     enable = true;
     email = "paul@finite.vip";
 
-    virtualHosts."v2.finite.chat".extraConfig = ''
+    virtualHosts."finite.site".extraConfig = ''
       tls ${originCert} ${originKey}
       ${sitesBackend}
     '';
-    virtualHosts."*.v2.finite.chat".extraConfig = ''
+    virtualHosts."*.finite.site".extraConfig = ''
       tls ${originCert} ${originKey}
       ${sitesBackend}
     '';

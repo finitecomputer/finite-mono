@@ -169,6 +169,15 @@ jobs:
       - name: Test dashboard
         run: pnpm test
 
+      - uses: DeterminateSystems/nix-installer-action@v16
+        if: needs.changes.outputs.run_dashboard_browser == 'true'
+      - uses: Swatinem/rust-cache@v2
+        if: needs.changes.outputs.run_dashboard_browser == 'true'
+      - name: Build real Sites browser-test service
+        if: needs.changes.outputs.run_dashboard_browser == 'true'
+        working-directory: .
+        run: nix develop .#devfinity-ci --command cargo build --locked -p finitesitesd
+
       - name: Test dashboard product flows
         if: needs.changes.outputs.run_dashboard_browser == 'true'
         run: pnpm run test:browser

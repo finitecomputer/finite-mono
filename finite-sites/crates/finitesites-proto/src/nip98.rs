@@ -150,6 +150,33 @@ mod tests {
         bytes
     }
 
+    // Produced by build_auth_header from deployed fsite/v0.5.3 at
+    // 662f837ed5875de4cbf55acd1d1adfe288e762a1, using public test key [1; 32].
+    // This is an old writer -> canonical reader proof, not a candidate roundtrip.
+    #[test]
+    fn deployed_signer_remains_bound_to_url_method_body_and_time() {
+        let header = include_str!("../tests/fixtures/v053-nip98.txt").trim();
+        let url = "https://finite.site/api/v2/projects/init";
+        let body = br#"{"name":"legacy"}"#;
+        assert_eq!(
+            verify_auth_header(header, url, "POST", Some(body), NOW).unwrap(),
+            pubkey_for_secret(&[1; 32]).unwrap()
+        );
+        assert!(
+            verify_auth_header(
+                header,
+                "https://other.finite.site/api/v2/projects/init",
+                "POST",
+                Some(body),
+                NOW
+            )
+            .is_err()
+        );
+        assert!(verify_auth_header(header, url, "GET", Some(body), NOW).is_err());
+        assert!(verify_auth_header(header, url, "POST", Some(b"changed"), NOW).is_err());
+        assert!(verify_auth_header(header, url, "POST", Some(body), NOW + 61).is_err());
+    }
+
     #[test]
     fn roundtrip_with_body() {
         let body = br#"{"name":"hello"}"#;

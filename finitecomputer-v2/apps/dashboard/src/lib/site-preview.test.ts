@@ -71,10 +71,10 @@ test("viewer-session responses stay on the requested output and preserve return 
   const token = "ab".repeat(32);
   const redeemUrl = `https://hello.finite.chat/_finite/auth?token=${token}&return_to=%2Fgallery%3Fview%3Done%23photo`;
   assert.equal(parseViewerSessionResponse({ redeem_url: redeemUrl }, target), redeemUrl);
-  const nativeRedeemUrl = `https://hello.finite.chat/_finite/auth?native_token=${token}&return_to=%2Fgallery%3Fview%3Done%23photo`;
+  const sessionRedeemUrl = `https://hello.finite.chat/_finite/auth?session_token=${token}&return_to=%2Fgallery%3Fview%3Done%23photo`;
   assert.equal(
-    parseViewerSessionResponse({ redeem_url: nativeRedeemUrl }, target),
-    nativeRedeemUrl
+    parseViewerSessionResponse({ redeem_url: sessionRedeemUrl }, target),
+    sessionRedeemUrl
   );
 
   for (const value of [
@@ -132,4 +132,61 @@ test("site preview body reads time out when a chunked request never closes", asy
     readBoundedSitePreviewUrl(request, 4 * 1024, 5),
     (error: unknown) => error instanceof SitePreviewError && error.status === 408,
   );
+});
+
+test("account bridge sends only verified email evidence to the Sites exchange", async (t) => {
+  const { createSiteAccountSession } = await import("@/lib/site-preview");
+  const saved = { ...process.env };
+  t.after(() => { process.env = saved; });
+  process.env.FC_SITES_UPSTREAM_URL = "https://finite.site";
+  process.env.FINITE_SITES_VIEWER_SESSION_TOKEN = "ab".repeat(32);
+  const target = parseSitePreviewTarget("https://hello.finite.site/docs?a=1");
+  const redeem = `https://hello.finite.site/_finite/auth?session_token=${"cd".repeat(32)}&return_to=%2Fdocs%3Fa%3D1`;
+  const fetch = t.mock.method(globalThis, "fetch", async (input: RequestInfo | URL, init?: RequestInit) => {
+    assert.equal(input, "https://finite.site/internal/v1/viewer-sessions");
+    assert.equal(init?.redirect, "error");
+    assert.equal(init?.cache, "no-store");
+    assert.deepEqual(JSON.parse(String(init?.body)), {
+      site_url: "https://hello.finite.site/", verified_email: "friend@example.com", return_to: "/docs?a=1",
+    });
+    return Response.json({ redeem_url: redeem });
+  });
+  const result = await createSiteAccountSession(target, {
+    workosUserId: "user_fixture", email: "friend@example.com", emailVerified: true, source: "workos",
+  });
+  assert.equal(result.url, redeem);
+  assert.equal(fetch.mock.callCount(), 1);
+});
+
+test("account bridge rejects unverified, caller-header, and production dev identities before requesting access", async (t) => {
+  const { createSiteAccountSession } = await import("@/lib/site-preview");
+  const saved = { ...process.env };
+  t.after(() => { process.env = saved; });
+  process.env = { ...process.env, NODE_ENV: "production" };
+  const fetch = t.mock.method(globalThis, "fetch", async () => { throw new Error("must not fetch"); });
+  for (const account of [
+    { source: "workos" as const, emailVerified: false },
+    { source: "header" as const, emailVerified: true },
+    { source: "dev" as const, emailVerified: true },
+  ]) {
+    await assert.rejects(createSiteAccountSession(parseSitePreviewTarget("https://hello.finite.site/"), {
+      workosUserId: "user_fixture", email: "friend@example.com", ...account,
+    }), /verified email/);
+  }
+  assert.equal(fetch.mock.callCount(), 0);
+});
+
+test("account bridge bounds upstream responses and rejects a different redemption origin", async (t) => {
+  const { createSiteAccountSession } = await import("@/lib/site-preview");
+  const saved = { ...process.env };
+  t.after(() => { process.env = saved; });
+  process.env.FC_SITES_UPSTREAM_URL = "https://finite.site";
+  process.env.FINITE_SITES_VIEWER_SESSION_TOKEN = "ab".repeat(32);
+  const responses = [new Response("x".repeat(8193)), Response.json({ redeem_url: `https://other.finite.site/_finite/auth?session_token=${"cd".repeat(32)}&return_to=%2F` })];
+  t.mock.method(globalThis, "fetch", async () => responses.shift()!);
+  for (let i = 0; i < 2; i++) {
+    await assert.rejects(createSiteAccountSession(parseSitePreviewTarget("https://hello.finite.site/"), {
+      workosUserId: "user_fixture", email: "friend@example.com", emailVerified: true, source: "workos",
+    }), (error: unknown) => error instanceof SitePreviewError && error.status === 502);
+  }
 });

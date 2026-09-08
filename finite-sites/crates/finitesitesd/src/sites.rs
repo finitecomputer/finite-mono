@@ -48,6 +48,7 @@ enum RedeemedViewer {
 pub fn router(state: Arc<AppState>) -> Router {
     Router::new()
         .route("/_finite/auth", get(redeem_link))
+        .route("/_finite/sign-in", get(email_sign_in))
         .route("/_finite/auth/native-session", post(native_session))
         .route("/_finite/request-link", post(request_link))
         .route("/_finite/request-access", post(request_access))
@@ -59,6 +60,15 @@ pub fn router(state: Arc<AppState>) -> Router {
         // Any method reaches the fallback; static handling rejects non-GET.
         .fallback(serve_path)
         .with_state(state)
+}
+
+// Explicit fallback never redirects through Account Auth again.
+async fn email_sign_in(State(state): State<Arc<AppState>>, headers: HeaderMap) -> Response {
+    match resolve_request_site(&state, &headers).await {
+        Ok(Some(site)) => html_response(StatusCode::UNAUTHORIZED, pages::login(&site.name)),
+        Ok(None) => html_response(StatusCode::NOT_FOUND, pages::unknown_site()),
+        Err(_) => internal_page(),
+    }
 }
 
 async fn request_access(State(state): State<Arc<AppState>>, headers: HeaderMap) -> Response {
@@ -330,11 +340,42 @@ async fn serve_path(
     let viewer_cookie = viewer_cookie_value(&headers);
     let access = state
         .serving_engines
-        .run(move |engine| engine.view_access(&access_site, viewer_cookie.as_deref(), now_unix()))
+        .run(move |engine| -> Result<_, EngineError> {
+            Ok((
+                engine.view_access(&access_site, viewer_cookie.as_deref(), now_unix())?,
+                engine.site_url_for_site(&access_site),
+            ))
+        })
         .await;
     match access {
-        Ok(Ok(ViewAccess::Allowed)) => {}
-        Ok(Ok(ViewAccess::NeedsLogin)) => {
+        Ok(Ok((ViewAccess::Allowed, _))) => {}
+        Ok(Ok((ViewAccess::NeedsLogin, site_url))) => {
+            // Only document navigation attempts Account Auth; assets and APIs
+            // retain their ordinary unauthorized response.
+            let document = headers
+                .get("sec-fetch-dest")
+                .and_then(|h| h.to_str().ok())
+                .is_some_and(|v| v == "document" || v == "iframe")
+                || headers
+                    .get("accept")
+                    .and_then(|h| h.to_str().ok())
+                    .is_some_and(|v| v.contains("text/html"));
+            if method == Method::GET
+                && document
+                && let Some(mut login) = state.account_login_url.clone()
+            {
+                let path = uri.path_and_query().map(|v| v.as_str()).unwrap_or("/");
+                if crate::api::valid_return_to(path) {
+                    login
+                        .query_pairs_mut()
+                        .append_pair("url", &format!("{}{path}", site_url.trim_end_matches('/')));
+                    return (
+                        [(CACHE_CONTROL, "no-store")],
+                        axum::response::Redirect::to(login.as_str()),
+                    )
+                        .into_response();
+                }
+            }
             return html_response(StatusCode::UNAUTHORIZED, pages::login(&site.name));
         }
         Ok(Err(error)) => {
@@ -589,9 +630,15 @@ async fn redeem_link(
             return internal_page();
         }
     };
+    let session_token = params.get("session_token");
     let email_token = params.get("token");
     let native_token = params.get("native_token");
-    if email_token.is_some() == native_token.is_some() {
+    if [email_token, native_token, session_token]
+        .iter()
+        .filter(|v| v.is_some())
+        .count()
+        != 1
+    {
         return html_response(StatusCode::BAD_REQUEST, pages::link_invalid());
     }
     let return_to = match params.get("return_to") {
@@ -602,15 +649,22 @@ async fn redeem_link(
 
     let redeemed = {
         let mut engine = state.engine.lock().expect("engine mutex never poisoned");
-        match (email_token, native_token) {
-            (Some(token), None) => engine.redeem_login_with_email(token, now_unix()).map(
+        match (email_token, native_token, session_token) {
+            (None, None, Some(token)) => engine
+                .redeem_viewer_handoff(&site, token, now_unix())
+                .map(|(site, cookie_value, email)| RedeemedViewer::Email {
+                    site,
+                    cookie_value,
+                    email,
+                }),
+            (Some(token), None, None) => engine.redeem_login_with_email(token, now_unix()).map(
                 |(site, cookie_value, email)| RedeemedViewer::Email {
                     site,
                     cookie_value,
                     email,
                 },
             ),
-            (None, Some(token)) => engine
+            (None, Some(token), None) => engine
                 .redeem_native_viewer_link(token, now_unix())
                 .map(|(site, cookie_value)| RedeemedViewer::Native { site, cookie_value }),
             _ => unreachable!("token shape validated above"),
@@ -647,6 +701,8 @@ async fn redeem_link(
                 Response::builder()
                     .status(StatusCode::SEE_OTHER)
                     .header(LOCATION, return_to)
+                    .header(CACHE_CONTROL, "no-store")
+                    .header("referrer-policy", "no-referrer")
                     .body(Body::empty())
                     .expect("static response builds")
             } else {

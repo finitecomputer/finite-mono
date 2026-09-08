@@ -1682,10 +1682,16 @@ wait "$postgres_pid"
         self.write_managed_command(yaml, process, &[format!("exec {command}")], &[]);
         self.write_environment(
             yaml,
-            &[(
-                "FINITE_SITES_VIEWER_SESSION_TOKEN",
-                self.sites_viewer_session_token.clone(),
-            )],
+            &[
+                (
+                    "FINITE_SITES_VIEWER_SESSION_TOKEN",
+                    self.sites_viewer_session_token.clone(),
+                ),
+                (
+                    "FINITE_SITES_ACCOUNT_LOGIN_URL",
+                    format!("{}/site-auth", self.dashboard_origin()),
+                ),
+            ],
         );
         let _ = writeln!(yaml, "    depends_on:");
         let _ = writeln!(yaml, "      {}:", ManagedProcess::ServiceBinaries);
