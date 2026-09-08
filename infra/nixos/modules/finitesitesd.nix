@@ -83,11 +83,11 @@ in
         assertion =
           cfg.mode != "static-v2"
           || (
-            cfg.baseDomain == "v2.finite.chat"
-            && cfg.apiUrl == "https://v2.finite.chat"
-            && cfg.gitUrl == "https://v2.finite.chat"
+            cfg.baseDomain == "finite.site"
+            && cfg.apiUrl == "https://finite.site"
+            && cfg.gitUrl == "https://finite.site"
           );
-        message = "static-v2 Sites mode is only for the dedicated v2.finite.chat validation host before canonical cutover";
+        message = "static-v2 Sites mode is only for the dedicated finite.site validation host before canonical cutover";
       }
     ];
 
@@ -153,7 +153,11 @@ in
         # 64 lowercase hex characters (`openssl rand -hex 32`).
         EnvironmentFile = [
           "/etc/finite-saas/sites.env"
+          # Still authenticates the hosted requester assertion used by publishing.
           "/etc/finite/sites-viewer-session.env"
+        ]
+        ++ lib.optionals (cfg.mode == "static-v2") [
+          "/etc/finite/sites-auth-gate.env"
         ];
         Restart = "on-failure";
         RestartSec = 2;

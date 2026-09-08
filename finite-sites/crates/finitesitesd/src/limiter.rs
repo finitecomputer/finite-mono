@@ -1,11 +1,9 @@
-//! In-memory rate limiting for the magic-link endpoint.
+//! In-memory rate limiting for the CLI email-login endpoint.
 //!
-//! Budgets guard `/_finite/request-link`: per (site, email) so one
-//! address cannot be mail-bombed, and per client IP so one client cannot
-//! sweep the endpoint. The same client-IP budget bounds direct native viewer
-//! proofs before they can create nonce rows. Limited email requests render the generic
-//! "check your email" page — the limiter must not become an oracle for the
-//! share list.
+//! Budgets guard `/api/v1/email-auth/request` (the CLI actor path, ADR 0027):
+//! per email so one address cannot be mail-bombed, and per client IP so one
+//! client cannot sweep the endpoint. Limited requests return the same body
+//! as success — the limiter must not become an oracle.
 //!
 //! State is in-memory and per-process: a restart resets budgets, which is
 //! acceptable for an abuse brake (not a billing meter).
@@ -13,14 +11,10 @@
 use std::collections::HashMap;
 use std::sync::Mutex;
 
-/// One email address may be sent at most this many links per window.
+/// One email address may be sent at most this many login tokens per window.
 pub const MAX_LINKS_PER_EMAIL: u32 = 3;
-/// One client IP may request at most this many links per window, across
-/// all sites it touches.
+/// One client IP may request at most this many login tokens per window.
 pub const MAX_LINKS_PER_IP: u32 = 20;
-/// Dashboard viewer-session exchanges may be reissued for reloads and a few
-/// concurrent tabs, but remain bounded per Site + verified email.
-pub const MAX_VIEWER_SESSIONS_PER_EMAIL: u32 = 30;
 /// Budget window. 10 minutes matches the token TTL order of magnitude:
 /// a legitimate viewer needs at most a couple of tries per visit.
 pub const WINDOW_SECONDS: u64 = 10 * 60;

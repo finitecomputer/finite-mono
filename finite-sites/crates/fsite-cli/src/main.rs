@@ -16,7 +16,7 @@
 //!   fsite project list --output json
 //!   fsite view URL_OR_NAME --output json
 //!
-//! Server address comes from FINITE_SITES_API (default https://v2.finite.chat).
+//! Server address comes from FINITE_SITES_API (default https://finite.site).
 
 mod api;
 mod identity_target;
@@ -150,7 +150,7 @@ fn usage() -> String {
      fsite project init --config finite.toml [--requesting-user-npub NPUB] [--dry-run] [--output json]\n  \
      fsite project grant PROJECT (--email MAILBOX | --nip05 NAME | --npub NPUB) [--role editor] [--send-invite] [--output json]\n  \
      fsite project revoke PROJECT (--email MAILBOX | --nip05 NAME | --npub NPUB) [--output json]\n  \
-     fsite project share PROJECT [--public --yes-public|--shared|--private] [--add-email MAILBOX]... [--remove-email MAILBOX]... [--add-nip05 NAME]... [--remove-nip05 NAME]... [--add-npub NPUB]... [--remove-npub NPUB]... [--send-invite] [--output json]\n  \
+     fsite project share PROJECT [--public --yes-public|--shared|--private] [--add-email MAILBOX]... [--remove-email MAILBOX]... [--add-nip05 NAME]... [--remove-nip05 NAME]... [--add-npub NPUB]... [--remove-npub NPUB]... [--output json]\n  \
      fsite project status PROJECT [--output json]\n  \
      fsite project list [--output json]\n  \
      fsite auth status [--output json]\n  \
@@ -166,27 +166,21 @@ fn usage() -> String {
 
 fn removed_site_first_command_help(command: &str) -> String {
     match command {
-        "share" => {
-            "`fsite share` is not part of the current Project Repository model.\n\n\
+        "share" => "`fsite share` is not part of the current Project Repository model.\n\n\
              Use Project Site sharing instead:\n  \
              fsite project status PROJECT --output json\n  \
-             fsite project share PROJECT --shared --add-email VIEWER_EMAIL --send-invite --output json\n  \
+             fsite project share PROJECT --shared --add-email VIEWER_EMAIL --output json\n  \
              fsite project share PROJECT --public --yes-public --output json\n  \
              fsite project share PROJECT --private --output json"
-                .to_string()
-        }
-        "status" => {
-            "`fsite status` is not part of the current Project Repository model.\n\n\
+            .to_string(),
+        "status" => "`fsite status` is not part of the current Project Repository model.\n\n\
              Use Project Status instead:\n  \
              fsite project status PROJECT --output json"
-                .to_string()
-        }
-        "list" => {
-            "`fsite list` is not part of the current Project Repository model.\n\n\
+            .to_string(),
+        "list" => "`fsite list` is not part of the current Project Repository model.\n\n\
              Use Project List instead:\n  \
              fsite project list --output json"
-                .to_string()
-        }
+            .to_string(),
         "email-login" | "email-redeem" => format!(
             "`fsite {command}` has moved under the auth product verb.\n\n\
              Use:\n  \
@@ -199,7 +193,7 @@ fn removed_site_first_command_help(command: &str) -> String {
              fsite describe workflow publish-static-site --output json\n  \
              fsite project init --config finite.toml --dry-run --output json\n  \
              fsite project init --config finite.toml --output json\n  \
-             fsite project grant PROJECT --email EDITOR_EMAIL --send-invite --output json\n  \
+             fsite project grant PROJECT --email EDITOR_EMAIL --output json\n  \
              fsite auth git PROJECT --store --output json\n  \
              git clone RETURNED_GIT_REMOTE_URL\n  \
              # edit, commit, and push the configured Deploy Branch"
@@ -224,7 +218,7 @@ fn describe_help() -> &'static str {
 }
 
 fn project_help() -> &'static str {
-    "usage:\n  fsite project init --config finite.toml [--requesting-user-npub NPUB] [--dry-run] [--output json]\n  fsite project grant PROJECT (--email MAILBOX | --nip05 NAME | --npub NPUB) [--role editor] [--send-invite] [--output json]\n  fsite project revoke PROJECT (--email MAILBOX | --nip05 NAME | --npub NPUB) [--output json]\n  fsite project share PROJECT [--public --yes-public|--shared|--private] [--add-email MAILBOX]... [--remove-email MAILBOX]... [--add-nip05 NAME]... [--remove-nip05 NAME]... [--add-npub NPUB]... [--remove-npub NPUB]... [--send-invite] [--output json]\n  fsite project status PROJECT [--output json]\n  fsite project list [--output json]\n\nProject is the source primitive: init creates the Project Repository and an optional Project Site; a [project]-only finite.toml creates a source-only repository. Git edits and publishes content; grant/revoke manage Project edit access; share manages viewer access for the Project Site."
+    "usage:\n  fsite project init --config finite.toml [--requesting-user-npub NPUB] [--dry-run] [--output json]\n  fsite project grant PROJECT (--email MAILBOX | --nip05 NAME | --npub NPUB) [--role editor] [--send-invite] [--output json]\n  fsite project revoke PROJECT (--email MAILBOX | --nip05 NAME | --npub NPUB) [--output json]\n  fsite project share PROJECT [--public --yes-public|--shared|--private] [--add-email MAILBOX]... [--remove-email MAILBOX]... [--add-nip05 NAME]... [--remove-nip05 NAME]... [--add-npub NPUB]... [--remove-npub NPUB]... [--output json]\n  fsite project status PROJECT [--output json]\n  fsite project list [--output json]\n\nProject is the source primitive: init creates the Project Repository and an optional Project Site; a [project]-only finite.toml creates a source-only repository. Git edits and publishes content; grant/revoke manage Project edit access; share manages viewer access for the Project Site."
 }
 
 fn project_init_help() -> &'static str {
@@ -240,7 +234,7 @@ fn project_revoke_help() -> &'static str {
 }
 
 fn project_share_help() -> &'static str {
-    "usage: fsite project share PROJECT [--public --yes-public|--shared|--private] [--add-email MAILBOX]... [--remove-email MAILBOX]... [--add-nip05 NAME]... [--remove-nip05 NAME]... [--add-npub NPUB]... [--remove-npub NPUB]... [--send-invite] [--output json]\n\nManage revocable viewer Shares for the Project Site. Mailbox viewers use email proof; NIP-05 Names resolve to native npubs; npubs use bounded Sites viewer sessions without email. This is separate from Project Repository edit access. Public sharing requires --yes-public."
+    "usage: fsite project share PROJECT [--public --yes-public|--shared|--private] [--add-email MAILBOX]... [--remove-email MAILBOX]... [--add-nip05 NAME]... [--remove-nip05 NAME]... [--add-npub NPUB]... [--remove-npub NPUB]... [--output json]\n\nManage revocable viewer Shares for the Project Site. Mailbox viewers use email proof; NIP-05 Names resolve to native npubs; browser viewing uses verified email through the Auth Gate; native grants remain available to signing clients. This is separate from Project Repository edit access. Public sharing requires --yes-public."
 }
 
 fn project_status_help() -> &'static str {
@@ -360,7 +354,7 @@ fn describe_commands() -> serde_json::Value {
             {
                 "name": "project share",
                 "summary": "Manage viewer access for the Project Site.",
-                "usage": "fsite project share PROJECT [--public --yes-public|--shared|--private] [--add-email MAILBOX]... [--remove-email MAILBOX]... [--add-nip05 NAME]... [--remove-nip05 NAME]... [--add-npub NPUB]... [--remove-npub NPUB]... [--send-invite] [--output json]"
+                "usage": "fsite project share PROJECT [--public --yes-public|--shared|--private] [--add-email MAILBOX]... [--remove-email MAILBOX]... [--add-nip05 NAME]... [--remove-nip05 NAME]... [--add-npub NPUB]... [--remove-npub NPUB]... [--output json]"
             },
             {
                 "name": "project status",
@@ -537,7 +531,7 @@ fn describe_workflow(name: &str) -> Result<serde_json::Value, CliError> {
             "steps": [
                 "Run fsite project status PROJECT --output json and confirm the project has a site.",
                 "For public viewer access, run fsite project share PROJECT --public --yes-public --output json.",
-                "For email-gated viewer access, run fsite project share PROJECT --shared --add-email VIEWER_EMAIL --send-invite --output json.",
+                "For email-gated viewer access, run fsite project share PROJECT --shared --add-email VIEWER_EMAIL --output json.",
                 "For native Finite viewer access without email, run fsite project share PROJECT --add-npub VIEWER_NPUB --output json. Remove it with --remove-npub.",
                 "For private viewer access, run fsite project share PROJECT --private --output json."
             ]
@@ -1071,7 +1065,6 @@ struct ProjectShareOptions {
     remove_nip05s: Vec<Nip05Name>,
     add_npubs: Vec<NativeNpub>,
     remove_npubs: Vec<NativeNpub>,
-    send_invite: bool,
     output_json: bool,
 }
 
@@ -1125,7 +1118,6 @@ fn project_share(args: &[String]) -> Result<(), CliError> {
             add_npubs,
             remove_npubs,
         },
-        options.send_invite,
     )?;
     if options.output_json {
         println!(
@@ -1161,7 +1153,6 @@ fn parse_project_share_args(args: &[String]) -> Result<ProjectShareOptions, CliE
     let mut remove_nip05s = Vec::new();
     let mut add_npubs = Vec::new();
     let mut remove_npubs = Vec::new();
-    let mut send_invite = false;
     let mut output_json = false;
     let mut index: usize = 0;
     // Bounded by argv length.
@@ -1181,10 +1172,6 @@ fn parse_project_share_args(args: &[String]) -> Result<ProjectShareOptions, CliE
             }
             "--yes-public" => {
                 confirm_public = true;
-                index += 1;
-            }
-            "--send-invite" => {
-                send_invite = true;
                 index += 1;
             }
             "--add-email" => {
@@ -1263,18 +1250,6 @@ fn parse_project_share_args(args: &[String]) -> Result<ProjectShareOptions, CliE
             "--public requires --yes-public to confirm public viewer access".to_string(),
         ));
     }
-    if send_invite {
-        if visibility.as_deref() != Some("shared") {
-            return Err(CliError::Usage(
-                "--send-invite requires --shared".to_string(),
-            ));
-        }
-        if add_emails.is_empty() {
-            return Err(CliError::Usage(
-                "--send-invite requires at least one --add-email".to_string(),
-            ));
-        }
-    }
     Ok(ProjectShareOptions {
         project: positionals.remove(0),
         visibility,
@@ -1285,7 +1260,6 @@ fn parse_project_share_args(args: &[String]) -> Result<ProjectShareOptions, CliE
         remove_nip05s,
         add_npubs,
         remove_npubs,
-        send_invite,
         output_json,
     })
 }
@@ -2513,7 +2487,7 @@ fn view_target_url(target: &str, discovered_url: Option<&str>) -> String {
         }
         return format!("{value}/");
     }
-    format!("https://{target}.v2.finite.chat/")
+    format!("https://{target}.finite.site/")
 }
 
 fn append_url_path(base: &str, path: &str) -> String {
@@ -2772,36 +2746,26 @@ mod tests {
     }
 
     #[test]
-    fn project_share_parser_validates_invites_and_visibility() {
-        assert!(matches!(
-            parse_project_share_args(&args(&[
-                "demo",
-                "--private",
-                "--send-invite",
-                "--add-email",
-                "viewer@example.com",
-            ])),
-            Err(CliError::Usage(message)) if message.contains("--shared")
-        ));
-        assert!(matches!(
-            parse_project_share_args(&args(&["demo", "--shared", "--send-invite"])),
-            Err(CliError::Usage(message)) if message.contains("--add-email")
-        ));
+    fn project_share_parser_validates_visibility_and_rejects_dead_invite_flag() {
         assert!(matches!(
             parse_project_share_args(&args(&["demo", "--shared", "--private"])),
             Err(CliError::Usage(message)) if message.contains("only one visibility")
+        ));
+        // --send-invite was deleted with the emailed viewing-link flow: the
+        // share row itself is the invitation now.
+        assert!(matches!(
+            parse_project_share_args(&args(&["demo", "--send-invite"])),
+            Err(CliError::Usage(message)) if message.contains("--send-invite")
         ));
         let parsed = parse_project_share_args(&args(&[
             "demo",
             "--shared",
             "--add-email",
             "viewer@example.com",
-            "--send-invite",
         ]))
         .unwrap();
         assert_eq!(parsed.visibility.as_deref(), Some("shared"));
         assert_eq!(parsed.add_emails[0].as_str(), "viewer@example.com");
-        assert!(parsed.send_invite);
 
         let native = parse_project_share_args(&args(&[
             "demo",
@@ -3069,7 +3033,7 @@ mod tests {
     fn view_target_url_supports_url_or_name() {
         assert_eq!(
             view_target_url("finitechat-native-mockup", None),
-            "https://finitechat-native-mockup.v2.finite.chat/"
+            "https://finitechat-native-mockup.finite.site/"
         );
         assert_eq!(
             view_target_url(

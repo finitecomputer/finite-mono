@@ -154,7 +154,7 @@ console.log(`dashboard->core ok: request ${request.id} created project ${request
 JS
 }
 
-check_native_requesting_user_site() {
+check_requesting_user_site() {
   local run_id
   local slug
   local marker
@@ -178,13 +178,9 @@ check_native_requesting_user_site() {
   local site_id
   local output_url
   local git_remote
-  local proof_request_json
-  local proof_json
-  local exchange_json
-  local exchange_response_json
-  local redeem_url
   local redemption_headers
   local viewer_cookie
+  local viewer_cookie_jar
   local status
   local body
   local revoke_json
@@ -192,7 +188,7 @@ check_native_requesting_user_site() {
   run_id="${DEVFINITY_SMOKE_RUN_ID:-$(date +%s)-$$}"
   slug="devfinity-private-${run_id}"
   marker="Devfinity private Sites ${run_id}"
-  smoke_root="${DEVFINITY_STATE_DIR:?}/sites-native-requester-${run_id}"
+  smoke_root="${DEVFINITY_STATE_DIR:?}/sites-requester-${run_id}"
   agent_home="$smoke_root/home"
   agent_finite_home="$smoke_root/finite-home"
   project_dir="$smoke_root/project"
@@ -203,11 +199,8 @@ check_native_requesting_user_site() {
   assertion_request_json="$smoke_root/hosted-requester-assertion-request.json"
   assertion_response_json="$smoke_root/hosted-requester-assertion-response.json"
   init_json="$smoke_root/init.json"
-  proof_request_json="$smoke_root/proof-request.json"
-  proof_json="$smoke_root/proof.json"
-  exchange_json="$smoke_root/exchange.json"
-  exchange_response_json="$smoke_root/exchange-response.json"
   redemption_headers="$smoke_root/redemption.headers"
+  viewer_cookie_jar="$smoke_root/viewer.cookies"
   revoke_json="$smoke_root/revoke.json"
   track_sensitive_dir "$smoke_root"
   owner_email="devfinity@finite.computer"
@@ -388,17 +381,17 @@ JS
     git remote add finite "$git_remote"
     git push -q finite main
   )
-  echo "Sites smoke private Output published"
+  echo "Sites smoke private Site published"
 
   local started
   started="$(date +%s)"
   while true; do
     status="$(curl -sS --max-time 5 -o /dev/null -w '%{http_code}' "$output_url" || true)"
-    if [[ "$status" == "401" ]]; then
+    if [[ "$status" == "303" ]]; then
       break
     fi
     if (( "$(date +%s)" - started >= 60 )); then
-      echo "Sites smoke Output did not publish within 60s; last status $status" >&2
+      echo "Sites smoke Site did not publish within 60s; last status $status" >&2
       return 1
     fi
     sleep 1
@@ -435,7 +428,7 @@ JS
       break
     fi
     if (( "$(date +%s)" - started >= 60 )); then
-      echo "Sites smoke second Output version did not publish within 60s" >&2
+      echo "Sites smoke second Site version did not publish within 60s" >&2
       return 1
     fi
     sleep 1
@@ -448,58 +441,30 @@ JS
   fi
   echo "Sites first-publication outbox notification delivered exactly once"
 
-  node - "$output_url" >"$proof_request_json" <<'JS'
-const { randomUUID } = require("node:crypto");
-const output = new URL(process.argv[2]);
-process.stdout.write(JSON.stringify({
-  version: "finite-sites-identity-provider-v1",
-  operation: "authorizeViewerSession",
-  input: {
-    url: `${output.origin}/_finite/auth/native-session`,
-    returnTo: "/",
-    client: "devfinity-services-smoke",
-    nonce: randomUUID(),
-  },
-}));
-JS
-  echo "Sites smoke requesting bounded proof from Hosted Device"
-  curl -fsS --config "$hosted_config" \
-    -H 'content-type: application/json' \
-    -H "x-finite-sites-public-origin: $(node -e 'process.stdout.write(new URL(process.argv[1]).origin)' "$output_url")" \
-    --data-binary "@$proof_request_json" \
-    "$hosted_device_url/v1/sites/identity-provider" >"$proof_json"
-  node - "$proof_json" "$output_url" >"$exchange_json" <<'JS'
-const fs = require("node:fs");
-const proof = JSON.parse(fs.readFileSync(process.argv[2], "utf8"));
-if (typeof proof.authorization_header !== "string" || typeof proof.body_json !== "string") {
-  throw new Error("Hosted Device did not return the bounded Sites proof");
-}
-process.stdout.write(JSON.stringify({
-  site_url: new URL(process.argv[3]).origin + "/",
-  authorization: proof.authorization_header,
-  signed_body: proof.body_json,
-}));
-JS
-  echo "Sites smoke exchanging bounded proof for Viewer Session"
-  curl -fsS --config "$sites_config" \
-    -H 'content-type: application/json' \
-    --data-binary "@$exchange_json" \
-    "$sites_url/internal/v1/native-viewer-sessions" >"$exchange_response_json"
-  redeem_url="$(node - "$exchange_response_json" <<'JS'
-const fs = require("node:fs");
-const response = JSON.parse(fs.readFileSync(process.argv[2], "utf8"));
-const redeem = new URL(String(response.redeem_url || ""));
-if (!/^[0-9a-f]{64}$/u.test(redeem.searchParams.get("native_token") || "")) {
-  throw new Error("Sites did not return a native redemption URL");
-}
-process.stdout.write(redeem.toString());
-JS
-)"
-  status="$(curl -sS --max-time 15 -D "$redemption_headers" -o /dev/null -w '%{http_code}' "$redeem_url")"
-  if [[ "$status" != "303" ]]; then
-    echo "Sites smoke redemption returned HTTP $status instead of 303" >&2
+  # The services-only dashboard already has the fixture's verified account.
+  # Start with no Sites cookie and follow the real browser path: Sites -> gate
+  # -> dashboard /site-auth -> signed vouch redemption -> protected content.
+  # The smoke never signs a native viewer proof or calls the gate with a token.
+  status="$(curl -sS --max-time 30 --location --max-redirs 4 \
+    --cookie "$viewer_cookie_jar" --cookie-jar "$viewer_cookie_jar" \
+    -D "$redemption_headers" -o /dev/null -w '%{http_code}' "$output_url")"
+  if [[ "$status" != "200" ]]; then
+    echo "Sites smoke account/gate redirect flow returned HTTP $status instead of 200" >&2
     return 1
   fi
+  node - "$redemption_headers" "$dashboard_url" <<'JS'
+const fs = require("node:fs");
+const headers = fs.readFileSync(process.argv[2], "utf8").split(/\r?\n/u);
+const dashboard = new URL(process.argv[3]);
+const visitedAccount = headers.some((line) => {
+  if (!/^location:/iu.test(line)) return false;
+  const target = new URL(line.replace(/^location:\s*/iu, ""), dashboard);
+  return target.origin === dashboard.origin && target.pathname === "/site-auth";
+});
+if (!visitedAccount) {
+  throw new Error("Sites viewing did not pass through the dashboard account adapter");
+}
+JS
   viewer_cookie="$(node - "$redemption_headers" <<'JS'
 const fs = require("node:fs");
 const headers = fs.readFileSync(process.argv[2], "utf8").split(/\r?\n/u);
@@ -513,7 +478,7 @@ JS
   echo "Sites smoke Viewer Session redeemed"
   body="$(curl -fsS --max-time 15 -H "Cookie: $viewer_cookie" "$output_url")"
   if [[ "$body" != *"$marker"* || "$body" != *"Second publication"* ]]; then
-    echo "Sites smoke Viewer Cookie did not open the private Output" >&2
+    echo "Sites smoke Viewer Cookie did not open the private Site" >&2
     return 1
   fi
 
@@ -530,7 +495,7 @@ JS
     echo "Mailbox-authorized Sites smoke Viewer Cookie returned HTTP $status instead of 200 after its redundant native Share was removed" >&2
     return 1
   fi
-  echo "agent -> requester native Share and same-mailbox keyset access ok: $output_url"
+  echo "agent -> publisher email -> account/gate viewer access ok: $output_url"
 }
 
 need bash
@@ -561,7 +526,7 @@ check_http "hosted-web-device" "$hosted_device_url/healthz" '"status":"ok"'
 check_http "finitesites" "$sites_url/api/v2/healthz" '"ok":true'
 check_http "finitebrain" "$brain_url/health" '"status":"ok"'
 check_http "dashboard" "$dashboard_url" '<html'
-check_native_requesting_user_site
+check_requesting_user_site
 check_dashboard_agent_creation
 cargo test -p finitechat-client --locked --lib \
   tests::sqlite_client_store_loads_metadata_written_before_paired_agent_field \

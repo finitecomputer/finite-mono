@@ -164,42 +164,24 @@ pub fn placeholder(name: &str) -> String {
     )
 }
 
-pub fn login(name: &str) -> String {
+/// Rendered when viewer auth is needed but the Auth Gate is not configured
+/// or the request is not a browser navigation. The normal browser path is a
+/// redirect to the gate, never this page.
+pub fn private_site() -> String {
     page(
-        &format!("Sign in to {name}"),
-        &format!(
-            "<p class=\"eyebrow\">{name}</p>\
-             <h1>This site is private</h1>\
-             <p>If {name} has been shared with you, enter your email and \
-             we&rsquo;ll send you a sign-in link.</p>\
-             <form method=\"post\" action=\"/_finite/request-link\">\
-               <input type=\"email\" name=\"email\" placeholder=\"you@example.com\" required>\
-               <button type=\"submit\">Send link</button>\
-             </form>\
-             <div class=\"agent-cta\">\
-               <p>Working with an agent?</p>\
-               <a class=\"agent-link\" href=\"/llms.txt\">Open llms.txt</a>\
-             </div>"
-        ),
-    )
-}
-
-pub fn link_sent() -> String {
-    page(
-        "Check your email",
-        "<h1>Check your email</h1>\
-         <p>A verification link is on its way. After you verify the address, \
-         we&rsquo;ll tell you whether the site has been shared with you. \
-         The link can be reused and expires in 15 minutes.</p>",
+        "This site is private",
+        "<h1>This site is private</h1>\
+         <p>Sign-in is handled by the Finite Auth Gate. \
+         Open the site in a browser to continue.</p>",
     )
 }
 
 pub fn link_invalid() -> String {
     page(
-        "Link expired",
-        "<h1>That link didn&rsquo;t work</h1>\
-         <p>Sign-in links expire after 15 minutes. \
-         Request a fresh one from the site&rsquo;s sign-in page.</p>",
+        "Sign-in didn&rsquo;t work",
+        "<h1>That sign-in didn&rsquo;t work</h1>\
+         <p>The sign-in voucher expired or was already used. \
+         Open the site again to start fresh.</p>",
     )
 }
 

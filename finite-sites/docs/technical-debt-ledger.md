@@ -128,3 +128,21 @@ acknowledgement.
 - **Delete condition**: this entry is the permanent record; remove the
   store-layer helpers only with a dedicated store cleanup that rewrites the
   fixtures that use them.
+
+## 11. Legacy viewing clients retained until Sites cutover
+
+- **Source**: PR 840 leaves canonical Sites on the released `fsite/v0.5.3`
+  binary while PR 803 introduces the gate for the new dedicated service.
+- **Risk**: removing dashboard/native viewer-session callers before production
+  moves breaks current previews; retaining them without a boundary creates two
+  permanent browser authentication paths.
+- **Proof**: `legacy-canonical` deployment pin and the existing dashboard
+  `site-preview.ts`, hosted-device viewer exchange, and native viewer preflight.
+  These remain solely for consumers of the old service, not as fallback auth
+  inside the v2 service.
+- **Delete condition**: after the coordinated
+  [finite.site cutover](../../infra/runbooks/deploy-sites.md) proves migrated
+  email grants and the dashboard/native clients target the new service, remove
+  their old viewer-session exchange, signer adapter, protocol types, and tests
+  together. Confirm no supported deployed consumer still requires those routes.
+  Do not remove actor publishing/requester assertions as part of viewer cleanup.

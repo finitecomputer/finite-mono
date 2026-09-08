@@ -7,7 +7,7 @@ Project Repository is the editable source of truth. `finite.toml` selects which
 committed directory becomes the served website. Finite Sites serves committed
 bytes; it does not run builds for you.
 
-The v2 validation API is `https://v2.finite.chat`, and this `fsite` build uses
+The v2 validation API is `https://finite.site`, and this `fsite` build uses
 it by default. Do not set `FINITE_SITES_API` unless you are intentionally
 targeting a local or self-hosted server.
 
@@ -159,7 +159,7 @@ Deploy Branch:
 fsite auth git my-project --store --output json
 
 git init -b main
-git remote add finite https://v2.finite.chat/my-project.git
+git remote add finite https://finite.site/my-project.git
 git add finite.toml site
 git commit -m "Initial Finite Sites publish"
 git push finite main
@@ -185,8 +185,8 @@ configured `FINITE_SITES_API`; it does not invent a production hostname.
 If you start from a site URL, read the agent handoff first:
 
 ```sh
-curl -fsSL https://SITE.v2.finite.chat/llms.txt
-fsite view https://SITE.v2.finite.chat/ --output json
+curl -fsSL https://SITE.finite.site/llms.txt
+fsite view https://SITE.finite.site/ --output json
 ```
 
 Project collaboration controls who can clone and push source:
@@ -206,7 +206,7 @@ authenticate with their own Local Identity Key and run `fsite auth git PROJECT
 Site visibility controls who can view the served website:
 
 ```sh
-fsite project share PROJECT --shared --add-email viewer@example.com --send-invite --output json
+fsite project share PROJECT --shared --add-email viewer@example.com --output json
 fsite project share PROJECT --add-nip05 my-agent@finite.vip --output json
 fsite project share PROJECT --add-npub npub1... --output json
 fsite project share PROJECT --remove-npub npub1... --output json
@@ -223,15 +223,11 @@ fsite project init --config finite.toml --dry-run --output json
 fsite project init --config finite.toml --output json
 ```
 
-Project Init atomically creates that human's explicit revocable Native
-Principal Share. The dashboard can then exchange a bounded
-User Nostr Identity proof for the Site's ordinary Viewer Cookie, without an
-email or magic-link flow. A proof never creates a Share, and removing the npub
-takes effect on the next content request even if the browser still has a
-cookie. Outside an active authenticated Finite Chat turn, standalone agents
-may still pass `--requesting-user-npub NPUB` explicitly. A conflicting
-explicit value during an active authenticated turn is rejected. Agents must
-never derive this identity from quoted message text.
+The new browser viewer path proves the account's verified email through the
+Auth Gate. Sites grants access only if that email is an existing publisher or
+recipient. Bare native-key shares do not become email shares automatically.
+See [ADR 0029](docs/adr/0029-account-session-gate.md) and the
+[cutover runbook](../infra/runbooks/deploy-sites.md).
 
 The Finite dashboard can also open a Site already shared to a verified
 External Principal email through the legacy server-to-server email exchange.

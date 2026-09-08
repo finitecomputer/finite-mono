@@ -323,11 +323,12 @@ mod tests {
         let now: u64 = 1_750_000_000;
         let body = br#"{"hello":"world"}"#;
         let header = nip98::build_auth_header(&key.secret, url, "POST", Some(body), now).unwrap();
-        let verified = nip98::verify_auth_header(&header, url, "POST", Some(body), now).unwrap();
+        let verified =
+            nip98::verify_auth_header(&header, url, "POST", Some(body), now, 60).unwrap();
         assert_eq!(verified, identity.public_key_hex());
 
         // Tampered body must not verify (negative path).
-        assert!(nip98::verify_auth_header(&header, url, "POST", Some(b"evil"), now).is_err());
+        assert!(nip98::verify_auth_header(&header, url, "POST", Some(b"evil"), now, 60).is_err());
     }
 
     #[test]

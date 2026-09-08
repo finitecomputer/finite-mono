@@ -1,3 +1,4 @@
+import { gateSiteOrigin, mintSiteGateSession, SiteGateError } from "./site-gate";
 import { randomUUID } from "node:crypto";
 
 import { getAccountAuthContext } from "@/lib/dashboard-auth";
@@ -117,6 +118,18 @@ export async function createSitePreviewSession(machineId: string, rawUrl: unknow
   }
 
   const target = parseSitePreviewTarget(rawUrl);
+  // Legacy finite.chat stays on its deployed native exchange until cutover.
+  // The new service always uses the same gate as direct browser navigation.
+  let gateTarget = false;
+  try { gateSiteOrigin(target.outputUrl); gateTarget = true; } catch { /* legacy host */ }
+  if (gateTarget) {
+    try {
+      return { url: await mintSiteGateSession(account, target.outputUrl, target.returnTo), originalUrl: target.originalUrl };
+    } catch (error) {
+      if (error instanceof SiteGateError) throw new SitePreviewError(error.message, error.status);
+      throw error;
+    }
+  }
   const upstream = sitesUpstreamOrigin();
   const serviceToken = process.env.FINITE_SITES_VIEWER_SESSION_TOKEN?.trim();
   const device = hostedDeviceConfig();
@@ -247,6 +260,7 @@ export function parseSitePreviewTarget(
 }
 
 function allowedOutputHost(url: URL, allowLocalOutputs: boolean) {
+  try { gateSiteOrigin(url.origin); return true; } catch { /* legacy host */ }
   if (url.protocol === "https:" && !url.port) {
     return oneLabelUnder(url.hostname, "docs.finite.chat")
       || oneLabelUnder(url.hostname, "finite.chat");

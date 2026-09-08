@@ -24,7 +24,7 @@ Current v2 capabilities:
 - Generated `/llms.txt` for project-backed editable sites when the project did
   not publish that path itself.
 - Per-site visibility: `private`, `shared`, or `public`.
-- Email magic links for external viewer and collaborator bootstrap.
+- Auth Gate email vouches for viewers; local email proofs for publishing/collaborator bootstrap.
 - Operator controls for publish grants, site disable/delete, and selected
   public-read Project Repository visibility.
 
