@@ -218,3 +218,12 @@ fn configuration_fails_closed() {
         Some("http://hello.sites.localhost:8787")
     );
 }
+
+#[test]
+fn local_account_callback_accepts_loopback_but_remote_http_fails_closed() {
+    let mut config = config();
+    config.account_url = "http://127.0.0.1:13002/site-auth".into();
+    assert!(config.validate().is_ok());
+    config.account_url = "http://finite.computer/site-auth".into();
+    assert!(config.validate().is_err());
+}

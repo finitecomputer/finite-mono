@@ -63,7 +63,10 @@ pub(crate) fn valid_label(label: &str) -> bool {
 pub(crate) fn secure_url(raw: &str) -> Result<url::Url> {
     let url = url::Url::parse(raw)?;
     let host = url.host_str().context("URL needs a host")?;
-    let local = host == "localhost" || host.ends_with(".localhost");
+    let local = host == "localhost"
+        || host.ends_with(".localhost")
+        || matches!(url.host(), Some(url::Host::Ipv4(ip)) if ip.is_loopback())
+        || matches!(url.host(), Some(url::Host::Ipv6(ip)) if ip.is_loopback());
     if !(url.scheme() == "https" || (url.scheme() == "http" && local))
         || !url.username().is_empty()
         || url.password().is_some()
@@ -71,7 +74,7 @@ pub(crate) fn secure_url(raw: &str) -> Result<url::Url> {
         || url.fragment().is_some()
     {
         bail!(
-            "URL must use HTTPS (HTTP only on localhost), without credentials, query or fragment"
+            "URL must use HTTPS (HTTP only on localhost or loopback), without credentials, query or fragment"
         );
     }
     Ok(url)

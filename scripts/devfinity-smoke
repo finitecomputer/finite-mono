@@ -180,7 +180,6 @@ check_requesting_user_site() {
   local git_remote
   local redemption_headers
   local viewer_cookie
-  local viewer_cookie_jar
   local status
   local body
   local revoke_json
@@ -200,7 +199,6 @@ check_requesting_user_site() {
   assertion_response_json="$smoke_root/hosted-requester-assertion-response.json"
   init_json="$smoke_root/init.json"
   redemption_headers="$smoke_root/redemption.headers"
-  viewer_cookie_jar="$smoke_root/viewer.cookies"
   revoke_json="$smoke_root/revoke.json"
   track_sensitive_dir "$smoke_root"
   owner_email="devfinity@finite.computer"
@@ -445,11 +443,14 @@ JS
   # Start with no Sites cookie and follow the real browser path: Sites -> gate
   # -> dashboard /site-auth -> signed vouch redemption -> protected content.
   # The smoke never signs a native viewer proof or calls the gate with a token.
-  status="$(curl -sS --max-time 30 --location --max-redirs 4 \
-    --cookie "$viewer_cookie_jar" --cookie-jar "$viewer_cookie_jar" \
-    -D "$redemption_headers" -o /dev/null -w '%{http_code}' "$output_url")"
-  if [[ "$status" != "200" ]]; then
-    echo "Sites smoke account/gate redirect flow returned HTTP $status instead of 200" >&2
+  # curl does not treat *.localhost HTTP as a secure cookie context. Stop at
+  # redemption and send the cookie explicitly below; Chrome's separate browser
+  # acceptance owns actual cookie-policy coverage.
+  local redirect_exit=0
+  status="$(curl -s --max-time 30 --location --max-redirs 3 \
+    -D "$redemption_headers" -o /dev/null -w '%{http_code}' "$output_url")" || redirect_exit=$?
+  if [[ "$redirect_exit" != "47" || "$status" != "303" ]]; then
+    echo "Sites smoke expected the redemption redirect; got curl $redirect_exit, HTTP $status" >&2
     return 1
   fi
   node - "$redemption_headers" "$dashboard_url" <<'JS'
@@ -523,6 +524,7 @@ check_tcp "postgres" "127.0.0.1" "$postgres_port"
 check_http "core" "$core_url/healthz" '"ok":true'
 check_http "finitechat" "$chat_url/health" '"status":"ok"'
 check_http "hosted-web-device" "$hosted_device_url/healthz" '"status":"ok"'
+check_http "finite-gate" "${FINITE_SITES_AUTH_GATE_URL:?}/healthz" "ok"
 check_http "finitesites" "$sites_url/api/v2/healthz" '"ok":true'
 check_http "finitebrain" "$brain_url/health" '"status":"ok"'
 check_http "dashboard" "$dashboard_url" '<html'
