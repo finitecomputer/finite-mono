@@ -2,8 +2,10 @@
 
 Recent archive imports, an additive legacy-history supplement, and a two-source
 consolidation completed on existing production Runtime implementations. A further
-single-origin import also completed; its external connection handoff remains
-blocked by recurring competing-consumer evidence. This record summarizes the retained execution evidence. It does not authorize another
+single-origin import also completed. Its recurring connection conflicts ceased
+after owner-reported source shutdown; operator-side verification passed, with
+human delivery testing explicitly deferred. This record summarizes the retained
+execution evidence. It does not authorize another
 cutover, introduce a migration framework, or claim current fleet-wide health.
 
 ## Publication boundary
@@ -29,15 +31,16 @@ channel; they should not attach raw evidence to this PR or its review comments.
 | Additive legacy-history supplement | Native export and source provenance; history and file overlap checks; preservation of all preexisting imported sessions and unrelated state; bounded memory updates; live Chat reads of the supplement | Completed. Identical files were not installed twice. Historical metadata remained identified as metadata. This was a point-in-time supplement, not continuous synchronization; later source activity and unmapped temporary attachments are outside its guarantee. |
 | Two-source consolidation | Frozen legacy source recovery; comparison with the rehearsed export, facts, persona, permissions and portable files; distinct history namespaces; installed-version import; all message fields and parent links; native memory/search readers | Completed. Both histories, structured facts and portable files were installed while preserving the destination's existing Chat and identity. Unsupported source events and inactive instructions remain archived rather than replayed. |
 | Subsequent connection transfers | Source-consumer fencing; target bot identity check; native configuration and pairing readers; preserved approved principal; rejection of an unrelated principal; post-transfer connection state and polling-conflict inspection | Later transfers passed these checks. A source with other active connections had only its transferred adapter disabled. Human message/reply tests were not observed at those checkpoints. An earlier, separate connection request remains blocked on source access. |
-| Further single-origin import | Source message/event accounting; branch segmentation and parent links; actual installed-version import and idempotence; native profile and search readers; exact stopped-target candidate comparison; live Chat and portable-file reads | Data import completed. Existing destination Chat and identity were preserved. Explicit source DM authorization was retained; native adapter tests accepted the approved sender and rejected an unrelated sender and group traffic. A real Telegram roundtrip has not been observed; recurring polling conflicts leave the connection handoff incomplete. |
+| Further single-origin import | Source message/event accounting; branch segmentation and parent links; actual installed-version import and idempotence; native profile and search readers; exact stopped-target candidate comparison; live Chat and portable-file reads | Data import completed. Existing destination Chat and identity were preserved. Explicit source DM authorization was retained; native adapter tests accepted the approved sender and rejected an unrelated sender and group traffic. After owner-reported source shutdown, polling remained free of new conflicts and current gateway/authentication checks passed. Operator-side handoff checks are complete; the human Telegram roundtrip is deferred and has not been observed. |
 
 The earlier checkpoint that reported competing Telegram consumers is superseded
 for the subsequently transferred connection: its source adapter was disconnected
 before target activation, and no polling conflict was found in the inspected
 post-transfer logs. A Connected label or successful identity API call alone is
 not proof of end-to-end delivery. The further single-origin import is a separate
-checkpoint: its recurring conflicts are not superseded by those earlier successful
-transfers. Cold-start handling may discard pending
+checkpoint: its earlier recurring conflicts were subsequently followed by the
+post-shutdown target checks described below. Cold-start handling may discard
+pending
 Telegram updates; no archival guarantee is made for the handoff interval.
 
 ## Compatibility and installation checks
@@ -106,31 +109,43 @@ restore an old Chat database over newer messages. Fence the target consumer
 before returning an external connection to a source. Source volumes and recovery
 copies remain retained; deletion and source retirement are separate operations.
 
-## Further connection blocker
+## Further connection follow-up
 
-At the retained checkpoint, target logs showed initial connection and successful
-reconnection followed by recurring Telegram `getUpdates` conflicts. A process
-inspection found one gateway process in the destination Runtime. These observations
-indicate a competing token consumer; they do not identify its host. The earlier
-owner report that the source was stopped is therefore insufficient fencing proof.
-The export records an automatically restarting source service, which is a possible
-explanation rather than a verified diagnosis of the live competing process.
+The earlier checkpoint showed recurring Telegram `getUpdates` conflicts after
+initial connection and reconnects. Destination process inspection found one
+gateway process; the competing consumer's host was not established. Source
+local-name resolution and available Tailscale inventories did not establish
+source access. An automatically restarting source service in the export was a
+possible explanation, not a verified diagnosis of the live competing process.
 
-Source local-name resolution failed from the operator environment. The available
-Tailscale peer list and authenticated admin device inventory had no matching
-source name. This does not prove the source is absent from every tailnet or
-unreachable under another name. No unrelated device was selected or modified.
-An authoritative source device name/address or direct source-owner action is
-required before the remaining consumer can be identified and stopped safely.
+The owner later reported the old source offline. Follow-up target evidence showed
+a healthy polling confirmation after the last conflict and a sustained interval
+without another conflict. The running gateway had a fresh heartbeat, an event-loop
+liveness indication and established Telegram TLS connections. Bot identity was
+revalidated and webhook configuration was absent, consistent with polling mode.
+No restart or production configuration change was needed for this follow-up.
+
+The Runtime implementation had independently advanced since the import. The exact
+destination binding and readiness were revalidated, and authorization was tested
+against the current installed adapter: approved DM accepted, unrelated DM and
+group traffic rejected, unrelated pairing absent. This follow-up is not a new
+proof of every import compatibility edge on the updated implementation.
+
+Operator-side handoff checks are complete at this checkpoint. The requester is
+not in direct contact with the end user, so the real inbound-message/outbound-reply
+test is explicitly deferred. No test message was sent to the end user. Gateway
+liveness, TLS connections, an identity API response and quiet conflict logs do not
+substitute for end-to-end delivery evidence. Source shutdown remains owner-reported;
+no independent inspection of the source process was obtained.
 
 ## Remaining checks
 
 - Observe a real inbound message and outbound reply from the already-approved
   Telegram account for the recent transfers. Group behavior was not exercised
   end to end; the further import has native adapter-level rejection tests only.
-- For the further import, identify and fence the competing consumer, verify
-  sustained polling without conflicts, then observe an approved-user roundtrip.
-  A response from the old source must not be mistaken for destination delivery.
+- For the further import, observe an approved-user roundtrip when direct user
+  testing becomes available. Confirm receipt in the destination Runtime; a reply
+  from another consumer must not be mistaken for destination delivery.
 - Resolve the earlier source-access prerequisite before attempting that separate
   connection handoff.
 - Use supported authorization flows for unrelated integrations; account login
