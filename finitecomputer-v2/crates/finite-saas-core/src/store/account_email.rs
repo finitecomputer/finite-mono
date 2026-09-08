@@ -343,6 +343,76 @@ mod tests {
         })
     }
 
+    // Laboratory-only disposition: no production retirement API is implied.
+    #[tokio::test]
+    async fn duplicate_account_rehearsal_preserves_rows_and_reverses_email_cutover() {
+        with_isolated_postgres(|db| async move {
+            let r = fixture(&db).await;
+            let duplicate_subject = "user_duplicate_rehearsal";
+            let duplicate = db.link_verified_user(LinkVerifiedUserInput {
+                verified_email: r.new_email.clone(),
+                workos_user_id: duplicate_subject.into(),
+                now: None,
+            }).await.unwrap();
+            let before = resources(&db).await;
+            let original_row = db.row("users", &r.user_id).await.unwrap();
+            let duplicate_row = db.row("users", &duplicate.id).await.unwrap();
+            assert_eq!(db.preview_account_email_change(r.clone()).await.unwrap().blockers,
+                ["destination_account_exists"]);
+            assert!(db.prepare_account_email_change(r.clone(), "operator_fixture", &r.expected_email).await.is_err());
+
+            // An enrolled user owns a personal organization even with zero Projects.
+            // Deleting just that user is rejected, rather than cascading into data.
+            let mut client = db.connection().await.unwrap();
+            let err = client.execute("DELETE FROM users WHERE id=$1", &[&duplicate.id]).await.unwrap_err();
+            assert_eq!(err.code(), Some(&tokio_postgres::error::SqlState::FOREIGN_KEY_VIOLATION));
+            assert_eq!(db.row("users", &duplicate.id).await.unwrap(), duplicate_row);
+            assert_eq!(resources(&db).await, before);
+
+            // Prove the proposed parking step can be rolled back before cutover.
+            // WorkOS deletion itself is not simulated as reversible by this test.
+            let tx = client.transaction().await.unwrap();
+            tx.execute("UPDATE users SET normalized_email='holding@example.test' WHERE id=$1 AND normalized_email=$2",
+                &[&duplicate.id, &r.new_email]).await.unwrap();
+            tx.rollback().await.unwrap();
+            assert_eq!(db.row("users", &duplicate.id).await.unwrap(), duplicate_row);
+
+            // TEST FIXTURE ONLY: stand in for a separately reviewed duplicate
+            // retirement operation after provider credentials/sessions are retired.
+            assert_eq!(client.execute("UPDATE users SET normalized_email='holding@example.test' WHERE id=$1 AND normalized_email=$2",
+                &[&duplicate.id, &r.new_email]).await.unwrap(), 1);
+            db.prepare_account_email_change(r.clone(), "operator_fixture", &r.expected_email).await.unwrap();
+            // Provider still reports source: cannot prematurely complete Core.
+            assert!(db.complete_account_email_change(r.clone(), "operator_fixture", &r.expected_email).await.is_err());
+            assert_eq!(db.row("users", &r.user_id).await.unwrap(), original_row);
+            let reopened = CoreStore::connect(&db.url).await.unwrap();
+            reopened.complete_account_email_change(r.clone(), "operator_fixture", &r.new_email).await.unwrap();
+            let linked = db.link_verified_user(LinkVerifiedUserInput {
+                verified_email: r.new_email.clone(), workos_user_id: r.workos_user_id.clone(), now: None,
+            }).await.unwrap();
+            assert_eq!(linked.id, r.user_id);
+            assert_eq!(resources(&db).await, before);
+            // A stale duplicate subject cannot take back the destination email.
+            assert!(db.link_verified_user(LinkVerifiedUserInput {
+                verified_email: r.new_email.clone(), workos_user_id: duplicate_subject.into(), now: None,
+            }).await.is_err());
+
+            // Reverse Core using a new intent and matching fresh provider evidence.
+            let mut reverse = r.clone();
+            reverse.operation_id = "email-change-reversal-fixture".into();
+            reverse.expected_email = r.new_email.clone();
+            reverse.new_email = r.expected_email.clone();
+            reopened.prepare_account_email_change(reverse.clone(), "operator_fixture", &reverse.expected_email).await.unwrap();
+            reopened.complete_account_email_change(reverse.clone(), "operator_fixture", &reverse.new_email).await.unwrap();
+            client.execute("UPDATE users SET normalized_email=$2 WHERE id=$1", &[&duplicate.id, &r.new_email]).await.unwrap();
+            assert_eq!(db.row("users", &r.user_id).await.unwrap()["normalized_email"], r.expected_email);
+            assert_eq!(db.row("users", &duplicate.id).await.unwrap(), duplicate_row);
+            assert_eq!(resources(&db).await, before);
+            // An old completed receipt must not replay over a newer reversal.
+            assert!(reopened.complete_account_email_change(r.clone(), "operator_fixture", &r.new_email).await.is_err());
+        }).await;
+    }
+
     #[tokio::test]
     async fn account_email_change_preserves_existing_identity_and_resources_across_restart_and_retry()
      {
