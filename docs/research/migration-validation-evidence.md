@@ -1,8 +1,9 @@
 # Migration validation evidence
 
 Recent archive imports, an additive legacy-history supplement, and a two-source
-consolidation completed on existing production Runtime implementations. This
-record summarizes the retained execution evidence. It does not authorize another
+consolidation completed on existing production Runtime implementations. A further
+single-origin import also completed; its external connection handoff remains
+blocked by recurring competing-consumer evidence. This record summarizes the retained execution evidence. It does not authorize another
 cutover, introduce a migration framework, or claim current fleet-wide health.
 
 ## Publication boundary
@@ -28,12 +29,15 @@ channel; they should not attach raw evidence to this PR or its review comments.
 | Additive legacy-history supplement | Native export and source provenance; history and file overlap checks; preservation of all preexisting imported sessions and unrelated state; bounded memory updates; live Chat reads of the supplement | Completed. Identical files were not installed twice. Historical metadata remained identified as metadata. This was a point-in-time supplement, not continuous synchronization; later source activity and unmapped temporary attachments are outside its guarantee. |
 | Two-source consolidation | Frozen legacy source recovery; comparison with the rehearsed export, facts, persona, permissions and portable files; distinct history namespaces; installed-version import; all message fields and parent links; native memory/search readers | Completed. Both histories, structured facts and portable files were installed while preserving the destination's existing Chat and identity. Unsupported source events and inactive instructions remain archived rather than replayed. |
 | Subsequent connection transfers | Source-consumer fencing; target bot identity check; native configuration and pairing readers; preserved approved principal; rejection of an unrelated principal; post-transfer connection state and polling-conflict inspection | Later transfers passed these checks. A source with other active connections had only its transferred adapter disabled. Human message/reply tests were not observed at those checkpoints. An earlier, separate connection request remains blocked on source access. |
+| Further single-origin import | Source message/event accounting; branch segmentation and parent links; actual installed-version import and idempotence; native profile and search readers; exact stopped-target candidate comparison; live Chat and portable-file reads | Data import completed. Existing destination Chat and identity were preserved. Explicit source DM authorization was retained; native adapter tests accepted the approved sender and rejected an unrelated sender and group traffic. A real Telegram roundtrip has not been observed; recurring polling conflicts leave the connection handoff incomplete. |
 
 The earlier checkpoint that reported competing Telegram consumers is superseded
 for the subsequently transferred connection: its source adapter was disconnected
 before target activation, and no polling conflict was found in the inspected
 post-transfer logs. A Connected label or successful identity API call alone is
-not proof of end-to-end delivery. Cold-start handling may discard pending
+not proof of end-to-end delivery. The further single-origin import is a separate
+checkpoint: its recurring conflicts are not superseded by those earlier successful
+transfers. Cold-start handling may discard pending
 Telegram updates; no archival guarantee is made for the handoff interval.
 
 ## Compatibility and installation checks
@@ -70,7 +74,13 @@ implicitly activated by importing files.
 
 Source and full pre-install destination recovery copies were retained separately
 from the live Runtime. Empty-directory restores compared the required regular
-bytes, modes, ownership and link metadata. Archive copies were checked by hash
+bytes, modes, ownership and link metadata for the applicable recovery boundary.
+For the further source export, every regular file was independently reread after
+restore and link records were verified. That source scratch restore used private,
+inert permissions; original ownership and mode metadata remain in the archive.
+This proves source bytes and links, not an executable restoration of the old host.
+The destination and merged-state restores retained and compared their filesystem
+metadata. Archive copies were checked by hash
 across hosts. Snapshot databases were inspected through scratch copies.
 
 Earlier imports and the additive supplement also received full post-import
@@ -78,6 +88,10 @@ backup/restore checks that included the verification conversations recorded
 before capture. The most recent consolidation has a complete, independently
 copied merged-state archive whose empty restore matches the installed state
 immediately before resumption. It does **not** include messages written later.
+The further single-origin import likewise has independently copied source,
+pre-install destination and merged-state recovery sets with empty-target restore
+proofs. Its merged checkpoint predates live verification replies and does not
+establish that the external handoff completed.
 A subsequent connection handoff has a separate restored configuration/approval
 checkpoint; its earlier full-data backup must not be described as containing
 that later connection state.
@@ -92,10 +106,31 @@ restore an old Chat database over newer messages. Fence the target consumer
 before returning an external connection to a source. Source volumes and recovery
 copies remain retained; deletion and source retirement are separate operations.
 
+## Further connection blocker
+
+At the retained checkpoint, target logs showed initial connection and successful
+reconnection followed by recurring Telegram `getUpdates` conflicts. A process
+inspection found one gateway process in the destination Runtime. These observations
+indicate a competing token consumer; they do not identify its host. The earlier
+owner report that the source was stopped is therefore insufficient fencing proof.
+The export records an automatically restarting source service, which is a possible
+explanation rather than a verified diagnosis of the live competing process.
+
+Source local-name resolution failed from the operator environment. The available
+Tailscale peer list and authenticated admin device inventory had no matching
+source name. This does not prove the source is absent from every tailnet or
+unreachable under another name. No unrelated device was selected or modified.
+An authoritative source device name/address or direct source-owner action is
+required before the remaining consumer can be identified and stopped safely.
+
 ## Remaining checks
 
 - Observe a real inbound message and outbound reply from the already-approved
-  Telegram account for the recent transfers. Group behavior was not exercised.
+  Telegram account for the recent transfers. Group behavior was not exercised
+  end to end; the further import has native adapter-level rejection tests only.
+- For the further import, identify and fence the competing consumer, verify
+  sustained polling without conflicts, then observe an approved-user roundtrip.
+  A response from the old source must not be mistaken for destination delivery.
 - Resolve the earlier source-access prerequisite before attempting that separate
   connection handoff.
 - Use supported authorization flows for unrelated integrations; account login
@@ -103,7 +138,10 @@ copies remain retained; deletion and source retirement are separate operations.
 - The canonical `scripts/finite-status` checks recorded Chat and recovery green
   around the recent cutovers, with unrelated fleet/service exceptions explicitly
   retained. The most recent Runtime was healthy and Chat replied even while the
-  browser sidebar retained an older offline label. No fleet-wide green result
+  browser sidebar retained an older offline label. For the further import, a fresh
+  dashboard view subsequently showed online; canonical Chat, recovery and rollout
+  checks passed while preexisting fleet exceptions and unknown host-health results
+  remained explicit. No fleet-wide green result
   or unrelated production repair is claimed.
 
 Validation for this documentation update: checked the summary against retained
