@@ -246,6 +246,7 @@
         in
         {
           simplex-chat = hermesPkgs.callPackage ./finitecomputer-v2/deploy/finite-computer/images/simplex-chat.nix {};
+          fsite-cli-v1 = hermesPkgs.callPackage ./finitecomputer-v2/deploy/finite-computer/images/fsite-cli-v1.nix {};
           hermes-agent = hermesAgentPackage;
           hermes-agent-runtime = hermesAgentPackage;
           hermes-agent-runtime-python = hermesAgentPackage.hermesVenv;
@@ -258,6 +259,7 @@
               {
                 hermesAgent = hermesAgentPackage;
                 simplexChat = hermesPkgs.callPackage ./finitecomputer-v2/deploy/finite-computer/images/simplex-chat.nix {};
+                fsiteCliV1 = hermesPkgs.callPackage ./finitecomputer-v2/deploy/finite-computer/images/fsite-cli-v1.nix {};
               };
         };
 
