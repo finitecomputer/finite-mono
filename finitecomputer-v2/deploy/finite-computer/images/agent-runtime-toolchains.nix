@@ -18,6 +18,7 @@
   playwright-test,
   hermesAgent,
   simplexChat,
+  fsiteCliV1,
 }:
 let
   nodejs = hermesAgent.hermesNpmLib.nodejs;
@@ -33,6 +34,7 @@ symlinkJoin {
     playwright-test
     browsers
     simplexChat
+    fsiteCliV1
   ];
   passthru = {
     inherit nodejs browsers;
@@ -48,6 +50,7 @@ symlinkJoin {
       "uvx"
       "playwright"
       "simplex-chat"
+      "fsite"
     ];
     versions = {
       bun = bun.version;
@@ -55,6 +58,7 @@ symlinkJoin {
       playwright = playwright-driver.version;
       uv = uv.version;
       simplex = simplexChat.version;
+      fsiteV1 = fsiteCliV1.version;
     };
   };
   meta = {

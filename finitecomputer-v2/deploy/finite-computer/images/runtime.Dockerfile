@@ -24,7 +24,6 @@ COPY finite-sites ./finite-sites
 RUN cargo build --locked --release \
       --package finite-agentd \
       --package finitechat-cli \
-      --package fsite-cli \
       --package finite-brain-cli
 
 FROM python:3.13-slim-trixie
@@ -105,14 +104,17 @@ RUN test -n "${HERMES_AGENT_STORE_PATH}" \
     && ln -sf "${HERMES_AGENT_STORE_PATH}/bin/hermes-acp" /usr/local/bin/hermes-acp \
     && ln -sf "${HERMES_AGENT_PYTHON_PATH}/bin/python3" /usr/local/bin/python3 \
     && ln -sf "${HERMES_AGENT_PYTHON_PATH}/bin/python3" /usr/local/bin/python \
+    && mkdir -p /runtime/bin \
+    && ln -sf "${AGENT_RUNTIME_TOOLCHAIN_PATH}/bin/fsite" /runtime/bin/fsite \
     && for bin in ${AGENT_RUNTIME_TOOLCHAIN_BINS}; do "$bin" --version >/dev/null; done
 
 COPY --from=finite-rust-builder /build/target/release/finitechat /usr/local/bin/finitechat
 COPY --from=finite-rust-builder /build/target/release/finitechat /runtime/bin/finitechat
 COPY --from=finite-rust-builder /build/target/release/finite-agentd /usr/local/bin/finite-agentd
 COPY --from=finite-rust-builder /build/target/release/finite-agentd /runtime/bin/finite-agentd
-COPY --from=finite-rust-builder /build/target/release/fsite /usr/local/bin/fsite
-COPY --from=finite-rust-builder /build/target/release/fsite /runtime/bin/fsite
+# fsite is the pinned v1 CLI from the staged Nix toolchains (see
+# fsite-cli-v1.nix); it must not be built from main until the Sites v2
+# cutover, because main's source speaks only /api/v2/*.
 COPY --from=finite-rust-builder /build/target/release/fbrain /usr/local/bin/fbrain
 COPY --from=finite-rust-builder /build/target/release/fbrain /runtime/bin/fbrain
 COPY finitechat/containers/agent/finite.py /runtime/bin/finite
