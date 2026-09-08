@@ -19,13 +19,17 @@ import {
 
 test("verified hosted requester assertion binds mailbox, human, and agent", async (context) => {
   const originalFetch = global.fetch;
+  const originalCore = process.env.FC_CORE_BASE_URL;
   const originalUpstream = process.env.FC_SITES_UPSTREAM_URL;
   const originalToken = process.env.FINITE_SITES_VIEWER_SESSION_TOKEN;
   context.after(() => {
     global.fetch = originalFetch;
+    if (originalCore === undefined) delete process.env.FC_CORE_BASE_URL;
+    else process.env.FC_CORE_BASE_URL = originalCore;
     process.env.FC_SITES_UPSTREAM_URL = originalUpstream;
     process.env.FINITE_SITES_VIEWER_SESSION_TOKEN = originalToken;
   });
+  process.env.FC_CORE_BASE_URL = "https://core.internal";
   process.env.FC_SITES_UPSTREAM_URL = "https://sites.internal";
   process.env.FINITE_SITES_VIEWER_SESSION_TOKEN = "sites-token";
   const requests: Array<{ url: string; body: unknown }> = [];
@@ -35,11 +39,14 @@ test("verified hosted requester assertion binds mailbox, human, and agent", asyn
       url,
       body: init?.body ? JSON.parse(String(init.body)) : null,
     });
+    if (url.endsWith("/api/core/v1/me")) {
+      return Response.json({ email: "after@example.test", workos_user_id: "user_fixture" });
+    }
     if (url.endsWith("/v1/app/state")) {
       return Response.json(targetState());
     }
     return Response.json({
-      email: "paul@finite.vip",
+      email: "after@example.test",
       requester_npub: "npub1human",
       agent_npub: "npub1agent",
       assertion: "assertion-1",
@@ -50,24 +57,54 @@ test("verified hosted requester assertion binds mailbox, human, and agent", asyn
   const requester = await createHostedRequesterContext({
     config: { baseUrl: "https://device.internal", apiToken: "device-token" },
     account: {
-      email: "paul@finite.vip",
-      workosUserId: "user_paul",
+      email: "before@example.test",
+      accessToken: "fixture-access-token",
+      workosUserId: "user_fixture",
       emailVerified: true,
       source: "workos",
     },
   });
   assert.deepEqual(requester, {
-    email: "paul@finite.vip",
+    email: "after@example.test",
     sitesAssertion: "assertion-1",
   });
-  assert.deepEqual(requests[1], {
+  assert.deepEqual(requests[2], {
     url: "https://sites.internal/internal/v1/hosted-requester-assertions",
     body: {
-      email: "paul@finite.vip",
+      email: "after@example.test",
       requester_npub: "human-1",
       agent_npub: "npub1agent",
     },
   });
+});
+
+test("requester assertions never fall back to stale session email when Core fails or returns another subject", async (context) => {
+  const originalFetch = global.fetch;
+  const names = ["FC_CORE_BASE_URL", "FC_SITES_UPSTREAM_URL", "FINITE_SITES_VIEWER_SESSION_TOKEN"] as const;
+  const previous = names.map((name) => process.env[name]);
+  context.after(() => {
+    global.fetch = originalFetch;
+    names.forEach((name, i) => {
+      if (previous[i] === undefined) delete process.env[name];
+      else process.env[name] = previous[i];
+    });
+  });
+  process.env.FC_CORE_BASE_URL = "https://core.internal";
+  process.env.FC_SITES_UPSTREAM_URL = "https://sites.internal";
+  process.env.FINITE_SITES_VIEWER_SESSION_TOKEN = "fixture-service-token";
+  for (const response of [
+    Response.json({ error: "unavailable" }, { status: 503 }),
+    Response.json({ email: "other@example.test", workos_user_id: "user_other" }),
+  ]) {
+    const requests: string[] = [];
+    global.fetch = (async (input) => { requests.push(String(input)); return response; }) as typeof fetch;
+    const result = await createHostedRequesterContext({
+      config: { baseUrl: "https://device.internal", apiToken: "fixture-device-token" },
+      account: { email: "before@example.test", workosUserId: "user_fixture", emailVerified: true, accessToken: "fixture-access-token", source: "workos" },
+    });
+    assert.equal(result, undefined);
+    assert.deepEqual(requests, ["https://core.internal/api/core/v1/me"]);
+  }
 });
 
 function targetState(): HostedChatState {

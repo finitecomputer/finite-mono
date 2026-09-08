@@ -9,6 +9,7 @@ import {
   coreProjectLabel,
   coreProjectPrimaryUrl,
   loadCoreMe,
+  loadCoreRequesterEmail,
   type CoreVisibleProject,
 } from "@/lib/core-client";
 import {
@@ -230,13 +231,13 @@ export async function createHostedRequesterContext(
     "config" | "account"
   >
 ): Promise<HostedRequesterContext | undefined> {
-  const email = context.account.email;
   const upstream = sitesUpstreamOrigin();
   const serviceToken = process.env.FINITE_SITES_VIEWER_SESSION_TOKEN?.trim();
-  if (!email || !context.account.emailVerified || !upstream || !serviceToken) {
+  if (!context.account.workosUserId || !context.account.emailVerified || !upstream || !serviceToken) {
     return undefined;
   }
   try {
+    const email = await loadCoreRequesterEmail(context.account);
     const state = await hostedDeviceState(context.config, context.account);
     const agentNpub = state.hosted_agent_binding?.agent_npub;
     if (!agentNpub) return undefined;

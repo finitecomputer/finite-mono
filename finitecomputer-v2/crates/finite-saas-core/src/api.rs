@@ -2,6 +2,7 @@ use crate::auth::{CoreAuth, VerifiedRunnerCredential, WorkosAuthError};
 use crate::launch_codes::{
     IssueLaunchCodeBatchInput, LaunchCodeBatchDetails, RevokeLaunchCodeBatchInput,
 };
+use crate::store::{AccountEmailChangePreview, AccountEmailChangeRequest};
 use crate::store::{CoreStore, VisibleProject};
 use crate::{
     AdminAssignFinitePrivateLimitProfileInput, AdminIssueFinitePrivateFriendKeyInput,
@@ -825,6 +826,10 @@ fn router_with_runtime_upgrades_and_agent_creation_placement(
         )
         .route("/api/core/v1/admin/runtimes", get(admin_runtimes))
         .route(
+            "/api/core/v1/admin/account-email-changes/{action}",
+            post(admin_account_email_change),
+        )
+        .route(
             "/api/core/v1/admin/launch-code-batches",
             get(admin_list_launch_code_batches).post(admin_issue_launch_code_batch),
         )
@@ -1186,6 +1191,52 @@ async fn finite_private_admin_state(
 ) -> Result<Json<FinitePrivateAdminState>, ApiError> {
     require_admin_identity(&state, &headers).await?;
     Ok(Json(state.store.finite_private_admin_state().await?))
+}
+
+async fn admin_account_email_change(
+    State(state): State<CoreApiState>,
+    Path(action): Path<String>,
+    headers: HeaderMap,
+    Json(request): Json<AccountEmailChangeRequest>,
+) -> Result<Json<AccountEmailChangePreview>, ApiError> {
+    let admin = require_admin_identity(&state, &headers).await?;
+    if action == "preview" {
+        return Ok(Json(
+            state.store.preview_account_email_change(request).await?,
+        ));
+    }
+    if !matches!(action.as_str(), "prepare" | "complete" | "cancel") {
+        return Err(ApiError::not_found("unknown email change action"));
+    }
+    let target = state
+        .auth
+        .workos()
+        .verified_user(&request.workos_user_id)
+        .await
+        .map_err(|error| workos_api_error_at("email_change_target", error))?;
+    let email = normalize_owner_email(Some(&target.email))
+        .ok_or_else(|| ApiError::conflict("target email is invalid"))?;
+    let result = match action.as_str() {
+        "prepare" => {
+            state
+                .store
+                .prepare_account_email_change(request, &admin.workos_user_id, &email)
+                .await?
+        }
+        "complete" => {
+            state
+                .store
+                .complete_account_email_change(request, &admin.workos_user_id, &email)
+                .await?
+        }
+        _ => {
+            state
+                .store
+                .cancel_account_email_change(request, &admin.workos_user_id, &email)
+                .await?
+        }
+    };
+    Ok(Json(result))
 }
 
 async fn admin_runtimes(
@@ -2565,7 +2616,8 @@ impl From<CoreError> for ApiError {
             CoreError::InvalidFinitePrivateApiKey => Self::unauthorized(error.to_string()),
             CoreError::BillingRequired => Self::payment_required(error.to_string()),
             CoreError::HostingTierNotAuthorized => Self::forbidden(error.to_string()),
-            CoreError::AgentCreationEntitlementExhausted
+            CoreError::AccountEmailChangeConflict
+            | CoreError::AgentCreationEntitlementExhausted
             | CoreError::AgentCreationRequestUnavailable
             | CoreError::AgentCreationRequestLeaseConflict
             | CoreError::AgentCreationRequestNotLaunching
@@ -5593,6 +5645,45 @@ mod tests {
             assert!(body.is_null(), "empty Runner queue should return null");
         })
         .await;
+    }
+
+    #[tokio::test]
+    async fn account_email_change_api_requires_operator_and_fresh_verified_same_subject() {
+        with_isolated_postgres(|db| async move {
+            let subject = "user_email_route_fixture";
+            let user = db.link_verified_user(LinkVerifiedUserInput {
+                verified_email: "route-before@example.test".into(), workos_user_id: subject.into(), now: None,
+            }).await.unwrap();
+            let request = json!({
+                "operationId": "route-email-fixture", "userId": user.id,
+                "workosUserId": subject, "expectedEmail": "route-before@example.test",
+                "newEmail": "route-after@example.test", "evidenceReference": "private-route-fixture",
+            });
+            let app = admin_router(db.store.clone());
+            let operator = operator_identity_headers("operator-email@example.test");
+            for action in ["preview", "prepare", "complete", "cancel"] {
+                let path = format!("/api/core/v1/admin/account-email-changes/{action}");
+                for headers in [vec![], vec![("authorization".into(), "Bearer core-token".into())], identity_headers("ordinary-email@example.test", "true")] {
+                    let (status, _) = send_json(&app, "POST", &path, &headers, Some(request.clone())).await;
+                    assert!(matches!(status, StatusCode::UNAUTHORIZED | StatusCode::FORBIDDEN));
+                }
+            }
+            let _ = access_token_with_subject(subject, "route-before@example.test", true, None);
+            let (status, _) = send_json(&app, "POST", "/api/core/v1/admin/account-email-changes/prepare", &operator, Some(request.clone())).await;
+            assert_eq!(status, StatusCode::OK);
+            let (status, _) = send_json(&app, "POST", "/api/core/v1/admin/account-email-changes/complete", &operator, Some(request.clone())).await;
+            assert_eq!(status, StatusCode::CONFLICT);
+            // Merely asserting the destination in the request cannot substitute
+            // for the provider's verification of that same subject.
+            let _ = access_token_with_subject(subject, "route-after@example.test", false, None);
+            let (status, _) = send_json(&app, "POST", "/api/core/v1/admin/account-email-changes/complete", &operator, Some(request.clone())).await;
+            assert_eq!(status, StatusCode::FORBIDDEN);
+            let _ = access_token_with_subject(subject, "route-after@example.test", true, None);
+            let (status, result) = send_json(&app, "POST", "/api/core/v1/admin/account-email-changes/complete", &operator, Some(request)).await;
+            assert_eq!(status, StatusCode::OK, "{result}");
+            assert_eq!(result["status"], "completed");
+            assert_eq!(db.row("users", &user.id).await.unwrap()["normalized_email"], "route-after@example.test");
+        }).await;
     }
 
     fn admin_router(store: CoreStore) -> Router {

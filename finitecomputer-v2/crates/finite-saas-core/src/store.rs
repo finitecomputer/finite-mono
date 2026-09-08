@@ -1,3 +1,6 @@
+mod account_email;
+pub use account_email::{AccountEmailChangePreview, AccountEmailChangeRequest};
+
 use crate::billing;
 use crate::launch_codes::{
     IssueLaunchCodeBatchInput, IssuedLaunchCodeBatch, LaunchCodeBatch, LaunchCodeBatchDetails,
