@@ -5,6 +5,7 @@
 //!   allow     add an operator publish grant for a pubkey (hex or npub)
 //!   disallow  revoke an operator publish grant
 //!   allowed   list active publishing grants
+//!   account-email-preflight  inventory mailbox authority without writes
 //!   project-visibility  set repository clone/fetch visibility
 //!   disable-site  stop serving one site without releasing its name
 //!   delete-site  stop serving one site as deleted without releasing its name
@@ -70,6 +71,7 @@ pub fn run(args: Vec<String>) -> Result<(), String> {
         "allow" => allowlist_mutate(&args[1..], true),
         "disallow" => allowlist_mutate(&args[1..], false),
         "allowed" => allowlist_list(&args[1..]),
+        "account-email-preflight" => account_email_preflight(&args[1..]),
         "project-visibility" => project_visibility_mutate(&args[1..]),
         "disable-site" => site_status_mutate(&args[1..], SiteStatus::Disabled, "site_disabled"),
         "delete-site" => delete_site(&args[1..]),
@@ -84,8 +86,30 @@ pub fn run(args: Vec<String>) -> Result<(), String> {
     }
 }
 
+fn account_email_preflight(args: &[String]) -> Result<(), String> {
+    if args.len() != 4 || args[0] != "--data" || args[2] != "--request" {
+        return Err(
+            "usage: finitesitesd account-email-preflight --data DIR --request PRIVATE_JSON_FILE"
+                .into(),
+        );
+    }
+    let bytes = std::fs::read(&args[3]).map_err(|_| "cannot read private preflight request")?;
+    if bytes.len() > 4096 {
+        return Err("preflight request exceeds size limit".into());
+    }
+    let request = serde_json::from_slice::<finitesites_store::AccountEmailPreflightRequest>(&bytes)
+        .map_err(|_| "invalid preflight request")?;
+    let report = Store::account_email_preflight(&Path::new(&args[1]).join("registry.db"), &request)
+        .map_err(|error| error.to_string())?;
+    println!(
+        "{}",
+        serde_json::to_string_pretty(&report).map_err(|error| error.to_string())?
+    );
+    Ok(())
+}
+
 fn usage() -> String {
-    "usage:\n  finitesitesd serve --data DIR [--listen 127.0.0.1:8787] \
+    "usage:\n  finitesitesd account-email-preflight --data DIR --request PRIVATE_JSON_FILE\n  finitesitesd serve --data DIR [--listen 127.0.0.1:8787] \
      [--base-domain sites.localhost] [--api-url http://127.0.0.1:8787] \
      [--git-url http://git.sites.localhost:8787] \
      [--git-hook-helper PATH] [--git-auto-reconcile true|false] \

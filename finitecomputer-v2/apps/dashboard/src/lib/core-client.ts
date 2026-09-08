@@ -458,6 +458,17 @@ export function coreBridgeStatus(env: EnvSource = process.env): CoreBridgeStatus
   };
 }
 
+/** Fresh Core-verified requester metadata; never a browser-session email cache. */
+export async function loadCoreRequesterEmail(account: AccountAuthContext): Promise<string> {
+  const me = await coreFetch<CoreMe>("/api/core/v1/me", account, {
+    signal: AbortSignal.timeout(5_000),
+  });
+  if (me.workos_user_id !== account.workosUserId || typeof me.email !== "string" || !me.email.trim()) {
+    throw new Error("Core requester identity does not match the current account.");
+  }
+  return me.email;
+}
+
 export async function loadCoreMe(options: CoreReadOptions = {}): Promise<CoreMeResult> {
   const status = coreBridgeStatus();
   const account = await getAccountAuthContext();

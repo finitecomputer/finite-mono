@@ -69,7 +69,9 @@ pub const CORE_SCHEMA_SQL: &str = concat!(
     "\n",
     include_str!("../migrations/0023_agent_creation_owner_chat_account_id.sql"),
     "\n",
-    include_str!("../migrations/0024_runtime_status_pending_first_report_remap.sql")
+    include_str!("../migrations/0024_runtime_status_pending_first_report_remap.sql"),
+    "\n",
+    include_str!("../migrations/0025_account_email_changes.sql")
 );
 pub const RUNTIME_UPGRADE_ROLLBACK_RESCUE_SQL: &str =
     include_str!("../migrations/runtime_upgrade_rollback_rescue.sql");
@@ -915,6 +917,10 @@ pub enum CoreError {
     InvalidTimestamp,
     #[error("WorkOS user is already linked to a different email")]
     WorkosUserConflict,
+    #[error(
+        "account email change conflicts with current identity, destination, or operation state"
+    )]
+    AccountEmailChangeConflict,
     #[error("failed to format current time")]
     TimeFormat(#[from] time::error::Format),
     #[error("store error: {0}")]

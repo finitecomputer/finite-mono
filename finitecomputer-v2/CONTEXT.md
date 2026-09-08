@@ -80,6 +80,13 @@ The dashboard login and billing identity used to create and administer Projects.
 In v2 today this is WorkOS.
 _Avoid_: Nostr identity, Agent Runtime key
 
+**Account Email Change**:
+An explicit Internal Operator transition of the login email on the same WorkOS
+User and Core User. It preserves account/resource IDs and cryptographic
+Principals. Product-owned mailbox grants require separate review; it is never
+an Agent ownership transfer or account merge. See
+[the operation contract](docs/account-email-change.md).
+
 **Internal Operator**:
 An Account Auth member of Finite's configured internal operator organization.
 _Avoid_: Customer Organization administrator, permission taxonomy, role slug
