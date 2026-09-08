@@ -93,7 +93,11 @@ prints key material, token hashes, messages, or mailbox values. These are counts
 of retained rows, not assertions that every token or grant remains active.
 Unknown schemas fail; zero rows do not prove the absence of external services.
 
-A nonempty report needs a product-owned disposition before mutation:
+A nonempty report needs a product-owned disposition before mutation. Automatic
+Sites grant migration is not required for the initial account-email move: the
+user may ask their Agent or colleagues to share each site with the new email.
+Keep existing Projects and grants intact; manual resharing does not authorize
+deleting mailbox-owned data.
 
 - Mailbox-owned Projects and Authorized Sites Keys must preserve their durable
   relationships, rather than being recreated under an unrelated Principal.
@@ -175,3 +179,59 @@ as a workaround for moving one Agent.
 Provider references:
 - https://workos.com/docs/authkit/email-changes
 - https://workos.com/docs/authkit/identity-linking
+
+## Duplicate-account laboratory rehearsal
+
+The existing operator API deliberately rejects an occupied destination. A
+separate retirement operation is not implemented by this branch. The synthetic
+Postgres test `duplicate_account_rehearsal_preserves_rows_and_reverses_email_cutover`
+exercises the next boundary using two enrolled accounts, an existing Project,
+billing, and Finite Private grants/keys:
+
+- Preparation rejects a destination held by the second account.
+- Deleting that second Core User directly fails with a foreign-key violation:
+  even an account with no Projects owns a personal Customer Organization.
+- A transaction that temporarily parks the duplicate email can roll back without
+  changing either account or its related rows.
+- Test-fixture SQL then parks the duplicate email, retaining its User ID, WorkOS
+  subject, organization and other resources. This is a laboratory stand-in for
+  a separately reviewed retirement step, not a production command or supported
+  account state. A holding email alone does not revoke credentials or sessions.
+- The real Core prepare/complete methods reject premature completion, succeed
+  with matching provider evidence, survive reopening the store, retain the
+  original User ID and all resource rows, and reject a stale duplicate subject
+  attempting to reclaim the destination through normal enrollment.
+- A new reverse operation restores the original email, after which the test
+  restores the duplicate email. Replaying the previous completed operation
+  cannot overwrite the reversed state.
+
+This proves a Core database transition, not a provider deletion or Google OAuth
+flow. The test supplies provider evidence directly to the store boundary;
+existing HTTP authorization tests cover fresh verified provider lookup. There
+were no local staging WorkOS credentials available for this rehearsal.
+
+Repository inspection found no WorkOS `user.deleted` consumer or WorkOS user
+mutation call in the current Core/dashboard implementation. Core fetches the
+current WorkOS User on verified-user lookup and rejects a missing record. This
+is not an audit of external webhook destinations, WorkOS Actions, existing
+hosted sessions, or all deployed versions. Those must be checked before using
+provider deletion as credential retirement.
+
+Recommended next qualification: preserve the duplicate Core record and its
+references while retiring its provider login through an explicit, audited
+operation; then perform the original account's email transition. Before any
+production use, define a durable retired-account state or equivalent guard,
+verify all alternate login paths fail closed, inventory the duplicate hosted
+identity and external product references, and rehearse against an explicitly
+identified WorkOS staging environment with two controlled accounts. Capture the
+original subject before the change and assert real Google sign-in returns that
+same subject afterward. A mocked Google response is insufficient.
+
+Provider deletion cannot be rolled back by recreating a user: recreation does
+not preserve its subject, credentials, or sessions. Keep provider deletion as a
+separate irreversible boundary; the Core reversal above does not claim to undo
+it. If the provider changes but Core completion fails, block normal enrollment
+from inventing a new account, inspect the exact intent, and either complete it
+after resolving the conflict or restore the original provider email before
+reversing Core. Do not remove organizations or invoke Agent/data purge to free
+an email address.
