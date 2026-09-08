@@ -8,6 +8,10 @@ import {
   type FinitePrivateDailyResetActionState,
 } from "@/app/actions";
 import { FormActionButton } from "@/components/form-action-button";
+import {
+  FinitePrivateUsageProgress,
+  finitePrivateUsedPercent,
+} from "@/components/finite-private-usage-progress";
 import type { CoreFinitePrivateUsageStatus } from "@/lib/core-client";
 import { formatUtcDateTime } from "@/lib/date-time";
 
@@ -25,10 +29,11 @@ export function FinitePrivateUsagePanel({
     claimFinitePrivateDailyResetAction,
     INITIAL_STATE
   );
-  const remainingPercent = Math.max(
-    0,
-    Math.min(100, Math.floor((usage.burstRemainingUnits / usage.burstLimitUnits) * 100))
+  const usedPercent = finitePrivateUsedPercent(
+    usage.burstUsedUnits,
+    usage.burstLimitUnits
   );
+  const remainingPercent = 100 - usedPercent;
 
   return (
     <section id="finite-private" className="ocean-utility-card scroll-mt-20">
@@ -58,6 +63,11 @@ export function FinitePrivateUsagePanel({
           </FormActionButton>
         </form>
       </div>
+      <FinitePrivateUsageProgress
+        className="mt-4"
+        usedUnits={usage.burstUsedUnits}
+        limitUnits={usage.burstLimitUnits}
+      />
       {!usage.freeDailyResetAvailable ? (
         <p className="mt-3 text-sm text-muted-foreground">
           Your next free reset is available at{" "}

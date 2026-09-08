@@ -54,6 +54,18 @@ test("admins issue Standard or Confidential Launch Codes", { timeout: 120_000 },
     await page.getByRole("heading", { name: "Finite Private usage" }).waitFor({
       state: "visible",
     });
+    await page.getByRole("progressbar", {
+      name: "Finite Private weighted token usage",
+    }).waitFor({ state: "visible" });
+    assert.equal(
+      await page.getByRole("progressbar", {
+        name: "Finite Private weighted token usage",
+      }).getAttribute("aria-valuenow"),
+      "75"
+    );
+    await page.getByText("75,000,000 of 100,000,000 weighted tokens").waitFor({
+      state: "visible",
+    });
     await page.getByText(/Jul 21, 2026, 8:00 PM UTC/u).waitFor({ state: "visible" });
     await page.locator("#finite-private + details").waitFor({ state: "visible" });
     await page.locator("summary").filter({ hasText: /^Advanced$/u }).waitFor({
@@ -80,6 +92,10 @@ test("admins issue Standard or Confidential Launch Codes", { timeout: 120_000 },
 
     await page.goto(`http://127.0.0.1:${dashboardPort}/dashboard/admin`);
     await page.getByRole("heading", { name: "Users" }).waitFor({ state: "visible" });
+    await page.getByRole("progressbar", {
+      name: "Finite Private weighted token usage",
+    }).waitFor({ state: "visible" });
+    await page.getByText("84 of 100,000,000 weighted tokens").waitFor({ state: "visible" });
     await page.getByRole("button", { name: "Reset usage" }).waitFor({ state: "visible" });
     await page.getByText("fp_key_1", { exact: true }).waitFor({ state: "visible" });
     await page.getByRole("tab", { name: "Finite Private" }).click();

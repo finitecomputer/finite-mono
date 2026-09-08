@@ -25,8 +25,8 @@ export function finitePrivateAssignableProfiles<T extends FinitePrivateProfileOp
 }
 
 export function finitePrivateProfileLabel(profileId: string): string {
-  if (profileId === FINITE_PRIVATE_1X_PROFILE_ID) return "1× · 100M units / 5h";
-  if (profileId === FINITE_PRIVATE_5X_PROFILE_ID) return "5× · 500M units / 5h";
+  if (profileId === FINITE_PRIVATE_1X_PROFILE_ID) return "1× · 100M weighted tokens / 5h";
+  if (profileId === FINITE_PRIVATE_5X_PROFILE_ID) return "5× · 500M weighted tokens / 5h";
   return profileId;
 }
 

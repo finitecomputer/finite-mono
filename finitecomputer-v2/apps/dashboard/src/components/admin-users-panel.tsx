@@ -23,6 +23,10 @@ import {
   AdminRotateKeyForm,
   ConfirmSubmitButton,
 } from "@/components/admin-ops-forms";
+import {
+  FinitePrivateUsageProgress,
+  formatWeightedTokens,
+} from "@/components/finite-private-usage-progress";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import {
@@ -278,7 +282,7 @@ function ProvisionedRuntimeRow({
   const resetGrantId =
     finitePrivateGrant?.grantId ?? finitePrivateAccount?.grant.id ?? null;
   const resetConfirmMessage = finitePrivateGrant
-    ? `Reset burst usage for ${runtime.project_display_name} (${runtime.source_machine_id}) grant ${finitePrivateGrant.grantId}? Current usage is ${formatUsageUnits(finitePrivateGrant.currentWindowUsedUnits)} units.`
+    ? `Reset burst usage for ${runtime.project_display_name} (${runtime.source_machine_id}) grant ${finitePrivateGrant.grantId}? Current usage is ${formatWeightedTokens(finitePrivateGrant.currentWindowUsedUnits)} weighted tokens.`
     : finitePrivateAccount
       ? `Reset Finite Private usage for ${runtime.project_display_name} (${finitePrivateAccount.email})?`
       : "";
@@ -425,7 +429,7 @@ function RuntimeFinitePrivateSummary({
         <span className="truncate font-mono">grant {finitePrivate.grantId}</span>
         <span className="truncate font-mono">key {finitePrivate.keyId}</span>
         <span>
-          burst usage {formatUsageUnits(finitePrivate.currentWindowUsedUnits)} units
+          burst usage {formatWeightedTokens(finitePrivate.currentWindowUsedUnits)} weighted tokens
           {finitePrivate.currentWindowStartedAt
             ? ` · window ${formatAdminDate(finitePrivate.currentWindowStartedAt)}`
             : ""}
@@ -443,6 +447,9 @@ function FinitePrivateAccountControls({
   profiles: CoreFinitePrivateLimitProfile[];
 }) {
   const grant = account.grant;
+  const limitProfile = profiles.find(
+    (profile) => profile.id === grant.limit_profile_id
+  );
   return (
     <div className="grid gap-3 border-t border-border pt-4">
       <div>
@@ -451,7 +458,22 @@ function FinitePrivateAccountControls({
           Finite Private
         </div>
         <p className="mt-1 text-xs text-muted-foreground">
-          {finitePrivateProfileLabel(grant.limit_profile_id)} · {grant.current_window_used_units.toLocaleString()} units used
+          {finitePrivateProfileLabel(grant.limit_profile_id)}
+        </p>
+        {limitProfile ? (
+          <FinitePrivateUsageProgress
+            className="mt-3 max-w-2xl"
+            usedUnits={grant.current_window_used_units}
+            limitUnits={limitProfile.burst_limit_units}
+          />
+        ) : (
+          <p className="mt-2 text-xs tabular-nums text-muted-foreground">
+            {formatWeightedTokens(grant.current_window_used_units)} weighted tokens used;
+            limit details are unavailable.
+          </p>
+        )}
+        <p className="mt-2 max-w-2xl text-xs text-muted-foreground">
+          Account-wide burst usage. Output and long-context tokens carry more weight.
         </p>
       </div>
 
@@ -558,8 +580,4 @@ function runtimeHealthLabel(runtime: CoreAdminRuntimeOverview) {
 function formatAdminDate(value: string) {
   const timestamp = Date.parse(value);
   return Number.isFinite(timestamp) ? new Date(timestamp).toLocaleString() : value;
-}
-
-function formatUsageUnits(value: number) {
-  return new Intl.NumberFormat("en-US").format(value);
 }
