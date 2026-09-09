@@ -11,6 +11,7 @@ on:
           - core
           - dashboard
           - private-limiter
+          - sites
       version:
         description: Image version tag, for example 2026-07-08.1
         required: true
@@ -61,6 +62,19 @@ jobs:
               echo "context=." >> "$GITHUB_OUTPUT"
               echo "build_args=FINITE_MONO_REV=$GITHUB_SHA" >> "$GITHUB_OUTPUT"
               ;;
+            sites)
+              echo "name=finite-sites" >> "$GITHUB_OUTPUT"
+              echo "dockerfile=infra/images/sites.Dockerfile" >> "$GITHUB_OUTPUT"
+              echo "context=." >> "$GITHUB_OUTPUT"
+              channel="$(python3 -c 'import tomllib; print(tomllib.load(open("rust-toolchain.toml", "rb"))["toolchain"]["channel"])')"
+              test -n "$channel"
+              {
+                echo 'build_args<<SITES_ARGS'
+                echo "RUST_TOOLCHAIN=$channel"
+                echo "FINITE_MONO_REV=$GITHUB_SHA"
+                echo 'SITES_ARGS'
+              } >> "$GITHUB_OUTPUT"
+              ;;
           esac
       - name: Log in to GHCR for canary publication
         env:
@@ -104,7 +118,7 @@ jobs:
             --manifest image-index.json \
             --platform linux/amd64 \
             --require-attestation
-          if [ "${{ inputs.image }}" = "private-limiter" ]; then
+          if [ "${{ inputs.image }}" = "private-limiter" ] || [ "${{ inputs.image }}" = "sites" ]; then
             test "$(docker image inspect "$IMAGE@$destination_digest" --format '{{index .Config.Labels "org.opencontainers.image.revision"}}')" = "$GITHUB_SHA"
           fi
           echo "digest=$destination_digest" >> "$GITHUB_OUTPUT"
@@ -116,6 +130,12 @@ jobs:
           docker logout ghcr.io
           docker image rm "$PINNED" >/dev/null 2>&1 || true
           docker pull "$PINNED" >/dev/null
+      - name: Verify the Sites container contract
+        if: inputs.image == 'sites'
+        timeout-minutes: 5
+        env:
+          PINNED: ${{ steps.canary.outputs.pinned }}
+        run: bash infra/images/sites-smoke.sh "$PINNED"
       - name: Promote the same saved build to production tags
         id: production
         if: inputs.publish_production == true && vars.FINITE_GHCR_PRODUCTION_PUBLISH_ENABLED == 'true'
