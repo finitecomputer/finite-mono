@@ -204,17 +204,25 @@ pub fn start_supervisor(
     hermes: ProcessSpec,
     simplex: Option<ProcessSpec>,
 ) -> SupervisorHandle {
+    start_processes(
+        hermes,
+        [Some(sidecar), Some(health), simplex]
+            .into_iter()
+            .flatten()
+            .collect(),
+    )
+}
+
+/// The control-only runtime has no chat sidecar or chat health server.
+pub(crate) fn start_processes(
+    hermes: ProcessSpec,
+    companions: Vec<ProcessSpec>,
+) -> SupervisorHandle {
     let status = Arc::new(RwLock::new(SupervisorStatus::default()));
-    let (sidecar_tx, sidecar_rx) = mpsc::channel(4);
-    let (health_tx, health_rx) = mpsc::channel(4);
     let (hermes_tx, hermes_rx) = mpsc::channel(4);
-
-    tokio::spawn(supervise_process(sidecar, sidecar_rx, Arc::clone(&status)));
-    tokio::spawn(supervise_process(health, health_rx, Arc::clone(&status)));
     tokio::spawn(supervise_process(hermes, hermes_rx, Arc::clone(&status)));
-
-    let mut all_txs = vec![sidecar_tx, health_tx, hermes_tx.clone()];
-    if let Some(spec) = simplex {
+    let mut all_txs = vec![hermes_tx.clone()];
+    for spec in companions {
         let (tx, rx) = mpsc::channel(4);
         tokio::spawn(supervise_process(spec, rx, Arc::clone(&status)));
         all_txs.push(tx);
