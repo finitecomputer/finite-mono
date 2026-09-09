@@ -5,6 +5,9 @@ edition = "2024"
 
 [dependencies]
 anyhow = "1.0"
+chacha20poly1305 = "0.10.1"
+hmac = "0.12"
+zeroize.workspace = true
 axum = "0.8"
 clap = { version = "4.5", features = ["derive"] }
 deadpool-postgres = "0.14"
