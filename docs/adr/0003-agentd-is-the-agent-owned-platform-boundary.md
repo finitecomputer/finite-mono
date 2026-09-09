@@ -2,7 +2,19 @@
 
 Status: accepted for the first implementation slice, 2026-07-09.
 
+## Planned Connections transition — 2026-09-09
+
+Paul agreed to a bounded, pull-based Connections direction. The
+[FIN-37 implementation plan](../fin-37-pull-connections-plan.md) records its
+scope and mandatory joint architecture checkpoints. This changes the intended
+transport and adds desired state for explicitly managed Connections settings;
+it does not authorize universal Hermes reconciliation. The detailed replacement
+contract is pending. The remainder of this ADR describes the existing command
+implementation and its ownership, rollback and recovery protections, which must
+be preserved or explicitly revised when that contract is agreed.
+
 ## Context
+
 
 Finite needs to offer improvements and product actions to a running agent
 without reaching into a Runner, editing a remote `.env`, or continuously
