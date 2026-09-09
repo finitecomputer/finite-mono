@@ -1,3 +1,4 @@
+mod agent_control;
 use crate::auth::{CoreAuth, VerifiedRunnerCredential, WorkosAuthError};
 use crate::launch_codes::{
     IssueLaunchCodeBatchInput, LaunchCodeBatchDetails, RevokeLaunchCodeBatchInput,
@@ -53,6 +54,8 @@ const WORKOS_EMAIL_VERIFIED_HEADER: &str = "x-finite-workos-email-verified";
 pub struct CoreApiState {
     store: CoreStore,
     auth: CoreAuth,
+    agent_control_directory: Option<std::path::PathBuf>,
+    agent_control_ca_file: Option<std::path::PathBuf>,
     standard_stripe_price_id: Option<String>,
     agent_creation_placement: Option<RuntimePlacement>,
     /// First-use deployment gate. Persisting `kind = 'upgrade'` crosses the
@@ -749,6 +752,9 @@ fn router_with_runtime_upgrades_and_agent_creation_placement(
     let standard_stripe_price_id = optional_env_value("FC_CORE_STANDARD_STRIPE_PRICE_ID")
         .or_else(|| optional_env_value("STRIPE_FINITE_COMPUTER_STANDARD_PRICE_ID"));
     let state = CoreApiState {
+        agent_control_directory: agent_control::directory_from_env(),
+        agent_control_ca_file: std::env::var_os("FC_CORE_AGENT_CONTROL_CA_FILE")
+            .map(std::path::PathBuf::from),
         store,
         auth,
         standard_stripe_price_id,
@@ -758,6 +764,12 @@ fn router_with_runtime_upgrades_and_agent_creation_placement(
     };
 
     Router::new()
+        .route(
+            "/api/core/v1/me/runtime-agent-control/{identifier}",
+            get(agent_control::get)
+                .post(agent_control::post)
+                .layer(axum::extract::DefaultBodyLimit::max(64 * 1024)),
+        )
         .route("/healthz", get(healthz))
         .route(
             "/api/core/v1/runtime-artifacts/{artifact_id}",

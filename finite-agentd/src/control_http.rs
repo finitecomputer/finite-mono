@@ -38,7 +38,6 @@ struct App {
     token_file: PathBuf,
     control: ConnectionControl,
     ledger: Ledger,
-    operation: Arc<Semaphore>,
 }
 
 pub async fn run_control_server(config: ControlServerConfig) -> Result<(), AgentdError> {
@@ -51,13 +50,6 @@ pub async fn run_control_server(config: ControlServerConfig) -> Result<(), Agent
     read_token(&config.token_file)?;
     let listener = tokio::net::TcpListener::bind(config.listen).await?;
     let ledger = Ledger::open(config.agent_home.join("agentd/agentd.sqlite3"))?;
-    // Additive: old binaries never read this table. Existing chat rows, ownership,
-    // config rollback history, and credentials retain their representation.
-    Connection::open(ledger.path())?.execute_batch(
-        "CREATE TABLE IF NOT EXISTS control_requests (
-        request_id TEXT PRIMARY KEY, fingerprint TEXT NOT NULL, result_json TEXT
-    );",
-    )?;
     let supervisor = start_processes(
         ProcessSpec {
             name: "hermes",
@@ -80,19 +72,17 @@ pub async fn run_control_server(config: ControlServerConfig) -> Result<(), Agent
         config_manager,
         hermes_home: config.hermes_home,
         supervisor: supervisor.clone(),
-    };
-    let app = App {
-        runtime_id: config.runtime_id,
-        token_file: config.token_file,
-        control,
-        ledger,
         operation: Arc::new(Semaphore::new(1)),
     };
-    let router = Router::new()
-        .route("/v1/runtimes/{runtime}/connections", get(status))
-        .route("/v1/runtimes/{runtime}/connections/commands", post(command))
-        .layer(DefaultBodyLimit::max(64 * 1024))
-        .with_state(app);
+    let router = control_router(
+        ControlListenerConfig {
+            listen: config.listen,
+            runtime_id: config.runtime_id,
+            token_file: config.token_file,
+        },
+        control,
+        ledger,
+    )?;
     let mut term = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())?;
     let result = axum::serve(listener, router)
         .with_graceful_shutdown(async move {
@@ -101,6 +91,53 @@ pub async fn run_control_server(config: ControlServerConfig) -> Result<(), Agent
         .await;
     supervisor.shutdown().await;
     result.map_err(AgentdError::from)
+}
+
+#[derive(Clone, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct ControlListenerConfig {
+    pub listen: SocketAddr,
+    pub runtime_id: String,
+    pub token_file: PathBuf,
+}
+impl ControlListenerConfig {
+    pub(crate) fn from_env() -> Result<Option<Self>, AgentdError> {
+        let Some(path) = std::env::var_os("FINITE_AGENTD_CONTROL_CONFIG") else {
+            return Ok(None);
+        };
+        let config: Self = serde_json::from_slice(&fs::read(path)?)?;
+        config.validate()?;
+        Ok(Some(config))
+    }
+    fn validate(&self) -> Result<(), AgentdError> {
+        if !self.listen.ip().is_loopback() || self.runtime_id.is_empty() {
+            return Err(AgentdError::Config(
+                "control listener requires loopback and a runtime id".into(),
+            ));
+        }
+        read_token(&self.token_file)?;
+        Ok(())
+    }
+}
+
+pub(crate) fn control_router(
+    config: ControlListenerConfig,
+    control: ConnectionControl,
+    ledger: Ledger,
+) -> Result<Router, AgentdError> {
+    config.validate()?;
+    Connection::open(ledger.path())?.execute_batch("CREATE TABLE IF NOT EXISTS control_requests (request_id TEXT PRIMARY KEY, fingerprint TEXT NOT NULL, result_json TEXT);")?;
+    let app = App {
+        runtime_id: config.runtime_id,
+        token_file: config.token_file,
+        control,
+        ledger,
+    };
+    Ok(Router::new()
+        .route("/v1/runtimes/{runtime}/connections", get(status))
+        .route("/v1/runtimes/{runtime}/connections/commands", post(command))
+        .layer(DefaultBodyLimit::max(64 * 1024))
+        .with_state(app))
 }
 
 fn read_token(path: &PathBuf) -> Result<Vec<u8>, AgentdError> {
@@ -148,7 +185,7 @@ async fn status(
     if let Err(code) = authorize(&app, &runtime, &headers) {
         return response(code, json!({"error":"unauthorized"}));
     }
-    let Ok(_permit) = app.operation.clone().try_acquire_owned() else {
+    let Ok(_permit) = app.control.operation.clone().try_acquire_owned() else {
         return response(
             StatusCode::CONFLICT,
             json!({"error":"operation_in_progress"}),
@@ -216,7 +253,7 @@ async fn command(
     }
     // Separate config proposal IDs from legacy chat request IDs.
     request.request_id = format!("https-{}", request.request_id);
-    let Ok(permit) = app.operation.clone().try_acquire_owned() else {
+    let Ok(permit) = app.control.operation.clone().try_acquire_owned() else {
         return response(
             StatusCode::CONFLICT,
             json!({"error":"operation_in_progress"}),

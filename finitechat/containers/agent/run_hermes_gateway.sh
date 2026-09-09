@@ -138,6 +138,16 @@ run_recover_chat_boot() {
         python "$recover_chat_boot" --config "${hermes_home}/config.yaml"
 }
 
+# Direct control runs local preparation independently of chat admission.
+# Run-only never rewrites settings while agentd is applying a control request.
+if [[ "${1:-}" == "--run-only" ]]; then
+    simplex_helper="${FINITE_AGENTD_SIMPLEX_SCRIPT:-/opt/simplex_runtime.py}"
+    if [[ -f "$simplex_helper" ]]; then
+        exec python "$simplex_helper" gateway
+    fi
+    exec hermes gateway run --replace
+fi
+
 recover_boot=0
 if [[ -n "${FINITE_AGENT_BOOT_INTENT_JSON:-}" ]]; then
     # A recover-known-good intent must run before any fresh-agent initialization.
@@ -154,6 +164,12 @@ if [[ ! -f "${hermes_home}/config.yaml" \
     && -z "$api_key" ]]; then
     echo "FINITE_DEFAULT_INFERENCE_PROFILE=finite-private requires FINITE_PRIVATE_API_KEY; refusing OpenRouter fallback." >&2
     exit 64
+fi
+
+if [[ "${1:-}" == "--prepare-local" ]]; then
+    # No finitechat CLI, network, or Device identity is needed here.
+    run_config_reconciler
+    exit 0
 fi
 
 if [[ ! -f "${agent_home}/config.json" ]]; then
@@ -207,7 +223,7 @@ fi
 # repairs only the Finite Chat transport and managed-skills registration. In
 # particular, model/provider settings and Telegram/other Hermes platforms are
 # Hermes/user-owned and must survive every runtime restart and image upgrade.
-if [[ "$recover_boot" -ne 1 ]]; then
+if [[ "$recover_boot" -ne 1 && "${1:-}" != "--prepare-chat" ]]; then
     managed_skills_config_dir=""
     if [[ -d "$managed_skills_dir" ]]; then
         managed_skills_config_dir="$managed_skills_dir"
@@ -215,7 +231,7 @@ if [[ "$recover_boot" -ne 1 ]]; then
     run_config_reconciler
 fi
 
-if [[ "${1:-}" == "--prepare-only" ]]; then
+if [[ "${1:-}" == "--prepare-only" || "${1:-}" == "--prepare-chat" ]]; then
     echo "FINITE_AGENT_RUNTIME_PREPARED hermes_home=${hermes_home} agent_home=${agent_home}"
     exit 0
 fi

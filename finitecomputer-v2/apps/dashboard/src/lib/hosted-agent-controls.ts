@@ -1,3 +1,5 @@
+import { randomUUID } from "node:crypto";
+import { CoreFetchError, requestCoreAgentControl } from "@/lib/core-client";
 import { fetchRuntimeAgentNpub } from "@/lib/agent-contact";
 import { getAccountAuthContext } from "@/lib/dashboard-auth";
 import { loadDashboardMachineAccess } from "@/lib/dashboard-machine-access";
@@ -73,6 +75,7 @@ export class HostedAgentControlError extends Error {
 }
 
 export async function loadAgentConnections(machineId: string) {
+  if (directControlEnabled()) return directStatus(machineId);
   const context = await hostedAgentContext(machineId);
   await claimOwner(context);
   return statusForContext(context);
@@ -80,6 +83,10 @@ export async function loadAgentConnections(machineId: string) {
 
 export async function dispatchAgentConnectionAction(machineId: string, payload: unknown) {
   const action = parseAgentConnectionAction(payload);
+  if (directControlEnabled()) {
+    if (action.action !== "status") await directCommand(machineId, commandForAction(action));
+    return directStatus(machineId);
+  }
   const context = await hostedAgentContext(machineId);
   await claimOwner(context);
   if (action.action !== "status") {
@@ -101,9 +108,7 @@ export async function applyGoogleConnection(
     scopes: string[];
   }
 ) {
-  const context = await hostedAgentContext(machineId);
-  await claimOwner(context);
-  await sendCommand(context, "agent.google.apply", "finite.agent.google.apply.v1", {
+  const googleBody = {
     client_id: body.clientId,
     client_secret: body.clientSecret,
     refresh_token: body.refreshToken,
@@ -111,7 +116,14 @@ export async function applyGoogleConnection(
     redirect_uri: body.redirectUri,
     connected_email: body.connectedEmail,
     scopes: body.scopes,
-  });
+  };
+  if (directControlEnabled()) {
+    await directCommand(machineId, { command: "agent.google.apply", schema: "finite.agent.google.apply.v1", body: googleBody });
+    return directStatus(machineId);
+  }
+  const context = await hostedAgentContext(machineId);
+  await claimOwner(context);
+  await sendCommand(context, "agent.google.apply", "finite.agent.google.apply.v1", googleBody);
   return statusForContext(context);
 }
 
@@ -424,4 +436,31 @@ function parseSimplexPending(value: unknown): PendingSimplexContact[] {
     }
     return { request_id, user_id: boundedString(row.user_id, "contact ID", 64), name: optionalString(row.name, "contact name", 128) ?? "", age_minutes: row.age_minutes };
   });
+}
+
+// Explicit mixed-version selection. Delete with legacy delivery after FIN-37.
+// An HTTP error never causes a fallback through chat.
+function directControlEnabled() {
+  return process.env.FC_CONNECTIONS_TRANSPORT === "https";
+}
+
+async function directRequest(machineId: string, command?: Parameters<typeof requestCoreAgentControl>[1]) {
+  try { return await requestCoreAgentControl(machineId, command); }
+  catch (error) {
+    throw new HostedAgentControlError(
+      error instanceof CoreFetchError ? error.message : "Independent Connections control is unavailable.",
+      error instanceof CoreFetchError ? error.status : 503,
+    );
+  }
+}
+
+async function directStatus(machineId: string) {
+  return parseConnectionsStatus(await directRequest(machineId));
+}
+
+async function directCommand(machineId: string, command: { command: string; schema: string; body: unknown }) {
+  const result = objectRecord(await directRequest(machineId, { ...command, request_id: randomUUID() }));
+  if (result.ok !== true) {
+    throw new HostedAgentControlError("The agent could not apply that change. Check its current settings before trying again.", 502);
+  }
 }
