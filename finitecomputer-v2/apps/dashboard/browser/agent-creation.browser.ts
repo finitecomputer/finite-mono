@@ -210,6 +210,8 @@ type HostedDeviceState = {
     NonNullable<FakeHostedChatState["hosted_agent_binding"]>
   >;
   connections: AgentConnectionsStatus;
+  gatewayEnabled: boolean;
+  gatewaySupported: boolean;
 };
 
 type AgentConnectionsStatus = {
@@ -371,6 +373,45 @@ test("dashboard agent creation browser states", { timeout: 300_000 }, async () =
         .waitFor({ state: "visible" });
     });
 
+    const gatewayRuntime = "runtime_" + "a".repeat(20);
+    core.reset({ projects: [visibleProject("project_gateway", "Gateway Agent", hostedDevice.runtimeStatusUrl, "a".repeat(20))] });
+    hostedDevice.state.agentBindings.set("project_gateway", {
+      version: 1, project_id: "project_gateway", human_account_id: hostedDevice.state.app.identity.account_id,
+      agent_account_id: "agent-account-browser", agent_npub: AGENT_NPUB,
+      canonical_room_id: "room_browser_agent", associated_room_ids: [],
+    });
+    await withSignedInPage(browser, paidDashboardPort, async (page) => {
+      const base = `http://127.0.0.1:${paidDashboardPort}`;
+      const api = `${base}/api/admin/machines/${gatewayRuntime}/gateway`;
+      await page.goto(`${base}/dashboard/machines/${gatewayRuntime}`);
+      await page.locator("summary").filter({ hasText: /^Advanced$/u }).click();
+      await page.getByRole("button", { name: "Load gateway controls" }).click();
+      const toggle = page.getByRole("switch", { name: "Enable hosted gateway" });
+      await toggle.waitFor({ state: "visible" });
+      assert.equal(await toggle.getAttribute("aria-checked"), "false");
+      await toggle.click();
+      await page.getByRole("button", { name: "Check connection" }).click();
+      await page.getByRole("button", { name: "Copy token" }).waitFor({ state: "visible" });
+      assert.equal(await page.getByLabel("Session token").getAttribute("type"), "password");
+      assert.equal(await page.getByLabel("Session token").inputValue(), "c".repeat(64));
+      assert(await page.getByText(`wss://r-${"a".repeat(20)}.agents.lat3.finite.computer/api/ws`, { exact: true }).isVisible());
+      const read = await page.request.get(api);
+      assert.equal(read.headers()["cache-control"], "no-store");
+      const commandsBefore = hostedDevice.state.runtimeCommands.length;
+      const crossOrigin = await page.request.post(api, { headers: { Origin: "https://other.example" }, data: { action: "disable" } });
+      assert.equal(crossOrigin.status(), 403);
+      const unowned = await page.request.get(`${base}/api/admin/machines/runtime_${"d".repeat(20)}/gateway`);
+      assert.equal(unowned.status(), 403);
+      assert.equal(hostedDevice.state.runtimeCommands.length, commandsBefore);
+      await toggle.click();
+      await page.getByText("Disabled", { exact: true }).waitFor({ state: "visible" });
+      assert.equal(await page.getByLabel("Session token").count(), 0);
+      hostedDevice.state.gatewaySupported = false;
+      await toggle.click();
+      await page.getByRole("alert").filter({ hasText: "Unsupported gateway command" }).waitFor({ state: "visible" });
+      hostedDevice.state.gatewaySupported = true;
+    });
+
     // This differently configured Next dev server is not used again. Keeping
     // both compilers alive makes later on-demand route compilation contend in CI.
     await stopChildProcess(paidDashboard);
@@ -408,6 +449,11 @@ test("dashboard agent creation browser states", { timeout: 300_000 }, async () =
       await page.getByRole("heading", { name: "Customer Controls Bot" }).waitFor({
         state: "visible",
       });
+      const commandsBefore = hostedDevice.state.runtimeCommands.length;
+      const api = `http://127.0.0.1:${dashboardPort}/api/admin/machines/runtime_customer-controls-bot/gateway`;
+      assert.equal((await page.request.get(api)).status(), 403);
+      assert.equal((await page.request.post(api, { headers: { Origin: `http://127.0.0.1:${dashboardPort}` }, data: { action: "enable" } })).status(), 403);
+      assert.equal(hostedDevice.state.runtimeCommands.length, commandsBefore);
       assert.equal(
         await page.locator("summary").filter({ hasText: /^Advanced$/u }).count(),
         0,
@@ -1992,6 +2038,7 @@ function startDashboard(
       cwd: process.cwd(),
       env: {
         ...process.env,
+        FC_HOSTED_GATEWAY_RUNNER_DOMAINS: JSON.stringify({ "finite-lat-3": "agents.lat3.finite.computer" }),
         FC_CORE_API_TOKEN: CORE_TOKEN,
         FC_CORE_BASE_URL: coreUrl,
         FINITECHAT_HOSTED_API_TOKEN: HOSTED_DEVICE_TOKEN,
@@ -2138,6 +2185,8 @@ async function startFakeHostedDevice() {
     ],
     bindingAuthorizationFailuresRemaining: 0,
     agentBindings: new Map(),
+    gatewayEnabled: false,
+    gatewaySupported: true,
     connections: {
       inference: {
         profile: "finite_private",
@@ -2493,6 +2542,15 @@ function applyRuntimeCommand(
   const body = request.body && typeof request.body === "object"
     ? request.body as Record<string, unknown>
     : {};
+  if (command.startsWith("agent.hosted-gateway.")) {
+    if (!state.gatewaySupported) return { request_id: "gateway-unsupported", status: "failed", body: null, error: { code: "unsupported_command", message: "Unsupported gateway command" } };
+    if (command.endsWith(".enable")) state.gatewayEnabled = true;
+    if (command.endsWith(".disable")) state.gatewayEnabled = false;
+    return { request_id: "gateway-command", status: "succeeded", error: null, body: {
+      enabled: state.gatewayEnabled, ready: state.gatewayEnabled && command.endsWith(".status"),
+      token: state.gatewayEnabled ? "c".repeat(64) : null,
+    } };
+  }
   if (command === "agent.inference.apply") {
     const profile = String(body.profile ?? "");
     if (profile === "finite_private") {
@@ -2926,6 +2984,13 @@ async function handleCoreRequest(
       projects: state.projects,
       agent_creation_requests: state.requests,
     });
+    return;
+  }
+
+  if (request.method === "GET" && request.url === "/api/core/v1/admin/runtimes") {
+    writeJson(response, 200, state.projects.filter((project) => project.runtime).map((project) => ({
+      project_id: project.project.id, agent_runtime_id: project.runtime!.id, source_host_id: "finite-lat-3",
+    })));
     return;
   }
 
