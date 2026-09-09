@@ -23,6 +23,15 @@ The approved Option B demo uses Fly organization `finite`, app
 not select Fly permanently or authorize moving production users. The checked-in
 configuration records this target; use an immutable CI image digest at deploy.
 
+The initial demo image is pinned in `fly.toml`. It was built from
+`f2778edb36581e8cf634f61fc3af943a259396a0` by
+[Service Images run 34401864605](https://github.com/finitecomputer/finite-mono/actions/runs/34401864605),
+which passed the AMD64 exact-image smoke with production promotion disabled.
+Fly resolves the pinned OCI index to its AMD64 manifest
+`sha256:ca998ad3d9d334e5cfa85c108b28e773935f23c9e3722b82d60f7c1777470078`.
+The health endpoint at `https://finite-sites-demo.fly.dev/api/v2/healthz`
+does not prove `finite.site` DNS/TLS, real mail, or the account bridge.
+
 The app's DNS records are below. Confirm ownership and review existing records
 before changing them. In particular, replace Namecheap URL forwarding only when
 the domain owner confirms it is no longer needed; do not remove unrelated mail

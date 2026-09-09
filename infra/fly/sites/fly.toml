@@ -1,9 +1,12 @@
 # Option B / Fly: isolated demo in the Finite organization.
-# No build definition: this deployment consumes an existing CI-built image.
+# This deployment consumes an existing CI-built image; Fly does not build it.
 app = "finite-sites-demo"
 primary_region = "iad"
 kill_signal = "SIGINT"
 kill_timeout = 30
+
+[build]
+  image = "ghcr.io/finitecomputer/finite-sites@sha256:25197b350ce7a389a1b4c373fae1326cdddb20f0ae876c7ee9d0c69ca5ae3c9e"
 
 [deploy]
   strategy = "rolling"
