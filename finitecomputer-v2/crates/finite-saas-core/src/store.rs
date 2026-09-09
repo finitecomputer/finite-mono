@@ -1,3 +1,5 @@
+pub mod connections;
+
 use crate::billing;
 use crate::launch_codes::{
     IssueLaunchCodeBatchInput, IssuedLaunchCodeBatch, LaunchCodeBatch, LaunchCodeBatchDetails,

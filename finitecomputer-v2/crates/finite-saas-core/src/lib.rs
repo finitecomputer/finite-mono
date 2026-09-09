@@ -69,7 +69,9 @@ pub const CORE_SCHEMA_SQL: &str = concat!(
     "\n",
     include_str!("../migrations/0023_agent_creation_owner_chat_account_id.sql"),
     "\n",
-    include_str!("../migrations/0024_runtime_status_pending_first_report_remap.sql")
+    include_str!("../migrations/0024_runtime_status_pending_first_report_remap.sql"),
+    "\n",
+    include_str!("../migrations/0025_connections_inference.sql")
 );
 pub const RUNTIME_UPGRADE_ROLLBACK_RESCUE_SQL: &str =
     include_str!("../migrations/runtime_upgrade_rollback_rescue.sql");
