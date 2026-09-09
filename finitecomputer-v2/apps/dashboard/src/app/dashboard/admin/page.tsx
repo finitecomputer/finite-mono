@@ -13,6 +13,7 @@ import {
   ConfirmSubmitButton,
 } from "@/components/admin-ops-forms";
 import { AdminUsersPanel } from "@/components/admin-users-panel";
+import { formatWeightedTokens } from "@/components/finite-private-usage-progress";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import {
   canAccessAdminOps,
@@ -222,8 +223,8 @@ function FinitePrivateOpsPanel({
               <small>Active keys</small>
             </div>
             <div className="ocean-metric">
-              <span>{usedUnits}</span>
-              <small>Burst window units used</small>
+              <span>{formatWeightedTokens(usedUnits)}</span>
+              <small>Burst window weighted tokens</small>
             </div>
           </div>
 

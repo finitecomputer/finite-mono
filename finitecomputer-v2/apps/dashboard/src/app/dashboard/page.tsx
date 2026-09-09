@@ -34,6 +34,7 @@ import {
   FinitePrivateUsagePanel,
   FinitePrivateUsageUnavailablePanel,
 } from "@/components/finite-private-usage-panel";
+import { formatWeightedTokens } from "@/components/finite-private-usage-progress";
 import { PendingRefresh } from "@/components/pending-refresh";
 import { StatusPrism } from "@/components/status-prism";
 import { Button } from "@/components/ui/button";
@@ -585,8 +586,8 @@ function FinitePrivateAdminPanel({
               <small>Active keys</small>
             </div>
             <div className="ocean-metric">
-              <span>{usedUnits}</span>
-              <small>Used units</small>
+              <span>{formatWeightedTokens(usedUnits)}</span>
+              <small>Weighted tokens used</small>
             </div>
           </div>
 
@@ -717,7 +718,9 @@ function FinitePrivateGrantList({ grants }: { grants: CoreFinitePrivateGrant[] }
                 <div className="mt-1 grid gap-1 text-xs text-muted-foreground">
                   <span className="truncate font-mono">user {grant.user_id}</span>
                   <span className="truncate font-mono">profile {grant.limit_profile_id}</span>
-                  <span>{grant.current_window_used_units} used units</span>
+                  <span>
+                    {formatWeightedTokens(grant.current_window_used_units)} weighted tokens used
+                  </span>
                 </div>
               </div>
               <div className="flex flex-wrap gap-2">

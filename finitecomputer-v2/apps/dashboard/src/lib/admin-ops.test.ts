@@ -49,11 +49,11 @@ test("Finite Private helpers keep the curated 1x/5x order and exact project corr
   );
   assert.equal(
     finitePrivateProfileLabel(profiles[0].id),
-    "1× · 100M units / 5h"
+    "1× · 100M weighted tokens / 5h"
   );
   assert.equal(
     finitePrivateProfileLabel(profiles[1].id),
-    "5× · 500M units / 5h"
+    "5× · 500M weighted tokens / 5h"
   );
 
   const accounts = [
