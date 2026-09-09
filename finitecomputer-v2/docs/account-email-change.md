@@ -128,8 +128,10 @@ send; it does not change Chat identity, Room state, or the Agent ledger.
 
 Existing Core uses the same `/me` response, so the new dashboard works with
 that pre-change API. Old dashboard sessions can still mint source-email
-assertions until refreshed; deploy the reader fix, refresh/revoke sessions,
-and account for outstanding assertions before authorizing a customer cutover.
+assertions until refreshed. Temporary access through the old email is accepted
+for this same-user sign-in change; immediate session or Sites-cookie revocation
+is not part of the feature. Fresh sign-in and manual re-sharing establish access
+through the destination email.
 Do not weaken the Agent ledger or re-run owner claim to refresh an email.
 
 ## Operator sequence and recovery boundary
@@ -139,24 +141,28 @@ Do not weaken the Agent ledger or re-run owner claim to refresh an email.
    Sites, Brain, billing contact details, and agent connected accounts. Stop on
    collisions. A separate account with no Projects still needs a preservation
    decision; never delete it or move its email to a placeholder automatically.
-2. Reproduce and qualify on synthetic existing accounts with the deployed
-   version mix. Keep the same keys, IDs, history, and unrelated grants. Prove a
-   real Google login returns the original WorkOS ID, not merely a mocked email.
-3. Prepare an exact coordinated recovery boundary: private WorkOS identity
+2. Prepare an exact coordinated recovery boundary: private WorkOS identity
    metadata, Core rows/receipt, and any product-owned changed state. Retain
    restorable Chat/hosted/runtime backups; do not clone or replace them just for
    an email change. Define what to do if the provider changes but Core cannot
    commit. Revoked OAuth credentials may require interactive reauthentication;
    restoring a database row alone is not full login rollback.
+3. Review and merge the PR, deploy the app-plane changes through the normal
+   reviewed closure path, then qualify on a designated throwaway account and
+   existing Agent. Keep the same keys, IDs, history, and unrelated grants;
+   verify real Google login returns the original WorkOS ID. This trial happens
+   after deployment, not as a prerequisite to making the admin feature available.
 4. Obtain explicit production authorization for the exact case. Run
    `scripts/finite-status` before/after any rollout. Deploy only reviewed,
-   qualified components. Prepare Core intent, execute the separately authorized
+   tested components. Prepare Core intent, execute the separately authorized
    WorkOS/native verification and product-owned steps, refresh sessions, and
    complete Core. Inspect intent/current provider state after any uncertain
    response rather than blindly replaying provider mutations.
-5. Accept only after Google sign-in, historical chat, a fresh message/reply,
-   Connections, Brain, existing private Sites, new publishing/sharing, and billing
-   continuity pass. A bot restart is conditional on an observed cache. Updating
+5. For the initial throwaway trial, sign in with the new Google account, read
+   existing chat history, talk to the Agent, ask it to re-share its private Site
+   to the new email, and have it read its existing Brain share. Investigate any
+   failure and ship fixes through a follow-up PR and deployment. A bot restart
+   is conditional on an observed cache. Updating
    bot memories is housekeeping, not an authorization mechanism. Google login
    does not change the bot's Gmail/Drive credentials.
 
@@ -170,8 +176,12 @@ Sites tests compare registry bytes before/after read-only inventory and prove
 missing/unknown schemas are not created or migrated. Dashboard tests exercise
 stale-session/new-Core email, unavailable Core, and wrong-subject responses.
 
-These tests are not a real Google OAuth acceptance test, full encrypted-history
-recovery proof, or completed Sites migration. Those remain production gates.
+A separate controlled rehearsal with empty accounts verified fresh Google
+sign-in retained the original WorkOS and Core IDs. It used operator SQL for
+Core reconciliation and did not test the admin UI or an existing Agent. The
+post-deployment throwaway trial above exercises that remaining product path.
+Automatic Sites grant migration and immediate old-email access revocation are
+not requirements for this feature; existing recovery guarantees still apply.
 The follow-up Agent transfer feature needs its own scoped grant/history and
 runtime-authorization transition; it must not reuse whole-account email change
 as a workaround for moving one Agent.
@@ -280,8 +290,10 @@ and have the Agent read the existing Brain share. No live existing-agent
 qualification or production deployment is claimed by this draft.
 
 Deployment includes both components: ship the Core binary with the additive
-receipt migration and new operator endpoints before the dashboard image that
-calls them. A dashboard-only rollout cannot exercise this flow. The live app
+receipt migration and new operator endpoints, plus the dashboard image that
+calls them. Both can ship in one reviewed app-plane closure with the new image
+digest pinned. Verify Core is serving the endpoints before exercising the form;
+a dashboard-only rollout cannot exercise this flow. The live app
 plane is lat2; lat1 is retired. Core runs from the reviewed NixOS closure, and
 the dashboard is a digest-pinned container in that host configuration. Follow
 the app-plane closure step in [the platform rollout runbook](../../infra/runbooks/platform-rollout.md) and
