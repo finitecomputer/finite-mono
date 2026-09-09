@@ -181,17 +181,18 @@ export function HermesChatProvider({ children }: { children: ReactNode }) {
   const scopedRef = useRef<Set<string>>(new Set());
   const sessionsRef = useRef<GatewaySession[]>([]);
   const selectedRef = useRef<{ topicId: string | null; chatId: string | null }>({
-    topicId: null,
+    topicId: RECENTS_TOPIC_ID,
     chatId: null,
   });
-  const typingRef = useRef(false);
   const turnKeyRef = useRef(0);
   const socketRef = useRef<WebSocket | null>(null);
   const nextIdRef = useRef(1);
   const pendingRef = useRef(
-    new Map<number, { resolve: (value: unknown) => void; reject: (reason: Error) => void }>()
+    new Map<number, { resolve: (value: unknown) => void; reject: (reason: Error) => void; timer: ReturnType<typeof setTimeout> }>()
   );
   const callRef = useRef<GatewayCall | null>(null);
+  const selectionSequenceRef = useRef(0);
+  const listSequenceRef = useRef(0);
 
   const stateRef = useRef<HostedChatState | null>(null);
 
@@ -271,7 +272,7 @@ export function HermesChatProvider({ children }: { children: ReactNode }) {
         },
       ],
       devices: [],
-      typing_members: typingRef.current
+      typing_members: Boolean(selected.chatId && chatsRef.current.get(selected.chatId)?.streaming)
         ? [
             {
               room_id: ROOM_ID,
@@ -325,7 +326,7 @@ export function HermesChatProvider({ children }: { children: ReactNode }) {
     if (streaming.reasoning) {
       upsert({
         ...gatewayMessage("assistant", streaming.reasoning, chatId, topicId, false, "running"),
-        message_id: `${chatId}:think:${streaming.turnKey}`,
+        message_id: `gateway:think:${streaming.turnKey}`,
         kind: "tool",
         display_content: streaming.reasoning,
       });
@@ -333,48 +334,43 @@ export function HermesChatProvider({ children }: { children: ReactNode }) {
     if (streaming.answer) {
       upsert({
         ...gatewayMessage("assistant", streaming.answer, chatId, topicId, false, "running"),
-        message_id: `${chatId}:reply:${streaming.turnKey}`,
+        message_id: `gateway:reply:${streaming.turnKey}`,
       });
     }
     transcriptRef.current.set(chatId, messages);
   }, []);
 
-  // hermes is authoritative once a draft materializes: refetch its transcript
-  // instead of trusting the local display buffer. A turn still in flight
-  // keeps its streaming tail after the fetched history.
+  // Reopening and reconnecting bind a fresh transport to durable history.
   const hydrateTranscript = useCallback(async (chatId: string, topicId: string) => {
     const call = callRef.current;
-    if (!call) return;
+    if (!call) return false;
     try {
       const resumed = (await call("session.resume", { session_id: chatId })) as {
         session_id: string;
         messages?: GatewayMessage[];
       } | null;
-      const current = transcriptRef.current.get(chatId) ?? [];
-      const history = historyMessageRows(resumed?.messages ?? [], chatId, topicId);
-      const streamingIndex = current.findIndex((message) => message.status === "running");
-      transcriptRef.current.set(
-        chatId,
-        streamingIndex >= 0 ? [...history, ...current.slice(streamingIndex)] : history
-      );
+      if (call !== callRef.current) return false;
+      if (!resumed?.session_id) throw new Error("Gateway returned no session handle");
+      transcriptRef.current.set(chatId, historyMessageRows(resumed.messages ?? [], chatId, topicId));
       const entry = chatsRef.current.get(chatId);
-      if (entry && resumed?.session_id && !entry.handleId) {
-        entry.handleId = resumed.session_id;
-      }
+      if (entry) entry.handleId = resumed.session_id;
       publish();
     } catch {
-      // The local transcript stays as-is; hermes remains authoritative on
-      // the next open.
+      setTransportError("Could not reload this conversation. Retry before sending.");
+      return false;
     }
+    return true;
   }, [publish]);
 
   const refreshLists = useCallback(async () => {
     const call = callRef.current;
     if (!call) return;
+    const sequence = ++listSequenceRef.current;
     const [treeResult, listResult] = await Promise.all([
       call("projects.tree", { preview_limit: 50 }),
       call("session.list", { limit: 100 }),
     ]);
+    if (sequence !== listSequenceRef.current || call !== callRef.current) return;
     const tree = treeResult as { projects?: GatewayProject[]; scoped_session_ids?: string[] } | null;
     const list = listResult as { sessions?: GatewaySession[] } | null;
     projectsRef.current = (tree?.projects ?? []).filter((project) => project.sessionCount > 0);
@@ -402,7 +398,7 @@ export function HermesChatProvider({ children }: { children: ReactNode }) {
       chatsRef.current.delete(chatId);
       const transcript = transcriptRef.current.get(chatId);
       if (transcript) {
-        transcriptRef.current.set(real.id, transcript);
+        transcriptRef.current.set(real.id, transcript.map((message) => ({ ...message, chat_id: real.id })));
         transcriptRef.current.delete(chatId);
       }
       const topicId = topicOfSession(real, projectsRef.current);
@@ -416,13 +412,10 @@ export function HermesChatProvider({ children }: { children: ReactNode }) {
       if (selectedRef.current.chatId === chatId) {
         selectedRef.current = { topicId, chatId: real.id };
       }
-      // hermes is now authoritative for this chat: refetch the transcript
-      // instead of trusting the local display buffer. A turn still in
-      // flight keeps its streaming tail after the fetched history.
-      void hydrateTranscript(real.id, topicId);
+      // Keep the in-flight tail intact; reopening reconciles with history.
     }
     publish();
-  }, [hydrateTranscript, publish]);
+  }, [publish]);
 
   const handleEvent = useCallback(
     (event: GatewayEvent) => {
@@ -454,7 +447,6 @@ export function HermesChatProvider({ children }: { children: ReactNode }) {
       const chatId = chat.summary.chat_id;
       if (type === "message.start") {
         chat.streaming = { turnKey: ++turnKeyRef.current, reasoning: "", answer: "" };
-        typingRef.current = true;
         publish();
       } else if (type === "reasoning.delta" || type === "message.delta") {
         if (chat.streaming) {
@@ -469,7 +461,6 @@ export function HermesChatProvider({ children }: { children: ReactNode }) {
       } else if (type === "message.complete") {
         const text = String(event.payload?.text ?? "");
         chat.streaming = null;
-        typingRef.current = false;
         const messages = transcriptRef.current.get(chatId) ?? [];
         // The reply row is replaced by the final text; every live rollup row
         // (the thinking trace) settles to complete.
@@ -478,9 +469,12 @@ export function HermesChatProvider({ children }: { children: ReactNode }) {
         );
         const finalMessage = gatewayMessage("assistant", text, chatId, chat.topicId, false);
         if (replyIndex >= 0) messages.splice(replyIndex, 1, finalMessage);
-        else messages.push(finalMessage);
+        else if (text) messages.push(finalMessage);
         for (const message of messages) {
-          if (message.status === "running") message.status = "complete";
+          if (message.status === "running") {
+            message.status = "complete";
+            message.final_delivery = true;
+          }
         }
         transcriptRef.current.set(chatId, messages);
         publish();
@@ -491,6 +485,7 @@ export function HermesChatProvider({ children }: { children: ReactNode }) {
 
   useEffect(() => {
     let disposed = false;
+    const pendingRequests = pendingRef.current;
     let retryMs = 500;
     let retryTimer: ReturnType<typeof setTimeout> | undefined;
 
@@ -502,8 +497,18 @@ export function HermesChatProvider({ children }: { children: ReactNode }) {
           return;
         }
         const id = nextIdRef.current++;
-        pendingRef.current.set(id, { resolve, reject });
-        socket.send(JSON.stringify({ jsonrpc: "2.0", id, method, params }));
+        const timer = setTimeout(() => {
+          pendingRequests.delete(id);
+          reject(new Error("Gateway request timed out. Check the conversation before retrying."));
+        }, 30_000);
+        pendingRequests.set(id, { resolve, reject, timer });
+        try {
+          socket.send(JSON.stringify({ jsonrpc: "2.0", id, method, params }));
+        } catch (error) {
+          clearTimeout(timer);
+          pendingRequests.delete(id);
+          reject(error);
+        }
       });
     callRef.current = call;
 
@@ -529,27 +534,36 @@ export function HermesChatProvider({ children }: { children: ReactNode }) {
       socketRef.current = socket;
 
       socket.addEventListener("open", () => {
+        if (disposed || socketRef.current !== socket) return;
         retryMs = 500;
         setStreamConnected(true);
         setTransportError(null);
-        void refreshLists().catch(() => undefined);
+        void refreshLists().then(async () => {
+          const selected = selectedRef.current;
+          if (selected.chatId && !selected.chatId.startsWith("draft:")) {
+            await hydrateTranscript(selected.chatId, selected.topicId ?? RECENTS_TOPIC_ID);
+          }
+        }).catch(() => setTransportError("Could not load gateway conversations. Retry load to reconnect."));
       });
 
       socket.addEventListener("message", (event: MessageEvent) => {
+        if (disposed || socketRef.current !== socket) return;
         let message: GatewayInbound;
         try {
           message = JSON.parse(String(event.data));
         } catch {
           return;
         }
+        if (!message || typeof message !== "object") return;
         if (message.method === "event" && message.params?.type) {
           handleEvent(message.params);
           return;
         }
         if (message.id == null) return;
-        const pending = pendingRef.current.get(message.id);
+        const pending = pendingRequests.get(message.id);
         if (!pending) return;
-        pendingRef.current.delete(message.id);
+        clearTimeout(pending.timer);
+        pendingRequests.delete(message.id);
         if (message.error) {
           pending.reject(
             new Error(`${message.error.message ?? "gateway error"} (${message.error.code ?? "?"})`)
@@ -560,27 +574,87 @@ export function HermesChatProvider({ children }: { children: ReactNode }) {
       });
 
       const reconnect = () => {
-        if (disposed) return;
-        for (const pending of pendingRef.current.values()) {
-          pending.reject(new Error("hermes gateway connection lost"));
+        if (disposed || socketRef.current !== socket) return;
+        socketRef.current = null;
+        ++listSequenceRef.current;
+        for (const [chatId, entry] of chatsRef.current) {
+          entry.handleId = "";
+          entry.streaming = null;
+          if (chatId.startsWith("draft:") && !entry.storedId) {
+            chatsRef.current.delete(chatId);
+          }
         }
-        pendingRef.current.clear();
+        for (const pending of pendingRequests.values()) {
+          clearTimeout(pending.timer);
+          pending.reject(new Error("Gateway connection lost. Check the conversation before retrying."));
+        }
+        pendingRequests.clear();
         setStreamConnected(false);
         setTransportError(`gateway unreachable at ${GATEWAY_WS_URL}`);
         retryTimer = setTimeout(connect, retryMs);
         retryMs = Math.min(retryMs * 2, 10_000);
       };
       socket.addEventListener("close", reconnect);
-      socket.addEventListener("error", reconnect);
+      // Browsers emit close after error; scheduling from both duplicates sockets.
+      socket.addEventListener("error", () => socket.close());
     };
 
     connect();
     return () => {
       disposed = true;
       if (retryTimer) clearTimeout(retryTimer);
-      socketRef.current?.close();
+      const socket = socketRef.current;
+      socketRef.current = null;
+      callRef.current = null;
+      for (const pending of pendingRequests.values()) {
+        clearTimeout(pending.timer);
+        pending.reject(new Error("Gateway connection closed"));
+      }
+      pendingRequests.clear();
+      socket?.close();
     };
-  }, [handleEvent, refreshLists]);
+  }, [handleEvent, hydrateTranscript, refreshLists]);
+
+  const createDraft = useCallback(async (topic_id: string) => {
+    const call = callRef.current;
+    if (!call) throw new Error("Gateway is not connected");
+    const project = projectsRef.current.find(
+      (candidate) => topicIdForProject(candidate) === topic_id
+    );
+    // source "desktop" is the client class we actually are: a remote UI
+    // with no launch folder of its own, exactly like the desktop app.
+    // hermes stamps no workspace on unpicked desktop-class creates, so
+    // they join the Home (no-project) bucket instead of inheriting the
+    // gateway's launch directory. A cwd is passed only when the user
+    // picked a real project topic.
+    const created = (await call("session.create", {
+      source: "desktop",
+      cols: 100,
+      ...(project?.path ? { cwd: project.path } : {}),
+    })) as { session_id: string; stored_session_id?: string } | null;
+    if (!created?.session_id) throw new Error("Gateway returned no session handle");
+    const draftId = `draft:${created.session_id}`;
+    chatsRef.current.set(draftId, {
+      summary: {
+        chat_id: draftId,
+        title: "New chat",
+        last_message_preview: "",
+        unread_count: 0,
+        message_count: 0,
+        started_seq: 0,
+        updated_seq: seqRef.current++,
+        active: true,
+        archived: false,
+      },
+      handleId: created?.session_id ?? "",
+      storedId: created?.stored_session_id ?? null,
+      topicId: topic_id,
+      streaming: null,
+    });
+    transcriptRef.current.set(draftId, []);
+    selectedRef.current = { topicId: topic_id, chatId: draftId };
+    return draftId;
+  }, []);
 
   const dispatch = useCallback(
     async (action: HostedChatAction): Promise<HostedChatState> => {
@@ -589,18 +663,27 @@ export function HermesChatProvider({ children }: { children: ReactNode }) {
 
       if ("OpenChat" in action) {
         const { chat_id } = action.OpenChat;
+        const sequence = ++selectionSequenceRef.current;
         selectedRef.current = {
           topicId: action.OpenChat.topic_id,
           chatId: chat_id,
         };
-        const entry = chatsRef.current.get(chat_id);
+        let entry = chatsRef.current.get(chat_id);
+        if (!entry) {
+          const preview = projectsRef.current.flatMap((project) => project.previewSessions).find((session) => session.id === chat_id);
+          if (!preview) throw new Error("Conversation is unavailable. Reload the list.");
+          entry = { summary: summaryFromSession(preview), handleId: "", storedId: null, topicId: action.OpenChat.topic_id, streaming: null };
+          chatsRef.current.set(chat_id, entry);
+        }
         if (entry) entry.topicId = action.OpenChat.topic_id;
-        if (entry && !chat_id.startsWith("draft:") && !transcriptRef.current.has(chat_id)) {
+        if (entry && !chat_id.startsWith("draft:")) {
           const resumed = (await call("session.resume", { session_id: chat_id })) as {
             session_id: string;
             messages?: GatewayMessage[];
           } | null;
-          entry.handleId = resumed?.session_id ?? entry.handleId;
+          if (sequence !== selectionSequenceRef.current) return currentState();
+          if (!resumed?.session_id) throw new Error("Gateway returned no session handle");
+          entry.handleId = resumed.session_id;
           transcriptRef.current.set(
             chat_id,
             historyMessageRows(resumed?.messages ?? [], chat_id, entry.topicId)
@@ -610,42 +693,15 @@ export function HermesChatProvider({ children }: { children: ReactNode }) {
         return currentState();
       }
 
+      if ("OpenTopic" in action) {
+        ++selectionSequenceRef.current;
+        selectedRef.current = { topicId: action.OpenTopic.topic_id, chatId: null };
+        publish();
+        return currentState();
+      }
+
       if ("StartTopicChatIntent" in action) {
-        const { topic_id } = action.StartTopicChatIntent;
-        const project = projectsRef.current.find(
-          (candidate) => topicIdForProject(candidate) === topic_id
-        );
-        // source "desktop" is the client class we actually are: a remote UI
-        // with no launch folder of its own, exactly like the desktop app.
-        // hermes stamps no workspace on unpicked desktop-class creates, so
-        // they join the Home (no-project) bucket instead of inheriting the
-        // gateway's launch directory. A cwd is passed only when the user
-        // picked a real project topic.
-        const created = (await call("session.create", {
-          source: "desktop",
-          cols: 100,
-          ...(project?.path ? { cwd: project.path } : {}),
-        })) as { session_id: string; stored_session_id?: string } | null;
-        const draftId = `draft:${created?.session_id ?? crypto.randomUUID()}`;
-        chatsRef.current.set(draftId, {
-          summary: {
-            chat_id: draftId,
-            title: "New chat",
-            last_message_preview: "",
-            unread_count: 0,
-            message_count: 0,
-            started_seq: 0,
-            updated_seq: seqRef.current++,
-            active: true,
-            archived: false,
-          },
-          handleId: created?.session_id ?? "",
-          storedId: created?.stored_session_id ?? null,
-          topicId: topic_id,
-          streaming: null,
-        });
-        transcriptRef.current.set(draftId, []);
-        selectedRef.current = { topicId: topic_id, chatId: draftId };
+        await createDraft(action.StartTopicChatIntent.topic_id);
         publish();
         return currentState();
       }
@@ -669,63 +725,48 @@ export function HermesChatProvider({ children }: { children: ReactNode }) {
               ? action.SendMessage.text
               : "");
         const explicitChatId = chatScoped?.chat_id ?? null;
-        const chatId = explicitChatId ?? selectedRef.current.chatId;
-        let entry = chatId ? chatsRef.current.get(chatId) ?? null : null;
+        let chatId = explicitChatId ?? selectedRef.current.chatId;
         const topicId = chatScoped?.topic_id
-          ?? ("SendTopicMessage" in action ? action.SendTopicMessage.topic_id : null);
-        if (!entry && (chatId || topicId)) {
-          // Topic-only send: open a fresh draft inside that topic first.
-          const project = topicId
-            ? projectsRef.current.find(
-                (candidate) => topicIdForProject(candidate) === topicId
-              )
-            : undefined;
-          const created = (await call("session.create", {
-            source: "desktop",
-            cols: 100,
-            ...(project?.path ? { cwd: project.path } : {}),
-          })) as { session_id: string; stored_session_id?: string } | null;
-          const draftId = `draft:${created?.session_id ?? crypto.randomUUID()}`;
-          entry = {
-            summary: {
-              chat_id: draftId,
-              title: "New chat",
-              last_message_preview: "",
-              unread_count: 0,
-              message_count: 0,
-              started_seq: 0,
-              updated_seq: seqRef.current++,
-              active: true,
-              archived: false,
-            },
-            handleId: created?.session_id ?? "",
-            storedId: created?.stored_session_id ?? null,
-            topicId: topicId ?? RECENTS_TOPIC_ID,
-            streaming: null,
-          };
-          chatsRef.current.set(draftId, entry);
-          transcriptRef.current.set(draftId, []);
-          selectedRef.current = { topicId: entry.topicId, chatId: draftId };
+          ?? ("SendTopicMessage" in action ? action.SendTopicMessage.topic_id : selectedRef.current.topicId)
+          ?? RECENTS_TOPIC_ID;
+        if (explicitChatId && !chatsRef.current.has(explicitChatId)) {
+          throw new Error("Conversation is unavailable. Reopen it before sending.");
         }
-        if (!entry || !chatId) throw new Error("no chat selected");
-        let handle = entry.handleId;
-        if (!handle) {
-          const created = (await call("session.create", {
-            source: "desktop",
-            cols: 100,
-          })) as { session_id: string; stored_session_id?: string } | null;
-          handle = created?.session_id ?? "";
-          entry.handleId = handle;
+        if (!chatId) chatId = await createDraft(topicId);
+        const entry = chatsRef.current.get(chatId);
+        if (!entry) throw new Error("Conversation is unavailable. Reopen it before sending.");
+        if (!entry.handleId) {
+          if (chatId.startsWith("draft:")) {
+            throw new Error("This unsent draft lost its connection. Start a new chat to send it.");
+          }
+          const resumed = await call("session.resume", { session_id: chatId }) as { session_id?: string };
+          if (!resumed?.session_id) throw new Error("Gateway returned no session handle");
+          entry.handleId = resumed.session_id;
         }
+        const handle = entry.handleId;
         const messages = transcriptRef.current.get(chatId) ?? [];
-        messages.push(gatewayMessage("user", text, chatId, entry.topicId, true));
+        const optimistic = gatewayMessage("user", text, chatId, entry.topicId, false);
+        optimistic.outbound_delivery = { local_send: "Sending", server_delivery: "Undelivered" };
+        messages.push(optimistic);
         transcriptRef.current.set(chatId, messages);
         // Publish the optimistic user message BEFORE awaiting the turn so a
         // slow gateway can never freeze the composer.
         publish();
-        await call("prompt.submit", { session_id: handle, text });
-        entry.streaming = { turnKey: ++turnKeyRef.current, reasoning: "", answer: "" };
-        typingRef.current = true;
+        try {
+          await call("prompt.submit", { session_id: handle, text });
+          for (const rows of transcriptRef.current.values()) {
+            const delivered = rows.find((row) => row.message_id === optimistic.message_id);
+            if (delivered) delivered.outbound_delivery = { local_send: "Sent", server_delivery: "Delivered" };
+          }
+        } catch (error) {
+          // The composer retains the text. Never leave a refused send marked delivered.
+          for (const rows of transcriptRef.current.values()) {
+            const index = rows.findIndex((row) => row.message_id === optimistic.message_id);
+            if (index >= 0) rows.splice(index, 1);
+          }
+          publish();
+          throw error;
+        }
         // The draft will be replaced by its stored row once it materializes;
         // keep the local entry selected until then so the view does not jump.
         publish();
@@ -744,26 +785,32 @@ export function HermesChatProvider({ children }: { children: ReactNode }) {
         return currentState();
       }
 
-      // MarkRoomRead, SetTyping, SetChatArchived and the profile/group flows
-      // have no gateway analogue yet; they stay quiet no-ops so the shared UI
-      // keeps working. They must NOT publish: a publish mints a fresh state
-      // object, and effects keyed on state that dispatch (read receipts,
-      // typing) would loop forever. Gaps are tracked in NOTES.md.
+      // Read receipts and outgoing typing have no gateway equivalent.
+      // Do not publish for these effects or they would dispatch in a loop.
+      // Other unsupported mutations must fail visibly.
+      if (!("MarkRoomRead" in action) && !("SetTyping" in action)) {
+        throw new Error("This action is not supported by gateway chat yet.");
+      }
       return currentState();
     },
-    [publish, refreshLists, upsertStreamingMessages]
+    [createDraft, currentState, publish, refreshLists]
   );
 
   const load = useCallback(async (): Promise<HostedChatRetryAttempt> => {
     try {
       await refreshLists();
+      const selected = selectedRef.current;
+      if (selected.chatId && !selected.chatId.startsWith("draft:")) {
+        const loaded = await hydrateTranscript(selected.chatId, selected.topicId ?? RECENTS_TOPIC_ID);
+        if (!loaded) return "stop";
+      }
       setTransportError(null);
       return "succeeded";
     } catch {
       setTransportError(`gateway unreachable at ${GATEWAY_WS_URL}`);
       return "stop";
     }
-  }, [refreshLists]);
+  }, [hydrateTranscript, refreshLists]);
 
   const claimOwner = useCallback(
     async (): Promise<HostedChatRetryAttempt> => "succeeded",
@@ -780,10 +827,10 @@ export function HermesChatProvider({ children }: { children: ReactNode }) {
       return null;
     }
   }, [dispatch]);
-  const refreshPendingChat = useCallback(
-    async (_target: PendingChatRefreshTarget) => false,
-    []
-  );
+  const refreshPendingChat = useCallback(async (target: PendingChatRefreshTarget) => {
+    if (chatsRef.current.get(target.chat_id)?.streaming) return false;
+    return await hydrateTranscript(target.chat_id, target.topic_id);
+  }, [hydrateTranscript]);
   const uploadAttachments = useCallback(async (): Promise<HostedChatState> => {
     throw new Error("attachments are not wired to the gateway yet");
   }, []);
@@ -791,6 +838,9 @@ export function HermesChatProvider({ children }: { children: ReactNode }) {
   const value = useMemo<HostedChatContextValue>(
     () => ({
       apiBase: "hermes-gateway",
+      canSendToTopic: true,
+      supportsAttachments: false,
+      supportsChatArchive: false,
       state,
       transportError,
       claimError: null,

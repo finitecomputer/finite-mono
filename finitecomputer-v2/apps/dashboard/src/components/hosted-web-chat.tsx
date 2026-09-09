@@ -142,6 +142,8 @@ export function HostedWebChat({
 }) {
   const {
     state,
+    canSendToTopic = false,
+    supportsAttachments = true,
     transportError,
     claimError,
     bindingRecoveryRequired,
@@ -578,7 +580,7 @@ export function HostedWebChat({
       (!text && attachments.length === 0)
       || !selectedRoom
       || !selectedTopic
-      || !selectedChat
+      || (!selectedChat && !canSendToTopic)
       || sending
       || audioRecordingState !== "idle"
     ) return;
@@ -630,6 +632,10 @@ export function HostedWebChat({
   }
 
   function addFiles(files: FileList | File[]) {
+    if (!supportsAttachments) {
+      setActionError("Attachments are not available on this connection yet.");
+      return;
+    }
     if (audioRecordingState !== "idle") {
       setActionError("Stop the audio recording before adding another attachment.");
       return;
@@ -875,7 +881,7 @@ export function HostedWebChat({
 
   const connected = ownerClaimed
     && selectedRoom?.state === "Connected"
-    && Boolean(selectedTopic && selectedChat);
+    && Boolean(selectedTopic && (selectedChat || canSendToTopic));
   const activityLabel = runtimeCanPresentActivity(runtimeStatus)
     ? sharedLiveActivityLabel(liveMembers, machineLabel, awaitingReply)
     : null;
@@ -1176,6 +1182,7 @@ export function HostedWebChat({
                         type="button"
                         className="finite-chat__tool-button"
                         disabled={!connected || sending}
+                        hidden={!supportsAttachments}
                         aria-label="Attach files"
                         onClick={() => fileInputRef.current?.click()}
                       >
@@ -1198,6 +1205,7 @@ export function HostedWebChat({
                             ? "Stop audio recording"
                             : "Start audio recording"
                         }
+                        hidden={!supportsAttachments}
                         aria-pressed={audioRecordingState === "recording"}
                         title={
                           audioRecordingState === "recording"

@@ -411,7 +411,6 @@ function AgentAppSection({
   // components render over the hermes tui_gateway WebSocket instead of the
   // finitechat hosted device.
   const isGatewayChat = dashboardGatewayChatFromPath(pathname);
-  const ChatProvider = isGatewayChat ? HermesChatProvider : HostedChatProvider;
   const scrollRef = useRef<HTMLElement>(null);
   const [collapsed, setCollapsed] = useState(false);
   const [mobileOpen, setMobileOpen] = useState(false);

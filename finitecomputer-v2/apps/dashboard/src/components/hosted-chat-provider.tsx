@@ -57,6 +57,10 @@ type MutationSnapshotRequest = {
 
 export type HostedChatContextValue = {
   apiBase: string;
+  /** This transport can create a chat when submitting into an empty topic. */
+  canSendToTopic?: boolean;
+  supportsAttachments?: boolean;
+  supportsChatArchive?: boolean;
   state: HostedChatState | null;
   transportError: string | null;
   claimError: string | null;

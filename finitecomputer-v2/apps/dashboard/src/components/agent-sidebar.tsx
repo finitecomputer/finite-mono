@@ -62,6 +62,7 @@ export function AgentSidebar({
   const {
     state,
     transportError,
+    supportsChatArchive: transportSupportsArchive = true,
     bindingRecoveryRequired,
     load,
     recoverBinding,
@@ -73,7 +74,7 @@ export function AgentSidebar({
     () => false
   );
   // The hosted web runtime always supports the durable chat archive.
-  const supportsChatArchive = hydrated;
+  const supportsChatArchive = hydrated && transportSupportsArchive;
   const [busy, setBusy] = useState(false);
   const [actionError, setActionError] = useState<string | null>(null);
   const [createTopicOpen, setCreateTopicOpen] = useState(false);

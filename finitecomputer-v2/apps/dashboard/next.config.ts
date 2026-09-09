@@ -9,7 +9,9 @@ const tsconfigPath = process.env.NEXT_TSCONFIG_PATH?.trim();
 //   HERMES_GATEWAY_PROXY_TARGET=https://host
 //   NEXT_PUBLIC_HERMES_GATEWAY_WS_URL=ws://127.0.0.1:PORT/hermes-gateway/api/ws
 // (plus NEXT_PUBLIC_HERMES_GATEWAY_USERNAME/PASSWORD for gated mode).
-const gatewayProxyTarget = process.env.HERMES_GATEWAY_PROXY_TARGET?.trim();
+const gatewayProxyTarget = process.env.NODE_ENV === "development"
+  ? process.env.HERMES_GATEWAY_PROXY_TARGET?.trim()
+  : undefined;
 
 const nextConfig: NextConfig = {
   distDir: process.env.NEXT_DIST_DIR?.trim() || ".next",
