@@ -1,11 +1,16 @@
 "use client";
 
-import { useActionState } from "react";
+import { useActionState, useState } from "react";
 import { accountEmailChangeAction } from "@/app/dashboard/admin/email-change-actions";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 
 export function AdminEmailChangeForm() {
+  const [review, setReview] = useState(0);
+  return <EmailChangeReview key={review} onStartOver={() => setReview((value) => value + 1)} />;
+}
+
+function EmailChangeReview({ onStartOver }: { onStartOver: () => void }) {
   const [state, action, pending] = useActionState(accountEmailChangeAction, {});
   const request = state.request;
   const completed = state.preview?.status === "completed";
@@ -27,6 +32,8 @@ export function AdminEmailChangeForm() {
         {state.error && <p role="alert" className="text-sm text-destructive">{state.error}</p>}
         {state.message && <p role="status" className="text-sm">{state.message}</p>}
         {request && <div className="grid gap-3 rounded-lg border p-4 text-sm">
+          <Button type="button" variant="outline" disabled={pending} onClick={onStartOver}>Start over</Button>
+          <p className="text-muted-foreground">Starting over clears this form only. Save the operation ID below to resume any pending change.</p>
           <p><strong>{request.expectedEmail}</strong> → <strong>{request.newEmail}</strong></p>
           <dl className="grid gap-1 break-all">
             <div><dt className="inline font-medium">Account: </dt><dd className="inline">{request.userId}</dd></div>

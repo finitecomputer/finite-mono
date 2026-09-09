@@ -281,9 +281,14 @@ qualification or production deployment is claimed by this draft.
 
 Deployment includes both components: ship the Core binary with the additive
 receipt migration and new operator endpoints before the dashboard image that
-calls them. A dashboard-only rollout cannot exercise this flow. On lat1 Core
-is a Nix-built service; the dashboard is a digest-pinned container. Use the
-normal reviewed deployment paths and `scripts/finite-status` before/after.
+calls them. A dashboard-only rollout cannot exercise this flow. The live app
+plane is lat2; lat1 is retired. Core runs from the reviewed NixOS closure, and
+the dashboard is a digest-pinned container in that host configuration. Follow
+the app-plane closure step in [the platform rollout runbook](../../infra/runbooks/platform-rollout.md) and
+[the current infrastructure deployment path](../../infra/README.md): build the
+exact reviewed revision's lat2 closure in CI, then activate its artifact with
+`just deploy-lat2-closure ARTIFACT_DIR --activate`. Do not build on the production
+host. Run `scripts/finite-status` before and after the rollout.
 After deployment, use only the designated throwaway account and Agent for the
 first end-to-end trial. Findings become a follow-up PR and deployment; the trial
 is not a pre-deployment gate. Customer account mutations remain separately
