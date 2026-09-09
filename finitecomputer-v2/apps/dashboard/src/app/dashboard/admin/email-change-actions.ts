@@ -28,7 +28,6 @@ export async function accountEmailChangeAction(_previous: EmailChangeFormState, 
   let request: EmailChangeRequest | undefined;
   let target: EmailChangeTarget | undefined;
   try {
-    if (process.env.ADMIN_ACCOUNT_EMAIL_CHANGE_ENABLED !== "true") throw new Error("Account email changes are not enabled.");
     const viewer = await loadOptionalViewerContext();
     if (!viewer.isAdmin) throw new Error("Only administrators can change account emails.");
     const action = String(form.get("step") ?? "review");

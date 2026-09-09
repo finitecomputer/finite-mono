@@ -238,8 +238,8 @@ an email address.
 
 ## Admin dashboard flow (draft)
 
-`ADMIN_ACCOUNT_EMAIL_CHANGE_ENABLED=true` on the dashboard enables the form in
-Admin Ops → Users. It is disabled by default. Core independently authorizes
+The form is available to administrators in Admin Ops → Users after deployment.
+There is no feature flag. Core independently authorizes
 lookup, receipt reads, and every transition using the operator organization;
 the dashboard calls Core before accessing WorkOS. The dashboard uses its existing
 `WORKOS_API_KEY` server-side; no key or code is stored in a receipt or logged.
@@ -273,8 +273,18 @@ email readers remain qualification concerns.
 
 The candidate includes a shared chat requester-email read change and table-level
 serialization against enrollment writers. A throwaway account limits mutation
-scope, not the entire deployment impact. Before enabling customer use, perform
-the simple existing-agent rehearsal: retain chat history, a private Site, and an
+scope, not the entire deployment impact. Review and merge the PR, deploy Core
+and the dashboard, then perform the simple production throwaway-account rehearsal: retain chat history, a private Site, and an
 Agent Brain share; change Google login; talk to the Agent, re-share the Site,
 and have the Agent read the existing Brain share. No live existing-agent
 qualification or production deployment is claimed by this draft.
+
+Deployment includes both components: ship the Core binary with the additive
+receipt migration and new operator endpoints before the dashboard image that
+calls them. A dashboard-only rollout cannot exercise this flow. On lat1 Core
+is a Nix-built service; the dashboard is a digest-pinned container. Use the
+normal reviewed deployment paths and `scripts/finite-status` before/after.
+After deployment, use only the designated throwaway account and Agent for the
+first end-to-end trial. Findings become a follow-up PR and deployment; the trial
+is not a pre-deployment gate. Customer account mutations remain separately
+operator-selected and authorized.

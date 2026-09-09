@@ -67,7 +67,7 @@ export default async function AdminOpsPage() {
         </TabsList>
         <TabsContent value="users">
           <AdminUsersPanel result={runtimes} finitePrivate={finitePrivate} />
-          {process.env.ADMIN_ACCOUNT_EMAIL_CHANGE_ENABLED === "true" && <AdminEmailChangeForm />}
+          <AdminEmailChangeForm />
         </TabsContent>
         <TabsContent value="invites">
           <LaunchCodeBatchesPanel result={launchCodeBatches} />
