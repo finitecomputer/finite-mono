@@ -65,6 +65,53 @@ impl AccountEmailChangeRequest {
 }
 
 impl CoreStore {
+    /// Exact linked Core account lookup; never enrolls or infers a merge.
+    pub async fn account_email_target(&self, email: &str) -> CoreResult<serde_json::Value> {
+        let email = normalize_owner_email(Some(email)).ok_or_else(conflict)?;
+        let client = self.connection().await?;
+        let row = client.query_opt("SELECT id, workos_user_id, normalized_email FROM users WHERE normalized_email=$1 AND link_status='linked'", &[&email]).await.map_err(store_error)?.ok_or_else(conflict)?;
+        let id: String = row.get("id");
+        let projects = client
+            .query(
+                "SELECT id, display_name FROM projects WHERE owner_user_id=$1 ORDER BY id",
+                &[&id],
+            )
+            .await
+            .map_err(store_error)?;
+        let pending = client
+            .query_opt(
+                "SELECT id FROM account_email_changes WHERE user_id=$1 AND status='prepared'",
+                &[&id],
+            )
+            .await
+            .map_err(store_error)?;
+        Ok(serde_json::json!({
+            "userId": id, "workosUserId": row.get::<_, String>("workos_user_id"),
+            "email": row.get::<_, String>("normalized_email"),
+            "projects": projects.iter().map(|p| serde_json::json!({"id": p.get::<_, String>("id"), "name": p.get::<_, String>("display_name")})).collect::<Vec<_>>(),
+            "pendingOperationId": pending.map(|r| r.get::<_, String>("id")),
+        }))
+    }
+
+    /// Reload immutable intent from its durable receipt for recovery after a lost response.
+    pub async fn account_email_operation(&self, id: &str) -> CoreResult<AccountEmailChangePreview> {
+        let client = self.connection().await?;
+        let row = client
+            .query_opt("SELECT * FROM account_email_changes WHERE id=$1", &[&id])
+            .await
+            .map_err(store_error)?
+            .ok_or_else(conflict)?;
+        let request = AccountEmailChangeRequest {
+            operation_id: id.into(),
+            user_id: row.get("user_id"),
+            workos_user_id: row.get("workos_user_id"),
+            expected_email: row.get("old_email"),
+            new_email: row.get("new_email"),
+            evidence_reference: row.get("evidence_reference"),
+        };
+        drop(client);
+        self.preview_account_email_change(request).await
+    }
     /// SELECT-only repeatable-read inventory. No schema initialization or locks.
     pub async fn preview_account_email_change(
         &self,

@@ -1692,3 +1692,21 @@ function safeHttpUrl(value: string) {
     return false;
   }
 }
+
+export async function lookupCoreEmailChangeTarget(email: string) {
+  return coreAdminFetch<import("./account-email-change").EmailChangeTarget>(
+    "/api/core/v1/admin/account-email-target", { method: "POST", body: JSON.stringify({ email }) },
+  );
+}
+export async function loadCoreEmailChangeOperation(id: string) {
+  return coreAdminFetch<import("./account-email-change").EmailChangePreview>(
+    `/api/core/v1/admin/account-email-changes/${encodeURIComponent(id)}`,
+  );
+}
+export async function coreEmailChange(action: "preview" | "prepare" | "complete", request: import("./account-email-change").EmailChangeRequest) {
+  const result = await coreAdminFetch<import("./account-email-change").EmailChangePreview>(
+    `/api/core/v1/admin/account-email-changes/${action}`, { method: "POST", body: JSON.stringify(request) },
+  );
+  if (action === "complete") invalidateCoreReadCache();
+  return result;
+}

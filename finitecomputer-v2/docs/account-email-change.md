@@ -235,3 +235,46 @@ from inventing a new account, inspect the exact intent, and either complete it
 after resolving the conflict or restore the original provider email before
 reversing Core. Do not remove organizations or invoke Agent/data purge to free
 an email address.
+
+## Admin dashboard flow (draft)
+
+`ADMIN_ACCOUNT_EMAIL_CHANGE_ENABLED=true` on the dashboard enables the form in
+Admin Ops → Users. It is disabled by default. Core independently authorizes
+lookup, receipt reads, and every transition using the operator organization;
+the dashboard calls Core before accessing WorkOS. The dashboard uses its existing
+`WORKOS_API_KEY` server-side; no key or code is stored in a receipt or logged.
+
+The admin enters the exact current email, unused destination email, and support
+request reference, reviews the account IDs and agents, and sends the native
+WorkOS verification code. The user supplies the mailbox code to the operator,
+who confirms the change. This first version is operator-assisted, not a public
+self-service verification page. WorkOS enforces native-email-change eligibility.
+Occupied Core/WorkOS destinations are blocked; there is no account deletion or
+retirement action. Finite account identity, connected accounts, and site grants
+are preserved rather than automatically moved.
+
+The operation ID is displayed before sending. Core preparation precedes sending;
+if a response is lost, use Check status / resume with that ID. Pending operations
+are also discovered by looking up the original Core email. Resume reloads the
+immutable receipt and checks the current provider identity. If the provider
+already has the verified destination, it retries Core completion without sending
+or confirming another code. Completion means the Core update completed; it does
+not claim the customer has tested Google sign-in, chat, Sites, or Brain.
+
+WorkOS/Core writes are not one transaction. An operator must not independently
+cancel or alter a provider email while another operator is confirming the same
+operation. Provider errors leave a prepared receipt for investigation/retry;
+Core's existing cancel endpoint is operator-only and requires the original
+verified provider email. There is no automatic rollback of a provider change.
+Existing login sessions and Sites assertions are not revoked by this form: ask
+the user to sign out and sign in again; account for outstanding assertions and
+old-email access per the preflight above. Billing contact and legacy dashboard
+email readers remain qualification concerns.
+
+The candidate includes a shared chat requester-email read change and table-level
+serialization against enrollment writers. A throwaway account limits mutation
+scope, not the entire deployment impact. Before enabling customer use, perform
+the simple existing-agent rehearsal: retain chat history, a private Site, and an
+Agent Brain share; change Google login; talk to the Agent, re-share the Site,
+and have the Agent read the existing Brain share. No live existing-agent
+qualification or production deployment is claimed by this draft.

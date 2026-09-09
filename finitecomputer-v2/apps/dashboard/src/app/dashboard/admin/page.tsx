@@ -12,6 +12,7 @@ import {
   AdminLaunchCodeBatchIssueForm,
   ConfirmSubmitButton,
 } from "@/components/admin-ops-forms";
+import { AdminEmailChangeForm } from "@/components/admin-email-change-form";
 import { AdminUsersPanel } from "@/components/admin-users-panel";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import {
@@ -66,6 +67,7 @@ export default async function AdminOpsPage() {
         </TabsList>
         <TabsContent value="users">
           <AdminUsersPanel result={runtimes} finitePrivate={finitePrivate} />
+          {process.env.ADMIN_ACCOUNT_EMAIL_CHANGE_ENABLED === "true" && <AdminEmailChangeForm />}
         </TabsContent>
         <TabsContent value="invites">
           <LaunchCodeBatchesPanel result={launchCodeBatches} />

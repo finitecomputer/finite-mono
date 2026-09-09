@@ -826,8 +826,12 @@ fn router_with_runtime_upgrades_and_agent_creation_placement(
         )
         .route("/api/core/v1/admin/runtimes", get(admin_runtimes))
         .route(
+            "/api/core/v1/admin/account-email-target",
+            post(admin_account_email_target),
+        )
+        .route(
             "/api/core/v1/admin/account-email-changes/{action}",
-            post(admin_account_email_change),
+            post(admin_account_email_change).get(admin_account_email_operation),
         )
         .route(
             "/api/core/v1/admin/launch-code-batches",
@@ -1191,6 +1195,30 @@ async fn finite_private_admin_state(
 ) -> Result<Json<FinitePrivateAdminState>, ApiError> {
     require_admin_identity(&state, &headers).await?;
     Ok(Json(state.store.finite_private_admin_state().await?))
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct AccountEmailTargetLookup {
+    email: String,
+}
+
+async fn admin_account_email_target(
+    State(state): State<CoreApiState>,
+    headers: HeaderMap,
+    Json(input): Json<AccountEmailTargetLookup>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    require_admin_identity(&state, &headers).await?;
+    Ok(Json(state.store.account_email_target(&input.email).await?))
+}
+
+async fn admin_account_email_operation(
+    State(state): State<CoreApiState>,
+    Path(id): Path<String>,
+    headers: HeaderMap,
+) -> Result<Json<AccountEmailChangePreview>, ApiError> {
+    require_admin_identity(&state, &headers).await?;
+    Ok(Json(state.store.account_email_operation(&id).await?))
 }
 
 async fn admin_account_email_change(
@@ -5668,6 +5696,16 @@ mod tests {
                     assert!(matches!(status, StatusCode::UNAUTHORIZED | StatusCode::FORBIDDEN));
                 }
             }
+            for headers in [vec![], identity_headers("ordinary-email@example.test", "true")] {
+                let (status, _) = send_json(&app, "POST", "/api/core/v1/admin/account-email-target", &headers, Some(json!({"email": "route-before@example.test"}))).await;
+                assert!(matches!(status, StatusCode::UNAUTHORIZED | StatusCode::FORBIDDEN));
+                let (status, _) = send_json(&app, "GET", "/api/core/v1/admin/account-email-changes/route-email-fixture", &headers, None).await;
+                assert!(matches!(status, StatusCode::UNAUTHORIZED | StatusCode::FORBIDDEN));
+            }
+            let (status, target) = send_json(&app, "POST", "/api/core/v1/admin/account-email-target", &operator, Some(json!({"email": "route-before@example.test"}))).await;
+            assert_eq!(status, StatusCode::OK);
+            assert_eq!(target["userId"], user.id);
+            assert_eq!(target["workosUserId"], subject);
             let _ = access_token_with_subject(subject, "route-before@example.test", true, None);
             let (status, _) = send_json(&app, "POST", "/api/core/v1/admin/account-email-changes/prepare", &operator, Some(request.clone())).await;
             assert_eq!(status, StatusCode::OK);
@@ -5682,6 +5720,12 @@ mod tests {
             let (status, result) = send_json(&app, "POST", "/api/core/v1/admin/account-email-changes/complete", &operator, Some(request)).await;
             assert_eq!(status, StatusCode::OK, "{result}");
             assert_eq!(result["status"], "completed");
+            let (status, receipt) = send_json(&app, "GET", "/api/core/v1/admin/account-email-changes/route-email-fixture", &operator, None).await;
+            assert_eq!(status, StatusCode::OK);
+            assert_eq!(receipt["status"], "completed");
+            assert_eq!(receipt["request"]["userId"], user.id);
+            assert_eq!(receipt["request"]["newEmail"], "route-after@example.test");
+
             assert_eq!(db.row("users", &user.id).await.unwrap()["normalized_email"], "route-after@example.test");
         }).await;
     }
