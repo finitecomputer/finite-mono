@@ -112,15 +112,18 @@ Fly forwards the daemon's public listener, preserving Host. The daemon owns
 API/Git/site dispatch. NIP-98 signatures must use the configured public HTTPS
 URL, not the Machine's private listener URL.
 
-The checked-in config deliberately uses `--mailer dev` for operator-controlled,
-disposable test projects. Mail goes to the private data directory's outbox and
-is **not delivered**. Current Project Init requires a verified owner mailbox:
-the container smoke requests and redeems a synthetic mailbox proof from its own
-dev outbox using the existing Sites-key flow. This is not a self-service demo
-and is never an acceptable proof of a real user's mailbox ownership. Before
-demonstrating self-service publishing or inviting real viewers,
-switch the process flags to `--mailer resend --mail-from APPROVED_SENDER` and
-install `RESEND_API_KEY` through Fly secrets. Enable the optional dashboard
+The checked-in config uses `--mailer resend` with the existing approved sender
+`Finite Sites <links@finite.chat>`. `RESEND_API_KEY` must be installed through
+Fly secrets before deployment. The September 10 setup reuses the documented
+send-only credential from lat2's root-owned `/etc/finite-saas/sites.env` without
+modifying that production file. Never print or save the value during transfer;
+`fly secrets import --stage` accepts it through stdin.
+
+The earlier demo and the exact-image container smoke use `--mailer dev` with
+synthetic addresses. That outbox flow is never proof of a real person's mailbox.
+Current Project Init requires verified owner-mailbox authority; complete a real
+Sites-key or email-login flow before claiming self-service verification.
+Enable the optional dashboard
 viewer-session exchange only with the matching reviewed dashboard/daemon
 contract and the shared `FINITE_SITES_VIEWER_SESSION_TOKEN` secret. No secret
 values belong in this runbook, tickets, command logs or screenshots.
@@ -190,9 +193,9 @@ The CLI version string alone is not the artifact identity: the operator client
 reports `fsite 0.5.2` but implements v2. FIN-24 records the exact client image
 identity separately from the public v1 release and deployed AMD64 image.
 
-Real email delivery is still unconfigured. A synthetic dev-outbox proof is not
-proof of a human's mailbox, and sharing this private URL alone does not grant
-access. Do not enable account redirects until the reviewed #854 dashboard and
+Real email is configured separately from those synthetic checks; successful
+provider submission is not proof of inbox delivery or mailbox ownership. Sharing
+this private URL alone does not grant access. Do not enable account redirects until the reviewed #854 dashboard and
 daemon are deployed with a matching service credential and upstream. The
 production dashboard has one Sites upstream; do not repoint it at this empty
 demo registry while legacy Sites remain authoritative.
@@ -243,6 +246,14 @@ proof. Do not destroy a volume during a deployment or rollback.
 FIN-52 owns inventory/rehearsal, FIN-53 the account bridge, FIN-55 the actual
 cutover and old-link compatibility, and FIN-56 the CLI/runtime rollout.
 Nothing in this demo runbook authorizes those production mutations.
+
+The September 10 live inventory found 25 published apps and eight published
+documents, contrary to the original zero-app assumption. Alex's updated decision
+is to retain them on the legacy service while static sites move. Never open the
+authoritative legacy registry with the static-only daemon: its migrations remove
+unsupported kinds. Preserve legacy routes/auth and qualify the mixed legacy/v2
+dashboard preview path before changing the dashboard upstream. FIN-52/FIN-55
+own the explicit site mapping; no blanket wildcard redirect or legacy shutdown.
 
 Provider references:
 [Fly configuration](https://fly.io/docs/reference/configuration/),

@@ -12,7 +12,7 @@ kill_timeout = 30
   strategy = "rolling"
 
 [processes]
-  app = "serve --data /var/lib/finite-sites --listen 0.0.0.0:8787 --base-domain finite.site --api-url https://finite.site --git-url https://finite.site --site-scheme https --site-port none --mailer dev"
+  app = "serve --data /var/lib/finite-sites --listen 0.0.0.0:8787 --base-domain finite.site --api-url https://finite.site --git-url https://finite.site --site-scheme https --site-port none --mailer resend --mail-from 'Finite Sites <links@finite.chat>'"
 
 [mounts]
   source = "sites_data"
