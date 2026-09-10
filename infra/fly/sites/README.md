@@ -40,10 +40,13 @@ or verification records.
 | Type | Host | Value |
 | --- | --- | --- |
 | A | `@` | `66.241.124.192` |
-| AAAA | `@` | `2a09:8280:1::188:c706:0` |
 | A | `*` | `66.241.124.192` |
-| AAAA | `*` | `2a09:8280:1::188:c706:0` |
 | CNAME | `_acme-challenge` | `finite.site.md0y25m.flydns.net` |
+
+These are the agreed minimal IPv4-only records, verified on September 9.
+The allocated IPv6 address is not published in DNS. AAAA records are optional,
+not a prerequisite or an outstanding demo task. Both apex and wildcard
+certificates were verified Ready, and real-domain API/site requests pass TLS.
 
 Creating certificate requests does not establish that TLS is ready. Check both
 `finite.site` and `*.finite.site` in Fly after DNS changes propagate. Any explicit
@@ -164,6 +167,66 @@ the real Fly edge**. Restart the Machine and redeploy the pinned image; verify
 the same content, grants and viewer sessions survive. The image smoke is not
 a substitute for those checks. Mail and account-bridge checks remain pending
 until their credentials and matching reviewed components are deployed.
+
+### Verified Demo Boundary
+
+The September 9-10 controlled demo in FIN-24 uses
+`https://fly-proof-0909-7b6e.finite.site/`. It is private and contains only
+synthetic content. Its completed **Option B / Fly** checks are:
+
+- Isolated CLI registration, synthetic owner proof, config dry-run, Project
+  Init, scoped Git authentication, publishing and an update at the same URL.
+- Browser-rendered HTML/CSS and authenticated asset reads; anonymous,
+  unshared and revoked viewers are denied.
+- Public HTML/CSS/assets through the real edge preserve `Cache-Control:
+  no-store`; returning to private immediately denies anonymous reads.
+- Machine restart and redeployment of the same CI-pinned image preserve
+  Project/Site IDs, active Version, content, cookie secret, viewer grants and
+  existing viewer sessions. The original Git credential still reads source.
+- Exactly one Machine remains attached to the original volume. No customer
+  state, legacy routing, dashboard upstream or agent CLI pin changed.
+
+The CLI version string alone is not the artifact identity: the operator client
+reports `fsite 0.5.2` but implements v2. FIN-24 records the exact client image
+identity separately from the public v1 release and deployed AMD64 image.
+
+Real email delivery is still unconfigured. A synthetic dev-outbox proof is not
+proof of a human's mailbox, and sharing this private URL alone does not grant
+access. Do not enable account redirects until the reviewed #854 dashboard and
+daemon are deployed with a matching service credential and upstream. The
+production dashboard has one Sites upstream; do not repoint it at this empty
+demo registry while legacy Sites remain authoritative.
+
+`scripts/finite-status` returns UNKNOWN on a laptop without a host profile.
+Use the installed command on the authenticated app-plane host for fleet
+evidence; Fly's passing health check is evidence only for this demo service.
+Keep FIN-54 open until recurring off-host recovery and failure visibility are
+qualified, even when a one-time synthetic restore succeeds.
+
+### Recovery Proof And Limits
+
+On September 10, the entire demo data directory was archived with its writer
+stopped, transferred off Fly over SFTP into a private local directory, and
+restored onto an empty local Docker volume using the exact CI-built AMD64
+image. The restored copy retained Site/Project IDs, Version 2, HTML/assets,
+grants and cookie secret; an existing authorized session worked and anonymous
+access was denied. The original publisher cloned the backed-up Git commit,
+passed `git fsck`, and pushed a new commit that created Version 3 **only on the
+isolated restore**. The live demo remains private at Version 2. FIN-54 records
+the archive location and checksum; never commit or attach the archive, which
+contains the cookie secret and registry.
+
+This was a manual maintenance-window proof, not a scheduled backup mechanism,
+production-state migration, or fresh-Fly-volume restore. Production still
+needs recurring independent off-host backups, freshness/failure reporting,
+and a restore of the actual source state without an hourly serving outage.
+
+Maintenance revealed a `flyctl machine update` pitfall: omitted `init` fields
+can retain the previous entrypoint override. Restoring the serving command
+alone is insufficient after a maintenance entrypoint. Explicitly restore
+`/usr/local/bin/sites-entrypoint`, the serving arguments, and the original
+services/mount/image configuration, then verify health and authenticated reads.
+Do not treat CLI command completion alone as recovery evidence.
 
 ## Availability And Later Cutover
 
