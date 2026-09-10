@@ -46,6 +46,12 @@ toolchain-versions:
 test:
     cargo run --quiet --locked -p devfinity -- run -- cargo test --workspace --locked
 
+# Verifies native Depot CI cache ownership and the Devfinity Nix handoff.
+depot-ci-cache-contract:
+    python3 -m unittest \
+        scripts.tests.test_depot_ci_cache_contract \
+        scripts.tests.test_devfinity_nix_handoff
+
 # Stable root wrappers for module-owned recipes.
 brain-api-route-check:
     just brain brain-api-route-check
