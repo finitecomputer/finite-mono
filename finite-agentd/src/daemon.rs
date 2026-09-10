@@ -1,6 +1,6 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs::{self, File};
-use std::future::Future;
+use std::future::{Future, IntoFuture};
 use std::io::Write;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
@@ -169,6 +169,9 @@ fn inactive_specialization_status() -> SpecializationBundleStatusV1 {
 }
 
 pub async fn run_daemon(config: DaemonConfig) -> Result<(), AgentdError> {
+    if let Some(listener) = crate::control_http::ControlListenerConfig::from_env()? {
+        return run_daemon_with_control(config, listener).await;
+    }
     become_process_group_leader();
     fs::create_dir_all(config.state_dir())?;
     fs::set_permissions(config.state_dir(), fs::Permissions::from_mode(0o700))?;
@@ -225,6 +228,7 @@ pub async fn run_daemon(config: DaemonConfig) -> Result<(), AgentdError> {
             connection_manager,
             hermes_home: config.hermes_home,
             supervisor: supervisor.clone(),
+            operation: std::sync::Arc::new(tokio::sync::Semaphore::new(1)),
         },
         bridge: bridge.clone(),
         supervisor: supervisor.clone(),
@@ -364,6 +368,12 @@ impl CommandExecutor {
             return Ok(());
         }
 
+        let _permit = self
+            .control
+            .operation
+            .acquire()
+            .await
+            .map_err(|_| AgentdError::Supervisor("control stopped".into()))?;
         let authorized = self
             .ledger
             .principal_is_authorized(&delivery.sender.account_id)?;
@@ -755,6 +765,156 @@ fn now_ms() -> u64 {
         .duration_since(UNIX_EPOCH)
         .map(|duration| duration.as_millis().min(u64::MAX as u128) as u64)
         .unwrap_or(0)
+}
+
+/// Opt-in runtime topology: local control and Hermes do not await chat.
+/// The legacy startup path remains unchanged until the combined runtime release.
+async fn run_daemon_with_control(
+    config: DaemonConfig,
+    listener_config: crate::control_http::ControlListenerConfig,
+) -> Result<(), AgentdError> {
+    if std::env::var_os("FINITE_AGENT_BOOT_INTENT_JSON").is_some() {
+        return Err(AgentdError::Config(
+            "Direct control recovery boots are not qualified yet".into(),
+        ));
+    }
+    become_process_group_leader();
+    fs::create_dir_all(config.state_dir())?;
+    fs::set_permissions(config.state_dir(), fs::Permissions::from_mode(0o700))?;
+    clear_boot_scoped_health_evidence(&config);
+    let socket = tokio::net::TcpListener::bind(listener_config.listen).await?;
+    // This mode never invokes chat initialization or rewrites chat identity.
+    prepare_phase(&config, "--prepare-local").await?;
+    let ledger = Ledger::open(config.state_dir().join("agentd.sqlite3"))?;
+    for account in &config.authorized_accounts {
+        ledger.authorize_principal(account)?;
+    }
+    let manager = ConfigManager::new(config.hermes_home.join("config.yaml"), ledger.clone());
+    let mut hermes = hermes_spec(&config);
+    hermes.args.push("--run-only".into());
+    let supervisor = crate::supervisor::start_processes(
+        hermes,
+        [Some(health_spec(&config)), simplex_spec(&config)]
+            .into_iter()
+            .flatten()
+            .collect(),
+    );
+    let control = ConnectionControl {
+        connection_manager: ConnectionManager::new(
+            &config.agent_home,
+            &config.hermes_home,
+            manager.clone(),
+        ),
+        config_manager: manager,
+        hermes_home: config.hermes_home.clone(),
+        supervisor: supervisor.clone(),
+        operation: std::sync::Arc::new(tokio::sync::Semaphore::new(1)),
+    };
+    let router =
+        crate::control_http::control_router(listener_config, control.clone(), ledger.clone())?;
+    let chat = async {
+        if run_chat_adapter(&config, ledger, control.clone(), supervisor.clone())
+            .await
+            .is_err()
+        {
+            eprintln!("finite-agentd: chat adapter stopped; independent control remains available");
+        }
+        std::future::pending::<Result<(), AgentdError>>().await
+    };
+    tokio::pin!(chat);
+    let mut term = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())?;
+    let server = axum::serve(socket, router).into_future();
+    tokio::pin!(server);
+    let result = tokio::select! {
+        result = &mut server => result.map_err(AgentdError::from),
+        result = &mut chat => result,
+        result = tokio::signal::ctrl_c() => result.map_err(AgentdError::from),
+        _ = term.recv() => Ok(()),
+    };
+    supervisor.shutdown().await;
+    result
+}
+
+async fn prepare_phase(config: &DaemonConfig, phase: &str) -> Result<(), AgentdError> {
+    let mut command = tokio::process::Command::new(&config.prepare_command);
+    command
+        .arg(phase)
+        .env("FINITE_AGENTD_SUPERVISED", "1")
+        .stdin(std::process::Stdio::null())
+        .kill_on_drop(true);
+    let status = tokio::time::timeout(config.bridge_ready_timeout, command.status())
+        .await
+        .map_err(|_| AgentdError::Supervisor("Runtime preparation timed out".into()))??;
+    if !status.success() {
+        return Err(AgentdError::Supervisor("Runtime preparation failed".into()));
+    }
+    Ok(())
+}
+
+async fn run_chat_adapter(
+    config: &DaemonConfig,
+    ledger: Ledger,
+    control: ConnectionControl,
+    supervisor: SupervisorHandle,
+) -> Result<(), AgentdError> {
+    // Chat-only preparation never writes config.yaml. A broken/hanging chat
+    // service cannot hold the Connections mutation permit or block its listener.
+    let identity = loop {
+        match prepare_phase(config, "--prepare-chat")
+            .await
+            .and_then(|()| load_agent_identity(&config.agent_home))
+        {
+            Ok(identity) => break identity,
+            Err(_) => eprintln!(
+                "finite-agentd: chat preparation unavailable; independent control remains available"
+            ),
+        }
+        tokio::time::sleep(Duration::from_secs(5)).await;
+    };
+    let seed_config = config.clone();
+    if tokio::task::spawn_blocking(move || seed_chat_admission(&seed_config))
+        .await
+        .map_err(|error| AgentdError::Supervisor(error.to_string()))?
+        .is_err()
+    {
+        eprintln!("finite-agentd: chat admission seed unavailable; sidecar will enforce admission");
+    }
+    {
+        let _permit = control
+            .operation
+            .acquire()
+            .await
+            .map_err(|_| AgentdError::Supervisor("control stopped".into()))?;
+        // Register skills seeded during first chat initialization, preserving
+        // settings through the existing local config reconciler.
+        prepare_phase(config, "--prepare-local").await?;
+        supervisor.restart_hermes().await?;
+    }
+    supervisor.start_companion(sidecar_spec(config)).await;
+    spawn_status_writer(
+        config.status_path(),
+        identity.clone(),
+        ledger.clone(),
+        supervisor.clone(),
+    );
+    let bridge = BridgeClient::new(config.bridge_url.clone())?;
+    while wait_for_bridge(&bridge, config.bridge_ready_timeout)
+        .await
+        .is_err()
+    {
+        eprintln!("finite-agentd: chat bridge unavailable; independent control remains available");
+        tokio::time::sleep(Duration::from_secs(5)).await;
+    }
+    let (tx, rx) = mpsc::channel(64);
+    spawn_delivery_stream(bridge.clone(), tx);
+    let executor = CommandExecutor {
+        identity,
+        ledger,
+        control,
+        bridge,
+        supervisor,
+    };
+    run_delivery_loop(rx, |delivery| executor.handle_delivery(delivery)).await
 }
 
 #[cfg(test)]

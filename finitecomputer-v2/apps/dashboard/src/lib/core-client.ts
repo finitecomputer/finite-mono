@@ -1072,6 +1072,16 @@ export async function revokeCoreFinitePrivateApiKey(keyId: string) {
   return result;
 }
 
+/** Core rechecks current ownership and the runtime binding on every call. */
+export async function requestCoreAgentControl(machineId: string, command?: {
+  request_id: string; command: string; schema: string; body: unknown;
+}): Promise<unknown> {
+  const account = await getAccountAuthContext();
+  return coreFetch(`/api/core/v1/me/runtime-agent-control/${encodeURIComponent(machineId)}`, account, command
+    ? { method: "POST", body: JSON.stringify(command) }
+    : { method: "GET" });
+}
+
 // --- Admin Ops ---
 //
 // Core validates the signed-in administrator's WorkOS AuthKit access token and
