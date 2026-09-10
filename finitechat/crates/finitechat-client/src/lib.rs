@@ -1,3 +1,7 @@
+// The WASM spike excludes native I/O. Shared persistence codecs remain here
+// until the production module split; their native consumers still compile.
+#![cfg_attr(target_arch = "wasm32", allow(dead_code))]
+
 use finitechat_delivery::{
     HttpKeyPackageId, HttpKeyPackagePublication, HttpSyncPage, MAX_HTTP_SYNC_PAGE_ENTRIES,
 };
@@ -10,8 +14,10 @@ use finitechat_http::{
     ListAccountRoomDirectoryRequest, ListAccountRoomDirectoryResponse, NostrProfileRecord,
     PublishKeyPackageResponse, PutNostrProfileRequest, PutNostrProfileResponse,
     RevokeDeviceRequest, RevokeDeviceResponse, SaveAccountRoomRequest, SaveAccountRoomResponse,
-    SyncHintEvent, SyncStreamRequest, SyncWaitRequest, SyncWaitResponse,
+    SyncWaitRequest, SyncWaitResponse,
 };
+#[cfg(not(target_arch = "wasm32"))]
+use finitechat_http::{SyncHintEvent, SyncStreamRequest};
 use finitechat_mls::{
     ExpectedDeviceCredential, FiniteDeviceCredentialV1, MlsCredentialError, NOSTR_PUBLIC_KEY_BYTES,
     NOSTR_SECRET_KEY_BYTES, NostrPublicKey, NostrSecretKey,
@@ -53,6 +59,7 @@ use openmls::prelude::{
 };
 use openmls_basic_credential::SignatureKeyPair;
 use openmls_rust_crypto::OpenMlsRustCrypto;
+#[cfg(not(target_arch = "wasm32"))]
 use rusqlite::{
     Connection, OpenFlags, OptionalExtension, Transaction, TransactionBehavior, params,
 };
@@ -62,14 +69,22 @@ use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet};
 use std::error::Error as StdError;
 use std::fmt;
+#[cfg(not(target_arch = "wasm32"))]
 use std::fs;
+#[cfg(not(target_arch = "wasm32"))]
 use std::io::Read;
-use std::path::{Path, PathBuf};
+#[cfg(not(target_arch = "wasm32"))]
+use std::path::Path;
+use std::path::PathBuf;
+#[cfg(not(target_arch = "wasm32"))]
 use std::sync::{Arc, Condvar, Mutex, OnceLock, Weak};
+#[cfg(not(target_arch = "wasm32"))]
 use std::time::Duration;
 use thiserror::Error;
 
+#[cfg(not(target_arch = "wasm32"))]
 pub mod rejected_entry_diagnostic;
+#[cfg(not(target_arch = "wasm32"))]
 pub mod room_log_capture;
 
 pub const FINITECHAT_CIPHERSUITE: Ciphersuite =
@@ -3615,10 +3630,12 @@ impl std::fmt::Debug for ClientStoreEncryptionKey {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg(not(target_arch = "wasm32"))]
 pub struct SqliteClientStoreOptions {
     pub encryption_key: ClientStoreEncryptionKey,
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 impl SqliteClientStoreOptions {
     pub fn from_nostr_secret(
         account_secret_key: &NostrSecretKey,
@@ -3651,6 +3668,7 @@ impl LegacyClientStoreTable {
 }
 
 #[derive(Debug)]
+#[cfg(not(target_arch = "wasm32"))]
 pub struct SqliteClientStore {
     db_path: PathBuf,
     conn: Connection,
@@ -3677,6 +3695,7 @@ pub struct SqliteClientStore {
 /// in-process access). The lease file is never deleted: unlinking a locked
 /// path would let a fresh inode split the lock domain.
 #[derive(Debug)]
+#[cfg(not(target_arch = "wasm32"))]
 struct WriterLease {
     file: Option<fs::File>,
     key: PathBuf,
@@ -3685,13 +3704,16 @@ struct WriterLease {
 }
 
 #[derive(Debug)]
+#[cfg(not(target_arch = "wasm32"))]
 struct WriterLeaseRegistry {
     leases: Mutex<BTreeMap<PathBuf, Weak<WriterLease>>>,
     released: Condvar,
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 static WRITER_LEASES: OnceLock<WriterLeaseRegistry> = OnceLock::new();
 
+#[cfg(not(target_arch = "wasm32"))]
 fn writer_lease_registry() -> &'static WriterLeaseRegistry {
     WRITER_LEASES.get_or_init(|| WriterLeaseRegistry {
         leases: Mutex::new(BTreeMap::new()),
@@ -3699,6 +3721,7 @@ fn writer_lease_registry() -> &'static WriterLeaseRegistry {
     })
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 impl Drop for WriterLease {
     fn drop(&mut self) {
         #[cfg(test)]
@@ -3732,12 +3755,14 @@ impl Drop for WriterLease {
     }
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 fn writer_lease_path(db_path: &Path) -> PathBuf {
     let mut path = db_path.as_os_str().to_owned();
     path.push(".writer-lease");
     PathBuf::from(path)
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 fn acquire_writer_lease(db_path: &Path) -> Result<Arc<WriterLease>, ClientStoreError> {
     let lease_path = writer_lease_path(db_path);
     let file = fs::OpenOptions::new()
@@ -3791,6 +3816,7 @@ fn acquire_writer_lease(db_path: &Path) -> Result<Arc<WriterLease>, ClientStoreE
     Ok(lease)
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 impl SqliteClientStore {
     /// Open the store for reading and writing, acquiring the exclusive
     /// single-writer lease. Fails fast with
@@ -5202,6 +5228,7 @@ fn stored_app_event_from_applied(
     })
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 fn open_client_store_connection(db_path: &Path) -> Result<Connection, ClientStoreError> {
     let conn = Connection::open(db_path)?;
     conn.execute_batch(
@@ -5217,6 +5244,7 @@ fn open_client_store_connection(db_path: &Path) -> Result<Connection, ClientStor
 
 /// Read-only connections must not run `journal_mode` (it rewrites the
 /// database header) or schema migrations; a writer open owns both.
+#[cfg(not(target_arch = "wasm32"))]
 fn open_read_only_client_store_connection(db_path: &Path) -> Result<Connection, ClientStoreError> {
     let conn = Connection::open_with_flags(db_path, OpenFlags::SQLITE_OPEN_READ_ONLY)?;
     conn.execute_batch("PRAGMA busy_timeout = 5000;")?;
@@ -5282,6 +5310,7 @@ fn current_unix_seconds() -> u64 {
 }
 
 #[derive(Debug, Clone)]
+#[cfg(not(target_arch = "wasm32"))]
 pub struct ReqwestHttpRuntimeTransport {
     base_url: String,
     client: reqwest::blocking::Client,
@@ -5293,7 +5322,9 @@ pub struct ReqwestHttpRuntimeTransport {
 /// request and, for streaming responses, per body read (reqwest resets it on
 /// every successful read, so a heartbeat-driven SSE stream stays alive while
 /// a silent connection errors out).
+#[cfg(not(target_arch = "wasm32"))]
 pub const DEFAULT_HTTP_CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
+#[cfg(not(target_arch = "wasm32"))]
 pub const DEFAULT_HTTP_TIMEOUT: Duration = Duration::from_secs(60);
 
 /// The standard blocking HTTP client for runtime transports: every call is
@@ -5304,11 +5335,13 @@ pub const DEFAULT_HTTP_TIMEOUT: Duration = Duration::from_secs(60);
 /// hiccup, server pause) then wedges the whole sidecar with no error, no
 /// retry, and no restart. The bounded HTTP transport tests below pin this
 /// wedge class.
+#[cfg(not(target_arch = "wasm32"))]
 pub fn blocking_http_client() -> reqwest::blocking::Client {
     blocking_http_client_with_timeouts(DEFAULT_HTTP_CONNECT_TIMEOUT, DEFAULT_HTTP_TIMEOUT)
 }
 
 /// Testable core of [`blocking_http_client`].
+#[cfg(not(target_arch = "wasm32"))]
 pub fn blocking_http_client_with_timeouts(
     connect_timeout: Duration,
     timeout: Duration,
@@ -5331,6 +5364,7 @@ const SYNC_STREAM_DEFAULT_HEARTBEAT_MILLIS: u64 = 15_000;
 /// while a silent one errors and the caller reconnects. Deriving it from the
 /// heartbeat (instead of the client's flat total bound) keeps the server's
 /// maximum heartbeat interval (60s) from false-tripping a healthy stream.
+#[cfg(not(target_arch = "wasm32"))]
 fn sync_stream_read_timeout(request: &SyncStreamRequest) -> Duration {
     let heartbeat_ms = request
         .heartbeat_ms
@@ -5338,6 +5372,7 @@ fn sync_stream_read_timeout(request: &SyncStreamRequest) -> Duration {
     Duration::from_millis(heartbeat_ms.saturating_mul(3).saturating_add(5_000))
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 impl ReqwestHttpRuntimeTransport {
     pub fn new(base_url: impl Into<String>) -> Self {
         Self::with_client(base_url, blocking_http_client())
@@ -5428,6 +5463,7 @@ impl ReqwestHttpRuntimeTransport {
     }
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 impl HttpRuntimeTransport for ReqwestHttpRuntimeTransport {
     type Error = ReqwestHttpRuntimeTransportError;
 
@@ -5457,6 +5493,7 @@ impl HttpRuntimeTransport for ReqwestHttpRuntimeTransport {
 }
 
 #[derive(Debug)]
+#[cfg(not(target_arch = "wasm32"))]
 pub enum ReqwestHttpRuntimeTransportError {
     Request(reqwest::Error),
     Encode(serde_json::Error),
@@ -5467,6 +5504,7 @@ pub enum ReqwestHttpRuntimeTransportError {
     },
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 impl fmt::Display for ReqwestHttpRuntimeTransportError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
@@ -5490,6 +5528,7 @@ impl fmt::Display for ReqwestHttpRuntimeTransportError {
     }
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 impl StdError for ReqwestHttpRuntimeTransportError {
     fn source(&self) -> Option<&(dyn StdError + 'static)> {
         match self {
@@ -5515,11 +5554,13 @@ fn error_message_with_sources(error: &(dyn StdError + 'static)) -> String {
     message
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 pub struct ReqwestSyncHintStream {
     response: reqwest::blocking::Response,
     buffer: String,
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 impl ReqwestSyncHintStream {
     pub fn next_hint(&mut self) -> Result<SyncHintEvent, ReqwestSyncHintStreamError> {
         loop {
@@ -5712,6 +5753,7 @@ impl<T: HttpRuntimeTransport> HttpRuntimeDelivery<T> {
     }
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 impl HttpRuntimeDelivery<ReqwestHttpRuntimeTransport> {
     pub fn sync_stream(
         &mut self,
@@ -6080,6 +6122,7 @@ fn http_group_id_for_room(room_id: &str) -> HttpGroupId {
     HttpGroupId::new(room_id.as_bytes().to_vec())
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 pub fn run_runtime_sync_tick<D: RuntimeDelivery>(
     store: &mut SqliteClientStore,
     device: &mut FiniteChatDevice,
@@ -6113,6 +6156,7 @@ pub fn run_runtime_sync_tick<D: RuntimeDelivery>(
 /// advancing a room. Callers which need room-level failure isolation can run
 /// this once and then use [`run_room_sync_tick`] with a fresh persisted Device
 /// candidate for each room.
+#[cfg(not(target_arch = "wasm32"))]
 pub fn run_runtime_sync_setup_tick<D: RuntimeDelivery>(
     store: &mut SqliteClientStore,
     device: &mut FiniteChatDevice,
@@ -6172,6 +6216,7 @@ pub fn run_runtime_sync_setup_tick<D: RuntimeDelivery>(
 /// Sync the rooms hosted on one specific room server (ADR 0005). The
 /// caller provides a delivery bound to that server's address; welcomes are
 /// claimed there too, because a room Welcome lives on the room's server.
+#[cfg(not(target_arch = "wasm32"))]
 pub fn run_room_server_sync_tick<D: RuntimeDelivery>(
     store: &mut SqliteClientStore,
     device: &mut FiniteChatDevice,
@@ -6201,6 +6246,7 @@ pub fn run_room_server_sync_tick<D: RuntimeDelivery>(
 
 /// Claim and activate Welcomes from one room server without advancing any
 /// existing room on it.
+#[cfg(not(target_arch = "wasm32"))]
 pub fn run_room_server_sync_setup_tick<D: RuntimeDelivery>(
     store: &mut SqliteClientStore,
     device: &mut FiniteChatDevice,
@@ -6243,6 +6289,7 @@ pub fn run_room_server_sync_setup_tick<D: RuntimeDelivery>(
 /// The one exception is [`ClientError::DeviceStateBehindServer`]: the rewind
 /// evidence (and the entries applied before it) is persisted before the
 /// error surfaces, so the flag survives the caller's reload.
+#[cfg(not(target_arch = "wasm32"))]
 pub fn run_room_sync_tick<D: RuntimeDelivery>(
     store: &mut SqliteClientStore,
     device: &mut FiniteChatDevice,
@@ -6267,6 +6314,7 @@ pub fn run_room_sync_tick<D: RuntimeDelivery>(
 
 /// Outcome of one accepted rekey Commit (see [`run_runtime_rekey_room`]).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg(not(target_arch = "wasm32"))]
 pub struct RuntimeRekeyRoomReport {
     pub room_id: RoomId,
     pub previous_epoch: u64,
@@ -6294,6 +6342,7 @@ pub struct RuntimeRekeyRoomReport {
 
 /// One backlog entry the rekey's pre-commit replay skipped on evidence.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg(not(target_arch = "wasm32"))]
 pub struct RuntimeRekeySkippedEntry {
     pub seq: u64,
     pub sender_account_id: String,
@@ -6338,6 +6387,7 @@ fn page_rekey_backlog<D: RuntimeDelivery>(
 
 /// Outcome of the pre-commit backlog replay.
 #[derive(Default)]
+#[cfg(not(target_arch = "wasm32"))]
 struct RekeyBacklogReplay {
     applied: u64,
     skipped: Vec<RuntimeRekeySkippedEntry>,
@@ -6354,6 +6404,7 @@ struct RekeyBacklogReplay {
 /// own-device entry that errors) refuses the rekey with a typed error and
 /// no durable change. The single save happens only when the whole backlog
 /// replayed or skipped.
+#[cfg(not(target_arch = "wasm32"))]
 fn replay_rekey_backlog<E>(
     store: &mut SqliteClientStore,
     device: &mut FiniteChatDevice,
@@ -6495,6 +6546,7 @@ fn server_room_epoch<D: RuntimeDelivery>(
 /// saved before submit (so a crash after acceptance is merged by the next
 /// sync), a server rejection restores the pre-rekey state, and acceptance
 /// is merged from the ordered log before the final save.
+#[cfg(not(target_arch = "wasm32"))]
 pub fn run_runtime_rekey_room<D: RuntimeDelivery>(
     store: &mut SqliteClientStore,
     device: &mut FiniteChatDevice,
@@ -6601,6 +6653,7 @@ pub fn run_runtime_rekey_room<D: RuntimeDelivery>(
 /// a commit naming any `sender`, so this gate is a policy control that
 /// becomes a security control only after the server-side flag flip. The
 /// Welcome payload itself stays opaque to us until activation.
+#[cfg(not(target_arch = "wasm32"))]
 fn welcome_admission_allows(
     store: &SqliteClientStore,
     owner: &DeviceRef,
@@ -6621,6 +6674,7 @@ fn welcome_admission_allows(
     store.welcome_sender_allowed(owner, &welcome.sender.account_id)
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 fn activate_pending_welcomes(
     store: &mut SqliteClientStore,
     device: &mut FiniteChatDevice,
@@ -6649,6 +6703,7 @@ fn pending_welcome_activation_failure_is_permanent(error: &ClientStoreError) -> 
     )
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 pub fn run_link_fanout_tick<D: RuntimeDelivery>(
     store: &mut SqliteClientStore,
     device: &mut FiniteChatDevice,
@@ -6702,6 +6757,7 @@ pub fn run_link_fanout_tick<D: RuntimeDelivery>(
     Ok(report)
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 fn run_link_fanout_discovery<D: RuntimeDelivery>(
     store: &mut SqliteClientStore,
     device: &mut FiniteChatDevice,
@@ -6795,6 +6851,7 @@ fn link_fanout_rooms_to_advance(
     Ok(LinkFanoutRoomsToAdvance { prepared, pending })
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 fn complete_link_fanout_room_from_sync<D: RuntimeDelivery>(
     store: &mut SqliteClientStore,
     device: &mut FiniteChatDevice,
@@ -6917,6 +6974,7 @@ fn complete_link_fanout_room_from_sync<D: RuntimeDelivery>(
     Ok(())
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 fn sync_room_pages<D: RuntimeDelivery>(
     store: &mut SqliteClientStore,
     device: &mut FiniteChatDevice,
@@ -7078,6 +7136,7 @@ pub enum ClientStoreError {
     #[error(transparent)]
     Client(#[from] ClientError),
     #[error(transparent)]
+    #[cfg(not(target_arch = "wasm32"))]
     Sqlite(#[from] rusqlite::Error),
     #[error("failed to create sqlite client store directory {path}: {source}")]
     CreateDir {
@@ -7448,6 +7507,7 @@ pub enum ClientError {
     #[error(
         "rekey refused for {room_id}: seq {seq} ({kind:?}) failed to replay with {error_class:?}; sync or repair the room first"
     )]
+    #[cfg(not(target_arch = "wasm32"))]
     RekeyBacklogNotReplayable {
         room_id: RoomId,
         seq: u64,
@@ -7891,6 +7951,7 @@ fn hex_lower(bytes: &[u8]) -> String {
     out
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 fn prepare_client_store_schema(conn: &Connection) -> Result<(), ClientStoreError> {
     reject_legacy_client_store_tables(conn)?;
     drop_retired_client_store_tables(conn)?;
@@ -7903,11 +7964,13 @@ fn prepare_client_store_schema(conn: &Connection) -> Result<(), ClientStoreError
 /// a writer open discards their rows for good: `client_app_outbox` held queued
 /// own sends, and a send now either gets server acceptance synchronously or
 /// fails to the caller with no durable trace.
+#[cfg(not(target_arch = "wasm32"))]
 fn drop_retired_client_store_tables(conn: &Connection) -> Result<(), ClientStoreError> {
     conn.execute_batch("DROP TABLE IF EXISTS client_app_outbox;")?;
     Ok(())
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 fn create_current_client_store_schema(conn: &Connection) -> Result<(), ClientStoreError> {
     conn.execute_batch(
         r#"
@@ -8106,6 +8169,7 @@ fn create_current_client_store_schema(conn: &Connection) -> Result<(), ClientSto
     Ok(())
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 fn reject_legacy_app_projection_schema(conn: &Connection) -> Result<(), ClientStoreError> {
     reject_legacy_app_projection_table(
         conn,
@@ -8162,6 +8226,7 @@ fn reject_legacy_app_projection_schema(conn: &Connection) -> Result<(), ClientSt
     )
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 fn reject_legacy_app_projection_table(
     conn: &Connection,
     table: &str,
@@ -8202,6 +8267,7 @@ fn reject_legacy_app_projection_table(
     Ok(())
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 fn sqlite_table_column_default(
     conn: &Connection,
     table: &str,
@@ -8221,6 +8287,7 @@ fn sqlite_table_column_default(
     Ok(None)
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 fn sqlite_table_columns(conn: &Connection, table: &str) -> Result<Vec<String>, ClientStoreError> {
     if !sqlite_table_exists(conn, table)? {
         return Ok(Vec::new());
@@ -8235,6 +8302,7 @@ fn sqlite_table_columns(conn: &Connection, table: &str) -> Result<Vec<String>, C
 }
 
 #[cfg(test)]
+#[cfg(not(target_arch = "wasm32"))]
 fn sqlite_table_has_column(
     conn: &Connection,
     table: &str,
@@ -8253,6 +8321,7 @@ fn sqlite_table_has_column(
     Ok(false)
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 fn sqlite_table_exists(conn: &Connection, table: &str) -> Result<bool, ClientStoreError> {
     let exists = conn.query_row(
         "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?1)",
@@ -8262,6 +8331,7 @@ fn sqlite_table_exists(conn: &Connection, table: &str) -> Result<bool, ClientSto
     Ok(exists)
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 fn reject_legacy_client_store_tables(conn: &Connection) -> Result<(), ClientStoreError> {
     let tables = [
         LegacyClientStoreTable::OpenMlsStorage,
@@ -8276,6 +8346,7 @@ fn reject_legacy_client_store_tables(conn: &Connection) -> Result<(), ClientStor
     Ok(())
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 fn legacy_table_exists(
     conn: &Connection,
     table: LegacyClientStoreTable,
@@ -8288,6 +8359,7 @@ fn legacy_table_exists(
     Ok(exists)
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 fn save_device_state_tx(
     tx: &Transaction<'_>,
     state: &FiniteChatDeviceState,
@@ -8296,6 +8368,7 @@ fn save_device_state_tx(
     save_device_state_tx_with_version(tx, state, encryption_key, CLIENT_STATE_SNAPSHOT_VERSION)
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 fn save_device_state_tx_with_version(
     tx: &Transaction<'_>,
     state: &FiniteChatDeviceState,
@@ -8653,6 +8726,7 @@ struct StoredDeviceLinkBootstrapTransferRow {
     manifest: StoredDeviceLinkBootstrapManifestV2,
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 fn load_device_link_bootstrap_transfer_row(
     conn: &Connection,
     encryption_key: &ClientStoreEncryptionKey,
@@ -8738,6 +8812,7 @@ fn validate_device_link_bootstrap_state(state: i64) -> Result<(), ClientStoreErr
     }
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 fn poison_device_link_bootstrap_identity_tx(
     tx: &Transaction<'_>,
     identity: DeviceLinkBootstrapIdentity<'_>,
@@ -8771,6 +8846,7 @@ fn poison_device_link_bootstrap_identity_tx(
     Ok(())
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 fn poison_device_link_bootstrap_tx(
     tx: &Transaction<'_>,
     owner: &DeviceRef,
@@ -8808,6 +8884,7 @@ fn poison_device_link_bootstrap_tx(
     Ok(())
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 fn stage_device_link_bootstrap_chunk_tx(
     tx: &Transaction<'_>,
     encryption_key: &ClientStoreEncryptionKey,
@@ -9072,6 +9149,7 @@ fn stage_device_link_bootstrap_chunk_tx(
     }
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 fn load_pending_device_link_bootstrap(
     conn: &Connection,
     encryption_key: &ClientStoreEncryptionKey,
@@ -9159,6 +9237,7 @@ fn load_pending_device_link_bootstrap(
     }))
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 fn load_pending_device_link_bootstraps(
     conn: &Connection,
     encryption_key: &ClientStoreEncryptionKey,
@@ -9274,6 +9353,7 @@ fn validated_device_link_bootstrap_events(
     Some(imported)
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 fn commit_device_link_bootstrap_tx(
     tx: &Transaction<'_>,
     encryption_key: &ClientStoreEncryptionKey,
@@ -9402,6 +9482,7 @@ fn commit_device_link_bootstrap_tx(
     Ok(DeviceLinkBootstrapCommitOutcome::Committed(stored_receipt))
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 fn load_completed_device_link_bootstrap_receipts(
     conn: &Connection,
     encryption_key: &ClientStoreEncryptionKey,
@@ -9454,6 +9535,7 @@ fn load_completed_device_link_bootstrap_receipts(
     Ok(receipts)
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 fn load_completed_device_link_bootstrap_receipt(
     conn: &Connection,
     encryption_key: &ClientStoreEncryptionKey,
@@ -9480,6 +9562,7 @@ fn load_completed_device_link_bootstrap_receipt(
     Ok(Some(row.manifest.receipt()?))
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 fn save_app_messages_tx(
     tx: &Transaction<'_>,
     encryption_key: &ClientStoreEncryptionKey,
@@ -9529,6 +9612,7 @@ fn save_app_messages_tx(
     Ok(())
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 fn save_app_events_tx(
     tx: &Transaction<'_>,
     encryption_key: &ClientStoreEncryptionKey,
@@ -9578,6 +9662,7 @@ fn save_app_events_tx(
     Ok(())
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 fn import_app_events_tx(
     tx: &Transaction<'_>,
     encryption_key: &ClientStoreEncryptionKey,
@@ -9588,6 +9673,7 @@ fn import_app_events_tx(
     save_app_events_tx(tx, encryption_key, owner, events)
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 fn validate_app_event_import_tx(
     tx: &Transaction<'_>,
     encryption_key: &ClientStoreEncryptionKey,
@@ -9685,6 +9771,7 @@ fn validate_app_event_import_tx(
     Ok(())
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 fn save_app_rooms_tx(
     tx: &Transaction<'_>,
     encryption_key: &ClientStoreEncryptionKey,
@@ -9720,6 +9807,7 @@ fn save_app_rooms_tx(
     Ok(())
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 fn save_app_state_tx(
     tx: &Transaction<'_>,
     encryption_key: &ClientStoreEncryptionKey,
@@ -9751,6 +9839,7 @@ fn save_app_state_tx(
     Ok(())
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 fn save_app_profiles_tx(
     tx: &Transaction<'_>,
     encryption_key: &ClientStoreEncryptionKey,
@@ -9788,6 +9877,7 @@ fn save_app_profiles_tx(
     Ok(())
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 fn prune_app_messages_tx(
     tx: &Transaction<'_>,
     owner: &DeviceRef,
@@ -9826,6 +9916,7 @@ fn prune_app_messages_tx(
     Ok(())
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 fn prune_app_events_tx(
     tx: &Transaction<'_>,
     owner: &DeviceRef,
@@ -9863,6 +9954,7 @@ fn prune_app_events_tx(
     Ok(())
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 fn prune_app_profiles_tx(
     tx: &Transaction<'_>,
     owner: &DeviceRef,
@@ -9900,6 +9992,7 @@ fn prune_app_profiles_tx(
     Ok(())
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 fn load_device_state(
     conn: &Connection,
     encryption_key: &ClientStoreEncryptionKey,

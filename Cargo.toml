@@ -27,6 +27,7 @@ members = [
     "finitechat/crates/finitechat-proto",
     "finitechat/crates/finitechat-server",
     "finitechat/crates/finitechat-transport",
+    "finitechat/crates/finitechat-wasm",
     "finite-sites/crates/finitesites-blob",
     "finite-sites/crates/finitesites-engine",
     "finite-sites/crates/finitesites-proto",

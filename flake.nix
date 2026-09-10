@@ -322,6 +322,17 @@
           packages = (hermesPackagesFor system) // finitePackages;
 
           devShells = {
+            chat-wasm = pkgs.mkShell {
+              CC_wasm32_unknown_unknown = "${pkgs.llvmPackages.clang-unwrapped}/bin/clang";
+              AR_wasm32_unknown_unknown = "${pkgs.llvmPackages.llvm}/bin/llvm-ar";
+              packages = rustBasePackages ++ [
+                (rustToolchain.override { targets = [ "wasm32-unknown-unknown" ]; })
+                pkgs.llvmPackages.clang
+                pkgs.nodejs_24
+                pkgs.pnpm
+                (import nixpkgs-lat3 { inherit system; }).wasm-bindgen-cli
+              ];
+            };
             default = pkgs.mkShell {
               packages =
                 rustBasePackages

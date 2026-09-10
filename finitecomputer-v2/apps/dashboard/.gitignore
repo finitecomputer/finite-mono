@@ -44,3 +44,6 @@ yarn-error.log*
 # typescript
 *.tsbuildinfo
 next-env.d.ts
+
+# Locally generated FiniteChat WASM spike bundle
+/public/wasm-spike/

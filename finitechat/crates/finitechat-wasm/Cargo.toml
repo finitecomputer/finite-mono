@@ -1,0 +1,38 @@
+[package]
+name = "finitechat-wasm"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+finitechat-client = { path = "../finitechat-client" }
+finitechat-mls = { path = "../finitechat-mls" }
+finitechat-proto = { path = "../finitechat-proto" }
+finitechat-hermes = { path = "../finitechat-hermes" }
+serde.workspace = true
+serde_json.workspace = true
+
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+finite-nostr.workspace = true
+finitechat-http = { path = "../finitechat-http" }
+finitechat-delivery.workspace = true
+finitechat-transport.workspace = true
+nostr.workspace = true
+reqwest.workspace = true
+js-sys = "0.3"
+wasm-bindgen = "=0.2.121"
+wasm-bindgen-futures = "0.4"
+
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+anyhow.workspace = true
+axum.workspace = true
+finitechat-server = { path = "../finitechat-server" }
+hex.workspace = true
+nostr.workspace = true
+tokio.workspace = true
+tower-http = { version = "0.6", features = ["cors"] }
