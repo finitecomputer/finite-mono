@@ -1,0 +1,89 @@
+{
+  "version": 1,
+  "organization": {
+    "name": "NED",
+    "commercialRoles": ["PARTNER"],
+    "relationshipSummary": "Partner that purchased one Agent Camp; follow-on work remains open.",
+    "relationshipSummaryRefreshedAt": "2026-08-25T12:00:00.000Z",
+    "sourceReference": "test://synthetic/ned"
+  },
+  "account": {
+    "name": "NED account",
+    "status": "ACTIVE",
+    "cashHistoryReconciled": true,
+    "sourceReference": "test://synthetic/ned"
+  },
+  "contacts": [
+    {
+      "firstName": "Test",
+      "lastName": "Contact",
+      "email": "ned-contact@example.invalid",
+      "jobTitle": "Synthetic fixture contact"
+    }
+  ],
+  "opportunities": [
+    {
+      "name": "NED Agent Camp",
+      "stage": "WON",
+      "sourceReference": "test://synthetic/ned/agent-camp"
+    },
+    {
+      "name": "NED follow-on work",
+      "stage": "EXPLORING",
+      "sourceReference": "test://synthetic/ned/follow-on"
+    }
+  ],
+  "arrangements": [
+    {
+      "name": "NED Agent Camp arrangement",
+      "status": "COMPLETED",
+      "wonOpportunity": "NED Agent Camp",
+      "sourceReference": "test://synthetic/ned/agent-camp",
+      "packages": [
+        {
+          "name": "NED Agent Camp package",
+          "status": "COMPLETED",
+          "priceBasis": "ONE_TIME",
+          "price": {
+            "amount": 100,
+            "currencyCode": "USD"
+          },
+          "billingCadence": "NONE",
+          "sourceReference": "test://synthetic/ned/agent-camp",
+          "offeringLines": [
+            {
+              "name": "Agent Camp",
+              "status": "COMPLETED",
+              "fulfillmentPath": "IN_PERSON",
+              "quantity": 1
+            }
+          ],
+          "charges": [
+            {
+              "name": "NED Agent Camp charge",
+              "amount": {
+                "amount": 100,
+                "currencyCode": "USD"
+              },
+              "status": "PAID",
+              "chargedOn": "2026-01-15",
+              "sourceReference": "test://synthetic/ned/agent-camp/charge",
+              "payments": [
+                {
+                  "name": "NED Agent Camp payment",
+                  "nativeAmount": 100,
+                  "assetCode": "USD",
+                  "reportingValueUsd": 100,
+                  "receivedAt": "2026-01-20T12:00:00.000Z",
+                  "status": "RECEIVED",
+                  "method": "BANK",
+                  "sourceReference": "test://synthetic/ned/agent-camp/payment"
+                }
+              ]
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}

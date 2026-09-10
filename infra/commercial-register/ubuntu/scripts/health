@@ -1,0 +1,39 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+config_root=/etc/finite/commercial-register
+state_root=/var/lib/finite-commercial-register
+latest="${state_root}/snapshots/latest"
+
+curl --fail --silent --show-error --max-time 20 \
+  http://127.0.0.1:3020/healthz >/dev/null
+
+/usr/bin/docker compose \
+  --env-file "${config_root}/twenty.env" \
+  --file "${config_root}/compose.yaml" ps --status running --quiet \
+  | awk 'END { exit NR == 4 ? 0 : 1 }'
+
+test -L "${latest}"
+snapshot="$(readlink -e -- "${latest}")"
+case "${snapshot}" in
+  "${state_root}/snapshots/"*) ;;
+  *) echo "latest commercial-register snapshot escapes its root" >&2; exit 1 ;;
+esac
+test "$(cat "${snapshot}/format")" = finite.commercial-register-recovery.v1
+(
+  cd "${snapshot}"
+  sha256sum --check manifest.sha256 >/dev/null
+)
+
+snapshot_age=$(( $(date -u +%s) - $(stat -c %Y "${snapshot}") ))
+if [[ "${snapshot_age}" -gt 93600 ]]; then
+  echo "commercial-register snapshot is stale (${snapshot_age}s)" >&2
+  exit 1
+fi
+
+borg_success="$(cat "${state_root}/borg-last-success")"
+borg_age=$(( $(date -u +%s) - borg_success ))
+if [[ "${borg_age}" -gt 93600 ]]; then
+  echo "commercial-register off-host backup is stale (${borg_age}s)" >&2
+  exit 1
+fi

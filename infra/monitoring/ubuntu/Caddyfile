@@ -8,6 +8,11 @@ monitoring.finite.computer {
 	reverse_proxy 127.0.0.1:3000
 }
 
+business.finite.computer {
+	encode zstd gzip
+	reverse_proxy 127.0.0.1:3020
+}
+
 metrics-ingest.finite.computer {
 	@remote_write {
 		method POST

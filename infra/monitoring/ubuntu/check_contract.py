@@ -103,11 +103,13 @@ def check_versions() -> None:
 def check_caddy() -> None:
     caddy = read(UBUNTU / "Caddyfile")
     require_contains(caddy, "monitoring.finite.computer", "Caddyfile")
+    require_contains(caddy, "business.finite.computer", "Caddyfile")
     require_contains(caddy, "metrics-ingest.finite.computer", "Caddyfile")
     require_contains(
         caddy, "admin unix//run/finite-monitoring-caddy/admin.sock", "Caddyfile"
     )
     require_contains(caddy, "reverse_proxy 127.0.0.1:3000", "Grafana route")
+    require_contains(caddy, "reverse_proxy 127.0.0.1:3020", "commercial register route")
     require_contains(caddy, "path /api/v1/write", "Prometheus remote-write route")
     require_contains(caddy, "path /loki/api/v1/push", "Loki push route")
     require_contains(caddy, "{$METRICS_USERNAME}", "Prometheus remote-write auth")
@@ -133,6 +135,7 @@ def check_prometheus() -> None:
         "finite.computer",
         "chat.finite.computer",
         "brain.finite.computer",
+        "business.finite.computer",
         "finitechat-native-mockup.finite.chat",
         "uptime-probe.docs.finite.chat",
         "finite-tinfoil-collector",

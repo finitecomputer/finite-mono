@@ -1,0 +1,18 @@
+{
+  "version": 1,
+  "organization": {
+    "name": "Invalid Example"
+  },
+  "opportunities": [
+    {
+      "name": "Malformed opportunity",
+      "stage": "EXPLORING",
+      "amount": {
+        "amount": "100",
+        "currencyCode": "USD"
+      },
+      "brainWants": "brain://organizations/invalid-example/wants",
+      "sourceReference": "test://invalid-opportunity"
+    }
+  ]
+}

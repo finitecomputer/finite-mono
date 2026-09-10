@@ -10,6 +10,7 @@ The active receiver config is `infra/monitoring/ubuntu/`. It runs:
 - Loki log ingestion at `metrics-ingest.finite.computer/loki/api/v1/push`
 - Blackbox HTTP probes for the narrow public uptime dashboard
 - Caddy as the only public edge
+- The private Finite Business application at `business.finite.computer`
 
 The Agent Runtime slots dashboard has a separate
 [dashboard-only deployment and rollback](runtime-slots.md). It uses existing
@@ -31,6 +32,11 @@ Roll out the lat1 closure that serves `/readyz` before deploying the monitoring
 receiver change. A rollback to a pre-`/readyz` server closure must also roll the
 receiver target back to `/health`; otherwise Chat can be serving while the
 newer probe correctly reports that its expected semantic endpoint is absent.
+
+Twenty is independently deployed under `infra/commercial-register/`; it binds
+only to `127.0.0.1:3020` and shares this Caddy edge. Its PostgreSQL, file
+storage, encryption keys, backup, and restore boundary are not monitoring
+state. See `infra/runbooks/deploy-commercial-register.md`.
 
 The monitoring host stores operational credentials only as operator-provisioned
 host files:

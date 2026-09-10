@@ -239,6 +239,7 @@ def nix_eval() -> dict[str, Any]:
           runtimeDirectory = cfg.systemd.services.caddy.serviceConfig.RuntimeDirectory;
           runtimeDirectoryMode = cfg.systemd.services.caddy.serviceConfig.RuntimeDirectoryMode;
           grafanaVhost = cfg.services.caddy.virtualHosts."monitoring.finite.computer".extraConfig;
+          businessVhost = cfg.services.caddy.virtualHosts."business.finite.computer".extraConfig;
           ingestVhost = cfg.services.caddy.virtualHosts."metrics-ingest.finite.computer".extraConfig;
         };
         latAlloy = {
@@ -739,6 +740,7 @@ def main() -> int:
             "finite.computer",
             "chat.finite.computer",
             "brain.finite.computer",
+            "business.finite.computer",
             "finitechat-native-mockup.finite.chat",
             "uptime-probe.docs.finite.chat",
             "v2.finite.chat",
@@ -786,6 +788,11 @@ def main() -> int:
     )
     require_contains(
         caddy["grafanaVhost"], "reverse_proxy 127.0.0.1:3000", "Grafana vhost"
+    )
+    require_contains(
+        caddy["businessVhost"],
+        "reverse_proxy 127.0.0.1:3020",
+        "Finite Business vhost",
     )
     require_contains(caddy["ingestVhost"], "path /api/v1/write", "ingest vhost")
     require_contains(caddy["ingestVhost"], "path /loki/api/v1/push", "ingest vhost")
