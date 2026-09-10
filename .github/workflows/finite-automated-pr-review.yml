@@ -1,0 +1,190 @@
+name: Finite automated PR review
+
+on:
+  pull_request:
+    branches:
+      - main
+    types:
+      - opened
+      - synchronize
+      - reopened
+      - ready_for_review
+  workflow_dispatch:
+    inputs:
+      pr_number:
+        description: Pull request number to review
+        required: true
+        type: number
+
+concurrency:
+  group: finite-automated-pr-review-${{ github.event_name == 'workflow_dispatch' && inputs.pr_number || github.event.pull_request.number }}
+  cancel-in-progress: true
+
+permissions:
+  actions: read
+  checks: read
+  contents: read
+  issues: write
+  pull-requests: write
+
+env:
+  NIX_CONFIG: |
+    accept-flake-config = true
+    access-tokens = github.com=${{ github.token }}
+
+jobs:
+  review:
+    name: Review PR with local Codex
+    if: >-
+      ${{
+        github.event_name == 'workflow_dispatch' ||
+        (
+          github.event.pull_request.draft == false &&
+          github.event.pull_request.head.repo.full_name == github.repository
+        )
+      }}
+    runs-on: [self-hosted, macOS, finite-pr-review]
+    timeout-minutes: 120
+    env:
+      GH_TOKEN: ${{ secrets.FINITE_PR_REVIEW_GITHUB_TOKEN || github.token }}
+      GITHUB_TOKEN: ${{ secrets.FINITE_PR_REVIEW_GITHUB_TOKEN || github.token }}
+      PR_NUMBER: ${{ github.event_name == 'workflow_dispatch' && inputs.pr_number || github.event.pull_request.number }}
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          token: ${{ secrets.FINITE_PR_REVIEW_GITHUB_TOKEN || github.token }}
+          persist-credentials: true
+
+      - name: Resolve PR metadata
+        id: pr
+        run: |
+          set -euo pipefail
+
+          pr_json="$(gh api "repos/${GITHUB_REPOSITORY}/pulls/${PR_NUMBER}")"
+          url="$(jq -r '.html_url' <<<"$pr_json")"
+          base_ref="$(jq -r '.base.ref' <<<"$pr_json")"
+          head_ref="$(jq -r '.head.ref' <<<"$pr_json")"
+          head_sha="$(jq -r '.head.sha' <<<"$pr_json")"
+          is_draft="$(jq -r '.draft' <<<"$pr_json")"
+          head_repository="$(jq -r '.head.repo.full_name' <<<"$pr_json")"
+
+          should_review=true
+          skip_reason=
+          if [[ "$head_repository" != "$GITHUB_REPOSITORY" ]]; then
+            should_review=false
+            skip_reason="fork PRs are not reviewed on the trusted Mac runner"
+          elif [[ "$is_draft" == "true" && "${{ github.event_name }}" != "workflow_dispatch" ]]; then
+            should_review=false
+            skip_reason="draft PRs are skipped unless manually dispatched"
+          fi
+
+          {
+            echo "url=$url"
+            echo "base_ref=$base_ref"
+            echo "head_ref=$head_ref"
+            echo "head_sha=$head_sha"
+            echo "is_draft=$is_draft"
+            echo "head_repository=$head_repository"
+            echo "should_review=$should_review"
+            echo "skip_reason=$skip_reason"
+          } >> "$GITHUB_OUTPUT"
+
+          {
+            echo "### Finite automated PR review"
+            echo
+            echo "- PR: ${url}"
+            echo "- Head: ${head_sha}"
+            echo "- Source: ${head_repository}:${head_ref}"
+            echo "- Base: ${base_ref}"
+            echo "- Should review: ${should_review}"
+            if [[ -n "$skip_reason" ]]; then
+              echo "- Skip reason: ${skip_reason}"
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Report skipped PR
+        if: steps.pr.outputs.should_review != 'true'
+        run: |
+          echo "Skipping PR ${PR_NUMBER}: ${{ steps.pr.outputs.skip_reason }}"
+
+      - name: Check out PR merge ref when available
+        if: steps.pr.outputs.should_review == 'true'
+        run: |
+          set -euo pipefail
+
+          merge_ref="refs/remotes/pull/${PR_NUMBER}/merge"
+          head_ref="refs/remotes/pull/${PR_NUMBER}/head"
+
+          if git fetch --no-tags origin "pull/${PR_NUMBER}/merge:$merge_ref"; then
+            git checkout --detach "$merge_ref"
+            echo "CHECKOUT_KIND=merge" >> "$GITHUB_ENV"
+          else
+            git fetch --no-tags origin "pull/${PR_NUMBER}/head:$head_ref"
+            git checkout --detach "$head_ref"
+            echo "CHECKOUT_KIND=head" >> "$GITHUB_ENV"
+          fi
+
+      - name: Capture review runtime preflight
+        if: steps.pr.outputs.should_review == 'true'
+        run: |
+          set -euo pipefail
+          set -o pipefail
+          mkdir -p .codex-review
+          {
+            echo "== codex =="
+            codex --version
+            codex doctor --summary
+            echo
+            echo "== gh =="
+            gh --version
+            gh auth status
+            echo
+            echo "== nix =="
+            nix --version
+            nix config show \
+              | sed -n \
+                  -e '/^accept-flake-config/p' \
+                  -e '/^substituters/p' \
+                  -e '/^trusted-public-keys/p'
+            echo
+            echo "== just via dev shell =="
+            nix develop .#default --command just --version
+            echo
+            echo "== dev shell =="
+            nix develop .#default --command true
+          } 2>&1 | tee .codex-review/preflight.log
+
+      - name: Run Codex review
+        if: steps.pr.outputs.should_review == 'true'
+        env:
+          GH_TOKEN: ${{ env.GH_TOKEN }}
+          GITHUB_TOKEN: ${{ env.GITHUB_TOKEN }}
+          PR_NUMBER: ${{ env.PR_NUMBER }}
+          PR_HEAD_SHA: ${{ steps.pr.outputs.head_sha }}
+          PR_BASE_REF: ${{ steps.pr.outputs.base_ref }}
+          PR_HEAD_REF: ${{ steps.pr.outputs.head_ref }}
+          PR_URL: ${{ steps.pr.outputs.url }}
+          CHECKOUT_KIND: ${{ env.CHECKOUT_KIND }}
+          NIX_CONFIG: ${{ env.NIX_CONFIG }}
+        run: |
+          set -euo pipefail
+          set -o pipefail
+          mkdir -p .codex-review
+
+          codex exec \
+            --sandbox danger-full-access \
+            --ask-for-approval never \
+            --ephemeral \
+            --output-last-message .codex-review/final-message.md \
+            - < .github/codex/prompts/finite-automated-pr-review.md \
+            2>&1 | tee .codex-review/codex.log
+
+      - name: Upload Codex review artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: finite-automated-pr-review-${{ env.PR_NUMBER }}
+          path: .codex-review/
+          if-no-files-found: ignore

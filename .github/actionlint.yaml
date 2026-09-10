@@ -1,0 +1,6 @@
+self-hosted-runner:
+  labels:
+    - finite-pr-review
+
+config-variables: null
+
