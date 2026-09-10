@@ -46,6 +46,13 @@ def ci_job_block(job_id: str) -> str:
 
 
 class CiHarnessSelectionTests(unittest.TestCase):
+    def test_github_ci_does_not_reference_parked_electron_harness(self) -> None:
+        workflow = ci_workflow_text()
+
+        self.assertNotIn("electron-alpha", workflow)
+        self.assertNotIn("run_electron_alpha", workflow)
+        self.assertNotIn("runs-on: macos-", workflow)
+
     def test_ci_pull_request_trigger_is_scoped_to_main(self) -> None:
         workflow = ci_workflow_text()
 
@@ -217,6 +224,12 @@ class CiHarnessSelectionTests(unittest.TestCase):
         for key, value in values.items():
             self.assertEqual(value, "true", key)
 
+    def test_depot_ci_workflow_selects_every_active_harness(self) -> None:
+        values = selection_for(".depot/workflows/ci.yml")
+
+        for key, value in values.items():
+            self.assertEqual(value, "true", key)
+
     def test_non_ci_workflow_selects_nix_checks(self) -> None:
         self.assertEqual(
             selected(".github/workflows/lat2-nixos-closure.yml"),
@@ -265,6 +278,12 @@ class CiHarnessSelectionTests(unittest.TestCase):
         self.assertEqual(
             selected("finite-skills/README.md"),
             set(),
+        )
+
+    def test_search_path_runs_search_check(self) -> None:
+        self.assertEqual(
+            selected("finite-search/src/lib.rs"),
+            {"run_search_check"},
         )
 
     def test_monitoring_script_runs_only_monitoring_contract(self) -> None:
