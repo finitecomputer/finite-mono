@@ -12,6 +12,7 @@ import {
 
 import { SimplexConnection } from "@/components/simplex-connection";
 import { ConnectionCard } from "@/components/connection-card";
+import { HermesGatewayConnectionCard } from "@/components/hermes-gateway-connection-card";
 import { useOptionalHostedChat } from "@/components/hosted-chat-provider";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -110,6 +111,8 @@ export function ConnectionsPanel({
           </Button>
         </div>
       ) : null}
+
+      <HermesGatewayConnectionCard />
 
       <ConnectionCard
         name="Inference"

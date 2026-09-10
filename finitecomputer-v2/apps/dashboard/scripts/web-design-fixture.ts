@@ -62,6 +62,15 @@ function localChildEnvironment(): NodeJS.ProcessEnv {
     "NIX_PATH",
     "NIX_PROFILES",
     "IN_NIX_SHELL",
+    // Spike: the browser talks DIRECTLY to the local hermes gateway, so the
+    // dashboard only needs the connection info inlined (public env). Gated
+    // remotes add username/password auth and the same-origin proxy target.
+    "NEXT_PUBLIC_HERMES_GATEWAY_WS_URL",
+    "NEXT_PUBLIC_HERMES_GATEWAY_TOKEN",
+    "NEXT_PUBLIC_HERMES_GATEWAY_USERNAME",
+    "NEXT_PUBLIC_HERMES_GATEWAY_PASSWORD",
+    "NEXT_PUBLIC_HERMES_GATEWAY_PUBLIC_URL",
+    "HERMES_GATEWAY_PROXY_TARGET",
   ]) {
     const value = process.env[key];
     if (value !== undefined) environment[key] = value;

@@ -55,8 +55,12 @@ type MutationSnapshotRequest = {
   sequence: number;
 };
 
-type HostedChatContextValue = {
+export type HostedChatContextValue = {
   apiBase: string;
+  /** This transport can create a chat when submitting into an empty topic. */
+  canSendToTopic?: boolean;
+  supportsAttachments?: boolean;
+  supportsChatArchive?: boolean;
   state: HostedChatState | null;
   transportError: string | null;
   claimError: string | null;
@@ -78,7 +82,10 @@ type HostedChatContextValue = {
   }) => string;
 };
 
-const HostedChatContext = createContext<HostedChatContextValue | null>(null);
+// Shared so the spike's hermes-ws provider (hermes-chat-provider.tsx) can
+// supply the SAME context the existing chat components already consume —
+// same UI, different backend.
+export const HostedChatContext = createContext<HostedChatContextValue | null>(null);
 
 export function HostedChatProvider({
   children,
