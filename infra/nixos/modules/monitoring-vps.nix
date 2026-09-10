@@ -136,6 +136,12 @@ in
         name = "finite.computer";
         target = "https://finite.computer";
       })
+      # Follow the public apex redirect and fail if it regresses to the legacy
+      # fleet's plain 404 response.
+      (publicProbe {
+        name = "finite.vip";
+        target = "https://finite.vip";
+      })
       (publicProbe {
         name = "chat.finite.computer";
         target = "https://chat.finite.computer/readyz";
