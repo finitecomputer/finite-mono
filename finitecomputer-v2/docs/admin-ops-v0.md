@@ -51,6 +51,7 @@ the exact configured operator organization):
 
 | Method | Route | Action |
 | --- | --- | --- |
+| POST | `/api/core/v1/admin/account-email-changes/{action}` | Preview, prepare, complete the Core step, or cancel an exact account-email intent; see [contract](account-email-change.md) |
 | GET | `/api/core/v1/admin/runtimes` | Provisioned-boxes overview |
 | GET/POST | `/api/core/v1/admin/launch-code-batches` | List metadata or issue one named exact-size batch |
 | POST | `/api/core/v1/admin/launch-code-batches/{batch_id}/revoke` | Revoke remaining unredeemed codes |

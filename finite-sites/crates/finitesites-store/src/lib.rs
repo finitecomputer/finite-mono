@@ -7,6 +7,9 @@
 
 mod schema;
 
+mod account_email;
+pub use account_email::{AccountEmailPreflight, AccountEmailPreflightRequest};
+
 use std::path::{Path, PathBuf};
 
 use rusqlite::{Connection, OpenFlags, OptionalExtension, params};

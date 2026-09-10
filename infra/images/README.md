@@ -4,18 +4,19 @@ Every first-party image is built by CI from this repo and pushed
 digest-pinned to GHCR. Nothing is built on a prod box (the pre-cutover
 on-host podman flow died with the k3s control plane).
 
-**Post-cutover note (2026-07-09):** lat1 is NixOS now. `finite-saas-core`
-runs from the nix-built binary (the `finite-saas-core` package), NOT the
-container image — the core image below is retained for provenance / other
-contexts. The dashboard runs as a digest-pinned oci-container (podman) on
-lat1. `private-limiter` is the Tinfoil surface; the one Agent Runtime image
-targets Kata first and Phala next. See `infra/nixos/` for what lat1 actually
-runs.
+Current host roles are defined in [the infrastructure overview](../README.md)
+and the [lat2 NixOS host configuration](../nixos/hosts/finite-lat-2/default.nix),
+not inferred from image names or historical cutover notes. The production app
+plane moved to lat2 on 2026-08-29; lat1 is retired. Core runs from the Nix-built
+`finite-saas-core` package, while the dashboard runs as a digest-pinned OCI
+container. Use [the Core/dashboard deployment runbook](../runbooks/deploy-core.md)
+for the CI-built lat2 closure and dashboard image pin. `private-limiter` is the
+Tinfoil surface; the Agent Runtime image has its own rollout lifecycle.
 
 | Image (ghcr.io/finitecomputer/…) | Definition | Built by | Deployed to |
 |---|---|---|---|
-| `finite-saas-core` | `core.Dockerfile` (context: repo root) | `service-images.yml` | (retained; lat1 runs the nix binary, not this image) |
-| `finite-saas-dashboard` | `dashboard.Dockerfile` (context: repo root; includes the shared Finite Chat UI package) | `service-images.yml` | lat1 (podman oci-container, digest-pinned in `modules/dashboard.nix`) |
+| `finite-saas-core` | `core.Dockerfile` (context: repo root) | `service-images.yml` | (retained; production Core runs from the lat2 NixOS closure) |
+| `finite-saas-dashboard` | `dashboard.Dockerfile` (context: repo root; includes the shared Finite Chat UI package) | `service-images.yml` | lat2 (podman OCI container, digest-pinned in `infra/nixos/modules/dashboard.nix`) |
 | `private-limiter` | `private-limiter.Dockerfile` (context: repo root) | `service-images.yml` | Finite Private Tinfoil CVM (digest pinned in confidential-finite-private) |
 | `glm-5-3-flash-sglang` | `glm-5.3-flash-sglang.Dockerfile` (context: repo root; wraps the exact upstream amd64 manifest with source labels and fail-closed internal auth) | `glm-5.3-flash-sglang-image.yml` | Live Finite Private GLM-5.3-Flash Tinfoil container |
 | `agent-runtime` | `finitecomputer-v2/deploy/finite-computer/images/runtime.Dockerfile` via `finitecomputer-v2/scripts/build_runtime_image.py` (one staged monorepo + root lockfile) | `runtime-image.yml`, whose build-once smoke proves the exact local image ID before push; `hermes-runtime-smoke.yml` is optional source preflight | local Docker, Kata, Phala, and agent canary lanes |

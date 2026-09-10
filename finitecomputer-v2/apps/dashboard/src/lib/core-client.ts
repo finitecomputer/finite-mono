@@ -458,6 +458,17 @@ export function coreBridgeStatus(env: EnvSource = process.env): CoreBridgeStatus
   };
 }
 
+/** Fresh Core-verified requester metadata; never a browser-session email cache. */
+export async function loadCoreRequesterEmail(account: AccountAuthContext): Promise<string> {
+  const me = await coreFetch<CoreMe>("/api/core/v1/me", account, {
+    signal: AbortSignal.timeout(5_000),
+  });
+  if (me.workos_user_id !== account.workosUserId || typeof me.email !== "string" || !me.email.trim()) {
+    throw new Error("Core requester identity does not match the current account.");
+  }
+  return me.email;
+}
+
 export async function loadCoreMe(options: CoreReadOptions = {}): Promise<CoreMeResult> {
   const status = coreBridgeStatus();
   const account = await getAccountAuthContext();
@@ -1680,4 +1691,22 @@ function safeHttpUrl(value: string) {
   } catch {
     return false;
   }
+}
+
+export async function lookupCoreEmailChangeTarget(email: string) {
+  return coreAdminFetch<import("./account-email-change").EmailChangeTarget>(
+    "/api/core/v1/admin/account-email-target", { method: "POST", body: JSON.stringify({ email }) },
+  );
+}
+export async function loadCoreEmailChangeOperation(id: string) {
+  return coreAdminFetch<import("./account-email-change").EmailChangePreview>(
+    `/api/core/v1/admin/account-email-changes/${encodeURIComponent(id)}`,
+  );
+}
+export async function coreEmailChange(action: "preview" | "prepare" | "complete", request: import("./account-email-change").EmailChangeRequest) {
+  const result = await coreAdminFetch<import("./account-email-change").EmailChangePreview>(
+    `/api/core/v1/admin/account-email-changes/${action}`, { method: "POST", body: JSON.stringify(request) },
+  );
+  if (action === "complete") invalidateCoreReadCache();
+  return result;
 }
