@@ -174,7 +174,7 @@ until their credentials and matching reviewed components are deployed.
 ### Verified Demo Boundary
 
 The September 9-10 controlled demo in FIN-24 uses
-`https://fly-proof-0909-7b6e.finite.site/`. It is private and contains only
+`https://fly-proof-0909-7b6e.finite.site/`. It is non-public and contains only
 synthetic content. Its completed **Option B / Fly** checks are:
 
 - Isolated CLI registration, synthetic owner proof, config dry-run, Project
@@ -188,14 +188,17 @@ synthetic content. Its completed **Option B / Fly** checks are:
   existing viewer sessions. The original Git credential still reads source.
 - Exactly one Machine remains attached to the original volume. No customer
   state, legacy routing, dashboard upstream or agent CLI pin changed.
+- Real Resend mail was enabled on September 10 using the same pinned image.
+  Alex's approved mailbox received the standard sign-in email, and Alex
+  confirmed that redeeming its link opened the demo. The demo is now shared
+  with that mailbox, not public. This verifies viewer login, not real-mailbox
+  publisher enrollment or the dashboard account bridge.
 
 The CLI version string alone is not the artifact identity: the operator client
 reports `fsite 0.5.2` but implements v2. FIN-24 records the exact client image
 identity separately from the public v1 release and deployed AMD64 image.
 
-Real email is configured separately from those synthetic checks; successful
-provider submission is not proof of inbox delivery or mailbox ownership. Sharing
-this private URL alone does not grant access. Do not enable account redirects until the reviewed #854 dashboard and
+Sharing this non-public URL alone does not grant access. Do not enable account redirects until the reviewed #854 dashboard and
 daemon are deployed with a matching service credential and upstream. The
 production dashboard has one Sites upstream; do not repoint it at this empty
 demo registry while legacy Sites remain authoritative.
@@ -203,6 +206,10 @@ demo registry while legacy Sites remain authoritative.
 `scripts/finite-status` returns UNKNOWN on a laptop without a host profile.
 Use the installed command on the authenticated app-plane host for fleet
 evidence; Fly's passing health check is evidence only for this demo service.
+The September 10 mail rollout's pre/post host probes reported green Chat and
+rollout sections, pre-existing red fleet convergence, and unknown host health
+because the SSH environment could not locate `nerdctl`. Overall fleet status
+was not green; the Fly health check passed independently.
 Keep FIN-54 open until recurring off-host recovery and failure visibility are
 qualified, even when a one-time synthetic restore succeeds.
 
@@ -215,7 +222,7 @@ image. The restored copy retained Site/Project IDs, Version 2, HTML/assets,
 grants and cookie secret; an existing authorized session worked and anonymous
 access was denied. The original publisher cloned the backed-up Git commit,
 passed `git fsck`, and pushed a new commit that created Version 3 **only on the
-isolated restore**. The live demo remains private at Version 2. FIN-54 records
+isolated restore**. The live demo remains non-public at Version 2. FIN-54 records
 the archive location and checksum; never commit or attach the archive, which
 contains the cookie secret and registry.
 
