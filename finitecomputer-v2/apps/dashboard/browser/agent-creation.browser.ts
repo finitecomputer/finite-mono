@@ -989,6 +989,12 @@ test("dashboard agent creation browser states", { timeout: 300_000 }, async () =
         connectionsStatusIndex > ownerClaimIndex,
         "Connections status was requested before the owner claim succeeded"
       );
+      const openRouterSignIn = page.getByRole("link", { name: "Sign in with OpenRouter" });
+      assert.match(
+        (await openRouterSignIn.getAttribute("href")) ?? "",
+        /^\/openrouter\/start\?machineId=/u,
+        "OpenRouter sign-in should route through the dashboard OAuth start endpoint"
+      );
       await page.getByRole("button", { name: "Use OpenRouter" }).click();
       await page.getByLabel("OpenRouter key").fill("test-only-invalid-key");
       await page.getByLabel("OpenRouter model").fill("openai/gpt-5-mini");
@@ -2505,7 +2511,7 @@ function applyRuntimeCommand(
       state.connections.inference = {
         profile,
         provider: "openrouter",
-        model: String(body.model ?? "anthropic/claude-sonnet-4.6"),
+        model: String(body.model ?? "deepseek/deepseek-v4-flash-0731"),
       };
     }
   } else if (command === "agent.telegram.connect") {
