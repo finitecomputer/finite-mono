@@ -370,11 +370,13 @@ jobs:
           nix develop "$GITHUB_WORKSPACE#hermes-bridge-ci" --command ruff format --check "$GITHUB_WORKSPACE/finite-agentd/"
           nix develop "$GITHUB_WORKSPACE#hermes-bridge-ci" --command ruff check "$GITHUB_WORKSPACE/finite-agentd/"
 
-      - name: Managed SimpleX control tests
+      - name: Managed SimpleX and hosted gateway tests
         env:
           HERMES_AGENT_PYTHON: ${{ steps.hermes_agent_runtime.outputs.python }}
         run: |
           "$HERMES_AGENT_PYTHON" -m unittest discover -s "$GITHUB_WORKSPACE/finite-agentd" -p 'test_simplex_runtime.py'
+          "$HERMES_AGENT_PYTHON" -m unittest discover -s "$GITHUB_WORKSPACE/finite-agentd" -p 'test_hosted_gateway.py'
+          "$HERMES_AGENT_PYTHON" "$GITHUB_WORKSPACE/finite-agentd/smoke_hosted_gateway.py"
 
       - name: Chat reliability fast gate (Hermes adapter)
         env:

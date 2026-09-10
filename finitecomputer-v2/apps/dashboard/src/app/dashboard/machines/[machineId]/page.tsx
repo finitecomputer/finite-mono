@@ -1,3 +1,4 @@
+import { HostedGatewayCard } from "@/components/hosted-gateway-card";
 import Link from "next/link";
 import { redirect } from "next/navigation";
 import {
@@ -117,6 +118,7 @@ async function ImportedMachineOverview({
   // Recovery and retirement remain operator maintenance. Their independent
   // product and persisted Runtime capability gates still fail closed.
   const isAdminViewer = Boolean(access.viewer.isAdmin);
+  const canUseGateway = isAdminViewer && Boolean(process.env.FC_HOSTED_GATEWAY_RUNNER_DOMAINS);
   const canRecoverRuntime =
     isAdminViewer && coreProjectSupportsHostedRecovery(access.coreProject);
   const canRetireRuntime =
@@ -193,7 +195,7 @@ async function ImportedMachineOverview({
       {!finitePrivateUsage.usage && finitePrivateUsage.error ? (
         <FinitePrivateUsageUnavailablePanel error={finitePrivateUsage.error} />
       ) : null}
-      {canRecoverRuntime || canRetireRuntime ? (
+      {canRecoverRuntime || canRetireRuntime || canUseGateway ? (
         <details className="group">
           <summary className="inline-flex cursor-pointer list-none items-center gap-2 rounded-lg border bg-card px-3 py-2 text-sm font-medium text-muted-foreground transition-colors hover:text-foreground [&::-webkit-details-marker]:hidden">
             <Settings2Icon className="size-4" />
@@ -201,6 +203,7 @@ async function ImportedMachineOverview({
             <ChevronDownIcon className="size-4 transition-transform group-open:rotate-180" />
           </summary>
           <div className="mt-4 space-y-4">
+            {canUseGateway ? <HostedGatewayCard key={access.machineId} machineId={access.machineId} /> : null}
             {canRecoverRuntime ? (
               <section className="rounded-xl border bg-card p-5">
                 <h2 className="font-semibold">Chat recovery</h2>

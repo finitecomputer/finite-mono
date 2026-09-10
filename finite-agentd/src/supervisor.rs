@@ -143,11 +143,57 @@ enum ProcessAction {
 #[derive(Clone)]
 pub struct SupervisorHandle {
     hermes_tx: mpsc::Sender<ProcessAction>,
+    hosted_gateway_tx: Option<mpsc::Sender<ProcessAction>>,
     all_txs: Arc<Vec<mpsc::Sender<ProcessAction>>>,
     status: Arc<RwLock<SupervisorStatus>>,
 }
 
 impl SupervisorHandle {
+    pub async fn restart_hosted_gateway(&self) -> Result<(), AgentdError> {
+        let previous_restart_count = self
+            .status
+            .read()
+            .await
+            .processes
+            .get("hosted_gateway")
+            .map(|status| status.restart_count)
+            .unwrap_or(0);
+        self.hosted_gateway_tx
+            .as_ref()
+            .ok_or_else(|| {
+                AgentdError::Supervisor(
+                    "Hosted gateway is unavailable in this runtime image".to_owned(),
+                )
+            })?
+            .send(ProcessAction::Restart)
+            .await
+            .map_err(|_| AgentdError::Supervisor("Hosted gateway supervisor stopped".to_owned()))?;
+        tokio::time::timeout(Duration::from_secs(30), async {
+            loop {
+                let restarted = self
+                    .status
+                    .read()
+                    .await
+                    .processes
+                    .get("hosted_gateway")
+                    .is_some_and(|status| {
+                        matches!(status.state, ProcessState::Running { .. })
+                            && status.restart_count > previous_restart_count
+                    });
+                if restarted {
+                    return;
+                }
+                tokio::time::sleep(Duration::from_millis(50)).await;
+            }
+        })
+        .await
+        .map_err(|_| {
+            AgentdError::Supervisor(
+                "Hosted gateway did not return to running state after restart".to_owned(),
+            )
+        })
+    }
+
     pub async fn restart_hermes(&self) -> Result<(), AgentdError> {
         let previous_restart_count = self
             .status
@@ -203,6 +249,7 @@ pub fn start_supervisor(
     health: ProcessSpec,
     hermes: ProcessSpec,
     simplex: Option<ProcessSpec>,
+    hosted_gateway: Option<ProcessSpec>,
 ) -> SupervisorHandle {
     let status = Arc::new(RwLock::new(SupervisorStatus::default()));
     let (sidecar_tx, sidecar_rx) = mpsc::channel(4);
@@ -219,7 +266,14 @@ pub fn start_supervisor(
         tokio::spawn(supervise_process(spec, rx, Arc::clone(&status)));
         all_txs.push(tx);
     }
+    let hosted_gateway_tx = hosted_gateway.map(|spec| {
+        let (tx, rx) = mpsc::channel(4);
+        tokio::spawn(supervise_process(spec, rx, Arc::clone(&status)));
+        all_txs.push(tx.clone());
+        tx
+    });
     SupervisorHandle {
+        hosted_gateway_tx,
         hermes_tx: hermes_tx.clone(),
         all_txs: Arc::new(all_txs),
         status,
@@ -399,12 +453,38 @@ mod tests {
     use super::*;
 
     #[tokio::test]
+    async fn hosted_gateway_restart_waits_and_leaves_chat_processes_running() {
+        let handle = start_supervisor(
+            sleeping_process("sidecar"),
+            sleeping_process("health"),
+            sleeping_process("hermes"),
+            None,
+            Some(sleeping_process("hosted_gateway")),
+        );
+        for name in ["hermes", "sidecar", "health", "hosted_gateway"] {
+            wait_for_running(&handle, name).await;
+        }
+        let before = handle.status().await;
+        handle.restart_hosted_gateway().await.unwrap();
+        let after = handle.status().await;
+        for name in ["hermes", "sidecar", "health"] {
+            assert_eq!(before.processes[name], after.processes[name]);
+        }
+        assert!(
+            after.processes["hosted_gateway"].restart_count
+                > before.processes["hosted_gateway"].restart_count
+        );
+        handle.shutdown().await;
+    }
+
+    #[tokio::test]
     async fn hermes_restart_leaves_simplex_running_and_shutdown_stops_it() {
         let handle = start_supervisor(
             sleeping_process("sidecar"),
             sleeping_process("health"),
             sleeping_process("hermes"),
             Some(sleeping_process("simplex")),
+            None,
         );
         let simplex_pid = wait_for_running(&handle, "simplex").await.pid();
         handle.restart_hermes().await.unwrap();
@@ -434,6 +514,7 @@ mod tests {
             sleeping_process("sidecar"),
             sleeping_process("health"),
             sleeping_process("hermes"),
+            None,
             None,
         );
         let original_pid = wait_for_running(&handle, "hermes").await.pid().unwrap();
@@ -479,6 +560,7 @@ mod tests {
             },
             sleeping_process("health"),
             sleeping_process("hermes"),
+            None,
             None,
         );
         wait_for_running(&handle, "finitechat").await;
@@ -532,6 +614,7 @@ mod tests {
                 args: Vec::new(),
                 environment: BTreeMap::new(),
             },
+            None,
             None,
         );
         wait_for_running(&handle, "hermes").await;

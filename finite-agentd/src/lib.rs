@@ -1,6 +1,7 @@
 mod config;
 mod connections;
 mod daemon;
+mod hosted_gateway;
 mod ledger;
 mod simplex;
 mod supervisor;
