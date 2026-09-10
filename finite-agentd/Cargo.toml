@@ -15,6 +15,7 @@ name = "finite-agentd"
 path = "src/main.rs"
 
 [dependencies]
+axum.workspace = true
 clap.workspace = true
 qrcode.workspace = true
 finitechat-proto = { path = "../finitechat/crates/finitechat-proto" }
