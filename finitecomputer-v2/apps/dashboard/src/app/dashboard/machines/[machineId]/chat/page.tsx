@@ -1,3 +1,4 @@
+import { wasmSpikeEnabled, WASM_SPIKE_MACHINE } from "@/lib/wasm-spike";
 import { redirect } from "next/navigation";
 
 import { HostedWebChat } from "@/components/hosted-web-chat";
@@ -12,6 +13,9 @@ export default async function HostedWebChatPage({
 }) {
   const { machineId } = await params;
   const query = await searchParams;
+  if (wasmSpikeEnabled() && machineId === WASM_SPIKE_MACHINE) {
+    return <HostedWebChat initialDraft={initialDraft(query.prompt)} machineId={machineId} machineLabel="Hermes" runtimeStatus="online" />;
+  }
   const access = await loadDashboardMachineAccess(machineId, { coreCacheMode: "swr" });
   if (!access) {
     redirect("/dashboard");

@@ -1,3 +1,4 @@
+import { wasmSpikeEnabled, WASM_SPIKE_MACHINE } from "@/lib/wasm-spike";
 import { DashboardShell } from "@/components/dashboard-shell";
 import {
   coreProductProjects,
@@ -13,6 +14,12 @@ export default async function DashboardLayout({
 }: {
   children: React.ReactNode;
 }) {
+  if (wasmSpikeEnabled()) {
+    return <DashboardShell isAdmin={false} saasMode browserChat viewerEmail="local@wasm-spike.test"
+      machines={[{ id: WASM_SPIKE_MACHINE, ownerLabel: "Hermes", runtimeStatus: "online" }]}>
+      {children}
+    </DashboardShell>;
+  }
   const [viewer, core] = await Promise.all([
     loadOptionalViewerContext(),
     loadCoreMe({ cacheMode: "swr" }),

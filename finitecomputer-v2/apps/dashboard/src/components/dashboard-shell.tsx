@@ -25,6 +25,7 @@ import {
 } from "@/components/agent-onboarding-progress";
 import { AgentSidebar } from "@/components/agent-sidebar";
 import { FiniteBrand } from "@/components/finite-brand";
+import { BrowserChatProvider } from "@/components/browser-chat-provider";
 import { HostedChatProvider } from "@/components/hosted-chat-provider";
 import { SignOutLink } from "@/components/sign-out-link";
 import type { CoreRuntimeStatus } from "@/lib/core-client";
@@ -46,6 +47,7 @@ type DashboardShellProps = {
   isAdmin: boolean;
   machines: MachineNavItem[];
   saasMode: boolean;
+  browserChat?: boolean;
 };
 
 type SectionLink = {
@@ -374,6 +376,7 @@ function OnboardingAppSection({
 }
 
 function AgentAppSection({
+  browserChat,
   children,
   isChatSurface,
   machine,
@@ -381,6 +384,7 @@ function AgentAppSection({
   viewerEmail,
 }: {
   children: React.ReactNode;
+  browserChat?: boolean;
   isChatSurface: boolean;
   machine: MachineNavItem;
   machines: MachineNavItem[];
@@ -403,8 +407,9 @@ function AgentAppSection({
     return () => window.removeEventListener("finite:open-agent-sidebar", open);
   }, []);
 
+  const ChatProvider = browserChat ? BrowserChatProvider : HostedChatProvider;
   return (
-    <HostedChatProvider key={machine.id} machineId={machine.id}>
+    <ChatProvider key={machine.id} machineId={machine.id}>
       <div className={`finite-agent-shell ${collapsed ? "is-sidebar-collapsed" : ""}`}>
         <AgentSidebar
           collapsed={collapsed}
@@ -441,11 +446,12 @@ function AgentAppSection({
           {isChatSurface ? children : <div className="ocean-app-content">{children}</div>}
         </main>
       </div>
-    </HostedChatProvider>
+    </ChatProvider>
   );
 }
 
 export function DashboardShell({
+  browserChat,
   children,
   isAdmin,
   machines,
@@ -487,6 +493,7 @@ export function DashboardShell({
     return (
       <div className="ocean-shell ocean-shell--agent">
         <AgentAppSection
+          browserChat={browserChat}
           isChatSurface={isChatSurface}
           machine={activeMachine}
           machines={machines}

@@ -1,3 +1,4 @@
+import { wasmSpikeEnabled, WASM_SPIKE_CHAT_PATH } from "@/lib/wasm-spike";
 import Link from "next/link";
 import { redirect } from "next/navigation";
 import { cookies } from "next/headers";
@@ -116,6 +117,7 @@ export default async function DashboardPage({
 }: {
   searchParams: Promise<DashboardSearchParams>;
 }) {
+  if (wasmSpikeEnabled()) redirect(WASM_SPIKE_CHAT_PATH);
   const query = await searchParams;
   const agentRemoval = firstSearchParam(query.agentRemoval);
   const agentCreationError = firstSearchParam(query.agentCreationError);

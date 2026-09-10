@@ -1,5 +1,6 @@
 use finitechat_client::{AppliedLogEntry, FiniteChatDevice, FiniteChatDeviceConfig};
 use finitechat_delivery::{HttpClaimedKeyPackage, HttpSyncPage, MAX_HTTP_SYNC_PAGE_ENTRIES};
+use finitechat_hermes::{HermesMessagePayloadV1, HermesSendRequestV1};
 use finitechat_http::{
     BootstrapAccountRoomRequest, BootstrapAccountRoomResponse, ClaimKeyPackageForAccountRequest,
     FiniteAccountRoomCommitProjection, GroupSyncRequest,
@@ -10,6 +11,7 @@ use finitechat_proto::{
     EventAccepted, LogEntryKind, RoomLogEntry, UploadKeyPackageRequest,
     delivery_member_id_for_device, lease_token_for,
 };
+use finitechat_proto::{DecryptedApplicationEventV1, DeviceRef};
 use finitechat_transport::{GroupId, MemberId};
 use serde::{Serialize, de::DeserializeOwned};
 use wasm_bindgen::prelude::*;
@@ -28,6 +30,18 @@ struct Message {
     text: String,
 }
 
+#[derive(Serialize)]
+struct BrowserEvent {
+    id: String,
+    seq: u64,
+    sender: DeviceRef,
+    timestamp: u64,
+    kind: DurableAppEventKind,
+    conversation_id: Option<String>,
+    segment_id: Option<String>,
+    payload: serde_json::Value,
+}
+
 #[wasm_bindgen]
 pub struct BrowserChat {
     device: FiniteChatDevice,
@@ -37,6 +51,7 @@ pub struct BrowserChat {
     room: String,
     after_seq: u64,
     messages: Vec<Message>,
+    events: Vec<BrowserEvent>,
 }
 
 #[wasm_bindgen]
@@ -61,6 +76,7 @@ impl BrowserChat {
             room: String::new(),
             after_seq: 0,
             messages: Vec::new(),
+            events: Vec::new(),
         })
     }
 
@@ -128,12 +144,66 @@ impl BrowserChat {
     }
 
     pub async fn send(&mut self, text: &str) -> Result<String, JsValue> {
+        self.send_chat(text, None, None, None).await
+    }
+
+    pub async fn send_chat(
+        &mut self,
+        text: &str,
+        topic: Option<String>,
+        chat: Option<String>,
+        metadata: Option<String>,
+    ) -> Result<String, JsValue> {
         if text.trim().is_empty() {
             return Err(error("Enter a message"));
         }
+        let mut request = HermesSendRequestV1::from_hermes_send(
+            &self.room,
+            text,
+            None::<String>,
+            Default::default(),
+        )
+        .map_err(error)?;
+        request.conversation_id = topic.clone();
+        request.segment_id = chat.clone();
+        if let Some(metadata) = metadata {
+            request.metadata = serde_json::from_str(&metadata).map_err(error)?;
+        }
+        let event = DecryptedApplicationEventV1 {
+            kind: DurableAppEventKind::ChatMessage,
+            conversation_id: topic,
+            segment_id: chat,
+            payload: HermesMessagePayloadV1::from_send(&request)
+                .encode()
+                .map_err(error)?,
+        };
+        self.publish(event).await
+    }
+
+    /// Organizational actions use the same encrypted durable event protocol as native Core.
+    pub async fn publish_event(
+        &mut self,
+        kind: &str,
+        topic: Option<String>,
+        payload: &str,
+    ) -> Result<String, JsValue> {
+        let event = DecryptedApplicationEventV1 {
+            kind: serde_json::from_str(kind).map_err(error)?,
+            conversation_id: topic,
+            segment_id: None,
+            payload: payload.as_bytes().to_vec(),
+        };
+        self.publish(event).await
+    }
+
+    async fn publish(&mut self, event: DecryptedApplicationEventV1) -> Result<String, JsValue> {
+        if self.room.is_empty() {
+            return Err(error("Connect before sending"));
+        }
+        event.validate_limits().map_err(error)?;
         self.sync().await?;
         self.device.set_now_unix_seconds(now());
-        let plaintext = crate::text_event(&self.room, text).map_err(error)?;
+        let plaintext = serde_json::to_vec(&event).map_err(error)?;
         let request = self
             .device
             .create_application_request(
@@ -152,7 +222,7 @@ impl BrowserChat {
                 "/events",
                 &AppendApplicationEventRequest {
                     event: request,
-                    delivery_policy: DurableAppEventKind::ChatMessage.delivery_policy(),
+                    delivery_policy: event.kind.delivery_policy(),
                 },
             )
             .await?;
@@ -162,11 +232,12 @@ impl BrowserChat {
         self.device
             .record_own_send_accepted(&self.room, receipt.seq, &receipt.message_id)
             .map_err(error)?;
-        self.messages.push(Message {
-            id: receipt.message_id,
-            sender: "You".to_owned(),
-            text: text.to_owned(),
-        });
+        self.record_event(
+            &plaintext,
+            receipt.message_id,
+            receipt.seq,
+            self.device.device_ref().clone(),
+        )?;
         self.snapshot()
     }
 
@@ -207,13 +278,8 @@ impl BrowserChat {
                         .device
                         .apply_log_entry(&self.room, &entry)
                         .map_err(error)?
-                    && let Some(text) = crate::event_text(&plaintext)
                 {
-                    self.messages.push(Message {
-                        id: entry.message_id.clone(),
-                        sender: sender.account_id,
-                        text,
-                    });
+                    self.record_event(&plaintext, entry.message_id.clone(), entry.seq, sender)?;
                 }
                 self.after_seq = entry.seq;
             }
@@ -228,11 +294,42 @@ impl BrowserChat {
         serde_json::to_string(&serde_json::json!({ "room": self.room,
             "device": self.device.device_ref(), "afterSeq": self.after_seq,
             "epoch": if self.room.is_empty() { 0 } else { self.device.group_epoch(&self.room).map_err(error)? },
-            "messages": self.messages })).map_err(error)
+            "messages": self.messages, "events": self.events })).map_err(error)
     }
 }
 
 impl BrowserChat {
+    fn record_event(
+        &mut self,
+        plaintext: &[u8],
+        id: String,
+        seq: u64,
+        sender: DeviceRef,
+    ) -> Result<(), JsValue> {
+        let Ok(event) = serde_json::from_slice::<DecryptedApplicationEventV1>(plaintext) else {
+            return Ok(());
+        };
+        event.validate_limits().map_err(error)?;
+        if let Some(text) = crate::event_text(plaintext) {
+            self.messages.push(Message {
+                id: id.clone(),
+                sender: sender.account_id.clone(),
+                text,
+            });
+        }
+        self.events.push(BrowserEvent {
+            id,
+            seq,
+            sender,
+            timestamp: now(),
+            kind: event.kind,
+            conversation_id: event.conversation_id,
+            segment_id: event.segment_id,
+            payload: serde_json::from_slice(&event.payload).unwrap_or(serde_json::Value::Null),
+        });
+        Ok(())
+    }
+
     async fn post<B: Serialize, R: DeserializeOwned>(
         &self,
         path: &str,

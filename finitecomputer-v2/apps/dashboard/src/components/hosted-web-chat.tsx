@@ -142,6 +142,7 @@ export function HostedWebChat({
 }) {
   const {
     state,
+    capabilities,
     transportError,
     claimError,
     bindingRecoveryRequired,
@@ -305,7 +306,7 @@ export function HostedWebChat({
       ),
     [approveEnvelopes]
   );
-  const approvalDetails = useBrainApprovalDetails(approvalRequestIds);
+  const approvalDetails = useBrainApprovalDetails(capabilities?.brain === false ? [] : approvalRequestIds);
   const approvalResolutions = useMemo(() => {
     const resolved = new Map<string, BrainApproveChoice>();
     for (const message of messages) {
@@ -630,6 +631,10 @@ export function HostedWebChat({
   }
 
   function addFiles(files: FileList | File[]) {
+    if (capabilities?.attachments === false) {
+      setActionError("Attachments are not implemented in the browser spike yet.");
+      return;
+    }
     if (audioRecordingState !== "idle") {
       setActionError("Stop the audio recording before adding another attachment.");
       return;
@@ -1000,7 +1005,7 @@ export function HostedWebChat({
                             message={item.message}
                             ownAccountId={state?.identity.account_id ?? ""}
                           />
-                          {selectedRoom ? (
+                          {selectedRoom && capabilities?.brain !== false ? (
                             <BrainApprovalCards
                               message={item.message}
                               envelope={approveEnvelopes.get(item.message.message_id) ?? null}
@@ -1033,7 +1038,7 @@ export function HostedWebChat({
                     {activityLabel && !waitingToolRollupId
                       ? <LiveActivity label={activityLabel} />
                       : null}
-                    <BrainInvitationCards
+                    {capabilities?.brain !== false ? <BrainInvitationCards
                       className="finite-chat__brain-cards"
                       revision={messages.length}
                       onSendMessage={
@@ -1049,7 +1054,7 @@ export function HostedWebChat({
                               ).then(() => undefined)
                           : undefined
                       }
-                    />
+                    /> : null}
                   </div>
                 ) : null}
               </div>
@@ -1175,7 +1180,7 @@ export function HostedWebChat({
                       <button
                         type="button"
                         className="finite-chat__tool-button"
-                        disabled={!connected || sending}
+                        disabled={!connected || sending || capabilities?.attachments === false}
                         aria-label="Attach files"
                         onClick={() => fileInputRef.current?.click()}
                       >
@@ -1190,6 +1195,7 @@ export function HostedWebChat({
                           audioRecordingState === "recording"
                             ? false
                             : !connected
+                              || capabilities?.attachments === false
                               || sending
                               || audioRecordingState !== "idle"
                         }

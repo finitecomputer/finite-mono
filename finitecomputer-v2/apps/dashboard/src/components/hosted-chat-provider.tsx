@@ -55,7 +55,8 @@ type MutationSnapshotRequest = {
   sequence: number;
 };
 
-type HostedChatContextValue = {
+export type HostedChatContextValue = {
+  capabilities?: { attachments: boolean; brain: boolean };
   apiBase: string;
   state: HostedChatState | null;
   transportError: string | null;
@@ -78,7 +79,7 @@ type HostedChatContextValue = {
   }) => string;
 };
 
-const HostedChatContext = createContext<HostedChatContextValue | null>(null);
+export const HostedChatContext = createContext<HostedChatContextValue | null>(null);
 
 export function HostedChatProvider({
   children,
