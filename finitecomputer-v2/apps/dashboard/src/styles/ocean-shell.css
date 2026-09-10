@@ -2937,6 +2937,67 @@ button.ocean-pill-button {
   margin-top: 8px;
 }
 
+.finite-chat__message-actions {
+  display: flex;
+  min-height: 32px;
+  align-items: center;
+  gap: 2px;
+  margin: 2px 0 0 -9px;
+  color: var(--text-tertiary);
+}
+
+.finite-chat__message-actions button {
+  display: inline-flex;
+  width: 32px;
+  height: 32px;
+  align-items: center;
+  justify-content: center;
+  border: 0;
+  border-radius: 8px;
+  background: transparent;
+  color: inherit;
+  cursor: pointer;
+  transition: background 140ms ease, color 140ms ease, transform 140ms ease;
+}
+
+.finite-chat__message-actions button:hover {
+  background: var(--bg-hover);
+  color: var(--text-primary);
+}
+
+.finite-chat__message-actions button:active {
+  transform: scale(0.96);
+}
+
+.finite-chat__message-actions button:focus-visible {
+  outline: 2px solid var(--ring);
+  outline-offset: 1px;
+}
+
+.finite-chat__message-actions button svg {
+  width: 14px;
+  height: 14px;
+}
+
+.finite-chat__message--agent .finite-chat__message-actions .finite-chat__message-time {
+  display: inline;
+  margin: 0 0 0 4px;
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity 140ms ease;
+}
+
+.finite-chat__message--agent:hover .finite-chat__message-actions .finite-chat__message-time,
+.finite-chat__message-actions:focus-within .finite-chat__message-time {
+  opacity: 1;
+}
+
+@media (hover: none) {
+  .finite-chat__message--agent .finite-chat__message-actions .finite-chat__message-time {
+    opacity: 1;
+  }
+}
+
 .finite-chat__work-log {
   display: grid;
   width: min(720px, 100%);

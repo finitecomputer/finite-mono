@@ -17,6 +17,7 @@ import { Drawer } from "vaul";
 import {
   ArrowDownIcon,
   ArrowUpIcon,
+  CheckIcon,
   ChevronRightIcon,
   CopyIcon,
   DownloadIcon,
@@ -31,6 +32,7 @@ import {
   PencilIcon,
   RefreshCwIcon,
   RotateCcwIcon,
+  ShareIcon,
   Share2Icon,
   SquareIcon,
   WrenchIcon,
@@ -54,6 +56,11 @@ import {
   DialogTitle,
 } from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
+import {
+  Tooltip,
+  TooltipContent,
+  TooltipTrigger,
+} from "@/components/ui/tooltip";
 import type {
   HostedChatAction,
   HostedChatMediaAttachment,
@@ -81,6 +88,11 @@ import {
   PENDING_CHAT_REFRESH_DELAY_MS,
   pendingChatRefreshIsDue,
 } from "@/lib/hosted-web-chat-refresh";
+import {
+  copyChatResponse,
+  shareChatResponse,
+  type ChatResponseActionResult,
+} from "@/lib/chat-response-actions";
 import {
   AUDIO_RECORDING_BITS_PER_SECOND,
   audioRecordingErrorMessage,
@@ -999,6 +1011,7 @@ export function HostedWebChat({
                             attachmentUrl={attachmentUrl}
                             message={item.message}
                             ownAccountId={state?.identity.account_id ?? ""}
+                            shareTitle={selectedChat?.title ?? machineLabel}
                           />
                           {selectedRoom ? (
                             <BrainApprovalCards
@@ -1366,10 +1379,12 @@ function MessageRow({
   attachmentUrl,
   message,
   ownAccountId,
+  shareTitle,
 }: {
   attachmentUrl: AttachmentUrl;
   message: HostedChatMessage;
   ownAccountId: string;
+  shareTitle: string;
 }) {
   const content = messageContent(message);
   if (message.sender_account_id === ownAccountId || (!ownAccountId && message.is_mine)) {
@@ -1387,8 +1402,102 @@ function MessageRow({
     <article className="finite-chat__message finite-chat__message--agent">
       <MessageAttachments attachmentUrl={attachmentUrl} message={message} />
       {content ? <MarkdownMessage text={content} /> : null}
-      <time className="finite-chat__message-time">{message.display_timestamp}</time>
+      {content && message.final_delivery ? (
+        <ChatResponseActions
+          text={content}
+          timestamp={message.display_timestamp}
+          title={shareTitle}
+        />
+      ) : (
+        <time className="finite-chat__message-time">{message.display_timestamp}</time>
+      )}
     </article>
+  );
+}
+
+function ChatResponseActions({
+  text,
+  timestamp,
+  title,
+}: {
+  text: string;
+  timestamp: string;
+  title: string;
+}) {
+  const [feedback, setFeedback] = useState<{
+    action: "copy" | "share";
+    result: ChatResponseActionResult;
+  } | null>(null);
+  const [copyTooltipOpen, setCopyTooltipOpen] = useState(false);
+  const [copyTriggerHovered, setCopyTriggerHovered] = useState(false);
+  const [copyTriggerFocusVisible, setCopyTriggerFocusVisible] = useState(false);
+  const resetTimerRef = useRef<number | null>(null);
+
+  useEffect(() => {
+    return () => {
+      if (resetTimerRef.current !== null) window.clearTimeout(resetTimerRef.current);
+    };
+  }, []);
+
+  const showResult = (action: "copy" | "share", result: ChatResponseActionResult) => {
+    if (result === "cancelled") return;
+    setFeedback({ action, result });
+    if (resetTimerRef.current !== null) window.clearTimeout(resetTimerRef.current);
+    resetTimerRef.current = window.setTimeout(() => setFeedback(null), 2_000);
+  };
+
+  const status = feedback?.result === "copied"
+    ? "Copied"
+    : feedback?.result === "shared"
+      ? "Shared"
+      : feedback?.result === "failed"
+        ? "Action failed"
+        : "";
+  const copySucceeded = feedback?.action === "copy" && feedback.result === "copied";
+  const shareSucceeded = feedback?.action === "share"
+    && (feedback.result === "copied" || feedback.result === "shared");
+  const shareTooltip = shareSucceeded
+    ? feedback.result === "shared" ? "Shared" : "Copied"
+    : "Share";
+
+  return (
+    <div className="finite-chat__message-actions">
+      <Tooltip
+        open={copyTooltipOpen || copyTriggerHovered || copyTriggerFocusVisible}
+        onOpenChange={setCopyTooltipOpen}
+      >
+        <TooltipTrigger asChild>
+          <button
+            type="button"
+            aria-label={copySucceeded ? "Copied response" : "Copy response"}
+            onBlur={() => setCopyTriggerFocusVisible(false)}
+            onFocus={(event) => setCopyTriggerFocusVisible(event.currentTarget.matches(":focus-visible"))}
+            onClick={() => void copyChatResponse(navigator, text).then((result) => showResult("copy", result))}
+            onPointerEnter={() => setCopyTriggerHovered(true)}
+            onPointerLeave={() => setCopyTriggerHovered(false)}
+          >
+            {copySucceeded ? <CheckIcon aria-hidden /> : <CopyIcon aria-hidden />}
+          </button>
+        </TooltipTrigger>
+        <TooltipContent side="top" sideOffset={4}>
+          {copySucceeded ? "Copied!" : "Copy"}
+        </TooltipContent>
+      </Tooltip>
+      <Tooltip>
+        <TooltipTrigger asChild>
+          <button
+            type="button"
+            aria-label="Share response"
+            onClick={() => void shareChatResponse(navigator, { text, title }).then((result) => showResult("share", result))}
+          >
+            {shareSucceeded ? <CheckIcon aria-hidden /> : <ShareIcon aria-hidden />}
+          </button>
+        </TooltipTrigger>
+        <TooltipContent side="top" sideOffset={4}>{shareTooltip}</TooltipContent>
+      </Tooltip>
+      <time className="finite-chat__message-time">{timestamp}</time>
+      <span className="sr-only" role="status" aria-live="polite">{status}</span>
+    </div>
   );
 }
 
