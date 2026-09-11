@@ -28,10 +28,12 @@ of the local event/signature implementation (the #800 consolidation, including
 its missing Nix source closure). There is no new service, crate, secret, custom
 signature protocol, account store, or grant synchronization.
 
-The final production-source diff (excluding tests) is approximately 382 lines
+The initial bridge production-source diff (excluding tests) was approximately 382 lines
 added and 299 removed, net +83. This fits the 300–500 added-line budget but
-misses the net-zero target; most total diff growth is compatibility/browser
-proof and documentation, not new runtime subsystems.
+missed the net-zero target; most total diff growth is compatibility/browser
+proof and documentation, not new runtime subsystems. The FIN-53 coexistence
+follow-up adds one endpoint setting and three net TypeScript lines in the
+existing adapter, plus local configuration wiring and paired transport tests.
 
 The added state transition is one atomic, site-bound consume of an existing
 login-token row. Its domain-separated hash prevents redemption through the
@@ -41,9 +43,18 @@ Redemption redirects are no-store and no-referrer. URL validation constrains
 handoffs to served Site origins, and the explicit email fallback cannot start
 another automatic account redirect.
 
-The temporary compatibility seam sends `output_url` to the old finite.chat
-exchange and `site_url` to v2. Remove that spelling branch when old-host
-previews are retired. Old Sites can accept verified-email previews, but only
+Retained legacy apps/documents and v2 static sites coexist (FIN-53). The
+existing hostname distinction selects both the request spelling and a fixed,
+server-configured exchange origin: `FC_SITES_UPSTREAM_URL` for legacy
+finite.chat (including docs.finite.chat), `FC_SITES_V2_UPSTREAM_URL` for
+finite.site and v2.finite.chat. Explicitly enabled local development sites use
+the v2 setting. Both use the existing service credential. No request supplies
+an upstream, and a missing/invalid/unavailable v2 origin never falls back to
+legacy. The existing Hosted Chat requester assertion remains on the legacy
+setting. Remove legacy selection and `output_url` spelling only when retained
+legacy previews and requester consumers are retired. No grants are mirrored.
+
+Old Sites can accept verified-email previews, but only
 the candidate daemon adds automatic direct-visit handoff. Existing NIP-98
 native clients retain their API; Chat is no longer a dependency of the browser
 bridge. Other products' competing NIP-98 implementations are outside this change.

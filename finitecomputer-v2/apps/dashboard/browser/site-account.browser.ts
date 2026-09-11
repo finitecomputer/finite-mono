@@ -75,7 +75,7 @@ test(`account bridge: ${scenario} viewer of a deployed-version email share`, { t
       FC_WORKOS_AUTH_ENABLED: "0", FC_DASHBOARD_ALLOW_DEV_ACCOUNT_AUTH: scenario === "anonymous" ? "0" : "1",
       FC_DASHBOARD_DEV_EMAIL: scenario === "unshared" ? "stranger@example.com" : "friend@example.com", FC_DASHBOARD_DEV_WORKOS_USER_ID: "user_local_browser_fixture",
       FC_DASHBOARD_DEV_WORKOS_ACCESS_TOKEN: "local-browser-fixture-access-token",
-      FC_SITES_UPSTREAM_URL: `http://localhost:${sitesPort}`, FC_SITES_ALLOW_LOCAL_OUTPUTS: "1", FINITE_SITES_VIEWER_SESSION_TOKEN: token,
+      FC_SITES_V2_UPSTREAM_URL: `http://localhost:${sitesPort}`, FC_SITES_ALLOW_LOCAL_OUTPUTS: "1", FINITE_SITES_VIEWER_SESSION_TOKEN: token,
     });
     await Promise.all([
       ready(`http://127.0.0.1:${sitesPort}/api/v2/healthz`, () => output),

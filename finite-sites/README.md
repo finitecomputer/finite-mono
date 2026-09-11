@@ -240,7 +240,9 @@ visitor can request access or try another email.
 Enable automatic browser handoff with the daemon's
 `FINITE_SITES_ACCOUNT_LOGIN_URL=https://finite.computer/site-auth`. Without it,
 direct visits retain the email form. The dashboard uses the existing
-`FC_SITES_UPSTREAM_URL` and service credential. The account handoff is site-bound,
+`FC_SITES_V2_UPSTREAM_URL` and existing service credential for v2. Retained
+legacy previews keep using `FC_SITES_UPSTREAM_URL`; neither exchange retries
+against the other registry. The account handoff is site-bound,
 single-use, and expires after 60 seconds; emailed links retain their existing
 reusable 15-minute behavior. Both mint the same seven-day cookie, with current
 Sites permissions checked on every content request. See
