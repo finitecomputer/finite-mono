@@ -102,6 +102,18 @@ provider because their browser transport isn't implemented. Other product
 surfaces (provisioning, third-party connection controls, Sites, billing, etc.) aren't configured.
 Connections now shows the current MLS Room device list described below.
 
+## Web bridge retirement audit
+
+The 2026-09-11 [removal audit](WEB_BRIDGE_REMOVAL_AUDIT.md) traces the working
+chat path and the remaining feature/authority dependencies. Text, metadata,
+history and Device sync bypass the hosted service. Embedded Site previews still
+call its signer; the intended verified requester context for Sites tools is omitted
+by the browser path (and has an existing response-contract mismatch noted in
+the audit). Production identity/bootstrap, agent controls, media and
+Brain need replacement paths before the service can be deleted. The audit gives
+state owners, a deletion inventory, rough effort and bridge-absent acceptance
+gates. It is a scope, not an implemented removal or a production cutover plan.
+
 ## Actual data flow
 
 ```text
