@@ -120,13 +120,16 @@ export async function createSiteAccountSession(target: SitePreviewTarget, accoun
       || !(account.source === "workos" || (process.env.NODE_ENV !== "production" && account.source === "dev"))) {
     throw new SitePreviewError("Sign in with a verified email.", 401);
   }
-  const upstream = sitesUpstreamOrigin();
+  const legacy = legacySite(target);
+  // Fixed service origins, never the visitor-supplied site origin. No cross-registry fallback.
+  const upstream = legacy
+    ? sitesUpstreamOrigin()
+    : sitesUpstreamOrigin(process.env.FC_SITES_V2_UPSTREAM_URL ?? "");
   const serviceToken = process.env.FINITE_SITES_VIEWER_SESSION_TOKEN?.trim();
   if (!upstream || !serviceToken) {
     throw new SitePreviewError("Site sign-in isn't available right now.", 503);
   }
-  // The pinned v0.5.3 service uses output_url. Remove at finite.site cutover.
-  const legacy = legacySite(target);
+  // Retained legacy apps/documents still use the v0.5.3 output_url contract.
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), SITES_REQUEST_TIMEOUT_MS);
   try {
