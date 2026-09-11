@@ -288,11 +288,12 @@ so it cannot simply serve as this history source unchanged. Account nsec custody
 can skip the key handoff for this experiment; it cannot skip MLS admission or
 recover pre-admission ciphertext.
 
-The shortest next proof is two independent browser profiles: admit browser B as
-a new Device using online browser A (or an existing native user Device), reuse
-the existing chunk/manifest protocol, import A's history into B, and prove both
-continue chatting in the same Room. Core must supply a stable, authorized Room
-binding rather than deriving one from a random new browser Device.
+To reuse the current full-history linking path, admit browser B as a new Device
+using online browser A (or an existing native user Device), transfer chunks and
+manifests, and prove both continue chatting in the same Room. The lighter
+Agent-assisted admission option below avoids requiring A online by deferring
+history. In either case Core must supply a stable, authorized Room binding
+rather than deriving one from a random new browser Device.
 
 When no other user Device is available, choose and prove a separate recovery
 source: a client-encrypted history backup, or explicitly authorized Agent-supplied
@@ -304,6 +305,154 @@ Do not relax the same-account importer check and assume that is sufficient.
 Do not copy one live MLS checkpoint into two browsers: Web Locks only coordinate
 one browser profile/origin. Independent browsers need distinct Devices, with
 history transfer, rather than concurrent writers sharing one MLS ratchet.
+
+## Follow-up exploration: Core authorization, admission, and optional history
+
+Explored 2026-09-10 against this spike's source. The recommendations below are
+proposals, not implemented behavior or changes to accepted product contracts.
+
+### The object model makes admission smaller than it first appears
+
+One **Room** is one MLS group and ordered log. Topics are Conversations inside
+that Room; resumable Chats are Segments inside Topics. `newChat` in the browser
+adapter publishes `conversation_segment_start` without creating an MLS group.
+The Hermes adapter routes using Room plus conversation/segment identifiers and
+account identity, not a fresh browser Device as the conversation identity.
+Finite Computer's Canonical Agent Room is the durable binding for a Project's
+human and Agent Principals. Therefore one new Device admission per actual Room
+covers future messages across all of that Room's Chats, including Chats created
+later. It is not one membership operation per Hermes session. Separate Projects
+or genuine Rooms still require separate admission.
+
+### Core can authorize; group membership is a separate transition
+
+`FiniteChatDevice::new` already makes a fresh MLS leaf signer and uses the User
+Key to sign `FiniteDeviceCredentialV1`, binding account, Device ID, leaf public
+key and validity interval. Handing the browser the nsec already grants it this
+authorization power. Core could instead sign that same credential after login,
+leaving the leaf private key in the browser, but the current construction API
+and account-signed HTTP requests also need adapting before removing the browser
+nsec. Keep the existing custody shortcut for the smallest next spike.
+
+A User Key alone is not an existing Room's MLS state. There are two MLS-native
+admission mechanisms: a current member creates an Add Commit and encrypted
+Welcome, or a new client makes an authorized External Commit using current
+GroupInfo and public tree material. Identity authorization, group admission,
+and history restoration should have separate completion conditions.
+[RFC 9420, membership and external joins](https://www.rfc-editor.org/rfc/rfc9420.html#section-12.4.3),
+[RFC 9750, multi-device and application policy](https://www.rfc-editor.org/rfc/rfc9750.html#section-6.7).
+
+| Admission option | Fit and remaining work |
+| --- | --- |
+| Agent FiniteChat runtime performs normal Add/Welcome | Recommended for this spike. It already holds the Room state and is needed for live chat anyway. Add a deterministic authenticated enrollment operation; no LLM/tool-call decision. Old browsers can remain offline. |
+| Existing user Device performs normal Add/Welcome | Closest to the native linking implementation. Requires an online user Device with membership in the relevant Rooms. Its current fanout and history helper is same-account-only. |
+| Browser joins using External Commit | Standard MLS option when no existing member should need to be online. FiniteChat currently has no exposed GroupInfo publication/discovery or external-join adapter/relay path; the client discards returned GroupInfo. Requires authorization, current-epoch publication, commit conflict handling and persistence. More work here than Add/Welcome. |
+| Retain a hosted user Device for enrollment/history | Reuses much of today's implementation but keeps a server MLS state owner and much of the operational machinery this spike is trying to remove. It is optional, not a prerequisite for browser MLS. |
+
+An Agent can be the ordinary MLS member issuing Add/Welcome. The relay's
+`validate_commit_room_membership` accepts active-member commits; its admin
+metadata does not gate cross-account additions, as explicitly exercised by
+`sqlite_room_admin_metadata_does_not_gate_membership_commits_and_survives_restart`.
+The lower-level `prepare_add_member_commit` verifies the target's account-signed
+KeyPackage. In contrast, `start_link_fanout` and `accept_link_device_bootstrap`
+require the source and target to share an account. Do not confuse those helper
+restrictions with an MLS prohibition on Agent-assisted Device admission.
+
+The new enrollment operation still needs its own authority boundary: bind the
+user account, exact Room, Device ID, leaf/KeyPackage, expiry and request ID to
+Core's authenticated approval (under the current custody assumption an
+account-signed grant is possible). The Agent checks the requesting human is
+already authorized in that exact Room. A browser is not yet a member, so this
+request cannot depend on sending inside that Room. Define a bounded pre-join
+request/inbox path or authenticated onboarding endpoint. Existing management
+telemetry is not a command channel, and the existing Agent Platform Channel
+must not be assumed to solve pre-admission access. This is new plumbing.
+No chat plaintext or MLS private state needs to pass through Core.
+
+### Sync choices, independently of admission
+
+| Choice | What the new browser gets | Main cost or limitation |
+| --- | --- | --- |
+| Future messages plus a small metadata snapshot | Existing Topic/Chat IDs, names and archive state; messages from its admission onward | Smallest useful option. Old transcript bodies stay absent. |
+| Agent-served history on demand | Above, then older messages for the Chat the user opens | Recommended follow-on. One-way bounded reads from the Agent's durable FiniteChat store; explicit source authorization, stable IDs/cursors, restart and partial-history semantics. |
+| Existing linked-Device full history | Complete retained history from another user Device | Reuses native chunks/manifests and atomic import, but needs browser store porting and an available source; full export currently participates in enrollment completion. |
+| Encrypted archive backup | Saved history even when all previous Devices are unavailable | Requires backup writer, coverage/freshness and key-recovery contracts; admission remains separate. A history archive is not a cloned live MLS Device checkpoint. |
+
+A metadata snapshot is necessary for a usable existing Chat list: creation,
+rename and archive events may predate the new Device. Today's browser projection
+does not create a Chat row merely from a new message carrying an unknown Segment
+ID. Replaying old organizational events as new global events could also change
+other Devices' active Chat or resurrect stale metadata. Prefer a target-scoped,
+versioned snapshot with an explicit Room sequence boundary, then ordinary live
+events. Preserve messages arriving during admission/snapshot transfer, and test
+concurrent rename/archive/new-Chat operations. Sending the snapshot in the joined
+Room keeps it encrypted; existing Devices must not reset their projections when
+they see another Device's bootstrap.
+
+“Future only” does not mean the browser never syncs: it still catches up on MLS
+Commits and messages that arrived while it was offline after joining. All
+Devices consume one authoritative ordered Room log. There is no need for
+browser-to-browser database reconciliation for that live traffic. Keep history
+backfill additive and separate from the live MLS cursor/ratchet. The Agent's
+model context can retain old turns even when the browser intentionally shows no
+pre-admission transcript; the UI should make that distinction understandable.
+
+The existing native `link_device` computes completion from both membership
+fanout and emitted history manifests. Removing history sends without changing
+that completion predicate would leave enrollment pending forever. Introduce
+per-Room membership readiness independent of optional history progress; do not
+make one unavailable Room or a large transcript block chatting in another Room.
+Agent-provided history must come from its durable FiniteChat transcript, not an
+LLM reconstruction. It can only supply history it actually retained and was
+allowed to see, and it does not replace the production Recovery Set.
+
+### Other MLS implementations
+
+- **Wire:** its current multi-device support page documents new Devices without
+  old conversation history, with conversations synchronized going forward.
+  Its server documentation also records External Commit support. This validates
+  the future-only product choice; its support explanation about per-device
+  encryption should not be substituted for an MLS wire-format description.
+  [Wire multi-device](https://support.wire.com/hc/en-us/articles/115003858445-Using-Wire-on-multiple-devices),
+  [Wire server External Commit support](https://docs.wire.com/v0.0.0/changelog/changelog.html).
+- **XMTP:** installations have independent keys. Its history feature requests
+  an encrypted archive from an online existing installation, coordinated by a
+  user-device MLS sync group and archive server. Its backup API explicitly
+  separates restored read-only history from later live group admission. Useful
+  precedent for treating admission and archive availability separately, rather
+  than copying one writable MLS state between installations.
+  [XMTP history sync](https://docs.xmtp.org/chat-apps/list-stream-sync/history-sync),
+  [XMTP archive backups](https://docs.xmtp.org/chat-apps/list-stream-sync/archive-backups),
+  [XMTP identity](https://docs.xmtp.org/protocol/identity).
+- **Marmot:** particularly relevant because it also uses Nostr identities and
+  MLS. Its current multi-device document is explicitly a branch draft, proposes
+  authorized External Commits with distinct device leaves, and leaves historical
+  messages out of scope. This is design precedent, not evidence of a shipped,
+  solved multi-device history experience. The old MIP document layout has been
+  replaced; use the current feature specification.
+  [Marmot multi-device draft](https://github.com/marmot-protocol/marmot/blob/master/features/multi-device.md).
+
+### Smallest next experiment and its acceptance criteria
+
+1. Two independent browser profiles, distinct Device keys, one Core-authorized
+   human account and the same canonical Agent Room. Start A, then take A offline
+   and enroll B through the Agent's normal Add/Welcome path.
+2. B receives a minimal encrypted Topic/Chat snapshot and future messages; no
+   old transcript transfer. Opening a known Chat uses its existing Segment ID,
+   preserving the real Hermes context.
+3. Bring A back. Both see each other's new messages and Chats across reloads.
+   Existing pre-join transcript remains on A; there is no replacement Room,
+   shared live checkpoint or hosted chat bridge.
+4. Interrupt enrollment after Commit acceptance, before Welcome acknowledgement,
+   and during concurrent sends. Retry the same enrollment safely; do not create
+   duplicate membership. Reject wrong-account, wrong-Room, expired and substituted
+   KeyPackage grants. Handle an epoch conflict by bounded sync/reconciliation.
+5. Create/rename/archive a Chat during the metadata snapshot and verify no lost
+   messages or stale sidebar state. An offline Agent leaves a clear pending
+   admission, and partial multi-Room progress does not disable ready Rooms.
+6. Only after that works, add paginated per-Chat historical reads with duplicate,
+   interruption, live-tail and missing-source-history tests. History failure
+   must leave already-working live chat working.
 
 ## Work required for a real product
 
