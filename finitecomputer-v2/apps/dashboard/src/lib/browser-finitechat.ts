@@ -1,5 +1,6 @@
 // Feasibility adapter: real dashboard projections over the real Rust/WASM Device.
 // This module runs only in the browser. Nothing forwards plaintext to Next or Hermes HTTP.
+import { BrowserChatStore } from "./browser-chat-store";
 import type { HostedChatAction, HostedChatMessage, HostedChatState, HostedChatTopic } from "./hosted-web-device";
 
 type Payload = {
@@ -24,15 +25,24 @@ type WasmChat = {
   publish_event: (kind: string, topic: string, payload: string) => Promise<string>;
   sync: () => Promise<string>;
   snapshot: () => string;
+  checkpoint: () => string;
+  free: () => void;
 };
 type WasmModule = {
   default: (options: { module_or_path: string }) => Promise<void>;
-  BrowserChat: new (nsec: string, server: string, device: string) => WasmChat;
+  BrowserChat: new (nsec: string, server: string, device: string, saved: string | undefined, persist: (checkpoint: string) => Promise<void>) => WasmChat;
 };
 const nonNotifying = { push: "never", unread: "never", command_inbox: "never" };
 
 export class BrowserFiniteChat {
   private client!: WasmChat;
+  private wasm!: WasmModule;
+  private nsec!: string;
+  private server!: string;
+  private store!: BrowserChatStore;
+  private deviceId = "";
+  private storedRevision = 0;
+  private lastSaved = "";
   private agent!: string;
   private agentNpub!: string;
   private snapshot!: Snapshot;
@@ -59,26 +69,68 @@ export class BrowserFiniteChat {
     this.project();
     return this.state!;
   }
+  private async save(wasm: string) {
+    const saved = { deviceId: this.deviceId, wasm, topic: this.topic, chat: this.chat };
+    const serialized = JSON.stringify(saved);
+    if (serialized === this.lastSaved) return;
+    this.storedRevision = await this.store.write(saved, this.storedRevision);
+    this.lastSaved = serialized;
+  }
+
+  private operate<T>(operation: () => Promise<T>): Promise<T> {
+    return this.serial(() => this.store.exclusive(async () => {
+      try {
+        const record = await this.store.read();
+        if (!record && this.deviceId) throw new Error("Browser Device storage disappeared. Reload to enroll a replacement; existing history is not recoverable from the nsec alone.");
+        if (!this.client || record?.revision !== this.storedRevision) {
+          const saved = record ? await this.store.openCheckpoint(record) : undefined;
+          this.client?.free();
+          this.client = undefined!;
+          this.deviceId = saved?.deviceId ?? `browser_${crypto.randomUUID()}`;
+          this.storedRevision = record?.revision ?? 0;
+          this.lastSaved = saved ? JSON.stringify(saved) : "";
+          // A tab's selection is local while it is open. On reload, restore the last durable selection.
+          if (!this.state && saved) { this.topic = saved.topic; this.chat = saved.chat; }
+          this.client = new this.wasm.BrowserChat(this.nsec, this.server, this.deviceId, saved?.wasm, checkpoint => this.save(checkpoint));
+          this.snapshot = JSON.parse(this.client.snapshot()) as Snapshot;
+        }
+        return await operation();
+      } catch (error) {
+        // In-memory MLS may have advanced before a failed save. Never keep using it.
+        this.client?.free();
+        this.client = undefined!;
+        this.error = String(error); this.connected = false; this.notify();
+        throw error;
+      }
+    }));
+  }
+
   async connect() {
-    try {
-      const moduleUrl = "/wasm-spike/finitechat_wasm.js";
-      const wasm = await import(/* webpackIgnore: true */ /* turbopackIgnore: true */ moduleUrl) as WasmModule;
-      await wasm.default({ module_or_path: "/wasm-spike/finitechat_wasm_bg.wasm" });
-      const response = await fetch("/api/wasm-spike/bootstrap", { method: "POST", cache: "no-store" });
-      if (!response.ok) throw new Error(`Local Core key handoff failed: ${response.status}`);
-      const bootstrap = await response.json();
-      this.agent = bootstrap.agentAccountId;
-      this.agentNpub = bootstrap.agentNpub;
-      const id = crypto.randomUUID();
-      this.client = new wasm.BrowserChat(bootstrap.nsec, bootstrap.serverUrl, `browser_${id}`);
-      bootstrap.nsec = "";
-      await this.client.connect(this.agent, `wasm_${id}`);
-      await this.publish("conversation_create", "home", { title: "Home", description: null, external_topic: null, skill_binding: null });
-      await this.newChat("home");
+    const moduleUrl = "/wasm-spike/finitechat_wasm.js";
+    this.wasm = await import(/* webpackIgnore: true */ /* turbopackIgnore: true */ moduleUrl) as WasmModule;
+    await this.wasm.default({ module_or_path: "/wasm-spike/finitechat_wasm_bg.wasm" });
+    const response = await fetch("/api/wasm-spike/bootstrap", { method: "POST", cache: "no-store" });
+    if (!response.ok) throw new Error(`Local Core key handoff failed: ${response.status}`);
+    const bootstrap = await response.json();
+    this.agent = bootstrap.agentAccountId; this.agentNpub = bootstrap.agentNpub;
+    this.nsec = bootstrap.nsec; this.server = bootstrap.serverUrl;
+    bootstrap.nsec = "";
+    this.store = await BrowserChatStore.open(this.nsec, this.server, this.agent);
+    await this.operate(async () => {
+      await this.client.connect(this.agent, `wasm_${this.deviceId}`);
+      this.snapshot = JSON.parse(this.client.snapshot()) as Snapshot;
+      if (!this.snapshot.events.some(event => event.conversation_id === "home" && event.kind.type === "conversation_create")) {
+        await this.publish("conversation_create", "home", { title: "Home", description: null, external_topic: null, skill_binding: null });
+      }
+      const chats = this.snapshot.events.filter(event => event.kind.type === "conversation_segment_start");
+      if (chats.length === 0) await this.newChat("home", `initial-${this.deviceId}`);
+      else if (!this.chat) {
+        const latest = chats.at(-1)!;
+        this.topic = latest.conversation_id ?? "home"; this.chat = latest.payload!.segment_id!;
+      }
+      await this.save(this.client.checkpoint());
       this.accept(this.client.snapshot());
-    } catch (error) {
-      this.error = String(error); this.connected = false; this.notify(); throw error;
-    }
+    });
   }
   private async publish(type: string, topic: string, payload: object, name?: string) {
     const kind = name ? { type: "namespaced", name, policy: nonNotifying } : { type };
@@ -93,13 +145,13 @@ export class BrowserFiniteChat {
     this.topic = topic; this.chat = id;
   }
   async sync() {
-    return this.serial(async () => {
+    return this.operate(async () => {
       try { return this.accept(await this.client.sync()); }
       catch (error) { this.error = String(error); this.connected = false; this.notify(); throw error; }
     });
   }
   async dispatch(action: HostedChatAction): Promise<HostedChatState> {
-    return this.serial(async () => {
+    return this.operate(async () => {
       if ("SendChatMessage" in action || "SendTopicMessage" in action || "SendMessage" in action) {
         const send = "SendChatMessage" in action ? action.SendChatMessage : "SendTopicMessage" in action ? action.SendTopicMessage : action.SendMessage;
         if (send.room_id !== this.snapshot.room) throw new Error("Wrong browser Room");
@@ -126,6 +178,7 @@ export class BrowserFiniteChat {
       } else if (!("MarkRoomRead" in action || "SetTyping" in action || "StartRuntime" in action || "OpenRoom" in action || "RefreshDevices" in action)) {
         throw new Error("This action is not implemented in the browser spike yet.");
       }
+      await this.save(this.client.checkpoint());
       this.project();
       return this.state!;
     });
@@ -192,8 +245,7 @@ export class BrowserFiniteChat {
   }
 }
 
-// One Device per document, including React StrictMode remounts and sidebar navigation.
-// Reload persistence is intentionally deferred and recorded in HOW_TO_DO_IT_FOR_REAL_LOG.
+// One adapter per document; IndexedDB + Web Locks keep one Device across tabs/reloads.
 let session: Promise<BrowserFiniteChat> | undefined;
 export function browserFiniteChatSession() {
   return session ??= (async () => { const client = new BrowserFiniteChat(); await client.connect(); return client; })()

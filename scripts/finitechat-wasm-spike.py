@@ -151,7 +151,8 @@ def main():
               "service": service_url, "pids": [process.pid for process in processes]}, indent=2))
         print(f"Open {origin}{CHAT_PATH}\nReal Hermes + Finite Private; no hosted web bridge.\nDisposable state and logs: {state}\nCtrl-C stops only this run.", flush=True)
         if args.action == "test":
-            run("node", "--import", "tsx", "--test", "browser/finitechat-wasm.browser.ts", cwd=DASHBOARD, env=env)
+            run("node", "--import", "tsx", "--test", "--test-concurrency=1", "browser/finitechat-wasm.browser.ts",
+                "browser/finitechat-wasm-persistence.browser.ts", cwd=DASHBOARD, env=env)
         else:
             while all(process.poll() is None for process in processes):
                 time.sleep(0.5)

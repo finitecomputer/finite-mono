@@ -2096,6 +2096,25 @@ impl FiniteChatDevice {
     // * `currency_verified` (in-memory) refuses sends from a loaded state
     //   until one sync tick has completed for the room in this process.
 
+    /// Shared ordered-sync transition for transports with their own durable store.
+    /// Persist rewind evidence before surfacing DeviceStateBehindServer; persist
+    /// cursor, MLS state and any projected events together before exposing them.
+    pub fn apply_synced_log_entry(
+        &mut self,
+        room_id: &str,
+        entry: &RoomLogEntry,
+    ) -> Result<Option<AppliedLogEntry>, ClientStoreError> {
+        apply_log_entry_in_memory(self, room_id, entry)
+    }
+
+    /// Call only after consuming every page of an authenticated Room sync pass.
+    /// This does not clear rewind evidence or bypass the sender-currency gate.
+    pub fn finish_room_sync(&mut self, room_id: &str) -> Result<(), ClientError> {
+        self.complete_currency_initialization(room_id)?;
+        self.mark_room_currency_verified(room_id);
+        self.ensure_current_for_send(room_id)
+    }
+
     /// True once a sync tick has completed for `room_id` since this state
     /// was loaded, or the room was created/joined in this process.
     pub fn room_currency_verified(&self, room_id: &str) -> bool {
@@ -3224,6 +3243,16 @@ impl FiniteChatDevice {
 }
 
 impl FiniteChatDeviceState {
+    /// Portable snapshot codec shared by native storage and browser checkpoints.
+    /// Contains Device secrets: callers must seal it before durable storage.
+    pub fn encode_snapshot(&self) -> Result<Vec<u8>, ClientStoreError> {
+        encode_device_state_with_version(self, CLIENT_STATE_SNAPSHOT_VERSION)
+    }
+
+    pub fn decode_snapshot(bytes: &[u8]) -> Result<Self, ClientStoreError> {
+        decode_device_state(bytes)
+    }
+
     fn validate_limits(&self) -> Result<(), ClientError> {
         self.device_ref.validate_limits()?;
         validate_bytes_non_empty("signer_public_key", self.signer_public_key.len())?;

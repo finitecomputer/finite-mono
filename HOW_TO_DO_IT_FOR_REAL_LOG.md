@@ -35,7 +35,11 @@ admission and Hermes' allowed-users list. No existing chat state is opened or mi
 Acceptance: real dashboard composer/transcript/sidebar; real Hermes inference
 and tools; real encrypted browser/Agent round trips; direct signed relay calls;
 conversation context and separate chat sessions; no hosted bridge calls.
-Migration and mixed-version proof remain out of scope per the spike request.
+The persistence extension additionally requires reload and browser-process restart
+to reuse one Device/Room/transcript, concurrent tabs to share a single MLS writer,
+and interrupted sends to recover without duplicate delivery. New-browser history
+transfer is investigated below, not implemented. Migration and mixed-version
+proof remain out of scope per the spike request.
 
 ## Run it
 
@@ -55,9 +59,16 @@ Ctrl-C stops only this run's processes. Fresh state lives in `/tmp/fc-wasm-*`,
 with a link under `.local-state/wasm-spike/`. Hermes creates Unix sockets beneath
 its home; the short path avoids macOS' socket path length limit. Logs and
 synthetic state remain for inspection. Each launch refuses occupied ports and
-creates a new state directory. **Browser state is in memory: refreshing the page
-creates a new Device/Room and loses that browser's access to the old transcript.**
-The Agent/relay retain their own state. An nsec alone does not recover MLS history.
+creates a new state directory and fresh identities. **Within a run, the same
+browser profile now reopens its encrypted IndexedDB Device, Room, and transcript
+across page reloads and browser restarts.** Tabs on the same origin share this
+Device using Web Locks. Restarting the entire harness intentionally creates a
+new fixture account and therefore a new browser storage namespace.
+
+A different browser/profile, incognito session, origin, or cleared/evicted store
+still creates a fresh Device/Room in this spike and cannot see old history.
+An nsec alone does not recover MLS history. Old memory-only spike sessions are
+not migrated; reload the dashboard to start using persistence.
 
 ```sh
 # Build the optimized browser client and native CLI/relay with pinned Nix tools.
@@ -72,7 +83,11 @@ scripts/finitechat-wasm-spike up --skip-build
 
 The test needs an existing Chromium/Chrome or Playwright executable and makes
 real Finite Private inference requests. It checks a terminal calculation, a
-remembered code, a separate new chat, and return to the prior transcript.
+remembered code, a separate new chat, and return to the prior transcript. A second
+test uses a disposable persistent Chromium profile to exercise reload, concurrent
+tabs, browser-process restart, delivery/receipt interruption, failed IndexedDB
+writes, and an authentic but stale checkpoint. Both use real relay and Hermes
+traffic; only browser I/O faults are injected.
 No Core, Runner, Hosted Web Device, or devfinity stack is needed. The runner
 starts four processes: relay, native FiniteChat daemon, Hermes gateway, Next.
 
@@ -146,13 +161,13 @@ panic abort, then the pinned `wasm-bindgen --target web`. No wasm-opt pass yet.
 
 | Artifact | Raw bytes | gzip (level 9) bytes |
 | --- | ---: | ---: |
-| WASM | 3,775,150 | 1,959,686 |
-| JS loader | 29,205 | 6,500 |
-| Total | 3,804,355 | 1,966,186 |
+| WASM | 4,106,370 | 2,042,169 |
+| JS loader | 29,752 | 6,547 |
+| Total | 4,136,122 | 2,048,716 |
 
-That's **3.60 MiB raw / 1.87 MiB gzip for WASM**, or **1.88 MiB gzip including
-the loader**. Brotli gives 1,742,595 bytes for WASM plus 5,633 bytes of JS
-(**1.67 MiB total**). These are compressed file measurements, not a measurement of the
+With persistence included, that's **3.92 MiB raw / 1.95 MiB gzip for WASM**,
+or **1.95 MiB gzip including the loader**. Brotli gives 1,798,030 bytes for WASM
+plus 5,679 bytes of JS (**1.72 MiB total**). These are compressed file measurements, not a measurement of the
 whole Next dashboard or a promise about server compression configuration.
 The initial debug artifact was 10,418,033 bytes raw / 3,458,752 bytes gzip,
 plus 28,464 / 6,389 bytes of loader JS.
@@ -172,10 +187,123 @@ plus 28,464 / 6,389 bytes of loader JS.
 - Dashboard typecheck, changed-file eslint, production Next build, WASM/native
   wrapper clippy (`-D warnings`) pass. The production build rejects both
   `/wasm-spike` and key bootstrap with 404 even with the spike flag set. The
-  Next build reports 12 file-tracing warnings through the unchanged
-  `workspace-paths.ts`/`fc-dashboard.ts` imports. The prior native client regression run
-  passed 92 tests with one performance benchmark ignored; this extension did
-  not change the native client implementation.
+  latest Next build reports 17 file-tracing warnings through the unchanged
+  `workspace-paths.ts`/`fc-dashboard.ts` imports (the earlier build reported 12). The prior native client regression run
+  passed 92 tests with one performance benchmark ignored. The persistence
+  extension reran those tests and adds portable snapshot/sync entry points;
+  native storage and transport behavior remain unchanged.
+- The real persistence browser matrix passed (165 seconds): the same Device and
+  Room survive page reload, two concurrent tabs, and a new browser process. Two
+  tabs converge on both Hermes replies. Killing a tab before delivery or after
+  actual relay acceptance retries byte-identical ciphertext; the accepted retry
+  returns the original receipt and produces one transcript entry. An aborted
+  IndexedDB write publishes nothing and reload restores a sendable Device.
+  Rolling back to an older authentic checkpoint triggers native sender-currency
+  protection with no new send, Room, or membership Commit. Every dashboard API
+  except key bootstrap is blocked throughout the test.
+- Focused existing tests passed:
+  `hosted_device_chats_with_an_agent_and_restarts_with_the_transcript` and
+  `startup_finalizes_durable_device_link_staging_and_exposes_exact_receipt`.
+
+## Browser persistence and crash boundaries
+
+The sole writer is `src/lib/browser-chat-store.ts` in the dashboard. It seals one
+versioned checkpoint in IndexedDB (`finitechat-wasm` / `devices`) using AES-GCM
+with a fresh nonce, a nonextractable WebCrypto key derived from the supplied nsec,
+and the account/relay/Agent scope as authenticated data. The nsec itself is not
+stored. This protects an offline database copy; it does not protect against
+same-origin malicious JavaScript, which also receives the nsec in this design.
+
+`BrowserFiniteChat` holds an exclusive Web Lock over reading the latest revision,
+restoring the WASM client, applying each operation, and committing its writes.
+A compare-and-swap revision check catches unexpected writers. Other tabs reload
+the current checkpoint before operating. IndexedDB transaction completion with
+strict durability is the save boundary. Missing capabilities, unreadable state,
+and write failures fail closed; the adapter discards any advanced in-memory MLS
+state after an operation fails. There is no localStorage or in-memory fallback.
+
+The checkpoint contains the native `FiniteChatDeviceState` codec (Device signer,
+OpenMLS storage, pending Commit, membership and sender-currency state), ordered
+sync cursor, decrypted event projection inputs, selected chat, admission journal,
+and one pending send with its exact ciphertext, idempotency key and plaintext.
+The entire checkpoint, including that plaintext, is sealed before persistence.
+This deliberately favors a small implementation over storage/memory efficiency.
+
+| Boundary | Durable state and restart behavior |
+| --- | --- |
+| Before Room creation | Device and exact bootstrap request/claimed Agent KeyPackage saved; restart reuses the request |
+| Before membership Commit | Pending MLS state and exact Commit/Welcome saved; restart republishes the same Commit |
+| Before message publication | Consumed MLS generation and exact outgoing envelope saved together; no send if storage fails |
+| Relay accepts, receipt is lost | Resend saved bytes/idempotency key; reconcile the original receipt before reading own log entries |
+| Receipt saved | Own-send high-water mark, local event, and cleared pending send saved together |
+| Incoming sync page | Native transition updates MLS, cursor, and event inputs; save together before exposing the page |
+| Older checkpoint restored | Native ordered-sync/currency checks persist rewind evidence and refuse sends |
+
+Initial admission is journaled but its full crash matrix has not been exercised
+in Chromium. The tested failures cover application sends and storage. The shared
+native currency gate is used rather than skipping own messages on replay.
+
+**Contract deviation:** `finitechat/CONTEXT.md` currently specifies no durable
+client outbox and synchronous send acceptance. This spike has one durable pending
+send to reconcile uncertain acceptance automatically. This is an experiment,
+not a change to that native product contract. Before shipping, define pending,
+rejected, retry and cancellation semantics, and reconcile the draft with eventual
+acceptance; currently a transport failure can retain a draft even if retry later
+succeeds. Do not encourage a manual resend as the recovery path.
+
+## Investigation: where old chats come from
+
+**Hosted web restart recovery is primarily a durable Device reopening, not a
+fresh browser acquiring old MLS secrets.** In
+`finitechat/crates/finitechat-hosted-device/src/lib.rs`, `user_root`,
+`chat_data_dir`, and `runtime_for` reopen the same per-user identity and SQLite
+store using the stable `hosted-web` Device. All browser sessions are views onto
+that server Device. The hosted HTTP restart test above proves the retained
+transcript. ADR 0012 (`finitechat/docs/adr/0012-hosted-agent-room-binding.md`)
+also requires replaying the exact journaled Room binding/admission artifacts;
+ordinary restarts must not create a new binding.
+
+Agent startup in `finitechat/containers/agent/recover_chat_boot.py` reconciles
+known-good configuration/home channels and calls `finitechat hermes recover` to
+finalize interrupted turns while preserving the existing client store. It is
+not a new-browser history recovery endpoint.
+
+**There is already a real encrypted linked-Device history-transfer protocol.**
+ADR 0014 (`finitechat/docs/adr/0014-nip-ab-device-pairing.md`) separates account
+key transfer from subsequent resumable Device enrollment. In
+`finitechat/crates/finitechat-core/src/lib.rs`, `link_device`,
+`advance_link_device_bootstrap_export`, and `send_link_device_bootstrap` first
+admit the target's distinct MLS Device, then transfer encrypted, chunked history
+at fixed per-Room membership fences. The target stages chunks invisibly and
+imports a complete validated manifest with an exact receipt;
+`accept_link_device_bootstrap` and `finish_link_device_bootstrap` implement that
+side. The focused startup test proves a restart can finalize durable staged
+history. These source/export and target/import paths live in native Core/store
+code that the WASM dashboard does not yet use.
+
+The important limitation is explicit in `accept_link_device_bootstrap`: the
+source account must equal the target user's account, the target Device must
+match, and the Room must already be joined. An Agent is a different Principal,
+so it cannot simply serve as this history source unchanged. Account nsec custody
+can skip the key handoff for this experiment; it cannot skip MLS admission or
+recover pre-admission ciphertext.
+
+The shortest next proof is two independent browser profiles: admit browser B as
+a new Device using online browser A (or an existing native user Device), reuse
+the existing chunk/manifest protocol, import A's history into B, and prove both
+continue chatting in the same Room. Core must supply a stable, authorized Room
+binding rather than deriving one from a random new browser Device.
+
+When no other user Device is available, choose and prove a separate recovery
+source: a client-encrypted history backup, or explicitly authorized Agent-supplied
+history. The latter needs a deliberate protocol/policy extension: proof that the
+new Device belongs to the user allowed in that Room, bounded export scope,
+source provenance, chunk/manifest integrity, atomic import and crash resumption.
+Do not relax the same-account importer check and assume that is sufficient.
+
+Do not copy one live MLS checkpoint into two browsers: Web Locks only coordinate
+one browser profile/origin. Independent browsers need distinct Devices, with
+history transfer, rather than concurrent writers sharing one MLS ratchet.
 
 ## Work required for a real product
 
@@ -186,17 +314,19 @@ plus 28,464 / 6,389 bytes of loader JS.
    compromised first-party bundle can steal an exported nsec; decide if a
    bounded signer/device enrollment design is preferable. Do not reuse the
    unauthenticated local fixture as an account API.
-2. **Browser Device persistence.** Select IndexedDB or OPFS/SQLite-WASM and
-   persist the Device signer, MLS storage, pending admission/Commit state,
-   cursors and app events atomically. Persist before publishing consumed key
-   material. Enforce a single writer across tabs/workers; test crashes between
-   encryption, server acceptance and save. The current browser wrapper owns a
-   transient cursor separately and is expressly not a durable sync engine.
-3. **Recovery and multiple Devices.** Restoring an nsec restores account
-   signing authority, not MLS state or old history. Design Room admission,
-   history transfer, browser storage loss/eviction, new browsers, revocation,
-   quota failure, and empty-target restore. Keep the existing sender currency
-   gate and rollback protection through the browser storage path.
+2. **Browser Device persistence.** The basic encrypted checkpoint, exact-send
+   journal, Web Lock and restart/currency proofs now work. Replace full JSON
+   snapshot rewrites with bounded storage and incremental projections; define
+   schema/WASM upgrades and credential renewal (the spike issues 24-hour Device
+   credentials). Test storage corruption, eviction, initial admission crashes,
+   worker/tab suspension and all supported browsers. Normalize key/relay scope
+   encoding. Persistent-storage permission is best effort, not a backup.
+3. **Recovery and multiple Devices.** Implement the linked-Device source and
+   target paths described above in browser storage, then prove new-profile and
+   empty-target recovery. Explicitly choose recovery when no user Device has
+   history; Agent-sourced import needs its own authorization contract. Prove
+   revocation, partial/missing/conflicting chunks and retry across restart.
+   Native sender currency/rollback protection is already wired and tested.
 4. **Runtime/transport boundaries.** Split portable Device/codec code from
    native filesystem/SQLite workers instead of accumulating target guards in
    a large file. Share HTTP validation/encoding between async and blocking
@@ -205,16 +335,16 @@ plus 28,464 / 6,389 bytes of loader JS.
 5. **Remaining Agent Runtime proof.** Real Hermes inference, terminal tools,
    allowlist admission, per-chat context and separate sessions now work. Still
    prove transient token streams, cancellation, attachment/tool approval flows,
-   process restart/recovery, and interrupted/outstanding work. Native daemon
-   durability is not evidence of browser crash safety.
+   Agent process restart/recovery, and interrupted/outstanding work. Browser
+   crash tests now pass; they do not prove every Agent Runtime recovery edge.
 6. **Complete dashboard integration.** The actual UI now works for text, tool
    output, topics and chats. Replace the temporary TypeScript projector with
    shared canonical projections; support runtime snapshots/commands, activity,
    streaming finalize, receipts, attachments, Brain/Sites signing and cards.
    Bound incremental projection work instead of rebuilding an ever-growing
    event array on every poll. Validate incoming payloads and reconcile all
-   native policies for titles, archives, edits and selection. Test refresh,
-   multi-tab, revocation and all unsupported actions before enabling them.
+   native policies for titles, archives, edits and selection. Extend the existing
+   reload/multi-tab proof to revocation and unsupported actions before enabling them.
    Project-to-Room binding remains navigation metadata, never membership
    authority; implement authenticated creation/admission explicitly.
 7. **Browser networking.** Add reviewed CORS to the service-owned public

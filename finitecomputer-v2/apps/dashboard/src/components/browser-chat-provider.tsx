@@ -16,13 +16,14 @@ export function BrowserChatProvider({ children }: { children: ReactNode; machine
         const session = await browserFiniteChatSession();
         if (!active) return;
         setClient(session);
+        setError(null);
         unsubscribe = session.subscribe(() => update(value => value + 1));
         const poll = async () => {
           try { await session.sync(); } catch { /* Exposed as transportError; retry on next poll. */ }
           if (active) timer = setTimeout(poll, 500);
         };
         timer = setTimeout(poll, 500);
-      } catch (error) { if (active) setError(String(error)); }
+      } catch (error) { if (active) { setError(String(error)); timer = setTimeout(start, 1500); } }
     }
     void start();
     return () => { active = false; clearTimeout(timer); unsubscribe?.(); };
