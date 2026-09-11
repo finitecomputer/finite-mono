@@ -24,6 +24,78 @@ The architectural win is real. The remaining work is replacing the service's
 other responsibilities and proving the new owners, not discovering how to get
 basic chat through MLS.
 
+## Revised target after PR #854 and the Iroh work
+
+Paul clarified the direction after the initial audit. Reviewed PR
+[#854](https://github.com/finitecomputer/finite-mono/pull/854) at
+`b0698431a3408da1db148b5fed4c933454926ffb` (open, not merged when read).
+The findings above describe this spike's source snapshot; the target removal
+scope must incorporate that work:
+
+- **Site viewing is already addressed by #854.** It deletes the dashboard
+  `hostedDeviceSitesIdentityProvider` call and uses the existing WorkOS account's
+  verified email with Sites' own viewer-session exchange/cookie. Do not port a
+  browser Nostr viewer signer that this direction no longer needs. Sites still
+  evaluates its own existing grants; login is not permission to view every Site.
+- **Site creation on behalf of a user is separate.** #854 does not change
+  `createHostedRequesterContext` or the hosted-requester assertion issuer.
+  The contract mismatch below therefore remains in that caller. Once Core
+  supplies the stable user public identity and authenticated account/Project
+  context, the existing assertion can be issued without consulting a hosted
+  chat Device and carried in the browser's encrypted message. It does not
+  inherently require a new permission protocol.
+- **User keypair custody moves to Core, encrypted.** Browser handoff consumes
+  that same stable account identity. Device MLS checkpoints remain local to
+  the browser and agent; the public Project/Agent mapping is separate from
+  private key custody.
+- **Agent commands use direct FiniteChat or the Iroh work.** The linked task's
+  saved `docs/research/2026-09-10-browser-iroh-hermes-feasibility.md` records real
+  browser HTTP/WebSocket/media and admission revocation/expiry proofs. Core
+  runtime-credential registration/activation foundations are implemented
+  locally. Launcher delivery/retry, production admission distribution and actual
+  agentd integration remain incomplete. Reuse that boundary if chosen; do not
+  count a second independent control/auth system as required for this spike.
+
+The prior 2–3-week / 4–8-engineer-week totals are withdrawn as a useful estimate
+of *bridge removal*. They bundled production reliability, ancillary feature
+coverage, and work already in progress. Estimate the narrowed integration tasks
+after choosing the agent-control transport and identifying the exact portable
+runtime extraction. The source inventory remains useful.
+
+### What the bridge actually supplied for media and chat state
+
+The browser spike compiles `FiniteChatDevice` and protocol/MLS support, but not
+`finitechat-core`'s complete application runtime. The hosted service ran that
+ordinary native runtime and presented its output over HTTP/SSE. It did not add
+special media, typing or receipt protocols.
+
+For media, `finitechat-blob` already separates `prepare_attachment_upload`,
+`finish_attachment_upload`, HTTP request/response codecs, and
+`decrypt_attachment_ciphertext` from I/O. The browser needs wrappers plus async
+Fetch, File/Blob buffers, object URLs/cache, and attachment message projection.
+The agent already consumes the same encrypted references. Voice recording UI
+also already exists. Blob WASM exposure still needs a build/roundtrip proof;
+this audit does not claim that wrapper is implemented.
+
+For chat state, `finitechat-core` already implements `mark_room_read`,
+`set_typing`, `ChatProjectionState`, ephemeral activity expiry, profile lookup,
+and Device operations. The browser's no-ops/empty arrays are scope shortcuts.
+Extract/reuse the applicable logic with browser storage and async I/O instead
+of inventing parallel semantics in TypeScript. Durable status/edit messages
+already travel through the spike; live activity needs the existing ephemeral
+channel, and local unread/read state needs persistence.
+
+Brain identity operations are a separate product boundary: existing signing
+and resource-bound grant operations can move to a browser identity provider.
+They are not new MLS mechanisms, but #854 only removes Sites viewer signing;
+it does not migrate Brain's provider or permissions.
+
+The distinctive service properties to replace deliberately are a durable
+server-side human Device, its always-running sync/runtime, and a consistent
+application-state projection. Browser persistence, agent admission and agent
+history already replace much of the first two in this spike. Browser lifetime
+and shared portable application logic remain the substantive integration work.
+
 ## What “web bridge” means here
 
 The deletion target is `finitechat-hosted-device`: a server-side human Device
@@ -128,38 +200,32 @@ the nsec plus ciphertext log cannot replace missing MLS/history material.
 
 ## Removal work packages and effort
 
-These are planning estimates for one engineer familiar with this repository,
-not measured delivery promises. They assume the current exported-nsec custody
-choice, reuse of existing crypto and runtime-command formats, fresh accounts,
-and no simultaneous native-client rewrite. Existing-user conversion is excluded.
+The revised work packages below reuse existing FiniteChat behavior and the
+parallel auth/transport work. The initial calendar estimates have been withdrawn
+for the reasons above. Existing-user conversion is still excluded.
 
-1. **Real identity and launch integration — roughly 3–5 engineer-days.**
+1. **Real identity and launch integration.**
    Replace fixture login, key source, fake Project and fixed endpoints with
    authenticated Core identity, real Project creation and a provisioned Agent.
    Make the browser provider the intended route. Carry owner public identity
    and product-scoped grants; retain a single canonical Room discovery record.
-2. **Admission, persistence and history reliability — roughly 5–8 days.**
+2. **Admission, persistence and history reliability.**
    Close the KeyPackage/Commit journal crash gaps, serialize/retry enrollments,
    renew credentials, bound/persist history responses and metadata, test agent
    restart. Fix the observed Hermes inbox lease/reconnect failure. Add browser
    lifecycle/eviction behavior and agent-history recovery coverage appropriate
-   to the promised durability. Full recovery design could extend this range.
-3. **Feature coverage — roughly 8–15 days.**
+   to the promised durability. Full disaster recovery is a separate scope from exposing these client features.
+3. **Expose existing client behavior and relocate identity callers.**
    Blob/media support, ephemeral/projection parity, real agent-control commands,
-   typed Brain/Sites proofs, verified requester context, and OAuth completion.
-   These are separate bounded slices; tool/approval and cross-browser failures
-   could increase the estimate. Browser nsec signing alone is not the whole
-   feature implementation.
-4. **Packaging, deletion and release gates — roughly 3–5 days.**
+   the Brain identity provider, verified requester context, and OAuth completion.
+   Adopt #854 for Sites viewer auth. Choose direct FiniteChat or the shared Iroh
+   path for controls. These are bounded reuse/integration slices; preserve
+   existing product authorization rather than adding new protocols.
+4. **Packaging, deletion and release gates.**
    Pinned versioned JS/WASM delivery; secure-context/CORS on product-owned public
    routes; replace loopback-only enrollment; production build and browser CI.
    Then remove the unused hosted service/client/routes and its deployment,
    secret, status and test dependencies. Preserve shared protocol/UI logic.
-
-A useful **fresh-account, text-first milestone is around 2–3 focused weeks**
-including a small bridge-absent CI/release slice. **Full service retirement with
-the surrounding features preserved is around 4–8 engineer-weeks**. Confidence is
-higher in the deletion inventory than the reliability/feature estimates.
 
 The mechanical deletion is relatively small: about 2.9k lines of hosted Rust
 service, 2.3k lines of its HTTP tests, three main dashboard provider/client/

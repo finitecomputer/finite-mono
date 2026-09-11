@@ -111,8 +111,10 @@ call its signer; the intended verified requester context for Sites tools is omit
 by the browser path (and has an existing response-contract mismatch noted in
 the audit). Production identity/bootstrap, agent controls, media and
 Brain need replacement paths before the service can be deleted. The audit gives
-state owners, a deletion inventory, rough effort and bridge-absent acceptance
-gates. It is a scope, not an implemented removal or a production cutover plan.
+state owners, a deletion inventory and bridge-absent acceptance gates. A
+follow-up records #854 removing Sites viewer signing, Core encrypted key
+custody, the Iroh option, and existing FiniteChat runtime behavior to reuse.
+The initial broad effort estimates are withdrawn. It is a scope, not an implemented removal or a production cutover plan.
 
 ## Actual data flow
 
