@@ -1203,6 +1203,7 @@ dependencies = [
  "axum",
  "clap",
  "finite-identity",
+ "finite-nostr",
  "finitechat-blob",
  "finitechat-client",
  "finitechat-core",
@@ -1223,6 +1224,7 @@ dependencies = [
  "thiserror",
  "time",
  "tokio",
+ "tower-http",
 ]
 
 [[package]]

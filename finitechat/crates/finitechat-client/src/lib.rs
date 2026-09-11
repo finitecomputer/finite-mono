@@ -2055,6 +2055,22 @@ impl FiniteChatDevice {
         Ok(())
     }
 
+    /// Activate a verified, addressed Welcome and start ordered replay at its Commit.
+    /// Callers must durably save the resulting Device before acknowledging delivery.
+    pub fn activate_delivered_welcome(
+        &mut self,
+        welcome: &WelcomeRecord,
+    ) -> Result<(), ClientError> {
+        self.store_pending_welcome(welcome)?;
+        self.activate_pending_welcome(&welcome.welcome_id)?;
+        Ok(())
+    }
+
+    /// Clear the durable acknowledgement intent after the delivery receipt.
+    pub fn record_welcome_acknowledged(&mut self, welcome_id: &str) -> Result<(), ClientError> {
+        self.clear_pending_welcome_ack(welcome_id)
+    }
+
     pub fn last_applied_seq(&self, room_id: &str) -> Result<u64, ClientError> {
         validate_room_id(room_id)?;
         Ok(self.room_entry(room_id)?.last_applied_seq)

@@ -37,9 +37,10 @@ and tools; real encrypted browser/Agent round trips; direct signed relay calls;
 conversation context and separate chat sessions; no hosted bridge calls.
 The persistence extension additionally requires reload and browser-process restart
 to reuse one Device/Room/transcript, concurrent tabs to share a single MLS writer,
-and interrupted sends to recover without duplicate delivery. New-browser history
-transfer is investigated below, not implemented. Migration and mixed-version
-proof remain out of scope per the spike request.
+and interrupted sends to recover without duplicate delivery. Independent browsers
+now join the same Agent Room, obtain an encrypted metadata snapshot, and share
+future messages. Per-Chat history is fetched on demand from the agent, separately
+from live-chat readiness. Migration and mixed-version proof remain out of scope.
 
 ## Run it
 
@@ -65,10 +66,12 @@ across page reloads and browser restarts.** Tabs on the same origin share this
 Device using Web Locks. Restarting the entire harness intentionally creates a
 new fixture account and therefore a new browser storage namespace.
 
-A different browser/profile, incognito session, origin, or cleared/evicted store
-still creates a fresh Device/Room in this spike and cannot see old history.
-An nsec alone does not recover MLS history. Old memory-only spike sessions are
-not migrated; reload the dashboard to start using persistence.
+A different browser/profile or cleared store creates a fresh Device in the same
+Agent Room. It receives the Topic/Chat list and future messages; no old transcript
+is transferred automatically. Use **Load earlier messages from agent** in each
+Chat to request its history. The spike deliberately uses two events per page to
+exercise pagination with a few real turns. An nsec alone does not recover MLS
+history: the agent supplies decrypted historical records over the new MLS epoch.
 
 ```sh
 # Build the optimized browser client and native CLI/relay with pinned Nix tools.
@@ -105,9 +108,10 @@ Disposable Core/login fixture
   -> POST /api/wasm-spike/bootstrap (nsec, relay URL, Agent public identity)
   -> actual dashboard + browser Rust/WASM FiniteChatDevice
        creates its own MLS leaf key and account-signed Device credential
-       claims Agent KeyPackage; creates Room and MLS group
-       signs /account-rooms/bootstrap and /commits with User Key
-       creates MLS Commit + encrypted Welcome for the Agent
+       persists its KeyPackage private state before publishing the public package
+       signs a narrow /spike/enroll request to the real agent
+       agent adds this exact Device to its canonical Room with MLS Add + Welcome
+       browser durably activates Welcome before acknowledging it
        encrypts standard conversation/segment/Hermes application events
   -> browser Fetch directly to FiniteChat relay /events and /sync/group
        relay orders/stores opaque MLS envelopes, knows membership metadata
@@ -122,7 +126,9 @@ Disposable Core/login fixture
 
 “Direct” removes the Hosted Web Device hop; the usual FiniteChat relay still
 provides delivery. This is not peer-to-peer WebRTC. The Agent's loopback Hermes
-service is its ordinary internal adapter: **the browser never calls it**.
+service retains its ordinary internal adapter. The browser calls only a separate,
+feature-gated `/spike/enroll` route for pre-join membership; it cannot fetch chat
+content there. Metadata and history use encrypted `/events` and `/sync/group`.
 Core custody of nsec means this is not cryptographic operator blindness.
 
 ## What blocked compilation, and the spike solution
@@ -161,13 +167,13 @@ panic abort, then the pinned `wasm-bindgen --target web`. No wasm-opt pass yet.
 
 | Artifact | Raw bytes | gzip (level 9) bytes |
 | --- | ---: | ---: |
-| WASM | 4,106,370 | 2,042,169 |
-| JS loader | 29,752 | 6,547 |
-| Total | 4,136,122 | 2,048,716 |
+| WASM | 4,024,665 | 2,019,677 |
+| JS loader | 29,893 | 6,546 |
+| Total | 4,054,558 | 2,026,223 |
 
-With persistence included, that's **3.92 MiB raw / 1.95 MiB gzip for WASM**,
-or **1.95 MiB gzip including the loader**. Brotli gives 1,798,030 bytes for WASM
-plus 5,679 bytes of JS (**1.72 MiB total**). These are compressed file measurements, not a measurement of the
+With persistence and agent admission included, that's **3.84 MiB raw / 1.93 MiB gzip for WASM**,
+or **1.93 MiB gzip including the loader**. Brotli gives 1,779,938 bytes for WASM
+plus 5,684 bytes of JS (**1.70 MiB total**). These are compressed file measurements, not a measurement of the
 whole Next dashboard or a promise about server compression configuration.
 The initial debug artifact was 10,418,033 bytes raw / 3,458,752 bytes gzip,
 plus 28,464 / 6,389 bytes of loader JS.
@@ -231,8 +237,9 @@ This deliberately favors a small implementation over storage/memory efficiency.
 
 | Boundary | Durable state and restart behavior |
 | --- | --- |
-| Before Room creation | Device and exact bootstrap request/claimed Agent KeyPackage saved; restart reuses the request |
-| Before membership Commit | Pending MLS state and exact Commit/Welcome saved; restart republishes the same Commit |
+| Before enrollment | Browser Device and KeyPackage private state saved; retry publishes the same public package and signed admission request |
+| Before membership Commit | Agent writer saves pending MLS state and journals the exact Commit/Welcome; file/SQLite atomicity remains a documented gap |
+| Before Welcome acknowledgement | Browser saves activated MLS state and admission cursor; retry acknowledges the same Welcome |
 | Before message publication | Consumed MLS generation and exact outgoing envelope saved together; no send if storage fails |
 | Relay accepts, receipt is lost | Resend saved bytes/idempotency key; reconcile the original receipt before reading own log entries |
 | Receipt saved | Own-send high-water mark, local event, and cleared pending send saved together |
@@ -309,7 +316,9 @@ history transfer, rather than concurrent writers sharing one MLS ratchet.
 ## Follow-up exploration: Core authorization, admission, and optional history
 
 Explored 2026-09-10 against this spike's source. The recommendations below are
-proposals, not implemented behavior or changes to accepted product contracts.
+design exploration. The selected future-messages/metadata and per-Chat history
+options are now implemented in the spike as described below; the other options
+are not implemented, and none changes an accepted production contract.
 
 ### The object model makes admission smaller than it first appears
 
@@ -454,6 +463,122 @@ allowed to see, and it does not replace the production Recovery Set.
    interruption, live-tail and missing-source-history tests. History failure
    must leave already-working live chat working.
 
+## Independent browsers and agent-sourced history (September 10 extension)
+
+The native CLI enables this experiment only with the `browser-spike` Cargo
+feature and the harness's explicit local environment. At startup the agent
+creates one canonical `wasm-hermes-room` in the disposable relay. Every browser
+owns a different MLS leaf; browser tabs in one profile still share one Device.
+The retired browser-owned Room/bootstrap/Commit path has been removed.
+
+The pre-join request binds Room, account, Device ID, KeyPackage ID and hash under
+the user's NIP-98 signature, including URL, method, body hash and a 60-second
+clock window. The agent admits only the fixture's configured public user account
+to that one Room. Its existing Core actor is the sole writer for Add/Commit,
+metadata responses, history responses and normal Hermes messages. The agent
+never receives the User Key. This stands in for a future authenticated Core
+Device grant; it is not a new general-purpose agent HTTP chat API.
+
+After Welcome activation the browser emits `finitechat.browser.request.v1` with
+operation `metadata`. The agent replies with `finitechat.browser.response.v1`:
+request ID, target Device, sequence boundary, Topic/Chat IDs, titles, active Chat
+IDs and archive state. Previews and transcript counts are scrubbed. Responses
+are non-notifying encrypted application events; other Devices ignore the target's
+snapshot. The browser applies organizational events after the boundary and keeps
+all transcript events it could decrypt since admission, including overlap during
+snapshot creation. It never replays old ChatStart events into the live group.
+
+History uses those same encrypted event kinds with operation `history`, explicit
+Topic/Chat, an exclusive `before_seq`, and page limit. The source reads its own
+encrypted `client_app_events` store through the existing SQLite store API, filters
+the requested Chat, and returns original event IDs, sequences, timestamps,
+senders, message/edit kinds and payloads. No LLM reconstructs history. No web
+bridge, dashboard history endpoint, copied MLS state or old browser is involved.
+History records are **agent-attested copies**, not newly authenticated original
+MLS ciphertext. The browser accepts only responses from the Agent Principal,
+addressed to its Device and matching a request it actually sent.
+
+Imported history is projected additively and persisted inside the encrypted
+browser checkpoint. Original live records win duplicate IDs. History never
+advances the browser's MLS cursor, re-enters Hermes' inbox, switches Chat selection
+or blocks a send while waiting for a response. A 15-second history timeout leaves
+live transport ready and permits retry; late responses still merge. Each Chat has
+its own cursor. An empty Chat has the same history control as one with live text.
+
+**Validation:** `/tmp/finitechat-multibrowser-test-5.log` passes the
+complete future-only scenario: B enrolled with A's browser process closed,
+received metadata but no old transcript, continued the same real Hermes context,
+and exchanged new messages with A after it reopened. B reload retained its own
+Device and history. The test verified distinct Device IDs, one Room, signed
+ciphertext traffic, no dashboard chat API/bridge, and rejected unsigned/tampered
+admission.
+
+`/tmp/finitechat-history-test-2.log` passes the complete history extension in
+44 seconds with actual Hermes inference. A creates two Chats before B enrolls.
+B gets neither transcript automatically. The test suspends only the disposable
+native agent, requests history, observes the history-only timeout, and proves A's
+new encrypted message still arrives on B. It closes A, resumes the agent and
+fetches multiple two-event pages. Original history survives B's reload, live
+messages are not duplicated, and the unrelated Chat remains empty until B requests
+that Chat separately. `/tmp/finitechat-final-enrollment-negative.log` additionally
+proves that **valid** signatures for the wrong account or wrong Room receive 403.
+
+`/tmp/finitechat-final-browser-regressions-2.log` passes both original browser
+suites (60 seconds): real terminal tool execution, Hermes context, separate
+Chats, reload/browser restart, concurrent tabs, interrupted delivery and lost
+receipts, failed IndexedDB save, and stale-checkpoint refusal. These tests now
+create their own Chat explicitly because fresh browsers share the existing Room.
+`/tmp/finitechat-final-native-checks-2.log` records 107 client/MLS tests passed,
+one pre-existing ignored test, and native clippy. WASM clippy and the default
+non-spike CLI check passed. Dashboard TypeScript, focused ESLint and production
+build passed; the build reports 14 existing file-tracing warnings. These focused
+checks do not claim the monorepo-wide Postgres/CI gate or production compatibility.
+
+### Deliberate shortcuts and remaining proof
+
+- **Hermes stream/lease recovery remains a known limitation.** An interrupted
+  early outage test left entries in `hermes-inbox.json` marked `leased` after
+  the stream disconnected; one later user request remained stored/leased without
+  reaching the gateway. Evidence is in `/tmp/fc-wasm-qaa7f8rb/agent/hermes-inbox.json`
+  and the associated gateway log (Room sequences 26 and 65). The writer is
+  `lease_pending_hermes_inbox_events`; readers/acknowledgers are the native inbound
+  stream and Hermes plugin. The later clean outage test passed, and the old
+  persistence suites passed on a fresh fixture. This is not proof of reliable
+  lease reclamation. Before shipping, reproduce and fix disconnect-before-ack,
+  re-offer unacknowledged deliveries without rerunning acknowledged model turns,
+  and prove native service/gateway restarts. No durable production state was
+  inspected or repaired; the final demo uses a fresh disposable fixture.
+- This is one fixture user, one Agent Room, one local agent. Core login, device
+  grants, revocation and multi-Room/project fanout are not production features.
+- The enrollment Commit journal and encrypted Device SQLite state are separate
+  writes. A crash between them is not proven safe. A failed preparation can also
+  leave a claimed KeyPackage without a resumable claim journal. Combine claim,
+  grant, pending Commit and Device state transactionally; reconcile accepted
+  Commits before preparing another. Add full crash and concurrent-Commit tests.
+- Metadata currently exports the agent's whole Topic/Chat list in one event.
+  Define bounded snapshots/chunks and test create/rename/archive races, large
+  lists, conflicting metadata and agent restart at every boundary.
+- The responder scans the most recent 10,000 stored events for unanswered
+  requests. Replace that scan with a durable indexed request/response ledger and
+  idempotent pending response envelopes. Full agent process-crash recovery is
+  not proven by a temporary process suspension.
+- History reads bounded SQLite pages but scans the Room to find the Chat. Add a
+  per-Chat index and bounded asynchronous work so very large histories cannot
+  monopolize the actor. Responses cap stored event JSON at 48 KiB; an oversized
+  individual message returns a history-only error and needs chunked transfer.
+  Metadata/history responses currently consume group bandwidth for all Devices.
+  The target field is routing, not private encryption within the group: every
+  active Room member can decrypt the response. This fixture has one human
+  account; review per-recipient history authorization/encryption before using
+  this design in multi-user Rooms.
+- Define history retention/completeness and missing-source recovery. An empty
+  result currently means only that this agent has no matching stored records;
+  it is not proof the original Chat never had older messages. Attachments and
+  original sender proof chains are not imported by this text spike.
+- Use a production page size, incremental IndexedDB tables, bounded projections,
+  and shared native projection code. The two-event page size exists to exercise
+  actual pagination in this experiment, not as a proposed product default.
+
 ## Work required for a real product
 
 1. **Key custody and login.** Implement an authenticated Core handoff scoped to
@@ -470,10 +595,9 @@ allowed to see, and it does not replace the production Recovery Set.
    credentials). Test storage corruption, eviction, initial admission crashes,
    worker/tab suspension and all supported browsers. Normalize key/relay scope
    encoding. Persistent-storage permission is best effort, not a backup.
-3. **Recovery and multiple Devices.** Implement the linked-Device source and
-   target paths described above in browser storage, then prove new-profile and
-   empty-target recovery. Explicitly choose recovery when no user Device has
-   history; Agent-sourced import needs its own authorization contract. Prove
+3. **Recovery and multiple Devices.** The selected Agent admission and per-Chat
+   import paths now exist as a spike. Harden their authorization and recovery
+   contracts, then prove empty-target recovery and missing Agent history. Prove
    revocation, partial/missing/conflicting chunks and retry across restart.
    Native sender currency/rollback protection is already wired and tested.
 4. **Runtime/transport boundaries.** Split portable Device/codec code from

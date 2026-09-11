@@ -52,7 +52,7 @@ test("browser Device survives reload, browser restart, concurrent tabs and uncer
     next.on("request", request => {
       const path = new URL(request.url()).pathname;
       if (path === "/events") requests.push(request);
-      if (["/account-rooms/bootstrap", "/commits"].includes(path)) mutations.push(path);
+      if (request.method() === "POST" && ["/account-rooms/bootstrap", "/commits", "/spike/enroll"].includes(path)) mutations.push(path);
     });
     next.on("page", page => page.on("pageerror", error => errors.push(error.message)));
     await next.route("**/api/**", async route => {
@@ -66,6 +66,9 @@ test("browser Device survives reload, browser restart, concurrent tabs and uncer
     context = await start();
     page = await context.newPage();
     await page.goto(chatUrl);
+    await composer(page).waitFor({ timeout: 60_000 });
+    await page.locator("button.finite-chat__sidebar-new-chat-fab").click();
+    await page.locator("button.finite-chat__sidebar-new-chat-fab").evaluate(async button => { while ((button as HTMLButtonElement).disabled) await new Promise(r => setTimeout(r, 25)); });
     const marker = `memory-${crypto.randomUUID()}`;
     await send(page, `Remember ${marker}. Reply with exactly: stored-in-this-chat`);
     await reply(page, "stored-in-this-chat");
@@ -164,8 +167,8 @@ test("browser Device survives reload, browser restart, concurrent tabs and uncer
 
     assert.deepEqual(new Set(requests.map(request => request.postDataJSON().event.sender.device_id)), new Set([initialDevice]));
     assert.deepEqual(new Set(requests.map(request => request.postDataJSON().event.room_id)), new Set([initialRoom]));
-    assert.equal(mutations.filter(path => path === "/account-rooms/bootstrap").length, 1, "No replacement Room on restart");
-    assert.equal(mutations.filter(path => path === "/commits").length, 1, "No replacement Device admission on restart");
+    assert.equal(mutations.filter(path => path === "/account-rooms/bootstrap").length, 0, "No replacement Room on restart");
+    assert.equal(mutations.filter(path => path === "/spike/enroll").length, 1, "No replacement Device admission on restart");
     assert.deepEqual(badApi, []); assert.deepEqual(errors, []);
     await page.screenshot({ path: process.env.FINITECHAT_WASM_SCREENSHOT || "/tmp/finitechat-wasm-persistence.png", fullPage: true });
 
@@ -181,7 +184,7 @@ test("browser Device survives reload, browser restart, concurrent tabs and uncer
     await page.reload();
     await page.getByText(/behind.*server|rewound|older than/i).first().waitFor({ timeout: 20_000 });
     assert.equal(requests.length, beforeRollback, "Stale authenticated checkpoint cannot publish");
-    assert.equal(mutations.length, 2, "Rollback does not replace the Room or Device");
+    assert.equal(mutations.length, 1, "Rollback does not replace the Room or Device");
     console.log("PASS: stale checkpoint refused by native sender-currency protection");
   } catch (error) {
     if (page && !page.isClosed()) {

@@ -1301,7 +1301,15 @@ pub struct FiniteChatRuntime {
     listening: AtomicBool,
 }
 
+#[cfg(feature = "browser-spike")]
+pub mod browser_spike;
+
 enum AppRuntimeCommand {
+    #[cfg(feature = "browser-spike")]
+    BrowserSpike {
+        request: browser_spike::Command,
+        response: mpsc::SyncSender<Result<serde_json::Value, FiniteChatCoreError>>,
+    },
     Dispatch {
         action: AppAction,
         requester_context: Option<VerifiedRequesterContext>,
@@ -2494,6 +2502,12 @@ fn spawn_app_runtime_worker(
         publish_app_update(&state.app, &shared_state, &reconciler);
         while let Ok(command) = command_rx.recv() {
             match command {
+                #[cfg(feature = "browser-spike")]
+                AppRuntimeCommand::BrowserSpike { request, response } => {
+                    let result = state.browser_spike(request);
+                    publish_app_update(&state.app, &shared_state, &reconciler);
+                    let _ = response.send(result);
+                }
                 AppRuntimeCommand::Dispatch {
                     action,
                     requester_context,

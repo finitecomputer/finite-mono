@@ -9,6 +9,9 @@ rust-version.workspace = true
 [lib]
 crate-type = ["rlib"]
 
+[features]
+browser-spike = []
+
 [dependencies]
 finite-identity.workspace = true
 finite-nostr.workspace = true

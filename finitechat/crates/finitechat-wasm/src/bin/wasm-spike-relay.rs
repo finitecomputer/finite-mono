@@ -28,6 +28,9 @@ async fn main() -> anyhow::Result<()> {
             .nth(4)
             .ok_or_else(|| anyhow::anyhow!("missing agent info path"))?,
     );
+    let agent_url = std::env::args()
+        .nth(5)
+        .ok_or_else(|| anyhow::anyhow!("missing agent service URL"))?;
     std::fs::create_dir(&state_dir)?;
     let secret = generate_account_secret()?;
     let user_id = hex::encode(secret.public_key().as_bytes());
@@ -43,6 +46,7 @@ async fn main() -> anyhow::Result<()> {
             get(move || {
                 let (nsec, server_url, agent_info) =
                     (nsec.clone(), server_url.clone(), agent_info.clone());
+                let agent_url = agent_url.clone();
                 async move {
                     let agent: serde_json::Value = std::fs::read(&agent_info)
                         .ok()
@@ -53,6 +57,7 @@ async fn main() -> anyhow::Result<()> {
                         Json(serde_json::json!({
                             "nsec": nsec, "serverUrl": server_url,
                             "agentAccountId": agent["account_id"], "agentNpub": agent["npub"],
+                            "agentUrl": agent_url, "room": "wasm-hermes-room",
                         })),
                     ))
                 }

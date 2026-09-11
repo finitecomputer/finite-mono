@@ -30,6 +30,8 @@ export type HostedChatRoom = {
   last_message_preview: string;
   unread_count: number;
   can_load_older: boolean;
+  history_status?: "loading" | "ready" | "error";
+  history_error?: string | null;
   is_agent_chat: boolean;
 };
 

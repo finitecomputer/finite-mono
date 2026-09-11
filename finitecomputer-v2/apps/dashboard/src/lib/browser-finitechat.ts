@@ -8,6 +8,8 @@ type Payload = {
   conversation_id?: string; segment_id?: string; topic_id?: string; chat_id?: string;
   title?: string; archived?: boolean; sender_name?: string; reply_to_message_id?: string;
   metadata?: Record<string, unknown>;
+  operation?: string; boundary?: number; target?: Snapshot["device"]; topics?: HostedChatTopic[];
+  request_id?: string; before_seq?: number; next_before_seq?: number; has_more?: boolean; events?: Event[]; error?: string;
 };
 type Event = {
   id: string; seq: number; timestamp: number;
@@ -20,7 +22,7 @@ type Snapshot = {
   afterSeq: number; epoch: number; events: Event[];
 };
 type WasmChat = {
-  connect: (agent: string, room: string) => Promise<void>;
+  join: (agent: string, agentUrl: string, room: string) => Promise<void>;
   send_chat: (text: string, topic?: string, chat?: string, metadata?: string) => Promise<string>;
   publish_event: (kind: string, topic: string, payload: string) => Promise<string>;
   sync: () => Promise<string>;
@@ -32,6 +34,8 @@ type WasmModule = {
   default: (options: { module_or_path: string }) => Promise<void>;
   BrowserChat: new (nsec: string, server: string, device: string, saved: string | undefined, persist: (checkpoint: string) => Promise<void>) => WasmChat;
 };
+// Deliberately tiny for the spike: exercise pagination with a few real Hermes turns.
+const HISTORY_PAGE_SIZE = 2;
 const nonNotifying = { push: "never", unread: "never", command_inbox: "never" };
 
 export class BrowserFiniteChat {
@@ -117,16 +121,20 @@ export class BrowserFiniteChat {
     bootstrap.nsec = "";
     this.store = await BrowserChatStore.open(this.nsec, this.server, this.agent);
     await this.operate(async () => {
-      await this.client.connect(this.agent, `wasm_${this.deviceId}`);
+      await this.client.join(this.agent, bootstrap.agentUrl, bootstrap.room);
       this.snapshot = JSON.parse(this.client.snapshot()) as Snapshot;
-      if (!this.snapshot.events.some(event => event.conversation_id === "home" && event.kind.type === "conversation_create")) {
-        await this.publish("conversation_create", "home", { title: "Home", description: null, external_topic: null, skill_binding: null });
+      if (!this.metadataSnapshot()) {
+        await this.publish("namespaced", "home", { operation: "metadata" }, "finitechat.browser.request.v1");
+        // Membership is ready; wait for the agent's encrypted organization snapshot.
+        for (let attempt = 0; attempt < 60 && !this.metadataSnapshot(); attempt++) {
+          await new Promise(resolve => setTimeout(resolve, 500));
+          this.snapshot = JSON.parse(await this.client.sync());
+        }
+        if (!this.metadataSnapshot()) throw new Error("Joined agent; waiting for its chat list. Retry is safe.");
       }
-      const chats = this.snapshot.events.filter(event => event.kind.type === "conversation_segment_start");
-      if (chats.length === 0) await this.newChat("home", `initial-${this.deviceId}`);
-      else if (!this.chat) {
-        const latest = chats.at(-1)!;
-        this.topic = latest.conversation_id ?? "home"; this.chat = latest.payload!.segment_id!;
+      if (!this.chat) {
+        this.topic = this.metadataSnapshot()?.topics?.[0]?.topic_id ?? "home";
+        this.chat = this.metadataSnapshot()?.topics?.find(topic => topic.topic_id === this.topic)?.active_chat_id ?? "";
       }
       await this.save(this.client.checkpoint());
       this.accept(this.client.snapshot());
@@ -166,6 +174,13 @@ export class BrowserFiniteChat {
         const topic = `topic-${crypto.randomUUID()}`;
         await this.publish("conversation_create", topic, { title: action.CreateTopic.title, description: null, external_topic: null, skill_binding: null });
         await this.newChat(topic);
+      } else if ("LoadOlderMessages" in action) {
+        if (action.LoadOlderMessages.room_id !== this.snapshot.room) throw new Error("Wrong history Room");
+        const history = this.historyStatus();
+        if (history.more && !history.loading) {
+          await this.publish("namespaced", this.topic, { operation: "history", topic_id: this.topic, chat_id: this.chat,
+            before_seq: history.before, limit: Math.min(HISTORY_PAGE_SIZE, Math.max(1, action.LoadOlderMessages.limit)) }, "finitechat.browser.request.v1");
+        }
       } else if ("OpenChat" in action) {
         this.topic = action.OpenChat.topic_id; this.chat = action.OpenChat.chat_id;
       } else if ("OpenTopic" in action) {
@@ -183,9 +198,39 @@ export class BrowserFiniteChat {
       return this.state!;
     });
   }
+  private responses(operation: string) {
+    const requests = new Map(this.snapshot.events.filter(event => event.kind.name === "finitechat.browser.request.v1"
+      && event.sender.account_id === this.snapshot.device.account_id && event.sender.device_id === this.snapshot.device.device_id
+      && event.payload?.operation === operation).map(event => [event.id, event.payload!]));
+    return this.snapshot.events.filter(event => {
+      const p = event.payload;
+      const request = requests.get(p?.request_id ?? "");
+      return event.sender.account_id === this.agent && event.kind.name === "finitechat.browser.response.v1"
+        && p?.operation === operation && p.target?.account_id === this.snapshot.device.account_id
+        && p.target?.device_id === this.snapshot.device.device_id && request
+        && (operation !== "history" || (request.topic_id === p.topic_id && request.chat_id === p.chat_id
+          && (p.error || request.before_seq === p.before_seq)));
+    });
+  }
+  private metadataSnapshot() { return this.responses("metadata").at(-1)?.payload; }
+  private historyStatus() {
+    const metadata = this.metadataSnapshot();
+    const eligible = !!metadata?.topics?.find(topic => topic.topic_id === this.topic)?.chats.some(chat => chat.chat_id === this.chat);
+    const replies = this.responses("history").map(event => event.payload!).filter(p => p.topic_id === this.topic && p.chat_id === this.chat);
+    const pages = replies.filter(p => !p.error);
+    const lastRequest = this.snapshot.events.filter(event => event.kind.name === "finitechat.browser.request.v1"
+      && event.sender.device_id === this.snapshot.device.device_id && event.sender.account_id === this.snapshot.device.account_id
+      && event.payload?.operation === "history" && event.payload.topic_id === this.topic && event.payload.chat_id === this.chat).at(-1);
+    const lastReply = replies.find(p => p.request_id === lastRequest?.id);
+    const loading = !!lastRequest && !lastReply && Date.now() / 1000 - lastRequest.timestamp < 15;
+    return { more: eligible && !pages.some(p => p.has_more === false), loading,
+      before: Math.min((metadata?.boundary ?? 0) + 1, ...pages.map(p => p.next_before_seq ?? Infinity)),
+      error: lastReply?.error ?? (lastRequest && !lastReply && !loading ? "History has not arrived. You can retry; live chat is still available." : null) };
+  }
   private project() {
     const s = this.snapshot;
-    const topics = new Map<string, HostedChatTopic>();
+    const metadata = this.metadataSnapshot();
+    const topics = new Map<string, HostedChatTopic>((metadata?.topics ?? []).map(topic => [topic.topic_id, structuredClone(topic)]));
     const messages: HostedChatMessage[] = [];
     const getTopic = (id: string, seq: number) => {
       let topic = topics.get(id);
@@ -196,9 +241,22 @@ export class BrowserFiniteChat {
       }
       return topic;
     };
-    for (const event of [...s.events].sort((a, b) => a.seq - b.seq)) {
+    const projected = new Map<string, Event>();
+    // Historical rows are agent-attested copies, never replayed through MLS or the
+    // Hermes command inbox. Original live events win any overlapping identifiers.
+    for (const response of this.responses("history")) {
+      for (const event of response.payload?.events ?? []) {
+        if (event.conversation_id === response.payload?.topic_id && event.segment_id === response.payload?.chat_id
+          && event.seq < (response.payload.before_seq ?? 0) && (event.kind.type === "chat_message" || event.kind.type === "chat_edit")) projected.set(event.id, event);
+      }
+    }
+    for (const event of s.events) projected.set(event.id, event);
+    for (const event of [...projected.values()].sort((a, b) => a.seq - b.seq)) {
       const p = event.payload;
-      if (!p) continue;
+      if (!p || event.kind.name?.startsWith("finitechat.browser.")) continue;
+      // The snapshot already includes organization through its sequence boundary.
+      // Live transcript events since admission are always retained, including this overlap.
+      if (event.seq <= (metadata?.boundary ?? 0) && event.kind.type !== "chat_message" && event.kind.type !== "chat_edit") continue;
       const topic = getTopic(event.conversation_id ?? p.conversation_id ?? "home", event.seq);
       const type = event.kind.type;
       if (type === "conversation_create" || type === "conversation_update") {
@@ -232,9 +290,10 @@ export class BrowserFiniteChat {
         });
       }
     }
+    const history = this.historyStatus();
     this.state = { rev: ++this.revision, identity: s.device,
       rooms: [{ room_id: s.room, display_name: "Hermes", state: "Connected", status: "connected", user_status_text: "Connected",
-        last_message_preview: messages.at(-1)?.text ?? "", unread_count: 0, can_load_older: false, is_agent_chat: true }],
+        last_message_preview: messages.at(-1)?.text ?? "", unread_count: 0, can_load_older: history.more, history_status: history.loading ? "loading" : history.error ? "error" : "ready", history_error: history.error, is_agent_chat: true }],
       selected_room_id: s.room, topics: [...topics.values()], selected_topic_id: this.topic, selected_chat_id: this.chat,
       status: "connected", messages, profiles: [], devices: [], typing_members: [],
       hosted_agent_binding: { version: 1, project_id: "wasm-hermes", human_account_id: s.device.account_id,

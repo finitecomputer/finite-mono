@@ -426,6 +426,10 @@ async fn prepare_hermes_service(
     // Welcomes on every resident-service start, which also makes restart the
     // natural healing path after Chat/server interruption.
     runtime.dispatch_and_wait(AppAction::StartRuntime)?;
+    #[cfg(feature = "browser-spike")]
+    if std::env::var_os("FINITECHAT_BROWSER_SPIKE_USER").is_some() {
+        runtime.browser_spike(finitechat_core::browser_spike::Command::Initialize)?;
+    }
     let state = HermesServiceState {
         agent_home: home_dir.to_path_buf(),
         account_id: home.config.account_id.clone(),
@@ -475,8 +479,11 @@ async fn serve_prepared_hermes_service(prepared: PreparedHermesService) -> Resul
     .map_err(|error| CliError::Hermes(format!("Hermes service failed: {error}")))
 }
 
+#[cfg(feature = "browser-spike")]
+mod browser_spike;
+
 fn hermes_service_router(state: HermesServiceState) -> Router {
-    Router::new()
+    let router = Router::new()
         .route("/healthz", get(hermes_service_healthz))
         .route("/readyz", get(hermes_service_readyz))
         .route("/v1/hermes/inbound", get(hermes_service_inbound))
@@ -485,7 +492,10 @@ fn hermes_service_router(state: HermesServiceState) -> Router {
         .route("/v1/agentd/ack", post(agentd_service_ack))
         .route("/v1/agentd/result", post(agentd_service_result))
         .route("/v1/agentd/state", post(agentd_service_state))
-        .with_state(state)
+        .with_state(state.clone());
+    #[cfg(feature = "browser-spike")]
+    let router = router.merge(browser_spike::router(state));
+    router
 }
 
 /// Outbound link state for the sidecar's server sync, as the resident sync
@@ -634,6 +644,14 @@ fn start_resident_bridge_sync(state: HermesServiceState) -> Result<(), CliError>
                 };
                 match result {
                     Ok(bridge) => {
+                        #[cfg(feature = "browser-spike")]
+                        if std::env::var_os("FINITECHAT_BROWSER_SPIKE_USER").is_some()
+                            && let Err(error) = state
+                                .runtime
+                                .browser_spike(finitechat_core::browser_spike::Command::Respond)
+                        {
+                            eprintln!("browser spike response: {error}");
+                        }
                         state
                             .server_stream
                             .record_established(cycle_started_unix_ms);

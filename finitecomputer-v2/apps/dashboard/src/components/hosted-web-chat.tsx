@@ -975,6 +975,14 @@ export function HostedWebChat({
                 {selectedRoom && selectionPending && !hasRenderableChatContent ? (
                   <ChatLoading label="Opening chat…" />
                 ) : null}
+                {selectedRoom?.history_error ? <p role="status">{selectedRoom.history_error}</p> : null}
+                {selectedRoom?.history_status && selectedRoom.can_load_older && !hasRenderableChatContent ? (
+                  <button type="button" className="finite-chat__load-older-button"
+                    disabled={selectedRoom.history_status === "loading"}
+                    onClick={() => void dispatch({ LoadOlderMessages: { room_id: selectedRoom.room_id, before_message_id: "", limit: 80 } })}>
+                    {selectedRoom.history_status === "loading" ? "Fetching history from agent…" : "Load earlier messages from agent"}
+                  </button>
+                ) : null}
                 {selectedRoom && !selectionPending && !hasRenderableChatContent ? (
                   <EmptyChat title="What should we work on?" body="Start here, or make a new chat inside this topic." />
                 ) : null}
@@ -984,6 +992,7 @@ export function HostedWebChat({
                       <button
                         type="button"
                         className="finite-chat__load-older-button"
+                        disabled={selectedRoom.history_status === "loading"}
                         onClick={() =>
                           void dispatch({
                             LoadOlderMessages: {
@@ -994,7 +1003,8 @@ export function HostedWebChat({
                           })
                         }
                       >
-                        Load earlier messages
+                        {selectedRoom.history_status === "loading" ? "Fetching history from agent…"
+                          : selectedRoom.history_status ? "Load earlier messages from agent" : "Load earlier messages"}
                       </button>
                     ) : null}
                     {transcript.map((item) =>

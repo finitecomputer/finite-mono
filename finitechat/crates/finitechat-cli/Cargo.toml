@@ -10,7 +10,12 @@ rust-version.workspace = true
 name = "finitechat"
 path = "src/main.rs"
 
+[features]
+browser-spike = ["finitechat-core/browser-spike", "dep:finite-nostr", "dep:tower-http"]
+
 [dependencies]
+finite-nostr = { workspace = true, optional = true }
+tower-http = { version = "0.6", features = ["cors"], optional = true }
 axum.workspace = true
 clap.workspace = true
 finite-identity.workspace = true

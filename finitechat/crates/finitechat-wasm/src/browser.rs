@@ -1,18 +1,13 @@
 use finitechat_client::{
     AppliedLogEntry, FiniteChatDevice, FiniteChatDeviceConfig, FiniteChatDeviceState,
 };
-use finitechat_delivery::{HttpClaimedKeyPackage, HttpSyncPage, MAX_HTTP_SYNC_PAGE_ENTRIES};
+use finitechat_delivery::{HttpSyncPage, MAX_HTTP_SYNC_PAGE_ENTRIES};
 use finitechat_hermes::{HermesMessagePayloadV1, HermesSendRequestV1};
-use finitechat_http::{
-    BootstrapAccountRoomRequest, BootstrapAccountRoomResponse, ClaimKeyPackageForAccountRequest,
-    FiniteAccountRoomCommitProjection, GroupSyncRequest,
-};
+use finitechat_http::{FiniteAccountRoomCommitProjection, GroupSyncRequest};
 use finitechat_mls::NostrSecretKey;
-use finitechat_proto::SubmitCommitRequest;
 use finitechat_proto::{
-    AppendApplicationEventRequest, ClaimKeyPackageResult, CommitAccepted, DurableAppEventKind,
-    EventAccepted, RoomLogEntry, UploadKeyPackageRequest, delivery_member_id_for_device,
-    lease_token_for,
+    AppendApplicationEventRequest, DurableAppEventKind, EventAccepted, RoomLogEntry,
+    UploadKeyPackageRequest, delivery_member_id_for_device,
 };
 use finitechat_proto::{DecryptedApplicationEventV1, DeviceRef};
 use finitechat_transport::{GroupId, MemberId};
@@ -40,12 +35,6 @@ struct BrowserEvent {
 }
 
 #[derive(Clone, Serialize, Deserialize)]
-struct BootstrapPlan {
-    request: BootstrapAccountRoomRequest,
-    claim: ClaimKeyPackageResult,
-}
-
-#[derive(Clone, Serialize, Deserialize)]
 struct PendingSend {
     request: AppendApplicationEventRequest,
     plaintext: Vec<u8>,
@@ -58,10 +47,12 @@ struct Checkpoint {
     room: String,
     after_seq: u64,
     events: Vec<BrowserEvent>,
-    bootstrap: Option<BootstrapPlan>,
-    commit: Option<SubmitCommitRequest>,
     send: Option<PendingSend>,
     next_send: u64,
+    #[serde(default)]
+    join_package: Option<UploadKeyPackageRequest>,
+    #[serde(default)]
+    welcome_ack: Option<String>,
 }
 
 #[wasm_bindgen]
@@ -73,10 +64,10 @@ pub struct BrowserChat {
     room: String,
     after_seq: u64,
     persist: js_sys::Function,
-    bootstrap: Option<BootstrapPlan>,
-    commit: Option<SubmitCommitRequest>,
     send: Option<PendingSend>,
     next_send: u64,
+    join_package: Option<UploadKeyPackageRequest>,
+    welcome_ack: Option<String>,
     events: Vec<BrowserEvent>,
 }
 
@@ -125,10 +116,10 @@ impl BrowserChat {
             http: reqwest::Client::new(),
             room: saved.as_ref().map(|s| s.room.clone()).unwrap_or_default(),
             after_seq: saved.as_ref().map(|s| s.after_seq).unwrap_or_default(),
-            bootstrap: saved.as_ref().and_then(|s| s.bootstrap.clone()),
-            commit: saved.as_ref().and_then(|s| s.commit.clone()),
             send: saved.as_ref().and_then(|s| s.send.clone()),
             next_send: saved.as_ref().map(|s| s.next_send).unwrap_or_default(),
+            join_package: saved.as_ref().and_then(|s| s.join_package.clone()),
+            welcome_ack: saved.as_ref().and_then(|s| s.welcome_ack.clone()),
             events: saved.map(|s| s.events).unwrap_or_default(),
         })
     }
@@ -145,62 +136,92 @@ impl BrowserChat {
             room: self.room.clone(),
             after_seq: self.after_seq,
             events: self.events.clone(),
-            bootstrap: self.bootstrap.clone(),
-            commit: self.commit.clone(),
             send: self.send.clone(),
             next_send: self.next_send,
+            join_package: self.join_package.clone(),
+            welcome_ack: self.welcome_ack.clone(),
         })
         .map_err(error)
     }
 
-    /// The browser owns Room creation, MLS admission, Commit and Welcome encryption.
-    pub async fn connect(&mut self, agent_account_id: &str, room_id: &str) -> Result<(), JsValue> {
+    /// Each browser owns an independent MLS leaf. The existing agent admits it.
+    pub async fn join(&mut self, agent: &str, agent_url: &str, room: &str) -> Result<(), JsValue> {
         if !self.room.is_empty() {
+            if self.room != room {
+                return Err(error("Stored Device belongs to a different Room"));
+            }
             self.sync().await?;
             return Ok(());
         }
-        // Pin this Device before the first network mutation.
-        self.save_checkpoint().await?;
-        self.device.set_now_unix_seconds(now());
-        let claimed: Option<HttpClaimedKeyPackage> = self
+        if self.join_package.is_none() {
+            self.join_package = Some(
+                self.device
+                    .upload_key_package_auto_id_request()
+                    .map_err(error)?,
+            );
+            self.save_checkpoint().await?;
+        }
+        let package = self.join_package.clone().unwrap();
+        let publication = finitechat_delivery::HttpKeyPackagePublication {
+            key_package_id: finitechat_delivery::HttpKeyPackageId::new(
+                package.key_package_id.as_bytes().to_vec(),
+            ),
+            owner: MemberId::new(delivery_member_id_for_device(self.device.device_ref())),
+            key_package: finitechat_transport::engine::KeyPackage::new(
+                serde_json::to_vec(&package).map_err(error)?,
+            ),
+        };
+        let _: serde_json::Value = self.post("/key-packages", &publication).await?;
+        let _: serde_json::Value = self.post(&format!("{agent_url}/spike/enroll"), &serde_json::json!({
+            "room": room, "device": self.device.device_ref(),
+            "key_package_id": package.key_package_id, "key_package_hash": package.key_package_hash,
+        })).await?;
+        let welcomes: Vec<finitechat_http::HttpClaimedWelcome> = self
             .post(
-                "/key-packages/claim-account",
-                &ClaimKeyPackageForAccountRequest {
-                    account_id: agent_account_id.to_owned(),
+                "/welcomes/claim",
+                &finitechat_http::ClaimWelcomesRequest {
+                    recipient: MemberId::new(delivery_member_id_for_device(
+                        self.device.device_ref(),
+                    )),
+                    limit: 16,
                 },
             )
             .await?;
-        let claimed = claimed.ok_or_else(|| error("Agent has no available KeyPackage"))?;
-        let upload: UploadKeyPackageRequest =
-            serde_json::from_slice(claimed.key_package.bytes()).map_err(error)?;
-        if upload.owner.account_id != agent_account_id
-            || claimed.key_package_id.as_slice() != upload.key_package_id.as_bytes()
-        {
-            return Err(error("Agent KeyPackage identity mismatch"));
+        let mut activated = false;
+        if let Some(claimed) = welcomes.into_iter().next() {
+            let welcome: finitechat_proto::WelcomeRecord =
+                serde_json::from_slice(&claimed.message.payload).map_err(error)?;
+            if welcome.recipient != *self.device.device_ref()
+                || welcome.sender.account_id != agent
+                || welcome.room_id != room
+                || welcome.key_package_id != package.key_package_id
+                || claimed.message.id.as_slice() != welcome.welcome_id.as_bytes()
+            {
+                return Err(error("Unsolicited or mismatched enrollment Welcome"));
+            }
+            self.device
+                .activate_delivered_welcome(&welcome)
+                .map_err(error)?;
+            // Verify authenticated MLS membership, not just relay-supplied routing metadata.
+            if !self
+                .device
+                .room_members(room)
+                .map_err(error)?
+                .iter()
+                .any(|member| member.account_id == agent)
+            {
+                return Err(error("Welcome group is missing the expected agent"));
+            }
+            self.room = room.to_owned();
+            self.after_seq = welcome.commit_seq;
+            self.welcome_ack = Some(welcome.welcome_id);
+            self.join_package = None;
+            self.save_checkpoint().await?;
+            activated = true;
         }
-        let claim = ClaimKeyPackageResult {
-            lease_token: lease_token_for(&upload.key_package_id, &upload.owner),
-            key_package_id: upload.key_package_id,
-            owner: upload.owner,
-            key_package_ref: upload.key_package_ref,
-            key_package_hash: upload.key_package_hash,
-            key_package_payload: upload.key_package_payload,
-        };
-        let group_id = format!("mls_{room_id}");
-        self.device
-            .create_group_state(room_id, &group_id)
-            .map_err(error)?;
-        self.room = room_id.to_owned();
-        self.bootstrap = Some(BootstrapPlan {
-            request: BootstrapAccountRoomRequest {
-                room_id: self.room.clone(),
-                mls_group_id: group_id,
-                creator: self.device.device_ref().clone(),
-                protocol: Default::default(),
-            },
-            claim,
-        });
-        self.save_checkpoint().await?;
+        if !activated {
+            return Err(error("Agent admission pending; retrying this Device"));
+        }
         self.sync().await?;
         Ok(())
     }
@@ -370,28 +391,17 @@ impl BrowserChat {
     }
 
     async fn resume_pending(&mut self) -> Result<(), JsValue> {
-        if let Some(plan) = &self.bootstrap {
-            let _: BootstrapAccountRoomResponse =
-                self.post("/account-rooms/bootstrap", &plan.request).await?;
-            let commit = self
-                .device
-                .prepare_add_member_commit(
-                    &self.room,
-                    &plan.claim,
-                    format!("welcome_{}", self.room),
-                    format!("admit_{}", self.room),
+        if let Some(id) = &self.welcome_ack {
+            let _: serde_json::Value = self
+                .post(
+                    "/welcomes/ack",
+                    &finitechat_http::AckWelcomeRequest {
+                        message_id: finitechat_transport::MessageId::new(id.as_bytes().to_vec()),
+                    },
                 )
-                .map_err(error)?;
-            self.commit = Some(commit.request);
-            self.bootstrap = None;
-            self.save_checkpoint().await?;
-        }
-        if let Some(commit) = &self.commit {
-            let receipt: CommitAccepted = self.post("/commits", commit).await?;
-            if receipt.message_id != commit.envelope.message_id().map_err(error)? {
-                return Err(error("Commit receipt mismatch"));
-            }
-            self.commit = None;
+                .await?;
+            self.device.record_welcome_acknowledged(id).map_err(error)?;
+            self.welcome_ack = None;
             self.save_checkpoint().await?;
         }
         if let Some(pending) = &self.send {
@@ -446,7 +456,11 @@ impl BrowserChat {
         path: &str,
         value: &B,
     ) -> Result<R, JsValue> {
-        let url = format!("{}{path}", self.server);
+        let url = if path.starts_with("http://") {
+            path.to_owned()
+        } else {
+            format!("{}{path}", self.server)
+        };
         let body = serde_json::to_vec(value).map_err(error)?;
         let auth = finite_nostr::sign_http_auth_header_with_secret(
             self.secret.as_bytes(),

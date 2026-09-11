@@ -26,7 +26,7 @@ def build():
     run("cargo", "build", "--locked", "-p", "finitechat-wasm", "--lib", "--target", "wasm32-unknown-unknown", "--release", env=env)
     run("wasm-bindgen", "target/wasm32-unknown-unknown/release/finitechat_wasm.wasm", "--target", "web",
         "--out-dir", str(DASHBOARD / "public/wasm-spike"))
-    run("cargo", "build", "--locked", "-p", "finitechat-wasm", "--bin", "wasm-spike-relay", "-p", "finitechat-cli", "--bin", "finitechat")
+    run("cargo", "build", "--locked", "-p", "finitechat-wasm", "--bin", "wasm-spike-relay", "-p", "finitechat-cli", "--bin", "finitechat", "--features", "finitechat-cli/browser-spike")
     run("pnpm", "install", "--frozen-lockfile", cwd=DASHBOARD)
     for name in ["finitechat_wasm_bg.wasm", "finitechat_wasm.js"]:
         data = (DASHBOARD / "public/wasm-spike" / name).read_bytes()
@@ -89,7 +89,8 @@ def main():
     base_env = child_environment()
     env = dict(base_env, FINITECHAT_WASM_SPIKE="1", FC_WORKOS_AUTH_ENABLED="false", NODE_ENV="development",
                FINITECHAT_WASM_SPIKE_PORT=str(args.peer_port), FINITECHAT_WASM_SPIKE_URL=origin,
-               FINITECHAT_WASM_SCREENSHOT=str(state / "browser-proof.png"), NEXT_DIST_DIR=".next-wasm-spike")
+               FINITECHAT_WASM_SCREENSHOT=str(state / "browser-proof.png"),
+               FINITECHAT_WASM_SPIKE_STATE=str(state), FINITECHAT_WASM_HISTORY_TEST="1", NEXT_DIST_DIR=".next-wasm-spike")
     processes = []
 
     def start(name, command, environment, cwd=ROOT):
@@ -102,7 +103,7 @@ def main():
     try:
         agent_info = state / "agent-info.json"
         relay = start("relay", [str(ROOT / "target/debug/wasm-spike-relay"), str(state / "relay"),
-                                str(args.peer_port), origin, str(agent_info)], base_env)
+                                str(args.peer_port), origin, str(agent_info), service_url], base_env)
         wait_ready(f"{relay_url}/health", relay)
         with urllib.request.urlopen(f"{relay_url}/spike/user") as response:
             user_id = json.load(response)["account_id"]
@@ -115,6 +116,7 @@ def main():
         agent_env = dict(base_env, FINITE_HOME=str(state / "identity"), FINITECHAT_HOME=str(agent_home),
                          FINITECHAT_BIN=finitechat, HERMES_HOME=str(hermes_home),
                          FINITECHAT_WELCOME_ALLOWLIST=user_id, FINITECHAT_ALLOWED_USERS=user_id,
+                         FINITECHAT_BROWSER_SPIKE_USER=user_id, FINITECHAT_BROWSER_SPIKE_ORIGIN=origin,
                          FINITECHAT_HERMES_INBOUND_STREAM="1", FINITECHAT_HERMES_SERVICE_URL=service_url,
                          FINITECHAT_HERMES_SERVICE_ADDR=f"127.0.0.1:{args.service_port}",
                          FINITE_GATEWAY_ENABLED="true", FINITE_AGENT_ID="wasm-hermes", FINITE_AGENT_NAME="Hermes")
@@ -152,7 +154,7 @@ def main():
         print(f"Open {origin}{CHAT_PATH}\nReal Hermes + Finite Private; no hosted web bridge.\nDisposable state and logs: {state}\nCtrl-C stops only this run.", flush=True)
         if args.action == "test":
             run("node", "--import", "tsx", "--test", "--test-concurrency=1", "browser/finitechat-wasm.browser.ts",
-                "browser/finitechat-wasm-persistence.browser.ts", cwd=DASHBOARD, env=env)
+                "browser/finitechat-wasm-persistence.browser.ts", "browser/finitechat-wasm-multibrowser.browser.ts", cwd=DASHBOARD, env=env)
         else:
             while all(process.poll() is None for process in processes):
                 time.sleep(0.5)

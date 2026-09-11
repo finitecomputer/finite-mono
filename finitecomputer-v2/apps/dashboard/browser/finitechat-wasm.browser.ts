@@ -33,13 +33,16 @@ test("real dashboard chats with real Hermes through browser-owned MLS, without a
     const composer = page.getByRole("textbox", { name: "Message your agent" });
     const marker = `remember-${crypto.randomUUID()}`;
     try {
+      await composer.waitFor({ timeout: 60_000 });
+      await page.locator("button.finite-chat__sidebar-new-chat-fab").click();
+      await page.locator("button.finite-chat__sidebar-new-chat-fab").evaluate(async button => { while ((button as HTMLButtonElement).disabled) await new Promise(r => setTimeout(r, 25)); });
       await composer.fill(`Use your terminal tool to calculate 137 + 286. Reply with just the number. Also remember the code ${marker} for my next message; do not repeat the code yet.`, { timeout: 60_000 });
       await page.getByRole("button", { name: "Send message", exact: true }).click();
       await page.getByText("423", { exact: true }).waitFor({ timeout: 100_000 });
       await composer.fill("What code did I ask you to remember? Reply with only the code.");
       await page.getByRole("button", { name: "Send message", exact: true }).click();
       await page.getByText(marker, { exact: true }).waitFor({ timeout: 100_000 });
-      await page.getByRole("button", { name: "New chat", exact: true }).click();
+      await page.locator("button.finite-chat__sidebar-new-chat-fab").click();
       await page.waitForFunction(() => !document.querySelector(".finite-chat__messages")?.textContent?.includes("What code did I ask"));
       await composer.fill("Reply with exactly: fresh-chat-ready");
       await page.getByRole("button", { name: "Send message", exact: true }).click();
