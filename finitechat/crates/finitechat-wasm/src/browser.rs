@@ -376,6 +376,7 @@ impl BrowserChat {
     pub fn snapshot(&self) -> Result<String, JsValue> {
         serde_json::to_string(&serde_json::json!({ "room": self.room,
             "device": self.device.device_ref(), "afterSeq": self.after_seq,
+            "members": if self.room.is_empty() { Vec::new() } else { self.device.room_members(&self.room).map_err(error)? },
             "epoch": if self.room.is_empty() { 0 } else { self.device.group_epoch(&self.room).map_err(error)? },
             "events": self.events, "pendingSend": self.send.is_some() })).map_err(error)
     }

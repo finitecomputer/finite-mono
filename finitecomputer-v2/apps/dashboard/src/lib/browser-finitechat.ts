@@ -19,7 +19,7 @@ type Event = {
 };
 type Snapshot = {
   room: string; device: { account_id: string; device_id: string };
-  afterSeq: number; epoch: number; events: Event[];
+  afterSeq: number; epoch: number; events: Event[]; members: Snapshot["device"][];
 };
 type WasmChat = {
   join: (agent: string, agentUrl: string, room: string) => Promise<void>;
@@ -174,6 +174,8 @@ export class BrowserFiniteChat {
         const topic = `topic-${crypto.randomUUID()}`;
         await this.publish("conversation_create", topic, { title: action.CreateTopic.title, description: null, external_topic: null, skill_binding: null });
         await this.newChat(topic);
+      } else if ("RefreshDevices" in action) {
+        return this.accept(await this.client.sync());
       } else if ("LoadOlderMessages" in action) {
         if (action.LoadOlderMessages.room_id !== this.snapshot.room) throw new Error("Wrong history Room");
         const history = this.historyStatus();
@@ -190,7 +192,7 @@ export class BrowserFiniteChat {
         await this.publish("namespaced", action.RenameChat.topic_id, action.RenameChat, "finitechat.chat.rename.v1");
       } else if ("SetChatArchived" in action) {
         await this.publish("namespaced", action.SetChatArchived.topic_id, action.SetChatArchived, "finitechat.chat.archive.v1");
-      } else if (!("MarkRoomRead" in action || "SetTyping" in action || "StartRuntime" in action || "OpenRoom" in action || "RefreshDevices" in action)) {
+      } else if (!("MarkRoomRead" in action || "SetTyping" in action || "StartRuntime" in action || "OpenRoom" in action)) {
         throw new Error("This action is not implemented in the browser spike yet.");
       }
       await this.save(this.client.checkpoint());
@@ -295,7 +297,12 @@ export class BrowserFiniteChat {
       rooms: [{ room_id: s.room, display_name: "Hermes", state: "Connected", status: "connected", user_status_text: "Connected",
         last_message_preview: messages.at(-1)?.text ?? "", unread_count: 0, can_load_older: history.more, history_status: history.loading ? "loading" : history.error ? "error" : "ready", history_error: history.error, is_agent_chat: true }],
       selected_room_id: s.room, topics: [...topics.values()], selected_topic_id: this.topic, selected_chat_id: this.chat,
-      status: "connected", messages, profiles: [], devices: [], typing_members: [],
+      status: "connected", messages, profiles: [],
+      // This spike exposes current MLS membership in its one Room, not the
+      // account-wide registry or device presence/revocation history.
+      devices: (s.members ?? []).map(member => ({ ...member, active: true, revoked: false, room_count: 1,
+        current_device: member.account_id === s.device.account_id && member.device_id === s.device.device_id })),
+      typing_members: [],
       hosted_agent_binding: { version: 1, project_id: "wasm-hermes", human_account_id: s.device.account_id,
         agent_account_id: this.agent, agent_npub: this.agentNpub, canonical_room_id: s.room, associated_room_ids: [] },
       flow: { notice_busy: false, scan_in_flight: false, scan_result: "" },

@@ -99,7 +99,8 @@ mode. HTTP listeners bind loopback, CORS permits exactly the dashboard origin,
 and fresh random identities are used. Generated WASM/JS, keys, databases, and
 logs remain untracked. Attachments/audio and Brain cards are disabled in this
 provider because their browser transport isn't implemented. Other product
-surfaces (provisioning, connections, Sites, billing, etc.) aren't configured.
+surfaces (provisioning, third-party connection controls, Sites, billing, etc.) aren't configured.
+Connections now shows the current MLS Room device list described below.
 
 ## Actual data flow
 
@@ -167,12 +168,12 @@ panic abort, then the pinned `wasm-bindgen --target web`. No wasm-opt pass yet.
 
 | Artifact | Raw bytes | gzip (level 9) bytes |
 | --- | ---: | ---: |
-| WASM | 4,024,665 | 2,019,677 |
+| WASM | 4,025,756 | 2,019,926 |
 | JS loader | 29,893 | 6,546 |
-| Total | 4,054,558 | 2,026,223 |
+| Total | 4,055,649 | 2,026,472 |
 
 With persistence and agent admission included, that's **3.84 MiB raw / 1.93 MiB gzip for WASM**,
-or **1.93 MiB gzip including the loader**. Brotli gives 1,779,938 bytes for WASM
+or **1.93 MiB gzip including the loader**. Brotli gives 1,779,906 bytes for WASM
 plus 5,684 bytes of JS (**1.70 MiB total**). These are compressed file measurements, not a measurement of the
 whole Next dashboard or a promise about server compression configuration.
 The initial debug artifact was 10,418,033 bytes raw / 3,458,752 bytes gzip,
@@ -210,6 +211,37 @@ plus 28,464 / 6,389 bytes of loader JS.
 - Focused existing tests passed:
   `hosted_device_chats_with_an_agent_and_restarts_with_the_transcript` and
   `startup_finalizes_durable_device_link_staging_and_exposes_exact_receipt`.
+
+## Connections device list
+
+The local `/dashboard/machines/wasm-hermes/connections` route now uses the same
+explicit development-only fixture gate as Chat. It renders current membership
+from `FiniteChatDevice::room_members` through the WASM snapshot, browser adapter,
+and dashboard provider. It does not call the production Connections API or a
+web bridge. The native agent still authors the admission Commit; browser sync
+applies and checkpoints it. There is no second membership store or writer.
+
+The list identifies this browser, other browser Devices and Hermes. It is scoped
+to this one Room, not the account-wide registry, online presence, or a revocation
+history. Tabs in one profile share a Device. Closing a browser leaves its Device
+in the Room, so earlier test Devices remain visible. Membership refreshes with
+the existing encrypted sync loop. A page loaded before this WASM update needs
+one reload to receive the new snapshot field.
+
+A local Chromium check passed against the running real-agent fixture:
+Chat sidebar -> Connections, direct Connections entry in a second isolated
+browser context, automatic appearance of its new Device in the first context,
+identical membership in both, same Device across tabs/reload, offline membership
+retained, and return to Chat. No page errors and no dashboard API calls except
+bootstrap. Evidence: `/tmp/finitechat-connections-browser-check.log` and
+`/tmp/finitechat-connections.png`. Dashboard typecheck/focused ESLint, workspace
+format check, WASM strict clippy and the release WASM build also passed. The live
+agent and relay were not restarted for this change.
+
+For a product device-management page, define account-wide versus per-Room views,
+authenticated device names/registration metadata, presence separately from
+membership, and an authorized Remove/revocation flow with recovery tests. This
+list only exposes existing membership; it does not implement device removal.
 
 ## Browser persistence and crash boundaries
 
