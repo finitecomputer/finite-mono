@@ -113,7 +113,11 @@ the audit). Production identity/bootstrap, agent controls, media and
 Brain need replacement paths before the service can be deleted. The audit gives
 state owners, a deletion inventory and bridge-absent acceptance gates. A
 follow-up records #854 removing Sites viewer signing, Core encrypted key
-custody, the Iroh option, and existing FiniteChat runtime behavior to reuse.
+custody, and existing FiniteChat runtime behavior to reuse. Paul then clarified
+that FiniteChat is an optional chat transport: agent controls belong to an
+independent Iroh or direct-HTTPS path. Admin access must work when FiniteChat is
+unavailable. Control implementation is outside this spike; retiring the hosted
+service still requires its existing control callers to move to that other path.
 The initial broad effort estimates are withdrawn. It is a scope, not an implemented removal or a production cutover plan.
 
 ## Actual data flow

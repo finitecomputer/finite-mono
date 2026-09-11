@@ -48,19 +48,23 @@ scope must incorporate that work:
   that same stable account identity. Device MLS checkpoints remain local to
   the browser and agent; the public Project/Agent mapping is separate from
   private key custody.
-- **Agent commands use direct FiniteChat or the Iroh work.** The linked task's
-  saved `docs/research/2026-09-10-browser-iroh-hermes-feasibility.md` records real
-  browser HTTP/WebSocket/media and admission revocation/expiry proofs. Core
-  runtime-credential registration/activation foundations are implemented
-  locally. Launcher delivery/retry, production admission distribution and actual
-  agentd integration remain incomplete. Reuse that boundary if chosen; do not
-  count a second independent control/auth system as required for this spike.
+- **Agent controls are outside FiniteChat's responsibility.** Paul selected
+  a generic, independently authorized Iroh path, or direct HTTPS to the Agent
+  Runtime if Iroh is unsuitable. FiniteChat becomes an optional chat transport.
+  Administrative access must work without FiniteChat, its relay, a joined Room,
+  usable MLS state, or a FiniteChat owner-claim exchange. Do not port the hosted
+  runtime-command control path into browser WASM as part of this work.
+  The Iroh task's saved feasibility log records browser HTTP/WebSocket/media
+  and admission revocation/expiry proofs plus a local Core credential
+  foundation; launcher delivery/retry and actual agentd integration remain
+  separate work. An HTTPS fallback is an alternative transport choice, not
+  automatic fallback behavior being added to the spike.
 
 The prior 2–3-week / 4–8-engineer-week totals are withdrawn as a useful estimate
 of *bridge removal*. They bundled production reliability, ancillary feature
 coverage, and work already in progress. Estimate the narrowed integration tasks
-after choosing the agent-control transport and identifying the exact portable
-runtime extraction. The source inventory remains useful.
+after identifying the exact portable runtime extraction. The independent
+controls work owns its transport choice. The source inventory remains useful.
 
 ### What the bridge actually supplied for media and chat state
 
@@ -160,7 +164,7 @@ removing the provider rather than rewriting the UI.
 | Hermes creates a Site for the user | `hosted-web-chat.ts:228` attempts to obtain Core-verified email and a Sites-issued requester assertion; when present, hosted dispatch adds it to encrypted message metadata. `adapter.py:329` materializes it for tools; `finite-sites/crates/fsite-cli/src/requester_context.rs` consumes it. Browser sends do not obtain this context. | Retain an authenticated, product-scoped assertion issuer; give the browser the assertion to carry in MLS, or establish equivalent explicit delegation at admission. An nsec proves a Principal, not a verified email address. Never trust a browser-supplied email alone. Ordinary chat already tolerates absence of this assertion. |
 | Login and first Agent creation | `agent-creation-requests/route.ts:181` asks the bridge to mint/read the owner's chat identity, passes its public ID to Core, then seals bootstrap authorization in the bridge. Profile-image upload also uses it. Core currently persists the public owner ID into the runtime spec, not this spike's nsec handoff. | Core-owned stable User Key/account mapping and authenticated handoff under the chosen custody assumption; correct public owner identity before runtime launch; relocate profile upload. |
 | Canonical Room binding / enrollment | Production binding and exact bootstrap journal live in hosted-device `lib.rs:1125`. Spike uses one fixed Room/Agent/user and feature-gated admission. | Durable product-to-Room discovery and one authorized creation path. Agent authors membership. Core authorizes the actual Project/Principal/Device grant; browser selection never creates or chooses authority. Scope grants to Device/KeyPackage, define retries/revocation and multiple Projects. |
-| Agent ownership and Connections controls | `hosted-web-chat.ts:362` sends `agent.owner.claim`; `hosted-agent-controls.ts` sends inference, Telegram, SimpleX and Google commands through `hostedDeviceRuntimeCommand`. Spike sets `ownerClaimed = client !== null`, makes claim/recovery call sync, and shows only the Room device list. The fixture does not run `finite-agentd`. | Browser sends and correlates the existing typed encrypted runtime commands; prove the actual agent-side handler and authorization. Google OAuth callback must get its result to the agent when the browser is absent, through an explicit product capability/delivery flow—not a hidden permanent human Device. |
+| Agent ownership and Connections controls | `hosted-web-chat.ts:362` sends `agent.owner.claim`; `hosted-agent-controls.ts` sends inference, Telegram, SimpleX and Google commands through `hostedDeviceRuntimeCommand`. Spike sets `ownerClaimed = client !== null`, makes claim/recovery call sync, and shows only the Room device list. The fixture does not run `finite-agentd`. | Independent controls work replaces these callers over Iroh or direct HTTPS, including authorization and OAuth completion. This is an external prerequisite for retiring the hosted service, not work to implement through browser FiniteChat. Prove admin access with FiniteChat unavailable. |
 | Attachments, voice notes and images | Browser capability is disabled; upload/download functions throw, and message projection uses `media: []`. Production hosted service encrypts/uploads and decrypts/downloads files. | Port shared blob encryption/reference verification plus browser upload, download, cache and resource bounds; test actual Hermes media input/output. Moving only upload is insufficient. |
 | Brain cards, approvals and identity operations | Explicitly disabled by the browser provider. `brain-hosted-client.ts` uses the hosted typed identity provider for HTTP proofs and approval signatures; the hosted service also wraps/opens resource-bound grants. | Implement the existing typed Brain identity-provider contract in the browser, preserving Brain authorization and grant boundaries. Enabling the current React cards alone still calls hosted APIs. |
 | Other chat state | `MarkRoomRead` and `SetTyping` are no-ops; profiles and live activity are empty, unread counts zero, per-message delivery projection absent. Harness disables streaming and approvals. | Port the selected canonical projections/ephemeral behavior. Prove streamed edits/finalization, cancellation and interactive tool flows before claiming parity; this audit does not claim every such feature already works in the old dashboard either. |
@@ -207,7 +211,7 @@ for the reasons above. Existing-user conversion is still excluded.
 1. **Real identity and launch integration.**
    Replace fixture login, key source, fake Project and fixed endpoints with
    authenticated Core identity, real Project creation and a provisioned Agent.
-   Make the browser provider the intended route. Carry owner public identity
+   Use the browser provider when FiniteChat is selected. Carry owner public identity
    and product-scoped grants; retain a single canonical Room discovery record.
 2. **Admission, persistence and history reliability.**
    Close the KeyPackage/Commit journal crash gaps, serialize/retry enrollments,
@@ -216,16 +220,18 @@ for the reasons above. Existing-user conversion is still excluded.
    lifecycle/eviction behavior and agent-history recovery coverage appropriate
    to the promised durability. Full disaster recovery is a separate scope from exposing these client features.
 3. **Expose existing client behavior and relocate identity callers.**
-   Blob/media support, ephemeral/projection parity, real agent-control commands,
-   the Brain identity provider, verified requester context, and OAuth completion.
-   Adopt #854 for Sites viewer auth. Choose direct FiniteChat or the shared Iroh
-   path for controls. These are bounded reuse/integration slices; preserve
-   existing product authorization rather than adding new protocols.
+   Blob/media support, ephemeral/projection parity, the Brain identity provider
+   and verified requester context. Adopt #854 for Sites viewer auth. These are
+   bounded reuse/integration slices; preserve existing product authorization
+   rather than adding new protocols. Agent controls and OAuth completion belong
+   to the independent controls work, not this FiniteChat port.
 4. **Packaging, deletion and release gates.**
    Pinned versioned JS/WASM delivery; secure-context/CORS on product-owned public
    routes; replace loopback-only enrollment; production build and browser CI.
    Then remove the unused hosted service/client/routes and its deployment,
    secret, status and test dependencies. Preserve shared protocol/UI logic.
+   Coordinate with the independent controls work before removing its remaining
+   hosted-service callers; this port does not implement their replacement.
 
 The mechanical deletion is relatively small: about 2.9k lines of hosted Rust
 service, 2.3k lines of its HTTP tests, three main dashboard provider/client/
@@ -270,8 +276,11 @@ The full deletion gate should run that same absence test and prove:
   expiry, gateway/native-agent restart and disconnect-before-ack. A paused
   process is not sufficient proof of process-crash recovery.
 - Site creation with correct verified ownership and embedded viewing, Brain
-  approvals/grants, media in both directions, actual Connections commands,
-  and Google completion through their replacement paths.
+  approvals/grants, and media in both directions.
+- External controls gate, owned by the Iroh/HTTPS work: Connections and OAuth
+  completion use their independent path, and administrative access succeeds
+  with FiniteChat stopped or its MLS state unusable. This is not a WASM chat
+  feature acceptance test.
 - No requests to hosted chat APIs or hosted signer APIs. Other product APIs
   are allowed only when they own an explicit control/authorization operation;
   none may become a plaintext chat relay.
