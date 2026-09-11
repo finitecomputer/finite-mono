@@ -1638,6 +1638,20 @@ impl Engine {
         Ok(())
     }
 
+    fn mint_viewer_cookie(
+        &self,
+        site: &SiteRecord,
+        subject: ViewerCookieSubject,
+        now: u64,
+    ) -> String {
+        ViewerCookie {
+            site_id: site.id.clone(),
+            subject,
+            expires_at: now + VIEWER_COOKIE_TTL_SECONDS,
+        }
+        .sign(&self.cookie_secret)
+    }
+
     // ---- native viewer auth -------------------------------------------------
 
     pub fn native_viewer_session(
@@ -1648,12 +1662,7 @@ impl Engine {
         now: u64,
     ) -> Result<String, EngineError> {
         let principal_id = self.authorize_native_viewer(site, signer_pubkey, nonce, now)?;
-        Ok(ViewerCookie {
-            site_id: site.id.clone(),
-            subject: ViewerCookieSubject::PrincipalId(principal_id),
-            expires_at: now + VIEWER_COOKIE_TTL_SECONDS,
-        }
-        .sign(&self.cookie_secret))
+        Ok(self.mint_viewer_cookie(site, ViewerCookieSubject::PrincipalId(principal_id), now))
     }
 
     pub fn request_native_viewer_link(
@@ -1746,12 +1755,8 @@ impl Engine {
             .ok_or(StoreError::CorruptState(
                 "native viewer token references missing site",
             ))?;
-        let cookie = ViewerCookie {
-            site_id,
-            subject: ViewerCookieSubject::PrincipalId(principal_id),
-            expires_at: now + VIEWER_COOKIE_TTL_SECONDS,
-        }
-        .sign(&self.cookie_secret);
+        let cookie =
+            self.mint_viewer_cookie(&site, ViewerCookieSubject::PrincipalId(principal_id), now);
         Ok((site, cookie))
     }
 
@@ -1804,6 +1809,61 @@ impl Engine {
         }))
     }
 
+    /// Account Auth proves an email; this creates no share or publishing grant.
+    pub fn request_viewer_handoff(
+        &mut self,
+        site: &SiteRecord,
+        email: &str,
+        now: u64,
+    ) -> Result<LoginLink, EngineError> {
+        let email = validate_email(email)?;
+        let token = hex::encode(&ids::random_32());
+        let token_hash = Self::viewer_handoff_hash(&token);
+        self.store.create_login_token(
+            &token_hash,
+            &site.id,
+            &email,
+            now + finitesites_proto::limits::VIEWER_HANDOFF_TTL_SECONDS,
+            now,
+        )?;
+        Ok(LoginLink {
+            site_name: site.name.clone(),
+            email,
+            url: format!(
+                "{}_finite/auth?session_token={token}",
+                self.site_url_for_site(site)
+            ),
+        })
+    }
+
+    pub fn redeem_viewer_handoff(
+        &mut self,
+        site: &SiteRecord,
+        token: &str,
+        now: u64,
+    ) -> Result<(SiteRecord, String, String), EngineError> {
+        if !hex::is_hex32(token) {
+            return Err(EngineError::Validation("malformed token"));
+        }
+        let email = self
+            .store
+            .consume_viewer_handoff(&Self::viewer_handoff_hash(token), &site.id, now)
+            .map_err(|error| match error {
+                StoreError::NotFound(_) => EngineError::Validation("unknown or expired link"),
+                other => EngineError::Store(other),
+            })?;
+        let cookie =
+            self.mint_viewer_cookie(site, ViewerCookieSubject::ExternalEmail(email.clone()), now);
+        Ok((site.clone(), cookie, email))
+    }
+
+    fn viewer_handoff_hash(token: &str) -> String {
+        // Prevent using a handoff through the reusable emailed-link endpoint.
+        hex::encode(&Sha256::digest(
+            format!("finite-sites-viewer-handoff-v1:{token}").as_bytes(),
+        ))
+    }
+
     /// Redeem a magic-link token; returns the site and a viewer cookie value.
     pub fn redeem_login(
         &mut self,
@@ -1839,12 +1899,11 @@ impl Engine {
             .ok_or(StoreError::CorruptState(
                 "login token references missing site",
             ))?;
-        let cookie = ViewerCookie {
-            site_id,
-            subject: ViewerCookieSubject::ExternalEmail(email.clone()),
-            expires_at: now + VIEWER_COOKIE_TTL_SECONDS,
-        }
-        .sign(&self.cookie_secret);
+        let cookie = self.mint_viewer_cookie(
+            &site,
+            ViewerCookieSubject::ExternalEmail(email.clone()),
+            now,
+        );
         Ok((site, cookie, email))
     }
 

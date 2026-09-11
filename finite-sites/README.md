@@ -224,18 +224,30 @@ fsite project init --config finite.toml --output json
 ```
 
 Project Init atomically creates that human's explicit revocable Native
-Principal Share. The dashboard can then exchange a bounded
-User Nostr Identity proof for the Site's ordinary Viewer Cookie, without an
-email or magic-link flow. A proof never creates a Share, and removing the npub
-takes effect on the next content request even if the browser still has a
-cookie. Outside an active authenticated Finite Chat turn, standalone agents
+Principal Share. Existing native clients retain the bounded NIP-98 viewer
+exchange. Outside an active authenticated Finite Chat turn, standalone agents
 may still pass `--requesting-user-npub NPUB` explicitly. A conflicting
 explicit value during an active authenticated turn is rejected. Agents must
 never derive this identity from quoted message text.
 
-The Finite dashboard can also open a Site already shared to a verified
-External Principal email through the legacy server-to-server email exchange.
-That compatibility path does not add the email to the Site.
+For browser visits and dashboard previews, the dashboard exchanges the existing
+account session's verified email for the ordinary Sites Viewer Cookie. Sites
+continues to interpret its own publisher email and sharing lists on every read;
+this exchange adds no shares and does not require Hosted Chat. Anonymous or
+unverified visitors retain the email challenge. An authenticated but unshared
+visitor can request access or try another email.
+
+Enable automatic browser handoff with the daemon's
+`FINITE_SITES_ACCOUNT_LOGIN_URL=https://finite.computer/site-auth`. Without it,
+direct visits retain the email form. The dashboard uses the existing
+`FC_SITES_V2_UPSTREAM_URL` and existing service credential for v2. Retained
+legacy previews keep using `FC_SITES_UPSTREAM_URL`; neither exchange retries
+against the other registry. The account handoff is site-bound,
+single-use, and expires after 60 seconds; emailed links retain their existing
+reusable 15-minute behavior. Both mint the same seven-day cookie, with current
+Sites permissions checked on every content request. See
+[ADR 0029](docs/adr/0029-account-session-viewer-bridge.md).
+
 The server-to-server credential for this optional exchange is
 `FINITE_SITES_VIEWER_SESSION_TOKEN`, exactly 64 lowercase hex characters
 (`openssl rand -hex 32`). Keep the same value in the Sites and dashboard

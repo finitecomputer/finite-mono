@@ -57,6 +57,7 @@ fn dashboard_create_agent_flow_persists_request_in_core() -> Result<(), Box<dyn 
     let response = ureq::post(&format!("{}/agent-creation-requests", env.dashboard_url))
         .send_form(&[
             ("displayName", display_name.as_str()),
+            ("hostingTier", "standard"),
             ("access", "launch-code"),
             ("launchCode", launch_code),
             ("idempotencyKey", idempotency_key.as_str()),

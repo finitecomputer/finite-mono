@@ -4867,6 +4867,24 @@ impl Store {
         Ok((site_id, email))
     }
 
+    /// Consume an account handoff atomically, bound to the receiving Site.
+    pub fn consume_viewer_handoff(
+        &mut self,
+        token_hash: &str,
+        site_id: &str,
+        now: u64,
+    ) -> Result<String, StoreError> {
+        self.conn
+            .query_row(
+                "UPDATE login_tokens SET used_at = ?1 WHERE token_hash = ?2 AND site_id = ?3
+             AND used_at IS NULL AND expires_at >= ?1 RETURNING email",
+                params![now, token_hash, site_id],
+                |row| row.get(0),
+            )
+            .optional()?
+            .ok_or(StoreError::NotFound("viewer handoff"))
+    }
+
     pub fn create_native_viewer_token(
         &mut self,
         token_hash: &str,

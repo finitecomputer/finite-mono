@@ -234,8 +234,8 @@ type FakeSitesState = {
   exchanges: Array<{
     serviceAuthorization: string | null;
     outputUrl: string;
-    proofAuthorization: string;
-    signedBody: string;
+    verifiedEmail: string;
+    returnTo: string;
   }>;
   redemptions: number;
   privateContentRequests: number;
@@ -1487,26 +1487,16 @@ test("dashboard agent creation browser states", { timeout: 300_000 }, async () =
       });
       assert(sites.state.exchanges.length >= 1);
       for (const exchange of sites.state.exchanges) {
-        const signedBody = JSON.parse(exchange.signedBody) as Record<string, unknown>;
-        assert.equal(
-          exchange.serviceAuthorization,
-          `Bearer ${SITES_VIEWER_SESSION_TOKEN}`
-        );
+        assert.equal(exchange.serviceAuthorization, `Bearer ${SITES_VIEWER_SESSION_TOKEN}`);
         assert.equal(exchange.outputUrl, localSiteUrl);
-        assert.equal(exchange.proofAuthorization, "Nostr browser-sites-proof");
-        assert.deepEqual(JSON.parse(exchange.signedBody), {
-          purpose: "finite_site_view_session",
-          return_to: "/",
-          client: "finite-dashboard",
-          nonce: signedBody.nonce,
-        });
-        assert.match(String(signedBody.nonce), /^[0-9a-f-]{36}$/u);
+        assert.equal(exchange.verifiedEmail, "browser@finite.vip");
+        assert.equal(exchange.returnTo, "/");
       }
       assert.equal(sites.state.redemptions, 1);
       assert(sites.state.privateContentRequests >= 1);
       assert.match(
         (await page.getByLabel("Site preview").locator("iframe").getAttribute("src")) ?? "",
-        /\/_finite\/auth\?native_token=/u
+        /\/_finite\/auth\?session_token=/u
       );
       const binding = hostedDevice.state.app.hosted_agent_binding;
       assert(binding);
@@ -1997,6 +1987,7 @@ function startDashboard(
         FINITECHAT_HOSTED_API_TOKEN: HOSTED_DEVICE_TOKEN,
         FC_HOSTED_WEB_DEVICE_URL: hostedDeviceUrl,
         FC_SITES_UPSTREAM_URL: sitesUrl,
+        FC_SITES_V2_UPSTREAM_URL: sitesUrl,
         FINITE_SITES_VIEWER_SESSION_TOKEN: SITES_VIEWER_SESSION_TOKEN,
         FC_SITES_ALLOW_LOCAL_OUTPUTS: "1",
         FC_DASHBOARD_ALLOW_DEV_ACCOUNT_AUTH: "1",
@@ -2038,37 +2029,33 @@ async function startFakeSites() {
     const requestUrl = new URL(request.url ?? "/", `http://${request.headers.host ?? "localhost"}`);
     if (
       request.method === "POST"
-      && requestUrl.pathname === "/internal/v1/native-viewer-sessions"
+      && requestUrl.pathname === "/internal/v1/viewer-sessions"
     ) {
       const body = (await readJson(request)) as Record<string, unknown>;
       const exchange = {
         serviceAuthorization: singleHeader(request.headers.authorization),
         outputUrl: String(body.output_url ?? body.site_url ?? ""),
-        proofAuthorization: String(body.authorization ?? ""),
-        signedBody: String(body.signed_body ?? ""),
+        verifiedEmail: String(body.verified_email ?? ""),
+        returnTo: String(body.return_to ?? ""),
       };
       state.exchanges.push(exchange);
-      const signedBody = JSON.parse(exchange.signedBody) as Record<string, unknown>;
       if (
         exchange.serviceAuthorization !== `Bearer ${SITES_VIEWER_SESSION_TOKEN}`
         || exchange.outputUrl !== siteUrl
-        || exchange.proofAuthorization !== "Nostr browser-sites-proof"
-        || signedBody.purpose !== "finite_site_view_session"
-        || signedBody.return_to !== "/"
-        || signedBody.client !== "finite-dashboard"
-        || typeof signedBody.nonce !== "string"
+        || exchange.verifiedEmail !== "browser@finite.vip"
+        || exchange.returnTo !== "/"
       ) {
         writeJson(response, 403, { error: "viewer access unavailable" });
         return;
       }
       writeJson(response, 200, {
-        redeem_url: `${siteUrl}_finite/auth?native_token=${token}&return_to=%2F`,
+        redeem_url: `${siteUrl}_finite/auth?session_token=${token}&return_to=%2F`,
       });
       return;
     }
 
     if (request.method === "GET" && requestUrl.pathname === "/_finite/auth") {
-      if (requestUrl.searchParams.get("native_token") !== token) {
+      if (requestUrl.searchParams.get("session_token") !== token) {
         response.writeHead(400).end();
         return;
       }
@@ -2259,8 +2246,7 @@ async function handleHostedDeviceRequest(
     return;
   }
 
-  const isSitesIdentityProvider = path === "/v1/sites/identity-provider";
-  if (!path.startsWith("/v1/app/") && !isSitesIdentityProvider) {
+  if (!path.startsWith("/v1/app/")) {
     writeJson(response, 404, { error: "not found" });
     return;
   }
@@ -2282,29 +2268,6 @@ async function handleHostedDeviceRequest(
 
   if (state.unavailable) {
     writeJson(response, 503, { error: "hosted chat is temporarily unavailable" });
-    return;
-  }
-
-  if (request.method === "POST" && isSitesIdentityProvider) {
-    const body = (await readJson(request)) as Record<string, unknown>;
-    const input = body.input as Record<string, unknown> | undefined;
-    const url = String(input?.url ?? "");
-    const origin = singleHeader(request.headers["x-finite-sites-public-origin"]);
-    assert.equal(body.version, "finite-sites-identity-provider-v1");
-    assert.equal(body.operation, "authorizeViewerSession");
-    assert.equal(input?.returnTo, "/");
-    assert.equal(input?.client, "finite-dashboard");
-    assert.match(String(input?.nonce ?? ""), /^[0-9a-f-]{36}$/u);
-    assert.equal(url, `${origin}/_finite/auth/native-session`);
-    writeJson(response, 200, {
-      body_json: JSON.stringify({
-        purpose: "finite_site_view_session",
-        return_to: input?.returnTo,
-        client: input?.client,
-        nonce: input?.nonce,
-      }),
-      authorization_header: "Nostr browser-sites-proof",
-    });
     return;
   }
 

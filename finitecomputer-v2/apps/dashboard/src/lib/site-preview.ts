@@ -1,11 +1,5 @@
-import { randomUUID } from "node:crypto";
-
-import { getAccountAuthContext } from "@/lib/dashboard-auth";
+import { type AccountAuthContext, getAccountAuthContext } from "@/lib/dashboard-auth";
 import { loadDashboardMachineAccess } from "@/lib/dashboard-machine-access";
-import {
-  hostedDeviceConfig,
-  hostedDeviceSitesIdentityProvider,
-} from "@/lib/hosted-web-device";
 
 const MAX_PREVIEW_URL_BYTES = 2 * 1024;
 const MAX_RETURN_TO_BYTES = 1024;
@@ -117,45 +111,39 @@ export async function createSitePreviewSession(machineId: string, rawUrl: unknow
   }
 
   const target = parseSitePreviewTarget(rawUrl);
-  const upstream = sitesUpstreamOrigin();
-  const serviceToken = process.env.FINITE_SITES_VIEWER_SESSION_TOKEN?.trim();
-  const device = hostedDeviceConfig();
-  if (!upstream || !serviceToken || !device) {
-    throw new SitePreviewError("Site previews aren't available right now.", 503);
+  return createSiteAccountSession(target, account);
+}
+
+// Both direct visits and embedded previews enter the same Sites-owned exchange.
+export async function createSiteAccountSession(target: SitePreviewTarget, account: AccountAuthContext) {
+  if (!account.workosUserId || !account.emailVerified || !account.email
+      || !(account.source === "workos" || (process.env.NODE_ENV !== "production" && account.source === "dev"))) {
+    throw new SitePreviewError("Sign in with a verified email.", 401);
   }
-
-  const endpointUrl = `${target.outputUrl}_finite/auth/native-session`;
-  const proof = await hostedDeviceSitesIdentityProvider(
-    device,
-    account,
-    {
-      version: "finite-sites-identity-provider-v1",
-      operation: "authorizeViewerSession",
-      input: {
-        url: endpointUrl,
-        returnTo: target.returnTo,
-        client: "finite-dashboard",
-        nonce: randomUUID(),
-      },
-    },
-    new URL(target.outputUrl).origin
-  ).catch(() => {
-    throw new SitePreviewError("Site previews aren't available right now.", 503);
-  });
-
+  const legacy = legacySite(target);
+  // Fixed service origins, never the visitor-supplied site origin. No cross-registry fallback.
+  const upstream = legacy
+    ? sitesUpstreamOrigin()
+    : sitesUpstreamOrigin(process.env.FC_SITES_V2_UPSTREAM_URL ?? "");
+  const serviceToken = process.env.FINITE_SITES_VIEWER_SESSION_TOKEN?.trim();
+  if (!upstream || !serviceToken) {
+    throw new SitePreviewError("Site sign-in isn't available right now.", 503);
+  }
+  // Retained legacy apps/documents still use the v0.5.3 output_url contract.
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), SITES_REQUEST_TIMEOUT_MS);
   try {
-    const response = await fetch(`${upstream}/internal/v1/native-viewer-sessions`, {
+    const response = await fetch(`${upstream}/internal/v1/viewer-sessions`, {
       method: "POST",
+      redirect: "error",
       headers: {
         authorization: `Bearer ${serviceToken}`,
         "content-type": "application/json",
       },
       body: JSON.stringify({
-        output_url: target.outputUrl,
-        authorization: proof.authorization_header,
-        signed_body: proof.body_json,
+        [legacy ? "output_url" : "site_url"]: target.outputUrl,
+        verified_email: account.email,
+        return_to: target.returnTo,
       }),
       cache: "no-store",
       signal: controller.signal,
@@ -172,7 +160,7 @@ export async function createSitePreviewSession(machineId: string, rawUrl: unknow
         status
       );
     }
-    const payload = (await response.json()) as unknown;
+    const payload = await readSessionResponse(response, controller.signal);
     return {
       url: parseViewerSessionResponse(payload, target),
       originalUrl: target.originalUrl,
@@ -183,6 +171,33 @@ export async function createSitePreviewSession(machineId: string, rawUrl: unknow
   } finally {
     clearTimeout(timeout);
   }
+}
+
+function legacySite(target: SitePreviewTarget) {
+  const host = new URL(target.outputUrl).hostname;
+  return host.endsWith(".finite.chat") && !host.endsWith(".v2.finite.chat");
+}
+
+export function siteEmailSignInUrl(target: SitePreviewTarget) {
+  // The old daemon has no automatic handoff or explicit fallback route.
+  return legacySite(target) ? target.originalUrl : new URL("/_finite/sign-in", target.outputUrl).toString();
+}
+
+async function readSessionResponse(response: Response, signal: AbortSignal): Promise<unknown> {
+  const reader = response.body?.getReader();
+  if (!reader) throw new SitePreviewError("Invalid site response.", 502);
+  const chunks: Uint8Array[] = [];
+  let size = 0;
+  try {
+    while (true) {
+      const { done, value } = await readSitePreviewChunk(reader, signal);
+      if (done) break;
+      size += value.byteLength;
+      if (size > 8192) throw new SitePreviewError("Invalid site response.", 502);
+      chunks.push(value);
+    }
+    return JSON.parse(Buffer.concat(chunks).toString("utf8")) as unknown;
+  } finally { await reader.cancel().catch(() => undefined); }
 }
 
 export function sitesUpstreamOrigin(value = process.env.FC_SITES_UPSTREAM_URL) {
@@ -234,6 +249,7 @@ export function parseSitePreviewTarget(
     returnTo.startsWith("//") ||
     returnTo.length > MAX_RETURN_TO_BYTES ||
     returnTo.includes("\\") ||
+    url.pathname.startsWith("/_finite/") ||
     /[\u0000-\u0020\u007f]/u.test(returnTo)
   ) {
     throw new SitePreviewError("Choose a Finite site to preview.", 400);
@@ -248,7 +264,9 @@ export function parseSitePreviewTarget(
 
 function allowedOutputHost(url: URL, allowLocalOutputs: boolean) {
   if (url.protocol === "https:" && !url.port) {
-    return oneLabelUnder(url.hostname, "docs.finite.chat")
+    return oneLabelUnder(url.hostname, "finite.site")
+      || oneLabelUnder(url.hostname, "v2.finite.chat")
+      || oneLabelUnder(url.hostname, "docs.finite.chat")
       || oneLabelUnder(url.hostname, "finite.chat");
   }
   if (allowLocalOutputs && url.protocol === "http:") {
@@ -271,7 +289,9 @@ function oneLabelUnder(hostname: string, baseDomain: string) {
   return Boolean(label)
     && !label.includes(".")
     && label !== "api"
-    && label !== "git";
+    && label !== "git"
+    && label !== "auth"
+    && label !== "www";
 }
 
 export function parseViewerSessionResponse(payload: unknown, target: SitePreviewTarget) {
@@ -291,7 +311,7 @@ export function parseViewerSessionResponse(payload: unknown, target: SitePreview
   }
   const expectedOrigin = new URL(target.outputUrl).origin;
   const keys = Array.from(url.searchParams.keys()).sort();
-  const tokenKey = keys.includes("native_token") ? "native_token" : "token";
+  const tokenKey = keys.includes("session_token") ? "session_token" : "token";
   if (
     url.origin !== expectedOrigin ||
     url.pathname !== "/_finite/auth" ||

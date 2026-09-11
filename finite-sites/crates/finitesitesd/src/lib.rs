@@ -47,6 +47,7 @@ pub struct ServeOptions {
     /// Dedicated account-boundary credential for the internal viewer-session
     /// exchange. It comes from the environment, never argv.
     pub viewer_session_service_token: Option<String>,
+    pub account_login_url: Option<String>,
     pub git_hook_helper_path: PathBuf,
     pub git_auto_reconcile: bool,
     pub site_url_scheme: String,
@@ -256,6 +257,9 @@ fn parse_serve_options(args: &[String]) -> Result<ServeOptions, String> {
         api_url,
         git_base_url,
         viewer_session_service_token,
+        account_login_url: std::env::var("FINITE_SITES_ACCOUNT_LOGIN_URL")
+            .ok()
+            .filter(|v| !v.is_empty()),
         git_hook_helper_path,
         git_auto_reconcile,
         site_url_scheme,

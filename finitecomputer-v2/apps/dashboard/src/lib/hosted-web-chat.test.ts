@@ -21,16 +21,20 @@ test("verified hosted requester assertion binds mailbox, human, and agent", asyn
   const originalFetch = global.fetch;
   const originalCore = process.env.FC_CORE_BASE_URL;
   const originalUpstream = process.env.FC_SITES_UPSTREAM_URL;
+  const originalV2Upstream = process.env.FC_SITES_V2_UPSTREAM_URL;
   const originalToken = process.env.FINITE_SITES_VIEWER_SESSION_TOKEN;
   context.after(() => {
     global.fetch = originalFetch;
     if (originalCore === undefined) delete process.env.FC_CORE_BASE_URL;
     else process.env.FC_CORE_BASE_URL = originalCore;
     process.env.FC_SITES_UPSTREAM_URL = originalUpstream;
+    if (originalV2Upstream === undefined) delete process.env.FC_SITES_V2_UPSTREAM_URL;
+    else process.env.FC_SITES_V2_UPSTREAM_URL = originalV2Upstream;
     process.env.FINITE_SITES_VIEWER_SESSION_TOKEN = originalToken;
   });
   process.env.FC_CORE_BASE_URL = "https://core.internal";
   process.env.FC_SITES_UPSTREAM_URL = "https://sites.internal";
+  process.env.FC_SITES_V2_UPSTREAM_URL = "https://finite.site";
   process.env.FINITE_SITES_VIEWER_SESSION_TOKEN = "sites-token";
   const requests: Array<{ url: string; body: unknown }> = [];
   global.fetch = (async (input, init) => {
