@@ -1,6 +1,7 @@
 mod config;
 mod connections;
 mod control;
+mod control_http;
 mod daemon;
 mod ledger;
 mod simplex;
@@ -13,6 +14,7 @@ pub use config::{
     ConfigApplyResultV1, ConfigManager, ConfigOfferPolicyV1, ConfigPreviewV1, HermesConfigOfferV1,
     HermesConfigRollbackV1, VISION_CONFIG_PATH, redact_value,
 };
+pub use control_http::{ControlServerConfig, run_control_server};
 pub use daemon::{
     AgentdStatus, DaemonConfig, SpecializationBundleStatusV1, read_status, run_daemon,
 };
