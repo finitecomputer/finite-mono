@@ -100,7 +100,7 @@ infra/
 Routine Grafana dashboard updates use the
 [monitoring dashboard deployment workflow](monitoring/dashboards.md). Its SSH
 credentials are the existing GitHub `production` environment secrets
-`FINITE_PRODUCTION_SSH_KEY`, `FINITE_PRODUCTION_KNOWN_HOSTS`, and supplemental
+`FINITE_MONITORING_SSH_KEY`, `FINITE_PRODUCTION_KNOWN_HOSTS`, and supplemental
 host pins in `FINITE_MONITORING_KNOWN_HOSTS`; Grafana's admin
 password stays in `/etc/finite/monitoring/grafana-admin-password` on the
 monitoring host. Source documents names and locations only.

@@ -27,6 +27,8 @@ class DeploymentTest(unittest.TestCase):
         self.backups = root / "backups"
         self.previous = {}
         self.bundle = {
+            "schema_version": 1,
+            "helper_sha256": deploy.digest(Path(deploy.__file__).read_bytes()),
             "revision": "a" * 40,
             "provider_sha256": deploy.digest(self.provider.read_bytes()),
             "files": {},
@@ -114,6 +116,13 @@ class DeploymentTest(unittest.TestCase):
 
         with self.assertRaisesRegex(ValueError, "ownership differs"):
             self.apply(fetch=unowned)
+        self.assert_previous()
+        self.assertFalse(self.backups.exists())
+
+    def test_rejects_mixed_version_helper_before_mutation(self):
+        self.bundle["helper_sha256"] = "0" * 64
+        with self.assertRaisesRegex(ValueError, "installed deployment helper differs"):
+            self.apply()
         self.assert_previous()
         self.assertFalse(self.backups.exists())
 
