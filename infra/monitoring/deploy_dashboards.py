@@ -10,7 +10,6 @@ import json
 import os
 from pathlib import Path
 import re
-import shlex
 import subprocess
 import sys
 import tempfile
@@ -24,6 +23,8 @@ BACKUPS = Path("/var/backups/finite-monitoring-dashboards")
 LOCK = Path("/run/lock/finite-monitoring-dashboards.lock")
 MONITORING = "ubuntu@152.236.5.27"
 APP_PLANE = "root@64.34.80.19"
+STATUS_COMMAND = "/run/current-system/sw/bin/python3 /var/lib/finite-monitoring-ci/scripts/finite-status --json"
+DASHBOARD_COMMAND = "/usr/bin/sudo -n /usr/bin/python3 /var/lib/finite-monitoring-ci/deploy_dashboards.py"
 
 
 def require(condition, message):
@@ -37,6 +38,10 @@ def digest(data):
 
 def validate(bundle):
     require(re.fullmatch(r"[0-9a-f]{40}", bundle["revision"]), "invalid revision")
+    require(bundle.get("schema_version") == 1, "unsupported deployment bundle")
+    require(
+        re.fullmatch(r"[0-9a-f]{64}", bundle["helper_sha256"]), "invalid helper hash"
+    )
     require(
         re.fullmatch(r"[0-9a-f]{64}", bundle["provider_sha256"]),
         "invalid provider hash",
@@ -66,6 +71,8 @@ def bundle_from_repo():
     monitoring = root / "infra/monitoring"
     manifest = json.loads((monitoring / "grafana/production.json").read_text())
     bundle = {
+        "schema_version": 1,
+        "helper_sha256": digest(Path(__file__).read_bytes()),
         "revision": subprocess.check_output(
             ["git", "rev-parse", "HEAD"], cwd=root, text=True
         ).strip(),
@@ -155,6 +162,10 @@ def preflight(
     bundle, *, directory=DASHBOARDS, provider=PROVIDER, fetch=grafana_dashboard
 ):
     validate(bundle)
+    require(
+        digest(Path(__file__).read_bytes()) == bundle["helper_sha256"],
+        "installed deployment helper differs; operator must run install_ci_access.py from this revision",
+    )
     require(
         directory.is_dir() and not directory.is_symlink(), "invalid dashboard directory"
     )
@@ -267,21 +278,8 @@ def ssh(target, command, **kwargs):
 
 
 def status(output):
-    # Execute the canonical scripts/finite-status entry point and its module
-    # from memory on the app-plane host, where its production evidence lives.
-    root = Path(__file__).resolve().parents[2]
-    source = (root / "scripts/finite_status.py").read_text()
-    entry = (root / "scripts/finite-status").read_text()
-    program = (
-        "import sys, types\n"
-        "module = types.ModuleType('finite_status')\n"
-        "module.__file__ = '/tmp/finite-status/scripts/finite_status.py'\n"
-        "sys.modules['finite_status'] = module\n"
-        f"exec(compile({source!r}, module.__file__, 'exec'), module.__dict__)\n"
-        "sys.argv = ['scripts/finite-status', '--json']\n"
-        f"exec(compile({entry!r}, 'scripts/finite-status', 'exec'))\n"
-    )
-    result = ssh(APP_PLANE, "python3 -", input=program, text=True, capture_output=True)
+    # The key is forced to the installed canonical, read-only status command.
+    result = ssh(APP_PLANE, STATUS_COMMAND, text=True, capture_output=True)
     require(result.returncode in (0, 1, 2), "finite-status SSH execution failed")
     report = json.loads(result.stdout)
     require(
@@ -291,7 +289,26 @@ def status(output):
     require(
         report.get("exit_code") == result.returncode, "finite-status exit code mismatch"
     )
-    Path(output).write_text(result.stdout)
+    # Actions artifacts are accessible with this public repository. Never
+    # publish the full report's agent names, project IDs, addresses, or errors.
+    summary = {
+        "schema_version": "finite.status.summary.v1",
+        "source_schema_version": report["schema_version"],
+        "generated_at": report["generated_at"],
+        "overall_status": report["overall_status"],
+        "exit_code": report["exit_code"],
+        "sections": {
+            name: {"status": report["sections"][name]["status"]}
+            for name in (
+                "fleet_convergence",
+                "host_health",
+                "recovery_boundary",
+                "rollout_state",
+                "chat_plane",
+            )
+        },
+    }
+    Path(output).write_text(json.dumps(summary, indent=2) + "\n")
     print(
         f"finite-status: {report['overall_status']} (exit {result.returncode}); evidence: {output}"
     )
@@ -337,9 +354,8 @@ def main():
         if options.command == "validate":
             print("Production dashboards validated: " + ", ".join(bundle["files"]))
             return
-        source = Path(__file__).read_text()
         if options.command == "preview":
-            command = "sudo -n python3 -c " + shlex.quote(source) + " preflight"
+            command = DASHBOARD_COMMAND + " preflight"
             ssh(MONITORING, command, input=json.dumps(bundle), text=True, check=True)
             return
         root = Path(__file__).resolve().parents[2]
@@ -361,7 +377,7 @@ def main():
                 result.returncode == 0,
                 "newer dashboard deployment changes are on main; run from current main",
             )
-        command = "sudo -n python3 -c " + shlex.quote(source) + " apply"
+        command = DASHBOARD_COMMAND + " apply"
         ssh(MONITORING, command, input=json.dumps(bundle), text=True, check=True)
 
 

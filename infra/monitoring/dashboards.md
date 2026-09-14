@@ -1,121 +1,129 @@
 # Dashboard deployment
 
-`grafana/production.json` maps production filenames to their stable Grafana
-UIDs. Agents edit the JSON under `grafana/dashboards/` and submit a PR.
-`just monitoring-nixos-contract` validates the production list, monitoring
-configuration, runtime queries, and deployment recovery tests in both PR CI
-and the deployment workflow. Draft-tagged dashboards cannot be deployed.
+Agents edit JSON under `grafana/dashboards/` and submit a PR. The explicit
+production list, `grafana/production.json`, includes the overview and runtime
+slots dashboards and excludes the Tinfoil draft. `just monitoring-nixos-contract`
+validates the list, monitoring configuration, queries, and deployment recovery
+in both PR CI and the deployment workflow.
 
-After a merge to `main` touching `infra/monitoring/` or the deployment workflow,
-`.github/workflows/monitoring-dashboards.yml` validates the exact commit and
-queues a deployment in the existing `production` GitHub environment. Its
-required-reviewer gate still applies. There is no additional shell deployment
-step after approval. Manual dispatch on `main` retries the workflow; dispatch
-from other branches does not run. Workflow changes and operational docs also
-trigger validation/deployment, which is a no-op when the files already match.
+Merges to `main` touching `infra/monitoring/` or the deployment workflow queue
+`.github/workflows/monitoring-dashboards.yml`. It validates the merged revision,
+then waits for the existing `production` environment reviewer approval. After
+approval it deploys without a separate shell command or Grafana restart.
+Manual dispatch on `main` retries this workflow; other branches do not run.
+The environment permits `main` and `production`, with its existing reviewers.
 
-## Access and activation
+## Restricted CI access
 
-The workflow uses existing environment secrets by name only:
-
-| GitHub `production` environment secret | Required access |
+| GitHub `production` environment secret | Purpose |
 | --- | --- |
-| `FINITE_PRODUCTION_SSH_KEY` | SSH to `ubuntu@152.236.5.27` with noninteractive sudo, and read-only status execution via `root@64.34.80.19` |
-| `FINITE_PRODUCTION_KNOWN_HOSTS` | Previously verified SSH host keys for both IP addresses |
-| `FINITE_MONITORING_KNOWN_HOSTS` | Additional verified host pins for the monitoring and app-plane IPs; appended to the existing production pins |
+| `FINITE_MONITORING_SSH_KEY` | Dedicated Ed25519 private key for the two forced commands described below |
+| `FINITE_MONITORING_KNOWN_HOSTS` | Verified host pins for `152.236.5.27` and `64.34.80.19` |
 
-The environment permits deployments from `main` and `production`, with the
-existing required reviewers retained. Alex authorized the addition of `main`
-when activating this workflow.
+The existing production SSH key and host-pin secrets are not used or changed by this workflow.
+Grafana's admin password stays at `/etc/finite/monitoring/grafana-admin-password`
+on the monitoring host. GET-only verification reads it locally; no credential
+value is copied into source or logs.
 
-The first approved run found missing host pins before any dashboard mutation.
-The supplemental pins were obtained through existing, strictly verified SSH
-connections to both hosts. Each run checks host pins, SSH/sudo access, and
-platform status before any dashboard mutation. A missing pin or denied login
-fails closed. Update these secrets only from operator-held credentials and
-independently verified host keys; never use an unauthenticated `ssh-keyscan`
-result as the sole source of trust. GitHub's environment protection is retained.
+The dedicated key has `restrict` plus a forced command on each host:
 
-Grafana's admin password remains on the monitoring host in
-`/etc/finite/monitoring/grafana-admin-password`. The script reads it locally for
-GET-only API verification; it is never copied into GitHub or logged.
+- On `ubuntu@152.236.5.27`, a root-owned dispatcher permits only the installed
+  dashboard helper's `preflight` and `apply` operations. Other commands fail.
+- On `root@64.34.80.19`, the forced command runs the installed canonical
+  `scripts/finite-status --json`. It ignores caller-supplied commands and code.
 
-Before the first deployment, review the candidate against live files without
-modifying them:
+Neither connection permits an interactive shell, PTY, or forwarding. Dashboard
+bundles carry a schema version and the expected helper SHA-256. A changed helper
+cannot deploy until an operator installs that reviewed revision; CI credentials
+cannot update their own dispatcher, Python helper, or status command.
+
+## Operator setup and helper updates
+
+From a clean, reviewed revision on `main`, using existing operator SSH access:
 
 ```sh
-scripts/with-dev-env python3 infra/monitoring/deploy_dashboards.py preview
+scripts/with-dev-env python3 infra/monitoring/install_ci_access.py /secure/path/monitoring-ci.pub
 ```
 
-Matching merges queue a deployment using the same approval gate. Fully unattended deploys
-would require a separately authorized change to GitHub environment protection.
+The installer copies the reviewed helper/dispatcher to
+`/var/lib/finite-monitoring-ci/` on the monitoring host and copies the canonical
+status entry point/module into that directory's `scripts/` subdirectory on the
+app-plane host. Files are root-owned. It preserves unrelated authorized keys,
+replaces only the reserved `finite-monitoring-ci` key entry, and records previous
+files under `/var/backups/finite-monitoring-ci.<unique-suffix>/` on each host.
+The app-plane authorized key is in `/root/.ssh/authorized_keys`; the monitoring
+key is in `/home/ubuntu/.ssh/authorized_keys`. The existing Nix-managed operator
+keys remain unchanged.
 
-## Deployment contract
+Store the matching private key in `FINITE_MONITORING_SSH_KEY` through GitHub's
+secret API/UI; never commit it or print it. Obtain host pins through existing
+strictly verified SSH connections or an independent trusted channel. Each run
+fails before dashboard mutation if host trust, key access, helper version, or
+status collection is invalid. The restricted key should be tested against both
+hosts before approving the first Actions deployment.
 
-The source is an exact merged revision with a clean checkout. If a newer
-monitoring or deployment-workflow change exists on `main`, an old run fails
-instead of overwriting it. Approve the newer run or dispatch from current main.
-Actions never cancels an in-progress deployment. A host lock serializes the
-dashboard transaction and the existing full-stack deployment script.
+Re-run the installer with the existing public key after reviewed changes to
+`deploy_dashboards.py`, `ci_dispatch`, or the installed status implementation.
+Record `scripts/finite-status` before and after installing production access.
+To revoke access, remove only the reserved key entry from those two authorized
+key files and delete the dedicated GitHub secret. Restore backed-up helper files
+if rolling back an installation; do not overwrite unrelated newer operator keys.
 
-The deploy script checks every candidate before writing anything:
+## Dashboard transaction
 
-- The live file-provider config must exactly match the repository config.
-- Every production filename must already be a regular file with its declared
-  UID. Every UID must already belong to that same file provider in Grafana.
-- The current Grafana API representation must match the current file, ignoring
-  database-assigned ID/version and server-added top-level fields.
+The source must be a clean merged revision. If newer monitoring/workflow changes
+exist on `main`, an old run fails rather than overwriting them. Approve the newer
+run or dispatch current main. Actions never cancels an in-progress deployment;
+a host lock serializes the dashboard transaction, helper installation, and the
+existing full-stack deployment script.
 
-This path updates existing dashboards. Adding an entirely new dashboard or
-changing a UID requires a separately reviewed initial provisioning operation;
-adding it to the manifest alone fails closed. Removing a manifest entry stops
-its deployment and leaves its live dashboard intact. No dashboard deletion is
-automated. The Tinfoil draft remains excluded.
+Before any file replacement, every dashboard must already exist as a regular
+file with its declared UID and belong to that same file provider in Grafana.
+The provider config must match the repository, and the API representation must
+match its current file. Database-assigned ID/version and server-added top-level
+fields are ignored. Ambiguous ownership or drift fails without mutation.
 
-The only dashboard writes replace the listed JSON files under
-`/var/lib/finite-monitoring/grafana/dashboards/`. Each file is replaced by an
-atomic rename. The independent dashboards can briefly show different revisions
-while Grafana reloads; this is not a cross-dashboard database transaction.
-There is no service restart, datasource change, collector change, or API write.
-Grafana polls every 30 seconds; deployment waits up to 100 seconds, plus bounded
-API requests, for source-owned fields to match through the GET API. A healthy
-HTTP endpoint alone is not success. This proves the definition loaded, not that
-every query returns useful live data; review query behavior separately.
+This path updates existing dashboards. New dashboards or UID changes require
+separately reviewed initial provisioning; adding a manifest entry alone fails
+closed. Removing an entry stops deploying it and leaves the live dashboard
+intact. No dashboard deletion is automated.
 
-The workflow executes `scripts/finite-status` before and after the rollout on
-the app-plane host. Reports are retained as Actions artifacts for 14 days;
-existing red/unknown platform state is recorded and does not prevent repairing
-an observability dashboard. Transport or invalid-report failures fail the step.
-The deploy log records candidate hashes, source revision, and backup location.
+Exact previous bytes and before/after hashes are backed up under
+`/var/backups/finite-monitoring-dashboards/<revision>.<unique-suffix>/`. Each
+listed JSON file is replaced by an atomic rename. Grafana polls every 30 seconds;
+verification waits up to 100 seconds plus bounded API requests for source-owned
+fields to match. Independent dashboards can briefly show different revisions;
+this is not a cross-dashboard database transaction. No services, data sources,
+collectors, or metrics/log stores are changed. Loaded definitions do not prove
+useful query results; review live query behavior separately.
+
+The workflow records the installed canonical `scripts/finite-status` before and
+after deployment on the app-plane host, retaining only overall/section status
+summaries as Actions artifacts for 14 days. This repository is public: full
+reports with agent names, project IDs, addresses, and diagnostic details are
+never uploaded. Existing red/unknown platform state is recorded and does not prevent
+a dashboard repair. Transport and invalid-report failures fail the step.
 
 ## Rollback
 
-Before replacement, exact previous JSON bytes and before/after hashes are saved
-under `/var/backups/finite-monitoring-dashboards/<revision>.<unique-suffix>/`.
-Backups stay on the monitoring host and have no automatic retention deletion.
-
-If installation or API verification fails, the script restores all previous
-files and verifies that Grafana reloads them. If restoration or verification
-also fails, the job stays failed and its log names the backup boundary. No
-automation can complete recovery after runner/SSH loss or process termination;
-use the named backup and the normal operator recovery procedure in that case.
+Installation or Grafana reload failures restore all previous dashboard files
+and verify their reload. If recovery also fails, the job stays failed and logs
+the backup boundary. Runner/SSH loss or process termination may require operator
+recovery from the named backup. Backups have no automatic retention deletion.
 
 For a successful deploy whose queries later prove incorrect, revert the JSON
-change in Git, merge the revert, and approve its deployment. That produces a
-new merged revision and preserves history. Do not retry an old workflow as a
-rollback: the stale-revision guard will reject it.
+change in Git, merge the revert, and approve its new deployment. Retrying an old
+workflow is not rollback: the stale-revision guard rejects it.
 
-For an explicitly authorized manual deployment from a clean current `main`
-checkout, use the same script and record status outside the checkout:
+An explicitly authorized manual deployment uses the same helper and records
+status outside the checkout (run the final status command even if deploy fails):
 
 ```sh
+scripts/with-dev-env python3 infra/monitoring/deploy_dashboards.py preview
 scripts/with-dev-env python3 infra/monitoring/deploy_dashboards.py status --output /tmp/finite-status-before.json
 scripts/with-dev-env python3 infra/monitoring/deploy_dashboards.py deploy
-# Run after the attempt even when deploy exits nonzero.
 scripts/with-dev-env python3 infra/monitoring/deploy_dashboards.py status --output /tmp/finite-status-after.json
 ```
 
 `ubuntu/deploy` remains the full-stack/bootstrap path and also writes the MVP
-dashboard under the same host lock. Use dashboard-only deployment for routine
-panel/query updates; an older full-stack checkout must not be used to roll back
-unrelated monitoring configuration just to change a dashboard.
+under the same lock. Use dashboard-only deployment for routine panel/query edits.

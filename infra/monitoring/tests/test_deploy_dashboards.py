@@ -6,6 +6,8 @@ import json
 from pathlib import Path
 import tempfile
 import unittest
+from unittest.mock import patch
+from types import SimpleNamespace
 
 
 SPEC = importlib.util.spec_from_file_location(
@@ -16,6 +18,41 @@ SPEC.loader.exec_module(deploy)
 
 
 class DeploymentTest(unittest.TestCase):
+    def test_status_artifact_omits_customer_and_diagnostic_details(self):
+        report = {
+            "schema_version": "finite.status.v1",
+            "generated_at": "2026-09-14T00:00:00Z",
+            "overall_status": "red",
+            "exit_code": 1,
+            "sections": {
+                name: {
+                    "status": "red",
+                    "agent_name": "private-agent",
+                    "project_id": "private-project",
+                    "ip": "private-address",
+                    "error": "private-diagnostic",
+                }
+                for name in (
+                    "fleet_convergence",
+                    "host_health",
+                    "recovery_boundary",
+                    "rollout_state",
+                    "chat_plane",
+                )
+            },
+        }
+        output = Path(self.temporary.name) / "summary.json"
+        with patch.object(
+            deploy,
+            "ssh",
+            return_value=SimpleNamespace(returncode=1, stdout=json.dumps(report)),
+        ):
+            deploy.status(output)
+        summary = json.loads(output.read_text())
+        self.assertEqual(summary["schema_version"], "finite.status.summary.v1")
+        self.assertEqual(summary["overall_status"], "red")
+        self.assertNotIn("private-", output.read_text())
+
     def setUp(self):
         self.temporary = tempfile.TemporaryDirectory()
         self.addCleanup(self.temporary.cleanup)
@@ -27,6 +64,8 @@ class DeploymentTest(unittest.TestCase):
         self.backups = root / "backups"
         self.previous = {}
         self.bundle = {
+            "schema_version": 1,
+            "helper_sha256": deploy.digest(Path(deploy.__file__).read_bytes()),
             "revision": "a" * 40,
             "provider_sha256": deploy.digest(self.provider.read_bytes()),
             "files": {},
@@ -114,6 +153,13 @@ class DeploymentTest(unittest.TestCase):
 
         with self.assertRaisesRegex(ValueError, "ownership differs"):
             self.apply(fetch=unowned)
+        self.assert_previous()
+        self.assertFalse(self.backups.exists())
+
+    def test_rejects_mixed_version_helper_before_mutation(self):
+        self.bundle["helper_sha256"] = "0" * 64
+        with self.assertRaisesRegex(ValueError, "installed deployment helper differs"):
+            self.apply()
         self.assert_previous()
         self.assertFalse(self.backups.exists())
 

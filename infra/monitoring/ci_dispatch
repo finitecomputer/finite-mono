@@ -1,0 +1,15 @@
+#!/bin/sh
+# Installed root-owned. The dedicated SSH key may invoke only this dispatcher.
+set -eu
+case "${SSH_ORIGINAL_COMMAND:-}" in
+  '/usr/bin/sudo -n /usr/bin/python3 /var/lib/finite-monitoring-ci/deploy_dashboards.py preflight')
+    exec sudo -n /usr/bin/python3 /var/lib/finite-monitoring-ci/deploy_dashboards.py preflight
+    ;;
+  '/usr/bin/sudo -n /usr/bin/python3 /var/lib/finite-monitoring-ci/deploy_dashboards.py apply')
+    exec sudo -n /usr/bin/python3 /var/lib/finite-monitoring-ci/deploy_dashboards.py apply
+    ;;
+  *)
+    echo 'Only dashboard preflight and apply are permitted' >&2
+    exit 64
+    ;;
+esac
