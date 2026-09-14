@@ -28,6 +28,10 @@
   through its public CLI interface.
 - **Finite Computer → Finite Identity / FiniteBrain**: supplies authenticated
   account-agent associations and navigation context, never Brain authority.
+- **Finite Computer → Finite Sites / FiniteBrain / Finite Chat**: serves
+  Account-Linked Key membership resolution; each product verifies it through
+  short-lived caches and keeps every product grant and route decision local.
+  Membership is the right to enter, never the right to act.
 - **Finite Deployment → all product contexts**: records how product-owned
   artifacts become production state without taking ownership of product
   protocols, data, or runtime lifecycle authority.
