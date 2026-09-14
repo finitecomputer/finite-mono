@@ -6,6 +6,7 @@ import {
   loadDashboardMachineAccess,
 } from "@/lib/dashboard-machine-access";
 import {
+  coreInitialAgentCreationRequests,
   coreProjectLabel,
   coreProjectPrimaryUrl,
   loadCoreMe,
@@ -142,42 +143,33 @@ async function bootstrapHostedWebChatWithContext(
 }
 
 /**
- * The request a first-time binding recovery may authorize: the ORIGINAL
- * creation request for this project.
+ * The request a first-time binding recovery may authorize: the project's one
+ * ORIGINAL creation request, still in a live status.
  *
  * A project can legitimately carry more than one request in
- * requested/launching/running: operator cold relocations append later rows
- * for the same project (they keep the original creation as history), and
- * those rows rest in `running` like the original. Requiring exactly one such
- * request permanently broke recovery for every relocated project. The
- * original is picked deterministically instead: among the caller's live
- * requests for this project, the OLDEST by `created_at` (any row appended
- * later postdates the creation that authored the project), tie-broken by id
- * so equal timestamps still select one stable row. Zero live requests still
- * returns null so the caller can fail closed.
+ * requested/launching/running: operator cold relocations append later rows for
+ * the same project (they keep the original creation as history), and those
+ * rows rest in `running` like the original. Requiring exactly one live
+ * request therefore permanently broke recovery for every relocated project.
+ * Relocation rows are excluded by the identity Core already exposes
+ * (`is_relocation`, the same field `coreInitialAgentCreationRequests`
+ * filters on), and among the remaining ORIGINAL requests exactly one live
+ * row must remain — timestamp order is never authority here. Zero (for
+ * example two relocation rows and no original) or more than one is
+ * ambiguous evidence, and ambiguous state fails closed: the caller keeps its
+ * recovery error instead of persisting a guessed authorization with the
+ * hosted device.
  */
 export function selectOriginalAgentCreationRequest(
   requests: CoreAgentCreationRequestSummary[],
   projectId: string
 ): CoreAgentCreationRequestSummary | null {
-  const live = requests.filter(
+  const eligible = coreInitialAgentCreationRequests(requests).filter(
     (candidate) =>
       candidate.project_id === projectId &&
       ["requested", "launching", "running"].includes(candidate.status)
   );
-  if (live.length === 0) {
-    return null;
-  }
-  return live.reduce((original, candidate) => {
-    const byCreated = Date.parse(candidate.created_at) - Date.parse(original.created_at);
-    if (byCreated < 0) {
-      return candidate;
-    }
-    if (byCreated > 0) {
-      return original;
-    }
-    return candidate.id < original.id ? candidate : original;
-  });
+  return eligible.length === 1 ? eligible[0]! : null;
 }
 
 export async function recoverHostedWebChatBinding(machineId: string) {

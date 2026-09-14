@@ -495,7 +495,7 @@ function creationSummary(overrides: Partial<CoreAgentCreationRequestSummary>) {
   } satisfies CoreAgentCreationRequestSummary;
 }
 
-test("binding recovery authorizes the original request among live duplicates", () => {
+test("binding recovery authorizes the one original request, ignoring relocation rows", () => {
   const original = creationSummary({
     id: "agent_request_original",
     project_id: "project_boss",
@@ -526,34 +526,65 @@ test("binding recovery authorizes the original request among live duplicates", (
       "project_boss"
     )?.id,
     "agent_request_original",
-    "the oldest live request for the project must win regardless of input order"
+    "the project's single live ORIGINAL request must win; relocation rows are history, not authority"
   );
   assert.equal(
     selectOriginalAgentCreationRequest([original], "project_boss")?.id,
     "agent_request_original",
-    "a single live request still selects itself"
+    "a single live original request still selects itself"
   );
 });
 
-test("binding recovery selection tie-breaks equal timestamps by id", () => {
-  const tied = creationSummary({
-    id: "agent_request_b",
-    project_id: "project_tie",
-    created_at: "2026-07-12T09:00:00.500Z",
+test("binding recovery selection fails closed on relocation rows without an original", () => {
+  const firstRelocation = creationSummary({
+    id: "agent_request_relocation_aug",
+    project_id: "project_no_original",
+    is_relocation: true,
+    agent_runtime_id: "runtime_no_original",
+    created_at: "2026-08-29T21:00:00Z",
   });
-  const tiedEarlierId = creationSummary({
-    id: "agent_request_a",
-    project_id: "project_tie",
-    created_at: "2026-07-12T09:00:00.500Z",
+  const secondRelocation = creationSummary({
+    id: "agent_request_relocation_sep",
+    project_id: "project_no_original",
+    is_relocation: true,
+    agent_runtime_id: "runtime_no_original",
+    created_at: "2026-09-02T15:00:00Z",
   });
   assert.equal(
-    selectOriginalAgentCreationRequest([tied, tiedEarlierId], "project_tie")?.id,
-    "agent_request_a"
+    selectOriginalAgentCreationRequest(
+      [firstRelocation, secondRelocation],
+      "project_no_original"
+    ),
+    null,
+    "no original request means no authorization: timestamp order must never pick a relocation"
   );
   assert.equal(
-    selectOriginalAgentCreationRequest([tiedEarlierId, tied], "project_tie")?.id,
-    "agent_request_a",
-    "the tie-break must not depend on input order"
+    selectOriginalAgentCreationRequest([firstRelocation], "project_no_original"),
+    null,
+    "even a single relocation row is not the creation that authored the project"
+  );
+});
+
+test("binding recovery selection fails closed on ambiguous originals", () => {
+  const first = creationSummary({
+    id: "agent_request_first",
+    project_id: "project_ambiguous",
+    created_at: "2026-07-12T09:00:00Z",
+  });
+  const second = creationSummary({
+    id: "agent_request_second",
+    project_id: "project_ambiguous",
+    created_at: "2026-09-02T15:00:00Z",
+  });
+  assert.equal(
+    selectOriginalAgentCreationRequest([first, second], "project_ambiguous"),
+    null,
+    "more than one live original is ambiguous evidence and must stay a recovery error"
+  );
+  assert.equal(
+    selectOriginalAgentCreationRequest([second, first], "project_ambiguous"),
+    null,
+    "the ambiguity must not depend on input order"
   );
 });
 
@@ -581,5 +612,24 @@ test("binding recovery selection fails closed without a live request", () => {
     ),
     null,
     "another project's live request must not authorize this project"
+  );
+  const cancelledOriginal = creationSummary({
+    id: "agent_request_cancelled_original",
+    project_id: "project_mixed",
+    status: "cancelled",
+  });
+  const liveRelocation = creationSummary({
+    id: "agent_request_live_relocation",
+    project_id: "project_mixed",
+    is_relocation: true,
+    status: "running",
+  });
+  assert.equal(
+    selectOriginalAgentCreationRequest(
+      [cancelledOriginal, liveRelocation],
+      "project_mixed"
+    ),
+    null,
+    "a dead original cannot be replaced by a live relocation row"
   );
 });
