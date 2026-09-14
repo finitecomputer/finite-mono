@@ -1131,7 +1131,7 @@ where
 
     // Dedupe via the UNIQUE(owner_user_id, idempotency_key): look up an existing
     // request, return it as reused; only mint fresh surrogate ids on a new one.
-    if let Some(existing_request) =
+    if let Some(mut existing_request) =
         select_agent_creation_request_by_idempotency(client, &user.id, &idempotency_key).await?
     {
         if let Some(locked) = locked_launch_code.as_ref()
@@ -1142,6 +1142,29 @@ where
                     != Some(locked.record.id.as_str()))
         {
             return Err(CoreError::InvalidLaunchCode);
+        }
+        // The reuse path must not silently drop a pre-mint it now carries: the
+        // first attempt may have failed open (hosted device briefly
+        // unavailable), and a retried attempt with the same idempotency key
+        // brings the owner's hosted-chat account id. Backfill ONLY the empty
+        // column — an existing value stays authoritative — in this same
+        // transaction, so the runner lease can scope FINITECHAT_OWNER_NPUBS
+        // even though the row was minted by the earlier attempt.
+        if existing_request.owner_chat_account_id.is_none()
+            && owner_chat_account_id.is_some()
+            && existing_request.status == AgentCreationRequestStatus::Requested
+        {
+            client
+                .execute(
+                    "UPDATE agent_creation_requests
+                     SET owner_chat_account_id = $2, updated_at = $3::text::timestamptz
+                     WHERE id = $1 AND owner_chat_account_id IS NULL",
+                    &[&existing_request.id, &owner_chat_account_id, &now],
+                )
+                .await
+                .map_err(store_error)?;
+            existing_request.owner_chat_account_id = owner_chat_account_id;
+            existing_request.updated_at = now.clone();
         }
         let project = select_project(client, &existing_request.project_id)
             .await?
@@ -3397,10 +3420,45 @@ where
     Ok(())
 }
 
+/// How an `agent_creation_requests` INSERT reacts to a conflict.
+///
+/// `UpsertById` rewrites an existing row with the same surrogate id (the
+/// historical whole-row upsert). `SingleFlight` inserts a brand-new row and
+/// reports `false` instead when any unique constraint — for a relocation the
+/// partial index `agent_creation_requests_one_active_relocation_per_runtime` —
+/// was already satisfied by a concurrent committed attempt, leaving the caller
+/// to decide between reuse and refusal inside the same transaction.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum AgentCreationInsertConflict {
+    UpsertById,
+    SingleFlight,
+}
+
 async fn upsert_agent_creation_request_row<C>(
     client: &C,
     request: &AgentCreationRequest,
 ) -> CoreResult<()>
+where
+    C: GenericClient + Sync,
+{
+    upsert_agent_creation_request_row_with_conflict(
+        client,
+        request,
+        AgentCreationInsertConflict::UpsertById,
+    )
+    .await?;
+    Ok(())
+}
+
+/// Insert one `agent_creation_requests` row under the given conflict policy.
+/// Returns `false` only for `SingleFlight` when a concurrent committed row
+/// already satisfies the conflicting unique constraint (the row was NOT
+/// written).
+async fn upsert_agent_creation_request_row_with_conflict<C>(
+    client: &C,
+    request: &AgentCreationRequest,
+    conflict: AgentCreationInsertConflict,
+) -> CoreResult<bool>
 where
     C: GenericClient + Sync,
 {
@@ -3422,8 +3480,8 @@ where
         .map(serde_json::to_value)
         .transpose()
         .map_err(json_error)?;
-    client
-        .execute(
+    let statement = match conflict {
+        AgentCreationInsertConflict::UpsertById => {
             "INSERT INTO agent_creation_requests (
                id, customer_org_id, owner_user_id, project_id, idempotency_key, display_name,
                runner_class, hosting_tier, placement_runner_class, runtime_resource_class,
@@ -3455,38 +3513,65 @@ where
                lease_token = EXCLUDED.lease_token,
                lease_expires_at = EXCLUDED.lease_expires_at,
                failure_message = EXCLUDED.failure_message,
-               updated_at = EXCLUDED.updated_at",
-            &[
-                &request.id,
-                &request.customer_org_id,
-                &request.owner_user_id,
-                &request.project_id,
-                &request.idempotency_key,
-                &request.display_name,
-                &request.runner_class.as_str(),
-                &request.hosting_tier.map(HostingTier::as_str),
-                &placement_runner_class,
-                &runtime_resource_class,
-                &request.desired_runtime_artifact_id,
-                &runtime_spec,
-                &request.target_source_host_id,
-                &relocation,
-                &request.profile_picture_url,
-                &request.owner_chat_account_id,
-                &request.status.as_str(),
-                &request.requested_launch_code,
-                &request.agent_runtime_id,
-                &request.runner_id,
-                &request.lease_token,
-                &request.lease_expires_at,
-                &request.failure_message,
-                &request.created_at,
-                &request.updated_at,
-            ],
-        )
-        .await
-        .map_err(store_error)?;
-    Ok(())
+               updated_at = EXCLUDED.updated_at"
+        }
+        AgentCreationInsertConflict::SingleFlight => {
+            "INSERT INTO agent_creation_requests (
+               id, customer_org_id, owner_user_id, project_id, idempotency_key, display_name,
+               runner_class, hosting_tier, placement_runner_class, runtime_resource_class,
+               desired_runtime_artifact_id, runtime_spec, target_source_host_id,
+               relocation_spec,
+               profile_picture_url, owner_chat_account_id, status, requested_launch_code,
+               agent_runtime_id, runner_id, lease_token,
+               lease_expires_at, failure_message, created_at, updated_at
+             )
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12::jsonb,
+                     $13, $14::jsonb, $15, $16, $17, $18, $19, $20, $21,
+                     $22::text::timestamptz, $23, $24::text::timestamptz,
+                     $25::text::timestamptz)
+             ON CONFLICT DO NOTHING
+             RETURNING id"
+        }
+    };
+    let params: [&(dyn tokio_postgres::types::ToSql + Sync); 25] = [
+        &request.id,
+        &request.customer_org_id,
+        &request.owner_user_id,
+        &request.project_id,
+        &request.idempotency_key,
+        &request.display_name,
+        &request.runner_class.as_str(),
+        &request.hosting_tier.map(HostingTier::as_str),
+        &placement_runner_class,
+        &runtime_resource_class,
+        &request.desired_runtime_artifact_id,
+        &runtime_spec,
+        &request.target_source_host_id,
+        &relocation,
+        &request.profile_picture_url,
+        &request.owner_chat_account_id,
+        &request.status.as_str(),
+        &request.requested_launch_code,
+        &request.agent_runtime_id,
+        &request.runner_id,
+        &request.lease_token,
+        &request.lease_expires_at,
+        &request.failure_message,
+        &request.created_at,
+        &request.updated_at,
+    ];
+    match conflict {
+        AgentCreationInsertConflict::UpsertById => client
+            .execute(statement, &params)
+            .await
+            .map_err(store_error)
+            .map(|_| true),
+        AgentCreationInsertConflict::SingleFlight => client
+            .query_opt(statement, &params)
+            .await
+            .map_err(store_error)
+            .map(|row| row.is_some()),
+    }
 }
 
 async fn upsert_agent_runtime_row<C>(client: &C, runtime: &AgentRuntime) -> CoreResult<()>
@@ -4971,6 +5056,20 @@ where
     .await
 }
 
+/// Does `existing` carry exactly this relocation attempt (envelope and target
+/// host), making it safe to REUSE instead of inserting another row? Used both
+/// by the up-front active-relocation check and by the post-conflict re-read
+/// after `ON CONFLICT DO NOTHING` lost a race, so both decision points apply
+/// the same identity test.
+fn relocation_attempt_matches(
+    existing: &AgentCreationRequest,
+    relocation: &RuntimeRelocationEnvelope,
+    target_source_host_id: &str,
+) -> bool {
+    existing.relocation.as_ref() == Some(relocation)
+        && existing.target_source_host_id.as_deref() == Some(target_source_host_id)
+}
+
 async fn postgres_admin_request_runtime_relocate_exact<C>(
     client: &C,
     input: AdminRuntimeRelocateExactInput,
@@ -5126,9 +5225,7 @@ where
         .map_err(store_error)?
     {
         let existing = agent_creation_request_from_row(&row)?;
-        if existing.relocation.as_ref() == Some(&relocation)
-            && existing.target_source_host_id.as_deref() == Some(target_source_host_id.as_str())
-        {
+        if relocation_attempt_matches(&existing, &relocation, target_source_host_id.as_str()) {
             return Ok(existing);
         }
         return Err(CoreError::RuntimeControlOperationConflict);
@@ -5192,6 +5289,7 @@ where
         "cold-relocate:{}:{}:{}",
         runtime.id, target_source_host_id, request_id
     );
+    let target_source_host = target_source_host_id.clone();
     let request = AgentCreationRequest {
         id: request_id,
         customer_org_id: project.customer_org_id.clone(),
@@ -5205,7 +5303,7 @@ where
         desired_runtime_artifact_id: Some(artifact.id),
         runtime_spec: Some(runtime_spec),
         target_source_host_id: Some(target_source_host_id),
-        relocation: Some(relocation),
+        relocation: Some(relocation.clone()),
         profile_picture_url: current_creation.profile_picture_url,
         owner_chat_account_id: current_creation.owner_chat_account_id,
         status: AgentCreationRequestStatus::Requested,
@@ -5218,7 +5316,33 @@ where
         created_at: now.clone(),
         updated_at: now.clone(),
     };
-    upsert_agent_creation_request_row(client, &request).await?;
+    // Single-flight per project: the check above and this insert share one
+    // transaction, but two concurrent identical operator attempts can both
+    // pass the check before either commits. The insert's ON CONFLICT DO
+    // NOTHING defers to the partial unique index
+    // `agent_creation_requests_one_active_relocation_per_runtime`, so the
+    // loser sees `false` and re-reads the winner's committed row — reusing it
+    // when it carries this exact envelope and target, refusing otherwise —
+    // instead of erroring on the unique violation or inserting a second
+    // active row.
+    let inserted = upsert_agent_creation_request_row_with_conflict(
+        client,
+        &request,
+        AgentCreationInsertConflict::SingleFlight,
+    )
+    .await?;
+    if !inserted {
+        let winner = client
+            .query_opt(active_sql, &[&runtime.id])
+            .await
+            .map_err(store_error)?
+            .ok_or(CoreError::RuntimeControlOperationConflict)?;
+        let existing = agent_creation_request_from_row(&winner)?;
+        if relocation_attempt_matches(&existing, &relocation, target_source_host.as_str()) {
+            return Ok(existing);
+        }
+        return Err(CoreError::RuntimeControlOperationConflict);
+    }
     insert_finite_private_admin_audit_event(
         client,
         FinitePrivateAdminAuditInsert {
@@ -10559,6 +10683,190 @@ mod tests {
         .await;
     }
 
+    /// Relocation is the one writer that can append a request row to a
+    /// project that already has one, so its single-flight contract matters
+    /// most here: two CONCURRENT identical operator attempts must resolve to
+    /// ONE row. The pre-check and the insert share the transaction, and the
+    /// insert's ON CONFLICT DO NOTHING defers to the partial unique index
+    /// `agent_creation_requests_one_active_relocation_per_runtime`, so the
+    /// loser re-reads the winner's committed row and reuses it instead of
+    /// surfacing the unique violation (or inserting a second active row).
+    #[tokio::test]
+    async fn postgres_concurrent_identical_cold_relocation_reuses_one_request() {
+        with_isolated_postgres(|store| async move {
+            let run = "relocate-race";
+            let source_host = "relocate-race-source";
+            let target_host = "relocate-race-target";
+            let machine = "finite-kata-relocate-race";
+            let email = format!("{run}@finite.vip");
+            let workos = format!("workos-{run}");
+            let launch_code = issue_test_launch_code(&store, "2026-09-14T12:00:00Z").await;
+
+            store
+                .upsert_runtime_artifact(UpsertRuntimeArtifactInput {
+                    id: "artifact-relocate-race".to_string(),
+                    kind: RuntimeArtifactKind::OciImage,
+                    reference: format!(
+                        "ghcr.io/finitecomputer/agent-runtime:relocate-race@sha256:{}",
+                        "5".repeat(64)
+                    ),
+                    version_label: "relocate-race".to_string(),
+                    source_git_sha: None,
+                    finitec_version: None,
+                    hermes_source_ref: None,
+                    finite_platform_plugin_ref: None,
+                    state_schema_version: "state-v1".to_string(),
+                    base_image: None,
+                    recover_known_good_chat: false,
+                    promoted: true,
+                    now: None,
+                })
+                .await
+                .unwrap();
+            store
+                .request_agent_creation_configured(
+                    RequestAgentCreationInput {
+                        verified_email: email.clone(),
+                        workos_user_id: workos.clone(),
+                        display_name: "Relocation Race Canary".to_string(),
+                        launch_code,
+                        idempotency_key: format!("{run}-create"),
+                        now: None,
+                    },
+                    AgentCreationConfiguration {
+                        placement: Some(RuntimePlacement::for_hosting_tier(HostingTier::Standard)),
+                        requested_hosting_tier: None,
+                        profile_picture_url: None,
+                        owner_chat_account_id: None,
+                    },
+                )
+                .await
+                .unwrap();
+            let creation = store
+                .lease_agent_creation_request(LeaseAgentCreationRequestInput {
+                    runner_id: format!("runner-{source_host}"),
+                    source_host_id: Some(source_host.to_string()),
+                    lease_token: "create-lease".to_string(),
+                    lease_seconds: Some(300),
+                    runner_capacity: Some(RunnerLeaseCapacity {
+                        runner_classes: vec![RunnerClass::Kata],
+                        ..RunnerLeaseCapacity::default()
+                    }),
+                    now: None,
+                })
+                .await
+                .unwrap()
+                .unwrap();
+            let completed = store
+                .complete_agent_creation_request(CompleteAgentCreationRequestInput {
+                    request_id: creation.request.id,
+                    runner_id: format!("runner-{source_host}"),
+                    lease_token: "create-lease".to_string(),
+                    source_host_id: source_host.to_string(),
+                    source_machine_id: machine.to_string(),
+                    runtime_artifact_id: Some("artifact-relocate-race".to_string()),
+                    state_schema_version: Some("state-v1".to_string()),
+                    provider_runtime_handle: None,
+                    contact_endpoint: Some("http://127.0.0.1:4301/contact".to_string()),
+                    runtime_capabilities: Some(kata_runtime_capabilities()),
+                    display_name: Some("Relocation Race Canary".to_string()),
+                    hostname: None,
+                    runtime_host: Some(source_host.to_string()),
+                    runtime_status: Some(RuntimeSummaryStatus::Online),
+                    active_inference_profile: Some("finite-private".to_string()),
+                    hermes_available: Some(true),
+                    published_app_urls: Vec::new(),
+                    agent_npub: None,
+                    now: None,
+                })
+                .await
+                .unwrap();
+            let project_id = completed.project.id;
+            let runtime_id = completed.request.agent_runtime_id.unwrap();
+
+            let stop = store
+                .request_runtime_stop(RequestRuntimeStopInput {
+                    verified_email: email,
+                    workos_user_id: workos,
+                    project_id: project_id.clone(),
+                    now: None,
+                })
+                .await
+                .unwrap();
+            let stop_lease = store
+                .lease_runtime_control_request(LeaseRuntimeControlRequestInput {
+                    runner_id: format!("runner-{source_host}"),
+                    lease_token: "stop-lease".to_string(),
+                    lease_seconds: Some(300),
+                    source_host_id: Some(source_host.to_string()),
+                    runner_capacity: Some(RunnerLeaseCapacity {
+                        runner_classes: vec![RunnerClass::Kata],
+                        runtime_capabilities: Some(kata_runtime_capabilities()),
+                        ..RunnerLeaseCapacity::default()
+                    }),
+                    now: None,
+                })
+                .await
+                .unwrap()
+                .unwrap();
+            assert_eq!(stop_lease.request.id, stop.id);
+            store
+                .complete_runtime_control_request(CompleteRuntimeControlRequestInput {
+                    request_id: stop.id,
+                    runner_id: format!("runner-{source_host}"),
+                    lease_token: "stop-lease".to_string(),
+                    runtime_artifact_id: None,
+                    state_schema_version: None,
+                    runtime_capabilities: None,
+                    runtime_host: None,
+                    published_app_urls: None,
+                    retirement_snapshot: None,
+                    now: None,
+                })
+                .await
+                .unwrap();
+
+            let relocate_input = || AdminRuntimeRelocateExactInput {
+                admin_verified_email: "relocate-race-admin@finite.vip".to_string(),
+                admin_workos_user_id: "workos-relocate-race-admin".to_string(),
+                project_id: project_id.clone(),
+                expected_agent_runtime_id: runtime_id.clone(),
+                expected_source_host_id: source_host.to_string(),
+                expected_source_machine_id: machine.to_string(),
+                target_source_host_id: target_host.to_string(),
+                expected_agent_npub: format!("npub1{}", "r".repeat(58)),
+                durable_state_manifest_sha256: "c".repeat(64),
+                operator_observed_compute_absent: false,
+                now: None,
+            };
+            let competing_store = CoreStore::connect(&store.url).await.unwrap();
+            let (first, second) = tokio::join!(
+                store
+                    .store
+                    .admin_request_runtime_relocate_exact(relocate_input()),
+                competing_store.admin_request_runtime_relocate_exact(relocate_input()),
+            );
+            let first = first.expect("first concurrent relocation must succeed");
+            let second = second.expect("the loser must reuse the winner's row, not error");
+            assert_eq!(first.id, second.id);
+            assert_eq!(first.relocation, second.relocation);
+            assert_eq!(first.target_source_host_id, second.target_source_host_id);
+
+            let rows = store.all("agent_creation_requests").await;
+            let relocations: Vec<_> = rows
+                .iter()
+                .filter(|row| !row["relocation_spec"].is_null())
+                .collect();
+            assert_eq!(
+                relocations.len(),
+                1,
+                "the race must not insert two active relocation rows"
+            );
+            assert_eq!(rows.len(), 2, "original creation plus one relocation");
+        })
+        .await;
+    }
+
     #[tokio::test]
     async fn postgres_cold_relocation_accepts_online_source_only_under_absence_attestation() {
         with_isolated_postgres(|store| async move {
@@ -15285,6 +15593,192 @@ mod tests {
                     .as_ref()
                     .and_then(|entitlement| entitlement.launch_code.as_deref()),
                 None
+            );
+        })
+        .await;
+    }
+
+    /// Agent creation is single-flight per project: one ordinary creation row
+    /// can ever exist per project. The same idempotency key reuses the row,
+    /// and a different key mints a NEW project (it can never append a second
+    /// row to the project an earlier attempt created), so the per-project
+    /// request count stays one until an operator relocation appends its own
+    /// transaction rows.
+    #[tokio::test]
+    async fn postgres_agent_creation_is_single_flight_per_project() {
+        with_isolated_postgres(|store| async move {
+            let run = "single-flight";
+            let email = format!("{run}@finite.vip");
+            let workos = format!("workos_{run}");
+            let launch_code = issue_test_launch_code(&store, "2026-09-14T12:00:00Z").await;
+
+            let created = store
+                .request_agent_creation(RequestAgentCreationInput {
+                    verified_email: email.clone(),
+                    workos_user_id: workos.clone(),
+                    display_name: "Single Flight Agent".to_string(),
+                    launch_code: launch_code.clone(),
+                    idempotency_key: format!("{run}-submit"),
+                    now: None,
+                })
+                .await
+                .unwrap();
+            assert!(!created.reused);
+
+            // A retried identical attempt (same draft, same key) reuses the row.
+            let retried = store
+                .request_agent_creation(RequestAgentCreationInput {
+                    verified_email: email.clone(),
+                    workos_user_id: workos.clone(),
+                    display_name: "Single Flight Agent".to_string(),
+                    launch_code: launch_code.clone(),
+                    idempotency_key: format!("{run}-submit"),
+                    now: None,
+                })
+                .await
+                .unwrap();
+            assert!(retried.reused);
+            assert_eq!(retried.request.id, created.request.id);
+            assert_eq!(retried.project.id, created.project.id);
+
+            // A genuinely different attempt (new key, new launch code) mints a
+            // new PROJECT; it must not add a second request row to the old one.
+            let second_code = issue_test_launch_code(&store, "2026-09-14T12:05:00Z").await;
+            let second = store
+                .request_agent_creation(RequestAgentCreationInput {
+                    verified_email: email.clone(),
+                    workos_user_id: workos.clone(),
+                    display_name: "Second Flight Agent".to_string(),
+                    launch_code: second_code,
+                    idempotency_key: format!("{run}-submit-2"),
+                    now: None,
+                })
+                .await
+                .unwrap();
+            assert_ne!(second.request.project_id, created.request.project_id);
+            assert_ne!(second.request.id, created.request.id);
+
+            let rows = store.all("agent_creation_requests").await;
+            assert_eq!(rows.len(), 2);
+            let project_ids: BTreeSet<&str> = rows
+                .iter()
+                .map(|row| row["project_id"].as_str().unwrap())
+                .collect();
+            assert_eq!(project_ids.len(), 2, "one creation row per project");
+        })
+        .await;
+    }
+
+    /// Concurrent identical creation attempts must not insert two rows: the
+    /// owner's user-row upsert serializes the transactions, so the loser's
+    /// idempotency lookup sees the winner's committed row and reuses it.
+    #[tokio::test]
+    async fn postgres_concurrent_identical_agent_creation_reuses_one_request() {
+        with_isolated_postgres(|store| async move {
+            let run = "single-flight-race";
+            let email = format!("{run}@finite.vip");
+            let workos = format!("workos_{run}");
+            let launch_code = issue_test_launch_code(&store, "2026-09-14T12:10:00Z").await;
+            let attempt = |launch_code: String| {
+                let store = store.store.clone();
+                let email = email.clone();
+                let workos = workos.clone();
+                async move {
+                    store
+                        .request_agent_creation(RequestAgentCreationInput {
+                            verified_email: email,
+                            workos_user_id: workos,
+                            display_name: "Race Agent".to_string(),
+                            launch_code,
+                            idempotency_key: format!("{run}-submit"),
+                            now: None,
+                        })
+                        .await
+                }
+            };
+            let (first, second) = tokio::join!(attempt(launch_code.clone()), attempt(launch_code));
+            let first = first.expect("first concurrent attempt must succeed");
+            let second = second.expect("second concurrent attempt must reuse, not duplicate");
+            assert_eq!(first.request.id, second.request.id);
+            assert_eq!(first.project.id, second.project.id);
+            assert!(first.reused || second.reused);
+
+            let rows = store.all("agent_creation_requests").await;
+            assert_eq!(rows.len(), 1, "the race must not insert two requests");
+        })
+        .await;
+    }
+
+    /// The reuse path must not drop a pre-mint it now carries: a retry with
+    /// the same idempotency key backfills the owner hosted-chat account id
+    /// only while the column is still empty, and never overwrites a value
+    /// that a previous attempt already recorded.
+    #[tokio::test]
+    async fn postgres_agent_creation_retry_backfills_owner_chat_account_id() {
+        with_isolated_postgres(|store| async move {
+            let run = "premint-backfill";
+            let email = format!("{run}@finite.vip");
+            let workos = format!("workos_{run}");
+            let launch_code = issue_test_launch_code(&store, "2026-09-14T12:20:00Z").await;
+            let input = |key: String| RequestAgentCreationInput {
+                verified_email: email.clone(),
+                workos_user_id: workos.clone(),
+                display_name: "Pre-mint Agent".to_string(),
+                launch_code: launch_code.clone(),
+                idempotency_key: key,
+                now: None,
+            };
+
+            // First attempt: the hosted device was unavailable, so the
+            // dashboard's fail-open pre-mint produced no account id.
+            let created = store
+                .request_agent_creation_configured(
+                    input(format!("{run}-submit")),
+                    AgentCreationConfiguration::default(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(created.request.owner_chat_account_id, None);
+
+            // Retry with the same key now carrying the pre-minted id.
+            let premint = "a".repeat(64);
+            let retried = store
+                .request_agent_creation_configured(
+                    input(format!("{run}-submit")),
+                    AgentCreationConfiguration {
+                        owner_chat_account_id: Some(premint.clone()),
+                        ..AgentCreationConfiguration::default()
+                    },
+                )
+                .await
+                .unwrap();
+            assert!(retried.reused);
+            assert_eq!(retried.request.owner_chat_account_id, Some(premint.clone()));
+            let row = store
+                .row("agent_creation_requests", &created.request.id)
+                .await
+                .unwrap();
+            assert_eq!(
+                row["owner_chat_account_id"].as_str(),
+                Some(premint.as_str())
+            );
+
+            // A later retry with a different id must not overwrite the
+            // recorded value.
+            let overwritten = store
+                .request_agent_creation_configured(
+                    input(format!("{run}-submit")),
+                    AgentCreationConfiguration {
+                        owner_chat_account_id: Some("b".repeat(64)),
+                        ..AgentCreationConfiguration::default()
+                    },
+                )
+                .await
+                .unwrap();
+            assert_eq!(
+                overwritten.request.owner_chat_account_id,
+                Some(premint),
+                "an existing pre-mint stays authoritative"
             );
         })
         .await;

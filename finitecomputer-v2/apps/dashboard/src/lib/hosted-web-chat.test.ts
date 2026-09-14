@@ -10,7 +10,9 @@ import {
   isAgentBindingAuthorizationRequired,
   isCanonicalNewChatTarget,
   parseHostedChatAction,
+  selectOriginalAgentCreationRequest,
 } from "@/lib/hosted-web-chat";
+import type { CoreAgentCreationRequestSummary } from "@/lib/core-client";
 import { CHAT_UNAVAILABLE_MESSAGE } from "@/lib/chat-product-copy";
 import {
   HostedDeviceRequestError,
@@ -477,4 +479,107 @@ test("the actions proxy route answers failures through the one error response", 
   );
   assert.match(routeSource, /const \{ status, body \} = hostedWebChatErrorResponse\(error\)/u);
   assert.match(routeSource, /Response\.json\(body, \{ status \}\)/u);
+});
+
+function creationSummary(overrides: Partial<CoreAgentCreationRequestSummary>) {
+  return {
+    id: "agent_request_base",
+    project_id: "project_base",
+    display_name: "Agent",
+    status: "running",
+    agent_runtime_id: null,
+    failure_message: null,
+    created_at: "2026-07-12T00:00:00Z",
+    updated_at: "2026-07-12T00:00:00Z",
+    ...overrides,
+  } satisfies CoreAgentCreationRequestSummary;
+}
+
+test("binding recovery authorizes the original request among live duplicates", () => {
+  const original = creationSummary({
+    id: "agent_request_original",
+    project_id: "project_boss",
+    created_at: "2026-07-12T09:00:00Z",
+  });
+  const firstRelocation = creationSummary({
+    id: "agent_request_relocation_aug",
+    project_id: "project_boss",
+    is_relocation: true,
+    agent_runtime_id: "runtime_boss",
+    created_at: "2026-08-29T21:00:00Z",
+  });
+  const secondRelocation = creationSummary({
+    id: "agent_request_relocation_sep",
+    project_id: "project_boss",
+    is_relocation: true,
+    agent_runtime_id: "runtime_boss",
+    created_at: "2026-09-02T15:00:00Z",
+  });
+  const otherProject = creationSummary({
+    id: "agent_request_other",
+    project_id: "project_other",
+    created_at: "2026-06-01T00:00:00Z",
+  });
+  assert.equal(
+    selectOriginalAgentCreationRequest(
+      [otherProject, secondRelocation, original, firstRelocation],
+      "project_boss"
+    )?.id,
+    "agent_request_original",
+    "the oldest live request for the project must win regardless of input order"
+  );
+  assert.equal(
+    selectOriginalAgentCreationRequest([original], "project_boss")?.id,
+    "agent_request_original",
+    "a single live request still selects itself"
+  );
+});
+
+test("binding recovery selection tie-breaks equal timestamps by id", () => {
+  const tied = creationSummary({
+    id: "agent_request_b",
+    project_id: "project_tie",
+    created_at: "2026-07-12T09:00:00.500Z",
+  });
+  const tiedEarlierId = creationSummary({
+    id: "agent_request_a",
+    project_id: "project_tie",
+    created_at: "2026-07-12T09:00:00.500Z",
+  });
+  assert.equal(
+    selectOriginalAgentCreationRequest([tied, tiedEarlierId], "project_tie")?.id,
+    "agent_request_a"
+  );
+  assert.equal(
+    selectOriginalAgentCreationRequest([tiedEarlierId, tied], "project_tie")?.id,
+    "agent_request_a",
+    "the tie-break must not depend on input order"
+  );
+});
+
+test("binding recovery selection fails closed without a live request", () => {
+  const cancelled = creationSummary({
+    id: "agent_request_cancelled",
+    project_id: "project_dead",
+    status: "cancelled",
+  });
+  const failed = creationSummary({
+    id: "agent_request_failed",
+    project_id: "project_dead",
+    status: "failed",
+  });
+  assert.equal(
+    selectOriginalAgentCreationRequest([cancelled, failed], "project_dead"),
+    null,
+    "only requested/launching/running requests may authorize recovery"
+  );
+  assert.equal(selectOriginalAgentCreationRequest([], "project_dead"), null);
+  assert.equal(
+    selectOriginalAgentCreationRequest(
+      [creationSummary({ project_id: "project_other" })],
+      "project_dead"
+    ),
+    null,
+    "another project's live request must not authorize this project"
+  );
 });
