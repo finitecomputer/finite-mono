@@ -364,6 +364,7 @@ jobs:
         run: |
           simplex_store="$(nix build --option builders '' "$GITHUB_WORKSPACE#simplex-chat" --no-link --print-out-paths)"
           "$simplex_store/bin/simplex-chat" --version
+          echo "$simplex_store/bin" >> "$GITHUB_PATH"
 
       - name: Managed SimpleX lint
         run: |
@@ -373,8 +374,9 @@ jobs:
       - name: Managed SimpleX control tests
         env:
           HERMES_AGENT_PYTHON: ${{ steps.hermes_agent_runtime.outputs.python }}
+          HERMES_BUNDLED_PLUGINS: ${{ steps.hermes_agent_runtime.outputs.path }}/share/hermes-agent/plugins
         run: |
-          "$HERMES_AGENT_PYTHON" -m unittest discover -s "$GITHUB_WORKSPACE/finite-agentd" -p 'test_simplex_runtime.py'
+          "$HERMES_AGENT_PYTHON" -m unittest discover -s "$GITHUB_WORKSPACE/finite-agentd" -p 'test_simplex*.py'
 
       - name: Chat reliability fast gate (Hermes adapter)
         env:

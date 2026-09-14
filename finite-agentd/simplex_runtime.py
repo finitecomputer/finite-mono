@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Managed SimpleX lifecycle/control. Uses the unmodified Hermes adapter.
+"""Managed SimpleX lifecycle/control. Owns daemon settings; Hermes owns message events.
 
 No arbitrary command endpoint. The CLI is called only by agentd using fixed
 operations; pairing remains Hermes-owned. The daemon alone opens its databases.
@@ -8,6 +8,7 @@ operations; pairing remains Hermes-owned. The daemon alone opens its databases.
 import argparse
 import asyncio
 import contextlib
+import copy
 import json
 import os
 import re
@@ -20,7 +21,19 @@ from pathlib import Path
 import websockets
 import yaml
 
-WS_URL = "ws://127.0.0.1:5225"
+CHAT_PORT = 5225
+WS_URL = f"ws://127.0.0.1:{CHAT_PORT}"
+SETUP_PORT = 5226
+SETUP_TIMEOUT = 5
+# Official SimpleX v7.0.2 Flux identities, including their certificate fingerprints.
+FLUX_SERVERS = (
+    "xftp://92Sctlc09vHl_nAqF2min88zKyjdYJ9mgxRCJns5K2U=@xftp1.simplexonflux.com,apl3pumq3emwqtrztykyyoomdx4dg6ysql5zek2bi3rgznz7ai3odkid.onion",
+    "xftp://YBXy4f5zU1CEhnbbCzVWTNVNsaETcAGmYqGNxHntiE8=@xftp2.simplexonflux.com,c5jjecisncnngysah3cz2mppediutfelco4asx65mi75d44njvua3xid.onion",
+    "xftp://ARQO74ZSvv2OrulRF3CdgwPz_AMy27r0phtLSq5b664=@xftp3.simplexonflux.com,dc4mohiubvbnsdfqqn7xhlhpqs5u4tjzp7xpz6v6corwvzvqjtaqqiqd.onion",
+    "xftp://ub2jmAa9U0uQCy90O-fSUNaYCj6sdhl49Jh3VpNXP58=@xftp4.simplexonflux.com,4qq5pzier3i4yhpuhcrhfbl6j25udc4czoyascrj4yswhodhfwev3nyd.onion",
+    "xftp://Rh19D5e4Eez37DEE9hAlXDB3gZa1BdFYJTPgJWPO9OI=@xftp5.simplexonflux.com,q7itltdn32hjmgcqwhow4tay5ijetng3ur32bolssw32fvc5jrwvozad.onion",
+    "xftp://0AznwoyfX8Od9T_acp1QeeKtxUi676IBIiQjXVwbdyU=@xftp6.simplexonflux.com,upvzf23ou6nrmaf3qgnhd6cn3d74tvivlmz3p7wdfwq6fhthjrjiiqid.onion",
+)
 
 
 def settings():
@@ -34,11 +47,11 @@ def managed_enabled():
     return cfg.get("enabled") is True and cfg.get("extra", {}).get("finite_managed") is True
 
 
-async def command(text, timeout=5):
+async def command(text, timeout=5, *, url=None):
     # Require our response, not the first unsolicited broadcast on the socket.
     corr = "finite-" + uuid.uuid4().hex
     async with asyncio.timeout(timeout):
-        async with websockets.connect(WS_URL, max_size=2**20, open_timeout=timeout) as ws:
+        async with websockets.connect(url or WS_URL, max_size=2**20, open_timeout=timeout) as ws:
             await ws.send(json.dumps({"corrId": corr, "cmd": text}))
             async for raw in ws:
                 event = json.loads(raw)
@@ -78,11 +91,13 @@ def saved_address():
     return address_from({"connLinkContact": {"connShortLink": value["address"]}})
 
 
-async def tcp_ready():
+async def tcp_ready(port=None):
     # Deliberately no WebSocket handshake: additional WS clients steal events
     # from the daemon's shared queue. TCP liveness is not message-path health.
     try:
-        _, writer = await asyncio.wait_for(asyncio.open_connection("127.0.0.1", 5225), 1)
+        _, writer = await asyncio.wait_for(
+            asyncio.open_connection("127.0.0.1", CHAT_PORT if port is None else port), 1
+        )
         writer.close()
         await writer.wait_closed()
         return True
@@ -108,7 +123,7 @@ async def status():
     return result
 
 
-async def start_child(home):
+async def start_child(home, *, maintenance=False):
     for folder in [home, home / "files", home / "tmp"]:
         folder.mkdir(mode=0o700, parents=True, exist_ok=True)
         os.chmod(folder, 0o700)
@@ -120,8 +135,9 @@ async def start_child(home):
         "-d",
         str(home / "identity"),
         "-p",
-        "5225",
+        str(SETUP_PORT if maintenance else CHAT_PORT),
         "--mute",
+        *(["--maintenance"] if maintenance else []),
         *profile_args,
         "--files-folder",
         str(home / "files"),
@@ -131,6 +147,122 @@ async def start_child(home):
         stdout=asyncio.subprocess.DEVNULL,
         stderr=asyncio.subprocess.DEVNULL,
     )
+
+
+def relay_settings(groups):
+    """Preserve owner policy; only extend the default managed server layout."""
+    operators = [g for g in groups if g.get("operator")]
+    customs = [g for g in groups if not g.get("operator")]
+    if (
+        len(operators) != 1
+        or operators[0]["operator"].get("operatorTag") != "simplex"
+        or operators[0]["operator"].get("enabled") is not True
+        or len(customs) != 1
+        or customs[0].get("smpServers")
+        or customs[0].get("chatRelays")
+        or customs[0].get("xftpServers")
+    ):
+        return groups
+    known = {s["server"] for g in groups for s in g["xftpServers"]}
+    updated = copy.deepcopy(groups)
+    custom = next(g for g in updated if not g.get("operator"))
+    for server in FLUX_SERVERS:
+        if server not in known:
+            custom["xftpServers"].append(
+                {
+                    "serverId": None,
+                    "server": server,
+                    "preset": False,
+                    "enabled": False,
+                    "roles": {},
+                    "deleted": False,
+                }
+            )
+    return updated
+
+
+async def configure_relays(home, *, url=None):
+    user = (await command("/u", url=url))["user"]["userId"]
+    get = f"/_servers {user}"
+    current = (await command(get, url=url))["userServers"]
+    backup = home / "flux-relays-before.json"
+    # The backup is also durable intent. After interruption, compare the actual
+    # state with that intent instead of treating our inserted rows as owner policy.
+    before = json.loads(backup.read_text()) if backup.exists() else current
+    after = relay_settings(before)
+    recovering = current != before
+    if not recovering and after == before:
+        atomic_json(home / "flux-relays-ready.json", {"changed": False})
+        return
+    if not recovering:
+        encoded = json.dumps(after)
+        valid = await command(f"/_validate_servers {user} {encoded}", url=url)
+        if (
+            valid.get("serverErrors")
+            or valid.get("serverWarnings")
+            or valid.get("type") != "userServersValidation"
+        ):
+            raise RuntimeError("SimpleX relay settings failed validation")
+        if not backup.exists():
+            atomic_json(backup, before)
+        await command(f"{get} {encoded}", url=url)
+        applied = (await command(get, url=url))["userServers"]
+    else:
+        applied = current
+    atomic_json(home / "flux-relays-after.json", applied)
+    rollback = copy.deepcopy(before)
+    old_ids = {s["serverId"] for g in before for s in g["xftpServers"]}
+    inserted = [
+        s
+        for g in applied
+        for s in g["xftpServers"]
+        if s["serverId"] not in old_ids and s["server"] in FLUX_SERVERS
+    ]
+    custom = next(g for g in rollback if not g.get("operator"))
+    custom["xftpServers"].extend(dict(s, deleted=True) for s in inserted)
+    atomic_json(home / "flux-relays-rollback.json", rollback)
+    normalized = copy.deepcopy(applied)
+    for group in normalized:
+        for entry in group["xftpServers"]:
+            if entry["serverId"] not in old_ids:
+                entry["serverId"] = None
+    if normalized != after:
+        if recovering:
+            # An owner may have edited settings since the interrupted attempt.
+            raise RuntimeError("Interrupted SimpleX relay setup needs operator review")
+        await command(f"{get} {json.dumps(rollback)}", url=url)
+        restored = (await command(get, url=url))["userServers"]
+        if restored != before:
+            raise RuntimeError("SimpleX settings rollback needs operator review")
+        raise RuntimeError("SimpleX settings read-back differed; restored original settings")
+    atomic_json(home / "flux-relays-ready.json", {"changed": True})
+
+
+async def prepare_relays(home):
+    if (home / "flux-relays-ready.json").exists():
+        return
+    # Configure on a separate port without subscribing contacts or starting file workers.
+    # Hermes can keep reconnecting to 5225 without consuming setup responses.
+    if await tcp_ready() or await tcp_ready(SETUP_PORT):
+        raise RuntimeError("SimpleX setup requires both daemon ports to be idle")
+    if not all((home / ("identity" + suffix)).is_file() for suffix in ("_chat.db", "_agent.db")):
+        raise RuntimeError("SimpleX relay preparation requires an existing identity")
+    child = await start_child(home, maintenance=True)
+    try:
+        async with asyncio.timeout(SETUP_TIMEOUT):
+            for _ in range(40):
+                await asyncio.sleep(0.25)
+                if child.returncode is not None:
+                    raise RuntimeError("SimpleX settings daemon could not start")
+                if await tcp_ready(SETUP_PORT):
+                    break
+            else:
+                raise RuntimeError("SimpleX settings daemon did not become ready")
+            url = f"ws://127.0.0.1:{SETUP_PORT}"
+            await command("/_start main=off snd_files=off", url=url)
+            await configure_relays(home, url=url)
+    finally:
+        await stop_child(child, timeout=2)
 
 
 async def create_address():
@@ -160,6 +292,11 @@ async def create_address():
         accepted = await command("/auto_accept on", timeout=20)
         if accepted.get("type") != "userContactLinkUpdated":
             raise RuntimeError("SimpleX could not enable contact acceptance")
+        try:
+            await configure_relays(home)
+        except Exception:
+            # A failed settings update must not strand a new pairing identity.
+            print("SimpleX relay setup failed; keeping current settings", file=sys.stderr)
         # Atomically persist before enabling Hermes or exposing the address.
         temporary = home / "address.json.tmp"
         with temporary.open("w") as out:
@@ -172,11 +309,11 @@ async def create_address():
         await stop_child(child)
 
 
-async def stop_child(child):
+async def stop_child(child, timeout=10):
     if child and child.returncode is None:
         child.terminate()
         try:
-            await asyncio.wait_for(child.wait(), 10)
+            await asyncio.wait_for(child.wait(), timeout)
         except TimeoutError:
             child.kill()
             await child.wait()
@@ -207,6 +344,13 @@ async def supervise():
                 # must be its sole event consumer, including during restarts.
                 pid_file.unlink(missing_ok=True)
                 if not await tcp_ready():
+                    try:
+                        await prepare_relays(state_dir())
+                    except Exception:
+                        # Existing chat must remain available if setup needs review.
+                        print(
+                            "SimpleX relay setup failed; keeping current settings", file=sys.stderr
+                        )
                     child = await start_child(state_dir())
                     pid_file.write_text(str(child.pid))
                     print("SimpleX daemon started", file=sys.stderr, flush=True)
@@ -373,6 +517,7 @@ def gateway():
     if settings().get("extra", {}).get("finite_managed") is True:
         if managed_enabled():
             os.environ["SIMPLEX_WS_URL"] = WS_URL
+            os.environ["SIMPLEX_FILES_FOLDER"] = str(state_dir() / "files")
         else:
             os.environ.pop("SIMPLEX_WS_URL", None)
         os.environ["SIMPLEX_AUTO_ACCEPT"] = "true"
