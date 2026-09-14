@@ -66,6 +66,10 @@ import type {
 import { chatPreviewUrls } from "@/lib/chat-preview-urls";
 import { directHostedImageUrl } from "@/lib/hosted-chat-attachment-url";
 import {
+  clearHostedChatDraft,
+  loadHostedChatDraft,
+} from "@/lib/hosted-chat-session";
+import {
   BrainApprovalCards,
   BrainInvitationCards,
   useBrainApprovalDetails,
@@ -155,6 +159,7 @@ export function HostedWebChat({
     recoverBinding,
     reportSessionAuthFailure,
     signInAgain,
+    noteComposerInput,
     dispatch,
     dispatchQuiet,
     refreshPendingChat,
@@ -172,6 +177,20 @@ export function HostedWebChat({
   const [sending, setSending] = useState(false);
   const [draft, setDraft] = useState(initialDraft ?? "");
   const [attachments, setAttachments] = useState<PendingAttachment[]>([]);
+  // Keep the provider current on unsent composer input so a session failure
+  // never auto-navigates away from a draft (and "Sign in again" can park it).
+  useEffect(() => {
+    noteComposerInput({ draftText: draft, attachmentCount: attachments.length });
+  }, [attachments.length, draft, noteComposerInput]);
+  // A draft parked by the sign-in round trip comes back once, on this page
+  // load, unless an explicit ?prompt= already supplied one.
+  useEffect(() => {
+    if (initialDraft) return;
+    const parked = loadHostedChatDraft(machineId);
+    if (parked === null) return;
+    setDraft(parked);
+    clearHostedChatDraft(machineId);
+  }, [initialDraft, machineId]);
   const [pendingAgentTurns, setPendingAgentTurns] = useState<PendingChatTurn[]>([]);
   const [activityObservedAtMs, setActivityObservedAtMs] = useState<number | null>(null);
   const [leaseNowMs, setLeaseNowMs] = useState(() => Date.now());

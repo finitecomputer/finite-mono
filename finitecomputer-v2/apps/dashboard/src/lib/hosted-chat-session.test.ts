@@ -2,11 +2,15 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import {
+  clearHostedChatDraft,
   currentHostedChatReturnPath,
   hostedChatSignInUrl,
   isHostedChatSessionAuthFailure,
+  loadHostedChatDraft,
   redirectToHostedChatSignIn,
   resetHostedChatSignInRedirect,
+  saveHostedChatDraft,
+  shouldAutoRedirectForSessionAuthFailure,
 } from "@/lib/hosted-chat-session";
 
 // Mirrors the shape of HostedChatHttpError from the hosted chat provider:
@@ -224,4 +228,93 @@ test("a stale bounce marker from an earlier visit does not block a fresh redirec
   } finally {
     cleanup();
   }
+});
+
+test("an empty composer may auto-redirect; unsent input keeps the composer", () => {
+  assert.equal(
+    shouldAutoRedirectForSessionAuthFailure({ draftText: "", attachmentCount: 0 }),
+    true
+  );
+  // Whitespace-only text is not unsent input.
+  assert.equal(
+    shouldAutoRedirectForSessionAuthFailure({ draftText: "  \n\t", attachmentCount: 0 }),
+    true
+  );
+  assert.equal(
+    shouldAutoRedirectForSessionAuthFailure({
+      draftText: "Keep the runtime boundary thin.",
+      attachmentCount: 0,
+    }),
+    false
+  );
+  // Staged attachments alone also pin the composer: files cannot survive a
+  // full-page navigation, so only an explicit "Sign in again" may drop them.
+  assert.equal(
+    shouldAutoRedirectForSessionAuthFailure({ draftText: "", attachmentCount: 2 }),
+    false
+  );
+  assert.equal(
+    shouldAutoRedirectForSessionAuthFailure({
+      draftText: "half-written",
+      attachmentCount: 1,
+    }),
+    false
+  );
+});
+
+function draftStorage() {
+  const store = new Map<string, string>();
+  return {
+    store,
+    storage: {
+      getItem: (key: string) => store.get(key) ?? null,
+      setItem: (key: string, value: string) => void store.set(key, value),
+      removeItem: (key: string) => void store.delete(key),
+    },
+  } as const;
+}
+
+test("a parked draft round-trips through the sign-in trip once", () => {
+  const { storage } = draftStorage();
+  const machineId = "runtime_70aecb4ba75f00f2fc6d";
+  const nowMs = Date.now();
+
+  assert.equal(saveHostedChatDraft(machineId, "Keep the runtime boundary thin.", { nowMs, storage }), true);
+  assert.equal(loadHostedChatDraft(machineId, { nowMs: nowMs + 5_000, storage }), "Keep the runtime boundary thin.");
+  // Consuming is one-shot: the caller clears after restoring.
+  clearHostedChatDraft(machineId, { storage });
+  assert.equal(loadHostedChatDraft(machineId, { nowMs, storage }), null);
+
+  // A blank draft is not parked — it clears whatever was there.
+  saveHostedChatDraft(machineId, "old draft", { nowMs, storage });
+  assert.equal(saveHostedChatDraft(machineId, "   ", { nowMs, storage }), true);
+  assert.equal(loadHostedChatDraft(machineId, { nowMs, storage }), null);
+
+  // Drafts are per machine.
+  saveHostedChatDraft(machineId, "for boss", { nowMs, storage });
+  assert.equal(loadHostedChatDraft("runtime_other", { nowMs, storage }), null);
+
+  // Machine ids are encoded into distinct, prefix-scoped keys.
+  saveHostedChatDraft("runtime other/odd", "scoped", { nowMs, storage });
+  assert.equal(loadHostedChatDraft("runtime other/odd", { nowMs, storage }), "scoped");
+});
+
+test("an expired or corrupted parked draft restores nothing and clears the key", () => {
+  const { store, storage } = draftStorage();
+  const machineId = "runtime_70aecb4ba75f00f2fc6d";
+  const nowMs = Date.now();
+
+  saveHostedChatDraft(machineId, "stale", { nowMs: nowMs - 16 * 60_000, storage });
+  assert.equal(loadHostedChatDraft(machineId, { nowMs, storage }), null);
+  assert.equal(store.has(`finite.chat-draft.${machineId}`), false, "expired draft key removed");
+
+  store.set(`finite.chat-draft.${machineId}`, "{not json");
+  assert.equal(loadHostedChatDraft(machineId, { nowMs, storage }), null);
+  assert.equal(store.has(`finite.chat-draft.${machineId}`), false, "corrupt draft key removed");
+
+  store.set(
+    `finite.chat-draft.${machineId}`,
+    JSON.stringify({ text: "   ", savedAtMs: nowMs })
+  );
+  assert.equal(loadHostedChatDraft(machineId, { nowMs, storage }), null, "blank stored text restores nothing");
 });

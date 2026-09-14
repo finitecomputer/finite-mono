@@ -30,6 +30,8 @@ import {
   currentHostedChatReturnPath,
   isHostedChatSessionAuthFailure,
   redirectToHostedChatSignIn,
+  saveHostedChatDraft,
+  shouldAutoRedirectForSessionAuthFailure,
 } from "@/lib/hosted-chat-session";
 import {
   runInitialHostedChatRetries,
@@ -75,11 +77,15 @@ type HostedChatContextValue = {
   recoverBinding: () => Promise<HostedChatRetryAttempt>;
   /**
    * Terminal session handling for a caught chat error: true when the error
-   * was a 401 session failure (the person is being routed to sign-in and the
-   * caller must not also present it as a transport/claim/action error).
+   * was a 401 session failure (the caller must not also present it as a
+   * transport/claim/action error). With unsent composer input the composer
+   * stays mounted and only the banner's "Sign in again" navigates.
    */
   reportSessionAuthFailure: (error: unknown) => boolean;
+  /** Full-page sign-in trip; parks the current draft text first. */
   signInAgain: () => void;
+  /** Keeps the provider current on unsent composer input (draft, attachments). */
+  noteComposerInput: (input: { draftText: string; attachmentCount: number }) => void;
   dispatch: (action: HostedChatAction) => Promise<HostedChatState>;
   dispatchQuiet: (action: HostedChatAction) => Promise<HostedChatState | null>;
   refreshPendingChat: (target: PendingChatRefreshTarget) => Promise<boolean>;
@@ -116,6 +122,7 @@ export function HostedChatProvider({
   const ownerClaimRef = useRef<Promise<HostedChatRetryAttempt> | null>(null);
   const lastClaimErrorRef = useRef<string | null>(null);
   const sessionAuthFailureRef = useRef(false);
+  const composerInputRef = useRef({ draftText: "", attachmentCount: 0 });
   const navigationMutationTailRef = useRef<Promise<void>>(Promise.resolve());
   const nextMutationSequenceRef = useRef(0);
   const latestAppliedMutationSequenceRef = useRef(0);
@@ -210,19 +217,35 @@ export function HostedChatProvider({
   // dead. That is not a transport error: retrying can never succeed, so the
   // person is routed to sign-in by full-page navigation (which also replaces
   // any stale deployment bundle a zombie tab is still running) and the chat
-  // error surfaces keep clear of the dead "Retry load" path.
+  // error surfaces keep clear of the dead "Retry load" path. Unsent composer
+  // input must not be navigated away from automatically — it only exists in
+  // React state — so with a draft or staged attachments the composer stays
+  // put and the banner's explicit "Sign in again" carries the trip.
   const reportSessionAuthFailure = useCallback((error: unknown) => {
     if (!isHostedChatSessionAuthFailure(error)) return false;
     sessionAuthFailureRef.current = true;
     setSessionError(hostedChatErrorMessage(error));
     setTransportError(null);
     setClaimError(null);
-    redirectToHostedChatSignIn(currentHostedChatReturnPath());
+    if (shouldAutoRedirectForSessionAuthFailure(composerInputRef.current)) {
+      redirectToHostedChatSignIn(currentHostedChatReturnPath());
+    }
     return true;
   }, []);
 
   const signInAgain = useCallback(() => {
+    saveHostedChatDraft(machineId, composerInputRef.current.draftText);
     redirectToHostedChatSignIn(currentHostedChatReturnPath(), { force: true });
+  }, [machineId]);
+
+  // The chat surface keeps this current so a session failure knows whether
+  // the composer holds unsent input. A ref, not state: keystrokes must not
+  // re-render the provider.
+  const noteComposerInput = useCallback((input: {
+    draftText: string;
+    attachmentCount: number;
+  }) => {
+    composerInputRef.current = input;
   }, []);
 
   const load = useCallback((showError = true) => {
@@ -586,6 +609,7 @@ export function HostedChatProvider({
       recoverBinding,
       reportSessionAuthFailure,
       signInAgain,
+      noteComposerInput,
       dispatch,
       dispatchQuiet,
       refreshPendingChat,
