@@ -342,9 +342,11 @@ class RelayTests(unittest.IsolatedAsyncioTestCase):
         ]
         with tempfile.TemporaryDirectory() as folder:
             home = Path(folder)
-            with patch.object(runtime, "command", AsyncMock(side_effect=responses)) as cmd:
-                with self.assertRaisesRegex(RuntimeError, "restored original"):
-                    await runtime.configure_relays(home)
+            with (
+                patch.object(runtime, "command", AsyncMock(side_effect=responses)) as cmd,
+                self.assertRaisesRegex(RuntimeError, "restored original"),
+            ):
+                await runtime.configure_relays(home)
             rollback = json.loads((home / "flux-relays-rollback.json").read_text())
             self.assertEqual(rollback[0], before[0])
             self.assertTrue(all(entry["deleted"] for entry in rollback[1]["xftpServers"]))
