@@ -13,6 +13,31 @@ to end-to-end-encrypted Finite Chat rooms. The current flow is Welcome-first:
 
 ## Install
 
+Plugin 0.4.2 requires this monorepo's pinned Hermes runtime with delivery
+contract v1. An unmodified upstream Hermes install does not provide that
+contract. From the monorepo root, `nix run .#hermes-agent -- gateway start`
+runs the supported runtime; the full and minimal packages and CI all compile
+the same checked-in `delivery-contract.patch` into the Hermes wheel.
+
+Select the patched Hermes runtime first, then update the embedded plugin.
+Before replacing a working plugin, preflight that exact runtime's interpreter
+from the repository root:
+
+```bash
+nix shell .#hermes-agent-runtime-python -c python3 -c \
+  'from gateway.platforms.base import BasePlatformAdapter; assert BasePlatformAdapter.DELIVERY_CONTRACT_VERSION == 1'
+```
+
+`finitechat hermes install`
+only copies the plugin; it does not upgrade Hermes. A new plugin on an old
+runtime fails clearly before recovery or inbox consumption. Upgrade the
+runtime to restore service, or reinstall the previous plugin with the previous
+FiniteChat binary. `install --force` can replace a working old plugin without
+checking which interpreter the next gateway boot will use, so doing that
+before the runtime upgrade can interrupt availability. Do not reset the Agent
+Home or chat stores. An old
+plugin remains compatible with the patched runtime, retaining its old behavior.
+
 The default way to get the binary is the released build: run the install
 block at the top of [the repo README](../../README.md), which downloads the
 `finitechat` release asset for your platform, verifies its sha256, and
@@ -35,7 +60,7 @@ Then onboard (one drop-in binary owns all crypto and state):
 #    --server http://127.0.0.1:8787 for a local development server.
 finitechat hermes init --server https://chat.finite.computer
 
-# 2. The plugin (Hermes ≥ 0.16 plugin layout)
+# 2. The plugin (requires the paired Finite Hermes runtime above)
 finitechat hermes install
 ```
 
@@ -102,14 +127,18 @@ supervisor-managed `finitechat hermes serve` process.
 For the supervised Rust bridge work, `finitechat hermes serve` starts the
 loopback service boundary and exposes `GET /healthz` plus `GET /readyz`. The
 plugin starts that service itself when no `FINITECHAT_HERMES_SERVICE_URL` is
-set. Compatibility mode can fall back to the CLI-per-call bridge when the
-service is unreachable.
+set. Compatibility mode can use the CLI-per-call bridge when no service is
+configured. Once a service request has been attempted it never switches
+transports or resubmits the mutation.
 The Finite Computer production runtime sets `FINITECHAT_HERMES_INBOUND_STREAM=1`
 and treats the resident `GET /v1/hermes/inbound` NDJSON path as mandatory.
 In that strict mode, stream failures reconnect with bounded backoff and resume
 from the Rust service's durable cursor. They never fall into Python timer
 polling or CLI-per-message subprocess calls. One-shot polling and CLI fallback
-remain available only when inbound streaming is disabled.
+remain available only when inbound streaming is disabled. CLI-only polling is
+capped at one second so its serialization lock cannot delay outgoing replies
+for a long poll; this trades more idle CLI calls for bounded reply latency.
+Resident service/stream timing is unchanged.
 
 ## Inbox in-flight state and reply routing live in Rust
 
@@ -129,15 +158,17 @@ its own.
   idempotency the adapter no longer has to provide. Existing `hermes-inbox.json`
   entries load as `Pending` (`#[serde(default)]`), so the on-disk format is
   unchanged.
-- **Busy-session admission.** While a Hermes session is busy the adapter keeps
-  at most the first blocked ordinary text event per session in memory as an
-  admission head; every redelivered head and every later event is `release`d
-  back to the durable inbox, so ordering is preserved without buffering in
-  adapter memory. Slash commands, pending approval responses, and pending
-  clarification replies still reach the active turn immediately, and one busy
-  session does not pause another. Events consumed inline by a busy session never
-  pass through a background turn, so the adapter acks them directly (exactly
-  once; the sidecar's ack is idempotent).
+- **Busy-session admission.** Hermes returns an explicit receipt: `started`
+  leaves settlement to its completion hook; `consumed` means an inline control
+  completed; `rejected` means a terminal refusal; `deferred` has accepted
+  nothing. A deferred receipt includes a readiness awaitable owned by Hermes.
+  The adapter holds one ephemeral head per session to preserve queue order,
+  with later messages released back to the Rust inbox. The head remains
+  unaccepted durable inbox state, never a second acceptance record. Cancelling
+  its wait cannot cancel the running turn. Hermes owns command, approval and
+  clarification recognition; a previously deferred head cannot be reclassified
+  as an answer to a prompt created later. The adapter never reads Hermes's
+  private session/queue dictionaries or polls a task every 50ms.
 - **Reply/edit routing (O2).** Every inbound event already carries its
   conversation and segment ids, and the sidecar mints `thread_id` from them. On
   send/edit/activity the adapter passes that `thread_id` back, and the sidecar
@@ -147,15 +178,34 @@ its own.
   override; an unknown thread id falls back to the Home default with a loud
   warning (an archived topic must never silently consume a message). There is
   no policy switch: the fallback is the only behaviour.
-- **Error classification.** Core decides each failure's class and whether the
-  same request may be retried (`FiniteChatCoreError::classification`); the
-  sidecar's error envelope (`error_kind`, `retryable`, HTTP status) and the
-  daemon's status are derived from that one decision, and the adapter reads
-  those fields verbatim. Nothing on either side matches on error text.
+- **Outbound attempts.** The adapter makes one request per send/edit/activity;
+  it never retries a lost response or falls back to another transport after
+  an attempt. Hermes honors the typed delivery disposition and cannot retry,
+  rewrite the response as a formatting fallback, or emit a second media
+  delivery notice. Error kind and retryability from a service refusal remain
+  available for diagnostics, but do not authorize an automatic resend. A lost,
+  malformed or empty send response is `unknown`, never success. Even a service
+  error after mutation can follow acceptance, so the adapter conservatively
+  reports `unknown` unless it rejected the operation locally before sending.
+- **No second outbound queue.** Hermes does not register FiniteChat responses
+  in its delivery-obligation ledger. Existing ledger rows remain inspectable
+  under its normal retention rules but are not automatically replayed through
+  FiniteChat. Completed input is acknowledged even when response delivery is
+  unknown: re-running tools would not recover that response safely. An operator
+  can inspect Hermes's transcript and any already delivered chat messages to
+  decide whether an explicit new send is appropriate. This does not promise
+  exactly-once delivery or automatic response recovery after a crash.
 
-None of this changes the Rust inbox on-disk format, the CLI/service protocol
-(the `release` command and the optional `thread_id` request field are additive),
-or the deployment order.
+The Rust inbox format, service/CLI requests, Room bindings and admission
+policies are unchanged. Existing pending/leased entries remain readable;
+interrupted or abandoned input still recovers through the existing release/
+lease-expiry contract. A crash after processing but before inbox acknowledgement
+can still replay input, and a lease expiring during a very long turn can still
+redeliver it; this change introduces no new database or exactly-once claim.
+Token streaming remains disabled for the append-only transport; separate
+interim commentary remains supported. Other Hermes platforms retain their
+existing queue, retry, streaming and delivery-ledger behavior. No Hosted Web
+Device component gains state or authority.
 
 ## Pinned Hermes clarification and compaction boundary
 

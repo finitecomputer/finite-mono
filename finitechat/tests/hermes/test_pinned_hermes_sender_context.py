@@ -560,7 +560,6 @@ class PinnedHermesSettlementTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(task.cancelled())
         self.assertEqual([action for action, _ in self.settlements()], ["release"])
         self.assertEqual(self.settlements()[0][1]["message_id"], "settlement-message")
-        self.assertEqual(self.adapter._inflight_admissions, set())
 
         # Sidecar redelivery is simulated explicitly: this does not claim to
         # prove the Rust inbox's on-disk lease recovery.
@@ -592,25 +591,20 @@ class PinnedHermesSettlementTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(sends), 1)
         self.assertIn("synthetic handler failure", sends[0]["text"])
         self.assertEqual(sends[0]["thread_id"], "settlement-chat")
-        self.assertEqual(self.adapter._inflight_admissions, set())
 
-    async def test_retryable_send_does_not_ack_until_delivery_retry_finishes(self):
-        retry_started = asyncio.Event()
-        finish_retry = asyncio.Event()
-        send_count = 0
+    async def test_failed_send_is_attempted_once_and_completed_turn_is_acked(self):
+        send_started, finish_send = asyncio.Event(), asyncio.Event()
+        sends = []
         original_bridge = self.adapter._finitechat_json
 
         async def bridge(action, payload, *, timeout):
-            nonlocal send_count
             if action == "send":
-                send_count += 1
-                if send_count == 1:
-                    self.calls.append((action, payload))
-                    return PINNED_ADAPTER_MODULE._FiniteChatResult(
-                        False, {}, "synthetic transient failure", True
-                    )
-                retry_started.set()
-                await finish_retry.wait()
+                sends.append(payload)
+                send_started.set()
+                await finish_send.wait()
+                return PINNED_ADAPTER_MODULE._FiniteChatResult(
+                    False, {}, "synthetic transient failure", True, outcome_unknown=True
+                )
             return await original_bridge(action, payload, timeout=timeout)
 
         async def handler(event):
@@ -618,15 +612,12 @@ class PinnedHermesSettlementTests(unittest.IsolatedAsyncioTestCase):
 
         self.adapter._finitechat_json = bridge
         task = await self.dispatch(handler)
-        try:
-            await asyncio.wait_for(retry_started.wait(), timeout=5)
-            self.assertEqual(self.settlements(), [])
-            finish_retry.set()
-            await asyncio.wait_for(task, timeout=5)
-            self.assertEqual(send_count, 2)
-            self.assertEqual([action for action, _ in self.settlements()], ["ack"])
-        finally:
-            finish_retry.set()
+        await asyncio.wait_for(send_started.wait(), timeout=5)
+        self.assertEqual(self.settlements(), [])
+        finish_send.set()
+        await asyncio.wait_for(task, timeout=5)
+        self.assertEqual(len(sends), 1)
+        self.assertEqual([action for action, _ in self.settlements()], ["ack"])
 
 
 if __name__ == "__main__":

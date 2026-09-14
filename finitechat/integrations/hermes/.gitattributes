@@ -1,0 +1,2 @@
+# Unified diffs require a prefix space on empty context lines.
+delivery-contract.patch -whitespace

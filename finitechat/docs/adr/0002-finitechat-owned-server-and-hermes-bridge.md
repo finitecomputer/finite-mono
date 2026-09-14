@@ -48,7 +48,10 @@ finitecomputer owns:
 
 The Hermes adapter is a Finite Chat integration. Python stays thin: translate
 Hermes callbacks into `finitechat hermes` JSON requests, translate poll events
-back into Hermes `MessageEvent`, and ack only after Hermes accepts the event.
+back into Hermes `MessageEvent`, and settle input only through the explicit
+Hermes admission/completion contract. Started turns ack after completion;
+inline consumed/rejected input acks without a background hook, and deferred
+or cancelled input remains recoverable in the Rust inbox.
 Rust owns validation, cursoring, storage, encryption, attachment materialization,
 and protocol projection.
 

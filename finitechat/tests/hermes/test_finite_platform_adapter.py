@@ -87,9 +87,26 @@ class SendResult:
     error: str | None = None
     raw_response: Any = None
     retryable: bool = False
+    error_kind: str | None = None
+    delivery_disposition: str | None = None
+
+
+class MessageDisposition(Enum):
+    STARTED = "started"
+    CONSUMED = "consumed"
+    REJECTED = "rejected"
+    DEFERRED = "deferred"
+
+
+@dataclass
+class MessageAdmission:
+    disposition: MessageDisposition
+    session_key: str
 
 
 class BasePlatformAdapter:
+    DELIVERY_CONTRACT_VERSION = 1
+
     def __init__(self, config: PlatformConfig, platform: Platform):
         self.config = config
         self.platform = platform
@@ -115,12 +132,20 @@ class BasePlatformAdapter:
         kwargs.setdefault("platform", self.platform)
         return types.SimpleNamespace(**kwargs)
 
+    async def admit_message(self, event, *, predecessors=None):
+        await self.on_processing_start(event)
+        await self.handle_message(event)
+        return MessageAdmission(MessageDisposition.STARTED, build_session_key(event.source))
+
     async def handle_message(self, event: MessageEvent) -> None:
         self.handled_messages.append(event)
         # The real base class returns at dispatch and reports completion from
         # the background turn through this hook. Firing it inline keeps the
         # ack-after-completion ordering visible to call-sequence assertions.
         await self.on_processing_complete(event, ProcessingOutcome.SUCCESS)
+
+    async def on_processing_start(self, event: MessageEvent) -> None:
+        return None
 
     async def on_processing_complete(self, event: MessageEvent, outcome: Any) -> None:
         return None
@@ -182,6 +207,8 @@ def install_gateway_stubs() -> None:
     config_module.Platform = Platform
     config_module.PlatformConfig = PlatformConfig
     base_module.BasePlatformAdapter = BasePlatformAdapter
+    base_module.MessageAdmission = MessageAdmission
+    base_module.MessageDisposition = MessageDisposition
     base_module.MessageEvent = MessageEvent
     base_module.MessageType = MessageType
     base_module.SendResult = SendResult
@@ -619,7 +646,6 @@ class FinitePlatformAdapterTests(unittest.TestCase):
                     "room-canonical",
                     1,
                     "message-1",
-                    "room-canonical:1",
                 )
             )
 
@@ -1141,269 +1167,15 @@ class FinitePlatformAdapterTests(unittest.TestCase):
         ack_calls = [call for call in calls if call[0] == "ack"]
         self.assertEqual(ack_calls[0][1]["message_id"], "msg-42")
 
-    def test_busy_text_waits_unacked_then_admits_in_inbox_order(self):
-        adapter = self.adapter()
-        calls = []
-        adapter._finitechat_json = self._record_json(calls)
-        session_key = "agent:main:finitechat:dm:room-agent-1:chat-build-1"
-        first = self._text_event(21, "msg-21", "queued first")
-        second = self._text_event(22, "msg-22", "queued second")
-
-        async def exercise():
-            release = asyncio.Event()
-
-            async def active_owner():
-                await release.wait()
-                adapter._active_sessions.pop(session_key, None)
-                adapter._session_tasks.pop(session_key, None)
-
-            owner = asyncio.create_task(active_owner())
-            adapter._active_sessions[session_key] = asyncio.Event()
-            adapter._session_tasks[session_key] = owner
-
-            await adapter._handle_finitechat_event(first)
-            for _ in range(20):
-                await adapter._handle_finitechat_event(first)
-                await adapter._handle_finitechat_event(second)
-
-            self.assertEqual(adapter.handled_messages, [])
-            # The head is held in adapter memory; every redelivered head and
-            # every later event is released back to the durable inbox for
-            # redelivery after the head is admitted (no second dispatch, no ack).
-            self.assertTrue(calls)
-            self.assertTrue(all(call[0] == "release" for call in calls))
-            self.assertEqual(len(adapter._deferred_admissions), 1)
-            self.assertEqual(len(adapter._admission_tasks), 1)
-            admission_task = adapter._admission_tasks[session_key]
-            calls.clear()
-
-            release.set()
-            await owner
-            await admission_task
-
-            self.assertEqual([event.text for event in adapter.handled_messages], ["queued first"])
-            self.assertEqual([call[0] for call in calls], ["activity", "ack"])
-            self.assertEqual(calls[-1][1]["message_id"], "msg-21")
-
-            # The second event stayed only in the durable Rust inbox. Its next
-            # redelivery becomes the following turn after the head is ACKed.
-            calls.clear()
-            await adapter._handle_finitechat_event(second)
-
-        asyncio.run(exercise())
-
-        self.assertEqual(
-            [event.text for event in adapter.handled_messages],
-            ["queued first", "queued second"],
-        )
-        self.assertEqual([call[0] for call in calls], ["activity", "ack"])
-        self.assertEqual(calls[-1][1]["message_id"], "msg-22")
-
-    def test_deferred_text_survives_adapter_restart_until_admission(self):
-        first_adapter = self.adapter()
-        first_calls = []
-        first_adapter._finitechat_json = self._record_json(first_calls)
-        session_key = "agent:main:finitechat:dm:room-agent-1:chat-build-1"
-        queued = self._text_event(31, "msg-31", "survive restart")
-
-        async def defer_then_stop():
-            owner = asyncio.create_task(asyncio.Event().wait())
-            first_adapter._active_sessions[session_key] = asyncio.Event()
-            first_adapter._session_tasks[session_key] = owner
-            await first_adapter._handle_finitechat_event(queued)
-            self.assertEqual(first_calls, [])
-            await first_adapter._cancel_admission_tasks()
-            owner.cancel()
-            with self.assertRaises(asyncio.CancelledError):
-                await owner
-
-        asyncio.run(defer_then_stop())
-
-        restarted = self.adapter()
-        restarted_calls = []
-        restarted._finitechat_json = self._record_json(restarted_calls)
-        asyncio.run(restarted._handle_finitechat_event(queued))
-
-        self.assertEqual(first_adapter.handled_messages, [])
-        self.assertEqual(first_calls, [])
-        self.assertEqual([event.text for event in restarted.handled_messages], ["survive restart"])
-        self.assertEqual([call[0] for call in restarted_calls], ["activity", "ack"])
-
-    def test_controls_bypass_busy_text_admission_gate(self):
-        adapter = self.adapter()
-        calls = []
-        adapter._finitechat_json = self._record_json(calls)
-        session_key = "agent:main:finitechat:dm:room-agent-1:chat-build-1"
-        tools_module = types.ModuleType("tools")
-        tools_module.__path__ = []
-        clarify_module = types.ModuleType("tools.clarify_gateway")
-        approval_module = types.ModuleType("tools.approval")
-        clarify_pending = True
-        approval_pending = True
-        cast(Any, clarify_module).get_pending_for_session = lambda _key, include_choice_prompts: (
-            object() if clarify_pending and include_choice_prompts else None
-        )
-        cast(Any, approval_module).has_blocking_approval = lambda _key: approval_pending
-        cast(Any, tools_module).clarify_gateway = clarify_module
-        previous_modules = {
-            name: sys.modules.get(name)
-            for name in ("tools", "tools.clarify_gateway", "tools.approval")
-        }
-        sys.modules["tools"] = tools_module
-        sys.modules["tools.clarify_gateway"] = clarify_module
-        sys.modules["tools.approval"] = approval_module
-
-        async def exercise():
-            nonlocal clarify_pending, approval_pending
-            release = asyncio.Event()
-
-            async def active_owner():
-                await release.wait()
-                adapter._active_sessions.pop(session_key, None)
-                adapter._session_tasks.pop(session_key, None)
-
-            owner = asyncio.create_task(active_owner())
-            adapter._active_sessions[session_key] = asyncio.Event()
-            adapter._session_tasks[session_key] = owner
-
-            await adapter._handle_finitechat_event(self._text_event(41, "msg-41", "2"))
-            clarify_pending = False
-            await adapter._handle_finitechat_event(self._text_event(42, "msg-42", "yes"))
-            approval_pending = False
-            await adapter._handle_finitechat_event(self._text_event(43, "msg-43", "/stop"))
-            await adapter._handle_finitechat_event(self._text_event(44, "msg-44", "ordinary"))
-
-            self.assertEqual(
-                [event.text for event in adapter.handled_messages],
-                ["2", "yes", "/stop"],
-            )
-            self.assertEqual(len(adapter._deferred_admissions), 1)
-            self.assertNotIn("msg-44", [call[1].get("message_id") for call in calls])
-
-            admission_task = adapter._admission_tasks[session_key]
-            release.set()
-            await owner
-            await admission_task
-
-        try:
-            asyncio.run(exercise())
-        finally:
-            for name, previous in previous_modules.items():
-                if previous is None:
-                    sys.modules.pop(name, None)
-                else:
-                    sys.modules[name] = previous
-
-        self.assertEqual(
-            [event.text for event in adapter.handled_messages],
-            ["2", "yes", "/stop", "ordinary"],
-        )
-        acked = [call[1]["message_id"] for call in calls if call[0] == "ack"]
-        self.assertEqual(acked, ["msg-41", "msg-42", "msg-43", "msg-44"])
-
-    def _assert_deferred_text_keeps_arrival_classification(
-        self,
-        *,
-        text: str,
-        later_control: str,
-    ) -> None:
-        adapter = self.adapter()
-        calls = []
-        adapter._finitechat_json = self._record_json(calls)
-        session_key = "agent:main:finitechat:dm:room-agent-1:chat-build-1"
-        tools_module = types.ModuleType("tools")
-        tools_module.__path__ = []
-        clarify_module = types.ModuleType("tools.clarify_gateway")
-        approval_module = types.ModuleType("tools.approval")
-        pending = {"clarification": False, "approval": False}
-        cast(Any, clarify_module).get_pending_for_session = lambda _key, include_choice_prompts: (
-            object() if pending["clarification"] and include_choice_prompts else None
-        )
-        cast(Any, approval_module).has_blocking_approval = lambda _key: pending["approval"]
-        cast(Any, tools_module).clarify_gateway = clarify_module
-
-        async def exercise():
-            release = asyncio.Event()
-
-            async def active_owner():
-                await release.wait()
-                adapter._active_sessions.pop(session_key, None)
-                adapter._session_tasks.pop(session_key, None)
-
-            owner = asyncio.create_task(active_owner())
-            adapter._active_sessions[session_key] = asyncio.Event()
-            adapter._session_tasks[session_key] = owner
-
-            await adapter._handle_finitechat_event(self._text_event(45, "msg-45", text))
-            pending[later_control] = True
-            await asyncio.sleep(self.module.ADMISSION_RECHECK_SECS * 2)
-
-            self.assertEqual(adapter.handled_messages, [])
-            self.assertNotIn("msg-45", [call[1].get("message_id") for call in calls])
-
-            admission_task = adapter._admission_tasks[session_key]
-            release.set()
-            await owner
-            await admission_task
-
-        with patch.dict(
-            sys.modules,
-            {
-                "tools": tools_module,
-                "tools.clarify_gateway": clarify_module,
-                "tools.approval": approval_module,
-            },
-        ):
-            asyncio.run(exercise())
-
-        self.assertEqual([event.text for event in adapter.handled_messages], [text])
-        acked = [call[1]["message_id"] for call in calls if call[0] == "ack"]
-        self.assertEqual(acked, ["msg-45"])
-
-    def test_deferred_text_does_not_become_later_clarification_reply(self):
-        self._assert_deferred_text_keeps_arrival_classification(
-            text="ordinary follow-up",
-            later_control="clarification",
-        )
-
-    def test_deferred_text_does_not_become_later_approval_reply(self):
-        self._assert_deferred_text_keeps_arrival_classification(
-            text="yes",
-            later_control="approval",
-        )
-
-    def test_active_session_does_not_block_another_session(self):
-        adapter = self.adapter()
-        calls = []
-        adapter._finitechat_json = self._record_json(calls)
-        active_key = "agent:main:finitechat:dm:room-agent-1:chat-a"
-
-        async def exercise():
-            owner = asyncio.create_task(asyncio.Event().wait())
-            adapter._active_sessions[active_key] = asyncio.Event()
-            adapter._session_tasks[active_key] = owner
-            await adapter._handle_finitechat_event(
-                self._text_event(51, "msg-51", "other session", segment_id="chat-b")
-            )
-            owner.cancel()
-            with self.assertRaises(asyncio.CancelledError):
-                await owner
-
-        asyncio.run(exercise())
-
-        self.assertEqual([event.text for event in adapter.handled_messages], ["other session"])
-        self.assertEqual([call[0] for call in calls], ["activity", "ack"])
-        self.assertEqual(adapter._deferred_admissions, {})
-
-    def test_failed_handoff_clears_processing_activity(self):
+    def test_failed_admission_releases_unaccepted_input(self):
         adapter = self.adapter()
         calls = []
         adapter._finitechat_json = self._record_json(calls)
 
-        async def fail_handle(_event):
+        async def fail_handle(_event, **_kwargs):
             raise RuntimeError("handoff failed")
 
-        adapter.handle_message = fail_handle
+        adapter.admit_message = fail_handle
         raw_event = {
             "room_id": "room-agent-1",
             "seq": 12,
@@ -1414,12 +1186,8 @@ class FinitePlatformAdapterTests(unittest.TestCase):
         with self.assertRaises(RuntimeError):
             asyncio.run(adapter._handle_finitechat_event(raw_event))
 
-        # A turn that fails before completion clears the typing activity and
-        # releases the leased inbox entry so the sidecar redelivers it whole.
-        self.assertEqual([call[0] for call in calls], ["activity", "activity", "release"])
-        self.assertEqual(calls[0][1]["action"], "set")
-        self.assertEqual(calls[1][1]["action"], "clear")
-        self.assertEqual(calls[2][1]["message_id"], "msg-12")
+        self.assertEqual([call[0] for call in calls], ["release"])
+        self.assertEqual(calls[0][1]["message_id"], "msg-12")
 
     def test_room_filter_drops_other_rooms_but_unfiltered_serves_all(self):
         filtered = self.adapter(room_id="room-agent-1")
@@ -1747,7 +1515,7 @@ class FinitePlatformAdapterTests(unittest.TestCase):
         self.assertIsNone(calls[-1][1]["conversation_id"])
         self.assertIsNone(calls[-1][1]["segment_id"])
 
-    def test_poll_loop_uses_short_poll_while_agent_turn_is_active(self):
+    def test_cli_poll_bounds_reply_delay_without_inspecting_hermes(self):
         adapter = self.adapter()
         adapter._mark_connected()
         adapter._active_sessions = {"room-agent-1": asyncio.Event()}
@@ -1764,7 +1532,7 @@ class FinitePlatformAdapterTests(unittest.TestCase):
         self.assertEqual(calls[0][0], "poll")
         self.assertEqual(
             calls[0][1]["timeout_millis"],
-            self.module.ACTIVE_TURN_POLL_TIMEOUT_MILLIS,
+            self.module.MAX_CLI_POLL_TIMEOUT_MILLIS,
         )
 
     def test_poll_loop_continues_after_transient_poll_error(self):
@@ -1809,7 +1577,7 @@ class FinitePlatformAdapterTests(unittest.TestCase):
                 max_active = max(max_active, active)
                 await asyncio.sleep(0.01)
                 active -= 1
-                return b'{"accepted":true}', b""
+                return b'{"message_id":"reply-1"}', b""
 
         async def fake_create_subprocess_exec(*args, **kwargs):
             return FakeProcess()
@@ -1870,7 +1638,7 @@ class FinitePlatformAdapterTests(unittest.TestCase):
         self.assertEqual(captured["body"], b"{}")
         self.assertEqual(captured["timeout"], 7)
 
-    def test_finitechat_json_retries_transient_service_transport_reset(self):
+    def test_finitechat_json_does_not_retry_a_lost_service_response(self):
         adapter = self.module.FiniteChatAdapter(
             PlatformConfig(
                 extra={
@@ -1918,18 +1686,12 @@ class FinitePlatformAdapterTests(unittest.TestCase):
             self.module.urllib.request.urlopen = original_urlopen
             self.module.asyncio.sleep = original_sleep
 
-        self.assertTrue(result.ok)
-        self.assertEqual(result.data["accepted"], True)
-        self.assertEqual(
-            calls,
-            [
-                ("http://127.0.0.1:9999/v1/hermes/activity", 7),
-                ("http://127.0.0.1:9999/v1/hermes/activity", 7),
-            ],
-        )
-        self.assertEqual(sleeps, [self.module.SERVICE_TRANSPORT_RETRY_SECS])
+        self.assertFalse(result.ok)
+        self.assertTrue(result.outcome_unknown)
+        self.assertEqual(calls, [("http://127.0.0.1:9999/v1/hermes/activity", 7)])
+        self.assertEqual(sleeps, [])
 
-    def test_finitechat_json_falls_back_to_cli_when_service_transport_fails(self):
+    def test_finitechat_json_never_switches_to_cli_after_service_attempt(self):
         adapter = self.module.FiniteChatAdapter(
             PlatformConfig(
                 extra={
@@ -1964,10 +1726,9 @@ class FinitePlatformAdapterTests(unittest.TestCase):
             self.module.urllib.request.urlopen = original_urlopen
             self.module.asyncio.create_subprocess_exec = original_create_subprocess_exec
 
-        self.assertTrue(result.ok)
-        self.assertEqual(result.data["recovered"], 0)
-        self.assertEqual(calls[0][0:2], ("/bin/finitechat", "hermes"))
-        self.assertEqual(calls[0][-2:], ("recover", "--json"))
+        self.assertFalse(result.ok)
+        self.assertTrue(result.outcome_unknown)
+        self.assertEqual(calls, [])
 
     # --- structured `retryable` / `error_kind` (ownership audit O8) ---------
     #
@@ -2118,6 +1879,7 @@ class FinitePlatformAdapterTests(unittest.TestCase):
 
     def _cli_fallback_failure(self, returncode: int, stderr: bytes):
         adapter = self._service_adapter()
+        adapter.service_url = ""
         original_urlopen = self.module.urllib.request.urlopen
         original_create_subprocess_exec = self.module.asyncio.create_subprocess_exec
         original_sleep = self.module.asyncio.sleep
@@ -2226,7 +1988,7 @@ class FinitePlatformAdapterTests(unittest.TestCase):
         self.assertFalse(result.ok)
         self.assertTrue(result.retryable)
         self.assertTrue(result.transport_error)
-        self.assertEqual(len(service_calls), 2)
+        self.assertEqual(len(service_calls), 1)
         self.assertEqual(subprocess_calls, [])
 
     def test_finitechat_service_stream_worker_parses_ndjson_records(self):

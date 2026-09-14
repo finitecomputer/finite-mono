@@ -1,0 +1,365 @@
+--- a/gateway/platforms/base.py
++++ b/gateway/platforms/base.py
+@@ -2421,6 +2421,32 @@
+     CANCELLED = "cancelled"
+ 
+ 
++class MessageDisposition(Enum):
++    """Admission into Hermes, distinct from completion or response delivery."""
++
++    STARTED = "started"  # completion hook owns settlement
++    CONSUMED = "consumed"  # control completed inline, no completion hook
++    REJECTED = "rejected"  # terminal refusal, not successful processing
++    DEFERRED = "deferred"  # caller still owns the unaccepted durable input
++
++
++@dataclass(frozen=True)
++class MessageAdmission:
++    disposition: MessageDisposition
++    session_key: str
++    ready: Optional[asyncio.Future] = None
++
++    async def wait_ready(self) -> None:
++        """Wait for another admission opportunity without cancelling its owner.
++
++        Readiness is not admission: the caller must submit the same input again.
++        Cancelling this wait never interrupts the turn holding the session.
++        """
++        if self.ready is None:
++            raise RuntimeError("Deferred admission has no readiness owner")
++        await asyncio.wait({self.ready})
++
++
+ @dataclass
+ class MessageEvent:
+     """
+@@ -2428,6 +2454,10 @@
+     
+     Normalized representation that all adapters produce.
+     """
++    # The caller retains a durable copy until admission/completion settlement.
++    durable_delivery: bool = field(default=False, kw_only=True)
++    durable_deferred: bool = field(default=False, kw_only=True)
++
+     # Message content
+     text: str
+     message_type: MessageType = MessageType.TEXT
+@@ -2622,6 +2652,10 @@
+     # ``None`` (unset / not classified).  Producers should set this via
+     # :func:`classify_send_error`.
+     error_kind: Optional[str] = None
++    # Typed transport authority. When set, callers must return this result
++    # unchanged: no retry, formatting fallback, or second delivery notice.
++    # "unknown" means acceptance could have happened before the response was lost.
++    delivery_disposition: Optional[str] = None  # accepted | rejected | unknown
+ 
+ 
+ # Machine-readable send-failure categories.  Kept platform-neutral so every
+@@ -3193,6 +3227,7 @@
+         # Without the owner-task map, an old task's finally block could delete
+         # a newer task's guard, leaving stale busy state.
+         self._active_sessions: Dict[str, asyncio.Event] = {}
++        self._admission_ready: Dict[str, asyncio.Future] = {}
+         self._pending_messages: Dict[str, MessageEvent] = {}
+         self._session_tasks: Dict[str, asyncio.Task] = {}
+         # Legacy busy_text_mode env var; when unset the runner syncs the
+@@ -5755,7 +5790,7 @@
+             metadata=metadata,
+         )
+ 
+-        if result.success:
++        if result.success or result.delivery_disposition is not None:
+             return result
+ 
+         error_str = result.error or ""
+@@ -6019,6 +6054,9 @@
+         if guard is not None and current_guard is not guard:
+             return
+         del self._active_sessions[session_key]
++        ready = self._admission_ready.pop(session_key, None)
++        if ready is not None and not ready.done():
++            ready.set_result(None)
+ 
+     def _session_task_is_stale(self, session_key: str) -> bool:
+         """Return True if the owner task for ``session_key`` is done/cancelled.
+@@ -6058,7 +6096,7 @@
+             self.name,
+             session_key,
+         )
+-        self._active_sessions.pop(session_key, None)
++        self._release_session_guard(session_key)
+         self._pending_messages.pop(session_key, None)
+         self._session_tasks.pop(session_key, None)
+         self._discard_text_debounce(session_key)
+@@ -6242,7 +6280,27 @@
+ 
+         await self._drain_pending_after_session_command(session_key, command_guard)
+ 
+-    async def handle_message(self, event: MessageEvent) -> None:
++    DELIVERY_CONTRACT_VERSION = 1
++    REPLAYS_OUTBOUND = True
++
++    async def admit_message(
++        self, event: MessageEvent, *, predecessors: Optional[dict[str, asyncio.Task]] = None,
++    ) -> MessageAdmission:
++        """Admit one durable input without merging it into volatile queues.
++
++        A deferred receipt keeps ownership with the caller. Its readiness task
++        only wakes the caller to retry admission; it never acknowledges input.
++        A caller-held predecessor preserves its durable queue order while
++        Hermes alone decides which controls may bypass a busy session.
++        """
++        if not self._message_handler:
++            raise RuntimeError("Hermes message handler is not ready")
++        event.durable_delivery = True
++        return await self.handle_message(event, _predecessors=predecessors)
++
++    async def handle_message(
++        self, event: MessageEvent, *, _predecessors: Optional[dict[str, asyncio.Task]] = None,
++    ) -> Optional[MessageAdmission]:
+         """
+         Process an incoming message.
+         
+@@ -6282,7 +6340,32 @@
+                 expected_session_key,
+                 session_key,
+             )
+-            return
++            return MessageAdmission(MessageDisposition.REJECTED, session_key) if event.durable_delivery else None
++
++        _predecessor = (_predecessors or {}).get(session_key)
++
++        def admitted(disposition):
++            return MessageAdmission(disposition, session_key) if event.durable_delivery else None
++
++        def deferred():
++            event.durable_deferred = True
++            if _predecessor is not None and not _predecessor.done():
++                ready = _predecessor
++            else:
++                ready = self._admission_ready.get(session_key)
++                if ready is None or ready.done():
++                    ready = asyncio.get_running_loop().create_future()
++                    self._admission_ready[session_key] = ready
++                    guard = self._active_sessions.get(session_key)
++                    owner = self._session_tasks.get(session_key)
++                    if owner is not None:
++                        def owner_exited(_task):
++                            # A command may replace the guard while cancelling
++                            # the old owner. Only heal that owner's exact guard.
++                            if self._active_sessions.get(session_key) is guard:
++                                self._heal_stale_session_lock(session_key)
++                        owner.add_done_callback(owner_exited)
++            return MessageAdmission(MessageDisposition.DEFERRED, session_key, ready)
+ 
+         # On-entry self-heal: if the adapter still has an _active_sessions
+         # entry for this key but the owner task has already exited (done or
+@@ -6292,8 +6375,10 @@
+         if session_key in self._active_sessions:
+             self._heal_stale_session_lock(session_key)
+ 
+-        # Check if there's already an active handler for this session
+-        if session_key in self._active_sessions:
++        # A predecessor reserves queue order, but controls can still bypass.
++        if session_key in self._active_sessions or (_predecessor is not None and not _predecessor.done()):
++            if event.durable_deferred:
++                return deferred()
+             # Certain commands must bypass the active-session guard and be
+             # dispatched directly to the gateway runner.  Without this, they
+             # are queued as pending messages and either:
+@@ -6321,11 +6406,13 @@
+                     try:
+                         await self._dispatch_active_session_command(event, session_key, cmd)
+                     except Exception as e:
++                        if event.durable_delivery:
++                            raise
+                         logger.error(
+                             "[%s] Command '/%s' dispatch failed: %s",
+                             self.name, cmd, e, exc_info=True,
+                         )
+-                    return
++                    return admitted(MessageDisposition.CONSUMED)
+ 
+                 # Other bypass commands (/approve, /deny, /status,
+                 # /bg, /restart) just need direct dispatch — they
+@@ -6352,8 +6439,10 @@
+                                 ttl_seconds=_eph_ttl,
+                             )
+                 except Exception as e:
++                    if event.durable_delivery:
++                        raise
+                     logger.error("[%s] Command '/%s' dispatch failed: %s", self.name, cmd, e, exc_info=True)
+-                return
++                return admitted(MessageDisposition.CONSUMED)
+ 
+             # Clarify reply bypass: if the agent is blocked on a
+             # clarify_tool call, the next non-command message in this
+@@ -6405,18 +6494,30 @@
+                                     ttl_seconds=_eph_ttl,
+                                 )
+                     except Exception as e:
++                        if event.durable_delivery:
++                            raise
+                         logger.error(
+                             "[%s] Clarify text-intercept dispatch failed: %s",
+                             self.name, e, exc_info=True,
+                         )
+-                    return
++                    return admitted(MessageDisposition.CONSUMED)
+ 
+             if self._busy_session_handler is not None:
+                 try:
+-                    if await self._busy_session_handler(event, session_key):
+-                        return
++                    disposition = await self._busy_session_handler(event, session_key)
++                    if disposition is MessageDisposition.DEFERRED:
++                        return deferred()
++                    if disposition is MessageDisposition.REJECTED:
++                        return admitted(MessageDisposition.REJECTED)
++                    if disposition:
++                        return admitted(MessageDisposition.CONSUMED)
+                 except Exception as e:
++                    if event.durable_delivery:
++                        raise
+                     logger.error("[%s] Busy-session handler failed: %s", self.name, e, exc_info=True)
++
++            if event.durable_delivery:
++                return deferred()
+ 
+             # Special case: photo bursts/albums frequently arrive as multiple near-
+             # simultaneous messages. Queue them without interrupting the active run,
+@@ -6457,7 +6558,9 @@
+         # pattern — set the guard synchronously, not inside the task.)
+         # _start_session_processing installs the guard AND the owner-task
+         # mapping atomically so stale-lock detection works.
+-        self._start_session_processing(event, session_key)
++        if not self._start_session_processing(event, session_key) and event.durable_delivery:
++            raise RuntimeError("Hermes could not start processing")
++        return admitted(MessageDisposition.STARTED)
+     
+     @staticmethod
+     def _get_human_delay() -> float:
+@@ -6776,7 +6879,7 @@
+                     # Slash-command and ephemeral replies are cheap to
+                     # regenerate and are not recorded.
+                     _obligation_id = None
+-                    if not is_ephemeral_response and not str(
++                    if delivery_adapter.REPLAYS_OUTBOUND and not is_ephemeral_response and not str(
+                         event.text or ""
+                     ).lstrip().startswith(("/", self.typed_command_prefix or "!")):
+                         try:
+@@ -6978,7 +7081,7 @@
+                                 metadata=_final_thread_metadata,
+                             )
+ 
+-                        if not media_result.success:
++                        if not media_result.success and media_result.delivery_disposition is None:
+                             logger.warning("[%s] Failed to send media (%s): %s", self.name, ext, media_result.error)
+                             await self._notify_media_delivery_failure(
+                                 event.source.chat_id,
+@@ -7007,7 +7110,7 @@
+                                 file_path=file_path,
+                                 metadata=_final_thread_metadata,
+                             )
+-                        if not file_result.success:
++                        if not file_result.success and file_result.delivery_disposition is None:
+                             logger.warning(
+                                 "[%s] Failed to send local file (%s): %s",
+                                 self.name,
+@@ -7100,7 +7203,7 @@
+         except asyncio.CancelledError:
+             current_task = asyncio.current_task()
+             outcome = ProcessingOutcome.CANCELLED
+-            if current_task is None or current_task not in self._expected_cancelled_tasks:
++            if not event.durable_delivery and (current_task is None or current_task not in self._expected_cancelled_tasks):
+                 outcome = ProcessingOutcome.FAILURE
+             await self._run_processing_hook("on_processing_complete", event, outcome)
+             raise
+@@ -7327,7 +7430,8 @@
+         except Exception:
+             pass
+         self._pending_messages.clear()
+-        self._active_sessions.clear()
++        for session_key in list(self._active_sessions):
++            self._release_session_guard(session_key)
+         for state in list(self._text_debounce_store().values()):
+             if state.task is not None and not state.task.done():
+                 state.task.cancel()
+--- a/gateway/run.py
++++ b/gateway/run.py
+@@ -5879,6 +5879,9 @@
+             if _plat_streaming is None
+             else bool(_plat_streaming)
+         )
++        _delivery_adapter = self._runner._adapter_for_source(ctx.source)
++        if _delivery_adapter and not _delivery_adapter.REPLAYS_OUTBOUND:
++            _streaming_enabled = False
+         _want_stream_deltas = _streaming_enabled
+         _want_interim_messages = ctx.interim_assistant_messages_enabled
+         _want_interim_consumer = _want_interim_messages
+@@ -10877,6 +10880,8 @@
+         return (enriched_text or text).strip()
+ 
+     async def _handle_active_session_busy_message(self, event: MessageEvent, session_key: str) -> bool:
++        from gateway.platforms.base import MessageDisposition
++
+         # --- Authorization gate (#17775) ---
+         # The cold path (_handle_message) checks _is_user_authorized before
+         # creating a session.  The busy path must enforce the same check;
+@@ -10891,12 +10896,14 @@
+                 event.source.platform.value if event.source.platform else "unknown",
+                 session_key,
+             )
+-            return True  # handled (silently dropped); do not fall through
++            return MessageDisposition.REJECTED if event.durable_delivery else True
+ 
+         effective_mode = self._effective_busy_input_mode(event.source)
+ 
+         # --- Draining case (gateway restarting/stopping) ---
+         if self._draining:
++            if event.durable_delivery:
++                return MessageDisposition.DEFERRED
+             adapter = self._adapter_for_source(event.source)
+             if not adapter:
+                 return True
+@@ -10992,11 +10999,18 @@
+                             )
+                     return True
+         except Exception:
++            if event.durable_delivery:
++                raise
+             logger.warning(
+                 "Plain-text approval routing failed for session %s; "
+                 "falling through to busy handling",
+                 session_key, exc_info=True,
+             )
++
++        # Durable callers retain ordinary inputs outside Hermes. Authorization
++        # and pending approval handling above remain the same canonical gates.
++        if event.durable_delivery:
++            return False
+ 
+         # Normal busy case (agent actively running a task)
+         adapter = self._adapter_for_source(event.source)
+@@ -12947,6 +12961,11 @@
+                         )
+                 # Startup claims preserve their historical state; attempts cap
+                 # + stale cutoff bound later retries.
++                continue
++            if not adapter.REPLAYS_OUTBOUND:
++                # Historical ledger rows remain inspectable; never turn an
++                # ambiguous old attempt into another transport operation.
++                logger.warning("Retaining delivery obligation %s without automatic replay: transport owns delivery", row["obligation_id"])
+                 continue
+             content = row["content"]
+             if row.get("needs_marker"):
+@@ -29773,6 +29792,9 @@
+         )
+ 
+         _thread_metadata: Optional[Dict[str, Any]] = self._thread_metadata_for_source(source, event_message_id)
++        _delivery_adapter = self._adapter_for_source(source)
++        if _delivery_adapter and not _delivery_adapter.REPLAYS_OUTBOUND:
++            _streaming_enabled = False
+ 
+         if _streaming_enabled:
+             try:

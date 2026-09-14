@@ -241,8 +241,31 @@
         let
           # Same pin as hermes-agent so toolchain ELFs share that glibc.
           hermesPkgs = import hermes-nixpkgs { inherit system; };
-          hermesAgentPackage = hermes-agent.packages.${system}.default;
-          hermesAgentMinimal = hermes-agent.packages.${system}.minimal;
+          # Extend the pinned Python package overlay, not workspaceRoot: UV
+          # reads its lockfile during evaluation, before target builds can run.
+          upstreamUv = hermes-agent.inputs.uv2nix;
+          patchedUv = upstreamUv // {
+            lib = upstreamUv.lib // {
+              workspace = upstreamUv.lib.workspace // {
+                loadWorkspace = args:
+                  let workspace = upstreamUv.lib.workspace.loadWorkspace args;
+                  in workspace // {
+                    mkPyprojectOverlay = opts: hermesPkgs.lib.composeExtensions
+                      (workspace.mkPyprojectOverlay opts)
+                      (_final: prev: {
+                        hermes-agent = prev.hermes-agent.overrideAttrs (old: {
+                          patches = (old.patches or []) ++ [
+                            ./finitechat/integrations/hermes/delivery-contract.patch
+                          ];
+                        });
+                      });
+                  };
+              };
+            };
+          };
+          patchHermes = package: package.override { uv2nix = patchedUv; };
+          hermesAgentPackage = patchHermes hermes-agent.packages.${system}.default;
+          hermesAgentMinimal = patchHermes hermes-agent.packages.${system}.minimal;
         in
         {
           simplex-chat = hermesPkgs.callPackage ./finitecomputer-v2/deploy/finite-computer/images/simplex-chat.nix {};
@@ -359,7 +382,7 @@
             # hermes-free so unrelated CI jobs never fetch hermes.
             hermes-bridge-ci =
               let
-                hermesAgentRuntime = hermes-agent.packages.${system}.default;
+                hermesAgentRuntime = (hermesPackagesFor system).hermes-agent-runtime;
                 hermesAgentRuntimePython = hermesAgentRuntime.hermesVenv;
               in
               pkgs.mkShell {

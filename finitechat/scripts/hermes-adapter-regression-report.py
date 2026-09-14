@@ -20,16 +20,26 @@ from pathlib import Path
 from typing import Any
 
 ADAPTER_TESTS = "tests.hermes.test_finite_platform_adapter.FinitePlatformAdapterTests"
+CONTRACT_TESTS = (
+    "tests.hermes.test_pinned_hermes_delivery_contract.PinnedHermesDeliveryContractTests"
+)
 
 REQUIRED_REGRESSIONS: dict[str, list[str]] = {
     "plain message mapping": [
         f"{ADAPTER_TESTS}.test_poll_event_maps_room_to_chat_and_conversation_to_thread_then_acks",
     ],
     "durable busy-text admission": [
-        f"{ADAPTER_TESTS}.test_busy_text_waits_unacked_then_admits_in_inbox_order",
-        f"{ADAPTER_TESTS}.test_deferred_text_survives_adapter_restart_until_admission",
-        f"{ADAPTER_TESTS}.test_controls_bypass_busy_text_admission_gate",
-        f"{ADAPTER_TESTS}.test_active_session_does_not_block_another_session",
+        f"{CONTRACT_TESTS}.test_ordered_inputs_stay_unacked_while_controls_bypass",
+        f"{CONTRACT_TESTS}.test_wait_cancellation_does_not_cancel_active_turn_or_ack_head",
+        f"{CONTRACT_TESTS}.test_runner_authorization_and_plain_approval_remain_canonical",
+        f"{CONTRACT_TESTS}.test_deferred_head_cannot_become_a_later_clarification_answer",
+    ],
+    "single-attempt delivery": [
+        f"{CONTRACT_TESTS}.test_service_response_lost_never_resends_or_falls_back",
+        f"{CONTRACT_TESTS}.test_typed_refusal_not_overridden_by_retry_flag_or_error_text",
+        f"{CONTRACT_TESTS}.test_historical_outbound_obligation_never_replayed",
+        f"{CONTRACT_TESTS}.test_background_final_response_never_registers_an_outbound_obligation",
+        f"{CONTRACT_TESTS}.test_background_media_unknown_does_not_send_a_failure_notice",
     ],
     "Hermes clarification routing": [
         f"{ADAPTER_TESTS}.test_clarification_uses_hermes_prompt_on_exact_ordinary_message_route",
@@ -42,8 +52,8 @@ REQUIRED_REGRESSIONS: dict[str, list[str]] = {
         f"{ADAPTER_TESTS}.test_ensure_service_starts_finitechat_serve_and_reads_ready_file",
         f"{ADAPTER_TESTS}.test_ensure_service_waits_for_health_after_ready_file",
     ],
-    "service fallback": [
-        f"{ADAPTER_TESTS}.test_finitechat_json_falls_back_to_cli_when_service_transport_fails",
+    "service failure preserves one attempt": [
+        f"{ADAPTER_TESTS}.test_finitechat_json_never_switches_to_cli_after_service_attempt",
     ],
     "service serialization": [
         f"{ADAPTER_TESTS}.test_finitechat_json_serializes_cli_access_per_adapter",

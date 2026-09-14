@@ -31,8 +31,15 @@ from gateway.platforms.base import (
     MessageEvent,
     MessageType,
     SendResult,
-    build_session_key,
 )
+
+try:
+    from gateway.platforms.base import MessageAdmission, MessageDisposition
+except ImportError as exc:
+    raise ImportError(
+        "FiniteChat requires the Finite Hermes delivery contract v1 runtime; "
+        "use this monorepo's patched Hermes runtime together with the FiniteChat plugin"
+    ) from exc
 
 logger = logging.getLogger(__name__)
 
@@ -40,18 +47,16 @@ FINITE_PLATFORM_NAME = "finitechat"
 LOCAL_ENV_FILE = "finitechat.env"
 DEFAULT_POLL_LIMIT = 10
 DEFAULT_POLL_TIMEOUT_SECS = 20
+MAX_CLI_POLL_TIMEOUT_MILLIS = 1000
 DEFAULT_ACTIVITY_REFRESH_SECS = 10.0
-ACTIVE_TURN_POLL_TIMEOUT_MILLIS = 100
 DEFAULT_SERVICE_ADDR = "127.0.0.1:0"
 SERVICE_READY_FILE = "hermes-service.json"
 BRIDGE_STATUS_FILE = "hermes-bridge-status.json"
 SERVICE_START_TIMEOUT_SECS = 5.0
 STREAM_RECONNECT_BACKOFF_SECS = 2.0
 STREAM_RECONNECT_MAX_BACKOFF_SECS = 30.0
-SERVICE_TRANSPORT_RETRY_SECS = 0.1
 ACTIVITY_CONTROL_TIMEOUT_SECS = 1.5
 PROCESSING_ACTIVITY_TTL_MILLIS = 15 * 1000
-ADMISSION_RECHECK_SECS = 0.05
 DEFAULT_FINITE_PRIVATE_CONTROL_URL = "https://finite.computer/api/core/v1/finite-private"
 FINITE_PRIVATE_CONTROL_TIMEOUT_SECS = 5
 FINITECHAT_HOME_CHANNEL_ENV = "FINITECHAT_HOME_CHANNEL"
@@ -67,30 +72,6 @@ _AUTHENTICATED_FINITE_TURN_USER: contextvars.ContextVar[str | None] = contextvar
 _AUTHENTICATED_FINITE_REQUESTER_CONTEXT: contextvars.ContextVar[tuple[str, str] | None] = (
     contextvars.ContextVar("finitechat_authenticated_requester_context", default=None)
 )
-APPROVAL_CONTROL_TEXT = frozenset(
-    {
-        "approve",
-        "yes",
-        "ok",
-        "okay",
-        "confirm",
-        "y",
-        "👍",
-        "deny",
-        "no",
-        "reject",
-        "cancel",
-        "n",
-        "👎",
-        "always",
-        "approve always",
-        "always approve",
-        "session",
-        "approve session",
-        "session approve",
-    }
-)
-
 # Pinned Hermes does not pass a semantic progress flag to platform adapters.
 # Pin its real registry prefix -> tool-name pairs and friendly prefix -> verb
 # pairs instead of accepting the unsafe cross-product of any tool emoji and
@@ -471,6 +452,9 @@ def is_connected(config: PlatformConfig) -> bool:
 class FiniteChatAdapter(BasePlatformAdapter):
     """Bridge Finite Chat messages to Hermes through the resident service."""
 
+    # The Rust transport owns delivery; Hermes must not create a replay outbox.
+    REPLAYS_OUTBOUND = False
+
     MAX_MESSAGE_LENGTH = 12000
     SUPPORTS_MESSAGE_EDITING = False
 
@@ -537,14 +521,8 @@ class FiniteChatAdapter(BasePlatformAdapter):
         # the adapter keeps at most its first blocked ordinary text event per
         # session in memory as an admission head; later events are released back
         # to the durable inbox and redelivered after the head is admitted.
-        self._deferred_admissions: dict[str, tuple[MessageEvent, str, Any, str, str]] = {}
+        self._deferred_admissions: dict[str, tuple[MessageEvent, str, Any, str]] = {}
         self._admission_tasks: dict[str, asyncio.Task] = {}
-        # Per-turn marker (not a dedup store): the key of an event currently
-        # being admitted. The turn's completion hook clears it when it settles
-        # the sidecar lease; if it is still set after handle_message returns the
-        # event was consumed inline by a busy session (no background turn fires
-        # the hook), so the inline path acks it exactly once.
-        self._inflight_admissions: set[str] = set()
 
     async def _process_message_background(
         self,
@@ -569,6 +547,9 @@ class FiniteChatAdapter(BasePlatformAdapter):
             _AUTHENTICATED_FINITE_TURN_USER.reset(token)
 
     async def connect(self, is_reconnect: bool = False, **_: Any) -> bool:
+        if getattr(BasePlatformAdapter, "DELIVERY_CONTRACT_VERSION", None) != 1:
+            logger.error("[finitechat] requires the Finite Hermes delivery contract v1 runtime")
+            return False
         if not self.home:
             logger.error("[finitechat] FINITECHAT_HOME is required (agent home directory)")
             return False
@@ -614,6 +595,13 @@ class FiniteChatAdapter(BasePlatformAdapter):
         self._mark_disconnected()
         self._write_bridge_status("disconnected")
         logger.info("[finitechat] disconnected")
+
+    async def on_processing_start(self, event: MessageEvent) -> None:
+        raw = event.raw_message if isinstance(event.raw_message, dict) else {}
+        await self._set_processing_activity(
+            str(raw.get("room_id") or self.room_id),
+            self._route_metadata(raw.get("conversation_id"), raw.get("segment_id")),
+        )
 
     async def on_processing_complete(self, event: MessageEvent, outcome: Any) -> None:
         """Settle the event's inbox lease, then surface any claimed quota notice.
@@ -663,15 +651,20 @@ class FiniteChatAdapter(BasePlatformAdapter):
         drained = self._attach_brain_approval_metadata(payload)
         result = await self._finitechat_json("send", payload, timeout=30)
         if not result.ok:
-            # `retryable` is the sidecar's decision, carried verbatim from the
-            # envelope; nothing here reads the message text.
-            return SendResult(success=False, error=result.error, retryable=result.retryable)
+            return SendResult(
+                success=False,
+                error=result.error,
+                retryable=result.retryable,
+                error_kind=result.error_kind,
+                delivery_disposition="unknown" if result.outcome_unknown else "rejected",
+            )
         self._finish_brain_approval_drain(drained)
         message_id = str(result.data.get("message_id") or result.data.get("id") or "") or None
         return SendResult(
             success=True,
             message_id=message_id,
             raw_response=result.data,
+            delivery_disposition="accepted",
         )
 
     async def send_clarify(
@@ -693,7 +686,9 @@ class FiniteChatAdapter(BasePlatformAdapter):
                 "refusing Home or active-chat fallback"
             )
             logger.warning("[finitechat] %s (session=%s)", error, session_key)
-            return SendResult(success=False, error=error, retryable=False)
+            return SendResult(
+                success=False, error=error, retryable=False, delivery_disposition="rejected"
+            )
 
         # Hermes owns the pending request and the prompt format. Finite only
         # pins its delivery route and keeps the prompt on the ordinary message
@@ -745,13 +740,20 @@ class FiniteChatAdapter(BasePlatformAdapter):
         drained = self._attach_brain_approval_metadata(payload) if finalize else []
         result = await self._finitechat_json("edit", payload, timeout=30)
         if not result.ok:
-            return SendResult(success=False, error=result.error, retryable=result.retryable)
+            return SendResult(
+                success=False,
+                error=result.error,
+                retryable=result.retryable,
+                error_kind=result.error_kind,
+                delivery_disposition="unknown" if result.outcome_unknown else "rejected",
+            )
         self._finish_brain_approval_drain(drained)
         edited_message_id = str(result.data.get("message_id") or message_id)
         return SendResult(
             success=True,
             message_id=edited_message_id,
             raw_response=result.data,
+            delivery_disposition="accepted",
         )
 
     async def send_typing(self, chat_id: str, metadata=None) -> None:
@@ -976,8 +978,10 @@ class FiniteChatAdapter(BasePlatformAdapter):
 
     def _inbound_request_payload(self) -> dict[str, Any]:
         timeout_millis = self.poll_timeout_secs * 1000
-        if self._has_active_turn():
-            timeout_millis = min(timeout_millis, ACTIVE_TURN_POLL_TIMEOUT_MILLIS)
+        if not self.inbound_stream and not self.service_url:
+            # Legacy CLI calls share one lock. Bound how long an idle poll can
+            # hold up a reply without inspecting Hermes's private turn state.
+            timeout_millis = min(timeout_millis, MAX_CLI_POLL_TIMEOUT_MILLIS)
         payload: dict[str, Any] = {
             "limit": self.poll_limit,
             "timeout_millis": timeout_millis,
@@ -1029,7 +1033,6 @@ class FiniteChatAdapter(BasePlatformAdapter):
         if not message_id:
             logger.warning("[finitechat] ignored event without message_id")
             return
-        event_key = _adapter_event_key(room_id, seq, message_id)
         # The sidecar leases an entry on delivery and keeps a recently-acked
         # ring, so an in-flight or already-acked entry is never redelivered to
         # the adapter — no adapter-side dedup or in-flight tracking is needed.
@@ -1075,36 +1078,19 @@ class FiniteChatAdapter(BasePlatformAdapter):
             ),
             internal=bool(raw_event.get("internal") or False),
         )
-        session_key = build_session_key(
-            event.source,
-            group_sessions_per_user=self.config.extra.get("group_sessions_per_user", True),
-            thread_sessions_per_user=self.config.extra.get("thread_sessions_per_user", False),
-        )
-        if self._should_defer_admission(event, session_key):
-            if session_key in self._deferred_admissions:
-                # A head event is already held for this session. This later
-                # event stays exclusively in the durable inbox: release its
-                # lease so the sidecar redelivers it after the head is admitted,
-                # preserving inbox order without buffering it in adapter memory.
-                await self._release_finitechat_event(room_id, seq, message_id)
-            else:
-                self._defer_admission(
-                    session_key,
-                    event,
-                    room_id,
-                    seq,
-                    message_id,
-                    event_key or "",
-                )
-            return
-
-        await self._admit_finitechat_event(
+        receipt = await self._admit_finitechat_event(
             event,
             room_id,
             seq,
             message_id,
-            event_key or "",
+            predecessors=self._admission_tasks,
         )
+        session_key = receipt.session_key
+        if receipt.disposition is MessageDisposition.DEFERRED:
+            if session_key in self._deferred_admissions:
+                await self._release_finitechat_event(room_id, seq, message_id)
+            else:
+                self._defer_admission(session_key, event, room_id, seq, message_id, receipt)
 
     async def _admit_finitechat_event(
         self,
@@ -1112,48 +1098,21 @@ class FiniteChatAdapter(BasePlatformAdapter):
         room_id: str,
         seq: Any,
         message_id: str,
-        event_key: str,
-    ) -> None:
-        raw_event = event.raw_message if isinstance(event.raw_message, dict) else {}
-        conversation_id = _string_or_none(raw_event.get("conversation_id"))
-        segment_id = _string_or_none(raw_event.get("segment_id"))
-        session_key = build_session_key(
-            event.source,
-            group_sessions_per_user=self.config.extra.get("group_sessions_per_user", True),
-            thread_sessions_per_user=self.config.extra.get("thread_sessions_per_user", False),
-        )
+        *,
+        predecessors: dict[str, asyncio.Task] | None = None,
+    ) -> MessageAdmission:
         await self._hydrate_hermes_home_channel_if_needed()
-        activity_metadata = self._route_metadata(conversation_id, segment_id)
-        activity_set = await self._set_processing_activity(room_id, activity_metadata)
-        # The sidecar leased this entry on delivery. Its lease is settled only
-        # by the turn: the completion hook acks on success or failure, and a
-        # cancelled turn releases it. A turn that fails synchronously before
-        # completion is released here so the sidecar redelivers it whole.
-        session_active = self._session_is_active(session_key)
-        if event_key:
-            self._inflight_admissions.add(event_key)
         try:
-            await self.handle_message(event)
-        except Exception:
-            if event_key:
-                self._inflight_admissions.discard(event_key)
-            if activity_set:
-                await self._clear_processing_activity(room_id, activity_metadata)
+            receipt = await self.admit_message(event, predecessors=predecessors)
+        except BaseException:
             await self._release_finitechat_event(room_id, seq, message_id)
             raise
-        queued_for_later = getattr(self, "_pending_messages", {}).get(session_key) is event
-        if (
-            event_key
-            and event_key in self._inflight_admissions
-            and session_active
-            and not queued_for_later
-        ):
-            # Events consumed inline by a busy session (slash-command bypass,
-            # busy-session handlers) never pass through the background turn that
-            # fires the completion hook, so ack here — exactly once. Every other
-            # event is acked (or released) by the completion hook.
-            self._inflight_admissions.discard(event_key)
+        if receipt.disposition in (MessageDisposition.CONSUMED, MessageDisposition.REJECTED):
+            # These dispositions have no background completion hook.
             await self._ack_finitechat_event(room_id, seq, message_id)
+        # STARTED settles exclusively through on_processing_complete, even if
+        # that hook ran before admission returned. DEFERRED has accepted nothing.
+        return receipt
 
     async def _hydrate_hermes_home_channel_if_needed(self) -> None:
         if self._home_channel_hydrated:
@@ -1187,46 +1146,6 @@ class FiniteChatAdapter(BasePlatformAdapter):
         )
         self._home_channel_hydrated = True
 
-    def _should_defer_admission(self, event: MessageEvent, session_key: str) -> bool:
-        if event.message_type != MessageType.TEXT or event.internal:
-            return False
-        if (event.text or "").lstrip().startswith("/"):
-            return False
-        if self._is_immediate_text_control(event, session_key):
-            return False
-        return session_key in self._deferred_admissions or self._session_is_active(session_key)
-
-    @staticmethod
-    def _is_immediate_text_control(event: MessageEvent, session_key: str) -> bool:
-        try:
-            from tools import clarify_gateway
-
-            if (
-                clarify_gateway.get_pending_for_session(
-                    session_key,
-                    include_choice_prompts=True,
-                )
-                is not None
-            ):
-                return True
-        except Exception:
-            pass
-
-        if (event.text or "").strip().lower() not in APPROVAL_CONTROL_TEXT:
-            return False
-        try:
-            from tools.approval import has_blocking_approval
-
-            return bool(has_blocking_approval(session_key))
-        except Exception:
-            return False
-
-    def _session_is_active(self, session_key: str) -> bool:
-        if session_key not in self._active_sessions:
-            return False
-        self._heal_stale_session_lock(session_key)
-        return session_key in self._active_sessions
-
     def _defer_admission(
         self,
         session_key: str,
@@ -1234,59 +1153,28 @@ class FiniteChatAdapter(BasePlatformAdapter):
         room_id: str,
         seq: Any,
         message_id: str,
-        event_key: str,
+        receipt: MessageAdmission,
     ) -> None:
-        if session_key in self._deferred_admissions:
-            return
-        self._deferred_admissions[session_key] = (
-            event,
-            room_id,
-            seq,
-            message_id,
-            event_key,
+        # This one ephemeral head is still unaccepted Rust inbox state. It
+        # reserves order while Hermes decides when and how admission can retry.
+        self._deferred_admissions[session_key] = (event, room_id, seq, message_id)
+        self._admission_tasks[session_key] = asyncio.create_task(
+            self._admit_when_ready(session_key, receipt)
         )
-        task = asyncio.create_task(self._admit_when_session_idle(session_key))
-        self._admission_tasks[session_key] = task
 
-    async def _admit_when_session_idle(self, session_key: str) -> None:
+    async def _admit_when_ready(self, session_key: str, receipt: MessageAdmission) -> None:
         try:
-            while self._session_is_active(session_key):
-                admission = self._deferred_admissions.get(session_key)
-                if admission is None:
-                    return
-                owner = self._session_tasks.get(session_key)
-                if owner is not None and not owner.done():
-                    await asyncio.wait({owner}, timeout=ADMISSION_RECHECK_SECS)
-                else:
-                    await asyncio.sleep(ADMISSION_RECHECK_SECS)
-
-            admission = self._deferred_admissions.get(session_key)
-            if admission is None:
-                return
-            event, room_id, seq, message_id, event_key = admission
-            await self._admit_finitechat_event(
-                event,
-                room_id,
-                seq,
-                message_id,
-                event_key,
-            )
+            while receipt.disposition is MessageDisposition.DEFERRED:
+                await receipt.wait_ready()
+                event, room_id, seq, message_id = self._deferred_admissions[session_key]
+                receipt = await self._admit_finitechat_event(event, room_id, seq, message_id)
         except asyncio.CancelledError:
             raise
-        except Exception as exc:
-            # The inbox still owns the unacknowledged event. Dropping only the
-            # ephemeral gate lets the next stream delivery retry it.
-            logger.error(
-                "[finitechat] deferred admission failed for session %s: %s",
-                session_key,
-                exc,
-                exc_info=True,
-            )
+        except Exception:
+            logger.exception("[finitechat] deferred admission failed for session %s", session_key)
         finally:
-            current = asyncio.current_task()
-            if self._admission_tasks.get(session_key) is current:
-                self._admission_tasks.pop(session_key, None)
-                self._deferred_admissions.pop(session_key, None)
+            self._admission_tasks.pop(session_key, None)
+            self._deferred_admissions.pop(session_key, None)
 
     async def _cancel_admission_tasks(self) -> None:
         tasks = list(self._admission_tasks.values())
@@ -1363,11 +1251,6 @@ class FiniteChatAdapter(BasePlatformAdapter):
         message_id = str(raw_message.get("message_id") or "")
         if not message_id:
             return
-        # Claim the in-flight marker so the inline-admission path does not also
-        # ack this event once its background turn's completion hook has fired.
-        event_key = _adapter_event_key(room_id, seq, message_id)
-        if event_key:
-            self._inflight_admissions.discard(event_key)
         if outcome_name == "cancelled":
             await self._release_finitechat_event(room_id, seq, message_id)
             return
@@ -1489,10 +1372,6 @@ class FiniteChatAdapter(BasePlatformAdapter):
             "expires_in_millis": 60 * 1000,
         }
 
-    def _has_active_turn(self) -> bool:
-        active_sessions = getattr(self, "_active_sessions", None)
-        return bool(active_sessions)
-
     def _room_id(self, chat_id: str | None) -> str:
         return str(chat_id or self.room_id).strip() or self.room_id
 
@@ -1545,33 +1424,9 @@ class FiniteChatAdapter(BasePlatformAdapter):
                 payload,
                 timeout,
             )
-            if result.ok or not result.transport_error:
-                return result
-            await asyncio.sleep(SERVICE_TRANSPORT_RETRY_SECS)
-            retry_result = await asyncio.to_thread(
-                _finitechat_service_json,
-                self.service_url,
-                action,
-                payload,
-                timeout,
-            )
-            if retry_result.ok or not retry_result.transport_error:
-                return retry_result
-            result = retry_result
-            action_detail = ""
-            if action == "activity" and isinstance(payload.get("action"), str):
-                action_detail = f"/{payload['action']}"
-            logger.warning(
-                "[finitechat] Hermes service unavailable during %s%s (%s)%s",
-                action,
-                action_detail,
-                result.error,
-                "; strict stream mode will retry the resident service"
-                if self.inbound_stream
-                else "; falling back to finitechat CLI",
-            )
-            if self.inbound_stream:
-                return result
+            # A lost response may follow acceptance. Never issue the same
+            # mutation again or switch transports after an attempted request.
+            return result
         if self.inbound_stream:
             return _FiniteChatResult(
                 False,
@@ -1598,11 +1453,11 @@ class FiniteChatAdapter(BasePlatformAdapter):
                 )
                 stdout, stderr = await asyncio.wait_for(proc.communicate(stdin), timeout=timeout)
         except TimeoutError:
-            return _FiniteChatResult(False, {}, "finitechat timed out", True)
+            return _FiniteChatResult(False, {}, "finitechat timed out", False, outcome_unknown=True)
         except FileNotFoundError as exc:
             return _FiniteChatResult(False, {}, str(exc), False)
         except Exception as exc:
-            return _FiniteChatResult(False, {}, str(exc), True)
+            return _FiniteChatResult(False, {}, str(exc), False, outcome_unknown=True)
 
         stdout_text = stdout.decode("utf-8", errors="replace").strip()
         stderr_text = stderr.decode("utf-8", errors="replace").strip()
@@ -1614,19 +1469,30 @@ class FiniteChatAdapter(BasePlatformAdapter):
                 error.message or f"finitechat exited {proc.returncode}",
                 error.retryable,
                 error_kind=error.kind,
+                outcome_unknown=action in ("send", "edit"),
             )
         if not stdout_text:
+            if action in ("send", "edit"):
+                return _FiniteChatResult(
+                    False,
+                    {},
+                    "finitechat returned no delivery receipt",
+                    False,
+                    outcome_unknown=True,
+                )
             return _FiniteChatResult(True, {}, None, False)
         try:
-            return _FiniteChatResult(True, json.loads(stdout_text), None, False)
+            return _finitechat_success(action, json.loads(stdout_text))
         except json.JSONDecodeError as exc:
             try:
-                return _FiniteChatResult(
-                    True, json.loads(stdout_text.splitlines()[-1]), None, False
-                )
+                return _finitechat_success(action, json.loads(stdout_text.splitlines()[-1]))
             except json.JSONDecodeError:
                 return _FiniteChatResult(
-                    False, {}, f"finitechat returned invalid JSON: {exc}", False
+                    False,
+                    {},
+                    f"finitechat returned invalid JSON: {exc}",
+                    False,
+                    outcome_unknown=True,
                 )
 
     async def _ensure_service(self) -> bool:
@@ -1750,6 +1616,7 @@ class _FiniteChatResult:
         transport_error: bool = False,
         *,
         error_kind: str | None = None,
+        outcome_unknown: bool = False,
     ):
         self.ok = ok
         self.data = data
@@ -1757,6 +1624,22 @@ class _FiniteChatResult:
         self.retryable = retryable
         self.transport_error = transport_error
         self.error_kind = error_kind
+        self.outcome_unknown = outcome_unknown
+
+
+def _finitechat_success(action: str, data: Any) -> _FiniteChatResult:
+    """Only a complete Rust receipt can confirm a successful mutation."""
+    if not isinstance(data, dict):
+        return _FiniteChatResult(
+            False, {}, "finitechat returned a non-object receipt", False, outcome_unknown=True
+        )
+    if action in ("send", "edit"):
+        message_id = data.get("message_id")
+        if not isinstance(message_id, str) or not message_id.strip():
+            return _FiniteChatResult(
+                False, {}, "finitechat returned no message_id receipt", False, outcome_unknown=True
+            )
+    return _FiniteChatResult(True, data, None, False)
 
 
 def _resolve_finitechat_command(configured: str) -> list[str]:
@@ -1797,19 +1680,32 @@ def _finitechat_service_json(
             error.retryable,
             False,
             error_kind=error.kind,
+            outcome_unknown=action in ("send", "edit"),
         )
     except TimeoutError as exc:
-        return _FiniteChatResult(False, {}, str(exc), True, False)
+        return _FiniteChatResult(False, {}, str(exc), False, False, outcome_unknown=True)
     except (urllib.error.URLError, OSError) as exc:
-        return _FiniteChatResult(False, {}, str(exc), True, True)
+        return _FiniteChatResult(False, {}, str(exc), False, True, outcome_unknown=True)
 
     if not body:
+        if action in ("send", "edit"):
+            return _FiniteChatResult(
+                False,
+                {},
+                "finitechat service returned no delivery receipt",
+                False,
+                outcome_unknown=True,
+            )
         return _FiniteChatResult(True, {}, None, False)
     try:
-        return _FiniteChatResult(True, json.loads(body), None, False)
+        return _finitechat_success(action, json.loads(body))
     except json.JSONDecodeError as exc:
         return _FiniteChatResult(
-            False, {}, f"finitechat service returned invalid JSON: {exc}", False
+            False,
+            {},
+            f"finitechat service returned invalid JSON: {exc}",
+            False,
+            outcome_unknown=True,
         )
 
 
@@ -1973,12 +1869,6 @@ def _finitechat_service_health(service_url: str, timeout: int) -> bool:
     except Exception:
         return False
     return isinstance(data, dict) and data.get("status") == "ok"
-
-
-def _adapter_event_key(room_id: str, seq: Any, message_id: str) -> str | None:
-    if not isinstance(seq, int):
-        return None
-    return f"{room_id}\x1f{seq}\x1f{message_id}"
 
 
 def _read_service_ready_file(path: Path) -> dict[str, Any]:

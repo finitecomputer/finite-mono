@@ -1,42 +1,10 @@
-"""Delivery-ownership settlement gates at the Python adapter boundary.
+"""Adapter settlement mappings for the explicit Hermes admission contract.
 
-The delivery-ownership swap (commits 54427832, 8f5ea22b, 30873332, and the
-gate drop 96de2dcd) made the Rust sidecar the sole owner of inbox in-flight
-state and deleted the adapter's shadow delivery state along with its
-regression layers. The adapter's entire remaining settle contract is these
-mappings, pinned here against ``adapter.py`` as-is:
-
-- a cancelled turn RELEASES the sidecar lease so the entry is redelivered
-  whole (was ``cancelled turn leaves event for redelivery``, both the
-  pre-swap durability scenario in
-  ``scripts/hermes-adapter-regression-report.py`` and the live test
-  ``test_cancelled_turn_stays_unacked_and_redelivery_reprocesses``);
-- a failed-but-completed turn ACKS the lease because re-running it would be
-  wrong (was the layer ``terminal failure acks completed turn`` and live test
-  ``test_failed_turn_is_acked_after_the_turn_ran``);
-- a handler failure before the terminal completion hook releases without any
-  ack (was ``pre-completion handler failure leaves event for redelivery`` /
-  ``test_processing_failure_before_completion_leaves_event_unacked``);
-- the completion hook settles the event exactly once: an admitted-but-
-  unfinished turn owns the in-flight marker and settles nothing on its own,
-  and once the hook fires it claims the marker so the inline-admission path
-  can never double-ack (modern form of the layers ``in-flight turn retains
-  inbox ownership until completion`` and ``ack retry without duplicate
-  dispatch`` / live tests ``test_turn_completion_hook_owns_the_ack`` and
-  ``test_duplicate_redelivery_is_acked_without_second_dispatch``).
-
-Each settle assertion is scoped to ONE outcome type (cancelled vs failure vs
-a raised handler): nothing here claims "all non-cancelled outcomes ack", so
-adding further outcome-specific release paths to ``_settle_event_ack`` does
-not invalidate these gates.
-
-Rust-side lease semantics themselves (lease-on-delivery, TTL sweep, acked
-ring, release redelivery, and the route resolver whose unknown-thread
-behavior this sidecar exposes to the adapter) are covered by the
-``finitechat-cli`` Rust tests: see
-``crates/finitechat-cli/tests/hermes_flow.rs``,
-``hermes_settlement_gates.rs`` and the unit tests in
-``crates/finitechat-cli/src/hermes.rs``.
+These small mapping tests complement test_pinned_hermes_delivery_contract.py,
+which exercises real pinned-Hermes admission, active controls, deferred input,
+cancellation, terminal response delivery, and historical replay behavior.
+Rust lease persistence/restart semantics remain covered by hermes_flow.rs and
+hermes_settlement_gates.rs: this adapter adds no durable queue or ack journal.
 """
 
 from __future__ import annotations
@@ -222,16 +190,10 @@ class AdapterSettlementGateTests(unittest.TestCase):
 
         asyncio.run(adapter._handle_finitechat_event(raw_event))
 
-        event_key = self.module._adapter_event_key("room-agent-1", 21, "msg-21")
         self.assertEqual([], [call for call in calls if call[0] in ("ack", "release")])
-        self.assertIn(
-            event_key,
-            adapter._inflight_admissions,
-            "the running turn's ownership must be visible until the hook fires",
-        )
 
         # The completion hook fires exactly once per turn, settles the lease
-        # exactly once, and claims the marker so the inline-admission path
+        # exactly once, without consulting adapter state, so the inline-admission path
         # can never double-ack behind it.
         asyncio.run(adapter.on_processing_complete(handled[0], harness.ProcessingOutcome.SUCCESS))
 
@@ -239,11 +201,6 @@ class AdapterSettlementGateTests(unittest.TestCase):
         self.assertEqual(len(acks), 1, "the completion hook settles the event exactly once")
         self.assertEqual([], [call for call in calls if call[0] == "release"])
         self.assertEqual(acks[0][1]["message_id"], "msg-21")
-        self.assertNotIn(
-            event_key,
-            adapter._inflight_admissions,
-            "the completion hook claims the event key after settling",
-        )
 
 
 if __name__ == "__main__":
