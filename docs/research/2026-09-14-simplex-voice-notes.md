@@ -1,12 +1,16 @@
-# FIN-68: SimpleX voice notes stop before transcription
+# FIN-68: SimpleX voice-note support across Finite
 
 [Ticket](https://linear.app/finitecomputer/issue/FIN-68/simplex-cant-read-voice-memos)
 · [Draft PR](https://github.com/finitecomputer/finite-mono/pull/875)
 · Investigation: 2026-09-14
 
-**The evidence points to a blocked audio download.** r2 knows one group of
-SimpleX file servers. Its pending voice notes use another official group,
-Flux. Hermes can transcribe a voice note only after SimpleX downloads it.
+**Finite's managed SimpleX setup can block voice-note downloads from official
+Flux file servers.** The reviewed daemon defaults omit that server group.
+Hermes needs the downloaded audio before it can transcribe a voice note.
+
+This investigation covers the shared setup for new and existing Agent Runtimes.
+r2 was the initial case inspected. Source review shows the broader exposure;
+the number of affected profiles remains unmeasured.
 
 The proposed fix is to add the official Flux servers to Finite's managed
 SimpleX setup. Keep the existing Hermes transcription settings. The fix still
@@ -17,10 +21,10 @@ No production state has changed.
 
 | Evidence | Finding | Limit |
 | --- | --- | --- |
-| r2 database scratch copy; SQLite integrity check passed | Known file servers use `simplex.im`. Two pending notes use `xftp3.simplexonflux.com` and/or `xftp5.simplexonflux.com`. Both have relay approval false and no started transfer. | Stored state does not prove current runtime health. The scratch copy was removed after recording these findings. |
-| SimpleX v7.0.2 source | The command-line daemon defaults include only the SimpleX operator. Finite's managed startup inherits this list. | Other Agents using this setup can have the same gap. A fresh-profile test and fleet count remain open. |
+| SimpleX v7.0.2 source | The command-line daemon defaults include only the SimpleX operator. Finite's managed startup inherits this list. | Agents using these defaults are exposed to the gap. A fresh-profile test and fleet count remain open. |
+| Initial case: r2 database scratch copy; SQLite integrity check passed | Known file servers use `simplex.im`. Two pending notes use `xftp3.simplexonflux.com` and/or `xftp5.simplexonflux.com`. Both have relay approval false and no started transfer. | Stored state does not prove current runtime health. The scratch copy was removed after recording these findings. |
 | Actual Hermes adapter methods replayed in isolation | A rejected download produces zero Agent events. An injected completion produces one voice event with a file path. | This does not test a real download or transcription. |
-| Hermes configuration and package source | Transcription is enabled by default. The full package includes local voice dependencies. | r2's live backend, model availability, and successful transcription remain unverified. |
+| Hermes configuration and package source | Transcription is enabled by default. The full package includes local voice dependencies. | Source review does not prove live backend or model availability, or successful transcription. |
 
 The normal path is:
 
@@ -40,7 +44,9 @@ network settings may already work.
 The original ticket mentions xftp6 and says there are no configured file
 servers. r2's inspected state differs; the report has not been tied to those
 same transfers. Flux has published official server identities, including
-xftp6. Its use does not establish a custom setup on the phone. [Flux presets][flux]
+xftp6. Its use does not establish a custom setup on the phone. The initial
+case also had admin execution timeouts, so live verification remains open.
+[Flux presets][flux]
 
 ## Fix plan
 
@@ -60,11 +66,12 @@ Complete each step before moving to the next.
 3. **Prove compatibility and recovery.** Run the checks below with recorded
    versions. Completion: each applicable check passes, including reopening
    updated state with the released components after rollback.
-4. **Verify r2, then assess rollout.** After explicit production-repair
-   authorization, confirm the exact Agent Runtime and SimpleX profile. Run
-   `scripts/finite-status` before and after the change; add any missing probe
-   there. Completion: a fresh voice note downloads, transcribes, and produces
-   a normal reply. Measure affected profiles before a wider rollout.
+4. **Validate affected profiles, then roll out.** Measure which managed
+   profiles need the change. After explicit production-repair authorization,
+   verify it on selected affected Agent Runtimes, confirming each exact profile.
+   Run `scripts/finite-status` before and after changes; add any missing probe
+   there. Completion: fresh voice notes download, transcribe, and produce
+   normal replies on the selected profiles before a wider rollout.
 
 ## Implementation reference
 
@@ -123,12 +130,13 @@ All items below are still open.
   servers still require approval; Hermes remains the sole event consumer during chat.
 - [ ] Recovery: settings rollback passes; old notes can be handled without
   guessing transfer identity or creating duplicate replies.
-- [ ] Live result: confirm r2's runtime version and healthy admin access, then
-  prove download → transcription → reply. Prior admin execution timed out.
+- [ ] Live results: identify affected managed profiles, confirm the selected
+  runtime versions and admin access, and prove download → transcription → reply
+  before wider rollout.
 
 ## Reviewed sources
 
-These pins describe inspected source, not proof of the deployed r2 version.
+These pins describe inspected source, not proof of deployed runtime versions.
 Before implementation, check for changes to the relevant code and owners.
 
 - Finite main `1568d5a9`: [managed helper][helper], [connection controls][controls],
