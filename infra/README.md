@@ -135,7 +135,9 @@ capacity. The one accepted next candidate and its hard gates live in
   `finite.computer/client`; its capability names the canonical Brain origin.
 - `identity.finite.vip` is the canonical Finite Identity signing/API origin.
   Its exact record points at lat2 (`64.34.80.19`); the `finite.vip` apex and
-  wildcard stay on the legacy fleet.
+  wildcard stay on the legacy fleet. The apex preserves the exact NIP-05
+  discovery path and permanently redirects every other request to the same
+  path and query at `finite.computer`; wildcard hosts remain untouched.
 - `brain.smoke.finite.computer` / `*.smoke.finite.computer` → smoke, retained
   only as an explicit rollback target.
 
