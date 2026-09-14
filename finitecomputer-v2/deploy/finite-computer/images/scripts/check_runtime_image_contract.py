@@ -29,6 +29,10 @@ CANONICAL_DOCKERFILE_ANCHORS = (
     "for bin in ${AGENT_RUNTIME_TOOLCHAIN_BINS}; do",
     "ENV AGENT_RUNTIME_TOOLCHAIN_BINS=",
     "ENV PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD=1",
+    # The Hermes python3 shim must keep the pin's libstdc++ loadable for
+    # pip-installed binary wheels (workarounds log 2026-09-12); this probe is
+    # the build-time proof.
+    "&& python3 -c 'import ctypes; ctypes.CDLL(\"libstdc++.so.6\")'",
     "COPY finitechat/integrations/hermes/finitechat /runtime/hermes-plugin/finitechat",
     "COPY finite-skills/skills /runtime/finite-skills",
     "COPY finitechat/containers/agent/entrypoint.sh /opt/agent-entrypoint.sh",
@@ -44,6 +48,8 @@ CANONICAL_WORKFLOW_ANCHORS = (
     "--report target/runtime-image-durable-smoke/report.json",
     'open("finitechat/target/runtime-image-durable-smoke/report.json")',
     "for bin in $AGENT_RUNTIME_TOOLCHAIN_BINS; do",
+    "weasyprint /tmp/probe.html /tmp/probe-weasyprint.pdf",
+    "playwright pdf file:///tmp/probe.html /tmp/probe-playwright.pdf",
 )
 
 WORKFLOW_BUILD_OR_PUBLISH = (

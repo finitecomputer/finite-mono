@@ -85,6 +85,11 @@ RUN set -eux; \
 
 COPY .finite-hermes-nix-store/nix/store /nix/store
 
+# python3 is exposed by the toolchain bins loop in this RUN: the shim execs
+# the Hermes venv interpreter with the pin's libstdc++ on LD_LIBRARY_PATH so
+# pip-installed binary wheels (greenlet/playwright) import (workarounds log
+# 2026-09-12). The dlopen probe at the end fails the image build if that
+# loading ever regresses.
 RUN test -n "${HERMES_AGENT_STORE_PATH}" \
     && test -n "${HERMES_AGENT_PYTHON_PATH}" \
     && test -n "${AGENT_RUNTIME_TOOLCHAIN_PATH}" \
@@ -102,11 +107,11 @@ RUN test -n "${HERMES_AGENT_STORE_PATH}" \
     && ln -sf "${HERMES_AGENT_STORE_PATH}/bin/hermes" /usr/local/bin/hermes \
     && ln -sf "${HERMES_AGENT_STORE_PATH}/bin/hermes-agent" /usr/local/bin/hermes-agent \
     && ln -sf "${HERMES_AGENT_STORE_PATH}/bin/hermes-acp" /usr/local/bin/hermes-acp \
-    && ln -sf "${HERMES_AGENT_PYTHON_PATH}/bin/python3" /usr/local/bin/python3 \
-    && ln -sf "${HERMES_AGENT_PYTHON_PATH}/bin/python3" /usr/local/bin/python \
+    && ln -sf /usr/local/bin/python3 /usr/local/bin/python \
     && mkdir -p /runtime/bin \
     && ln -sf "${AGENT_RUNTIME_TOOLCHAIN_PATH}/bin/fsite" /runtime/bin/fsite \
-    && for bin in ${AGENT_RUNTIME_TOOLCHAIN_BINS}; do "$bin" --version >/dev/null; done
+    && for bin in ${AGENT_RUNTIME_TOOLCHAIN_BINS}; do "$bin" --version >/dev/null; done \
+    && python3 -c 'import ctypes; ctypes.CDLL("libstdc++.so.6")'
 
 COPY --from=finite-rust-builder /build/target/release/finitechat /usr/local/bin/finitechat
 COPY --from=finite-rust-builder /build/target/release/finitechat /runtime/bin/finitechat

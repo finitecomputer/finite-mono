@@ -86,7 +86,7 @@ jobs:
             test -n "$HERMES_AGENT_PYTHON_PATH"
             test "$(python3 -c '\''import importlib.metadata; print(importlib.metadata.version("hermes-agent"))'\'')" = "$HERMES_AGENT_VERSION"
             test "$(command -v hermes)" = "$HERMES_AGENT_STORE_PATH/bin/hermes"
-            test "$(command -v python3)" = "$HERMES_AGENT_PYTHON_PATH/bin/python3"
+            test "$(command -v python3)" = "$AGENT_RUNTIME_TOOLCHAIN_PATH/bin/python3"
             test -n "$AGENT_RUNTIME_TOOLCHAIN_PATH"
             test -n "$PLAYWRIGHT_BROWSERS_PATH"
             test -n "$AGENT_RUNTIME_TOOLCHAIN_BINS"
@@ -96,6 +96,11 @@ jobs:
             done
             test -d "$PLAYWRIGHT_BROWSERS_PATH"
             find "$PLAYWRIGHT_BROWSERS_PATH" -iname "*chrom*" | grep -q .
+            printf "%s\n" "<html><body><h1>html2pdf probe</h1></body></html>" > /tmp/probe.html
+            weasyprint /tmp/probe.html /tmp/probe-weasyprint.pdf
+            head -c 4 /tmp/probe-weasyprint.pdf | grep -q "%PDF"
+            playwright pdf file:///tmp/probe.html /tmp/probe-playwright.pdf
+            head -c 4 /tmp/probe-playwright.pdf | grep -q "%PDF"
             /runtime/bin/finitechat --help >/dev/null
             /runtime/bin/finite-agentd --help >/dev/null
             /runtime/bin/fsite describe workflow publish-static-site --output json >/dev/null

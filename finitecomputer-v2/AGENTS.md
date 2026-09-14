@@ -93,7 +93,9 @@ with a delete condition.
   paths. Every Hermes version fact derives from that pin: the image build
   stamps the pinned Nix package's evaluated version into
   `deploy/finite-computer/images/runtime.Dockerfile`; never hand-copy one. Baseline agent CLIs (Node from Hermes, bun,
-  deno, uv, Playwright browsers) are `.#agent-runtime-toolchains` on the
+  deno, uv, Playwright browsers, the weasyprint HTML→PDF CLI, and python3
+  behind a shim that loads the pin's libstdc++ so pip-installed binary wheels
+  import) are `.#agent-runtime-toolchains` on the
   same flake (`deploy/finite-computer/images/agent-runtime-toolchains.nix`);
   the image copies that closure and does not pin tarball hashes, and that
   derivation's `bins` passthru is the only list of exposed CLI names. The production Finite Chat bridge is

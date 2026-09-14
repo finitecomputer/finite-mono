@@ -109,6 +109,44 @@ class RuntimeImageContractTests(unittest.TestCase):
         )
         self.assertTrue(any("RUST_TOOLCHAIN" in item for item in self.violations()))
 
+    def test_libstdcxx_load_probe_missing_from_dockerfile_fails(self) -> None:
+        # The Hermes python3 shim prepends the pin's libstdc++ to
+        # LD_LIBRARY_PATH (workarounds log 2026-09-12); without this probe a
+        # silent shim regression only resurfaces as a pip-wheel import crash
+        # inside a live agent session.
+        self.write(
+            CANONICAL_DOCKERFILE,
+            "\n".join(
+                anchor
+                for anchor in CANONICAL_DOCKERFILE_ANCHORS
+                if anchor
+                != "&& python3 -c 'import ctypes; ctypes.CDLL(\"libstdc++.so.6\")'"
+            ),
+        )
+        self.assertTrue(any("libstdc++" in item for item in self.violations()))
+
+    def test_html2pdf_workflow_probes_missing_fails(self) -> None:
+        self.write(
+            CANONICAL_WORKFLOW,
+            "name: Agent Runtime Image\n"
+            "run: docker build . && docker push agent-runtime\n"
+            + "\n".join(
+                anchor
+                for anchor in CANONICAL_WORKFLOW_ANCHORS
+                if anchor
+                not in {
+                    "weasyprint /tmp/probe.html /tmp/probe-weasyprint.pdf",
+                    "playwright pdf file:///tmp/probe.html /tmp/probe-playwright.pdf",
+                }
+            ),
+        )
+        self.assertTrue(
+            any(
+                "missing canonical Runtime workflow anchor" in item
+                for item in self.violations()
+            )
+        )
+
     def test_builder_without_rust_toolchain_arg_fails(self) -> None:
         self.write(
             CANONICAL_BUILDER,

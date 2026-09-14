@@ -1,12 +1,12 @@
 ---
 name: generate-pdf-finite
-description: Generate structured, multi-page PDFs from scratch using fpdf2 (simple) or reportlab (rich visuals). Use when the user wants a report, reference document, brochure, or any custom PDF created programmatically. Covers installation, page layout, styling, and common pitfalls. Use reportlab when the user wants high graphical fidelity (dark themes, transparency, custom shapes, glow effects, patterns).
-version: 1.1.0
+description: Generate structured, multi-page PDFs from scratch using fpdf2 (simple) or reportlab (rich visuals), or convert HTML to PDF with the preinstalled weasyprint / playwright CLIs. Use when the user wants a report, reference document, brochure, printable table, or any custom PDF created programmatically. Covers installation, page layout, styling, and common pitfalls. Use reportlab when the user wants high graphical fidelity (dark themes, transparency, custom shapes, glow effects, patterns).
+version: 1.2.0
 author: community
 license: MIT
 metadata:
   hermes:
-    tags: [PDF, Documents, Generation, Reports, Python]
+    tags: [PDF, Documents, Generation, Reports, Python, HTML]
 ---
 
 # Generate PDF with fpdf2
@@ -18,6 +18,56 @@ Create structured, styled, multi-page PDFs from scratch using Python's fpdf2 lib
 - User asks for a PDF document to be created (reports, references, catalogs, etc.)
 - Need programmatic PDF generation (not editing an existing PDF — use nano-pdf for that)
 - Need full control over layout, styling, headers/footers, and page structure
+- Already have HTML (or prefer writing HTML/CSS over PDF primitives) — use the HTML→PDF routes below
+
+## HTML→PDF (preinstalled — do not pip install anything)
+
+This runtime ships first-class HTML→PDF tooling on PATH. Prefer these over
+pip-installed PDF libraries whenever the content is HTML or Markdown you can
+render to HTML.
+
+### Route 1 — `weasyprint` CLI (documents, tables, print CSS)
+
+```bash
+weasyprint input.html output.pdf
+```
+
+- Nix-provided WeasyPrint with its own pango stack; works offline, no install.
+- Supports print CSS: `@page { size: A4; margin: 2cm }`, page breaks via
+  `break-before: page`, headers/footers via `@page margin boxes`.
+- DejaVu + Liberation fonts are bundled; CSS `font-family: serif`/`sans-serif`
+  /`monospace` and the Liberation metric-compatible families resolve.
+- Weak at: heavy JavaScript, complex CSS grid in some browsers' style, exact
+  Chromium pixel fidelity.
+
+### Route 2 — `playwright pdf` CLI (Chromium fidelity, JS-rendered pages)
+
+```bash
+playwright pdf file:///abs/path/input.html output.pdf
+```
+
+- Real Chromium (the same staged browsers `playwright screenshot` uses).
+- Note the `file://` URL — a bare path is treated as a URL and fails.
+- Options: `--paper-format A4`, `--wait-for-selector`, `--wait-for-timeout`.
+
+### Route 3 — Python `playwright` in the runtime python3
+
+```bash
+uv pip install --system playwright   # browsers are already staged; nothing to download
+python3 html2pdf.py                  # from playwright.sync_api import sync_playwright ...
+```
+
+- The runtime `python3` already loads the Nix libstdc++ the greenlet wheel
+  needs. **Never set `LD_LIBRARY_PATH` by hand** — pointing it at system or
+  arbitrary `/nix/store` paths crashes the interpreter (workarounds log
+  2026-09-12). The env var comes with the interpreter; just import and go.
+- `PLAYWRIGHT_BROWSERS_PATH` and `PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD=1` are
+  preset, so no `playwright install` is needed or useful.
+
+### Do NOT
+
+- Do not `pip install weasyprint` in this runtime — its native gobject/pango
+  stack cannot load under the Nix interpreter. Use the `weasyprint` CLI.
 
 ## Prerequisites
 
