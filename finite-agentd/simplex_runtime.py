@@ -24,6 +24,7 @@ import yaml
 CHAT_PORT = 5225
 WS_URL = f"ws://127.0.0.1:{CHAT_PORT}"
 SETUP_PORT = 5226
+SETUP_TIMEOUT = 5
 # Official SimpleX v7.0.2 Flux identities, including their certificate fingerprints.
 FLUX_SERVERS = (
     "xftp://92Sctlc09vHl_nAqF2min88zKyjdYJ9mgxRCJns5K2U=@xftp1.simplexonflux.com,apl3pumq3emwqtrztykyyoomdx4dg6ysql5zek2bi3rgznz7ai3odkid.onion",
@@ -159,7 +160,7 @@ def relay_settings(groups):
         or len(customs) != 1
         or customs[0].get("smpServers")
         or customs[0].get("chatRelays")
-        or any(s["server"] not in FLUX_SERVERS for s in customs[0]["xftpServers"])
+        or customs[0].get("xftpServers")
     ):
         return groups
     known = {s["server"] for g in groups for s in g["xftpServers"]}
@@ -186,6 +187,7 @@ async def configure_relays(home, *, url=None):
     before = (await command(get, url=url))["userServers"]
     after = relay_settings(before)
     if after == before:
+        atomic_json(home / "flux-relays-ready.json", {"changed": False})
         return
     encoded = json.dumps(after)
     valid = await command(f"/_validate_servers {user} {encoded}", url=url)
@@ -201,9 +203,34 @@ async def configure_relays(home, *, url=None):
     await command(f"{get} {encoded}", url=url)
     applied = (await command(get, url=url))["userServers"]
     atomic_json(home / "flux-relays-after.json", applied)
+    rollback = copy.deepcopy(before)
+    old_ids = {s["serverId"] for g in before for s in g["xftpServers"]}
+    inserted = [
+        s
+        for g in applied
+        for s in g["xftpServers"]
+        if s["serverId"] not in old_ids and s["server"] in FLUX_SERVERS
+    ]
+    custom = next(g for g in rollback if not g.get("operator"))
+    custom["xftpServers"].extend(dict(s, deleted=True) for s in inserted)
+    atomic_json(home / "flux-relays-rollback.json", rollback)
+    normalized = copy.deepcopy(applied)
+    for group in normalized:
+        for entry in group["xftpServers"]:
+            if entry["serverId"] not in old_ids:
+                entry["serverId"] = None
+    if normalized != after:
+        await command(f"{get} {json.dumps(rollback)}", url=url)
+        restored = (await command(get, url=url))["userServers"]
+        if restored != before:
+            raise RuntimeError("SimpleX settings rollback needs operator review")
+        raise RuntimeError("SimpleX settings read-back differed; restored original settings")
+    atomic_json(home / "flux-relays-ready.json", {"changed": True})
 
 
 async def prepare_relays(home):
+    if (home / "flux-relays-ready.json").exists():
+        return
     # Configure on a separate port without subscribing contacts or starting file workers.
     # Hermes can keep reconnecting to 5225 without consuming setup responses.
     if await tcp_ready() or await tcp_ready(SETUP_PORT):
@@ -212,19 +239,20 @@ async def prepare_relays(home):
         raise RuntimeError("SimpleX relay preparation requires an existing identity")
     child = await start_child(home, maintenance=True)
     try:
-        for _ in range(40):
-            await asyncio.sleep(0.25)
-            if child.returncode is not None:
-                raise RuntimeError("SimpleX settings daemon could not start")
-            if await tcp_ready(SETUP_PORT):
-                break
-        else:
-            raise RuntimeError("SimpleX settings daemon did not become ready")
-        url = f"ws://127.0.0.1:{SETUP_PORT}"
-        await command("/_start main=off snd_files=off", url=url)
-        await configure_relays(home, url=url)
+        async with asyncio.timeout(SETUP_TIMEOUT):
+            for _ in range(40):
+                await asyncio.sleep(0.25)
+                if child.returncode is not None:
+                    raise RuntimeError("SimpleX settings daemon could not start")
+                if await tcp_ready(SETUP_PORT):
+                    break
+            else:
+                raise RuntimeError("SimpleX settings daemon did not become ready")
+            url = f"ws://127.0.0.1:{SETUP_PORT}"
+            await command("/_start main=off snd_files=off", url=url)
+            await configure_relays(home, url=url)
     finally:
-        await stop_child(child)
+        await stop_child(child, timeout=2)
 
 
 async def create_address():
@@ -271,11 +299,11 @@ async def create_address():
         await stop_child(child)
 
 
-async def stop_child(child):
+async def stop_child(child, timeout=10):
     if child and child.returncode is None:
         child.terminate()
         try:
-            await asyncio.wait_for(child.wait(), 10)
+            await asyncio.wait_for(child.wait(), timeout)
         except TimeoutError:
             child.kill()
             await child.wait()

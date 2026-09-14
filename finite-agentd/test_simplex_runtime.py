@@ -294,6 +294,10 @@ class RelayTests(unittest.IsolatedAsyncioTestCase):
             before = self.defaults()
             before[1][field] = [{"server": "custom://owner-choice"}]
             self.assertEqual(runtime.relay_settings(before), before)
+        for enabled in [True, False]:
+            before = self.defaults()
+            before[1]["xftpServers"] = [{"server": runtime.FLUX_SERVERS[0], "enabled": enabled}]
+            self.assertEqual(runtime.relay_settings(before), before)
         before = self.defaults()
         before[0]["operator"]["enabled"] = False
         self.assertEqual(runtime.relay_settings(before), before)
@@ -321,6 +325,78 @@ class RelayTests(unittest.IsolatedAsyncioTestCase):
                 await runtime.prepare_relays(Path("/unused"))
             start.assert_not_called()
 
+    async def test_unexpected_readback_restores_prior_settings(self):
+        before = self.defaults()
+        changed = runtime.relay_settings(before)
+        for index, entry in enumerate(changed[1]["xftpServers"], 2):
+            entry["serverId"] = index
+        changed[0]["smpServers"][0]["enabled"] = True
+        responses = [
+            {"user": {"userId": 1}},
+            {"userServers": before},
+            {"type": "userServersValidation", "serverErrors": [], "serverWarnings": []},
+            {"type": "cmdOk"},
+            {"userServers": changed},
+            {"type": "cmdOk"},
+            {"userServers": before},
+        ]
+        with tempfile.TemporaryDirectory() as folder:
+            home = Path(folder)
+            with patch.object(runtime, "command", AsyncMock(side_effect=responses)) as cmd:
+                with self.assertRaisesRegex(RuntimeError, "restored original"):
+                    await runtime.configure_relays(home)
+            rollback = json.loads((home / "flux-relays-rollback.json").read_text())
+            self.assertEqual(rollback[0], before[0])
+            self.assertTrue(all(entry["deleted"] for entry in rollback[1]["xftpServers"]))
+            self.assertIn(json.dumps(rollback), cmd.call_args_list[-2].args[0])
+            self.assertFalse((home / "flux-relays-ready.json").exists())
+
+    async def test_slow_preparation_is_bounded_and_closes_maintenance_child(self):
+        from types import SimpleNamespace
+
+        with tempfile.TemporaryDirectory() as folder:
+            home = Path(folder)
+            for suffix in ["_chat.db", "_agent.db"]:
+                (home / ("identity" + suffix)).touch()
+            with (
+                patch.object(runtime, "tcp_ready", AsyncMock(return_value=False)),
+                patch.object(
+                    runtime, "start_child", AsyncMock(return_value=SimpleNamespace(returncode=None))
+                ),
+                patch.object(runtime, "stop_child", AsyncMock()) as stop,
+                patch.object(runtime, "SETUP_TIMEOUT", 0.01),
+            ):
+                with self.assertRaises(TimeoutError):
+                    await runtime.prepare_relays(home)
+                stop.assert_awaited_once()
+                self.assertEqual(stop.call_args.kwargs, {"timeout": 2})
+
+    async def test_supervisor_starts_normal_chat_after_failed_preparation(self):
+        from types import SimpleNamespace
+
+        with tempfile.TemporaryDirectory() as folder:
+            home = Path(folder)
+            stopped = runtime.asyncio.Event()
+            child = SimpleNamespace(pid=12345, returncode=None)
+
+            async def start(*args, **kwargs):
+                stopped.set()
+                return child
+
+            with (
+                patch.object(runtime, "state_dir", return_value=home),
+                patch.object(runtime.asyncio, "Event", return_value=stopped),
+                patch.object(runtime, "managed_enabled", return_value=True),
+                patch.object(runtime, "saved_address", return_value="https://synthetic"),
+                patch.object(runtime, "tcp_ready", AsyncMock(return_value=False)),
+                patch.object(runtime, "prepare_relays", AsyncMock(side_effect=TimeoutError)),
+                patch.object(runtime, "start_child", AsyncMock(side_effect=start)) as starts,
+                patch.object(runtime, "stop_child", AsyncMock()),
+            ):
+                await runtime.supervise()
+                starts.assert_awaited_once_with(home)
+            self.assertFalse((home / "daemon.pid").exists())
+
     async def test_packaged_daemon_persistence_and_released_settings_rollback(self):
         import shutil
 
@@ -343,7 +419,18 @@ class RelayTests(unittest.IsolatedAsyncioTestCase):
             after = json.loads((home / "flux-relays-after.json").read_text())
             self.assertEqual(before[0], after[0])
             self.assertEqual(len(after[1]["xftpServers"]), 6)
-            await runtime.prepare_relays(home)
+            self.assertTrue(
+                all(
+                    not s["enabled"] and not s["preset"] and not s["deleted"]
+                    for s in after[1]["xftpServers"]
+                )
+            )
+            with patch.object(
+                runtime,
+                "start_child",
+                AsyncMock(side_effect=AssertionError("must skip completed setup")),
+            ):
+                await runtime.prepare_relays(home)
             self.assertEqual(json.loads((home / "flux-relays-before.json").read_text()), before)
             child = await runtime.start_child(home, maintenance=True)
             try:
@@ -359,9 +446,7 @@ class RelayTests(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(
                     (await runtime.command("/_servers 1", url=url))["userServers"], after
                 )
-                rollback = json.loads(json.dumps(after))
-                for entry in rollback[1]["xftpServers"]:
-                    entry["deleted"] = True
+                rollback = json.loads((home / "flux-relays-rollback.json").read_text())
                 await runtime.command("/_servers 1 " + json.dumps(rollback), url=url)
                 self.assertEqual(
                     (await runtime.command("/_servers 1", url=url))["userServers"], before
