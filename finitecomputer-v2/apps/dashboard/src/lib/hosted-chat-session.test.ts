@@ -1,7 +1,9 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
+import { CHAT_SIGN_IN_DRAFT_UNSAVED_MESSAGE } from "@/lib/chat-product-copy";
 import {
+  attemptHostedChatSignIn,
   clearHostedChatDraft,
   currentHostedChatReturnPath,
   hostedChatSignInUrl,
@@ -9,6 +11,7 @@ import {
   loadHostedChatDraft,
   redirectToHostedChatSignIn,
   resetHostedChatSignInRedirect,
+  restoreHostedChatComposerDraft,
   saveHostedChatDraft,
   shouldAutoRedirectForSessionAuthFailure,
 } from "@/lib/hosted-chat-session";
@@ -317,4 +320,73 @@ test("an expired or corrupted parked draft restores nothing and clears the key",
     JSON.stringify({ text: "   ", savedAtMs: nowMs })
   );
   assert.equal(loadHostedChatDraft(machineId, { nowMs, storage }), null, "blank stored text restores nothing");
+});
+
+test("a draft that cannot be parked blocks the sign-in trip", () => {
+  try {
+    installSessionStorage();
+    const window = installWindow();
+    const machineId = "runtime_70aecb4ba75f00f2fc6d";
+
+    // Storage whose writes throw (quota exhausted): keep the composer.
+    const { store } = draftStorage();
+    const quotaStorage = {
+      getItem: (key: string) => store.get(key) ?? null,
+      setItem: () => {
+        throw new Error("quota exceeded");
+      },
+      removeItem: (key: string) => void store.delete(key),
+    };
+    assert.equal(
+      attemptHostedChatSignIn(machineId, "Keep the runtime boundary thin.", { storage: quotaStorage }),
+      CHAT_SIGN_IN_DRAFT_UNSAVED_MESSAGE
+    );
+    assert.equal(window.location.assigned.length, 0, "no navigation without a parked draft");
+
+    // Over-limit content is unparkable too: save and restore share one shape
+    // rule, so it fails closed instead of stranding a draft restore deletes.
+    const { storage } = draftStorage();
+    assert.equal(saveHostedChatDraft(machineId, "x".repeat(65_537), { storage }), false);
+    assert.equal(
+      attemptHostedChatSignIn(machineId, "y".repeat(65_537), { storage }),
+      CHAT_SIGN_IN_DRAFT_UNSAVED_MESSAGE
+    );
+    assert.equal(window.location.assigned.length, 0);
+    // At the limit the round trip works end to end.
+    assert.equal(saveHostedChatDraft(machineId, "x".repeat(65_536), { storage }), true);
+    assert.equal(loadHostedChatDraft(machineId, { storage }), "x".repeat(65_536));
+
+    // Blank text has nothing to lose, so even broken storage proceeds.
+    assert.equal(attemptHostedChatSignIn(machineId, "   ", { storage: quotaStorage }), null);
+    assert.equal(window.location.assigned.length, 1);
+    // A parked draft proceeds too.
+    assert.equal(
+      attemptHostedChatSignIn(machineId, "Keep the runtime boundary thin.", { storage }),
+      null
+    );
+    assert.equal(window.location.assigned.length, 2);
+  } finally {
+    cleanup();
+  }
+});
+
+test("a parked draft outranks the ?prompt= on the sign-in return trip", () => {
+  const { storage } = draftStorage();
+  const machineId = "runtime_70aecb4ba75f00f2fc6d";
+  const nowMs = Date.now();
+
+  // Both present: the parked edits resume, the stale prompt is ignored, and
+  // the key is consumed.
+  saveHostedChatDraft(machineId, "edited after the prompt", { nowMs, storage });
+  assert.equal(
+    restoreHostedChatComposerDraft(machineId, "original prompt", { nowMs, storage }),
+    "edited after the prompt"
+  );
+  assert.equal(loadHostedChatDraft(machineId, { nowMs, storage }), null, "parked draft consumed");
+
+  // Nothing parked: the ?prompt= prefills as usual.
+  assert.equal(
+    restoreHostedChatComposerDraft(machineId, "fresh prompt", { nowMs, storage }),
+    "fresh prompt"
+  );
 });

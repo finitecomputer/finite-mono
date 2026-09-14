@@ -1,3 +1,4 @@
+import { CHAT_SIGN_IN_DRAFT_UNSAVED_MESSAGE } from "@/lib/chat-product-copy";
 import { safeWorkosReturnPathname } from "@/lib/workos-auth";
 
 const SIGN_IN_REDIRECT_STORAGE_KEY = "fc-hosted-chat-sign-in-redirected-at";
@@ -115,7 +116,7 @@ export function shouldAutoRedirectForSessionAuthFailure(composer: {
 
 const HOSTED_CHAT_DRAFT_PREFIX = "finite.chat-draft.";
 const HOSTED_CHAT_DRAFT_TTL_MS = 15 * 60_000;
-const HOSTED_CHAT_DRAFT_MAX_BYTES = 64 * 1024;
+const HOSTED_CHAT_DRAFT_MAX_CHARS = 64 * 1024;
 
 type HostedChatDraftStorage = Pick<Storage, "getItem" | "setItem" | "removeItem">;
 
@@ -130,10 +131,21 @@ export function hostedChatDraftStorageKey(machineId: string): string {
 }
 
 /**
+ * The one shape rule both parking and restoring apply, so anything save
+ * accepts, restore accepts — a successful save can never strand a draft the
+ * restore side would reject and delete.
+ */
+function isRestorableHostedChatDraft(text: string): boolean {
+  return text.trim().length > 0 && text.length <= HOSTED_CHAT_DRAFT_MAX_CHARS;
+}
+
+/**
  * Park the composer's draft text so the sign-in round trip can bring it back.
  * The `finite.` prefix means signing out clears it with the rest of the
- * dashboard's browser state; blank text removes the key instead of storing a
- * tombstone.
+ * dashboard's browser state. True means the trip may proceed: the text was
+ * blank (nothing to lose, any stale key removed) or is parked and restorable.
+ * False means there is unsent text that could not be parked — do not
+ * navigate away from it.
  */
 export function saveHostedChatDraft(
   machineId: string,
@@ -141,13 +153,14 @@ export function saveHostedChatDraft(
   options: { nowMs?: number; storage?: HostedChatDraftStorage | null } = {}
 ): boolean {
   const storage = options.storage !== undefined ? options.storage : defaultDraftStorage();
-  if (!storage) return false;
+  const key = hostedChatDraftStorageKey(machineId);
   if (text.trim().length === 0) {
-    storage.removeItem(hostedChatDraftStorageKey(machineId));
+    if (storage) tryRemoveDraft(storage, key);
     return true;
   }
+  if (!storage || !isRestorableHostedChatDraft(text)) return false;
   try {
-    storage.setItem(hostedChatDraftStorageKey(machineId), JSON.stringify({
+    storage.setItem(key, JSON.stringify({
       text,
       savedAtMs: options.nowMs ?? Date.now(),
     } satisfies StoredHostedChatDraft));
@@ -180,7 +193,7 @@ export function loadHostedChatDraft(
   let text: string | null = null;
   try {
     const parsed = JSON.parse(raw) as StoredHostedChatDraft;
-    if (typeof parsed.text === "string" && parsed.text.trim().length > 0) {
+    if (typeof parsed.text === "string" && isRestorableHostedChatDraft(parsed.text)) {
       const savedAtMs = typeof parsed.savedAtMs === "number" ? parsed.savedAtMs : Number.NaN;
       const nowMs = options.nowMs ?? Date.now();
       text = Number.isFinite(savedAtMs) && nowMs - savedAtMs < HOSTED_CHAT_DRAFT_TTL_MS
@@ -190,7 +203,7 @@ export function loadHostedChatDraft(
   } catch {
     text = null;
   }
-  if (text === null || text.length > HOSTED_CHAT_DRAFT_MAX_BYTES) {
+  if (text === null) {
     tryRemoveDraft(storage, key);
     return null;
   }
@@ -205,6 +218,41 @@ export function clearHostedChatDraft(
   const storage = options.storage !== undefined ? options.storage : defaultDraftStorage();
   if (!storage) return;
   tryRemoveDraft(storage, hostedChatDraftStorageKey(machineId));
+}
+
+/**
+ * The composer draft for a fresh page load. A draft parked by the sign-in
+ * round trip resumes the person's newer edits, so it outranks any `?prompt=`
+ * the return URL still carries; consuming it clears the key. With nothing
+ * parked, the `?prompt=` prefills as usual.
+ */
+export function restoreHostedChatComposerDraft(
+  machineId: string,
+  initialDraft: string,
+  options: { nowMs?: number; storage?: HostedChatDraftStorage | null } = {}
+): string {
+  const parked = loadHostedChatDraft(machineId, options);
+  if (parked === null) return initialDraft;
+  clearHostedChatDraft(machineId, options);
+  return parked;
+}
+
+/**
+ * The explicit "Sign in again" click: park the composer's draft, then start
+ * the full-page sign-in trip. Returns a banner message when the trip must
+ * not proceed because unsent text could not be parked (the composer stays
+ * mounted with it); null once navigation has started.
+ */
+export function attemptHostedChatSignIn(
+  machineId: string,
+  draftText: string,
+  options: { storage?: HostedChatDraftStorage | null } = {}
+): string | null {
+  if (!saveHostedChatDraft(machineId, draftText, options)) {
+    return CHAT_SIGN_IN_DRAFT_UNSAVED_MESSAGE;
+  }
+  redirectToHostedChatSignIn(currentHostedChatReturnPath(), { force: true });
+  return null;
 }
 
 function tryRemoveDraft(storage: HostedChatDraftStorage, key: string): void {

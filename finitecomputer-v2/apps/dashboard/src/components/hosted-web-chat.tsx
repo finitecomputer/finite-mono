@@ -65,10 +65,7 @@ import type {
 } from "@/lib/hosted-web-device";
 import { chatPreviewUrls } from "@/lib/chat-preview-urls";
 import { directHostedImageUrl } from "@/lib/hosted-chat-attachment-url";
-import {
-  clearHostedChatDraft,
-  loadHostedChatDraft,
-} from "@/lib/hosted-chat-session";
+import { restoreHostedChatComposerDraft } from "@/lib/hosted-chat-session";
 import {
   BrainApprovalCards,
   BrainInvitationCards,
@@ -182,14 +179,10 @@ export function HostedWebChat({
   useEffect(() => {
     noteComposerInput({ draftText: draft, attachmentCount: attachments.length });
   }, [attachments.length, draft, noteComposerInput]);
-  // A draft parked by the sign-in round trip comes back once, on this page
-  // load, unless an explicit ?prompt= already supplied one.
+  // A draft parked by the sign-in round trip resumes the person's newer
+  // edits, so it outranks any ?prompt= the return URL still carries.
   useEffect(() => {
-    if (initialDraft) return;
-    const parked = loadHostedChatDraft(machineId);
-    if (parked === null) return;
-    setDraft(parked);
-    clearHostedChatDraft(machineId);
+    setDraft(restoreHostedChatComposerDraft(machineId, initialDraft ?? ""));
   }, [initialDraft, machineId]);
   const [pendingAgentTurns, setPendingAgentTurns] = useState<PendingChatTurn[]>([]);
   const [activityObservedAtMs, setActivityObservedAtMs] = useState<number | null>(null);

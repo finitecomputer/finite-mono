@@ -27,10 +27,10 @@ import {
   shouldApplyStreamHostedChatSnapshot,
 } from "@/lib/hosted-web-chat-snapshots";
 import {
+  attemptHostedChatSignIn,
   currentHostedChatReturnPath,
   isHostedChatSessionAuthFailure,
   redirectToHostedChatSignIn,
-  saveHostedChatDraft,
   shouldAutoRedirectForSessionAuthFailure,
 } from "@/lib/hosted-chat-session";
 import {
@@ -234,8 +234,10 @@ export function HostedChatProvider({
   }, []);
 
   const signInAgain = useCallback(() => {
-    saveHostedChatDraft(machineId, composerInputRef.current.draftText);
-    redirectToHostedChatSignIn(currentHostedChatReturnPath(), { force: true });
+    // Navigate only when there is no unsent text to lose or it is safely
+    // parked; otherwise the composer stays mounted and the banner says why.
+    const unsaved = attemptHostedChatSignIn(machineId, composerInputRef.current.draftText);
+    if (unsaved) setSessionError(unsaved);
   }, [machineId]);
 
   // The chat surface keeps this current so a session failure knows whether
