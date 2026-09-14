@@ -53,8 +53,7 @@ jobs:
       - name: Configure restricted monitoring SSH credentials
         env:
           DEPLOY_KEY: ${{ secrets.FINITE_MONITORING_SSH_KEY }}
-          KNOWN_HOSTS: ${{ secrets.FINITE_PRODUCTION_KNOWN_HOSTS }}
-          MONITORING_KNOWN_HOSTS: ${{ secrets.FINITE_MONITORING_KNOWN_HOSTS }}
+          KNOWN_HOSTS: ${{ secrets.FINITE_MONITORING_KNOWN_HOSTS }}
         run: |
           set -euo pipefail
           test -n "$DEPLOY_KEY"
@@ -62,7 +61,6 @@ jobs:
           install -d -m 0700 ~/.ssh
           printf '%s\n' "$DEPLOY_KEY" > ~/.ssh/id_ed25519
           printf '%s\n' "$KNOWN_HOSTS" > ~/.ssh/known_hosts
-          printf '%s\n' "$MONITORING_KNOWN_HOSTS" >> ~/.ssh/known_hosts
           chmod 0600 ~/.ssh/id_ed25519 ~/.ssh/known_hosts
           # No trust-on-first-use: both hosts must already be pinned.
           ssh-keygen -F 152.236.5.27 > /dev/null || { echo 'Missing monitoring host pin'; exit 1; }

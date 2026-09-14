@@ -19,9 +19,8 @@ The environment permits `main` and `production`, with its existing reviewers.
 | --- | --- |
 | `FINITE_MONITORING_SSH_KEY` | Dedicated Ed25519 private key for the two forced commands described below |
 | `FINITE_MONITORING_KNOWN_HOSTS` | Verified host pins for `152.236.5.27` and `64.34.80.19` |
-| `FINITE_PRODUCTION_KNOWN_HOSTS` | Existing production pins, preserved alongside the monitoring pins |
 
-The existing `FINITE_PRODUCTION_SSH_KEY` is not used or changed by this workflow.
+The existing production SSH key and host-pin secrets are not used or changed by this workflow.
 Grafana's admin password stays at `/etc/finite/monitoring/grafana-admin-password`
 on the monitoring host. GET-only verification reads it locally; no credential
 value is copied into source or logs.
