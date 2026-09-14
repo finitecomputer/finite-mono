@@ -6,10 +6,12 @@ import {
   loadDashboardMachineAccess,
 } from "@/lib/dashboard-machine-access";
 import {
+  coreInitialAgentCreationRequests,
   coreProjectLabel,
   coreProjectPrimaryUrl,
   loadCoreMe,
   loadCoreRequesterEmail,
+  type CoreAgentCreationRequestSummary,
   type CoreVisibleProject,
 } from "@/lib/core-client";
 import {
@@ -140,6 +142,36 @@ async function bootstrapHostedWebChatWithContext(
   }
 }
 
+/**
+ * The request a first-time binding recovery may authorize: the project's one
+ * ORIGINAL creation request, still in a live status.
+ *
+ * A project can legitimately carry more than one request in
+ * requested/launching/running: operator cold relocations append later rows for
+ * the same project (they keep the original creation as history), and those
+ * rows rest in `running` like the original. Requiring exactly one live
+ * request therefore permanently broke recovery for every relocated project.
+ * Relocation rows are excluded by the identity Core already exposes
+ * (`is_relocation`, the same field `coreInitialAgentCreationRequests`
+ * filters on), and among the remaining ORIGINAL requests exactly one live
+ * row must remain — timestamp order is never authority here. Zero (for
+ * example two relocation rows and no original) or more than one is
+ * ambiguous evidence, and ambiguous state fails closed: the caller keeps its
+ * recovery error instead of persisting a guessed authorization with the
+ * hosted device.
+ */
+export function selectOriginalAgentCreationRequest(
+  requests: CoreAgentCreationRequestSummary[],
+  projectId: string
+): CoreAgentCreationRequestSummary | null {
+  const eligible = coreInitialAgentCreationRequests(requests).filter(
+    (candidate) =>
+      candidate.project_id === projectId &&
+      ["requested", "launching", "running"].includes(candidate.status)
+  );
+  return eligible.length === 1 ? eligible[0]! : null;
+}
+
 export async function recoverHostedWebChatBinding(machineId: string) {
   const account = await getAccountAuthContext();
   if (!account.workosUserId || !account.emailVerified) {
@@ -160,18 +192,16 @@ export async function recoverHostedWebChatBinding(machineId: string) {
     );
   }
   const context = hostedWebChatContextForProject(account, project);
-  const requests = (core.me?.agent_creation_requests ?? []).filter(
-    (candidate) =>
-      candidate.project_id === context.projectId &&
-      ["requested", "launching", "running"].includes(candidate.status)
+  const creation = selectOriginalAgentCreationRequest(
+    core.me?.agent_creation_requests ?? [],
+    context.projectId
   );
-  if (!project || requests.length !== 1) {
+  if (!project || !creation) {
     throw new HostedWebChatError(
       "Finite could not verify the original agent creation request.",
       409
     );
   }
-  const creation = requests[0]!;
   await hostedDeviceAuthorizeAgentBinding(context.config, context.account, {
     project_id: context.projectId,
     creation_request_id: creation.id,
