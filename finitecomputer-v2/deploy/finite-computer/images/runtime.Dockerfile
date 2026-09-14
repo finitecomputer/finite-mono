@@ -124,6 +124,8 @@ COPY finite-skills/skills /runtime/finite-skills
 COPY finitechat/containers/agent/entrypoint.sh /opt/agent-entrypoint.sh
 COPY finitechat/containers/agent/health_server.py /opt/health_server.py
 COPY finite-agentd/simplex_runtime.py /opt/simplex_runtime.py
+COPY finite-agentd/hosted_gateway.py /opt/hosted_gateway.py
+COPY finite-agentd/gateway_ingress.py /opt/gateway_ingress.py
 COPY finitechat/containers/agent/reconcile_hermes_config.py /opt/reconcile_hermes_config.py
 COPY finitechat/containers/agent/recover_chat_boot.py /opt/recover_chat_boot.py
 COPY finitechat/containers/agent/probe_hermes_vision.py /opt/probe_hermes_vision.py

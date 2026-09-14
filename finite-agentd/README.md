@@ -32,6 +32,9 @@ Platform Channel:
 - `agent.status.inspect`
 - `agent.owner.claim`
 - `agent.connections.status`
+- `agent.hosted-gateway.status`, `agent.hosted-gateway.enable`, and
+  `agent.hosted-gateway.disable` (admin dashboard team preview; see
+  [hosted gateway](../infra/runbooks/hosted-hermes-gateway.md))
 - `agent.inference.apply`
 - `agent.telegram.connect`, `agent.telegram.approve`, `agent.telegram.home`,
   and `agent.telegram.disconnect`

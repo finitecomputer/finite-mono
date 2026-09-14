@@ -213,6 +213,7 @@ pub async fn run_daemon(config: DaemonConfig) -> Result<(), AgentdError> {
         health_spec(&config),
         hermes_spec(&config),
         simplex_spec(&config),
+        hosted_gateway_spec(&config),
     );
     spawn_status_writer(
         config.status_path(),
@@ -225,6 +226,7 @@ pub async fn run_daemon(config: DaemonConfig) -> Result<(), AgentdError> {
     let (delivery_tx, delivery_rx) = mpsc::channel::<RuntimeCommandDeliveryV1>(64);
     spawn_delivery_stream(bridge.clone(), delivery_tx);
     let executor = CommandExecutor {
+        agent_home: config.agent_home.clone(),
         identity,
         ledger,
         config_manager,
@@ -350,6 +352,7 @@ fn prepare_agent_runtime(config: &DaemonConfig) -> Result<(), AgentdError> {
 
 #[derive(Clone)]
 struct CommandExecutor {
+    agent_home: PathBuf,
     identity: DeviceRef,
     ledger: Ledger,
     config_manager: ConfigManager,
@@ -431,6 +434,17 @@ impl CommandExecutor {
             OWNER_CLAIM_COMMAND => {
                 parse_body::<EmptyRequest>(request, EMPTY_REQUEST_SCHEMA)?;
                 Ok(json!({ "connected": true }))
+            }
+            "agent.hosted-gateway.status" => {
+                parse_body::<EmptyRequest>(request, EMPTY_REQUEST_SCHEMA)?;
+                crate::hosted_gateway::status(&self.agent_home).await
+            }
+            "agent.hosted-gateway.enable" | "agent.hosted-gateway.disable" => {
+                parse_body::<EmptyRequest>(request, EMPTY_REQUEST_SCHEMA)?;
+                let home = &self.agent_home;
+                crate::hosted_gateway::configure(home, request.command.ends_with(".enable"))?;
+                self.supervisor.restart_hosted_gateway().await?;
+                crate::hosted_gateway::status(home).await
             }
             "agent.connections.status" => {
                 parse_body::<EmptyRequest>(request, EMPTY_REQUEST_SCHEMA)?;
@@ -804,6 +818,25 @@ fn sidecar_spec(config: &DaemonConfig) -> ProcessSpec {
         ],
         environment,
     }
+}
+
+fn hosted_gateway_spec(config: &DaemonConfig) -> Option<ProcessSpec> {
+    let script = crate::hosted_gateway::script_path();
+    script.is_file().then(|| ProcessSpec {
+        name: "hosted_gateway",
+        program: config.health_python.clone(),
+        args: vec![script.display().to_string()],
+        environment: BTreeMap::from([
+            (
+                "HERMES_HOME".to_owned(),
+                config.hermes_home.display().to_string(),
+            ),
+            (
+                "FINITECHAT_HOME".to_owned(),
+                config.agent_home.display().to_string(),
+            ),
+        ]),
+    })
 }
 
 fn simplex_spec(config: &DaemonConfig) -> Option<ProcessSpec> {

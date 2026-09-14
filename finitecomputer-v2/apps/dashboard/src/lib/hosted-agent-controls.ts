@@ -1,3 +1,5 @@
+import { loadCoreAdminRuntimes } from "@/lib/core-client";
+import { hostedGatewayUrl, parseHostedGatewayStatus } from "@/lib/hosted-gateway";
 import { fetchRuntimeAgentNpub } from "@/lib/agent-contact";
 import { getAccountAuthContext } from "@/lib/dashboard-auth";
 import { loadDashboardMachineAccess } from "@/lib/dashboard-machine-access";
@@ -164,12 +166,12 @@ type AgentCommandContext = {
   targetAccountId: string;
 };
 
-async function hostedAgentContext(machineId: string): Promise<AgentCommandContext> {
+async function hostedAgentContext(machineId: string, authorizedAccess?: NonNullable<Awaited<ReturnType<typeof loadDashboardMachineAccess>>>): Promise<AgentCommandContext> {
   const account = await getAccountAuthContext();
   if (!account.workosUserId || !account.emailVerified) {
     throw new HostedAgentControlError("Sign in again to manage this agent.", 401);
   }
-  const access = await loadDashboardMachineAccess(machineId, { coreCacheMode: "swr" });
+  const access = authorizedAccess ?? await loadDashboardMachineAccess(machineId, { coreCacheMode: "swr" });
   if (!access) {
     throw new HostedAgentControlError("Agent not found.", 404);
   }
@@ -424,4 +426,23 @@ function parseSimplexPending(value: unknown): PendingSimplexContact[] {
     }
     return { request_id, user_id: boundedString(row.user_id, "contact ID", 64), name: optionalString(row.name, "contact name", 128) ?? "", age_minutes: row.age_minutes };
   });
+}
+
+/** Credentials are available only to an admin with ordinary access to this Agent. */
+export async function controlHostedGateway(machineId: string, action: "status" | "enable" | "disable") {
+  const access = await loadDashboardMachineAccess(machineId);
+  if (!access?.viewer.isAdmin) {
+    throw new HostedAgentControlError("Gateway access is unavailable.", 403);
+  }
+  const inventory = await loadCoreAdminRuntimes();
+  const matches = inventory.runtimes?.filter((runtime) =>
+    runtime.agent_runtime_id === access.machineId && runtime.project_id === access.coreProject.project.id
+  ) ?? [];
+  const url = matches.length === 1 ? hostedGatewayUrl(access.machineId, matches[0].source_host_id) : null;
+  if (!url) throw new HostedAgentControlError("Hosted gateway is not configured for this runner.", 503);
+  const context = await hostedAgentContext(access.machineId, access);
+  await claimOwner(context);
+  const response = await sendCommand(context, `agent.hosted-gateway.${action}`, EMPTY_SCHEMA, {});
+  const status = parseHostedGatewayStatus(response.body);
+  return { ...status, url };
 }

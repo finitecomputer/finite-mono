@@ -358,7 +358,33 @@ def runtime_ready(payload: dict[str, Any]) -> bool:
 
 
 class Handler(BaseHTTPRequestHandler):
+    # Keep request bodies on the socket for the optional streaming ingress.
+    rbufsize = 0
+
+    def gateway_request(self) -> bool:
+        if not self.path.startswith("/gateway/"):
+            return False
+        try:
+            from gateway_ingress import forward
+        except ImportError:
+            self.send_error(404)
+            return True
+        forward(self, AGENT_HOME)
+        return True
+
+    def do_POST(self) -> None:
+        if not self.gateway_request():
+            self.send_error(404)
+
+    do_PUT = do_POST
+    do_PATCH = do_POST
+    do_DELETE = do_POST
+    do_OPTIONS = do_POST
+    do_HEAD = do_POST
+
     def do_GET(self) -> None:
+        if self.gateway_request():
+            return
         if self.path == "/healthz":
             payload = runtime_health()
             self._write(200 if runtime_ready(payload) else 503, payload)
