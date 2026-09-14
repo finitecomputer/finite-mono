@@ -1,0 +1,19 @@
+--- a/platforms/simplex/adapter.py
++++ b/platforms/simplex/adapter.py
+@@ -568,6 +568,16 @@
+                 if isinstance(file_source, dict)
+                 else None
+             )
++            # Finite's managed daemon returns paths relative to --files-folder.
++            # Resolve at the adapter boundary, before shared Hermes transcription.
++            files_folder = os.getenv("SIMPLEX_FILES_FOLDER")
++            if file_path and files_folder and not Path(file_path).is_absolute():
++                root = Path(files_folder).resolve()
++                resolved = (root / file_path).resolve()
++                if not resolved.is_relative_to(root):
++                    logger.warning("SimpleX: ignoring attachment outside files folder")
++                    return
++                file_path = str(resolved)
+             file_name = file_info.get("fileName", "")
+             file_id = file_info.get("fileId")
+ 

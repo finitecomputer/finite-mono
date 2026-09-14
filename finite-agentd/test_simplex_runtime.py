@@ -249,5 +249,126 @@ db.close()
             self.assertEqual(result.returncode, 0, result.stderr)
 
 
+class RelayTests(unittest.IsolatedAsyncioTestCase):
+    def setUp(self):
+        import socket
+
+        sockets = [socket.socket(), socket.socket()]
+        for sock in sockets:
+            sock.bind(("127.0.0.1", 0))
+        ports = [sock.getsockname()[1] for sock in sockets]
+        for sock in sockets:
+            sock.close()
+        for name, value in [
+            ("CHAT_PORT", ports[0]),
+            ("SETUP_PORT", ports[1]),
+            ("WS_URL", f"ws://127.0.0.1:{ports[0]}"),
+        ]:
+            patcher = patch.object(runtime, name, value)
+            patcher.start()
+            self.addCleanup(patcher.stop)
+
+    def defaults(self):
+        return [
+            {
+                "operator": {"operatorTag": "simplex", "enabled": True},
+                "smpServers": [{"server": "smp://synthetic", "enabled": False}],
+                "xftpServers": [{"serverId": 1, "server": "xftp://synthetic", "enabled": True}],
+                "chatRelays": [],
+            },
+            {"smpServers": [], "xftpServers": [], "chatRelays": []},
+        ]
+
+    def test_preserves_existing_fields_and_adds_download_only_relays_once(self):
+        before = self.defaults()
+        original = json.dumps(before)
+        after = runtime.relay_settings(before)
+        self.assertEqual(json.dumps(before), original)
+        self.assertEqual(after[0], before[0])
+        self.assertEqual(len(after[1]["xftpServers"]), 6)
+        self.assertTrue(all(not s["enabled"] for s in after[1]["xftpServers"]))
+        self.assertEqual(runtime.relay_settings(after), after)
+
+    def test_custom_policy_and_disabled_operator_are_unchanged(self):
+        for field in ["smpServers", "xftpServers", "chatRelays"]:
+            before = self.defaults()
+            before[1][field] = [{"server": "custom://owner-choice"}]
+            self.assertEqual(runtime.relay_settings(before), before)
+        before = self.defaults()
+        before[0]["operator"]["enabled"] = False
+        self.assertEqual(runtime.relay_settings(before), before)
+
+    async def test_failed_validation_does_not_write_settings_or_backup(self):
+        with tempfile.TemporaryDirectory() as home:
+            cmd = AsyncMock(
+                side_effect=[
+                    {"user": {"userId": 7}},
+                    {"userServers": self.defaults()},
+                    {"type": "userServersValidation", "serverErrors": ["synthetic"]},
+                ]
+            )
+            with patch.object(runtime, "command", cmd), self.assertRaises(RuntimeError):
+                await runtime.configure_relays(Path(home))
+            self.assertEqual(len(cmd.call_args_list), 3)
+            self.assertEqual(list(Path(home).iterdir()), [])
+
+    async def test_setup_refuses_a_live_daemon(self):
+        with (
+            patch.object(runtime, "tcp_ready", AsyncMock(return_value=True)),
+            patch.object(runtime, "start_child", AsyncMock()) as start,
+        ):
+            with self.assertRaises(RuntimeError):
+                await runtime.prepare_relays(Path("/unused"))
+            start.assert_not_called()
+
+    async def test_packaged_daemon_persistence_and_released_settings_rollback(self):
+        import shutil
+
+        if not shutil.which("simplex-chat"):
+            self.skipTest("packaged simplex-chat is not on PATH")
+        with tempfile.TemporaryDirectory() as folder:
+            home = Path(folder)
+            # Create untouched state with the released daemon first.
+            child = await runtime.start_child(home)
+            try:
+                for _ in range(40):
+                    await runtime.asyncio.sleep(0.25)
+                    if await runtime.tcp_ready():
+                        break
+                original_user = (await runtime.command("/u"))["user"]["userId"]
+            finally:
+                await runtime.stop_child(child)
+            await runtime.prepare_relays(home)
+            before = json.loads((home / "flux-relays-before.json").read_text())
+            after = json.loads((home / "flux-relays-after.json").read_text())
+            self.assertEqual(before[0], after[0])
+            self.assertEqual(len(after[1]["xftpServers"]), 6)
+            await runtime.prepare_relays(home)
+            self.assertEqual(json.loads((home / "flux-relays-before.json").read_text()), before)
+            child = await runtime.start_child(home, maintenance=True)
+            try:
+                for _ in range(40):
+                    await runtime.asyncio.sleep(0.25)
+                    if await runtime.tcp_ready(runtime.SETUP_PORT):
+                        break
+                url = f"ws://127.0.0.1:{runtime.SETUP_PORT}"
+                await runtime.command("/_start main=off snd_files=off", url=url)
+                self.assertEqual(
+                    (await runtime.command("/u", url=url))["user"]["userId"], original_user
+                )
+                self.assertEqual(
+                    (await runtime.command("/_servers 1", url=url))["userServers"], after
+                )
+                rollback = json.loads(json.dumps(after))
+                for entry in rollback[1]["xftpServers"]:
+                    entry["deleted"] = True
+                await runtime.command("/_servers 1 " + json.dumps(rollback), url=url)
+                self.assertEqual(
+                    (await runtime.command("/_servers 1", url=url))["userServers"], before
+                )
+            finally:
+                await runtime.stop_child(child)
+
+
 if __name__ == "__main__":
     unittest.main()
