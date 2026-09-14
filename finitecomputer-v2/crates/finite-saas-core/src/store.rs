@@ -1147,24 +1147,47 @@ where
         // first attempt may have failed open (hosted device briefly
         // unavailable), and a retried attempt with the same idempotency key
         // brings the owner's hosted-chat account id. Backfill ONLY the empty
-        // column — an existing value stays authoritative — in this same
-        // transaction, so the runner lease can scope FINITECHAT_OWNER_NPUBS
-        // even though the row was minted by the earlier attempt.
-        if existing_request.owner_chat_account_id.is_none()
-            && owner_chat_account_id.is_some()
-            && existing_request.status == AgentCreationRequestStatus::Requested
-        {
-            client
-                .execute(
+        // column — an existing value stays authoritative — and only while the
+        // row is still `requested`: the predicate in the UPDATE itself is the
+        // check, and it is the exact complement of the runner lease's
+        // transition (`status = 'requested'` candidate ->
+        // `SET status = 'launching'`, runner_id/lease_token/lease_expires_at),
+        // which injects FINITECHAT_OWNER_NPUBS from this column at spec-build
+        // time after taking the row lock. Row-level locking serializes the
+        // two writers, so either the backfill commits first and the lease
+        // reads the id, or the lease commits first, this UPDATE matches zero
+        // rows, and the row is NOT mutated — the runtime spec was built
+        // without the owner identity and the database must not claim
+        // otherwise. On that loss the row is re-read so the returned request
+        // reports what is actually persisted.
+        if existing_request.owner_chat_account_id.is_none() && owner_chat_account_id.is_some() {
+            let landed = client
+                .query_opt(
                     "UPDATE agent_creation_requests
                      SET owner_chat_account_id = $2, updated_at = $3::text::timestamptz
-                     WHERE id = $1 AND owner_chat_account_id IS NULL",
+                     WHERE id = $1
+                       AND owner_chat_account_id IS NULL
+                       AND status = 'requested'
+                     RETURNING core_rfc3339(updated_at) AS updated_at",
                     &[&existing_request.id, &owner_chat_account_id, &now],
                 )
                 .await
                 .map_err(store_error)?;
-            existing_request.owner_chat_account_id = owner_chat_account_id;
-            existing_request.updated_at = now.clone();
+            match landed {
+                Some(row) => {
+                    existing_request.owner_chat_account_id = owner_chat_account_id;
+                    existing_request.updated_at = row.get("updated_at");
+                }
+                None => {
+                    existing_request = select_agent_creation_request_by_idempotency(
+                        client,
+                        &user.id,
+                        &idempotency_key,
+                    )
+                    .await?
+                    .unwrap_or(existing_request);
+                }
+            }
         }
         let project = select_project(client, &existing_request.project_id)
             .await?
@@ -15777,8 +15800,178 @@ mod tests {
                 .unwrap();
             assert_eq!(
                 overwritten.request.owner_chat_account_id,
-                Some(premint),
+                Some(premint.clone()),
                 "an existing pre-mint stays authoritative"
+            );
+
+            // The complementary ordering: when the backfill lands while the
+            // row is still `requested`, the runner lease that follows reads
+            // the owner id and injects it into the runtime spec environment.
+            let lease = store
+                .lease_agent_creation_request(LeaseAgentCreationRequestInput {
+                    runner_id: "runner-premint-backfill".to_string(),
+                    source_host_id: None,
+                    lease_token: "premint-backfill-lease".to_string(),
+                    lease_seconds: Some(300),
+                    runner_capacity: None,
+                    now: None,
+                })
+                .await
+                .unwrap()
+                .expect("the backfilled request must still be leasable");
+            assert_eq!(
+                lease.request.owner_chat_account_id,
+                Some(premint.clone()),
+                "the lease must observe the backfilled owner id after the row lock"
+            );
+            let spec = runtime_spec_v1(
+                lease
+                    .request
+                    .runtime_spec
+                    .as_ref()
+                    .expect("the lease must build a runtime spec"),
+            );
+            assert_eq!(
+                spec.environment.get(crate::OWNER_CHAT_NPUBS_ENV),
+                Some(&premint),
+                "the lease-time spec must scope chat admission to the backfilled owner"
+            );
+        })
+        .await;
+    }
+
+    /// The owner-identity backfill must be atomic against a runner lease
+    /// (review point "Backfill update"): reading `status = 'requested'` and
+    /// then updating is not enough, because a runner can lease between the
+    /// two statements and build its runtime spec without the owner identity —
+    /// a backfill that still landed afterwards would make the database claim
+    /// a configuration the runtime never received. This reproduces that
+    /// interleaving: one transaction READS `requested`, a real runner lease
+    /// commits `launching`, and the backfill UPDATE — carrying the full
+    /// `status = 'requested'` predicate — must then match zero rows and leave
+    /// the row untouched; the reuse path reports the persisted reality.
+    #[tokio::test]
+    async fn postgres_agent_creation_backfill_loses_to_runner_lease() {
+        with_isolated_postgres(|store| async move {
+            let run = "premint-lease-race";
+            let email = format!("{run}@finite.vip");
+            let workos = format!("workos_{run}");
+            let launch_code = issue_test_launch_code(&store, "2026-09-14T13:00:00Z").await;
+            let created = store
+                .request_agent_creation(RequestAgentCreationInput {
+                    verified_email: email.clone(),
+                    workos_user_id: workos.clone(),
+                    display_name: "Lease Race Agent".to_string(),
+                    launch_code: launch_code.clone(),
+                    idempotency_key: format!("{run}-submit"),
+                    now: None,
+                })
+                .await
+                .unwrap();
+            assert_eq!(
+                created.request.status,
+                AgentCreationRequestStatus::Requested
+            );
+            assert_eq!(created.request.owner_chat_account_id, None);
+
+            // The reuse-read half of the racy interleaving: an open
+            // transaction observes `requested` (plain read, no row lock, so
+            // the lease below is free to claim and commit).
+            let (racy, racy_connection) = tokio_postgres::connect(&store.url, NoTls).await.unwrap();
+            let racy_connection = tokio::spawn(async move {
+                let _ = racy_connection.await;
+            });
+            racy.execute("BEGIN", &[]).await.unwrap();
+            let observed: String = racy
+                .query_one(
+                    "SELECT status FROM agent_creation_requests WHERE id = $1",
+                    &[&created.request.id],
+                )
+                .await
+                .unwrap()
+                .get(0);
+            assert_eq!(observed, "requested");
+
+            // The runner leases the request for real: status flips to
+            // `launching` and the spec is built WITHOUT the owner identity
+            // (the column is still empty).
+            let leased = store
+                .lease_agent_creation_request(LeaseAgentCreationRequestInput {
+                    runner_id: format!("runner-{run}"),
+                    source_host_id: None,
+                    lease_token: "lease-race-lease".to_string(),
+                    lease_seconds: Some(300),
+                    runner_capacity: None,
+                    now: None,
+                })
+                .await
+                .unwrap()
+                .expect("the request must be leasable");
+            assert_eq!(leased.request.id, created.request.id);
+            assert_eq!(
+                leased.request.owner_chat_account_id, None,
+                "the lease-time spec was built without the owner identity"
+            );
+
+            // The update half of the interleaving, from the SAME transaction
+            // that read `requested`: the predicate is re-evaluated against
+            // the now-committed row, so the backfill must match zero rows.
+            let landed = racy
+                .execute(
+                    "UPDATE agent_creation_requests
+                     SET owner_chat_account_id = $2
+                     WHERE id = $1
+                       AND owner_chat_account_id IS NULL
+                       AND status = 'requested'",
+                    &[&created.request.id, &"a".repeat(64)],
+                )
+                .await
+                .unwrap();
+            assert_eq!(landed, 0, "a leased request must not be backfilled");
+            racy.execute("COMMIT", &[]).await.unwrap();
+            drop(racy);
+            racy_connection.abort();
+
+            let row = store
+                .row("agent_creation_requests", &created.request.id)
+                .await
+                .unwrap();
+            assert_eq!(
+                row["owner_chat_account_id"].as_str(),
+                None,
+                "the database must not claim an owner identity the runtime never received"
+            );
+            assert_eq!(row["status"].as_str(), Some("launching"));
+
+            // The reuse path must report that reality, not the requested
+            // pre-mint: no error, no fake configuration.
+            let retried = store
+                .request_agent_creation_configured(
+                    RequestAgentCreationInput {
+                        verified_email: email,
+                        workos_user_id: workos,
+                        display_name: "Lease Race Agent".to_string(),
+                        launch_code,
+                        idempotency_key: format!("{run}-submit"),
+                        now: None,
+                    },
+                    AgentCreationConfiguration {
+                        owner_chat_account_id: Some("a".repeat(64)),
+                        ..AgentCreationConfiguration::default()
+                    },
+                )
+                .await
+                .unwrap();
+            assert!(retried.reused);
+            assert_eq!(retried.request.id, created.request.id);
+            assert_eq!(
+                retried.request.status,
+                AgentCreationRequestStatus::Launching,
+                "the returned row must reflect the lease, not the backfill attempt"
+            );
+            assert_eq!(
+                retried.request.owner_chat_account_id, None,
+                "losing the race to a lease must leave the row unconfigured"
             );
         })
         .await;
