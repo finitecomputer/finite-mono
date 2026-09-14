@@ -28,7 +28,10 @@ with open('/run/lock/finite-monitoring-dashboards.lock', 'w') as lock:
     root.mkdir(mode=0o755, exist_ok=True)
     (root / 'scripts').mkdir(mode=0o755, exist_ok=True)
     assert not (root / 'scripts').is_symlink()
-    backup = pathlib.Path(tempfile.mkdtemp(prefix='finite-monitoring-ci.', dir='/var/backups'))
+    backup_root = pathlib.Path('/var/backups')
+    assert not backup_root.is_symlink()
+    backup_root.mkdir(mode=0o755, exist_ok=True)
+    backup = pathlib.Path(tempfile.mkdtemp(prefix='finite-monitoring-ci.', dir=backup_root))
     previous = auth.read_text() if auth.exists() else ''
     (backup / 'authorized_keys').write_text(previous)
     (backup / 'authorized_keys.state').write_text('present' if auth.exists() else 'absent')

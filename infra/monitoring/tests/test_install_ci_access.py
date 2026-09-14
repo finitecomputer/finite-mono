@@ -26,7 +26,6 @@ class AccessInstallationTest(unittest.TestCase):
             operator = "ssh-ed25519 operator-bytes operator"
             auth.write_text(operator + "\nssh-ed25519 old-ci finite-monitoring-ci\n")
             backups = root / "backups"
-            backups.mkdir()
             # Real remote code and file operations; map privileged host paths
             # into the fixture and emulate ownership on an unprivileged runner.
             setup = f"""
@@ -39,7 +38,7 @@ os.fchown = lambda *args: None
             program = setup + installer.INSTALL.replace(
                 "/run/lock/finite-monitoring-dashboards.lock", str(root / "lock")
             ).replace("/var/lib/finite-monitoring-ci", str(root / "installed")).replace(
-                "dir='/var/backups'", f"dir={str(backups)!r}"
+                    "/var/backups", str(backups)
             )
             payload = {
                 "user": "synthetic",
