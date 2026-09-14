@@ -735,6 +735,29 @@ impl CoreStore {
         Ok(grant)
     }
 
+    /// Agent-local control is owner-authorized without chat identities or rooms.
+    pub async fn owned_control_runtime(
+        &self,
+        workos_user_id: &str,
+        identifier: &str,
+    ) -> CoreResult<Option<AgentRuntime>> {
+        let client = self.connection().await?;
+        let rows = client.query(
+            "SELECT runtime.id FROM users owner
+             JOIN projects project ON project.owner_user_id = owner.id
+             JOIN project_runtime_links link ON link.project_id = project.id AND link.active
+             JOIN agent_runtimes runtime ON runtime.id = link.agent_runtime_id AND runtime.project_id = project.id
+             WHERE owner.workos_user_id = $1 AND owner.link_status = 'linked'
+               AND project.import_candidate_id IS NULL
+               AND (project.id = $2 OR runtime.id = $2 OR runtime.source_machine_id = $2)",
+            &[&workos_user_id, &identifier],
+        ).await.map_err(store_error)?;
+        if rows.len() != 1 {
+            return Ok(None);
+        }
+        select_agent_runtime(&**client, &rows[0].get::<_, String>(0)).await
+    }
+
     pub async fn admin_runtime_overviews(&self) -> CoreResult<Vec<AdminRuntimeOverview>> {
         let client = self.connection().await?;
         postgres_admin_runtime_overviews(&**client).await

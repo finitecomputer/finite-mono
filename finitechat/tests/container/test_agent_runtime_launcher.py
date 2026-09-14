@@ -312,7 +312,7 @@ class AgentRuntimeLauncherConfigTest(unittest.TestCase):
     def test_gateway_launcher_has_agentd_prepare_and_supervised_modes(self) -> None:
         script = (REPO_ROOT / "containers/agent/run_hermes_gateway.sh").read_text(encoding="utf-8")
 
-        prepared = script.index('if [[ "${1:-}" == "--prepare-only" ]]')
+        prepared = script.index('if [[ "${1:-}" == "--prepare-only" ||')
         health = script.index("python /opt/health_server.py &", prepared)
         gateway = script.index("exec hermes gateway run --replace", health)
         self.assertLess(prepared, health)

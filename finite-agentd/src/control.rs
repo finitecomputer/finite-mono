@@ -29,6 +29,7 @@ pub(crate) struct ConnectionControl {
     pub connection_manager: ConnectionManager,
     pub hermes_home: PathBuf,
     pub supervisor: SupervisorHandle,
+    pub operation: std::sync::Arc<tokio::sync::Semaphore>,
 }
 const EMPTY_REQUEST_SCHEMA: &str = "finite.agent.empty.request.v1";
 const INFERENCE_APPLY_SCHEMA: &str = "finite.agent.inference.apply.v1";

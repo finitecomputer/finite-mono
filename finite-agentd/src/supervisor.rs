@@ -143,11 +143,17 @@ enum ProcessAction {
 #[derive(Clone)]
 pub struct SupervisorHandle {
     hermes_tx: mpsc::Sender<ProcessAction>,
-    all_txs: Arc<Vec<mpsc::Sender<ProcessAction>>>,
+    all_txs: Arc<RwLock<Vec<mpsc::Sender<ProcessAction>>>>,
     status: Arc<RwLock<SupervisorStatus>>,
 }
 
 impl SupervisorHandle {
+    pub(crate) async fn start_companion(&self, spec: ProcessSpec) {
+        let (tx, rx) = mpsc::channel(4);
+        self.all_txs.write().await.push(tx);
+        tokio::spawn(supervise_process(spec, rx, Arc::clone(&self.status)));
+    }
+
     pub async fn restart_hermes(&self) -> Result<(), AgentdError> {
         let previous_restart_count = self
             .status
@@ -192,7 +198,7 @@ impl SupervisorHandle {
     }
 
     pub async fn shutdown(&self) {
-        for tx in self.all_txs.iter() {
+        for tx in self.all_txs.read().await.iter() {
             let _ = tx.send(ProcessAction::Stop).await;
         }
     }
@@ -229,7 +235,7 @@ pub(crate) fn start_processes(
     }
     SupervisorHandle {
         hermes_tx: hermes_tx.clone(),
-        all_txs: Arc::new(all_txs),
+        all_txs: Arc::new(RwLock::new(all_txs)),
         status,
     }
 }
