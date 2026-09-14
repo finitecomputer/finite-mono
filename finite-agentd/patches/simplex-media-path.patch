@@ -1,7 +1,6 @@
 --- a/platforms/simplex/adapter.py
 +++ b/platforms/simplex/adapter.py
-@@ -568,6 +568,16 @@
-                 if isinstance(file_source, dict)
+@@ -569,4 +569,14 @@
                  else None
              )
 +            # Finite's managed daemon returns paths relative to --files-folder.
@@ -16,4 +15,3 @@
 +                file_path = str(resolved)
              file_name = file_info.get("fileName", "")
              file_id = file_info.get("fileId")
- 
