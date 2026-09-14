@@ -35,7 +35,7 @@ export async function GET(request: Request) {
   }
 
   try {
-    const billing = await loadCoreBillingOverview({ cacheMode: "fresh" });
+    const billing = await loadCoreBillingOverview();
     if (
       !billing.billing?.can_create_agent ||
       billing.billing.customer_org.billing_class !== "standard" ||

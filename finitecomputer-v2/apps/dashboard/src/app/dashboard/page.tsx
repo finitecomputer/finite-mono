@@ -389,7 +389,7 @@ export default async function DashboardPage({
   }
 
   const deploySourceRev = viewer.deployMetadata?.source_rev ?? null;
-  const finitePrivateAdmin = await loadCoreFinitePrivateAdminState({ cacheMode: "swr" });
+  const finitePrivateAdmin = await loadCoreFinitePrivateAdminState();
 
   return (
     <div className="ocean-page-stack">

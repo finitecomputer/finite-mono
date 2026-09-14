@@ -169,7 +169,7 @@ async function hostedAgentContext(machineId: string): Promise<AgentCommandContex
   if (!account.workosUserId || !account.emailVerified) {
     throw new HostedAgentControlError("Sign in again to manage this agent.", 401);
   }
-  const access = await loadDashboardMachineAccess(machineId, { coreCacheMode: "swr" });
+  const access = await loadDashboardMachineAccess(machineId);
   if (!access) {
     throw new HostedAgentControlError("Agent not found.", 404);
   }

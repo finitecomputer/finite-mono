@@ -53,9 +53,7 @@ export default async function MachineDetailPage({
   const { machineId } = await params;
   const query = await searchParams;
   const [access, finitePrivateUsage] = await Promise.all([
-    loadDashboardMachineAccess(machineId, {
-      coreCacheMode: "swr",
-    }),
+    loadDashboardMachineAccess(machineId),
     loadCoreFinitePrivateUsageStatus(),
   ]);
 

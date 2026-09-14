@@ -713,10 +713,8 @@ test("dashboard agent creation browser states", { timeout: 300_000 }, async () =
       await expectVisibleText(page, "Your agent is online.");
       const productNav = page.getByRole("navigation", { name: "Agent navigation" });
       const agentLink = productNav.getByRole("link", { name: "Agent", exact: true });
-      // The fake Core changes out of band, unlike a product mutation that
-      // invalidates the dashboard's short SWR cache. A stale server render
-      // starts the background refresh; reload until that refreshed projection
-      // is visible instead of racing one fixed sleep against CI load.
+      // Wait for the route transition and hydrated navigation instead of
+      // racing one fixed sleep against CI load.
       await waitFor(
         async () => {
           if (

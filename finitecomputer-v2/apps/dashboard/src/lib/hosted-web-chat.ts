@@ -207,8 +207,8 @@ export async function recoverHostedWebChatBinding(machineId: string) {
     creation_request_id: creation.id,
   });
   // Keep the Project, Runtime contact, and Agent Principal lookup on the same
-  // fresh Core snapshot that authorized this exact recovery. Falling back to
-  // the ordinary SWR context here could bind a stale Runtime endpoint.
+  // fresh Core snapshot that authorized this exact recovery. A second read
+  // could observe a different Runtime while this recovery is in progress.
   return bootstrapHostedWebChatWithContext(context);
 }
 
@@ -352,15 +352,12 @@ export async function streamHostedWebChatAttachment(
   );
 }
 
-async function hostedWebChatContext(
-  machineId: string,
-  coreCacheMode: "fresh" | "swr" = "swr"
-) {
+async function hostedWebChatContext(machineId: string) {
   const account = await getAccountAuthContext();
   if (!account.workosUserId || !account.emailVerified) {
     throw new HostedWebChatError("Sign in again to use chat.", 401);
   }
-  const access = await loadDashboardMachineAccess(machineId, { coreCacheMode });
+  const access = await loadDashboardMachineAccess(machineId);
   if (!access) {
     throw new HostedWebChatError("Agent not found.", 404);
   }

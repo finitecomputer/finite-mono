@@ -1,10 +1,4 @@
-import { createHash } from "node:crypto";
-
 import { getAccountAuthContext, type AccountAuthContext } from "@/lib/dashboard-auth";
-import {
-  invalidateServerSwrCache,
-  readThroughServerSwr,
-} from "@/lib/server-swr-cache";
 
 export type CoreBridgeStatus = {
   configured: boolean;
@@ -437,18 +431,8 @@ export type CoreRuntimeRouteResolution = {
 };
 
 const REQUIRED_CORE_ENV = ["FC_CORE_BASE_URL"] as const;
-const REQUIRED_CORE_SERVICE_ENV = ["FC_CORE_BASE_URL", "FC_CORE_API_TOKEN"] as const;
-const CORE_CACHE_PREFIX = "core:";
-const CORE_ME_FRESH_MS = 5_000;
-const CORE_ME_STALE_MS = 30_000;
-const CORE_SERVICE_FRESH_MS = 10_000;
-const CORE_SERVICE_STALE_MS = 60_000;
 
 type EnvSource = Record<string, string | undefined>;
-export type CoreReadCacheMode = "fresh" | "swr";
-export type CoreReadOptions = {
-  cacheMode?: CoreReadCacheMode;
-};
 
 export function coreBridgeStatus(env: EnvSource = process.env): CoreBridgeStatus {
   const missing = REQUIRED_CORE_ENV.filter((name) => !env[name]?.trim());
@@ -469,7 +453,7 @@ export async function loadCoreRequesterEmail(account: AccountAuthContext): Promi
   return me.email;
 }
 
-export async function loadCoreMe(options: CoreReadOptions = {}): Promise<CoreMeResult> {
+export async function loadCoreMe(): Promise<CoreMeResult> {
   const status = coreBridgeStatus();
   const account = await getAccountAuthContext();
   if (!status.configured) {
@@ -491,18 +475,10 @@ export async function loadCoreMe(options: CoreReadOptions = {}): Promise<CoreMeR
   }
 
   try {
-    const load = () => coreFetch<CoreMe>("/api/core/v1/me", account);
     return {
       ...status,
       account,
-      me:
-        options.cacheMode === "swr"
-          ? await readThroughServerSwr(
-              `${CORE_CACHE_PREFIX}me:${coreCacheFingerprint(accountCacheParts(account))}`,
-              { freshMs: CORE_ME_FRESH_MS, staleMs: CORE_ME_STALE_MS },
-              load
-            )
-          : await load(),
+      me: await coreFetch<CoreMe>("/api/core/v1/me", account),
       error: null,
     };
   } catch (error) {
@@ -515,9 +491,7 @@ export async function loadCoreMe(options: CoreReadOptions = {}): Promise<CoreMeR
   }
 }
 
-export async function loadCoreBillingOverview(
-  options: CoreReadOptions = {}
-): Promise<CoreBillingOverviewResult> {
+export async function loadCoreBillingOverview(): Promise<CoreBillingOverviewResult> {
   const status = coreBridgeStatus();
   const account = await getAccountAuthContext();
   if (!status.configured) {
@@ -539,18 +513,10 @@ export async function loadCoreBillingOverview(
   }
 
   try {
-    const load = () => coreFetch<CoreBillingOverview>("/api/core/v1/me/billing", account);
     return {
       ...status,
       account,
-      billing:
-        options.cacheMode === "swr"
-          ? await readThroughServerSwr(
-              `${CORE_CACHE_PREFIX}billing:${coreCacheFingerprint(accountCacheParts(account))}`,
-              { freshMs: CORE_ME_FRESH_MS, staleMs: CORE_ME_STALE_MS },
-              load
-            )
-          : await load(),
+      billing: await coreFetch<CoreBillingOverview>("/api/core/v1/me/billing", account),
       error: null,
     };
   } catch (error) {
@@ -682,7 +648,6 @@ export async function requestCoreAgentCreation(input: CoreAgentCreationInput) {
     });
   try {
     const result = await post(input);
-    invalidateCoreReadCache();
     return result;
   } catch (error) {
     // An N-1 Core predating owner-npub granting has no `ownerChatAccountId`
@@ -698,7 +663,6 @@ export async function requestCoreAgentCreation(input: CoreAgentCreationInput) {
         "Core rejected ownerChatAccountId (pre-owner-npub Core); retrying agent creation without the chat grant"
       );
       const result = await post({ ...input, ownerChatAccountId: null });
-      invalidateCoreReadCache();
       return result;
     }
     throw error;
@@ -724,7 +688,6 @@ export async function linkCoreStripeCustomer(stripeCustomerId: string) {
       }),
     }
   );
-  invalidateCoreReadCache();
   return result;
 }
 
@@ -759,7 +722,6 @@ export async function syncCoreStripeSubscription(input: {
       }),
     }
   );
-  invalidateCoreReadCache();
   return result;
 }
 
@@ -781,7 +743,6 @@ export async function requestCoreRuntimeRestart(projectId: string) {
       body: JSON.stringify({}),
     }
   );
-  invalidateCoreReadCache();
   return result;
 }
 
@@ -803,7 +764,6 @@ export async function requestCoreRuntimeRecoverKnownGoodChat(projectId: string) 
       body: JSON.stringify({}),
     }
   );
-  invalidateCoreReadCache();
   return result;
 }
 
@@ -825,7 +785,6 @@ export async function requestCoreRuntimeStop(projectId: string) {
       body: JSON.stringify({}),
     }
   );
-  invalidateCoreReadCache();
   return result;
 }
 
@@ -847,7 +806,6 @@ export async function requestCoreRuntimeDestroy(projectId: string) {
       body: JSON.stringify({}),
     }
   );
-  invalidateCoreReadCache();
   return result;
 }
 
@@ -864,7 +822,6 @@ export async function cancelFailedCoreAgentCreationRequest(requestId: string) {
       body: JSON.stringify({}),
     }
   );
-  invalidateCoreReadCache();
   return result;
 }
 
@@ -889,9 +846,7 @@ export async function resolveCoreRuntimeRoute(identifier: string) {
   }
 }
 
-export async function loadCoreFinitePrivateAdminState(
-  options: CoreReadOptions = {}
-): Promise<CoreFinitePrivateAdminStateResult> {
+export async function loadCoreFinitePrivateAdminState(): Promise<CoreFinitePrivateAdminStateResult> {
   const status = coreBridgeStatus();
   if (!status.configured) {
     return {
@@ -902,17 +857,9 @@ export async function loadCoreFinitePrivateAdminState(
   }
 
   try {
-    const load = () => coreAdminFetch<CoreFinitePrivateAdminState>("/api/core/v1/finite-private/admin-state");
     return {
       ...status,
-      state:
-        options.cacheMode === "swr"
-          ? await readThroughServerSwr(
-              `${CORE_CACHE_PREFIX}finite-private-admin:${coreCacheFingerprint(accountCacheParts(await getAccountAuthContext()))}`,
-              { freshMs: CORE_SERVICE_FRESH_MS, staleMs: CORE_SERVICE_STALE_MS },
-              load
-            )
-          : await load(),
+      state: await coreAdminFetch<CoreFinitePrivateAdminState>("/api/core/v1/finite-private/admin-state"),
       error: null,
     };
   } catch (error) {
@@ -969,7 +916,6 @@ export async function claimCoreFinitePrivateDailyReset() {
     account,
     { method: "POST", body: JSON.stringify({}) }
   );
-  invalidateCoreReadCache();
   return result;
 }
 
@@ -986,7 +932,6 @@ export async function approveCoreFinitePrivateGrant(input: {
       limitProfileId: optionalString(input.limitProfileId),
     }),
   });
-  invalidateCoreReadCache();
   return result;
 }
 
@@ -1008,7 +953,6 @@ export async function issueCoreFinitePrivateApiKey(input: {
       }),
     }
   );
-  invalidateCoreReadCache();
   return result;
 }
 
@@ -1022,7 +966,6 @@ export async function resetCoreFinitePrivateGrant(grantId: string) {
       body: JSON.stringify({}),
     }
   );
-  invalidateCoreReadCache();
   return result;
 }
 
@@ -1036,7 +979,6 @@ export async function revokeCoreFinitePrivateGrant(grantId: string) {
       body: JSON.stringify({}),
     }
   );
-  invalidateCoreReadCache();
   return result;
 }
 
@@ -1054,7 +996,6 @@ export async function rotateCoreFinitePrivateApiKey(input: {
       }),
     }
   );
-  invalidateCoreReadCache();
   return result;
 }
 
@@ -1068,7 +1009,6 @@ export async function revokeCoreFinitePrivateApiKey(keyId: string) {
       body: JSON.stringify({}),
     }
   );
-  invalidateCoreReadCache();
   return result;
 }
 
@@ -1145,7 +1085,6 @@ export async function adminIssueCoreLaunchCodeBatch(input: {
       body: JSON.stringify(coreLaunchCodeBatchRequestBody(input)),
     }
   );
-  invalidateCoreReadCache();
   return result;
 }
 
@@ -1170,7 +1109,6 @@ export async function adminRevokeCoreLaunchCodeBatch(batchId: string) {
     )}/revoke`,
     { method: "POST", body: JSON.stringify({}) }
   );
-  invalidateCoreReadCache();
   return result;
 }
 
@@ -1181,7 +1119,6 @@ export async function adminRestartCoreRuntime(projectId: string) {
     )}/runtime/restart`,
     { method: "POST", body: JSON.stringify({}) }
   );
-  invalidateCoreReadCache();
   return result;
 }
 
@@ -1192,7 +1129,6 @@ export async function adminRecoverCoreRuntime(projectId: string) {
     )}/runtime/recover-known-good-chat`,
     { method: "POST", body: JSON.stringify({}) }
   );
-  invalidateCoreReadCache();
   return result;
 }
 
@@ -1212,7 +1148,6 @@ export async function adminUpgradeCoreRuntime(input: {
       body: JSON.stringify({ targetRuntimeArtifactId }),
     }
   );
-  invalidateCoreReadCache();
   return result;
 }
 
@@ -1230,7 +1165,6 @@ export async function adminIssueCoreFinitePrivateFriendKey(input: {
       }),
     }
   );
-  invalidateCoreReadCache();
   return result;
 }
 
@@ -1241,7 +1175,6 @@ export async function adminRotateCoreFinitePrivateApiKey(keyId: string) {
     )}/rotate`,
     { method: "POST", body: JSON.stringify({}) }
   );
-  invalidateCoreReadCache();
   return result;
 }
 
@@ -1252,7 +1185,6 @@ export async function adminRevokeCoreFinitePrivateApiKey(keyId: string) {
     )}/revoke`,
     { method: "POST", body: JSON.stringify({}) }
   );
-  invalidateCoreReadCache();
   return result;
 }
 
@@ -1263,7 +1195,6 @@ export async function adminResetCoreFinitePrivateWindow(grantId: string) {
     )}/window-reset`,
     { method: "POST", body: JSON.stringify({}) }
   );
-  invalidateCoreReadCache();
   return result;
 }
 
@@ -1284,7 +1215,6 @@ export async function adminAssignCoreFinitePrivateLimitProfile(input: {
       }),
     }
   );
-  invalidateCoreReadCache();
   return result;
 }
 
@@ -1551,6 +1481,8 @@ async function coreFetch<T>(
     throw new Error("Finite Core is not configured.");
   }
 
+  // Core owns current access, placement, and readiness. Never retain a
+  // cross-request dashboard copy that can outlive those decisions.
   const response = await fetch(new URL(pathname, baseUrl), {
     ...init,
     cache: "no-store",
@@ -1665,25 +1597,6 @@ function optionalString(value: string | null | undefined) {
   return trimmed || null;
 }
 
-export function invalidateCoreReadCache() {
-  invalidateServerSwrCache(CORE_CACHE_PREFIX);
-}
-
-function accountCacheParts(account: AccountAuthContext) {
-  return [
-    process.env.FC_CORE_BASE_URL?.trim() ?? "",
-    account.source,
-    account.accessToken ?? "",
-    account.workosUserId ?? "",
-    account.email ?? "",
-    account.emailVerified ? "verified" : "unverified",
-  ];
-}
-
-function coreCacheFingerprint(parts: string[]) {
-  return createHash("sha256").update(parts.join("\0")).digest("hex").slice(0, 32);
-}
-
 function safeHttpUrl(value: string) {
   try {
     const url = new URL(value);
@@ -1707,6 +1620,5 @@ export async function coreEmailChange(action: "preview" | "prepare" | "complete"
   const result = await coreAdminFetch<import("./account-email-change").EmailChangePreview>(
     `/api/core/v1/admin/account-email-changes/${action}`, { method: "POST", body: JSON.stringify(request) },
   );
-  if (action === "complete") invalidateCoreReadCache();
   return result;
 }

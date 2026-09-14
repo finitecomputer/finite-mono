@@ -96,7 +96,7 @@ export async function POST(request: Request) {
       returnMachineId,
       stripeCheckoutStartedAtMs: null,
     };
-    const billing = await loadCoreBillingOverview({ cacheMode: "fresh" });
+    const billing = await loadCoreBillingOverview();
     const access = formData.get("access");
     const accessPath = resolveAgentCreationAccessPath(
       access,

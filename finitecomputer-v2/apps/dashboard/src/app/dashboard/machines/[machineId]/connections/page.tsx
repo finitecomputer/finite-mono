@@ -11,7 +11,7 @@ export default async function MachineConnectionsPage({
   params: Promise<{ machineId: string }>;
 }) {
   const { machineId } = await params;
-  const access = await loadDashboardMachineAccess(machineId, { coreCacheMode: "swr" });
+  const access = await loadDashboardMachineAccess(machineId);
   if (!access) redirect("/dashboard");
   if (access.machineId !== machineId) {
     redirect(

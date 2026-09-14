@@ -111,7 +111,7 @@ export async function createSitePreviewSession(machineId: string, rawUrl: unknow
   if (!account.workosUserId || !account.emailVerified) {
     throw new SitePreviewError("Sign in again to preview this site.", 401);
   }
-  const access = await loadDashboardMachineAccess(machineId, { coreCacheMode: "swr" });
+  const access = await loadDashboardMachineAccess(machineId);
   if (!access || access.machineId !== machineId) {
     throw new SitePreviewError("Agent not found.", 404);
   }

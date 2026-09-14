@@ -31,7 +31,7 @@ export async function GET(request: Request) {
   }
   const code = requestUrl.searchParams.get("code")?.trim();
   const account = await getAccountAuthContext();
-  const access = await loadDashboardMachineAccess(state.machineId, { coreCacheMode: "swr" });
+  const access = await loadDashboardMachineAccess(state.machineId);
   const config = googleWorkspaceOAuthConfig(request.url);
   if (
     !code ||

@@ -242,6 +242,13 @@ _Avoid_: Purge User Data, subscription cancellation, provider destroy
   image, and upgrade never flows through **Purge User Data** or Runtime destroy.
 - A **Runner** hosts one or more **Agent Runtimes**.
 - **Core** is the source of truth for desired **Agent Runtime** lifecycle state.
+- Dashboard Core reads use authenticated `no-store` requests, with no
+  cross-request dashboard cache of access, Project placement, readiness, or
+  billing. Chat actions and routing read current Core state; binding handoff
+  recovery keeps its authorization and bootstrap on the same fresh snapshot.
+  This costs a Core read for each chat action/access request and admin overview
+  load; the dashboard does not keep TTLs or mutation-invalidation rules. Next
+  may still deduplicate identical fetches within one server render.
 - A **Finite Private Runaway Guard** limits pathological continuous inference;
   it does not represent customer billing or a dollar-denominated budget.
 - A **Launch Code Batch** contains an explicit number of **Launch Codes** and can expire or be revoked before every code is redeemed.

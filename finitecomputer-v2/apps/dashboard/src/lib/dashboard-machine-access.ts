@@ -7,7 +7,6 @@ import {
   runtimeRetirementProductEnabled,
   loadCoreMe,
   resolveCoreRuntimeRoute,
-  type CoreReadCacheMode,
   type CoreVisibleProject,
   type CoreMe,
 } from "@/lib/core-client";
@@ -26,24 +25,14 @@ export type DashboardMachineAccess = {
   canRetireRuntime: boolean;
 };
 
-type DashboardMachineAccessOptions = {
-  coreCacheMode?: CoreReadCacheMode;
-};
-
 export async function loadDashboardMachineAccess(
-  routeIdentifier: string,
-  options: DashboardMachineAccessOptions = {}
+  routeIdentifier: string
 ): Promise<DashboardMachineAccess | null> {
-  const [viewer, initialCore] = await Promise.all([
+  const [viewer, core] = await Promise.all([
     loadOptionalViewerContext(),
-    loadCoreMe({ cacheMode: options.coreCacheMode }),
+    loadCoreMe(),
   ]);
-  let core = initialCore;
   let coreProject = dashboardMachineProjectFromSnapshot(core.me, routeIdentifier);
-  if (!coreProject && options.coreCacheMode === "swr") {
-    core = await loadCoreMe();
-    coreProject = dashboardMachineProjectFromSnapshot(core.me, routeIdentifier);
-  }
   if (!coreProject) {
     coreProject = await projectForResolvedRoute(core.me, routeIdentifier);
   }

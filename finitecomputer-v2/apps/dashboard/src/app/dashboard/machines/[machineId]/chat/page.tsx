@@ -12,7 +12,7 @@ export default async function HostedWebChatPage({
 }) {
   const { machineId } = await params;
   const query = await searchParams;
-  const access = await loadDashboardMachineAccess(machineId, { coreCacheMode: "swr" });
+  const access = await loadDashboardMachineAccess(machineId);
   if (!access) {
     redirect("/dashboard");
   }

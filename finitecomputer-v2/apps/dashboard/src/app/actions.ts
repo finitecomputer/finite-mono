@@ -154,7 +154,7 @@ export async function destroyCoreRuntimeAction(formData: FormData) {
 
 export async function cancelFailedAgentCreationRequestAction(formData: FormData) {
   const requestId = String(formData.get("requestId") ?? "");
-  const core = await loadCoreMe({ cacheMode: "fresh" });
+  const core = await loadCoreMe();
   const request = core.me?.agent_creation_requests.find(
     (candidate) => candidate.id === requestId
   );
@@ -180,7 +180,7 @@ export async function billingCheckoutDestination(
   if (!stripeCheckoutAvailable()) {
     throw new Error("Payment is unavailable right now.");
   }
-  const billing = await loadCoreBillingOverview({ cacheMode: "fresh" });
+  const billing = await loadCoreBillingOverview();
   if (!billing.billing || !billing.account.email || !billing.account.workosUserId) {
     throw new Error(billing.error ?? "Sign in again to manage billing.");
   }
@@ -230,7 +230,7 @@ export async function billingCheckoutDestination(
 }
 
 export async function openBillingPortalAction() {
-  const billing = await loadCoreBillingOverview({ cacheMode: "fresh" });
+  const billing = await loadCoreBillingOverview();
   const stripeCustomerId = billing.billing?.billing_account?.stripe_customer_id?.trim();
   if (!stripeCustomerId) {
     return startBillingCheckoutAction();

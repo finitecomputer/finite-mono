@@ -22,7 +22,7 @@ export async function GET(request: Request) {
     login.searchParams.set("returnTo", `${requestUrl.pathname}${requestUrl.search}`);
     return NextResponse.redirect(login);
   }
-  const access = await loadDashboardMachineAccess(machineId, { coreCacheMode: "swr" });
+  const access = await loadDashboardMachineAccess(machineId);
   const config = googleWorkspaceOAuthConfig(request.url);
   if (!access || !config) {
     return NextResponse.redirect(

@@ -15,7 +15,7 @@ export default async function DashboardLayout({
 }) {
   const [viewer, core] = await Promise.all([
     loadOptionalViewerContext(),
-    loadCoreMe({ cacheMode: "swr" }),
+    loadCoreMe(),
   ]);
   const machineIds = new Set<string>();
   const machines = [
