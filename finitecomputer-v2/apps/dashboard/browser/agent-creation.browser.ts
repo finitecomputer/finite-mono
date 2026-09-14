@@ -1422,6 +1422,29 @@ test("dashboard agent creation browser states", { timeout: 300_000 }, async () =
       });
       hostedDevice.emit();
       await expectVisibleText(page, "Worked through 1 step");
+      const completedResponse = page
+        .locator(".finite-chat__message--agent")
+        .filter({ hasText: "Browser QA complete." });
+      await completedResponse
+        .getByRole("button", { name: "Copy response" })
+        .waitFor({ state: "visible" });
+      await completedResponse
+        .getByRole("button", { name: "Share response" })
+        .waitFor({ state: "visible" });
+      assert.equal(
+        await completedResponse.locator(".finite-chat__message-actions time").count(),
+        1,
+        "a completed response timestamp must share the response-action row"
+      );
+      assert.equal(
+        await page
+          .locator(".finite-chat__message--agent")
+          .filter({ hasText: "Video returned by agent." })
+          .getByRole("button", { name: "Copy response" })
+          .count(),
+        0,
+        "non-final agent messages must not offer response actions"
+      );
       assert.equal(
         await browserQaRollup.evaluate((element) => (element as HTMLDetailsElement).open),
         false,
