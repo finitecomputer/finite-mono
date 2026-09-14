@@ -247,6 +247,21 @@ in
       '';
     };
 
+    # Freshness must not depend on deploy cadence: the snapshot service has
+    # no scheduler of its own and the health timer only detects drift after
+    # the fact (2026-09-14: a quiet week left the Recovery Snapshot 10.6
+    # days stale while the nightly borg kept archiving it). Weekly, before
+    # the nightly borg window, with catch-up after downtime.
+    systemd.timers.finite-hosted-web-chat-snapshot = {
+      description = "Weekly hosted Recovery Snapshot";
+      wantedBy = [ "timers.target" ];
+      timerConfig = {
+        OnCalendar = "Tue *-*-* 02:30:00";
+        RandomizedDelaySec = "10min";
+        Persistent = true;
+      };
+    };
+
     systemd.timers.finite-hosted-web-chat-snapshot-health = {
       wantedBy = [ "timers.target" ];
       timerConfig = {
