@@ -22,16 +22,15 @@ The workflow uses existing environment secrets by name only:
 | --- | --- |
 | `FINITE_PRODUCTION_SSH_KEY` | SSH to `ubuntu@152.236.5.27` with noninteractive sudo, and read-only status execution via `root@64.34.80.19` |
 | `FINITE_PRODUCTION_KNOWN_HOSTS` | Previously verified SSH host keys for both IP addresses |
+| `FINITE_MONITORING_KNOWN_HOSTS` | Additional verified host pins for the monitoring and app-plane IPs; appended to the existing production pins |
 
-The environment currently permits deployments only from the `production`
-branch. Activation requires an owner-authorized addition of `main` to its
-deployment branch policies, retaining the current required reviewers and the
-existing `production` branch policy. Without that addition GitHub blocks this
-workflow before credentials or deployment are available.
+The environment permits deployments from `main` and `production`, with the
+existing required reviewers retained. Alex authorized the addition of `main`
+when activating this workflow.
 
-Both secrets already existed when this workflow was prepared. Their presence
-does not prove that the stored key reaches the monitoring host or that its host
-key is included. The first approved run checks host pins, SSH/sudo access, and
+The first approved run found missing host pins before any dashboard mutation.
+The supplemental pins were obtained through existing, strictly verified SSH
+connections to both hosts. Each run checks host pins, SSH/sudo access, and
 platform status before any dashboard mutation. A missing pin or denied login
 fails closed. Update these secrets only from operator-held credentials and
 independently verified host keys; never use an unauthenticated `ssh-keyscan`
@@ -48,9 +47,7 @@ modifying them:
 scripts/with-dev-env python3 infra/monitoring/deploy_dashboards.py preview
 ```
 
-After the branch-policy prerequisite, merging the workflow and approving its
-first `production` deployment activates it. Future matching merges use the same
-approval gate. Fully unattended deploys
+Matching merges queue a deployment using the same approval gate. Fully unattended deploys
 would require a separately authorized change to GitHub environment protection.
 
 ## Deployment contract
