@@ -322,6 +322,18 @@
           packages = (hermesPackagesFor system) // finitePackages;
 
           devShells = {
+            code-map = pkgs.mkShell {
+              # Keep scc 3.7's counting semantics used by the initial map. The
+              # existing newer nixpkgs input pins it without a second lockfile.
+              packages = [
+                (import hermes-nixpkgs { inherit system; }).scc
+              ]
+              ++ (with pkgs; [
+                python3
+                git
+              ]);
+            };
+
             default = pkgs.mkShell {
               packages =
                 rustBasePackages
