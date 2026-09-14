@@ -92,10 +92,17 @@ infra/
     smoke/     # ovh-vps-smoke (15.204.56.61, OVH) — legacy Brain rollback source
     clawland/  # clawland-ovh (15.204.108.57, OVH) — legacy finite.vip fleet box
   images/      # container image definitions; built ONLY by CI, pushed digest-pinned to GHCR
-  monitoring/  # external monitoring dashboards and NixOS receiver docs
+  monitoring/  # Grafana dashboards, deployment workflow, Ubuntu receiver
   tinfoil/     # pins + notes for the public Tinfoil satellite repos (measured enclaves)
   runbooks/    # per-service: deploy, rollback, backup/restore, break-glass
 ```
+
+Routine Grafana dashboard updates use the
+[monitoring dashboard deployment workflow](monitoring/dashboards.md). Its SSH
+credentials are the existing GitHub `production` environment secrets
+`FINITE_PRODUCTION_SSH_KEY` and `FINITE_PRODUCTION_KNOWN_HOSTS`; Grafana's admin
+password stays in `/etc/finite/monitoring/grafana-admin-password` on the
+monitoring host. Source documents names and locations only.
 
 `infra/nixos/` is the declared source of truth for the NixOS fleet (lat2,
 lat3, lat4; lat1 is retired). Every
