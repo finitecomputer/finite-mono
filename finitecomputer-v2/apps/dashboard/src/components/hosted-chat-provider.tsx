@@ -27,6 +27,11 @@ import {
   shouldApplyStreamHostedChatSnapshot,
 } from "@/lib/hosted-web-chat-snapshots";
 import {
+  currentHostedChatReturnPath,
+  isHostedChatSessionAuthFailure,
+  redirectToHostedChatSignIn,
+} from "@/lib/hosted-chat-session";
+import {
   runInitialHostedChatRetries,
   shouldRetryHostedChatRequest,
   type HostedChatRetryAttempt,
@@ -60,6 +65,7 @@ type HostedChatContextValue = {
   state: HostedChatState | null;
   transportError: string | null;
   claimError: string | null;
+  sessionError: string | null;
   streamConnected: boolean;
   ownerClaimed: boolean;
   bindingRecoveryRequired: boolean;
@@ -67,6 +73,13 @@ type HostedChatContextValue = {
   load: (showError?: boolean) => Promise<HostedChatRetryAttempt>;
   claimOwner: (showError?: boolean) => Promise<HostedChatRetryAttempt>;
   recoverBinding: () => Promise<HostedChatRetryAttempt>;
+  /**
+   * Terminal session handling for a caught chat error: true when the error
+   * was a 401 session failure (the person is being routed to sign-in and the
+   * caller must not also present it as a transport/claim/action error).
+   */
+  reportSessionAuthFailure: (error: unknown) => boolean;
+  signInAgain: () => void;
   dispatch: (action: HostedChatAction) => Promise<HostedChatState>;
   dispatchQuiet: (action: HostedChatAction) => Promise<HostedChatState | null>;
   refreshPendingChat: (target: PendingChatRefreshTarget) => Promise<boolean>;
@@ -91,6 +104,7 @@ export function HostedChatProvider({
   const [state, setState] = useState<HostedChatState | null>(null);
   const [transportError, setTransportError] = useState<string | null>(null);
   const [claimError, setClaimError] = useState<string | null>(null);
+  const [sessionError, setSessionError] = useState<string | null>(null);
   const [streamConnected, setStreamConnected] = useState(false);
   const [ownerClaimed, setOwnerClaimed] = useState(false);
   const [bindingRecoveryRequired, setBindingRecoveryRequired] = useState(false);
@@ -101,6 +115,7 @@ export function HostedChatProvider({
   const lastLoadErrorRef = useRef<string | null>(null);
   const ownerClaimRef = useRef<Promise<HostedChatRetryAttempt> | null>(null);
   const lastClaimErrorRef = useRef<string | null>(null);
+  const sessionAuthFailureRef = useRef(false);
   const navigationMutationTailRef = useRef<Promise<void>>(Promise.resolve());
   const nextMutationSequenceRef = useRef(0);
   const latestAppliedMutationSequenceRef = useRef(0);
@@ -191,6 +206,25 @@ export function HostedChatProvider({
     return true;
   }, [setMergedState]);
 
+  // A 401 from a hosted-device chat route means the WorkOS session itself is
+  // dead. That is not a transport error: retrying can never succeed, so the
+  // person is routed to sign-in by full-page navigation (which also replaces
+  // any stale deployment bundle a zombie tab is still running) and the chat
+  // error surfaces keep clear of the dead "Retry load" path.
+  const reportSessionAuthFailure = useCallback((error: unknown) => {
+    if (!isHostedChatSessionAuthFailure(error)) return false;
+    sessionAuthFailureRef.current = true;
+    setSessionError(hostedChatErrorMessage(error));
+    setTransportError(null);
+    setClaimError(null);
+    redirectToHostedChatSignIn(currentHostedChatReturnPath());
+    return true;
+  }, []);
+
+  const signInAgain = useCallback(() => {
+    redirectToHostedChatSignIn(currentHostedChatReturnPath(), { force: true });
+  }, []);
+
   const load = useCallback((showError = true) => {
     if (stateLoadRef.current) return stateLoadRef.current;
     const requestGeneration = snapshotSourceRef.current.generation;
@@ -206,6 +240,7 @@ export function HostedChatProvider({
         setBindingRecoveryRequired(false);
         return "succeeded";
       } catch (caught) {
+        if (reportSessionAuthFailure(caught)) return "stop";
         const message = hostedChatErrorMessage(caught);
         setBindingRecoveryRequired(
           caught instanceof HostedChatHttpError &&
@@ -224,7 +259,7 @@ export function HostedChatProvider({
       if (stateLoadRef.current === pending) stateLoadRef.current = null;
     });
     return pending;
-  }, [apiBase, applyHttpSnapshot]);
+  }, [apiBase, applyHttpSnapshot, reportSessionAuthFailure]);
 
   const claimOwner = useCallback((showError = true) => {
     if (ownerClaimRef.current) return ownerClaimRef.current;
@@ -235,6 +270,7 @@ export function HostedChatProvider({
         setClaimError(null);
         return "succeeded";
       } catch (caught) {
+        if (reportSessionAuthFailure(caught)) return "stop";
         const message = hostedChatErrorMessage(caught);
         lastClaimErrorRef.current = message;
         if (showError) setClaimError(message);
@@ -249,7 +285,7 @@ export function HostedChatProvider({
       if (ownerClaimRef.current === pending) ownerClaimRef.current = null;
     });
     return pending;
-  }, [apiBase]);
+  }, [apiBase, reportSessionAuthFailure]);
 
   const requestMutationSnapshot = useCallback(async (
     path: string,
@@ -292,10 +328,11 @@ export function HostedChatProvider({
       }
       return "succeeded";
     } catch (caught) {
+      if (reportSessionAuthFailure(caught)) return "stop";
       setTransportError(hostedChatErrorMessage(caught));
       return "stop";
     }
-  }, [requestMutationSnapshot]);
+  }, [requestMutationSnapshot, reportSessionAuthFailure]);
 
   const requestActionSnapshot = useCallback((
     action: HostedChatAction,
@@ -435,7 +472,11 @@ export function HostedChatProvider({
       () => load(false),
       controller.signal
     ).then((result) => {
-      if (result === "stop" && !controller.signal.aborted) {
+      if (
+        result === "stop" &&
+        !controller.signal.aborted &&
+        !sessionAuthFailureRef.current
+      ) {
         setTransportError(lastLoadErrorRef.current ?? CHAT_UNAVAILABLE_MESSAGE);
       }
     });
@@ -449,7 +490,11 @@ export function HostedChatProvider({
       () => claimOwner(false),
       controller.signal
     ).then((result) => {
-      if (result === "stop" && !controller.signal.aborted) {
+      if (
+        result === "stop" &&
+        !controller.signal.aborted &&
+        !sessionAuthFailureRef.current
+      ) {
         setClaimError(lastClaimErrorRef.current ?? CHAT_UNAVAILABLE_MESSAGE);
       }
     });
@@ -509,6 +554,10 @@ export function HostedChatProvider({
         nextEvents.close();
         events = null;
         setStreamConnected(false);
+        // A 401 already observed on a chat request means the session is dead
+        // and the page is heading to sign-in; reconnecting every second
+        // against a dead session is pure noise.
+        if (sessionAuthFailureRef.current) return;
         reconnectTimer = setTimeout(connect, STREAM_RECONNECT_DELAY_MS);
       });
     };
@@ -527,6 +576,7 @@ export function HostedChatProvider({
       state,
       transportError,
       claimError,
+      sessionError,
       streamConnected,
       ownerClaimed,
       bindingRecoveryRequired,
@@ -534,6 +584,8 @@ export function HostedChatProvider({
       load,
       claimOwner,
       recoverBinding,
+      reportSessionAuthFailure,
+      signInAgain,
       dispatch,
       dispatchQuiet,
       refreshPendingChat,
