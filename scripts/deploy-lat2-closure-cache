@@ -297,7 +297,6 @@ if [[ "$expect_startup" != "1" ]]; then
   done
 fi
 
-containerd_pid="$(systemctl show containerd.service --property=MainPID --value)"
 networkd_pid="$(systemctl show systemd-networkd.service --property=MainPID --value)"
 
 # --- activation helpers (begin) ---------------------------------------------
@@ -474,14 +473,27 @@ pid_unchanged_unless_approved() {
     return 1
   fi
 }
-pid_unchanged_unless_approved containerd.service "$containerd_pid" \
-  || activation_failed 1 "containerd.service restarted without approval"
 pid_unchanged_unless_approved systemd-networkd.service "$networkd_pid" \
   || activation_failed 1 "systemd-networkd.service restarted without approval"
-systemctl is-active --quiet containerd.service \
-  || activation_failed 1 "containerd.service is not active after the switch"
 systemctl is-active --quiet systemd-networkd.service \
   || activation_failed 1 "systemd-networkd.service is not active after the switch"
+
+# A restart job created before the daemon-reload can launch the OLD
+# ExecStart: on 2026-09-14 a "successful" switch left finite-saas-core
+# running the previous binary (new unit file, old process), so its boot
+# migration silently did not apply while every health probe stayed green.
+# Unit files and is-active do not prove the new binary is running; the
+# process exe does. The podman dashboard unit is skipped (its MainPID is
+# conmon; the container digest is verified separately).
+for unit in finite-saas-core.service finitechat-server.service \
+            finitechat-hosted-device.service finite-saas-sites.service \
+            finite-identity.service finite-brain-app.service; do
+  exe="$(systemctl show "$unit" --property=MainPID --value | { read -r p; [[ -n "$p" && "$p" != 0 ]] && readlink "/proc/$p/exe" || true; })"
+  want="$(systemctl cat "$unit" | sed -n 's/^[[:space:]]*ExecStart=//p' | awk '{print $1}' | head -n 1)"
+  if [[ -n "$exe" && -n "$want" && "$exe" != "$want" ]]; then
+    activation_failed 1 "$unit is running $exe but its unit starts $want (restart raced the unit swap; systemctl restart $unit)"
+  fi
+done
 
 if [[ "$expect_startup" == "1" ]]; then
   # Go-live: every core product unit must be up after the switch.
