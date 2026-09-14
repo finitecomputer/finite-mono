@@ -24,6 +24,7 @@ import {
   FileTextIcon,
   ImageIcon,
   Loader2Icon,
+  LogInIcon,
   MicIcon,
   MonitorIcon,
   PanelLeftIcon,
@@ -64,6 +65,7 @@ import type {
 } from "@/lib/hosted-web-device";
 import { chatPreviewUrls } from "@/lib/chat-preview-urls";
 import { directHostedImageUrl } from "@/lib/hosted-chat-attachment-url";
+import { restoreHostedChatComposerDraft } from "@/lib/hosted-chat-session";
 import {
   BrainApprovalCards,
   BrainInvitationCards,
@@ -144,6 +146,7 @@ export function HostedWebChat({
     state,
     transportError,
     claimError,
+    sessionError,
     bindingRecoveryRequired,
     selectionPending,
     streamConnected,
@@ -151,6 +154,9 @@ export function HostedWebChat({
     load,
     claimOwner,
     recoverBinding,
+    reportSessionAuthFailure,
+    signInAgain,
+    noteComposerInput,
     dispatch,
     dispatchQuiet,
     refreshPendingChat,
@@ -168,6 +174,16 @@ export function HostedWebChat({
   const [sending, setSending] = useState(false);
   const [draft, setDraft] = useState(initialDraft ?? "");
   const [attachments, setAttachments] = useState<PendingAttachment[]>([]);
+  // Keep the provider current on unsent composer input so a session failure
+  // never auto-navigates away from a draft (and "Sign in again" can park it).
+  useEffect(() => {
+    noteComposerInput({ draftText: draft, attachmentCount: attachments.length });
+  }, [attachments.length, draft, noteComposerInput]);
+  // A draft parked by the sign-in round trip resumes the person's newer
+  // edits, so it outranks any ?prompt= the return URL still carries.
+  useEffect(() => {
+    setDraft(restoreHostedChatComposerDraft(machineId, initialDraft ?? ""));
+  }, [initialDraft, machineId]);
   const [pendingAgentTurns, setPendingAgentTurns] = useState<PendingChatTurn[]>([]);
   const [activityObservedAtMs, setActivityObservedAtMs] = useState<number | null>(null);
   const [leaseNowMs, setLeaseNowMs] = useState(() => Date.now());
@@ -623,6 +639,7 @@ export function HostedWebChat({
       if (pendingTurn) {
         setPendingAgentTurns((turns) => turns.filter((turn) => turn !== pendingTurn));
       }
+      if (reportSessionAuthFailure(caught)) return;
       setActionError(hostedChatErrorMessage(caught));
     } finally {
       setSending(false);
@@ -869,6 +886,7 @@ export function HostedWebChat({
       });
       setRenameOpen(false);
     } catch (caught) {
+      if (reportSessionAuthFailure(caught)) return;
       setActionError(hostedChatErrorMessage(caught));
     }
   }
@@ -1069,16 +1087,18 @@ export function HostedWebChat({
                 </button>
               ) : null}
 
-              {transportError || claimError || actionError ? (
+              {sessionError || transportError || claimError || actionError ? (
                 <div className="finite-chat__send-error" role="alert">
                   <strong>Chat needs attention</strong>
-                  <span>{transportError ?? claimError ?? actionError}</span>
+                  <span>{sessionError ?? transportError ?? claimError ?? actionError}</span>
                   <Button
                     type="button"
                     variant="outline"
                     size="sm"
                     onClick={() => {
-                      if (transportError) {
+                      if (sessionError) {
+                        signInAgain();
+                      } else if (transportError) {
                         void (bindingRecoveryRequired
                           ? recoverBinding()
                           : load(true));
@@ -1089,8 +1109,10 @@ export function HostedWebChat({
                       }
                     }}
                   >
-                    {transportError || claimError ? <RotateCcwIcon /> : null}
-                    {transportError
+                    {sessionError ? <LogInIcon /> : transportError || claimError ? <RotateCcwIcon /> : null}
+                    {sessionError
+                      ? "Sign in again"
+                      : transportError
                       ? bindingRecoveryRequired
                         ? "Finish chat setup"
                         : "Retry load"

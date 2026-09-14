@@ -9,4 +9,7 @@ export const CHAT_NAVIGATION_TIMEOUT_MESSAGE =
 
 export const CHAT_WAITING_FOR_AGENT_MESSAGE = "Waiting for your agent…";
 
+export const CHAT_SIGN_IN_DRAFT_UNSAVED_MESSAGE =
+  "Chat could not save your unsent message for the sign-in trip. Copy your text or free up storage, then try again.";
+
 export const CHAT_TOPIC_DESCRIPTION = "Topics keep related chats together.";

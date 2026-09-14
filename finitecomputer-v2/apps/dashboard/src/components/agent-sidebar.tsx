@@ -8,6 +8,7 @@ import {
   ArchiveRestoreIcon,
   ChevronRightIcon,
   HashIcon,
+  LogInIcon,
   MessageSquarePlusIcon,
   PanelLeftIcon,
   PencilIcon,
@@ -62,9 +63,12 @@ export function AgentSidebar({
   const {
     state,
     transportError,
+    sessionError,
     bindingRecoveryRequired,
     load,
     recoverBinding,
+    reportSessionAuthFailure,
+    signInAgain,
     dispatch,
   } = useHostedChat();
   const hydrated = useSyncExternalStore(
@@ -127,6 +131,7 @@ export function AgentSidebar({
       }
       return next;
     } catch (caught) {
+      if (reportSessionAuthFailure(caught)) return null;
       setActionError(caught instanceof Error
         ? caught.message
         : "That chat action is temporarily unavailable.");
@@ -134,7 +139,7 @@ export function AgentSidebar({
     } finally {
       setBusy(false);
     }
-  }, [dispatch, machineId, onMobileOpenChange, pathname, router]);
+  }, [dispatch, machineId, onMobileOpenChange, pathname, reportSessionAuthFailure, router]);
 
   function openChat(topic: HostedChatTopic, chat: HostedChatSummary) {
     void act({
@@ -285,7 +290,16 @@ export function AgentSidebar({
               <PlusIcon className="size-3.5" />
             </button>
           </div>
-          {!state && !transportError ? <p className="finite-agent-sidebar__status">Loading chats…</p> : null}
+          {!state && !transportError && !sessionError ? <p className="finite-agent-sidebar__status">Loading chats…</p> : null}
+          {sessionError ? (
+            <div className="finite-agent-sidebar__error">
+              <span>{sessionError}</span>
+              <Button type="button" variant="ghost" size="sm" onClick={signInAgain}>
+                <LogInIcon />
+                Sign in again
+              </Button>
+            </div>
+          ) : null}
           {transportError ? (
             <div className="finite-agent-sidebar__error">
               <span>{transportError}</span>
