@@ -1,0 +1,92 @@
+name: Monitoring dashboards
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'infra/monitoring/**'
+      - '.github/workflows/monitoring-dashboards.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+# Never interrupt a file replacement or rollback. The deploy script also rejects
+# revisions whose monitoring files have been superseded on main.
+concurrency:
+  group: monitoring-dashboards-production
+  cancel-in-progress: false
+
+env:
+  NIX_CONFIG: |
+    access-tokens = github.com=${{ github.token }}
+
+jobs:
+  validate:
+    if: github.ref == 'refs/heads/main'
+    runs-on: depot-ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: DeterminateSystems/nix-installer-action@v16
+      - uses: cachix/cachix-action@v17
+        with:
+          name: finite
+          skipPush: true
+      - name: Validate monitoring contracts, queries, and deployment recovery
+        run: nix develop --command just monitoring-nixos-contract
+
+  deploy:
+    needs: validate
+    runs-on: depot-ubuntu-24.04
+    timeout-minutes: 20
+    environment: production
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: DeterminateSystems/nix-installer-action@v16
+      - uses: cachix/cachix-action@v17
+        with:
+          name: finite
+          skipPush: true
+      - name: Configure existing production SSH credentials
+        env:
+          DEPLOY_KEY: ${{ secrets.FINITE_PRODUCTION_SSH_KEY }}
+          KNOWN_HOSTS: ${{ secrets.FINITE_PRODUCTION_KNOWN_HOSTS }}
+        run: |
+          set -euo pipefail
+          test -n "$DEPLOY_KEY"
+          test -n "$KNOWN_HOSTS"
+          install -d -m 0700 ~/.ssh
+          printf '%s\n' "$DEPLOY_KEY" > ~/.ssh/id_ed25519
+          printf '%s\n' "$KNOWN_HOSTS" > ~/.ssh/known_hosts
+          chmod 0600 ~/.ssh/id_ed25519 ~/.ssh/known_hosts
+          # No trust-on-first-use: both hosts must already be pinned.
+          ssh-keygen -F 152.236.5.27 > /dev/null
+          ssh-keygen -F 64.34.80.19 > /dev/null
+          ssh -o BatchMode=yes -o StrictHostKeyChecking=yes -o ConnectTimeout=15 \
+            ubuntu@152.236.5.27 'sudo -n true'
+      - name: Record platform status before deployment
+        id: before
+        run: |
+          scripts/with-dev-env python3 infra/monitoring/deploy_dashboards.py \
+            status --output "$RUNNER_TEMP/finite-status-before.json"
+      - name: Deploy and verify dashboards, restoring previous files on failure
+        run: scripts/with-dev-env python3 infra/monitoring/deploy_dashboards.py deploy
+      - name: Record platform status after deployment
+        if: always() && steps.before.outcome == 'success'
+        run: |
+          scripts/with-dev-env python3 infra/monitoring/deploy_dashboards.py \
+            status --output "$RUNNER_TEMP/finite-status-after.json"
+      - name: Preserve platform status evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: monitoring-dashboard-status-${{ github.sha }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/finite-status-*.json
+          if-no-files-found: ignore
+          retention-days: 14
+      - name: Remove SSH credentials
+        if: always()
+        run: rm -f ~/.ssh/id_ed25519 ~/.ssh/known_hosts

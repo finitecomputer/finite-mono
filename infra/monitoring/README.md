@@ -11,9 +11,12 @@ The active receiver config is `infra/monitoring/ubuntu/`. It runs:
 - Blackbox HTTP probes for the narrow public uptime dashboard
 - Caddy as the only public edge
 
-The Agent Runtime slots dashboard has a separate
-[dashboard-only deployment and rollback](runtime-slots.md). It uses existing
-metrics and does not require the full receiver deploy or Tinfoil collector.
+Production dashboard updates use the
+[dashboard-only deployment workflow](dashboards.md). The reviewed production
+list is `grafana/production.json`; it includes the overview and Agent Runtime
+slots dashboards and excludes the Tinfoil draft. Merges queue a deployment
+through GitHub's existing `production` environment approval gate. See
+[runtime slots](runtime-slots.md) for its query semantics and live checks.
 
 Prometheus, Loki, Grafana, and blackbox exporter bind only to loopback. Caddy
 terminates TLS and protects the metrics/log ingest routes with separate basic

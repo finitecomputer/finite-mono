@@ -67,6 +67,10 @@ remote_archive="$2"
 [[ "${rev}" =~ ^[0-9a-f]{40}$ ]] || exit 64
 [[ "${remote_archive}" == "/tmp/finite-monitoring-ubuntu-${rev}.tar.gz" ]] || exit 64
 
+# Serialize this existing dashboard writer with dashboard-only deployments.
+exec 9>/run/lock/finite-monitoring-dashboards.lock
+flock -n 9
+
 if [[ ! -r /etc/os-release ]]; then
   echo "cannot identify the operating system" >&2
   exit 1
