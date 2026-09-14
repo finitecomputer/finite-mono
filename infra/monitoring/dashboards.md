@@ -99,8 +99,10 @@ collectors, or metrics/log stores are changed. Loaded definitions do not prove
 useful query results; review live query behavior separately.
 
 The workflow records the installed canonical `scripts/finite-status` before and
-after deployment on the app-plane host, retaining reports as Actions artifacts
-for 14 days. Existing red/unknown platform state is recorded and does not prevent
+after deployment on the app-plane host, retaining only overall/section status
+summaries as Actions artifacts for 14 days. This repository is public: full
+reports with agent names, project IDs, addresses, and diagnostic details are
+never uploaded. Existing red/unknown platform state is recorded and does not prevent
 a dashboard repair. Transport and invalid-report failures fail the step.
 
 ## Rollback

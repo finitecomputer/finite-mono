@@ -289,7 +289,26 @@ def status(output):
     require(
         report.get("exit_code") == result.returncode, "finite-status exit code mismatch"
     )
-    Path(output).write_text(result.stdout)
+    # Actions artifacts are accessible with this public repository. Never
+    # publish the full report's agent names, project IDs, addresses, or errors.
+    summary = {
+        "schema_version": "finite.status.summary.v1",
+        "source_schema_version": report["schema_version"],
+        "generated_at": report["generated_at"],
+        "overall_status": report["overall_status"],
+        "exit_code": report["exit_code"],
+        "sections": {
+            name: {"status": report["sections"][name]["status"]}
+            for name in (
+                "fleet_convergence",
+                "host_health",
+                "recovery_boundary",
+                "rollout_state",
+                "chat_plane",
+            )
+        },
+    }
+    Path(output).write_text(json.dumps(summary, indent=2) + "\n")
     print(
         f"finite-status: {report['overall_status']} (exit {result.returncode}); evidence: {output}"
     )
