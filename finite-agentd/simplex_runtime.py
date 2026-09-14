@@ -184,24 +184,31 @@ def relay_settings(groups):
 async def configure_relays(home, *, url=None):
     user = (await command("/u", url=url))["user"]["userId"]
     get = f"/_servers {user}"
-    before = (await command(get, url=url))["userServers"]
+    current = (await command(get, url=url))["userServers"]
+    backup = home / "flux-relays-before.json"
+    # The backup is also durable intent. After interruption, compare the actual
+    # state with that intent instead of treating our inserted rows as owner policy.
+    before = json.loads(backup.read_text()) if backup.exists() else current
     after = relay_settings(before)
-    if after == before:
+    recovering = current != before
+    if not recovering and after == before:
         atomic_json(home / "flux-relays-ready.json", {"changed": False})
         return
-    encoded = json.dumps(after)
-    valid = await command(f"/_validate_servers {user} {encoded}", url=url)
-    if (
-        valid.get("serverErrors")
-        or valid.get("serverWarnings")
-        or valid.get("type") != "userServersValidation"
-    ):
-        raise RuntimeError("SimpleX relay settings failed validation")
-    backup = home / "flux-relays-before.json"
-    if not backup.exists():
-        atomic_json(backup, before)
-    await command(f"{get} {encoded}", url=url)
-    applied = (await command(get, url=url))["userServers"]
+    if not recovering:
+        encoded = json.dumps(after)
+        valid = await command(f"/_validate_servers {user} {encoded}", url=url)
+        if (
+            valid.get("serverErrors")
+            or valid.get("serverWarnings")
+            or valid.get("type") != "userServersValidation"
+        ):
+            raise RuntimeError("SimpleX relay settings failed validation")
+        if not backup.exists():
+            atomic_json(backup, before)
+        await command(f"{get} {encoded}", url=url)
+        applied = (await command(get, url=url))["userServers"]
+    else:
+        applied = current
     atomic_json(home / "flux-relays-after.json", applied)
     rollback = copy.deepcopy(before)
     old_ids = {s["serverId"] for g in before for s in g["xftpServers"]}
@@ -220,6 +227,9 @@ async def configure_relays(home, *, url=None):
             if entry["serverId"] not in old_ids:
                 entry["serverId"] = None
     if normalized != after:
+        if recovering:
+            # An owner may have edited settings since the interrupted attempt.
+            raise RuntimeError("Interrupted SimpleX relay setup needs operator review")
         await command(f"{get} {json.dumps(rollback)}", url=url)
         restored = (await command(get, url=url))["userServers"]
         if restored != before:

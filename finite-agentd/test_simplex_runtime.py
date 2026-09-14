@@ -353,6 +353,72 @@ class RelayTests(unittest.IsolatedAsyncioTestCase):
             self.assertIn(json.dumps(rollback), cmd.call_args_list[-2].args[0])
             self.assertFalse((home / "flux-relays-ready.json").exists())
 
+    async def test_restart_recovers_receipt_after_cancellation_at_commit(self):
+        before = self.defaults()
+        applied = runtime.relay_settings(before)
+        for index, entry in enumerate(applied[1]["xftpServers"], 2):
+            entry["serverId"] = index
+        with tempfile.TemporaryDirectory() as folder:
+            home = Path(folder)
+            interrupted = AsyncMock(
+                side_effect=[
+                    {"user": {"userId": 1}},
+                    {"userServers": before},
+                    {"type": "userServersValidation", "serverErrors": [], "serverWarnings": []},
+                    runtime.asyncio.CancelledError,
+                ]
+            )
+            with (
+                patch.object(runtime, "command", interrupted),
+                self.assertRaises(runtime.asyncio.CancelledError),
+            ):
+                await runtime.configure_relays(home)
+            self.assertTrue((home / "flux-relays-before.json").exists())
+            self.assertFalse((home / "flux-relays-ready.json").exists())
+            # The released daemon committed before the connection disappeared.
+            with patch.object(
+                runtime,
+                "command",
+                AsyncMock(
+                    side_effect=[
+                        {"user": {"userId": 1}},
+                        {"userServers": applied},
+                    ]
+                ),
+            ) as cmd:
+                await runtime.configure_relays(home)
+                self.assertEqual(len(cmd.call_args_list), 2)  # recovery is read-only
+            self.assertTrue((home / "flux-relays-ready.json").exists())
+            rollback = json.loads((home / "flux-relays-rollback.json").read_text())
+            self.assertEqual(rollback[0], before[0])
+            self.assertTrue(all(s["deleted"] for s in rollback[1]["xftpServers"]))
+
+    async def test_interrupted_setup_with_later_owner_edit_fails_closed(self):
+        before = self.defaults()
+        changed = runtime.relay_settings(before)
+        for index, entry in enumerate(changed[1]["xftpServers"], 2):
+            entry["serverId"] = index
+        changed[1]["xftpServers"][0]["enabled"] = True
+        with tempfile.TemporaryDirectory() as folder:
+            home = Path(folder)
+            (home / "flux-relays-before.json").write_text(json.dumps(before))
+            with (
+                patch.object(
+                    runtime,
+                    "command",
+                    AsyncMock(
+                        side_effect=[
+                            {"user": {"userId": 1}},
+                            {"userServers": changed},
+                        ]
+                    ),
+                ) as cmd,
+                self.assertRaisesRegex(RuntimeError, "operator review"),
+            ):
+                await runtime.configure_relays(home)
+            self.assertEqual(len(cmd.call_args_list), 2)
+            self.assertFalse((home / "flux-relays-ready.json").exists())
+
     async def test_slow_preparation_is_bounded_and_closes_maintenance_child(self):
         from types import SimpleNamespace
 
