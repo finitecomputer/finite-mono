@@ -365,7 +365,7 @@
 
           devShells = {
             crate2nix = pkgs.mkShell {
-              packages = [ pkgs.crate2nix rustToolchain pkgs.git ];
+              packages = [ pkgs.crate2nix rustToolchain pkgs.git pkgs.ripgrep ];
             };
             default = pkgs.mkShell {
               packages =
