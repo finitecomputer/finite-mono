@@ -1,6 +1,6 @@
 # Cutting a CLI release (finitechat / fsite / fbrain)
 
-GitHub `finitecomputer/finite-mono` is the source authority. GitHub Actions
+GitHub `finitecomputer/finite-mono` is the source authority. Native Depot CI
 builds the release from component-scoped source tags and publishes metadata and
 binary assets to the public `finitecomputer/finite-releases` repository. The
 release repository never contains product source.
@@ -8,16 +8,18 @@ release repository never contains product source.
 Asset names are product contracts. Installers use the per-component rolling
 alias rather than GitHub's repository-wide `releases/latest` pointer:
 
-| Component | Source tag | GitHub Actions workflow | Rolling alias |
+| Component | Source tag | Depot workflow | Rolling alias |
 |---|---|---|---|
-| finitechat | `finitechat/vX.Y.Z` | `.github/workflows/release-finitechat.yml` | `finitechat-latest` |
-| fsite | `fsite/vX.Y.Z` | `.github/workflows/release-fsite.yml` | `fsite-latest` |
-| fbrain | `fbrain/vX.Y.Z` | `.github/workflows/release-fbrain.yml` | `fbrain-latest` |
+| finitechat | `finitechat/vX.Y.Z` | `.depot/workflows/release-finitechat.yml` | `finitechat-latest` |
+| fsite | `fsite/vX.Y.Z` | `.depot/workflows/release-fsite.yml` | `fsite-latest` |
+| fbrain | `fbrain/vX.Y.Z` | `.depot/workflows/release-fbrain.yml` | `fbrain-latest` |
 
-The release workflows publish CLI archives for linux-x86_64, macos-aarch64,
-and macos-x86_64, each with a `.sha256` sibling. `fsite` also publishes
-`finitesitesd` for linux-x86_64; `fbrain` also publishes `finite-brain` for
-linux-x86_64.
+The migrated Depot workflows currently publish Linux x86_64 archives and their
+`.sha256` siblings. `fsite` also publishes `finitesitesd` for linux-x86_64;
+`fbrain` also publishes `finite-brain` for linux-x86_64. macOS CLI and Electron
+publication are paused until a dedicated macOS release lane is reintroduced.
+Existing versioned macOS assets remain available, but a new release must not
+claim to refresh them.
 
 Install URL shape:
 
@@ -26,12 +28,13 @@ Install URL shape:
 ## Preconditions
 
 - The exact source commit is on GitHub `main` and `CI gate` is green.
-- `FINITE_RELEASES_GITHUB_TOKEN` is available to GitHub Actions and scoped only
-  to Contents write on `finitecomputer/finite-releases`.
-- Repository variable `FINITE_RELEASE_PUBLISH_ENABLED` is exactly `true`. Leave
-  it unset for shadow runs so disposable tags cannot publish.
+- Depot holds `FINITE_RELEASES_GITHUB_TOKEN`, scoped only to Contents write on
+  `finitecomputer/finite-releases`.
+- Depot variable `FINITE_RELEASE_PUBLISH_ENABLED` is exactly `true`. Leave it
+  unset for shadow runs so disposable tags cannot publish.
 - The version is newer than `git tag -l '<component>/v*'`, and the matching
   release-repository tag does not already identify different metadata.
+- The release does not depend on Electron packaging.
 
 ## Release-host backfill
 
@@ -54,8 +57,8 @@ repair.
    in `infra/deployment-changelog.md` in the same PR as the final release
    changes. A release that changes nothing about compatibility needs no record
    beyond its tag.
-3. Merge the release changes to GitHub `main` and prove the required CI check
-   is green.
+3. Merge the release changes to GitHub `main` and prove the required Depot
+   check is green.
 4. Tag the exact merge commit and push:
 
    ```sh
@@ -64,12 +67,23 @@ repair.
    ```
 
    Use the same shape with `fsite/` or `fbrain/` prefixes.
-5. Watch the matching GitHub Actions release workflow. The workflow derives and
-   checks both version and source SHA from the tag. Publication records
-   `release.json`, creates the matching component tag in `finite-releases`,
-   checksum-verifies every versioned asset after upload, and only then refreshes
-   the rolling alias. A retry reuses already verified immutable assets rather
-   than rebuilding them.
+5. If GitHub tag events are connected to Depot, watch the matching release
+   workflow. If not, dispatch that workflow at the fully qualified tag ref:
+
+   ```sh
+   depot ci dispatch \
+     --repo finitecomputer/finite-mono \
+     --workflow release-finitechat.yml \
+     --ref refs/tags/finitechat/vX.Y.Z \
+     --input publish=true \
+     --input alias_only=false
+   ```
+
+   The workflow derives and checks both version and source SHA from the tag.
+   Publication records `release.json`, creates the matching component tag in
+   `finite-releases`, checksum-verifies every versioned asset after upload,
+   and only then refreshes the rolling alias. A retry reuses already verified
+   immutable assets rather than rebuilding them.
 
 ## Verify
 
@@ -78,7 +92,7 @@ repair.
 2. Repeat through the rolling alias.
 3. Run the component README's clean-install block away from this checkout and
    confirm `--version`.
-4. Confirm `release.json` names the source SHA and GitHub Actions run ID.
+4. Confirm `release.json` names the source SHA and Depot run ID.
 
 Example alias verification:
 
@@ -98,12 +112,13 @@ downloads the previous versioned release, verifies every asset against
 `release.json` and its checksum sibling, and moves the alias without rebuilding:
 
 ```sh
-gh workflow run release-finitechat.yml \
+depot ci dispatch \
   --repo finitecomputer/finite-mono \
+  --workflow release-finitechat.yml \
   --ref main \
-  -f publish=true \
-  -f alias_only=true \
-  -f release_tag=finitechat/vPREVIOUS
+  --input publish=true \
+  --input alias_only=true \
+  --input release_tag=finitechat/vPREVIOUS
 ```
 
 Do not delete a versioned release or overwrite its assets.
