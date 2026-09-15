@@ -8,4 +8,4 @@ let
   };
   rust = pkgs.rust-bin.fromRustupToolchainFile (root + "/rust-toolchain.toml");
 in
-[ pkgs.crate2nix pkgs.python3 pkgs.git rust ]
+[ pkgs.crate2nix pkgs.git rust ]

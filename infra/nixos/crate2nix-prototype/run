@@ -1,5 +1,0 @@
-#!/usr/bin/env bash
-set -euo pipefail
-prototype_dir="$(cd "$(dirname "$0")" && pwd)"
-exec nix shell --impure --file "$prototype_dir/tools.nix" \
-  -c python3 "$prototype_dir/probe.py" "$@"

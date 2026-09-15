@@ -40,8 +40,9 @@ jobs:
         env:
           BENCHMARK_ENGINE: ${{ matrix.engine }}
         run: |
-          infra/nixos/crate2nix-prototype/benchmark "$BENCHMARK_ENGINE" \
-            --output "$RUNNER_TEMP/crate2nix-benchmark"
+          nix shell --impure --file infra/nixos/crate2nix-prototype/tools.nix \
+            -c bash infra/nixos/crate2nix-prototype/benchmark \
+            "$BENCHMARK_ENGINE" "$RUNNER_TEMP/crate2nix-benchmark"
       - name: Upload timings and diagnostic logs
         if: always()
         uses: actions/upload-artifact@v4
@@ -49,11 +50,7 @@ jobs:
           name: crate2nix-benchmark-${{ matrix.engine }}
           if-no-files-found: warn
           path: |
-            ${{ runner.temp }}/crate2nix-benchmark/*.json
             ${{ runner.temp }}/crate2nix-benchmark/*.md
             ${{ runner.temp }}/crate2nix-benchmark/*.log
-            ${{ runner.temp }}/crate2nix-benchmark/*.stdout
-            ${{ runner.temp }}/crate2nix-benchmark/sources/*.json
-            ${{ runner.temp }}/crate2nix-benchmark/sources/*.log
-            ${{ runner.temp }}/crate2nix-benchmark/sources/*.stderr
-            ${{ runner.temp }}/crate2nix-benchmark/sources/*.txt
+            ${{ runner.temp }}/crate2nix-benchmark/*.paths
+            ${{ runner.temp }}/crate2nix-benchmark/*.seconds

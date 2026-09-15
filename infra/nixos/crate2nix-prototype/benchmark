@@ -1,5 +1,50 @@
 #!/usr/bin/env bash
 set -euo pipefail
 prototype_dir="$(cd "$(dirname "$0")" && pwd)"
-exec nix shell --impure --file "$prototype_dir/tools.nix" \
-  -c python3 "$prototype_dir/benchmark.py" "$@"
+repo_root="$(git -C "$prototype_dir" rev-parse --show-toplevel)"
+engine="${1:?Specify crane or crate2nix}"
+mkdir "${2:?Specify a new output directory}"
+output="$(cd "$2" && pwd -P)"
+mkdir "$output/pristine"
+git -C "$repo_root" archive HEAD | tar -x -C "$output/pristine"
+summary="$output/summary.md"
+{
+  printf '## %s packaging benchmark\n\n' "$engine"
+  printf 'Source: %s\n\n' "$(git -C "$repo_root" rev-parse HEAD)"
+  printf 'Services: finitesitesd and finite-saas-core. Public Nix cache only.\n'
+  printf 'Rebuilds reuse the local store; this is not a fresh-runner cache test.\n\n'
+  printf '| Case | Preparation (s) | Build (s) | Exit code |\n| --- | ---: | ---: | ---: |\n'
+} > "$summary"
+TIMEFORMAT=%R
+
+for scenario in baseline identical sites-source sites-dependency; do
+  echo "Preparing $engine: $scenario"
+  source_dir="$output/$scenario"
+  cp -R "$output/pristine" "$source_dir"
+  started=$SECONDS
+  if [[ "$scenario" == sites-source ]]; then
+    printf '\n// Benchmark source edit.\n' >> "$source_dir/finite-sites/crates/finitesites-engine/src/lib.rs"
+  elif [[ "$scenario" == sites-dependency ]]; then
+    printf '\n[dependencies.hex]\nworkspace = true\n' >> "$source_dir/finite-sites/crates/finitesites-engine/Cargo.toml"
+    (cd "$source_dir" && cargo metadata --format-version 1 --all-features) > "$output/$scenario.metadata.log" 2>&1
+  fi
+  if [[ "$engine" == crate2nix ]]; then
+    (cd "$source_dir" && crate2nix generate) > "$output/$scenario.generate.log" 2>&1
+  fi
+  preparation=$((SECONDS - started))
+  echo "Building $engine: $scenario"
+  status=0
+  { time nix-build "$prototype_dir/benchmark.nix" --no-out-link \
+      --argstr source "$source_dir" --argstr engine "$engine" \
+      --option builders '' --option substituters https://cache.nixos.org \
+      --cores 8 --max-jobs 8 > "$output/$scenario.paths" 2> "$output/$scenario.build.log";
+  } 2> "$output/$scenario.seconds" || status=$?
+  printf '| %s | %s | %s | %s |\n' "$scenario" "$preparation" "$(cat "$output/$scenario.seconds")" "$status" | tee -a "$summary"
+  if [[ -n "${GITHUB_STEP_SUMMARY:-}" ]]; then
+    cp "$summary" "$GITHUB_STEP_SUMMARY"
+  fi
+  if [[ "$status" != 0 ]]; then
+    tail -100 "$output/$scenario.build.log"
+    exit "$status"
+  fi
+done
