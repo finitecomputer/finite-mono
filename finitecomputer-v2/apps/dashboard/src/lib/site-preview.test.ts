@@ -2,8 +2,12 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { createServer } from "node:http";
 import { once } from "node:events";
+import { mkdtemp, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 
 import {
+  createSitePreviewSession,
   localOutputsEnabled,
   parseSitePreviewTarget,
   parseViewerSessionResponse,
@@ -11,6 +15,88 @@ import {
   SitePreviewError,
   sitesUpstreamOrigin,
 } from "@/lib/site-preview";
+
+test("authorized previews fall back to email when their exchange is unavailable", async (t) => {
+  const saved = { ...process.env };
+  t.after(() => { process.env = saved; });
+  const root = await mkdtemp(join(tmpdir(), "site-preview-fallback-"));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const exchanges: string[] = [];
+  let status = 503;
+  let disconnect = false;
+  async function backend(name: "v2" | "legacy") {
+    const server = createServer((request, response) => {
+      if (request.url === "/api/core/v1/me") {
+        response.writeHead(200, { "content-type": "application/json" });
+        response.end(JSON.stringify({ projects: [{
+          project: { id: "project-preview", display_name: "Preview" },
+          runtime: { id: "runtime-preview" },
+        }] }));
+      } else if (request.url === "/internal/v1/viewer-sessions") {
+        exchanges.push(name);
+        if (disconnect) request.socket.destroy();
+        else {
+          response.writeHead(status);
+          response.end();
+        }
+      } else {
+        response.writeHead(404);
+        response.end();
+      }
+    });
+    server.listen(0, "127.0.0.1");
+    await once(server, "listening");
+    t.after(async () => {
+      server.closeAllConnections();
+      await new Promise<void>((resolve) => server.close(() => resolve()));
+    });
+    const address = server.address();
+    assert(address && typeof address !== "string");
+    return `http://127.0.0.1:${address.port}`;
+  }
+  const v2 = await backend("v2");
+  const legacy = await backend("legacy");
+  process.env = {
+    ...process.env, NODE_ENV: "development", PATH: "", FC_FINITED_BIN: "",
+    FC_REPO_ROOT: root, FC_WORKSPACE_ROOT: root, FC_CONTROL_PLANE_ROOT: root,
+    FC_WORKOS_AUTH_ENABLED: "0", FC_DASHBOARD_ALLOW_DEV_ACCOUNT_AUTH: "1",
+    FC_DASHBOARD_DEV_EMAIL: "friend@example.com", FC_DASHBOARD_DEV_WORKOS_USER_ID: "user_preview",
+    FC_DASHBOARD_DEV_WORKOS_ACCESS_TOKEN: "local-preview-fixture",
+    FC_CORE_BASE_URL: v2, FC_SITES_V2_UPSTREAM_URL: v2, FC_SITES_UPSTREAM_URL: legacy,
+    FINITE_SITES_VIEWER_SESSION_TOKEN: "ab".repeat(32),
+  };
+  const url = "https://hello.finite.site/docs?view=one";
+  const fallback = { url: "https://hello.finite.site/_finite/sign-in", originalUrl: url };
+  for (status of [503, 401, 429]) {
+    const before = exchanges.length;
+    assert.deepEqual(await createSitePreviewSession("runtime-preview", url), fallback);
+    assert.deepEqual(exchanges.slice(before), ["v2"]);
+  }
+  disconnect = true;
+  assert.deepEqual(await createSitePreviewSession("runtime-preview", url), fallback);
+  disconnect = false;
+  for (const origin of ["", "https://finite.site/internal", "file:///tmp/sites"]) {
+    process.env.FC_SITES_V2_UPSTREAM_URL = origin;
+    const before = exchanges.length;
+    assert.deepEqual(await createSitePreviewSession("runtime-preview", url), fallback);
+    assert.equal(exchanges.length, before);
+  }
+  process.env.FC_SITES_V2_UPSTREAM_URL = v2;
+  const beforeDenied = exchanges.length;
+  await assert.rejects(createSitePreviewSession("other-runtime", url),
+    (error: unknown) => error instanceof SitePreviewError && error.status === 404);
+  for (const invalid of ["http://127.0.0.1/private", "https://evil.example/", "https://hello.finite.site/_finite/auth?token=x"]) {
+    await assert.rejects(createSitePreviewSession("runtime-preview", invalid),
+      (error: unknown) => error instanceof SitePreviewError && error.status === 400);
+  }
+  assert.equal(exchanges.length, beforeDenied);
+  assert(!exchanges.includes("legacy"));
+  const legacyUrl = "https://app.finite.chat/docs?view=one";
+  assert.deepEqual(await createSitePreviewSession("runtime-preview", legacyUrl), {
+    url: legacyUrl, originalUrl: legacyUrl,
+  });
+  assert.equal(exchanges.at(-1), "legacy");
+});
 
 test("Finite site preview targets split the canonical output origin from navigation", () => {
   assert.deepEqual(

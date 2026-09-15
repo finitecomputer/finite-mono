@@ -685,10 +685,11 @@ async fn redeem_link(
                 return html_response(StatusCode::BAD_REQUEST, pages::link_invalid());
             }
             let email_has_access = match verified_email.as_deref() {
-                Some(email) => {
+                Some(_) => {
                     let engine = state.engine.lock().expect("engine mutex never poisoned");
-                    match engine.email_can_view_site(&site, email) {
-                        Ok(allowed) => allowed,
+                    match engine.view_access(&site, Some(&cookie_value), now_unix()) {
+                        Ok(ViewAccess::Allowed) => true,
+                        Ok(ViewAccess::NeedsLogin) => false,
                         Err(error) => {
                             eprintln!("finitesitesd email access error: {error}");
                             return internal_page();
