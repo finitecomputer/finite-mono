@@ -78,15 +78,6 @@ select the dev mailer with `--mailer dev`; omitting the flag is an error.
   plus key rotation and destructive recovery tests, before durable first-slice
   publishing. Direct operator SQL is not the product recovery flow.
 
-## 7. RESOLVED — NIP-98 URL matching verified through the live proxy
-
-`https://api.finite.chat` is pinned end to end and the signed-call gate
-passed on 2026-06-09 and later updated to the Project Repository flow:
-project init plus git push from a remote machine through Cloudflare
-succeeded against finite-lat-2. The residual behavior (a
-misconfigured `--api-url` fails closed with "url mismatch") remains the
-expected signed-call behavior.
-
 ## 8. Static-only Sites boundary
 
 Under [ADR 0028](adr/0028-static-only-sites-platform-service.md), the Sites
@@ -107,24 +98,15 @@ missing output failure, restart reconciliation after a ref update before
 deploy, and idempotent replay after Version creation before event
 acknowledgement.
 
-## 10. RETIRED — `reconcile-identity` one-shot migration command
+## 10. Test-fixture reconciliation helpers
 
-- **Source**: the mailbox-grant → native-Principal reconciliation was a
-  completed one-shot migration. Its optional Core cross-check called
-  `/api/core/v1/brain/agent-account`, which the auth-kernel stack deleted
-  (its only consumers are gone).
-- **Risk**: none from removal — the migration already ran; durable grants
-  were rewritten additively and the command was never part of startup.
-  The store-layer reconciliation helpers stay because the engine and store
-  test fixtures still exercise their local invariants (e.g. automated
-  evidence never resurrects a revoked key).
-- **Proof**: `finitesitesd reconcile-identity`, its Directory/Core clients
-  (`crates/finitesitesd/src/identity.rs`), and the devfinity smoke
-  operator-boundary check are deleted; the daemon no longer reads
-  `FINITE_IDENTITY_AUTHORITY` / `FC_CORE_API_*` anywhere.
-- **Delete condition**: this entry is the permanent record; remove the
-  store-layer helpers only with a dedicated store cleanup that rewrites the
-  fixtures that use them.
+- **Source**: engine and store test fixtures use store-layer reconciliation
+  helpers to exercise identity/grant invariants.
+- **Risk**: removing the helpers without replacing their callers would lose
+  coverage, including rejection of automated evidence for revoked keys.
+- **Delete condition**: replace those fixture callers with equivalent invariant
+  coverage before removing the helpers. They are not a daemon command or a
+  startup migration.
 
 ## 11. Retained legacy viewer-session exchange
 
