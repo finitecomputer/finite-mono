@@ -1,7 +1,9 @@
 # Static Sites Migration Exceptions
 
 Scope: the September 14, 2026 source receipt, inspected on September 15 using
-disposable copies. Apps and documents remain authoritative on legacy. This is
+disposable copies. The September 15 decision retires apps, documents and
+unpublished/missing-source projects at cutover; only the agreed published static
+sites migrate. Legacy remains authoritative until cutover. This is
 one-time offline preparation, not a migration framework or cutover approval.
 No production mutations, routing changes, deploys or remote requests were made.
 Customer identifiers, source/config contents and selections remain outside git.
@@ -11,8 +13,8 @@ Customer identifiers, source/config contents and selections remain outside git.
 | Exception | Evidence | Safe handling |
 | --- | --- | --- |
 | `mockup`, `web` | Each project has exactly one published static output, no runtime fields and no canonical ID collision. Both copied repositories pass `git fsck --full`. Each committed config selects one static output and matches the registry's name, branch, path and SPA setting. | On a new offline registry copy, change only the explicitly selected `output_id` to `site`. Keep the output row primary key, project/site IDs, attribution, names, versions, shares and Git references. Both conversions were rehearsed successfully. |
-| `static`, the mixed project | One static output and one app output share a project and deploy branch, with different deploy paths. The branch's committed config declares both outputs. The repository passes `git fsck --full`. | Keep gated for explicit owner/operator disposition of Git publishing authority and config. Renaming alone does not fix the rejected two-output config. Preserve the app and its config on legacy; do not split ownership, rewrite its shared branch, or invent a new project. |
-| Four missing repositories | All four projects have one unpublished static output, one active name claim, no active version, zero historical versions, zero publishes and zero Git events. Their source repository directories are absent. | Preserve records, ownership and name claims. Keep source recovery/owner disposition gated. Do not create empty repos, reconstruct rendered content, delete claims or claim successful source recovery. |
+| `static`, the mixed project | One static output and one app output share a project and deploy branch, with different deploy paths. The branch's committed config declares both outputs. The repository passes `git fsck --full`. | The app is retired. Preserving the published static site still requires explicit selection, a static-only config on the isolated copy and a successful subsequent publish. This tool deliberately rejects mixed projects; renaming alone is insufficient. Do not rewrite the live source branch. |
+| Four missing repositories | All four projects have one unpublished static output, one active name claim, no active version, zero historical versions, zero publishes and zero Git events. Their source repository directories are absent. | Exclude from the cutover candidate under the retirement decision, preserving the source archive. Do not create empty repos, reconstruct rendered content or claim successful source recovery. |
 
 The three source `sites.kind='static'` rows removed by startup are separate from
 the four missing repositories: all three are unpublished, associated with **app**
