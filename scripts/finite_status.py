@@ -415,6 +415,12 @@ def psql_query_sets(environment: dict[str, str]) -> dict[str, list[dict[str, Any
             ["source_host_id", "version_label", "count"],
         ),
         (
+            "agent_creation_requests",
+            "SELECT id, project_id, display_name, status, target_source_host_id, runner_id, agent_runtime_id "
+            "FROM agent_creation_requests WHERE status IN ('requested', 'launching') ORDER BY created_at, id;",
+            ["id", "project_id", "display_name", "status", "target_source_host_id", "runner_id", "agent_runtime_id"],
+        ),
+        (
             "runtimes",
             RUNTIME_DETAILS_QUERY,
             [
@@ -1567,6 +1573,7 @@ def build_fleet(
         "recorded_distribution": distribution,
         "distribution_consistent_with_detail_snapshot": distribution_consistent,
         "hosts": host_reports,
+        "agent_creation_requests": core.get("agent_creation_requests", []),
     }
     if probe is not None:
         report["lifecycle_probe"] = {

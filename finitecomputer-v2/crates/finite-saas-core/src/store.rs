@@ -264,6 +264,77 @@ impl CoreStore {
         Ok(response)
     }
 
+    /// Root-only operator command: bind an unused code issued by the named
+    /// existing operator. No user/project/runtime row is rewritten.
+    pub async fn target_launch_code_exact(
+        &self,
+        code_id: &str,
+        expected_batch_id: &str,
+        source_host_id: &str,
+        operator_email: &str,
+        operator_workos_user_id: &str,
+    ) -> CoreResult<()> {
+        let host = normalize_source_host_id(source_host_id)?;
+        let email =
+            normalize_owner_email(Some(operator_email)).ok_or(CoreError::MissingVerifiedEmail)?;
+        let mut client = self.connection().await?;
+        let tx = client.transaction().await.map_err(store_error)?;
+        let operator = select_user_by_email(&*tx, &email)
+            .await?
+            .filter(|user| user.workos_user_id.as_deref() == Some(operator_workos_user_id))
+            .ok_or(CoreError::WorkosUserConflict)?;
+        let row = tx
+            .query_opt(
+                "SELECT code.id FROM launch_codes code
+             JOIN launch_code_batches batch ON batch.id = code.batch_id
+             WHERE code.id = $1 AND code.batch_id = $2
+               AND batch.created_by_workos_user_id = $3
+               AND COALESCE(batch.hosting_tier, 'standard') = 'standard'
+               AND batch.revoked_at IS NULL AND batch.expires_at > CURRENT_TIMESTAMP
+               AND code.redeemed_customer_org_id IS NULL
+               AND code.redemption_idempotency_key IS NULL AND code.redeemed_at IS NULL
+             FOR UPDATE OF code, batch",
+                &[&code_id, &expected_batch_id, &operator_workos_user_id],
+            )
+            .await
+            .map_err(store_error)?;
+        if row.is_none() {
+            return Err(CoreError::InvalidLaunchCode);
+        }
+        let existing = tx
+            .query_opt(
+                "SELECT source_host_id FROM launch_code_host_targets WHERE launch_code_id = $1",
+                &[&code_id],
+            )
+            .await
+            .map_err(store_error)?;
+        if let Some(existing) = existing {
+            if existing.get::<_, String>("source_host_id") != host {
+                return Err(CoreError::RuntimeSpecMismatch);
+            }
+        } else {
+            tx.execute(
+                "INSERT INTO launch_code_host_targets
+                 (launch_code_id, source_host_id, created_by_workos_user_id, created_at)
+                 VALUES ($1, $2, $3, CURRENT_TIMESTAMP)",
+                &[&code_id, &host, &operator_workos_user_id],
+            )
+            .await
+            .map_err(store_error)?;
+            insert_finite_private_admin_audit_event(&*tx, FinitePrivateAdminAuditInsert {
+                action: "launch_code.target_host",
+                target_type: "launch_code",
+                target_id: code_id,
+                grant_id: None,
+                api_key_id: None,
+                actor: Some(&email),
+                metadata: serde_json::json!({"sourceHostId":host,"batchId":expected_batch_id,"operatorUserId":operator.id}),
+                now: &current_time_iso()?,
+            }).await?;
+        }
+        self.finish(tx).await
+    }
+
     pub async fn list_launch_code_batches(&self) -> CoreResult<Vec<LaunchCodeBatchDetails>> {
         let client = self.connection().await?;
         postgres_list_launch_code_batches(&**client).await
@@ -1114,6 +1185,13 @@ where
     let placement = configuration
         .placement
         .unwrap_or_else(|| RuntimePlacement::for_hosting_tier(hosting_tier));
+    if locked_launch_code
+        .as_ref()
+        .is_some_and(|code| code.target_source_host_id.is_some())
+        && placement.runner_class != crate::RunnerClass::Kata
+    {
+        return Err(CoreError::RuntimeSpecMismatch);
+    }
     if client
         .query_opt(
             "SELECT id FROM users WHERE workos_user_id = $1 AND normalized_email <> $2",
@@ -1265,7 +1343,9 @@ where
         placement: Some(placement),
         desired_runtime_artifact_id: None,
         runtime_spec: None,
-        target_source_host_id: None,
+        target_source_host_id: locked_launch_code
+            .as_ref()
+            .and_then(|code| code.target_source_host_id.clone()),
         relocation: None,
         profile_picture_url,
         owner_chat_account_id,
@@ -1514,8 +1594,14 @@ where
                       )
                   AND (
                         target_source_host_id IS NULL
-                        OR $5::text IS NULL
                         OR target_source_host_id = $5
+                      )
+                  AND (
+                        target_source_host_id = $5
+                        OR NOT EXISTS (
+                            SELECT 1 FROM launch_code_host_targets targets
+                            WHERE targets.source_host_id = $5
+                        )
                       )
                   AND (
                         relocation_spec IS NULL
@@ -3159,6 +3245,7 @@ fn launch_code_batch_from_row(row: &Row) -> CoreResult<LaunchCodeBatch> {
 struct LockedLaunchCode {
     record: LaunchCodeRecord,
     hosting_tier: Option<HostingTier>,
+    target_source_host_id: Option<String>,
 }
 
 async fn lock_postgres_launch_code<C>(
@@ -3195,7 +3282,19 @@ where
     if redeemed_customer_org_id.is_none() && (batch_revoked || batch_expired) {
         return Err(CoreError::InvalidLaunchCode);
     }
+    // Read the binding AFTER taking the code lock. Redemption and operator
+    // targeting serialize on that same row; an outer-join snapshot could miss
+    // a binding committed while the lock was being acquired.
+    let target_source_host_id = client
+        .query_opt(
+            "SELECT source_host_id FROM launch_code_host_targets WHERE launch_code_id = $1",
+            &[&row.get::<_, String>("id")],
+        )
+        .await
+        .map_err(store_error)?
+        .map(|target| target.get("source_host_id"));
     Ok(LockedLaunchCode {
+        target_source_host_id,
         hosting_tier: optional_hosting_tier_column(&row, "hosting_tier")?,
         record: LaunchCodeRecord {
             id: row.get("id"),
@@ -15401,6 +15500,206 @@ mod tests {
     /// The agent-creation lease queue is partitioned by source host: two requests
     /// routed to different hosts, and a runner declaring host A leases only A's
     /// request — never B's. Proves the global claim across all rows is gone.
+    #[tokio::test]
+    async fn postgres_targeted_launch_code_is_atomic_and_isolates_the_host() {
+        with_isolated_postgres(|store| async move {
+            store
+                .link_verified_user(LinkVerifiedUserInput {
+                    verified_email: "operator@finite.vip".into(),
+                    workos_user_id: "operator".into(),
+                    now: None,
+                })
+                .await
+                .unwrap();
+            let issued = store
+                .issue_launch_code_batch(IssueLaunchCodeBatchInput {
+                    name: "targeted canary".into(),
+                    code_count: 2,
+                    expires_in_hours: Some(1),
+                    hosting_tier: Some(HostingTier::Standard),
+                    created_by_workos_user_id: "operator".into(),
+                    now: None,
+                })
+                .await
+                .unwrap();
+            let code = &issued.codes[0];
+            // Fail closed on a mismatched exact batch or issuer, without creating policy.
+            assert!(
+                store
+                    .target_launch_code_exact(
+                        &code.id,
+                        "wrong-batch",
+                        "target-host",
+                        "operator@finite.vip",
+                        "operator"
+                    )
+                    .await
+                    .is_err()
+            );
+            assert!(
+                store
+                    .target_launch_code_exact(
+                        &code.id,
+                        &issued.batch.id,
+                        "target-host",
+                        "operator@finite.vip",
+                        "someone-else"
+                    )
+                    .await
+                    .is_err()
+            );
+            store
+                .target_launch_code_exact(
+                    &code.id,
+                    &issued.batch.id,
+                    "target-host",
+                    "operator@finite.vip",
+                    "operator",
+                )
+                .await
+                .unwrap();
+            store
+                .target_launch_code_exact(
+                    &code.id,
+                    &issued.batch.id,
+                    "target-host",
+                    "operator@finite.vip",
+                    "operator",
+                )
+                .await
+                .unwrap();
+            assert!(
+                store
+                    .target_launch_code_exact(
+                        &code.id,
+                        &issued.batch.id,
+                        "another-host",
+                        "operator@finite.vip",
+                        "operator"
+                    )
+                    .await
+                    .is_err()
+            );
+            let input = |suffix: &str, launch_code: &str| RequestAgentCreationInput {
+                verified_email: format!("{suffix}@finite.vip"),
+                workos_user_id: suffix.into(),
+                display_name: suffix.into(),
+                launch_code: launch_code.into(),
+                idempotency_key: suffix.into(),
+                now: None,
+            };
+            // The older ordinary request must not be picked by the reserved host.
+            let ordinary = store
+                .request_agent_creation(input("ordinary", &issued.codes[1].code))
+                .await
+                .unwrap();
+            let targeted = store
+                .request_agent_creation_configured(
+                    input("canary", &code.code),
+                    AgentCreationConfiguration {
+                        owner_chat_account_id: Some("a".repeat(64)),
+                        ..Default::default()
+                    },
+                )
+                .await
+                .unwrap();
+            assert_eq!(
+                targeted.request.target_source_host_id.as_deref(),
+                Some("target-host")
+            );
+            assert_eq!(
+                targeted.request.owner_chat_account_id.as_deref(),
+                Some("a".repeat(64).as_str())
+            );
+            let retry = store
+                .request_agent_creation(input("canary", &code.code))
+                .await
+                .unwrap();
+            assert!(retry.reused);
+            assert_eq!(retry.request.id, targeted.request.id);
+            assert_eq!(
+                retry.request.target_source_host_id,
+                targeted.request.target_source_host_id
+            );
+            assert!(
+                store
+                    .target_launch_code_exact(
+                        &code.id,
+                        &issued.batch.id,
+                        "target-host",
+                        "operator@finite.vip",
+                        "operator"
+                    )
+                    .await
+                    .is_err()
+            );
+            let lease = |host: Option<&str>| LeaseAgentCreationRequestInput {
+                runner_id: host.unwrap_or("no-host").into(),
+                lease_token: "lease".into(),
+                source_host_id: host.map(String::from),
+                runner_capacity: None,
+                lease_seconds: Some(300),
+                now: None,
+            };
+            // Existing, unmodified Runner request shape: no new wire fields required.
+            let canary_lease = store
+                .lease_agent_creation_request(lease(Some("target-host")))
+                .await
+                .unwrap()
+                .unwrap();
+            assert_eq!(canary_lease.request.id, targeted.request.id);
+            assert!(
+                store
+                    .lease_agent_creation_request(lease(Some("target-host")))
+                    .await
+                    .unwrap()
+                    .is_none()
+            );
+            let normal_lease = store
+                .lease_agent_creation_request(lease(Some("ordinary-host")))
+                .await
+                .unwrap()
+                .unwrap();
+            assert_eq!(normal_lease.request.id, ordinary.request.id);
+            assert!(
+                store
+                    .lease_agent_creation_request(lease(None))
+                    .await
+                    .unwrap()
+                    .is_none()
+            );
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn postgres_target_binding_serializes_with_redemption() {
+        with_isolated_postgres(|store| async move {
+            store.link_verified_user(LinkVerifiedUserInput { verified_email: "race@finite.vip".into(), workos_user_id: "race".into(), now: None }).await.unwrap();
+            let issued = store.issue_launch_code_batch(IssueLaunchCodeBatchInput {
+                name: "race".into(), code_count: 1, expires_in_hours: Some(1), hosting_tier: Some(HostingTier::Standard), created_by_workos_user_id: "race".into(), now: None,
+            }).await.unwrap();
+            let code = &issued.codes[0];
+            let mut client = store.connection().await.unwrap();
+            let tx = client.transaction().await.unwrap();
+            tx.query_one("SELECT id FROM launch_codes WHERE id=$1 FOR UPDATE", &[&code.id]).await.unwrap();
+            // Block the production redemption writer on the same code row.
+            let other = store.clone();
+            let plaintext = code.code.clone();
+            let create = tokio::spawn(async move {
+                other.request_agent_creation(RequestAgentCreationInput {
+                    verified_email:"race-user@finite.vip".into(), workos_user_id:"race-user".into(), display_name:"race agent".into(), launch_code:plaintext, idempotency_key:"race".into(), now:None,
+                }).await
+            });
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+            tx.execute("INSERT INTO launch_code_host_targets VALUES ($1,'race-host','race',CURRENT_TIMESTAMP)", &[&code.id]).await.unwrap();
+            tx.commit().await.unwrap();
+            let created = create.await.unwrap().unwrap();
+            assert_eq!(created.request.target_source_host_id.as_deref(),Some("race-host"));
+            assert!(store.target_launch_code_exact(&code.id,&issued.batch.id,"other-host","race@finite.vip","race").await.is_err());
+        }).await;
+    }
+
     #[tokio::test]
     async fn postgres_agent_creation_lease_partition_by_source_host() {
         with_isolated_postgres(|store| async move {
