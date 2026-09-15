@@ -1,55 +1,36 @@
-# Borg on the existing rsync.net surface
+# ADR 0031: Snapshot and Borg Backups
 
-Accepted September 15, 2026 for FIN-54. Adapt the existing legacy Sites backup
-coverage to Fly using stopped-Sites snapshots and native Borg archives.
+## Decision
 
-Use native Borg 1.x over SSH to a dedicated Sites repository on the existing
-rsync.net account. Reuse the established SSH credential, pinned host identity,
-passphrase custody, and independent recovery procedure documented in
-`infra/nixos/README.md`. Borg provides authenticated encryption, chunk
-deduplication, archive completion, and extraction.
-Each dedicated Borg repository has its own generated repokey; export the Sites
-key independently. Another service's key export cannot recover this repository.
+Sites uses a stopped-service snapshot archived with native Borg 1.x over SSH
+to a dedicated repository on rsync.net. This follows the existing
+[hosted backup procedure](../../../infra/nixos/modules/backups.nix).
 
-rsync.net is the destination; Borg speaks its own protocol over SSH. A separate
-rsync of the live registry/Git tree is neither necessary nor a consistent
-backup. If a staging transfer is later needed, transfer only a completed
-Recovery Point and its immutable dependencies to a protected filesystem.
-Never copy an active Borg repository while it has writers.
+One job stops only Sites, copies the complete data tree with rsync, creates a
+consistent SQLite registry backup, verifies the snapshot, and resumes Sites
+before uploading it. Each upload requires a fresh successful capture. This
+includes Git history, blobs, authorization state, and the cookie signing key.
 
-Reuse the Sites portion of `infra/nixos/modules/backups.nix`: stop Sites,
-copy its data directory and create a consistent SQLite registry backup, verify
-the snapshot, and resume Sites. Archive that completed snapshot with Borg.
-Adapt the existing job's lifecycle controls to Fly; do not carry its Chat,
-Core, Identity, or runner stops into an independent Sites backup. Resume Sites
-before the remote upload and ensure capture failures also trigger recovery of
-the previously running service. Measure the pause and agree its operating
-window before enabling the job; this is not a zero-downtime promise.
+On Fly, stock Supervisor and cron own the opt-in job lifecycle. The backup
+credential and control socket are inaccessible to the serving process. The
+job does not stop Chat, Core, Identity, or runners. The maintenance pause and
+daily capture interval must meet the deployment's availability and recovery
+requirements before backups are enabled.
 
-One scheduled job creates a fresh snapshot before each upload. If capture
-fails, report failure rather than uploading an older snapshot as fresh. Keep
-the existing daily archival cadence as the starting proposal; confirm the
-acceptable data-loss window before enabling it. Borg supplies deduplication
-and archive consistency. Full snapshots include metadata-only changes and all
-source history without per-project queues, revision hooks, a dependency graph,
-separate metadata schedules, or a custom reconciliation service.
+## Recovery Contract
 
-Implementation lives in the Sites operator script and opt-in stock
-Supervisor/cron image configuration. There is no new daemon transport API.
-The custom content-addressed capture/restore code has been removed; tests use
-the actual stopped-Sites snapshot and native Borg flow. Remaining operational
-work is credential provisioning, image promotion, external freshness alerts,
-and an independent remote restore drill.
+Borg provides authenticated encryption and deduplication. Preserve the Sites
+repository's exported repokey, passphrase, SSH access, pinned host identity,
+runtime configuration, and deploy artifact independently of the serving host.
+Another repository's key cannot recover Sites. Local staging is plaintext and
+must remain private.
 
-The archival job does not prune or compact. Retention needs separately
-authorized administrative access and restore proof. No-prune is not
-server-enforced append-only protection: the existing SSH credential has been
-documented as overprivileged. Do not claim isolation from other repositories
-until destination restrictions have been verified.
+The job does not initialize, prune, or compact the remote repository. No-prune
+is not server-enforced append-only protection; verify destination credential
+restrictions before claiming isolation from other repositories.
 
-Option B / Fly is the active hosting path; Option A / Latitude remains available
-without changing the backup format. Both need independent access to the Borg
-endpoint, SSH key, pinned host key, passphrase, exported Sites repokey, runtime
-configuration, and deploy artifact. A clean client restoring to an empty target
-must prove serving, permissions, and continued publishing. A local encrypted
-Borg test is not evidence of rsync.net access or a completed Fly restore drill.
+An independent client must restore the complete Recovery Set onto an empty
+target and prove content, permissions, and continued publishing. Successful
+uploads or local tests alone do not satisfy this requirement. See the
+[backup interface](../backups.md) and
+[operating runbook](../../../infra/runbooks/sites-borg-recovery.md).

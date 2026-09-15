@@ -1,26 +1,10 @@
-# Sites backup adaptation and recovery
+# Sites Backup and Recovery
 
-Tracking: [FIN-54](https://linear.app/finitecomputer/issue/FIN-54).
 Decision: [Sites ADR 0031](../../finite-sites/docs/adr/0031-borg-on-existing-rsync-net.md).
 
-## Reuse the existing system
+## Backup Job
 
-Legacy Sites is already included in the shared
-[snapshot and Borg job](../nixos/modules/backups.nix), enabled on
-[LAT2](../nixos/hosts/finite-lat-2/default.nix). The snapshot stops Sites, copies
-its data, and creates a consistent SQLite registry backup. Borg archives the
-snapshot to rsync.net. The current shared snapshot is deploy/manual-triggered;
-its daily Borg upload does not prove that source state was captured that day.
-
-FIN-54 adapts this coverage to the independent Sites host. It does not introduce
-a new backup platform, per-revision queues, revision hooks, a dependency graph,
-a metadata scheduler, or a bespoke retry service.
-
-## Fly adaptation
-
-Option B / Fly is active. Option A / Latitude remains available with the same
-backup approach, not a second implementation. Reuse the Sites snapshot and
-restore logic where applicable, adapting paths and lifecycle control to Fly:
+`infra/scripts/sites-backup` runs on the independent Sites host:
 
 1. Serialize backup runs with the ordinary job lock. Record whether Sites was
    running, stop only Sites, and ensure all Sites writers have stopped.
@@ -39,10 +23,8 @@ restore logic where applicable, adapting paths and lifecycle control to Fly:
 
 Schedule these steps as one job so each upload follows a fresh snapshot.
 If capture fails, fail the run; do not silently upload an older snapshot and
-call it fresh. Use normal scheduler/operator retries, not a database-backed
-work queue. Daily is the starting cadence proposal matching existing archival,
-not a promise of an agreed data-loss window. Confirm cadence and measure the
-Sites pause before enabling it. No zero-downtime claim is made.
+call it fresh. Confirm that the daily cadence and measured Sites pause meet
+the deployment's recovery and availability requirements before enabling it.
 
 The implementation is `infra/scripts/sites-backup`. The opt-in image uses stock
 Supervisor and cron for Sites-only lifecycle control; it never stops Chat,
@@ -50,9 +32,9 @@ Core, Identity or runners. Existing LAT2 jobs and archives are unchanged.
 
 ## Enable only after provisioning
 
-The checked-in Fly digest still points to the earlier image. Build and qualify
-a new immutable image before enabling backups. The default entrypoint remains
-the direct non-root daemon. Supervision requires:
+Deploy an immutable image qualified for backup and restore before enabling
+backups. The checked-in Fly configuration leaves backups disabled. The default
+entrypoint is the direct non-root daemon. Supervision requires:
 
 ```text
 FINITE_SITES_BACKUP_ENABLED=1
@@ -184,10 +166,7 @@ fresh-client extraction, wrong-passphrase and corrupt-snapshot rejection,
 no-overwrite restore, capture/upload/restart failures, interruption cleanup,
 and restore followed by publishing with the original editor credential. The
 exact-image workflow also runs real Supervisor/cron isolation and shutdown
-tests. The obsolete content-addressed backup subsystem and its test contracts
-are removed. Synthetic local evidence does not establish remote access,
+tests. Synthetic local evidence does not establish remote access,
 production pause duration, external alerts or recovery from the real archive.
 
-FIN-54 remains open until the adapted job runs, freshness/failure checks work,
-and the real restore drill passes. No production rollout has occurred.
 Run `scripts/finite-status` before and after any separately authorized rollout.
