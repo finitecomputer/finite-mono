@@ -1,5 +1,10 @@
 # Revision backups with shared-state checkpoints
 
+Superseded by [ADR 0031](0031-borg-on-existing-rsync-net.md). The September 15,
+2026 simplification selects the existing snapshot-and-Borg system, not a new
+per-revision backup subsystem. The proposal below is historical, not a cutover
+requirement.
+
 Sites retains live SQLite, Git, and static blobs on the serving host and backs
 up changed project revisions independently. Registry and service-secret
 checkpoints preserve ownership, permissions, and revision mappings without
@@ -20,6 +25,5 @@ Production qualification requires an empty-target application restore, not
 merely successful upload or SQLite integrity. Neither this decision nor local
 tests authorize production provisioning or cutover.
 
-The original S3 transport choice was replaced on September 15, 2026 by
-[Borg over SSH to rsync.net](0031-borg-on-existing-rsync-net.md). This does not
-relax the checkpoint, durable scheduling, or application restore requirements.
+The Recovery Set and empty-target application restore remain required. Durable
+per-revision queues and separate metadata checkpoint scheduling do not.

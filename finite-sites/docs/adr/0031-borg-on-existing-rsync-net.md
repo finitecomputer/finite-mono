@@ -1,7 +1,8 @@
 # Borg on the existing rsync.net surface
 
-Accepted September 15, 2026 for FIN-54. This replaces ADR 0030's S3 transport
-choice, not its Recovery Set or revision-triggered backup requirements.
+Accepted September 15, 2026 for FIN-54. This supersedes ADR 0030's S3 transport
+and per-revision scheduling design. Adapt the existing legacy Sites backup
+coverage to Fly; do not build a new backup platform.
 
 Use native Borg 1.x over SSH to a dedicated Sites repository on the existing
 rsync.net account. Reuse the established SSH credential, pinned host identity,
@@ -18,18 +19,30 @@ backup. If a staging transfer is later needed, transfer only a completed
 Recovery Point and its immutable dependencies to a protected filesystem.
 Never copy an active Borg repository while it has writers.
 
-Keep application capture separate from archival. Borg must archive completed
-Sites Recovery Points, not live SQLite WAL files or changing Git directories.
-Revision-triggered work remains asynchronous and durable. Registry and secret
-checkpoints also run after metadata-only changes. Deduplication saves transfer
-and storage; it does not make the current full-catalog capture incremental.
-Do not enable a recurring service-stop job to bypass checkpoint coordination.
+Reuse the Sites portion of `infra/nixos/modules/backups.nix`: stop Sites,
+copy its data directory and create a consistent SQLite registry backup, verify
+the snapshot, and resume Sites. Archive that completed snapshot with Borg.
+Adapt the existing job's lifecycle controls to Fly; do not carry its Chat,
+Core, Identity, or runner stops into an independent Sites backup. Resume Sites
+before the remote upload and ensure capture failures also trigger recovery of
+the previously running service. Measure the pause and agree its operating
+window before enabling the job; this is not a zero-downtime promise.
+
+One scheduled job creates a fresh snapshot before each upload. If capture
+fails, report failure rather than uploading an older snapshot as fresh. Keep
+the existing daily archival cadence as the starting proposal; confirm the
+acceptable data-loss window before enabling it. Borg supplies deduplication
+and archive consistency. Full snapshots include metadata-only changes and all
+source history without per-project queues, revision hooks, a dependency graph,
+separate metadata schedules, or a custom reconciliation service.
 
 The first implementation slice is the native Borg operator procedure and a
 synthetic encrypted-archive application restore test. There is no new daemon
-transport API. Existing local capture/restore commands remain authoritative for
-the Sites format. Scheduling, bounded incremental capture, off-host freshness
-reporting, and production remote qualification remain FIN-54 gates.
+transport API. That test uses the already-built local capture/restore commands;
+their content-addressed format is not mandatory for the production adaptation.
+Prefer existing snapshot/restore logic where applicable, and test the actual
+chosen production flow. Remaining work is Fly job wiring, credential access,
+simple freshness/failure reporting, and an independent remote restore drill.
 
 The archival job does not prune or compact. Retention needs separately
 authorized administrative access and restore proof. No-prune is not

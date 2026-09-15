@@ -46,8 +46,8 @@ select the dev mailer with `--mailer dev`; omitting the flag is an error.
 - **Source**: local v1; no object storage running.
 - **Risk**: single-disk durability for all site content and the registry.
 - **Proof**: `crates/finitesites-blob/src/lib.rs` writes under `--data`.
-- **Delete condition**: ADR 0030's revision backups and shared-state
-  checkpoints are deployed and the complete Recovery Set has restored onto an
+- **Delete condition**: ADR 0031's adapted snapshot-and-Borg job is deployed
+  and the complete Recovery Set has restored onto an
   empty target. The local operator commands in `docs/backups.md` do not close
   this debt or provide independent durability. ADR 0031 selects Borg on the
   existing rsync.net surface; its local test is not a production restore drill.
@@ -129,7 +129,8 @@ acknowledgement.
 - **Proof**: `backup::capture` requires a unique acyclic recorded transition
   chain per ref and checks its terminal state against Git. Regression tests
   reject an unrecorded tip and restore manifests omitting historical objects.
-- **Delete condition**: writer-coordinated durable ref state plus restart and
-  concurrent-push recovery tests replace this conservative eligibility check
-  before the backup scheduler is enabled in production. Do not mutate user
+- **Delete condition**: retire this optional local command or replace its
+  conservative capture restriction with a proven consistent snapshot boundary.
+  ADR 0031 selects the existing stopped-Sites snapshot pattern for production;
+  adding a per-ref cursor is not a cutover requirement. Do not mutate user
   history to satisfy the local command.
