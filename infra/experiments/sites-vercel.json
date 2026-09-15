@@ -63,5 +63,15 @@
     "evidence": "finite-sites/experiments/vercel/evidence/wildcard-live.json",
     "certificateRenewalValidated": false,
     "teardown": "Remove only the *.sites-poc.lwn.lol project domain/alias when retiring this experiment; do not delete the lwn.lol zone, existing records, or unrelated domains."
+  },
+  "platformGit": {
+    "repository": "finitecomputer/finite-mono",
+    "branch": "alex/sites-vercel-experiment",
+    "rootDirectory": "finite-sites/experiments/vercel/app",
+    "connectionStatus": "pending Vercel GitHub App access",
+    "previewDeploymentsDisabled": true,
+    "commandForIgnoringBuildStep": "[ \"$VERCEL_GIT_COMMIT_REF\" != \"alex/sites-vercel-experiment\" ]",
+    "config": "app/vercel.json also disables all Git branch patterns except the exact experiment branch",
+    "evidence": "finite-sites/experiments/vercel/evidence/branch-restriction.json"
   }
 }

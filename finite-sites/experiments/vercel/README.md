@@ -125,6 +125,29 @@ scripts/with-dev-env node finite-sites/experiments/vercel/storage-test.mjs
 scripts/with-dev-env node finite-sites/experiments/vercel/browser-test.mjs
 ```
 
+## Experiment branch only
+
+Automatic platform deployments are restricted to `alex/sites-vercel-experiment`.
+The Vercel project has preview deployments disabled and a project-level Ignored
+Build Step that skips every other Git ref, including an absent ref:
+
+```sh
+[ "$VERCEL_GIT_COMMIT_REF" != "alex/sites-vercel-experiment" ]
+```
+
+Vercel interprets exit 0 as skip and exit 1 as build. This project-level guard
+also applies to branches that do not contain the experiment's `vercel.json`.
+That file additionally disables all Git branch patterns except the exact
+experiment branch, using `git.deploymentEnabled`.
+
+GitHub connection is still pending installation/configuration of the Vercel
+GitHub App for `finitecomputer/finite-mono`. When connecting, set this exact
+branch as the **production branch**, and the root directory to
+`finite-sites/experiments/vercel/app`. Keep preview deployments disabled.
+Do not enable repository-wide PR previews. The current project remains unlinked;
+no automatic deployment is claimed until the Git connection is completed and
+an allowed push is verified. See `evidence/branch-restriction.json`.
+
 ## Wildcard configuration
 
 The live wildcard is `*.sites-poc.lwn.lol`, attached once to the same shared

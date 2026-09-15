@@ -1,0 +1,40 @@
+{
+  "at": "2026-09-15T21:33:04.086Z",
+  "project": "finite-sites-poc",
+  "previewDeploymentsDisabled": true,
+  "commandForIgnoringBuildStep": "[ \"$VERCEL_GIT_COMMIT_REF\" != \"alex/sites-vercel-experiment\" ]",
+  "gitConnected": false,
+  "productionBranch": null,
+  "localBuildGuardChecks": [
+    {
+      "ref": "alex/sites-vercel-experiment",
+      "decision": "build",
+      "passed": true
+    },
+    {
+      "ref": "main",
+      "decision": "skip",
+      "passed": true
+    },
+    {
+      "ref": "alex/unrelated-pr",
+      "decision": "skip",
+      "passed": true
+    },
+    {
+      "ref": "alex/sites-vercel-experiment-extra",
+      "decision": "skip",
+      "passed": true
+    },
+    {
+      "ref": "feature/nested/branch",
+      "decision": "skip",
+      "passed": true
+    },
+    {
+      "ref": "(unset/empty)",
+      "decision": "skip",
+      "passed": true
+    }
+  ]
+}
