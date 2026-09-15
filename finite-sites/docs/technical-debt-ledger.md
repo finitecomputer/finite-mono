@@ -119,18 +119,3 @@ acknowledgement.
   paired exchange tests must prove requests and failures stay on their backend.
 - **Contract**: [ADR 0029](adr/0029-account-session-viewer-bridge.md).
   Production cutover requires separate authorization.
-
-## 12. Local backup Git checkpoint eligibility is conservative
-
-- **Source**: `git_ref_events` deduplicates old/new transitions and records
-  them after Git updates refs. It is not an authoritative per-ref cursor.
-- **Risk**: optimistic comparison alone can miss an already-stalled hook;
-  refusing ambiguous histories can prevent a checkpoint for a valid project.
-- **Proof**: `backup::capture` requires a unique acyclic recorded transition
-  chain per ref and checks its terminal state against Git. Regression tests
-  reject an unrecorded tip and restore manifests omitting historical objects.
-- **Delete condition**: retire this optional local command or replace its
-  conservative capture restriction with a proven consistent snapshot boundary.
-  ADR 0031 selects the existing stopped-Sites snapshot pattern for production;
-  adding a per-ref cursor is not a cutover requirement. Do not mutate user
-  history to satisfy the local command.

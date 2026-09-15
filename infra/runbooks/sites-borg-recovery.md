@@ -44,9 +44,50 @@ work queue. Daily is the starting cadence proposal matching existing archival,
 not a promise of an agreed data-loss window. Confirm cadence and measure the
 Sites pause before enabling it. No zero-downtime claim is made.
 
-Do not copy the entire shared host job and its Chat/Core/Identity/runner stops
-to Fly. Adapting Sites lifecycle control and volume access is still unfinished.
-Keep existing LAT2 backup jobs and archives unchanged.
+The implementation is `infra/scripts/sites-backup`. The opt-in image uses stock
+Supervisor and cron for Sites-only lifecycle control; it never stops Chat,
+Core, Identity or runners. Existing LAT2 jobs and archives are unchanged.
+
+## Enable only after provisioning
+
+The checked-in Fly digest still points to the earlier image. Build and qualify
+a new immutable image before enabling backups. The default entrypoint remains
+the direct non-root daemon. Supervision requires:
+
+```text
+FINITE_SITES_BACKUP_ENABLED=1
+FINITE_SITES_BACKUP_REPOSITORY=<approved dedicated Sites repository>
+FINITE_SITES_BACKUP_REMOTE_PATH=borg12
+```
+
+Optional `FINITE_SITES_BACKUP_ROOT` defaults to `/var/backups/finite-sites`,
+outside the mounted serving data. This private local staging and status receipt
+are ephemeral across Machine replacement; Borg is the durable off-host copy.
+Provision enough local disk for one full snapshot. Repository initialization
+and credential provisioning are separate authorized operator actions. The job
+refuses an absent repository or encryption other than `repokey-blake2`.
+
+Cron starts the supervised job daily at 03:07 UTC. For a manual run inside the
+Machine, use the same supervised job rather than launching a detached process:
+
+```sh
+supervisorctl -c /run/sites-supervisor.conf start sites-backup
+supervisorctl -c /run/sites-supervisor.conf status
+finite-status --sites-backup-state /var/backups/finite-sites/status.json --json
+```
+
+Starting the job is not proof of completion. The receipt must report success,
+a new archive ID, and fresh source and upload timestamps. `finite-status`
+checks both timestamps (36-hour default, overridable with
+`--sites-backup-max-age SECONDS`). Wire an external check before promotion;
+logs and a local receipt alone do not notify anyone. A missing receipt after
+Machine replacement is unknown, not healthy.
+
+Normal failures and SIGINT/SIGTERM attempt restart of a previously running
+Sites process. The image stops cron, then the job, then Sites during shutdown.
+SIGKILL or host loss cannot execute cleanup; inspect the run and restart Sites
+through Supervisor or restart the Machine before retrying. Do not claim
+zero downtime or automatic recovery from every failure.
 
 ## Access and custody
 
@@ -66,6 +107,30 @@ needs access; do not bake credentials into a serving image. Borg connects
 directly to rsync.net over SSH, so a separate rsync of live databases is not
 needed. Never copy an active Borg repository while it has writers.
 
+For Fly, provision the files using the existing secret custody process and
+[Fly file secrets](https://fly.io/docs/reference/configuration/#the-files-section).
+Add the following mappings to the deployment configuration only when the
+corresponding base64-encoded secrets are provisioned (import through stdin,
+never place their values in shell arguments, logs or git):
+
+```toml
+[[files]]
+guest_path = "/var/lib/finitecomputer/backups/rsync-net/id_ed25519"
+secret_name = "FINITE_SITES_BORG_SSH_KEY"
+
+[[files]]
+guest_path = "/var/lib/finitecomputer/backups/rsync-net/known_hosts"
+secret_name = "FINITE_SITES_BORG_KNOWN_HOSTS"
+
+[[files]]
+guest_path = "/var/lib/finitecomputer/backups/rsync-net/borg-passphrase"
+secret_name = "FINITE_SITES_BORG_PASSPHRASE"
+```
+
+The image precreates the root-only directory, tightens these files to `0600`
+and removes their corresponding environment variables before starting Sites.
+Never place them beneath the UID 65532-owned serving data directory.
+
 The existing job selects remote executable `borg12`; the local test client is
 Borg 1.4.x. Verify actual client/server compatibility at the destination.
 A new dedicated repository needs its own exported Borg repokey, retained with
@@ -81,9 +146,22 @@ by this document.
 
 ## Restore gate
 
-From an independent recovery environment, use native Borg to check and extract
-the recorded archive into private scratch. Validate the snapshot using the
-adapted existing restore checks before installing it onto an empty target.
+From an independent recovery environment, configure native Borg with the
+escrowed SSH identity, pinned host key, repository, passphrase and repokey,
+without relying on the source Fly Machine. Use a fresh Borg client directory.
+Check and extract the recorded archive into a new private scratch directory:
+
+```sh
+umask 077
+borg check --verify-data
+borg extract "::$ARCHIVE"
+sites-backup restore --snapshot ./snapshot --target "$NEW_DATA_DIR"
+```
+
+`NEW_DATA_DIR` must not exist; its parent must be private and on the empty
+recovery volume. Run as root to preserve UID/GID 65532 ownership. The script
+checks all file hashes, symlink inventory and registry integrity, copies into
+private staging, then installs without overwriting any existing target.
 Never overwrite live data or start an incomplete/failed restore. Inspect
 protected SQLite only through `scripts/snapshot-sqlite` or a scratch copy.
 
@@ -93,19 +171,22 @@ revocation, guest/account access, and clone/push/publish using pre-backup
 credentials. Confirm the source is unchanged and record recovery time.
 A successful upload or `borg check` alone is not enough.
 
-## Existing local proof
+## Local qualification
 
 ```sh
-scripts/with-dev-env cargo test -p finitesitesd --locked --test e2e borg_restore_
+scripts/with-dev-env just sites-backup-contract
+bash infra/images/sites-smoke.sh "$SITES_IMAGE"
+SITES_BACKUP_SMOKE=1 bash infra/images/sites-smoke.sh "$SITES_IMAGE"
 ```
 
-This synthetic local test already proves native encrypted Borg archival,
-fresh-client extraction, wrong-passphrase/replay rejection, and application
-restore followed by publishing with the original editor credential. It uses
-the previously built local capture/restore commands; that content-addressed
-format is not mandatory for the simpler production adaptation. Test the chosen
-stopped-Sites snapshot flow as it is wired up rather than adding new machinery
-to satisfy restrictions of the optional local command.
+These tests exercise stopped-Sites capture, real native encrypted Borg,
+fresh-client extraction, wrong-passphrase and corrupt-snapshot rejection,
+no-overwrite restore, capture/upload/restart failures, interruption cleanup,
+and restore followed by publishing with the original editor credential. The
+exact-image workflow also runs real Supervisor/cron isolation and shutdown
+tests. The obsolete content-addressed backup subsystem and its test contracts
+are removed. Synthetic local evidence does not establish remote access,
+production pause duration, external alerts or recovery from the real archive.
 
 FIN-54 remains open until the adapted job runs, freshness/failure checks work,
 and the real restore drill passes. No production rollout has occurred.

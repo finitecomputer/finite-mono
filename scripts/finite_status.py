@@ -10,6 +10,7 @@ import glob
 import hashlib
 import io
 import json
+import math
 import os
 import re
 import shlex
@@ -18,7 +19,6 @@ import socket
 import subprocess
 import sys
 import tempfile
-import time
 from collections import Counter
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -1408,8 +1408,7 @@ def collect_chat_plane(hostname: str, now: datetime) -> dict[str, Any]:
         sync_rate: dict[str, Any] = {
             "applicable": False,
             "reason": (
-                "chat edge is not on this runner-role host "
-                f"(roles: {', '.join(roles)})"
+                f"chat edge is not on this runner-role host (roles: {', '.join(roles)})"
             ),
         }
     else:
@@ -2192,9 +2191,7 @@ def build_chat_plane(raw: dict[str, Any] | None, now: datetime) -> dict[str, Any
             "available": False,
             "applicable": False,
             "state": "not-applicable",
-            "reason": rate.get(
-                "reason", "chat edge is not on this host"
-            ),
+            "reason": rate.get("reason", "chat edge is not on this host"),
         }
     elif rate.get("available"):
         hot = [
@@ -2239,6 +2236,98 @@ def report_exit_code(report: dict[str, Any]) -> int:
     if "unknown" in statuses:
         return 2
     return 0
+
+
+def build_sites_backup(
+    path: Path, now: datetime, maximum_age_seconds: int
+) -> dict[str, Any]:
+    try:
+        receipt = json.loads(path.read_text(encoding="utf-8"))
+        if not isinstance(receipt, dict) or receipt.get("status") not in (
+            "running",
+            "failed",
+            "ok",
+        ):
+            raise ValueError("invalid run status")
+        success_fields = ("snapshot_at", "uploaded_at", "archive", "archive_id")
+        has_success = any(key in receipt for key in success_fields)
+        timestamp_fields = ["started_at"]
+        if has_success or receipt["status"] == "ok":
+            timestamp_fields.extend(("snapshot_at", "uploaded_at"))
+            for field in ("archive", "archive_id"):
+                if (
+                    not isinstance(receipt.get(field), str)
+                    or not receipt[field].strip()
+                ):
+                    raise ValueError("invalid archive identity")
+        for field in timestamp_fields:
+            value = receipt.get(field)
+            if type(value) not in (int, float) or not math.isfinite(value) or value < 0:
+                raise ValueError("invalid timestamp")
+        if "error" in receipt or receipt["status"] == "failed":
+            error = receipt.get("error")
+            if not isinstance(error, str) or not re.fullmatch(
+                r"[A-Za-z_][A-Za-z0-9_]*", error
+            ):
+                raise ValueError("invalid error class")
+    except (OSError, ValueError, OverflowError, RecursionError) as error:
+        return {
+            "status": "unknown",
+            "maximum_age_seconds": maximum_age_seconds,
+            "errors": [
+                f"Sites backup receipt unavailable or malformed ({type(error).__name__})"
+            ],
+        }
+    section: dict[str, Any] = {
+        "run_status": receipt["status"],
+        "maximum_age_seconds": maximum_age_seconds,
+        **{
+            key: receipt[key]
+            for key in (
+                "started_at",
+                "snapshot_at",
+                "uploaded_at",
+                "archive",
+                "archive_id",
+                "error",
+            )
+            if key in receipt
+        },
+    }
+    errors = []
+    if receipt["status"] == "failed":
+        errors.append("latest backup run failed")
+    for field, age_field in (
+        ("snapshot_at", "snapshot_age_seconds"),
+        ("uploaded_at", "upload_age_seconds"),
+    ):
+        if field not in receipt:
+            continue
+        age = now.timestamp() - receipt[field]
+        section[age_field] = age
+        if age < 0:
+            errors.append(f"{field} is in the future")
+        elif age > maximum_age_seconds:
+            errors.append(f"{field} is stale")
+    section["errors"] = errors
+    section["status"] = (
+        "red" if errors else "unknown" if receipt["status"] == "running" else "green"
+    )
+    return section
+
+
+def build_sites_backup_report(
+    path: Path, now: datetime, maximum_age_seconds: int
+) -> dict[str, Any]:
+    section = build_sites_backup(path, now, maximum_age_seconds)
+    report = {
+        "schema_version": "finite.status.v1",
+        "generated_at": isoformat(now),
+        "overall_status": section["status"],
+        "sections": {"sites_backup": section},
+    }
+    report["exit_code"] = report_exit_code(report)
+    return report
 
 
 def build_report(raw: dict[str, Any], now: datetime) -> dict[str, Any]:
@@ -2300,6 +2389,34 @@ def badge(status: str) -> str:
 
 def render_human(report: dict[str, Any]) -> str:
     sections = report["sections"]
+    if "sites_backup" in sections:
+        backup = sections["sites_backup"]
+        lines = [
+            f"Finite platform status - {report['generated_at']}",
+            f"Overall {badge(report['overall_status'])}; exit {report['exit_code']}",
+            "",
+            f"Sites Borg backup {badge(backup['status'])} - local receipt evidence",
+            f"  Maximum age: {backup['maximum_age_seconds']}s",
+        ]
+        if "run_status" in backup:
+            lines.append(
+                f"  Latest run: {backup['run_status']}; started_at={backup['started_at']}"
+            )
+            for label, field, age_field in (
+                ("Source snapshot", "snapshot_at", "snapshot_age_seconds"),
+                ("Last successful upload", "uploaded_at", "upload_age_seconds"),
+            ):
+                age = backup.get(age_field)
+                lines.append(
+                    f"  {label}: {backup.get(field, 'unknown')}; "
+                    f"age {human_age(math.floor(age) if age is not None else None)}"
+                )
+            if "archive" in backup:
+                lines.append(f"  Archive: {backup['archive']} ({backup['archive_id']})")
+            if "error" in backup:
+                lines.append(f"  Error: {backup['error']}")
+        lines.extend(f"  {error}" for error in backup["errors"])
+        return "\n".join(lines)
     lines = [
         f"Finite platform status — {report['generated_at']}",
         f"Overall {badge(report['overall_status'])}; exit {report['exit_code']}",
@@ -2590,25 +2707,50 @@ def parse_args(arguments: list[str]) -> argparse.Namespace:
     parser.add_argument(
         "--json", action="store_true", help="emit finite.status.v1 JSON"
     )
-    parser.add_argument(
+    mode = parser.add_mutually_exclusive_group()
+    mode.add_argument(
+        "--sites-backup-state",
+        type=Path,
+        help="read only a local Sites Borg backup receipt instead of fleet evidence",
+    )
+    mode.add_argument(
         "--fixture",
         type=Path,
         help="read an offline recorded fixture instead of host/production evidence",
     )
-    return parser.parse_args(arguments)
+    parser.add_argument(
+        "--sites-backup-max-age",
+        type=int,
+        metavar="SECONDS",
+        help="maximum Sites snapshot and upload age in seconds (default: 129600 / 36h)",
+    )
+    options = parser.parse_args(arguments)
+    if options.sites_backup_max_age is not None:
+        if options.sites_backup_max_age < 0:
+            parser.error("--sites-backup-max-age must be nonnegative")
+        if options.sites_backup_state is None:
+            parser.error("--sites-backup-max-age requires --sites-backup-state")
+    else:
+        options.sites_backup_max_age = 36 * 60 * 60
+    return options
 
 
 def main(arguments: list[str] | None = None) -> None:
     options = parse_args(sys.argv[1:] if arguments is None else arguments)
     try:
-        if options.fixture:
+        if options.sites_backup_state:
+            report = build_sites_backup_report(
+                options.sites_backup_state, utc_now(), options.sites_backup_max_age
+            )
+        elif options.fixture:
             raw = load_fixture(options.fixture)
             now = parse_time(raw.get("now"))
             if now is None:
                 raise CollectionError("fixture has no valid 'now' timestamp")
+            report = build_report(raw, now)
         else:
             raw, now = collect_live()
-        report = build_report(raw, now)
+            report = build_report(raw, now)
     except CollectionError as error:
         report = {
             "schema_version": "finite.status.v1",

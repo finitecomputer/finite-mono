@@ -103,6 +103,9 @@ finite-status-contract:
 hosted-recovery-contract:
     just infra hosted-recovery-contract
 
+sites-backup-contract:
+    just infra sites-backup-contract
+
 identity-conformance:
     just identity identity-conformance
 

@@ -339,7 +339,6 @@
           rustToolchain = pkgs.rust-bin.fromRustupToolchainFile ./rust-toolchain.toml;
           rustCiToolchain = pkgs.rust-bin.fromRustupToolchainFile ./rust-toolchain.toml;
           rustBasePackages = with pkgs; [
-            borgbackup
             curl
             git
             jq
@@ -371,6 +370,8 @@
                 rustBasePackages
                 ++ [
                   pkgs.age
+                  pkgs.borgbackup
+                  pkgs.python3Packages.supervisor
                   gcxCli
                   litestreamCli
                   pyToolPkgs.ruff

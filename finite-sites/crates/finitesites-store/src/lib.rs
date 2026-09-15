@@ -5,7 +5,6 @@
 //! Database and corruption errors are surfaced as typed errors, never hidden
 //! behind `Option`.
 
-pub mod recovery;
 mod schema;
 
 mod account_email;
