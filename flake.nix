@@ -313,6 +313,10 @@
             overlays = [ (import rust-overlay) ];
           };
           finitePackagePkgs = import nixpkgs { inherit system; };
+          # https://github.com/nix-community/crate2nix/issues/258
+          crate2nixGenerator = pkgs.crate2nix.overrideAttrs (old: {
+            patches = (old.patches or [ ]) ++ [ ./infra/nixos/crate2nix-dep-features.patch ];
+          });
           # The repo-wide Python formatter/linter pin. Deliberately from the
           # hermes-nixpkgs pin (ruff 0.15.x, the version the tree is
           # formatted with and hermes-bridge-ci checks with) so local, CI,
@@ -360,15 +364,12 @@
             ]);
         in
         {
-          packages = (hermesPackagesFor system) // finitePackages;
+          packages = (hermesPackagesFor system) // finitePackages // { crate2nix = crate2nixGenerator; };
 
           devShells = {
             crate2nix = pkgs.mkShell {
               packages = [
-                # https://github.com/nix-community/crate2nix/issues/258
-                (pkgs.crate2nix.overrideAttrs (old: {
-                  patches = (old.patches or [ ]) ++ [ ./infra/nixos/crate2nix-dep-features.patch ];
-                }))
+                crate2nixGenerator
                 rustToolchain
                 pkgs.git
                 pkgs.ripgrep
