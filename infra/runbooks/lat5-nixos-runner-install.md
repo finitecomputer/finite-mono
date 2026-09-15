@@ -374,6 +374,11 @@ HTTP health were insufficient deployment proof. A scoped Core restart at
 21:42:27 UTC produced PID 1247302; `/proc/1247302/exe` then matched the candidate.
 The lat2 deploy helper now fails if a first-party service's running executable
 differs from its candidate unit, without automatically restarting services.
+Canonical `finite-status` also reports these identities under
+`sections.host_health.service_executables`; mismatches are red and incomplete
+or changing observations are unknown. The activation test exercises the full
+helper with simulated host I/O, proves stale-process failure before success,
+and checks timer restoration without automatic restart or rollback.
 
 Post-correction canonical status: Chat green, lat3 31/31 ready, lat4 28/28
 ready including this canary. Lat5 remained drained throughout, with a one-runtime
