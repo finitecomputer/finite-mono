@@ -5,6 +5,7 @@ from pathlib import Path
 import base64
 import binascii
 import stat
+import subprocess
 import sys
 
 
@@ -39,6 +40,23 @@ def validate(root: Path, *, expected_uid: int = 0, expected_gid: int = 0) -> Non
         raise SystemExit("invalid WireGuard private key encoding") from None
     if len(decoded) != 32 or not any(decoded) or key not in (base64.b64encode(decoded), base64.b64encode(decoded) + b"\n"):
         raise SystemExit("invalid WireGuard private key")
+
+    private = root / "etc/ssh/ssh_host_ed25519_key"
+    public = root / "etc/ssh/ssh_host_ed25519_key.pub"
+    try:
+        derived = subprocess.run(
+            ["ssh-keygen", "-y", "-P", "", "-f", str(private)],
+            stdin=subprocess.DEVNULL, capture_output=True, check=True,
+        ).stdout.split()
+        staged = public.read_bytes().split()
+        if len(derived) < 2 or derived[0] != b"ssh-ed25519" or staged[:2] != derived[:2]:
+            raise ValueError("host key mismatch")
+        subprocess.run(
+            ["ssh-keygen", "-l", "-f", str(public)],
+            stdin=subprocess.DEVNULL, capture_output=True, check=True,
+        )
+    except (OSError, ValueError, subprocess.CalledProcessError):
+        raise SystemExit("invalid or mismatched Ed25519 SSH host keypair") from None
 
 
 if __name__ == "__main__":

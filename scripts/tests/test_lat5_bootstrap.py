@@ -4,6 +4,7 @@ import base64
 import runpy
 import os
 from pathlib import Path
+import subprocess
 import tempfile
 import unittest
 
@@ -20,11 +21,15 @@ class BootstrapTests(unittest.TestCase):
         self.root.chmod(0o700)
         for directory in ('etc', 'etc/finite', 'etc/ssh'):
             (self.root / directory).mkdir(mode=0o700)
-        for name in ('etc/finite/metrics-remote-write.env', 'etc/finite/logs-write.env',
-                     'etc/ssh/ssh_host_ed25519_key', 'etc/ssh/ssh_host_ed25519_key.pub'):
+        for name in ('etc/finite/metrics-remote-write.env', 'etc/finite/logs-write.env'):
             path = self.root / name
             path.write_text('synthetic fixture\n')
             path.chmod(0o600)
+        self.private = self.root / 'etc/ssh/ssh_host_ed25519_key'
+        self.public = self.root / 'etc/ssh/ssh_host_ed25519_key.pub'
+        subprocess.run(['ssh-keygen', '-q', '-t', 'ed25519', '-N', '', '-f', str(self.private)],
+                       check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        self.public.chmod(0o600)
         self.key = self.root / 'etc/finite/wireguard-private-key'
         self.key.write_bytes(base64.b64encode(os.urandom(32)) + b'\n')
         self.key.chmod(0o600)
@@ -63,6 +68,21 @@ class BootstrapTests(unittest.TestCase):
         path.write_text('synthetic fixture\n')
         path.chmod(0o600)
         with self.assertRaisesRegex(SystemExit, 'unexpected path or mode'):
+            self.validate()
+
+    def test_malformed_private_key_is_refused(self):
+        self.private.write_text('synthetic-invalid-private-key')
+        with self.assertRaisesRegex(SystemExit, 'invalid or mismatched Ed25519'):
+            self.validate()
+
+    def test_mismatched_public_key_is_refused(self):
+        other = Path(self.temp.name) / 'other-key'
+        subprocess.run(['ssh-keygen', '-q', '-t', 'ed25519', '-N', '', '-f', str(other)],
+                       check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        self.public.write_bytes(other.with_suffix('.pub').read_bytes())
+        other.unlink()
+        other.with_suffix('.pub').unlink()
+        with self.assertRaisesRegex(SystemExit, 'invalid or mismatched Ed25519'):
             self.validate()
 
     def test_incorrect_owner_is_refused(self):

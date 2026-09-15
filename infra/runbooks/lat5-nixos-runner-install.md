@@ -167,9 +167,10 @@ historical migration section as a separate operation.
 
 Stage credentials by name and secure file transfer, with root-only access:
 `runner.env`, `identity-operator.env`, `runtime-secrets.env`,
-`wireguard-private-key`, `metrics-remote-write.env` and `logs-write.env`
-under `/etc/finite/`. Use a unique Runner credential and WireGuard private
-key. Pin the current promoted runtime artifact and set `FC_RUNNER_DRAIN=true`.
+under `/etc/finite/`. Retain the WireGuard private key and monitoring
+credentials staged during OS installation. Derive the public key from that
+existing WireGuard key and register it on lat2; do not generate a replacement.
+Use a unique Runner credential. Pin the current promoted runtime artifact and set `FC_RUNNER_DRAIN=true`.
 
 Complete when lat5 boots the exact artifact, both arrays are healthy, both
 ESPs and storage identities pass validation, storage/boot refusal checks
