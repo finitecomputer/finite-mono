@@ -50,7 +50,10 @@ session. The command never creates or relinks an operator identity. A repeated
 binding to the same host succeeds while the code is unused; retargeting and
 post-redemption binding fail. A durable audit event records the first binding.
 
-The database permits only one bound code per canary host. A host named by a binding accepts **only explicitly targeted creation**.
+The database permits one root binding per canary host. The guarded
+[lat5 retry procedure](lat5-canary-retry.md) permits one linked retry after an
+exact completed misplacement, while preserving the root binding. A host named
+by a binding accepts **only explicitly targeted creation**.
 The restriction survives redemption, revocation and expiry; it is not a timer
 or an inference from available capacity. It does not drain existing-runtime
 lifecycle operations. Broader capacity release is a separate reviewed change;

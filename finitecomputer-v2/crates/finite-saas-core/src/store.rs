@@ -283,25 +283,8 @@ impl CoreStore {
             .await?
             .filter(|user| user.workos_user_id.as_deref() == Some(operator_workos_user_id))
             .ok_or(CoreError::WorkosUserConflict)?;
-        let row = tx
-            .query_opt(
-                "SELECT code.id FROM launch_codes code
-             JOIN launch_code_batches batch ON batch.id = code.batch_id
-             WHERE code.id = $1 AND code.batch_id = $2
-               AND batch.created_by_workos_user_id = $3
-               AND COALESCE(batch.hosting_tier, 'standard') = 'standard'
-               AND batch.code_count = 1
-               AND batch.revoked_at IS NULL AND batch.expires_at > CURRENT_TIMESTAMP
-               AND code.redeemed_customer_org_id IS NULL
-               AND code.redemption_idempotency_key IS NULL AND code.redeemed_at IS NULL
-             FOR UPDATE OF code, batch",
-                &[&code_id, &expected_batch_id, &operator_workos_user_id],
-            )
-            .await
-            .map_err(store_error)?;
-        if row.is_none() {
-            return Err(CoreError::InvalidLaunchCode);
-        }
+        lock_unused_standard_launch_code(&*tx, code_id, expected_batch_id, operator_workos_user_id)
+            .await?;
         let existing = tx
             .query_opt(
                 "SELECT source_host_id FROM launch_code_host_targets WHERE launch_code_id = $1",
@@ -345,6 +328,112 @@ impl CoreStore {
                 metadata: serde_json::json!({"sourceHostId":host,"batchId":expected_batch_id,"operatorUserId":operator.id}),
                 now: &current_time_iso()?,
             }).await?;
+        }
+        self.finish(tx).await
+    }
+
+    /// Preserve the original binding and append one retry after an exact,
+    /// completed, untargeted misplacement. Never reset entitlement or runtime state.
+    pub async fn retry_targeted_launch_code_exact(
+        &self,
+        input: &crate::RetryTargetedLaunchCodeInput,
+    ) -> CoreResult<()> {
+        let host = normalize_source_host_id(&input.target_source_host_id)?;
+        let previous_host = normalize_source_host_id(&input.expected_previous_source_host_id)?;
+        if host == previous_host || input.code_id == input.previous_code_id {
+            return Err(CoreError::RuntimeSpecMismatch);
+        }
+        let email = normalize_owner_email(Some(&input.operator_email))
+            .ok_or(CoreError::MissingVerifiedEmail)?;
+        let mut client = self.connection().await?;
+        let tx = client.transaction().await.map_err(store_error)?;
+        let operator = select_user_by_email(&*tx, &email)
+            .await?
+            .filter(|u| u.workos_user_id.as_deref() == Some(input.operator_workos_user_id.as_str()))
+            .ok_or(CoreError::WorkosUserConflict)?;
+        // Lock the original code, reservation, request and Runtime while checking
+        // the failure record. Competing retries serialize on the parent binding.
+        let previous = tx.query_opt(
+            "SELECT target.launch_code_id
+             FROM launch_code_host_targets target
+             JOIN launch_codes code ON code.id=target.launch_code_id
+             JOIN launch_code_batches batch ON batch.id=code.batch_id
+             JOIN agent_creation_requests request ON request.requested_launch_code=code.id
+             JOIN agent_runtimes runtime ON runtime.id=request.agent_runtime_id
+             WHERE code.id=$1 AND target.source_host_id=$2
+               AND target.retry_of_launch_code_id IS NULL
+               AND batch.created_by_workos_user_id=$3
+               AND batch.code_count=1 AND COALESCE(batch.hosting_tier, 'standard')='standard'
+               AND target.created_by_workos_user_id=$3
+               AND request.id=$4 AND request.project_id=$5 AND runtime.project_id=$5
+               AND runtime.id=$6 AND runtime.source_host_id=$7
+               AND request.owner_user_id=$8
+               AND code.redeemed_at IS NOT NULL
+               AND code.redeemed_customer_org_id=request.customer_org_id
+               AND code.redemption_idempotency_key=request.idempotency_key
+               AND request.status='running' AND request.target_source_host_id IS NULL
+               AND EXISTS(SELECT 1 FROM project_runtime_links link WHERE link.project_id=$5 AND link.agent_runtime_id=$6 AND link.active)
+               AND (SELECT count(*) FROM agent_creation_requests r WHERE r.requested_launch_code=code.id)=1
+             FOR UPDATE OF target, code, batch, request, runtime",
+            &[&input.previous_code_id, &host, &input.operator_workos_user_id,
+              &input.expected_previous_request_id, &input.expected_previous_project_id,
+              &input.expected_previous_runtime_id, &previous_host, &operator.id],
+        ).await.map_err(store_error)?;
+        if previous.is_none() {
+            return Err(CoreError::RuntimeSpecMismatch);
+        }
+        let blocked: bool = tx.query_one(
+            "SELECT EXISTS(SELECT 1 FROM agent_runtimes WHERE source_host_id=$1)
+                OR EXISTS(SELECT 1 FROM agent_creation_requests WHERE (target_source_host_id=$1 OR agent_runtime_id=$2) AND status IN ('requested','launching'))
+                OR EXISTS(SELECT 1 FROM runtime_control_requests WHERE agent_runtime_id=$2 AND status IN ('requested','launching'))",
+            &[&host, &input.expected_previous_runtime_id],
+        ).await.map_err(store_error)?.get(0);
+        if blocked {
+            return Err(CoreError::RuntimeSpecMismatch);
+        }
+        lock_unused_standard_launch_code(
+            &*tx,
+            &input.code_id,
+            &input.expected_batch_id,
+            &input.operator_workos_user_id,
+        )
+        .await?;
+        let existing = tx.query_opt(
+            "SELECT launch_code_id, source_host_id, retry_of_launch_code_id FROM launch_code_host_targets
+             WHERE launch_code_id=$1 OR retry_of_launch_code_id=$2",
+            &[&input.code_id, &input.previous_code_id],
+        ).await.map_err(store_error)?;
+        if let Some(existing) = existing {
+            if existing.get::<_, String>("launch_code_id") != input.code_id
+                || existing.get::<_, String>("source_host_id") != host
+                || existing
+                    .get::<_, Option<String>>("retry_of_launch_code_id")
+                    .as_deref()
+                    != Some(input.previous_code_id.as_str())
+            {
+                return Err(CoreError::RuntimeSpecMismatch);
+            }
+        } else {
+            tx.execute(
+                "INSERT INTO launch_code_host_targets
+                 (launch_code_id, source_host_id, created_by_workos_user_id, created_at, retry_of_launch_code_id)
+                 VALUES ($1,$2,$3,CURRENT_TIMESTAMP,$4)",
+                &[&input.code_id, &host, &input.operator_workos_user_id, &input.previous_code_id],
+            ).await.map_err(store_error)?;
+            insert_finite_private_admin_audit_event(
+                &*tx,
+                FinitePrivateAdminAuditInsert {
+                    action: "launch_code.retry_target_host",
+                    target_type: "launch_code",
+                    target_id: &input.code_id,
+                    grant_id: None,
+                    api_key_id: None,
+                    actor: Some(&email),
+                    metadata: serde_json::to_value(input).map_err(json_error)?,
+                    now: &current_time_iso()?,
+                },
+            )
+            .await?;
         }
         self.finish(tx).await
     }
@@ -3254,6 +3343,34 @@ fn launch_code_batch_from_row(row: &Row) -> CoreResult<LaunchCodeBatch> {
         created_by_workos_user_id: row.get("created_by_workos_user_id"),
         created_at: row.get("created_at"),
     })
+}
+
+async fn lock_unused_standard_launch_code<C: GenericClient + Sync>(
+    client: &C,
+    code_id: &str,
+    expected_batch_id: &str,
+    operator_workos_user_id: &str,
+) -> CoreResult<()> {
+    let row = client
+        .query_opt(
+            "SELECT code.id FROM launch_codes code
+             JOIN launch_code_batches batch ON batch.id = code.batch_id
+             WHERE code.id = $1 AND code.batch_id = $2
+               AND batch.created_by_workos_user_id = $3
+               AND COALESCE(batch.hosting_tier, 'standard') = 'standard'
+               AND batch.code_count = 1
+               AND batch.revoked_at IS NULL AND batch.expires_at > CURRENT_TIMESTAMP
+               AND code.redeemed_customer_org_id IS NULL
+               AND code.redemption_idempotency_key IS NULL AND code.redeemed_at IS NULL
+             FOR UPDATE OF code, batch",
+            &[&code_id, &expected_batch_id, &operator_workos_user_id],
+        )
+        .await
+        .map_err(store_error)?;
+    if row.is_none() {
+        return Err(CoreError::InvalidLaunchCode);
+    }
+    Ok(())
 }
 
 struct LockedLaunchCode {
@@ -15514,6 +15631,208 @@ mod tests {
     /// The agent-creation lease queue is partitioned by source host: two requests
     /// routed to different hosts, and a runner declaring host A leases only A's
     /// request — never B's. Proves the global claim across all rows is gone.
+    async fn retry_canary_fixture(
+        db: &crate::test_support::TestDb,
+    ) -> (crate::RetryTargetedLaunchCodeInput, String) {
+        db.link_verified_user(LinkVerifiedUserInput {
+            verified_email: "retry-operator@finite.vip".into(),
+            workos_user_id: "retry-operator".into(),
+            now: None,
+        })
+        .await
+        .unwrap();
+        let issue = |name: &str| IssueLaunchCodeBatchInput {
+            name: name.into(),
+            code_count: 1,
+            expires_in_hours: Some(1),
+            hosting_tier: Some(HostingTier::Standard),
+            created_by_workos_user_id: "retry-operator".into(),
+            now: None,
+        };
+        let old = db.issue_launch_code_batch(issue("original")).await.unwrap();
+        db.target_launch_code_exact(
+            &old.codes[0].id,
+            &old.batch.id,
+            "retry-target",
+            "retry-operator@finite.vip",
+            "retry-operator",
+        )
+        .await
+        .unwrap();
+        let created = db
+            .request_agent_creation(RequestAgentCreationInput {
+                verified_email: "retry-operator@finite.vip".into(),
+                workos_user_id: "retry-operator".into(),
+                display_name: "Misplaced canary".into(),
+                launch_code: old.codes[0].code.clone(),
+                idempotency_key: "original".into(),
+                now: None,
+            })
+            .await
+            .unwrap();
+        // Reproduce the N-1 writer's durable failure, on synthetic state only:
+        // the binding exists but the saved request has no host target.
+        let client = db.connection().await.unwrap();
+        client
+            .execute(
+                "UPDATE agent_creation_requests SET target_source_host_id=NULL WHERE id=$1",
+                &[&created.request.id],
+            )
+            .await
+            .unwrap();
+        drop(client);
+        let leased = db
+            .lease_agent_creation_request(LeaseAgentCreationRequestInput {
+                runner_id: "wrong-runner".into(),
+                source_host_id: Some("wrong-host".into()),
+                lease_token: "old-lease".into(),
+                lease_seconds: Some(300),
+                runner_capacity: None,
+                now: None,
+            })
+            .await
+            .unwrap()
+            .unwrap();
+        let completed = db
+            .complete_agent_creation_request(CompleteAgentCreationRequestInput {
+                request_id: leased.request.id,
+                runner_id: "wrong-runner".into(),
+                lease_token: "old-lease".into(),
+                source_host_id: "wrong-host".into(),
+                source_machine_id: "old-canary-machine".into(),
+                runtime_artifact_id: Some("artifact-postgres-fixture".into()),
+                state_schema_version: Some("state-v1".into()),
+                provider_runtime_handle: None,
+                contact_endpoint: None,
+                runtime_capabilities: Some(kata_runtime_capabilities()),
+                display_name: Some("Misplaced canary".into()),
+                hostname: None,
+                runtime_host: Some("wrong-host".into()),
+                runtime_status: Some(RuntimeSummaryStatus::Online),
+                active_inference_profile: None,
+                hermes_available: Some(true),
+                published_app_urls: vec![],
+                agent_npub: None,
+                now: None,
+            })
+            .await
+            .unwrap();
+        let fresh = db.issue_launch_code_batch(issue("retry")).await.unwrap();
+        (
+            crate::RetryTargetedLaunchCodeInput {
+                code_id: fresh.codes[0].id.clone(),
+                expected_batch_id: fresh.batch.id,
+                previous_code_id: old.codes[0].id.clone(),
+                expected_previous_request_id: completed.request.id,
+                expected_previous_project_id: completed.project.id,
+                expected_previous_runtime_id: completed.request.agent_runtime_id.unwrap(),
+                expected_previous_source_host_id: "wrong-host".into(),
+                target_source_host_id: "retry-target".into(),
+                operator_email: "retry-operator@finite.vip".into(),
+                operator_workos_user_id: "retry-operator".into(),
+            },
+            fresh.codes[0].code.clone(),
+        )
+    }
+
+    #[tokio::test]
+    async fn postgres_canary_retry_preserves_history_dry_run_and_n_minus_one_readers() {
+        with_isolated_postgres(|db| async move {
+            let (input, code) = retry_canary_fixture(&db).await;
+            let before = [
+                db.row("launch_codes", &input.previous_code_id).await,
+                db.row("agent_creation_requests", &input.expected_previous_request_id).await,
+                db.row("agent_runtimes", &input.expected_previous_runtime_id).await,
+                db.row("projects", &input.expected_previous_project_id).await,
+            ];
+            let original_binding = db.query_json("SELECT to_jsonb(t) FROM launch_code_host_targets t WHERE launch_code_id=$1", &[&input.previous_code_id]).await;
+            let preview = CoreStore::connect_dry_run(&db.url).await.unwrap();
+            preview.retry_targeted_launch_code_exact(&input).await.unwrap();
+            assert!(db.query_json("SELECT to_jsonb(t) FROM launch_code_host_targets t WHERE launch_code_id=$1", &[&input.code_id]).await.is_empty());
+            assert!(db.query_json("SELECT to_jsonb(t) FROM finite_private_admin_audit_events t WHERE action='launch_code.retry_target_host'", &[]).await.is_empty());
+            db.retry_targeted_launch_code_exact(&input).await.unwrap();
+            db.retry_targeted_launch_code_exact(&input).await.unwrap();
+            // N-1 startup keeps the partial host index; N-1 readers need no new
+            // column or wire shape. Apply that exact old migration after retry.
+            let client = db.connection().await.unwrap();
+            client.batch_execute(include_str!("../migrations/0026_launch_code_host_targets.sql")).await.unwrap();
+            for id in [&input.previous_code_id, &input.code_id] {
+                let host: String = client.query_one("SELECT source_host_id FROM launch_code_host_targets WHERE launch_code_id=$1", &[id]).await.unwrap().get(0);
+                assert_eq!(host, "retry-target");
+            }
+            drop(client);
+            db.migrate().await.unwrap(); // retry schema is idempotent too
+            assert_eq!(db.query_json("SELECT to_jsonb(t) FROM finite_private_admin_audit_events t WHERE action='launch_code.retry_target_host'", &[]).await.len(), 1);
+            let created = db.request_agent_creation(RequestAgentCreationInput {
+                verified_email: input.operator_email.clone(), workos_user_id: input.operator_workos_user_id.clone(),
+                display_name: "Fresh canary".into(), launch_code: code, idempotency_key: "fresh".into(), now: None,
+            }).await.unwrap();
+            assert_eq!(created.request.target_source_host_id.as_deref(), Some("retry-target"));
+            assert!(db.retry_targeted_launch_code_exact(&input).await.is_err()); // consumed retry is never reset
+            for host in [None, Some("wrong-host"), Some("retry-target")] {
+                let leased = db.lease_agent_creation_request(LeaseAgentCreationRequestInput {
+                    runner_id: "retry-runner".into(), source_host_id: host.map(String::from), lease_token: "retry-lease".into(),
+                    lease_seconds: Some(300), runner_capacity: None, now: None,
+                }).await.unwrap();
+                if host == Some("retry-target") { assert_eq!(leased.unwrap().request.id, created.request.id); }
+                else { assert!(leased.is_none()); }
+            }
+            assert_eq!(original_binding, db.query_json("SELECT to_jsonb(t) FROM launch_code_host_targets t WHERE launch_code_id=$1", &[&input.previous_code_id]).await);
+            assert_eq!(before, [
+                db.row("launch_codes", &input.previous_code_id).await,
+                db.row("agent_creation_requests", &input.expected_previous_request_id).await,
+                db.row("agent_runtimes", &input.expected_previous_runtime_id).await,
+                db.row("projects", &input.expected_previous_project_id).await,
+            ]);
+        }).await;
+    }
+
+    #[tokio::test]
+    async fn postgres_canary_retry_rejects_mismatched_or_occupied_state_and_competing_retries() {
+        with_isolated_postgres(|db| async move {
+            let (input, _) = retry_canary_fixture(&db).await;
+            for field in ["codeId", "expectedBatchId", "previousCodeId", "expectedPreviousRequestId", "expectedPreviousProjectId", "expectedPreviousRuntimeId", "expectedPreviousSourceHostId", "targetSourceHostId", "operatorEmail", "operatorWorkosUserId"] {
+                let mut bad = serde_json::to_value(&input).unwrap();
+                bad[field] = serde_json::json!("mismatch");
+                let bad = serde_json::from_value(bad).unwrap();
+                assert!(db.retry_targeted_launch_code_exact(&bad).await.is_err(), "accepted mismatched {field}");
+            }
+            let client = db.connection().await.unwrap();
+            // A separate Runtime on the target refuses even when the exact
+            // original misplacement still matches all expected identifiers.
+            client.execute("INSERT INTO agent_runtimes SELECT (jsonb_populate_record(NULL::agent_runtimes, to_jsonb(r) || jsonb_build_object('id','occupied-runtime','source_host_id',$1::text,'source_machine_id','occupied-machine','source_import_key','occupied-key'))).* FROM agent_runtimes r WHERE id=$2", &[&input.target_source_host_id, &input.expected_previous_runtime_id]).await.unwrap();
+            assert!(db.retry_targeted_launch_code_exact(&input).await.is_err());
+            client.execute("DELETE FROM agent_runtimes WHERE id='occupied-runtime'", &[]).await.unwrap();
+            client.execute("UPDATE agent_creation_requests SET target_source_host_id=$1 WHERE id=$2", &[&input.target_source_host_id, &input.expected_previous_request_id]).await.unwrap();
+            assert!(db.retry_targeted_launch_code_exact(&input).await.is_err());
+            client.execute("UPDATE agent_creation_requests SET target_source_host_id=NULL WHERE id=$1", &[&input.expected_previous_request_id]).await.unwrap();
+            client.execute("UPDATE launch_code_batches SET revoked_at=CURRENT_TIMESTAMP, revoked_by_workos_user_id='retry-operator' WHERE id=$1", &[&input.expected_batch_id]).await.unwrap();
+            assert!(db.retry_targeted_launch_code_exact(&input).await.is_err());
+            client.execute("UPDATE launch_code_batches SET revoked_at=NULL, revoked_by_workos_user_id=NULL WHERE id=$1", &[&input.expected_batch_id]).await.unwrap();
+            drop(client);
+            let stop = db.request_runtime_stop(RequestRuntimeStopInput {
+                verified_email: input.operator_email.clone(), workos_user_id: input.operator_workos_user_id.clone(),
+                project_id: input.expected_previous_project_id.clone(), now: None,
+            }).await.unwrap();
+            assert!(db.retry_targeted_launch_code_exact(&input).await.is_err());
+            let client = db.connection().await.unwrap();
+            client.execute("UPDATE runtime_control_requests SET status='failed' WHERE id=$1", &[&stop.id]).await.unwrap();
+            drop(client);
+            let another = db.issue_launch_code_batch(IssueLaunchCodeBatchInput {
+                name: "competing retry".into(), code_count: 1, expires_in_hours: Some(1), hosting_tier: Some(HostingTier::Standard),
+                created_by_workos_user_id: input.operator_workos_user_id.clone(), now: None,
+            }).await.unwrap();
+            let mut competing = input.clone(); competing.code_id = another.codes[0].id.clone(); competing.expected_batch_id = another.batch.id;
+            let (a,b) = tokio::join!(db.retry_targeted_launch_code_exact(&input), db.retry_targeted_launch_code_exact(&competing));
+            assert!(a.is_ok() ^ b.is_ok());
+            assert_eq!(db.query_json("SELECT to_jsonb(t) FROM launch_code_host_targets t WHERE retry_of_launch_code_id=$1", &[&input.previous_code_id]).await.len(), 1);
+            assert_eq!(db.query_json("SELECT to_jsonb(t) FROM finite_private_admin_audit_events t WHERE action='launch_code.retry_target_host'", &[]).await.len(), 1);
+            let rejected = if a.is_ok() { &competing } else { &input };
+            // The normal command still cannot create a second root reservation.
+            assert!(db.target_launch_code_exact(&rejected.code_id, &rejected.expected_batch_id, "retry-target", &input.operator_email, &input.operator_workos_user_id).await.is_err());
+        }).await;
+    }
+
     #[tokio::test]
     async fn postgres_targeted_launch_code_is_atomic_and_isolates_the_host() {
         with_isolated_postgres(|store| async move {

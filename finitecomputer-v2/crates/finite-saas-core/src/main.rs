@@ -45,6 +45,33 @@ enum Command {
         #[arg(long)]
         operator_workos_user_id: String,
     },
+    /// Root-only: append one canary retry after an exact completed misplacement.
+    #[command(name = "launch-code-retry-target-exact")]
+    LaunchCodeRetryTargetExact {
+        #[arg(long)]
+        code_id: String,
+        #[arg(long)]
+        expected_batch_id: String,
+        #[arg(long)]
+        previous_code_id: String,
+        #[arg(long)]
+        expected_previous_request_id: String,
+        #[arg(long)]
+        expected_previous_project_id: String,
+        #[arg(long)]
+        expected_previous_runtime_id: String,
+        #[arg(long)]
+        expected_previous_source_host_id: String,
+        #[arg(long)]
+        target_source_host_id: String,
+        #[arg(long)]
+        operator_email: String,
+        #[arg(long)]
+        operator_workos_user_id: String,
+        /// Commit the retry. Omit for rollback-only preview (schema must exist).
+        #[arg(long)]
+        execute: bool,
+    },
     /// Run the Core HTTP API.
     Serve,
     /// Add or update a promoted runtime artifact record.
@@ -479,6 +506,41 @@ async fn main() -> Result<()> {
                 .await?;
             print_json(
                 &serde_json::json!({"launchCodeId":code_id,"batchId":expected_batch_id,"targetSourceHostId":target_source_host_id,"targetedCreationOnly":true}),
+            )
+        }
+        Command::LaunchCodeRetryTargetExact {
+            code_id,
+            expected_batch_id,
+            previous_code_id,
+            expected_previous_request_id,
+            expected_previous_project_id,
+            expected_previous_runtime_id,
+            expected_previous_source_host_id,
+            target_source_host_id,
+            operator_email,
+            operator_workos_user_id,
+            execute,
+        } => {
+            let auth = CoreAuth::from_env()?;
+            if !auth.has_kata_host(&target_source_host_id) {
+                bail!("target must match an active host-bound Kata credential");
+            }
+            let input = finite_saas_core::RetryTargetedLaunchCodeInput {
+                code_id,
+                expected_batch_id,
+                previous_code_id,
+                expected_previous_request_id,
+                expected_previous_project_id,
+                expected_previous_runtime_id,
+                expected_previous_source_host_id,
+                target_source_host_id,
+                operator_email,
+                operator_workos_user_id,
+            };
+            let store = postgres_store_from_env(ImportMode::from_dry_run(!execute)).await?;
+            store.retry_targeted_launch_code_exact(&input).await?;
+            print_json(
+                &serde_json::json!({"binding":input,"dryRun":!execute,"targetedCreationOnly":true}),
             )
         }
         Command::RuntimeArtifactRollout(args) => runtime_artifact_rollout_command(args).await,
@@ -1815,6 +1877,45 @@ mod tests {
             assert_eq!(stored.status.as_str(), "active");
         })
         .await;
+    }
+
+    #[test]
+    fn canary_retry_requires_exact_ids_and_defaults_to_preview() {
+        let args = [
+            "finite-saas-core",
+            "launch-code-retry-target-exact",
+            "--code-id",
+            "new-code",
+            "--expected-batch-id",
+            "new-batch",
+            "--previous-code-id",
+            "old-code",
+            "--expected-previous-request-id",
+            "old-request",
+            "--expected-previous-project-id",
+            "old-project",
+            "--expected-previous-runtime-id",
+            "old-runtime",
+            "--expected-previous-source-host-id",
+            "wrong-host",
+            "--target-source-host-id",
+            "target-host",
+            "--operator-email",
+            "operator@finite.vip",
+            "--operator-workos-user-id",
+            "operator",
+        ];
+        assert!(matches!(
+            Args::try_parse_from(args).unwrap().command,
+            Some(Command::LaunchCodeRetryTargetExact { execute: false, .. })
+        ));
+        assert!(matches!(
+            Args::try_parse_from(args.into_iter().chain(["--execute"]))
+                .unwrap()
+                .command,
+            Some(Command::LaunchCodeRetryTargetExact { execute: true, .. })
+        ));
+        assert!(Args::try_parse_from(&args[..args.len() - 2]).is_err());
     }
 
     #[test]
