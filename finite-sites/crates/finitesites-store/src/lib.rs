@@ -667,9 +667,8 @@ impl Store {
         let legacy_sites_shape_migrated = Self::migrate_legacy_sites_shape(&conn)?;
         Self::record_legacy_migration(&conn, "sites_shape", legacy_sites_shape_migrated)?;
         Self::migrate_legacy_allowed_pubkeys(&conn)?;
-        // Shape-rebuild migrations above intentionally preserve only columns
-        // known to their legacy source shape, so re-assert newer attribution
-        // columns after those table swaps.
+        // Attribution is authorization state. Shape rebuilds must preserve
+        // these values, not replace them with empty columns after the swap.
         Self::ensure_column(
             &conn,
             "sites",
@@ -1222,6 +1221,8 @@ impl Store {
                    kind TEXT NOT NULL DEFAULT 'static' CHECK (kind IN ('static')),
                    app_port INTEGER UNIQUE CHECK (app_port IS NULL OR (app_port >= 21000 AND app_port <= 29999)),
                    active_version_id TEXT REFERENCES versions(id),
+                   publisher_email_principal_id TEXT REFERENCES sites_email_principals(id),
+                   originating_publisher_principal_id TEXT REFERENCES principals(id),
                    created_at INTEGER NOT NULL,
                    updated_at INTEGER NOT NULL
                  );",
@@ -1229,9 +1230,11 @@ impl Store {
             conn.execute(
                 &format!(
                     "INSERT INTO sites_new
-                        (id, owner_pubkey, status, visibility, kind, app_port, active_version_id, created_at, updated_at)
+                        (id, owner_pubkey, status, visibility, kind, app_port, active_version_id,
+                         publisher_email_principal_id, originating_publisher_principal_id, created_at, updated_at)
                      SELECT id, {owner_expr}, status, visibility, 'static', NULL,
-                            active_version_id, created_at, updated_at
+                            active_version_id, publisher_email_principal_id,
+                            originating_publisher_principal_id, created_at, updated_at
                      FROM sites
                      WHERE {kind_expr} = 'static'"
                 ),
@@ -1350,15 +1353,20 @@ impl Store {
                    id TEXT PRIMARY KEY,
                    slug TEXT NOT NULL UNIQUE,
                    owner_principal_id TEXT NOT NULL REFERENCES principals(id),
+                   publisher_email_principal_id TEXT REFERENCES sites_email_principals(id),
+                   originating_publisher_principal_id TEXT REFERENCES principals(id),
                    visibility TEXT NOT NULL CHECK (visibility IN ('private', 'public-read')),
                    created_at INTEGER NOT NULL,
                    updated_at INTEGER NOT NULL
                  );
                  INSERT INTO projects_new
-                   (id, slug, owner_principal_id, visibility, created_at, updated_at)
+                   (id, slug, owner_principal_id, publisher_email_principal_id,
+                    originating_publisher_principal_id, visibility, created_at, updated_at)
                  SELECT id,
                         slug,
                         owner_principal_id,
+                        publisher_email_principal_id,
+                        originating_publisher_principal_id,
                         CASE visibility
                           WHEN 'public' THEN 'public-read'
                           ELSE 'private'
@@ -1488,12 +1496,16 @@ impl Store {
                    kind TEXT NOT NULL DEFAULT 'static' CHECK (kind IN ('static')),
                    app_port INTEGER UNIQUE CHECK (app_port IS NULL OR (app_port >= 21000 AND app_port <= 29999)),
                    active_version_id TEXT REFERENCES versions(id),
+                   publisher_email_principal_id TEXT REFERENCES sites_email_principals(id),
+                   originating_publisher_principal_id TEXT REFERENCES principals(id),
                    created_at INTEGER NOT NULL,
                    updated_at INTEGER NOT NULL
                  );
                  INSERT INTO sites_new
-                   (id, owner_pubkey, status, visibility, kind, app_port, active_version_id, created_at, updated_at)
-                 SELECT id, owner_pubkey, status, visibility, 'static', NULL, active_version_id, created_at, updated_at
+                   (id, owner_pubkey, status, visibility, kind, app_port, active_version_id,
+                    publisher_email_principal_id, originating_publisher_principal_id, created_at, updated_at)
+                 SELECT id, owner_pubkey, status, visibility, 'static', NULL, active_version_id,
+                        publisher_email_principal_id, originating_publisher_principal_id, created_at, updated_at
                  FROM sites
                  WHERE kind = 'static';
                  DROP TABLE sites;
