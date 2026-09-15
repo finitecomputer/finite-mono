@@ -8,3 +8,16 @@
 !package.json
 !package-lock.json
 !vercel.json
+# Git deployments apply this file from the monorepo root. Keep the same
+# allowlist there as for the initial app-directory CLI bootstrap above.
+!finite-sites
+!finite-sites/experiments
+!finite-sites/experiments/vercel
+!finite-sites/experiments/vercel/app
+!finite-sites/experiments/vercel/app/api
+!finite-sites/experiments/vercel/app/api/**
+!finite-sites/experiments/vercel/app/lib
+!finite-sites/experiments/vercel/app/lib/**
+!finite-sites/experiments/vercel/app/package.json
+!finite-sites/experiments/vercel/app/package-lock.json
+!finite-sites/experiments/vercel/app/vercel.json
