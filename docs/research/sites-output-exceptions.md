@@ -21,6 +21,9 @@ disposable static candidate does not authorize deletion from legacy.
 
 ## Why a Rename Is Necessary
 
+These code references describe the investigated `b5280f16` source revision;
+the offline tool does not depend on that branch or its store implementation.
+
 - `finite-sites/crates/finitesites-store/src/lib.rs`,
   `migrate_project_output_document_shape` (line 1517): copies surviving `output_id` values
   verbatim when rebuilding the table.
@@ -98,6 +101,7 @@ Selection format, using synthetic identifiers only:
 
 The source must be a hash-pinned, checkpointed legacy registry. The tool rejects
 nonempty SQLite sidecars, symlink input paths, already-created output directories,
+output directories inside either the source registry or repository tree,
 post-startup schemas that have erased mixed-output evidence, unexpected triggers,
 stale/duplicate selections, multiple-output projects, runtime fields and missing
 selected repositories. It copies before opening SQLite. It compares every logical
@@ -125,7 +129,9 @@ Validation:
 scripts/with-dev-env python3 -m unittest scripts.tests.test_sites_reconcile_static_output_ids
 ```
 
-Seven synthetic offline-command tests cover conversion, source preservation,
+Eight synthetic offline-command tests cover conversion, source preservation,
 mixed-project refusal, missing source, replay, stale batches, wrong hash,
-nonempty WAL and symlink refusal. The parent owns startup and authorization
+nonempty WAL, symlink refusal and separate-repository-tree protection. The positive
+test independently reads a scratch copy of the emitted database and compares
+literal IDs, ownership, provenance, shares and Git-event references. The parent owns startup and authorization
 behavior tests; no Rust/store or backup modules are changed here.
