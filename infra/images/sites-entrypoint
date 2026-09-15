@@ -1,0 +1,15 @@
+#!/bin/sh
+set -eu
+
+if [ "${1:-}" = serve ]; then
+    # Refuse to put durable state on the ephemeral image filesystem.
+    mountpoint -q /var/lib/finite-sites || {
+        echo 'Sites requires a volume at /var/lib/finite-sites' >&2
+        exit 1
+    }
+    # Initialize only the mount root; never recursively rewrite user data.
+    chown 65532:65532 /var/lib/finite-sites
+    chmod 700 /var/lib/finite-sites
+fi
+umask 077
+exec setpriv --reuid=65532 --regid=65532 --clear-groups --no-new-privs finitesitesd "$@"

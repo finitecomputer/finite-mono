@@ -18,6 +18,7 @@ Tinfoil surface; the Agent Runtime image has its own rollout lifecycle.
 | `finite-saas-core` | `core.Dockerfile` (context: repo root) | `service-images.yml` | (retained; production Core runs from the lat2 NixOS closure) |
 | `finite-saas-dashboard` | `dashboard.Dockerfile` (context: repo root; includes the shared Finite Chat UI package) | `service-images.yml` | lat2 (podman OCI container, digest-pinned in `infra/nixos/modules/dashboard.nix`) |
 | `private-limiter` | `private-limiter.Dockerfile` (context: repo root) | `service-images.yml` | Finite Private Tinfoil CVM (digest pinned in confidential-finite-private) |
+| `finite-sites` | `sites.Dockerfile` (context: repo root; Rust pin from `rust-toolchain.toml`) | `service-images.yml` (`sites`) | Option B / Fly demo candidate; not a production deployment. See [Sites on Fly](../fly/sites/README.md). |
 | `glm-5-3-flash-sglang` | `glm-5.3-flash-sglang.Dockerfile` (context: repo root; wraps the exact upstream amd64 manifest with source labels and fail-closed internal auth) | `glm-5.3-flash-sglang-image.yml` | Live Finite Private GLM-5.3-Flash Tinfoil container |
 | `agent-runtime` | `finitecomputer-v2/deploy/finite-computer/images/runtime.Dockerfile` via `finitecomputer-v2/scripts/build_runtime_image.py` (one staged monorepo + root lockfile) | `runtime-image.yml`, whose build-once smoke proves the exact local image ID before push; `hermes-runtime-smoke.yml` is optional source preflight | local Docker, Kata, Phala, and agent canary lanes |
 
