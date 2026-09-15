@@ -328,6 +328,20 @@
             craneLib = crane.mkLib finitePackagePkgs;
             sourceRoot = ./.;
           };
+          # Explicit candidates for the draft crate2nix integration test.
+          # Use the same packaging compiler/native libraries as Crane.
+          crate2nixWorkspace = import ./Cargo.nix { pkgs = finitePackagePkgs; };
+          crate2nixServices = {
+            finitesitesd = crate2nixWorkspace.workspaceMembers.finitesitesd.build;
+            finite-saas-core = crate2nixWorkspace.workspaceMembers.finite-saas-core.build;
+          };
+          crate2nixDevfinity =
+            (import ./infra/nixos/packages.nix {
+              pkgs = finitePackagePkgs;
+              craneLib = crane.mkLib finitePackagePkgs;
+              sourceRoot = ./.;
+              devfinityServiceOverrides = crate2nixServices;
+            }).devfinity;
           gcxCli = (import nixpkgs-lat3 { inherit system; }).gcx;
           # Litestream comes from the lat1 platform pin: 25.11's litestream is
           # 0.3.x and marked insecure, and the restore drill must use the same
@@ -364,9 +378,24 @@
             ]);
         in
         {
-          packages = (hermesPackagesFor system) // finitePackages;
+          packages =
+            (hermesPackagesFor system)
+            // finitePackages
+            // {
+              finitesitesd-crate2nix = crate2nixServices.finitesitesd;
+              finite-saas-core-crate2nix = crate2nixServices.finite-saas-core;
+              devfinity-crate2nix = crate2nixDevfinity;
+            };
 
           devShells = {
+            # Regenerate the root Cargo.nix using the repo's pinned tooling.
+            crate2nix = pkgs.mkShell {
+              packages = [
+                pkgs.crate2nix
+                rustToolchain
+                pkgs.git
+              ];
+            };
             default = pkgs.mkShell {
               packages =
                 rustBasePackages
