@@ -98,8 +98,8 @@ in
   postDisko = "disk_source_machine = machine";
   extraTestScript = ''
     machine.wait_for_unit("data.mount")
-    machine.wait_for_unit("boot-a.mount")
-    machine.wait_for_unit("boot-b.mount")
+    machine.wait_until_succeeds("mountpoint -q /boot-a")
+    machine.wait_until_succeeds("mountpoint -q /boot-b")
     machine.succeed("test $(blkid -s UUID -o value /dev/md/root) = ${ids.filesystemUuids.root}")
     machine.succeed("test $(blkid -s UUID -o value /dev/md/data) = ${ids.filesystemUuids.data}")
     machine.succeed("test -f /boot-a/EFI/BOOT/BOOTX64.EFI; test -f /boot-b/EFI/BOOT/BOOTX64.EFI")
@@ -113,16 +113,16 @@ in
     machine = create_test_machine(oldmachine=disk_source_machine, name="booted_from_esp_a")
     machine.start()
     machine.wait_for_unit("local-fs.target")
-    machine.wait_for_unit("boot-a.mount")
-    machine.wait_for_unit("boot-b.mount")
+    machine.wait_until_succeeds("mountpoint -q /boot-a")
+    machine.wait_until_succeeds("mountpoint -q /boot-b")
     machine.succeed("mv /boot-b/EFI/BOOT/BOOTX64.EFI.test-disabled /boot-b/EFI/BOOT/BOOTX64.EFI")
     machine.succeed("mv /boot-a/EFI/BOOT/BOOTX64.EFI /boot-a/EFI/BOOT/BOOTX64.EFI.test-disabled; sync")
     machine.shutdown()
     machine = create_test_machine(oldmachine=disk_source_machine, name="booted_from_esp_b")
     machine.start()
     machine.wait_for_unit("local-fs.target")
-    machine.wait_for_unit("boot-a.mount")
-    machine.wait_for_unit("boot-b.mount")
+    machine.wait_until_succeeds("mountpoint -q /boot-a")
+    machine.wait_until_succeeds("mountpoint -q /boot-b")
     machine.succeed("mv /boot-a/EFI/BOOT/BOOTX64.EFI.test-disabled /boot-a/EFI/BOOT/BOOTX64.EFI")
 
     # The unchanged production guard must refuse before invoking GRUB.
