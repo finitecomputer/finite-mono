@@ -156,13 +156,22 @@ Prerequisites for eventual cloud qualification, not resources provisioned here:
 Only an explicit S3 command initializes the AWS credential provider chain
 (environment/profile, process, role/web-identity/container/instance providers;
 SSO is not compiled in). Local capture/restore and daemon startup do not.
-`--endpoint-url` supports HTTPS test endpoints and HTTP on loopback only; all
-tests clear inherited configuration and supply synthetic credentials.
+`--endpoint-url` supports HTTPS test endpoints and HTTP on loopback only.
+Inherited shared or service-specific endpoint overrides cannot replace this
+validated flag. Tests clear inherited configuration and supply synthetic
+credentials; the endpoint-precedence regression injects only loopback overrides.
 These commands reuse the 60-second backup operation ceiling for each complete
 network operation, including GET bodies, with at most three SDK attempts.
 They retain the existing local object/manifest/inventory limits and require
 space for a full validation restore. GET verification reads reused bytes again:
 deduplication saves uploads/storage, not download bandwidth or capture work.
+On reuse, the local upload buffer and the downloaded verification buffer can
+coexist: allow roughly **two object-sized RAM buffers**, plus SDK, manifest,
+SQLite and Git overhead. During restore, downloaded repository objects and the
+materialized restore tree coexist on disk; capture also retains its full local
+validation tree during upload. Provision scratch space for both copies and Git
+expansion. The **1 GiB per-object ceiling is not qualification for a 1 GiB Fly
+Machine**, nor a measured peak-memory or remote-volume sizing guarantee.
 
 Run `scripts/with-dev-env cargo test -p finitesitesd --locked --test backup_s3`
 for the synthetic public CLI contract. SDK additions are pinned to

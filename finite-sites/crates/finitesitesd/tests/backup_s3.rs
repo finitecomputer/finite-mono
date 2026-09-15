@@ -18,6 +18,7 @@ const HTML: &[u8] = b"<h1>Synthetic S3 recovery</h1>";
 
 #[derive(Default)]
 struct Bucket {
+    requests: u64,
     objects: BTreeMap<String, Vec<Vec<u8>>>,
     lifecycle: Option<String>,
     encryption: Option<&'static str>,
@@ -38,6 +39,7 @@ async fn s3(
     bytes: Bytes,
 ) -> Response {
     let mut bucket = bucket.lock().unwrap();
+    bucket.requests += 1;
     if query.contains_key("versioning") {
         if bucket.suspended {
             return "<VersioningConfiguration><Status>Suspended</Status></VersioningConfiguration>"
@@ -207,6 +209,15 @@ impl S3Server {
     }
 
     async fn command(&self, home: &Path, args: &[&str]) -> Output {
+        self.command_with_env(home, args, &[]).await
+    }
+
+    async fn command_with_env(
+        &self,
+        home: &Path,
+        args: &[&str],
+        overrides: &[(&str, &str)],
+    ) -> Output {
         let mut cmd = Command::new(env!("CARGO_BIN_EXE_finitesitesd"));
         cmd.env_clear()
             .env("PATH", std::env::var_os("PATH").unwrap())
@@ -214,6 +225,7 @@ impl S3Server {
             .env("AWS_ACCESS_KEY_ID", "synthetic-access")
             .env("AWS_SECRET_ACCESS_KEY", "synthetic-secret")
             .env("AWS_EC2_METADATA_DISABLED", "true")
+            .envs(overrides.iter().copied())
             .args(["backup"])
             .args(args)
             .args([
@@ -230,6 +242,71 @@ impl S3Server {
             .await
             .unwrap()
     }
+}
+
+#[tokio::test]
+async fn explicit_loopback_endpoint_wins_over_inherited_shared_and_service_endpoints() {
+    let selected = S3Server::start().await;
+    let inherited = S3Server::start().await;
+    let root = tempfile::tempdir().unwrap();
+    let source = root.path().join("source");
+    fixture(&source);
+    let repository = root.path().join("local");
+    let point = finitesitesd::backup::capture(&source, &repository, 200).unwrap();
+    let shared = ("AWS_ENDPOINT_URL", inherited.endpoint.as_str());
+    let service = ("AWS_ENDPOINT_URL_S3", inherited.endpoint.as_str());
+    for (name, overrides) in [
+        ("shared", vec![shared]),
+        ("service", vec![service]),
+        ("both", vec![shared, service]),
+    ] {
+        let receipt = success(
+            selected
+                .command_with_env(
+                    root.path(),
+                    &[
+                        "capture-s3",
+                        "--repository",
+                        repository.to_str().unwrap(),
+                        "--point",
+                        &point.id,
+                    ],
+                    &overrides,
+                )
+                .await,
+        );
+        let target = root.path().join(name);
+        success(
+            selected
+                .command_with_env(
+                    root.path(),
+                    &[
+                        "restore-s3",
+                        "--point",
+                        receipt["id"].as_str().unwrap(),
+                        "--version-id",
+                        receipt["version_id"].as_str().unwrap(),
+                        "--target",
+                        target.to_str().unwrap(),
+                    ],
+                    &overrides,
+                )
+                .await,
+        );
+        assert_eq!(
+            Store::open(&target.join("registry.db"))
+                .unwrap()
+                .shares("site_1")
+                .unwrap(),
+            ["viewer@example.com"]
+        );
+    }
+    assert!(selected.bucket.lock().unwrap().requests > 0);
+    assert_eq!(
+        inherited.bucket.lock().unwrap().requests,
+        0,
+        "inherited endpoints must receive neither reads nor writes"
+    );
 }
 
 #[tokio::test]
