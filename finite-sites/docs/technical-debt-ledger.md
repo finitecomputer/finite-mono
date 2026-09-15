@@ -85,20 +85,15 @@ succeeded against finite-lat-2. The residual behavior (a
 misconfigured `--api-url` fails closed with "url mismatch") remains the
 expected signed-call behavior.
 
-## 8. RESOLVED — app runner debt removed by static-only Sites
+## 8. Static-only Sites boundary
 
-ADR 0028 cuts app/document output kinds, Kata app runners, app proxying, and
-wake-on-request from Finite Sites. The previous tier-2 runtime debt entries
-are closed by removal rather than by completing the app-hosting path:
+Under [ADR 0028](adr/0028-static-only-sites-platform-service.md), the Sites
+service and CLI support static Sites only. App/document output kinds, app
+runners and proxies, and wake-on-request are outside that boundary.
 
-- no `kind = "app"` public contract;
-- no app bundle manifest exception;
-- no app proxy or websocket/log surface;
-- no Sites-specific Kata/containerd/sudo integration;
-- no wake-on-request app supervisor.
-
-Future dynamic compute belongs in a separate product boundary, not as another
-Sites kind.
+Dynamic compute belongs in a separate product boundary. Retained legacy
+app/document consumers stay on their existing service until retirement; they
+are not converted into static Sites during cutover.
 
 ## 9. RESOLVED — Project Repository pushes use durable post-receive events
 
@@ -129,7 +124,7 @@ acknowledgement.
   store-layer helpers only with a dedicated store cleanup that rewrites the
   fixtures that use them.
 
-## 11. Retained legacy viewer-session exchange (FIN-53)
+## 11. Retained legacy viewer-session exchange
 
 - **Boundary**: dashboard account previews select one of two fixed configured
   Sites origins using the existing allowed site hostname distinction. Legacy
@@ -138,4 +133,5 @@ acknowledgement.
 - **Delete condition**: remove legacy selection and request spelling after
   legacy previews and Hosted Chat requester consumers are retired. Until then,
   paired exchange tests must prove requests and failures stay on their backend.
-- **Decision**: ADR 0029. Production cutover remains separately authorized.
+- **Contract**: [ADR 0029](adr/0029-account-session-viewer-bridge.md).
+  Production cutover requires separate authorization.

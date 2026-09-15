@@ -7,8 +7,8 @@ the rest of the server stack.
 This runbook does not cut canonical `finite.chat` Sites traffic over. The
 finite-lat-2 app-plane service stays in `legacy-canonical` mode, pinned to the
 released `fsite/v0.5.2` daemon, so `api.finite.chat`, `*.finite.chat`, and
-`*.docs.finite.chat` continue to serve the public v1 contract until a separate
-cutover PR changes that boundary deliberately.
+`*.docs.finite.chat` continue to serve the public v1 contract until a separately
+authorized cutover.
 
 ## Topology
 
@@ -61,7 +61,7 @@ spelling. Missing or failing v2 configuration does not fall back to legacy.
 Both servers use the existing credential. The bridge retains the guest email
 challenge and never writes or mirrors shares.
 
-Coordinate this order; none of these production steps is performed by the PR:
+Production cutover requires explicit authorization. Coordinate this order:
 
 1. Provision the dedicated host from the reviewed Nix closure. Run
    `scripts/finite-status` before and after each rollout.
@@ -79,8 +79,8 @@ Coordinate this order; none of these production steps is performed by the PR:
    Qualify the static-only copy on an empty destination and prove stable Site
    IDs, URLs/slugs, active content, publisher-email ownership, and allowlisted guest access.
    The synthetic v0.5.3 fixture covers one supported old writer; it is not
-   evidence that every production source is compatible. Unsupported outputs
-   are retired under the September 15 decision, not converted to static sites.
+   evidence that every production source is compatible. Only static Sites
+   belong on the destination; app/document outputs are not converted to Sites.
 5. Verify the account bridge on the actual finite.computer and finite.site
    domains: authorized WorkOS session, anonymous guest challenge, unshared
    email, changed/revoked share, direct URL, and dashboard iframe. In the same
@@ -91,7 +91,7 @@ Coordinate this order; none of these production steps is performed by the PR:
    exchange selection alone does not rewrite them. Then enable
    the destination auth model for traffic.
 6. Only after those checks, release the CLI whose default is `finite.site`.
-   Apps and documents are retired, not supported by the new CLI. Qualify
+   The v2 CLI supports static Sites only. Qualify
    existing agents and saved Git remotes before fleet rollout. Remove legacy
    exchange configuration only after its remaining consumers are retired.
 

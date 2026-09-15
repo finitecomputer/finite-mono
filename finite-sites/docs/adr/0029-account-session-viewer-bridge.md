@@ -1,75 +1,83 @@
 # ADR 0029: Bridge account sessions into the existing Sites email viewer session
 
-Status: Accepted for implementation; deployment follows the Sites v2 cutover.
+Status: Accepted.
 
 ## Decision
 
 The account dashboard proves the current WorkOS session's verified email to
-Sites through the existing authenticated `/internal/v1/viewer-sessions`
-endpoint. Sites issues a short-lived, single-use redemption token and mints
-its existing host-scoped ExternalEmail Viewer Cookie. Direct HTML visits and
-dashboard previews use the same account adapter. Missing account evidence or
-an unavailable exchange returns the visitor to the existing email challenge.
+Sites through `POST /internal/v1/viewer-sessions`, authenticated with a
+server-only service credential. Sites issues a short-lived, single-use
+redemption token for its host-scoped ExternalEmail Viewer Cookie. Direct HTML
+visits and dashboard previews use the same account adapter without Hosted Chat
+signing. Dashboard previews also require Core-confirmed access to the selected
+Agent Runtime. Missing account evidence or an unavailable exchange returns
+the visitor to the guest email challenge.
 An unshared verified account reaches the existing Request Access page and can
 try another email. Authentication never creates a share.
 
 Sites remains responsible for interpreting publisher-email ownership, email
-shares, native grants, and visibility on each read. Core owns the account/key/
-email roster direction; this bridge does not mirror that roster or product
-grants. Permanent npub identity and key custody are deferred to BANKS. This
-is a bounded email bridge, not the completed Core/npub architecture.
+shares, native grants, and visibility on redemption and every content read.
+The bridge neither mirrors an account roster nor creates or copies grants.
+Existing NIP-98 native clients retain their API; native-only grants do not
+become email grants.
 
-## Reuse and complexity budget
+## Configuration and coexistence
 
-Use the existing dashboard session reader, service credential, Sites endpoint,
-login-token store, email subject, cookie signer, and access evaluator. All
-viewer routes use one cookie mint. Reuse `finite-nostr` for Sites NIP-98 instead
-of the local event/signature implementation (the #800 consolidation, including
-its missing Nix source closure). There is no new service, crate, secret, custom
-signature protocol, account store, or grant synchronization.
+The daemon's `FINITE_SITES_ACCOUNT_LOGIN_URL=https://finite.computer/site-auth`
+enables automatic direct-visit handoff after the dashboard serves `/site-auth`.
+Without it, direct visits retain the email form. Legacy Sites supports account
+previews but does not initiate automatic direct-visit handoff.
 
-The initial bridge production-source diff (excluding tests) was approximately 382 lines
-added and 299 removed, net +83. This fits the 300–500 added-line budget but
-missed the net-zero target; most total diff growth is compatibility/browser
-proof and documentation, not new runtime subsystems. The FIN-53 coexistence
-follow-up adds one endpoint setting and three net TypeScript lines in the
-existing adapter, plus local configuration wiring and paired transport tests.
+`FINITE_SITES_VIEWER_SESSION_TOKEN` is the shared dashboard/Sites service
+credential: exactly 64 lowercase hex characters, kept only in server
+environments. An absent value disables the exchange endpoint. It must never
+reach a browser or Agent Runtime.
 
-The added state transition is one atomic, site-bound consume of an existing
-login-token row. Its domain-separated hash prevents redemption through the
-reusable emailed-link route. Existing email links keep their current behavior.
-The new token lifetime is 60 seconds; cookie lifetime remains seven days.
-Redemption redirects are no-store and no-referrer. URL validation constrains
-handoffs to served Site origins, and the explicit email fallback cannot start
-another automatic account redirect.
+Validated Site hostnames select the fixed server-configured origin and request
+field for `/internal/v1/viewer-sessions`:
 
-Retained legacy apps/documents and v2 static sites coexist (FIN-53). The
-existing hostname distinction selects both the request spelling and a fixed,
-server-configured exchange origin: `FC_SITES_UPSTREAM_URL` for legacy
-finite.chat (including docs.finite.chat), `FC_SITES_V2_UPSTREAM_URL` for
-finite.site and v2.finite.chat. Explicitly enabled local development sites use
-the v2 setting. Both use the existing service credential. No request supplies
-an upstream, and a missing/invalid/unavailable v2 origin never falls back to
-legacy. The existing Hosted Chat requester assertion remains on the legacy
-setting. Remove legacy selection and `output_url` spelling only when retained
-legacy previews and requester consumers are retired. No grants are mirrored.
+- Legacy finite.chat and docs.finite.chat Sites use `FC_SITES_UPSTREAM_URL`
+  with `output_url`.
+- Static finite.site and v2.finite.chat Sites use `FC_SITES_V2_UPSTREAM_URL`
+  with `site_url`. Explicitly enabled local development Sites use this setting.
 
-Old Sites can accept verified-email previews, but only
-the candidate daemon adds automatic direct-visit handoff. Existing NIP-98
-native clients retain their API; Chat is no longer a dependency of the browser
-bridge. Other products' competing NIP-98 implementations are outside this change.
+Both use the service credential. Requests cannot supply an upstream, and a
+missing, invalid, or unavailable v2 origin never falls back to legacy. Hosted
+Chat requester assertions retain the legacy setting. Remove legacy selection,
+configuration, and `output_url` spelling only when retained legacy previews and
+requester consumers are retired.
+
+## Tokens and cookies
+
+Account handoffs expire after 60 seconds and atomically consume one Site-bound
+login-token row. Issuance and outstanding tokens are bounded per Site/email.
+A domain-separated hash prevents redemption through the reusable emailed-link
+route. Emailed links remain reusable for 15 minutes.
+
+Viewer routes share one cookie mint with a seven-day lifetime. Cookies are
+host-scoped and HttpOnly: the ordinary cookie uses `SameSite=Lax`, with
+`Secure` in secure contexts; a distinct `SameSite=None; Secure; Partitioned`
+cookie carries iframe access in those contexts. A cookie proves a session,
+not continuing authorization; Sites rechecks access on every content request.
+
+Redemption redirects are `no-store` and `no-referrer`. URL validation constrains
+handoffs to served Site origins and same-origin return paths. The explicit
+email fallback cannot start another automatic account redirect.
 
 ## Compatibility and limits
 
-A registry generated by deployed `fsite/v0.5.3` is opened by the candidate to
-prove stable IDs, served bytes, publisher and allowlisted email access, denial,
-and durable revocation. Browser tests run the real daemon and dashboard with
-an explicit development account fixture; they do not claim live WorkOS proof.
+A synthetic registry generated by the actual `fsite/v0.5.3` writer proves
+stable IDs, served bytes, publisher and allowlisted email access, denial,
+old-cookie decoding, and durable revocation in the v2 daemon. Retain the
+[fixture and old-writer generator](../../crates/finitesitesd/tests/fixtures/legacy-email-v053/README.md)
+as compatibility evidence. This covers one old writer, not every production
+source or Git Repository migration. Browser tests run the real daemon and
+dashboard with a development account fixture; they do not prove live WorkOS.
 Existing cookies do not cross domains. The same email can establish a fresh
 cookie on the destination without copying grants or republishing sites.
 
 This does not reconcile changed account emails, aggregate aliases, migrate
-keys, provision a host, or redirect old sites. Existing native-only grants do
-not automatically become email grants. Before deployment, prove the actual
-source backup restores with the same email authority and verify WorkOS on the
-real domains. See the [cutover runbook](../../../infra/runbooks/deploy-sites.md).
+keys, provision a host, or redirect old sites. Before deployment, prove the
+actual source backup restores with the same email authority and verify WorkOS
+on the real domains. See the
+[cutover runbook](../../../infra/runbooks/deploy-sites.md).
