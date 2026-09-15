@@ -549,6 +549,7 @@ async fn original_viewer_session_serves_restored_content_and_revocation_still_ap
         api_url: format!("http://{address}"),
         git_base_url: format!("http://{address}"),
         viewer_session_service_token: None,
+        account_login_url: None,
         git_hook_helper_path: env!("CARGO_BIN_EXE_finitesitesd").into(),
         git_auto_reconcile: true,
         site_url_scheme: "http".into(),
