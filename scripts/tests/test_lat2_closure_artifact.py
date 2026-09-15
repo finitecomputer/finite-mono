@@ -186,13 +186,10 @@ class Lat2ClosureArtifactTests(unittest.TestCase):
         # not carry any runner-only rollout machinery.
         self.assertNotIn("finite-saas-runner.timer", source)
         self.assertNotIn("Runner-only", source)
-        # No transient-unit machinery: the only ExecStart reference is the
-        # chat fold guard READING the candidate closure's own unit file.
+        # ExecStart is read from candidate units for fold/executable checks;
+        # the deployment must not construct transient services.
         self.assertNotIn("systemd-run", source)
-        exec_start_lines = [
-            line for line in source.splitlines() if "ExecStart" in line
-        ]
-        self.assertEqual(exec_start_lines, ['  chat_exec_start="$(sed -n \'s/^ExecStart=//p\' "$chat_unit_file" | head -n 1)"'])
+        self.assertNotIn("--property=ExecStart", source)
         # The absence guard is the only runner reference allowed: a live
         # runner on the host, or any runner unit in the candidate closure,
         # refuses; an inert husk in the outgoing closure is crossable
