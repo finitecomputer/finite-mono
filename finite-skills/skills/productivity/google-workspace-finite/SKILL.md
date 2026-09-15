@@ -229,6 +229,11 @@ $GAPI sheets append SHEET_ID "Sheet1!A:C" --values '[["new","row","data"]]'
 
 ### Docs
 
+For creating, editing, or repairing Google Doc formatting, load
+`skill_view("layout-check-finite")` before writing and use it to check the saved result.
+Use native Docs styles through `gws` for writes; the Python command below is
+read-only. A read-only lookup does not require a layout pass.
+
 ```bash
 $GAPI docs get DOC_ID
 ```

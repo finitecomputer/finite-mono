@@ -97,6 +97,10 @@ Choose one route, then load the matching references.
 
 ## Design Standards
 
+Load `skill_view("layout-check-finite")` when repairing layout or checking a completed site
+before delivery, including simple static pages. Keep the Fast First Reveal
+brief; run the complete layout check once the site is ready for final delivery.
+
 - Avoid interchangeable AI-looking layouts.
 - Use expressive typography and intentional spacing.
 - Create visual rhythm with real imagery, diagrams, or illustration.
