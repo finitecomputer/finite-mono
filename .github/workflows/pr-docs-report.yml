@@ -1,0 +1,84 @@
+name: PR docs report
+
+on:
+  pull_request_target:
+    types: [opened, synchronize, reopened, edited]
+
+# Advisory only: keep this out of the CI gate and required status checks.
+# The target event permits fork PR comments. Never check out or execute PR code.
+permissions:
+  pull-requests: write
+
+concurrency:
+  group: pr-docs-report-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  report:
+    name: Markdown census (advisory)
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    continue-on-error: true
+    steps:
+      - name: Update documentation census comment
+        uses: actions/github-script@ed597411d8f924073f98dfc5c65a23a2325f34cd # v8
+        continue-on-error: true
+        with:
+          script: |
+            const marker = '<!-- finite-pr-docs-report -->';
+            const repo = context.repo;
+            const pull_number = context.payload.pull_request.number;
+            const { data: pr } = await github.rest.pulls.get({ ...repo, pull_number });
+            if (pr.state !== 'open') return;
+
+            const files = await github.paginate(github.rest.pulls.listFiles, {
+              ...repo, pull_number, per_page: 100,
+            });
+            const comments = await github.paginate(github.rest.issues.listComments, {
+              ...repo, issue_number: pull_number, per_page: 100,
+            });
+            const previous = comments.find(comment =>
+              comment.user?.login === 'github-actions[bot]' &&
+              comment.body?.startsWith(marker)
+            );
+
+            let body;
+            // GitHub caps listFiles at 3,000 files. Never present a partial count as exact.
+            if (files.length !== pr.changed_files) {
+              body = `${marker}\n### Documentation census\n\n` +
+                'Counts unavailable: GitHub did not return the complete PR file list ' +
+                '(the API is limited to 3,000 files).\n\n_Advisory only; never a merge gate._';
+            } else {
+              const markdown = files.filter(file => /\.(md|markdown)$/i.test(file.filename));
+              const addedFiles = markdown.filter(file => file.status === 'added').length;
+              const addedLines = markdown.reduce((sum, file) => sum + file.additions, 0);
+              // Avoid noise on unrelated PRs, but clear a previous report after docs are removed.
+              if (addedFiles === 0 && addedLines === 0 && !previous) return;
+
+              const count = value => value.toLocaleString('en-US');
+              body = `${marker}\n### Documentation census\n\n` +
+                `This PR adds **${count(addedFiles)} new Markdown file${addedFiles === 1 ? '' : 's'}** ` +
+                `and **${count(addedLines)} line${addedLines === 1 ? '' : 's'} of Markdown**.\n\n` +
+                (addedFiles || addedLines
+                  ? 'Are you sure all of this needs to live in the repo? Future us already has enough required reading.\n\n'
+                  : 'No Markdown additions remain. The repo can breathe again.\n\n') +
+                '_Counts `.md` and `.markdown` files anywhere in the repo, case-insensitively. ' +
+                'Lines are additions across new and existing files, not net growth; ' +
+                'renamed files are not counted as new. Advisory only; never a merge gate._';
+            }
+
+            // A push or base change during pagination invalidates the snapshot.
+            const { data: current } = await github.rest.pulls.get({ ...repo, pull_number });
+            if (current.state !== 'open' || current.head.sha !== pr.head.sha ||
+                current.base.sha !== pr.base.sha || current.base.ref !== pr.base.ref) {
+              core.info('PR changed while counting; leaving the report to the next run.');
+              return;
+            }
+
+            if (previous) {
+              if (previous.body !== body) {
+                await github.rest.issues.updateComment({ ...repo, comment_id: previous.id, body });
+              }
+            } else {
+              await github.rest.issues.createComment({ ...repo, issue_number: pull_number, body });
+            }
