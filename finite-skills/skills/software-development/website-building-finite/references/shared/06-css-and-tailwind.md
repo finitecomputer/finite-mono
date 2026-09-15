@@ -123,7 +123,7 @@ shadcn/ui is the standard component system for React projects. It is not a depen
 - Vanilla HTML/CSS/JS projects — shadcn/ui is React-only. For non-React projects, build components from scratch using the base CSS, Tailwind, and the Popover/Dialog APIs from native HTML
 - Simple landing pages with no interactive UI beyond links and scroll — the overhead isn't worth it
 
-**Most projects are vanilla HTML** (static to S3, no build step). Only use shadcn when the user requests React or the project needs complex interactive components (data tables, command palettes, drawers). Landing pages, portfolios, editorial → build by hand.
+**Most projects are vanilla HTML** (static files served by Finite Sites, no build step). Only use shadcn when the user requests React or the project needs complex interactive components (data tables, command palettes, drawers). Landing pages, portfolios, editorial → build by hand.
 
 ### Setup — Webapp Template (Pre-installed)
 
@@ -235,4 +235,3 @@ Use with `@supports` fallbacks:
 **`shape()`** — responsive clip-paths with %, vw, calc (unlike pixel-only `path()`).
 
 **`sibling-index()`** — CSS-only staggered animations: `animation-delay: calc(sibling-index() * 60ms)`.
-

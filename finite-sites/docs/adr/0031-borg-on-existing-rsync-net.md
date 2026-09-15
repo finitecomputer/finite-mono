@@ -1,15 +1,13 @@
 # Borg on the existing rsync.net surface
 
-Accepted September 15, 2026 for FIN-54. This replaces the former S3 transport
-and per-revision scheduling proposal. Adapt the existing legacy Sites backup
-coverage to Fly; do not build a new backup platform.
+Accepted September 15, 2026 for FIN-54. Adapt the existing legacy Sites backup
+coverage to Fly using stopped-Sites snapshots and native Borg archives.
 
 Use native Borg 1.x over SSH to a dedicated Sites repository on the existing
 rsync.net account. Reuse the established SSH credential, pinned host identity,
 passphrase custody, and independent recovery procedure documented in
 `infra/nixos/README.md`. Borg provides authenticated encryption, chunk
-deduplication, archive completion, and extraction. Do not introduce an AWS
-dependency, custom encryption format, or bespoke object-store transport.
+deduplication, archive completion, and extraction.
 Each dedicated Borg repository has its own generated repokey; export the Sites
 key independently. Another service's key export cannot recover this repository.
 
