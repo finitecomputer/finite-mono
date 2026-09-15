@@ -1,0 +1,340 @@
+{
+  "at": "2026-09-15T19:13:45.286Z",
+  "origins": [
+    "https://finite-sites-poc-alpha.vercel.app",
+    "https://finite-sites-poc-alpha-foh6n7qxn-alexlwn123-s-team.vercel.app",
+    "https://finite-sites-poc-alpha-2kmn5l0e1-alexlwn123-s-team.vercel.app"
+  ],
+  "outcomes": [
+    {
+      "label": "anonymous https://finite-sites-poc-alpha.vercel.app/",
+      "status": 403,
+      "ms": 282,
+      "cache": null
+    },
+    {
+      "label": "anonymous https://finite-sites-poc-alpha.vercel.app/index.html",
+      "status": 403,
+      "ms": 147,
+      "cache": null
+    },
+    {
+      "label": "anonymous https://finite-sites-poc-alpha.vercel.app/assets/private.txt",
+      "status": 403,
+      "ms": 95,
+      "cache": null
+    },
+    {
+      "label": "anonymous https://finite-sites-poc-alpha.vercel.app/assets/style.css",
+      "status": 403,
+      "ms": 101,
+      "cache": null
+    },
+    {
+      "label": "anonymous https://finite-sites-poc-alpha.vercel.app/llms.txt",
+      "status": 403,
+      "ms": 91,
+      "cache": null
+    },
+    {
+      "label": "anonymous https://finite-sites-poc-alpha.vercel.app/missing",
+      "status": 403,
+      "ms": 99,
+      "cache": null
+    },
+    {
+      "label": "anonymous https://finite-sites-poc-alpha.vercel.app/assets%2fprivate.txt",
+      "status": 403,
+      "ms": 82,
+      "cache": null
+    },
+    {
+      "label": "forged middleware header",
+      "status": 403,
+      "ms": 93,
+      "cache": null
+    },
+    {
+      "label": "forged viewer header",
+      "status": 403,
+      "ms": 86,
+      "cache": null
+    },
+    {
+      "label": "anonymous https://finite-sites-poc-alpha-foh6n7qxn-alexlwn123-s-team.vercel.app/",
+      "status": 403,
+      "ms": 2547,
+      "cache": null
+    },
+    {
+      "label": "anonymous https://finite-sites-poc-alpha-foh6n7qxn-alexlwn123-s-team.vercel.app/index.html",
+      "status": 403,
+      "ms": 1962,
+      "cache": null
+    },
+    {
+      "label": "anonymous https://finite-sites-poc-alpha-foh6n7qxn-alexlwn123-s-team.vercel.app/assets/private.txt",
+      "status": 403,
+      "ms": 2143,
+      "cache": null
+    },
+    {
+      "label": "anonymous https://finite-sites-poc-alpha-foh6n7qxn-alexlwn123-s-team.vercel.app/assets/style.css",
+      "status": 403,
+      "ms": 1912,
+      "cache": null
+    },
+    {
+      "label": "anonymous https://finite-sites-poc-alpha-foh6n7qxn-alexlwn123-s-team.vercel.app/llms.txt",
+      "status": 403,
+      "ms": 1909,
+      "cache": null
+    },
+    {
+      "label": "anonymous https://finite-sites-poc-alpha-foh6n7qxn-alexlwn123-s-team.vercel.app/missing",
+      "status": 403,
+      "ms": 2238,
+      "cache": null
+    },
+    {
+      "label": "anonymous https://finite-sites-poc-alpha-foh6n7qxn-alexlwn123-s-team.vercel.app/assets%2fprivate.txt",
+      "status": 403,
+      "ms": 2241,
+      "cache": null
+    },
+    {
+      "label": "forged middleware header",
+      "status": 403,
+      "ms": 1850,
+      "cache": null
+    },
+    {
+      "label": "forged viewer header",
+      "status": 403,
+      "ms": 1883,
+      "cache": null
+    },
+    {
+      "label": "anonymous https://finite-sites-poc-alpha-2kmn5l0e1-alexlwn123-s-team.vercel.app/",
+      "status": 403,
+      "ms": 1980,
+      "cache": null
+    },
+    {
+      "label": "anonymous https://finite-sites-poc-alpha-2kmn5l0e1-alexlwn123-s-team.vercel.app/index.html",
+      "status": 403,
+      "ms": 2072,
+      "cache": null
+    },
+    {
+      "label": "anonymous https://finite-sites-poc-alpha-2kmn5l0e1-alexlwn123-s-team.vercel.app/assets/private.txt",
+      "status": 403,
+      "ms": 1965,
+      "cache": null
+    },
+    {
+      "label": "anonymous https://finite-sites-poc-alpha-2kmn5l0e1-alexlwn123-s-team.vercel.app/assets/style.css",
+      "status": 403,
+      "ms": 1856,
+      "cache": null
+    },
+    {
+      "label": "anonymous https://finite-sites-poc-alpha-2kmn5l0e1-alexlwn123-s-team.vercel.app/llms.txt",
+      "status": 403,
+      "ms": 1934,
+      "cache": null
+    },
+    {
+      "label": "anonymous https://finite-sites-poc-alpha-2kmn5l0e1-alexlwn123-s-team.vercel.app/missing",
+      "status": 403,
+      "ms": 1852,
+      "cache": null
+    },
+    {
+      "label": "anonymous https://finite-sites-poc-alpha-2kmn5l0e1-alexlwn123-s-team.vercel.app/assets%2fprivate.txt",
+      "status": 403,
+      "ms": 1934,
+      "cache": null
+    },
+    {
+      "label": "forged middleware header",
+      "status": 403,
+      "ms": 1906,
+      "cache": null
+    },
+    {
+      "label": "forged viewer header",
+      "status": 403,
+      "ms": 2216,
+      "cache": null
+    },
+    {
+      "label": "redeem one-use proof",
+      "status": 303,
+      "ms": 190,
+      "cache": null
+    },
+    {
+      "label": "proof replay rejected",
+      "status": 403,
+      "ms": 108,
+      "cache": null
+    },
+    {
+      "label": "authorized HTML",
+      "status": 200,
+      "ms": 123,
+      "cache": "HIT"
+    },
+    {
+      "label": "authorized asset",
+      "status": 200,
+      "ms": 201,
+      "cache": "MISS"
+    },
+    {
+      "label": "authorized HTML",
+      "status": 200,
+      "ms": 107,
+      "cache": "HIT"
+    },
+    {
+      "label": "authorized asset",
+      "status": 200,
+      "ms": 108,
+      "cache": "HIT"
+    },
+    {
+      "label": "authorized HTML",
+      "status": 200,
+      "ms": 98,
+      "cache": "HIT"
+    },
+    {
+      "label": "authorized asset",
+      "status": 200,
+      "ms": 838,
+      "cache": "HIT"
+    },
+    {
+      "label": "authorized alternate deployment",
+      "status": 200,
+      "ms": 1976,
+      "cache": "HIT"
+    },
+    {
+      "label": "authorized alternate deployment",
+      "status": 200,
+      "ms": 1974,
+      "cache": "HIT"
+    },
+    {
+      "label": "revoked https://finite-sites-poc-alpha.vercel.app/",
+      "status": 403,
+      "ms": 189,
+      "cache": null
+    },
+    {
+      "label": "revoked https://finite-sites-poc-alpha.vercel.app/assets/private.txt",
+      "status": 403,
+      "ms": 94,
+      "cache": null
+    },
+    {
+      "label": "revoked https://finite-sites-poc-alpha.vercel.app/assets/style.css",
+      "status": 403,
+      "ms": 97,
+      "cache": null
+    },
+    {
+      "label": "revoked https://finite-sites-poc-alpha.vercel.app/llms.txt",
+      "status": 403,
+      "ms": 97,
+      "cache": null
+    },
+    {
+      "label": "revoked HEAD",
+      "status": 403,
+      "ms": 101,
+      "cache": null
+    },
+    {
+      "label": "revoked conditional request",
+      "status": 403,
+      "ms": 113,
+      "cache": null
+    },
+    {
+      "label": "revoked https://finite-sites-poc-alpha-foh6n7qxn-alexlwn123-s-team.vercel.app/",
+      "status": 403,
+      "ms": 1876,
+      "cache": null
+    },
+    {
+      "label": "revoked https://finite-sites-poc-alpha-foh6n7qxn-alexlwn123-s-team.vercel.app/assets/private.txt",
+      "status": 403,
+      "ms": 2116,
+      "cache": null
+    },
+    {
+      "label": "revoked https://finite-sites-poc-alpha-foh6n7qxn-alexlwn123-s-team.vercel.app/assets/style.css",
+      "status": 403,
+      "ms": 2407,
+      "cache": null
+    },
+    {
+      "label": "revoked https://finite-sites-poc-alpha-foh6n7qxn-alexlwn123-s-team.vercel.app/llms.txt",
+      "status": 403,
+      "ms": 1938,
+      "cache": null
+    },
+    {
+      "label": "revoked HEAD",
+      "status": 403,
+      "ms": 2269,
+      "cache": null
+    },
+    {
+      "label": "revoked conditional request",
+      "status": 403,
+      "ms": 2007,
+      "cache": null
+    },
+    {
+      "label": "revoked https://finite-sites-poc-alpha-2kmn5l0e1-alexlwn123-s-team.vercel.app/",
+      "status": 403,
+      "ms": 2186,
+      "cache": null
+    },
+    {
+      "label": "revoked https://finite-sites-poc-alpha-2kmn5l0e1-alexlwn123-s-team.vercel.app/assets/private.txt",
+      "status": 403,
+      "ms": 2119,
+      "cache": null
+    },
+    {
+      "label": "revoked https://finite-sites-poc-alpha-2kmn5l0e1-alexlwn123-s-team.vercel.app/assets/style.css",
+      "status": 403,
+      "ms": 1914,
+      "cache": null
+    },
+    {
+      "label": "revoked https://finite-sites-poc-alpha-2kmn5l0e1-alexlwn123-s-team.vercel.app/llms.txt",
+      "status": 403,
+      "ms": 1870,
+      "cache": null
+    },
+    {
+      "label": "revoked HEAD",
+      "status": 403,
+      "ms": 1885,
+      "cache": null
+    },
+    {
+      "label": "revoked conditional request",
+      "status": 403,
+      "ms": 1910,
+      "cache": null
+    }
+  ]
+}

@@ -1,0 +1,32 @@
+{
+  "experiment": "sites-vercel",
+  "production": false,
+  "team": "alexlwn123-s-team",
+  "teamId": "team_PY34kYpgJFQlooA8haRuFeG3",
+  "controlProject": "finite-sites-poc-control",
+  "siteProjectPrefix": "finite-sites-poc-",
+  "database": "finite-sites-poc-db",
+  "region": "iad1",
+  "source": "finite-sites/experiments/vercel",
+  "secrets": {
+    "POC_ADMIN_TOKEN": "Experiment operator and control project only",
+    "POC_ISSUER_TOKEN": "Synthetic verified-email issuer and control project only",
+    "POC_GATE_TOKEN": "Per-site gate credential; hashed in the experiment database",
+    "DATABASE_URL": "Marketplace-managed environment variable on the control project"
+  },
+  "customerData": false,
+  "canonicalDnsChanges": false,
+  "teardown": "Delete only the explicitly listed experiment resources after retaining any wanted evidence. No production service depends on this experiment.",
+  "controlProjectId": "prj_11v04LOfFRaXQgqqeE8RUZmhUKjE",
+  "databaseResourceId": "store_oeEvQL5q9EsdXOMD",
+  "siteProjects": [
+    {
+      "name": "finite-sites-poc-alpha",
+      "id": "prj_Vmq1wBvWVXse8VPzUWWdIlmzUldH"
+    },
+    {
+      "name": "finite-sites-poc-beta",
+      "id": "prj_ADRttezR61kvaUy8JtkYImlLIIaI"
+    }
+  ]
+}

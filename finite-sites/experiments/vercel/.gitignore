@@ -1,0 +1,4 @@
+.local-state/
+.vercel/
+.env*
+node_modules/

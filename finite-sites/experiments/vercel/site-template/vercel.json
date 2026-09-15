@@ -1,0 +1,12 @@
+{
+  "$schema": "https://openapi.vercel.sh/vercel.json",
+  "framework": null,
+  "buildCommand": "",
+  "outputDirectory": "public",
+  "regions": ["iad1"],
+  "headers": [{"source":"/(.*)","headers":[
+    {"key":"Cache-Control","value":"private, no-store"},
+    {"key":"CDN-Cache-Control","value":"no-store"},
+    {"key":"Vercel-CDN-Cache-Control","value":"no-store"}
+  ]}]
+}

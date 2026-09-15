@@ -1,5 +1,18 @@
 # Technical Debt Ledger
 
+## Experiment: native Vercel Sites
+
+- **Source**: `experiments/vercel`, on `alex/sites-vercel-experiment`.
+- **Risk**: synthetic email issuer, opaque experiment sessions, operator-only
+  publication, no production Git/auth compatibility or disaster recovery claim.
+  Expired experiment sessions require cleanup; this is a bounded disposable run.
+- **First proof**: managed Postgres grants checked by every site's injected gate;
+  live probes cover grant revocation, old deployments, and content rollback.
+- **Delete condition**: delete the experiment or replace its issuer/publisher
+  with the approved Sites contracts before any customer migration. ADR 0028
+  remains the production decision. JavaScript is intentional for Vercel's native
+  Node runtime; this experiment does not change the Rust daemon or CLI.
+
 Tolerated shortcuts. Each item has an observed source, a risk, the first
 proof of the shortcut in code, and a delete condition. A shortcut without a
 delete condition is unfinished design, not accepted debt.
