@@ -1,7 +1,7 @@
 {
-  "at": "2026-09-15T19:39:40.172Z",
+  "at": "2026-09-15T20:03:15.340Z",
   "project": "finite-sites-poc",
-  "deployment": "finite-sites-492222h6z-alexlwn123-s-team.vercel.app",
+  "deployment": "finite-sites-bsuqq5kua-alexlwn123-s-team.vercel.app",
   "origins": {
     "alpha": "https://finite-sites-poc-one-alpha.vercel.app",
     "beta": "https://finite-sites-poc-one-beta.vercel.app"

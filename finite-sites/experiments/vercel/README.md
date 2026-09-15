@@ -7,6 +7,31 @@ This is disposable synthetic infrastructure on `alex/sites-vercel-experiment`.
 Production ADR 0028, the Rust daemon, `fsite`, customer state, and production DNS
 are unchanged. See [RESULTS.md](RESULTS.md) for measured evidence and omissions.
 
+## Higher-fidelity slice
+
+The console now also includes **Managed Git + Finite identity**. Gamma uses the
+actual Finite signed-request protocol and a private GitHub source repository.
+A normal Git push publishes its content and a recoverable Git bundle. The
+production dashboard/WorkOS flow remains unconnected. See
+[HIGH-FIDELITY.md](HIGH-FIDELITY.md) for the exact boundary and results.
+
+To prepare this slice on the existing experiment operator checkout:
+
+```sh
+scripts/with-dev-env cargo build -p fsite-cli --bin fsite --example sites_poc_sign
+scripts/with-dev-env node finite-sites/experiments/vercel/fidelity-setup.mjs
+scripts/with-dev-env node finite-sites/experiments/vercel/native-test.mjs
+scripts/with-dev-env node finite-sites/experiments/vercel/recovery-test.mjs
+scripts/with-dev-env node finite-sites/experiments/vercel/native-browser-test.mjs
+```
+
+The setup reuses ignored isolated `FINITE_HOME` identities. A new machine with a
+new owner key cannot take over the existing Site: provision a separate binding
+explicitly instead. Run the demo for browser tests. Recovery creates fresh
+scratch namespaces and leaves them available for inspection. The scoped Git
+publisher credential is stored only in the ignored operator state and the
+private fixture repository's GitHub Actions secret.
+
 ## Shape
 
 ```text

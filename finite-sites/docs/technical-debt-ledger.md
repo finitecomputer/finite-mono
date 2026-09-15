@@ -15,6 +15,14 @@
   tenants only. Pending uploads/orphan blobs have no automatic cleanup. Source
   Git stays local; no empty-target recovery, production identity integration,
   or public/private transition contract is established by this experiment.
+- **Higher-fidelity slice**: native Finite signed requests, owner-scoped Sites
+  APIs, a private managed Git fixture with push-triggered publication, committed
+  source bundles, and an empty-target restore drill. Native ownership in this
+  experiment is not the production mailbox/Hosted Requester Assertion ownership
+  contract. Managed Git editor permissions remain provider-owned. The dashboard
+  exchange adapter does not authorize a production dashboard rollout. New JS
+  crypto uses the audited noble-curves Schnorr implementation and scure-base
+  encoding; verification must interoperate with the repository's Rust signer.
 - **Delete condition**: delete the experiment or replace its issuer/publisher
   with the approved Sites contracts before any customer migration. ADR 0028
   remains the production decision. JavaScript is intentional for Vercel's native

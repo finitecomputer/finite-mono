@@ -51,6 +51,8 @@ async function main() {
     const sql = neon(dbEnv.DATABASE_URL);
     const statements = (await readFile(join(root, 'app/schema.sql'), 'utf8')).split(/;\n(?=CREATE|DO|$)/).filter(s => s.trim());
     await sql.transaction(statements.map(statement => sql.query(statement)));
+    const fidelity=(await readFile(join(root,'app/fidelity-schema.sql'),'utf8')).split(';').filter(s=>s.trim());
+    await sql.transaction(fidelity.map(statement=>sql.query(statement)));
     console.log('Experiment schema initialized; operator secrets stored in ignored owner-only file.');
   } else if (command === 'grant' || command === 'revoke') {
     console.log(await call({ op: 'grant.set', site: args[0], email: args[1], allowed: command === 'grant' }));

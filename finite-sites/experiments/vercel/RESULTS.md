@@ -2,6 +2,16 @@
 
 Date: 2026-09-15. Synthetic data only; no production cutover.
 
+## Higher-fidelity follow-up
+
+The next slice is implemented; see [HIGH-FIDELITY.md](HIGH-FIDELITY.md). It proves
+real `fsite` signature interoperability, native sharing/revocation, managed Git
+push publication, and an empty logical target restore of content, permissions,
+and editable source. The older observations below describe the first slice;
+its source-hosting and native-auth omissions are superseded only to the extent
+explicitly proven by the follow-up. Production account login, provider-loss
+recovery, complete Git/CLI compatibility, and live wildcard DNS remain open.
+
 ## Answer
 
 **Yes: one Vercel project can serve multiple independently published private

@@ -5,6 +5,7 @@
   "siteBaseDomain": "",
   "siteHosts": {
     "alpha": "finite-sites-poc-one-alpha.vercel.app",
-    "beta": "finite-sites-poc-one-beta.vercel.app"
+    "beta": "finite-sites-poc-one-beta.vercel.app",
+    "gamma": "finite-sites-poc-native.vercel.app"
   }
 }

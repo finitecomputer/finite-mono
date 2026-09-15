@@ -1,7 +1,8 @@
-import { neon } from '@neondatabase/serverless';
+import {database} from '../lib/database.js';
 import { get } from '@vercel/blob';
 import { Readable } from 'node:stream';
 import { pipeline } from 'node:stream/promises';
+import {nativeApi,exchangeNative,issueNative,redeemNative} from '../lib/native.js';
 import { control } from '../lib/control.js';
 import { COOKIE, hash, token, validToken, validPath, resolveHost, blobKey, contentType, requireThat } from '../lib/model.js';
 
@@ -14,15 +15,20 @@ export default async function handler(req, res) {
     const route = resolveHost(req.headers.host);
     requireThat(route,404,'unknown_host');
     const url = new URL(req.url, `https://${route.host}`);
-    const sql = neon(process.env.DATABASE_URL);
+    const sql = database();
     if (route.control) {
       if (req.method === 'GET' && url.pathname === '/') return json(200,{ experiment:'finite-sites-single-project', hosting:'private Blob + managed Postgres', deployment:process.env.VERCEL_URL });
+      if(url.pathname.startsWith('/api/v2/'))return json(200,await nativeApi(sql,url.pathname,req.method,req.method==='GET'?'':await readBody(req,3000000),req.headers.authorization,`https://${route.host}`));
+      if(url.pathname==='/internal/v1/native-viewer-sessions'){
+        requireThat(req.method==='POST',405,'method_not_allowed');
+        return json(200,await exchangeNative(sql,await readBody(req,16384),(req.headers.authorization||'').replace(/^Bearer /,'')));
+      }
       requireThat(url.pathname === '/api/control',404,'not_found');
       requireThat(req.method === 'POST',405,'method_not_allowed');
       // This API accepts bearer credentials, never ambient cookies. Cross-origin
       // browser calls cannot pass the JSON preflight; Origin is checked as well.
       requireThat(!req.headers.origin || req.headers.origin === `https://${route.host}`,403,'invalid_origin');
-      const body = await readBody(req, 1450000);
+      const body = await readBody(req, 3000000);
       const result = await control(sql, JSON.parse(body), (req.headers.authorization || '').replace(/^Bearer /,''));
       return json(200,result);
     }
@@ -30,6 +36,21 @@ export default async function handler(req, res) {
     requireThat(rows.length,404,'unknown_site');
     const site = rows[0];
     requireThat(!site.disabled,403,'access_denied');
+    if(url.pathname==='/_finite/auth/native-session'){
+      requireThat(req.method==='POST',405,'method_not_allowed');
+      requireThat(!req.headers.origin||req.headers.origin===url.origin,403,'invalid_origin');
+      const result=await issueNative(sql,site,req.headers.authorization,await readBody(req,4096));
+      const redemption=new URL(result.redeem_url);
+      const session=await redeemNative(sql,site,redemption.searchParams.get('native_token'),redemption.searchParams.get('return_to'));
+      res.statusCode=303;res.setHeader('Location',redemption.searchParams.get('return_to'));
+      res.setHeader('Set-Cookie',`${COOKIE}=${session}; Path=/; Secure; HttpOnly; SameSite=Lax; Max-Age=3600`);return res.end();
+    }
+    if(url.pathname==='/_finite/auth'){
+      requireThat(req.method==='GET',405,'method_not_allowed');
+      const session=await redeemNative(sql,site,url.searchParams.get('native_token'),url.searchParams.get('return_to'));
+      res.statusCode=303;res.setHeader('Location',url.searchParams.get('return_to'));res.setHeader('Referrer-Policy','no-referrer');
+      res.setHeader('Set-Cookie',`${COOKIE}=${session}; Path=/; Secure; HttpOnly; SameSite=Lax; Max-Age=3600`);return res.end();
+    }
     if (url.pathname === '/_finite/login' && req.method === 'GET') {
       const nonce=token();
       res.setHeader('Content-Type','text/html; charset=utf-8');
@@ -40,7 +61,7 @@ export default async function handler(req, res) {
       requireThat(req.method === 'POST',405,'method_not_allowed');
       requireThat(req.headers.origin === `https://${route.host}`,403,'invalid_origin');
       const raw = await readBody(req,256);
-      const proof = req.body && typeof req.body === 'object' && !Buffer.isBuffer(req.body) ? req.body.proof : new URLSearchParams(raw).get('proof');
+      const proof = new URLSearchParams(raw).get('proof');
       requireThat(validToken(proof),403,'invalid_proof');
       const session=token();
       const redeemed = await sql`WITH consumed AS (
@@ -60,6 +81,8 @@ export default async function handler(req, res) {
     const cookies=(req.headers.cookie || '').split(';').map(c=>c.trim()).filter(c=>c.startsWith(`${COOKIE}=`));
     requireThat(cookies.length === 1 && validToken(cookies[0].slice(COOKIE.length+1)),403,'access_denied');
     const authorized = await sql`SELECT v.site_id FROM poc2_sessions v JOIN poc2_grants g ON v.site_id=g.site_id AND v.email=g.email
+      WHERE v.token_hash=${hash(cookies[0].slice(COOKIE.length+1))} AND v.site_id=${site.id} AND v.hostname=${route.host} AND v.expires_at>now()
+      UNION ALL SELECT v.site_id FROM poc2_native_sessions v JOIN poc2_native_grants g ON v.site_id=g.site_id AND v.pubkey=g.pubkey
       WHERE v.token_hash=${hash(cookies[0].slice(COOKIE.length+1))} AND v.site_id=${site.id} AND v.hostname=${route.host} AND v.expires_at>now()`;
     requireThat(authorized.length,403,'access_denied');
     let path=decodeURIComponent(url.pathname).slice(1);
@@ -83,11 +106,7 @@ export default async function handler(req, res) {
   }
 }
 async function readBody(req, limit) {
-  if (req.body !== undefined) {
-    const raw=typeof req.body === 'string' || Buffer.isBuffer(req.body) ? req.body.toString() : JSON.stringify(req.body);
-    requireThat(Buffer.byteLength(raw)<=limit,413,'body_too_large'); return raw;
-  }
-  const chunks=[]; let size=0;
-  for await (const chunk of req) { size+=chunk.length; requireThat(size<=limit,413,'body_too_large'); chunks.push(chunk); }
+  const chunks=[];let size=0;
+  for await(const chunk of req){size+=chunk.length;requireThat(size<=limit,413,'body_too_large');chunks.push(chunk);}
   return Buffer.concat(chunks).toString();
 }

@@ -36,5 +36,18 @@
       "status": "deleted 2026-09-15; original proof retained in git commit b0a20308"
     }
   ],
-  "teardown": "Delete only these explicitly named scratch resources. Local fixture Git and committed proof artifacts retain the experiment evidence. No production dependency exists."
+  "teardown": "Delete only these explicitly named scratch resources. Local fixture Git and committed proof artifacts retain the experiment evidence. No production dependency exists.",
+  "managedGit": {
+    "repository": "alexlwn123/finite-sites-poc-source",
+    "visibility": "private",
+    "purpose": "Synthetic committed-source and GitHub Actions publication fixture",
+    "secret": "POC_PUBLISHER_TOKEN (one-Site scope; value only in GitHub Actions and ignored operator state)"
+  },
+  "recoveryTargets": {
+    "database": "Fresh poc_restore_<random> namespaces in the scratch Neon database",
+    "blobs": "Fresh restore-<random>/ object prefixes in the scratch private Blob store",
+    "inventory": "Ignored .local-state/restored.json; public proof in evidence/fidelity-recovery.json",
+    "providerLossQualified": false
+  },
+  "nativeIdentity": "Isolated FINITE_HOME keys under ignored .local-state/native; no production identity copied"
 }

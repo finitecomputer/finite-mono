@@ -15,7 +15,7 @@ CREATE TABLE IF NOT EXISTS poc2_versions (
   PRIMARY KEY (site_id,id)
 );
 DO $$ BEGIN
-  IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname='poc2_active_version_fk') THEN
+  IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname='poc2_active_version_fk' AND connamespace=current_schema()::regnamespace) THEN
     ALTER TABLE poc2_sites ADD CONSTRAINT poc2_active_version_fk
       FOREIGN KEY (id,active_version) REFERENCES poc2_versions(site_id,id);
   END IF;

@@ -7,6 +7,8 @@
   },
   "dependencies": {
     "@neondatabase/serverless": "1.1.0",
+    "@noble/curves": "2.4.0",
+    "@scure/base": "2.0.0",
     "@vercel/blob": "2.8.0"
   }
 }

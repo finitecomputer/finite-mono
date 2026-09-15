@@ -46,7 +46,9 @@ export function manifest(input) {
   const value = { commit: input.commit, deployPath: input.deployPath, files };
   return { ...value, version: hash(JSON.stringify(value)) };
 }
-export const blobKey = (site, version, file) => `sites/${site}/versions/${version}/${file.sha256}`;
+export const objectKey = key => process.env.POC_BLOB_PREFIX ? `${process.env.POC_BLOB_PREFIX}/${key}` : key;
+export const sourceKey = (site,digest) => objectKey(`sources/${site}/${digest}.bundle`);
+export const blobKey = (site, version, file) => objectKey(`sites/${site}/versions/${version}/${file.sha256}`);
 export function contentType(path) {
   const extension = path.split('.').at(-1).toLowerCase();
   return ({ html:'text/html; charset=utf-8', css:'text/css; charset=utf-8', js:'text/javascript; charset=utf-8', mjs:'text/javascript; charset=utf-8', txt:'text/plain; charset=utf-8', json:'application/json', svg:'image/svg+xml', png:'image/png', jpg:'image/jpeg', jpeg:'image/jpeg', ico:'image/x-icon', pdf:'application/pdf', woff2:'font/woff2', webp:'image/webp' })[extension] || 'application/octet-stream';
