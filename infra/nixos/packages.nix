@@ -11,6 +11,8 @@
   craneLib,
   pkgs,
   sourceRoot,
+  # Opt-in service candidates for the existing local integration harness.
+  devfinityServiceOverrides ? { },
 }:
 let
   inherit (pkgs) lib;
@@ -325,12 +327,12 @@ rec {
     let
       runtimeInputs = [
         devfinity-unwrapped
-        finite-saas-core
+        (devfinityServiceOverrides.finite-saas-core or finite-saas-core)
         finite-saas-local
         finite-saas-runner
         finitechat-server
         finitechat-hosted-device
-        finitesitesd
+        (devfinityServiceOverrides.finitesitesd or finitesitesd)
         finite-identity
         finite-brain
         fsite

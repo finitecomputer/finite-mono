@@ -1,0 +1,100 @@
+name: crate2nix flake integration
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - infra/nixos/crate2nix-prototype/**
+      - infra/nixos/packages.nix
+      - flake.nix
+      - flake.lock
+      - Cargo.nix
+      - Cargo.toml
+      - Cargo.lock
+      - crate-hashes.json
+      - '**/Cargo.toml'
+      - rust-toolchain.toml
+      - .github/workflows/crate2nix-prototype.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: crate2nix-prototype-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  benchmark:
+    name: Package benchmark (${{ matrix.engine }})
+    runs-on: depot-ubuntu-24.04
+    timeout-minutes: 90
+    strategy:
+      fail-fast: false
+      matrix:
+        engine: [crane, crate2nix]
+    env:
+      NIX_CONFIG: |
+        access-tokens = github.com=${{ github.token }}
+        substituters = https://cache.nixos.org
+        accept-flake-config = false
+    steps:
+      - uses: actions/checkout@v4
+      - uses: DeterminateSystems/nix-installer-action@v16
+      - name: Record runner resources
+        run: |
+          lscpu
+          free -h
+          df -h
+      - name: Verify generated Cargo definitions
+        if: matrix.engine == 'crate2nix'
+        run: |
+          nix develop .#crate2nix -c crate2nix generate
+          git diff --exit-code -- Cargo.nix crate-hashes.json Cargo.lock
+      - name: Compare initial build and local rebuilds
+        env:
+          BENCHMARK_ENGINE: ${{ matrix.engine }}
+        run: |
+          nix develop .#crate2nix \
+            -c bash infra/nixos/crate2nix-prototype/benchmark \
+            "$BENCHMARK_ENGINE" "$RUNNER_TEMP/crate2nix-benchmark"
+      - name: Upload timings and diagnostic logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: crate2nix-benchmark-${{ matrix.engine }}
+          if-no-files-found: warn
+          path: |
+            ${{ runner.temp }}/crate2nix-benchmark/*.md
+            ${{ runner.temp }}/crate2nix-benchmark/*.log
+            ${{ runner.temp }}/crate2nix-benchmark/*.paths
+            ${{ runner.temp }}/crate2nix-benchmark/*.seconds
+      # Separate from timings: boot the real stack with the two candidate
+      # services and exercise the same smoke script as normal CI.
+      - name: Configure read-only cache for integration dependencies
+        if: matrix.engine == 'crate2nix'
+        uses: cachix/cachix-action@v17
+        with:
+          name: finite
+          skipPush: true
+      - uses: Swatinem/rust-cache@v2
+        if: matrix.engine == 'crate2nix'
+      - name: Run existing devfinity smoke with crate2nix services
+        if: matrix.engine == 'crate2nix'
+        env:
+          DEVFINITY_READY_TIMEOUT_SECS: '600'
+        run: |
+          nix develop .#devfinity-ci --command bash -euxo pipefail -c '
+            cargo test -p finitechat-client --locked --lib --no-run
+            cargo test -p devfinity --locked --test stack_smoke --no-run
+            nix run .#devfinity-crate2nix -- --state-dir .local-state/dfs up --services-only --fresh --headless -- scripts/devfinity-smoke
+          '
+      - name: Dump service logs on failure
+        if: failure() && matrix.engine == 'crate2nix'
+        run: |
+          for log in .local-state/dfs/runs/default/logs/*; do
+            if [ -f "$log" ]; then
+              echo "$log"
+              tail -100 "$log"
+            fi
+          done
