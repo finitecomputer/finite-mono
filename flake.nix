@@ -81,7 +81,6 @@
       finitePackagePkgsLinux = import nixpkgs { system = "x86_64-linux"; };
       finitePackagesLinux = import ./infra/nixos/packages.nix {
         pkgs = finitePackagePkgsLinux;
-        craneLib = crane.mkLib finitePackagePkgsLinux;
         sourceRoot = ./.;
       };
       kataPackagesLinux = import nixpkgs-kata { system = "x86_64-linux"; };
@@ -325,7 +324,6 @@
           pyToolPkgs = import hermes-nixpkgs { inherit system; };
           finitePackages = import ./infra/nixos/packages.nix {
             pkgs = finitePackagePkgs;
-            craneLib = crane.mkLib finitePackagePkgs;
             sourceRoot = ./.;
           };
           gcxCli = (import nixpkgs-lat3 { inherit system; }).gcx;
@@ -367,6 +365,9 @@
           packages = (hermesPackagesFor system) // finitePackages;
 
           devShells = {
+            crate2nix = pkgs.mkShell {
+              packages = [ pkgs.crate2nix rustToolchain pkgs.git ];
+            };
             default = pkgs.mkShell {
               packages =
                 rustBasePackages

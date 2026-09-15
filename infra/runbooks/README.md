@@ -123,38 +123,19 @@ Two rules apply to **every** release and promotion, no exceptions:
 - Never open a snapshot SQLite file directly. Use
   `scripts/snapshot-sqlite`, which inspects a private scratch copy and leaves
   the sealed snapshot untouched.
-- Rust service packages use content-scoped sources in
-  `infra/nixos/packages.nix`: the root `Cargo.lock`, a generated root workspace
-  manifest listing only the package's selected workspace members, and only the
-  binary's transitive local crate directories plus explicitly embedded assets.
-  Crane builds dummy-source dependency artifacts and feeds them into the
-  real-source application builds. Related binaries share three product-family
-  artifacts: `finite-saas` (`finite-saas-core`, `finite-saas-local`, and
-  `finite-saas-runner`), `finitechat` (`finitechat-server`,
-  `finitechat-hosted-device`, `finitechat`, and `finitechat-rmp`), and
-  `finite-brain` (`finite-brain` and `fbrain`). Other packages retain their own
-  artifact. A grouped artifact prebuilds its members in separate Cargo
-  invocations so it retains each package's exact feature resolution instead of
-  a feature-unified graph that the final builds cannot reuse. Every final
-  package keeps its narrower source closure, so an ordinary Rust source edit
-  must leave
-  `.#packages.x86_64-linux.<package>.cargoArtifacts.drvPath` unchanged; manifest,
-  lockfile, build-input, or dependency-group membership changes intentionally
-  invalidate it. Inspect `<package>.cargoArtifactGroup` to identify the shared
-  boundary; packages in one group must expose the same `cargoArtifacts.drvPath`.
-  When a package gains a path dependency or an
-  `include_str!`/`include_bytes!` input outside those crate directories, add
-  that path to its `sourcePaths` in the same change. Do not add unrelated
-  workspace members or fall back to the full flake source. Shared dependency
-  groups must remain product-scoped: do not widen a group merely because two
-  packages happen to use some of the same third-party crates. The `Nix service
-  packages` CI lane builds every distinct dependency artifact before its scoped
-  packages and explicitly includes both closures in trusted Cachix pushes; its
-  job summary reports whether each phase required a build and how long it took.
-  The lane must pass before rollout.
-  For a supposedly component-only change, compare the clean base and candidate
-  outputs with `nix path-info .#packages.x86_64-linux.<package>`; an unrelated
-  package path change is a stop condition and a source-scoping bug.
+- Rust service packages use the root generated `Cargo.nix` through
+  `infra/nixos/packages.nix`. Regenerate after manifest/lock changes with
+  `nix develop .#crate2nix -c crate2nix generate`; CI rejects stale definitions.
+  Cargo.toml and Cargo.lock remain authoritative. Each crate is cached
+  separately; a dependency edit rebuilds its reverse dependency closure.
+  The CLI overrides explicitly include embedded files outside their crate
+  directories. Preserve those relative paths when changing embedded assets.
+  `.#rust-build-cache` retains the compiled libraries and build scripts that
+  are absent from runtime closures. Trusted CI publishes that closure as well
+  as package outputs to Cachix; omitting it loses reuse on fresh runners.
+  Chat retains its scoped build fingerprint, including resolved dependencies.
+  Ordinary unrelated source edits must preserve its output. The `Nix service
+  packages` and devfinity smoke lanes must pass before rollout.
 - Backups are only real once restored. The coordinated Hosted Web Chat and
   Postgres empty-target drills have not yet passed. The accepted July 20 plan
   does not authorize additional paid or Launch Code Agent creation before its
