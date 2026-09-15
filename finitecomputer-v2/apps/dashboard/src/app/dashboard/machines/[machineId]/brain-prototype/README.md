@@ -67,3 +67,13 @@ default-off and admin-enabled. Reuse its settled connection and authorization
 contract before enabling production Brain navigation. Native plugin support alone
 does not prove dashboard viewer authorization or cross-agent isolation. Keep Brain
 inventory out of Core status storage, Runtime Management Pipe, and chat commands.
+
+FiKnight checked the Organization Brain at sequence 1806 and found no newer
+implemented inventory path. The August 14 proposal
+`Finite Mono LLM Wiki/topics/finite-mono/wiki/topics/brain-surface-and-viewers.md`
+preferred viewers that do not call agent compute at request time. It predates
+the native Hermes work and does not describe its plugin API. This candidate
+would require the agent to be online for a fresh result: on an ordinary failed
+refresh, retain only the page's previous in-memory result and mark it stale.
+Record that availability tradeoff when finalizing the integration; it does not
+justify adding a background inventory store to this small page.
