@@ -426,6 +426,11 @@
     in
     systemOutputs
     // {
+      checks.x86_64-linux.lat5-storage-boot = import ./infra/nixos/tests/lat5-storage-boot.nix {
+        nixpkgs = nixpkgs-lat3;
+        inherit disko;
+        production = lat5;
+      };
       packages = systemOutputs.packages // {
         # Server binaries + CLIs built by nix from this workspace (built by CI /
         # Depot-backed runners; eval-only on darwin). See infra/nixos/packages.nix.

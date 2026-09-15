@@ -3,9 +3,9 @@
 Execution plan for [FIN-74](https://linear.app/finitecomputer/issue/FIN-74).
 Status on 2026-09-15: provisioned in Chicago, SSH and initial hardware capture
 complete. NixOS configuration and artifact tooling are drafted. All PR CI checks,
-including Nix evaluation, passed at revision 5934f626. Synthetic storage/boot
-qualification, CI packaging, install, overlay admission and launch qualification
-remain open.
+including Nix evaluation, passed at revision 5934f626. A synthetic storage/boot qualification gate and a fully packaged installer
+are being added before installation; CI packaging, install, overlay admission
+and launch qualification remain open.
 No Agent Runtime has been created on lat5.
 
 Use lat4's dedicated NixOS/Kata Runner architecture with an empty `/data`.
@@ -90,6 +90,55 @@ through `scripts/finite-status`'s existing contract.
 Complete when those checks pass and CI packages an exact merged revision
 with matching system, disko and kexec paths. Record the reviewed install
 command here before executing it.
+
+### Reviewed OS installation procedure
+
+Austin authorized steps 1–2 end to end on September 15. This operation replaces
+only the disposable Ubuntu installation on `sv_6B9VaL7GE57vr`,
+`ubuntu@64.34.93.213`. The separate `lat5-installer` Linux container consumes
+CI closures; no source build runs on lat5 or an existing production server.
+
+The `lat5-storage-boot` check executes the production Disko geometry and UUIDs
+on sparse virtual media with the pinned 6.18 kernel, mirrored GRUB and the
+production ESP guard. It boots independently from A and B and exercises
+missing/wrong ESP and degraded-array refusal. Only virtual media use
+`--assume-clean`; physical RAID synchronization and SMART are host gates.
+The synthetic OS omits runtime services and the 64 GiB swap allocation;
+those remain physical-host verification. CI must pass this check before merge
+and before publishing the installation artifact.
+
+After merging, record the exact revision and workflow run below, then use:
+
+```sh
+gh workflow run lat5-nixos-closure.yml --ref "$REV" -f rev="$REV"
+gh run download "$RUN_ID" --name "lat5-nixos-closure-$REV" \
+  --dir "target/lat5-nixos-closure-$REV"
+scripts/install-lat5-from-artifact "target/lat5-nixos-closure-$REV" \
+  ubuntu@64.34.93.213 --validate-only
+scripts/install-lat5-from-artifact "target/lat5-nixos-closure-$REV" \
+  ubuntu@64.34.93.213 --extra-files /run/lat5-bootstrap
+```
+
+The artifact records and contains the exact installer closure and successful
+qualification output as well as SYSTEM, DISKO and KEXEC. The installer cannot
+resolve a different executable from a local flake. The bootstrap set carries a fresh, locally generated SSH host keypair; record
+its public fingerprint before installation and verify it after reboot.
+
+Before install, transfer `metrics-remote-write.env` and `logs-write.env`
+file-to-file from existing monitoring credential custody into
+`/run/lat5-bootstrap/etc/finite/`, owned by root with mode 0600. They must be
+present during activation. Add a fresh Ed25519 SSH host keypair under
+`etc/ssh/`, with both files mode 0600. The staging root and its directories
+must be root-owned 0700; the installer rejects every other file or symlink.
+Do not stage `runner.env` during this OS-only step;
+its absence keeps the Runner disabled. WireGuard/Core admission and the
+remaining host credentials belong to step 3. Verify Latitude rescue/console
+access and recheck the exact disk identities before starting the installer.
+
+Rollback before agent admission is rescue access and reinstalling this empty
+host from the same artifact. Ubuntu is disposable; no user state is being
+migrated or erased. Record the resulting closure, healthy arrays, both ESPs,
+SSH reachability, and canonical fleet status before calling steps 1–2 complete.
 
 ## 3. Install and connect while drained
 

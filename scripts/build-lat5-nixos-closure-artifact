@@ -53,6 +53,7 @@ fi
 mkdir -p "$out_dir"
 out_dir="$(cd "$out_dir" && pwd -P)"
 rm -rf "$out_dir/nix-cache" "$out_dir/system" "$out_dir/disko" "$out_dir/kexec" \
+  "$out_dir/installer" "$out_dir/qualification" \
   "$out_dir/manifest.json" "$out_dir/store-paths.txt" "$out_dir/closure-size.txt"
 cache_dir="$out_dir/nix-cache"
 mkdir -p "$cache_dir"
@@ -112,9 +113,20 @@ if [[ "$(readlink "$out_dir/kexec")" != "$kexec_path" ]]; then
   exit 70
 fi
 
+installer_path="$(nix build --option builders '' --print-build-logs \
+  --out-link "$out_dir/installer" --print-out-paths \
+  .#packages.x86_64-linux.finite-lat-5-nixos-anywhere)"
+test -x "$installer_path/bin/nixos-anywhere"
+
+# A real synthetic install and dual-ESP boot is a prerequisite for packaging.
+qualification_path="$(nix build --option builders '' --print-build-logs \
+  --out-link "$out_dir/qualification" --print-out-paths \
+  .#checks.x86_64-linux.lat5-storage-boot)"
+test -d "$qualification_path"
+
 nix path-info --recursive "$system_path" > "$out_dir/store-paths.txt"
 nix path-info --closure-size "$system_path" > "$out_dir/closure-size.txt"
-nix copy --option builders '' --to "file://$cache_dir" "$system_path" "$disko_path" "$kexec_path"
+nix copy --option builders '' --to "file://$cache_dir" "$system_path" "$disko_path" "$kexec_path" "$installer_path" "$qualification_path"
 
 created_utc="$(date -u '+%Y-%m-%dT%H:%M:%SZ')"
 python3 - "$out_dir/manifest.json" <<PY
@@ -131,6 +143,8 @@ manifest = {
     "system": "$system_path",
     "disko": "$disko_path",
     "kexec": "$kexec_path",
+    "installer": "$installer_path",
+    "qualification": "$qualification_path",
     "cache": "nix-cache",
     "created_utc": "$created_utc",
 }

@@ -114,6 +114,8 @@ class Lat5ClosureArtifactTests(unittest.TestCase):
                 "disko": "/nix/store/" + "c" * 32 + "-disko",
                 "kexec": "/nix/store/" + "d" * 32 + "-kexec-tarball",
                 "cache": "nix-cache",
+                "installer": "/nix/store/" + "e" * 32 + "-nixos-anywhere-1.0.0",
+                "qualification": "/nix/store/" + "f" * 32 + "-vm-test-run-disko-lat5-storage-boot",
             }
 
         with tempfile.TemporaryDirectory() as temp:
@@ -140,6 +142,8 @@ class Lat5ClosureArtifactTests(unittest.TestCase):
             "repository": "finitecomputer/finite-mono",
             "rev": "a" * 40,
             "cache": "nix-cache",
+                "installer": "/nix/store/" + "e" * 32 + "-nixos-anywhere-1.0.0",
+                "qualification": "/nix/store/" + "f" * 32 + "-vm-test-run-disko-lat5-storage-boot",
         }
         cases = [
             ("system", "/nix/store/" + "b" * 32 + "-nixos-system-finite-lat-1-26.05.test"),
@@ -205,7 +209,9 @@ class Lat5ClosureArtifactTests(unittest.TestCase):
         self.assertIn("--store-paths \"$DISKO\" \"$SYSTEM\"", source)
         self.assertIn('--kexec "${kexec_tarballs[0]}"', source)
         self.assertIn("--build-on local", source)
-        self.assertIn("packages.x86_64-linux.finite-lat-5-nixos-anywhere", source)
+        self.assertIn('"$INSTALLER/bin/nixos-anywhere"', source)
+        self.assertNotIn("nix run", source)
+        self.assertNotIn("NIXOS_ANYWHERE_CMD", source)
         # Substitution from the artifact cache only: no build invocation.
         self.assertNotIn("nix build", source)
 
@@ -251,6 +257,15 @@ class Lat5ClosureArtifactTests(unittest.TestCase):
         # Gate A compares against infra/nixos/hosts/finite-lat-5/storage-ids.nix.
         self.assertIn("nvme-eui.", " ".join(kept))
 
+
+    def test_extra_files_option_is_parsed_without_forwarding_arbitrary_flags(self):
+        with tempfile.TemporaryDirectory() as temp:
+            result = self.run_install(Path(temp), "ubuntu@64.34.93.213", "--extra-files", temp)
+        self.assertEqual(result.returncode, 66)
+        self.assertIn("artifact manifest is missing", result.stderr)
+        with tempfile.TemporaryDirectory() as temp:
+            result = self.run_install(Path(temp), "ubuntu@64.34.93.213", "--target-host", "root@64.34.82.77")
+        self.assertEqual(result.returncode, 64)
 
     def test_wrong_physical_target_is_rejected_before_artifact_access(self):
         with tempfile.TemporaryDirectory() as temp:

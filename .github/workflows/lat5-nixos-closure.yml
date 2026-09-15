@@ -1,6 +1,14 @@
 name: Lat5 NixOS Closure
 
 on:
+  pull_request:
+    paths:
+      - 'infra/nixos/hosts/finite-lat-5/**'
+      - 'infra/nixos/tests/lat5-storage-boot.nix'
+      - 'scripts/*lat5*'
+      - '.github/workflows/lat5-nixos-closure.yml'
+      - 'flake.nix'
+      - 'flake.lock'
   workflow_dispatch:
     inputs:
       rev:
@@ -14,22 +22,38 @@ on:
         type: string
 
 concurrency:
-  group: lat5-nixos-closure-${{ inputs.rev }}
+  group: lat5-nixos-closure-${{ inputs.rev || github.ref }}
 
 permissions:
   contents: read
 
 env:
   CACHIX_CACHE_NAME: finite
+  NIX_CONFIG: |
+    access-tokens = github.com=${{ github.token }}
 
 jobs:
+  qualify:
+    if: github.event_name == 'pull_request'
+    runs-on: depot-ubuntu-24.04
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+      - uses: DeterminateSystems/nix-installer-action@v16
+      - uses: cachix/cachix-action@v17
+        with:
+          name: ${{ env.CACHIX_CACHE_NAME }}
+          skipPush: true
+      - name: Qualify storage and both EFI boot paths on synthetic disks
+        run: nix build --option builders '' --print-build-logs .#checks.x86_64-linux.lat5-storage-boot
   build:
+    if: github.event_name == 'workflow_dispatch'
     runs-on: ${{ fromJSON(inputs.runs_on_json) }}
     steps:
       - uses: actions/checkout@v4
         with:
           ref: ${{ inputs.rev }}
-          fetch-depth: 1
+          fetch-depth: 0
 
       - uses: DeterminateSystems/nix-installer-action@v16
 
@@ -46,7 +70,7 @@ jobs:
           set -euo pipefail
           [[ "$REV" =~ ^[0-9a-f]{40}$ ]]
           test "$(git rev-parse HEAD)" = "$REV"
-          git fetch origin main --depth=1
+          git fetch origin main
           git merge-base --is-ancestor "$REV" origin/main
           scripts/build-lat5-nixos-closure-artifact \
             "$REV" \

@@ -11,29 +11,31 @@
 #   4. invokes the flake-pinned nixos-anywhere with those exact store paths
 #      against the rescue-mode host.
 #
-# The driver must run on a machine that can realize x86_64-linux store paths
-# (a Linux driver machine or CI job). On any other machine `nix copy` fails
-# honestly; do not work around it by building. Override the pinned
-# nixos-anywhere invocation with NIXOS_ANYWHERE_CMD only to point at the
-# same pin from another checkout.
-#
-# usage: install-lat5-from-artifact <artifact-dir> <target-host> [extra nixos-anywhere args...]
-# example: install-lat5-from-artifact target/lat5-nixos-closure-REV root@64.34.93.213
+# Run on a Linux driver. All executables come from the CI file cache;
+# no local flake evaluation, installer override, or build fallback is used.
+# Bootstrap files must contain root-owned 0600 monitoring credentials.
+# usage: install-lat5-from-artifact <artifact-dir> <target-host> --extra-files <root>
 set -euo pipefail
 
 mode_driver="run"
 artifact_dir=""
 target_host=""
+extra_files=""
 extra_args=()
 
 usage() {
-  echo "usage: $0 <artifact-dir> <target-host> [extra nixos-anywhere args...]" >&2
+  echo "usage: $0 <artifact-dir> <target-host> [--validate-only | --extra-files <root>]" >&2
 }
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --validate-only)
       mode_driver="validate"
+      ;;
+    --extra-files)
+      [[ $# -ge 2 ]] || { usage; exit 64; }
+      extra_files="$2"
+      shift
       ;;
     -*) usage; exit 64 ;;
     *)
@@ -92,6 +94,8 @@ for key, pattern in (
     ("system", r"/nix/store/[0-9a-z]{32}-nixos-system-finite-lat-5-[^/\s]+"),
     ("disko", r"/nix/store/[0-9a-z]{32}-disko"),
     ("kexec", r"/nix/store/[0-9a-z]{32}-kexec-tarball"),
+    ("installer", r"/nix/store/[0-9a-z]{32}-nixos-anywhere-[^/\s]+"),
+    ("qualification", r"/nix/store/[0-9a-z]{32}-vm-test-run-disko-lat5-storage-boot"),
 ):
     value = data.get(key)
     if not isinstance(value, str) or not re.fullmatch(pattern, value):
@@ -99,7 +103,7 @@ for key, pattern in (
 if data.get("cache") != "nix-cache":
     raise SystemExit(f"invalid cache directory: {data.get('cache')!r}")
 
-for key in ("rev", "system", "disko", "kexec", "cache"):
+for key in ("rev", "system", "disko", "kexec", "cache", "installer", "qualification"):
     print(data[key])
 PY
 
@@ -108,6 +112,8 @@ SYSTEM="$(sed -n '2p' "$manifest_values_file")"
 DISKO="$(sed -n '3p' "$manifest_values_file")"
 KEXEC="$(sed -n '4p' "$manifest_values_file")"
 CACHE_REL="$(sed -n '5p' "$manifest_values_file")"
+INSTALLER="$(sed -n '6p' "$manifest_values_file")"
+QUALIFICATION="$(sed -n '7p' "$manifest_values_file")"
 CACHE_DIR="$artifact_dir/$CACHE_REL"
 
 if [[ ! -d "$CACHE_DIR" || ! -f "$CACHE_DIR/nix-cache-info" ]]; then
@@ -138,8 +144,8 @@ echo "==> realizing SYSTEM/DISKO/KEXEC from the artifact cache"
 # deploy-cache consumer.
 nix copy --no-check-sigs --option builders '' \
   --from "file://$CACHE_DIR" \
-  "$SYSTEM" "$DISKO" "$KEXEC"
-for path in "$SYSTEM" "$DISKO" "$KEXEC"; do
+  "$SYSTEM" "$DISKO" "$KEXEC" "$INSTALLER" "$QUALIFICATION"
+for path in "$SYSTEM" "$DISKO" "$KEXEC" "$INSTALLER" "$QUALIFICATION"; do
   [[ -e "$path" ]] || {
     echo "store path did not realize from the artifact cache: $path" >&2
     exit 67
@@ -147,13 +153,46 @@ for path in "$SYSTEM" "$DISKO" "$KEXEC"; do
 done
 test -x "$SYSTEM/bin/switch-to-configuration"
 
-# The pinned nixos-anywhere from the same flake; override only with the same
-# pin from another checkout (e.g. a Linux driver machine).
-if [[ -n "${NIXOS_ANYWHERE_CMD:-}" ]]; then
-  read -ra nixos_anywhere_cmd <<< "$NIXOS_ANYWHERE_CMD"
-else
-  nixos_anywhere_cmd=(nix run --option builders '' --option max-jobs 0 .#packages.x86_64-linux.finite-lat-5-nixos-anywhere --)
-fi
+# No local flake evaluation or command override is part of an install.
+test -x "$INSTALLER/bin/nixos-anywhere"
+test -d "$QUALIFICATION"
+[[ -n "$extra_files" && -d "$extra_files" ]] || {
+  echo "--extra-files must name the root-only bootstrap directory" >&2; exit 64;
+}
+extra_files="$(cd "$extra_files" && pwd -P)"
+python3 - "$extra_files" <<'BOOTSTRAP'
+from pathlib import Path
+import stat
+import sys
+root = Path(sys.argv[1])
+files = {
+    "etc/finite/metrics-remote-write.env", "etc/finite/logs-write.env",
+    "etc/ssh/ssh_host_ed25519_key", "etc/ssh/ssh_host_ed25519_key.pub",
+}
+directories = {"etc", "etc/finite", "etc/ssh"}
+if root == Path("/") or root.is_symlink():
+    raise SystemExit("refusing a broad or symlink bootstrap root")
+seen = set()
+for path in [root, *root.rglob("*")]:
+    info = path.lstat()
+    rel = str(path.relative_to(root))
+    if info.st_uid != 0 or info.st_gid != 0 or stat.S_ISLNK(info.st_mode):
+        raise SystemExit("bootstrap paths must be root-owned and not symlinks")
+    if path == root or rel in directories:
+        valid = stat.S_ISDIR(info.st_mode) and stat.S_IMODE(info.st_mode) == 0o700
+    else:
+        valid = rel in files and stat.S_ISREG(info.st_mode) and stat.S_IMODE(info.st_mode) == 0o600
+        seen.add(rel)
+    if not valid:
+        raise SystemExit("bootstrap contains an unexpected path or mode")
+if seen != files:
+    raise SystemExit("bootstrap must contain exactly monitoring credentials and a fresh SSH host keypair")
+BOOTSTRAP
+"$(dirname "$0")/../infra/nixos/scripts/check-lat-monitoring-secrets" --root "$extra_files"
+[[ ! -e "$extra_files/etc/finite/runner.env" ]] || {
+  echo "initial OS install must not stage Runner admission credentials" >&2; exit 65;
+}
+[[ ${#extra_args[@]} -eq 0 ]] || { usage; exit 64; }
 
 echo "==> driving the bare-metal install on $target_host"
 # Pinned nixos-anywhere 7239104 expects DISKO before SYSTEM and a tarball
@@ -163,10 +202,11 @@ kexec_tarballs=("$KEXEC"/*.tar.gz "$KEXEC"/*.tar.xz "$KEXEC"/*.tar.zst "$KEXEC"/
 [[ ${#kexec_tarballs[@]} -eq 1 ]] || {
   echo "expected exactly one kexec tarball in $KEXEC" >&2; exit 67;
 }
-"${nixos_anywhere_cmd[@]}" \
+"$INSTALLER/bin/nixos-anywhere" \
   --kexec "${kexec_tarballs[0]}" \
   --store-paths "$DISKO" "$SYSTEM" \
   --build-on local \
+  --extra-files "$extra_files" \
   "$target_host" \
   "${extra_args[@]+"${extra_args[@]}"}"
 
