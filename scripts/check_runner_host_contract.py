@@ -19,7 +19,7 @@ import subprocess
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
-HOSTS = ["finite-lat-1", "finite-lat-3", "finite-lat-4"]
+HOSTS = ["finite-lat-1", "finite-lat-3", "finite-lat-4", "finite-lat-5"]
 
 EXPECTED_MAX_SANDBOXES = {
     "finite-lat-1": "12",
@@ -27,6 +27,7 @@ EXPECTED_MAX_SANDBOXES = {
     # finite-lat-4 mirrors lat3's owner-authorized ceiling; it is admitted
     # drained (FC_RUNNER_DRAIN is operator env, not shared env).
     "finite-lat-4": "42",
+    "finite-lat-5": "1",
 }
 
 SHARED_ENV_PATH = "/etc/finite/runner-shared.env"
@@ -34,6 +35,7 @@ OPERATOR_ENV_PATH = "/etc/finite/runner.env"
 OPERATOR_ENV_TEMPLATES = (
     ROOT / "infra/nixos/hosts/finite-lat-3/runner.env.example",
     ROOT / "infra/nixos/hosts/finite-lat-4/runner.env.example",
+    ROOT / "infra/nixos/hosts/finite-lat-5/runner.env.example",
 )
 
 # Keys the host configs set through finite.kataRunnerHost.*. Everything else

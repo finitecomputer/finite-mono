@@ -162,3 +162,18 @@ stripe-price-contract:
 
 web-check:
     just dashboard web-check
+
+# lat5 provisioning and artifact validation.
+[positional-arguments]
+deploy-lat5-closure artifact_dir *args:
+    just nixos deploy-lat5-closure "$@"
+
+[positional-arguments]
+install-lat5-from-artifact artifact_dir target_host *args:
+    just nixos install-lat5-from-artifact "$artifact_dir" "$target_host" "$@"
+
+nixos-build-lat5-closure rev out_dir="target/lat5-nixos-closure":
+    just nixos nixos-build-lat5-closure {{ quote(rev) }} {{ quote(out_dir) }}
+
+lat5-runner-rollout-contract:
+    just nixos lat5-runner-rollout-contract

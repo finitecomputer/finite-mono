@@ -145,6 +145,7 @@ CONTRACT: dict[str, Any] = {
             "64.34.80.19": "finite-lat-2",
             "207.188.7.157": "finite-lat-3",
             "152.236.34.15": "finite-lat-4",
+            "64.34.93.213": "finite-lat-5",
         },
     },
     "hosts": {
@@ -178,6 +179,13 @@ CONTRACT: dict[str, Any] = {
             "recovery": True,
         },
         "finite-lat-4": {
+            "mounts": ["/", "/data", "/boot-a", "/boot-b"],
+            "storage": "raid",
+            "storage_health_unit": "finite-storage-health.service",
+            "roles": ["runner"],
+            "recovery": False,
+        },
+        "finite-lat-5": {
             "mounts": ["/", "/data", "/boot-a", "/boot-b"],
             "storage": "raid",
             "storage_health_unit": "finite-storage-health.service",

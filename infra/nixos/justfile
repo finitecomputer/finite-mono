@@ -155,3 +155,31 @@ lat1-secret-bootstrap-contract:
 lat2-runner-guardrails-contract:
     cd ../.. && bash -n infra/hosts/lat2/configure-runner-linger infra/hosts/lat2/restart-idle-runner infra/hosts/lat2/runner-maintenance
     cd ../.. && python3 -m unittest scripts.tests.test_lat2_runner_guardrails
+
+# lat5 provisioning and artifact validation.
+nixos-build-lat5-closure rev out_dir="target/lat5-nixos-closure":
+    #!/usr/bin/env bash
+    set -euo pipefail
+    repo_root="$(cd ../.. && pwd)"
+    cd "$repo_root"
+    exec scripts/build-lat5-nixos-closure-artifact {{ quote(rev) }} {{ quote(out_dir) }}
+
+[positional-arguments]
+deploy-lat5-closure artifact_dir *args:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    repo_root="$(cd ../.. && pwd)"
+    cd "$repo_root"
+    exec scripts/deploy-lat5-closure-cache "$@"
+
+[positional-arguments]
+install-lat5-from-artifact artifact_dir target_host *args:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    repo_root="$(cd ../.. && pwd)"
+    cd "$repo_root"
+    exec scripts/install-lat5-from-artifact "$artifact_dir" "$target_host" "$@"
+
+lat5-runner-rollout-contract:
+    cd ../.. && bash -n scripts/build-lat5-nixos-closure-artifact scripts/deploy-lat5-closure-cache scripts/install-lat5-from-artifact infra/nixos/scripts/capture-lat5-host-evidence
+    cd ../.. && python3 -m unittest scripts.tests.test_lat5_closure_artifact
