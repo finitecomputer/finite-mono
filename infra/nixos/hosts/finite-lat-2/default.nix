@@ -202,7 +202,7 @@ in
 
   # This host inherits lat1's role as the wg-finite overlay hub at
   # 10.254.3.1: the Core socket proxy and Identity Authority proxy live
-  # here, and the runner hosts (lat3 and lat4) peer with it.
+  # here, and the runner hosts (lat3, lat4, and lat5) peer with it.
   networking.wireguard.interfaces."wg-finite" = {
     ips = [ "10.254.3.1/29" ];
     listenPort = 51820;
@@ -224,6 +224,13 @@ in
         endpoint = "152.236.34.15:51820";
         persistentKeepalive = 25;
       }
+      {
+        # finite-lat-5: public half of the escrowed OS bootstrap key.
+        publicKey = "FpoqgBozVP8xlvmrJ1Ru6HI9o9R1xENh/eGA2U6WHQQ=";
+        allowedIPs = [ "10.254.3.5/32" ];
+        endpoint = "64.34.93.213:51820";
+        persistentKeepalive = 25;
+      }
     ];
   };
 
@@ -238,7 +245,7 @@ in
     ];
     allowedUDPPorts = [ 51820 ];
     # Preserve the bounded live rules: only the runner hosts' public
-    # addresses (lat3, lat4) can establish WireGuard, and only those
+    # addresses (lat3, lat4, lat5) can establish WireGuard, and only those
     # authenticated overlay addresses can reach the private Core and
     # Identity proxies. extraCommands run before the final reject rule in
     # the iptables firewall.
@@ -273,10 +280,25 @@ in
         -p tcp --dport 18790 \
         -m comment --comment finite-lat4-identity \
         -j nixos-fw-accept
+      iptables -w -A nixos-fw \
+        -s 64.34.93.213/32 -d 64.34.80.19/32 \
+        -p udp --dport 51820 \
+        -m comment --comment finite-lat5-wg \
+        -j nixos-fw-accept
+      iptables -w -A nixos-fw \
+        -s 10.254.3.5/32 -d 10.254.3.1/32 -i wg-finite \
+        -p tcp --dport 14200 \
+        -m comment --comment finite-lat5-core \
+        -j nixos-fw-accept
+      iptables -w -A nixos-fw \
+        -s 10.254.3.5/32 -d 10.254.3.1/32 -i wg-finite \
+        -p tcp --dport 18790 \
+        -m comment --comment finite-lat5-identity \
+        -j nixos-fw-accept
     '';
   };
 
-  # Private finite-lat Runner access to Core (lat3 and future lat4 runners
+  # Private finite-lat Runner access to Core (lat3, lat4, and lat5 runners
   # lease creation through this proxy; this host runs no runner itself).
   systemd.sockets.finite-core-private-proxy = {
     description = "Private finite-lat Runner access to Core";

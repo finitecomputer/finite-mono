@@ -199,11 +199,32 @@ Add lat5's peer-scoped WireGuard access and unique Core Runner credential
 through the infrastructure rollout. Verify existing Runner connectivity after
 the hub change.
 
-Verify the empty target again before the authorized wipe/install. Consume
-only the CI artifact from a Linux driver. Follow lat4's storage and boot
-qualification in [the lat4 install runbook](lat4-nixos-runner-install.md),
-substituting the reviewed lat5 identities and artifact tooling. Treat its
-historical migration section as a separate operation.
+The OS installation and physical qualification above are complete; step 3
+does not repeat the wipe. Keep the installed lat5 closure and its one-runtime
+ceiling. Add the escrowed peer key at `10.254.3.5/32` on lat2 and allow only
+its public WireGuard endpoint plus private Core (`14200`) and Identity
+(`18790`) access, matching the existing peer rules. Existing lat3 and lat4
+peer identities and access stay intact.
+
+For this rollout, the pre-change lat2 closure is
+`/nix/store/q7syl41zvi2bb4k31pdjs5fsmi8cc41y-nixos-system-finite-lat-2-26.05.20260719.fd14620`
+(revision `1568d5a924c8c31a5a0f9e8d47a5379c0900f4c3`). Build the reviewed
+hub change with `lat2-nixos-closure.yml` and use
+`scripts/deploy-lat2-closure-cache` from a Linux driver. Review dry activation
+and compare service executable paths before switching; this operation must
+not introduce a product binary upgrade. Preserve an off-host root-only copy
+of lat2's original `core.env` before adding the credential and restarting
+Core. Rollback restores that file and the recorded closure.
+
+The production path is lat5 Runner → authenticated WireGuard peer → lat2
+Core/Identity socket proxies → existing Core and Identity services. Core
+reads the credential keyring at startup; the new credential is bound to
+`finite-kata-runner-5`, class `kata`, source host `finite-lat-5`. Preserve all
+existing keyring entries. Core may record drained Runner contact/capacity,
+but must offer no creation work; the lat5 Runner must create no Runtime or
+Identity state. Existing chat services and Runtime bindings are unchanged.
+Verify lat3/lat4 connectivity and ready counts after the hub switch and Core
+restart, then authenticate lat5 while drained.
 
 Stage credentials by name and secure file transfer, with root-only access:
 `runner.env`, `identity-operator.env` and `runtime-secrets.env`
