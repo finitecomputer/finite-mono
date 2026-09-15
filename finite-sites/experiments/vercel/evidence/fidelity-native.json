@@ -1,0 +1,20 @@
+{
+  "at": "2026-09-15T22:42:01.543Z",
+  "site": "gamma",
+  "origin": "https://gamma.sites-poc.lwn.lol",
+  "checks": [
+    "real fsite registration, config replay and status",
+    "another native identity cannot inspect or change this Project",
+    "signed body alteration rejected; exact whitespace preserved",
+    "unshared native viewer cannot obtain a handoff",
+    "native share mutation replay is safe",
+    "native callback establishes host-only session exactly once",
+    "native viewer reads HTML and assets; cannot cross Site boundary",
+    "native nonce replay cannot produce another handoff",
+    "revoke invalidates existing native session and pending handoff",
+    "content rollback does not restore native access",
+    "scoped Git publisher cannot grant access or publish Alpha",
+    "managed publication cannot activate without a complete source bundle",
+    "publisher admission revocation blocks native and Git publishing authority"
+  ]
+}

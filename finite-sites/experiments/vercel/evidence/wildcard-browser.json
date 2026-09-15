@@ -1,0 +1,13 @@
+{
+  "at": "2026-09-15T22:43:09.737Z",
+  "passed": [
+    "two real login handoffs",
+    "private CSS rendered",
+    "separate browser storage",
+    "cross-origin response unreadable",
+    "host-only Secure HttpOnly cookies",
+    "Alpha rollback + restore",
+    "Alpha revocation blocks page and asset",
+    "Beta unaffected by Alpha revocation"
+  ]
+}

@@ -1,16 +1,16 @@
 {
-  "at": "2026-09-15T21:15:54.112Z",
+  "at": "2026-09-15T22:42:51.697Z",
   "project": "finite-sites-poc",
-  "deployment": "finite-sites-33zqblgg1-alexlwn123-s-team.vercel.app",
+  "deployment": "finite-sites-ik1hq23m1-alexlwn123-s-team.vercel.app",
   "wildcard": "*.sites-poc.lwn.lol",
   "origins": [
     "https://wild-alpha.sites-poc.lwn.lol",
     "https://wild-beta.sites-poc.lwn.lol"
   ],
-  "freshSite": "wild-probe-95db4f3ebae6",
+  "freshSite": "wild-probe-2c6d3b460050",
   "addresses": [
-    "216.150.16.129",
-    "216.150.16.193"
+    "216.150.1.1",
+    "216.150.16.129"
   ],
   "certificate": {
     "trusted": true,
@@ -20,37 +20,33 @@
   },
   "domains": [
     "*.sites-poc.lwn.lol",
-    "finite-sites-poc-control.vercel.app",
-    "finite-sites-poc-native.vercel.app",
-    "finite-sites-poc-one-alpha.vercel.app",
-    "finite-sites-poc-one-beta.vercel.app",
     "finite-sites-poc.vercel.app"
   ],
   "publications": [
     {
-      "site": "wild-probe-95db4f3ebae6",
+      "site": "wild-probe-2c6d3b460050",
       "version": "cf36fa9b1a07c6296d60546710cbcb49e0851a1bc660aeeab71af18977f48aa6",
-      "deployment": "finite-sites-33zqblgg1-alexlwn123-s-team.vercel.app"
+      "deployment": "finite-sites-ik1hq23m1-alexlwn123-s-team.vercel.app"
     },
     {
       "site": "wild-alpha",
       "version": "cf36fa9b1a07c6296d60546710cbcb49e0851a1bc660aeeab71af18977f48aa6",
-      "deployment": "finite-sites-33zqblgg1-alexlwn123-s-team.vercel.app"
+      "deployment": "finite-sites-ik1hq23m1-alexlwn123-s-team.vercel.app"
     },
     {
       "site": "wild-alpha",
       "version": "30b219c980745f2da63558a1ca595511f2c2c9f04a523078ddecef57159de949",
-      "deployment": "finite-sites-33zqblgg1-alexlwn123-s-team.vercel.app"
+      "deployment": "finite-sites-ik1hq23m1-alexlwn123-s-team.vercel.app"
     },
     {
       "site": "wild-beta",
       "version": "cf36fa9b1a07c6296d60546710cbcb49e0851a1bc660aeeab71af18977f48aa6",
-      "deployment": "finite-sites-33zqblgg1-alexlwn123-s-team.vercel.app"
+      "deployment": "finite-sites-ik1hq23m1-alexlwn123-s-team.vercel.app"
     },
     {
       "site": "wild-beta",
       "version": "30b219c980745f2da63558a1ca595511f2c2c9f04a523078ddecef57159de949",
-      "deployment": "finite-sites-33zqblgg1-alexlwn123-s-team.vercel.app"
+      "deployment": "finite-sites-ik1hq23m1-alexlwn123-s-team.vercel.app"
     }
   ],
   "checks": [

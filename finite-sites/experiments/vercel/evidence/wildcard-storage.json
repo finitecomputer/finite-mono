@@ -1,0 +1,13 @@
+{
+  "at": "2026-09-15T22:43:04.543Z",
+  "checks": [
+    "unknown and generated hostnames fail closed, even with forwarded tenant headers",
+    "registered suffix still requires a real Site record",
+    "private Blob cannot be read directly without credentials",
+    "maximum-size upload, duplicate blob paths, and interrupted-upload replay",
+    "expired handoff cannot create a session",
+    "fresh handler reads persisted version and session",
+    "expired session fails closed",
+    "unavailable database fails closed"
+  ]
+}

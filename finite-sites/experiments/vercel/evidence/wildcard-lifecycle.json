@@ -1,0 +1,207 @@
+{
+  "at": "2026-09-15T22:42:59.907Z",
+  "project": "finite-sites-poc",
+  "deployment": "finite-sites-ik1hq23m1-alexlwn123-s-team.vercel.app",
+  "origins": {
+    "wild-alpha": "https://wild-alpha.sites-poc.lwn.lol",
+    "wild-beta": "https://wild-beta.sites-poc.lwn.lol"
+  },
+  "checks": [
+    {
+      "name": "one platform deployment for both Sites",
+      "passed": true
+    },
+    {
+      "name": "wild-alpha: create replay + admin boundary",
+      "passed": true
+    },
+    {
+      "name": "wild-alpha: anonymous denied /",
+      "passed": true
+    },
+    {
+      "name": "wild-alpha: anonymous denied /assets/style.css",
+      "passed": true
+    },
+    {
+      "name": "wild-alpha: anonymous denied /assets/private.txt",
+      "passed": true
+    },
+    {
+      "name": "wild-alpha: anonymous denied /llms.txt",
+      "passed": true
+    },
+    {
+      "name": "wild-alpha: anonymous denied /api/index",
+      "passed": true
+    },
+    {
+      "name": "wild-alpha: anonymous denied /api/control",
+      "passed": true
+    },
+    {
+      "name": "wild-alpha: anonymous denied /_next/static/fake.js",
+      "passed": true
+    },
+    {
+      "name": "wild-alpha: ungranted issuer denied",
+      "passed": true
+    },
+    {
+      "name": "wild-alpha: grants replay + invalid mutation",
+      "passed": true
+    },
+    {
+      "name": "wild-alpha: cross-origin and cross-site proof rejected",
+      "passed": true
+    },
+    {
+      "name": "wild-alpha: proof redemption single winner and replay denied",
+      "passed": true
+    },
+    {
+      "name": "wild-alpha: authorized HTML/CSS/assets, no-store, current version",
+      "passed": true
+    },
+    {
+      "name": "wild-beta: create replay + admin boundary",
+      "passed": true
+    },
+    {
+      "name": "wild-beta: anonymous denied /",
+      "passed": true
+    },
+    {
+      "name": "wild-beta: anonymous denied /assets/style.css",
+      "passed": true
+    },
+    {
+      "name": "wild-beta: anonymous denied /assets/private.txt",
+      "passed": true
+    },
+    {
+      "name": "wild-beta: anonymous denied /llms.txt",
+      "passed": true
+    },
+    {
+      "name": "wild-beta: anonymous denied /api/index",
+      "passed": true
+    },
+    {
+      "name": "wild-beta: anonymous denied /api/control",
+      "passed": true
+    },
+    {
+      "name": "wild-beta: anonymous denied /_next/static/fake.js",
+      "passed": true
+    },
+    {
+      "name": "wild-beta: ungranted issuer denied",
+      "passed": true
+    },
+    {
+      "name": "wild-beta: grants replay + invalid mutation",
+      "passed": true
+    },
+    {
+      "name": "wild-beta: cross-origin and cross-site proof rejected",
+      "passed": true
+    },
+    {
+      "name": "wild-beta: proof redemption single winner and replay denied",
+      "passed": true
+    },
+    {
+      "name": "wild-beta: authorized HTML/CSS/assets, no-store, current version",
+      "passed": true
+    },
+    {
+      "name": "copied cookie and duplicate cookies cannot cross tenant gate",
+      "passed": true
+    },
+    {
+      "name": "forged tenant and forwarded-host headers grant no access",
+      "passed": true
+    },
+    {
+      "name": "control mutation rejected on site host",
+      "passed": true
+    },
+    {
+      "name": "incomplete/corrupt upload cannot replace current content",
+      "passed": true
+    },
+    {
+      "name": "rollback changes Alpha only and keeps platform deployment fixed",
+      "passed": true
+    },
+    {
+      "name": "stale activation rejects lost updates; complete replay is safe",
+      "passed": true
+    },
+    {
+      "name": "wild-alpha: revocation replay and pending proof denial",
+      "passed": true
+    },
+    {
+      "name": "wild-alpha: revoked GET /",
+      "passed": true
+    },
+    {
+      "name": "wild-alpha: revoked GET /assets/private.txt",
+      "passed": true
+    },
+    {
+      "name": "wild-alpha: revoked GET /assets/style.css",
+      "passed": true
+    },
+    {
+      "name": "wild-alpha: revoked HEAD /",
+      "passed": true
+    },
+    {
+      "name": "wild-alpha: revoked If-None-Match /",
+      "passed": true
+    },
+    {
+      "name": "wild-alpha: revoked Range /assets/private.txt",
+      "passed": true
+    },
+    {
+      "name": "wild-beta: revocation replay and pending proof denial",
+      "passed": true
+    },
+    {
+      "name": "wild-beta: revoked GET /",
+      "passed": true
+    },
+    {
+      "name": "wild-beta: revoked GET /assets/private.txt",
+      "passed": true
+    },
+    {
+      "name": "wild-beta: revoked GET /assets/style.css",
+      "passed": true
+    },
+    {
+      "name": "wild-beta: revoked HEAD /",
+      "passed": true
+    },
+    {
+      "name": "wild-beta: revoked If-None-Match /",
+      "passed": true
+    },
+    {
+      "name": "wild-beta: revoked Range /assets/private.txt",
+      "passed": true
+    },
+    {
+      "name": "restoring content cannot restore revoked access",
+      "passed": true
+    },
+    {
+      "name": "disable replay and invalid disable input",
+      "passed": true
+    }
+  ]
+}

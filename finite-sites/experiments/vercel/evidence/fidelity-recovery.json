@@ -1,0 +1,20 @@
+{
+  "at": "2026-09-15T22:42:07.652Z",
+  "scope": "empty logical database and Blob namespaces; new serving process",
+  "schema": "poc_restore_f0ddbe95b3a5624d",
+  "blobPrefix": "restore-f0ddbe95b3a5624d",
+  "site": "gamma",
+  "hostname": "gamma.sites-poc.lwn.lol",
+  "activeVersion": "feff272aaa532c06ec2a147925a20da061d1c3e8cbb1e3a41a32ca7617aebc97",
+  "versions": 2,
+  "objects": 10,
+  "restoredAt": "2026-09-15T22:42:06.385Z",
+  "checks": [
+    "corrupt recovery object rejected before target creation",
+    "fresh process denies anonymous viewer",
+    "revoked native Share remains revoked after recovery",
+    "retained Share signs in against restored authority",
+    "restored HTML and assets served from new Blob namespace",
+    "complete editable source and Git history restore from bundle"
+  ]
+}
