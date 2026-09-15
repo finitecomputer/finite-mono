@@ -1,19 +1,27 @@
 "use client";
 
-// FIN-89: compare cards, rows, and category columns in the real dashboard shell.
+// FIN-89: the selected categorized-card design in the real dashboard shell.
 // Synthetic memberships only. This prototype proves no Brain access contract.
 import { useEffect, useRef, useState } from "react";
-import { usePathname, useRouter, useSearchParams } from "next/navigation";
-import { ArrowLeftIcon, ArrowRightIcon, BrainIcon, Building2Icon, Clock3Icon, FolderIcon, RefreshCwIcon, UserRoundIcon } from "lucide-react";
+import { BrainIcon, Building2Icon, Clock3Icon, FolderIcon, RefreshCwIcon, UserRoundIcon } from "lucide-react";
 
 import { Button } from "@/components/ui/button";
 
-type Brain = { id: string; name: string; kind: "Personal" | "Organization"; role: string; folders: string[] };
-type Scenario = "ready" | "empty" | "unavailable" | "stale" | "unauthorized";
+type Brain = {
+  id: string;
+  name: string;
+  kind: "Personal" | "Organization";
+  role: string;
+  folders: string[] | null;
+};
+type Scenario =
+  | "ready"
+  | "empty"
+  | "unavailable"
+  | "stale"
+  | "unauthorized"
+  | "folder-details-unavailable";
 type Scope = "agent" | "human";
-const VARIANTS = ["cards", "rows", "columns"] as const;
-type Variant = typeof VARIANTS[number];
-const LABELS = { cards: "A · Categorized cards", rows: "B · Compact list", columns: "C · Category columns" };
 const SAMPLES: Record<Scope, Brain[]> = {
   agent: [
     { id: "sample-personal", name: "Personal knowledge", kind: "Personal", role: "Personal Agent", folders: ["Notes", "Projects", "Reading"] },
@@ -28,38 +36,11 @@ const SAMPLES: Record<Scope, Brain[]> = {
 const controlClass = "rounded-md border border-border bg-background px-2 py-1.5 text-sm";
 
 export function BrainOverviewPrototype() {
-  const query = useSearchParams();
-  const pathname = usePathname();
-  const router = useRouter();
-  const requested = query.get("variant");
-  const variant = VARIANTS.find((value) => value === requested) ?? "cards";
   const [scenario, setScenario] = useState<Scenario>("ready");
   const [scope, setScope] = useState<Scope>("agent");
 
-  useEffect(() => {
-    function keydown(event: KeyboardEvent) {
-      if (event.altKey || event.ctrlKey || event.metaKey || event.shiftKey) return;
-      if (event.target instanceof Element && event.target.closest("input, textarea, select, button, [contenteditable]")) return;
-      if (event.key !== "ArrowLeft" && event.key !== "ArrowRight") return;
-      event.preventDefault();
-      const offset = event.key === "ArrowRight" ? 1 : -1;
-      const next = VARIANTS[(VARIANTS.indexOf(variant) + offset + VARIANTS.length) % VARIANTS.length];
-      const params = new URLSearchParams(query.toString());
-      params.set("variant", next);
-      router.replace(`${pathname}?${params}`, { scroll: false });
-    }
-    window.addEventListener("keydown", keydown);
-    return () => window.removeEventListener("keydown", keydown);
-  }, [pathname, query, router, variant]);
-
-  function cycle(offset: number) {
-    const params = new URLSearchParams(query.toString());
-    params.set("variant", VARIANTS[(VARIANTS.indexOf(variant) + offset + VARIANTS.length) % VARIANTS.length]);
-    router.replace(`${pathname}?${params}`, { scroll: false });
-  }
-
   return (
-    <div className="ocean-page-stack pb-24">
+    <div className="ocean-page-stack">
       <aside className="flex flex-wrap items-center gap-x-5 gap-y-3 rounded-xl border border-dashed border-border p-4 text-sm">
         <div className="mr-auto"><strong>Local prototype</strong><p className="text-muted-foreground">Sample data · layout and states only</p></div>
         <div className="flex items-center gap-2"><label htmlFor="prototype-scope">View as</label>
@@ -72,24 +53,26 @@ export function BrainOverviewPrototype() {
             <option value="ready">Available</option><option value="empty">No memberships</option>
             <option value="unavailable">Service unavailable</option><option value="stale">Refresh failed</option>
             <option value="unauthorized">Access lost</option>
+            <option value="folder-details-unavailable">Folder details unavailable</option>
           </select>
         </div>
       </aside>
 
-      <MembershipPreview key={`${scope}:${scenario}`} scope={scope} scenario={scenario} variant={variant} />
-
-      {process.env.NODE_ENV === "development" && (
-        <nav aria-label="Prototype layouts" className="fixed bottom-5 left-1/2 z-50 flex max-w-[calc(100vw-2rem)] -translate-x-1/2 items-center gap-2 rounded-full bg-foreground p-2 text-background shadow-xl">
-          <button aria-label="Previous layout" className="rounded-full p-2 hover:opacity-70 focus-visible:outline-2" onClick={() => cycle(-1)}><ArrowLeftIcon className="size-4" /></button>
-          <span className="min-w-40 text-center text-xs font-medium sm:min-w-48">{LABELS[variant]}</span>
-          <button aria-label="Next layout" className="rounded-full p-2 hover:opacity-70 focus-visible:outline-2" onClick={() => cycle(1)}><ArrowRightIcon className="size-4" /></button>
-        </nav>
-      )}
+      <MembershipPreview key={`${scope}:${scenario}`} scope={scope} scenario={scenario} />
     </div>
   );
 }
 
-function MembershipPreview({ scope, scenario, variant }: { scope: Scope; scenario: Scenario; variant: Variant }) {
+function sampleMemberships(scope: Scope, scenario: Scenario): Brain[] {
+  if (scenario === "empty") return [];
+  return SAMPLES[scope].map((brain) => (
+    scenario === "folder-details-unavailable" && brain.id === "sample-team"
+      ? { ...brain, folders: null }
+      : brain
+  ));
+}
+
+function MembershipPreview({ scope, scenario }: { scope: Scope; scenario: Scenario }) {
   const [brains, setBrains] = useState<Brain[] | null>(null);
   const [refreshedAt, setRefreshedAt] = useState<string | null>(null);
   const [busy, setBusy] = useState(true);
@@ -104,7 +87,7 @@ function MembershipPreview({ scope, scenario, variant }: { scope: Scope; scenari
       } else if (scenario === "unavailable") {
         setError("Brain is unavailable right now. Try refreshing in a moment.");
       } else {
-        setBrains(scenario === "empty" ? [] : SAMPLES[scope]);
+        setBrains(sampleMemberships(scope, scenario));
         setRefreshedAt(new Date(Date.now() - (scenario === "stale" ? 300_000 : 0)).toISOString());
         if (scenario === "stale") setError("Refresh failed. Showing the last successful result.");
       }
@@ -116,8 +99,8 @@ function MembershipPreview({ scope, scenario, variant }: { scope: Scope; scenari
   function refresh() {
     setBusy(true);
     pending.current = setTimeout(() => {
-      if (scenario === "ready" || scenario === "empty") {
-        setBrains(scenario === "empty" ? [] : SAMPLES[scope]);
+      if (scenario === "ready" || scenario === "empty" || scenario === "folder-details-unavailable") {
+        setBrains(sampleMemberships(scope, scenario));
         setRefreshedAt(new Date().toISOString());
         setError(null);
       }
@@ -153,9 +136,7 @@ function MembershipPreview({ scope, scenario, variant }: { scope: Scope; scenari
       <section aria-label="Brain memberships" aria-busy={busy}>
         {brains === null && busy ? <div role="status" className="ocean-empty-state">Loading Brain memberships…</div> : null}
         {brains?.length === 0 ? <div className="ocean-empty-state"><BrainIcon className="mx-auto mb-3 size-6" /><h2 className="font-semibold text-foreground">No Brain memberships</h2><p className="mt-1">Brains shared with {identity} will appear here after you refresh.</p></div> : null}
-        {ordered.length > 0 && variant === "cards" && <VariantCards brains={ordered} />}
-        {ordered.length > 0 && variant === "rows" && <VariantRows brains={ordered} />}
-        {ordered.length > 0 && variant === "columns" && <VariantColumns brains={ordered} />}
+        {ordered.length > 0 && <BrainCards brains={ordered} />}
       </section>
 
       {invitations.length > 0 && <section className="rounded-xl border border-dashed border-border p-4">
@@ -166,7 +147,7 @@ function MembershipPreview({ scope, scenario, variant }: { scope: Scope; scenari
 
       <details className="text-xs text-muted-foreground">
         <summary className="cursor-pointer">Prototype state · synthetic data</summary>
-        <pre className="mt-3 overflow-auto rounded-lg bg-muted p-3">{JSON.stringify({ scope, scenario, layout: variant, busy, refreshedAt, error, brains, invitations }, null, 2)}</pre>
+        <pre className="mt-3 overflow-auto rounded-lg bg-muted p-3">{JSON.stringify({ scope, scenario, busy, refreshedAt, error, brains, invitations }, null, 2)}</pre>
       </details>
     </>
   );
@@ -177,46 +158,64 @@ function CategoryIcon({ kind }: { kind: Brain["kind"] }) {
   return <Icon className="size-4 text-muted-foreground" />;
 }
 
-function VariantCards({ brains }: { brains: Brain[] }) {
-  return <div className="space-y-7">{(["Personal", "Organization"] as const).map((kind) => {
-    const group = brains.filter((brain) => brain.kind === kind);
-    if (!group.length) return null;
-    return <section key={kind}><h2 className="mb-3 flex items-center gap-2 text-sm font-semibold"><CategoryIcon kind={kind} />{kind}<span className="font-normal text-muted-foreground">{group.length}</span></h2>
-      <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-3">{group.map((brain) => <article key={brain.id} className="ocean-skill-card">
-        <div className="ocean-skill-card__meta"><span className="ocean-chip">{brain.kind}</span></div>
-        <div className="ocean-skill-card__copy"><h3>{brain.name}</h3></div>
-        <div className="mt-3 min-w-0 text-sm">
-          <p className="flex items-center gap-1.5 text-muted-foreground" title="Folders listed for this identity. Linked folders and local sync status are not included.">
-            <FolderIcon className="size-3.5" aria-hidden />
-            {brain.folders.length} {brain.folders.length === 1 ? "folder" : "folders"} shown
-          </p>
-          {brain.folders.length > 0 && <p className="mt-1.5 break-words leading-relaxed text-muted-foreground">
-            {brain.folders.slice(0, 3).join(" · ")}
-            {brain.folders.length > 3 && <span aria-label={`${brain.folders.length - 3} more folders`}> · +{brain.folders.length - 3}</span>}
-          </p>}
-        </div>
-        <div className="mt-4 flex items-center justify-between gap-2 border-t border-border pt-3 text-sm"><span className="text-muted-foreground">Role</span><span>{brain.role}</span></div>
-      </article>)}</div>
-    </section>;
-  })}</div>;
-}
-
-function VariantRows({ brains }: { brains: Brain[] }) {
-  return <div className="overflow-hidden rounded-xl border border-border">{(["Personal", "Organization"] as const).map((kind) => {
-    const group = brains.filter((brain) => brain.kind === kind);
-    if (!group.length) return null;
-    return <section key={kind}><h2 className="flex items-center gap-2 bg-muted/40 px-4 py-3 text-sm font-semibold"><CategoryIcon kind={kind} />{kind}<span className="text-muted-foreground">{group.length}</span></h2>
-      {group.map((brain) => <article key={brain.id} className="flex flex-wrap items-center justify-between gap-3 border-t border-border bg-card px-4 py-5"><h3 className="text-sm font-medium">{brain.name}</h3><span className="ocean-chip">{brain.role}</span></article>)}
-    </section>;
-  })}</div>;
-}
-
-function VariantColumns({ brains }: { brains: Brain[] }) {
-  return <div className="grid gap-4 lg:grid-cols-2">{(["Personal", "Organization"] as const).map((kind) => {
-    const group = brains.filter((brain) => brain.kind === kind);
-    if (!group.length) return null;
-    return <section key={kind} className="rounded-xl border border-border bg-card p-5"><div className="mb-5 flex items-start justify-between"><div><CategoryIcon kind={kind} /><h2 className="mt-3 text-lg font-semibold">{kind}</h2></div><span className="text-3xl font-semibold text-muted-foreground">{group.length}</span></div>
-      <div className="divide-y divide-border">{group.map((brain) => <article key={brain.id} className="py-4"><h3 className="text-sm font-medium">{brain.name}</h3><p className="mt-1 text-sm text-muted-foreground">{brain.role}</p></article>)}</div>
-    </section>;
-  })}</div>;
+function BrainCards({ brains }: { brains: Brain[] }) {
+  return (
+    <div className="space-y-7">
+      {(["Personal", "Organization"] as const).map((kind) => {
+        const group = brains.filter((brain) => brain.kind === kind);
+        if (!group.length) return null;
+        return (
+          <section key={kind}>
+            <h2 className="mb-3 flex items-center gap-2 text-sm font-semibold">
+              <CategoryIcon kind={kind} />
+              {kind}
+              <span className="font-normal text-muted-foreground">{group.length}</span>
+            </h2>
+            <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-3">
+              {group.map((brain) => (
+                <article
+                  key={brain.id}
+                  aria-labelledby={`${brain.id}-name`}
+                  className="ocean-skill-card min-w-0"
+                  style={{ gridTemplateRows: "auto auto 1fr auto" }}
+                >
+                  <div className="ocean-skill-card__meta">
+                    <span className="ocean-chip">{brain.kind}</span>
+                  </div>
+                  <div className="ocean-skill-card__copy">
+                    <h3 id={`${brain.id}-name`} className="[overflow-wrap:anywhere]">{brain.name}</h3>
+                  </div>
+                  {brain.folders === null ? (
+                    <p className="mt-3 text-sm text-muted-foreground">Folder details unavailable</p>
+                  ) : (
+                    <div className="mt-3 min-w-0 text-sm">
+                      <p
+                        className="flex items-center gap-1.5 text-muted-foreground"
+                        title="Folders listed for this identity. Linked folders and local sync status are not included."
+                      >
+                        <FolderIcon className="size-3.5" aria-hidden />
+                        {brain.folders.length} {brain.folders.length === 1 ? "folder" : "folders"} shown
+                      </p>
+                      {brain.folders.length > 0 && (
+                        <p className="mt-1.5 leading-relaxed text-muted-foreground [overflow-wrap:anywhere]">
+                          {brain.folders.slice(0, 3).join(" · ")}
+                          {brain.folders.length > 3 && (
+                            <span aria-label={`${brain.folders.length - 3} more folders`}> · +{brain.folders.length - 3}</span>
+                          )}
+                        </p>
+                      )}
+                    </div>
+                  )}
+                  <dl className="mt-4 flex items-center justify-between gap-2 border-t border-border pt-3 text-sm">
+                    <dt className="text-muted-foreground">Role</dt>
+                    <dd>{brain.role}</dd>
+                  </dl>
+                </article>
+              ))}
+            </div>
+          </section>
+        );
+      })}
+    </div>
+  );
 }

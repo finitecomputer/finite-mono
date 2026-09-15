@@ -1,6 +1,6 @@
 # FIN-89 Brain overview prototype
 
-Question: does a categorized membership list make the Brain tab useful before a content viewer exists?
+Selected design: categorized membership cards (A), approved by Austin on September 15.
 
 Run from the repository root in the pinned development environment:
 
@@ -14,7 +14,9 @@ The Brain page uses in-memory synthetic memberships and makes no Brain requests.
 
 The selected A cards show each Brain's folder count and up to three folder names, followed by `+N` for the remainder. “Folders shown” refers to the metadata visible to the selected identity; it excludes linked folders and does not measure local sync. Sample agent and human views have different folder visibility. These are example names and counts, not live inventory.
 
-Compare `?variant=cards` (default), `?variant=rows`, and `?variant=columns` with the bottom arrows or keyboard left/right. Use the preview controls to change identity and inspect empty, unavailable, stale, and access-lost states. Changing identity clears the displayed result before loading the new example. Refresh shows loading and updates the successful-fetch time; the failure scenarios remain failures until another scenario is selected. Expand “Prototype state” for the full example state.
+Use the preview controls to change identity and inspect empty, unavailable, stale, access-lost, and unavailable-folder-detail states. Missing folder details preserve the Brain's name and role without displaying a false zero count. Changing identity clears the displayed result before loading the new example. Refresh shows loading and updates the successful-fetch time; the failure scenarios remain failures until another scenario is selected. Expand “Prototype state” for the full example state.
+
+Only the selected card layout remains on this branch. The original three-layout study is preserved in commit `89c9806c`; old `?variant=` links now display the selected cards.
 
 The route requires development mode, the existing local-account fixture switch, and the fixture machine ID. Production requests return not found, and production navigation stays disabled. No new authentication bypass or Brain integration is introduced.
 
