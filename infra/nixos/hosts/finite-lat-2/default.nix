@@ -244,11 +244,12 @@ in
       443
     ];
     allowedUDPPorts = [ 51820 ];
-    # Preserve the bounded live rules: only the runner hosts' public
-    # addresses (lat3, lat4, lat5) can establish WireGuard, and only those
-    # authenticated overlay addresses can reach the private Core and
-    # Identity proxies. extraCommands run before the final reject rule in
-    # the iptables firewall.
+    # Preserve the live boundary: WireGuard's public UDP listener authenticates
+    # configured peer keys and permits endpoint roaming. The source-specific
+    # UDP rules below are redundant with allowedUDPPorts, retained for the
+    # existing peers. Private Core and Identity ingress is restricted to each
+    # authenticated overlay address on wg-finite. extraCommands run before
+    # the final reject rule in the iptables firewall.
     extraCommands = ''
       iptables -w -A nixos-fw \
         -s 207.188.7.157/32 -d 64.34.80.19/32 \
@@ -279,11 +280,6 @@ in
         -s 10.254.3.4/32 -d 10.254.3.1/32 -i wg-finite \
         -p tcp --dport 18790 \
         -m comment --comment finite-lat4-identity \
-        -j nixos-fw-accept
-      iptables -w -A nixos-fw \
-        -s 64.34.93.213/32 -d 64.34.80.19/32 \
-        -p udp --dport 51820 \
-        -m comment --comment finite-lat5-wg \
         -j nixos-fw-accept
       iptables -w -A nixos-fw \
         -s 10.254.3.5/32 -d 10.254.3.1/32 -i wg-finite \

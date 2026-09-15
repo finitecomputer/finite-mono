@@ -201,10 +201,12 @@ the hub change.
 
 The OS installation and physical qualification above are complete; step 3
 does not repeat the wipe. Keep the installed lat5 closure and its one-runtime
-ceiling. Add the escrowed peer key at `10.254.3.5/32` on lat2 and allow only
-its public WireGuard endpoint plus private Core (`14200`) and Identity
-(`18790`) access, matching the existing peer rules. Existing lat3 and lat4
-peer identities and access stay intact.
+ceiling. Add the escrowed peer key at `10.254.3.5/32` on lat2, with the
+captured public endpoint, and permit its overlay address to reach private
+Core (`14200`) and Identity (`18790`). Preserve the existing public UDP/51820
+listener: WireGuard authenticates configured peer keys and permits endpoint
+roaming; it is not a public source-IP allowlist. Existing lat3 and lat4 peer
+identities and access stay intact.
 
 For this rollout, the pre-change lat2 closure is
 `/nix/store/q7syl41zvi2bb4k31pdjs5fsmi8cc41y-nixos-system-finite-lat-2-26.05.20260719.fd14620`
@@ -214,7 +216,28 @@ hub change with `lat2-nixos-closure.yml` and use
 and compare service executable paths before switching; this operation must
 not introduce a product binary upgrade. Preserve an off-host root-only copy
 of lat2's original `core.env` before adding the credential and restarting
-Core. Rollback restores that file and the recorded closure.
+Core. Use a compare-before-replace check against the backed-up file so a
+concurrent operator change fails closed.
+
+Append exactly this metadata record to `FC_CORE_RUNNER_CREDENTIALS_JSON`,
+with a newly generated unique token in the named environment variable:
+
+```json
+{"credentialId":"finite-lat-5-current","tokenEnv":"FC_CORE_RUNNER_CREDENTIAL_TOKEN_FINITE_LAT_5_CURRENT","runnerId":"finite-kata-runner-5","runnerClasses":["kata"],"sourceHostId":"finite-lat-5"}
+```
+
+Reject duplicate identities or token-variable names, missing/empty referenced
+tokens, reused bearer values, and any change to existing metadata or other
+Core settings. Validate the candidate JSON and token references before
+atomic replacement. Keep lat5's `runner.env` absent until Core restarts and
+passes health checks with the new keyring. Then install lat5's root-only
+environment with the matching token and `FC_RUNNER_DRAIN=true`.
+
+If credential activation fails, stop lat5's timer/service first, restore the
+original `core.env`, restart Core, and verify Core health and existing Runner
+connectivity. If the hub configuration itself failed, also restore the
+recorded lat2 closure. The closure deploy helper cannot roll back a separately
+edited `core.env`; treat these as two explicit rollback boundaries.
 
 The production path is lat5 Runner → authenticated WireGuard peer → lat2
 Core/Identity socket proxies → existing Core and Identity services. Core
