@@ -1,21 +1,14 @@
 # Sites backups
 
-Tracking: [FIN-54](https://linear.app/finitecomputer/issue/FIN-54).
-Decision: [snapshot and Borg adaptation](adr/0031-borg-on-existing-rsync-net.md).
+Decision: [snapshot and Borg backups](adr/0031-borg-on-existing-rsync-net.md).
 Operations: [Sites Borg recovery](../../infra/runbooks/sites-borg-recovery.md).
 
 ## Implementation
 
-`infra/scripts/sites-backup` adapts the existing hosted backup procedure to
-Sites alone: stop Sites, copy its full data tree with rsync, back up SQLite,
-verify the snapshot, resume Sites, then archive it with native Borg over SSH.
-Git repositories are copied as repositories, not rebundled or reconstructed.
-There is no revision queue, custom object store, or shared-object dependency graph.
-
-The previous `finitesitesd backup` commands, content-addressed repository,
-Git history eligibility machinery and associated tests have been removed.
-The replacement is an operator script; publishing APIs and workflows do not
-change.
+`infra/scripts/sites-backup` stops Sites, copies its full data tree with rsync,
+backs up SQLite, verifies the snapshot, resumes Sites, then archives it with
+native Borg over SSH. Git repositories are copied intact. The operator script
+is independent of publishing APIs and workflows.
 
 ## Operator commands
 
@@ -52,7 +45,7 @@ and archives only the snapshot from this run. Failed capture never re-uploads
 an old snapshot as fresh. Local staging is removed after the attempt; successful
 archives remain in Borg. No automatic prune/compact or remote initialization.
 
-## Image and remaining rollout
+## Service Lifecycle
 
 The Fly image uses stock Supervisor and cron only when
 `FINITE_SITES_BACKUP_ENABLED=1`. Default serving remains the existing direct
@@ -68,10 +61,9 @@ or restart the Machine and inspect the failed/incomplete run before retrying.
 The next image boot starts Sites normally. This is a maintenance-window backup,
 not a zero-downtime design.
 
-Production still needs the authorized credential provisioning, new image
-deployment, external freshness alert wiring, and rsync.net-to-empty-Fly restore
-drill. Neither the checked-in Fly image digest nor the opt-in flag has been
-changed. Option A / Latitude and existing host/Chat jobs are untouched.
+Before enabling backups, follow the operating runbook to provision credentials,
+qualify the image, wire external freshness alerts, and restore from rsync.net
+onto an empty Fly volume. Existing host and Chat backup jobs are independent.
 
 ## Verification
 
