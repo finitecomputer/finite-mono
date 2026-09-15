@@ -20,7 +20,7 @@ cutover. Production migration and old-link compatibility belong in the
 | Machine | One shared CPU, 1 GiB RAM |
 | Volume | `sites_data`, 10 GiB, mounted at `/var/lib/finite-sites` |
 | Lifecycle | Rolling deploy; auto-stop off; auto-start on; minimum one Machine |
-| Shutdown | `SIGINT`, 30-second grace period |
+| Shutdown | `SIGINT`, 120-second grace period for ordered backup/service shutdown |
 | Health check | `GET /api/v2/healthz`, Host `finite.site`; 15s grace, 30s interval, 5s timeout |
 
 Organization and volume size are provisioning inputs, not fields in
@@ -171,6 +171,13 @@ The volume contains the registry, repositories, blobs, cookie secret and
 outbox. The [entrypoint](../../images/sites-entrypoint) refuses a missing mount,
 initializes only its root ownership and drops to UID/GID 65532. It does not
 recursively repair imported data.
+
+Backups are opt-in. The image packages Borg, rsync, SQLite, OpenSSH, Supervisor
+and cron; the checked-in configuration leaves the job disabled. Follow the
+[Borg recovery runbook](../../runbooks/sites-borg-recovery.md) to provision the
+dedicated rsync.net repository and root-only credentials, enable the schedule
+and external alerts, and qualify an independent empty-volume restore. Image
+CI includes the backup-enabled smoke in addition to the default serving test.
 
 One Machine and one volume mean restart/deploy downtime and no high
 availability. Do not scale to independently writable volumes. Image rollback

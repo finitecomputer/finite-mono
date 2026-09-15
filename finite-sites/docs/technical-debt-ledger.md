@@ -46,9 +46,11 @@ select the dev mailer with `--mailer dev`; omitting the flag is an error.
 - **Source**: local v1; no object storage running.
 - **Risk**: single-disk durability for all site content and the registry.
 - **Proof**: `crates/finitesites-blob/src/lib.rs` writes under `--data`.
-- **Delete condition**: Garage/S3 `BlobStore` implementation and a
-  Litestream replication unit for `registry.db` in the production deploy
-  definition.
+- **Delete condition**: ADR 0031's adapted snapshot-and-Borg job is deployed
+  and the complete Recovery Set has restored onto an
+  empty target. The local operator commands in `docs/backups.md` do not close
+  this debt or provide independent durability. ADR 0031 selects Borg on the
+  existing rsync.net surface; its local test is not a production restore drill.
 
 ## 5. Global blob dedup leaks hash existence
 
@@ -109,8 +111,8 @@ acknowledgement.
 ## 11. Retained legacy viewer-session exchange
 
 - **Boundary**: dashboard account previews select one of two fixed configured
-  Sites origins using the existing allowed site hostname distinction. Legacy
-  apps/documents retain their registry; v2 static sites use theirs. No retry
+  Sites origins using the existing allowed site hostname distinction. Until
+  cutover, legacy outputs retain their registry; v2 static sites use theirs. No retry
   across registries, new roster, or grant copy is introduced.
 - **Delete condition**: remove legacy selection and request spelling after
   legacy previews and Hosted Chat requester consumers are retired. Until then,

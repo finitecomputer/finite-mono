@@ -136,6 +136,17 @@ jobs:
         env:
           PINNED: ${{ steps.canary.outputs.pinned }}
         run: bash infra/images/sites-smoke.sh "$PINNED"
+      - name: Verify Sites backup and restore in the exact image
+        if: inputs.image == 'sites'
+        timeout-minutes: 6
+        env:
+          PINNED: ${{ steps.canary.outputs.pinned }}
+        run: |
+          SITES_BACKUP_SMOKE=1 bash infra/images/sites-smoke.sh "$PINNED"
+          docker run --rm --entrypoint python3 \
+            -e SITES_SUPERVISOR_INTEGRATION=1 \
+            --mount "type=bind,src=$PWD,dst=/work,readonly" \
+            "$PINNED" -m unittest discover -s /work/scripts/tests -p test_sites_supervisor.py
       - name: Promote the same saved build to production tags
         id: production
         if: inputs.publish_production == true && vars.FINITE_GHCR_PRODUCTION_PUBLISH_ENABLED == 'true'
