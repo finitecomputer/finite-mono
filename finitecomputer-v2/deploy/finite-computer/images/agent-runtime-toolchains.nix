@@ -36,15 +36,21 @@ let
   # ship only the CLI so it cannot shadow the Hermes venv interpreter.
   weasyprint = python3.pkgs.weasyprint;
   weasyprintEnv = python3.withPackages (ps: [ ps.weasyprint ]);
-  weasyprintFontsConf = makeFontsConf {
+  pdfFontsConf = makeFontsConf {
     fontDirectories = [
       dejavu_fonts
       liberation_ttf
     ];
   };
   weasyprintCli = writeShellScriptBin "weasyprint" ''
-    export FONTCONFIG_FILE="${weasyprintFontsConf}"
+    export FONTCONFIG_FILE="${pdfFontsConf}"
     exec "${weasyprintEnv}/bin/weasyprint" "$@"
+  '';
+  # The pinned Chromium headless shell has no font wrapper of its own.
+  # Supply the document fonts explicitly in the slim Runtime image too.
+  playwrightCli = writeShellScriptBin "playwright" ''
+    export FONTCONFIG_FILE="${pdfFontsConf}"
+    exec "${playwright-test}/bin/playwright" "$@"
   '';
 in
 symlinkJoin {
@@ -54,7 +60,7 @@ symlinkJoin {
     bun
     deno
     uv
-    playwright-test
+    playwrightCli
     browsers
     weasyprintCli
     simplexChat

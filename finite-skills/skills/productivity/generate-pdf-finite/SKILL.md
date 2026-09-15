@@ -47,6 +47,7 @@ playwright pdf file:///abs/path/input.html output.pdf
 ```
 
 - Real Chromium (the same staged browsers `playwright screenshot` uses).
+- Uses the bundled DejaVu and Liberation fonts through the CLI's font configuration.
 - An existing local path also works; an absolute `file://` URL makes the input explicit.
 - Options: `--paper-format A4`, `--wait-for-selector`, `--wait-for-timeout`.
 
