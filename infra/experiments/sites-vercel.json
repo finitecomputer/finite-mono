@@ -5,7 +5,6 @@
   "teamId": "team_PY34kYpgJFQlooA8haRuFeG3",
   "project": "finite-sites-poc",
   "projectId": "prj_11v04LOfFRaXQgqqeE8RUZmhUKjE",
-  "previousProjectName": "finite-sites-poc-control",
   "database": "finite-sites-poc-db",
   "databaseResourceId": "store_oeEvQL5q9EsdXOMD",
   "activeDatabaseTables": "poc2_*",
@@ -24,18 +23,6 @@
   "customerData": false,
   "canonicalDnsChanges": false,
   "wildcardDnsValidated": true,
-  "retiredProjects": [
-    {
-      "name": "finite-sites-poc-alpha",
-      "id": "prj_Vmq1wBvWVXse8VPzUWWdIlmzUldH",
-      "status": "deleted 2026-09-15; original proof retained in git commit b0a20308"
-    },
-    {
-      "name": "finite-sites-poc-beta",
-      "id": "prj_ADRttezR61kvaUy8JtkYImlLIIaI",
-      "status": "deleted 2026-09-15; original proof retained in git commit b0a20308"
-    }
-  ],
   "teardown": "Delete only these explicitly named scratch resources. Local fixture Git and committed proof artifacts retain the experiment evidence. No production dependency exists.",
   "managedGit": {
     "repository": "alexlwn123/finite-sites-poc-source",
@@ -57,7 +44,8 @@
     "projectDomainEntry": "Single wildcard attached to finite-sites-poc",
     "sites": [
       "wild-alpha",
-      "wild-beta"
+      "wild-beta",
+      "gamma"
     ],
     "probeSites": "wild-probe-<random>; disabled after validation, named in evidence/wildcard-live.json",
     "evidence": "finite-sites/experiments/vercel/evidence/wildcard-live.json",
@@ -73,5 +61,6 @@
     "commandForIgnoringBuildStep": "[ \"$VERCEL_GIT_COMMIT_REF\" != \"alex/sites-vercel-experiment\" ]",
     "config": "app/vercel.json also disables all Git branch patterns except the exact experiment branch",
     "evidence": "finite-sites/experiments/vercel/evidence/branch-restriction.json"
-  }
+  },
+  "retiredSiteState": "Old alpha/beta synthetic rows are disabled and their hostnames detached; their content remains private offline scratch state. Gamma retains its source/version history at gamma.sites-poc.lwn.lol."
 }

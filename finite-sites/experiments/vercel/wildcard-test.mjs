@@ -32,7 +32,6 @@ try {
   await check('one wildcard attached; no per-Site Vercel domains',async()=>{
     assert.ok(beforeDomains.includes(`*.${config.siteBaseDomain}`));
     for(const site of [...sites,fresh]){
-      assert.equal(config.siteHosts[site],undefined);
       assert.ok(!beforeDomains.includes(`${site}.${config.siteBaseDomain}`));
     }
   });

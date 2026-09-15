@@ -25,7 +25,7 @@
   encoding; verification must interoperate with the repository's Rust signer.
 - **Wildcard slice**: `*.sites-poc.lwn.lol` tests real DNS/TLS and same-site
   sibling origins on the same project. Synthetic wildcard Sites use the email
-  issuer; native identity remains exercised on the original Gamma alias.
+  issuer; native identity is exercised at gamma.sites-poc.lwn.lol.
   Probe Sites are disabled after checks, but retained for inspection. Initial
   wildcard certificate issuance is proven; renewal is not.
 - **Delete condition**: delete the experiment or replace its issuer/publisher

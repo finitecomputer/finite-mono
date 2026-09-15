@@ -1,12 +1,12 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { manifest, resolveHost, hash, validPath } from './app/lib/model.js';
-const env={POC_CONTROL_HOST:'control.example.com',POC_SITE_BASE_DOMAIN:'sites.example.net',POC_SITE_HOSTS:'{"alpha":"alpha-test.vercel.app"}'};
-test('wildcard routing only accepts one valid tenant label; aliases are exact',()=>{
+const env={POC_CONTROL_HOST:'control.example.com',POC_SITE_BASE_DOMAIN:'sites.example.net'};
+test('routing only accepts the control host or one valid wildcard tenant label',()=>{
   assert.deepEqual(resolveHost('beta.sites.example.net',env),{site:'beta',host:'beta.sites.example.net'});
-  assert.equal(resolveHost('ALPHA-TEST.vercel.app',env).site,'alpha');
+  assert.equal(resolveHost('ALPHA.sites.example.net',env).site,'alpha');
   assert.equal(resolveHost('control.example.com',env).control,true);
-  for (const host of ['alpha.beta.sites.example.net','alpha.sites.example.net.attacker.com','sites.example.net','api.sites.example.net','alpha-test-other.vercel.app','unmapped.vercel.app','beta.sites.example.net:443','-abc.sites.example.net','abc-.sites.example.net']) assert.equal(resolveHost(host,env),null,host);
+  for (const host of ['alpha.beta.sites.example.net','alpha.sites.example.net.attacker.com','sites.example.net','api.sites.example.net','alpha-test.vercel.app','alpha-test-other.vercel.app','unmapped.vercel.app','beta.sites.example.net:443','-abc.sites.example.net','abc-.sites.example.net']) assert.equal(resolveHost(host,env),null,host);
 });
 test('manifest identity is stable; changed bytes create another version',()=>{
   const input={commit:'a'.repeat(40),deployPath:'site',files:[{path:'index.html',size:1,sha256:hash('a')},{path:'assets/a.txt',size:1,sha256:hash('b')}]};

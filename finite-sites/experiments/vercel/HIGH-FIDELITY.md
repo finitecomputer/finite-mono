@@ -1,6 +1,6 @@
 # Higher-fidelity proof boundary
 
-The next slice keeps one Vercel project and adds real Finite NIP-98 verification,
+The wildcard prototype keeps one Vercel project and adds real Finite NIP-98 verification,
 owner-scoped control operations, managed Git publication, and source recovery.
 
 - Existing Finite identities sign requests. The Rust `fsite` client is an
@@ -47,8 +47,8 @@ and unknown-host denial where the experiment DNS suffix is available.
   cloned from its bundle with the original commit and complete reachable history
   verified by `git fsck`. The target has new database/Blob namespaces and a new
   serving process. Original viewer sessions are not restored.
-- Nine input/auth tests and workspace clippy passed. The previous 49 hosted
-  gate/version checks still pass after the native path was added.
+- Nine input/auth tests and workspace clippy passed. The 49 hosted
+  gate/version checks now target Wild-alpha and Wild-beta.
 - Live wildcard `*.sites-poc.lwn.lol` points to the same project with a trusted
   wildcard certificate. Eleven checks prove DNS/TLS before Site creation,
   dynamic publication without Vercel domain entries or another deployment,
@@ -56,8 +56,8 @@ and unknown-host denial where the experiment DNS suffix is available.
   proof redemption, control-host isolation, and revocation through rollback.
   See `evidence/wildcard-live.json`. The local console exposes Wild-alpha/Beta.
 
-Evidence: `evidence/fidelity-{native,git,browser,recovery,latency}.json` and browser
-screenshots. Latency is a small workstation sample, not capacity or cost proof.
+Evidence: `evidence/fidelity-{native,git,browser,recovery}.json` and browser
+screenshots. These checks do not establish capacity or cost.
 
 ## Boundaries still requiring work
 
@@ -68,9 +68,8 @@ screenshots. Latency is a small workstation sample, not capacity or cost proof.
   that boundary requires its own explicit configuration and tests.
 - **Wildcard operations:** real DNS, initial certificate issuance and request
   routing are proven on a Vercel-managed zone. Certificate renewal and delegated
-  external DNS remain untested. The native identity fixture remains at
-  `https://finite-sites-poc-native.vercel.app`; wildcard browser tests use the
-  synthetic email issuer and the same serving authorization gate.
+  external DNS remain untested. The native identity fixture now uses
+  `https://gamma.sites-poc.lwn.lol`; all three demo Sites use the wildcard.
 - **Git authorization:** GitHub owns editor access. The scoped publisher is a
   trusted CI actor that checks Git objects locally; the service does not run a
   Git parser to independently attest the uploaded bundle at publish time.

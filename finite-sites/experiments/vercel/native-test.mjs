@@ -36,7 +36,7 @@ try{
  });
  await check('native viewer reads HTML and assets; cannot cross Site boundary',async()=>{
   for(const path of ['/','/assets/style.css'])assert.equal((await fetch(status.origin+path,{headers:{Cookie:cookie}})).status,200);
-  assert.equal((await fetch('https://finite-sites-poc-one-alpha.vercel.app/',{headers:{Cookie:cookie}})).status,403);
+  assert.equal((await fetch('https://wild-alpha.sites-poc.lwn.lol/',{headers:{Cookie:cookie}})).status,403);
  });
  await check('native nonce replay cannot produce another handoff',async()=>{
   const body=JSON.stringify({purpose:'finite_site_view_session',return_to:'/',client:'finite-dashboard',nonce:randomUUID()});const signed=sign('viewer','POST',status.origin+'/_finite/auth/native-session',body);
@@ -54,7 +54,7 @@ try{
   await call({op:'version.activate',site:f.site,version:status.active_version,expectedVersion:older.id});
  });
  await check('scoped Git publisher cannot grant access or publish Alpha',async()=>{
-  const env=await secrets();for(const body of [{op:'grant.set',site:'gamma',email:'bad@example.invalid',allowed:true},{op:'site.status',site:'alpha'}]){
+  const env=await secrets();for(const body of [{op:'grant.set',site:'gamma',email:'bad@example.invalid',allowed:true},{op:'site.status',site:'wild-alpha'}]){
    const r=await fetch(env.POC_CONTROL_URL,{method:'POST',headers:{Authorization:`Bearer ${f.publisherToken}`,'Content-Type':'application/json'},body:JSON.stringify(body)});assert.equal(r.status,401);
   }
  });

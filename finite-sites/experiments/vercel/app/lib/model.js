@@ -14,17 +14,13 @@ export function fault(status, error) { return Object.assign(new Error(error), { 
 export function requireThat(ok, status, error) { if (!ok) throw fault(status, error); }
 export function siteHost(site, env = process.env) {
   requireThat(validSite(site), 400, 'invalid_site');
-  const aliases = JSON.parse(env.POC_SITE_HOSTS || '{}');
-  return aliases[site] || (env.POC_SITE_BASE_DOMAIN ? `${site}.${env.POC_SITE_BASE_DOMAIN}` : null);
+  return env.POC_SITE_BASE_DOMAIN ? `${site}.${env.POC_SITE_BASE_DOMAIN}` : null;
 }
 export function resolveHost(raw, env = process.env) {
   // Trust only the real request Host. Forwarded/tenant headers are never authority.
   if (typeof raw !== 'string' || !/^[a-zA-Z0-9.-]+$/.test(raw)) return null;
   const host = raw.toLowerCase();
   if (host === env.POC_CONTROL_HOST) return { control: true, host };
-  for (const [site, alias] of Object.entries(JSON.parse(env.POC_SITE_HOSTS || '{}'))) {
-    if (host === alias && validSite(site)) return { site, host };
-  }
   const suffix = env.POC_SITE_BASE_DOMAIN;
   if (suffix && host.endsWith(`.${suffix}`)) {
     const site = host.slice(0, -suffix.length - 1);
