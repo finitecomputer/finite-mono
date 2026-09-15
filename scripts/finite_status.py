@@ -194,6 +194,33 @@ ARTIFACTS_QUERY = """select id, reference, version_label, source_git_sha, finite
        promoted_at, retired_at
   from runtime_artifacts order by created_at desc;"""
 
+# Opt-in launch evidence. Never select the full RuntimeSpec: it contains
+# environment values. Keep pending requests regardless of age and recent
+# terminal requests so an image promotion's creation cohort can be observed.
+LAUNCH_REQUESTS_QUERY = """select request.id, request.project_id, request.status,
+       core_rfc3339(request.created_at) as created_at,
+       core_rfc3339(request.updated_at) as updated_at,
+       request.runner_id, request.target_source_host_id,
+       request.desired_runtime_artifact_id,
+       request.runtime_spec ->> 'schema' as runtime_spec_schema,
+       request.runtime_spec #>> '{spec,runtimeArtifactId}' as spec_artifact_id,
+       request.runtime_spec #>> '{spec,runtimeImageDigest}' as spec_image,
+       request.agent_runtime_id, runtime.source_host_id,
+       runtime.source_machine_id, runtime.runtime_artifact_id as recorded_artifact_id,
+       artifact.reference as recorded_image
+  from agent_creation_requests request
+  left join agent_runtimes runtime on runtime.id = request.agent_runtime_id
+  left join runtime_artifacts artifact on artifact.id = runtime.runtime_artifact_id
+ where request.status in ('requested', 'launching')
+    or request.updated_at >= CURRENT_TIMESTAMP - INTERVAL '24 hours'
+ order by request.created_at, request.id;"""
+LAUNCH_REQUEST_COLUMNS = [
+    "id", "project_id", "status", "created_at", "updated_at", "runner_id",
+    "target_source_host_id", "desired_runtime_artifact_id", "runtime_spec_schema",
+    "spec_artifact_id", "spec_image", "agent_runtime_id", "source_host_id",
+    "source_machine_id", "recorded_artifact_id", "recorded_image",
+]
+
 # This query is deliberately byte-for-byte equivalent to the operator-verified
 # query in the task. Do not replace it with inferred counts from richer joins.
 DISTRIBUTION_QUERY = """select ar.source_host_id, ra.version_label, count(*)
@@ -386,7 +413,9 @@ def postgres_environment() -> dict[str, str]:
     return environment
 
 
-def psql_query_sets(environment: dict[str, str]) -> dict[str, list[dict[str, Any]]]:
+def psql_query_sets(
+    environment: dict[str, str], *, include_launches: bool = False
+) -> dict[str, list[dict[str, Any]]]:
     definitions = [
         (
             "artifacts",
@@ -428,6 +457,10 @@ def psql_query_sets(environment: dict[str, str]) -> dict[str, list[dict[str, Any
             ],
         ),
     ]
+    if include_launches:
+        definitions.insert(
+            -1, ("launch_requests", LAUNCH_REQUESTS_QUERY, LAUNCH_REQUEST_COLUMNS)
+        )
     markers = {
         f"__FINITE_STATUS_{name.upper()}__": (name, columns)
         for name, _, columns in definitions
@@ -456,11 +489,13 @@ def psql_query_sets(environment: dict[str, str]) -> dict[str, list[dict[str, Any
         detail = message[-1] if message else f"exit {result.returncode}"
         raise CollectionError(f"read-only Core query failed: {detail}")
     query_sets = {name: [] for name, _, _ in definitions}
+    seen_sets: set[str] = set()
     active_name: str | None = None
     active_columns: list[str] = []
     for values in csv.reader(io.StringIO(result.stdout)):
         if len(values) == 1 and values[0] in markers:
             active_name, active_columns = markers[values[0]]
+            seen_sets.add(active_name)
             continue
         if not values:
             continue
@@ -469,12 +504,14 @@ def psql_query_sets(environment: dict[str, str]) -> dict[str, list[dict[str, Any
         query_sets[active_name].append(dict(zip(active_columns, values, strict=True)))
     if active_name != "runtimes":
         raise CollectionError("Core query transaction did not reach Runtime details")
+    if include_launches and "launch_requests" not in seen_sets:
+        raise CollectionError("Core query transaction did not include launch evidence")
     return query_sets
 
 
-def collect_core() -> dict[str, Any]:
+def collect_core(*, include_launches: bool = False) -> dict[str, Any]:
     environment = postgres_environment()
-    return psql_query_sets(environment)
+    return psql_query_sets(environment, include_launches=include_launches)
 
 
 def systemd_properties(unit: str) -> dict[str, str]:
@@ -2407,12 +2444,12 @@ def render_human(report: dict[str, Any]) -> str:
     return "\n".join(lines)
 
 
-def collect_live() -> tuple[dict[str, Any], datetime]:
+def collect_live(*, include_launches: bool = False) -> tuple[dict[str, Any], datetime]:
     now = utc_now()
     hostname = socket.gethostname().split(".", 1)[0]
     raw: dict[str, Any] = {"collection_errors": {}}
     try:
-        raw["core"] = collect_core()
+        raw["core"] = collect_core(include_launches=include_launches)
     except CollectionError as error:
         raw["collection_errors"]["core"] = str(error)
     raw["host_health"] = collect_host_health(hostname)
@@ -2433,11 +2470,18 @@ def parse_args(arguments: list[str]) -> argparse.Namespace:
         "--json", action="store_true", help="emit finite.status.v1 JSON"
     )
     parser.add_argument(
+        "--launches", action="store_true",
+        help="include pending and last-24-hour launch evidence (requires --json)",
+    )
+    parser.add_argument(
         "--fixture",
         type=Path,
         help="read an offline recorded fixture instead of host/production evidence",
     )
-    return parser.parse_args(arguments)
+    options = parser.parse_args(arguments)
+    if options.launches and not options.json:
+        parser.error("--launches requires --json")
+    return options
 
 
 def main(arguments: list[str] | None = None) -> None:
@@ -2449,8 +2493,17 @@ def main(arguments: list[str] | None = None) -> None:
             if now is None:
                 raise CollectionError("fixture has no valid 'now' timestamp")
         else:
-            raw, now = collect_live()
+            raw, now = collect_live(include_launches=options.launches)
         report = build_report(raw, now)
+        if options.launches:
+            rows = raw.get("core", {}).get("launch_requests")
+            report["launch_evidence"] = {
+                "status": "observed" if rows is not None else "unknown",
+                "scope": "all pending requests and requests updated in the last 24 hours",
+                "source": "Core records; recorded images are not live container inspection",
+                "requests": rows,
+                "error": raw.get("collection_errors", {}).get("core"),
+            }
     except CollectionError as error:
         report = {
             "schema_version": "finite.status.v1",

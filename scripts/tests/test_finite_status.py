@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import csv
 import hashlib
+import io
 import json
 import os
 from datetime import timedelta
@@ -19,6 +21,57 @@ FIXTURE = ROOT / "scripts" / "tests" / "fixtures" / "finite_status_aug1.json"
 
 
 class FiniteStatusTests(unittest.TestCase):
+    def test_launch_probe_preserves_pending_and_bound_image_evidence(self) -> None:
+        output = io.StringIO()
+        writer = csv.writer(output)
+        writer.writerow(["__FINITE_STATUS_ARTIFACTS__"])
+        writer.writerow(["__FINITE_STATUS_DISTRIBUTION__"])
+        writer.writerow(["__FINITE_STATUS_LAUNCH_REQUESTS__"])
+        for artifact, schema in [("", ""), ("artifact-old", "runtime_spec.v1")]:
+            row = dict.fromkeys(finite_status.LAUNCH_REQUEST_COLUMNS, "")
+            row.update(
+                id="request-" + artifact,
+                status="launching",
+                spec_artifact_id=artifact,
+                runtime_spec_schema=schema,
+            )
+            writer.writerow([row[key] for key in finite_status.LAUNCH_REQUEST_COLUMNS])
+        writer.writerow(["__FINITE_STATUS_RUNTIMES__"])
+        completed = subprocess.CompletedProcess([], 0, output.getvalue(), "")
+        with mock.patch.object(
+            finite_status, "run_read_only", return_value=completed
+        ) as run:
+            result = finite_status.psql_query_sets({}, include_launches=True)
+        self.assertEqual(result["launch_requests"][0]["spec_artifact_id"], "")
+        self.assertEqual(result["launch_requests"][1]["spec_artifact_id"], "artifact-old")
+        sql = run.call_args.kwargs["input_text"]
+        self.assertTrue(sql.startswith("BEGIN TRANSACTION READ ONLY;"))
+        self.assertIn("request.status in ('requested', 'launching')", sql)
+        self.assertIn("INTERVAL '24 hours'", sql)
+        self.assertNotIn("lease_token", sql)
+        self.assertNotIn("failure_message", sql)
+        self.assertNotIn("environment", sql)
+
+    def test_launch_probe_requires_json_and_marks_absent_fixture_unknown(self) -> None:
+        with mock.patch("sys.stderr", io.StringIO()), self.assertRaises(SystemExit):
+            finite_status.parse_args(["--launches"])
+        output = io.StringIO()
+        with mock.patch("sys.stdout", output), self.assertRaises(SystemExit):
+            finite_status.main(["--json", "--launches", "--fixture", str(FIXTURE)])
+        self.assertEqual(
+            json.loads(output.getvalue())["launch_evidence"]["status"], "unknown"
+        )
+
+    def test_launch_probe_does_not_treat_missing_evidence_as_empty_queue(self) -> None:
+        completed = subprocess.CompletedProcess(
+            [], 0, "__FINITE_STATUS_RUNTIMES__\n", ""
+        )
+        with mock.patch.object(
+            finite_status, "run_read_only", return_value=completed
+        ):
+            with self.assertRaises(finite_status.CollectionError):
+                finite_status.psql_query_sets({}, include_launches=True)
+
     def fixture_report(self) -> dict[str, object]:
         raw = finite_status.load_fixture(FIXTURE)
         now = finite_status.parse_time(raw["now"])
