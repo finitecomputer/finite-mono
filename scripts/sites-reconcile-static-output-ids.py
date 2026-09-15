@@ -147,6 +147,8 @@ def run(args):
         require(destination.parent.is_dir(), 'output parent must already exist')
         require(not destination.is_relative_to(source.parent),
                 'output must be outside the input registry directory')
+        require(not destination.is_relative_to(repositories),
+                'output must be outside the source repositories directory')
     with tempfile.TemporaryDirectory(prefix='sites-output-reconciliation-') as temp:
         copy = Path(temp) / 'registry.db'
         shutil.copyfile(source, copy)

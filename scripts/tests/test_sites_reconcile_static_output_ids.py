@@ -2,6 +2,7 @@
 import hashlib
 import json
 from pathlib import Path
+import shutil
 import sqlite3
 import subprocess
 import sys
@@ -28,6 +29,7 @@ class StaticOutputReconciliationTests(unittest.TestCase):
 
     def fixture(self, output_id='mockup', mixed=False, missing=False):
         with sqlite3.connect(self.registry) as db:
+            self.addCleanup(db.close)
             db.executescript('''
                 CREATE TABLE projects (id TEXT PRIMARY KEY, owner_principal_id TEXT);
                 CREATE TABLE sites (
@@ -93,6 +95,29 @@ class StaticOutputReconciliationTests(unittest.TestCase):
         self.assertEqual(after.returncode, 0, after.stderr)
         self.assertEqual(json.loads(after.stdout)['noncanonical_static_outputs'], 0)
         self.assertEqual(self.registry.read_bytes(), before)
+        artifact_copy = self.root / 'artifact-inspection.db'
+        shutil.copyfile(self.destination / 'registry.db', artifact_copy)
+        db = sqlite3.connect(artifact_copy.as_uri() + '?mode=ro', uri=True)
+        try:
+            self.assertEqual(db.execute('SELECT * FROM project_outputs').fetchall(), [
+                ('synthetic-output', 'synthetic-project', 'site', 'site',
+                 'synthetic-site', None, None),
+            ])
+            self.assertEqual(db.execute('SELECT * FROM projects').fetchall(), [
+                ('synthetic-project', 'synthetic-owner'),
+            ])
+            self.assertEqual(db.execute('SELECT * FROM sites').fetchall(), [
+                ('synthetic-site', 'static', 'published', 'synthetic-version',
+                 'synthetic-email-principal', 'synthetic-origin'),
+            ])
+            self.assertEqual(db.execute('SELECT * FROM shares').fetchall(), [
+                ('synthetic-site', 'viewer@example.test'),
+            ])
+            self.assertEqual(db.execute('SELECT * FROM git_ref_events').fetchall(), [
+                (1, 'synthetic-output'),
+            ])
+        finally:
+            db.close()
 
     def test_mixed_static_app_project_is_reported_and_never_converted(self):
         self.fixture(output_id='static', mixed=True)
@@ -106,6 +131,30 @@ class StaticOutputReconciliationTests(unittest.TestCase):
         self.assertFalse(self.destination.exists())
         self.assertEqual(self.registry.read_bytes(), before)
         self.assertNotIn('synthetic-project', refused.stdout + refused.stderr)
+
+    def test_output_inside_separate_repository_tree_is_refused_without_changes(self):
+        self.fixture()
+        separate = self.root / 'repositories'
+        shutil.move(self.repositories, separate)
+        self.repositories = separate
+        repo = self.repositories / 'synthetic-project.git'
+        (repo / 'HEAD').write_bytes(b'ref: refs/heads/main\n')
+        (repo / 'objects').mkdir()
+        (repo / 'objects/synthetic-object').write_bytes(b'synthetic repository bytes\x00')
+        before = {str(p.relative_to(separate)): p.read_bytes() if p.is_file() else None
+                  for p in separate.rglob('*')}
+        registry_before = self.registry.read_bytes()
+        for destination in (separate / 'candidate', repo / 'objects/candidate'):
+            with self.subTest(destination=destination.relative_to(separate)):
+                self.destination = destination
+                refused = self.convert()
+                self.assertFalse(destination.exists())
+                self.assertEqual(
+                    {str(p.relative_to(separate)): p.read_bytes() if p.is_file() else None
+                     for p in separate.rglob('*')}, before)
+                self.assertEqual(self.registry.read_bytes(), registry_before)
+                self.assertEqual(refused.returncode, 1)
+                self.assertIn('outside the source repositories directory', refused.stdout)
 
     def test_missing_unpublished_repository_is_not_fabricated(self):
         self.fixture(output_id='web', missing=True)
@@ -143,6 +192,7 @@ class StaticOutputReconciliationTests(unittest.TestCase):
         self.assertEqual(wrong_hash.returncode, 1)
         self.assertIn('source hash mismatch', wrong_hash.stdout)
         with sqlite3.connect(self.registry) as writer:
+            self.addCleanup(writer.close)
             writer.execute('PRAGMA journal_mode=WAL')
             writer.execute('PRAGMA wal_autocheckpoint=0')
             writer.execute("INSERT INTO shares VALUES ('synthetic-site', 'another@example.test')")
