@@ -1,0 +1,114 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+if [[ $# -gt 1 ]]; then
+  echo "usage: restore-check [BORG_ARCHIVE]" >&2
+  exit 64
+fi
+
+config_root=/etc/finite/commercial-register
+postgres_image='docker.io/library/postgres@sha256:64154d0babcb1741988719e703419af0382b19953706149f9872fbd0f438efa8'
+redis_image='docker.io/library/redis@sha256:7d1e4ce8b9395088377ab382d1f6cfdbd13b3690795198a0399ab8d683064d6d'
+server_image='docker.io/twentycrm/twenty@sha256:a8ab7d34ac102a3c75d4538f917b57ab3f3f853a2afcdf01b4e6fcb7dec2cd6f'
+
+# shellcheck disable=SC1091
+source "${config_root}/borg.env"
+export BORG_REPO BORG_PASSPHRASE BORG_RSH
+
+archive="${1:-$(borg list --short --last 1)}"
+[[ "${archive}" == finite-commercial-register-* ]] || {
+  echo "refusing unexpected Borg archive: ${archive}" >&2
+  exit 65
+}
+
+scratch="$(mktemp -d /var/tmp/finite-commercial-register-restore.XXXXXX)"
+suffix="${RANDOM}"
+db_container="finite-commercial-register-restore-db-${suffix}"
+redis_container="finite-commercial-register-restore-redis-${suffix}"
+server_container="finite-commercial-register-restore-server-${suffix}"
+network="finite-commercial-register-restore-${suffix}"
+volume="${db_container}-data"
+cleanup() {
+  /usr/bin/docker rm --force \
+    "${server_container}" "${redis_container}" "${db_container}" >/dev/null 2>&1 || true
+  /usr/bin/docker network rm "${network}" >/dev/null 2>&1 || true
+  /usr/bin/docker volume rm "${volume}" >/dev/null 2>&1 || true
+  chmod -R u+w -- "${scratch}" 2>/dev/null || true
+  rm -rf -- "${scratch}"
+}
+trap cleanup EXIT
+
+(
+  cd "${scratch}"
+  borg extract "::${archive}"
+)
+format_file="$(find "${scratch}" -type f -name format -print -quit)"
+test -n "${format_file}"
+snapshot="$(dirname "${format_file}")"
+test "$(cat "${snapshot}/format")" = finite.commercial-register-recovery.v1
+(
+  cd "${snapshot}"
+  sha256sum --check manifest.sha256 >/dev/null
+  tar --list --gzip --file storage.tar.gz >/dev/null
+)
+
+# shellcheck disable=SC1090
+source "${snapshot}/postgres.env"
+mkdir "${scratch}/recovered"
+tar --extract --gzip --file "${snapshot}/storage.tar.gz" \
+  --directory "${scratch}/recovered"
+
+/usr/bin/docker volume create "${volume}" >/dev/null
+/usr/bin/docker network create "${network}" >/dev/null
+/usr/bin/docker run --detach --name "${db_container}" \
+  --network "${network}" --network-alias db \
+  --env-file "${snapshot}/postgres.env" \
+  --volume "${volume}:/var/lib/postgresql/data" \
+  "${postgres_image}" >/dev/null
+ready=0
+for _ in {1..60}; do
+  if /usr/bin/docker exec "${db_container}" \
+    pg_isready --username "${POSTGRES_USER}" --dbname "${POSTGRES_DB}" >/dev/null 2>&1; then
+    ready=1
+    break
+  fi
+  sleep 1
+done
+test "${ready}" -eq 1
+/usr/bin/docker exec -i "${db_container}" pg_restore \
+  --username "${POSTGRES_USER}" --dbname "${POSTGRES_DB}" --no-owner --no-privileges \
+  < "${snapshot}/twenty.dump"
+table_count="$(/usr/bin/docker exec "${db_container}" psql --username "${POSTGRES_USER}" \
+  --dbname "${POSTGRES_DB}" --tuples-only --no-align \
+  --command "select count(*) from information_schema.tables where table_schema not in ('pg_catalog', 'information_schema');")"
+if [[ ! "${table_count}" =~ ^[1-9][0-9]*$ ]]; then
+  echo "empty-target restore contained no application tables" >&2
+  exit 1
+fi
+/usr/bin/docker run --detach --name "${redis_container}" \
+  --network "${network}" --network-alias redis \
+  "${redis_image}" redis-server --maxmemory-policy noeviction >/dev/null
+/usr/bin/docker run --detach --name "${server_container}" \
+  --network "${network}" \
+  --env-file "${snapshot}/twenty.env" \
+  --env DISABLE_DB_MIGRATIONS=true \
+  --env DISABLE_CRON_JOBS_REGISTRATION=true \
+  --env LOGIC_FUNCTION_TYPE=DISABLED \
+  --env CODE_INTERPRETER_TYPE=DISABLED \
+  --volume "${scratch}/recovered/storage:/app/packages/twenty-server/.local-storage" \
+  "${server_image}" >/dev/null
+healthy=0
+for _ in {1..120}; do
+  if /usr/bin/docker exec "${server_container}" \
+    curl --fail --silent --max-time 5 http://127.0.0.1:3000/healthz >/dev/null 2>&1; then
+    healthy=1
+    break
+  fi
+  sleep 1
+done
+if [[ "${healthy}" -ne 1 ]]; then
+  echo "restored Twenty application did not become healthy" >&2
+  exit 1
+fi
+printf 'commercial-register empty-target restore OK archive=%s tables=%s\n' \
+  "${archive}" "${table_count}"

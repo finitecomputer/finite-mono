@@ -16,6 +16,8 @@
   runtimes, and dashboard orchestration
 - [Finite Deployment](./infra/CONTEXT.md) — production delivery, artifact
   promotion, and rollout language
+- [Commercial Relationships](./docs/commercial-relationships/CONTEXT.md) —
+  internal organizations, arrangements, offerings, contributions, and wants
 
 ## Relationships
 
@@ -28,6 +30,11 @@
   through its public CLI interface.
 - **Finite Computer → Finite Identity / FiniteBrain**: supplies authenticated
   account-agent associations and navigation context, never Brain authority.
+- **Commercial Relationships → Twenty / FiniteBrain / Finite Computer**: Twenty
+  owns curated structured commercial records and manual subledger facts;
+  FiniteBrain owns meeting, Wants, relationship, research, and proposal
+  context; Finite Computer remains authoritative for product access, Projects,
+  Hosting Tiers, and runtime state.
 - **Finite Deployment → all product contexts**: records how product-owned
   artifacts become production state without taking ownership of product
   protocols, data, or runtime lifecycle authority.

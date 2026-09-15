@@ -1,0 +1,29 @@
+{
+  "name": "@finite/commercial-register",
+  "version": "0.1.0",
+  "private": true,
+  "license": "MIT",
+  "engines": {
+    "node": "^24.5.0",
+    "twenty": ">=2.35.0 <2.36.0",
+    "yarn": ">=4.0.2"
+  },
+  "packageManager": "yarn@4.13.0",
+  "bin": {
+    "finite-commercial-register": "dist/agent/cli.js"
+  },
+  "scripts": {
+    "agent": "yarn build:agent && node dist/agent/cli.js",
+    "app:build": "twenty dev:build",
+    "build:agent": "tsc --project tsconfig.agent.json",
+    "test": "yarn test:app && yarn test:agent",
+    "test:agent": "yarn build:agent && node --test tests/agent-interface.test.mjs",
+    "test:app": "twenty dev:build && node --test tests/app-manifest.test.mjs",
+    "typecheck": "tsc --noEmit"
+  },
+  "devDependencies": {
+    "@types/node": "24.10.0",
+    "twenty-sdk": "2.35.0",
+    "typescript": "5.9.3"
+  }
+}

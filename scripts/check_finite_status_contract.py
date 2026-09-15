@@ -52,6 +52,42 @@ def main() -> None:
         contract["hosts"]["finite-lat-1"]["disks"],
     )
 
+    monitoring = contract["monitoring_host"]
+    monitoring_units = {
+        path.name
+        for path in (ROOT / "infra" / "monitoring" / "ubuntu" / "systemd").iterdir()
+    }
+    missing_monitoring_units = set(monitoring["services"]) - monitoring_units
+    if missing_monitoring_units:
+        raise SystemExit(
+            f"finite-status monitoring units are not repo-owned: {sorted(missing_monitoring_units)}"
+        )
+    commercial = monitoring["commercial_register"]
+    commercial_units = {
+        path.name
+        for path in (ROOT / "infra" / "commercial-register" / "ubuntu" / "systemd").iterdir()
+    }
+    expected_commercial_units = set(commercial["services"]) | set(
+        commercial["oneshot_services"]
+    )
+    if not expected_commercial_units <= commercial_units:
+        raise SystemExit(
+            "finite-status commercial-register units are not repo-owned: "
+            f"{sorted(expected_commercial_units - commercial_units)}"
+        )
+    require_all(
+        ROOT / "infra" / "commercial-register" / "ubuntu" / "compose.yaml",
+        list(commercial["containers"].values()),
+    )
+    require_all(
+        ROOT / "infra" / "commercial-register" / "ubuntu" / "scripts" / "backup",
+        [
+            commercial["snapshot_root"],
+            commercial["snapshot_format"],
+            commercial["borg_success_stamp"],
+        ],
+    )
+
     recovery = contract["recovery"]
     require_all(
         ROOT / "infra" / "nixos" / "modules" / "backups.nix",

@@ -3,6 +3,7 @@ set shell := ["scripts/dev-shell", "-cu"]
 # Domain command modules.
 mod brain 'finite-brain/justfile'
 mod chat 'finitechat/justfile'
+mod commercial 'commercial-register/justfile'
 mod computer 'finitecomputer-v2/justfile'
 mod dashboard 'finitecomputer-v2/apps/dashboard/justfile'
 mod dev 'devfinity/justfile'

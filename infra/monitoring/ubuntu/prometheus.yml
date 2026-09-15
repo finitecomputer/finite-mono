@@ -47,6 +47,17 @@ scrape_configs:
     relabel_configs: *blackbox_relabel
     metric_relabel_configs: *probe_metrics
 
+  - job_name: business.finite.computer
+    metrics_path: /probe
+    params:
+      module: [http_200]
+    static_configs:
+      - targets: [https://business.finite.computer/healthz]
+        labels:
+          probe: finite-monitoring
+    relabel_configs: *blackbox_relabel
+    metric_relabel_configs: *probe_metrics
+
   - job_name: finitechat-native-mockup.finite.chat
     metrics_path: /probe
     params:
