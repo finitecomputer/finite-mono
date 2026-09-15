@@ -4,9 +4,9 @@
 //! `root/ab/cd/abcd…` to keep directories small. Writes go through a temp
 //! file + rename so a crash never leaves a partial blob at a final path.
 //!
-//! This is the storage seam: a Garage/S3 implementation replaces this crate
-//! behind the same four operations when the platform moves to object storage
-//! (see docs/adr/0007-content-addressed-blob-store.md).
+//! The serving store lives on the Sites data volume and is included in the
+//! stopped-Sites snapshot archived by Borg. See
+//! docs/adr/0007-content-addressed-blobs-with-global-dedup.md.
 
 use std::fs;
 use std::io::Write as _;
