@@ -10,9 +10,16 @@ No existing Project, Runtime, or Chat identity is moved.
 
 The target must be drained, empty, and capped at one Runtime before binding.
 Run `scripts/finite-status` on the app host and target before and after the test.
+Capture those timestamped receipts before binding. Core rejects hosts with any
+recorded Runtime and competing code reservations, but it cannot atomically
+observe the host-local drain/ceiling. Those two checks are an explicit manual
+preflight limitation; do not run the command against an unverified host.
 The app-host JSON includes pending/launching requests under
 `sections.fleet_convergence.agent_creation_requests`; inspect the exact canary
-request and actual Runtime host, not queue order. Keep source Telegram bots alive.
+request and actual Runtime host, not queue order. The same JSON exposes all
+bindings under `canary_host_reservations`, including unused/expired/revoked
+codes, their batch ids and issuers. A database before migration 0026 reports an
+empty reservation list. Keep source Telegram bots alive.
 
 Issue a one-code Standard batch in the signed-in admin dashboard. Save its
 one-time plaintext privately; do not put it in command arguments, logs, or git.
@@ -28,14 +35,14 @@ finite-saas-core launch-code-target-exact \
 ```
 
 The command requires a matching unrevoked host-bound Kata credential, exact
-unused/unexpired/unrevoked code and batch, and the code issuer's existing
+unused/unexpired/unrevoked code and one-code batch, and the code issuer's existing
 email/WorkOS binding. Local access to Core's database credentials is the
 operator capability; this CLI does not authenticate an interactive WorkOS
 session. The command never creates or relinks an operator identity. A repeated
 binding to the same host succeeds while the code is unused; retargeting and
 post-redemption binding fail. A durable audit event records the first binding.
 
-A host named by any binding accepts **only explicitly targeted creation**.
+The database permits only one bound code per canary host. A host named by a binding accepts **only explicitly targeted creation**.
 The restriction survives redemption, revocation and expiry; it is not a timer
 or an inference from available capacity. It does not drain existing-runtime
 lifecycle operations. Broader capacity release is a separate reviewed change;

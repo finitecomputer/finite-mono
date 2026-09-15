@@ -6,5 +6,5 @@ CREATE TABLE IF NOT EXISTS launch_code_host_targets (
     created_by_workos_user_id TEXT NOT NULL,
     created_at TIMESTAMPTZ NOT NULL
 );
-CREATE INDEX IF NOT EXISTS launch_code_host_targets_host_idx
+CREATE UNIQUE INDEX IF NOT EXISTS launch_code_host_targets_host_idx
     ON launch_code_host_targets(source_host_id);

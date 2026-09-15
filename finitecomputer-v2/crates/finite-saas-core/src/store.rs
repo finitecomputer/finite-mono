@@ -290,6 +290,7 @@ impl CoreStore {
              WHERE code.id = $1 AND code.batch_id = $2
                AND batch.created_by_workos_user_id = $3
                AND COALESCE(batch.hosting_tier, 'standard') = 'standard'
+               AND batch.code_count = 1
                AND batch.revoked_at IS NULL AND batch.expires_at > CURRENT_TIMESTAMP
                AND code.redeemed_customer_org_id IS NULL
                AND code.redemption_idempotency_key IS NULL AND code.redeemed_at IS NULL
@@ -313,6 +314,19 @@ impl CoreStore {
                 return Err(CoreError::RuntimeSpecMismatch);
             }
         } else {
+            // This command admits an empty qualification host only. A unique
+            // host index serializes competing reservations for different codes.
+            let occupied: bool = tx
+                .query_one(
+                    "SELECT EXISTS (SELECT 1 FROM agent_runtimes WHERE source_host_id = $1)",
+                    &[&host],
+                )
+                .await
+                .map_err(store_error)?
+                .get(0);
+            if occupied {
+                return Err(CoreError::RuntimeSpecMismatch);
+            }
             tx.execute(
                 "INSERT INTO launch_code_host_targets
                  (launch_code_id, source_host_id, created_by_workos_user_id, created_at)
@@ -15514,7 +15528,7 @@ mod tests {
             let issued = store
                 .issue_launch_code_batch(IssueLaunchCodeBatchInput {
                     name: "targeted canary".into(),
-                    code_count: 2,
+                    code_count: 1,
                     expires_in_hours: Some(1),
                     hosting_tier: Some(HostingTier::Standard),
                     created_by_workos_user_id: "operator".into(),
@@ -15580,6 +15594,22 @@ mod tests {
                     .await
                     .is_err()
             );
+            // A different code cannot compete for the same one-slot host.
+            let competing = store.issue_launch_code_batch(IssueLaunchCodeBatchInput {
+                name: "competing".into(), code_count: 1, expires_in_hours: Some(1),
+                hosting_tier: Some(HostingTier::Standard), created_by_workos_user_id: "operator".into(), now: None,
+            }).await.unwrap();
+            assert!(store.target_launch_code_exact(&competing.codes[0].id, &competing.batch.id, "target-host", "operator@finite.vip", "operator").await.is_err());
+            let multiple = store.issue_launch_code_batch(IssueLaunchCodeBatchInput {
+                name: "multiple".into(), code_count: 2, expires_in_hours: Some(1),
+                hosting_tier: Some(HostingTier::Standard), created_by_workos_user_id: "operator".into(), now: None,
+            }).await.unwrap();
+            assert!(store.target_launch_code_exact(&multiple.codes[0].id, &multiple.batch.id, "other-host", "operator@finite.vip", "operator").await.is_err());
+            let client = store.connection().await.unwrap();
+            let count: i64 = client.query_one("SELECT count(*) FROM launch_code_host_targets", &[]).await.unwrap().get(0);
+            let audits: i64 = client.query_one("SELECT count(*) FROM finite_private_admin_audit_events WHERE action='launch_code.target_host'", &[]).await.unwrap().get(0);
+            assert_eq!((count, audits), (1, 1));
+            drop(client);
             let input = |suffix: &str, launch_code: &str| RequestAgentCreationInput {
                 verified_email: format!("{suffix}@finite.vip"),
                 workos_user_id: suffix.into(),
@@ -15589,8 +15619,9 @@ mod tests {
                 now: None,
             };
             // The older ordinary request must not be picked by the reserved host.
+            let ordinary_code = issue_test_launch_code(&store, "2026-05-25T12:00:00Z").await;
             let ordinary = store
-                .request_agent_creation(input("ordinary", &issued.codes[1].code))
+                .request_agent_creation(input("ordinary", &ordinary_code))
                 .await
                 .unwrap();
             let targeted = store
@@ -15641,6 +15672,28 @@ mod tests {
                 lease_seconds: Some(300),
                 now: None,
             };
+            // Wrong/missing host cannot claim the still-pending target. The
+            // old ordinary request remains available to an ordinary runner.
+            let normal_lease = store
+                .lease_agent_creation_request(lease(Some("ordinary-host")))
+                .await
+                .unwrap()
+                .unwrap();
+            assert_eq!(normal_lease.request.id, ordinary.request.id);
+            assert!(
+                store
+                    .lease_agent_creation_request(lease(Some("ordinary-host")))
+                    .await
+                    .unwrap()
+                    .is_none()
+            );
+            assert!(
+                store
+                    .lease_agent_creation_request(lease(None))
+                    .await
+                    .unwrap()
+                    .is_none()
+            );
             // Existing, unmodified Runner request shape: no new wire fields required.
             let canary_lease = store
                 .lease_agent_creation_request(lease(Some("target-host")))
@@ -15655,15 +15708,15 @@ mod tests {
                     .unwrap()
                     .is_none()
             );
-            let normal_lease = store
-                .lease_agent_creation_request(lease(Some("ordinary-host")))
+            // A newly queued ordinary request still cannot enter the reserved host.
+            let another_code = issue_test_launch_code(&store, "2026-05-25T12:00:00Z").await;
+            store
+                .request_agent_creation(input("ordinary-later", &another_code))
                 .await
-                .unwrap()
                 .unwrap();
-            assert_eq!(normal_lease.request.id, ordinary.request.id);
             assert!(
                 store
-                    .lease_agent_creation_request(lease(None))
+                    .lease_agent_creation_request(lease(Some("target-host")))
                     .await
                     .unwrap()
                     .is_none()
@@ -15674,30 +15727,66 @@ mod tests {
 
     #[tokio::test]
     async fn postgres_target_binding_serializes_with_redemption() {
-        with_isolated_postgres(|store| async move {
-            store.link_verified_user(LinkVerifiedUserInput { verified_email: "race@finite.vip".into(), workos_user_id: "race".into(), now: None }).await.unwrap();
-            let issued = store.issue_launch_code_batch(IssueLaunchCodeBatchInput {
-                name: "race".into(), code_count: 1, expires_in_hours: Some(1), hosting_tier: Some(HostingTier::Standard), created_by_workos_user_id: "race".into(), now: None,
-            }).await.unwrap();
-            let code = &issued.codes[0];
-            let mut client = store.connection().await.unwrap();
-            let tx = client.transaction().await.unwrap();
-            tx.query_one("SELECT id FROM launch_codes WHERE id=$1 FOR UPDATE", &[&code.id]).await.unwrap();
-            // Block the production redemption writer on the same code row.
-            let other = store.clone();
-            let plaintext = code.code.clone();
-            let create = tokio::spawn(async move {
-                other.request_agent_creation(RequestAgentCreationInput {
-                    verified_email:"race-user@finite.vip".into(), workos_user_id:"race-user".into(), display_name:"race agent".into(), launch_code:plaintext, idempotency_key:"race".into(), now:None,
-                }).await
-            });
-            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
-            tx.execute("INSERT INTO launch_code_host_targets VALUES ($1,'race-host','race',CURRENT_TIMESTAMP)", &[&code.id]).await.unwrap();
-            tx.commit().await.unwrap();
-            let created = create.await.unwrap().unwrap();
-            assert_eq!(created.request.target_source_host_id.as_deref(),Some("race-host"));
-            assert!(store.target_launch_code_exact(&code.id,&issued.batch.id,"other-host","race@finite.vip","race").await.is_err());
-        }).await;
+        for binding_first in [true, false] {
+            with_isolated_postgres(|store| async move {
+                store.link_verified_user(LinkVerifiedUserInput {
+                    verified_email: "race@finite.vip".into(), workos_user_id: "race".into(), now: None,
+                }).await.unwrap();
+                let issued = store.issue_launch_code_batch(IssueLaunchCodeBatchInput {
+                    name: "race".into(), code_count: 1, expires_in_hours: Some(1),
+                    hosting_tier: Some(HostingTier::Standard), created_by_workos_user_id: "race".into(), now: None,
+                }).await.unwrap();
+                let mut client = store.connection().await.unwrap();
+                let tx = client.transaction().await.unwrap();
+                tx.query_one("SELECT id FROM launch_codes WHERE id=$1 FOR UPDATE", &[&issued.codes[0].id]).await.unwrap();
+                let bind_store = store.clone();
+                let code_id = issued.codes[0].id.clone();
+                let batch_id = issued.batch.id.clone();
+                let bind = async move { bind_store.target_launch_code_exact(&code_id, &batch_id, "race-host", "race@finite.vip", "race").await };
+                let create_store = store.clone();
+                let plaintext = issued.codes[0].code.clone();
+                let create = async move { create_store.request_agent_creation(RequestAgentCreationInput {
+                    verified_email: "race-user@finite.vip".into(), workos_user_id: "race-user".into(),
+                    display_name: "race agent".into(), launch_code: plaintext, idempotency_key: "race".into(), now: None,
+                }).await };
+                let (binding, creation) = if binding_first {
+                    let binding = tokio::spawn(bind);
+                    wait_for_targeting_lock(&tx, "%WHERE code.id = $1 AND code.batch_id = $2%").await;
+                    let creation = tokio::spawn(create);
+                    wait_for_targeting_lock(&tx, "%WHERE code.code_hash = $1%").await;
+                    (binding, creation)
+                } else {
+                    let creation = tokio::spawn(create);
+                    wait_for_targeting_lock(&tx, "%WHERE code.code_hash = $1%").await;
+                    let binding = tokio::spawn(bind);
+                    wait_for_targeting_lock(&tx, "%WHERE code.id = $1 AND code.batch_id = $2%").await;
+                    (binding, creation)
+                };
+                tx.commit().await.unwrap();
+                let bound = binding.await.unwrap();
+                let created = creation.await.unwrap().unwrap();
+                assert_eq!(bound.is_ok(), binding_first);
+                assert_eq!(created.request.target_source_host_id.as_deref(), binding_first.then_some("race-host"));
+                let count: i64 = client.query_one("SELECT count(*) FROM launch_code_host_targets", &[]).await.unwrap().get(0);
+                let audits: i64 = client.query_one("SELECT count(*) FROM finite_private_admin_audit_events WHERE action='launch_code.target_host'", &[]).await.unwrap().get(0);
+                assert_eq!(count, i64::from(binding_first));
+                assert_eq!(audits, count);
+            }).await;
+        }
+    }
+
+    async fn wait_for_targeting_lock(tx: &Transaction<'_>, pattern: &str) {
+        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            loop {
+                tx.query_one("SELECT pg_stat_clear_snapshot()", &[]).await.unwrap();
+                let waiting: bool = tx.query_one(
+                    "SELECT EXISTS (SELECT 1 FROM pg_stat_activity WHERE datname=current_database() AND pid<>pg_backend_pid() AND wait_event_type='Lock' AND query LIKE $1)",
+                    &[&pattern],
+                ).await.unwrap().get(0);
+                if waiting { break; }
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            }
+        }).await.expect("production writer must be waiting on code lock");
     }
 
     #[tokio::test]
