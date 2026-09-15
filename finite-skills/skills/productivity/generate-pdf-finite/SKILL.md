@@ -50,19 +50,24 @@ playwright pdf file:///abs/path/input.html output.pdf
 - Note the `file://` URL — a bare path is treated as a URL and fails.
 - Options: `--paper-format A4`, `--wait-for-selector`, `--wait-for-timeout`.
 
-### Route 3 — Python `playwright` in the runtime python3
+### Calling from Python
 
-```bash
-uv pip install --system playwright   # browsers are already staged; nothing to download
-python3 html2pdf.py                  # from playwright.sync_api import sync_playwright ...
+Use the bundled CLI from Python so the Playwright client and staged Chromium
+stay on the same image pin. This needs only the Python standard library:
+
+```python
+from pathlib import Path
+import subprocess
+
+subprocess.run(
+    ["playwright", "pdf", Path("input.html").resolve().as_uri(), "output.pdf"],
+    check=True,
+)
 ```
 
-- The runtime `python3` already loads the Nix libstdc++ the greenlet wheel
-  needs. **Never set `LD_LIBRARY_PATH` by hand** — pointing it at system or
-  arbitrary `/nix/store` paths crashes the interpreter (workarounds log
-  2026-09-12). The env var comes with the interpreter; just import and go.
-- `PLAYWRIGHT_BROWSERS_PATH` and `PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD=1` are
-  preset, so no `playwright install` is needed or useful.
+The image configures `PLAYWRIGHT_BROWSERS_PATH` for its bundled CLI. Use that
+CLI for HTML conversion; a separately installed Python Playwright package may
+require a different browser revision.
 
 ### Do NOT
 

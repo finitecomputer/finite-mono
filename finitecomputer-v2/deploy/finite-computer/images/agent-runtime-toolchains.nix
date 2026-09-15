@@ -14,7 +14,6 @@
   writeShellScriptBin,
   makeFontsConf,
   python3,
-  gcc,
   dejavu_fonts,
   liberation_ttf,
   bun,
@@ -47,18 +46,6 @@ let
     export FONTCONFIG_FILE="${weasyprintFontsConf}"
     exec "${weasyprintEnv}/bin/weasyprint" "$@"
   '';
-
-  # The Hermes venv interpreter is the image's python3, but binary wheels
-  # pip-installed into it expect a FHS libstdc++ the Nix build never put on
-  # its loader path (workarounds log 2026-09-12: `import playwright.sync_api`
-  # dies on greenlet's missing libstdc++.so.6; hand-pointing LD_LIBRARY_PATH
-  # at system or foreign store paths segfaults). Expose python3 as a shim
-  # that prepends the pin's own gcc runtime — same glibc family as every
-  # other ELF staged here, and baked per image build, never by hand.
-  hermesPython = writeShellScriptBin "python3" ''
-    export LD_LIBRARY_PATH="${gcc.cc.lib}/lib''${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
-    exec "${hermesAgent.hermesVenv}/bin/python3" "$@"
-  '';
 in
 symlinkJoin {
   name = "agent-runtime-toolchains";
@@ -70,7 +57,6 @@ symlinkJoin {
     playwright-test
     browsers
     weasyprintCli
-    hermesPython
     simplexChat
     fsiteCliV1
   ];
@@ -88,7 +74,6 @@ symlinkJoin {
       "uvx"
       "playwright"
       "weasyprint"
-      "python3"
       "simplex-chat"
       "fsite"
     ];
@@ -106,9 +91,9 @@ symlinkJoin {
     description = "Finite Agent Runtime baseline toolchains";
     longDescription = ''
       node/npm/npx (Hermes Node 26), bun, deno, uv, the Playwright CLI plus
-      browser blobs, the WeasyPrint HTML→PDF CLI, and the Hermes venv
-      python3 behind a libstdc++-loading shim. Exposed on the container PATH
-      so agents do not re-download toolchains into ephemeral writable layers.
+      browser blobs, and the WeasyPrint HTML→PDF CLI. Exposed on the
+      container PATH so agents do not re-download toolchains into ephemeral
+      writable layers.
     '';
     license = with lib.licenses; [
       mit

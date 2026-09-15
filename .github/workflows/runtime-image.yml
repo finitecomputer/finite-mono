@@ -86,7 +86,7 @@ jobs:
             test -n "$HERMES_AGENT_PYTHON_PATH"
             test "$(python3 -c '\''import importlib.metadata; print(importlib.metadata.version("hermes-agent"))'\'')" = "$HERMES_AGENT_VERSION"
             test "$(command -v hermes)" = "$HERMES_AGENT_STORE_PATH/bin/hermes"
-            test "$(command -v python3)" = "$AGENT_RUNTIME_TOOLCHAIN_PATH/bin/python3"
+            test "$(command -v python3)" = "$HERMES_AGENT_PYTHON_PATH/bin/python3"
             test -n "$AGENT_RUNTIME_TOOLCHAIN_PATH"
             test -n "$PLAYWRIGHT_BROWSERS_PATH"
             test -n "$AGENT_RUNTIME_TOOLCHAIN_BINS"
@@ -101,6 +101,8 @@ jobs:
             head -c 4 /tmp/probe-weasyprint.pdf | grep -q "%PDF"
             playwright pdf file:///tmp/probe.html /tmp/probe-playwright.pdf
             head -c 4 /tmp/probe-playwright.pdf | grep -q "%PDF"
+            python3 -c '\''from pathlib import Path; import subprocess; subprocess.run(["playwright", "pdf", Path("/tmp/probe.html").resolve().as_uri(), "/tmp/probe-python.pdf"], check=True)'\''
+            head -c 4 /tmp/probe-python.pdf | grep -q "%PDF"
             /runtime/bin/finitechat --help >/dev/null
             /runtime/bin/finite-agentd --help >/dev/null
             /runtime/bin/fsite describe workflow publish-static-site --output json >/dev/null
