@@ -142,3 +142,28 @@ pub const MAX_PROJECT_OUTPUT_PATH_BYTES: u32 = 256;
 
 /// Account-session handoffs are single-use and never emailed.
 pub const VIEWER_HANDOFF_TTL_SECONDS: u64 = 60;
+
+/// Bound local recovery work and manifest allocations; oversized estates need
+/// an explicitly reviewed increase rather than an unbounded serving-host job.
+pub const MAX_BACKUP_OBJECTS: u32 = 100_000;
+pub const MAX_BACKUP_OBJECT_BYTES: u64 = 1024 * 1024 * 1024;
+pub const MAX_BACKUP_MANIFEST_BYTES: u64 = 64 * 1024 * 1024;
+pub const MAX_BACKUP_CAPTURE_SECONDS: u64 = 60;
+
+/// Bound restore sync work independently of manifest counts: unpacked Git
+/// objects, refs, and directories can expand beyond the archive entry count.
+pub const MAX_BACKUP_RESTORE_TREE_ENTRIES: u32 = 1_000_000;
+/// Bound traversal paths and stack depth even for deeply nested Git refs.
+pub const MAX_BACKUP_RESTORE_TREE_DEPTH: u32 = 128;
+/// Empty-template bare metadata plus one fetched pack/index and bookkeeping;
+/// refs are counted separately and fetch is configured never to unpack loose objects.
+pub const BACKUP_GIT_FIXED_TREE_ENTRIES: u32 = 64;
+
+/// Each Git child has a wall-clock deadline, including descendants holding pipes open.
+pub const MAX_BACKUP_GIT_SECONDS: u64 = 60;
+/// Git diagnostics must not consume memory or run forever on a damaged repository.
+pub const MAX_BACKUP_GIT_STDERR_BYTES: u64 = 1024 * 1024;
+/// One read per pipe per iteration keeps timeout checks and stderr draining fair.
+pub const BACKUP_PROCESS_BUFFER_BYTES: u32 = 64 * 1024;
+/// Avoid spinning while retaining responsive cancellation of idle children.
+pub const BACKUP_PROCESS_POLL_MILLIS: u64 = 5;

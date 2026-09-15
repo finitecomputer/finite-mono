@@ -46,9 +46,10 @@ select the dev mailer with `--mailer dev`; omitting the flag is an error.
 - **Source**: local v1; no object storage running.
 - **Risk**: single-disk durability for all site content and the registry.
 - **Proof**: `crates/finitesites-blob/src/lib.rs` writes under `--data`.
-- **Delete condition**: Garage/S3 `BlobStore` implementation and a
-  Litestream replication unit for `registry.db` in the production deploy
-  definition.
+- **Delete condition**: ADR 0029's S3 revision backups and shared-state
+  checkpoints are deployed and the complete Recovery Set has restored onto an
+  empty target. The local operator commands in `docs/backups.md` do not close
+  this debt or provide independent durability.
 
 ## 5. Global blob dedup leaks hash existence
 
@@ -139,3 +140,17 @@ acknowledgement.
   legacy previews and Hosted Chat requester consumers are retired. Until then,
   paired exchange tests must prove requests and failures stay on their backend.
 - **Decision**: ADR 0029. Production cutover remains separately authorized.
+
+## 12. Local backup Git checkpoint eligibility is conservative
+
+- **Source**: `git_ref_events` deduplicates old/new transitions and records
+  them after Git updates refs. It is not an authoritative per-ref cursor.
+- **Risk**: optimistic comparison alone can miss an already-stalled hook;
+  refusing ambiguous histories can prevent a checkpoint for a valid project.
+- **Proof**: `backup::capture` requires a unique acyclic recorded transition
+  chain per ref and checks its terminal state against Git. Regression tests
+  reject an unrecorded tip and restore manifests omitting historical objects.
+- **Delete condition**: writer-coordinated durable ref state plus restart and
+  concurrent-push recovery tests replace this conservative eligibility check
+  before the backup scheduler is enabled in production. Do not mutate user
+  history to satisfy the local command.
