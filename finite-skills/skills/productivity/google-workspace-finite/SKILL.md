@@ -306,7 +306,9 @@ CLI state survive restarts and Runtime upgrades.
 gws auth status
 ```
 
-If `token_valid: true` and a `user` field is present, you're good to go. Use it directly:
+Confirm access with a read for the requested task. `auth status` can validate
+config-directory credentials while an API command selects a different source;
+status alone does not prove that the request will authenticate.
 
 ```bash
 gws gmail users messages list --params '{"userId": "me", "maxResults": 10, "labelIds": "INBOX"}'
@@ -315,12 +317,21 @@ gws gmail users messages get --params '{"userId": "me", "id": "MESSAGE_ID", "for
 
 ### gws authentication mismatch
 
-Do not run a second `gws auth login` flow or copy credentials into
-`/root/.config/gws`. Run `$GSETUP --check` first; it refreshes and normalizes
-the platform-managed token in durable Hermes state. If that succeeds but a
-`gws` API command still reports an authentication-format error, report a
-Runtime image/skill packaging bug and use the bundled Python helper for the
-current task.
+Check `GOOGLE_WORKSPACE_CLI_CONFIG_DIR` and
+`GOOGLE_WORKSPACE_CLI_CREDENTIALS_FILE` in the process that actually runs
+`gws`. A login shell and an `execute_code` process can have different
+environments. If these paths are missing, pass the existing platform paths
+to the `gws` child process: the platform Hermes home's `gws` directory and
+`google_token.json` respectively. Use the platform home, not a temporary test
+home. Inspect path presence only; keep credential contents out of logs.
+
+Run `$GSETUP --check` to refresh and normalize the existing platform token,
+then retry the task's read once. Keep credentials in durable Hermes state;
+do not start another login flow or copy them into `/root/.config/gws`.
+If the read still fails, report the execution environment and redacted error.
+The bundled Python helper can perform its supported operations, including
+Docs reads; it is not a Docs-write fallback. Stop blocked Docs writes rather
+than inventing a separate authentication path.
 
 ## Revoking Access
 
