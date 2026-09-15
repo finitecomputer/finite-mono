@@ -4,6 +4,10 @@ set shell := ["../../../scripts/dev-shell", "-cu"]
 default:
     just --list
 
+# FIN-89: local Brain overview with sample memberships; no real Brain requests.
+brain-prototype:
+    pnpm install --frozen-lockfile && pnpm run prototype:brain
+
 # Web-only contributor gate: dashboard unit tests, lint, project-wide typecheck,
 # and production build.
 web-check:
