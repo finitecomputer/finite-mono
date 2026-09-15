@@ -1,10 +1,11 @@
 # Sites backup implementation status
 
-The selected design is [revision backups with shared-state checkpoints](adr/0030-revision-backups-with-shared-state-checkpoints.md).
-The selected transport is [Borg over SSH to rsync.net](adr/0031-borg-on-existing-rsync-net.md),
-replacing S3. The [operator procedure](../../infra/runbooks/sites-borg-recovery.md)
-reuses native Borg commands and existing credential custody; it does not copy
-live SQLite or Git state with rsync.
+The selected design adapts the existing legacy Sites snapshot-and-Borg flow to
+Fly: [ADR 0031](adr/0031-borg-on-existing-rsync-net.md). It replaces both S3 and
+the proposed per-revision backup subsystem. The
+[runbook](../../infra/runbooks/sites-borg-recovery.md) describes the narrow
+hosting adaptation. The existing local commands below remain available, but
+their format is not a prerequisite for the production backup job.
 Tracking: [FIN-54](https://linear.app/finitecomputer/issue/FIN-54).
 
 ## Local foundation
@@ -30,7 +31,7 @@ Historical commits use `refs/finite-recovery/` in the restored repository so
 later Git maintenance cannot discard them. Live branch names are unchanged.
 Each operator invocation still walks the full catalog and rebuilds Git bundles;
 deduplication reduces stored bytes, not capture work. Per-revision execution is
-not implemented yet.
+out of scope for the selected snapshot-and-Borg plan.
 
 Capture checks for pending Git reconciliation and for observed Git/catalog
 changes across the checkpoint. A busy or inconsistent generation fails and can
@@ -44,8 +45,10 @@ per-ref cursor. Capture therefore accepts only an unambiguous acyclic chain of
 recorded transitions for each ref, with the observed ref at its terminal SHA.
 Unrecorded tips, cycles (including some branch delete/recreate and rollback
 histories), and branching histories fail closed. Do not repair or rewrite user
-history to make capture succeed. Writer-coordinated checkpointing is still a
-production gate; this conservative operator command is not its replacement.
+history to make capture succeed. These are limitations of the optional local
+command, not reasons to add a new Git event model before cutover. The selected
+production adaptation uses the existing stopped-Sites snapshot pattern and
+must prove its own restore; it need not use this conservative command.
 Missing repositories are refused, not synthesized as empty. An initialized,
 empty bare repository can be captured and restored.
 
@@ -107,23 +110,25 @@ source. All credentials and repositories in this test are synthetic and local.
 
 ## Still required before production
 
-- Revision-triggered durable work tracking and background execution, including
-  source-only Git updates, retry/backoff, missed-work reconciliation, and an
-  authoritative writer-coordinated Git checkpoint boundary.
+- Adapt the existing Sites-only consistent snapshot step and Borg job to Fly.
+  Each scheduled run must capture fresh state before archival, resume Sites
+  before upload, and recover the previously running service on failure. Measure
+  and agree the pause and cadence before enabling it.
 - Qualify the dedicated Sites Borg repository, pinned SSH access and native
   encryption with independently recoverable credentials/key export. Record the
-  archive ID and Sites point ID, and test retention before enabling it.
-- Shared-state scheduling and dependency-aware retention. Do not configure an
-  object-age lifecycle that deletes blobs needed by newer recovery points.
-- Bounded source-host resource use, concurrency/crash qualification, freshness
-  and failure reporting through `scripts/finite-status`, and an independent
-  alert path.
+  archive ID and source snapshot timestamp. Keep automatic pruning disabled.
+- Verify capture/upload failure handling, disk capacity, snapshot freshness
+  and upload success through `scripts/finite-status` and existing alerting.
 - An actual rsync.net/Borg restore onto an empty Fly volume,
   including the original publisher's clone/push/publish flow and preserved
   permissions. Local tests are not off-host recovery proof.
 - Independently recoverable runtime configuration, mail/service credentials,
   encryption keys, and image access. These are not all files in the Sites data
   directory; the local capture includes the cookie key, not Fly secret values.
+
+No per-revision queue, separate metadata checkpoint scheduler, custom retry
+service, or dependency graph is required. Full snapshots capture the complete
+Sites-owned state; Borg handles deduplication.
 
 No production service, remote backup repository, CLI fleet pin, DNS record, or migration
 state is changed by implementing these commands. Option A / Latitude remains
