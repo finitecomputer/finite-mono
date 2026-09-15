@@ -111,7 +111,12 @@ export async function createSitePreviewSession(machineId: string, rawUrl: unknow
   }
 
   const target = parseSitePreviewTarget(rawUrl);
-  return createSiteAccountSession(target, account);
+  try {
+    return await createSiteAccountSession(target, account);
+  } catch {
+    // Authorization and URL validation must succeed before offering guest sign-in.
+    return { url: siteEmailSignInUrl(target), originalUrl: target.originalUrl };
+  }
 }
 
 // Both direct visits and embedded previews enter the same Sites-owned exchange.
