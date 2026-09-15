@@ -1,41 +1,87 @@
-# Sites Hosting Options
+# Sites on Fly
 
-**Option A / Latitude** remains the dedicated NixOS deployment in
-[`infra/nixos/hosts/finite-sites-v2`](../../nixos/hosts/finite-sites-v2). Keep that definition
-and the current production service intact. Latitude capacity is currently an
-external constraint, not a reason to delete the option.
+Run one `finitesitesd` serving static sites on one Fly Machine and one volume.
+This runbook does not authorize production mutations or establish a completed
+cutover. Production migration and old-link compatibility belong in the
+[Sites deployment runbook](../../runbooks/deploy-sites.md).
 
-**Option B / Fly** is the active implementation path for this session:
-one Fly Machine, one volume, one Sites daemon serving all static sites.
-This directory prepares an empty-state demo, not a production cutover.
-No Sprites, per-site runtimes, replication, migration framework, or CLI fleet
-rollout are involved. The final provider choice remains open.
+[Latitude deployment](../../nixos/hosts/finite-sites-v2) is also supported.
 
-Track work in [FIN-49](https://linear.app/finitecomputer/issue/FIN-49).
-Completion receipts must say **Option A / Latitude**, **Option B / Fly**, or
-**Shared**, and distinguish prepared, demo-deployed, and production-cutover.
-An uncompleted alternative is not a blocker to completing the selected path.
+## Configuration
 
-## Demo Target
+[`fly.toml`](fly.toml) is the deployment configuration. Its target is:
 
-The approved Option B demo uses Fly organization `finite`, app
-`finite-sites-demo`, region `iad`, and the 10 GiB `sites_data` volume. This does
-not select Fly permanently or authorize moving production users. The checked-in
-configuration records this target; use an immutable CI image digest at deploy.
+| Setting | Value |
+| --- | --- |
+| Organization / app / region | `finite` / `finite-sites-demo` / `iad` |
+| API and Git URL | `https://finite.site` |
+| Site URLs | `https://{site}.finite.site/` |
+| Public listener | `0.0.0.0:8787`, forwarded by Fly with HTTPS enforced |
+| Machine | One shared CPU, 1 GiB RAM |
+| Volume | `sites_data`, 10 GiB, mounted at `/var/lib/finite-sites` |
+| Lifecycle | Rolling deploy; auto-stop off; auto-start on; minimum one Machine |
+| Shutdown | `SIGINT`, 120-second grace period for ordered backup/service shutdown |
+| Health check | `GET /api/v2/healthz`, Host `finite.site`; 15s grace, 30s interval, 5s timeout |
 
-The initial demo image is pinned in `fly.toml`. It was built from
-`f2778edb36581e8cf634f61fc3af943a259396a0` by
-[Service Images run 34401864605](https://github.com/finitecomputer/finite-mono/actions/runs/34401864605),
-which passed the AMD64 exact-image smoke with production promotion disabled.
-Fly resolves the pinned OCI index to its AMD64 manifest
-`sha256:ca998ad3d9d334e5cfa85c108b28e773935f23c9e3722b82d60f7c1777470078`.
-The health endpoint at `https://finite-sites-demo.fly.dev/api/v2/healthz`
-does not prove `finite.site` DNS/TLS, real mail, or the account bridge.
+Organization and volume size are provisioning inputs, not fields in
+`fly.toml`. The image is pinned there; a deployment must select the reviewed
+CI-built digest explicitly. Sizing is not a measured production capacity claim.
+Fly forwards the daemon's public listener without route allowlists and preserves
+Host; the daemon owns API, Git and site dispatch. NIP-98 signatures use the
+configured public HTTPS URL.
 
-The app's DNS records are below. Confirm ownership and review existing records
-before changing them. In particular, replace Namecheap URL forwarding only when
-the domain owner confirms it is no longer needed; do not remove unrelated mail
-or verification records.
+## Build the Artifact
+
+Run commands from the repository root. Set `REVIEWED_REF` to the reviewed
+revision and `VERSION` to the build's version label, then dispatch
+[Service Images](../../../.github/workflows/service-images.yml):
+
+```sh
+gh workflow run service-images.yml --ref "$REVIEWED_REF" \
+  -f image=sites -f version="$VERSION" -f publish_production=false
+```
+
+The workflow uses the root Rust pin and locked workspace dependencies to build
+the AMD64 daemon and matching operator `fsite`. Wait for its anonymous GHCR pull
+and exact-image smoke gates to pass. Set `SITES_IMAGE` to the immutable
+`ghcr.io/finitecomputer/finite-sites@sha256:...` from that run's summary and
+confirm the source revision. Resolve package-access failures before deployment.
+Do not deploy a mutable tag or build on the destination Machine.
+
+To run the same smoke gate in a Docker-capable development environment:
+
+```sh
+bash infra/images/sites-smoke.sh "$SITES_IMAGE"
+```
+
+It uses disposable volumes to test registration, synthetic mailbox proof,
+init, Git push, visibility, non-root serving, shutdown, restart and replacement
+with retained credentials and cookie secret. It does not qualify real mail,
+the Fly edge, the account bridge or cross-version migration.
+
+## Provision and Configure DNS
+
+Use scoped Fly credentials. For the configured target:
+
+```sh
+APP=finite-sites-demo
+ORG=finite
+REGION=iad
+```
+
+Inspect existing resources before provisioning. Run creation commands only for
+an authorized new target after confirming organization, billing, region and DNS
+ownership; skip them for existing resources:
+
+```sh
+fly apps create "$APP" --org "$ORG"
+fly volumes create sites_data --app "$APP" --region "$REGION" --size 10
+fly ips allocate-v4 --shared --app "$APP"
+fly certs add finite.site --app "$APP"
+fly certs add '*.finite.site' --app "$APP"
+```
+
+The configured app's DNS records are:
 
 | Type | Host | Value |
 | --- | --- | --- |
@@ -43,95 +89,51 @@ or verification records.
 | A | `*` | `66.241.124.192` |
 | CNAME | `_acme-challenge` | `finite.site.md0y25m.flydns.net` |
 
-These are the agreed minimal IPv4-only records, verified on September 9.
-The allocated IPv6 address is not published in DNS. AAAA records are optional,
-not a prerequisite or an outstanding demo task. Both apex and wildcard
-certificates were verified Ready, and real-domain API/site requests pass TLS.
+These records are specific to this app; use the allocated addresses and
+certificate records for any new app. The allocated IPv6 address is not
+published in DNS; AAAA records are optional. Review existing records and
+explicit subdomains, which override the wildcard. Replace Namecheap URL
+forwarding only with domain-owner approval; preserve unrelated mail and
+verification records. Do not repoint domains serving production users.
+Keep Cloudflare records DNS-only during Fly-edge qualification.
 
-Creating certificate requests does not establish that TLS is ready. Check both
-`finite.site` and `*.finite.site` in Fly after DNS changes propagate. Any explicit
-subdomain record takes precedence over the wildcard; inventory those before
-claiming all site URLs work. The Machine is not a production recovery target.
+After propagation, check both names with `fly certs show` and require issued
+certificates. Creating certificate requests or passing health on
+`finite-sites-demo.fly.dev` does not prove apex/wildcard DNS and TLS. If changing
+the namespace, update all three daemon URL/domain flags and the health-check
+Host together.
 
-## Option B: Prepare The Artifact
+## Mail and Account Bridge
 
-Run the **Service Images** workflow with `image=sites` and
-`publish_production=false` on the reviewed revision. It uses the root Rust pin
-and locked workspace dependencies, builds `finitesitesd` and the matching
-operator `fsite`, and publishes a canary under `ghcr.io/finitecomputer/finite-sites`.
-The runtime contains Git (including its HTTP backend), CA certificates and
-the libraries needed by the binaries. It also packages native Borg, rsync,
-SQLite, OpenSSH, Supervisor and cron for the opt-in backup job. Neither core
-nor an agent runs in it.
+The configuration uses `--mailer resend` and sender
+`Finite Sites <links@finite.chat>`. Install `RESEND_API_KEY` in Fly secrets before
+deployment. The approved send-only credential lives in lat2's root-owned
+`/etc/finite-saas/sites.env`; transfer it without modifying that file or printing
+or saving its value. `fly secrets import --stage --app "$APP"` accepts secret
+assignments through stdin. See the [secret inventory](../../nixos/README.md#secrets-bootstrap-checklist-values-never-in-this-repo).
 
-The image smoke gate tests the exact pulled canary, with disposable volumes:
-registration, owner-mailbox proof via the dev outbox, project init, Git hooks/push, committed content, private/public
-visibility, non-root serving, graceful shutdown, restart, container replacement,
-retained credentials/cookie secret, and another push using the original identity.
-For a local Docker-capable development environment:
+Project Init requires verified owner-mailbox authority. Complete a real
+Sites-key or email-login flow for publisher enrollment; a synthetic dev outbox
+or successful viewer login does not prove this flow.
 
-```sh
-bash infra/images/sites-smoke.sh "$SITES_IMAGE"
-```
+The optional dashboard verified-email exchange requires matching reviewed
+dashboard/daemon contracts and the same server-only
+`FINITE_SITES_VIEWER_SESSION_TOKEN` (64 lowercase hex characters). Its host
+location is `/etc/finite/sites-viewer-session.env`; provision the matching Fly
+secret only when enabling the exchange. It does not create sharing grants.
+Do not enable account redirects before that contract and upstream are ready.
+Configure `FC_SITES_V2_UPSTREAM_URL` for this service while retaining
+`FC_SITES_UPSTREAM_URL` for legacy consumers. Neither backend retries against
+the other. Qualify both paths before enabling the account bridge; do not
+repoint the legacy upstream at an empty registry.
 
-Record the Git SHA, successful workflow URL and immutable `name@sha256:...`
-from its summary. Do not deploy a tag or build on the destination Machine.
-The first GHCR publication must be anonymously pullable; resolve package
-visibility/access issues if that gate fails rather than bypassing it.
-Package preparation or this container test is not evidence of a live Fly demo,
-Fly edge compatibility, or a cross-version migration.
+## Deploy and Verify
 
-## Option B: Provision And Deploy The Demo
-
-For a new target, before running these commands, confirm the Fly organization, billing authority,
-app name, region and DNS ownership in FIN-50. `APP`, `ORG`, `REGION`, and
-`SITES_IMAGE` below are operator-supplied values, not reserved resources.
-Use an approved Fly CLI and scoped credentials; never put secrets in git.
-For the existing demo, use `APP=finite-sites-demo`, `ORG=finite`, `REGION=iad`;
-inspect existing resources and skip the creation commands. Do not create a
-second volume or app on each deploy.
-
-The config targets `finite.site` and `*.finite.site`. Confirm those are the
-team's intended, available domains before using them. **Do not repoint any
-domain currently serving production users for this demo.** If these names are
-occupied, first agree on an isolated demo namespace and change all three daemon
-URL/domain flags and the health-check Host together. Leave `git.finite.chat`,
-canonical v1 Sites and the agent/runtime CLI pin unchanged.
+Run `scripts/finite-status` on the authenticated app-plane host before and after
+each rollout. A laptop without a host profile returns UNKNOWN; a Fly health
+check does not establish platform health.
 
 ```sh
-fly apps create "$APP" --org "$ORG"
-fly volumes create sites_data --app "$APP" --region "$REGION" --size 10
-fly ips allocate-v4 --shared --app "$APP"
-fly ips allocate-v6 --app "$APP"
-fly certs add finite.site --app "$APP"
-fly certs add '*.finite.site' --app "$APP"
-```
-
-Follow the DNS records returned by `fly certs show` for each name, including
-wildcard ACME validation, and verify certificate issuance. Keep Cloudflare
-records DNS-only for the initial Fly-edge qualification. No route allowlists:
-Fly forwards the daemon's public listener, preserving Host. The daemon owns
-API/Git/site dispatch. NIP-98 signatures must use the configured public HTTPS
-URL, not the Machine's private listener URL.
-
-The checked-in config uses `--mailer resend` with the existing approved sender
-`Finite Sites <links@finite.chat>`. `RESEND_API_KEY` must be installed through
-Fly secrets before deployment. The September 10 setup reuses the documented
-send-only credential from lat2's root-owned `/etc/finite-saas/sites.env` without
-modifying that production file. Never print or save the value during transfer;
-`fly secrets import --stage` accepts it through stdin.
-
-The earlier demo and the exact-image container smoke use `--mailer dev` with
-synthetic addresses. That outbox flow is never proof of a real person's mailbox.
-Current Project Init requires verified owner-mailbox authority; complete a real
-Sites-key or email-login flow before claiming self-service verification.
-Enable the optional dashboard
-viewer-session exchange only with the matching reviewed dashboard/daemon
-contract and the shared `FINITE_SITES_VIEWER_SESSION_TOKEN` secret. No secret
-values belong in this runbook, tickets, command logs or screenshots.
-
-```sh
-scripts/finite-status
 fly config validate --strict --app "$APP" --config infra/fly/sites/fly.toml
 fly deploy --app "$APP" --config infra/fly/sites/fly.toml \
   --primary-region "$REGION" --image "$SITES_IMAGE" --ha=false
@@ -139,149 +141,75 @@ fly machine list --app "$APP"
 fly volumes list --app "$APP"
 fly checks list --app "$APP"
 curl --fail --show-error https://finite.site/api/v2/healthz
-scripts/finite-status
 ```
 
-Check that exactly one application Machine exists and is attached to the
-expected volume. `--ha=false` prevents spare creation but does not delete
-preexisting Machines; investigate unexpected instances, never automatically
-delete them. Keep autoscaling off. One shared CPU, 1 GiB RAM and 10 GiB storage
-are initial demo sizing, not measured production capacity.
+Require exactly one application Machine attached to the expected volume.
+`--ha=false` prevents spare creation but does not delete existing Machines;
+investigate unexpected instances without automatically deleting them. Keep
+autoscaling off.
 
-The volume mounts at `/var/lib/finite-sites`, containing the complete registry,
-repositories, blobs, cookie secret and outbox. Startup refuses a missing mount,
-initializes only its root ownership, then drops to UID/GID 65532 before serving.
-It does not recursively repair imported data. SIGINT matches the daemon's
-graceful-shutdown handler. The prepared config allows 120 seconds for ordered
-shutdown when backup supervision is enabled; this is not a claim that the
-currently deployed Machine configuration has changed.
+Use the matching reviewed v2 CLI in an isolated Finite Home with
+`FINITE_SITES_API=https://finite.site`. Follow the
+[static publishing workflow](../../../finite-sites/README.md#publish-a-static-site)
+using the Git URL returned by this server. Standalone publishers use
+`fsite auth sites-key request MAILBOX`, then
+`fsite auth sites-key add MAILBOX TOKEN`, and `--owner-email MAILBOX` for Init.
+Keep tokens out of logs. Do not change the public rolling release, agents'
+default endpoint or runtime CLI pin as part of this deployment.
 
-## Option B: Backup Qualification
+On an authorized disposable project, check registration, Init, push, rendered
+HTML/assets and an update at the same URL through the real Fly edge. Check
+private/public viewing, unshared and revoked viewer rejection, and
+`Cache-Control: no-store` on mutable HTML and assets. Restart and redeploy the
+pinned image; verify content, grants, viewer sessions and original Git
+credentials survive. Exercise real mail and the account bridge separately
+when their prerequisites are present.
 
-Backups remain disabled until the new image, dedicated rsync.net repository
-and root-only credentials are provisioned. Follow the
-[Sites Borg recovery runbook](../../runbooks/sites-borg-recovery.md) for the
-opt-in settings, Fly file-secret mappings, daily job, status check and
-empty-volume restore drill. This adapts the existing stopped-Sites snapshot
-and Borg flow; it does not change publishing or the legacy Latitude jobs.
-Do not promote based only on a successful upload: FIN-54 also requires
-independent restore proof and external freshness/failure alerting.
+## Durability and Recovery
 
-## Option B: Demonstrate And Record
+The volume contains the registry, repositories, blobs, cookie secret and
+outbox. The [entrypoint](../../images/sites-entrypoint) refuses a missing mount,
+initializes only its root ownership and drops to UID/GID 65532. It does not
+recursively repair imported data.
 
-Use the matching reviewed v2 CLI in an isolated Finite Home, with
-`FINITE_SITES_API=https://finite.site`. Follow the existing
-[publish workflow](../../../finite-sites/README.md#publish-a-static-site), using
-the Git URL returned by this server. Standalone publishers first use
-`fsite auth sites-key request MAILBOX` and `fsite auth sites-key add MAILBOX TOKEN`
-to prove the owner mailbox, then pass `--owner-email MAILBOX` to Project Init.
-Use actual mail delivery for real-user proof. Do not update the public rolling release
-or existing agents' default endpoint.
+Backups are opt-in. The image packages Borg, rsync, SQLite, OpenSSH, Supervisor
+and cron; the checked-in configuration leaves the job disabled. Follow the
+[Borg recovery runbook](../../runbooks/sites-borg-recovery.md) to provision the
+dedicated rsync.net repository and root-only credentials, enable the schedule
+and external alerts, and qualify an independent empty-volume restore. Image
+CI includes the backup-enabled smoke in addition to the default serving test.
 
-In FIN-24 record the demo URL, provider, app/Machine/volume identifiers, revision,
-image digest and results of registration, init, push, content/assets, an update
-at the same URL, private/public viewing and unauthorized rejection **through
-the real Fly edge**. Restart the Machine and redeploy the pinned image; verify
-the same content, grants and viewer sessions survive. The image smoke is not
-a substitute for those checks. Mail and account-bridge checks remain pending
-until their credentials and matching reviewed components are deployed.
+One Machine and one volume mean restart/deploy downtime and no high
+availability. Do not scale to independently writable volumes. Image rollback
+does not roll back data: use a previous digest only when its data contract is
+compatible, and never destroy the volume during deployment or rollback.
 
-### Verified Demo Boundary
+A Fly volume or its snapshots are not independent off-host backups. Before
+production data arrives, require recurring service-consistent off-host backups,
+freshness/failure reporting and restoration of the whole Recovery Set onto an
+empty target. This runbook does not establish that backups are enabled. Protect
+archives as secrets; inspect snapshot SQLite only through
+`scripts/snapshot-sqlite` or a scratch copy. A restore check must verify content,
+IDs, grants, existing viewer sessions and Git integrity, then exercise a push
+only on the isolated restored copy.
 
-The September 9-10 controlled demo in FIN-24 uses
-`https://fly-proof-0909-7b6e.finite.site/`. It is non-public and contains only
-synthetic content. Its completed **Option B / Fly** checks are:
-
-- Isolated CLI registration, synthetic owner proof, config dry-run, Project
-  Init, scoped Git authentication, publishing and an update at the same URL.
-- Browser-rendered HTML/CSS and authenticated asset reads; anonymous,
-  unshared and revoked viewers are denied.
-- Public HTML/CSS/assets through the real edge preserve `Cache-Control:
-  no-store`; returning to private immediately denies anonymous reads.
-- Machine restart and redeployment of the same CI-pinned image preserve
-  Project/Site IDs, active Version, content, cookie secret, viewer grants and
-  existing viewer sessions. The original Git credential still reads source.
-- Exactly one Machine remains attached to the original volume. No customer
-  state, legacy routing, dashboard upstream or agent CLI pin changed.
-- Real Resend mail was enabled on September 10 using the same pinned image.
-  Alex's approved mailbox received the standard sign-in email, and Alex
-  confirmed that redeeming its link opened the demo. The demo is now shared
-  with that mailbox, not public. This verifies viewer login, not real-mailbox
-  publisher enrollment or the dashboard account bridge.
-
-The CLI version string alone is not the artifact identity: the operator client
-reports `fsite 0.5.2` but implements v2. FIN-24 records the exact client image
-identity separately from the public v1 release and deployed AMD64 image.
-
-Sharing this non-public URL alone does not grant access. Do not enable account redirects until the reviewed #854 dashboard and
-daemon are deployed with a matching service credential and upstream. The
-production dashboard has one Sites upstream; do not repoint it at this empty
-demo registry while legacy Sites remain authoritative.
-
-`scripts/finite-status` returns UNKNOWN on a laptop without a host profile.
-Use the installed command on the authenticated app-plane host for fleet
-evidence; Fly's passing health check is evidence only for this demo service.
-The September 10 mail rollout's pre/post host probes reported green Chat and
-rollout sections, pre-existing red fleet convergence, and unknown host health
-because the SSH environment could not locate `nerdctl`. Overall fleet status
-was not green; the Fly health check passed independently.
-Keep FIN-54 open until recurring off-host recovery and failure visibility are
-qualified, even when a one-time synthetic restore succeeds.
-
-### Recovery Proof And Limits
-
-On September 10, the entire demo data directory was archived with its writer
-stopped, transferred off Fly over SFTP into a private local directory, and
-restored onto an empty local Docker volume using the exact CI-built AMD64
-image. The restored copy retained Site/Project IDs, Version 2, HTML/assets,
-grants and cookie secret; an existing authorized session worked and anonymous
-access was denied. The original publisher cloned the backed-up Git commit,
-passed `git fsck`, and pushed a new commit that created Version 3 **only on the
-isolated restore**. The live demo remains non-public at Version 2. FIN-54 records
-the archive location and checksum; never commit or attach the archive, which
-contains the cookie secret and registry.
-
-This was a manual maintenance-window proof, not a scheduled backup mechanism,
-production-state migration, or fresh-Fly-volume restore. Production still
-needs recurring independent off-host backups, freshness/failure reporting,
-and a restore of the actual source state without an hourly serving outage.
-
-Maintenance revealed a `flyctl machine update` pitfall: omitted `init` fields
-can retain the previous entrypoint override. Restoring the serving command
-alone is insufficient after a maintenance entrypoint. Explicitly restore
+**Entrypoint restoration:** `flyctl machine update` can retain a previous
+entrypoint override when `init` fields are omitted. Restoring the serving
+command alone after maintenance is insufficient. Explicitly restore
 `/usr/local/bin/sites-entrypoint`, the serving arguments, and the original
 services/mount/image configuration, then verify health and authenticated reads.
-Do not treat CLI command completion alone as recovery evidence.
+CLI command completion alone is not recovery evidence.
 
-## Availability And Later Cutover
+## Migration Boundary
 
-A single-volume, single-Machine demo has restart/deployment downtime. It is
-not a no-downtime or highly available production design. Do not clone or scale
-it to a second independently writable volume to hide that limitation.
+Only the agreed published static sites migrate. Apps, documents and
+unpublished/missing-source projects are retired at cutover; preserve the source
+archive because retirement does not authorize durable data deletion. Never
+open the authoritative legacy registry with the static-only daemon: its
+migrations remove unsupported kinds.
 
-Redeploy a previously verified image digest only when its data contract is
-compatible. Image rollback does not roll back the volume. Before production
-data arrives, FIN-54 must prove off-host backups and restoration of the whole
-Recovery Set onto an empty target. Fly volume snapshots alone are not that
-proof. Do not destroy a volume during a deployment or rollback.
-
-FIN-52 owns inventory/rehearsal, FIN-53 the account bridge, FIN-55 the actual
-cutover and old-link compatibility, and FIN-56 the CLI/runtime rollout.
-Nothing in this demo runbook authorizes those production mutations.
-
-The September 10 live inventory found 25 published apps and eight published
-documents, contrary to the original zero-app assumption. Alex's September 15
-decision retires apps, documents and unpublished/missing-source projects at
-cutover; only the agreed published static sites migrate. Preserve the source
-archive: retirement does not authorize durable data deletion. Never open the
-authoritative legacy registry with the static-only daemon: its migrations remove
-unsupported kinds. Until cutover, preserve legacy routes/auth and qualify the
-mixed legacy/v2 dashboard preview path before changing the dashboard upstream.
-FIN-52/FIN-55 own the explicit site mapping and legacy retirement. No blanket
-wildcard redirect or legacy shutdown is authorized by this demo runbook.
-
-Provider references:
-[Fly configuration](https://fly.io/docs/reference/configuration/),
-[deploy flags](https://fly.io/docs/flyctl/deploy/),
-[custom domains](https://fly.io/docs/networking/custom-domain/),
-[volume limitations](https://fly.io/docs/volumes/overview/).
+Until a separately authorized cutover, preserve legacy routes/auth and
+`git.finite.chat`. The [Sites deployment runbook](../../runbooks/deploy-sites.md)
+owns the site mapping, account transition and old-link compatibility. This
+runbook authorizes no wildcard redirect, legacy shutdown or production data
+mutation.

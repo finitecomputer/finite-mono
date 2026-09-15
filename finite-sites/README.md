@@ -237,15 +237,19 @@ this exchange adds no shares and does not require Hosted Chat. Anonymous or
 unverified visitors retain the email challenge. An authenticated but unshared
 visitor can request access or try another email.
 
-Enable automatic browser handoff with the daemon's
+After the dashboard serves `/site-auth`, enable automatic browser handoff with
+the daemon's
 `FINITE_SITES_ACCOUNT_LOGIN_URL=https://finite.computer/site-auth`. Without it,
 direct visits retain the email form. The dashboard uses the existing
-`FC_SITES_V2_UPSTREAM_URL` and existing service credential for v2. Retained
+`FC_SITES_V2_UPSTREAM_URL` and the service credential for v2. Retained
 legacy previews keep using `FC_SITES_UPSTREAM_URL`; neither exchange retries
-against the other registry. The account handoff is site-bound,
+against the other registry. Keep the legacy adapter until its previews and
+Hosted Chat requester consumers are retired. The account handoff is site-bound,
 single-use, and expires after 60 seconds; emailed links retain their existing
-reusable 15-minute behavior. Both mint the same seven-day cookie, with current
-Sites permissions checked on every content request. See
+reusable 15-minute behavior. Both use the same seven-day, host-scoped Viewer
+Cookie: `SameSite=Lax` for top-level visits and a distinct `Partitioned` cookie
+for iframe access in secure contexts. Sites checks current permissions on every
+content request. See
 [ADR 0029](docs/adr/0029-account-session-viewer-bridge.md).
 
 The server-to-server credential for this optional exchange is

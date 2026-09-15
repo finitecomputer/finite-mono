@@ -1,4 +1,4 @@
-# Option B / Fly: isolated demo in the Finite organization.
+# Fly: isolated deployment in the Finite organization; no production cutover.
 # This deployment consumes an existing CI-built image; Fly does not build it.
 app = "finite-sites-demo"
 primary_region = "iad"
