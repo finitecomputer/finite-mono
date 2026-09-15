@@ -36,6 +36,8 @@ OUTPUT_NAMES = (
 GLOBAL_EXACT_PATHS = {
     ".github/workflows/ci.yml",
     "Cargo.lock",
+    "Cargo.nix",
+    "crate-hashes.json",
     "Cargo.toml",
     "flake.lock",
     "flake.nix",
