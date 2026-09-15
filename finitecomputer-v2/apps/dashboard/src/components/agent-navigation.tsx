@@ -34,6 +34,7 @@ export function AgentNavigation({
 }) {
   const pathname = usePathname() ?? "";
   const root = `/dashboard/machines/${encodeURIComponent(machineId)}`;
+  const brainPrototype = process.env.NODE_ENV === "development" && machineId === "runtime_web_design";
   const items: Array<{
     label: string;
     href?: string;
@@ -57,8 +58,9 @@ export function AgentNavigation({
     {
       label: "Brain",
       icon: BrainIcon,
-      active: false,
-      note: "Coming soon",
+      href: brainPrototype ? `${root}/brain-prototype` : undefined,
+      active: brainPrototype && pathname === `${root}/brain-prototype`,
+      note: brainPrototype ? "Local prototype" : "Coming soon",
     },
     {
       label: "Skills",
