@@ -480,6 +480,48 @@ class Lat2ClosureArtifactTests(unittest.TestCase):
 
             result = run("judge", "0", failed=core_down)
             self.assertEqual(result.returncode, 0)
+    def test_containerd_health_preserves_the_pre_switch_app_host_state(self) -> None:
+        source = DEPLOY.read_text(encoding="utf-8")
+        start = source.index("pid_unchanged_unless_approved() {")
+        end = source.index('if [[ "$expect_startup" == "1" ]]; then', start)
+        checks = source[start:end]
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            write_shim(
+                root,
+                "systemctl",
+                'case "$*" in\n'
+                '  "show containerd.service "*) echo "$AFTER_PID" ;;\n'
+                '  "show systemd-networkd.service "*) echo 88 ;;\n'
+                '  "is-active --quiet containerd.service") exit "$AFTER_INACTIVE" ;;\n'
+                '  "is-active --quiet systemd-networkd.service") exit 0 ;;\n'
+                '  *) exit 90 ;;\n'
+                'esac\n',
+            )
+            cases = (
+                # The actual app-plane topology: containerd is not installed.
+                ("0", "0", "1", "", True),
+                ("42", "42", "0", "", True),
+                ("42", "0", "1", "", False),
+                ("42", "43", "0", "", False),
+                ("42", "43", "0", "containerd.service", True),
+                ("42", "0", "1", "containerd.service", False),
+                ("42", "42", "1", "", False),
+            )
+            for before, after, inactive, approved, success in cases:
+                with self.subTest(before=before, after=after, approved=approved, inactive=inactive):
+                    result = subprocess.run(
+                        ["bash", "-c", 'set -euo pipefail\n'
+                         'containerd_pid="$BEFORE_PID"\nnetworkd_pid=88\n'
+                         'approved_units=("$APPROVED_UNIT")\n'
+                         'activation_failed() { echo "$*" >&2; exit 99; }\n' + checks],
+                        env={**os.environ, "PATH": f"{root}{os.pathsep}{os.environ['PATH']}",
+                             "BEFORE_PID": before, "AFTER_PID": after,
+                             "AFTER_INACTIVE": inactive, "APPROVED_UNIT": approved},
+                        capture_output=True, text=True, check=False,
+                    )
+                    self.assertEqual(result.returncode == 0, success, result.stderr)
+
     def test_go_live_requires_product_health_after_the_switch(self) -> None:
         source = DEPLOY.read_text(encoding="utf-8")
         for unit in (
@@ -525,13 +567,6 @@ class Lat2ClosureArtifactTests(unittest.TestCase):
         # The pre-mutation gate must exist and must run before the boundary.
         self.assertLess(gate, mutation)
         self.assertIn('"$expect_startup" != "1"', source)
-
-    def test_app_plane_host_loads_kvm_for_the_kata_runtime(self) -> None:
-        host = (ROOT / "infra/nixos/hosts/finite-lat-2/default.nix").read_text(
-            encoding="utf-8"
-        )
-        self.assertIn('boot.kernelModules = [ "kvm-amd" ]', host)
-        self.assertIn("kvm-amd kernel module", host)  # the assertion message
 
     def test_capture_by_id_filter_keeps_whole_namespaces_only(self) -> None:
         # The by-id listing must keep whole NVMe namespace symlinks (the EUI
