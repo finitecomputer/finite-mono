@@ -2,8 +2,10 @@
 
 Execution plan for [FIN-74](https://linear.app/finitecomputer/issue/FIN-74).
 Status on 2026-09-15: provisioned in Chicago, SSH and initial hardware capture
-complete. NixOS configuration and artifact tooling are drafted. Nix evaluation,
-CI packaging, install, overlay admission and launch qualification remain open.
+complete. NixOS configuration and artifact tooling are drafted. All PR CI checks,
+including Nix evaluation, passed at revision 5934f626. Synthetic storage/boot
+qualification, CI packaging, install, overlay admission and launch qualification
+remain open.
 No Agent Runtime has been created on lat5.
 
 Use lat4's dedicated NixOS/Kata Runner architecture with an empty `/data`.
@@ -54,7 +56,9 @@ Support ticket **832519** was opened from `austin@finite.vip` to
 `support@latitude.sh` and routed to Sales. The original request asks about the
 128/192 GB listing and unchanged price. The actual lat5 delivery now proves
 that this order received 192 GB; it does not establish a guaranteed standard
-configuration for other orders. Their response does not block setup.
+configuration for other orders. Latitude replied on September 15 that the
+standard configuration changed to 128 GB at the same price because hardware
+costs increased; some older 192 GB units remain. This does not block setup.
 
 Pre-provision `scripts/finite-status` evidence: lat2 app HTTP/Chat, storage and
 recovery checks passed; lat3 had 31 and lat4 27 active, ready Agent Runtimes.
@@ -142,23 +146,19 @@ Source Telegram bots stay running during host setup and migration rehearsal.
 Each later migration owns a brief, single-consumer Telegram switch and Google
 reconnection under the [shared fleet plan](https://linear.app/finitecomputer/document/trf-fleet-migration-plan-and-evidence-21410d33bc9b).
 
-## Lat1 reuse assessment
+## Lat1 retirement
 
-Austin requested that lat1 conversion be considered alongside lat5. Core's
-2026-09-15 status snapshot shows zero active links and seven intentionally
-inactive Runtime records on `finite-lat-1`. Latitude still reports rescue mode.
-Neither observation proves that its disks contain no retained recovery data.
+Austin confirmed on 2026-09-15 that lat1 will remain on its existing Latitude
+retirement schedule because Dallas continues to have repeated heat problems.
+This supersedes the reuse proposal. Lat1 is excluded from migration capacity;
+lat5 setup proceeds independently.
 
-[FIN-71](https://linear.app/finitecomputer/issue/FIN-71) records retirement on
-September 24; leave that scheduled while assessing reuse. The earlier failure
-included repeated thermal shutdowns, including after provider maintenance.
-A software reinstall is not evidence of repaired hardware.
+[FIN-71](https://linear.app/finitecomputer/issue/FIN-71) tracks retirement.
+The meeting recorded September 24; Alex's scheduling comment says end of month.
+The exact provider date and eventual billing stop still need confirmation.
+No cancellation was submitted to Latitude, and no lat1 disk changes occurred.
 
-Before proposing conversion: verify the rescue SSH host key through a trusted
-provider console (the current SSH key differs from the saved production key),
-inventory retained disks without mounting them writable, reconcile all retained
-state with independently verified Recovery Sets and restore proof, and obtain
-provider repair evidence plus sustained thermal, memory and storage qualification.
-If those checks pass, compare retaining this Dallas host with its scheduled
-retirement. Retaining it, cancelling retirement, wiping it and admitting agents
-are separate decisions; none occurred during this assessment.
+The September 15 Core snapshot showed zero active links and seven inactive
+Runtime records. Lat1's old app-server disks remain a recovery source. Confirm
+independent Recovery Sets and restore proof before provider deletion; inactive
+compute does not authorize data loss or a separate manual purge.
