@@ -4,11 +4,11 @@
 // Synthetic memberships only. This prototype proves no Brain access contract.
 import { useEffect, useRef, useState } from "react";
 import { usePathname, useRouter, useSearchParams } from "next/navigation";
-import { ArrowLeftIcon, ArrowRightIcon, BrainIcon, Building2Icon, Clock3Icon, RefreshCwIcon, UserRoundIcon } from "lucide-react";
+import { ArrowLeftIcon, ArrowRightIcon, BrainIcon, Building2Icon, Clock3Icon, FolderIcon, RefreshCwIcon, UserRoundIcon } from "lucide-react";
 
 import { Button } from "@/components/ui/button";
 
-type Brain = { id: string; name: string; kind: "Personal" | "Organization"; role: string };
+type Brain = { id: string; name: string; kind: "Personal" | "Organization"; role: string; folders: string[] };
 type Scenario = "ready" | "empty" | "unavailable" | "stale" | "unauthorized";
 type Scope = "agent" | "human";
 const VARIANTS = ["cards", "rows", "columns"] as const;
@@ -16,13 +16,13 @@ type Variant = typeof VARIANTS[number];
 const LABELS = { cards: "A · Categorized cards", rows: "B · Compact list", columns: "C · Category columns" };
 const SAMPLES: Record<Scope, Brain[]> = {
   agent: [
-    { id: "sample-personal", name: "Personal knowledge", kind: "Personal", role: "Personal Agent" },
-    { id: "sample-team", name: "Studio handbook", kind: "Organization", role: "Member" },
-    { id: "sample-research", name: "Research library", kind: "Organization", role: "Guest" },
+    { id: "sample-personal", name: "Personal knowledge", kind: "Personal", role: "Personal Agent", folders: ["Notes", "Projects", "Reading"] },
+    { id: "sample-team", name: "Studio handbook", kind: "Organization", role: "Member", folders: ["Engineering", "Operations", "Research", "Runbooks", "Support", "Team"] },
+    { id: "sample-research", name: "Research library", kind: "Organization", role: "Guest", folders: ["Shared research"] },
   ],
   human: [
-    { id: "sample-personal", name: "Personal knowledge", kind: "Personal", role: "Owner" },
-    { id: "sample-team", name: "Studio handbook", kind: "Organization", role: "Admin" },
+    { id: "sample-personal", name: "Personal knowledge", kind: "Personal", role: "Owner", folders: ["Notes", "Projects", "Reading"] },
+    { id: "sample-team", name: "Studio handbook", kind: "Organization", role: "Admin", folders: ["Engineering", "Finance", "Operations", "People", "Research", "Runbooks", "Support", "Team"] },
   ],
 };
 const controlClass = "rounded-md border border-border bg-background px-2 py-1.5 text-sm";
@@ -185,6 +185,16 @@ function VariantCards({ brains }: { brains: Brain[] }) {
       <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-3">{group.map((brain) => <article key={brain.id} className="ocean-skill-card">
         <div className="ocean-skill-card__meta"><span className="ocean-chip">{brain.kind}</span></div>
         <div className="ocean-skill-card__copy"><h3>{brain.name}</h3></div>
+        <div className="mt-3 min-w-0 text-sm">
+          <p className="flex items-center gap-1.5 text-muted-foreground" title="Folders listed for this identity. Linked folders and local sync status are not included.">
+            <FolderIcon className="size-3.5" aria-hidden />
+            {brain.folders.length} {brain.folders.length === 1 ? "folder" : "folders"} shown
+          </p>
+          {brain.folders.length > 0 && <p className="mt-1.5 break-words leading-relaxed text-muted-foreground">
+            {brain.folders.slice(0, 3).join(" · ")}
+            {brain.folders.length > 3 && <span aria-label={`${brain.folders.length - 3} more folders`}> · +{brain.folders.length - 3}</span>}
+          </p>}
+        </div>
         <div className="mt-4 flex items-center justify-between gap-2 border-t border-border pt-3 text-sm"><span className="text-muted-foreground">Role</span><span>{brain.role}</span></div>
       </article>)}</div>
     </section>;

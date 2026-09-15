@@ -12,6 +12,8 @@ Open http://127.0.0.1:13089/dashboard/machines/runtime_web_design/brain-prototyp
 The existing design fixture supplies the dashboard shell and its example agent, Moss.
 The Brain page uses in-memory synthetic memberships and makes no Brain requests.
 
+The selected A cards show each Brain's folder count and up to three folder names, followed by `+N` for the remainder. “Folders shown” refers to the metadata visible to the selected identity; it excludes linked folders and does not measure local sync. Sample agent and human views have different folder visibility. These are example names and counts, not live inventory.
+
 Compare `?variant=cards` (default), `?variant=rows`, and `?variant=columns` with the bottom arrows or keyboard left/right. Use the preview controls to change identity and inspect empty, unavailable, stale, and access-lost states. Changing identity clears the displayed result before loading the new example. Refresh shows loading and updates the successful-fetch time; the failure scenarios remain failures until another scenario is selected. Expand “Prototype state” for the full example state.
 
 The route requires development mode, the existing local-account fixture switch, and the fixture machine ID. Production requests return not found, and production navigation stays disabled. No new authentication bypass or Brain integration is introduced.
