@@ -571,6 +571,7 @@ jobs:
         run: |
           nix develop .#crate2nix -c crate2nix generate
           git diff --exit-code -- Cargo.nix crate-hashes.json Cargo.lock
+          nix build --no-link .#checks.x86_64-linux.crate2nix-features
       - name: Build every Rust package
         id: build_packages
         working-directory: nix-packages-${{ github.run_id }}-${{ github.run_attempt }}

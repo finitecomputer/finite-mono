@@ -19329,7 +19329,12 @@ rec {
           dependency:
             assert (builtins.isAttrs dependency);
             let
-              enabled = builtins.any (doesFeatureEnableDependency dependency) features;
+              # dep:name enables the dependency, not a same-named feature.
+              # Forwarded name/feature selections still enable that feature.
+              enabled = builtins.any
+                (feature: feature != "dep:${dependency.rename or dependency.name}"
+                  && doesFeatureEnableDependency dependency feature)
+                features;
             in
             if (dependency.optional or false) && enabled
             then [ (dependency.rename or dependency.name) ]
