@@ -420,11 +420,18 @@ def psql_query_sets(environment: dict[str, str]) -> dict[str, list[dict[str, Any
             "\\if :finite_has_canary_targets\n"
             "SELECT target.source_host_id, target.launch_code_id, code.batch_id, "
             "batch.created_by_workos_user_id, code.redeemed_customer_org_id, "
-            "batch.revoked_at IS NOT NULL, batch.expires_at <= CURRENT_TIMESTAMP "
+            "batch.revoked_at IS NOT NULL, batch.expires_at <= CURRENT_TIMESTAMP, "
+            "request.id, request.project_id, request.status, request.target_source_host_id, "
+            "request.runner_id, request.agent_runtime_id, runtime.source_host_id "
             "FROM launch_code_host_targets target JOIN launch_codes code ON code.id=target.launch_code_id "
-            "JOIN launch_code_batches batch ON batch.id=code.batch_id ORDER BY target.source_host_id;\n"
+            "JOIN launch_code_batches batch ON batch.id=code.batch_id "
+            "LEFT JOIN agent_creation_requests request ON request.requested_launch_code=code.id "
+            "LEFT JOIN agent_runtimes runtime ON runtime.id=request.agent_runtime_id "
+            "ORDER BY target.source_host_id, request.id;\n"
             "\\endif",
-            ["source_host_id", "launch_code_id", "batch_id", "issuer_workos_user_id", "redeemed_customer_org_id", "batch_revoked", "batch_expired"],
+            ["source_host_id", "launch_code_id", "batch_id", "issuer_workos_user_id", "redeemed_customer_org_id", "batch_revoked", "batch_expired",
+             "creation_request_id", "project_id", "request_status", "request_target_source_host_id",
+             "request_runner_id", "agent_runtime_id", "actual_source_host_id"],
         ),
         (
             "agent_creation_requests",

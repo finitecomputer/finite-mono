@@ -349,6 +349,23 @@ The resulting `Lat5 Canary` Project `project_0ca6e90da32abcb9f11b`, Runtime
 `runtime_86af3c895170b9d3be4f`, landed on **finite-lat-4**. Preserve this Runtime;
 do not treat its name as placement evidence or count it as lat5 qualification.
 
+The read-only canonical status join confirms the complete chain:
+
+| Record | Observed value |
+| --- | --- |
+| Launch Code | `launch_code_54432c99f217fa5cbb6f` |
+| Reserved host | `finite-lat-5` |
+| Creation request | `agent_request_d8a77342192705324b16` |
+| Saved request target | NULL (untargeted) |
+| Claiming Runner | `finite-kata-runner-4` |
+| Request status | `running` |
+| Actual Runtime host | `finite-lat-4` |
+
+The target was absent at request creation; this was not evidence that a lat4
+Runner bypassed a persisted lat5 target. `canary_host_reservations` now includes
+completed creation requests and their actual Runtime host, so a request leaving
+the pending queue cannot hide this discrepancy.
+
 The lat2 closure activation changed the unit's configured Core executable to
 `46mhcv6lgjh31dm13apg0jab7s0k7z8d-finite-saas-core-0.1.0`, but PID 1245864
 still executed the old `19m4d5fknf6l63l0ff4p34h84cwqxabq` Core package. The old

@@ -4353,6 +4353,124 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn core_api_targeted_code_preserves_host_through_creation_and_retry() {
+        with_isolated_postgres(|db| async move {
+            let store = db.store.clone();
+            store
+                .link_verified_user(LinkVerifiedUserInput {
+                    verified_email: "new@finite.vip".into(),
+                    workos_user_id: "user_workos_new".into(),
+                    now: None,
+                })
+                .await
+                .unwrap();
+            let issued = store
+                .issue_launch_code_batch(crate::launch_codes::IssueLaunchCodeBatchInput {
+                    name: "API canary".into(),
+                    code_count: 1,
+                    expires_in_hours: Some(1),
+                    hosting_tier: Some(crate::HostingTier::Standard),
+                    created_by_workos_user_id: "user_workos_new".into(),
+                    now: None,
+                })
+                .await
+                .unwrap();
+            let code = &issued.codes[0];
+            store
+                .target_launch_code_exact(
+                    &code.id,
+                    &issued.batch.id,
+                    "target-host",
+                    "new@finite.vip",
+                    "user_workos_new",
+                )
+                .await
+                .unwrap();
+            let app = router(store.clone(), test_auth());
+            let create = serde_json::to_vec(&CreateAgentRequest {
+                display_name: "API Canary".into(),
+                launch_code: code.code.clone(),
+                idempotency_key: "targeted-browser-submit".into(),
+                hosting_tier: None,
+                profile_picture_url: None,
+                owner_chat_account_id: Some("a".repeat(64)),
+            })
+            .unwrap();
+            let mut request_id = None;
+            for retry in [false, true] {
+                let response = app
+                    .clone()
+                    .oneshot(
+                        Request::builder()
+                            .method("POST")
+                            .uri("/api/core/v1/me/agent-creation-requests")
+                            .header(
+                                "authorization",
+                                format!(
+                                    "Bearer {}",
+                                    access_token_with_subject(
+                                        "user_workos_new",
+                                        "new@finite.vip",
+                                        true,
+                                        None
+                                    )
+                                ),
+                            )
+                            .header("content-type", "application/json")
+                            .body(Body::from(create.clone()))
+                            .unwrap(),
+                    )
+                    .await
+                    .unwrap();
+                assert_eq!(response.status(), StatusCode::OK);
+                let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+                    .await
+                    .unwrap();
+                let result: RequestAgentCreationResult = serde_json::from_slice(&body).unwrap();
+                assert_eq!(result.reused, retry);
+                assert_eq!(
+                    result.request.target_source_host_id.as_deref(),
+                    Some("target-host")
+                );
+                assert_eq!(
+                    result.request.status,
+                    crate::AgentCreationRequestStatus::Requested
+                );
+                assert!(result.request.agent_runtime_id.is_none());
+                assert_eq!(
+                    result.request.owner_chat_account_id.as_deref(),
+                    Some("a".repeat(64).as_str())
+                );
+                if let Some(ref first) = request_id {
+                    assert_eq!(&result.request.id, first);
+                }
+                request_id = Some(result.request.id);
+            }
+            // The persisted request, not only the HTTP response, must exclude
+            // another host and a caller with no declared host identity.
+            for host in [Some("wrong-host"), None, Some("target-host")] {
+                let leased = store
+                    .lease_agent_creation_request(LeaseAgentCreationRequestInput {
+                        runner_id: host.unwrap_or("missing-host").into(),
+                        source_host_id: host.map(String::from),
+                        lease_token: "api-canary-lease".into(),
+                        lease_seconds: Some(300),
+                        runner_capacity: None,
+                        now: None,
+                    })
+                    .await
+                    .unwrap();
+                if host == Some("target-host") {
+                    assert_eq!(Some(leased.unwrap().request.id), request_id);
+                } else {
+                    assert!(leased.is_none());
+                }
+            }
+        })
+        .await;
+    }
+
+    #[tokio::test]
     async fn core_api_rejects_tier_mismatch_without_consuming_launch_code() {
         with_isolated_postgres(|db| async move {
             let store = db.store.clone();

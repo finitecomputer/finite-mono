@@ -21,6 +21,14 @@ bindings under `canary_host_reservations`, including unused/expired/revoked
 codes, their batch ids and issuers. A database before migration 0026 reports an
 empty reservation list. Keep source Telegram bots alive.
 
+Before issuing or redeeming a code, complete the lat2 deploy helper's running
+executable verification. A system closure path, configured unit, changed PID,
+or HTTP health response alone is insufficient: the September 15 attempt ran
+old Core after an apparently successful activation and launched on lat4.
+Treat any executable mismatch as a failed deployment. Correct the exact service
+under the reviewed deployment boundary, then repeat canonical status and
+executable verification before continuing.
+
 Issue a one-code Standard batch in the signed-in admin dashboard. Save its
 one-time plaintext privately; do not put it in command arguments, logs, or git.
 Record the code **id**, batch id, and the issuer's existing Core-linked WorkOS
@@ -48,8 +56,13 @@ or an inference from available capacity. It does not drain existing-runtime
 lifecycle operations. Broader capacity release is a separate reviewed change;
 this canary command intentionally has no release or retarget switch.
 
-Redeem the code in the regular new-agent form. Confirm the pending request
-names the intended host, then undrain only that host at its one-runtime ceiling.
+Redeem the code in the regular new-agent form while the target remains drained.
+Use the reservation's `creation_request_id` to identify the exact request. Require
+`request_status=requested`, the intended `request_target_source_host_id`, and
+empty `request_runner_id`, `agent_runtime_id`, and `actual_source_host_id`.
+A missing request, missing target, existing claim, or different host stops the
+procedure. Preserve the records for investigation. Only after those checks pass,
+undrain that host at its one-runtime ceiling.
 Verify the exact resulting Runtime, identity readiness and a real Chat reply.
 Re-drain after the claim/test. This proves launch for an existing account;
 it does not prove fresh account enrollment or the eventual fleet capacity.

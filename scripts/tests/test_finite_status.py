@@ -60,7 +60,7 @@ class FiniteStatusTests(unittest.TestCase):
                 "__FINITE_STATUS_DISTRIBUTION__",
                 "finite-lat-1,v2,1",
                 "__FINITE_STATUS_CANARY_HOST_RESERVATIONS__",
-                "finite-lat-5,code-canary,batch-canary,workos-operator,,f,f",
+                "finite-lat-5,code-canary,batch-canary,workos-operator,org-canary,f,f,request-done,project-done,running,,runner-4,runtime-done,finite-lat-4",
                 "__FINITE_STATUS_AGENT_CREATION_REQUESTS__",
                 "request-canary,project-canary,Lat5 Canary,requested,finite-lat-5,,",
                 "__FINITE_STATUS_RUNTIMES__",
@@ -73,6 +73,11 @@ class FiniteStatusTests(unittest.TestCase):
         ) as run:
             result = finite_status.psql_query_sets({})
         self.assertEqual(result["canary_host_reservations"][0]["batch_id"], "batch-canary")
+        reservation = result["canary_host_reservations"][0]
+        # Completed misplaced launches remain visible after leaving the queue.
+        self.assertEqual(reservation["request_status"], "running")
+        self.assertEqual(reservation["request_target_source_host_id"], "")
+        self.assertEqual(reservation["actual_source_host_id"], "finite-lat-4")
         self.assertEqual(result["agent_creation_requests"][0]["target_source_host_id"], "finite-lat-5")
         self.assertEqual(result["agent_creation_requests"][0]["status"], "requested")
         self.assertEqual(len(result["runtimes"]), 1)
