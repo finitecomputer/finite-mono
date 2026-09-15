@@ -130,7 +130,23 @@ impl TestServer {
         single_origin_git: bool,
         viewer_session_service_token: Option<&str>,
     ) -> TestServer {
-        let data_dir = tempfile::tempdir().unwrap();
+        Self::start_in(
+            tempfile::tempdir().unwrap(),
+            allowed_pubkey,
+            git_auto_reconcile,
+            single_origin_git,
+            viewer_session_service_token,
+        )
+        .await
+    }
+
+    async fn start_in(
+        data_dir: tempfile::TempDir,
+        allowed_pubkey: Option<&str>,
+        git_auto_reconcile: bool,
+        single_origin_git: bool,
+        viewer_session_service_token: Option<&str>,
+    ) -> TestServer {
         let mut store = Store::open(&data_dir.path().join("registry.db")).unwrap();
         if let Some(allowed_pubkey) = allowed_pubkey {
             store
@@ -146,10 +162,17 @@ impl TestServer {
 
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
+        let cookie_path = data_dir.path().join("cookie-secret");
+        if !cookie_path.exists() {
+            std::fs::write(&cookie_path, finitesites_proto::hex::encode(&[9u8; 32])).unwrap();
+        }
+        let cookie_secret =
+            finitesites_proto::hex::decode32(std::fs::read_to_string(cookie_path).unwrap().trim())
+                .unwrap();
         let engine = Engine::new(
             store,
             blobs,
-            [9u8; 32],
+            cookie_secret,
             EngineConfig {
                 base_domain: BASE_DOMAIN.to_string(),
                 site_url_scheme: "http".to_string(),
@@ -3119,6 +3142,94 @@ async fn git_http_clone_and_push_with_minted_credential() {
         assert!(llms.contains("git push origin main"));
     });
     task.await.unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn restored_site_preserves_editor_credentials_and_publishes_without_changing_source() {
+    let user_pubkey = finitesites_proto::event::pubkey_for_secret(&user_secret()).unwrap();
+    let source = TestServer::start(&user_pubkey).await;
+    let (source, restored_data, credential, config) = tokio::task::spawn_blocking(move || {
+        let body = serde_json::to_vec(&project_init_request(false)).unwrap();
+        let created: ProjectInitResponse = json_body(
+            source
+                .signed(&user_secret(), "POST", "/api/v2/projects/init", Some(&body))
+                .unwrap(),
+        );
+        let credential = mint_skyler_git_credential(&source);
+        push_project_files(
+            &source,
+            &credential,
+            &created.finite_toml,
+            "main",
+            &[("index.html", "<h1>original version</h1>")],
+            "original",
+        );
+        wait_for_active_version(&source, "finitechat-native-mockup", Some(1));
+        wait_for_pending_git_events(&source, 0);
+        let backup_parent = tempfile::tempdir().unwrap();
+        let repository = backup_parent.path().join("backup");
+        let receipt =
+            finitesitesd::backup::capture(source.data_dir(), &repository, now_unix()).unwrap();
+        let restored_data = tempfile::tempdir().unwrap();
+        // Reserve a unique test path, then remove only its empty placeholder.
+        std::fs::remove_dir(restored_data.path()).unwrap();
+        finitesitesd::backup::restore(&repository, &receipt.id, restored_data.path()).unwrap();
+        (source, restored_data, credential, created.finite_toml)
+    })
+    .await
+    .unwrap();
+    // No new publish grant, key registration, or credential mint on the restore.
+    let restored = TestServer::start_in(restored_data, None, true, false, None).await;
+    tokio::task::spawn_blocking(move || {
+        assert!(matches!(
+            restored.site_get("finitechat-native-mockup", "/", restored.port()),
+            Err(ureq::Error::Status(401, _))
+        ));
+        push_project_files(
+            &restored,
+            &credential,
+            &config,
+            "main",
+            &[("index.html", "<h1>restored second version</h1>")],
+            "after recovery",
+        );
+        wait_for_active_version(&restored, "finitechat-native-mockup", Some(2));
+        let sharing = serde_json::to_vec(&SharingRequest {
+            visibility: Some("public".into()),
+            confirm_public: true,
+            add_emails: vec![],
+            remove_emails: vec![],
+            add_npubs: vec![],
+            remove_npubs: vec![],
+        })
+        .unwrap();
+        restored
+            .signed(
+                &user_secret(),
+                "POST",
+                "/api/v2/projects/finitechat-native/site/sharing",
+                Some(&sharing),
+            )
+            .unwrap();
+        assert_eq!(
+            restored
+                .site_get("finitechat-native-mockup", "/", restored.port())
+                .unwrap()
+                .into_string()
+                .unwrap(),
+            "<h1>restored second version</h1>"
+        );
+        assert_eq!(
+            project_site_status(&source, "finitechat-native-mockup").active_version,
+            Some(1)
+        );
+        assert!(matches!(
+            source.site_get("finitechat-native-mockup", "/", source.port()),
+            Err(ureq::Error::Status(401, _))
+        ));
+    })
+    .await
+    .unwrap();
 }
 
 #[tokio::test(flavor = "multi_thread")]

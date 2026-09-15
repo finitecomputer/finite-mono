@@ -1473,6 +1473,7 @@ dependencies = [
  "http-body-util",
  "hyper",
  "hyper-util",
+ "libc",
  "pulldown-cmark",
  "serde",
  "serde_json",

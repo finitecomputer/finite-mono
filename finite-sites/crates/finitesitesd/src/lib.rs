@@ -15,6 +15,7 @@
 //! cookie secret, and dev-mail outbox live under that directory.
 
 pub mod api;
+pub mod backup;
 pub mod content_type;
 pub mod git;
 pub mod limiter;
@@ -75,6 +76,7 @@ pub fn run(args: Vec<String>) -> Result<(), String> {
         "delete-site" => delete_site(&args[1..]),
         "pre-user-reset" => pre_user_reset(&args[1..]),
         "git-post-receive" => git_post_receive(),
+        "backup" => backup_command(&args[1..]),
         "--version" | "-V" | "version" => version(&args[1..]),
         "--help" | "help" => {
             println!("{}", usage());
@@ -98,8 +100,50 @@ fn usage() -> String {
      finitesitesd disable-site --data DIR SITE_NAME\n  \
      finitesitesd delete-site --data DIR SITE_NAME --confirm-delete-site yes\n  \
      finitesitesd pre-user-reset --data DIR --confirm-wipe-product-data yes\n  \
-     finitesitesd git-post-receive"
+     finitesitesd git-post-receive\n  \
+     finitesitesd backup capture --data DIR --repository DIR\n  \
+     finitesitesd backup restore --repository DIR --point SHA256 --target NEW_DIR"
         .to_string()
+}
+
+fn backup_command(args: &[String]) -> Result<(), String> {
+    let Some((action, args)) = args.split_first() else {
+        return Err("backup requires capture or restore".into());
+    };
+    let allowed: &[&str] = match action.as_str() {
+        "capture" => &["data", "repository"],
+        "restore" => &["repository", "point", "target"],
+        _ => return Err("backup requires capture or restore".into()),
+    };
+    let (flags, positionals) = parse_flags(args)?;
+    if !positionals.is_empty()
+        || flags.len() != allowed.len()
+        || flags
+            .iter()
+            .any(|(name, _)| !allowed.contains(&name.as_str()))
+    {
+        return Err("unexpected or duplicate backup arguments".into());
+    }
+    let value = |name| flag_value(&flags, name).ok_or_else(|| format!("--{name} is required"));
+    let repository = Path::new(value("repository")?);
+    match action.as_str() {
+        "capture" => {
+            let receipt =
+                backup::capture(Path::new(value("data")?), repository, server::now_unix())
+                    .map_err(|error| error.to_string())?;
+            println!(
+                "{}",
+                serde_json::to_string(&receipt).map_err(|error| error.to_string())?
+            );
+        }
+        "restore" => {
+            backup::restore(repository, value("point")?, Path::new(value("target")?))
+                .map_err(|error| error.to_string())?;
+            println!("{}", serde_json::json!({"restored": true}));
+        }
+        _ => unreachable!("action was validated"),
+    }
+    Ok(())
 }
 
 fn version(args: &[String]) -> Result<(), String> {
