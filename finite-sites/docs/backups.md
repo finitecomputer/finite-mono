@@ -1,6 +1,6 @@
 # Sites backup implementation status
 
-The selected design is [revision backups with shared-state checkpoints](adr/0029-revision-backups-with-shared-state-checkpoints.md).
+The selected design is [revision backups with shared-state checkpoints](adr/0030-revision-backups-with-shared-state-checkpoints.md).
 Tracking: [FIN-54](https://linear.app/finitecomputer/issue/FIN-54).
 
 ## Local foundation

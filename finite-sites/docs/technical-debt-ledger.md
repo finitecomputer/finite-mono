@@ -46,7 +46,7 @@ select the dev mailer with `--mailer dev`; omitting the flag is an error.
 - **Source**: local v1; no object storage running.
 - **Risk**: single-disk durability for all site content and the registry.
 - **Proof**: `crates/finitesites-blob/src/lib.rs` writes under `--data`.
-- **Delete condition**: ADR 0029's S3 revision backups and shared-state
+- **Delete condition**: ADR 0030's S3 revision backups and shared-state
   checkpoints are deployed and the complete Recovery Set has restored onto an
   empty target. The local operator commands in `docs/backups.md` do not close
   this debt or provide independent durability.
@@ -110,8 +110,8 @@ acknowledgement.
 ## 11. Retained legacy viewer-session exchange
 
 - **Boundary**: dashboard account previews select one of two fixed configured
-  Sites origins using the existing allowed site hostname distinction. Legacy
-  apps/documents retain their registry; v2 static sites use theirs. No retry
+  Sites origins using the existing allowed site hostname distinction. Until
+  cutover, legacy outputs retain their registry; v2 static sites use theirs. No retry
   across registries, new roster, or grant copy is introduced.
 - **Delete condition**: remove legacy selection and request spelling after
   legacy previews and Hosted Chat requester consumers are retired. Until then,
@@ -119,7 +119,7 @@ acknowledgement.
 - **Contract**: [ADR 0029](adr/0029-account-session-viewer-bridge.md).
   Production cutover requires separate authorization.
 
-## 11. Local backup Git checkpoint eligibility is conservative
+## 12. Local backup Git checkpoint eligibility is conservative
 
 - **Source**: `git_ref_events` deduplicates old/new transitions and records
   them after Git updates refs. It is not an authoritative per-ref cursor.
