@@ -1,0 +1,59 @@
+name: crate2nix prototype benchmark
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - infra/nixos/crate2nix-prototype/**
+      - .github/workflows/crate2nix-prototype.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: crate2nix-prototype-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  benchmark:
+    name: Package benchmark (${{ matrix.engine }})
+    runs-on: depot-ubuntu-24.04
+    timeout-minutes: 90
+    strategy:
+      fail-fast: false
+      matrix:
+        engine: [crane, crate2nix]
+    env:
+      NIX_CONFIG: |
+        access-tokens = github.com=${{ github.token }}
+        substituters = https://cache.nixos.org
+    steps:
+      - uses: actions/checkout@v4
+      - uses: DeterminateSystems/nix-installer-action@v16
+      - name: Record runner resources
+        run: |
+          lscpu
+          free -h
+          df -h
+      - name: Compare initial build and local rebuilds
+        env:
+          BENCHMARK_ENGINE: ${{ matrix.engine }}
+        run: |
+          infra/nixos/crate2nix-prototype/benchmark "$BENCHMARK_ENGINE" \
+            --output "$RUNNER_TEMP/crate2nix-benchmark"
+      - name: Upload timings and diagnostic logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: crate2nix-benchmark-${{ matrix.engine }}
+          if-no-files-found: warn
+          path: |
+            ${{ runner.temp }}/crate2nix-benchmark/*.json
+            ${{ runner.temp }}/crate2nix-benchmark/*.md
+            ${{ runner.temp }}/crate2nix-benchmark/*.log
+            ${{ runner.temp }}/crate2nix-benchmark/*.stdout
+            ${{ runner.temp }}/crate2nix-benchmark/sources/*.json
+            ${{ runner.temp }}/crate2nix-benchmark/sources/*.log
+            ${{ runner.temp }}/crate2nix-benchmark/sources/*.stderr
+            ${{ runner.temp }}/crate2nix-benchmark/sources/*.txt

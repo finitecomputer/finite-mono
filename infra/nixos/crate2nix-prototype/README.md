@@ -103,6 +103,35 @@ or treat the successful library build as feature-equivalence proof.
 
 ## Why it can help CI
 
+### Draft PR benchmark
+
+The `crate2nix prototype benchmark` workflow runs automatically on draft PRs
+touching this prototype. Its two independent Depot jobs build `finitesitesd`
+and unrelated `finite-saas-core` using Crane and crate2nix, respectively.
+Each measures initial build, identical local rebuild, Sites source edit, and
+Sites dependency addition. Results appear in the Actions job summaries and
+downloadable timing/diagnostic artifacts. The normal repository CI also runs.
+
+Both jobs allow only the public Nix cache, use eight Nix jobs/eight cores per
+job, and record runner resources. Production cached service outputs would
+otherwise give Crane an advantage over the unseeded candidate. These are
+cache-assisted initial builds and subsequent warm-local-store rebuilds, not
+fresh-runner candidate binary-cache tests. Compiler versions match production;
+the implementations' default compiler flags and scheduling still differ.
+No candidate outputs are pushed to the production binary cache.
+
+Run the same benchmark on a disposable local machine with:
+
+```sh
+infra/nixos/crate2nix-prototype/benchmark crate2nix --output /absolute/new/directory
+```
+
+Use `crane` for the other implementation. Existing local artifacts can affect
+timings; CI's separate jobs are the intended comparison. This is a bounded
+two-service packaging experiment, not a full-fleet compatibility gate.
+
+### Scope of the expected benefit
+
 `infra/nixos/packages.nix` includes the root Cargo.lock in every dependency
 bundle's dummy source and uses a vendor directory derived from that lockfile.
 The Nix service package lane builds eight bundles and then 13 package outputs.
