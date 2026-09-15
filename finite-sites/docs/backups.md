@@ -1,6 +1,10 @@
 # Sites backup implementation status
 
 The selected design is [revision backups with shared-state checkpoints](adr/0030-revision-backups-with-shared-state-checkpoints.md).
+The selected transport is [Borg over SSH to rsync.net](adr/0031-borg-on-existing-rsync-net.md),
+replacing S3. The [operator procedure](../../infra/runbooks/sites-borg-recovery.md)
+reuses native Borg commands and existing credential custody; it does not copy
+live SQLite or Git state with rsync.
 Tracking: [FIN-54](https://linear.app/finitecomputer/issue/FIN-54).
 
 ## Local foundation
@@ -91,27 +95,36 @@ checks that an original viewer cookie still works and revocation still applies.
 
 The workspace gate is `scripts/with-dev-env just test`, which supplies the
 isolated Postgres environment required by Core tests. Local macOS success is
-not Linux, AWS, Fly, or production recovery qualification.
+not Linux, rsync.net, Fly, or production recovery qualification.
+
+The Nix development and Rust CI shells include Borg. The `borg_restore_*`
+application test captures through the operator CLI, creates a native encrypted
+Borg archive, exports its repokey, removes the original local checkpoint and
+writer's Borg client state, and extracts using a fresh client. It then restores
+through the operator CLI and proves private serving, original editor credential
+reuse, publishing Version 2, and owner-controlled sharing without changing the
+source. All credentials and repositories in this test are synthetic and local.
 
 ## Still required before production
 
 - Revision-triggered durable work tracking and background execution, including
   source-only Git updates, retry/backoff, missed-work reconciliation, and an
   authoritative writer-coordinated Git checkpoint boundary.
-- S3 transport with independently recoverable credentials, client-side
-  encryption/key custody, exact-version receipts, and tested retention.
+- Qualify the dedicated Sites Borg repository, pinned SSH access and native
+  encryption with independently recoverable credentials/key export. Record the
+  archive ID and Sites point ID, and test retention before enabling it.
 - Shared-state scheduling and dependency-aware retention. Do not configure an
   object-age lifecycle that deletes blobs needed by newer recovery points.
 - Bounded source-host resource use, concurrency/crash qualification, freshness
   and failure reporting through `scripts/finite-status`, and an independent
   alert path.
-- S3 contract tests and an actual remote restore onto an empty Fly volume,
+- An actual rsync.net/Borg restore onto an empty Fly volume,
   including the original publisher's clone/push/publish flow and preserved
   permissions. Local tests are not off-host recovery proof.
 - Independently recoverable runtime configuration, mail/service credentials,
   encryption keys, and image access. These are not all files in the Sites data
   directory; the local capture includes the cookie key, not Fly secret values.
 
-No production service, AWS resource, CLI fleet pin, DNS record, or migration
+No production service, remote backup repository, CLI fleet pin, DNS record, or migration
 state is changed by implementing these commands. Option A / Latitude remains
 intact. A local repository on the serving volume is not an independent backup.

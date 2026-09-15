@@ -341,6 +341,7 @@
           rustToolchain = pkgs.rust-bin.fromRustupToolchainFile ./rust-toolchain.toml;
           rustCiToolchain = pkgs.rust-bin.fromRustupToolchainFile ./rust-toolchain.toml;
           rustBasePackages = with pkgs; [
+            borgbackup
             curl
             git
             jq

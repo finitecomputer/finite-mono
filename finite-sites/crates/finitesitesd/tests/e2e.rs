@@ -6,6 +6,9 @@
 // HTTP statuses; its size does not matter in a test binary.
 #![allow(clippy::result_large_err)]
 
+#[path = "support/borg.rs"]
+mod borg;
+
 use std::collections::BTreeMap;
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
@@ -3137,6 +3140,15 @@ async fn git_http_clone_and_push_with_minted_credential() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn restored_site_preserves_editor_credentials_and_publishes_without_changing_source() {
+    verify_recovered_publishing(false).await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn borg_restore_preserves_editor_credentials_and_publishes_without_changing_source() {
+    verify_recovered_publishing(true).await;
+}
+
+async fn verify_recovered_publishing(through_borg: bool) {
     let user_pubkey = finitesites_proto::event::pubkey_for_secret(&user_secret()).unwrap();
     let source = TestServer::start(&user_pubkey).await;
     let (source, restored_data, credential, config) = tokio::task::spawn_blocking(move || {
@@ -3157,14 +3169,18 @@ async fn restored_site_preserves_editor_credentials_and_publishes_without_changi
         );
         wait_for_active_version(&source, "finitechat-native-mockup", Some(1));
         wait_for_pending_git_events(&source, 0);
-        let backup_parent = tempfile::tempdir().unwrap();
-        let repository = backup_parent.path().join("backup");
-        let receipt =
-            finitesitesd::backup::capture(source.data_dir(), &repository, now_unix()).unwrap();
         let restored_data = tempfile::tempdir().unwrap();
         // Reserve a unique test path, then remove only its empty placeholder.
         std::fs::remove_dir(restored_data.path()).unwrap();
-        finitesitesd::backup::restore(&repository, &receipt.id, restored_data.path()).unwrap();
+        if through_borg {
+            borg::restore_through_borg(source.data_dir(), restored_data.path());
+        } else {
+            let backup_parent = tempfile::tempdir().unwrap();
+            let repository = backup_parent.path().join("backup");
+            let receipt =
+                finitesitesd::backup::capture(source.data_dir(), &repository, now_unix()).unwrap();
+            finitesitesd::backup::restore(&repository, &receipt.id, restored_data.path()).unwrap();
+        }
         (source, restored_data, credential, created.finite_toml)
     })
     .await
