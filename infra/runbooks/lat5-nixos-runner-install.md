@@ -319,9 +319,10 @@ permission to open cohort capacity. Step 4 remains outstanding.
 
 Use an explicit test account to prove enrollment, Agent admission, launch,
 identity readiness and a Chat reply. Verify the actual destination through
-the supported placement path: a Launch Code grants entitlement and does not
-itself select lat5. Establish this path before inviting TRF IT to create the
-cohort. Begin with one canary, then qualify the intended workload in stages.
+the [targeted canary procedure](targeted-agent-canary.md): an ordinary Launch
+Code grants entitlement without selecting a host; the operator must bind the
+unused canary code to lat5 before redemption. Keep lat5 reserved for targeted
+creation. Establish this path before inviting TRF IT to create the cohort. Begin with one canary, then qualify the intended workload in stages.
 The earlier 24–28-runtime estimate was for the advertised 128 GB hardware
 and is superseded. The captured host has 192 GB, like lat4. Start with the
 Nix-owned one-runtime ceiling and drain enabled; lat4's 42-runtime setting is

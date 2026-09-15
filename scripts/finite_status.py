@@ -415,6 +415,24 @@ def psql_query_sets(environment: dict[str, str]) -> dict[str, list[dict[str, Any
             ["source_host_id", "version_label", "count"],
         ),
         (
+            "canary_host_reservations",
+            "SELECT to_regclass('launch_code_host_targets') IS NOT NULL AS finite_has_canary_targets \\gset\n"
+            "\\if :finite_has_canary_targets\n"
+            "SELECT target.source_host_id, target.launch_code_id, code.batch_id, "
+            "batch.created_by_workos_user_id, code.redeemed_customer_org_id, "
+            "batch.revoked_at IS NOT NULL, batch.expires_at <= CURRENT_TIMESTAMP "
+            "FROM launch_code_host_targets target JOIN launch_codes code ON code.id=target.launch_code_id "
+            "JOIN launch_code_batches batch ON batch.id=code.batch_id ORDER BY target.source_host_id;\n"
+            "\\endif",
+            ["source_host_id", "launch_code_id", "batch_id", "issuer_workos_user_id", "redeemed_customer_org_id", "batch_revoked", "batch_expired"],
+        ),
+        (
+            "agent_creation_requests",
+            "SELECT id, project_id, display_name, status, target_source_host_id, runner_id, agent_runtime_id "
+            "FROM agent_creation_requests WHERE status IN ('requested', 'launching') ORDER BY created_at, id;",
+            ["id", "project_id", "display_name", "status", "target_source_host_id", "runner_id", "agent_runtime_id"],
+        ),
+        (
             "runtimes",
             RUNTIME_DETAILS_QUERY,
             [
@@ -1567,6 +1585,8 @@ def build_fleet(
         "recorded_distribution": distribution,
         "distribution_consistent_with_detail_snapshot": distribution_consistent,
         "hosts": host_reports,
+        "canary_host_reservations": core.get("canary_host_reservations", []),
+        "agent_creation_requests": core.get("agent_creation_requests", []),
     }
     if probe is not None:
         report["lifecycle_probe"] = {

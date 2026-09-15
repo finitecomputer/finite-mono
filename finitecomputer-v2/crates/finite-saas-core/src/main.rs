@@ -31,6 +31,20 @@ struct Args {
 
 #[derive(Debug, Subcommand)]
 enum Command {
+    /// Root-only: reserve a registered Kata host and bind one unused Launch Code.
+    #[command(name = "launch-code-target-exact")]
+    LaunchCodeTargetExact {
+        #[arg(long)]
+        code_id: String,
+        #[arg(long)]
+        expected_batch_id: String,
+        #[arg(long)]
+        target_source_host_id: String,
+        #[arg(long)]
+        operator_email: String,
+        #[arg(long)]
+        operator_workos_user_id: String,
+    },
     /// Run the Core HTTP API.
     Serve,
     /// Add or update a promoted runtime artifact record.
@@ -441,6 +455,31 @@ async fn main() -> Result<()> {
             )
             .await?;
             print_json(&artifact)
+        }
+        Command::LaunchCodeTargetExact {
+            code_id,
+            expected_batch_id,
+            target_source_host_id,
+            operator_email,
+            operator_workos_user_id,
+        } => {
+            let auth = CoreAuth::from_env()?;
+            if !auth.has_kata_host(&target_source_host_id) {
+                bail!("target must match an active host-bound Kata credential");
+            }
+            let store = postgres_store_from_env(ImportMode::Commit).await?;
+            store
+                .target_launch_code_exact(
+                    &code_id,
+                    &expected_batch_id,
+                    &target_source_host_id,
+                    &operator_email,
+                    &operator_workos_user_id,
+                )
+                .await?;
+            print_json(
+                &serde_json::json!({"launchCodeId":code_id,"batchId":expected_batch_id,"targetSourceHostId":target_source_host_id,"targetedCreationOnly":true}),
+            )
         }
         Command::RuntimeArtifactRollout(args) => runtime_artifact_rollout_command(args).await,
         Command::RuntimeRetireExact(args) => runtime_retire_exact_command(args).await,

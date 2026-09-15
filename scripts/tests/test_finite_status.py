@@ -59,6 +59,10 @@ class FiniteStatusTests(unittest.TestCase):
                 "artifact-v2,ghcr.io/finite/runtime@sha256:2222,v2,git-v2,0.2.0,2026-08-01T00:00:00Z,",
                 "__FINITE_STATUS_DISTRIBUTION__",
                 "finite-lat-1,v2,1",
+                "__FINITE_STATUS_CANARY_HOST_RESERVATIONS__",
+                "finite-lat-5,code-canary,batch-canary,workos-operator,,f,f",
+                "__FINITE_STATUS_AGENT_CREATION_REQUESTS__",
+                "request-canary,project-canary,Lat5 Canary,requested,finite-lat-5,,",
                 "__FINITE_STATUS_RUNTIMES__",
                 "finite-lat-1,artifact-v2,runtime-a,project-a,machine-a,Agent A,v2,active,restart,launching,online,2026-08-01T13:59:00Z,t,,60",
             ]
@@ -68,6 +72,9 @@ class FiniteStatusTests(unittest.TestCase):
             finite_status, "run_read_only", return_value=completed
         ) as run:
             result = finite_status.psql_query_sets({})
+        self.assertEqual(result["canary_host_reservations"][0]["batch_id"], "batch-canary")
+        self.assertEqual(result["agent_creation_requests"][0]["target_source_host_id"], "finite-lat-5")
+        self.assertEqual(result["agent_creation_requests"][0]["status"], "requested")
         self.assertEqual(len(result["runtimes"]), 1)
         self.assertEqual(result["runtimes"][0]["runtime_artifact_id"], "artifact-v2")
         # The canonical lifecycle state arrives with the row, unmodified.

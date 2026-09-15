@@ -209,6 +209,16 @@ impl CoreAuth {
         &self.workos
     }
 
+    /// Operator placement may name only a live, host-bound Kata credential.
+    pub fn has_kata_host(&self, source_host_id: &str) -> bool {
+        self.runner_credentials.iter().any(|credential| {
+            !credential.revoked
+                && !credential.legacy_kata_compatibility
+                && credential.source_host_id.as_ref() == source_host_id
+                && credential.runner_classes.contains(&RunnerClass::Kata)
+        })
+    }
+
     pub(crate) fn service_api_token(&self) -> &str {
         &self.service_api_token
     }
@@ -1303,6 +1313,46 @@ mod tests {
             runner_classes,
             source_host_id: source_host_id.to_string(),
             revoked,
+        }
+    }
+
+    #[test]
+    fn targeted_creation_requires_an_active_host_bound_kata_credential() {
+        let auth = CoreAuth::new_with_runner_credentials(
+            authenticator(),
+            "service",
+            vec![
+                runner_credential(
+                    "live",
+                    "live-token",
+                    "live-runner",
+                    vec![RunnerClass::Kata],
+                    "live-host",
+                    false,
+                ),
+                runner_credential(
+                    "revoked",
+                    "revoked-token",
+                    "revoked-runner",
+                    vec![RunnerClass::Kata],
+                    "revoked-host",
+                    true,
+                ),
+                runner_credential(
+                    "phala",
+                    "phala-token",
+                    "phala-runner",
+                    vec![RunnerClass::Phala],
+                    "phala-host",
+                    false,
+                ),
+            ],
+            "usage",
+        )
+        .unwrap();
+        assert!(auth.has_kata_host("live-host"));
+        for host in ["revoked-host", "phala-host", "missing-host"] {
+            assert!(!auth.has_kata_host(host));
         }
     }
 
