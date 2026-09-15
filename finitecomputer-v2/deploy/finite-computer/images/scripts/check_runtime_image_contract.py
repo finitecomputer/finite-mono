@@ -44,6 +44,10 @@ CANONICAL_WORKFLOW_ANCHORS = (
     "--report target/runtime-image-durable-smoke/report.json",
     'open("finitechat/target/runtime-image-durable-smoke/report.json")',
     "for bin in $AGENT_RUNTIME_TOOLCHAIN_BINS; do",
+    "weasyprint /tmp/probe.html /tmp/pdf-probes/probe-weasyprint.pdf",
+    "playwright pdf file:///tmp/probe.html /tmp/pdf-probes/probe-playwright.pdf",
+    'subprocess.run(["playwright", "pdf", Path("/tmp/probe.html").resolve().as_uri(), "/tmp/pdf-probes/probe-python.pdf"], check=True)',
+    'pdftotext "$pdf" - | grep -Fq "html2pdf probe"',
 )
 
 WORKFLOW_BUILD_OR_PUBLISH = (

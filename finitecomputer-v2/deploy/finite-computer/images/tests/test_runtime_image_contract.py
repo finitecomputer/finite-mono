@@ -109,6 +109,54 @@ class RuntimeImageContractTests(unittest.TestCase):
         )
         self.assertTrue(any("RUST_TOOLCHAIN" in item for item in self.violations()))
 
+    def test_python_html2pdf_workflow_probe_missing_fails(self) -> None:
+        self.write(
+            CANONICAL_WORKFLOW,
+            "name: Agent Runtime Image\n"
+            "run: docker build . && docker push agent-runtime\n"
+            + "\n".join(
+                anchor
+                for anchor in CANONICAL_WORKFLOW_ANCHORS
+                if "subprocess.run" not in anchor
+            ),
+        )
+        self.assertTrue(any("subprocess.run" in item for item in self.violations()))
+
+    def test_html2pdf_workflow_probes_missing_fails(self) -> None:
+        self.write(
+            CANONICAL_WORKFLOW,
+            "name: Agent Runtime Image\n"
+            "run: docker build . && docker push agent-runtime\n"
+            + "\n".join(
+                anchor
+                for anchor in CANONICAL_WORKFLOW_ANCHORS
+                if anchor
+                not in {
+                    "weasyprint /tmp/probe.html /tmp/pdf-probes/probe-weasyprint.pdf",
+                    "playwright pdf file:///tmp/probe.html /tmp/pdf-probes/probe-playwright.pdf",
+                }
+            ),
+        )
+        self.assertTrue(
+            any(
+                "missing canonical Runtime workflow anchor" in item
+                for item in self.violations()
+            )
+        )
+
+    def test_pdf_text_validation_missing_fails(self) -> None:
+        self.write(
+            CANONICAL_WORKFLOW,
+            "name: Agent Runtime Image\n"
+            "run: docker build . && docker push agent-runtime\n"
+            + "\n".join(
+                anchor
+                for anchor in CANONICAL_WORKFLOW_ANCHORS
+                if "pdftotext" not in anchor
+            ),
+        )
+        self.assertTrue(any("pdftotext" in item for item in self.violations()))
+
     def test_builder_without_rust_toolchain_arg_fails(self) -> None:
         self.write(
             CANONICAL_BUILDER,
