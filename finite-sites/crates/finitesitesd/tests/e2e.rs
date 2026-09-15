@@ -130,23 +130,7 @@ impl TestServer {
         single_origin_git: bool,
         viewer_session_service_token: Option<&str>,
     ) -> TestServer {
-        Self::start_in(
-            tempfile::tempdir().unwrap(),
-            allowed_pubkey,
-            git_auto_reconcile,
-            single_origin_git,
-            viewer_session_service_token,
-        )
-        .await
-    }
-
-    async fn start_in(
-        data_dir: tempfile::TempDir,
-        allowed_pubkey: Option<&str>,
-        git_auto_reconcile: bool,
-        single_origin_git: bool,
-        viewer_session_service_token: Option<&str>,
-    ) -> TestServer {
+        let data_dir = tempfile::tempdir().unwrap();
         let mut store = Store::open(&data_dir.path().join("registry.db")).unwrap();
         if let Some(allowed_pubkey) = allowed_pubkey {
             store
@@ -162,17 +146,10 @@ impl TestServer {
 
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
-        let cookie_path = data_dir.path().join("cookie-secret");
-        if !cookie_path.exists() {
-            std::fs::write(&cookie_path, finitesites_proto::hex::encode(&[9u8; 32])).unwrap();
-        }
-        let cookie_secret =
-            finitesites_proto::hex::decode32(std::fs::read_to_string(cookie_path).unwrap().trim())
-                .unwrap();
         let engine = Engine::new(
             store,
             blobs,
-            cookie_secret,
+            [9u8; 32],
             EngineConfig {
                 base_domain: BASE_DOMAIN.to_string(),
                 site_url_scheme: "http".to_string(),
