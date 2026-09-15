@@ -1682,10 +1682,16 @@ wait "$postgres_pid"
         self.write_managed_command(yaml, process, &[format!("exec {command}")], &[]);
         self.write_environment(
             yaml,
-            &[(
-                "FINITE_SITES_VIEWER_SESSION_TOKEN",
-                self.sites_viewer_session_token.clone(),
-            )],
+            &[
+                (
+                    "FINITE_SITES_VIEWER_SESSION_TOKEN",
+                    self.sites_viewer_session_token.clone(),
+                ),
+                (
+                    "FINITE_SITES_ACCOUNT_LOGIN_URL",
+                    format!("{}/site-auth", self.dashboard_origin()),
+                ),
+            ],
         );
         let _ = writeln!(yaml, "    depends_on:");
         let _ = writeln!(yaml, "      {}:", ManagedProcess::ServiceBinaries);
@@ -2182,6 +2188,10 @@ wait "$postgres_pid"
             ("FC_BRAIN_PUBLIC_ORIGIN", self.dashboard_origin()),
             (
                 "FC_SITES_UPSTREAM_URL",
+                format!("http://127.0.0.1:{}", self.ports.finitesites),
+            ),
+            (
+                "FC_SITES_V2_UPSTREAM_URL",
                 format!("http://127.0.0.1:{}", self.ports.finitesites),
             ),
             ("FC_SITES_ALLOW_LOCAL_OUTPUTS", "1".to_string()),
@@ -3564,6 +3574,10 @@ wait "$postgres_pid"
             ("FINITE_BRAIN_SERVER_URL", self.finite_brain_url()),
             (
                 "FC_SITES_UPSTREAM_URL",
+                format!("http://127.0.0.1:{}", self.ports.finitesites),
+            ),
+            (
+                "FC_SITES_V2_UPSTREAM_URL",
                 format!("http://127.0.0.1:{}", self.ports.finitesites),
             ),
             ("FC_SITES_ALLOW_LOCAL_OUTPUTS", "1".to_string()),
@@ -5199,6 +5213,7 @@ printf '{"finalReply":"ok","html":"ok"}\n' > "$DEVFINITY_AGENT_RUN_OUTPUT_FILE"
         assert!(yaml.contains("FC_BRAIN_UPSTREAM_URL=http://127.0.0.1:18790"));
         assert!(yaml.contains("FC_BRAIN_PUBLIC_ORIGIN=http://127.0.0.1:13002"));
         assert!(yaml.contains("FC_SITES_UPSTREAM_URL=http://127.0.0.1:18789"));
+        assert!(yaml.contains("FC_SITES_V2_UPSTREAM_URL=http://127.0.0.1:18789"));
         assert!(yaml.contains("FC_SITES_ALLOW_LOCAL_OUTPUTS=1"));
         assert!(
             yaml.contains(

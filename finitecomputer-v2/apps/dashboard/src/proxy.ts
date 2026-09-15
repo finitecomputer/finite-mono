@@ -15,6 +15,7 @@ import {
 
 export default async function proxy(request: NextRequest) {
   const status = workosAuthStatus();
+  const siteAuth = request.nextUrl.pathname === "/site-auth";
 
   if (!status.enabled) {
     return NextResponse.next();
@@ -23,6 +24,8 @@ export default async function proxy(request: NextRequest) {
   if (workosProxyBypassPath(request.nextUrl.pathname)) {
     return NextResponse.next();
   }
+
+  if (!status.ready && siteAuth) return NextResponse.next();
 
   if (!status.ready) {
     return NextResponse.json(
@@ -35,7 +38,7 @@ export default async function proxy(request: NextRequest) {
   }
 
   const protectedPath = workosProtectedPath(request.nextUrl.pathname);
-  if (!protectedPath) {
+  if (!protectedPath && !siteAuth) {
     return NextResponse.next();
   }
 
@@ -48,7 +51,7 @@ export default async function proxy(request: NextRequest) {
     },
   });
 
-  if (!session.user && authorizationUrl) {
+  if (!session.user && authorizationUrl && !siteAuth) {
     if (workosInteractiveAuthRequest(request.method, request.headers)) {
       return handleAuthkitHeaders(request, headers, { redirect: authorizationUrl });
     }

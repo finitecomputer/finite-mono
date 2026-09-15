@@ -41,10 +41,11 @@ in
   finite.sites = {
     mode = "static-v2";
     package = finitePackages.finitesitesd;
-    baseDomain = "v2.finite.chat";
-    apiUrl = "https://v2.finite.chat";
-    gitUrl = "https://v2.finite.chat";
+    baseDomain = "finite.site";
+    apiUrl = "https://finite.site";
+    gitUrl = "https://finite.site";
   };
+  systemd.services.finite-saas-sites.environment.FINITE_SITES_ACCOUNT_LOGIN_URL = "https://finite.computer/site-auth";
   finite.sitesV2Backup.enable = true;
 
   services.openssh = {
