@@ -158,6 +158,33 @@ function CategoryIcon({ kind }: { kind: Brain["kind"] }) {
   return <Icon className="size-4 text-muted-foreground" />;
 }
 
+function FolderNames({ brainId, folders }: { brainId: string; folders: string[] }) {
+  const [expanded, setExpanded] = useState(false);
+  const remaining = folders.length - 3;
+  return (
+    <p className="mt-1.5 leading-relaxed text-muted-foreground [overflow-wrap:anywhere]">
+      <span id={`${brainId}-folders`}>
+        {(expanded ? folders : folders.slice(0, 3)).join(" · ")}
+      </span>
+      {remaining > 0 && (
+        <>
+          {" · "}
+          <button
+            type="button"
+            aria-expanded={expanded}
+            aria-controls={`${brainId}-folders`}
+            aria-label={expanded ? "Show fewer folders" : `Show ${remaining} more folders`}
+            className="rounded-sm font-medium text-foreground underline decoration-current/40 underline-offset-4 hover:decoration-current focus-visible:outline-2 focus-visible:outline-offset-2"
+            onClick={() => setExpanded((value) => !value)}
+          >
+            {expanded ? "Show less" : `+${remaining} more`}
+          </button>
+        </>
+      )}
+    </p>
+  );
+}
+
 function BrainCards({ brains }: { brains: Brain[] }) {
   return (
     <div className="space-y-7">
@@ -197,12 +224,7 @@ function BrainCards({ brains }: { brains: Brain[] }) {
                         {brain.folders.length} {brain.folders.length === 1 ? "folder" : "folders"} shown
                       </p>
                       {brain.folders.length > 0 && (
-                        <p className="mt-1.5 leading-relaxed text-muted-foreground [overflow-wrap:anywhere]">
-                          {brain.folders.slice(0, 3).join(" · ")}
-                          {brain.folders.length > 3 && (
-                            <span aria-label={`${brain.folders.length - 3} more folders`}> · +{brain.folders.length - 3}</span>
-                          )}
-                        </p>
+                        <FolderNames brainId={brain.id} folders={brain.folders} />
                       )}
                     </div>
                   )}

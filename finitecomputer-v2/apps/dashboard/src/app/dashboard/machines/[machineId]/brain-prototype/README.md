@@ -12,7 +12,7 @@ Open http://127.0.0.1:13089/dashboard/machines/runtime_web_design/brain-prototyp
 The existing design fixture supplies the dashboard shell and its example agent, Moss.
 The Brain page uses in-memory synthetic memberships and makes no Brain requests.
 
-The selected A cards show each Brain's folder count and up to three folder names, followed by `+N` for the remainder. “Folders shown” refers to the metadata visible to the selected identity; it excludes linked folders and does not measure local sync. Sample agent and human views have different folder visibility. These are example names and counts, not live inventory.
+The selected A cards show each Brain's folder count and up to three folder names. Click or keyboard-activate `+N more` to expand all names in the card; `Show less` collapses them. “Folders shown” refers to the metadata visible to the selected identity; it excludes linked folders and does not measure local sync. Sample agent and human views have different folder visibility. These are example names and counts, not live inventory.
 
 Use the preview controls to change identity and inspect empty, unavailable, stale, access-lost, and unavailable-folder-detail states. Missing folder details preserve the Brain's name and role without displaying a false zero count. Changing identity clears the displayed result before loading the new example. Refresh shows loading and updates the successful-fetch time; the failure scenarios remain failures until another scenario is selected. Expand “Prototype state” for the full example state.
 
