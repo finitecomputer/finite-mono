@@ -127,10 +127,30 @@ scripts/with-dev-env node finite-sites/experiments/vercel/browser-test.mjs
 
 ## Wildcard configuration
 
-The router supports one-label `{site}.{POC_SITE_BASE_DOMAIN}` routing. The live
-proof currently uses explicit Vercel-provided hostnames to avoid production DNS
-changes. Configure `siteBaseDomain` and attach a wildcard domain/certificate to
-this same project to exercise live wildcard DNS. Exact alias overrides are in
+The live wildcard is `*.sites-poc.lwn.lol`, attached once to the same shared
+project. Vercel provides its certificate; the parent zone already uses Vercel
+DNS. `wild-alpha.sites-poc.lwn.lol` and `wild-beta.sites-poc.lwn.lol` have no
+individual Vercel domain entries. The local console includes both Sites.
+
+`deploy.mjs` registers and assigns the wildcard from `siteBaseDomain`. Publishing
+new Sites only changes application data. Exact alias overrides remain in
 `config.json`; existing registered Site hostnames are immutable in this proof.
-Use new synthetic Site names when testing a new suffix. Actual wildcard TLS
-issuance/delegation remains unverified. See [ROUTING-RESEARCH.md](ROUTING-RESEARCH.md).
+New Site names exercise the wildcard without changing those existing origins.
+
+```sh
+scripts/with-dev-env node finite-sites/experiments/vercel/wildcard-test.mjs
+```
+
+The test uses actual DNS, trusted HTTPS and Chromium without certificate or host
+overrides. It proves a random unregistered hostname reaches the router, then
+becomes a private Site without domain registration or platform deployment. It
+also checks sibling storage/cookies, same-site cross-origin request denial,
+revocation and rollback. It leaves both demo viewers revoked and disables its
+random probe Site. Evidence is in `evidence/wildcard-live.json`.
+
+Vercel rejected `*.finite-sites-poc.vercel.app` with HTTP 403: this team's slug
+does not match that project hostname. Vercel's legacy team-slug exception is not
+the supported custom-domain wildcard path; see
+[Vercel's explanation](https://community.vercel.com/t/wildcard-vercel-domain/788).
+Initial certificate issuance is proven; renewal and external DNS delegation
+are not. See [ROUTING-RESEARCH.md](ROUTING-RESEARCH.md).

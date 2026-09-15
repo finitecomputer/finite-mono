@@ -49,6 +49,12 @@ and unknown-host denial where the experiment DNS suffix is available.
   serving process. Original viewer sessions are not restored.
 - Nine input/auth tests and workspace clippy passed. The previous 49 hosted
   gate/version checks still pass after the native path was added.
+- Live wildcard `*.sites-poc.lwn.lol` points to the same project with a trusted
+  wildcard certificate. Eleven checks prove DNS/TLS before Site creation,
+  dynamic publication without Vercel domain entries or another deployment,
+  browser storage and host-only cookie isolation, denial of sibling-origin
+  proof redemption, control-host isolation, and revocation through rollback.
+  See `evidence/wildcard-live.json`. The local console exposes Wild-alpha/Beta.
 
 Evidence: `evidence/fidelity-{native,git,browser,recovery,latency}.json` and browser
 screenshots. Latency is a small workstation sample, not capacity or cost proof.
@@ -60,9 +66,11 @@ screenshots. Latency is a small workstation sample, not capacity or cost proof.
   production WorkOS/dashboard/Hosted Device integration has not been deployed.
   The actual dashboard currently restricts its allowed Site origins; changing
   that boundary requires its own explicit configuration and tests.
-- **Wildcard DNS:** implementation supports it, but a live suffix is awaiting
-  the user's domain choice. Current native Site:
-  `https://finite-sites-poc-native.vercel.app` on the same shared project.
+- **Wildcard operations:** real DNS, initial certificate issuance and request
+  routing are proven on a Vercel-managed zone. Certificate renewal and delegated
+  external DNS remain untested. The native identity fixture remains at
+  `https://finite-sites-poc-native.vercel.app`; wildcard browser tests use the
+  synthetic email issuer and the same serving authorization gate.
 - **Git authorization:** GitHub owns editor access. The scoped publisher is a
   trusted CI actor that checks Git objects locally; the service does not run a
   Git parser to independently attest the uploaded bundle at publish time.

@@ -1,6 +1,22 @@
 # Single-project routing and publishing research
 
-Research date: 2026-09-15. Proposal only; no Vercel or DNS resources changed.
+Research date: 2026-09-15. The original proposal below is followed by a live
+implementation described in [HIGH-FIDELITY.md](HIGH-FIDELITY.md).
+
+## Live wildcard outcome
+
+The project API rejected `*.finite-sites-poc.vercel.app` with HTTP 403. Nested
+`vercel.app` domains have a legacy team-slug exception, rather than general
+project-name wildcard support. [Vercel staff explanation](https://community.vercel.com/t/wildcard-vercel-domain/788)
+
+The user-approved fallback `*.sites-poc.lwn.lol` is attached once to the shared
+project. Its existing parent zone uses Vercel nameservers. Real HTTPS proves a
+trusted certificate containing that wildcard; no nameserver changes or manual
+DNS record edits were needed. Two sibling Sites and a fresh random Site were
+published without individual Vercel domain entries. Browser tests cover the
+same-site sibling boundary that unrelated `vercel.app` aliases could not prove.
+Initial issuance is proven, but renewal and external delegation are not.
+See `evidence/wildcard-live.json` for the deployment and certificate evidence.
 
 ## Recommendation
 

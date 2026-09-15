@@ -2,7 +2,7 @@
   "project": "finite-sites-poc",
   "projectId": "prj_11v04LOfFRaXQgqqeE8RUZmhUKjE",
   "controlHost": "finite-sites-poc.vercel.app",
-  "siteBaseDomain": "",
+  "siteBaseDomain": "sites-poc.lwn.lol",
   "siteHosts": {
     "alpha": "finite-sites-poc-one-alpha.vercel.app",
     "beta": "finite-sites-poc-one-beta.vercel.app",

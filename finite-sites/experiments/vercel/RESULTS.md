@@ -9,8 +9,10 @@ real `fsite` signature interoperability, native sharing/revocation, managed Git
 push publication, and an empty logical target restore of content, permissions,
 and editable source. The older observations below describe the first slice;
 its source-hosting and native-auth omissions are superseded only to the extent
-explicitly proven by the follow-up. Production account login, provider-loss
-recovery, complete Git/CLI compatibility, and live wildcard DNS remain open.
+explicitly proven by the follow-up. Live wildcard DNS/TLS and sibling browser
+isolation now pass on `*.sites-poc.lwn.lol`; see `evidence/wildcard-live.json`.
+Production account login, provider-loss recovery, complete Git/CLI compatibility,
+and certificate renewal remain open.
 
 ## Answer
 

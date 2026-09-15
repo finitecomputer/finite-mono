@@ -1,0 +1,102 @@
+{
+  "at": "2026-09-15T21:15:54.112Z",
+  "project": "finite-sites-poc",
+  "deployment": "finite-sites-33zqblgg1-alexlwn123-s-team.vercel.app",
+  "wildcard": "*.sites-poc.lwn.lol",
+  "origins": [
+    "https://wild-alpha.sites-poc.lwn.lol",
+    "https://wild-beta.sites-poc.lwn.lol"
+  ],
+  "freshSite": "wild-probe-95db4f3ebae6",
+  "addresses": [
+    "216.150.16.129",
+    "216.150.16.193"
+  ],
+  "certificate": {
+    "trusted": true,
+    "subjectAltName": "DNS:*.sites-poc.lwn.lol",
+    "validTo": "Dec 14 20:16:25 2026 GMT",
+    "status": 404
+  },
+  "domains": [
+    "*.sites-poc.lwn.lol",
+    "finite-sites-poc-control.vercel.app",
+    "finite-sites-poc-native.vercel.app",
+    "finite-sites-poc-one-alpha.vercel.app",
+    "finite-sites-poc-one-beta.vercel.app",
+    "finite-sites-poc.vercel.app"
+  ],
+  "publications": [
+    {
+      "site": "wild-probe-95db4f3ebae6",
+      "version": "cf36fa9b1a07c6296d60546710cbcb49e0851a1bc660aeeab71af18977f48aa6",
+      "deployment": "finite-sites-33zqblgg1-alexlwn123-s-team.vercel.app"
+    },
+    {
+      "site": "wild-alpha",
+      "version": "cf36fa9b1a07c6296d60546710cbcb49e0851a1bc660aeeab71af18977f48aa6",
+      "deployment": "finite-sites-33zqblgg1-alexlwn123-s-team.vercel.app"
+    },
+    {
+      "site": "wild-alpha",
+      "version": "30b219c980745f2da63558a1ca595511f2c2c9f04a523078ddecef57159de949",
+      "deployment": "finite-sites-33zqblgg1-alexlwn123-s-team.vercel.app"
+    },
+    {
+      "site": "wild-beta",
+      "version": "cf36fa9b1a07c6296d60546710cbcb49e0851a1bc660aeeab71af18977f48aa6",
+      "deployment": "finite-sites-33zqblgg1-alexlwn123-s-team.vercel.app"
+    },
+    {
+      "site": "wild-beta",
+      "version": "30b219c980745f2da63558a1ca595511f2c2c9f04a523078ddecef57159de949",
+      "deployment": "finite-sites-33zqblgg1-alexlwn123-s-team.vercel.app"
+    }
+  ],
+  "checks": [
+    {
+      "name": "one wildcard attached; no per-Site Vercel domains",
+      "passed": true
+    },
+    {
+      "name": "unregistered random hostname resolves with a trusted wildcard certificate",
+      "passed": true
+    },
+    {
+      "name": "reserved labels reach the router but fail closed",
+      "passed": true
+    },
+    {
+      "name": "fresh Site publication requires no new domain or platform deployment",
+      "passed": true
+    },
+    {
+      "name": "two sibling Sites publish and replay beneath the wildcard",
+      "passed": true
+    },
+    {
+      "name": "real browsers redeem one-use proofs and render private sibling Sites",
+      "passed": true
+    },
+    {
+      "name": "sibling origins have separate storage and host-only Secure HttpOnly cookies",
+      "passed": true
+    },
+    {
+      "name": "same-site sibling cannot read private content or redeem another Site proof",
+      "passed": true
+    },
+    {
+      "name": "site hosts cannot impersonate the control plane",
+      "passed": true
+    },
+    {
+      "name": "rollback changes only one sibling and retains current authorization",
+      "passed": true
+    },
+    {
+      "name": "all wildcard operations leave Vercel domain inventory and deployment unchanged",
+      "passed": true
+    }
+  ]
+}

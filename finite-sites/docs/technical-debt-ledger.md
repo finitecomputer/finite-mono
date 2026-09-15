@@ -23,6 +23,11 @@
   exchange adapter does not authorize a production dashboard rollout. New JS
   crypto uses the audited noble-curves Schnorr implementation and scure-base
   encoding; verification must interoperate with the repository's Rust signer.
+- **Wildcard slice**: `*.sites-poc.lwn.lol` tests real DNS/TLS and same-site
+  sibling origins on the same project. Synthetic wildcard Sites use the email
+  issuer; native identity remains exercised on the original Gamma alias.
+  Probe Sites are disabled after checks, but retained for inspection. Initial
+  wildcard certificate issuance is proven; renewal is not.
 - **Delete condition**: delete the experiment or replace its issuer/publisher
   with the approved Sites contracts before any customer migration. ADR 0028
   remains the production decision. JavaScript is intentional for Vercel's native

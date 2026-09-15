@@ -23,7 +23,7 @@
   },
   "customerData": false,
   "canonicalDnsChanges": false,
-  "wildcardDnsValidated": false,
+  "wildcardDnsValidated": true,
   "retiredProjects": [
     {
       "name": "finite-sites-poc-alpha",
@@ -49,5 +49,19 @@
     "inventory": "Ignored .local-state/restored.json; public proof in evidence/fidelity-recovery.json",
     "providerLossQualified": false
   },
-  "nativeIdentity": "Isolated FINITE_HOME keys under ignored .local-state/native; no production identity copied"
+  "nativeIdentity": "Isolated FINITE_HOME keys under ignored .local-state/native; no production identity copied",
+  "wildcard": {
+    "domain": "*.sites-poc.lwn.lol",
+    "zone": "lwn.lol",
+    "dns": "Existing Vercel nameservers and wildcard DNS; no manual record or nameserver changes",
+    "projectDomainEntry": "Single wildcard attached to finite-sites-poc",
+    "sites": [
+      "wild-alpha",
+      "wild-beta"
+    ],
+    "probeSites": "wild-probe-<random>; disabled after validation, named in evidence/wildcard-live.json",
+    "evidence": "finite-sites/experiments/vercel/evidence/wildcard-live.json",
+    "certificateRenewalValidated": false,
+    "teardown": "Remove only the *.sites-poc.lwn.lol project domain/alias when retiring this experiment; do not delete the lwn.lol zone, existing records, or unrelated domains."
+  }
 }
