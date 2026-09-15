@@ -1,15 +1,13 @@
 # finite-lat-5 setup
 
 Execution plan for [FIN-74](https://linear.app/finitecomputer/issue/FIN-74).
-Status on 2026-09-15: provisioned in Chicago; hardware capture, code review,
-and synthetic storage/boot qualification passed. PR #883 merged as
-`8993d75b0d3e6ba5e9d6497b32bf43192ada3254`. The exact-revision installation
-artifact was built successfully in workflow run
-[34996898901](https://github.com/finitecomputer/finite-mono/actions/runs/34996898901).
-NixOS was installed and booted. First boot exposed a missing WireGuard
-bootstrap key that blocked public networking; recovery is in progress.
-Physical storage/boot verification, overlay admission and launch qualification
-remain open.
+Status on 2026-09-15: **steps 1–2 complete**. The reviewed configuration
+merged in [PR #883](https://github.com/finitecomputer/finite-mono/pull/883)
+and the exact CI artifact is installed. Both physical EFI boot paths,
+fully synchronized mirrors, storage health, and SSH identity are verified.
+The bootstrap credential fix merged in
+[PR #889](https://github.com/finitecomputer/finite-mono/pull/889).
+Overlay/Core admission and launch qualification remain in step 3.
 No Agent Runtime has been created on lat5.
 
 Use lat4's dedicated NixOS/Kata Runner architecture with an empty `/data`.
@@ -151,6 +149,48 @@ host from the same artifact. Ubuntu is disposable; no user state is being
 migrated or erased. Record the resulting closure, healthy arrays, both ESPs,
 SSH reachability, and canonical fleet status before calling steps 1–2 complete.
 
+### Installation receipt — 2026-09-15
+
+| Check | Verified result |
+| --- | --- |
+| Installed revision | `8993d75b0d3e6ba5e9d6497b32bf43192ada3254` |
+| CI artifact | [Run 34996898901](https://github.com/finitecomputer/finite-mono/actions/runs/34996898901), artifact `10409875610` |
+| Artifact ZIP SHA-256 | `e794b85cd92795299adde2e6563da77d7b43f92c17402d56f05cd89bfa1aae21` |
+| Running system | `/nix/store/a0wvpp0irzn622fc3llx24vfx61ijavz-nixos-system-finite-lat-5-26.05.20260719.fd14620` |
+| Kernel | `6.18.39`; KVM device present and cgroups v2 active |
+| SSH host identity | Ed25519 `SHA256:NzeN06mlYWSufL6DRLSzKKyI9XWyZBjabsQZQT+bGDk`, recorded before install and verified after both test boots |
+| Physical ESP A boot | `BootCurrent: 0005`, PARTUUID `c176bf90-d8fd-445a-8588-daaa356b4676` |
+| Physical ESP B boot | `BootCurrent: 0006`, PARTUUID `38edadcb-9ca4-4e87-9153-8aba824551e9` |
+| RAID and storage | Both mirrors idle, two active members each, zero degraded members and mismatches; full storage health service succeeds |
+| Swap and data | 64 GiB active swapfile, zswap 10%, swappiness 20, `/data` project quotas and expected filesystem identity |
+| Admission | `runner.env` absent, Runner service inactive, agent and staging directories empty |
+
+First boot exposed a bootstrap error: `systemd-networkd` failed with
+`243/CREDENTIALS` because its required WireGuard key had been deferred to
+step 3. Latitude rescue mode provided SSH access without reinstalling the
+host. The exact root filesystem was mounted, a newly generated host-specific
+key was staged with root-only permissions and private off-host escrow, and
+normal boot restored networking. The installer now rejects that incomplete
+bootstrap set and malformed or mismatched SSH keys before installation.
+All 24 focused tests, CI checks, and both reviews passed for that correction.
+The installed NixOS closure did not change.
+
+The physical bootloader guard refused both a missing ESP and the wrong ESP
+PARTUUID in private mount namespaces, leaving host mounts unchanged. The
+real storage health service refused readiness during initial synchronization
+and succeeded after both mirrors became idle. Temporary array-specific
+resync limits were restored to the system defaults. The final boot uses
+ESP A; the normal boot order prefers A, then B, then the provider's PXE
+entries and EFI shell. No kernel errors or failed systemd units were present
+in the final boot verification.
+
+Canonical `scripts/finite-status` receipts at 19:20 UTC report lat5 storage
+green. Its overall Runner status remains red/unknown until credentials,
+artifact pin, and Core admission are configured in step 3. Lat2's chat,
+recovery and rollout sections remain green, with lat3 at 31/31 and lat4 at
+27/27 ready runtimes. The pre-existing fleet version-skew status remains red.
+Do not treat OS qualification as permission to create or migrate agents.
+
 ## 3. Install and connect while drained
 
 Run `scripts/finite-status` before the rollout. Record the existing lat2
@@ -166,7 +206,7 @@ substituting the reviewed lat5 identities and artifact tooling. Treat its
 historical migration section as a separate operation.
 
 Stage credentials by name and secure file transfer, with root-only access:
-`runner.env`, `identity-operator.env`, `runtime-secrets.env`,
+`runner.env`, `identity-operator.env` and `runtime-secrets.env`
 under `/etc/finite/`. Retain the WireGuard private key and monitoring
 credentials staged during OS installation. Derive the public key from that
 existing WireGuard key and register it on lat2; do not generate a replacement.
