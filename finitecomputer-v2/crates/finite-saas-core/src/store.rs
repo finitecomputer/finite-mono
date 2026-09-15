@@ -385,7 +385,7 @@ impl CoreStore {
         let blocked: bool = tx.query_one(
             "SELECT EXISTS(SELECT 1 FROM agent_runtimes WHERE source_host_id=$1)
                 OR EXISTS(SELECT 1 FROM agent_creation_requests WHERE (target_source_host_id=$1 OR agent_runtime_id=$2) AND status IN ('requested','launching'))
-                OR EXISTS(SELECT 1 FROM runtime_control_requests WHERE agent_runtime_id=$2 AND status IN ('requested','launching'))",
+                OR EXISTS(SELECT 1 FROM runtime_control_requests WHERE agent_runtime_id=$2 AND status IN ('requested','launching','compute_up','ready'))",
             &[&host, &input.expected_previous_runtime_id],
         ).await.map_err(store_error)?.get(0);
         if blocked {
@@ -15810,13 +15810,16 @@ mod tests {
             assert!(db.retry_targeted_launch_code_exact(&input).await.is_err());
             client.execute("UPDATE launch_code_batches SET revoked_at=NULL, revoked_by_workos_user_id=NULL WHERE id=$1", &[&input.expected_batch_id]).await.unwrap();
             drop(client);
-            let stop = db.request_runtime_stop(RequestRuntimeStopInput {
+            let restart = db.request_runtime_restart(RequestRuntimeRestartInput {
                 verified_email: input.operator_email.clone(), workos_user_id: input.operator_workos_user_id.clone(),
                 project_id: input.expected_previous_project_id.clone(), now: None,
             }).await.unwrap();
-            assert!(db.retry_targeted_launch_code_exact(&input).await.is_err());
             let client = db.connection().await.unwrap();
-            client.execute("UPDATE runtime_control_requests SET status='failed' WHERE id=$1", &[&stop.id]).await.unwrap();
+            for status in ["requested", "launching", "compute_up", "ready"] {
+                client.execute("UPDATE runtime_control_requests SET status=$1 WHERE id=$2", &[&status, &restart.id]).await.unwrap();
+                assert!(db.retry_targeted_launch_code_exact(&input).await.is_err(), "accepted active control status {status}");
+            }
+            client.execute("UPDATE runtime_control_requests SET status='failed' WHERE id=$1", &[&restart.id]).await.unwrap();
             drop(client);
             let another = db.issue_launch_code_batch(IssueLaunchCodeBatchInput {
                 name: "competing retry".into(), code_count: 1, expires_in_hours: Some(1), hosting_tier: Some(HostingTier::Standard),
