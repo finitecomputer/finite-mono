@@ -102,7 +102,9 @@ fn usage() -> String {
      finitesitesd pre-user-reset --data DIR --confirm-wipe-product-data yes\n  \
      finitesitesd git-post-receive\n  \
      finitesitesd backup capture --data DIR --repository DIR\n  \
-     finitesitesd backup restore --repository DIR --point SHA256 --target NEW_DIR"
+     finitesitesd backup restore --repository DIR --point SHA256 --target NEW_DIR\n  \
+     finitesitesd backup capture-s3 --repository DIR --point LOCAL_SHA256 --bucket BUCKET --prefix PREFIX --region REGION [--endpoint-url URL]\n  \
+     finitesitesd backup restore-s3 --point REMOTE_SHA256 --version-id VERSION --target NEW_DIR --bucket BUCKET --prefix PREFIX --region REGION [--endpoint-url URL]"
         .to_string()
 }
 
@@ -110,6 +112,9 @@ fn backup_command(args: &[String]) -> Result<(), String> {
     let Some((action, args)) = args.split_first() else {
         return Err("backup requires capture or restore".into());
     };
+    if matches!(action.as_str(), "capture-s3" | "restore-s3") {
+        return backup::s3::command(action, args);
+    }
     let allowed: &[&str] = match action.as_str() {
         "capture" => &["data", "repository"],
         "restore" => &["repository", "point", "target"],

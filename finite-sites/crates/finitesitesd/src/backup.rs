@@ -13,6 +13,7 @@ use thiserror::Error;
 
 mod git;
 mod install;
+pub mod s3;
 
 #[cfg(test)]
 mod tests;
@@ -27,6 +28,8 @@ pub enum BackupError {
     Json(#[from] serde_json::Error),
     #[error("invalid recovery point: {0}")]
     Invalid(&'static str),
+    #[error("S3 recovery: {0}")]
+    Remote(&'static str),
 }
 
 #[derive(Debug, Serialize, Deserialize)]
