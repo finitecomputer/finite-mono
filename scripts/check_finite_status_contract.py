@@ -175,7 +175,7 @@ def main() -> None:
         raise SystemExit(
             "finite-lat-2 is the app-plane host (ADR 0007); no runner role"
         )
-    for runner_host in ("finite-lat-3", "finite-lat-4"):
+    for runner_host in ("finite-lat-3", "finite-lat-4", "finite-lat-5"):
         if "runner" not in contract["hosts"][runner_host]["roles"]:
             raise SystemExit(f"{runner_host} must keep the runner role")
         require_all(

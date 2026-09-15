@@ -211,6 +211,41 @@
         ];
       };
 
+      lat5Modules = [
+        disko.nixosModules.disko
+        sops-nix.nixosModules.sops
+        revisionModule
+        ./infra/nixos/modules/secrets.nix
+        ./infra/nixos/hosts/finite-lat-5
+      ];
+
+      lat5Unguarded = nixpkgs-lat3.lib.nixosSystem {
+        system = "x86_64-linux";
+        specialArgs = runnerSpecialArgs;
+        modules = lat5Modules;
+      };
+
+      lat5 = nixpkgs-lat3.lib.nixosSystem {
+        system = "x86_64-linux";
+        specialArgs = runnerSpecialArgs // {
+          unguardedInstallBootLoader = lat5Unguarded.config.system.build.installBootLoader;
+        };
+        modules = lat5Modules ++ [ ./infra/nixos/hosts/finite-lat-5/esp-guard.nix ];
+      };
+
+      lat5Kexec = nixpkgs-lat3.lib.nixosSystem {
+        system = "x86_64-linux";
+        modules = [
+          nixos-images.nixosModules.kexec-installer
+          nixos-images.nixosModules.noninteractive
+          {
+            networking.hostName = "finite-lat-5-installer";
+            system.kexec-installer.name = "finite-lat-5-nixos-26.05-kexec";
+            system.stateVersion = "26.05";
+          }
+        ];
+      };
+
       # Dedicated static-only Finite Sites v2 validation host (ADR 0028).
       sitesV2 = nixpkgs-lat3.lib.nixosSystem {
         system = "x86_64-linux";
@@ -412,9 +447,13 @@
             finite-lat-2-kexec = lat2Kexec.config.system.build.kexecInstallerTarball;
             finite-lat-2-nixos-anywhere = nixos-anywhere.packages.x86_64-linux.nixos-anywhere;
             finite-lat-4-system = lat4.config.system.build.toplevel;
+            finite-lat-5-system = lat5.config.system.build.toplevel;
             finite-lat-4-disko = lat4.config.system.build.diskoScript;
+            finite-lat-5-disko = lat5.config.system.build.diskoScript;
             finite-lat-4-kexec = lat4Kexec.config.system.build.kexecInstallerTarball;
+            finite-lat-5-kexec = lat5Kexec.config.system.build.kexecInstallerTarball;
             finite-lat-4-nixos-anywhere = nixos-anywhere.packages.x86_64-linux.nixos-anywhere;
+            finite-lat-5-nixos-anywhere = nixos-anywhere.packages.x86_64-linux.nixos-anywhere;
             finite-sites-v2-system = sitesV2.config.system.build.toplevel;
             finite-monitoring-system = monitoring.config.system.build.toplevel;
           };
@@ -448,6 +487,7 @@
       # and admitted only through
       # infra/runbooks/lat4-nixos-runner-install.md; it starts drained.
       nixosConfigurations.finite-lat-4 = lat4;
+      nixosConfigurations.finite-lat-5 = lat5;
 
       # Dedicated static-only Finite Sites v2 validation host (ADR 0028).
       # The current app-plane hosts keep their canonical edge until cutover.
