@@ -43,6 +43,11 @@ indices. For a simple implementation, insert the content, read it back, then
 apply styles to those observed ranges. Re-read after table or list operations
 that change structure before styling subsequent ranges.
 
+When filling multiple table cells from one read, insert at their observed
+positions in descending document order, or read again between insertions.
+Ascending-position inserts shift the remaining cell positions and can put text
+in the wrong cell.
+
 Use narrow style field masks so a heading or spacing fix preserves unrelated
 properties. Apply changes only to the requested ranges and tab. Check the API
 schema for the specific table, list, paragraph, or text operation being used.
