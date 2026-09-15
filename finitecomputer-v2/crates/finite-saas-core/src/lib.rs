@@ -73,7 +73,9 @@ pub const CORE_SCHEMA_SQL: &str = concat!(
     "\n",
     include_str!("../migrations/0025_account_email_changes.sql"),
     "\n",
-    include_str!("../migrations/0026_launch_code_host_targets.sql")
+    include_str!("../migrations/0026_launch_code_host_targets.sql"),
+    "\n",
+    include_str!("../migrations/0027_launch_code_target_retry.sql")
 );
 pub const RUNTIME_UPGRADE_ROLLBACK_RESCUE_SQL: &str =
     include_str!("../migrations/runtime_upgrade_rollback_rescue.sql");
@@ -1822,6 +1824,23 @@ pub struct AdminRuntimeUpgradeInput {
     pub project_id: String,
     pub target_runtime_artifact_id: String,
     pub now: Option<String>,
+}
+
+/// One retry of a consumed canary code whose untargeted creation completed
+/// on the wrong host. All old identifiers are assertions, never selections.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RetryTargetedLaunchCodeInput {
+    pub code_id: String,
+    pub expected_batch_id: String,
+    pub previous_code_id: String,
+    pub expected_previous_request_id: String,
+    pub expected_previous_project_id: String,
+    pub expected_previous_runtime_id: String,
+    pub expected_previous_source_host_id: String,
+    pub target_source_host_id: String,
+    pub operator_email: String,
+    pub operator_workos_user_id: String,
 }
 
 /// Operator-only upgrade input that binds enqueueing to the exact Runtime
