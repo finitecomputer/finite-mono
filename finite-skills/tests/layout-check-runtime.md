@@ -1,4 +1,4 @@
-# Layout Check promotion test
+# Docs and website layout promotion test
 
 Status: procedure only; not executed. Static validation is not promotion proof.
 
@@ -13,6 +13,11 @@ version (the current baseline expects 0.22.5), and candidate skills commit. Conf
 that the runtime actually exposes the commands and schemas used by the skill.
 If any required operation is unavailable, do not qualify that release.
 
+Run first with only the candidate managed baseline in an isolated agent home,
+then repeat ordinary requests on a customized agent with its user skills
+preserved. Record resolved skill paths; local shadows do not prove canonical
+baseline discovery.
+
 Seed fixtures before the test turn. Give the agent the task and target only,
 without naming the new skill or telling it how to repair the defect. Retain
 redacted tool-call evidence, before/after structure, and inspected screenshots
@@ -22,7 +27,7 @@ or Google exports. Keep raw credentials and document payloads out of git.
 
 1. **Create a Google Doc.** Ask for a short report with a title, section headings,
    bullets, a small table, a long link, and an emoji before a later heading.
-   Pass: both Google Workspace and layout skills are loaded; native styles and
+   Pass: the Google Workspace skill and its Docs reference are loaded; native styles and
    structure are present; the later heading is styled correctly; all requested
    content survives; the saved Google output is inspected after the final edit.
 2. **Repair one tab.** Supply a multi-tab Doc with a named nested target tab,
@@ -46,7 +51,7 @@ or Google exports. Keep raw credentials and document payloads out of git.
    change sharing, or present a reconstructed document as Google output.
 6. **Website layout.** Supply a simple static test site with a long heading and
    fixed-width content overflowing on mobile. Ask for a layout repair. Pass:
-   the layout skill loads, desktop/mobile renderings are inspected, all content
+   the website skill loads, desktop/mobile renderings are inspected, all content
    remains readable, overflow is resolved, and a fresh final view is checked.
 7. **Unrelated request.** Ask for a read-only Gmail lookup. Pass: the agent does
    not invoke layout verification or modify a document.

@@ -11,9 +11,9 @@ reason to hide the first result while the agent repeatedly debates its own taste
 - Keep one server running and reload between edits instead of restarting constantly.
 - Take screenshots at desktop and mobile.
 - Check both functionality and visual quality.
-- For simple one-page static sites, keep browser QA brief and apply
-  `layout-check-finite` before final delivery. Expand interaction testing for
-  richer sites.
+- For simple one-page static sites, keep browser QA brief and complete the
+  website skill's Design Standards check before final delivery. Expand
+  interaction testing for richer sites.
 
 ## Setup
 

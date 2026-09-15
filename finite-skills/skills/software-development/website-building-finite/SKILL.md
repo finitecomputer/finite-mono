@@ -97,9 +97,23 @@ Choose one route, then load the matching references.
 
 ## Design Standards
 
-Load `skill_view("layout-check-finite")` when repairing layout or checking a completed site
-before delivery, including simple static pages. Keep the Fast First Reveal
-brief; run the complete layout check once the site is ready for final delivery.
+For layout repairs and final delivery, including simple static pages:
+
+1. Inspect desktop and mobile renderings after fonts and images load. Scroll
+   through the changed page and check affected navigation/expanded states.
+2. Check readable, complete text; wrapping of long headings and links; consistent
+   spacing; image proportions; and unintended horizontal page scrolling. Wide
+   data tables may use local scrolling while keeping their content accessible.
+3. Fix observed defects with wrapping and responsive sizing, preserving content
+   and readable type. Inspect a fresh rendering of the changed area and its
+   neighbors. Stop after two unsuccessful corrections to the same defect and
+   explain what remains; a clean inspection needs no cosmetic changes.
+4. Report what was actually inspected and any limits. A saved screenshot, DOM
+   text, or passing overflow metric alone is not visual verification. If images
+   are blank or inspection is unavailable, report layout as visually unverified.
+   Check the served version too when deployment is part of the task.
+
+Keep the Fast First Reveal brief; complete this check before final delivery.
 
 - Avoid interchangeable AI-looking layouts.
 - Use expressive typography and intentional spacing.

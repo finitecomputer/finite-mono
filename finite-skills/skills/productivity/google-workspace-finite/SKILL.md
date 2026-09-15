@@ -229,10 +229,31 @@ $GAPI sheets append SHEET_ID "Sheet1!A:C" --values '[["new","row","data"]]'
 
 ### Docs
 
-For creating, editing, or repairing Google Doc formatting, load
-`skill_view("layout-check-finite")` before writing and use it to check the saved result.
-Use native Docs styles through `gws` for writes; the Python command below is
-read-only. A read-only lookup does not require a layout pass.
+For every Doc creation, edit, or formatting repair, complete this sequence.
+Read `references/docs-formatting.md` before constructing writes. The Python
+command below is read-only; use the authenticated `gws` Docs write path.
+
+1. **Read and target.** Read tab content, including nested tabs. Resolve the
+   requested tab; ask if ambiguous. For each batch based on read ranges, include
+   `writeControl.requiredRevisionId` from that read and the operation's explicit
+   tab field. Check these fields in the outgoing request before sending it.
+   If the installed API cannot provide them, stop the edit and report the gap.
+2. **Write native structure.** Use title/heading styles, real lists and table
+   cells, narrow style masks, and UTF-16 ranges from the read structure. Preserve
+   content, template, unrelated styles, and sharing. After structural changes,
+   read again before computing later ranges. A revision rejection requires a
+   fresh read; an uncertain write requires inspecting saved state before retry.
+3. **Read back.** Verify text, headings, lists, every table cell, and target tab.
+   An API success alone does not finish the task.
+4. **Inspect the saved layout.** Open the saved Doc or render a Google-produced
+   PDF export and inspect the images. Check every page of a short Doc, including
+   table/page breaks, wrapping, spacing, and clipping. Fix observed defects and
+   inspect fresh output; stop after two unsuccessful corrections to one defect.
+5. **Report coverage.** Return the link, what was checked, and any limitation.
+   If rendering is unavailable, say visual layout is unverified. Creating a
+   screenshot or extracting text alone is not visual inspection.
+
+A read-only lookup does not require a layout pass.
 
 ```bash
 $GAPI docs get DOC_ID
