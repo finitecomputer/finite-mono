@@ -11,6 +11,11 @@ Sites, account login, customer data and ADR 0028 are unchanged. See
 
 ## Current demo
 
+Open **https://admin.sites-poc.lwn.lol/** for a read-only, database-backed list
+of active published wildcard Sites. This synthetic catalog publicly shows only
+names and links; disabled and unpublished Sites are omitted. It has no admin
+actions or sign-in controls. Site content keeps its existing authorization gate.
+
 | Site | URL | Purpose |
 | --- | --- | --- |
 | Wild-alpha | https://wild-alpha.sites-poc.lwn.lol | Private viewing, version switching and revocation |
@@ -18,8 +23,9 @@ Sites, account login, customer data and ADR 0028 are unchanged. See
 | Gamma | https://gamma.sites-poc.lwn.lol | Native Finite identity, managed Git publication and recovery |
 
 The control API stays at `https://finite-sites-poc.vercel.app`; it is infrastructure,
-not a served Site. The router accepts only this exact control hostname or a valid
-one-label Site under the wildcard. No per-Site aliases or alias override exist.
+not a served Site. The router accepts this exact control hostname, the reserved
+`admin` wildcard host, or a valid one-label Site under the wildcard. No per-Site
+aliases or alias override exist.
 
 Start the local console, then open http://127.0.0.1:4319/:
 

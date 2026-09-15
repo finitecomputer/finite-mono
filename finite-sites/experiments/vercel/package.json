@@ -5,7 +5,7 @@
   "engines": { "node": "24.x" },
   "scripts": {
     "demo": "node demo.mjs",
-    "test": "node --test model.test.mjs native-model.test.mjs publish.test.mjs",
+    "test": "node --test model.test.mjs native-model.test.mjs publish.test.mjs admin.test.mjs",
     "browser-test": "node browser-test.mjs"
   },
   "devDependencies": { "playwright": "1.63.0" }

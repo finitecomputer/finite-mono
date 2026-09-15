@@ -30,6 +30,11 @@
   with the approved Sites contracts before any customer migration. ADR 0028
   remains the production decision. JavaScript is intentional for Vercel's native
   Node runtime; this experiment does not change the Rust daemon or CLI.
+- **Admin catalog slice**: the read-only `admin` wildcard host publicly lists
+  active synthetic Site names and links. It exposes no owners, grants, content,
+  or mutation controls. Add authenticated, role-scoped administration before
+  any real tenant metadata enters this experiment; delete this public catalog
+  at that boundary.
 
 Tolerated shortcuts. Each item has an observed source, a risk, the first
 proof of the shortcut in code, and a delete condition. A shortcut without a

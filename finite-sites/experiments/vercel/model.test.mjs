@@ -2,10 +2,12 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { manifest, resolveHost, hash, validPath } from './app/lib/model.js';
 const env={POC_CONTROL_HOST:'control.example.com',POC_SITE_BASE_DOMAIN:'sites.example.net'};
-test('routing only accepts the control host or one valid wildcard tenant label',()=>{
+test('routing separates control, admin, and valid wildcard tenant labels',()=>{
   assert.deepEqual(resolveHost('beta.sites.example.net',env),{site:'beta',host:'beta.sites.example.net'});
   assert.equal(resolveHost('ALPHA.sites.example.net',env).site,'alpha');
   assert.equal(resolveHost('control.example.com',env).control,true);
+  assert.deepEqual(resolveHost('admin.sites.example.net',env),{admin:true,host:'admin.sites.example.net'});
+  assert.equal(resolveHost('admin.sites.example.net.attacker.com',env),null);
   for (const host of ['alpha.beta.sites.example.net','alpha.sites.example.net.attacker.com','sites.example.net','api.sites.example.net','alpha-test.vercel.app','alpha-test-other.vercel.app','unmapped.vercel.app','beta.sites.example.net:443','-abc.sites.example.net','abc-.sites.example.net']) assert.equal(resolveHost(host,env),null,host);
 });
 test('manifest identity is stable; changed bytes create another version',()=>{

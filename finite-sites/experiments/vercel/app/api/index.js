@@ -4,6 +4,7 @@ import { Readable } from 'node:stream';
 import { pipeline } from 'node:stream/promises';
 import {nativeApi,exchangeNative,issueNative,redeemNative} from '../lib/native.js';
 import { control } from '../lib/control.js';
+import { adminCatalog } from '../lib/admin.js';
 import { COOKIE, hash, token, validToken, validPath, resolveHost, blobKey, contentType, requireThat } from '../lib/model.js';
 
 export default async function handler(req, res) {
@@ -16,6 +17,7 @@ export default async function handler(req, res) {
     requireThat(route,404,'unknown_host');
     const url = new URL(req.url, `https://${route.host}`);
     const sql = database();
+    if (route.admin) return await adminCatalog(req, res, url, sql);
     if (route.control) {
       if (req.method === 'GET' && url.pathname === '/') return json(200,{ experiment:'finite-sites-single-project', hosting:'private Blob + managed Postgres', deployment:process.env.VERCEL_URL });
       if(url.pathname.startsWith('/api/v2/'))return json(200,await nativeApi(sql,url.pathname,req.method,req.method==='GET'?'':await readBody(req,3000000),req.headers.authorization,`https://${route.host}`));

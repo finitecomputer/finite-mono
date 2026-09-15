@@ -22,6 +22,7 @@ export function resolveHost(raw, env = process.env) {
   const host = raw.toLowerCase();
   if (host === env.POC_CONTROL_HOST) return { control: true, host };
   const suffix = env.POC_SITE_BASE_DOMAIN;
+  if (suffix && host === `admin.${suffix}`) return { admin: true, host };
   if (suffix && host.endsWith(`.${suffix}`)) {
     const site = host.slice(0, -suffix.length - 1);
     if (validSite(site)) return { site, host };

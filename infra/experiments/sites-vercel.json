@@ -14,6 +14,7 @@
   "region": "iad1",
   "source": "finite-sites/experiments/vercel",
   "hostConfiguration": "finite-sites/experiments/vercel/config.json",
+  "adminCatalog": "https://admin.sites-poc.lwn.lol/ — public read-only names and links for active synthetic Sites; no privileged actions",
   "secrets": {
     "POC_ADMIN_TOKEN": "Ignored owner-only operator.env and shared Vercel project production environment",
     "POC_ISSUER_TOKEN": "Synthetic verified-email issuer and shared Vercel project production environment",
