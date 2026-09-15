@@ -48,7 +48,8 @@ ambiguous.
 ## Scripts
 
 - `scripts/setup.py` — OAuth2 setup (run once to authorize)
-- `scripts/google_api.py` — API wrapper CLI (agent uses this for all operations)
+- `scripts/google_api.py` — API wrapper CLI for the operations listed below;
+  Docs writes use `gws`.
 
 ## First-Time Setup
 
@@ -155,7 +156,8 @@ Should print `AUTHENTICATED`. Setup is complete — token refreshes automaticall
 
 ## Usage
 
-All commands go through the API script. Set `GAPI` as a shorthand:
+The examples below use the API script for its supported operations. Docs writes
+use `gws` as described in the Docs section. Set `GAPI` as a shorthand:
 
 ```bash
 GAPI="python $SKILL_ROOT/scripts/google_api.py"

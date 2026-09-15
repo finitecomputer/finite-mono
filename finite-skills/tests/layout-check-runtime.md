@@ -19,7 +19,7 @@ preserved. Record resolved skill paths; local shadows do not prove canonical
 baseline discovery.
 
 Seed fixtures before the test turn. Give the agent the task and target only,
-without naming the new skill or telling it how to repair the defect. Retain
+without naming the checklist/reference or telling it how to repair the defect. Retain
 redacted tool-call evidence, before/after structure, and inspected screenshots
 or Google exports. Keep raw credentials and document payloads out of git.
 
