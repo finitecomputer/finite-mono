@@ -139,3 +139,6 @@ pub const MAX_PROJECT_BRANCH_BYTES: u32 = 128;
 /// Site paths select committed deploy bytes. They are directory paths, not
 /// arbitrary pathspecs, and remain small enough for logs and audit rows.
 pub const MAX_PROJECT_OUTPUT_PATH_BYTES: u32 = 256;
+
+/// Account-session handoffs are single-use and never emailed.
+pub const VIEWER_HANDOFF_TTL_SECONDS: u64 = 60;

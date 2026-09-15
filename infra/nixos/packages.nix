@@ -413,6 +413,7 @@ rec {
       "finite-mail"
       "finite-sites/crates/finitesites-blob"
       "finite-sites/crates/finitesites-engine"
+      "finite-nostr"
       "finite-sites/crates/finitesites-proto"
       "finite-sites/crates/finitesites-store"
       "finite-sites/crates/finitesitesd"
@@ -481,6 +482,7 @@ rec {
     sourcePaths = [
       "finite-identity"
       "finite-mail"
+      "finite-nostr"
       "finite-sites/crates/finitesites-proto"
       "finite-sites/crates/fsite-cli"
       "finite-sites/examples"

@@ -128,3 +128,14 @@ acknowledgement.
 - **Delete condition**: this entry is the permanent record; remove the
   store-layer helpers only with a dedicated store cleanup that rewrites the
   fixtures that use them.
+
+## 11. Retained legacy viewer-session exchange (FIN-53)
+
+- **Boundary**: dashboard account previews select one of two fixed configured
+  Sites origins using the existing allowed site hostname distinction. Legacy
+  apps/documents retain their registry; v2 static sites use theirs. No retry
+  across registries, new roster, or grant copy is introduced.
+- **Delete condition**: remove legacy selection and request spelling after
+  legacy previews and Hosted Chat requester consumers are retired. Until then,
+  paired exchange tests must prove requests and failures stay on their backend.
+- **Decision**: ADR 0029. Production cutover remains separately authorized.

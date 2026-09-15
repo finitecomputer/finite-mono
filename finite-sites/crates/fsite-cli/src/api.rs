@@ -20,7 +20,7 @@ pub struct Client {
     base_url: String,
 }
 
-const DEFAULT_API_URL: &str = "https://v2.finite.chat";
+const DEFAULT_API_URL: &str = "https://finite.site";
 const DEFAULT_IDENTITY_AUTHORITY_URL: &str = "https://identity.finite.vip";
 const IDENTITY_AUTHORITY_ENV: &str = "FINITE_IDENTITY_AUTHORITY";
 
@@ -387,7 +387,7 @@ mod tests {
 
     #[test]
     fn production_api_is_the_default() {
-        assert_eq!(base_url_from_env_value(None), "https://v2.finite.chat");
+        assert_eq!(base_url_from_env_value(None), "https://finite.site");
         assert_eq!(
             base_url_from_env_value(Some("http://127.0.0.1:8787/".to_string())),
             "http://127.0.0.1:8787"
