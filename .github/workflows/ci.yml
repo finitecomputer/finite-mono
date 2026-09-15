@@ -108,6 +108,10 @@ jobs:
           components: clippy, rustfmt
 
       - uses: Swatinem/rust-cache@v2
+        with:
+          # The v0 cache repeatedly restored an unexecutable secp256k1 build
+          # script. Start fresh rather than bypassing the Rust checks.
+          prefix-key: v1-rust
 
       - name: Select Rust package scope
         id: rust_scope
