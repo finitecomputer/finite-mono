@@ -156,3 +156,21 @@ acknowledgement.
   concurrent-push recovery tests replace this conservative eligibility check
   before the backup scheduler is enabled in production. Do not mutate user
   history to satisfy the local command.
+
+## 13. Operator S3 transport is not recurring backup qualification
+
+- **Source**: FIN-54 requires revision-triggered protection, shared-state
+  checkpoints, encryption/key custody, retention and an empty-volume restore.
+- **Risk**: the explicit S3 operator commands transport unencrypted local
+  Recovery Points; no worker records/retries missed publications, and no
+  production retention or independent recovery authority is established.
+  Capture verifies by restoring to private scratch space and re-reads all
+  dependencies, so its disk, memory and transfer costs are not incremental
+  per revision. This command must not be enabled as a production scheduler.
+- **Proof**: `backup::s3::Repository` extends the local capture/restore boundary
+  with versioned, manifest-last transport. Synthetic loopback S3 tests are
+  transport evidence only, not AWS or Fly recovery evidence.
+- **Delete condition**: qualify client-side encryption and independent key
+  access, durable revision work/reconciliation, coordinated shared-state
+  snapshots, dependency-aware retention and monitoring, then restore onto an
+  empty remote volume and prove application reads, permissions and publishing.
