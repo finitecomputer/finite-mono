@@ -1,6 +1,8 @@
 *
 !api
 !api/**
+!lib
+!lib/**
 !public
 !public/**
 !package.json

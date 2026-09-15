@@ -1,7 +1,0 @@
-{
-  "name": "finite-sites-vercel-poc-control",
-  "private": true,
-  "type": "module",
-  "engines": { "node": "24.x" },
-  "dependencies": { "@neondatabase/serverless": "1.1.0" }
-}

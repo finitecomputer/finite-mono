@@ -1,73 +1,87 @@
-# Experiment result — 2026-09-15
+# Single-project experiment results
 
-**Verdict: the core architecture works in a live Vercel deployment.** Finite
-can own authorization while Vercel serves independently deployed static sites.
-The remaining work is product integration and recovery design, rather than a
-requirement to operate a dedicated Sites hosting machine.
+Date: 2026-09-15. Synthetic data only; no production cutover.
 
-## What was built
+## Answer
 
-- One native Vercel control API and a real Marketplace Neon database.
-- Two independent Vercel site projects, with two content versions for alpha.
-- A publisher selecting committed Git files and injecting a platform-owned gate.
-- A local interactive console and a real browser sign-in/revocation walkthrough.
+**Yes: one Vercel project can serve multiple independently published private
+Finite Sites, including the shared control/auth API.** Alpha and Beta are
+hostname mappings and stored versions, not Vercel projects. Each content
+publication and rollback leaves the shared Vercel deployment unchanged.
 
-Core service code is approximately 200 lines across the control endpoint and
-site middleware. The remaining experiment code is publishing, fixtures, probes,
-the local demo, and evidence. This is not the full production Sites feature set.
+This supersedes the per-project experiment at commit `b0a20308`. Its code and
+original evidence remain in Git history. The former control project was renamed
+`finite-sites-poc`; the two obsolete per-site scratch projects were removed.
 
-## Proven
+## Live shape
 
-- A private site and its assets deny unauthenticated access.
-- A trusted synthetic verified-email assertion yields a short-lived one-use
-  handoff. Browser redemption sets a Secure, HttpOnly, host-scoped cookie.
-- The browser loads the page and its stylesheet after login. After revocation,
-  reloading the page and requesting an asset both return 403.
-- Current grants apply to every file, including retained deployment URLs after
-  authenticating through Vercel's additional Deployment Protection layer.
-- The final v2 run passed 55 live HTTP checks across the canonical site URL,
-  its retained v1 deployment, and the current v2 deployment.
-- Forged identity/middleware headers, HEAD, conditional reads, and encoded asset
-  paths do not bypass the tested gate.
-- Repeated authorized reads produced Vercel static cache HITs. Revoked reads
-  still reached the gate and returned 403; browser responses used `no-store`.
-- Alpha's session cannot read beta. Alpha can roll back while beta continues
-  serving its own content. Revocation survives rollback and promotion forward.
-- Real Postgres tests cover replay, concurrent proof consumption, expiration,
-  disabling, grant removal and credential scope. Bad deploy trees fail before
-  any remote mutation. All 14 Node tests passed.
-- `cargo clippy -p finitesitesd -p fsite-cli --all-targets --locked -- -D warnings`
-  passed. Existing Rust services were not changed.
+- Project: `finite-sites-poc` (`prj_11v04LOfFRaXQgqqeE8RUZmhUKjE`).
+- Control: https://finite-sites-poc.vercel.app.
+- Alpha: https://finite-sites-poc-one-alpha.vercel.app.
+- Beta: https://finite-sites-poc-one-beta.vercel.app.
+- Private content: Vercel Blob `finite-sites-poc-content` in `iad1`.
+- Authority: existing scratch Neon `finite-sites-poc-db`, new `poc2_*` tables.
+- Local synthetic issuer/operator console: http://127.0.0.1:4319.
 
-## Findings that affect the design
+The exact deployment is recorded in `evidence/single-project-publication.json`.
+Both Sites finish private with the synthetic viewer revoked. The console can
+issue fresh grants and sign-in handoffs. Alpha finishes at v2, Beta at v1.
 
-1. **Retained deployments need current authority.** The content deployment
-   contains a site-scoped credential, not a snapshot of permission rules.
-2. **Alias convergence is observable.** In the recorded rollback drill, the
-   desired content appeared approximately 1.4–3.5 seconds after the CLI operation
-   completed. Authorization denial was tested separately without retries.
-3. **Browser testing matters.** `Referrer-Policy: no-referrer` caused browser
-   form POSTs to carry `Origin: null`. Login/console pages now use `same-origin`
-   while retaining strict origin checks. The browser walkthrough passed after
-   this fix.
-4. **There is request overhead.** Warm canonical-origin probes were generally
-   around 100–200 ms from this machine, including the central authorization
-   roundtrip. This is a small sample, not a load test or service-level promise.
-5. **Recovery is still a product requirement.** This experiment does not make
-   Vercel deployments the source of truth for editable Git history or grants.
+## Evidence
 
-Raw, credential-free live evidence is under `evidence/`. Deployment identifiers
-in those receipts identify the exact tested content/gate versions. The final
-browser screenshots are also retained there.
+| Proof | Result / artifact |
+| --- | --- |
+| Independent publication | Four content publications; identical platform deployment before/after; Alpha publication leaves Beta's pointer unchanged. `single-project-publication.json` |
+| Hosted request boundary | 49 checks: anonymous HTML/assets/helpers, grant replay, issuer/admin separation, concurrent proof redemption, cookie isolation, forged headers, failed-upload nonactivation, stale activation rejection, rollback, disable, and revocation on GET/HEAD/conditional/range. `single-project-live.json` |
+| Actual DB/Blob behavior | 8 checks using scratch Neon/Blob and a fresh local handler: unknown hosts, nonexistent wildcard tenant, direct private-Blob denial, max-size upload and interrupted-upload replay, expired proof/session, persisted state, database outage. `single-project-storage.json` |
+| Real browser | Two sign-in flows, private CSS, separate browser storage, cross-origin response unreadability, host-only cookies, rollback/restore, and independent revocation. `single-project-browser.json` and screenshots |
+| Generated deployment host | Finite returns 404 after `vercel curl` bypasses outer Vercel protection. `single-project-generated-host.json` |
+| Input validation | 7 Node tests: wildcard labels/exact aliases, immutable manifest identity, unsafe paths, and Git deploy-tree rejection. |
+| Repository gate | `cargo clippy --all-targets -- -D warnings` passed. No Rust code changed. |
 
-## Boundary
+Artifacts above are in `evidence/`. `scripts/finite-status --json` was run before
+and after the rollout; this local machine reports `unknown` because production
+host evidence is unavailable. This is not production health validation.
 
-Synthetic viewers and test content only. No production WorkOS bridge, guest
-email delivery, native-principal authorization, managed Git repository service,
-custom-domain qualification, legacy migration, or complete recovery drill was
-performed. See README for the explicit omissions and how to run the experiment.
+## What this means
 
-The canonical `scripts/finite-status` command returned `unknown` before and
-after from this laptop because production host evidence is unavailable here.
-That is not a green fleet-health assertion. No production Sites, Chat, DNS, or
-runtime rollout was performed.
+There is no per-site machine, volume, container, Vercel project, injected gate
+credential, or content deployment. Finite retains a small relational catalog:
+Sites, grants, sessions, immutable versions/file manifests, and Active Version
+pointers. The shared handler checks current grants before reading private Blob.
+
+A successful Blob write is read back and hashed before its file row becomes
+uploaded. Replays verify existing immutable bytes, including a simulated crash
+between the Blob write and the database acknowledgement. Completing a version
+requires every file. Activation uses a compare-and-swap pointer; permissions are
+never part of content rollback. Private responses disable browser/CDN caching;
+Blob's internal object cache remains behind the authorization boundary.
+
+## Deliberately unproven
+
+- **Actual wildcard DNS/TLS.** Hostname routing is implemented and tested, but
+  live URLs use two exact Vercel-provided hostnames on the same project. No
+  `finite.site` or other production DNS changed. Domain delegation/certificate
+  renewal is still a separate live validation. Configuring a suffix does not
+  provision DNS by itself.
+- **Production identity and fsite/Git integration.** Synthetic issuer, email
+  grants, and opaque sessions model the boundary; they are not WorkOS/native
+  principal or existing-cookie compatibility. Source Git remains local.
+- **Recovery.** No complete empty-target recovery of sources, grants, sessions,
+  manifests, and content has been qualified. Managed storage is not the entire
+  Recovery Set or a backup proof. No customer data is in these resources.
+- **Full serving contract.** Private-only; no public/private transitions, SPA
+  fallback, generated llms.txt, preview-per-version URLs, range streaming,
+  conditional 304 responses, iframe behavior, or broad MIME coverage. Unknown
+  file types download as binary. Range gets the full file after authorization.
+- **Operations.** No cleanup of pending versions/orphan objects/expired sessions,
+  account-level publish permissions, quota enforcement beyond the bounded
+  fixture limits, audit log, load test, or cost/latency qualification. The
+  publisher is an operator tool, not a tenant API. One platform deployment
+  affects every Site's serving code.
+- **Production browser isolation.** Live aliases are under Vercel's suffix. A
+  custom shared suffix needs its own cookie/CSRF/PSL validation before arbitrary
+  customer content is hosted there.
+
+Retire the experiment or replace these shortcuts with approved Sites contracts
+before any customer migration; see the technical debt ledger.

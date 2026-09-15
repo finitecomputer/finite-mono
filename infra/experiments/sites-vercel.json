@@ -3,30 +3,38 @@
   "production": false,
   "team": "alexlwn123-s-team",
   "teamId": "team_PY34kYpgJFQlooA8haRuFeG3",
-  "controlProject": "finite-sites-poc-control",
-  "siteProjectPrefix": "finite-sites-poc-",
+  "project": "finite-sites-poc",
+  "projectId": "prj_11v04LOfFRaXQgqqeE8RUZmhUKjE",
+  "previousProjectName": "finite-sites-poc-control",
   "database": "finite-sites-poc-db",
+  "databaseResourceId": "store_oeEvQL5q9EsdXOMD",
+  "activeDatabaseTables": "poc2_*",
+  "blobStore": "finite-sites-poc-content",
+  "blobStoreId": "store_2tQnacRfB5z9lJIr",
+  "blobAccess": "private",
   "region": "iad1",
   "source": "finite-sites/experiments/vercel",
+  "hostConfiguration": "finite-sites/experiments/vercel/config.json",
   "secrets": {
-    "POC_ADMIN_TOKEN": "Experiment operator and control project only",
-    "POC_ISSUER_TOKEN": "Synthetic verified-email issuer and control project only",
-    "POC_GATE_TOKEN": "Per-site gate credential; hashed in the experiment database",
-    "DATABASE_URL": "Marketplace-managed environment variable on the control project"
+    "POC_ADMIN_TOKEN": "Ignored owner-only operator.env and shared Vercel project production environment",
+    "POC_ISSUER_TOKEN": "Synthetic verified-email issuer and shared Vercel project production environment",
+    "DATABASE_URL": "Marketplace-managed variable on the shared project; ignored app/.env.local for scratch tests",
+    "BLOB_READ_WRITE_TOKEN": "Private store connection on shared project; ignored app/.env.local for scratch tests"
   },
   "customerData": false,
   "canonicalDnsChanges": false,
-  "teardown": "Delete only the explicitly listed experiment resources after retaining any wanted evidence. No production service depends on this experiment.",
-  "controlProjectId": "prj_11v04LOfFRaXQgqqeE8RUZmhUKjE",
-  "databaseResourceId": "store_oeEvQL5q9EsdXOMD",
-  "siteProjects": [
+  "wildcardDnsValidated": false,
+  "retiredProjects": [
     {
       "name": "finite-sites-poc-alpha",
-      "id": "prj_Vmq1wBvWVXse8VPzUWWdIlmzUldH"
+      "id": "prj_Vmq1wBvWVXse8VPzUWWdIlmzUldH",
+      "status": "deleted 2026-09-15; original proof retained in git commit b0a20308"
     },
     {
       "name": "finite-sites-poc-beta",
-      "id": "prj_ADRttezR61kvaUy8JtkYImlLIIaI"
+      "id": "prj_ADRttezR61kvaUy8JtkYImlLIIaI",
+      "status": "deleted 2026-09-15; original proof retained in git commit b0a20308"
     }
-  ]
+  ],
+  "teardown": "Delete only these explicitly named scratch resources. Local fixture Git and committed proof artifacts retain the experiment evidence. No production dependency exists."
 }

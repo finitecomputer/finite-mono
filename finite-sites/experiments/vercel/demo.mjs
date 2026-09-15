@@ -1,37 +1,41 @@
 import { createServer } from 'node:http';
+import { readFile } from 'node:fs/promises';
 import { call } from './operator.mjs';
-
-const origin = 'http://127.0.0.1:4319';
-const email = 'viewer@example.invalid';
-const siteOrigin = 'https://finite-sites-poc-alpha.vercel.app';
-const html = `<!doctype html><meta charset="utf-8"><title>Finite Sites / Experiment Console</title>
-<style>body{font:18px/1.6 system-ui;background:#f4f5ef;color:#20352b;max-width:700px;margin:70px auto;padding:24px}h1{font-size:42px;font-weight:500}button,a{font:inherit}button{padding:12px 20px;background:#20352b;color:white;border:0;border-radius:4px;cursor:pointer}form{display:inline-block;margin:6px}small{display:block;margin-top:28px}</style>
-<p>FINITE / EXPERIMENT</p><h1>Private sites, hosted by Vercel.</h1>
-<p>This local console acts as a synthetic verified-email issuer for <b>viewer@example.invalid</b>. It holds the experiment operator credentials on this machine.</p>
-<ol><li>Grant access and open the private site.</li><li>Return here and revoke access.</li><li>Refresh the site or open its asset URL. Both should be denied.</li></ol>
-<form method="post" action="/grant"><button>Grant access</button></form>
-<form method="post" action="/login" target="_blank"><button>Open private site</button></form>
-<form method="post" action="/revoke"><button>Revoke access</button></form>
-<p><a href="${siteOrigin}" target="_blank">Site</a> · <a href="${siteOrigin}/assets/private.txt" target="_blank">Private asset</a></p>
-<small>Disposable data only. No production identity, DNS, Git remote, or Sites service is changed. Stop this console with Ctrl-C.</small>`;
-createServer(async (req,res) => {
-  res.setHeader('Cache-Control','no-store');
-  res.setHeader('Referrer-Policy','same-origin');
-  res.setHeader('X-Content-Type-Options','nosniff');
-  if (req.headers.host !== '127.0.0.1:4319') { res.writeHead(403); return res.end(); }
-  if (req.method === 'GET' && req.url === '/') { res.setHeader('Content-Type','text/html; charset=utf-8'); return res.end(html); }
-  if (req.method !== 'POST' || req.headers.origin !== origin || !['/grant','/revoke','/login'].includes(req.url)) { res.writeHead(403); return res.end('Denied'); }
+const origin='http://127.0.0.1:4319', email='viewer@example.invalid';
+const config=JSON.parse(await readFile(new URL('config.json',import.meta.url),'utf8'));
+const html=`<!doctype html><meta charset="utf-8"><title>Finite Sites / One Project Experiment</title>
+<style>body{font:18px/1.6 system-ui;background:#f4f5ef;color:#20352b;max-width:900px;margin:50px auto;padding:24px}h1{font-size:42px;font-weight:500}button,a{font:inherit}button{padding:10px 15px;background:#20352b;color:white;border:0;border-radius:4px;cursor:pointer}form{display:inline-block;margin:5px}small{display:block;margin-top:28px}.sites{display:grid;grid-template-columns:1fr 1fr;gap:24px}section{border:1px solid #bdc8b9;padding:20px;border-radius:8px}pre{font-size:12px;white-space:pre-wrap;overflow-wrap:anywhere}h2{text-transform:capitalize}</style>
+<p>FINITE / EXPERIMENT</p><h1>Two sites. One Vercel project.</h1>
+<p>Each site has its own hostname and permissions. Content is stored privately; publishing and rollback change its active version without deploying the platform.</p>
+<div class="sites">${['alpha','beta'].map(site=>`<section data-site="${site}"><h2>${site}</h2><p><a href="https://${config.siteHosts[site] || `${site}.${config.siteBaseDomain}`}" target="_blank">Open URL</a></p>${[['grant','Grant access'],['login','Open private site'],['revoke','Revoke access'],['v1','Use version 1'],['v2','Use version 2']].map(([op,label])=>`<form method="post" action="/${site}/${op}" ${op==='login'?'target="_blank"':''}><button>${label}</button></form>`).join('')}<p id="${site}-summary">Loading state…</p><details><summary>Technical state</summary><pre id="${site}"></pre></details></section>`).join('')}</div>
+<small>Synthetic viewer: ${email}. Operator credentials stay on this machine. Project: ${config.project}. Source Git remains local.</small>
+<script>fetch('/status').then(r=>r.json()).then(data=>{for(const site of ['alpha','beta']){document.getElementById(site+'-summary').textContent='Active: version '+data[site].demoVersion+' · '+data[site].versions.filter(v=>v.ready).length+' ready versions';document.getElementById(site).textContent=JSON.stringify(data[site],null,2)}});</script>`;
+createServer(async(req,res)=>{
+  res.setHeader('Cache-Control','no-store');res.setHeader('Referrer-Policy','same-origin');res.setHeader('X-Content-Type-Options','nosniff');
+  if(req.headers.host!=='127.0.0.1:4319'){res.writeHead(403);return res.end();}
+  if(req.method==='GET'&&req.url==='/'){res.setHeader('Content-Type','text/html; charset=utf-8');return res.end(html);}
   try {
-    if (req.url === '/login') {
-      const { proof } = await call({ op:'viewer.issue',site:'alpha',verified_email:email },'issuer');
-      res.writeHead(303,{ Location:`${siteOrigin}/_finite/login#${proof}` });
-    } else {
-      await call({ op:'grant.set',site:'alpha',email,allowed:req.url === '/grant' });
+    if(req.method==='GET'&&req.url==='/status'){
+      const fixture=JSON.parse(await readFile(new URL('.local-state/fixture.json',import.meta.url),'utf8'));
+      const statuses=await Promise.all(['alpha','beta'].map(async site=>{const status=await call({op:'site.status',site});const active=status.versions.find(v=>v.id===status.active_version);return [site,{...status,demoVersion:fixture.commits.indexOf(active?.source_commit)+1}]}));
+      res.setHeader('Content-Type','application/json');return res.end(JSON.stringify(Object.fromEntries(statuses)));
+    }
+    const match=/^\/(alpha|beta)\/(grant|revoke|login|v1|v2)$/.exec(req.url);
+    if(req.method!=='POST'||req.headers.origin!==origin||!match){res.writeHead(403);return res.end('Denied');}
+    const [,site,op]=match;
+    if(op==='login'){
+      const {proof,origin:siteOrigin}=await call({op:'viewer.issue',site,verified_email:email},'issuer');
+      res.writeHead(303,{Location:`${siteOrigin}/_finite/login#${proof}`});
+    }else{
+      if(op==='v1'||op==='v2'){
+        const fixtures=JSON.parse(await readFile(new URL('.local-state/fixture.json',import.meta.url),'utf8'));
+        const status=await call({op:'site.status',site});
+        const version=status.versions.find(v=>v.source_commit===fixtures.commits[op==='v1'?0:1]&&v.ready);
+        if(!version)throw new Error('Publish both fixture versions first.');
+        await call({op:'version.activate',site,version:version.id,expectedVersion:status.active_version});
+      }else await call({op:'grant.set',site,email,allowed:op==='grant'});
       res.writeHead(303,{Location:'/'});
     }
     res.end();
-  } catch {
-    res.writeHead(403,{'Content-Type':'text/plain'});
-    res.end('Access was not granted. Return to the console and grant the synthetic viewer first.');
-  }
-}).listen(4319,'127.0.0.1',() => console.log(`Experiment console: ${origin}`));
+  }catch(error){res.writeHead(403,{'Content-Type':'text/plain'});res.end(error.message);}
+}).listen(4319,'127.0.0.1',()=>console.log(`Experiment console: ${origin}`));

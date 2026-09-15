@@ -6,8 +6,15 @@
 - **Risk**: synthetic email issuer, opaque experiment sessions, operator-only
   publication, no production Git/auth compatibility or disaster recovery claim.
   Expired experiment sessions require cleanup; this is a bounded disposable run.
-- **First proof**: managed Postgres grants checked by every site's injected gate;
-  live probes cover grant revocation, old deployments, and content rollback.
+- **First proof**: the original per-project experiment checked managed Postgres
+  grants in injected gates. Its replacement uses one shared hostname router,
+  private Vercel Blob, and transactional version pointers. Live probes must
+  prove independent publication, failed-upload nonactivation, tenant isolation,
+  and revocation through rollback before claiming that replacement works.
+- **Bounds**: at most 200 files, 1 MiB per file, 8 MiB per version; synthetic
+  tenants only. Pending uploads/orphan blobs have no automatic cleanup. Source
+  Git stays local; no empty-target recovery, production identity integration,
+  or public/private transition contract is established by this experiment.
 - **Delete condition**: delete the experiment or replace its issuer/publisher
   with the approved Sites contracts before any customer migration. ADR 0028
   remains the production decision. JavaScript is intentional for Vercel's native

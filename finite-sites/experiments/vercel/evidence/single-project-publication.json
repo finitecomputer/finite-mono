@@ -1,0 +1,35 @@
+{
+  "at": "2026-09-15T19:39:04.141Z",
+  "beforeDeployment": "finite-sites-492222h6z-alexlwn123-s-team.vercel.app",
+  "afterDeployment": "finite-sites-492222h6z-alexlwn123-s-team.vercel.app",
+  "publications": [
+    {
+      "site": "alpha",
+      "fixtureVersion": 1,
+      "version": "cf36fa9b1a07c6296d60546710cbcb49e0851a1bc660aeeab71af18977f48aa6",
+      "deployment": "finite-sites-492222h6z-alexlwn123-s-team.vercel.app"
+    },
+    {
+      "site": "beta",
+      "fixtureVersion": 1,
+      "version": "cf36fa9b1a07c6296d60546710cbcb49e0851a1bc660aeeab71af18977f48aa6",
+      "deployment": "finite-sites-492222h6z-alexlwn123-s-team.vercel.app"
+    },
+    {
+      "site": "alpha",
+      "fixtureVersion": 2,
+      "version": "30b219c980745f2da63558a1ca595511f2c2c9f04a523078ddecef57159de949",
+      "deployment": "finite-sites-492222h6z-alexlwn123-s-team.vercel.app"
+    },
+    {
+      "site": "beta",
+      "fixtureVersion": 2,
+      "version": "30b219c980745f2da63558a1ca595511f2c2c9f04a523078ddecef57159de949",
+      "deployment": "finite-sites-492222h6z-alexlwn123-s-team.vercel.app"
+    }
+  ],
+  "final": {
+    "alpha": 2,
+    "beta": 1
+  }
+}

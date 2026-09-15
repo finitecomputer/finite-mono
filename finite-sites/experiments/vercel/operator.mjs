@@ -5,7 +5,7 @@ import { parseEnv } from 'node:util';
 import { fileURLToPath } from 'node:url';
 import { join } from 'node:path';
 import { spawnSync } from 'node:child_process';
-import { neon } from './control/node_modules/@neondatabase/serverless/index.mjs';
+import { neon } from './app/node_modules/@neondatabase/serverless/index.mjs';
 
 export const root = fileURLToPath(new URL('.', import.meta.url));
 export const state = join(root, '.local-state');
@@ -16,11 +16,13 @@ export async function call(body, role = 'admin', endpoint) {
   const env = await secrets();
   const credential = role === 'issuer' ? env.POC_ISSUER_TOKEN : env.POC_ADMIN_TOKEN;
   const response = await fetch(endpoint ?? env.POC_CONTROL_URL, {
-    method: 'POST', redirect: 'error', signal: AbortSignal.timeout(15000),
+    method: 'POST', redirect: 'error', signal: AbortSignal.timeout(60000),
     headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${credential}` },
     body: JSON.stringify(body),
   });
-  const result = await response.json();
+  const text = await response.text();
+  let result;
+  try { result = JSON.parse(text); } catch { throw new Error(`Control API returned non-JSON status ${response.status}`); }
   if (!response.ok) throw new Error(`Control API: ${response.status} ${result.error}`);
   return result;
 }
@@ -42,28 +44,20 @@ async function main() {
       await writeFile(envFile, [
         `POC_ADMIN_TOKEN=${randomBytes(32).toString('hex')}`,
         `POC_ISSUER_TOKEN=${randomBytes(32).toString('hex')}`,
-        'POC_CONTROL_URL=https://finite-sites-poc-control.vercel.app/api/control',
+        'POC_CONTROL_URL=https://finite-sites-poc.vercel.app/api/control',
       ].join('\n') + '\n', { mode: 0o600, flag: 'wx' });
     }
-    const dbEnv = parseEnv(await readFile(join(root, 'control/.env.local'), 'utf8'));
+    const dbEnv = parseEnv(await readFile(join(root, 'app/.env.local'), 'utf8'));
     const sql = neon(dbEnv.DATABASE_URL);
-    const statements = (await readFile(join(root, 'control/schema.sql'), 'utf8')).split(';').filter(s => s.trim());
+    const statements = (await readFile(join(root, 'app/schema.sql'), 'utf8')).split(/;\n(?=CREATE|DO|$)/).filter(s => s.trim());
     await sql.transaction(statements.map(statement => sql.query(statement)));
     console.log('Experiment schema initialized; operator secrets stored in ignored owner-only file.');
-  } else if (command === 'push-control-env') {
-    const env = await secrets();
-    for (const key of ['POC_ADMIN_TOKEN', 'POC_ISSUER_TOKEN']) {
-      for (const target of ['production', 'preview']) {
-        vc(['env', 'add', key, target, '--force', '--cwd', join(root, 'control'), '--scope', 'alexlwn123-s-team'], env[key]);
-      }
-      console.log(`Configured ${key}`);
-    }
   } else if (command === 'grant' || command === 'revoke') {
     console.log(await call({ op: 'grant.set', site: args[0], email: args[1], allowed: command === 'grant' }));
   } else if (command === 'disable' || command === 'enable') {
     console.log(await call({ op: 'site.disable', site: args[0], disabled: command === 'disable' }));
   } else {
-    throw new Error('Usage: operator.mjs init | push-control-env | grant/revoke SITE EMAIL | disable/enable SITE');
+    throw new Error('Usage: operator.mjs init | grant/revoke SITE EMAIL | disable/enable SITE');
   }
 }
 if (process.argv[1] === fileURLToPath(import.meta.url)) main().catch(error => { console.error(error.message); process.exitCode = 1; });

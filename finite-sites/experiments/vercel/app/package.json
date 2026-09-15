@@ -1,0 +1,12 @@
+{
+  "name": "finite-sites-vercel-poc-shared",
+  "private": true,
+  "type": "module",
+  "engines": {
+    "node": "24.x"
+  },
+  "dependencies": {
+    "@neondatabase/serverless": "1.1.0",
+    "@vercel/blob": "2.8.0"
+  }
+}

@@ -1,30 +1,46 @@
 import { chromium } from 'playwright';
 import assert from 'node:assert/strict';
 import { join } from 'node:path';
-import { state } from './operator.mjs';
-
-// Use an existing browser; never install system dependencies for this test.
-const browser = await chromium.launch({ executablePath: process.env.POC_BROWSER_PATH || chromium.executablePath(), headless: true });
-try {
-  const context = await browser.newContext();
-  const page = await context.newPage();
-  await page.goto('http://127.0.0.1:4319');
-  await page.getByRole('button', { name: 'Grant access', exact: true }).click();
-  await page.waitForURL('http://127.0.0.1:4319/');
-  const popupPromise = context.waitForEvent('page');
-  await page.getByRole('button', { name: 'Open private site', exact: true }).click();
-  const site = await popupPromise;
-  await site.waitForURL('https://finite-sites-poc-alpha.vercel.app/', { timeout: 30000 });
-  await site.getByRole('heading', { name: 'Content version 2' }).waitFor();
-  assert.equal(await site.locator('body').evaluate(element => getComputedStyle(element).backgroundColor), 'rgb(244, 245, 239)');
-  await site.screenshot({ path: join(state, 'browser-authorized.png'), fullPage: true });
-  await page.getByRole('button', { name: 'Revoke access', exact: true }).click();
-  await page.waitForURL('http://127.0.0.1:4319/');
-  const denied = await site.reload();
-  assert.equal(denied.status(), 403);
-  assert.equal((await site.goto('https://finite-sites-poc-alpha.vercel.app/assets/private.txt')).status(), 403);
-  await site.screenshot({ path: join(state, 'browser-revoked.png') });
-  const other = await context.newPage();
-  assert.equal((await other.goto('https://finite-sites-poc-beta.vercel.app/')).status(), 403);
-  console.log('Browser: real sign-in handoff, styled private page, revoke, denied reload/asset, and second-site denial passed.');
-} finally { await browser.close(); }
+import { readFile,writeFile } from 'node:fs/promises';
+import { root,call } from './operator.mjs';
+const config=JSON.parse(await readFile(join(root,'config.json')));
+const browser=await chromium.launch({executablePath:process.env.POC_BROWSER_PATH||chromium.executablePath(),headless:true});
+const email='viewer@example.invalid';
+try{
+ const context=await browser.newContext();const page=await context.newPage();
+ await page.goto('http://127.0.0.1:4319');
+ const alphaPanel=page.locator('[data-site="alpha"]'),betaPanel=page.locator('[data-site="beta"]');
+ const openSite=async(panel,site)=>{
+  await panel.getByRole('button',{name:'Grant access',exact:true}).click();await page.waitForURL('http://127.0.0.1:4319/');
+  const popup=context.waitForEvent('page');await panel.getByRole('button',{name:'Open private site',exact:true}).click();
+  const tab=await popup;await tab.waitForURL(`https://${config.siteHosts[site]||`${site}.${config.siteBaseDomain}`}/`,{timeout:30000});return tab;
+ };
+ const alpha=await openSite(alphaPanel,'alpha');
+ await alpha.getByRole('heading',{name:'Content version 2'}).waitFor();
+ assert.equal(await alpha.locator('body').evaluate(e=>getComputedStyle(e).backgroundColor),'rgb(244, 245, 239)');
+ await alpha.evaluate(()=>localStorage.setItem('tenant-marker','alpha'));
+ const beta=await openSite(betaPanel,'beta');
+ await beta.getByRole('heading',{name:'Content version 1'}).waitFor();
+ assert.equal(await beta.evaluate(()=>localStorage.getItem('tenant-marker')),null);
+ assert.equal(await alpha.evaluate(async url=>{try{await fetch(url,{credentials:'include'});return false;}catch{return true;}},beta.url()),true);
+ const cookies=await context.cookies();
+ const sessions=cookies.filter(c=>c.name==='__Host-finite_poc');
+ assert.equal(sessions.length,2);assert.equal(new Set(sessions.map(c=>c.domain)).size,2);assert.ok(sessions.every(c=>!c.domain.startsWith('.')&&c.secure&&c.httpOnly));
+ await alphaPanel.getByRole('button',{name:'Use version 1',exact:true}).click();await page.waitForURL('http://127.0.0.1:4319/');
+ await alpha.reload();await alpha.getByRole('heading',{name:'Content version 1'}).waitFor();
+ await beta.reload();await beta.getByRole('heading',{name:'Content version 1'}).waitFor();
+ await alphaPanel.getByRole('button',{name:'Use version 2',exact:true}).click();await page.waitForURL('http://127.0.0.1:4319/');
+ await alpha.reload();await alpha.getByRole('heading',{name:'Content version 2'}).waitFor();
+ await page.screenshot({path:join(root,'evidence/single-project-console.png'),fullPage:true});
+ await alpha.screenshot({path:join(root,'evidence/single-project-authorized.png'),fullPage:true});
+ await alphaPanel.getByRole('button',{name:'Revoke access',exact:true}).click();await page.waitForURL('http://127.0.0.1:4319/');
+ assert.equal((await alpha.reload()).status(),403);
+ assert.equal((await alpha.goto(`https://${config.siteHosts.alpha||`alpha.${config.siteBaseDomain}`}/assets/private.txt`)).status(),403);
+ assert.equal((await beta.reload()).status(),200);
+ await alpha.screenshot({path:join(root,'evidence/single-project-revoked.png')});
+ await writeFile(join(root,'evidence/single-project-browser.json'),JSON.stringify({at:new Date().toISOString(),passed:['two real login handoffs','private CSS rendered','separate browser storage','cross-origin response unreadable','host-only Secure HttpOnly cookies','Alpha rollback + restore','Alpha revocation blocks page and asset','Beta unaffected by Alpha revocation']},null,2));
+ console.log('Browser proof passed: login, content rollback, tenant isolation and independent revocation.');
+}finally{
+ await browser.close();
+ for(const site of ['alpha','beta'])await call({op:'grant.set',site,email,allowed:false});
+}
