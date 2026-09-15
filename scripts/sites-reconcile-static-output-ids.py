@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
-"""One-time, offline output-ID reconciliation for the September 2026 copy.
+"""One-time, offline output-ID reconciliation for the static-only Sites Cutover.
 
 Produces a new legacy registry copy, NOT a bootable static-only recovery set.
-Never opens the input in SQLite. See docs/research/sites-output-exceptions.md.
+Never opens the input in SQLite.
+See infra/runbooks/sites-static-output-reconciliation.md.
 """
 import argparse
 import hashlib
@@ -130,7 +131,7 @@ def run(args):
     require(source.stat().st_size <= 128 * 1024 * 1024, 'registry exceeds the one-time size limit')
     require(repositories.is_dir(), 'repository directory is missing')
     require(re.fullmatch(r'[0-9a-f]{64}', args.expect_sha256), 'expected SHA-256 is invalid')
-    # This receipt's registry is checkpointed. WAL recovery belongs to the
+    # The input registry must be checkpointed. WAL recovery belongs to the
     # snapshot protocol, not this narrowly scoped conversion.
     for suffix in ('-wal', '-shm', '-journal'):
         sidecar = Path(str(source) + suffix)
