@@ -53,7 +53,7 @@ The dashboard must serve `/site-auth` before enabling
 The dedicated host definition enables that URL. Its existing
 `/etc/finite-saas/sites-viewer-session.env` and dashboard must agree on
 `FINITE_SITES_VIEWER_SESSION_TOKEN`. Keep the dashboard's
-`FC_SITES_UPSTREAM_URL` on legacy for retained app/document previews and
+`FC_SITES_UPSTREAM_URL` on legacy for pre-cutover app/document previews and
 Hosted Chat requester assertions. Configure `FC_SITES_V2_UPSTREAM_URL`
 separately for the serving v2 API; do not switch the legacy origin wholesale.
 The existing validated hostname distinction selects the exchange and request
@@ -73,24 +73,27 @@ Coordinate this order; none of these production steps is performed by the PR:
    and access checks succeed. Never reconstruct email grants from npubs.
 4. Rehearse on an isolated copy, never by opening authoritative legacy state
    with the v2 daemon: its startup migrations remove unsupported output kinds.
-   Retain legacy apps/documents and explicitly resolve mixed-output projects.
+   Exclude retired apps/documents and unpublished/missing-source projects from
+   the candidate, preserving their source archive. Explicitly resolve the
+   static portion of mixed-output projects and prove another publish.
    Qualify the static-only copy on an empty destination and prove stable Site
    IDs, URLs/slugs, active content, publisher-email ownership, and allowlisted guest access.
    The synthetic v0.5.3 fixture covers one supported old writer; it is not
    evidence that every production source is compatible. Unsupported outputs
-   require an explicit migration decision before routing their traffic.
+   are retired under the September 15 decision, not converted to static sites.
 5. Verify the account bridge on the actual finite.computer and finite.site
    domains: authorized WorkOS session, anonymous guest challenge, unshared
    email, changed/revoked share, direct URL, and dashboard iframe. In the same
-   deployment prove retained legacy app/document previews still use their
-   existing registry and email flow, including when v2 is unavailable. Old
+   deployment prove pre-cutover legacy app/document previews still use their
+   existing registry and email flow, including when v2 is unavailable. Retire
+   those routes only at the separately authorized cutover. Old
    references to migrated static sites still need the approved URL mapping;
    exchange selection alone does not rewrite them. Then enable
    the destination auth model for traffic.
 6. Only after those checks, release the CLI whose default is `finite.site`.
-   Preserve a supported legacy client/endpoint path for editing retained apps
-   and documents. The v2 CLI does not regain those features by selecting the
-   old API. Qualify existing agents and saved Git remotes before fleet rollout.
+   Apps and documents are retired, not supported by the new CLI. Qualify
+   existing agents and saved Git remotes before fleet rollout. Remove legacy
+   exchange configuration only after its remaining consumers are retired.
 
 Old-site redirects are a separate edge cutover. Redirect only known migrated
 Site document/asset URLs, preserving path and query. Do not blanket-redirect
