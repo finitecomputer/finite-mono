@@ -225,28 +225,14 @@ def select_harnesses(args: argparse.Namespace) -> tuple[HarnessSelection, str, l
 
 
 def is_package_graph_path(path: str) -> bool:
-    """Whether the path changes the nix service package derivations.
+    """Inputs that require publishing and validating the Rust package cache.
 
-    These are the inputs that make a PR-time package build the difference
-    between substituting warm cargoArtifacts from Cachix and paying the cold
-    ~30-minute crane build inside devfinity-smoke:
-
-    - Workspace manifests: crane's mkDummySrc scopes every mkCargoArtifacts
-      to the member Cargo.toml files and the root Cargo.lock (cargoVendorDir
-      also derives from the lock).
-    - rust-toolchain.toml: the single Rust pin, read by the flake via
-      fromRustupToolchainFile, part of every cargoArtifacts derivation.
-    - .cargo/ config: cargo invocation settings for those artifact builds.
-    - flake.nix / flake.lock: crane args, toolchain overlay, and inputs.
-    - infra/nixos/: the packaged closures themselves (packages.nix and the
-      NixOS modules) - the thing this job exists to validate.
-
-    Everything else (Rust source, protos, SQL, docs) only affects thin final
-    package derivations, which devfinity-smoke builds locally against warm
-    cargoArtifacts.
+    Ordinary Rust source edits are exercised by devfinity smoke; manifests,
+    generated crate definitions, native inputs and cache plumbing run the full
+    package lane before integration tests.
     """
     return (
-        path == "Cargo.lock"
+        path in ("Cargo.lock", "Cargo.nix", "crate-hashes.json", "scripts/ci/check-rust-cache", ".github/workflows/ci.yml")
         or path == "Cargo.toml"
         or path.endswith("/Cargo.toml")
         or path == "rust-toolchain.toml"
