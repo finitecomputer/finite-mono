@@ -1,0 +1,466 @@
+#!/usr/bin/env python3
+"""Sites-only adaptation of the hosted snapshot + native Borg procedure."""
+
+import argparse
+import contextlib
+import ctypes
+import fcntl
+import hashlib
+import json
+import os
+from pathlib import Path
+import shlex
+import signal
+import sqlite3
+import stat
+import subprocess
+import sys
+import tempfile
+import time
+
+
+FORMAT = b"finite.sites-snapshot.v1\n"
+MAX_ENTRIES = 1_000_000
+MAX_DEPTH = 128
+MAX_MANIFEST = 64 * 1024 * 1024
+CAPTURE_TIMEOUT = 300
+
+
+class BackupInterrupted(Exception):
+    """Do not use InterruptedError: subprocess selectors retry that exception."""
+
+
+def command(args, **kwargs):
+    timeout = kwargs.pop("timeout", CAPTURE_TIMEOUT)
+    process = subprocess.Popen(
+        args,
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        start_new_session=True,
+        **kwargs,
+    )
+    try:
+        stdout, stderr = process.communicate(timeout=timeout)
+    except BaseException:
+        # Also stop rsync/SSH descendants before resuming the source service.
+        with contextlib.suppress(ProcessLookupError):
+            os.killpg(process.pid, signal.SIGKILL)
+        process.communicate(timeout=5)
+        raise
+    if process.returncode:
+        raise subprocess.CalledProcessError(process.returncode, args, stdout, stderr)
+    return stdout
+
+
+def regular(path):
+    if not stat.S_ISREG(path.lstat().st_mode):
+        raise ValueError(f"not a regular file: {path.name}")
+
+
+def inventory(root):
+    """Walk without following links, as in the shared hosted snapshot job."""
+    files, links = [], []
+    pending = [(root, 0)]
+    count = 0
+    while pending:
+        parent, depth = pending.pop()
+        if depth > MAX_DEPTH:
+            raise ValueError("snapshot exceeds directory depth limit")
+        with os.scandir(parent) as entries:
+            for entry in entries:
+                count += 1
+                if count > MAX_ENTRIES:
+                    raise ValueError("snapshot exceeds entry limit")
+                path = Path(entry.path)
+                if entry.is_symlink():
+                    links.append(path)
+                elif entry.is_dir(follow_symlinks=False):
+                    pending.append((path, depth + 1))
+                elif entry.is_file(follow_symlinks=False):
+                    files.append(path)
+                else:
+                    raise ValueError("unsupported snapshot filesystem entry")
+    return sorted(files, key=os.fsencode), sorted(links, key=os.fsencode)
+
+
+def manifests(snapshot):
+    files, links = inventory(snapshot)
+    symlinks = bytearray()
+    for path in links:
+        relative = path.relative_to(snapshot)
+        if relative.parts[0] != "finite-sites":
+            raise ValueError("symlink outside Sites data")
+        symlinks.extend(os.fsencode(path.relative_to(snapshot / "finite-sites")))
+        symlinks.extend(b"\0" + os.fsencode(os.readlink(path)) + b"\0")
+    checksums = bytearray()
+    for path in files:
+        if path == snapshot / "manifest.sha256":
+            continue
+        with path.open("rb") as stream:
+            digest = hashlib.file_digest(stream, "sha256").hexdigest().encode()
+        name = os.fsencode(path.relative_to(snapshot))
+        escaped = (
+            name.replace(b"\\", b"\\\\").replace(b"\n", b"\\n").replace(b"\r", b"\\r")
+        )
+        checksums.extend(
+            (b"\\" if name != escaped else b"") + digest + b"  " + escaped + b"\n"
+        )
+        if len(checksums) + len(symlinks) > MAX_MANIFEST:
+            raise ValueError("snapshot manifest exceeds size limit")
+    return bytes(checksums), bytes(symlinks)
+
+
+def verify(snapshot):
+    if not stat.S_ISDIR((snapshot / "finite-sites").lstat().st_mode):
+        raise ValueError("Sites snapshot data must be a real directory")
+    for name in (
+        "format",
+        "created-at",
+        "manifest.sha256",
+        "finite-sites-symlinks.bin",
+        "finite-sites/registry.db",
+        "finite-sites/cookie-secret",
+    ):
+        regular(snapshot / name)
+    if (snapshot / "format").read_bytes() != FORMAT:
+        raise ValueError("unsupported Sites snapshot format")
+    for suffix in ("-wal", "-shm"):
+        sidecar = snapshot / ("finite-sites/registry.db" + suffix)
+        if sidecar.exists() or sidecar.is_symlink():
+            raise ValueError("snapshot must contain a standalone registry backup")
+    for name in ("manifest.sha256", "finite-sites-symlinks.bin"):
+        if (snapshot / name).stat().st_size > MAX_MANIFEST:
+            raise ValueError("oversized snapshot manifest")
+    checksums, links = manifests(snapshot)
+    if (
+        checksums != (snapshot / "manifest.sha256").read_bytes()
+        or links != (snapshot / "finite-sites-symlinks.bin").read_bytes()
+    ):
+        raise ValueError("snapshot inventory or checksums do not match")
+    # The shared helper inspects a private scratch copy, never the snapshot DB.
+    helper = Path(__file__).resolve().parents[2] / "scripts/snapshot-sqlite"
+    if not helper.is_file():
+        helper = Path("/usr/local/bin/snapshot-sqlite")
+    if (
+        command(
+            [str(helper), "integrity-check", str(snapshot / "finite-sites/registry.db")]
+        ).strip()
+        != b"ok"
+    ):
+        raise ValueError("snapshot registry integrity failed")
+    return int((snapshot / "created-at").read_text().strip())
+
+
+def install(source, target):
+    """Publish without replacing even an empty directory created concurrently."""
+    libc = ctypes.CDLL(None, use_errno=True)
+    if sys.platform == "linux":
+        result = libc.renameat2(-100, os.fsencode(source), -100, os.fsencode(target), 1)
+    elif sys.platform == "darwin":
+        result = libc.renamex_np(os.fsencode(source), os.fsencode(target), 4)
+    else:
+        raise ValueError("atomic restore requires Linux or macOS")
+    if result != 0:
+        error = ctypes.get_errno()
+        raise OSError(error, os.strerror(error))
+
+
+def separate(source, target):
+    source = source.resolve(strict=True)
+    target = target.parent.resolve(strict=True) / target.name
+    if target.exists() or target.is_symlink():
+        raise FileExistsError("destination already exists")
+    if source == target or source in target.parents or target in source.parents:
+        raise ValueError("source and destination must be separate")
+    return source, target
+
+
+def snapshot(data, target):
+    data, target = separate(data, target)
+    regular(data / "registry.db")
+    regular(data / "cookie-secret")
+    for suffix in ("-wal", "-shm"):
+        path = data / ("registry.db" + suffix)
+        if path.exists() or path.is_symlink():
+            regular(path)
+    inventory(data)
+    started = time.monotonic()
+    with tempfile.TemporaryDirectory(
+        prefix=".sites-snapshot-", dir=target.parent
+    ) as scratch:
+        stage = Path(scratch) / "snapshot"
+        stage.mkdir(mode=0o700)
+        copy = stage / "finite-sites"
+        copy.mkdir(mode=0o700)
+        command(
+            [
+                "rsync",
+                "-a",
+                "--exclude=/registry.db",
+                "--exclude=/registry.db-wal",
+                "--exclude=/registry.db-shm",
+                "--",
+                str(data) + "/",
+                str(copy) + "/",
+            ]
+        )
+        with contextlib.closing(
+            sqlite3.connect((data / "registry.db").as_uri() + "?mode=ro", uri=True)
+        ) as source:
+            with contextlib.closing(
+                sqlite3.connect(copy / "registry.db")
+            ) as destination:
+
+                def progress(*_):
+                    if time.monotonic() - started > CAPTURE_TIMEOUT:
+                        raise TimeoutError("SQLite snapshot timed out")
+
+                source.backup(destination, pages=256, progress=progress)
+        registry = (data / "registry.db").stat()
+        os.chown(copy / "registry.db", registry.st_uid, registry.st_gid)
+        (copy / "registry.db").chmod(stat.S_IMODE(registry.st_mode))
+        (stage / "format").write_bytes(FORMAT)
+        (stage / "created-at").write_text(str(int(time.time())) + "\n")
+        (stage / "finite-sites-symlinks.bin").write_bytes(manifests(stage)[1])
+        (stage / "manifest.sha256").write_bytes(manifests(stage)[0])
+        verify(stage)
+        install(stage, target)
+
+
+def restore(source, target):
+    source, target = separate(source, target)
+    verify(source)
+    with tempfile.TemporaryDirectory(
+        prefix=".sites-restore-", dir=target.parent
+    ) as scratch:
+        stage = Path(scratch) / "snapshot"
+        command(["rsync", "-a", "--", str(source) + "/", str(stage) + "/"])
+        verify(stage)
+        install(stage / "finite-sites", target)
+
+
+def load_config(path):
+    regular(path)
+    if path.stat().st_mode & 0o077:
+        raise ValueError("backup configuration must be private")
+    config = json.loads(path.read_text())
+    for key in (
+        "data",
+        "root",
+        "repository",
+        "remote_path",
+        "credentials_dir",
+        "service",
+    ):
+        if not isinstance(config.get(key), str) or not config[key]:
+            raise ValueError(f"missing backup configuration: {key}")
+    control = config.get("control")
+    if (
+        not isinstance(control, list)
+        or not control
+        or any(not isinstance(x, str) or not x for x in control)
+    ):
+        raise ValueError("control must be a command argument array")
+    data = Path(config["data"]).resolve(strict=True)
+    root = Path(config["root"]).resolve()
+    if root == data or root in data.parents or data in root.parents:
+        raise ValueError("backup staging must be outside the Sites data tree")
+    root.mkdir(mode=0o700, parents=True, exist_ok=True)
+    if root.stat().st_mode & 0o077:
+        raise ValueError("backup staging must be private")
+    return config, data, root
+
+
+def borg_environment(config, root):
+    credentials = Path(config["credentials_dir"])
+    for name in ("id_ed25519", "known_hosts", "borg-passphrase"):
+        path = credentials / name
+        regular(path)
+        if path.stat().st_mode & 0o077 or path.stat().st_uid != os.geteuid():
+            raise ValueError(
+                "backup credentials must be private and owned by the job user"
+            )
+    env = {k: v for k, v in os.environ.items() if not k.startswith("BORG_")}
+    env.update(
+        BORG_REPO=config["repository"],
+        BORG_REMOTE_PATH=config["remote_path"],
+        BORG_PASSCOMMAND=shlex.join(["cat", str(credentials / "borg-passphrase")]),
+        BORG_RSH=shlex.join(
+            [
+                "ssh",
+                "-i",
+                str(credentials / "id_ed25519"),
+                "-o",
+                "BatchMode=yes",
+                "-o",
+                f"UserKnownHostsFile={credentials / 'known_hosts'}",
+                "-o",
+                "StrictHostKeyChecking=yes",
+            ]
+        ),
+        BORG_BASE_DIR=str(root / "borg-client"),
+    )
+    return env
+
+
+def write_status(root, value):
+    with tempfile.NamedTemporaryFile(mode="w", dir=root, delete=False) as stream:
+        json.dump(value, stream)
+        stream.flush()
+        os.fsync(stream.fileno())
+        temporary = stream.name
+    os.replace(temporary, root / "status.json")
+
+
+def service(config, action):
+    return command([*config["control"], action, config["service"]], timeout=45).decode()
+
+
+def service_state(config):
+    # supervisorctl returns nonzero for STOPPED as well as communication errors.
+    try:
+        result = service(config, "status")
+    except subprocess.CalledProcessError as error:
+        result = error.stdout.decode()
+    fields = result.split()
+    if (
+        len(fields) < 2
+        or fields[0] != config["service"]
+        or fields[1] not in ("RUNNING", "STOPPED", "STOPPING")
+    ):
+        raise ValueError("cannot establish Sites service state")
+    return fields[1]
+
+
+def resume_service(config):
+    # Cancelling supervisorctl does not cancel Supervisor's outstanding stop.
+    deadline = time.monotonic() + 35
+    while (state := service_state(config)) == "STOPPING":
+        if time.monotonic() >= deadline:
+            raise TimeoutError("Sites did not finish stopping")
+        time.sleep(0.1)
+    if state != "RUNNING":
+        service(config, "start")
+    if service_state(config) != "RUNNING":
+        raise ValueError("Sites did not restart after capture")
+
+
+def run_job(config_path):
+    config, data, root = load_config(config_path)
+    with (root / "job.lock").open("a") as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        status_path = root / "status.json"
+        previous = json.loads(status_path.read_text()) if status_path.exists() else {}
+        state = {
+            k: previous[k]
+            for k in ("snapshot_at", "uploaded_at", "archive", "archive_id")
+            if k in previous
+        }
+        state.update(status="running", started_at=int(time.time()))
+        write_status(root, state)
+        try:
+            env = borg_environment(config, root)
+            info = json.loads(command(["borg", "info", "--json"], env=env, timeout=60))
+            if info.get("encryption", {}).get("mode") != "repokey-blake2":
+                raise ValueError("an existing encrypted Borg repository is required")
+            with tempfile.TemporaryDirectory(prefix="capture-", dir=root) as scratch:
+                target = Path(scratch) / "snapshot"
+                was_running = service_state(config) == "RUNNING"
+                try:
+                    if was_running:
+                        service(config, "stop")
+                    if service_state(config) != "STOPPED":
+                        raise ValueError("Sites writers are not stopped")
+                    snapshot(data, target)
+                finally:
+                    if was_running:
+                        resume_service(config)
+                captured = verify(target)
+                archive = (
+                    "sites-"
+                    + time.strftime("%Y%m%dT%H%M%SZ", time.gmtime(captured))
+                    + "-"
+                    + os.urandom(4).hex()
+                )
+                command(
+                    [
+                        "borg",
+                        "create",
+                        "--compression=auto,zstd",
+                        "--files-cache=disabled",
+                        "::" + archive,
+                        "snapshot",
+                    ],
+                    env=env,
+                    cwd=scratch,
+                    timeout=3600,
+                )
+                info = json.loads(
+                    command(
+                        ["borg", "info", "--json", "::" + archive], env=env, timeout=60
+                    )
+                )
+                state.update(
+                    status="ok",
+                    snapshot_at=captured,
+                    uploaded_at=int(time.time()),
+                    archive=archive,
+                    archive_id=info["archives"][0]["id"],
+                )
+        except BaseException as error:
+            state.update(status="failed", error=type(error).__name__)
+            write_status(root, state)
+            raise
+        write_status(root, state)
+
+
+def main():
+    os.umask(0o077)
+    parser = argparse.ArgumentParser(description=__doc__)
+    actions = parser.add_subparsers(dest="action", required=True)
+    capture = actions.add_parser(
+        "snapshot", help="capture only after stopping all Sites writers"
+    )
+    capture.add_argument("--offline", action="store_true", required=True)
+    capture.add_argument("--data", type=Path, required=True)
+    capture.add_argument("--target", type=Path, required=True)
+    recover = actions.add_parser(
+        "restore", help="restore a verified snapshot to a nonexistent target"
+    )
+    recover.add_argument("--snapshot", type=Path, required=True)
+    recover.add_argument("--target", type=Path, required=True)
+    job = actions.add_parser(
+        "run", help="stop Sites, snapshot, restart, then archive with Borg"
+    )
+    job.add_argument("--config", type=Path, required=True)
+    args = parser.parse_args()
+    try:
+        if args.action == "snapshot":
+            snapshot(args.data, args.target)
+        elif args.action == "restore":
+            restore(args.snapshot, args.target)
+        elif args.action == "run":
+            run_job(args.config)
+    except (
+        OSError,
+        ValueError,
+        sqlite3.Error,
+        subprocess.SubprocessError,
+        BackupInterrupted,
+    ) as error:
+        # Subprocess output may contain paths or credentials; do not echo it.
+        print(f"Sites backup failed: {type(error).__name__}", file=sys.stderr)
+        return 1
+    print(json.dumps({"ok": True}))
+    return 0
+
+
+if __name__ == "__main__":
+
+    def interrupted(*_):
+        raise BackupInterrupted("backup interrupted")
+
+    signal.signal(signal.SIGTERM, interrupted)
+    signal.signal(signal.SIGINT, interrupted)
+    sys.exit(main())

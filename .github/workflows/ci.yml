@@ -505,6 +505,8 @@ jobs:
         run: nix develop --command just stripe-price-contract
       - name: Hosted Recovery Set contract
         run: nix develop --command just hosted-recovery-contract
+      - name: Sites snapshot and Borg contract
+        run: nix develop --command just sites-backup-contract
       - name: Sites offline reconciliation contract
         run: nix develop --command just sites-offline-reconciliation-contract
       - name: Litestream recovery contract

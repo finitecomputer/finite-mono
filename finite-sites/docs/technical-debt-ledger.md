@@ -143,18 +143,3 @@ acknowledgement.
 - **Decision**: ADR 0029. Production cutover remains separately authorized.
   The September 15 retirement decision excludes apps/documents from migration;
   it does not remove this adapter before the remaining consumers are retired.
-
-## 12. Local backup Git checkpoint eligibility is conservative
-
-- **Source**: `git_ref_events` deduplicates old/new transitions and records
-  them after Git updates refs. It is not an authoritative per-ref cursor.
-- **Risk**: optimistic comparison alone can miss an already-stalled hook;
-  refusing ambiguous histories can prevent a checkpoint for a valid project.
-- **Proof**: `backup::capture` requires a unique acyclic recorded transition
-  chain per ref and checks its terminal state against Git. Regression tests
-  reject an unrecorded tip and restore manifests omitting historical objects.
-- **Delete condition**: retire this optional local command or replace its
-  conservative capture restriction with a proven consistent snapshot boundary.
-  ADR 0031 selects the existing stopped-Sites snapshot pattern for production;
-  adding a per-ref cursor is not a cutover requirement. Do not mutate user
-  history to satisfy the local command.

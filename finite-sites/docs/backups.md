@@ -1,135 +1,91 @@
-# Sites backup implementation status
+# Sites backups
 
-The selected design adapts the existing legacy Sites snapshot-and-Borg flow to
-Fly: [ADR 0031](adr/0031-borg-on-existing-rsync-net.md). It replaces both S3 and
-the proposed per-revision backup subsystem. The
-[runbook](../../infra/runbooks/sites-borg-recovery.md) describes the narrow
-hosting adaptation. The existing local commands below remain available, but
-their format is not a prerequisite for the production backup job.
 Tracking: [FIN-54](https://linear.app/finitecomputer/issue/FIN-54).
+Decision: [snapshot and Borg adaptation](adr/0031-borg-on-existing-rsync-net.md).
+Operations: [Sites Borg recovery](../../infra/runbooks/sites-borg-recovery.md).
 
-## Local foundation
+## Implementation
 
-The operator can capture and restore a **local** Recovery Point:
+`infra/scripts/sites-backup` adapts the existing hosted backup procedure to
+Sites alone: stop Sites, copy its full data tree with rsync, back up SQLite,
+verify the snapshot, resume Sites, then archive it with native Borg over SSH.
+Git repositories are copied as repositories, not rebundled or reconstructed.
+There is no revision queue, custom object store, or shared-object dependency graph.
+
+The previous `finitesitesd backup` commands, content-addressed repository,
+Git history eligibility machinery and associated tests have been removed.
+The replacement is an operator script; publishing APIs and workflows do not
+change.
+
+## Operator commands
+
+Only after all Sites writers have been stopped:
 
 ```sh
-finitesitesd backup capture --data /path/to/sites --repository /path/to/backup
-finitesitesd backup restore --repository /path/to/backup --point POINT_SHA256 --target /path/to/new-target
+infra/scripts/sites-backup snapshot --offline --data DATA_DIR --target NEW_SNAPSHOT_DIR
+infra/scripts/sites-backup restore --snapshot SNAPSHOT_DIR --target NEW_DATA_DIR
 ```
 
-Capture prints a JSON receipt with the point ID, capture timestamp, and count
-of newly stored objects. Both parent directories must exist. The repository
-must be outside the source tree. Restore requires a destination that does not
-exist; it never overwrites a live registry. Inspect protected snapshot databases
-only through `scripts/snapshot-sqlite` or disposable scratch copies.
+Targets must not exist and must be outside the source tree. Capture uses a
+read-only source database connection and SQLite's backup API. It never migrates
+the source. Snapshots contain `finite-sites/`, a format marker, source capture
+timestamp, `manifest.sha256`, and the existing NUL-delimited symlink inventory
+convention. Restore verifies the complete inventory and SQLite integrity through
+`scripts/snapshot-sqlite`, copies to private scratch and installs without
+overwriting an existing target. No daemon starts during restore.
 
-The source registry is opened read-only and is not initialized or migrated.
-SQLite snapshots preserve shared metadata while published blobs are stored
-once by content hash. Git bundles preserve all captured refs and recorded
-historical object IDs, including source-only projects and non-deploy branches.
-Historical commits use `refs/finite-recovery/` in the restored repository so
-later Git maintenance cannot discard them. Live branch names are unchanged.
-Each operator invocation still walks the full catalog and rebuilds Git bundles;
-deduplication reduces stored bytes, not capture work. Per-revision execution is
-out of scope for the selected snapshot-and-Borg plan.
+Whole snapshots include source-only repositories, non-deploy refs, historical
+Git objects, blobs, sharing/auth state and the cookie key. Runtime configuration,
+mail/service credentials and the Borg key/passphrase still need independent
+custody. The local snapshot is plaintext: keep its parent private.
 
-Capture checks for pending Git reconciliation and for observed Git/catalog
-changes across the checkpoint. A busy or inconsistent generation fails and can
-be retried; earlier completed points and immutable objects remain available.
-This is optimistic validation, not a global serving freeze. It is not yet a
-qualified production capture scheduler, and sustained writes can prevent a
-complete checkpoint.
+The job command controls the stop/copy/start sequence:
 
-The current event log deduplicates Git transitions and has no authoritative
-per-ref cursor. Capture therefore accepts only an unambiguous acyclic chain of
-recorded transitions for each ref, with the observed ref at its terminal SHA.
-Unrecorded tips, cycles (including some branch delete/recreate and rollback
-histories), and branching histories fail closed. Do not repair or rewrite user
-history to make capture succeed. These are limitations of the optional local
-command, not reasons to add a new Git event model before cutover. The selected
-production adaptation uses the existing stopped-Sites snapshot pattern and
-must prove its own restore; it need not use this conservative command.
-Missing repositories are refused, not synthesized as empty. An initialized,
-empty bare repository can be captured and restored.
+```sh
+sites-backup run --config /run/sites-backup.json
+finite-status --sites-backup-state /var/backups/finite-sites/status.json --json
+```
 
-Completion manifests are content-addressed and written last. Restore validates
-object hashes, registry integrity, required blob coverage, project inventory,
-Git bundles, registry-required historical objects, and refs in private scratch
-space before creating the destination.
-It does not start the daemon or send email. Boot a test restore with dev mail
-and production network access disabled. Never start a failed restore.
+The job validates encrypted Borg access before pausing Sites, serializes runs
+with a file lock, resumes a previously running service in its cleanup path,
+and archives only the snapshot from this run. Failed capture never re-uploads
+an old snapshot as fresh. Local staging is removed after the attempt; successful
+archives remain in Borg. No automatic prune/compact or remote initialization.
 
-On Linux and macOS, the verified tree's files and directories are synced before
-an atomic no-replace rename, followed by syncing the destination parent.
-Concurrent restores cannot overwrite one another. Interruption before
-publication leaves the destination absent; scratch directories left by a killed
-process are private but require operator cleanup. A parent-sync error after
-rename is reported as a failed restore even though the complete target exists.
-Keep that target offline and investigate; do not automatically delete or retry
-over it. Other operating systems are not supported for atomic publication.
+## Image and remaining rollout
 
-Current ceilings are 100,000 manifest inventory items (files, projects, refs,
-and retained Git objects combined), 64 MiB serialized manifest, and 1 GiB per
-object. Objects are currently read into bounded memory; allow more than 1 GiB
-of memory plus Git working space. Each SQLite capture and each Git command has
-a 60-second deadline, and Git stderr is capped at 1 MiB. These are safety
-ceilings, not production sizing or throughput qualification.
-The restored tree is also bounded to one million entries and depth 128;
-capture applies a conservative expansion budget before completing a point.
+The Fly image uses stock Supervisor and cron only when
+`FINITE_SITES_BACKUP_ENABLED=1`. Default serving remains the existing direct
+non-root daemon. Opt-in requires provisioned root-only credentials and a
+repository; the daemon cannot access the supervisor socket or backup keys.
+Cron starts a supervised one-shot daily at 03:07 UTC. Confirm the cadence and
+measured pause before enabling it. Image shutdown stops cron, then the backup
+worker, then Sites.
 
-The local repository is **not encrypted**. It contains private source, registry
-credentials/auth state, and the cookie signing secret. Directories are private
-and object files are created with private permissions. Do not commit it, attach
-it to a ticket, or upload it through an unqualified transport. Keep it on a
-protected filesystem with enough space for the source checkpoint, bundles, and
-retained objects. There is no automated deletion; unfinished capture objects
-remain reusable but consume disk.
+Normal errors and SIGINT/SIGTERM attempt service recovery and report failure.
+SIGKILL or host loss cannot run cleanup: restore service through the supervisor
+or restart the Machine and inspect the failed/incomplete run before retrying.
+The next image boot starts Sites normally. This is a maintenance-window backup,
+not a zero-downtime design.
 
-## Local verification
+Production still needs the authorized credential provisioning, new image
+deployment, external freshness alert wiring, and rsync.net-to-empty-Fly restore
+drill. Neither the checked-in Fly image digest nor the opt-in flag has been
+changed. Option A / Latitude and existing host/Chat jobs are untouched.
 
-Run `scripts/with-dev-env cargo test -p finitesitesd --locked` for operator
-capture/restore, crash/retry, concurrent no-replace publication, bounded Git
-process failures, and application HTTP tests. The recovery application test
-publishes a first version, captures/restores it, then uses the original editor
-credential to clone and publish Version 2 on the restored server. The original
-owner changes sharing through the signed API; the restored bytes become
-public while the source remains private at Version 1. Another recovery test
-checks that an original viewer cookie still works and revocation still applies.
+## Verification
 
-The workspace gate is `scripts/with-dev-env just test`, which supplies the
-isolated Postgres environment required by Core tests. Local macOS success is
-not Linux, rsync.net, Fly, or production recovery qualification.
+```sh
+scripts/with-dev-env just sites-backup-contract
+bash infra/images/sites-smoke.sh IMAGE
+SITES_BACKUP_SMOKE=1 bash infra/images/sites-smoke.sh IMAGE
+```
 
-The Nix development and Rust CI shells include Borg. The `borg_restore_*`
-application test captures through the operator CLI, creates a native encrypted
-Borg archive, exports its repokey, removes the original local checkpoint and
-writer's Borg client state, and extracts using a fresh client. It then restores
-through the operator CLI and proves private serving, original editor credential
-reuse, publishing Version 2, and owner-controlled sharing without changing the
-source. All credentials and repositories in this test are synthetic and local.
-
-## Still required before production
-
-- Adapt the existing Sites-only consistent snapshot step and Borg job to Fly.
-  Each scheduled run must capture fresh state before archival, resume Sites
-  before upload, and recover the previously running service on failure. Measure
-  and agree the pause and cadence before enabling it.
-- Qualify the dedicated Sites Borg repository, pinned SSH access and native
-  encryption with independently recoverable credentials/key export. Record the
-  archive ID and source snapshot timestamp. Keep automatic pruning disabled.
-- Verify capture/upload failure handling, disk capacity, snapshot freshness
-  and upload success through `scripts/finite-status` and existing alerting.
-- An actual rsync.net/Borg restore onto an empty Fly volume,
-  including the original publisher's clone/push/publish flow and preserved
-  permissions. Local tests are not off-host recovery proof.
-- Independently recoverable runtime configuration, mail/service credentials,
-  encryption keys, and image access. These are not all files in the Sites data
-  directory; the local capture includes the cookie key, not Fly secret values.
-
-No per-revision queue, separate metadata checkpoint scheduler, custom retry
-service, or dependency graph is required. Full snapshots capture the complete
-Sites-owned state; Borg handles deduplication.
-
-No production service, remote backup repository, CLI fleet pin, DNS record, or migration
-state is changed by implementing these commands. Option A / Latitude remains
-intact. A local repository on the serving volume is not an independent backup.
+The contract tests cover the actual script and native encrypted Borg, corruption,
+wrong credentials, overlapping jobs, no-overwrite restore, capture/upload/restart
+failures, supervisor isolation, and separate snapshot/upload freshness. The image
+smoke covers the real daemon, restart/replacement, a Borg restore into an empty
+Docker volume, original-credential clone/push and preserved sharing. A separate
+root Linux test exercises real cron scheduling and ordered supervisor shutdown.
+CI runs both the script contracts and exact-image checks. Local tests do not
+prove rsync.net access or a completed production Fly restore.

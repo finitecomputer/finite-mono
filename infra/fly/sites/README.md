@@ -60,7 +60,9 @@ Run the **Service Images** workflow with `image=sites` and
 and locked workspace dependencies, builds `finitesitesd` and the matching
 operator `fsite`, and publishes a canary under `ghcr.io/finitecomputer/finite-sites`.
 The runtime contains Git (including its HTTP backend), CA certificates and
-the libraries needed by the binaries. Neither core nor an agent runs in it.
+the libraries needed by the binaries. It also packages native Borg, rsync,
+SQLite, OpenSSH, Supervisor and cron for the opt-in backup job. Neither core
+nor an agent runs in it.
 
 The image smoke gate tests the exact pulled canary, with disposable volumes:
 registration, owner-mailbox proof via the dev outbox, project init, Git hooks/push, committed content, private/public
@@ -150,7 +152,20 @@ The volume mounts at `/var/lib/finite-sites`, containing the complete registry,
 repositories, blobs, cookie secret and outbox. Startup refuses a missing mount,
 initializes only its root ownership, then drops to UID/GID 65532 before serving.
 It does not recursively repair imported data. SIGINT matches the daemon's
-graceful-shutdown handler; Fly allows 30 seconds before forced termination.
+graceful-shutdown handler. The prepared config allows 120 seconds for ordered
+shutdown when backup supervision is enabled; this is not a claim that the
+currently deployed Machine configuration has changed.
+
+## Option B: Backup Qualification
+
+Backups remain disabled until the new image, dedicated rsync.net repository
+and root-only credentials are provisioned. Follow the
+[Sites Borg recovery runbook](../../runbooks/sites-borg-recovery.md) for the
+opt-in settings, Fly file-secret mappings, daily job, status check and
+empty-volume restore drill. This adapts the existing stopped-Sites snapshot
+and Borg flow; it does not change publishing or the legacy Latitude jobs.
+Do not promote based only on a successful upload: FIN-54 also requires
+independent restore proof and external freshness/failure alerting.
 
 ## Option B: Demonstrate And Record
 

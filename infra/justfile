@@ -17,6 +17,11 @@ hosted-recovery-contract:
     cd .. && python3 -m unittest discover -s scripts/tests -p 'test_snapshot_sqlite.py'
     cd .. && infra/scripts/test-hosted-web-chat-restore
 
+sites-backup-contract:
+    cd .. && python3 -m unittest discover -s scripts/tests -p 'test_sites_backup*.py'
+    cd .. && python3 -m unittest discover -s scripts/tests -p 'test_sites_supervisor.py'
+    cd .. && bash -n infra/images/sites-smoke.sh
+
 # Synthetic offline litestream replicate -> restore -> integrity proof.
 litestream-recovery-contract:
     cd .. && bash -n infra/scripts/test-litestream-restore

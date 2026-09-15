@@ -1,7 +1,7 @@
 # Borg on the existing rsync.net surface
 
-Accepted September 15, 2026 for FIN-54. This supersedes ADR 0030's S3 transport
-and per-revision scheduling design. Adapt the existing legacy Sites backup
+Accepted September 15, 2026 for FIN-54. This replaces the former S3 transport
+and per-revision scheduling proposal. Adapt the existing legacy Sites backup
 coverage to Fly; do not build a new backup platform.
 
 Use native Borg 1.x over SSH to a dedicated Sites repository on the existing
@@ -36,13 +36,12 @@ and archive consistency. Full snapshots include metadata-only changes and all
 source history without per-project queues, revision hooks, a dependency graph,
 separate metadata schedules, or a custom reconciliation service.
 
-The first implementation slice is the native Borg operator procedure and a
-synthetic encrypted-archive application restore test. There is no new daemon
-transport API. That test uses the already-built local capture/restore commands;
-their content-addressed format is not mandatory for the production adaptation.
-Prefer existing snapshot/restore logic where applicable, and test the actual
-chosen production flow. Remaining work is Fly job wiring, credential access,
-simple freshness/failure reporting, and an independent remote restore drill.
+Implementation lives in the Sites operator script and opt-in stock
+Supervisor/cron image configuration. There is no new daemon transport API.
+The custom content-addressed capture/restore code has been removed; tests use
+the actual stopped-Sites snapshot and native Borg flow. Remaining operational
+work is credential provisioning, image promotion, external freshness alerts,
+and an independent remote restore drill.
 
 The archival job does not prune or compact. Retention needs separately
 authorized administrative access and restore proof. No-prune is not

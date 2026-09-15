@@ -1,6 +1,10 @@
 #!/bin/sh
 set -eu
 
+# Fly file secrets may also be environment variables; never pass backup keys
+# to the unprivileged serving process (including when backups are disabled).
+unset FINITE_SITES_BORG_SSH_KEY FINITE_SITES_BORG_KNOWN_HOSTS FINITE_SITES_BORG_PASSPHRASE
+
 if [ "${1:-}" = serve ]; then
     # Refuse to put durable state on the ephemeral image filesystem.
     mountpoint -q /var/lib/finite-sites || {
@@ -12,4 +16,7 @@ if [ "${1:-}" = serve ]; then
     chmod 700 /var/lib/finite-sites
 fi
 umask 077
+if [ "${1:-}" = serve ] && [ "${FINITE_SITES_BACKUP_ENABLED:-}" = 1 ]; then
+    exec python3 /usr/local/bin/sites-supervisor.py "$@"
+fi
 exec setpriv --reuid=65532 --regid=65532 --clear-groups --no-new-privs finitesitesd "$@"
