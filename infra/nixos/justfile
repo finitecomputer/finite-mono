@@ -182,4 +182,4 @@ install-lat5-from-artifact artifact_dir target_host *args:
 
 lat5-runner-rollout-contract:
     cd ../.. && bash -n scripts/build-lat5-nixos-closure-artifact scripts/deploy-lat5-closure-cache scripts/install-lat5-from-artifact infra/nixos/scripts/capture-lat5-host-evidence
-    cd ../.. && python3 -m unittest scripts.tests.test_lat5_closure_artifact
+    cd ../.. && python3 -m unittest scripts.tests.test_lat5_closure_artifact scripts.tests.test_lat5_bootstrap

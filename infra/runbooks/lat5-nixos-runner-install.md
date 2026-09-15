@@ -1,11 +1,15 @@
 # finite-lat-5 setup
 
 Execution plan for [FIN-74](https://linear.app/finitecomputer/issue/FIN-74).
-Status on 2026-09-15: provisioned in Chicago, SSH and initial hardware capture
-complete. NixOS configuration and artifact tooling are drafted. All PR CI checks,
-including Nix evaluation, passed at revision 5934f626. A synthetic storage/boot qualification gate and a fully packaged installer
-are being added before installation; CI packaging, install, overlay admission
-and launch qualification remain open.
+Status on 2026-09-15: provisioned in Chicago; hardware capture, code review,
+and synthetic storage/boot qualification passed. PR #883 merged as
+`8993d75b0d3e6ba5e9d6497b32bf43192ada3254`. The exact-revision installation
+artifact was built successfully in workflow run
+[34996898901](https://github.com/finitecomputer/finite-mono/actions/runs/34996898901).
+NixOS was installed and booted. First boot exposed a missing WireGuard
+bootstrap key that blocked public networking; recovery is in progress.
+Physical storage/boot verification, overlay admission and launch qualification
+remain open.
 No Agent Runtime has been created on lat5.
 
 Use lat4's dedicated NixOS/Kata Runner architecture with an empty `/data`.
@@ -110,7 +114,7 @@ and before publishing the installation artifact.
 After merging, record the exact revision and workflow run below, then use:
 
 ```sh
-gh workflow run lat5-nixos-closure.yml --ref "$REV" -f rev="$REV"
+gh workflow run lat5-nixos-closure.yml --ref main -f rev="$REV"
 gh run download "$RUN_ID" --name "lat5-nixos-closure-$REV" \
   --dir "target/lat5-nixos-closure-$REV"
 scripts/install-lat5-from-artifact "target/lat5-nixos-closure-$REV" \
@@ -130,9 +134,16 @@ file-to-file from existing monitoring credential custody into
 present during activation. Add a fresh Ed25519 SSH host keypair under
 `etc/ssh/`, with both files mode 0600. The staging root and its directories
 must be root-owned 0700; the installer rejects every other file or symlink.
-Do not stage `runner.env` during this OS-only step;
-its absence keeps the Runner disabled. WireGuard/Core admission and the
-remaining host credentials belong to step 3. Verify Latitude rescue/console
+Generate a unique WireGuard private key with `wg genkey` under `umask 077`
+and stage it at `etc/finite/wireguard-private-key` (root:root, 0600). Keep
+a secure copy with the bootstrap escrow; never copy another host's key.
+The generated `systemd-networkd` service requires this credential before it
+can start **any networking**, including public SSH. Hub peer registration
+can wait until step 3, but this file cannot.
+
+Do not stage `runner.env` during this OS-only step; its absence keeps the
+Runner disabled. Hub/Core admission and the remaining host credentials
+belong to step 3. Verify Latitude rescue/console
 access and recheck the exact disk identities before starting the installer.
 
 Rollback before agent admission is rescue access and reinstalling this empty
@@ -156,9 +167,10 @@ historical migration section as a separate operation.
 
 Stage credentials by name and secure file transfer, with root-only access:
 `runner.env`, `identity-operator.env`, `runtime-secrets.env`,
-`wireguard-private-key`, `metrics-remote-write.env` and `logs-write.env`
-under `/etc/finite/`. Use a unique Runner credential and WireGuard private
-key. Pin the current promoted runtime artifact and set `FC_RUNNER_DRAIN=true`.
+under `/etc/finite/`. Retain the WireGuard private key and monitoring
+credentials staged during OS installation. Derive the public key from that
+existing WireGuard key and register it on lat2; do not generate a replacement.
+Use a unique Runner credential. Pin the current promoted runtime artifact and set `FC_RUNNER_DRAIN=true`.
 
 Complete when lat5 boots the exact artifact, both arrays are healthy, both
 ESPs and storage identities pass validation, storage/boot refusal checks

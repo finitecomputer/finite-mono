@@ -13,7 +13,7 @@
 #
 # Run on a Linux driver. All executables come from the CI file cache;
 # no local flake evaluation, installer override, or build fallback is used.
-# Bootstrap files must contain root-owned 0600 monitoring credentials.
+# Bootstrap files include root-owned 0600 monitoring, WireGuard and SSH keys.
 # usage: install-lat5-from-artifact <artifact-dir> <target-host> --extra-files <root>
 set -euo pipefail
 
@@ -159,35 +159,8 @@ test -d "$QUALIFICATION"
 [[ -n "$extra_files" && -d "$extra_files" ]] || {
   echo "--extra-files must name the root-only bootstrap directory" >&2; exit 64;
 }
+python3 "$(dirname "$0")/check-lat5-bootstrap" "$extra_files"
 extra_files="$(cd "$extra_files" && pwd -P)"
-python3 - "$extra_files" <<'BOOTSTRAP'
-from pathlib import Path
-import stat
-import sys
-root = Path(sys.argv[1])
-files = {
-    "etc/finite/metrics-remote-write.env", "etc/finite/logs-write.env",
-    "etc/ssh/ssh_host_ed25519_key", "etc/ssh/ssh_host_ed25519_key.pub",
-}
-directories = {"etc", "etc/finite", "etc/ssh"}
-if root == Path("/") or root.is_symlink():
-    raise SystemExit("refusing a broad or symlink bootstrap root")
-seen = set()
-for path in [root, *root.rglob("*")]:
-    info = path.lstat()
-    rel = str(path.relative_to(root))
-    if info.st_uid != 0 or info.st_gid != 0 or stat.S_ISLNK(info.st_mode):
-        raise SystemExit("bootstrap paths must be root-owned and not symlinks")
-    if path == root or rel in directories:
-        valid = stat.S_ISDIR(info.st_mode) and stat.S_IMODE(info.st_mode) == 0o700
-    else:
-        valid = rel in files and stat.S_ISREG(info.st_mode) and stat.S_IMODE(info.st_mode) == 0o600
-        seen.add(rel)
-    if not valid:
-        raise SystemExit("bootstrap contains an unexpected path or mode")
-if seen != files:
-    raise SystemExit("bootstrap must contain exactly monitoring credentials and a fresh SSH host keypair")
-BOOTSTRAP
 "$(dirname "$0")/../infra/nixos/scripts/check-lat-monitoring-secrets" --root "$extra_files"
 [[ ! -e "$extra_files/etc/finite/runner.env" ]] || {
   echo "initial OS install must not stage Runner admission credentials" >&2; exit 65;
