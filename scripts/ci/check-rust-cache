@@ -1,0 +1,61 @@
+#!/usr/bin/env bash
+set -euo pipefail
+scenario="${1:?scenario}"
+output="${2:?output directory}"
+mkdir -p "$output"
+core_before="$(nix eval --raw .#finite-saas-core.outPath)"
+sites_before="$(nix eval --raw .#finitesitesd.outPath)"
+started=$SECONDS
+case "$scenario" in
+  identical) ;;
+  sites-source)
+    printf '\n// Cache isolation check.\n' >> finite-sites/crates/finitesites-engine/src/lib.rs
+    ;;
+  sites-dependency)
+    # A real version change, requiring the changed third-party crate to build.
+    cargo update -p pulldown-cmark --precise 0.13.3
+    crate2nix generate
+    ;;
+  shared-dependency)
+    cargo update -p serde_json --precise 1.0.148
+    crate2nix generate
+    ;;
+  *) exit 64 ;;
+esac
+preparation=$((SECONDS - started))
+git diff --stat > "$output/change.txt"
+core_after="$(nix eval --raw .#finite-saas-core.outPath)"
+sites_after="$(nix eval --raw .#finitesitesd.outPath)"
+if [[ "$scenario" != identical && "$sites_before" == "$sites_after" ]]; then
+  echo "Changed Sites inputs did not invalidate Sites" >&2
+  exit 1
+fi
+if [[ "$scenario" == sites-* && "$core_before" != "$core_after" ]]; then
+  echo "Sites-only edit invalidated SaaS Core" >&2
+  exit 1
+fi
+if [[ "$scenario" == shared-dependency && "$core_before" == "$core_after" ]]; then
+  echo "Shared dependency edit failed to invalidate SaaS Core" >&2
+  exit 1
+fi
+TIMEFORMAT=%R
+{ time nix build .#finitesitesd .#finite-saas-core --no-link --print-out-paths \
+    --print-build-logs --option builders '' --cores 8 --max-jobs 8 \
+    > "$output/outputs.txt" 2> "$output/build.log"; } 2> "$output/seconds.txt"
+# Check actual compilation, not just whether Nix returned success.
+rg "^building .*rust_" "$output/build.log" > "$output/rebuilt.txt" || true
+case "$scenario" in
+  identical) test ! -s "$output/rebuilt.txt" ;;
+  sites-source|sites-dependency)
+    if rg -v 'rust_(pulldown-cmark|finitesites-engine|finitesitesd)-' "$output/rebuilt.txt"; then
+      echo "Unchanged crates were rebuilt instead of downloaded" >&2
+      exit 1
+    fi
+    ;;
+esac
+{
+  echo "### Fresh runner: $scenario"
+  echo "Preparation: ${preparation}s; build/substitution: $(cat "$output/seconds.txt")s"
+  echo "Rust derivations rebuilt: $(wc -l < "$output/rebuilt.txt")"
+  cat "$output/rebuilt.txt"
+} | tee "$output/summary.md" >> "$GITHUB_STEP_SUMMARY"

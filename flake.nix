@@ -12,7 +12,6 @@
 
   inputs = {
     nixpkgs.url = "github:nixos/nixpkgs/nixos-25.11";
-    crane.url = "github:ipetkov/crane/v0.23.4";
     # Hermes Agent's PyPI channel was retired in v0.20.0. Keep every repo-owned
     # Hermes runtime path on the upstream Nix package instead of ad hoc archives.
     hermes-nixpkgs.url = "github:NixOS/nixpkgs/0954f7ee2f6bb3dc7d4e3d0d8bcb8fd4bde4cfc5";
@@ -64,7 +63,6 @@
     {
       self,
       nixpkgs,
-      crane,
       hermes-nixpkgs,
       hermes-agent,
       nixpkgs-lat3,
@@ -81,7 +79,6 @@
       finitePackagePkgsLinux = import nixpkgs { system = "x86_64-linux"; };
       finitePackagesLinux = import ./infra/nixos/packages.nix {
         pkgs = finitePackagePkgsLinux;
-        craneLib = crane.mkLib finitePackagePkgsLinux;
         sourceRoot = ./.;
       };
       kataPackagesLinux = import nixpkgs-kata { system = "x86_64-linux"; };
@@ -316,6 +313,10 @@
             overlays = [ (import rust-overlay) ];
           };
           finitePackagePkgs = import nixpkgs { inherit system; };
+          # https://github.com/nix-community/crate2nix/issues/258
+          crate2nixGenerator = pkgs.crate2nix.overrideAttrs (old: {
+            patches = (old.patches or [ ]) ++ [ ./infra/nixos/crate2nix-dep-features.patch ];
+          });
           # The repo-wide Python formatter/linter pin. Deliberately from the
           # hermes-nixpkgs pin (ruff 0.15.x, the version the tree is
           # formatted with and hermes-bridge-ci checks with) so local, CI,
@@ -325,7 +326,6 @@
           pyToolPkgs = import hermes-nixpkgs { inherit system; };
           finitePackages = import ./infra/nixos/packages.nix {
             pkgs = finitePackagePkgs;
-            craneLib = crane.mkLib finitePackagePkgs;
             sourceRoot = ./.;
           };
           gcxCli = (import nixpkgs-lat3 { inherit system; }).gcx;
@@ -364,9 +364,17 @@
             ]);
         in
         {
-          packages = (hermesPackagesFor system) // finitePackages;
+          packages = (hermesPackagesFor system) // finitePackages // { crate2nix = crate2nixGenerator; };
 
           devShells = {
+            crate2nix = pkgs.mkShell {
+              packages = [
+                crate2nixGenerator
+                rustToolchain
+                pkgs.git
+                pkgs.ripgrep
+              ];
+            };
             default = pkgs.mkShell {
               packages =
                 rustBasePackages
@@ -426,6 +434,12 @@
     in
     systemOutputs
     // {
+      checks.x86_64-linux.crate2nix-features =
+        assert import ./infra/nixos/tests/crate2nix-features.nix {
+          pkgs = finitePackagePkgsLinux;
+          sourceRoot = ./.;
+        };
+        finitePackagePkgsLinux.runCommand "crate2nix-features" { } ''touch "$out"'';
       checks.x86_64-linux.lat5-storage-boot = import ./infra/nixos/tests/lat5-storage-boot.nix {
         nixpkgs = nixpkgs-lat3;
         inherit disko;

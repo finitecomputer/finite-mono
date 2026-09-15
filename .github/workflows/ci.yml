@@ -503,12 +503,12 @@ jobs:
       - name: Evaluate production NixOS configuration
         run: nix eval .#nixosConfigurations.finite-lat-2.config.system.build.toplevel.drvPath
 
-  # Landing gate: builds the 15 scoped service packages through crane and
+  # Landing gate: builds the Rust service packages and compiled-crate cache and
   # repopulates Cachix. select-harnesses defers this to landing events
   # (push / merge_group) except when a PR changes the package derivations
   # themselves: the workspace manifests / Cargo.lock / .cargo config that
-  # scope cargoArtifacts, rust-toolchain.toml, the flake graph, or
-  # infra/nixos/. A cold cargoArtifacts build here costs ~30 minutes and
+  # change per-crate builds, rust-toolchain.toml, the flake graph, or
+  # infra/nixos/. A cold full package build can be expensive and
   # the Rust workspace job has already compiled and tested the PR diff.
   nix-service-packages:
     name: Nix service packages
@@ -566,18 +566,23 @@ jobs:
           name: ${{ env.CACHIX_CACHE_NAME }}
           authToken: ${{ secrets.CACHIX_AUTH_TOKEN }}
           skipPush: true
-      - name: Build every scoped Rust package
+      - name: Verify generated Cargo definitions
+        working-directory: nix-packages-${{ github.run_id }}-${{ github.run_attempt }}
+        run: |
+          nix develop .#crate2nix -c crate2nix generate
+          git diff --exit-code -- Cargo.nix crate-hashes.json Cargo.lock
+          nix build --no-link .#checks.x86_64-linux.crate2nix-features
+      - name: Build every Rust package
         id: build_packages
         working-directory: nix-packages-${{ github.run_id }}-${{ github.run_attempt }}
         env:
-          ARTIFACT_BUILD_PLAN: ${{ runner.temp }}/nix-service-package-artifact-build-plan
           BUILD_PLAN: ${{ runner.temp }}/nix-service-package-build-plan
-          CARGO_ARTIFACT_OUTPUTS: ${{ runner.temp }}/nix-service-package-cargo-artifact-outputs
           PACKAGE_OUTPUTS: ${{ runner.temp }}/nix-service-package-outputs
         run: |
           set -euo pipefail
 
           packages=(
+            ".#packages.x86_64-linux.crate2nix"
             ".#packages.x86_64-linux.devfinity"
             ".#packages.x86_64-linux.finite-saas-core"
             ".#packages.x86_64-linux.finite-saas-local"
@@ -593,86 +598,31 @@ jobs:
             ".#packages.x86_64-linux.finitechat"
           )
 
-          cargo_artifacts=()
-          for package in "${packages[@]}"; do
-            cargo_artifacts+=("${package}.cargoArtifacts")
-          done
-
-          nix build --dry-run --option builders '' "${cargo_artifacts[@]}" 2>&1 | tee "$ARTIFACT_BUILD_PLAN"
+          # Include compiled libraries/build scripts, not only runtime binaries.
+          packages+=(".#packages.x86_64-linux.rust-build-cache")
           nix build --dry-run --option builders '' "${packages[@]}" 2>&1 | tee "$BUILD_PLAN"
-
-          artifact_build_required=false
-          package_build_required=false
-          if grep -Eq 'derivations? will be built:' "$ARTIFACT_BUILD_PLAN"; then
-            artifact_build_required=true
-          fi
           if grep -Eq 'derivations? will be built:' "$BUILD_PLAN"; then
-            package_build_required=true
-          fi
-          if [[ "$artifact_build_required" == true || "$package_build_required" == true ]]; then
             echo "built_paths=true" >> "$GITHUB_OUTPUT"
           else
             echo "built_paths=false" >> "$GITHUB_OUTPUT"
           fi
-
-          artifact_started="$SECONDS"
-          nix build --no-link --print-build-logs --print-out-paths --option builders '' "${cargo_artifacts[@]}" \
-            | sort -u \
-            | tee "$CARGO_ARTIFACT_OUTPUTS"
-          artifact_elapsed="$((SECONDS - artifact_started))"
-
-          package_started="$SECONDS"
+          started="$SECONDS"
           nix build --no-link --print-build-logs --print-out-paths --option builders '' "${packages[@]}" \
             | tee "$PACKAGE_OUTPUTS"
-          package_elapsed="$((SECONDS - package_started))"
-
-          artifact_count="$(wc -l < "$CARGO_ARTIFACT_OUTPUTS" | tr -d '[:space:]')"
-          package_count="$(wc -l < "$PACKAGE_OUTPUTS" | tr -d '[:space:]')"
-          if [[ "$artifact_count" -ne 8 ]]; then
-            echo "::error::expected 8 distinct Cargo dependency artifacts for the scoped packages; got $artifact_count"
-            exit 1
-          fi
-          {
-            echo "### Nix service package cache"
-            echo
-            echo "| Phase | Output roots | Elapsed | Build required before execution |"
-            echo "| --- | ---: | ---: | --- |"
-            echo "| Cargo dependency artifacts | $artifact_count | ${artifact_elapsed}s | $artifact_build_required |"
-            echo "| Application/runtime packages | $package_count | ${package_elapsed}s | $package_build_required |"
-          } >> "$GITHUB_STEP_SUMMARY"
-      - name: Push Nix service package runtime closures and Cargo artifacts
-        if: steps.cachix.outputs.push_enabled == 'true' && steps.build_packages.outputs.built_paths == 'true'
+          echo "Built/substituted Rust packages and per-crate cache in $((SECONDS - started))s" >> "$GITHUB_STEP_SUMMARY"
+      - name: Push runtime and compiled crate closures
+        if: steps.cachix.outputs.push_enabled == 'true'
         working-directory: nix-packages-${{ github.run_id }}-${{ github.run_attempt }}
         env:
-          CARGO_ARTIFACT_OUTPUTS: ${{ runner.temp }}/nix-service-package-cargo-artifact-outputs
           PACKAGE_OUTPUTS: ${{ runner.temp }}/nix-service-package-outputs
           CACHIX_AUTH_TOKEN: ${{ secrets.CACHIX_AUTH_TOKEN }}
         run: |
           set -euo pipefail
-
-          if [[ ! -s "$PACKAGE_OUTPUTS" ]]; then
-            echo "::error::Nix service package build did not record any output paths"
-            exit 1
-          fi
-          if [[ ! -s "$CARGO_ARTIFACT_OUTPUTS" ]]; then
-            echo "::error::Nix service package build did not record any Cargo artifact paths"
-            exit 1
-          fi
-
-          closure_paths="$RUNNER_TEMP/nix-service-package-cache-closure"
+          test -s "$PACKAGE_OUTPUTS"
           mapfile -t outputs < "$PACKAGE_OUTPUTS"
-          mapfile -t cargo_artifacts < "$CARGO_ARTIFACT_OUTPUTS"
-          nix path-info --recursive "${outputs[@]}" "${cargo_artifacts[@]}" | sort -u > "$closure_paths"
-          closure_count="$(wc -l < "$closure_paths" | tr -d '[:space:]')"
-          echo "Pushing $closure_count Nix paths for ${#outputs[@]} runtime outputs and ${#cargo_artifacts[@]} Cargo artifact outputs to $CACHIX_CACHE_NAME"
-          xargs -r -d '\n' cachix push "$CACHIX_CACHE_NAME" < "$closure_paths"
-          {
-            echo
-            echo "Pushed **$closure_count** unique runtime and Cargo artifact closure paths to Cachix."
-          } >> "$GITHUB_STEP_SUMMARY"
-      - name: Skip Cachix push for fully substituted service packages and Cargo artifacts
-        if: steps.cachix.outputs.push_enabled == 'true' && steps.build_packages.outputs.built_paths != 'true'
-        run: echo "Nix dry-run found no service package or Cargo artifact derivations to build; skipping Cachix push."
+          nix path-info --recursive "${outputs[@]}" | sort -u > "$RUNNER_TEMP/rust-cache-paths"
+          xargs -r -d '\n' cachix push "$CACHIX_CACHE_NAME" < "$RUNNER_TEMP/rust-cache-paths"
+          echo "Published $(wc -l < "$RUNNER_TEMP/rust-cache-paths") runtime and compiled-crate paths" >> "$GITHUB_STEP_SUMMARY"
       - name: Verify Chat reports its scoped source fingerprint
         working-directory: nix-packages-${{ github.run_id }}-${{ github.run_attempt }}
         run: |
@@ -721,11 +671,41 @@ jobs:
             sudo -n find "$CHECKOUT_PATH" -xdev -depth -delete
           fi
 
+  rust-cache-reuse:
+    name: Fresh-runner Rust cache (${{ matrix.scenario }})
+    needs: [changes, nix-service-packages]
+    if: >-
+      needs.changes.outputs.run_nix_service_packages == 'true' &&
+      (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)
+    runs-on: depot-ubuntu-24.04
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        scenario: [identical, sites-source, sites-dependency, shared-dependency]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: DeterminateSystems/nix-installer-action@v16
+      - uses: cachix/cachix-action@v17
+        with:
+          name: ${{ env.CACHIX_CACHE_NAME }}
+          skipPush: true
+      - name: Verify cache reuse on a separate runner
+        env:
+          SCENARIO: ${{ matrix.scenario }}
+        run: |
+          nix develop .#crate2nix -c bash scripts/ci/check-rust-cache "$SCENARIO" "$RUNNER_TEMP/rust-cache"
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: rust-cache-${{ matrix.scenario }}
+          path: ${{ runner.temp }}/rust-cache
+
   devfinity-smoke:
     name: devfinity services-only smoke
     # Packaging runs on landing events only (and flake-graph PRs); on other
     # pull requests this job proceeds while the packaging job is skipped:
-    # warm cargoArtifacts substitute from Cachix and only the thin final
+    # warm compiled crates substitute from Cachix and only the thin final
     # packages build locally from the PR tree. `!cancelled()` overrides the
     # default "skip when a dependency is skipped" without losing the wait for
     # the Cachix push on landing runs.
@@ -805,6 +785,7 @@ jobs:
       - finite-status-contract
       - nix-checks
       - nix-service-packages
+      - rust-cache-reuse
       - devfinity-smoke
       - brain-product-matrix
     runs-on: depot-ubuntu-24.04
@@ -827,6 +808,8 @@ jobs:
       RESULT_NIX_CHECKS: ${{ needs['nix-checks'].result }}
       RUN_NIX_SERVICE_PACKAGES: ${{ needs.changes.outputs.run_nix_service_packages }}
       RESULT_NIX_SERVICE_PACKAGES: ${{ needs['nix-service-packages'].result }}
+      RUN_RUST_CACHE_REUSE: ${{ needs.changes.outputs.run_nix_service_packages == 'true' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) }}
+      RESULT_RUST_CACHE_REUSE: ${{ needs['rust-cache-reuse'].result }}
       RUN_DEVFINITY_SMOKE: ${{ needs.changes.outputs.run_devfinity_smoke }}
       RESULT_DEVFINITY_SMOKE: ${{ needs['devfinity-smoke'].result }}
       RUN_BRAIN_PRODUCT_MATRIX: ${{ needs.changes.outputs.run_brain_product_matrix }}
@@ -872,6 +855,7 @@ jobs:
           check_selected "Finite status contract" "$RUN_FINITE_STATUS_CONTRACT" "$RESULT_FINITE_STATUS_CONTRACT"
           check_selected "Nix checks" "$RUN_NIX_CHECKS" "$RESULT_NIX_CHECKS"
           check_selected "Nix service packages" "$RUN_NIX_SERVICE_PACKAGES" "$RESULT_NIX_SERVICE_PACKAGES"
+          check_selected "Fresh-runner Rust cache" "$RUN_RUST_CACHE_REUSE" "$RESULT_RUST_CACHE_REUSE"
           check_selected "devfinity smoke" "$RUN_DEVFINITY_SMOKE" "$RESULT_DEVFINITY_SMOKE"
           check_selected "Brain product matrix" "$RUN_BRAIN_PRODUCT_MATRIX" "$RESULT_BRAIN_PRODUCT_MATRIX"
 
