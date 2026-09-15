@@ -503,6 +503,32 @@ else
   done
 fi
 
+# BEGIN RUNNING_EXECUTABLE_VERIFICATION
+# A successful NixOS switch can leave an old process behind even after
+# systemd's unit configuration points at the candidate. Fail closed; do not
+# automatically restart Chat or another service outside the approved boundary.
+verify_running_executable() {
+  local unit="$1" line expected pid running
+  line="$(sed -n 's/^ExecStart=//p' "$system/etc/systemd/system/$unit" | sed '/^[[:space:]]*$/d' | tail -n 1)"
+  expected="${line%%[[:space:]]*}"
+  [[ "$expected" == /nix/store/* ]] || return 1
+  pid="$(systemctl show --property=MainPID --value "$unit")"
+  [[ "$pid" =~ ^[1-9][0-9]*$ ]] || return 1
+  running="$(readlink -f "/proc/$pid/exe")" || return 1
+  expected="$(readlink -f "$expected")" || return 1
+  [[ "$running" == "$expected" ]] || {
+    echo "$unit executable mismatch: running=$running expected=$expected" >&2
+    return 1
+  }
+  echo "==> verified $unit running executable=$running"
+}
+for unit in finite-saas-core.service finitechat-server.service finitechat-hosted-device.service finite-brain-app.service finite-saas-sites.service finite-identity.service; do
+  [[ -e "$system/etc/systemd/system/$unit" ]] || continue
+  verify_running_executable "$unit" \
+    || activation_failed 1 "$unit does not run the candidate executable; inspect before an explicitly scoped restart"
+done
+# END RUNNING_EXECUTABLE_VERIFICATION
+
 runner_check="$(systemctl cat finite-saas-runner.service >/dev/null 2>&1 && echo present || echo absent)"
 [[ "$runner_check" == "absent" ]] \
   || activation_failed 1 "a runner unit appeared during activation"

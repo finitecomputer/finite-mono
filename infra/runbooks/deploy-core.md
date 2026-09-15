@@ -183,10 +183,14 @@ Fleet scope requires both `--roll-all` and an explicit
    to GET status and POST reset; never put the raw key in argv or logs.
 3. Units are up: `ssh root@64.34.80.19 'systemctl status finite-saas-core
    podman-finite-saas-dashboard'`.
-4. Core still exposes no build fingerprint in its health payload. The
-   authoritative identity check is therefore the exact comparison of
-   `/run/current-system` to the prebuilt `SYSTEM` path in step 2; a generation
-   number alone is not sufficient.
+4. Require both the exact `/run/current-system` match to the prebuilt `SYSTEM`
+   path and canonical `scripts/finite-status --json` evidence that every entry
+   in `sections.host_health.service_executables` is green. These entries compare
+   each running process with the executable in the installed closure. The
+   September 15 canary failure showed that the closure and configured unit can
+   be current while Core still runs old code. A healthy HTTP response or changed
+   PID is insufficient. Any mismatch or unknown identity stops the rollout;
+   inspect it before an explicitly scoped correction and repeat verification.
 
 ### ROLLBACK
 

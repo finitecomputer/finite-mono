@@ -60,7 +60,7 @@ class FiniteStatusTests(unittest.TestCase):
                 "__FINITE_STATUS_DISTRIBUTION__",
                 "finite-lat-1,v2,1",
                 "__FINITE_STATUS_CANARY_HOST_RESERVATIONS__",
-                "finite-lat-5,code-canary,batch-canary,workos-operator,,f,f",
+                "finite-lat-5,code-canary,batch-canary,workos-operator,org-canary,f,f,request-done,project-done,running,,runner-4,runtime-done,finite-lat-4",
                 "__FINITE_STATUS_AGENT_CREATION_REQUESTS__",
                 "request-canary,project-canary,Lat5 Canary,requested,finite-lat-5,,",
                 "__FINITE_STATUS_RUNTIMES__",
@@ -73,6 +73,11 @@ class FiniteStatusTests(unittest.TestCase):
         ) as run:
             result = finite_status.psql_query_sets({})
         self.assertEqual(result["canary_host_reservations"][0]["batch_id"], "batch-canary")
+        reservation = result["canary_host_reservations"][0]
+        # Completed misplaced launches remain visible after leaving the queue.
+        self.assertEqual(reservation["request_status"], "running")
+        self.assertEqual(reservation["request_target_source_host_id"], "")
+        self.assertEqual(reservation["actual_source_host_id"], "finite-lat-4")
         self.assertEqual(result["agent_creation_requests"][0]["target_source_host_id"], "finite-lat-5")
         self.assertEqual(result["agent_creation_requests"][0]["status"], "requested")
         self.assertEqual(len(result["runtimes"]), 1)
@@ -89,6 +94,50 @@ class FiniteStatusTests(unittest.TestCase):
         self.assertIn(finite_status.DISTRIBUTION_QUERY, sql)
         self.assertIn(finite_status.RUNTIME_DETAILS_QUERY, sql)
         self.assertEqual(call.args[0].count("psql"), 1)
+
+    def executable_probe(self, *, stale=False, pid="123", after_pid=None, continued=False):
+        expected = "/nix/store/candidate-core/bin/finite-saas-core"
+        system = Path("/nix/store/candidate-system")
+        def resolve(path, strict=False):
+            if str(path) == "/run/current-system":
+                return system
+            if str(path).startswith("/proc/"):
+                return Path("/nix/store/old-core/bin/finite-saas-core" if stale else expected)
+            return path
+        command = expected + (" serve " + chr(92) + "\n  --port 8787" if continued else "")
+        properties = {"MainPID": pid, "ActiveState": "active"}
+        after = {**properties, "MainPID": after_pid or pid}
+        with mock.patch.object(Path, "resolve", autospec=True, side_effect=resolve), \
+             mock.patch.object(Path, "read_text", return_value=f"[Service]\nExecStart={command}\n"), \
+             mock.patch.object(finite_status, "systemd_properties", side_effect=[properties, after]):
+            return finite_status.collect_service_executable("finite-saas-core.service")
+
+    def test_active_candidate_executable_is_green(self):
+        result = self.executable_probe()
+        self.assertEqual(result["status"], "green")
+        self.assertEqual(result["running_executable"], result["expected_executable"])
+
+    def test_continued_execstart_reads_only_the_executable(self):
+        self.assertEqual(self.executable_probe(continued=True)["status"], "green")
+
+    def test_active_stale_executable_is_red_in_canonical_status(self):
+        result = self.executable_probe(stale=True)
+        self.assertEqual(result["status"], "red")
+        self.assertNotEqual(result["running_executable"], result["expected_executable"])
+        raw = finite_status.load_fixture(FIXTURE)
+        raw["host_health"]["service_executables"] = [result]
+        report = finite_status.build_report(raw, finite_status.parse_time(raw["now"]))
+        row = report["sections"]["host_health"]["service_executables"][0]
+        self.assertEqual(row["status"], "red")
+        self.assertIn("differs", row["error"])
+
+    def test_missing_process_cannot_pass_executable_check(self):
+        self.assertEqual(self.executable_probe(pid="0")["status"], "red")
+
+    def test_process_change_during_observation_requires_repeat(self):
+        result = self.executable_probe(after_pid="124")
+        self.assertEqual(result["status"], "unknown")
+        self.assertIn("repeat status", result["error"])
 
     def test_human_output_projects_active_control_state(self) -> None:
         raw = json.loads(FIXTURE.read_text(encoding="utf-8"))

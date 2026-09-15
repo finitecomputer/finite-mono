@@ -340,6 +340,54 @@ Source Telegram bots stay running during host setup and migration rehearsal.
 Each later migration owns a brief, single-consumer Telegram switch and Google
 reconnection under the [shared fleet plan](https://linear.app/finitecomputer/document/trf-fleet-migration-plan-and-evidence-21410d33bc9b).
 
+### Controlled-canary attempt, 2026-09-15
+
+Qualification is **not complete**. The one-code Standard batch
+`launch_batch_a30e96b79c7fab045601` was bound to `finite-lat-5` through the
+operator CLI from PR #895 and redeemed through Austin's existing admin session.
+The resulting `Lat5 Canary` Project `project_0ca6e90da32abcb9f11b`, Runtime
+`runtime_86af3c895170b9d3be4f`, landed on **finite-lat-4**. Preserve this Runtime;
+do not treat its name as placement evidence or count it as lat5 qualification.
+
+The read-only canonical status join confirms the complete chain:
+
+| Record | Observed value |
+| --- | --- |
+| Launch Code | `launch_code_54432c99f217fa5cbb6f` |
+| Reserved host | `finite-lat-5` |
+| Creation request | `agent_request_d8a77342192705324b16` |
+| Saved request target | NULL (untargeted) |
+| Claiming Runner | `finite-kata-runner-4` |
+| Request status | `running` |
+| Actual Runtime host | `finite-lat-4` |
+
+The target was absent at request creation; this was not evidence that a lat4
+Runner bypassed a persisted lat5 target. `canary_host_reservations` now includes
+completed creation requests and their actual Runtime host, so a request leaving
+the pending queue cannot hide this discrepancy.
+
+The lat2 closure activation changed the unit's configured Core executable to
+`46mhcv6lgjh31dm13apg0jab7s0k7z8d-finite-saas-core-0.1.0`, but PID 1245864
+still executed the old `19m4d5fknf6l63l0ff4p34h84cwqxabq` Core package. The old
+process did not enforce the new binding. Closure revision, changed PID and
+HTTP health were insufficient deployment proof. A scoped Core restart at
+21:42:27 UTC produced PID 1247302; `/proc/1247302/exe` then matched the candidate.
+The lat2 deploy helper now fails if a first-party service's running executable
+differs from its candidate unit, without automatically restarting services.
+Canonical `finite-status` also reports these identities under
+`sections.host_health.service_executables`; mismatches are red and incomplete
+or changing observations are unknown. The activation test exercises the full
+helper with simulated host I/O, proves stale-process failure before success,
+and checks timer restoration without automatic restart or rollback.
+
+Post-correction canonical status: Chat green, lat3 31/31 ready, lat4 28/28
+ready including this canary. Lat5 remained drained throughout, with a one-runtime
+ceiling and zero Kata containers. The redeemed code's durable host reservation
+still exists. Do not remove it or rebind the redeemed code as an ad-hoc repair.
+A fresh-launch recovery or exact cold relocation needs its own reviewed execution
+boundary. No real Chat round trip on lat5 has been proved, and no TRF or Box 1
+bot has been migrated by this attempt.
+
 ## Lat1 retirement
 
 Austin confirmed on 2026-09-15 that lat1 will remain on its existing Latitude

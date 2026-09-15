@@ -65,6 +65,14 @@ CONTRACT: dict[str, Any] = {
             "node-exporter": "http://127.0.0.1:9100/metrics",
         },
     },
+    "executable_services": [
+        "finite-saas-core.service",
+        "finitechat-server.service",
+        "finitechat-hosted-device.service",
+        "finite-brain-app.service",
+        "finite-saas-sites.service",
+        "finite-identity.service",
+    ],
     "runner": {
         "service": "finite-saas-runner.service",
         "timer": "finite-saas-runner.timer",
@@ -285,6 +293,7 @@ HEALTH_SILENT_LIFECYCLE_STATUSES = ("offline", "pending_first_report")
 HEALTH_TRACKED_LIFECYCLE_STATUSES = ("online", "pending_first_report")
 
 SYSTEMD_PROPERTIES = (
+    "MainPID",
     "LoadState",
     "ActiveState",
     "SubState",
@@ -420,11 +429,18 @@ def psql_query_sets(environment: dict[str, str]) -> dict[str, list[dict[str, Any
             "\\if :finite_has_canary_targets\n"
             "SELECT target.source_host_id, target.launch_code_id, code.batch_id, "
             "batch.created_by_workos_user_id, code.redeemed_customer_org_id, "
-            "batch.revoked_at IS NOT NULL, batch.expires_at <= CURRENT_TIMESTAMP "
+            "batch.revoked_at IS NOT NULL, batch.expires_at <= CURRENT_TIMESTAMP, "
+            "request.id, request.project_id, request.status, request.target_source_host_id, "
+            "request.runner_id, request.agent_runtime_id, runtime.source_host_id "
             "FROM launch_code_host_targets target JOIN launch_codes code ON code.id=target.launch_code_id "
-            "JOIN launch_code_batches batch ON batch.id=code.batch_id ORDER BY target.source_host_id;\n"
+            "JOIN launch_code_batches batch ON batch.id=code.batch_id "
+            "LEFT JOIN agent_creation_requests request ON request.requested_launch_code=code.id "
+            "LEFT JOIN agent_runtimes runtime ON runtime.id=request.agent_runtime_id "
+            "ORDER BY target.source_host_id, request.id;\n"
             "\\endif",
-            ["source_host_id", "launch_code_id", "batch_id", "issuer_workos_user_id", "redeemed_customer_org_id", "batch_revoked", "batch_expired"],
+            ["source_host_id", "launch_code_id", "batch_id", "issuer_workos_user_id", "redeemed_customer_org_id", "batch_revoked", "batch_expired",
+             "creation_request_id", "project_id", "request_status", "request_target_source_host_id",
+             "request_runner_id", "agent_runtime_id", "actual_source_host_id"],
         ),
         (
             "agent_creation_requests",
@@ -524,6 +540,45 @@ def systemd_properties(unit: str) -> dict[str, str]:
     return properties
 
 
+def collect_service_executable(unit: str) -> dict[str, Any]:
+    """Compare actual process identity with the installed NixOS closure."""
+    result: dict[str, Any] = {"unit": unit, "status": "unknown"}
+    try:
+        system = Path("/run/current-system").resolve(strict=True)
+        result["system"] = str(system)
+        lines = (system / "etc/systemd/system" / unit).read_text().splitlines()
+        starts = [line.removeprefix("ExecStart=").strip() for line in lines
+                  if line.startswith("ExecStart=") and line.removeprefix("ExecStart=").strip()]
+        if not starts:
+            raise CollectionError("candidate unit has no executable")
+        tokens = shlex.shlex(starts[-1], posix=True)
+        tokens.whitespace_split = True
+        expected = next(tokens)
+        if not expected.startswith("/nix/store/"):
+            raise CollectionError("candidate executable is not a direct Nix store path")
+        result["expected_executable"] = str(Path(expected).resolve(strict=True))
+        properties = systemd_properties(unit)
+        pid = properties.get("MainPID", "")
+        result["main_pid"] = pid
+        if not pid.isdigit() or int(pid) <= 0:
+            result.update(status="red", error="service has no running main process")
+            return result
+        result["running_executable"] = str(Path(f"/proc/{pid}/exe").resolve(strict=True))
+        after = systemd_properties(unit)
+        if (after.get("MainPID") != pid or
+                Path("/run/current-system").resolve(strict=True) != system):
+            raise CollectionError("service or system changed during observation; repeat status")
+        if properties.get("ActiveState") != "active" or after.get("ActiveState") != "active":
+            result.update(status="red", error="service is not active")
+        elif result["running_executable"] != result["expected_executable"]:
+            result.update(status="red", error="running executable differs from installed closure")
+        else:
+            result["status"] = "green"
+    except (OSError, ValueError, StopIteration, CollectionError) as error:
+        result["error"] = str(error)
+    return result
+
+
 def collect_healthcheck_journal(properties: dict[str, str]) -> dict[str, str]:
     invocation = properties.get("InvocationID")
     if not invocation:
@@ -606,6 +661,11 @@ def collect_host_health(hostname: str) -> dict[str, Any]:
             raw["units"][unit] = systemd_properties(unit)
         except CollectionError as error:
             raw["units"][unit] = {"error": str(error)}
+
+    if "app" in raw["roles"]:
+        raw["service_executables"] = [
+            collect_service_executable(unit) for unit in CONTRACT["executable_services"]
+        ]
 
     healthcheck = raw["units"].get(CONTRACT["healthcheck"]["unit"], {})
     if "app" in raw["roles"]:
@@ -1637,6 +1697,14 @@ def build_host_health(
                 }
             )
 
+    executables = []
+    if "app" in roles:
+        observed = {row["unit"]: row for row in raw.get("service_executables", [])}
+        for unit in CONTRACT["executable_services"]:
+            row = observed.get(unit, {"unit": unit, "status": "unknown", "error": "not observed"})
+            executables.append(row)
+            statuses.append(row["status"])
+
     health_unit = CONTRACT["healthcheck"]["unit"]
     health_props = raw.get("units", {}).get(health_unit, {"error": "not observed"})
     if "app" in roles:
@@ -1827,6 +1895,7 @@ def build_host_health(
             "invocation_id": health_props.get("InvocationID"),
         },
         "services": units,
+        "service_executables": executables,
         "http_probes": probes,
         "filesystems": filesystems,
         "storage": storage,
@@ -2281,6 +2350,12 @@ def render_human(report: dict[str, Any]) -> str:
         for unit in failed_services:
             lines.append(
                 f"    {badge(unit['status'])} {unit['unit']}: {unit['active_state'] or unit.get('error') or 'unknown'}"
+            )
+        for executable in health.get("service_executables", []):
+            lines.append(
+                f"    {badge(executable['status'])} executable {executable['unit']}: "
+                f"{executable.get('running_executable') or 'unknown'} "
+                f"(expected {executable.get('expected_executable') or 'unknown'})"
             )
         for probe in health["http_probes"]:
             lines.append(
