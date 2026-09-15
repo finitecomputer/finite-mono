@@ -224,6 +224,12 @@ jobs:
           toolchain: ${{ steps.rust_pin.outputs.channel }}
 
       - uses: Swatinem/rust-cache@v2
+        with:
+          # Cargo runs from the root workspace but the smoke writes its
+          # binaries to CARGO_TARGET_DIR. Cache that directory explicitly.
+          workspaces: ". -> finitechat/target"
+          # Retire the existing cache that only contains the root target.
+          key: hermes-target-v1
 
       - name: Install Python
         uses: actions/setup-python@v5
