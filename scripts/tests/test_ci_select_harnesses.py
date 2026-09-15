@@ -236,6 +236,15 @@ class CiHarnessSelectionTests(unittest.TestCase):
             {"run_nix_checks"},
         )
 
+    def test_depot_cache_contract_helpers_select_nix_checks(self) -> None:
+        for path in (
+            "scripts/ci/devfinity-nix-handoff",
+            "scripts/tests/test_depot_ci_cache_contract.py",
+            "scripts/tests/test_devfinity_nix_handoff.py",
+        ):
+            with self.subTest(path=path):
+                self.assertEqual(selected(path), {"run_nix_checks"})
+
     def test_unknown_root_file_selects_every_active_harness(self) -> None:
         values = selection_for("pnpm-workspace.yaml")
 
