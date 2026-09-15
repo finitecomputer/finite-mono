@@ -4,6 +4,7 @@ scenario="${1:?scenario}"
 output="${2:?output directory}"
 mkdir -p "$output"
 core_before="$(nix eval --raw .#finite-saas-core.outPath)"
+sites_before="$(nix eval --raw .#finitesitesd.outPath)"
 started=$SECONDS
 case "$scenario" in
   identical) ;;
@@ -24,6 +25,11 @@ esac
 preparation=$((SECONDS - started))
 git diff --stat > "$output/change.txt"
 core_after="$(nix eval --raw .#finite-saas-core.outPath)"
+sites_after="$(nix eval --raw .#finitesitesd.outPath)"
+if [[ "$scenario" != identical && "$sites_before" == "$sites_after" ]]; then
+  echo "Changed Sites inputs did not invalidate Sites" >&2
+  exit 1
+fi
 if [[ "$scenario" == sites-* && "$core_before" != "$core_after" ]]; then
   echo "Sites-only edit invalidated SaaS Core" >&2
   exit 1

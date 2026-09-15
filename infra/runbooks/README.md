@@ -49,6 +49,9 @@ fresh read-only evidence establish observed state.
 - Rust service packages use the root generated `Cargo.nix` through
   `infra/nixos/packages.nix`. Regenerate after manifest/lock changes with
   `nix develop .#crate2nix -c crate2nix generate`; CI rejects stale definitions.
+  The generator carries a small patch for upstream crate2nix issue #258:
+  `dep:name` must not activate an explicitly declared same-named feature.
+  `checks.x86_64-linux.crate2nix-features` covers this distinction.
   Cargo.toml and Cargo.lock remain authoritative. Each crate is cached
   separately; a dependency edit rebuilds its reverse dependency closure.
   The CLI overrides explicitly include embedded files outside their crate
