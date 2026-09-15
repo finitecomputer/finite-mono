@@ -613,6 +613,7 @@ jobs:
           set -euo pipefail
 
           packages=(
+            ".#packages.x86_64-linux.crate2nix"
             ".#packages.x86_64-linux.devfinity"
             ".#packages.x86_64-linux.finite-saas-core"
             ".#packages.x86_64-linux.finite-saas-local"
