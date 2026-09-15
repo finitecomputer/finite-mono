@@ -1,79 +1,58 @@
-# FIN-89 Brain overview prototype
+# Brain overview prototype
 
-Selected design: categorized membership cards (A), approved by Austin on September 15.
+This development-only page previews the approved categorized cards (A) for the
+selected agent. It uses sample data for Moss and makes no Brain service requests.
+[FIN-89](https://linear.app/finitecomputer/issue/FIN-89/add-a-basic-brain-overview-with-categorized-membership-cards-and)
+owns the implementation plan and completion checks.
 
-Run from the repository root in the pinned development environment:
+## Review locally
+
+From the repository root in the pinned development environment:
 
 ```sh
 just dashboard brain-prototype
 ```
 
 Open http://127.0.0.1:13089/dashboard/machines/runtime_web_design/brain-prototype.
-The existing design fixture supplies the dashboard shell and its example agent, Moss.
-The Brain page uses in-memory synthetic memberships and makes no Brain requests.
 
-The page always represents the selected agent's Brain memberships and Folder metadata. The human user's memberships do not determine this list: the agent is the user's main interface to Brain.
+- Check Personal and Organization cards, access labels, and folder previews.
+  Activate `+N more` with a mouse or keyboard; use `Show less` to collapse it.
+- Use the preview control for empty, unavailable, stale, access-lost, and missing
+  folder details. Missing details show an unavailable label rather than zero.
+- Refresh updates the sample timestamp. Failure scenarios remain failures until
+  another scenario is selected. Expand “Prototype state” to inspect the fixtures.
 
-The selected A cards show each Brain's folder count and up to three folder names. Click or keyboard-activate `+N more` to expand all names in the card; `Show less` collapses them. “Folders shown” refers to the metadata visible to the selected agent; it excludes linked folders and does not measure local sync. These are example names and counts, not live inventory.
+The route requires development mode, the existing local-account fixture switch,
+and the fixture agent ID. Production requests return not found; production Brain
+navigation remains disabled.
 
-Use the preview control to inspect empty, unavailable, stale, access-lost, and unavailable-folder-detail states. Missing folder details preserve the Brain's name and role without displaying a false zero count. Refresh shows loading and updates the successful-fetch time; the failure scenarios remain failures until another scenario is selected. Expand “Prototype state” for the full example state.
+## Source evidence for implementation
 
-Only the selected card layout remains on this branch. The original three-layout study is preserved in commit `89c9806c`; old `?variant=` links now display the selected cards.
+Checked against finite-mono `f2a10ffe` and its pinned Hermes revision
+`29112bef099274229cadff79cdff7bf7b99c4b77`:
 
-The route requires development mode, the existing local-account fixture switch, and the fixture machine ID. Production requests return not found, and production navigation stays disabled. No new authentication bypass or Brain integration is introduced.
+| Source | Finding |
+| --- | --- |
+| `finite-brain/crates/finite-brain-server/src/routes/brains.rs::list_brains_handler` | `GET /v1/brains` lists the request signer's Brains and pending invitations. |
+| `finite-brain/crates/finite-brain-server/src/responses.rs::metadata_response_for_actor` | Per-Brain metadata includes folder names. Guest results are filtered. Metadata visibility does not prove content decryption or local sync. |
+| Dashboard `src/lib/brain-hosted-client.ts` | The hosted signer uses the human identity and cannot supply the selected agent's inventory. |
+| `finite-brain/crates/finite-brain-cli/src/lib.rs::brain` and `src/http.rs::signed_json_request` | Existing `fbrain brain list --json` and `fbrain brain metadata <id> --json` use the local signer. |
+| [Pinned Hermes `hermes_cli/web_server.py`](https://github.com/NousResearch/hermes-agent/blob/29112bef099274229cadff79cdff7bf7b99c4b77/hermes_cli/web_server.py#L19071) | Enabled user/bundled plugins can mount authenticated `/api/plugins/<name>/` routes. This proves extension support, not a working Brain endpoint. |
 
-This is a throwaway review artifact on `prototype/brain-overview`, tracked in [FIN-89](https://linear.app/finitecomputer/issue/FIN-89/add-a-basic-brain-overview-with-categorized-membership-cards-and). Austin selected A (categorized cards) and confirmed selected-agent scope on September 15. The authorized agent inventory path remains implementation work; sample memberships do not validate that contract. The dashboard must verify the user's access to the selected agent, then obtain that agent's Brain inventory. File counts and storage size are deferred.
+Neither Brain read supplies file counts or a storage-size summary. The overview
+uses only Brain and folder metadata; it does not need an export or file scan.
 
-## Integration investigation — September 15
+## Brain-document context
 
-The card data already exists. The connection from the dashboard to the selected
-agent's Brain identity is the remaining dependency. Source checked at finite-mono
-`f2a10ffe` and the repository's pinned Hermes revision
-`29112bef099274229cadff79cdff7bf7b99c4b77`.
+FiKnight reviewed the Organization Brain on September 15 at sequence 1806, with
+no conflicts. Relevant sources:
 
-| Read | Current source | Meaning for this page |
-| --- | --- | --- |
-| Brain list | Brain server `routes/brains.rs::list_brains_handler` | Returns the request signer's Brains, including pending invitations. |
-| Folder metadata | Brain server `responses.rs::metadata_response_for_actor` | Guest results are filtered; metadata visibility does not prove content decryption. |
-| Dashboard Brain signing | Dashboard `lib/brain-hosted-client.ts` | Uses the human identity, so it cannot supply this agent inventory. |
-| Agent Brain signing | Brain CLI `lib.rs::brain`, `http.rs::signed_json_request` | Existing `fbrain brain list --json` and `fbrain brain metadata <id> --json` use the local signer. |
-| Native extension | [Pinned Hermes `hermes_cli/web_server.py`](https://github.com/NousResearch/hermes-agent/blob/29112bef099274229cadff79cdff7bf7b99c4b77/hermes_cli/web_server.py#L19071) | Enabled user/bundled plugins can mount authenticated `/api/plugins/<name>/` routes. No Brain overview handler ships here. |
+- `Finite Mono LLM Wiki/topics/finite-mono/wiki/topics/brain-surface-and-viewers.md`
+  and sibling `brain-single-file-viewer-plan.md`: August 14 viewer proposals.
+- `audits/output/essentials-audit-2026-08-29/01-auth-kernel-rebase.md`: authentication
+  audit context.
 
-### Smallest candidate to prove
-
-Reuse the authenticated agent connection from
-[FIN-39](https://linear.app/finitecomputer/issue/FIN-39/provide-hermes-web-authentication-and-desktop-connection-details)
-and a Brain-owned Hermes plugin with one fixed read-only overview operation.
-The local handler would run the existing Brain CLI reads and return only Brain
-ID, name, kind, role, and folder IDs/names. Keep invitations separate and discard
-invite capabilities, member lists, grants, keys, and unrelated metadata.
-
-The dashboard must authorize access to the current agent on every request. The
-handler must use that agent's existing signer; the browser receives only the card
-result. Bound process time, output size, and metadata fanout. A metadata service
-failure means unknown folder details. Authorization loss clears affected data;
-it must not be treated as an ordinary stale refresh.
-
-First prove this with two synthetic agents whose Brain memberships differ from
-each other and from their human controller. Include one guest with limited folder
-metadata, a pending invitation, missing signer, and revoked access. Verify that
-unauthenticated requests never invoke the CLI, agent switching discards late
-responses, and disabled native access remains unavailable without being enabled
-by opening this page.
-
-This is a candidate, not an implemented or qualified connection. FIN-39 currently
-holds connection implementation for the Iroh comparison; its first release is
-default-off and admin-enabled. Reuse its settled connection and authorization
-contract before enabling production Brain navigation. Native plugin support alone
-does not prove dashboard viewer authorization or cross-agent isolation. Keep Brain
-inventory out of Core status storage, Runtime Management Pipe, and chat commands.
-
-FiKnight checked the Organization Brain at sequence 1806 and found no newer
-implemented inventory path. The August 14 proposal
-`Finite Mono LLM Wiki/topics/finite-mono/wiki/topics/brain-surface-and-viewers.md`
-preferred viewers that do not call agent compute at request time. It predates
-the native Hermes work and does not describe its plugin API. This candidate
-would require the agent to be online for a fresh result: on an ordinary failed
-refresh, retain only the page's previous in-memory result and mark it stale.
-Record that availability tradeoff when finalizing the integration; it does not
-justify adding a background inventory store to this small page.
+The viewer proposal preferred reads independent of agent compute. Austin's
+September 15 decision accepts an online-agent requirement for this overview and
+reuses FIN-39's connection. That decision is recorded in FIN-89. The Brain
+endpoint and dashboard authorization checks remain implementation work.
