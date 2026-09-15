@@ -6,6 +6,7 @@ on:
       - 'infra/nixos/hosts/finite-lat-5/**'
       - 'infra/nixos/tests/lat5-storage-boot.nix'
       - 'scripts/*lat5*'
+      - 'scripts/tests/test_lat5*.py'
       - '.github/workflows/lat5-nixos-closure.yml'
       - 'flake.nix'
       - 'flake.lock'
@@ -48,6 +49,8 @@ jobs:
         with:
           name: ${{ env.CACHIX_CACHE_NAME }}
           skipPush: true
+      - name: Validate installer and bootstrap boundaries
+        run: python3 -m unittest scripts.tests.test_lat5_closure_artifact scripts.tests.test_lat5_bootstrap
       - name: Qualify storage and both EFI boot paths on synthetic disks
         run: nix build --option builders '' --print-build-logs .#checks.x86_64-linux.lat5-storage-boot
   build:
