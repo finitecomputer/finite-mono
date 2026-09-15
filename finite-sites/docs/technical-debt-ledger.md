@@ -46,10 +46,11 @@ select the dev mailer with `--mailer dev`; omitting the flag is an error.
 - **Source**: local v1; no object storage running.
 - **Risk**: single-disk durability for all site content and the registry.
 - **Proof**: `crates/finitesites-blob/src/lib.rs` writes under `--data`.
-- **Delete condition**: ADR 0030's S3 revision backups and shared-state
+- **Delete condition**: ADR 0030's revision backups and shared-state
   checkpoints are deployed and the complete Recovery Set has restored onto an
   empty target. The local operator commands in `docs/backups.md` do not close
-  this debt or provide independent durability.
+  this debt or provide independent durability. ADR 0031 selects Borg on the
+  existing rsync.net surface; its local test is not a production restore drill.
 
 ## 5. Global blob dedup leaks hash existence
 
