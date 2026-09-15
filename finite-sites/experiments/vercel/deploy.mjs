@@ -5,6 +5,8 @@ import { root, state, secrets, vc } from './operator.mjs';
 const config=JSON.parse(await readFile(join(root,'config.json'),'utf8'));
 const env=await secrets();
 const app=join(root,'app');
+const project=JSON.parse(vc(['api',`/v9/projects/${config.projectId}`],undefined,app));
+if(project.link)throw new Error('This project deploys from Git. Commit and push alex/sites-vercel-experiment; deploy.mjs is only for initial unlinked bootstrap.');
 const domains=[config.controlHost,...Object.values(config.siteHosts),...(config.siteBaseDomain?[`*.${config.siteBaseDomain}`]:[])];
 for (const [key,value] of Object.entries({
   POC_ADMIN_TOKEN:env.POC_ADMIN_TOKEN, POC_ISSUER_TOKEN:env.POC_ISSUER_TOKEN,

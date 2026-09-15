@@ -140,13 +140,14 @@ also applies to branches that do not contain the experiment's `vercel.json`.
 That file additionally disables all Git branch patterns except the exact
 experiment branch, using `git.deploymentEnabled`.
 
-GitHub connection is still pending installation/configuration of the Vercel
-GitHub App for `finitecomputer/finite-mono`. When connecting, set this exact
-branch as the **production branch**, and the root directory to
-`finite-sites/experiments/vercel/app`. Keep preview deployments disabled.
-Do not enable repository-wide PR previews. The current project remains unlinked;
-no automatic deployment is claimed until the Git connection is completed and
-an allowed push is verified. See `evidence/branch-restriction.json`.
+The project is connected to `finitecomputer/finite-mono`, with this exact branch
+as its **production branch**, and `finite-sites/experiments/vercel/app` as its
+root directory. Keep preview deployments disabled; do not enable repository-wide
+PR previews. Commit and push this branch to deploy shared platform changes.
+`deploy.mjs` is for unlinked bootstrap only and refuses a linked project before
+making changes. Individual Site publication continues to update private content
+and its active version, without a platform deployment.
+See `evidence/branch-restriction.json` for the verified project settings.
 
 ## Wildcard configuration
 

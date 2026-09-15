@@ -1,10 +1,10 @@
 {
-  "at": "2026-09-15T21:33:04.086Z",
+  "at": "2026-09-15T21:36:38.177Z",
   "project": "finite-sites-poc",
   "previewDeploymentsDisabled": true,
   "commandForIgnoringBuildStep": "[ \"$VERCEL_GIT_COMMIT_REF\" != \"alex/sites-vercel-experiment\" ]",
-  "gitConnected": false,
-  "productionBranch": null,
+  "gitConnected": true,
+  "productionBranch": "alex/sites-vercel-experiment",
   "localBuildGuardChecks": [
     {
       "ref": "alex/sites-vercel-experiment",
@@ -36,5 +36,7 @@
       "decision": "skip",
       "passed": true
     }
-  ]
+  ],
+  "repository": "finitecomputer/finite-mono",
+  "rootDirectory": "finite-sites/experiments/vercel/app"
 }

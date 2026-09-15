@@ -68,7 +68,7 @@
     "repository": "finitecomputer/finite-mono",
     "branch": "alex/sites-vercel-experiment",
     "rootDirectory": "finite-sites/experiments/vercel/app",
-    "connectionStatus": "pending Vercel GitHub App access",
+    "connectionStatus": "connected",
     "previewDeploymentsDisabled": true,
     "commandForIgnoringBuildStep": "[ \"$VERCEL_GIT_COMMIT_REF\" != \"alex/sites-vercel-experiment\" ]",
     "config": "app/vercel.json also disables all Git branch patterns except the exact experiment branch",
