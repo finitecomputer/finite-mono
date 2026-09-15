@@ -22,17 +22,19 @@ returns setup-required, and arbitrary sign/decrypt operations are not routes.
 Sites implementation note: Sites owns the versioned
 `finite-sites-identity-provider-v1` contract. Project Init signed by an Agent
 Principal may atomically create an explicit, revocable Native Principal Share
-for the authenticated human sender npub on each Project Output. Existing native clients can ask the WorkOS-bound Hosted Device to
-`authorizeViewerSession` for an exact Output native-session URL and bounded
-body; iOS/Electron sign the same request locally. Sites, not the adapter,
+for the authenticated human sender npub on the Project Site. Native clients
+can ask the WorkOS-bound Hosted Device to `authorizeViewerSession` for an exact
+Site native-session URL and bounded body; iOS/Electron sign the same request
+locally. Sites, not the adapter,
 verifies the proof against an existing Share and mints its ordinary Viewer
 Cookie (or a single-use hosted redemption URL). A valid signature never
 creates a Share, and revocation is rechecked on every content request.
 
-Sites browser update: direct visits and dashboard previews now use the existing
-verified-email exchange and Viewer Cookie, without Hosted Device signing. This
-bounded bridge preserves Sites-owned grants while BANKS defines permanent
-account/npub custody. See [Sites ADR 0029](../../finite-sites/docs/adr/0029-account-session-viewer-bridge.md).
+Sites browser contract: direct visits and dashboard previews use the
+verified-email exchange and Viewer Cookie without Hosted Device signing.
+Sites evaluates its own publisher-email ownership, shares, and visibility on
+every read; account authentication never creates a Share. See
+[Sites ADR 0029](../../finite-sites/docs/adr/0029-account-session-viewer-bridge.md).
 
 ## Context
 
@@ -40,11 +42,9 @@ Finite products need a person's Nostr identity without putting raw key material
 in browser or renderer code, turning Account Auth into a Nostr signer, or
 making one product's signer adapter a cross-product authority.
 
-FiniteBrain is the first product to make this boundary explicit. Finite Sites
-will need the same architectural pattern later, but it has its own product
-grants, content, and authorization rules. The initial implementation runs each
-product's adapter on the server; a later native implementation moves that
-product's adapter to the client environment.
+Brain and Sites each own their product grants, content, and authorization
+rules. Hosted and native adapters preserve those product boundaries regardless
+of where keys are held.
 
 ## Decision
 
@@ -88,9 +88,8 @@ product's adapter to the client environment.
 - Brain's compatibility adapter binds HTTP authorization to the official Brain
   origin and protected routes, validates method/body tags, and accepts only
   named Brain event and Folder Key Grant intents.
-- Finite Sites will adopt this pattern with its own Sites adapter while using
-  Finite Identity primitives. It does not inherit Brain grants or Folder Key
-  access.
+- Finite Sites owns its Sites adapter and authorization rules. It does not
+  inherit Brain grants or Folder Key access.
 - Product access pickers show a Managed Agent NIP-05 or similarly readable
   identity, resolve it through Finite Identity, and grant the resulting Native
   Principal. Brain establishes this pattern first; Sites may reuse the

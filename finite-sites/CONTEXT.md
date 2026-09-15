@@ -307,13 +307,14 @@ with exactly these meanings.
   signer must already have a Native Principal Share. Direct native clients
   receive Viewer Cookies immediately; Hosted Web redeems a single-use link for
   the same cookies. Proof never creates a Share.
-- **Verified Email Viewer Session**: the existing server-to-server exchange
+- **Verified Email Viewer Session**: the server-to-server exchange
   accepting email verified by the account boundary. It issues a Site-bound,
-  single-use, 60-second handoff to the existing email Viewer Cookie. The Site
+  single-use, 60-second handoff to a seven-day email Viewer Cookie. The Site
   evaluates its current publisher and sharing authority on redemption and every
   content read; issuance never creates a Share. Unshared visitors can request
   access or use the guest email challenge. Direct visits and dashboard previews
-  share the account adapter without Hosted Chat signing (ADR 0029). Issuance
+  share the account adapter without Hosted Chat signing
+  ([ADR 0029](docs/adr/0029-account-session-viewer-bridge.md)). Issuance
   and outstanding tokens remain bounded per Site/email. The ordinary cookie is
   top-level `SameSite=Lax`; a distinct `Partitioned` cookie carries iframe access.
 - **Control Plane**: the NIP-98-authenticated API (Project Init, git auth,
