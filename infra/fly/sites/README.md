@@ -255,12 +255,15 @@ cutover and old-link compatibility, and FIN-56 the CLI/runtime rollout.
 Nothing in this demo runbook authorizes those production mutations.
 
 The September 10 live inventory found 25 published apps and eight published
-documents, contrary to the original zero-app assumption. Alex's updated decision
-is to retain them on the legacy service while static sites move. Never open the
+documents, contrary to the original zero-app assumption. Alex's September 15
+decision retires apps, documents and unpublished/missing-source projects at
+cutover; only the agreed published static sites migrate. Preserve the source
+archive: retirement does not authorize durable data deletion. Never open the
 authoritative legacy registry with the static-only daemon: its migrations remove
-unsupported kinds. Preserve legacy routes/auth and qualify the mixed legacy/v2
-dashboard preview path before changing the dashboard upstream. FIN-52/FIN-55
-own the explicit site mapping; no blanket wildcard redirect or legacy shutdown.
+unsupported kinds. Until cutover, preserve legacy routes/auth and qualify the
+mixed legacy/v2 dashboard preview path before changing the dashboard upstream.
+FIN-52/FIN-55 own the explicit site mapping and legacy retirement. No blanket
+wildcard redirect or legacy shutdown is authorized by this demo runbook.
 
 Provider references:
 [Fly configuration](https://fly.io/docs/reference/configuration/),
