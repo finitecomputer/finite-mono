@@ -169,6 +169,7 @@ impl TestServer {
             api_url,
             git_base_url,
             viewer_session_service_token: viewer_session_service_token.map(str::to_string),
+            account_login_url: None,
             git_hook_helper_path: hook_helper_path(),
             git_auto_reconcile,
             site_url_scheme: "http".to_string(),
@@ -1460,7 +1461,102 @@ async fn verified_email_viewer_session_endpoint_is_disabled_without_its_service_
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn verified_email_viewer_session_reuses_login_and_revokes_immediately() {
+async fn public_site_account_preview_allows_unshared_email_until_visibility_is_revoked() {
+    let user_pubkey = finitesites_proto::event::pubkey_for_secret(&user_secret()).unwrap();
+    let server = TestServer::start(&user_pubkey).await;
+    let port = server.port();
+    tokio::task::spawn_blocking(move || {
+        let body = serde_json::to_vec(&project_init_request(false)).unwrap();
+        let created: ProjectInitResponse = json_body(
+            server
+                .signed(&user_secret(), "POST", "/api/v2/projects/init", Some(&body))
+                .unwrap(),
+        );
+        let credential = mint_skyler_git_credential(&server);
+        push_project_files(
+            &server,
+            &credential,
+            &created.finite_toml,
+            "main",
+            &[("index.html", "<h1>public account preview</h1>")],
+            "Public viewer session deploy",
+        );
+        wait_for_active_version(&server, "finitechat-native-mockup", Some(1));
+        let set_visibility = |visibility: &str| {
+            let body = serde_json::to_vec(&SharingRequest {
+                visibility: Some(visibility.into()),
+                confirm_public: visibility == "public",
+                add_emails: vec![],
+                remove_emails: vec![],
+                add_npubs: vec![],
+                remove_npubs: vec![],
+            })
+            .unwrap();
+            server
+                .signed(
+                    &user_secret(),
+                    "POST",
+                    "/api/v2/projects/finitechat-native/site/sharing",
+                    Some(&body),
+                )
+                .unwrap();
+        };
+        set_visibility("public");
+        let site_url = format!("http://finitechat-native-mockup.{BASE_DOMAIN}:{port}/");
+        let request = VerifiedEmailViewerSessionRequest {
+            site_url: site_url.clone(),
+            verified_email: "unshared@example.com".into(),
+            return_to: "/".into(),
+        };
+        let handoff = || -> VerifiedEmailViewerSessionResponse {
+            json_body(
+                server
+                    .viewer_session(Some(VIEWER_SESSION_SERVICE_TOKEN), &request)
+                    .unwrap(),
+            )
+        };
+        let session = handoff();
+        let outstanding = handoff();
+        let redeemed = server.agent.get(&session.redeem_url).call().unwrap();
+        assert_eq!(redeemed.status(), 303);
+        assert_eq!(redeemed.header("location"), Some("/"));
+        let cookie = redeemed
+            .header("set-cookie")
+            .unwrap()
+            .split(';')
+            .next()
+            .unwrap();
+        let viewer = agent_for(SocketAddr::from(([127, 0, 0, 1], port)));
+        assert_eq!(
+            viewer
+                .get(&site_url)
+                .set("Cookie", cookie)
+                .call()
+                .unwrap()
+                .into_string()
+                .unwrap(),
+            "<h1>public account preview</h1>"
+        );
+        assert!(matches!(
+            server.agent.get(&session.redeem_url).call(),
+            Err(ureq::Error::Status(400, _))
+        ));
+        set_visibility("private");
+        assert!(matches!(
+            viewer.get(&site_url).set("Cookie", cookie).call(),
+            Err(ureq::Error::Status(401, _))
+        ));
+        assert!(matches!(
+            server.agent.get(&outstanding.redeem_url).call(),
+            Err(ureq::Error::Status(403, _))
+        ));
+    })
+    .await
+    .unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn verified_email_viewer_session_is_single_use_and_revokes_immediately() {
     let user_pubkey = finitesites_proto::event::pubkey_for_secret(&user_secret()).unwrap();
     let server = TestServer::start(&user_pubkey).await;
     let port = server.port();
@@ -1607,15 +1703,10 @@ async fn verified_email_viewer_session_reuses_login_and_revokes_immediately() {
                 .status(),
             303
         );
-        assert_eq!(
-            server
-                .agent
-                .get(&latest_redeem_url)
-                .call()
-                .unwrap()
-                .status(),
-            303
-        );
+        assert!(matches!(
+            server.agent.get(&latest_redeem_url).call(),
+            Err(ureq::Error::Status(400, _))
+        ));
 
         let mut second_project = project_init_request(false);
         second_project.config.project.slug = "second-preview-project".into();
@@ -1663,7 +1754,7 @@ async fn verified_email_viewer_session_reuses_login_and_revokes_immediately() {
         assert!(
             session
                 .redeem_url
-                .starts_with(&format!("{site_base}/_finite/auth?token="))
+                .starts_with(&format!("{site_base}/_finite/auth?session_token="))
         );
         assert!(
             session
@@ -1699,15 +1790,10 @@ async fn verified_email_viewer_session_reuses_login_and_revokes_immediately() {
             .unwrap()
             .to_string();
 
-        assert_eq!(
-            server
-                .agent
-                .get(&session.redeem_url)
-                .call()
-                .unwrap()
-                .status(),
-            303
-        );
+        assert!(matches!(
+            server.agent.get(&session.redeem_url).call(),
+            Err(ureq::Error::Status(400, _))
+        ));
         let clean_agent = agent_for(SocketAddr::from(([127, 0, 0, 1], port)));
         let page = clean_agent
             .get(&format!("{site_base}/"))

@@ -74,15 +74,31 @@ the public Brain origin to the internal Hosted Device.
 `FC_BRAIN_UPSTREAM_URL`. Logout or session expiry makes this bridge unavailable;
 it never replaces Brain's Nostr authorization or Folder Key Grants.
 
-## Sites account preview boundary
+## Sites account viewer boundary
 
-Set `FC_SITES_UPSTREAM_URL` to the internal Finite Sites origin and give the
-dashboard and `finitesitesd` the same dedicated
+Direct visits through `/site-auth` and dashboard previews share the verified
+account-email exchange without Hosted Chat signing. Sites enables automatic
+direct-visit handoff with
+`FINITE_SITES_ACCOUNT_LOGIN_URL=https://finite.computer/site-auth` after this
+dashboard route is available. Missing account evidence or an unavailable
+exchange retains the guest email challenge; an unshared verified email can
+request access or try another email.
+
+Keep `FC_SITES_UPSTREAM_URL` on the existing legacy Sites origin. Set
+`FC_SITES_V2_UPSTREAM_URL` to the v2 origin separately. Validated finite.chat
+and docs.finite.chat previews use legacy; finite.site and v2.finite.chat use
+v2. Local development sites also use the v2 setting. Missing or failing v2
+configuration never retries on legacy. Hosted Chat requester assertions keep
+using the legacy origin. Keep legacy selection and request spelling until
+legacy previews and requester consumers are retired. Give the dashboard and
+both Sites services the same dedicated
 `FINITE_SITES_VIEWER_SESSION_TOKEN`. The dashboard may exchange a signed-in,
-verified account email for Sites' existing one-time viewer link only after
-Core confirms that account can access the selected Agent Runtime. Sites still
+verified account email for a one-time viewer link. Dashboard previews also
+require Core to confirm access to the selected Agent Runtime. Sites still
 owns the share list and viewer cookie: the exchange never adds a share, and
-removing the email from the output revokes the cookie on the next request.
+revoking the email's Sites access takes effect on the next content request.
+Token, cookie, and compatibility rules are defined in
+[Sites ADR 0029](../../../finite-sites/docs/adr/0029-account-session-viewer-bridge.md).
 
 The service token is server-only. It must not use a `NEXT_PUBLIC_` name, enter
 a browser response, or be shared with an Agent Runtime.

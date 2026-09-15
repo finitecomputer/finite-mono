@@ -122,9 +122,10 @@ dashboard/daemon contracts and the same server-only
 location is `/etc/finite/sites-viewer-session.env`; provision the matching Fly
 secret only when enabling the exchange. It does not create sharing grants.
 Do not enable account redirects before that contract and upstream are ready.
-The production dashboard has one Sites upstream: do not repoint it at an empty
-registry while legacy Sites remain authoritative. Qualify mixed legacy/v2
-preview behavior before changing that upstream.
+Configure `FC_SITES_V2_UPSTREAM_URL` for this service while retaining
+`FC_SITES_UPSTREAM_URL` for legacy consumers. Neither backend retries against
+the other. Qualify both paths before enabling the account bridge; do not
+repoint the legacy upstream at an empty registry.
 
 ## Deploy and Verify
 

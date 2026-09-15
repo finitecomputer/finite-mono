@@ -178,11 +178,6 @@ check_native_requesting_user_site() {
   local site_id
   local output_url
   local git_remote
-  local proof_request_json
-  local proof_json
-  local exchange_json
-  local exchange_response_json
-  local redeem_url
   local redemption_headers
   local viewer_cookie
   local status
@@ -203,10 +198,6 @@ check_native_requesting_user_site() {
   assertion_request_json="$smoke_root/hosted-requester-assertion-request.json"
   assertion_response_json="$smoke_root/hosted-requester-assertion-response.json"
   init_json="$smoke_root/init.json"
-  proof_request_json="$smoke_root/proof-request.json"
-  proof_json="$smoke_root/proof.json"
-  exchange_json="$smoke_root/exchange.json"
-  exchange_response_json="$smoke_root/exchange-response.json"
   redemption_headers="$smoke_root/redemption.headers"
   revoke_json="$smoke_root/revoke.json"
   track_sensitive_dir "$smoke_root"
@@ -448,56 +439,14 @@ JS
   fi
   echo "Sites first-publication outbox notification delivered exactly once"
 
-  node - "$output_url" >"$proof_request_json" <<'JS'
-const { randomUUID } = require("node:crypto");
-const output = new URL(process.argv[2]);
-process.stdout.write(JSON.stringify({
-  version: "finite-sites-identity-provider-v1",
-  operation: "authorizeViewerSession",
-  input: {
-    url: `${output.origin}/_finite/auth/native-session`,
-    returnTo: "/",
-    client: "devfinity-services-smoke",
-    nonce: randomUUID(),
-  },
-}));
-JS
-  echo "Sites smoke requesting bounded proof from Hosted Device"
-  curl -fsS --config "$hosted_config" \
-    -H 'content-type: application/json' \
-    -H "x-finite-sites-public-origin: $(node -e 'process.stdout.write(new URL(process.argv[1]).origin)' "$output_url")" \
-    --data-binary "@$proof_request_json" \
-    "$hosted_device_url/v1/sites/identity-provider" >"$proof_json"
-  node - "$proof_json" "$output_url" >"$exchange_json" <<'JS'
-const fs = require("node:fs");
-const proof = JSON.parse(fs.readFileSync(process.argv[2], "utf8"));
-if (typeof proof.authorization_header !== "string" || typeof proof.body_json !== "string") {
-  throw new Error("Hosted Device did not return the bounded Sites proof");
-}
-process.stdout.write(JSON.stringify({
-  site_url: new URL(process.argv[3]).origin + "/",
-  authorization: proof.authorization_header,
-  signed_body: proof.body_json,
-}));
-JS
-  echo "Sites smoke exchanging bounded proof for Viewer Session"
-  curl -fsS --config "$sites_config" \
-    -H 'content-type: application/json' \
-    --data-binary "@$exchange_json" \
-    "$sites_url/internal/v1/native-viewer-sessions" >"$exchange_response_json"
-  redeem_url="$(node - "$exchange_response_json" <<'JS'
-const fs = require("node:fs");
-const response = JSON.parse(fs.readFileSync(process.argv[2], "utf8"));
-const redeem = new URL(String(response.redeem_url || ""));
-if (!/^[0-9a-f]{64}$/u.test(redeem.searchParams.get("native_token") || "")) {
-  throw new Error("Sites did not return a native redemption URL");
-}
-process.stdout.write(redeem.toString());
-JS
-)"
-  status="$(curl -sS --max-time 15 -D "$redemption_headers" -o /dev/null -w '%{http_code}' "$redeem_url")"
-  if [[ "$status" != "303" ]]; then
-    echo "Sites smoke redemption returned HTTP $status instead of 303" >&2
+  # Exercise the browser entry point through the account session and Sites exchange.
+  # curl refuses Secure cookies on *.localhost over HTTP; capture redemption and
+  # send the cookie explicitly below. Chromium covers real cookie policy.
+  status=0
+  curl -sS --max-time 30 -L --max-redirs 2 -H 'Accept: text/html' \
+    -D "$redemption_headers" -o /dev/null "$output_url" || status=$?
+  if [[ "$status" != "47" ]]; then
+    echo "Sites account bridge did not reach its final redemption redirect ($status)" >&2
     return 1
   fi
   viewer_cookie="$(node - "$redemption_headers" <<'JS'
@@ -567,7 +516,6 @@ cargo test -p finitechat-client --locked --lib \
   tests::sqlite_client_store_loads_metadata_written_before_paired_agent_field \
   -- --exact
 cargo test -p devfinity --locked --test stack_smoke \
-  native_device_pairing_crosses_dashboard_hosted_and_authority \
-  -- --ignored --exact --nocapture
+  -- --ignored --nocapture
 
 echo "devfinity smoke passed"

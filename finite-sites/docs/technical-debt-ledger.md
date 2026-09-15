@@ -76,29 +76,15 @@ select the dev mailer with `--mailer dev`; omitting the flag is an error.
   plus key rotation and destructive recovery tests, before durable first-slice
   publishing. Direct operator SQL is not the product recovery flow.
 
-## 7. RESOLVED — NIP-98 URL matching verified through the live proxy
+## 8. Static-only Sites boundary
 
-`https://api.finite.chat` is pinned end to end and the signed-call gate
-passed on 2026-06-09 and later updated to the Project Repository flow:
-project init plus git push from a remote machine through Cloudflare
-succeeded against finite-lat-2. The residual behavior (a
-misconfigured `--api-url` fails closed with "url mismatch") remains the
-expected signed-call behavior.
+Under [ADR 0028](adr/0028-static-only-sites-platform-service.md), the Sites
+service and CLI support static Sites only. App/document output kinds, app
+runners and proxies, and wake-on-request are outside that boundary.
 
-## 8. RESOLVED — app runner debt removed by static-only Sites
-
-ADR 0028 cuts app/document output kinds, Kata app runners, app proxying, and
-wake-on-request from Finite Sites. The previous tier-2 runtime debt entries
-are closed by removal rather than by completing the app-hosting path:
-
-- no `kind = "app"` public contract;
-- no app bundle manifest exception;
-- no app proxy or websocket/log surface;
-- no Sites-specific Kata/containerd/sudo integration;
-- no wake-on-request app supervisor.
-
-Future dynamic compute belongs in a separate product boundary, not as another
-Sites kind.
+Dynamic compute belongs in a separate product boundary. Retained legacy
+app/document consumers stay on their existing service until retirement; they
+are not converted into static Sites during cutover.
 
 ## 9. RESOLVED — Project Repository pushes use durable post-receive events
 
@@ -110,21 +96,24 @@ missing output failure, restart reconciliation after a ref update before
 deploy, and idempotent replay after Version creation before event
 acknowledgement.
 
-## 10. RETIRED — `reconcile-identity` one-shot migration command
+## 10. Test-fixture reconciliation helpers
 
-- **Source**: the mailbox-grant → native-Principal reconciliation was a
-  completed one-shot migration. Its optional Core cross-check called
-  `/api/core/v1/brain/agent-account`, which the auth-kernel stack deleted
-  (its only consumers are gone).
-- **Risk**: none from removal — the migration already ran; durable grants
-  were rewritten additively and the command was never part of startup.
-  The store-layer reconciliation helpers stay because the engine and store
-  test fixtures still exercise their local invariants (e.g. automated
-  evidence never resurrects a revoked key).
-- **Proof**: `finitesitesd reconcile-identity`, its Directory/Core clients
-  (`crates/finitesitesd/src/identity.rs`), and the devfinity smoke
-  operator-boundary check are deleted; the daemon no longer reads
-  `FINITE_IDENTITY_AUTHORITY` / `FC_CORE_API_*` anywhere.
-- **Delete condition**: this entry is the permanent record; remove the
-  store-layer helpers only with a dedicated store cleanup that rewrites the
-  fixtures that use them.
+- **Source**: engine and store test fixtures use store-layer reconciliation
+  helpers to exercise identity/grant invariants.
+- **Risk**: removing the helpers without replacing their callers would lose
+  coverage, including rejection of automated evidence for revoked keys.
+- **Delete condition**: replace those fixture callers with equivalent invariant
+  coverage before removing the helpers. They are not a daemon command or a
+  startup migration.
+
+## 11. Retained legacy viewer-session exchange
+
+- **Boundary**: dashboard account previews select one of two fixed configured
+  Sites origins using the existing allowed site hostname distinction. Legacy
+  apps/documents retain their registry; v2 static sites use theirs. No retry
+  across registries, new roster, or grant copy is introduced.
+- **Delete condition**: remove legacy selection and request spelling after
+  legacy previews and Hosted Chat requester consumers are retired. Until then,
+  paired exchange tests must prove requests and failures stay on their backend.
+- **Contract**: [ADR 0029](adr/0029-account-session-viewer-bridge.md).
+  Production cutover requires separate authorization.

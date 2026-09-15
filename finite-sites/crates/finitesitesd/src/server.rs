@@ -45,6 +45,7 @@ pub struct AppState {
     pub api_url: String,
     pub git_base_url: String,
     pub viewer_session_service_token: Option<String>,
+    pub account_login_url: Option<url::Url>,
     pub base_domain: String,
     pub data_dir: std::path::PathBuf,
     pub git_hook_helper_path: std::path::PathBuf,
@@ -284,6 +285,17 @@ pub async fn serve_on(
             "Git dependency preflight failed: {error}. Install Git and make it available on PATH"
         )
     })?;
+    let account_login_url = options.account_login_url.as_deref().map(|raw| {
+        let url = url::Url::parse(raw).map_err(|_| "invalid account login URL")?;
+        let local = url.host_str().is_some_and(|h| h == "localhost" || h.ends_with(".localhost"))
+            || matches!(url.host(), Some(url::Host::Ipv4(ip)) if ip.is_loopback());
+        if !(url.scheme() == "https" || (url.scheme() == "http" && local))
+            || !url.username().is_empty() || url.password().is_some()
+            || url.query().is_some() || url.fragment().is_some() {
+            return Err("account login URL must be HTTPS (or local HTTP), without credentials/query/fragment");
+        }
+        Ok(url)
+    }).transpose()?;
     let blobs = engine.blob_store();
     let serving_engines = ServingEnginePool::new(&engine, SERVING_ENGINE_POOL_SIZE)
         .map_err(|error| format!("cannot open serving registry readers: {error}"))?;
@@ -296,6 +308,7 @@ pub async fn serve_on(
         api_url: options.api_url.clone(),
         git_base_url: options.git_base_url.clone(),
         viewer_session_service_token: options.viewer_session_service_token.clone(),
+        account_login_url,
         base_domain: options.base_domain.clone(),
         data_dir: options.data_dir.clone(),
         git_hook_helper_path: options.git_hook_helper_path.clone(),
