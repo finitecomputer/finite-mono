@@ -18,7 +18,7 @@ on:
       runs_on_json:
         description: "GitHub runner label JSON string or labels array"
         required: true
-        default: '"depot-ubuntu-24.04"'
+        default: '"ubuntu-24.04"'
         type: string
 
 concurrency:
@@ -35,10 +35,14 @@ env:
 jobs:
   qualify:
     if: github.event_name == 'pull_request'
-    runs-on: depot-ubuntu-24.04
+    runs-on: ubuntu-24.04
     timeout-minutes: 60
     steps:
       - uses: actions/checkout@v4
+      - name: Require hardware virtualization for storage qualification
+        run: |
+          test -c /dev/kvm
+          sudo chmod a+rw /dev/kvm
       - uses: DeterminateSystems/nix-installer-action@v16
       - uses: cachix/cachix-action@v17
         with:
@@ -55,6 +59,10 @@ jobs:
           ref: ${{ inputs.rev }}
           fetch-depth: 0
 
+      - name: Require hardware virtualization for storage qualification
+        run: |
+          test -c /dev/kvm
+          sudo chmod a+rw /dev/kvm
       - uses: DeterminateSystems/nix-installer-action@v16
 
       - name: Configure Cachix read-only cache
