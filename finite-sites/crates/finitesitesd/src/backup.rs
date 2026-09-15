@@ -14,6 +14,9 @@ use thiserror::Error;
 mod git;
 mod install;
 
+#[cfg(test)]
+mod tests;
+
 #[derive(Debug, Error)]
 pub enum BackupError {
     #[error("backup IO: {0}")]
@@ -411,6 +414,10 @@ fn persist(path: &Path, bytes: &[u8]) -> Result<bool, BackupError> {
         if read_bounded(path, limits::MAX_BACKUP_OBJECT_BYTES)? != bytes {
             return Err(BackupError::Invalid("existing immutable object differs"));
         }
+        // A previous capture may have stopped after rename but before sync.
+        // Visible matching bytes alone do not establish durable publication.
+        File::open(path)?.sync_all()?;
+        sync_parent(path)?;
         return Ok(false);
     }
     let parent = path
@@ -420,8 +427,18 @@ fn persist(path: &Path, bytes: &[u8]) -> Result<bool, BackupError> {
     temp.write_all(bytes)?;
     temp.as_file().sync_all()?;
     temp.persist_noclobber(path).map_err(|error| error.error)?;
-    File::open(parent)?.sync_all()?;
+    sync_parent(path)?;
     Ok(true)
+}
+
+fn sync_parent(path: &Path) -> Result<(), BackupError> {
+    #[cfg(test)]
+    tests::before_parent_sync(path)?;
+    let parent = path
+        .parent()
+        .ok_or(BackupError::Invalid("object has no parent"))?;
+    File::open(parent)?.sync_all()?;
+    Ok(())
 }
 
 fn private_dir(path: &Path) -> Result<(), BackupError> {
