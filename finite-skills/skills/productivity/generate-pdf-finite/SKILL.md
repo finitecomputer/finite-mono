@@ -47,7 +47,7 @@ playwright pdf file:///abs/path/input.html output.pdf
 ```
 
 - Real Chromium (the same staged browsers `playwright screenshot` uses).
-- Note the `file://` URL — a bare path is treated as a URL and fails.
+- An existing local path also works; an absolute `file://` URL makes the input explicit.
 - Options: `--paper-format A4`, `--wait-for-selector`, `--wait-for-timeout`.
 
 ### Calling from Python

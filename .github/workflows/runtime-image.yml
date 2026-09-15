@@ -81,7 +81,10 @@ jobs:
           # The label is the lock-derived stamp; the running Hermes must equal it.
           hermes_label="$(docker image inspect "$version_ref" --format '{{index .Config.Labels "computer.finite.runtime.hermes-agent-version"}}')"
           test -n "$hermes_label"
-          docker run --rm --entrypoint /bin/sh -e "HERMES_AGENT_VERSION=$hermes_label" "$version_ref" -ec '
+          mkdir -p "$RUNNER_TEMP/runtime-pdf-probes"
+          docker run --rm --entrypoint /bin/sh \
+            --mount "type=bind,source=$RUNNER_TEMP/runtime-pdf-probes,target=/tmp/pdf-probes" \
+            -e "HERMES_AGENT_VERSION=$hermes_label" "$version_ref" -ec '
             test -n "$HERMES_AGENT_STORE_PATH"
             test -n "$HERMES_AGENT_PYTHON_PATH"
             test "$(python3 -c '\''import importlib.metadata; print(importlib.metadata.version("hermes-agent"))'\'')" = "$HERMES_AGENT_VERSION"
@@ -97,12 +100,12 @@ jobs:
             test -d "$PLAYWRIGHT_BROWSERS_PATH"
             find "$PLAYWRIGHT_BROWSERS_PATH" -iname "*chrom*" | grep -q .
             printf "%s\n" "<html><body><h1>html2pdf probe</h1></body></html>" > /tmp/probe.html
-            weasyprint /tmp/probe.html /tmp/probe-weasyprint.pdf
-            head -c 4 /tmp/probe-weasyprint.pdf | grep -q "%PDF"
-            playwright pdf file:///tmp/probe.html /tmp/probe-playwright.pdf
-            head -c 4 /tmp/probe-playwright.pdf | grep -q "%PDF"
-            python3 -c '\''from pathlib import Path; import subprocess; subprocess.run(["playwright", "pdf", Path("/tmp/probe.html").resolve().as_uri(), "/tmp/probe-python.pdf"], check=True)'\''
-            head -c 4 /tmp/probe-python.pdf | grep -q "%PDF"
+            weasyprint /tmp/probe.html /tmp/pdf-probes/probe-weasyprint.pdf
+            head -c 4 /tmp/pdf-probes/probe-weasyprint.pdf | grep -q "%PDF"
+            playwright pdf file:///tmp/probe.html /tmp/pdf-probes/probe-playwright.pdf
+            head -c 4 /tmp/pdf-probes/probe-playwright.pdf | grep -q "%PDF"
+            python3 -c '\''from pathlib import Path; import subprocess; subprocess.run(["playwright", "pdf", Path("/tmp/probe.html").resolve().as_uri(), "/tmp/pdf-probes/probe-python.pdf"], check=True)'\''
+            head -c 4 /tmp/pdf-probes/probe-python.pdf | grep -q "%PDF"
             /runtime/bin/finitechat --help >/dev/null
             /runtime/bin/finite-agentd --help >/dev/null
             /runtime/bin/fsite describe workflow publish-static-site --output json >/dev/null
@@ -117,6 +120,15 @@ jobs:
             test -f /runtime/finite-skills/software-development/finitebrain/SKILL.md
             test "$FINITECHAT_HERMES_INBOUND_STREAM" = "1"
           '
+          # Validate actual text, including Chromium font discovery in the slim image.
+          # The inspection tool comes from the same pin and runs outside the image.
+          nix shell --impure --expr \
+            '(import (builtins.getFlake (toString ./.)).inputs.hermes-nixpkgs { system = "x86_64-linux"; }).poppler-utils' \
+            -c bash -euo pipefail -c '
+              for pdf in "$RUNNER_TEMP"/runtime-pdf-probes/probe-{weasyprint,playwright,python}.pdf; do
+                pdftotext "$pdf" - | grep -Fq "html2pdf probe"
+              done
+            '
           (
             cd finitechat
             python3 -m unittest \
@@ -225,6 +237,7 @@ jobs:
             finitecomputer-v2/runtime-image-report.json
             finitechat/target/runtime-image-durable-smoke/report.json
             runtime-image-index.json
+            ${{ runner.temp }}/runtime-pdf-probes/*.pdf
       - name: Summarize
         env:
           CANARY: ${{ steps.canary.outputs.pinned }}
