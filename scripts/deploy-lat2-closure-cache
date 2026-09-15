@@ -478,8 +478,13 @@ pid_unchanged_unless_approved containerd.service "$containerd_pid" \
   || activation_failed 1 "containerd.service restarted without approval"
 pid_unchanged_unless_approved systemd-networkd.service "$networkd_pid" \
   || activation_failed 1 "systemd-networkd.service restarted without approval"
-systemctl is-active --quiet containerd.service \
-  || activation_failed 1 "containerd.service is not active after the switch"
+# The app-plane host need not install containerd. Preserve a running daemon
+# when one existed, but do not mistake its pre-existing absence for a failed
+# switch. The PID fence above still rejects an unapproved start/stop/restart.
+if [[ "$containerd_pid" != "0" ]]; then
+  systemctl is-active --quiet containerd.service \
+    || activation_failed 1 "containerd.service is not active after the switch"
+fi
 systemctl is-active --quiet systemd-networkd.service \
   || activation_failed 1 "systemd-networkd.service is not active after the switch"
 

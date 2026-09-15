@@ -1,13 +1,14 @@
 # finite-lat-5 setup
 
 Execution plan for [FIN-74](https://linear.app/finitecomputer/issue/FIN-74).
-Status on 2026-09-15: **steps 1–2 complete**. The reviewed configuration
+Status on 2026-09-15: **steps 1–3 complete**. The reviewed configuration
 merged in [PR #883](https://github.com/finitecomputer/finite-mono/pull/883)
 and the exact CI artifact is installed. Both physical EFI boot paths,
 fully synchronized mirrors, storage health, and SSH identity are verified.
 The bootstrap credential fix merged in
 [PR #889](https://github.com/finitecomputer/finite-mono/pull/889).
-Overlay/Core admission and launch qualification remain in step 3.
+Lat5 is connected to the hub and Core and reports drained capacity.
+Controlled launch and cohort capacity qualification remain in step 4.
 No Agent Runtime has been created on lat5.
 
 Use lat4's dedicated NixOS/Kata Runner architecture with an empty `/data`.
@@ -266,6 +267,53 @@ escrowed configuration and credentials. Revert a failed lat2 change to its
 recorded closure and credential configuration. Once lat5 holds user state,
 reinstallation requires a verified Recovery Set and restore proof; the empty
 host recovery boundary no longer applies.
+
+### Drained connection receipt — 2026-09-15
+
+[PR #893](https://github.com/finitecomputer/finite-mono/pull/893) added lat5's
+existing WireGuard public key and private Core/Identity access. CI artifact
+[35015095493](https://github.com/finitecomputer/finite-mono/actions/runs/35015095493)
+built merged revision `6ca4e21bc6e51ceea440594b6b1494467f47974f`.
+Its digest-verified system is now running on lat2:
+`/nix/store/yfm0r7m75cciy9bdgckmsg6c9bj59sb2-nixos-system-finite-lat-2-26.05.20260719.fd14620`.
+Lat5 retains the exact OS closure from step 2.
+
+Dry activation required a networkd restart, firewall/D-Bus reloads, and a
+tmpfiles refresh of the revision metric. These four units were explicitly
+allowed. All nine product-service unit files were byte-identical; Core and
+chat retained their PIDs through the hub switch. The helper initially
+reported failure because it unconditionally required containerd on lat2,
+but neither the previous nor the new app-plane closure installs it. Live
+checks confirmed the successful switch and healthy product services. The
+helper now preserves containerd health only when a daemon was running before
+the switch, while retaining its PID-change fence. A synthetic test reproduced
+the false failure and covers absent, healthy, stopped, and approved/unapproved
+restart cases. All 22 lat2 helper tests pass; CI now runs that previously
+omitted suite. The obsolete test requiring Kata/KVM on the app-plane host
+was removed.
+
+The new Core credential was added atomically after comparing the live file
+with its off-host escrow; all existing metadata and settings were preserved.
+Core restarted successfully and returned HTTP 200 before lat5 received
+`runner.env`. The original root-only file remains in
+`/var/backups/finite-lat5-admission-20260915/core.env` on lat2 and in off-host
+escrow. Identity and Runtime secret files were transferred directly and
+verified as root-owned mode 0600.
+
+| Check | Verified result |
+| --- | --- |
+| Overlay | Fresh handshakes for lat3, lat4, and lat5; lat5 reaches private Core and Identity health endpoints with HTTP 200 |
+| Runner authentication | Repeated successful cycles, `capacity_unavailable` because `runner is draining` |
+| Capacity | `draining=true`, `maxSandboxCount=1`, `activeSandboxCount=0`; no Agent Runtime created |
+| Runtime pin | `finite-agent-runtime-2026-09-14.1`, matching Core's current promoted, non-retired artifact |
+| Storage and telemetry | Storage green; metrics `up=1`; Runner logs received with `host="finite-lat-5"` and `role="runner"` |
+| Existing fleet | Chat, recovery, and rollout sections green; lat3 31/31 and lat4 27/27 ready |
+
+Canonical status intentionally marks lat5's drain as red for new admission.
+Its local-only artifact comparison is unknown because Core's catalog is on
+lat2; the pin was checked against lat2's canonical status separately. Existing
+fleet version skew remains red. These are not an all-green fleet claim or
+permission to open cohort capacity. Step 4 remains outstanding.
 
 ## 4. Qualify launch and release capacity
 
