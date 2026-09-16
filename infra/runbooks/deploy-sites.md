@@ -7,12 +7,6 @@ It enables real mail and account login; apply it only after the cutover gates,
 including the dashboard route and dedicated offsite recovery proof. An isolated
 rehearsal uses private routing and dev mail instead.
 
-The currently pinned image passed restoration but is not cutover-ready: a
-pending Git event whose commit lacks `finite.toml` blocks correcting pushes.
-Fix and qualify invalid-then-corrected pushes with inherited pending events,
-then update the image pin and repeat recovery qualification. Do not bypass this
-gate by editing the production event history.
-
 Preserve the source data and archives until the Fly restore and access checks
 pass. Never open the live source registry with the static-only daemon: its
 startup migrations remove unsupported output kinds.
@@ -76,7 +70,9 @@ arguments, image, services and mount; restoring the command alone is insufficien
 Follow [ADR 0029](../../finite-sites/docs/adr/0029-account-session-viewer-bridge.md)
 and the [dashboard configuration](../../finitecomputer-v2/apps/dashboard/README.md#sites-account-viewer-boundary).
 Deploy and qualify the dashboard's `/site-auth` route before applying the
-account login setting in `fly.toml`.
+account login setting in `fly.toml`. The pre-cutover dashboard lacks this route;
+setting an upstream alone is insufficient. Stage the reviewed dashboard image
+and include its deployment in the authorized cutover.
 Both services must receive the same `FINITE_SITES_VIEWER_SESSION_TOKEN` from the
 secret inventory. At the authorized cutover, merge the
 [dashboard assignment](../fly/sites/dashboard.env.example) into its existing
@@ -109,6 +105,14 @@ revoked viewers. Mutable HTML and assets must return `Cache-Control: no-store`.
 After restart and artifact replacement, verify content, grants, existing viewer
 sessions and Git credentials still work. Exercise real mail and any enabled
 account exchange through the public domains.
+
+The Runtime's pinned `fsite/v0.5.3` calls `/api/v1` and cannot use the new
+`/api/v2` service. Stage a matching CLI/Runtime artifact before cutover; change
+the runtime pin and public `fsite-latest` alias only with the canonical endpoint.
+Saved Git remotes also require an explicit update to the server-returned URL
+and host-scoped credential storage. Content redirects do not migrate Git or
+API requests. Keep legacy publishing frozen until retained publishers have
+transitioned, so old agents cannot create a second history on legacy.
 
 The [container smoke test](../images/sites-smoke.sh) covers synthetic publishing,
 visibility and restart/replacement. It does not qualify real mail, Fly TLS, the
@@ -155,8 +159,9 @@ private, outside serving data, and ephemeral across Machine replacement.
 Once enabled, backups run daily at 03:07 UTC. Sites stops only for the consistent
 file/SQLite copy, then resumes before hashing, verification and upload. Stop and
 capture share a five-minute deadline; on timeout the job aborts capture and
-attempts a bounded restart before cleanup. Confirm this pause and recovery
-interval are acceptable. Runs are serialized; Borg warnings fail the job. There
+attempts a bounded restart before cleanup. The full-data rehearsal paused
+serving for about 108–113 seconds; this daily pause was accepted for the initial launch. Re-measure
+after material data growth. Runs are serialized; Borg warnings fail the job. There
 is no automatic retry, prune or compact.
 
 ### Check or retry

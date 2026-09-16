@@ -7,10 +7,9 @@ kill_signal = "SIGINT"
 kill_timeout = 120
 
 [build]
-  # d3245b403d938d5fde9bdd36a4a6a2f879086ef2; restore rehearsal passed.
-  # Pending invalid Git events still block correcting pushes; replace after the fix.
-  # https://github.com/finitecomputer/finite-mono/actions/runs/35049949459
-  image = "ghcr.io/finitecomputer/finite-sites@sha256:e951abcb5ab5e4b0f48e316af4ec5a260eee2d2e37dd4419edf998716502c722"
+  # 91928989fdfe16e5c5b92968d353d4935c67e482; includes Git recovery fix #909.
+  # https://github.com/finitecomputer/finite-mono/actions/runs/35059052591
+  image = "ghcr.io/finitecomputer/finite-sites@sha256:61365f5c79a035bf72cf23c083c9b3f73a086a2b1414bd00ead922f068c0b665"
 
 [deploy]
   strategy = "rolling"

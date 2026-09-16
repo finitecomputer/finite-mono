@@ -4,12 +4,10 @@
 { ... }:
 {
   virtualisation.oci-containers.containers.finite-saas-dashboard = {
-    # 2026-09-14.1, pinned 2026-09-14 (chat binding recovery + response
-    # actions + copy/share #867/#869, operator email-change UI #857, Finite
-    # Private usage progress #855).
-    # This line is the dashboard's deployment record; there is no ledger to
-    # update alongside it (infra/deployment-changelog.md holds narrative only).
-    image = "ghcr.io/finitecomputer/finite-saas-dashboard@sha256:ff6a1b80841d19e8f914db509ae630056a6e8af278abada4f144ca6e8466a660";
+    # Sites account bridge cutover candidate; deploy only after the Sites gates.
+    # Source 91928989fdfe16e5c5b92968d353d4935c67e482.
+    # https://github.com/finitecomputer/finite-mono/actions/runs/35060382895
+    image = "ghcr.io/finitecomputer/finite-saas-dashboard@sha256:75447c59608b1d799afb47290ba8ec968f2b17efcbd960bf351b48a42194c4c6";
 
     # Host networking: the dashboard must reach core on the HOST loopback
     # (127.0.0.1:4200) and itself bind 127.0.0.1:3000 (HOSTNAME below). With
