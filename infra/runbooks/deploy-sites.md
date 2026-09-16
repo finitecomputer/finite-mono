@@ -115,6 +115,16 @@ and host-scoped credential storage. Content redirects do not migrate Git or
 API requests. Keep legacy publishing frozen until retained publishers have
 transitioned, so old agents cannot create a second history on legacy.
 
+The Hosted Chat requester-assertion issuer must also move to the publishing
+registry before qualifying an existing agent against v2. Assertions are random
+tokens stored in the issuing registry, not portable signed claims: using the
+same service credential on both servers does not make an old-registry token
+valid on Fly. The current dashboard's `createHostedRequesterContext` still
+selects `FC_SITES_UPSTREAM_URL`; changing that variable globally would also
+move retained legacy previews. Qualify an explicit issuer transition with the
+Runtime rollout while preserving the legacy viewer exchange and Chat when
+Sites is unavailable. A standalone CLI test does not cover this boundary.
+
 The [container smoke test](../images/sites-smoke.sh) covers synthetic publishing,
 visibility and restart/replacement. It does not qualify real mail, Fly TLS, the
 dashboard account bridge or migration from a legacy database.
@@ -248,3 +258,22 @@ contains test writes and must not become production. Define rollback around
 destination writes; do not overwrite them with an earlier database. Qualify
 saved Git remotes and existing agents before changing CLI defaults or runtime
 pins. This procedure does not authorize cutover or a CLI/runtime rollout.
+
+After cutover, remove obsolete publishing guidance and promote a Runtime whose
+bundled skills match its CLI. Existing agents adopt that bundle only through
+their own `finite skills sync`; image replacement does not overwrite skills.
+Core's `FC_CORE_RUNTIME_ENV_JSON` and the Runner's N-1
+`FC_RUNNER_RUNTIME_ENV_JSON` must both use `FINITE_SITES_API=https://finite.site`.
+Check operator environment files for overrides. Changing these defaults does
+not rewrite existing persisted RuntimeSpecs: verify each transitioned agent's
+effective endpoint as part of its supported rollout, without direct database
+edits. Do not apply the new defaults with an old `/api/v1` CLI.
+
+Retiring the Latitude service is a separate step from moving static Sites.
+Its daemon/package, registry backups, old-domain routes and probes, and legacy
+dashboard viewer exchange remain necessary for retained apps/documents and
+other excluded outputs. Delete them together only after every retained output
+has an approved replacement or retirement, legacy requester consumers are gone,
+and the retained Recovery Set has restored independently. Preserve redirects
+for migrated URLs and existing-state migration/restore tests; their age alone
+does not make them disposable.

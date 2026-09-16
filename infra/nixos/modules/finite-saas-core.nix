@@ -52,7 +52,7 @@ in
       # RuntimeSpec. Runner keeps its process-global copy only for N-1 rows
       # without a spec during the expand window.
       FC_CORE_RUNTIME_ENV_JSON = builtins.toJSON {
-        FINITE_SITES_API = "https://api.finite.chat";
+        FINITE_SITES_API = "https://finite.site";
         FINITE_BRAIN_SERVER_URL = "https://brain.finite.computer";
         FINITE_BRAIN_PUBLIC_BASE_URL = "https://brain.finite.computer";
       };

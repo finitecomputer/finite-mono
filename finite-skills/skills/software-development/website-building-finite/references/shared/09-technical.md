@@ -18,18 +18,17 @@ project-name/
 ```
 
 Use a real app folder for React, Vite, Next, or another framework. The Project
-Repository contains source, data, build logic, and the deploy bytes or runtime
-payload collaborators need. `finite.toml` selects what Finite Sites serves.
+Repository contains source, data, build logic, and the static deploy bytes
+collaborators need. `finite.toml` selects what Finite Sites serves.
 
 ## Platform Rules
 
 - Publish with `fsite` and ordinary Git through a Finite Sites Project
   Repository.
-- Keep Project Outputs private by default. Public sharing requires an explicit
+- Keep Project Sites private by default. Public sharing requires an explicit
   human decision and `--yes-public`.
 - Do not edit proxies, DNS, host networking, or platform configuration.
-- Use `kind = "site"` for static bytes, `kind = "document"` for Markdown, and
-  `kind = "app"` for a server process or durable mutable state.
+- Use `[site]` to select committed static bytes. Render Markdown to HTML locally.
 - Finite Sites does not run builds. Build and test before committing.
 - Keep secrets server-side. Never commit `.env*`, `.finite/`, private keys,
   credentials, or build caches.
@@ -44,7 +43,7 @@ publishing, identity, sharing, and recovery contract.
 
 ## Workflow
 
-1. Pick the output type and art direction.
+1. Establish the static site scope and art direction.
 2. Research real references.
 3. Scaffold the Project Repository and `finite.toml`.
 4. Build the experience with real content and intentional assets.
@@ -87,9 +86,8 @@ Use a dedicated output directory for built static assets:
 [project]
 slug = "project-name"
 
-[outputs.site]
-kind = "site"
-site_name = "project-name"
+[site]
+name = "project-name"
 branch = "main"
 path = "dist"
 spa = false
@@ -97,27 +95,6 @@ spa = false
 
 Set `spa = true` only when history-API routes need an index fallback. The
 served site is the committed `dist/` snapshot, not a development server.
-
-## Stateful App Configuration
-
-Use an app output only when static bytes cannot provide the product:
-
-```toml
-[project]
-slug = "project-name"
-
-[outputs.web]
-kind = "app"
-site_name = "project-name"
-branch = "main"
-path = "app"
-start = "bun server.ts"
-```
-
-The start command must use a supported runtime. Listen on `0.0.0.0:$PORT` and
-write live mutable state only under `DATA_DIR`. Finite Sites preserves
-`DATA_DIR` across deploys, restarts, and wake/sleep. Do not store live state in
-the committed app directory.
 
 ## Recommended Local Preview
 
@@ -135,8 +112,8 @@ leave the terminal wrapper hanging. Verify the local server with
 
 ## Backend Note
 
-If the site needs backend logic, read `19-backend.md` and publish a
-`kind = "app"` Project Output.
+If the site needs backend logic, read `19-backend.md`. Sites does not host
+server processes; agree on a separate backend deployment first.
 
 ## Quality Checklist
 
@@ -146,4 +123,4 @@ If the site needs backend logic, read `19-backend.md` and publish a
 - Mobile and desktop both look deliberate.
 - The project's own tests and build passed before commit.
 - The private served Version was tested after push, not only locally.
-- Output visibility matches the human's explicit request.
+- Site visibility matches the human's explicit request.

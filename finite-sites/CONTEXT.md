@@ -23,8 +23,8 @@ with exactly these meanings.
   Service and its agent-facing CLI. Until the Sites Service Boundary is stable,
   server and CLI behavior are shipped and reasoned about as one component.
 - **Validation Build**: an exact unreleased or pinned Sites Component build
-  used during the V2 Validation Phase. It is not promoted as the public
-  rolling CLI release until the default production endpoint can satisfy it.
+  used for isolated qualification. It is not promoted as the public rolling
+  CLI release until the production endpoint can satisfy it.
 - **Sites Capability Check**: the client/server compatibility handshake that
   tells an agent whether its CLI understands the Sites Service Boundary it is
   contacting. It exists to fail clearly at the boundary, not to preserve every
@@ -33,20 +33,6 @@ with exactly these meanings.
   Service: the Sites API origin, Git Remote origin, and one-label Site hosts
   under the Site Base Domain. Finite application/dashboard/chat origins are not
   Sites hostnames.
-- **Sites V2 Endpoint**: the minimal temporary or versioned Sites endpoint
-  needed for new `fsite` clients and selected agent runtimes to target the
-  Static Sites API before canonical Sites hostnames move. It may carry both
-  control API and Git Remote traffic on one origin; it does not imply
-  duplicating every production hostname plane.
-- **V2 Validation Phase**: the opt-in period where new `fsite` clients or
-  selected agent runtimes publish to the Sites V2 Endpoint while legacy Sites
-  production remains authoritative for canonical Sites hostnames.
-- **Validation Site Base Domain**: the temporary wildcard domain used to test
-  served Sites during the V2 Validation Phase. It is validation plumbing, not
-  the long-term public Site URL contract.
-- **Validation Site URL**: a served Site URL under the Validation Site Base
-  Domain. It may prove behavior during validation, but it is not a durable
-  public URL promise.
 - **Sites Dependency Fact**: a narrow non-authorizing fact that Sites obtains
   from another Finite service, such as Identity Directory NIP-05 resolution or
   a bounded SaaS account assertion for an already shared Site. It never
@@ -60,7 +46,7 @@ with exactly these meanings.
   sharing keep their user-visible meaning while the hosting architecture
   changes.
 - **Sites Cutover**: the operator-led move from the legacy Sites deployment to
-  the Sites Platform Service after the Sites V2 Endpoint has been proven.
+  the Sites Platform Service after isolated qualification.
   Already-published Sites keep serving while publishing writes may be briefly
   frozen, Sites state may be reconciled once, and canonical Sites hostnames
   move.
@@ -233,9 +219,9 @@ with exactly these meanings.
 - An agent using either delegation signs as its **Agent Principal Key**, and
   Sites audit records the delegation separately from actor identity.
 - **Git Remote**: the standard git clone/push endpoint for a Project
-  Repository, canonically `https://git.finite.chat/{project}.git` in
-  production. The server-returned Git Remote is authoritative, so validation
-  deployments may use the Sites V2 Endpoint before canonical hostnames move.
+  Repository, canonically `https://finite.site/{project}.git` in production.
+  The server-returned Git Remote is authoritative, including on isolated
+  validation deployments.
   Agents use normal git commands against it; Finite Sites maps authenticated
   pushes to Project Repository permissions.
 - **Git Credential**: a revocable, scoped HTTPS credential minted after an
@@ -319,9 +305,10 @@ with exactly these meanings.
   top-level `SameSite=Lax`; a distinct `Partitioned` cookie carries iframe access.
 - **Control Plane**: the NIP-98-authenticated API (Project Init, git auth,
   sharing, status). **Serving Plane**: anonymous-or-cookie HTTP on site
-  subdomains. One process serves both in v1, split by Host header.
+  subdomains. One process serves both, split by Host header.
 - **Base Domain**: the wildcard domain under which sites live —
   `sites.localhost` in development, `finite.site` for the Fly deployment.
-  Legacy `finite.chat` URLs remain on the old service until cutover.
+  Migrated static `finite.chat` URLs redirect to their `finite.site` Sites.
+  Retained apps/documents stay on the old service until separately retired.
 - **Outbox**: the dev mailer's output directory; each would-be email is a
   text file containing the magic link.

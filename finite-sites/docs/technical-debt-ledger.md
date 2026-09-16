@@ -110,8 +110,9 @@ acknowledgement.
 ## 11. Retained legacy viewer-session exchange
 
 - **Boundary**: dashboard account previews select one of two fixed configured
-  Sites origins using the existing allowed site hostname distinction. Until
-  cutover, legacy outputs retain their registry; v2 static sites use theirs. No retry
+  Sites origins using the existing allowed site hostname distinction. After the
+  static cutover, retained apps/documents still use their legacy registry;
+  migrated static Sites use Fly. No retry
   across registries, new roster, or grant copy is introduced.
 - **Delete condition**: remove legacy selection and request spelling after
   legacy previews and Hosted Chat requester consumers are retired. Until then,

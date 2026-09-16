@@ -81,8 +81,7 @@ else:
         "preview",
         "list",
         "share",
-        "document",
-        "stateful app",
+        "static",
     )
     for term in required_description_terms:
         if term not in description:
@@ -92,20 +91,33 @@ else:
 
     sites_text = sites_path.read_text(encoding="utf-8")
     required_contract_markers = (
-        "fsite` 0.4.0",
-        'kind = "site"',
-        'kind = "document"',
-        'kind = "app"',
+        "fsite` 0.6.0",
+        '[site]',
         "fsite project list --output json",
         "fsite project status PROJECT --output json",
         "fsite view URL_OR_NAME --output json",
-        "fsite project share PROJECT OUTPUT",
-        "0.0.0.0:$PORT",
-        "DATA_DIR",
+        "fsite project share PROJECT --shared",
+        "fsite describe workflow share-site --output json",
+        "git_remote_url",
     )
     for marker in required_contract_markers:
         if marker not in sites_text:
-            errors.append(f"{sites_path}: missing fsite 0.4.0 contract marker {marker!r}")
+            errors.append(f"{sites_path}: missing static Sites contract marker {marker!r}")
+
+    # Scan the linked website references too: an updated top-level skill must
+    # not send an agent back to retired app hosting or multi-output commands.
+    publishing_paths = [sites_path]
+    for name in ("git-finite", "publish-web-apps-finite", "website-building-finite"):
+        publishing_paths.extend((root / "software-development" / name).rglob("*.md"))
+    for path in publishing_paths:
+        text = path.read_text(encoding="utf-8")
+        for retired in (
+            '[outputs.', 'kind = "app"', 'kind = "document"',
+            "publish-stateful-app", "publish-document", "share-output",
+            "fsite project share PROJECT OUTPUT", "https://git.finite.chat/",
+        ):
+            if retired in text:
+                errors.append(f"{path}: retired Sites publishing contract {retired!r}")
 
 brain_path = root / "software-development/finitebrain/SKILL.md"
 if not brain_path.is_file():

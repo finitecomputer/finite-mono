@@ -318,8 +318,10 @@ Caddy vhost → backend: `finite.computer` -> 4200 for
 `/api/core/v1/finite-private/`, else 3000; `chat.finite.computer` -> 8788;
 `api.finite.chat`, `*.finite.chat`, and `*.docs.finite.chat` -> 8787
 (Cloudflare Origin CA); `identity.finite.vip` public identity routes -> 8791.
-The static-only Sites destination is [Fly](../runbooks/deploy-sites.md).
-Keep the legacy Sites service and canonical edge until the reviewed cutover.
+Static Sites run on [Fly](../runbooks/deploy-sites.md). Migrated static hosts
+use the reviewed content redirects; retained apps/documents and legacy
+account previews still need the local Sites service and its recovery coverage.
+A static Sites cutover alone does not retire those consumers.
 Brain has no independent edge: authenticated `/client` and `/_admin/*` requests
 go through the dashboard to loopback :3015, then Brain applies its Nostr
 authorization.

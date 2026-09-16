@@ -44,7 +44,7 @@ in
       # not a records edit. It is independent of the Kata fleet's pin.
       FC_RUNNER_RUNTIME_ARTIFACT_ID = "finite-agent-runtime-2026-07-22.1";
       FC_RUNNER_RUNTIME_ENV_JSON = builtins.toJSON {
-        FINITE_SITES_API = "https://api.finite.chat";
+        FINITE_SITES_API = "https://finite.site";
         FINITE_BRAIN_SERVER_URL = "https://brain.finite.computer";
         FINITE_BRAIN_PUBLIC_BASE_URL = "https://brain.finite.computer";
       };
