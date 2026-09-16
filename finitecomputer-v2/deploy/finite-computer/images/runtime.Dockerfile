@@ -112,9 +112,8 @@ COPY --from=finite-rust-builder /build/target/release/finitechat /usr/local/bin/
 COPY --from=finite-rust-builder /build/target/release/finitechat /runtime/bin/finitechat
 COPY --from=finite-rust-builder /build/target/release/finite-agentd /usr/local/bin/finite-agentd
 COPY --from=finite-rust-builder /build/target/release/finite-agentd /runtime/bin/finite-agentd
-# fsite is the pinned v1 CLI from the staged Nix toolchains (see
-# fsite-cli-v1.nix); it must not be built from main until the Sites v2
-# cutover, because main's source speaks only /api/v2/*.
+# fsite comes from this revision's staged Nix toolchains and speaks /api/v2.
+# Promote this Runtime only with the Sites v2 canonical endpoint cutover.
 COPY --from=finite-rust-builder /build/target/release/fbrain /usr/local/bin/fbrain
 COPY --from=finite-rust-builder /build/target/release/fbrain /runtime/bin/fbrain
 COPY finitechat/containers/agent/finite.py /runtime/bin/finite

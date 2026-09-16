@@ -106,9 +106,10 @@ After restart and artifact replacement, verify content, grants, existing viewer
 sessions and Git credentials still work. Exercise real mail and any enabled
 account exchange through the public domains.
 
-The Runtime's pinned `fsite/v0.5.3` calls `/api/v1` and cannot use the new
-`/api/v2` service. Stage a matching CLI/Runtime artifact before cutover; change
-the runtime pin and public `fsite-latest` alias only with the canonical endpoint.
+The pre-cutover Runtime's `fsite/v0.5.3` calls `/api/v1` and cannot use the new
+`/api/v2` service. Build the staged Runtime with this revision's CLI and qualify it before cutover;
+promote that Runtime and the public `fsite-latest` alias only with the canonical
+endpoint.
 Saved Git remotes also require an explicit update to the server-returned URL
 and host-scoped credential storage. Content redirects do not migrate Git or
 API requests. Keep legacy publishing frozen until retained publishers have
