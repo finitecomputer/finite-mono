@@ -69,6 +69,8 @@ class FiniteStatusTests(unittest.TestCase):
     def test_core_queries_share_one_read_only_transaction(self) -> None:
         output = "\n".join(
             [
+                "__FINITE_STATUS_HOSTED_ENROLLMENT__",
+                "finite-lat-1,runtime-a,artifact-v2,kata,1,missing",
                 "__FINITE_STATUS_ARTIFACTS__",
                 "artifact-v2,ghcr.io/finite/runtime@sha256:2222,v2,git-v2,0.2.0,2026-08-01T00:00:00Z,",
                 "__FINITE_STATUS_DISTRIBUTION__",
@@ -92,6 +94,8 @@ class FiniteStatusTests(unittest.TestCase):
             finite_status, "run_read_only", return_value=completed
         ) as run:
             result = finite_status.psql_query_sets({})
+        self.assertEqual(result["hosted_enrollment"][0]["bootstrap_state"], "missing")
+        self.assertEqual(result["hosted_enrollment"][0]["runner_class"], "kata")
         self.assertEqual(result["canary_host_reservations"][0]["batch_id"], "batch-canary")
         self.assertEqual(result["launch_host_reservation_releases"][0]["canary_runtime_id"], "runtime-retry")
         self.assertEqual(result["unused_single_code_batches"][0], {

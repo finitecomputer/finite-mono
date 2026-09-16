@@ -13,6 +13,15 @@ pub struct ProvisionRuntimeCredential {
     pub source_host_id: String,
 }
 
+// Existing-agent delivery is tied to a live upgrade lease, not a runtime ID
+// supplied by a caller. No Debug: the lease token is private.
+pub struct ProvisionUpgradeCredential {
+    pub request_id: String,
+    pub runner_id: String,
+    pub lease_token: String,
+    pub source_host_id: String,
+}
+
 // Serialize only for the dedicated, authenticated provisioning response.
 #[derive(Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -62,6 +71,94 @@ pub fn validate_runtime_core_url(value: &str) -> CoreResult<String> {
 }
 
 impl CoreStore {
+    /// Enroll an existing assignment as part of its already-authorized upgrade.
+    /// Retries return the same credential. Ambiguous, revoked or changed
+    /// assignments fail closed; this is not an ownership/relocation repair API.
+    pub async fn provision_upgrade_credential(
+        &self,
+        input: ProvisionUpgradeCredential,
+    ) -> CoreResult<RuntimeBootstrapCredential> {
+        let mut client = self.connection().await?;
+        let tx = client.transaction().await.map_err(store_error)?;
+        let request = locked_runtime_control_request(&*tx, &input.request_id).await?;
+        verify_runtime_control_lease(&request, &input.runner_id, &input.lease_token)?;
+        if request.kind != RuntimeControlKind::Upgrade
+            || request.source_host_id != input.source_host_id
+        {
+            return Err(CoreError::ProviderOperationIdentityMismatch);
+        }
+        let row = tx
+            .query_opt(
+                "SELECT p.owner_user_id FROM agent_runtimes r
+             JOIN projects p ON p.id=r.project_id
+             JOIN project_runtime_links l ON l.project_id=p.id AND l.agent_runtime_id=r.id
+             WHERE r.id=$1 AND r.project_id=$2 AND r.source_host_id=$3
+               AND r.source_machine_id=$4 AND l.active AND p.import_candidate_id IS NULL
+             FOR UPDATE OF r,p,l",
+                &[
+                    &request.agent_runtime_id,
+                    &request.project_id,
+                    &input.source_host_id,
+                    &request.source_machine_id,
+                ],
+            )
+            .await
+            .map_err(store_error)?
+            .ok_or(CoreError::ProviderOperationIdentityMismatch)?;
+        let owner: String = row.get(0);
+        // Do not choose among historical/relocated assignments by sort order.
+        let creations = tx
+            .query(
+                "SELECT id,owner_user_id FROM agent_creation_requests
+             WHERE agent_runtime_id=$1 AND project_id=$2 AND status='running' FOR UPDATE",
+                &[&request.agent_runtime_id, &request.project_id],
+            )
+            .await
+            .map_err(store_error)?;
+        if creations.len() != 1 || creations[0].get::<_, String>(1) != owner {
+            return Err(CoreError::ProviderOperationIdentityMismatch);
+        }
+        let creation: String = creations[0].get(0);
+        let existing = tx.query_opt(
+            "SELECT bootstrap_secret,creation_request_id,source_host_id,source_machine_id,owner_user_id,revoked,activated
+             FROM runtime_core_credentials WHERE agent_runtime_id=$1 OR creation_request_id=$2 FOR UPDATE",
+            &[&request.agent_runtime_id, &creation],
+        ).await.map_err(store_error)?;
+        // Validate wall-clock expiry after waiting for all state locks.
+        let live: bool = tx.query_one(
+            "SELECT COALESCE(lease_expires_at>clock_timestamp(),FALSE) FROM runtime_control_requests WHERE id=$1",
+            &[&request.id],
+        ).await.map_err(store_error)?.get(0);
+        if !live {
+            return Err(CoreError::RuntimeControlRequestLeaseConflict);
+        }
+        let secret = if let Some(row) = existing {
+            if row.get::<_, String>(1) != creation
+                || row.get::<_, String>(2) != input.source_host_id
+                || row.get::<_, Option<String>>(3).as_deref() != Some(&request.source_machine_id)
+                || row.get::<_, String>(4) != owner
+                || row.get::<_, bool>(5)
+                || !row.get::<_, bool>(6)
+            {
+                return Err(CoreError::ProviderOperationTransitionConflict);
+            }
+            row.get(0)
+        } else {
+            let secret = new_secret()?;
+            tx.execute(
+                "INSERT INTO runtime_core_credentials
+                 (creation_request_id,agent_runtime_id,source_host_id,source_machine_id,owner_user_id,
+                  bootstrap_secret,token_sha256,lease_sha256,activated)
+                 VALUES ($1,$2,$3,$4,$5,$6,$7,$8,TRUE)",
+                &[&creation,&request.agent_runtime_id,&input.source_host_id,&request.source_machine_id,
+                  &owner,&secret,&digest(&secret),&digest(&input.lease_token)],
+            ).await.map_err(store_error)?;
+            secret
+        };
+        self.finish(tx).await?;
+        Ok(RuntimeBootstrapCredential { secret })
+    }
+
     /// Core returns the same secret for retries of this creation, including a
     /// new live lease on the same host. It never rotates an installed secret as
     /// a side effect of retry. A revoked/replaced creation cannot be re-enrolled.
@@ -283,7 +380,10 @@ pub(super) async fn authenticated<C: GenericClient + Sync>(
 pub(crate) mod tests {
     use super::*;
     use crate::test_support::{TestDb, with_isolated_postgres};
-    use crate::{RuntimeCapabilitiesEnvelope, RuntimeCapabilitiesV1};
+    use crate::{
+        RunnerClass, RunnerLeaseCapacity, RuntimeArtifactKind, RuntimeCapabilitiesEnvelope,
+        RuntimeCapabilitiesV1,
+    };
     pub(crate) async fn requested(db: &TestDb) -> String {
         let code = db
             .issue_launch_code_batch(IssueLaunchCodeBatchInput {
@@ -356,6 +456,7 @@ pub(crate) mod tests {
             provider_runtime_handle: None,
             contact_endpoint: None,
             runtime_capabilities: Some(RuntimeCapabilitiesEnvelope::V1(RuntimeCapabilitiesV1 {
+                runtime_upgrade: true,
                 restart: true,
                 stop: true,
                 ..Default::default()
@@ -398,6 +499,317 @@ pub(crate) mod tests {
     async fn expire(db: &TestDb, request: &str) {
         db.connection().await.unwrap().execute("UPDATE agent_creation_requests SET lease_expires_at=clock_timestamp()-INTERVAL '1 second' WHERE id=$1", &[&request]).await.unwrap();
     }
+    async fn upgrade(db: &TestDb, creation: &str) -> RuntimeControlLease {
+        let project = db
+            .agent_creation_request(creation)
+            .await
+            .unwrap()
+            .project_id;
+        db.upsert_runtime_artifact(UpsertRuntimeArtifactInput {
+            id: "enrollment-v2".into(),
+            kind: RuntimeArtifactKind::OciImage,
+            reference: format!(
+                "ghcr.io/finitecomputer/agent-runtime:enrollment@sha256:{}",
+                "b".repeat(64)
+            ),
+            version_label: "enrollment".into(),
+            source_git_sha: None,
+            finitec_version: None,
+            hermes_source_ref: None,
+            finite_platform_plugin_ref: None,
+            state_schema_version: "state-v1".into(),
+            base_image: None,
+            recover_known_good_chat: false,
+            promoted: true,
+            now: None,
+        })
+        .await
+        .unwrap();
+        db.admin_request_runtime_upgrade(AdminRuntimeUpgradeInput {
+            admin_verified_email: "enrollment-operator@finite.test".into(),
+            admin_workos_user_id: "enrollment-operator".into(),
+            project_id: project,
+            target_runtime_artifact_id: "enrollment-v2".into(),
+            now: None,
+        })
+        .await
+        .unwrap();
+        db.lease_runtime_control_request(LeaseRuntimeControlRequestInput {
+            runner_id: "auth-runner".into(),
+            lease_token: "upgrade-lease".into(),
+            lease_seconds: Some(300),
+            source_host_id: Some("auth-host".into()),
+            runner_capacity: Some(RunnerLeaseCapacity {
+                runner_classes: vec![RunnerClass::Kata],
+                runtime_capabilities: Some(RuntimeCapabilitiesEnvelope::V1(
+                    RuntimeCapabilitiesV1 {
+                        runtime_upgrade: true,
+                        restart: true,
+                        stop: true,
+                        ..Default::default()
+                    },
+                )),
+                ..Default::default()
+            }),
+            now: None,
+        })
+        .await
+        .unwrap()
+        .unwrap()
+    }
+    fn upgrade_input(lease: &RuntimeControlLease) -> ProvisionUpgradeCredential {
+        ProvisionUpgradeCredential {
+            request_id: lease.request.id.clone(),
+            runner_id: "auth-runner".into(),
+            lease_token: "upgrade-lease".into(),
+            source_host_id: "auth-host".into(),
+        }
+    }
+
+    #[tokio::test]
+    async fn existing_enrollment_preserves_assignment_and_native_generation_on_replay() {
+        for already_enrolled in [false, true] {
+            with_isolated_postgres(move |db| async move {
+                let creation = requested(&db).await;
+                let initial = if already_enrolled {
+                    Some(
+                        db.provision_runtime_credential(provision(&creation))
+                            .await
+                            .unwrap()
+                            .secret,
+                    )
+                } else {
+                    None
+                };
+                let runtime = register(&db, &creation).await;
+                complete(&db, &creation).await.unwrap();
+                let lease = upgrade(&db, &creation).await;
+                let secret = db
+                    .provision_upgrade_credential(upgrade_input(&lease))
+                    .await
+                    .unwrap()
+                    .secret;
+                if let Some(initial) = initial {
+                    assert!(initial == secret);
+                }
+                assert_eq!(
+                    db.authenticate_runtime_credential(&secret)
+                        .await
+                        .unwrap()
+                        .unwrap()
+                        .agent_runtime_id,
+                    runtime
+                );
+                let state = db
+                    .hosted_access(&runtime, "runtime-auth-user")
+                    .await
+                    .unwrap();
+                assert!(state.enrolled && !state.enabled);
+                let enabled = db
+                    .set_hosted_access(
+                        &runtime,
+                        "runtime-auth-user",
+                        super::super::hosted_hermes::SetHostedAccess {
+                            enabled: true,
+                            expected_generation: state.generation,
+                        },
+                    )
+                    .await
+                    .unwrap();
+                let origins = crate::hosted_hermes::HostedHermesOrigins::from_json(
+                    r#"{"auth-host":"https://agent.example.test"}"#,
+                )
+                .unwrap();
+                let before = db.hosted_desired(&secret, &origins).await.unwrap().unwrap();
+                let retry = db
+                    .provision_upgrade_credential(upgrade_input(&lease))
+                    .await
+                    .unwrap();
+                assert!(retry.secret == secret);
+                // A replacement worker's live lease can retry delivery without rotation.
+                db.connection().await.unwrap().execute("UPDATE runtime_control_requests SET lease_token='replacement-lease' WHERE id=$1", &[&lease.request.id]).await.unwrap();
+                assert!(db.provision_upgrade_credential(upgrade_input(&lease)).await.is_err());
+                let mut replacement = upgrade_input(&lease);
+                replacement.lease_token = "replacement-lease".into();
+                assert!(db.provision_upgrade_credential(replacement).await.unwrap().secret == secret);
+                db.connection().await.unwrap().execute("UPDATE runtime_control_requests SET lease_token='upgrade-lease' WHERE id=$1", &[&lease.request.id]).await.unwrap();
+
+                let after = db.hosted_desired(&secret, &origins).await.unwrap().unwrap();
+                assert_eq!(after.generation, enabled.generation);
+                assert!(
+                    before.password == after.password
+                        && before.signing_secret == after.signing_secret
+                );
+                assert!(
+                    db.revoke_runtime_credential(&runtime, &creation)
+                        .await
+                        .unwrap()
+                );
+                assert!(
+                    db.provision_upgrade_credential(upgrade_input(&lease))
+                        .await
+                        .is_err()
+                );
+                assert!(
+                    db.authenticate_runtime_credential(&secret)
+                        .await
+                        .unwrap()
+                        .is_none()
+                );
+            })
+            .await;
+        }
+    }
+
+    #[tokio::test]
+    async fn existing_enrollment_rejects_stale_authority_without_creating_credentials() {
+        for mutation in [
+            "UPDATE runtime_control_requests SET lease_expires_at=clock_timestamp()-INTERVAL '1 second'",
+            "UPDATE runtime_control_requests SET source_machine_id='stale-machine'",
+            "UPDATE runtime_control_requests SET source_host_id='other-host'",
+            "UPDATE runtime_control_requests SET kind='restart',target_runtime_artifact_id=NULL",
+            "UPDATE project_runtime_links SET active=FALSE",
+            "UPDATE projects SET owner_user_id=(SELECT id FROM users WHERE workos_user_id='enrollment-operator')",
+            "UPDATE agent_creation_requests SET status='cancelled'",
+        ] {
+            with_isolated_postgres(move |db| async move {
+                let creation = requested(&db).await;
+                register(&db, &creation).await;
+                complete(&db, &creation).await.unwrap();
+                let lease = upgrade(&db, &creation).await;
+                db.connection()
+                    .await
+                    .unwrap()
+                    .execute(mutation, &[])
+                    .await
+                    .unwrap();
+                assert!(
+                    db.provision_upgrade_credential(upgrade_input(&lease))
+                        .await
+                        .is_err(),
+                    "{mutation}"
+                );
+                let count: i64 = db
+                    .connection()
+                    .await
+                    .unwrap()
+                    .query_one("SELECT count(*) FROM runtime_core_credentials", &[])
+                    .await
+                    .unwrap()
+                    .get(0);
+                assert_eq!(count, 0);
+            })
+            .await;
+        }
+    }
+
+    #[tokio::test]
+    async fn existing_enrollment_rejects_ambiguous_creation_history() {
+        with_isolated_postgres(|db| async move {
+            let creation = requested(&db).await;
+            register(&db, &creation).await;
+            complete(&db, &creation).await.unwrap();
+            let lease = upgrade(&db, &creation).await;
+            let relocation = serde_json::to_value(crate::RuntimeRelocationEnvelope::V1(crate::RuntimeRelocationV1 {
+                source_host_id: "previous-host".into(), source_machine_id: "previous-machine".into(),
+                target_source_host_id: "auth-host".into(), expected_agent_npub: "npub-history-fixture".into(),
+                durable_state_manifest_sha256: "a".repeat(64), source_compute_absent: true,
+            })).unwrap();
+            db.connection().await.unwrap().execute(
+                "INSERT INTO agent_creation_requests SELECT (jsonb_populate_record(NULL::agent_creation_requests,
+                 to_jsonb(q)||jsonb_build_object('id',q.id||'-relocation','idempotency_key',q.idempotency_key||'-relocation','relocation_spec',$2::jsonb))).*
+                 FROM agent_creation_requests q WHERE q.id=$1", &[&creation, &relocation],
+            ).await.unwrap();
+            assert!(db.provision_upgrade_credential(upgrade_input(&lease)).await.is_err());
+            let count: i64 = db.connection().await.unwrap().query_one("SELECT count(*) FROM runtime_core_credentials", &[]).await.unwrap().get(0);
+            assert_eq!(count, 0);
+        }).await;
+    }
+
+    #[tokio::test]
+    async fn existing_enrollment_http_requires_exact_runner_and_live_upgrade_lease() {
+        use crate::auth::test_support::{
+            core_auth_with_runner_credentials, runner_credential_config,
+        };
+        with_isolated_postgres(|db| async move {
+            let creation = requested(&db).await;
+            register(&db, &creation).await;
+            complete(&db, &creation).await.unwrap();
+            let lease = upgrade(&db, &creation).await;
+            let auth = core_auth_with_runner_credentials(
+                "service",
+                vec![
+                    runner_credential_config(
+                        "runner",
+                        "runner-secret",
+                        "auth-runner",
+                        &[RunnerClass::Kata],
+                        "auth-host",
+                        false,
+                    ),
+                    runner_credential_config(
+                        "other",
+                        "other-secret",
+                        "other-runner",
+                        &[RunnerClass::Kata],
+                        "other-host",
+                        false,
+                    ),
+                ],
+                "usage",
+            );
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let url = format!(
+                "http://{}/api/core/v1/runtime-control-requests/{}/runtime-credential",
+                listener.local_addr().unwrap(),
+                lease.request.id
+            );
+            let app = crate::api::router(db.store.clone(), auth);
+            let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+            let client = reqwest::Client::new();
+            for (bearer, runner, token) in [
+                ("service", "auth-runner", "upgrade-lease"),
+                ("usage", "auth-runner", "upgrade-lease"),
+                ("other-secret", "auth-runner", "upgrade-lease"),
+                ("other-secret", "other-runner", "upgrade-lease"),
+                ("runner-secret", "auth-runner", "old-lease"),
+            ] {
+                let response = client
+                    .post(&url)
+                    .bearer_auth(bearer)
+                    .json(&serde_json::json!({"runnerId":runner,"leaseToken":token}))
+                    .send()
+                    .await
+                    .unwrap();
+                assert!(response.status().is_client_error());
+            }
+            let body = serde_json::json!({"runnerId":"auth-runner","leaseToken":"upgrade-lease"});
+            let response = client
+                .post(&url)
+                .bearer_auth("runner-secret")
+                .json(&body)
+                .send()
+                .await
+                .unwrap();
+            assert_eq!(response.status(), reqwest::StatusCode::OK);
+            assert_eq!(response.headers()["cache-control"], "no-store");
+            let first = response.json::<RuntimeBootstrapCredential>().await.unwrap();
+            let second = client
+                .post(&url)
+                .bearer_auth("runner-secret")
+                .json(&body)
+                .send()
+                .await
+                .unwrap()
+                .json::<RuntimeBootstrapCredential>()
+                .await
+                .unwrap();
+            assert!(first.secret == second.secret);
+            server.abort();
+        })
+        .await;
+    }
+
     #[tokio::test]
     async fn runtime_bootstrap_direct_completion_and_immutable_binding() {
         with_isolated_postgres(|db| async move {

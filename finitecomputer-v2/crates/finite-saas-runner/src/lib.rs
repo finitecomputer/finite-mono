@@ -250,7 +250,7 @@ pub enum RunnerError {
     InvalidRuntimeEnvironment(String),
     #[error("Core request failed: {0}")]
     CoreRequest(String),
-    #[error("runtime Core bootstrap is temporarily unavailable; creation remains retryable")]
+    #[error("runtime Core bootstrap is temporarily unavailable; operation remains retryable")]
     RuntimeBootstrapUnavailable,
     #[error("Core returned HTTP {status}: {body}")]
     CoreStatus { status: u16, body: String },
@@ -919,8 +919,26 @@ where
         } else {
             BTreeMap::new()
         };
-        let restart_options = RuntimeRestartOptions::new(desired_environment)?
+        let mut restart_options = RuntimeRestartOptions::new(desired_environment)?
             .with_secret_environment(desired_secret_environment)?;
+        // Enroll while replacing compute for an already-authorized upgrade.
+        // Fail before touching the guest; an old/unavailable Core leaves the
+        // lease retryable. Restart/recovery preserve the installed environment.
+        if kind == RuntimeControlKind::Upgrade
+            && let Some(url) = self.runtime_core_url.as_ref()
+        {
+            if self.launcher.runner_class() != RunnerClass::Kata {
+                return Err(RunnerError::RuntimeLaunch(
+                    "existing-agent Core enrollment requires the Kata upgrade adapter".into(),
+                ));
+            }
+            let credential = self.queue.provision_upgrade_core_credential(
+                &request_id,
+                &self.runner_id,
+                &lease_token,
+            )?;
+            restart_options = restart_options.with_core_bootstrap(url, credential.secret)?;
+        }
         let operation_result: Result<RuntimeControlCompletionFacts, RunnerError> = match kind {
             RuntimeControlKind::Restart => self
                 .launcher
@@ -1240,6 +1258,16 @@ pub trait AgentCreationQueue {
         Err(RunnerError::CoreRequest(
             "runtime Core bootstrap is not supported by this queue".into(),
         ))
+    }
+
+    fn provision_upgrade_core_credential(
+        &mut self,
+        _request_id: &str,
+        _runner_id: &str,
+        _lease_token: &str,
+    ) -> Result<finite_saas_core::store::runtime_credentials::RuntimeBootstrapCredential, RunnerError>
+    {
+        Err(RunnerError::RuntimeBootstrapUnavailable)
     }
 
     fn fail_agent_creation(
@@ -1640,6 +1668,8 @@ pub struct RuntimeLaunchOptions {
 pub struct RuntimeRestartOptions {
     environment: BTreeMap<String, String>,
     secret_environment: BTreeMap<String, String>,
+    // Only the authenticated Core provisioning path may populate reserved keys.
+    core_bootstrap: Option<(String, String)>,
 }
 
 fn runtime_spec_v1(envelope: &RuntimeSpecEnvelope) -> &RuntimeSpecV1 {
@@ -1789,6 +1819,7 @@ impl RuntimeRestartOptions {
         Ok(Self {
             environment,
             secret_environment: BTreeMap::new(),
+            core_bootstrap: None,
         })
     }
 
@@ -1808,6 +1839,56 @@ impl RuntimeRestartOptions {
 
     pub fn secret_environment(&self) -> &BTreeMap<String, String> {
         &self.secret_environment
+    }
+
+    fn with_core_bootstrap(mut self, url: &str, secret: String) -> Result<Self, RunnerError> {
+        let url = finite_saas_core::store::runtime_credentials::validate_runtime_core_url(url)
+            .map_err(|_| RunnerError::RuntimeBootstrapUnavailable)?;
+        if secret.len() != 64
+            || !secret
+                .bytes()
+                .all(|c| c.is_ascii_digit() || (b'a'..=b'f').contains(&c))
+        {
+            return Err(RunnerError::RuntimeBootstrapUnavailable);
+        }
+        self.core_bootstrap = Some((url, secret));
+        Ok(self)
+    }
+
+    /// Install only into an unenrolled environment, or accept an exact replay.
+    /// Partial, duplicate or different local values are conflicts, never repairs.
+    fn enroll_environment(
+        &self,
+        entries: &mut Vec<(String, String)>,
+        allow_missing: bool,
+    ) -> Result<(), RunnerError> {
+        let Some((url, credential)) = self.core_bootstrap.as_ref() else {
+            return Ok(());
+        };
+        let expected = [
+            ("FINITE_CORE_URL", url),
+            ("FINITE_CORE_CREDENTIAL", credential),
+        ];
+        let present = entries
+            .iter()
+            .filter(|(k, _)| expected.iter().any(|(name, _)| k == name))
+            .collect::<Vec<_>>();
+        if present.is_empty() && allow_missing {
+            entries.extend(expected.map(|(key, value)| (key.to_string(), value.clone())));
+            return Ok(());
+        }
+        if present.len() != 2
+            || expected.iter().any(|(key, value)| {
+                present
+                    .iter()
+                    .filter(|(k, v)| k == key && v == *value)
+                    .count()
+                    != 1
+            })
+        {
+            return Err(RunnerError::RuntimeLaunch("existing Core bootstrap conflicts with the current assignment; local values preserved".into()));
+        }
+        Ok(())
     }
 }
 
@@ -2137,24 +2218,20 @@ impl CoreHttpAgentCreationQueue {
     }
 }
 
-impl AgentCreationQueue for CoreHttpAgentCreationQueue {
-    fn provision_runtime_core_credential(
-        &mut self,
-        request_id: &str,
+impl CoreHttpAgentCreationQueue {
+    fn provision_core_credential(
+        &self,
+        url: &str,
         runner_id: &str,
         lease_token: &str,
     ) -> Result<finite_saas_core::store::runtime_credentials::RuntimeBootstrapCredential, RunnerError>
     {
-        let url = format!(
-            "{}/api/core/v1/agent-creation-requests/{request_id}/runtime-credential",
-            self.base_url
-        );
         let agent = ureq::AgentBuilder::new()
             .timeout(Duration::from_secs(15))
             .redirects(0)
             .build();
         let response = agent
-            .post(&url)
+            .post(url)
             .set("authorization", &format!("Bearer {}", self.api_token))
             .send_json(serde_json::json!({"runnerId":runner_id,"leaseToken":lease_token}));
         match response {
@@ -2173,6 +2250,37 @@ impl AgentCreationQueue for CoreHttpAgentCreationQueue {
             }),
         }
     }
+}
+
+impl AgentCreationQueue for CoreHttpAgentCreationQueue {
+    fn provision_runtime_core_credential(
+        &mut self,
+        request_id: &str,
+        runner_id: &str,
+        lease_token: &str,
+    ) -> Result<finite_saas_core::store::runtime_credentials::RuntimeBootstrapCredential, RunnerError>
+    {
+        let url = format!(
+            "{}/api/core/v1/agent-creation-requests/{request_id}/runtime-credential",
+            self.base_url
+        );
+        self.provision_core_credential(&url, runner_id, lease_token)
+    }
+
+    fn provision_upgrade_core_credential(
+        &mut self,
+        request_id: &str,
+        runner_id: &str,
+        lease_token: &str,
+    ) -> Result<finite_saas_core::store::runtime_credentials::RuntimeBootstrapCredential, RunnerError>
+    {
+        let url = format!(
+            "{}/api/core/v1/runtime-control-requests/{request_id}/runtime-credential",
+            self.base_url
+        );
+        self.provision_core_credential(&url, runner_id, lease_token)
+    }
+
     fn lease_runtime_control(
         &mut self,
         runner_id: &str,
@@ -5033,6 +5141,133 @@ mod tests {
         assert_eq!(paths.len(), 3, "must not post a terminal creation failure");
         assert!(paths[2].ends_with("/runtime-credential"));
         assert!(runner.launcher.launch_options.is_empty());
+    }
+
+    #[test]
+    fn upgrade_enrollment_http_and_old_core_retry() {
+        for status in [200, 404, 503] {
+            let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+            let address = listener.local_addr().unwrap();
+            let server = std::thread::spawn(move || {
+                // Lease, bootstrap, then completion only on success.
+                let mut paths = Vec::new();
+                for _ in 0..if status == 200 { 3 } else { 2 } {
+                    let (mut stream, _) = listener.accept().unwrap();
+                    let request = read_http_request(&mut stream);
+                    let path = request.split_whitespace().nth(1).unwrap().to_owned();
+                    let (response_status, body) = if path.ends_with("/lease") {
+                        (
+                            200,
+                            serde_json::to_string(&sample_runtime_upgrade_lease(
+                                "upgrade-bootstrap",
+                            ))
+                            .unwrap(),
+                        )
+                    } else if path.ends_with("/runtime-credential") {
+                        assert!(request.contains("lease-upgrade") && request.contains("runner-1"));
+                        (
+                            status,
+                            serde_json::json!({"secret":"a".repeat(64)}).to_string(),
+                        )
+                    } else {
+                        assert!(path.ends_with("/complete"));
+                        (
+                            200,
+                            serde_json::to_string(
+                                &sample_runtime_upgrade_lease("upgrade-bootstrap").request,
+                            )
+                            .unwrap(),
+                        )
+                    };
+                    paths.push(path);
+                    write_http_json(&mut stream, response_status, &body);
+                }
+                paths
+            });
+            let mut runner = AgentCreationRunner::new(
+                CoreHttpAgentCreationQueue::new(format!("http://{address}"), "test-runner")
+                    .unwrap(),
+                FakeLauncher::ready(RuntimeLaunchFacts::sample()).for_kata(),
+                FixedLeaseTokens::new(["lease-upgrade"]),
+                "runner-1",
+                300,
+            )
+            .unwrap()
+            .with_runtime_core_bootstrap("https://core.example.test".into())
+            .unwrap();
+            let result = runner.run_once();
+            let paths = server.join().unwrap();
+            assert_eq!(
+                paths[1],
+                "/api/core/v1/runtime-control-requests/upgrade-bootstrap/runtime-credential"
+            );
+            if status == 200 {
+                assert!(matches!(
+                    result.unwrap(),
+                    RunOnceOutcome::RuntimeUpgraded { .. }
+                ));
+                assert_eq!(
+                    runner.launcher.restart_options[0]
+                        .core_bootstrap
+                        .as_ref()
+                        .unwrap()
+                        .0,
+                    "https://core.example.test"
+                );
+                assert!(
+                    !format!("{:?}", runner.launcher.restart_options[0]).contains(&"a".repeat(64))
+                );
+            } else {
+                assert!(matches!(
+                    result,
+                    Err(RunnerError::RuntimeBootstrapUnavailable)
+                ));
+                assert!(runner.launcher.upgraded.is_empty());
+            }
+        }
+    }
+
+    #[test]
+    fn enrollment_preserves_or_rejects_local_bootstrap_without_overwriting() {
+        let options = RuntimeRestartOptions::default()
+            .with_core_bootstrap("https://core.example.test", "a".repeat(64))
+            .unwrap();
+        for entries in [
+            vec![("FINITE_CORE_URL".into(), "https://core.example.test".into())],
+            vec![
+                (
+                    "FINITE_CORE_URL".into(),
+                    "https://other.example.test".into(),
+                ),
+                ("FINITE_CORE_CREDENTIAL".into(), "a".repeat(64)),
+            ],
+            vec![
+                ("FINITE_CORE_URL".into(), "https://core.example.test".into()),
+                ("FINITE_CORE_CREDENTIAL".into(), "b".repeat(64)),
+            ],
+            vec![
+                ("FINITE_CORE_URL".into(), "https://core.example.test".into()),
+                ("FINITE_CORE_URL".into(), "https://core.example.test".into()),
+            ],
+        ] {
+            let mut actual = entries.clone();
+            assert!(options.enroll_environment(&mut actual, true).is_err());
+            assert!(actual == entries);
+        }
+        let mut existing = vec![("FINITECHAT_HOME".into(), "/data/chat".into())];
+        assert!(
+            options
+                .enroll_environment(&mut existing.clone(), false)
+                .is_err()
+        );
+        options.enroll_environment(&mut existing, true).unwrap();
+        let installed = existing.clone();
+        options.enroll_environment(&mut existing, false).unwrap();
+        assert!(installed == existing);
+        // Rollback to an unconfigured Runner retains both reserved values.
+        let unchanged =
+            merge_desired_runtime_environment(existing, &RuntimeRestartOptions::default());
+        assert!(unchanged == installed);
     }
 
     #[test]
