@@ -17,7 +17,6 @@ in
     ../../modules/finite-identity.nix
     ../../modules/finitechat-server.nix
     ../../modules/finitechat-hosted-device.nix
-    ../../modules/finitesitesd.nix
     ../../modules/finite-brain.nix
     ../../modules/dashboard.nix
     ../../modules/caddy.nix

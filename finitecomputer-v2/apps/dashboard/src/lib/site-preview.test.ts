@@ -24,7 +24,7 @@ test("authorized previews fall back to email when their exchange is unavailable"
   const exchanges: string[] = [];
   let status = 503;
   let disconnect = false;
-  async function backend(name: "v2" | "legacy") {
+  async function backend() {
     const server = createServer((request, response) => {
       if (request.url === "/api/core/v1/me") {
         response.writeHead(200, { "content-type": "application/json" });
@@ -33,7 +33,7 @@ test("authorized previews fall back to email when their exchange is unavailable"
           runtime: { id: "runtime-preview" },
         }] }));
       } else if (request.url === "/internal/v1/viewer-sessions") {
-        exchanges.push(name);
+        exchanges.push("sites");
         if (disconnect) request.socket.destroy();
         else {
           response.writeHead(status);
@@ -54,15 +54,14 @@ test("authorized previews fall back to email when their exchange is unavailable"
     assert(address && typeof address !== "string");
     return `http://127.0.0.1:${address.port}`;
   }
-  const v2 = await backend("v2");
-  const legacy = await backend("legacy");
+  const sites = await backend();
   process.env = {
     ...process.env, NODE_ENV: "development", PATH: "", FC_FINITED_BIN: "",
     FC_REPO_ROOT: root, FC_WORKSPACE_ROOT: root, FC_CONTROL_PLANE_ROOT: root,
     FC_WORKOS_AUTH_ENABLED: "0", FC_DASHBOARD_ALLOW_DEV_ACCOUNT_AUTH: "1",
     FC_DASHBOARD_DEV_EMAIL: "friend@example.com", FC_DASHBOARD_DEV_WORKOS_USER_ID: "user_preview",
     FC_DASHBOARD_DEV_WORKOS_ACCESS_TOKEN: "local-preview-fixture",
-    FC_CORE_BASE_URL: v2, FC_SITES_V2_UPSTREAM_URL: v2, FC_SITES_UPSTREAM_URL: legacy,
+    FC_CORE_BASE_URL: sites, FC_SITES_UPSTREAM_URL: sites,
     FINITE_SITES_VIEWER_SESSION_TOKEN: "ab".repeat(32),
   };
   const url = "https://hello.finite.site/docs?view=one";
@@ -70,18 +69,18 @@ test("authorized previews fall back to email when their exchange is unavailable"
   for (status of [503, 401, 429]) {
     const before = exchanges.length;
     assert.deepEqual(await createSitePreviewSession("runtime-preview", url), fallback);
-    assert.deepEqual(exchanges.slice(before), ["v2"]);
+    assert.deepEqual(exchanges.slice(before), ["sites"]);
   }
   disconnect = true;
   assert.deepEqual(await createSitePreviewSession("runtime-preview", url), fallback);
   disconnect = false;
   for (const origin of ["", "https://finite.site/internal", "file:///tmp/sites"]) {
-    process.env.FC_SITES_V2_UPSTREAM_URL = origin;
+    process.env.FC_SITES_UPSTREAM_URL = origin;
     const before = exchanges.length;
     assert.deepEqual(await createSitePreviewSession("runtime-preview", url), fallback);
     assert.equal(exchanges.length, before);
   }
-  process.env.FC_SITES_V2_UPSTREAM_URL = v2;
+  process.env.FC_SITES_UPSTREAM_URL = sites;
   const beforeDenied = exchanges.length;
   await assert.rejects(createSitePreviewSession("other-runtime", url),
     (error: unknown) => error instanceof SitePreviewError && error.status === 404);
@@ -90,12 +89,12 @@ test("authorized previews fall back to email when their exchange is unavailable"
       (error: unknown) => error instanceof SitePreviewError && error.status === 400);
   }
   assert.equal(exchanges.length, beforeDenied);
-  assert(!exchanges.includes("legacy"));
-  const legacyUrl = "https://app.finite.chat/docs?view=one";
-  assert.deepEqual(await createSitePreviewSession("runtime-preview", legacyUrl), {
-    url: legacyUrl, originalUrl: legacyUrl,
+  const beforeRedirect = exchanges.length;
+  const previousUrl = "https://app.finite.chat/docs?view=one";
+  assert.deepEqual(await createSitePreviewSession("runtime-preview", previousUrl), {
+    url: previousUrl, originalUrl: previousUrl,
   });
-  assert.equal(exchanges.at(-1), "legacy");
+  assert.equal(exchanges.length, beforeRedirect);
 });
 
 test("Finite site preview targets split the canonical output origin from navigation", () => {
@@ -157,7 +156,7 @@ test("Sites upstream is a bare server-only HTTP origin", () => {
 test("viewer-session responses stay on the requested output and preserve return path", () => {
   const target = parseSitePreviewTarget("https://hello.finite.chat/gallery?view=one#photo");
   const token = "ab".repeat(32);
-  const redeemUrl = `https://hello.finite.chat/_finite/auth?token=${token}&return_to=%2Fgallery%3Fview%3Done%23photo`;
+  const redeemUrl = `https://hello.finite.chat/_finite/auth?session_token=${token}&return_to=%2Fgallery%3Fview%3Done%23photo`;
   assert.equal(parseViewerSessionResponse({ redeem_url: redeemUrl }, target), redeemUrl);
   const sessionRedeemUrl = `https://hello.finite.chat/_finite/auth?session_token=${token}&return_to=%2Fgallery%3Fview%3Done%23photo`;
   assert.equal(
@@ -226,7 +225,7 @@ test("account bridge sends only verified email evidence to the Sites exchange", 
   const { createSiteAccountSession } = await import("@/lib/site-preview");
   const saved = { ...process.env };
   t.after(() => { process.env = saved; });
-  process.env.FC_SITES_V2_UPSTREAM_URL = "https://finite.site";
+  process.env.FC_SITES_UPSTREAM_URL = "https://finite.site";
   process.env.FINITE_SITES_VIEWER_SESSION_TOKEN = "ab".repeat(32);
   const target = parseSitePreviewTarget("https://hello.finite.site/docs?a=1");
   const redeem = `https://hello.finite.site/_finite/auth?session_token=${"cd".repeat(32)}&return_to=%2Fdocs%3Fa%3D1`;
@@ -268,7 +267,7 @@ test("account bridge bounds upstream responses and rejects a different redemptio
   const { createSiteAccountSession } = await import("@/lib/site-preview");
   const saved = { ...process.env };
   t.after(() => { process.env = saved; });
-  process.env.FC_SITES_V2_UPSTREAM_URL = "https://finite.site";
+  process.env.FC_SITES_UPSTREAM_URL = "https://finite.site";
   process.env.FINITE_SITES_VIEWER_SESSION_TOKEN = "ab".repeat(32);
   const responses = [new Response("x".repeat(8193)), Response.json({ redeem_url: `https://other.finite.site/_finite/auth?session_token=${"cd".repeat(32)}&return_to=%2F` })];
   t.mock.method(globalThis, "fetch", async () => responses.shift()!);
@@ -280,41 +279,18 @@ test("account bridge bounds upstream responses and rejects a different redemptio
 });
 
 
-test("legacy and v2 exchanges coexist and never retry against the other registry", async (t) => {
+test("Sites exchanges reject failures and never follow credential redirects", async (t) => {
   const { createSiteAccountSession } = await import("@/lib/site-preview");
   const saved = { ...process.env };
   t.after(() => { process.env = saved; });
   const account = {
     workosUserId: "user_fixture", email: "friend@example.com", emailVerified: true, source: "workos" as const,
   };
-  const calls: { backend: string; body: Record<string, string>; authorization: string | undefined; path: string | undefined }[] = [];
-  let v2Status = 200;
-  let v2Redirect = false;
-  let wrongOrigin = false;
-  let disconnected = false;
-  async function backend(name: "legacy" | "v2") {
-    const server = createServer(async (request, response) => {
-      const chunks = [];
-      for await (const chunk of request) chunks.push(chunk);
-      const body = JSON.parse(Buffer.concat(chunks).toString()) as Record<string, string>;
-      calls.push({ backend: name, body, authorization: request.headers.authorization, path: request.url });
-      if (name === "v2" && disconnected) {
-        request.socket.destroy();
-        return;
-      }
-      if (name === "v2" && v2Redirect) {
-        response.writeHead(307, { location: `${process.env.FC_SITES_UPSTREAM_URL}/internal/v1/viewer-sessions` });
-        response.end();
-        return;
-      }
-      const status = name === "v2" ? v2Status : 200;
-      const origin = wrongOrigin ? "https://other.finite.chat/" : body[name === "legacy" ? "output_url" : "site_url"];
-      const redeem = new URL("/_finite/auth", origin);
-      redeem.searchParams.set(name === "legacy" ? "token" : "session_token", "cd".repeat(32));
-      redeem.searchParams.set("return_to", body.return_to);
-      response.writeHead(status, { "content-type": "application/json" });
-      response.end(JSON.stringify({ redeem_url: redeem.toString() }));
-    });
+  let calls = 0;
+  let receiverCalls = 0;
+  let status = 200;
+  let mode = "normal";
+  async function listen(server: ReturnType<typeof createServer>) {
     server.listen(0, "127.0.0.1");
     await once(server, "listening");
     t.after(async () => { server.closeAllConnections(); await new Promise<void>((resolve) => server.close(() => resolve())); });
@@ -322,62 +298,55 @@ test("legacy and v2 exchanges coexist and never retry against the other registry
     assert(address && typeof address !== "string");
     return `http://127.0.0.1:${address.port}`;
   }
-  process.env.FC_SITES_UPSTREAM_URL = await backend("legacy");
-  const v2Origin = await backend("v2");
-  process.env.FC_SITES_V2_UPSTREAM_URL = v2Origin;
+  const receiver = await listen(createServer((_request, response) => { receiverCalls++; response.end(); }));
+  const origin = await listen(createServer(async (request, response) => {
+    calls++;
+    const chunks = [];
+    for await (const chunk of request) chunks.push(chunk);
+    const body = JSON.parse(Buffer.concat(chunks).toString()) as Record<string, string>;
+    assert.equal(request.headers.authorization, `Bearer ${"ab".repeat(32)}`);
+    assert.equal(body.output_url, undefined);
+    if (mode === "disconnect") { request.socket.destroy(); return; }
+    if (mode === "redirect") { response.writeHead(307, { location: receiver }); response.end(); return; }
+    const redeem = new URL("/_finite/auth", mode === "wrong-origin" ? "https://other.finite.site/" : body.site_url);
+    redeem.searchParams.set("session_token", "cd".repeat(32));
+    redeem.searchParams.set("return_to", body.return_to);
+    response.writeHead(status, { "content-type": "application/json" });
+    response.end(JSON.stringify({ redeem_url: redeem.toString() }));
+  }));
+  process.env.FC_SITES_UPSTREAM_URL = origin;
   process.env.FINITE_SITES_VIEWER_SESSION_TOKEN = "ab".repeat(32);
-
-  for (const [host, expectedBackend, field] of [
-    ["app.finite.chat", "legacy", "output_url"],
-    ["guide.docs.finite.chat", "legacy", "output_url"],
-    ["hello.finite.site", "v2", "site_url"],
-    ["hello.v2.finite.chat", "v2", "site_url"],
-  ]) {
-    const target = parseSitePreviewTarget(`https://${host}/docs?a=1#intro`);
-    const result = await createSiteAccountSession(target, account);
-    assert.equal(new URL(result.url).origin, `https://${host}`);
-    assert.equal(new URL(result.url).searchParams.get("return_to"), target.returnTo);
-    assert.deepEqual(calls.at(-1), {
-      backend: expectedBackend, path: "/internal/v1/viewer-sessions",
-      authorization: `Bearer ${process.env.FINITE_SITES_VIEWER_SESSION_TOKEN}`,
-      body: { [field]: target.outputUrl, verified_email: account.email, return_to: target.returnTo },
-    });
+  const target = parseSitePreviewTarget("https://hello.finite.site/docs?a=1#intro");
+  const result = await createSiteAccountSession(target, account);
+  assert.equal(new URL(result.url).searchParams.get("return_to"), target.returnTo);
+  for (const host of ["app.finite.chat", "guide.docs.finite.chat", "hello.v2.finite.chat"]) {
+    const previous = parseSitePreviewTarget(`https://${host}/docs?a=1#intro`);
+    const before = calls;
+    assert.deepEqual(await createSiteAccountSession(previous, account), { url: previous.originalUrl, originalUrl: previous.originalUrl });
+    assert.equal(calls, before);
   }
-  const legacy = parseSitePreviewTarget("https://app.finite.chat/");
-  const v2 = parseSitePreviewTarget("https://hello.finite.site/");
-  // Missing/invalid v2 config cannot inherit sitesUpstreamOrigin's legacy default.
   for (const value of [undefined, "", "https://finite.site/internal", "file:///tmp/sites"]) {
-    if (value === undefined) delete process.env.FC_SITES_V2_UPSTREAM_URL;
-    else process.env.FC_SITES_V2_UPSTREAM_URL = value;
-    const before = calls.length;
-    await assert.rejects(createSiteAccountSession(v2, account), (e: unknown) => e instanceof SitePreviewError && e.status === 503);
-    assert.equal(calls.length, before);
-    await createSiteAccountSession(legacy, account);
-    assert.equal(calls.at(-1)?.backend, "legacy");
+    if (value === undefined) delete process.env.FC_SITES_UPSTREAM_URL;
+    else process.env.FC_SITES_UPSTREAM_URL = value;
+    const before = calls;
+    await assert.rejects(createSiteAccountSession(target, account), (e: unknown) => e instanceof SitePreviewError && e.status === 503);
+    assert.equal(calls, before);
   }
-  process.env.FC_SITES_V2_UPSTREAM_URL = v2Origin;
-  for (const status of [401, 403, 500]) {
-    v2Status = status;
-    const before = calls.length;
+  process.env.FC_SITES_UPSTREAM_URL = origin;
+  for (status of [401, 403, 500]) {
+    const before = calls;
     if (status === 403) {
-      assert.deepEqual(await createSiteAccountSession(v2, account), { url: v2.originalUrl, originalUrl: v2.originalUrl });
+      assert.deepEqual(await createSiteAccountSession(target, account), { url: target.originalUrl, originalUrl: target.originalUrl });
     } else {
-      await assert.rejects(createSiteAccountSession(v2, account), (e: unknown) => e instanceof SitePreviewError && e.status === (status === 401 ? 401 : 502));
+      await assert.rejects(createSiteAccountSession(target, account), (e: unknown) => e instanceof SitePreviewError && e.status === (status === 401 ? 401 : 502));
     }
-    assert.equal(calls.length, before + 1);
-    assert.equal(calls.at(-1)?.backend, "v2");
-    await createSiteAccountSession(legacy, account);
+    assert.equal(calls, before + 1);
   }
-  v2Status = 200;
-  for (const mode of ["redirect", "wrong-origin", "disconnect"]) {
-    v2Redirect = mode === "redirect";
-    wrongOrigin = mode === "wrong-origin";
-    disconnected = mode === "disconnect";
-    const before = calls.length;
-    await assert.rejects(createSiteAccountSession(v2, account), (e: unknown) => e instanceof SitePreviewError && e.status === 502);
-    assert.equal(calls.length, before + 1);
-    assert.equal(calls.at(-1)?.backend, "v2");
-    wrongOrigin = false;
-    await createSiteAccountSession(legacy, account);
+  status = 200;
+  for (mode of ["redirect", "wrong-origin", "disconnect"]) {
+    const before = calls;
+    await assert.rejects(createSiteAccountSession(target, account), (e: unknown) => e instanceof SitePreviewError && e.status === 502);
+    assert.equal(calls, before + 1);
   }
+  assert.equal(receiverCalls, 0);
 });

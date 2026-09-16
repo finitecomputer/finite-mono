@@ -288,9 +288,15 @@ def main() -> None:
     dashboard = json.loads(nix_eval(
         "finite-lat-2", "virtualisation.oci-containers.containers.finite-saas-dashboard.environment"
     ))
-    if (dashboard.get("FC_SITES_V2_UPSTREAM_URL") != "https://finite.site"
-            or dashboard.get("FC_SITES_UPSTREAM_URL") != "http://127.0.0.1:8787"):
-        raise SystemExit("Dashboard must keep separate v2 and retained legacy viewer origins")
+    if dashboard.get("FC_SITES_UPSTREAM_URL") != "https://finite.site":
+        raise SystemExit("Dashboard viewing and publishing must use the Finite Sites registry")
+    services = json.loads(subprocess.run(
+        ["nix", "eval", "--json", "--apply", "builtins.attrNames",
+         ".#nixosConfigurations.finite-lat-2.config.systemd.services"],
+        cwd=ROOT, check=True, capture_output=True, text=True,
+    ).stdout)
+    if "finite-saas-sites" in services:
+        raise SystemExit("The app host must not run a second Sites daemon")
     check_unit_fragments()
     print("Kata Runner host contract: ok")
 

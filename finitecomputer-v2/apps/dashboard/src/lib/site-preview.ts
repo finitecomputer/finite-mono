@@ -125,16 +125,16 @@ export async function createSiteAccountSession(target: SitePreviewTarget, accoun
       || !(account.source === "workos" || (process.env.NODE_ENV !== "production" && account.source === "dev"))) {
     throw new SitePreviewError("Sign in with a verified email.", 401);
   }
-  const legacy = legacySite(target);
-  // Fixed service origins, never the visitor-supplied site origin. No cross-registry fallback.
-  const upstream = legacy
-    ? sitesUpstreamOrigin()
-    : sitesUpstreamOrigin(process.env.FC_SITES_V2_UPSTREAM_URL ?? "");
+  // Previous content URLs redirect at the edge. Never send account credentials
+  // to them or infer a new Site name from an old output name.
+  if (isRedirectHost(target)) {
+    return { url: target.originalUrl, originalUrl: target.originalUrl };
+  }
+  const upstream = sitesUpstreamOrigin();
   const serviceToken = process.env.FINITE_SITES_VIEWER_SESSION_TOKEN?.trim();
   if (!upstream || !serviceToken) {
     throw new SitePreviewError("Site sign-in isn't available right now.", 503);
   }
-  // Retained legacy apps/documents still use the v0.5.3 output_url contract.
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), SITES_REQUEST_TIMEOUT_MS);
   try {
@@ -146,7 +146,7 @@ export async function createSiteAccountSession(target: SitePreviewTarget, accoun
         "content-type": "application/json",
       },
       body: JSON.stringify({
-        [legacy ? "output_url" : "site_url"]: target.outputUrl,
+        site_url: target.outputUrl,
         verified_email: account.email,
         return_to: target.returnTo,
       }),
@@ -178,14 +178,14 @@ export async function createSiteAccountSession(target: SitePreviewTarget, accoun
   }
 }
 
-function legacySite(target: SitePreviewTarget) {
+function isRedirectHost(target: SitePreviewTarget) {
   const host = new URL(target.outputUrl).hostname;
-  return host.endsWith(".finite.chat") && !host.endsWith(".v2.finite.chat");
+  return host.endsWith(".finite.chat");
 }
 
 export function siteEmailSignInUrl(target: SitePreviewTarget) {
-  // The old daemon has no automatic handoff or explicit fallback route.
-  return legacySite(target) ? target.originalUrl : new URL("/_finite/sign-in", target.outputUrl).toString();
+  // Old content URLs must reach their exact-host redirect before signing in.
+  return isRedirectHost(target) ? target.originalUrl : new URL("/_finite/sign-in", target.outputUrl).toString();
 }
 
 async function readSessionResponse(response: Response, signal: AbortSignal): Promise<unknown> {
@@ -275,8 +275,7 @@ function allowedOutputHost(url: URL, allowLocalOutputs: boolean) {
       || oneLabelUnder(url.hostname, "finite.chat");
   }
   if (allowLocalOutputs && url.protocol === "http:") {
-    return oneLabelUnder(url.hostname, "docs.sites.localhost")
-      || oneLabelUnder(url.hostname, "sites.localhost");
+    return oneLabelUnder(url.hostname, "sites.localhost");
   }
   return false;
 }
@@ -316,7 +315,7 @@ export function parseViewerSessionResponse(payload: unknown, target: SitePreview
   }
   const expectedOrigin = new URL(target.outputUrl).origin;
   const keys = Array.from(url.searchParams.keys()).sort();
-  const tokenKey = keys.includes("session_token") ? "session_token" : "token";
+  const tokenKey = "session_token";
   if (
     url.origin !== expectedOrigin ||
     url.pathname !== "/_finite/auth" ||

@@ -28,7 +28,6 @@ LONG_RUNNING = [
     "finitechat-server",
     "finitechat-hosted-device",
     "finite-brain-app",
-    "finite-saas-sites",
     "finite-identity",
 ]
 RUN_ONCE = "finite-saas-runner"

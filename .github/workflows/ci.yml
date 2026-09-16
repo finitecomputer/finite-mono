@@ -2,8 +2,6 @@ name: CI
 
 on:
   pull_request:
-    branches:
-      - main
   merge_group:
     types: [checks_requested]
   push:
@@ -509,6 +507,8 @@ jobs:
         run: nix develop --command just hosted-recovery-contract
       - name: Sites snapshot and Borg contract
         run: nix develop --command just sites-backup-contract
+      - name: Sites content redirect contract
+        run: nix shell --inputs-from . nixpkgs#caddy --command python3 scripts/tests/test_sites_redirects.py
       - name: Sites offline reconciliation contract
         run: nix develop --command just sites-offline-reconciliation-contract
       - name: Litestream recovery contract

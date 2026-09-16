@@ -12,7 +12,7 @@ This `fsite` build defaults to the Fly API at `https://finite.site`. Set
 
 ## Install `fsite`
 
-For v2 validation, use the reviewed binary artifact for the exact revision
+For isolated validation, use the reviewed binary artifact for the exact revision
 being tested or build it locally from this repo:
 
 ```sh
@@ -21,7 +21,7 @@ nix build .#fsite
 ```
 
 The public `fsite-latest` rolling release is for the canonical production
-contract. Do not advance or rely on it for this static-only v2 API until the
+contract. Do not advance or rely on it for this static-only API until the
 canonical production endpoint is ready for that contract.
 
 After cutover, install the latest release binary:
@@ -240,10 +240,9 @@ After the dashboard serves `/site-auth`, enable automatic browser handoff with
 the daemon's
 `FINITE_SITES_ACCOUNT_LOGIN_URL=https://finite.computer/site-auth`. Without it,
 direct visits retain the email form. The dashboard uses the existing
-`FC_SITES_V2_UPSTREAM_URL` and the service credential for v2. Retained
-legacy previews keep using `FC_SITES_UPSTREAM_URL`; neither exchange retries
-against the other registry. Keep the legacy adapter until its previews and
-Hosted Chat requester consumers are retired. The account handoff is site-bound,
+`FC_SITES_UPSTREAM_URL` and service credential for both viewing and Hosted Chat
+publishing authorization. Previous content URLs redirect to their retained Site;
+unsupported apps are retired with source archives preserved. The account handoff is site-bound,
 single-use, and expires after 60 seconds; emailed links retain their existing
 reusable 15-minute behavior. Both use the same seven-day, host-scoped Viewer
 Cookie: `SameSite=Lax` for top-level visits and a distinct `Partitioned` cookie

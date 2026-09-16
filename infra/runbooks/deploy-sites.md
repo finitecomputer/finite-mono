@@ -3,11 +3,10 @@
 Fly is the destination for the complete Sites switchover. The
 [`fly.toml`](../fly/sites/fly.toml) configuration owns the deployment's domains,
 ports and resource sizes: one Machine with one persistent volume.
-It enables real mail. Account login is enabled separately after the dashboard
-route is deployed and qualified. Updating the existing public service is
-separate from migrating legacy Sites: that migration still requires the
-cutover gates, including dedicated offsite recovery proof. An isolated
-rehearsal uses private routing and dev mail instead.
+The public service uses real mail. Enable dashboard account login only after
+its route and shared credential are deployed and verified. The dedicated
+rsync.net restore proof remains a migration gate; public validation alone does
+not satisfy it.
 
 Preserve the source data and archives until the Fly restore and access checks
 pass. Never open the live source registry with the static-only daemon: its
@@ -19,22 +18,19 @@ in CI from the reviewed revision, never on a production host.
 
 ## Fly
 
-The production app is `finite-sites-demo` in the `finite` organization. Despite
-its historical name, this is the real production server. The internal name is
-retained to reuse its volume, IPs and certificates for
-`finite.site` without a DNS change. The separate `finite-sites` app holds a
-private rehearsal database and must not be promoted as production. Set
-`APP=finite-sites-demo`. Inspect this app's resources and provision any missing app
-or `sites_data` volume before deployment; use 10 GiB as the initial volume size.
-Obtain the app's allocated IPs and certificate DNS records from Fly. Require
-issued certificates for both the API apex and wildcard Site hosts; do not copy another app's DNS records. Keep records DNS-only when
-qualifying Fly's TLS edge. [Fly provisioning documentation](https://fly.io/docs/launch/).
+The production Fly app retains its historical name `finite-sites-demo` in the
+`finite` organization; set `APP=finite-sites-demo`. It serves `finite.site` and
+already contains live writes. Do not create a replacement app or overwrite its
+volume with a rehearsal database. The separate `finite-sites` app holds private
+rehearsal state and must not be promoted as production. Inspect the production
+Machine, attached
+`sites_data` volume, IPs and issued apex/wildcard certificates before deploying.
 
 Install `RESEND_API_KEY` from the
 [secret inventory](../nixos/README.md#secrets-bootstrap-checklist-values-never-in-this-repo)
 using `fly secrets import --stage --app "$APP"` with secret assignments on stdin.
 Keep values out of logs and files. Configure any dashboard account exchange
-separately; do not repoint the legacy dashboard upstream at an empty registry.
+separately, after verifying the intended registry and account route.
 
 Set `REVIEWED_REF` to a branch or tag at the reviewed revision and `VERSION` to
 an image version label. From the repository root:
@@ -75,29 +71,24 @@ arguments, image, services and mount; restoring the command alone is insufficien
 
 Follow [ADR 0029](../../finite-sites/docs/adr/0029-account-session-viewer-bridge.md)
 and the [dashboard configuration](../../finitecomputer-v2/apps/dashboard/README.md#sites-account-viewer-boundary).
-Deploy and qualify the dashboard's `/site-auth` route before setting
-`FINITE_SITES_ACCOUNT_LOGIN_URL=https://finite.computer/site-auth` in the
-`[env]` table in `fly.toml` and redeploying Sites. Until then, Sites uses guest
-email login. The pre-cutover dashboard lacks this route;
+Deploy and qualify the dashboard's `/site-auth` route before applying the
+account login setting in `fly.toml`. The pre-cutover dashboard lacks this route;
 setting an upstream alone is insufficient. Stage the reviewed dashboard image
 and include its deployment in the authorized cutover.
 Both services must receive the same `FINITE_SITES_VIEWER_SESSION_TOKEN` from the
-secret inventory. The NixOS dashboard module owns both non-secret origins:
-`FC_SITES_V2_UPSTREAM_URL=https://finite.site` and
-`FC_SITES_UPSTREAM_URL=http://127.0.0.1:8787` for retained legacy previews.
-At cutover, remove stale copies of these two assignments from
+secret inventory. The NixOS dashboard module owns the single non-secret origin:
+`FC_SITES_UPSTREAM_URL=https://finite.site`, used for viewing and publishing
+assertions. Remove stale Sites endpoint assignments from
 `/etc/finite/dashboard.env`, preserving its other settings and root:root `0600`.
-Do not maintain a second endpoint configuration in an operator file.
-Restart the dashboard through its normal deployment procedure and verify both
-origins. A failed v2 exchange must not retry against legacy.
+Deploy a dashboard image built from the reviewed single-origin implementation;
+the previous image's separate-origin behavior is incompatible with this config.
 
-Before enabling traffic, verify authorized and unshared accounts, the guest
-email fallback, share revocation, direct Site visits and dashboard iframes on
-the real domains. Also prove legacy app/document previews and Hosted Chat
-requester assertions still work when v2 is unavailable. The bridge grants no
-new shares and does not migrate old URLs. Its synthetic legacy fixture and
-development browser tests do not replace a restore of the actual source state
-and live account verification.
+Verify authorized and unshared accounts, email fallback, share revocation,
+direct Site visits and dashboard iframes on the real domains. Missing Sites
+availability must leave Chat usable. Previous content links navigate through
+the edge redirect and then Sites-owned sign-in; no account credentials are sent
+to the previous content host. Cookies and login links do not migrate across
+hosts. Historical-state fixtures and local tests do not replace live checks.
 
 ## Verify
 
@@ -121,17 +112,15 @@ promote that Runtime and the public `fsite-latest` alias only with the canonical
 endpoint.
 Saved Git remotes also require an explicit update to the server-returned URL
 and host-scoped credential storage. Content redirects do not migrate Git or
-API requests. Keep legacy publishing frozen until retained publishers have
-transitioned, so old agents cannot create a second history on legacy.
+API requests. Retire the previous publishing listener at cutover; old clients must fail
+clearly rather than create a second history.
 
 The Hosted Chat requester-assertion issuer must also move to the publishing
-registry before qualifying an existing agent against v2. Assertions are random
-tokens stored in the issuing registry, not portable signed claims: using the
-same service credential on both servers does not make an old-registry token
-valid on Fly. Deploy the separately reviewed dashboard issuer change with
-the Runtime rollout; keep `FC_SITES_UPSTREAM_URL` on the retained legacy
-viewer registry. Qualify the transition while preserving that exchange and Chat when
-Sites is unavailable. A standalone CLI test does not cover this boundary.
+registry before qualifying an existing agent. Assertions are random tokens
+stored in the issuing registry, not portable signed claims. Deploy the reviewed
+dashboard issuer and Runtime together. Prove one existing agent can publish and
+update through Hosted Chat, then verify Chat still works when Sites is unavailable.
+A standalone CLI test does not cover this boundary.
 
 The [container smoke test](../images/sites-smoke.sh) covers synthetic publishing,
 visibility and restart/replacement. It does not qualify real mail, Fly TLS, the
@@ -240,57 +229,56 @@ Preserve the data volume; binary rollback does not undo migrations or writes.
 If a Git push was accepted but publication failed, reconcile it after service
 recovery. Never restore an old database over newer accepted writes.
 
-Only agreed published static Sites migrate. Preserve archives for retired
-apps/documents and unpublished or missing-source projects. Rehearse on isolated
-copies; use the [offline reconciliation procedure](sites-static-output-reconciliation.md)
-for supported legacy output IDs. Mixed projects need an explicit retained Site
-and proof of another publish.
+Prepare the cutover review package outside git because it contains customer data:
 
-Prepare the cutover review package outside git; it contains customer data:
+- Assign every output a retained static Site or archive-only disposition, with
+  exact old/new URLs. Render documents ahead of time; copy only reviewed public
+  HTML/assets from app bundles. Preserve browser JavaScript where useful, but
+  do not copy server code, databases, dependency trees or credentials into a
+  deploy path. Unsupported server behavior is retired. Check document deep
+  links, relative assets and app pages with their backends absent.
+- Preserve source history, owner, visibility, shares and grants for retained
+  Sites. A fallback is not permission to make private content public. Mixed
+  projects need an explicit retained Site and proof of a subsequent publish.
+  Use the [offline reconciliation procedure](sites-static-output-reconciliation.md)
+  for supported output IDs. Record proposed source commits and observed branch
+  tips; drift requires review, never a force-push.
+- Capture the destination's current projects, shares, sessions, Git credentials
+  and cookie key as well as the frozen source. Rehearse their reconciliation on
+  copies; never replace current Fly state with an older one-project snapshot or
+  with the rehearsal database, which contains synthetic writes.
 
-- Every inventoried output's exact IDs, retained/excluded disposition and old/new
-  URLs; exclusions preserve their source archives and remain on legacy until
-  separately retired. Retain existing demo shares and account for its cookie key.
-- For each source exception, the active Version's recorded Git commit, observed
-  branch tip, proposed source commit and subsequent-publish evidence. Preserve
-  history; stale branch tips require review, never a force-push.
-- Exact-host content redirects with path/query preservation and rollback-safe
-  caching. Keep legacy auth, API, Git, app and document requests on legacy;
-  old-host cookies and tokens cannot establish a new-host session.
+### Activate redirects and retire the app-host service
 
-At the authorized cutover, compare the frozen source inventory and branch tips
-with that package; stop and review any drift. Take a fresh service-consistent
-Recovery Set under a Publishing Write Freeze, restore into an empty target,
-and repeat access verification before routing traffic. The rehearsal database
-contains test writes and must not become production. Define rollback around
-destination writes; do not overwrite them with an earlier database. Qualify
-saved Git remotes and existing agents before changing CLI defaults or runtime
-pins. This procedure does not authorize cutover or a CLI/runtime rollout.
+Only after authorized migration and access checks pass:
 
-After cutover, remove obsolete publishing guidance and promote a Runtime whose
-bundled skills match its CLI. Existing agents adopt that bundle only through
-their own `finite skills sync`; image replacement does not overwrite skills.
-Core's `FC_CORE_RUNTIME_ENV_JSON` and the Runner's N-1
-`FC_RUNNER_RUNTIME_ENV_JSON` must both use `FINITE_SITES_API=https://finite.site`.
-Check operator environment files for overrides. Changing these defaults does
-not rewrite existing persisted RuntimeSpecs: verify each transitioned agent's
-effective endpoint as part of its supported rollout, without direct database
-edits. Do not apply the new defaults with an old `/api/v1` CLI.
+1. Under the final publishing freeze, capture and independently archive the
+   complete source Recovery Set. Preserve the old data directory and complete
+   archives; this rollout does not purge them. Record the final archive and
+   credential custody before removing ongoing app-host Sites backups.
+2. Prepare a private JSON array of `from_host` / `to_host` mappings for retained
+   content. Generate the Caddy fragment with `infra/scripts/sites-redirects`.
+   Install it atomically as `/etc/finite/sites-redirects.caddy`, root:caddy `0640`.
+   The file is required, including when deploying this shared Caddy module on
+   another host. Missing mappings must fail validation before activation.
+3. Validate the candidate's complete Caddy configuration with that fragment.
+   Deploy the reviewed app-host closure only after the new dashboard image and
+   Runtime are qualified. This removes `finite-saas-sites`, its package,
+   health checks and ongoing host snapshot dependency. Caddy redirects mapped
+   GET/HEAD content requests with 302 and `no-store`; paths and queries survive.
+   Old auth routes, API/Git hosts and unmapped content return 410. Neither old
+   login tokens nor Git credentials are forwarded to another host.
+4. Verify mapped URLs, document deep links, private/unshared access, current
+   public content, saved Git remotes and an existing agent's next publish.
+   Run `scripts/finite-status`. Keep the Identity mail credential at
+   `/etc/finite-saas/sites.env`; Identity still reads it despite the old filename.
+5. Create and verify a new hosted Recovery Snapshot and archive it. Format v4
+   covers Chat/Core/Brain/Identity without Sites. Historical v3 snapshots remain
+   readable by the restore tool; current Sites recovery follows the independent
+   [Sites backup procedure](#backups-and-restore).
 
-Retiring the Latitude service is a separate step from moving static Sites.
-Its daemon/package, registry backups, old-domain routes and probes, and legacy
-dashboard viewer exchange remain necessary for retained apps/documents and
-other excluded outputs. Delete them together only after every retained output
-has an approved replacement or retirement, legacy requester consumers are gone,
-and the retained Recovery Set has restored independently. Preserve redirects
-for migrated URLs and existing-state migration/restore tests; their age alone
-does not make them disposable.
-
-For Runtime promotion, use the same qualified Core artifact in the active
-Kata workers' `/etc/finite/runner.env` and, when enabled, Phala's
-`/etc/finite/phala-runner.env` as `FC_RUNNER_RUNTIME_ARTIFACT_ID`. Neither lane
-has a repository fallback pin. Set the Phala pin before applying a closure
-that removes the old default; otherwise the worker intentionally fails startup.
-The credential bootstrap does not promote a Runtime. Follow the existing
-[Runtime rollout procedure](runtime-image.md) for artifact registration,
-new-agent admission and existing-agent upgrades.
+Rollback must preserve all destination writes. Do not restart an old writable
+registry as an automatic closure rollback, or restore an old database over new
+commits. Fence publishing, diagnose on copies, and choose a recovery image that
+can read the current state. This runbook does not itself authorize production
+mutation or a Runtime rollout.

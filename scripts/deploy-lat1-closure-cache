@@ -353,7 +353,6 @@ long_running=(
   finitechat-server
   finitechat-hosted-device
   finite-brain-app
-  finite-saas-sites
   finite-identity
 )
 # finite-saas-runner is a timer-driven run-once (Type=oneshot, no persistent

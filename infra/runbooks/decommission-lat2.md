@@ -192,7 +192,7 @@ Candidates for a private off-host archive:
    ssh finite-lat-2 '
      set -eu
      sudo systemctl disable --now "actions.runner.*" || true
-     sudo systemctl disable --now finite-saas-sites caddy finite-core-tunnel finite-saas-runner.timer finite-saas-runner.service || true
+     sudo systemctl disable --now caddy finite-core-tunnel finite-saas-runner.timer finite-saas-runner.service || true
      sudo rm -rf /srv/github-runner
    '
    ```

@@ -263,7 +263,7 @@ export async function createHostedRequesterContext(
 ): Promise<HostedRequesterContext | undefined> {
   // Requester assertions are stored in the publishing registry. The retained
   // legacy viewer origin cannot issue tokens usable by a v2 publishing agent.
-  const upstream = sitesUpstreamOrigin(process.env.FC_SITES_V2_UPSTREAM_URL ?? "");
+  const upstream = sitesUpstreamOrigin();
   const serviceToken = process.env.FINITE_SITES_VIEWER_SESSION_TOKEN?.trim();
   if (!context.account.workosUserId || !context.account.emailVerified || !upstream || !serviceToken) {
     return undefined;

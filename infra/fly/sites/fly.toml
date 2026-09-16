@@ -21,7 +21,7 @@ kill_timeout = 120
 
 [env]
   # Set FINITE_SITES_ACCOUNT_LOGIN_URL=https://finite.computer/site-auth only
-  # after deploying and qualifying the dashboard route and v2 upstream.
+  # after deploying and qualifying the dashboard route and Sites upstream.
   # Enable only with the dedicated repository, file secrets and remote restore proof.
   FINITE_SITES_BACKUP_ENABLED = "0"
 

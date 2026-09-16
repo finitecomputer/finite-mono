@@ -84,16 +84,13 @@ dashboard route is available. Missing account evidence or an unavailable
 exchange retains the guest email challenge; an unshared verified email can
 request access or try another email.
 
-Keep `FC_SITES_UPSTREAM_URL` on the existing legacy Sites origin. Set
-`FC_SITES_V2_UPSTREAM_URL` to the v2 origin separately. Validated finite.chat
-and docs.finite.chat previews use legacy; finite.site and v2.finite.chat use
-v2. Local development sites also use the v2 setting. Missing or failing v2
-configuration never retries on legacy. Hosted Chat requester assertions use the v2 origin as well: their tokens
-are stored in the publishing registry. Missing/failing v2 configuration omits
-that optional context so Chat remains available; it never retries on legacy.
-Deploy this issuer change with the v2 publishing Runtime. Keep legacy viewer
-selection and request spelling until retained previews are retired. Give the dashboard and
-both Sites services the same dedicated
+`FC_SITES_UPSTREAM_URL` selects the single Sites registry for viewing and
+Hosted Chat publishing assertions (`https://finite.site` in production).
+Failed assertion issuance omits optional context so Chat remains available.
+Previous finite.chat content links are navigation-only: the edge redirects
+mapped hosts to their new Site, where Sites owns sign-in. The dashboard never
+exchanges credentials against those hosts or guesses a destination name.
+Give the dashboard and Sites the same dedicated
 `FINITE_SITES_VIEWER_SESSION_TOKEN`. The dashboard may exchange a signed-in,
 verified account email for a one-time viewer link. Dashboard previews also
 require Core to confirm access to the selected Agent Runtime. Sites still

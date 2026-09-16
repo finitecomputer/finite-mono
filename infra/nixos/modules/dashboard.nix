@@ -31,10 +31,8 @@
       FC_HOSTED_WEB_DEVICE_URL = "http://127.0.0.1:38918";
       FC_BRAIN_UPSTREAM_URL = "http://127.0.0.1:3015";
       FC_BRAIN_PUBLIC_ORIGIN = "https://brain.finite.computer";
-      # Retained legacy viewer origin; publishing assertion routing is dashboard-owned.
-      FC_SITES_UPSTREAM_URL = "http://127.0.0.1:8787";
-      # Deploy with the qualified v2 registry and shared viewer credential.
-      FC_SITES_V2_UPSTREAM_URL = "https://finite.site";
+      # One Sites registry owns viewing and publishing authorization.
+      FC_SITES_UPSTREAM_URL = "https://finite.site";
       FC_CHAT_RELAY_TIMEOUT_MS = "30000";
       FC_DASHBOARD_BASE_URL = "https://finite.computer";
       NEXT_PUBLIC_WORKOS_REDIRECT_URI = "https://finite.computer/callback";

@@ -23,7 +23,6 @@ test("verified hosted requester assertion binds mailbox, human, and agent", asyn
   const originalFetch = global.fetch;
   const originalCore = process.env.FC_CORE_BASE_URL;
   const originalUpstream = process.env.FC_SITES_UPSTREAM_URL;
-  const originalV2Upstream = process.env.FC_SITES_V2_UPSTREAM_URL;
   const originalToken = process.env.FINITE_SITES_VIEWER_SESSION_TOKEN;
   context.after(() => {
     global.fetch = originalFetch;
@@ -31,14 +30,11 @@ test("verified hosted requester assertion binds mailbox, human, and agent", asyn
     else process.env.FC_CORE_BASE_URL = originalCore;
     if (originalUpstream === undefined) delete process.env.FC_SITES_UPSTREAM_URL;
     else process.env.FC_SITES_UPSTREAM_URL = originalUpstream;
-    if (originalV2Upstream === undefined) delete process.env.FC_SITES_V2_UPSTREAM_URL;
-    else process.env.FC_SITES_V2_UPSTREAM_URL = originalV2Upstream;
     if (originalToken === undefined) delete process.env.FINITE_SITES_VIEWER_SESSION_TOKEN;
     else process.env.FINITE_SITES_VIEWER_SESSION_TOKEN = originalToken;
   });
   process.env.FC_CORE_BASE_URL = "https://core.internal";
-  process.env.FC_SITES_UPSTREAM_URL = "https://sites.internal";
-  process.env.FC_SITES_V2_UPSTREAM_URL = "https://finite.site";
+  process.env.FC_SITES_UPSTREAM_URL = "https://finite.site";
   process.env.FINITE_SITES_VIEWER_SESSION_TOKEN = "sites-token";
   const requests: Array<{ url: string; body: unknown }> = [];
   global.fetch = (async (input, init) => {
@@ -88,7 +84,7 @@ test("verified hosted requester assertion binds mailbox, human, and agent", asyn
 
 test("requester assertions never fall back to stale session email when Core fails or returns another subject", async (context) => {
   const originalFetch = global.fetch;
-  const names = ["FC_CORE_BASE_URL", "FC_SITES_V2_UPSTREAM_URL", "FINITE_SITES_VIEWER_SESSION_TOKEN"] as const;
+  const names = ["FC_CORE_BASE_URL", "FC_SITES_UPSTREAM_URL", "FINITE_SITES_VIEWER_SESSION_TOKEN"] as const;
   const previous = names.map((name) => process.env[name]);
   context.after(() => {
     global.fetch = originalFetch;
@@ -98,7 +94,7 @@ test("requester assertions never fall back to stale session email when Core fail
     });
   });
   process.env.FC_CORE_BASE_URL = "https://core.internal";
-  process.env.FC_SITES_V2_UPSTREAM_URL = "https://finite.site";
+  process.env.FC_SITES_UPSTREAM_URL = "https://finite.site";
   process.env.FINITE_SITES_VIEWER_SESSION_TOKEN = "fixture-service-token";
   for (const response of [
     Response.json({ error: "unavailable" }, { status: 503 }),
@@ -115,7 +111,7 @@ test("requester assertions never fall back to stale session email when Core fail
   }
 });
 
-test("missing or failing v2 requester exchange keeps Chat context optional without legacy fallback", async (context) => {
+test("missing or failing Sites requester exchange keeps Chat context optional", async (context) => {
   const previous = { ...process.env };
   const originalFetch = global.fetch;
   context.after(() => { process.env = previous; global.fetch = originalFetch; });
@@ -133,13 +129,13 @@ test("missing or failing v2 requester exchange keeps Chat context optional witho
     throw new Error("missing configuration must not fetch");
   }) as typeof fetch;
   for (const origin of [undefined, "", "https://finite.site/internal", "file:///tmp/sites"]) {
-    if (origin === undefined) delete process.env.FC_SITES_V2_UPSTREAM_URL;
-    else process.env.FC_SITES_V2_UPSTREAM_URL = origin;
+    if (origin === undefined) delete process.env.FC_SITES_UPSTREAM_URL;
+    else process.env.FC_SITES_UPSTREAM_URL = origin;
     assert.equal(await createHostedRequesterContext(input), undefined);
   }
   assert.equal(requests.length, 0);
 
-  process.env.FC_SITES_V2_UPSTREAM_URL = "https://finite.site";
+  process.env.FC_SITES_UPSTREAM_URL = "https://finite.site";
   for (const failure of ["unavailable", "unauthorized", "disconnect", "bad-payload"] as const) {
     requests.length = 0;
     global.fetch = (async (url, init) => {

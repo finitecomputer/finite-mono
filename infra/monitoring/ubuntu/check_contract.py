@@ -133,8 +133,7 @@ def check_prometheus() -> None:
         "finite.computer",
         "chat.finite.computer",
         "brain.finite.computer",
-        "finitechat-native-mockup.finite.chat",
-        "uptime-probe.docs.finite.chat",
+        "finite.site",
         "finite-tinfoil-collector",
     ]:
         require_contains(prometheus, f"job_name: {job}", "Prometheus public probes")
