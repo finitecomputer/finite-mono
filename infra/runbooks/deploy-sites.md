@@ -1,105 +1,139 @@
-# Deploying finite-sites v2
+# Deploying Finite Sites
 
-ADR 0028 makes Finite Sites a static-only platform service. The validation
-deployment is one dedicated NixOS VPS/VM running `finitesitesd` separately from
-the rest of the server stack.
+Deploy static-only Sites to one of the targets below. Canonical `finite.chat`
+traffic remains on lat2's `legacy-canonical` service and its
+[pinned legacy package](../nixos/packages.nix) until production cutover.
+Never open that live registry with the static-only daemon: its startup
+migrations remove unsupported output kinds.
 
-This runbook does not cut canonical `finite.chat` Sites traffic over. The
-finite-lat-2 app-plane service stays in `legacy-canonical` mode, pinned to the
-released `fsite/v0.5.2` daemon, so `api.finite.chat`, `*.finite.chat`, and
-`*.docs.finite.chat` continue to serve the public v1 contract until a separate
-cutover PR changes that boundary deliberately.
+| Target | Configuration | Delivery |
+| --- | --- | --- |
+| Fly demo | [`fly.toml`](../fly/sites/fly.toml) | CI-built OCI image; one Machine and one persistent volume |
+| Dedicated NixOS validation host | [host definition](../nixos/hosts/finite-sites-v2/default.nix) | Reviewed NixOS closure; Sites and Caddy on one host |
 
-## Topology
+Use the selected target's configuration for domains, ports and resource sizes.
+Run `scripts/finite-status` on the authenticated app-plane host before and after
+rollouts; target health alone does not establish platform health. Build artifacts
+in CI from the reviewed revision, never on a production host.
 
-- API and git smart HTTP: `https://v2.finite.chat`
-- Served sites: `https://{site}.v2.finite.chat/`
-- Daemon listener: `127.0.0.1:8787`
-- State: `/var/lib/finite-sites`
-- Healthcheck: `GET /api/v2/healthz`
-- Systemd unit: `finite-saas-sites.service`
-- NixOS config: `nixosConfigurations.finite-sites-v2`
-- NixOS modules: `infra/nixos/modules/finitesitesd.nix`,
-  `infra/nixos/modules/caddy-sites-v2.nix`, and
-  `infra/nixos/modules/finite-sites-v2-backups.nix`
+## Fly
 
-There is no app runner, document renderer, Kata/containerd dependency, or
-wake-on-request path in v2 Sites.
+The configured demo is `finite-sites-demo` in the `finite` organization. Set
+`APP=finite-sites-demo` and reuse its existing Machine and `sites_data` volume. For a new target, provision an app and volume
+(the demo uses 10 GiB), then obtain its allocated IPs and certificate DNS records
+from Fly. Require issued certificates for both the API apex and wildcard Site
+hosts; do not copy another app's DNS records. Keep records DNS-only when
+qualifying Fly's TLS edge. [Fly provisioning documentation](https://fly.io/docs/launch/).
 
-`fsite/v*` releases still ship the `fsite` CLI + `finitesitesd` linux binary
-([release-cli.md](release-cli.md)), but the validation daemon is deployed by a
-reviewed NixOS closure from the pinned mono rev, not by copying a release
-tarball onto the box.
+Install `RESEND_API_KEY` from the
+[secret inventory](../nixos/README.md#secrets-bootstrap-checklist-values-never-in-this-repo)
+using `fly secrets import --stage --app "$APP"` with secret assignments on stdin.
+Keep values out of logs and files. Configure any dashboard account exchange
+separately; do not repoint the legacy dashboard upstream at an empty registry.
 
-## Preconditions
+Set `REVIEWED_REF` to a branch or tag at the reviewed revision and `VERSION` to
+an image version label. From the repository root:
 
-- The finitesitesd source change is merged to `main`.
-- The deploy artifact is built from the exact reviewed monorepo revision; do
-  not build on the production host.
-- DNS has `v2.finite.chat` and `*.v2.finite.chat` pointed at the validation
-  host or edge.
-- The host has a Cloudflare Origin CA cert/key at
-  `/etc/finite-saas/certs/finite-sites-v2-origin.{pem,key}` covering
-  `v2.finite.chat` and `*.v2.finite.chat`.
-- The validation host has the mail secrets documented by name in
-  `infra/README.md`; do not write secret values into git.
-- The local backup timers from `finite-sites-v2-backups.nix` are enabled, and
-  an off-host copy plan exists before real production traffic moves.
+```sh
+gh workflow run service-images.yml --ref "$REVIEWED_REF" \
+  -f image=sites -f version="$VERSION" -f publish_production=false
+```
 
-## Deploy
+Wait for the workflow's source-revision, anonymous-pull and image smoke checks.
+Set `SITES_IMAGE` to the immutable `ghcr.io/finitecomputer/finite-sites@sha256:...`
+printed in that run's summary. Select the image for this rollout explicitly;
+do not assume the checked-in pin includes your source changes:
 
-1. Build/download the reviewed
-   `nixosConfigurations.finite-sites-v2.config.system.build.toplevel` closure
-   artifact using the host deployment procedure.
+```sh
+APP=finite-sites-demo
+fly config validate --strict --app "$APP" --config infra/fly/sites/fly.toml
+fly deploy --app "$APP" --config infra/fly/sites/fly.toml \
+  --image "$SITES_IMAGE" --ha=false
+fly machine list --app "$APP"
+fly volumes list --app "$APP"
+fly checks list --app "$APP"
+```
 
-2. Activate the reviewed closure on the host. The service command should look
-   like:
+Require exactly one application Machine attached to the intended volume.
+`--ha=false` suppresses automatic spare creation; it does not remove existing
+Machines. A single volume has restart/deploy downtime and must not be scaled
+into independent writable copies.
 
-   ```sh
-   finitesitesd serve \
-     --data /var/lib/finite-sites \
-     --listen 127.0.0.1:8787 \
-     --base-domain v2.finite.chat \
-     --api-url https://v2.finite.chat \
-     --git-url https://v2.finite.chat \
-     --site-scheme https \
-     --site-port none \
-     --mailer resend \
-     --mail-from "Finite Sites <links@finite.chat>"
-   ```
+The [entrypoint](../images/sites-entrypoint) requires the data mount, adjusts
+only its root ownership, and runs Sites as UID/GID 65532. Imported files must
+already be accessible to that user. After maintenance using a Machine entrypoint
+override, explicitly restore `/usr/local/bin/sites-entrypoint`, the serving
+arguments, image, services and mount; restoring the command alone is insufficient.
 
-3. Keep config changes in `infra/nixos/hosts/finite-sites-v2/` and
-   `infra/nixos/modules/`; do not edit production units by hand.
+## NixOS
 
-## Verify
+The [host definition](../nixos/hosts/finite-sites-v2/default.nix),
+[service module](../nixos/modules/finitesitesd.nix) and
+[Caddy module](../nixos/modules/caddy-sites-v2.nix) own this target's configuration.
+Provision the Origin CA certificate/key named in the Caddy module, covering its
+apex and wildcard domains; route those names through Cloudflare Full (strict).
+Create both service environment files listed in the service module using the
+[secret inventory](../nixos/README.md#secrets-bootstrap-checklist-values-never-in-this-repo).
 
-1. `systemctl status finite-saas-sites` is active.
-2. `curl -fsS https://v2.finite.chat/api/v2/healthz` succeeds.
-3. `systemctl start finite-sites-v2-snapshot.service` succeeds, then
-   `systemctl start finite-sites-v2-restore-check.service` succeeds.
-4. `fsite auth register --output json` works with
-   `FINITE_SITES_API=https://v2.finite.chat`.
-5. `fsite project init --config finite.toml --dry-run --output json` returns a
-   `site` object or `site: null`, never `outputs`.
-6. Create an operator-owned disposable static project, push the configured
-   Deploy Branch, and confirm the returned site URL serves the committed
-   bytes.
-7. Exercise viewer sharing:
+Build and transfer the reviewed
+`nixosConfigurations.finite-sites-v2.config.system.build.toplevel` closure, then
+activate it on the selected host. Keep the previous closure for rollback and
+keep service changes in Nix, rather than editing generated units. Verify
+`finite-saas-sites.service` is active and the configured public health endpoint
+responds.
 
-   ```sh
-   fsite project share PROJECT --public --yes-public --output json
-   fsite project share PROJECT --private --output json
-   ```
+The [backup module](../nixos/modules/finite-sites-v2-backups.nix) supplies local
+snapshot and integrity-check timers. On the validation host:
 
-8. Probe one real HTML URL and one real asset URL through the public edge.
-   Both must preserve `Cache-Control: no-store` while URLs remain mutable.
+```sh
+systemctl start finite-sites-v2-snapshot.service
+systemctl start finite-sites-v2-restore-check.service
+```
 
-## Rollback
+The snapshot job briefly stops Sites. Despite its name, `restore-check` checks
+the snapshot manifest and SQLite integrity; it does not restore repositories,
+serve content, or prove independent recovery.
 
-Rollback is the previous NixOS generation or the previous known-good reviewed
-closure for the validation host. Re-run the healthcheck and one static-site
-read after rollback.
+## Verify either target
 
-Rollback must not delete `/var/lib/finite-sites`. If a git ref was accepted
-but deployment failed before rollback, fix forward with a new commit after the
-service is healthy.
+Use the matching reviewed CLI with an isolated `FINITE_HOME` and
+`FINITE_SITES_API` set to the target's public API. Follow the
+[publishing workflow](../../finite-sites/README.md#publish-a-static-site), using
+the server-returned Git URL. Standalone publishers must first verify their
+mailbox with `fsite auth sites-key request` / `add`; pass that mailbox as
+`--owner-email` for Project Init.
+
+On a disposable project, verify Init, Git push, rendered HTML/assets, a second
+publish at the same URL, private/public viewing, and rejection of unshared or
+revoked viewers. Mutable HTML and assets must return `Cache-Control: no-store`.
+After restart and artifact replacement, verify content, grants, existing viewer
+sessions and Git credentials still work. Exercise real mail and any enabled
+account exchange through the public domains.
+
+The [container smoke test](../images/sites-smoke.sh) covers synthetic publishing,
+visibility and restart/replacement. It does not qualify real mail, Fly TLS, the
+dashboard account bridge or migration from a legacy database.
+
+## Recovery and cutover
+
+Rollback the image digest or NixOS closure only when it can read the current
+state. Preserve the data volume; binary rollback does not undo migrations or
+writes. If a Git push was accepted but publication failed, reconcile it after
+service recovery. Never restore an old database over newer accepted writes.
+
+Before production migration, prove an independent backup of the complete Sites
+Recovery Set restores onto an empty target, including repositories, blobs,
+registry and cookie secret. Local snapshots and Fly volumes alone do not prove
+this. Inspect snapshot SQLite through `scripts/snapshot-sqlite` or a scratch copy.
+
+Only agreed published static Sites migrate. Preserve archives for retired
+apps/documents and unpublished or missing-source projects. Rehearse on isolated
+copies; use the [offline reconciliation procedure](sites-static-output-reconciliation.md)
+for supported legacy output IDs. Mixed projects need an explicit retained Site
+and proof of another publish.
+
+Production cutover needs a separately reviewed site/URL mapping, final
+service-consistent copy under a Publishing Write Freeze, access verification,
+and a rollback boundary for destination writes. Preserve legacy API, Git and
+auth routes until their consumers are retired; do not blanket-redirect them.
+This deployment procedure does not authorize cutover or a CLI/runtime rollout.
