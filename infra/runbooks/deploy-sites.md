@@ -3,6 +3,9 @@
 Fly is the destination for the complete Sites switchover. The
 [`fly.toml`](../fly/sites/fly.toml) configuration owns the deployment's domains,
 ports and resource sizes: one Machine with one persistent volume.
+It enables real mail and account login; apply it only after the cutover gates,
+including the dashboard route and dedicated offsite recovery proof. An isolated
+rehearsal uses private routing and dev mail instead.
 
 Preserve the source data and archives until the Fly restore and access checks
 pass. Never open the live source registry with the static-only daemon: its
@@ -57,7 +60,8 @@ into independent writable copies.
 
 The [entrypoint](../images/sites-entrypoint) requires the data mount, adjusts
 only its root ownership, and runs Sites as UID/GID 65532. Imported files must
-already be accessible to that user. After maintenance using a Machine entrypoint
+already be accessible to that user, including the Git trees and mail outbox.
+Check ownership after all staging writes. After maintenance using a Machine entrypoint
 override, explicitly restore `/usr/local/bin/sites-entrypoint`, the serving
 arguments, image, services and mount; restoring the command alone is insufficient.
 
@@ -65,12 +69,18 @@ arguments, image, services and mount; restoring the command alone is insufficien
 
 Follow [ADR 0029](../../finite-sites/docs/adr/0029-account-session-viewer-bridge.md)
 and the [dashboard configuration](../../finitecomputer-v2/apps/dashboard/README.md#sites-account-viewer-boundary).
-Deploy the dashboard's `/site-auth` route before enabling
-`FINITE_SITES_ACCOUNT_LOGIN_URL=https://finite.computer/site-auth` on Sites.
+Deploy and qualify the dashboard's `/site-auth` route before applying the
+account login setting in `fly.toml`. The pre-cutover dashboard lacks this route;
+setting an upstream alone is insufficient. Stage the reviewed dashboard image
+and include its deployment in the authorized cutover.
 Both services must receive the same `FINITE_SITES_VIEWER_SESSION_TOKEN` from the
-secret inventory. Keep `FC_SITES_UPSTREAM_URL` on legacy and set
-`FC_SITES_V2_UPSTREAM_URL` to the Fly service API. A failed v2 exchange must not
-retry against legacy.
+secret inventory. At the authorized cutover, merge the
+[dashboard assignment](../fly/sites/dashboard.env.example) into its existing
+`/etc/finite/dashboard.env`, preserving all other values and root:root `0600`.
+This sets `FC_SITES_V2_UPSTREAM_URL=https://finite.site`; keep
+`FC_SITES_UPSTREAM_URL=http://127.0.0.1:8787` for legacy previews and Hosted Chat.
+Restart the dashboard through its normal deployment procedure and verify both
+origins. A failed v2 exchange must not retry against legacy.
 
 Before enabling traffic, verify authorized and unshared accounts, the guest
 email fallback, share revocation, direct Site visits and dashboard iframes on
@@ -95,6 +105,15 @@ revoked viewers. Mutable HTML and assets must return `Cache-Control: no-store`.
 After restart and artifact replacement, verify content, grants, existing viewer
 sessions and Git credentials still work. Exercise real mail and any enabled
 account exchange through the public domains.
+
+The pre-cutover Runtime's `fsite/v0.5.3` calls `/api/v1` and cannot use the new
+`/api/v2` service. Build the staged Runtime with this revision's CLI and qualify it before cutover;
+promote that Runtime and the public `fsite-latest` alias only with the canonical
+endpoint.
+Saved Git remotes also require an explicit update to the server-returned URL
+and host-scoped credential storage. Content redirects do not migrate Git or
+API requests. Keep legacy publishing frozen until retained publishers have
+transitioned, so old agents cannot create a second history on legacy.
 
 The [container smoke test](../images/sites-smoke.sh) covers synthetic publishing,
 visibility and restart/replacement. It does not qualify real mail, Fly TLS, the
@@ -141,8 +160,9 @@ private, outside serving data, and ephemeral across Machine replacement.
 Once enabled, backups run daily at 03:07 UTC. Sites stops only for the consistent
 file/SQLite copy, then resumes before hashing, verification and upload. Stop and
 capture share a five-minute deadline; on timeout the job aborts capture and
-attempts a bounded restart before cleanup. Confirm this pause and recovery
-interval are acceptable. Runs are serialized; Borg warnings fail the job. There
+attempts a bounded restart before cleanup. The full-data rehearsal paused
+serving for about 108–113 seconds; this daily pause was accepted for the initial launch. Re-measure
+after material data growth. Runs are serialized; Borg warnings fail the job. There
 is no automatic retry, prune or compact.
 
 ### Check or retry
@@ -208,11 +228,23 @@ copies; use the [offline reconciliation procedure](sites-static-output-reconcili
 for supported legacy output IDs. Mixed projects need an explicit retained Site
 and proof of another publish.
 
-Production cutover needs a separately reviewed site/URL mapping, final
-service-consistent copy under a Publishing Write Freeze, access verification,
-and a rollback boundary for destination writes. Preserve legacy API, Git and
-auth routes until their consumers are retired; do not blanket-redirect them.
-Redirect only explicitly mapped static content URLs, preserving path and query;
-old-host cookies and tokens cannot establish a new-host session. Qualify saved
-Git remotes and existing agents before changing CLI defaults or runtime pins.
-This deployment procedure does not authorize cutover or a CLI/runtime rollout.
+Prepare the cutover review package outside git; it contains customer data:
+
+- Every inventoried output's exact IDs, retained/excluded disposition and old/new
+  URLs; exclusions preserve their source archives and remain on legacy until
+  separately retired. Retain existing demo shares and account for its cookie key.
+- For each source exception, the active Version's recorded Git commit, observed
+  branch tip, proposed source commit and subsequent-publish evidence. Preserve
+  history; stale branch tips require review, never a force-push.
+- Exact-host content redirects with path/query preservation and rollback-safe
+  caching. Keep legacy auth, API, Git, app and document requests on legacy;
+  old-host cookies and tokens cannot establish a new-host session.
+
+At the authorized cutover, compare the frozen source inventory and branch tips
+with that package; stop and review any drift. Take a fresh service-consistent
+Recovery Set under a Publishing Write Freeze, restore into an empty target,
+and repeat access verification before routing traffic. The rehearsal database
+contains test writes and must not become production. Define rollback around
+destination writes; do not overwrite them with an earlier database. Qualify
+saved Git remotes and existing agents before changing CLI defaults or runtime
+pins. This procedure does not authorize cutover or a CLI/runtime rollout.

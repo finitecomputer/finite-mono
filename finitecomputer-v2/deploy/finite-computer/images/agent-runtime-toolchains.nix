@@ -23,7 +23,7 @@
   playwright-test,
   hermesAgent,
   simplexChat,
-  fsiteCliV1,
+  fsiteCli,
 }:
 let
   nodejs = hermesAgent.hermesNpmLib.nodejs;
@@ -64,7 +64,7 @@ symlinkJoin {
     browsers
     weasyprintCli
     simplexChat
-    fsiteCliV1
+    fsiteCli
   ];
   passthru = {
     inherit nodejs browsers;
@@ -90,7 +90,7 @@ symlinkJoin {
       uv = uv.version;
       weasyprint = weasyprint.version;
       simplex = simplexChat.version;
-      fsiteV1 = fsiteCliV1.version;
+      fsite = fsiteCli.version;
     };
   };
   meta = {

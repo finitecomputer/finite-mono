@@ -266,6 +266,12 @@
         let
           # Same pin as hermes-agent so toolchain ELFs share that glibc.
           hermesPkgs = import hermes-nixpkgs { inherit system; };
+          # Sites v2 cutover candidate, built with the Runtime's libc family.
+          runtimeFinitePackages = import ./infra/nixos/packages.nix {
+            pkgs = hermesPkgs;
+            craneLib = crane.mkLib hermesPkgs;
+            sourceRoot = ./.;
+          };
           hermesAgentPackage = hermes-agent.packages.${system}.default.overrideAttrs (old: {
             postInstall = (old.postInstall or "") + ''
               # Keep the Python environment unchanged; patch only the bundled adapter.
@@ -283,9 +289,6 @@
           simplex-chat =
             hermesPkgs.callPackage ./finitecomputer-v2/deploy/finite-computer/images/simplex-chat.nix
               { };
-          fsite-cli-v1 =
-            hermesPkgs.callPackage ./finitecomputer-v2/deploy/finite-computer/images/fsite-cli-v1.nix
-              { };
           hermes-agent = hermesAgentPackage;
           hermes-agent-runtime = hermesAgentPackage;
           hermes-agent-runtime-python = hermesAgentPackage.hermesVenv;
@@ -300,9 +303,7 @@
                 simplexChat =
                   hermesPkgs.callPackage ./finitecomputer-v2/deploy/finite-computer/images/simplex-chat.nix
                     { };
-                fsiteCliV1 =
-                  hermesPkgs.callPackage ./finitecomputer-v2/deploy/finite-computer/images/fsite-cli-v1.nix
-                    { };
+                fsiteCli = runtimeFinitePackages.fsite;
               };
         };
 
