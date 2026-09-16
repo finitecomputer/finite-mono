@@ -98,8 +98,9 @@ remain intact. A release changes admission, not enrollment or migration state.
 Migration 0029 appends a release receipt and audit event without deleting target
 bindings or rewriting user state. Redemption continues to read those bindings;
 the creation lease reader ignores released reservations for untargeted work.
-Explicit request targets and Runner drain/capacity checks still apply. New retry
-bindings are refused after release. Repeating the same exact release is a no-op.
+Explicit request targets and Runner drain/capacity checks still apply. The database fence refuses new bindings after release, including writes from
+older Core executables. The successful canary must belong to the exact root
+reservation or its retry. Repeating the same exact release is a no-op.
 Core versions supporting 0026–0028 ignore the receipt and conservatively block
 ordinary launches on that host. Keep the additive schema on binary rollback;
 re-enable drain to stop new admission without deleting any Agent or Chat history.

@@ -362,7 +362,6 @@ impl CoreStore {
              JOIN agent_runtimes runtime ON runtime.id=request.agent_runtime_id
              WHERE code.id=$1 AND target.source_host_id=$2
                AND target.retry_of_launch_code_id IS NULL AND target.cohort_of_launch_code_id IS NULL
-               AND NOT EXISTS(SELECT 1 FROM launch_host_reservation_releases released WHERE released.source_host_id=target.source_host_id)
                AND batch.created_by_workos_user_id=$3
                AND batch.code_count=1 AND COALESCE(batch.hosting_tier, 'standard')='standard'
                AND target.created_by_workos_user_id=$3
@@ -384,7 +383,8 @@ impl CoreStore {
             return Err(CoreError::RuntimeSpecMismatch);
         }
         let blocked: bool = tx.query_one(
-            "SELECT EXISTS(SELECT 1 FROM agent_runtimes WHERE source_host_id=$1)
+            "SELECT EXISTS(SELECT 1 FROM launch_host_reservation_releases WHERE source_host_id=$1)
+                OR EXISTS(SELECT 1 FROM agent_runtimes WHERE source_host_id=$1)
                 OR EXISTS(SELECT 1 FROM agent_creation_requests WHERE (target_source_host_id=$1 OR agent_runtime_id=$2) AND status IN ('requested','launching'))
                 OR EXISTS(SELECT 1 FROM runtime_control_requests WHERE agent_runtime_id=$2 AND status IN ('requested','launching','compute_up','ready'))",
             &[&host, &input.expected_previous_runtime_id],
@@ -515,6 +515,7 @@ impl CoreStore {
              WHERE runtime.id=$1 AND runtime.source_host_id=$2
                AND request.status='running' AND request.target_source_host_id=$2
                AND request.project_id=runtime.project_id AND target.source_host_id=$2
+               AND (target.launch_code_id=$3 OR target.retry_of_launch_code_id=$3)
                AND runtime.health_ready=true
                AND runtime.health_report_interval_seconds>0
                AND runtime.health_reported_at BETWEEN
@@ -522,7 +523,7 @@ impl CoreStore {
                    AND CURRENT_TIMESTAMP
                AND EXISTS(SELECT 1 FROM project_runtime_links link
                    WHERE link.project_id=runtime.project_id AND link.agent_runtime_id=runtime.id AND link.active)
-             FOR UPDATE OF runtime, request", &[&input.expected_canary_runtime_id, &host],
+             FOR UPDATE OF runtime, request", &[&input.expected_canary_runtime_id, &host, &input.reservation_code_id],
         ).await.map_err(store_error)?;
         if canary.is_none() {
             return Err(CoreError::RuntimeSpecMismatch);
@@ -16155,6 +16156,9 @@ mod tests {
                 assert!(db.release_launch_host_exact(&input).await.is_err());
                 client.execute("UPDATE agent_runtimes SET health_ready=true, health_reported_at=CURRENT_TIMESTAMP WHERE id=$1", &[&input.expected_canary_runtime_id]).await.unwrap();
             }
+            client.execute("UPDATE launch_code_host_targets SET retry_of_launch_code_id=NULL, cohort_of_launch_code_id=$1 WHERE launch_code_id=(SELECT requested_launch_code FROM agent_creation_requests WHERE agent_runtime_id=$2)", &[&input.reservation_code_id, &input.expected_canary_runtime_id]).await.unwrap();
+            assert!(db.release_launch_host_exact(&input).await.is_err());
+            client.execute("UPDATE launch_code_host_targets SET retry_of_launch_code_id=$1, cohort_of_launch_code_id=NULL WHERE launch_code_id=(SELECT requested_launch_code FROM agent_creation_requests WHERE agent_runtime_id=$2)", &[&input.reservation_code_id, &input.expected_canary_runtime_id]).await.unwrap();
             // Model a preserved 0028 child created by the retired writer.
             let unused = db.issue_launch_code_batch(IssueLaunchCodeBatchInput {
                 name: "Old cohort child".into(), code_count: 1, expires_in_hours: Some(1), hosting_tier: Some(HostingTier::Standard),
@@ -16178,6 +16182,57 @@ mod tests {
             }
             assert!(db.query_json("SELECT to_jsonb(t) FROM launch_host_reservation_releases t", &[]).await.is_empty());
         }).await;
+    }
+
+    #[tokio::test]
+    async fn postgres_host_release_fences_old_cohort_writer_in_both_lock_orders() {
+        for release_first in [false, true] {
+            with_isolated_postgres(|db| async move {
+                let (input, _) = release_canary_fixture(&db).await;
+                let unused = db.issue_launch_code_batch(IssueLaunchCodeBatchInput {
+                    name: "Old writer race".into(), code_count: 1, expires_in_hours: Some(1), hosting_tier: Some(HostingTier::Standard),
+                    created_by_workos_user_id: input.operator_workos_user_id.clone(), now: None,
+                }).await.unwrap();
+                // These are the root-lock and INSERT statements from the 0028
+                // writer at 98cc02be; it has no knowledge of release receipts.
+                let old_lock = "SELECT launch_code_id FROM launch_code_host_targets
+                    WHERE launch_code_id=$1 AND source_host_id=$2 AND created_by_workos_user_id=$3
+                      AND retry_of_launch_code_id IS NULL AND cohort_of_launch_code_id IS NULL FOR UPDATE";
+                let old_insert = "INSERT INTO launch_code_host_targets
+                    (launch_code_id, source_host_id, created_by_workos_user_id, created_at, cohort_of_launch_code_id)
+                    VALUES ($1,$2,$3,CURRENT_TIMESTAMP,$4)";
+                let mut blocker = db.connection().await.unwrap();
+                let tx = blocker.transaction().await.unwrap();
+                if release_first {
+                    // Pause release after it owns the root, at the canary lock.
+                    tx.query_one("SELECT id FROM agent_runtimes WHERE id=$1 FOR UPDATE", &[&input.expected_canary_runtime_id]).await.unwrap();
+                    let release_store = db.store.clone(); let release_input = input.clone();
+                    let release = tokio::spawn(async move { release_store.release_launch_host_exact(&release_input).await });
+                    wait_for_targeting_lock(&tx, "%SELECT runtime.id FROM agent_runtimes runtime%").await;
+                    let writer_store = db.store.clone(); let writer_input = input.clone();
+                    let old_writer = tokio::spawn(async move {
+                        let mut connection = writer_store.connection().await.unwrap();
+                        let old_tx = connection.transaction().await.unwrap();
+                        old_tx.query_one(old_lock, &[&writer_input.reservation_code_id, &writer_input.source_host_id, &writer_input.operator_workos_user_id]).await.unwrap();
+                        let result = old_tx.execute(old_insert, &[&unused.codes[0].id, &writer_input.source_host_id, &writer_input.operator_workos_user_id, &writer_input.reservation_code_id]).await;
+                        old_tx.rollback().await.unwrap(); result
+                    });
+                    wait_for_targeting_lock(&tx, "%SELECT launch_code_id FROM launch_code_host_targets%").await;
+                    tx.commit().await.unwrap();
+                    release.await.unwrap().unwrap();
+                    assert_eq!(old_writer.await.unwrap().unwrap_err().as_db_error().unwrap().code(), &tokio_postgres::error::SqlState::CHECK_VIOLATION);
+                } else {
+                    tx.query_one(old_lock, &[&input.reservation_code_id, &input.source_host_id, &input.operator_workos_user_id]).await.unwrap();
+                    let release_store = db.store.clone(); let release_input = input.clone();
+                    let release = tokio::spawn(async move { release_store.release_launch_host_exact(&release_input).await });
+                    wait_for_targeting_lock(&tx, "%SELECT launch_code_id FROM launch_code_host_targets%").await;
+                    tx.execute(old_insert, &[&unused.codes[0].id, &input.source_host_id, &input.operator_workos_user_id, &input.reservation_code_id]).await.unwrap();
+                    tx.commit().await.unwrap();
+                    assert!(matches!(release.await.unwrap(), Err(CoreError::InvalidLaunchCode)));
+                    assert!(db.query_json("SELECT to_jsonb(t) FROM launch_host_reservation_releases t", &[]).await.is_empty());
+                }
+            }).await;
+        }
     }
 
     #[tokio::test]
