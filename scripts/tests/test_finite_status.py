@@ -25,6 +25,39 @@ class FiniteStatusTests(unittest.TestCase):
         self.assertIsNotNone(now)
         return finite_status.build_report(raw, now)
 
+    @unittest.skipUnless(os.environ.get("FC_CORE_POSTGRES_TEST_URL"), "requires disposable Core Postgres")
+    def test_hosted_enrollment_query_matches_primary_and_credential_conflicts(self) -> None:
+        with mock.patch.object(finite_status, "run_read_only", return_value=subprocess.CompletedProcess([], 0, "__FINITE_STATUS_RUNTIMES__\n", "")) as run:
+            finite_status.psql_query_sets({})
+        query = run.call_args.kwargs["input_text"].split("\\echo __FINITE_STATUS_HOSTED_ENROLLMENT__\n", 1)[1].split("\\echo __FINITE_STATUS_ARTIFACTS__", 1)[0]
+        fixture = """
+BEGIN;
+SET LOCAL search_path=pg_temp;
+CREATE TEMP TABLE projects(id text,owner_user_id text);
+CREATE TEMP TABLE agent_runtimes(id text,project_id text,source_host_id text,source_machine_id text,runtime_artifact_id text);
+CREATE TEMP TABLE project_runtime_links(project_id text,agent_runtime_id text,active boolean);
+CREATE TEMP TABLE agent_creation_requests(id text,agent_runtime_id text,project_id text,status text,owner_user_id text,runner_class text,relocation_spec jsonb);
+INSERT INTO projects VALUES ('project','owner');
+INSERT INTO agent_runtimes VALUES ('runtime','project','host','machine','artifact');
+INSERT INTO project_runtime_links VALUES ('project','runtime',TRUE);
+INSERT INTO agent_creation_requests VALUES ('primary','runtime','project','running','owner','kata',NULL),('relocation','runtime','project','running','owner','kata','{}'),('old-owner','runtime','project','running','previous-owner','kata','{}');
+"""
+        schema = "CREATE TEMP TABLE runtime_core_credentials(creation_request_id text,agent_runtime_id text,source_host_id text,source_machine_id text,owner_user_id text,revoked boolean,activated boolean);\n"
+        for setup, expected in [
+            ("", "schema_absent"),
+            (schema, "missing"),
+            (schema + "INSERT INTO runtime_core_credentials VALUES ('primary',NULL,'host','machine','owner',FALSE,TRUE);", "assignment_conflict"),
+            (schema + "INSERT INTO runtime_core_credentials VALUES ('relocation','runtime','host','machine','owner',FALSE,TRUE);", "assignment_conflict"),
+            (schema + "INSERT INTO runtime_core_credentials VALUES ('primary','runtime','host','machine','owner',FALSE,TRUE);", "bound"),
+            (schema + "UPDATE agent_creation_requests SET owner_user_id='previous-owner' WHERE id='primary';", "primary_conflict"),
+        ]:
+            with self.subTest(expected=expected, setup=setup):
+                result = subprocess.run(["psql", "--no-psqlrc", "--csv", "--tuples-only", "--quiet", "--set", "ON_ERROR_STOP=1", "--dbname", os.environ["FC_CORE_POSTGRES_TEST_URL"]], input=fixture + setup + query + "ROLLBACK;", text=True, capture_output=True, check=True)
+                values = result.stdout.strip().split(",")
+                self.assertEqual(values[-1], expected)
+                if expected != "primary_conflict":
+                    self.assertEqual(values[4:6], ["2", "1"])
+
     def test_aug1_convergence_math_and_inactive_exclusion(self) -> None:
         report = self.fixture_report()
         fleet = report["sections"]["fleet_convergence"]
@@ -70,7 +103,7 @@ class FiniteStatusTests(unittest.TestCase):
         output = "\n".join(
             [
                 "__FINITE_STATUS_HOSTED_ENROLLMENT__",
-                "finite-lat-1,runtime-a,artifact-v2,kata,1,missing",
+                "finite-lat-1,runtime-a,artifact-v2,kata,1,1,missing",
                 "__FINITE_STATUS_ARTIFACTS__",
                 "artifact-v2,ghcr.io/finite/runtime@sha256:2222,v2,git-v2,0.2.0,2026-08-01T00:00:00Z,",
                 "__FINITE_STATUS_DISTRIBUTION__",

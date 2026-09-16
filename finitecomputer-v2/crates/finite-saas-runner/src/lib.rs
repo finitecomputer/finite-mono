@@ -1669,7 +1669,7 @@ pub struct RuntimeRestartOptions {
     environment: BTreeMap<String, String>,
     secret_environment: BTreeMap<String, String>,
     // Only the authenticated Core provisioning path may populate reserved keys.
-    core_bootstrap: Option<(String, String)>,
+    core_bootstrap: Option<RuntimeCoreBootstrap>,
 }
 
 fn runtime_spec_v1(envelope: &RuntimeSpecEnvelope) -> &RuntimeSpecV1 {
@@ -1813,6 +1813,13 @@ fn runtime_spec_image_is_immutable(reference: &str) -> bool {
         && digest.bytes().all(|byte| byte.is_ascii_hexdigit())
 }
 
+// No Debug/Serialize: bootstrap values are private delivery material.
+#[derive(Clone, PartialEq, Eq)]
+struct RuntimeCoreBootstrap {
+    url: String,
+    credential: String,
+}
+
 impl RuntimeRestartOptions {
     pub fn new(environment: BTreeMap<String, String>) -> Result<Self, RunnerError> {
         validate_runtime_environment(&environment)?;
@@ -1851,7 +1858,10 @@ impl RuntimeRestartOptions {
         {
             return Err(RunnerError::RuntimeBootstrapUnavailable);
         }
-        self.core_bootstrap = Some((url, secret));
+        self.core_bootstrap = Some(RuntimeCoreBootstrap {
+            url,
+            credential: secret,
+        });
         Ok(self)
     }
 
@@ -1862,7 +1872,7 @@ impl RuntimeRestartOptions {
         entries: &mut Vec<(String, String)>,
         allow_missing: bool,
     ) -> Result<(), RunnerError> {
-        let Some((url, credential)) = self.core_bootstrap.as_ref() else {
+        let Some(RuntimeCoreBootstrap { url, credential }) = self.core_bootstrap.as_ref() else {
             return Ok(());
         };
         let expected = [
@@ -5211,7 +5221,7 @@ mod tests {
                         .core_bootstrap
                         .as_ref()
                         .unwrap()
-                        .0,
+                        .url,
                     "https://core.example.test"
                 );
                 assert!(

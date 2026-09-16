@@ -186,7 +186,9 @@ An opted-in Runner requests
 `POST /api/core/v1/runtime-control-requests/{request_id}/runtime-credential`
 before invoking the Kata upgrade adapter. Core requires that Runner's current,
 unexpired upgrade lease and exact host/machine/Project binding, an active link,
-and one unambiguous running creation record with the current owner. This does
+and the unique running primary creation record with the current owner.
+The primary record (`relocation_spec IS NULL`, unique per Project) is a stable
+origin reference; it is not placement authority. This does
 not authorize an upgrade itself or enable native serving. No account API,
 RuntimeSpec, health report or status command exposes the bootstrap secret.
 
@@ -194,9 +196,11 @@ Core inserts into the existing credential table with serving disabled. An
 exact retry, including a replacement worker's live lease, returns the same
 secret without changing native credentials or applied generation. Revoked,
 changed-owner, moved, inactive or ambiguous assignments fail closed without
-repair. Multiple historical running creation records are **not** resolved by
-date/ID ordering; those agents need an explicit assignment-binding design
-before enrollment. This slice does not claim universal fleet enrollment.
+repair. Historical relocation records are not candidates for that primary reference.
+No date/ID ordering chooses an assignment. Missing or mismatched primary
+records fail closed. Future relocation still revokes the old credential;
+re-enrolling a revoked/reassigned identity requires the separate FIN-39
+relocation/recovery contract, not an automatic repair here.
 
 The Kata adapter carries the reserved pair in the existing transient private
 environment file during the already-planned image upgrade. Both absent means
@@ -209,7 +213,7 @@ agentd readiness errors; enrollment never repairs those settings.
 
 Ordinary restart/recovery and unconfigured Runner upgrades preserve installed
 reserved variables. Automatic failed-upgrade rollback restores the previous
-container and its previous environment; the Core row remains disabled/pending
+container and its previous environment; a newly enrolled Core row remains disabled/pending
 until an agent applies settings. Retry redelivers the same secret. Missing
 upgrade bootstrap support on an older Core (404), network failure, throttling
 or 5xx leaves the operation retryable before any guest mutation. Old Runners
@@ -218,12 +222,20 @@ does not prove that an old image implements native serving: applied readiness
 remains required before any native session can be granted.
 
 `scripts/finite-status --json` adds `fleet_convergence.hosted_enrollment` with
-Core-recorded provider, artifact, matching creation count and credential state.
+Core-recorded provider, artifact, matching creation/primary counts and credential state.
 It reads no credential values. An older schema is reported as `schema_absent`;
 guest configuration remains explicitly unknown until qualified. The supported
-implementation cohort is Kata with one current matching creation and no
-revoked/conflicting credential row; other providers and ambiguous history are
+implementation cohort is Kata with one current matching primary creation and no
+revoked/conflicting credential row; other providers and missing/conflicting primary history are
 not silently included. No production enrollment occurs by running this probe.
+
+The missing-bootstrap insertion is a compatibility bridge for pre-capability
+agents. Retire that insertion branch when all supported active assignments
+have Core bootstrap records, old images can no longer launch, and the existing
+recovery path has proven that restored assignments carry their bootstrap.
+Keep exact-assignment credential re-delivery/retry while upgrades can need it;
+removing the bridge must not remove recovery material or introduce rotation.
+Track that removal gate under FIN-39/FIN-57, not a separate preparatory rollout.
 
 ### Authoritative writers and readers
 

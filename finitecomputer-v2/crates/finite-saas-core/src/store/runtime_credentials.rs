@@ -106,11 +106,13 @@ impl CoreStore {
             .map_err(store_error)?
             .ok_or(CoreError::ProviderOperationIdentityMismatch)?;
         let owner: String = row.get(0);
-        // Do not choose among historical/relocated assignments by sort order.
+        // The DB-enforced primary creation is a stable origin reference, not
+        // placement authority. Completed relocations remain history; the
+        // current lease/runtime/link above authorize delivery. Never sort history.
         let creations = tx
             .query(
                 "SELECT id,owner_user_id FROM agent_creation_requests
-             WHERE agent_runtime_id=$1 AND project_id=$2 AND status='running' FOR UPDATE",
+             WHERE agent_runtime_id=$1 AND project_id=$2 AND relocation_spec IS NULL AND status='running' FOR UPDATE",
                 &[&request.agent_runtime_id, &request.project_id],
             )
             .await
@@ -671,6 +673,7 @@ pub(crate) mod tests {
             "UPDATE project_runtime_links SET active=FALSE",
             "UPDATE projects SET owner_user_id=(SELECT id FROM users WHERE workos_user_id='enrollment-operator')",
             "UPDATE agent_creation_requests SET status='cancelled'",
+            "UPDATE agent_creation_requests SET relocation_spec='{}'::jsonb",
         ] {
             with_isolated_postgres(move |db| async move {
                 let creation = requested(&db).await;
@@ -704,7 +707,7 @@ pub(crate) mod tests {
     }
 
     #[tokio::test]
-    async fn existing_enrollment_rejects_ambiguous_creation_history() {
+    async fn existing_enrollment_uses_primary_origin_not_relocation_history() {
         with_isolated_postgres(|db| async move {
             let creation = requested(&db).await;
             register(&db, &creation).await;
@@ -720,9 +723,15 @@ pub(crate) mod tests {
                  to_jsonb(q)||jsonb_build_object('id',q.id||'-relocation','idempotency_key',q.idempotency_key||'-relocation','relocation_spec',$2::jsonb))).*
                  FROM agent_creation_requests q WHERE q.id=$1", &[&creation, &relocation],
             ).await.unwrap();
+            let secret = db.provision_upgrade_credential(upgrade_input(&lease)).await.unwrap().secret;
+            let authenticated = db.authenticate_runtime_credential(&secret).await.unwrap().unwrap();
+            assert_eq!(authenticated.creation_request_id, creation);
+            let retry = db.provision_upgrade_credential(upgrade_input(&lease)).await.unwrap();
+            assert!(retry.secret == secret);
+            // Relocation completion revokes the old credential. Primary history
+            // must never resurrect that previous incarnation.
+            db.revoke_runtime_credential(&lease.runtime.id, &creation).await.unwrap();
             assert!(db.provision_upgrade_credential(upgrade_input(&lease)).await.is_err());
-            let count: i64 = db.connection().await.unwrap().query_one("SELECT count(*) FROM runtime_core_credentials", &[]).await.unwrap().get(0);
-            assert_eq!(count, 0);
         }).await;
     }
 
