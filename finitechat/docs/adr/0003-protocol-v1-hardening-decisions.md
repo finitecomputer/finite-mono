@@ -4,11 +4,9 @@ Status: accepted 2026-06-11
 
 ## Context
 
-The Marmot/Pika feature audit (`docs/feature-audit-marmot-pika.md`) identified
-seven protocol-shaping gaps to close before external clients exist. The full
-proposals, rejected alternatives, and chosen options live in
-`docs/protocol-decisions.md`; this ADR records the accepted decisions and
-their rationale in one place.
+The June 2026 Marmot/Pika comparison identified seven protocol decisions to
+make before external clients exist. This ADR records the accepted decisions
+and their rationale.
 
 A standing constraint accepted alongside decision 4: **full-history replay is
 a rare recovery action, not a day-to-day mechanism.** Any design that makes
@@ -50,7 +48,10 @@ replays the whole op log) is debt against this ADR.
 7. **Recovery and rotation blessed.** Account recovery = restore account
    secret + relink via the existing link/fanout path. Credential renewal =
    self-update commit; 90-day credentials with renewal nudges from 30 days
-   out.
+   out. User-held or Finite-assisted account-secret backup is a SaaS launch
+   gate. Restoring the secret and linking a Device does not restore
+   pre-membership MLS history; that requires the separate encrypted
+   backup/history-share path in `docs/protocol-v1.md`.
 
 ## Consequences
 

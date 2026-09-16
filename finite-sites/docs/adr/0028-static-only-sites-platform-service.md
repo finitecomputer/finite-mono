@@ -2,11 +2,10 @@
 
 ## Status
 
-Accepted. This supersedes the target architecture in ADR 0011, ADR 0014,
-ADR 0015, ADR 0016, ADR 0019, and ADR 0022 wherever those decisions
-depend on app/document output kinds, Kata app runners, Core-synced publish
-grants, or a multi-output public Sites model. ADR 0027 remains authoritative
-for Sites-owned email proofs and the remaining finite-identity dependency.
+Accepted. This supersedes the earlier app/document hosting and Kata app-runner
+plans, plus ADR 0016 and ADR 0019 where they depend on Core-synced publish grants
+or a multi-output public Sites model. ADR 0027 remains authoritative for
+Sites-owned email proofs and the remaining finite-identity dependency.
 
 ## Context
 
@@ -117,8 +116,6 @@ deleted rather than retained as dormant architecture.
   vocabulary to Site vocabulary. Private Rust identifiers can be cleaned up as
   touched, but the public v2 contract must not expose output ids or output
   kinds.
-- Historical ADRs remain in the repository as history. This ADR records the new
-  target boundary instead of rewriting old decisions in place.
 
 ## Considered Options
 

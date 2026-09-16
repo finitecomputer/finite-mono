@@ -282,7 +282,6 @@ Decisions are ADRs; vocabulary is the glossary; running work is logged.
 - `CONTEXT.md` / `docs/protocol-glossary.md` — domain language and the
   user-promise behind each mechanism
 - `docs/perf-plan.md` — performance program
-- `docs/feature-audit-marmot-pika.md` — what adjacent projects taught us
 
 ## 11. Deliberately not built yet
 

@@ -1,8 +1,8 @@
 # Performance Plan: Hundreds of Users, Dozens of Long Chats
 
 Date: 2026-06-11. Executes the Tier 1/Tier 2 findings from
-`docs/perf-audit.md` and queues the protocol decisions from
-`docs/feature-audit-marmot-pika.md`.
+`docs/perf-audit.md`. The accepted protocol decisions are recorded in
+`docs/adr/0003-protocol-v1-hardening-decisions.md`.
 
 ## Scale target for this phase
 
@@ -93,10 +93,10 @@ Full workspace verification. Ship.
 1. **Snapshot + horizon** for the server: periodic in-memory-state snapshot
    keyed to an op seq; startup = snapshot + tail replay; idempotency-record
    expiry tied to the same horizon. Co-design with the retention decision
-   (feature audit §1.6) so compaction and disappearing messages share cursor
+   (ADR 0003, decision 4) so compaction and disappearing messages share cursor
    semantics. This is also the answer to the in-memory full-history mirror's
    memory envelope (~1 KB/entry today).
-2. **Protocol decisions** from the feature audit, in its §5 order:
+2. **Protocol decisions** from ADR 0003, in implementation order:
    versioning/capability slots, admin authority, leave-group, retention
    field + below-horizon sync rule, push wake contract, stream-lane
    reservation, recovery doc. Items 1–3 change typed-route validation and

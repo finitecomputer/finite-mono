@@ -1,7 +1,5 @@
 # Documentation
 
-- [Carry-over manifest](carry-over-manifest.md): what was copied from legacy
-  finitecomputer and what must be cut.
 - [Service dependencies](service-dependencies.md): separate repos and services
   that v2 deploys or integrates.
 - [Hermes runtime test matrix](hermes-runtime-test-matrix.md): local,
