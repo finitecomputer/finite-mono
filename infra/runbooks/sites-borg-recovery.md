@@ -1,40 +1,41 @@
 # Sites Backup and Recovery
 
-Decision: [Sites ADR 0031](../../finite-sites/docs/adr/0031-borg-on-existing-rsync-net.md).
+## Automatic Operation
 
-## Backup Job
+Once enabled, cron runs `sites-backup` daily at 03:07 UTC. No operator is needed
+for each backup. The job checks Borg access, stops only Sites, copies its data
+with rsync and a consistent SQLite backup, verifies the snapshot, restarts
+Sites, and uploads to rsync.net. Git repositories, blobs, permissions, and the
+cookie signing key are included. Failed capture never uploads an old snapshot
+as fresh. The job serializes runs and treats Borg warnings as failures.
 
-`infra/scripts/sites-backup` runs on the independent Sites host:
+The serving pause lasts through capture and verification, not remote upload.
+SIGINT/SIGTERM and ordinary errors attempt restart; host loss or SIGKILL cannot
+run cleanup. There is no automatic prune, compact, or immediate retry. Existing
+Latitude and Chat backup jobs are independent.
 
-1. Serialize backup runs with the ordinary job lock. Record whether Sites was
-   running, stop only Sites, and ensure all Sites writers have stopped.
-2. Copy its data directory into private staging and use SQLite's backup API
-   for the registry, excluding raw registry/WAL/SHM copies. Include Git
-   repositories, blobs, permissions/auth state, and the cookie signing key.
-3. Verify and finalize the snapshot. Resume the previously running Sites
-   service before uploading. Capture failure must also attempt restart and
-   report any restart failure.
-4. Archive that completed snapshot using the existing native Borg conventions:
-   encrypted `repokey-blake2`, SSH with a pinned host key, compression/dedup,
-   and nonzero exit codes (including warnings) treated as failure.
-5. Record the source snapshot timestamp, archive ID, and successful upload
-   time. Report failures and stale snapshots through `scripts/finite-status`
-   and existing alerting.
+## One-Time Setup
 
-Schedule these steps as one job so each upload follows a fresh snapshot.
-If capture fails, fail the run; do not silently upload an older snapshot and
-call it fresh. Confirm that the daily cadence and measured Sites pause meet
-the deployment's recovery and availability requirements before enabling it.
+The checked-in [Fly configuration](../fly/sites/fly.toml) leaves backups
+disabled. Repository provisioning, recovery-key custody, external alerting, and
+the real remote restore drill are not automated by this code.
 
-The implementation is `infra/scripts/sites-backup`. The opt-in image uses stock
-Supervisor and cron for Sites-only lifecycle control; it never stops Chat,
-Core, Identity or runners. Existing LAT2 jobs and archives are unchanged.
+1. Provision a dedicated Sites Borg repository on the existing rsync.net account
+   using `repokey-blake2`. Retain its exported repokey, passphrase, SSH identity,
+   pinned host key, and runtime/mail/service configuration independently of Fly.
+   Another repository's exported key cannot recover Sites. The job refuses a
+   missing repository or a different encryption mode; it never initializes one.
+2. Provision the three file secrets below through the existing secret custody
+   process. Never put values in git or command arguments.
+3. Deploy a qualified immutable Sites image with the settings below. Allow
+   local space for a full snapshot and confirm the daily recovery interval and
+   measured serving pause are acceptable.
+4. Trigger the job once, check its result, and restore from rsync.net onto an
+   isolated empty target before relying on it. Wire an external freshness and
+   failure check; the local status command does not send notifications.
 
-## Enable only after provisioning
-
-Deploy an immutable image qualified for backup and restore before enabling
-backups. The checked-in Fly configuration leaves backups disabled. The default
-entrypoint is the direct non-root daemon. Supervision requires:
+Run `scripts/finite-status` before and after an authorized rollout. Add these
+environment settings to the Fly deployment when enabling backups:
 
 ```text
 FINITE_SITES_BACKUP_ENABLED=1
@@ -42,58 +43,7 @@ FINITE_SITES_BACKUP_REPOSITORY=<approved dedicated Sites repository>
 FINITE_SITES_BACKUP_REMOTE_PATH=borg12
 ```
 
-Optional `FINITE_SITES_BACKUP_ROOT` defaults to `/var/backups/finite-sites`,
-outside the mounted serving data. This private local staging and status receipt
-are ephemeral across Machine replacement; Borg is the durable off-host copy.
-Provision enough local disk for one full snapshot. Repository initialization
-and credential provisioning are separate authorized operator actions. The job
-refuses an absent repository or encryption other than `repokey-blake2`.
-
-Cron starts the supervised job daily at 03:07 UTC. For a manual run inside the
-Machine, use the same supervised job rather than launching a detached process:
-
-```sh
-supervisorctl -c /run/sites-supervisor.conf start sites-backup
-supervisorctl -c /run/sites-supervisor.conf status
-finite-status --sites-backup-state /var/backups/finite-sites/status.json --json
-```
-
-Starting the job is not proof of completion. The receipt must report success,
-a new archive ID, and fresh source and upload timestamps. `finite-status`
-checks both timestamps (36-hour default, overridable with
-`--sites-backup-max-age SECONDS`). Wire an external check before promotion;
-logs and a local receipt alone do not notify anyone. A missing receipt after
-Machine replacement is unknown, not healthy.
-
-Normal failures and SIGINT/SIGTERM attempt restart of a previously running
-Sites process. The image stops cron, then the job, then Sites during shutdown.
-SIGKILL or host loss cannot execute cleanup; inspect the run and restart Sites
-through Supervisor or restart the Machine before retrying. Do not claim
-zero downtime or automatic recovery from every failure.
-
-## Access and custody
-
-Use a dedicated Sites repository on the existing rsync.net account. Verify its
-path and access before promotion; a dedicated path alone is not access
-isolation. Reuse the existing credential layout and independent custody from
-[the NixOS inventory](../nixos/README.md):
-
-```text
-/var/lib/finitecomputer/backups/rsync-net/id_ed25519
-/var/lib/finitecomputer/backups/rsync-net/known_hosts
-/var/lib/finitecomputer/backups/rsync-net/borg-passphrase
-```
-
-These files remain root-only beneath a private directory. Only the backup job
-needs access; do not bake credentials into a serving image. Borg connects
-directly to rsync.net over SSH, so a separate rsync of live databases is not
-needed. Never copy an active Borg repository while it has writers.
-
-For Fly, provision the files using the existing secret custody process and
-[Fly file secrets](https://fly.io/docs/reference/configuration/#the-files-section).
-Add the following mappings to the deployment configuration only when the
-corresponding base64-encoded secrets are provisioned (import through stdin,
-never place their values in shell arguments, logs or git):
+Use these Fly file mappings for the provisioned base64-encoded secrets:
 
 ```toml
 [[files]]
@@ -109,51 +59,73 @@ guest_path = "/var/lib/finitecomputer/backups/rsync-net/borg-passphrase"
 secret_name = "FINITE_SITES_BORG_PASSPHRASE"
 ```
 
-The image precreates the root-only directory, tightens these files to `0600`
-and removes their corresponding environment variables before starting Sites.
-Never place them beneath the UID 65532-owned serving data directory.
+The image makes the credential directory root-only, tightens files to `0600`,
+and strips their environment variables before starting the unprivileged daemon.
+Staging and `status.json` default to `/var/backups/finite-sites`, outside serving
+data, and are ephemeral across Machine replacement. Set
+`FINITE_SITES_BACKUP_ROOT` only to another private directory outside that data.
+A dedicated repository path is not access isolation or append-only protection;
+verify the SSH credential's restrictions separately.
 
-The existing job selects remote executable `borg12`; the local test client is
-Borg 1.4.x. Verify actual client/server compatibility at the destination.
-A new dedicated repository needs its own exported Borg repokey, retained with
-the passphrase independently of Fly. Also retain SSH access, the pinned host
-identity, runtime/mail/service configuration and deploy artifact access.
-Another repository's exported repokey is not a substitute.
+## Check or Retry a Backup
 
-Reuse the current no-prune policy. No automatic prune/compact is introduced.
-The existing SSH credential has been documented as overprivileged; do not
-claim server-enforced append-only protection. No secret transfers, remote
-initialization, production service stops, or retention changes are authorized
-by this document.
-
-## Restore gate
-
-From an independent recovery environment, configure native Borg with the
-escrowed SSH identity, pinned host key, repository, passphrase and repokey,
-without relying on the source Fly Machine. Use a fresh Borg client directory.
-Check and extract the recorded archive into a new private scratch directory:
+Inside the backup-enabled Machine as root:
 
 ```sh
-umask 077
-borg check --verify-data
-borg extract "::$ARCHIVE"
-sites-backup restore --snapshot ./snapshot --target "$NEW_DATA_DIR"
+supervisorctl -c /run/sites-supervisor.conf start sites-backup
+supervisorctl -c /run/sites-supervisor.conf status sites-backup
+finite-status --sites-backup-state /var/backups/finite-sites/status.json --json
 ```
 
-`NEW_DATA_DIR` must not exist; its parent must be private and on the empty
-recovery volume. Run as root to preserve UID/GID 65532 ownership. The script
-checks all file hashes, symlink inventory and registry integrity, copies into
-private staging, then installs without overwriting any existing target.
-Never overwrite live data or start an incomplete/failed restore. Inspect
-protected SQLite only through `scripts/snapshot-sqlite` or a scratch copy.
+`start` launches the one-shot; it does not wait for a completed backup. Check
+status after it finishes. Success requires a fresh archive ID and both source
+and upload timestamps. `finite-status` defaults to a 36-hour maximum age
+(`--sites-backup-max-age SECONDS` overrides it). A missing receipt is unknown,
+not healthy. After host loss or forced termination, check Sites health and
+restart it through Supervisor or restart the Machine before retrying.
 
-Restore the actual production-shaped snapshot onto an empty isolated Fly volume,
-with dev mail and production egress blocked. Prove content/assets, sharing and
-revocation, guest/account access, and clone/push/publish using pre-backup
-credentials. Confirm the source is unchanged and record recovery time.
-A successful upload or `borg check` alone is not enough.
+## Restore or Recovery Drill
 
-## Local qualification
+This is an operator action, not part of the nightly job. Use a matching Sites
+image on an isolated recovery Machine/container with an empty volume mounted at
+`/var/lib/finite-sites` and no running Sites writer. Run as root to preserve
+UID/GID 65532. Keep production routing unchanged.
+
+From independently held credentials, configure Borg 1.x with `BORG_REPO`,
+`BORG_REMOTE_PATH=borg12`, `BORG_PASSCOMMAND` reading the private passphrase file,
+and `BORG_RSH` using the SSH key with strict pinned-host checking. Use a fresh
+private `BORG_BASE_DIR`. Select `ARCHIVE` from `borg list`; do not depend on a
+status file surviving the lost Machine. Retain the exported repokey for key
+recovery. Never copy a Borg repository while it has writers.
+
+The restore tool requires a nonexistent destination, so restore to scratch
+first, then copy verified data into the already-created empty volume:
+
+```sh
+set -eu
+umask 077
+RESTORE_ROOT=$(mktemp -d)
+cd "$RESTORE_ROOT"
+borg check --verify-data "::$ARCHIVE"
+borg extract "::$ARCHIVE"
+sites-backup restore --snapshot ./snapshot --target "$RESTORE_ROOT/data"
+mountpoint -q /var/lib/finite-sites
+test -z "$(ls -A /var/lib/finite-sites)"
+rsync -a "$RESTORE_ROOT/data/" /var/lib/finite-sites/
+```
+
+Stop on any error; never overwrite a nonempty volume or start an incomplete
+restore. The tool verifies inventory, checksums, and SQLite integrity. Use
+`scripts/snapshot-sqlite` or a scratch copy for any database inspection. Allow
+scratch capacity for the extracted snapshot and verified copy; protect both as
+secrets and remove them after qualification.
+
+Restore the service configuration and start Sites on the isolated target.
+Verify content, guest/account permissions and revocation, then clone/push/publish
+using pre-backup credentials. Keep mail and other outbound effects controlled
+during the drill. Do not move production traffic until recovery is verified.
+
+## Local Tests
 
 ```sh
 scripts/with-dev-env just sites-backup-contract
@@ -161,12 +133,5 @@ bash infra/images/sites-smoke.sh "$SITES_IMAGE"
 SITES_BACKUP_SMOKE=1 bash infra/images/sites-smoke.sh "$SITES_IMAGE"
 ```
 
-These tests exercise stopped-Sites capture, real native encrypted Borg,
-fresh-client extraction, wrong-passphrase and corrupt-snapshot rejection,
-no-overwrite restore, capture/upload/restart failures, interruption cleanup,
-and restore followed by publishing with the original editor credential. The
-exact-image workflow also runs real Supervisor/cron isolation and shutdown
-tests. Synthetic local evidence does not establish remote access,
-production pause duration, external alerts or recovery from the real archive.
-
-Run `scripts/finite-status` before and after any separately authorized rollout.
+These cover local backup/restore and Supervisor behavior, not remote credential
+access, external notifications, or a real rsync.net-to-Fly restore.
