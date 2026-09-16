@@ -7,9 +7,8 @@ Project Repository is the editable source of truth. `finite.toml` selects which
 committed directory becomes the served website. Finite Sites serves committed
 bytes; it does not run builds for you.
 
-The v2 validation API is `https://v2.finite.chat`, and this `fsite` build uses
-it by default. Do not set `FINITE_SITES_API` unless you are intentionally
-targeting a local or self-hosted server.
+This `fsite` build defaults to the Fly API at `https://finite.site`. Set
+`FINITE_SITES_API` when intentionally targeting another server.
 
 ## Install `fsite`
 
@@ -159,7 +158,7 @@ Deploy Branch:
 fsite auth git my-project --store --output json
 
 git init -b main
-git remote add finite https://v2.finite.chat/my-project.git
+git remote add finite https://finite.site/my-project.git
 git add finite.toml site
 git commit -m "Initial Finite Sites publish"
 git push finite main
@@ -185,8 +184,8 @@ configured `FINITE_SITES_API`; it does not invent a production hostname.
 If you start from a site URL, read the agent handoff first:
 
 ```sh
-curl -fsSL https://SITE.v2.finite.chat/llms.txt
-fsite view https://SITE.v2.finite.chat/ --output json
+curl -fsSL https://SITE.finite.site/llms.txt
+fsite view https://SITE.finite.site/ --output json
 ```
 
 Project collaboration controls who can clone and push source:
@@ -224,18 +223,34 @@ fsite project init --config finite.toml --output json
 ```
 
 Project Init atomically creates that human's explicit revocable Native
-Principal Share. The dashboard can then exchange a bounded
-User Nostr Identity proof for the Site's ordinary Viewer Cookie, without an
-email or magic-link flow. A proof never creates a Share, and removing the npub
-takes effect on the next content request even if the browser still has a
-cookie. Outside an active authenticated Finite Chat turn, standalone agents
+Principal Share. Existing native clients retain the bounded NIP-98 viewer
+exchange. Outside an active authenticated Finite Chat turn, standalone agents
 may still pass `--requesting-user-npub NPUB` explicitly. A conflicting
 explicit value during an active authenticated turn is rejected. Agents must
 never derive this identity from quoted message text.
 
-The Finite dashboard can also open a Site already shared to a verified
-External Principal email through the legacy server-to-server email exchange.
-That compatibility path does not add the email to the Site.
+For browser visits and dashboard previews, the dashboard exchanges the existing
+account session's verified email for the ordinary Sites Viewer Cookie. Sites
+continues to interpret its own publisher email and sharing lists on every read;
+this exchange adds no shares and does not require Hosted Chat. Anonymous or
+unverified visitors retain the email challenge. An authenticated but unshared
+visitor can request access or try another email.
+
+After the dashboard serves `/site-auth`, enable automatic browser handoff with
+the daemon's
+`FINITE_SITES_ACCOUNT_LOGIN_URL=https://finite.computer/site-auth`. Without it,
+direct visits retain the email form. The dashboard uses the existing
+`FC_SITES_V2_UPSTREAM_URL` and the service credential for v2. Retained
+legacy previews keep using `FC_SITES_UPSTREAM_URL`; neither exchange retries
+against the other registry. Keep the legacy adapter until its previews and
+Hosted Chat requester consumers are retired. The account handoff is site-bound,
+single-use, and expires after 60 seconds; emailed links retain their existing
+reusable 15-minute behavior. Both use the same seven-day, host-scoped Viewer
+Cookie: `SameSite=Lax` for top-level visits and a distinct `Partitioned` cookie
+for iframe access in secure contexts. Sites checks current permissions on every
+content request. See
+[ADR 0029](docs/adr/0029-account-session-viewer-bridge.md).
+
 The server-to-server credential for this optional exchange is
 `FINITE_SITES_VIEWER_SESSION_TOKEN`, exactly 64 lowercase hex characters
 (`openssl rand -hex 32`). Keep the same value in the Sites and dashboard

@@ -62,6 +62,25 @@ already be accessible to that user. After maintenance using a Machine entrypoint
 override, explicitly restore `/usr/local/bin/sites-entrypoint`, the serving
 arguments, image, services and mount; restoring the command alone is insufficient.
 
+## Account bridge
+
+Follow [ADR 0029](../../finite-sites/docs/adr/0029-account-session-viewer-bridge.md)
+and the [dashboard configuration](../../finitecomputer-v2/apps/dashboard/README.md#sites-account-viewer-boundary).
+Deploy the dashboard's `/site-auth` route before enabling
+`FINITE_SITES_ACCOUNT_LOGIN_URL=https://finite.computer/site-auth` on Sites.
+Both services must receive the same `FINITE_SITES_VIEWER_SESSION_TOKEN` from the
+secret inventory. Keep `FC_SITES_UPSTREAM_URL` on legacy and set
+`FC_SITES_V2_UPSTREAM_URL` to the Fly service API. A failed v2 exchange must not
+retry against legacy.
+
+Before enabling traffic, verify authorized and unshared accounts, the guest
+email fallback, share revocation, direct Site visits and dashboard iframes on
+the real domains. Also prove legacy app/document previews and Hosted Chat
+requester assertions still work when v2 is unavailable. The bridge grants no
+new shares and does not migrate old URLs. Its synthetic legacy fixture and
+development browser tests do not replace a restore of the actual source state
+and live account verification.
+
 ## Verify
 
 Use the matching reviewed CLI with an isolated `FINITE_HOME` and
@@ -103,4 +122,7 @@ Production cutover needs a separately reviewed site/URL mapping, final
 service-consistent copy under a Publishing Write Freeze, access verification,
 and a rollback boundary for destination writes. Preserve legacy API, Git and
 auth routes until their consumers are retired; do not blanket-redirect them.
+Redirect only explicitly mapped static content URLs, preserving path and query;
+old-host cookies and tokens cannot establish a new-host session. Qualify saved
+Git remotes and existing agents before changing CLI defaults or runtime pins.
 This deployment procedure does not authorize cutover or a CLI/runtime rollout.

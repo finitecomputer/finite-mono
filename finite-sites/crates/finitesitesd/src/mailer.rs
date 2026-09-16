@@ -203,7 +203,7 @@ fn site_url_with_path(base_url: &str, path: &str) -> String {
 }
 
 fn api_prefix(api_url: &str) -> String {
-    if api_url == "https://v2.finite.chat" {
+    if api_url == "https://finite.site" {
         String::new()
     } else {
         format!("FINITE_SITES_API={api_url} ")
@@ -473,8 +473,8 @@ https://hello.finite.chat/llms.txt\n"
             email: "skyler@example.com",
             project_slug: "finitechat-native",
             role: "editor",
-            api_url: "https://v2.finite.chat",
-            git_remote_url: "https://v2.finite.chat/finitechat-native.git",
+            api_url: "https://finite.site",
+            git_remote_url: "https://finite.site/finitechat-native.git",
             email_login_token: "token123",
             site: Some(&site),
         });
@@ -495,7 +495,22 @@ For your agent\n\n"
         assert!(project.contains(
             "fsite auth git finitechat-native --email skyler@example.com --store --output json"
         ));
-        assert!(project.contains("git clone https://v2.finite.chat/finitechat-native.git"));
+        assert!(project.contains("git clone https://finite.site/finitechat-native.git"));
+        assert!(!project.contains("FINITE_SITES_API="));
+        for api in ["https://v2.finite.chat", "http://127.0.0.1:8787"] {
+            let invite = project_collaborator_invite_text(&ProjectCollaboratorInvite {
+                email: "skyler@example.com",
+                project_slug: "finitechat-native",
+                role: "editor",
+                api_url: api,
+                git_remote_url: "https://finite.site/finitechat-native.git",
+                email_login_token: "token123",
+                site: Some(&site),
+            });
+            assert!(invite.contains(&format!(
+                "FINITE_SITES_API={api} fsite auth redeem skyler@example.com token123"
+            )));
+        }
         assert!(project.contains("Project site:"));
         assert!(
             project.contains(

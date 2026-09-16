@@ -212,7 +212,7 @@ pub fn not_shared(email: &str) -> String {
              that address.</p>\
              <form method=\"post\" action=\"/_finite/request-access\">\
                <button type=\"submit\">Request access</button>\
-             </form>"
+             </form><p><a href=\"/_finite/sign-in\">Try another email</a></p>"
         ),
     )
 }

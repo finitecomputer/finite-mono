@@ -255,14 +255,13 @@ async fn create_verified_email_viewer_session(
         ));
     }
     let link = engine
-        .request_login_for_site(&site, &normalized_email, now)
+        .request_viewer_handoff(&site, &normalized_email, now)
         .map_err(|error| {
             log_if_internal(&error);
             ApiError::from(error)
-        })?
-        .ok_or_else(|| ApiError::forbidden("viewer access is unavailable"))?;
+        })?;
 
-    // Reuse the existing reusable magic-link token. `return_to` is a bounded,
+    // Account handoffs are single-use. `return_to` is a bounded,
     // same-origin path and is validated again by the redeem handler.
     let redeem_url = format!(
         "{}&return_to={}",

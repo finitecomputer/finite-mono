@@ -61,13 +61,13 @@ pub struct VerifiedEmailViewerSessionRequest {
     pub site_url: String,
     /// Email verified by the calling account boundary.
     pub verified_email: String,
-    /// Same-origin path to visit after the magic-link token is redeemed.
+    /// Same-origin path to visit after the session token is redeemed.
     pub return_to: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct VerifiedEmailViewerSessionResponse {
-    /// Existing reusable Sites magic-link URL. It expires quickly and must
+    /// Single-use, site-bound account handoff URL. It expires quickly and must
     /// never be persisted as a durable account credential.
     pub redeem_url: String,
 }

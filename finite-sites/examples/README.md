@@ -23,7 +23,7 @@ fsite project grant finitechat-native --email skyler@example.com --send-invite -
 fsite auth login skyler@example.com
 fsite auth redeem skyler@example.com TOKEN_FROM_EMAIL
 fsite auth git finitechat-native --email skyler@example.com --output json
-git clone https://v2.finite.chat/finitechat-native.git /tmp/finitechat-native
+git clone https://finite.site/finitechat-native.git /tmp/finitechat-native
 rsync -a --delete examples/finitechat-native-mockup/ /tmp/finitechat-native/
 cd /tmp/finitechat-native
 git add finite.toml index.html

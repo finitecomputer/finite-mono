@@ -1439,6 +1439,7 @@ version = "0.2.16"
 dependencies = [
  "base64",
  "bech32",
+ "finite-nostr",
  "getrandom 0.3.4",
  "secp256k1",
  "serde",
@@ -1485,6 +1486,7 @@ dependencies = [
  "tokio",
  "tower",
  "ureq",
+ "url",
 ]
 
 [[package]]

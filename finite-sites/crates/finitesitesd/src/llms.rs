@@ -4,7 +4,7 @@
 //! it when the active Version has no user-authored `/llms.txt`.
 
 const FSITE_REPOSITORY_URL: &str = env!("CARGO_PKG_REPOSITORY");
-const DEFAULT_API_URL: &str = "https://v2.finite.chat";
+const DEFAULT_API_URL: &str = "https://finite.site";
 
 fn api_configuration_text(api_url: &str) -> String {
     let normalized = api_url.trim_end_matches('/');
@@ -128,7 +128,7 @@ mod tests {
         let text = generated_project_llms_txt(
             "demo",
             "https://demo.finite.chat/",
-            "https://v2.finite.chat",
+            "https://finite.site",
             "demo-project",
             "https://git.finite.chat/demo-project.git",
             "main",
@@ -158,17 +158,19 @@ mod tests {
 
     #[test]
     fn generated_text_configures_non_default_apis() {
-        let text = generated_project_llms_txt(
-            "demo",
-            "http://demo.sites.localhost:8787/",
-            "http://127.0.0.1:8787",
-            "demo-project",
-            "http://git.sites.localhost:8787/demo-project.git",
-            "main",
-            "dist",
-        );
-        assert!(text.contains("Configure this non-default API before running fsite"));
-        assert!(text.contains("export FINITE_SITES_API=\"http://127.0.0.1:8787\""));
+        for api in ["http://127.0.0.1:8787", "https://v2.finite.chat"] {
+            let text = generated_project_llms_txt(
+                "demo",
+                "http://demo.sites.localhost:8787/",
+                api,
+                "demo-project",
+                "http://git.sites.localhost:8787/demo-project.git",
+                "main",
+                "dist",
+            );
+            assert!(text.contains("Configure this non-default API before running fsite"));
+            assert!(text.contains(&format!("export FINITE_SITES_API=\"{api}\"")));
+        }
     }
 
     #[test]
@@ -176,7 +178,7 @@ mod tests {
         let text = generated_project_llms_txt(
             "crm",
             "https://crm.finite.chat/",
-            "https://v2.finite.chat",
+            "https://finite.site",
             "crm",
             "https://git.finite.chat/crm.git",
             "main",

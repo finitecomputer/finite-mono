@@ -246,16 +246,6 @@
         ];
       };
 
-      # Dedicated static-only Finite Sites v2 validation host (ADR 0028).
-      sitesV2 = nixpkgs-lat3.lib.nixosSystem {
-        system = "x86_64-linux";
-        specialArgs = runnerSpecialArgs;
-        modules = [
-          revisionModule
-          ./infra/nixos/hosts/finite-sites-v2
-        ];
-      };
-
       monitoring = nixpkgs-lat3.lib.nixosSystem {
         system = "x86_64-linux";
         modules = [
@@ -290,8 +280,12 @@
           hermesAgentMinimal = hermes-agent.packages.${system}.minimal;
         in
         {
-          simplex-chat = hermesPkgs.callPackage ./finitecomputer-v2/deploy/finite-computer/images/simplex-chat.nix {};
-          fsite-cli-v1 = hermesPkgs.callPackage ./finitecomputer-v2/deploy/finite-computer/images/fsite-cli-v1.nix {};
+          simplex-chat =
+            hermesPkgs.callPackage ./finitecomputer-v2/deploy/finite-computer/images/simplex-chat.nix
+              { };
+          fsite-cli-v1 =
+            hermesPkgs.callPackage ./finitecomputer-v2/deploy/finite-computer/images/fsite-cli-v1.nix
+              { };
           hermes-agent = hermesAgentPackage;
           hermes-agent-runtime = hermesAgentPackage;
           hermes-agent-runtime-python = hermesAgentPackage.hermesVenv;
@@ -303,8 +297,12 @@
               ./finitecomputer-v2/deploy/finite-computer/images/agent-runtime-toolchains.nix
               {
                 hermesAgent = hermesAgentPackage;
-                simplexChat = hermesPkgs.callPackage ./finitecomputer-v2/deploy/finite-computer/images/simplex-chat.nix {};
-                fsiteCliV1 = hermesPkgs.callPackage ./finitecomputer-v2/deploy/finite-computer/images/fsite-cli-v1.nix {};
+                simplexChat =
+                  hermesPkgs.callPackage ./finitecomputer-v2/deploy/finite-computer/images/simplex-chat.nix
+                    { };
+                fsiteCliV1 =
+                  hermesPkgs.callPackage ./finitecomputer-v2/deploy/finite-computer/images/fsite-cli-v1.nix
+                    { };
               };
         };
 
@@ -459,7 +457,6 @@
             finite-lat-5-kexec = lat5Kexec.config.system.build.kexecInstallerTarball;
             finite-lat-4-nixos-anywhere = nixos-anywhere.packages.x86_64-linux.nixos-anywhere;
             finite-lat-5-nixos-anywhere = nixos-anywhere.packages.x86_64-linux.nixos-anywhere;
-            finite-sites-v2-system = sitesV2.config.system.build.toplevel;
             finite-monitoring-system = monitoring.config.system.build.toplevel;
           };
       };
@@ -493,10 +490,6 @@
       # infra/runbooks/lat4-nixos-runner-install.md; it starts drained.
       nixosConfigurations.finite-lat-4 = lat4;
       nixosConfigurations.finite-lat-5 = lat5;
-
-      # Dedicated static-only Finite Sites v2 validation host (ADR 0028).
-      # The current app-plane hosts keep their canonical edge until cutover.
-      nixosConfigurations.finite-sites-v2 = sitesV2;
 
       # Dedicated NixOS Grafana/Prometheus/Loki receiver. This is the hard-cut
       # replacement for the historical monitoring Docker Compose stack.

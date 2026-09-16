@@ -19,19 +19,15 @@ Finite Sites is a static-only platform service:
 - finite-identity/core used only for facts Sites does not own, such as NIP-05
   directory lookup.
 
-## Validation Service
+## Deployment
 
-The first production-like deployment is a single NixOS VPS/VM:
+The destination is one Fly Machine with a persistent volume and CI-built image.
+The [Sites runbook](../../infra/runbooks/deploy-sites.md) owns deployment,
+backup/restore qualification and cutover. API and Git use `https://finite.site`;
+served Sites use `https://{site}.finite.site/`.
 
-- API and git smart HTTP: `https://v2.finite.chat`;
-- served sites: `https://{site}.v2.finite.chat/`;
-- state: `/var/lib/finite-sites`;
-- healthcheck: `GET /api/v2/healthz`;
-- backups and restore drills owned by the Sites service.
-
-The validation service starts essentially empty except for reserved names and
-collision-protection data imported by a narrow operator process. There is no
-dual-write migration framework.
+Validate restored static Sites and existing access before moving traffic.
+There is no dual-write migration framework.
 
 ## Product Scope
 

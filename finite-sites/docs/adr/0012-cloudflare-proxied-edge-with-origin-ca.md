@@ -1,5 +1,9 @@
 # Cloudflare-Proxied Edge With Origin CA Certificates
 
+This applies to the retained legacy `finite.chat` deployment. The static-only
+Fly deployment uses the edge and TLS configuration in
+[the Sites runbook](../../../infra/runbooks/deploy-sites.md).
+
 `finite.chat` lives on Cloudflare. The wildcard and API records are
 proxied: Cloudflare terminates public TLS with its Universal SSL wildcard
 and absorbs DDoS, and the origin (Caddy on the SaaS box) presents a

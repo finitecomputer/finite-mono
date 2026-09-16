@@ -16,7 +16,7 @@ ADR 0007 emergency cutover that made finite-lat-2 the replacement app server.
   7.0.0-15-generic, x86-64.
 - Disks at the dated capture: /dev/md0 439G root (24% used); /dev/md1 1.8T at
   `/data` (essentially empty). `/data` is not an Agent placement or recovery
-  target; the historical proposal in `backups.md` is superseded.
+  target; use the current recovery runbooks.
 - Network: 64.34.80.19/31 + IPv6. Public exposure is exactly 22 (sshd) and
   80/443 (Caddy); everything else binds loopback. `/tmp` is a 94G tmpfs
   (matters for backups — see appendix).
@@ -25,8 +25,7 @@ ADR 0007 emergency cutover that made finite-lat-2 the replacement app server.
 
 | Service | What | Config in this tree |
 |---|---|---|
-| `finite-saas-sites.service` **(historical pre-NixOS unit)** | Current production Sites is NixOS-managed on finite-lat-2 and remains pinned to the released v1 API/docs/static daemon until a deliberate ADR 0028 cutover. The separate v2 validation host is `infra/nixos/hosts/finite-sites-v2/`. Data: `/var/lib/finite-sites`. | `systemd/finite-saas-sites.service` |
-| `caddy.service` **(historical pre-NixOS unit)** | Current production Caddy is NixOS-managed on finite-lat-2. Canonical vhosts `api.finite.chat`, `*.finite.chat`, and `*.docs.finite.chat` still proxy to the canonical Sites daemon on 127.0.0.1:8787 until cutover. | `caddy/Caddyfile` |
+| Legacy Sites and Caddy | The live NixOS service and canonical routes remain until the [Fly cutover](../../runbooks/deploy-sites.md). | [Sites module](../../nixos/modules/finitesitesd.nix), [Caddy module](../../nixos/modules/caddy.nix) |
 | `finite-core-tunnel.service` **(historical, retired)** | Pre-NixOS SSH tunnel capture. Current Core is native on finite-lat-2; do not recreate the tunnel. | `systemd/finite-core-tunnel.service` |
 | `finite-saas-runner.service` + `.timer` | **Previously undocumented, DORMANT.** "Finite agent creation runner": oneshot every 20s from the build-on-box checkout `/opt/finite/finitecomputer`. Timer is disabled and absent from `list-timers`. Stale `After=k3s.service` (no k3s here); depends on the core tunnel via drop-in. | `systemd/finite-saas-runner.service`, `.timer`, `systemd/finite-saas-runner-10-core-tunnel.conf` |
 | GitHub Actions runners **(removal inventory)** | `finite-lat-2-mono` (registered against finite-mono) **plus** the 3 legacy-repo runners (v2.335.1, `User=ubuntu`, under `/srv/github-runner/`, registered to finitechat / finitecomputer / finitecomputer-v2). Current workflows use Depot and should not target these runners; they are to be unregistered during decommission. | `runners.md` |
@@ -56,15 +55,12 @@ ADR 0007 emergency cutover that made finite-lat-2 the replacement app server.
 
 ## Files here
 
-- `systemd/` — unit files and env example. Deployed-vs-repo drift check on
-  2026-07-08 was **byte-identical** for the pre-ADR Caddyfile,
-  finite-saas-sites.service, kata.conf, finite-app@.service, and nerdctl
-  sudoers. ADR 0028 removed the app-runner files from this tree; git history
-  is the archive.
-- `caddy/Caddyfile` — deployed at `/etc/caddy/Caddyfile`.
+- `systemd/` — historical runner and tunnel files.
 - `runners.md` — runner removal inventory for the lat2 decommission.
-- `backups.md` — backup reality and the proposed timer.
-- `deploy.md` — current (deprecated) manual sites deploy and the target flow.
+
+Obsolete Sites units, Caddy configuration, and manual deploy/backup procedures
+were removed; git history preserves the capture. Current Sites deployment
+guidance lives in the [Sites runbook](../../runbooks/deploy-sites.md).
 
 ## Captured-state appendix — on-host reality that is not (yet) code
 
@@ -93,8 +89,8 @@ ADR 0007 emergency cutover that made finite-lat-2 the replacement app server.
    `/var/lib/finite-sites` is `/var/backups/finite-sites/finite-sites-20260617T215714Z.tar.gz`
    (2026-06-17). A newer tarball,
    `/tmp/finite-sites-20260702T145453Z.tar.gz` (2026-07-02), sits in `/tmp`
-   — **a tmpfs; it evaporates on reboot**. `/data` (1.8T) is empty. See
-   `backups.md`.
+   — **a tmpfs; it evaporates on reboot**. `/data` (1.8T) was empty.
+   Preserve any surviving archives under the [decommission recovery rules](../../runbooks/decommission-lat2.md).
 6. `/etc/sudoers.d/finite-sites` (systemctl start/stop/restart/is-active for
    `finite-app@*`) existed on the host as app-runner residue. ADR 0028 removes
    the Sites app-runner path; do not recreate the sudoers or polkit files.
