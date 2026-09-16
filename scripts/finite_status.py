@@ -444,6 +444,15 @@ def psql_query_sets(environment: dict[str, str]) -> dict[str, list[dict[str, Any
              "request_runner_id", "agent_runtime_id", "actual_source_host_id", "retry_of_launch_code_id"],
         ),
         (
+            "unused_single_code_batches",
+            "SELECT code.id, batch.id, batch.name, batch.created_by_workos_user_id, batch.hosting_tier, batch.expires_at "
+            "FROM launch_codes code JOIN launch_code_batches batch ON batch.id=code.batch_id "
+            "WHERE batch.code_count=1 AND code.redeemed_at IS NULL "
+            "AND batch.revoked_at IS NULL AND batch.expires_at>CURRENT_TIMESTAMP "
+            "ORDER BY batch.created_at, code.id;",
+            ["launch_code_id", "batch_id", "batch_name", "issuer_workos_user_id", "hosting_tier", "expires_at"],
+        ),
+        (
             "agent_creation_requests",
             "SELECT id, project_id, display_name, status, target_source_host_id, runner_id, agent_runtime_id "
             "FROM agent_creation_requests WHERE status IN ('requested', 'launching') ORDER BY created_at, id;",
@@ -1647,6 +1656,7 @@ def build_fleet(
         "distribution_consistent_with_detail_snapshot": distribution_consistent,
         "hosts": host_reports,
         "canary_host_reservations": core.get("canary_host_reservations", []),
+        "unused_single_code_batches": core.get("unused_single_code_batches", []),
         "agent_creation_requests": core.get("agent_creation_requests", []),
     }
     if probe is not None:
