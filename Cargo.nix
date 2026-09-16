@@ -5173,12 +5173,12 @@ rec {
         libName = "finitesites_proto";
         dependencies = [
           {
-            name = "base64";
-            packageId = "base64";
-          }
-          {
             name = "bech32";
             packageId = "bech32";
+          }
+          {
+            name = "finite-nostr";
+            packageId = "finite-nostr";
           }
           {
             name = "getrandom";
@@ -5210,6 +5210,12 @@ rec {
           {
             name = "toml";
             packageId = "toml";
+          }
+        ];
+        devDependencies = [
+          {
+            name = "base64";
+            packageId = "base64";
           }
         ];
 
@@ -5328,10 +5334,6 @@ rec {
             packageId = "tar";
           }
           {
-            name = "thiserror";
-            packageId = "thiserror";
-          }
-          {
             name = "time";
             packageId = "time";
             features = [ "formatting" "local-offset" "parsing" ];
@@ -5350,6 +5352,10 @@ rec {
             name = "ureq";
             packageId = "ureq";
             features = [ "json" ];
+          }
+          {
+            name = "url";
+            packageId = "url";
           }
         ];
         devDependencies = [
@@ -5512,7 +5518,7 @@ rec {
       };
       "fsite-cli" = rec {
         crateName = "fsite-cli";
-        version = "0.5.2";
+        version = "0.6.0";
         edition = "2024";
         crateBin = [
           {
