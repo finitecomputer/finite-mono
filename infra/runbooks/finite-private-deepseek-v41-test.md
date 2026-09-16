@@ -9,8 +9,9 @@ A future start is not evidence that a scheduler has been armed; see the executio
 ## Window and recovery
 
 Working retry window, retaining the previous duration: **September 17,
-03:00–06:00 Central (08:00–11:00 UTC)**. Date confirmation was requested;
-preparation does not itself schedule or start a production swap.
+03:00–06:00 Central (08:00–11:00 UTC)**. This uses the previous window as
+the working assumption for tonight. Preparation does not itself schedule or
+start a production swap.
 
 | Central | Action |
 | --- | --- |
@@ -302,8 +303,14 @@ passing speed measurements as permission to leave DeepSeek serving.
 
 ## September 17 retry preparation
 
-- The exact schema-2 DeepSeek pack is being prepared on `control.inf9.tinfoil.sh`,
-  job `rigfuoralxtfifii`. Readiness is not established until the live gate passes.
+- The exact schema-2 DeepSeek pack completed on `control.inf9.tinfoil.sh`,
+  job `rigfuoralxtfifii`, at **September 16 09:37:55 Central**. Preparation
+  took about 15 minutes. Root hash, offset and verity UUID exactly match the
+  existing measured candidate; no candidate/config release change is required.
+- Provider modelwrap image:
+  `ghcr.io/tinfoilsh/modelwrap@sha256:714595d190dcb141099b20d178f9cf6e5d16763be53eaba9f9e521167709978f`.
+- Private receipt and reports are in `.local-state/deepseek-v41-20260917/`.
+  The final live pack gate and read-only launch preflight both passed.
 - The exact schema-1 GLM rollback pack passes the new live host gate.
 - The candidate launch guard refuses incomplete/mismatched packs, changed
   serving identity, and early/late starts before it can stop GLM.
@@ -313,7 +320,15 @@ passing speed measurements as permission to leave DeepSeek serving.
   America/Chicago, including daylight saving time. Dry-run remains the default.
 - Validation: 32 focused Python tests pass; dry-run confirms September 17
   UTC bounds, the 05:15 cutoff, and concurrency tiers through 128. The live
-  launch dry-run correctly refuses the incomplete DeepSeek job.
+  launch dry-run first refused the incomplete job and then passed after the
+  exact pack completed, without relaunching anything.
+- Tinfoil's candidate-config validation returned `valid: true` for the exact
+  release and container UUID. This is separate from host-pack verification.
+- GLM remained `ready` on its original tag/host with unchanged sealed secret
+  names and update settings. Health checks stayed HTTP 200 during preparation.
+  Canonical status after preparation had green chat/recovery/rollout sections;
+  existing fleet convergence red and app-host collection unknown remain
+  explicit entry-review items.
 - No new timed execution is armed. The previous overnight sleep loop ended
   after verified recovery; it will not wake this retry automatically.
 
