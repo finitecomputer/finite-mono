@@ -3,6 +3,15 @@
 Fly is the destination for the complete Sites switchover. The
 [`fly.toml`](../fly/sites/fly.toml) configuration owns the deployment's domains,
 ports and resource sizes: one Machine with one persistent volume.
+It enables real mail and account login; apply it only after the cutover gates,
+including the dashboard route and dedicated offsite recovery proof. An isolated
+rehearsal uses private routing and dev mail instead.
+
+The currently pinned image passed restoration but is not cutover-ready: a
+pending Git event whose commit lacks `finite.toml` blocks correcting pushes.
+Fix and qualify invalid-then-corrected pushes with inherited pending events,
+then update the image pin and repeat recovery qualification. Do not bypass this
+gate by editing the production event history.
 
 Preserve the source data and archives until the Fly restore and access checks
 pass. Never open the live source registry with the static-only daemon: its
@@ -57,7 +66,8 @@ into independent writable copies.
 
 The [entrypoint](../images/sites-entrypoint) requires the data mount, adjusts
 only its root ownership, and runs Sites as UID/GID 65532. Imported files must
-already be accessible to that user. After maintenance using a Machine entrypoint
+already be accessible to that user, including the Git trees and mail outbox.
+Check ownership after all staging writes. After maintenance using a Machine entrypoint
 override, explicitly restore `/usr/local/bin/sites-entrypoint`, the serving
 arguments, image, services and mount; restoring the command alone is insufficient.
 
@@ -65,12 +75,16 @@ arguments, image, services and mount; restoring the command alone is insufficien
 
 Follow [ADR 0029](../../finite-sites/docs/adr/0029-account-session-viewer-bridge.md)
 and the [dashboard configuration](../../finitecomputer-v2/apps/dashboard/README.md#sites-account-viewer-boundary).
-Deploy the dashboard's `/site-auth` route before enabling
-`FINITE_SITES_ACCOUNT_LOGIN_URL=https://finite.computer/site-auth` on Sites.
+Deploy and qualify the dashboard's `/site-auth` route before applying the
+account login setting in `fly.toml`.
 Both services must receive the same `FINITE_SITES_VIEWER_SESSION_TOKEN` from the
-secret inventory. Keep `FC_SITES_UPSTREAM_URL` on legacy and set
-`FC_SITES_V2_UPSTREAM_URL` to the Fly service API. A failed v2 exchange must not
-retry against legacy.
+secret inventory. At the authorized cutover, merge the
+[dashboard assignment](../fly/sites/dashboard.env.example) into its existing
+`/etc/finite/dashboard.env`, preserving all other values and root:root `0600`.
+This sets `FC_SITES_V2_UPSTREAM_URL=https://finite.site`; keep
+`FC_SITES_UPSTREAM_URL=http://127.0.0.1:8787` for legacy previews and Hosted Chat.
+Restart the dashboard through its normal deployment procedure and verify both
+origins. A failed v2 exchange must not retry against legacy.
 
 Before enabling traffic, verify authorized and unshared accounts, the guest
 email fallback, share revocation, direct Site visits and dashboard iframes on
@@ -208,11 +222,23 @@ copies; use the [offline reconciliation procedure](sites-static-output-reconcili
 for supported legacy output IDs. Mixed projects need an explicit retained Site
 and proof of another publish.
 
-Production cutover needs a separately reviewed site/URL mapping, final
-service-consistent copy under a Publishing Write Freeze, access verification,
-and a rollback boundary for destination writes. Preserve legacy API, Git and
-auth routes until their consumers are retired; do not blanket-redirect them.
-Redirect only explicitly mapped static content URLs, preserving path and query;
-old-host cookies and tokens cannot establish a new-host session. Qualify saved
-Git remotes and existing agents before changing CLI defaults or runtime pins.
-This deployment procedure does not authorize cutover or a CLI/runtime rollout.
+Prepare the cutover review package outside git; it contains customer data:
+
+- Every inventoried output's exact IDs, retained/excluded disposition and old/new
+  URLs; exclusions preserve their source archives and remain on legacy until
+  separately retired. Retain existing demo shares and account for its cookie key.
+- For each source exception, the active Version's recorded Git commit, observed
+  branch tip, proposed source commit and subsequent-publish evidence. Preserve
+  history; stale branch tips require review, never a force-push.
+- Exact-host content redirects with path/query preservation and rollback-safe
+  caching. Keep legacy auth, API, Git, app and document requests on legacy;
+  old-host cookies and tokens cannot establish a new-host session.
+
+At the authorized cutover, compare the frozen source inventory and branch tips
+with that package; stop and review any drift. Take a fresh service-consistent
+Recovery Set under a Publishing Write Freeze, restore into an empty target,
+and repeat access verification before routing traffic. The rehearsal database
+contains test writes and must not become production. Define rollback around
+destination writes; do not overwrite them with an earlier database. Qualify
+saved Git remotes and existing agents before changing CLI defaults or runtime
+pins. This procedure does not authorize cutover or a CLI/runtime rollout.

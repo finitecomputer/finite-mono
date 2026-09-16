@@ -1,4 +1,4 @@
-# Fly: isolated deployment in the Finite organization; no production cutover.
+# Cutover target: apply only after the gates in infra/runbooks/deploy-sites.md.
 # This deployment consumes an existing CI-built image; Fly does not build it.
 app = "finite-sites"
 primary_region = "iad"
@@ -7,13 +7,22 @@ kill_signal = "SIGINT"
 kill_timeout = 120
 
 [build]
-  image = "ghcr.io/finitecomputer/finite-sites@sha256:25197b350ce7a389a1b4c373fae1326cdddb20f0ae876c7ee9d0c69ca5ae3c9e"
+  # d3245b403d938d5fde9bdd36a4a6a2f879086ef2; restore rehearsal passed.
+  # Pending invalid Git events still block correcting pushes; replace after the fix.
+  # https://github.com/finitecomputer/finite-mono/actions/runs/35049949459
+  image = "ghcr.io/finitecomputer/finite-sites@sha256:e951abcb5ab5e4b0f48e316af4ec5a260eee2d2e37dd4419edf998716502c722"
 
 [deploy]
   strategy = "rolling"
 
 [processes]
-  app = "serve --data /var/lib/finite-sites --listen 0.0.0.0:8787 --base-domain finite.site --api-url https://finite.site --git-url https://finite.site --site-scheme https --site-port none --mailer resend --mail-from 'Finite Sites <links@finite.chat>'"
+  app = "serve --data /var/lib/finite-sites --listen [::]:8787 --base-domain finite.site --api-url https://finite.site --git-url https://finite.site --site-scheme https --site-port none --git-auto-reconcile true --mailer resend --mail-from 'Finite Sites <links@finite.chat>'"
+
+[env]
+  # Qualify the dashboard /site-auth route and upstream before applying this file.
+  FINITE_SITES_ACCOUNT_LOGIN_URL = "https://finite.computer/site-auth"
+  # Enable only with the dedicated repository, file secrets and remote restore proof.
+  FINITE_SITES_BACKUP_ENABLED = "0"
 
 [mounts]
   source = "sites_data"
