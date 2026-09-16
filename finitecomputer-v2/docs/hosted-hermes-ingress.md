@@ -61,8 +61,8 @@ WebSocket URL and single-use native ticket.
 to stdout. It does not start Caddy, discover containers, reserve ports, call
 Core, or mutate running services. The manifest describes one HTTPS origin,
 an explicit listener and private admin Unix socket, and the runtime-to-loopback
-port projection. It is intended as disposable output of the future Runner
-reconciler, not an operator-maintained route database.
+port projection. The opt-in Runner reconciler uses the same renderer for disposable output;
+this is not an operator-maintained route database.
 
 For example, a derived manifest has this shape (these are configuration names
 and synthetic identifiers, not live routing):
@@ -95,8 +95,9 @@ CORS does not replace native
 authentication: `/api/status` is public, while protected native reads must
 reject anonymous and invalid credentials independently of origin.
 
-The command alone is **not safe production publication**. No deployment module
-or existing launch path invokes it in this draft.
+The command alone is **not safe production publication**. The opt-in lifecycle
+below supplies its ownership and process-lifetime preconditions. No production
+host enables it by default.
 
 ## Address lifetime is a release gate
 
@@ -112,7 +113,54 @@ Core placement and owned container metadata. Existing stopped-container port
 bindings remain reservations. Integrating that boundary requires all canonical,
 upgrade, rollback and recovery paths, interrupted child commands and startup
 reconciliation. Keep long guest-stop and readiness waits outside host-wide
-Caddy downtime. The renderer does not yet implement that lifecycle boundary.
+Caddy downtime. `hosted_hermes_lifecycle` supplies this boundary around Kata's
+shared create/start/stop/rename/remove operations, including upgrade and recovery
+helpers. Read-only provider commands and independent Borg recovery IO keep their
+existing paths; unknown provider operations fail closed when ingress is enabled.
+
+`GET /api/core/v1/hosted-hermes-route-targets` authenticates the Runner and
+projects only that host's current, enabled, applied, completed assignments.
+Runner joins those identifiers to canonical container ownership labels, the
+runtime's writable `/data` bind, and current native listener readiness. It reads
+saved ports through `nerdctl port` in every containerd namespace, including stopped
+and foreign containers; stopped `inspect` output alone loses port bindings.
+Hermes gets an explicit loopback port in 30000–31023, outside nerdctl's random
+allocation range. This does not change the broader finite-agentd port allocator.
+
+The host lock serializes Runner invocations. A marker written before each
+provider mutation survives an interrupted command until a fresh, quiescent
+systemd invocation confirms proxy exit. Runner's `ExitType=cgroup` and
+`KillMode=control-group` prevent a delayed nerdctl/CNI child from overlapping the
+next invocation; containerd-owned agents remain in their own service cgroups.
+Before removal, Runner computes a successor projection without the retiring
+container, confirms the old proxy's exit, and starts that successor **before**
+provider removal. Core reads, inventory scans, listener probes, guest shutdown,
+and slow removal therefore stay outside the host-wide stop/start interval.
+A failed projection or unconfirmed process exit blocks address release.
+
+`finite.hostedHermes.enable` enables the dedicated NixOS unit and the Runner
+configuration file. Set `publicOrigin` to the exact Core host origin and set
+`allowedOrigins` explicitly; `listenAddress`/`listenPort` configure the listener,
+and the module opens that TCP port in the host firewall. DNS, host reachability,
+certificates, and production Kata behavior still require deployment qualification.
+Caddy has no timer, automatic restart, resume, or boot activation. Only a fresh
+Runner projection starts it. The pre-start gate compares the configured immutable
+Runner executable with the last publisher: changing or rolling back the binary
+requires confirmed Caddy exit before that Runner can mutate compute. An older
+Runner cannot republish hosted ingress. Re-enabling a capable Runner reconstructs
+routes from Core and containerd. Removing the opt-in NixOS module removes/stops
+the dedicated service as part of system activation; do not roll back only unit
+files by hand while leaving an independently managed proxy alive.
+
+The disposable Linux proof in
+`scripts/proofs/hosted-hermes-process-lifetime.py` invokes the actual Kata adapter
+and lifecycle from an ignored Rust test executable. Build its tools with
+`scripts/proofs/hosted-hermes-lifecycle-tools.nix`, build the Runner library tests
+with `cargo test --locked -p finite-saas-runner --lib --no-run`, then supply
+`--tools <tool-output> --runner-test-binary <test-executable> --disposable-fixture`.
+It owns temporary systemd units, a separate containerd daemon, and synthetic data;
+never run it on a fleet host. This qualifies process/address behavior with runc,
+not the full Core lease/guest protocol or production x86 Kata/DNS/TLS rollout.
 
 ## Native auth and browser qualification
 

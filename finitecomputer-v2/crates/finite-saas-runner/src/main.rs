@@ -427,10 +427,12 @@ fn run_cycle() -> Result<RunOnceOutcome> {
                     health_reports: health_reports.clone(),
                 },
             );
-            if let Some(hosted) = hosted_hermes {
-                if hosted.reconcile().is_err() {
-                    eprintln!("hosted Hermes reconciliation unavailable; ingress is stopped");
-                }
+            if let Some(hosted) = hosted_hermes
+                && hosted.reconcile().is_err()
+            {
+                eprintln!(
+                    "hosted Hermes reconciliation failed; see service state for ingress availability"
+                );
             }
             outcome?
         }

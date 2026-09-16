@@ -145,10 +145,10 @@ impl HostedHermesGuard {
         }
         // Check the old path too; systemd may clear ControlGroup on transition.
         for state in [&before, &after] {
-            if let Some(group) = state.get("ControlGroup").filter(|group| !group.is_empty()) {
-                if !cgroup_processes(&cgroup_path(group)?)?.is_empty() {
-                    return Err(refused("dedicated proxy still has live processes"));
-                }
+            if let Some(group) = state.get("ControlGroup").filter(|group| !group.is_empty())
+                && !cgroup_processes(&cgroup_path(group)?)?.is_empty()
+            {
+                return Err(refused("dedicated proxy still has live processes"));
             }
         }
         Ok(())
@@ -290,4 +290,72 @@ fn service_state(unit: &str) -> Result<BTreeMap<String, String>> {
     systemctl(&["show", unit, "--property=LoadState,ActiveState,Type,ExitType,KillMode,SendSIGKILL,Delegate,MainPID,ControlGroup,InvocationID,Restart"])?
         .lines().map(|line| line.split_once('=').map(|(key, value)| (key.into(), value.into()))
             .ok_or_else(|| refused("malformed service state"))).collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn state() -> BTreeMap<String, String> {
+        [
+            ("LoadState", "loaded"),
+            ("Type", "exec"),
+            ("ExitType", "cgroup"),
+            ("KillMode", "control-group"),
+            ("SendSIGKILL", "yes"),
+            ("Delegate", "no"),
+            ("ActiveState", "active"),
+            ("MainPID", "42"),
+            ("InvocationID", "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"),
+            ("ControlGroup", "/system.slice/runner.service"),
+        ]
+        .into_iter()
+        .map(|(key, value)| (key.into(), value.into()))
+        .collect()
+    }
+
+    #[test]
+    fn only_current_main_process_with_complete_cgroup_policy_can_publish() {
+        let current = "0::/system.slice/runner.service\n";
+        assert!(validate_runner(&state(), 42, current).is_ok());
+        for (key, invalid) in [
+            ("Type", "oneshot"),
+            ("ExitType", "main"),
+            ("KillMode", "process"),
+            ("SendSIGKILL", "no"),
+            ("Delegate", "yes"),
+            ("ActiveState", "deactivating"),
+            ("LoadState", "not-found"),
+            ("MainPID", "41"),
+            ("InvocationID", "not-an-invocation"),
+        ] {
+            let mut changed = state();
+            changed.insert(key.into(), invalid.into());
+            assert!(validate_runner(&changed, 42, current).is_err(), "{key}");
+            changed.remove(key);
+            assert!(
+                validate_runner(&changed, 42, current).is_err(),
+                "missing {key}"
+            );
+        }
+        assert!(validate_runner(&state(), 42, "0::/other.service").is_err());
+        for path in ["/", "relative", "/system.slice/../other"] {
+            assert!(cgroup_path(path).is_err());
+        }
+    }
+
+    #[test]
+    fn detached_descendants_are_counted_even_when_parent_group_is_empty() {
+        let root = tempfile::tempdir().unwrap();
+        std::fs::write(root.path().join("cgroup.procs"), "").unwrap();
+        let child = root.path().join("child");
+        std::fs::create_dir(&child).unwrap();
+        std::fs::write(child.join("cgroup.procs"), "71\n72\n").unwrap();
+        assert_eq!(
+            cgroup_processes(root.path()).unwrap(),
+            BTreeSet::from([71, 72])
+        );
+        std::fs::write(child.join("cgroup.procs"), "unreadable PID").unwrap();
+        assert!(cgroup_processes(root.path()).is_err());
+    }
 }

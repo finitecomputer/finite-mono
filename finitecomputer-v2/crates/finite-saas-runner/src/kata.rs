@@ -485,7 +485,9 @@ impl KataLauncher {
     }
 
     fn execute(&self, command: &PlannedCommand, timeout: Duration) -> Result<Output, RunnerError> {
-        if let Some(hosted) = &self.config.hosted_hermes {
+        if let Some(hosted) = &self.config.hosted_hermes
+            && command.program == self.config.nerdctl_bin
+        {
             return hosted.execute(command, timeout, |command, timeout| {
                 self.execute_unfenced(command, timeout)
             });
@@ -8274,3 +8276,7 @@ esac
         assert!(fake_state.join(format!("{own}.image")).exists());
     }
 }
+
+#[cfg(all(test, target_os = "linux"))]
+#[path = "hosted_hermes_proof.rs"]
+mod hosted_hermes_proof;

@@ -111,12 +111,23 @@ impl HostedHermesLifecycle {
         {
             return Err(refused("unexpected provider command shape"));
         }
-        if !matches!(
-            verb,
-            Some("run" | "create" | "rm" | "start" | "stop" | "rename" | "restart")
-        ) {
-            return execute(command, timeout);
+        match verb {
+            Some("inspect" | "ps" | "port" | "info" | "pull") => return execute(command, timeout),
+            Some("run" | "create" | "rm" | "start" | "stop" | "rename" | "restart") => {}
+            _ => return Err(refused("unclassified provider operation")),
         }
+        let removal = if verb == Some("rm") {
+            if command.args.len() != 5 || command.args[3] != "--force" {
+                return Err(refused("unexpected remove command shape"));
+            }
+            Some(
+                command.args[4]
+                    .to_str()
+                    .ok_or_else(|| refused("invalid removal target"))?,
+            )
+        } else {
+            None
+        };
         let guard = self
             .guard
             .lock()
@@ -142,7 +153,17 @@ impl HostedHermesLifecycle {
                 ],
             );
         }
-        guard.begin_mutation(verb == Some("rm"))?;
+        // Resolve authority, inventory and readiness while the old process is
+        // still serving. The successor omits the record being removed. Start
+        // it before provider IO: slow removal cannot prolong host-wide downtime
+        // and no request in either process can follow that address into reuse.
+        let successor = removal
+            .map(|name| self.projection(Some(name)))
+            .transpose()?;
+        guard.begin_mutation(removal.is_some())?;
+        if let Some(successor) = successor {
+            self.publish(successor, &guard)?;
+        }
         let output = execute(&command, timeout)?;
         if !output.status.success() {
             // Preserve the original provider result, but do not let a later
@@ -150,7 +171,7 @@ impl HostedHermesLifecycle {
             return Ok(output);
         }
         guard.finish_mutation()?;
-        if self.reconcile_locked(&guard).is_err() {
+        if removal.is_none() && self.reconcile_locked(&guard).is_err() {
             guard.stop_proxy()?;
             eprintln!(
                 "hosted Hermes routes unavailable after provider mutation; ingress is stopped"
@@ -179,8 +200,16 @@ impl HostedHermesLifecycle {
 
     fn reconcile_locked(&self, guard: &HostedHermesGuard) -> Result<()> {
         guard.before_publication()?;
+        let projection = self.projection(None)?;
+        self.publish(projection, guard)
+    }
+
+    fn projection(&self, excluded: Option<&str>) -> Result<Option<Vec<u8>>> {
         let targets = self.targets()?;
-        let inventory = self.inventory()?;
+        let mut inventory = self.inventory()?;
+        if let Some(name) = excluded {
+            inventory.exclude_container(&self.namespace, name);
+        }
         let mut routes = inventory
             .routes(
                 &self.namespace,
@@ -202,8 +231,7 @@ impl HostedHermesLifecycle {
                 .is_ok_and(|response| response.status() == 200)
         });
         if routes.is_empty() {
-            guard.stop_proxy()?;
-            return Ok(());
+            return Ok(None);
         }
         let manifest = HostedHermesRouteManifest {
             public_origin: self.config.public_origin.clone(),
@@ -218,6 +246,16 @@ impl HostedHermesLifecycle {
                 .map_err(|_| refused("route projection is invalid"))?,
         )
         .map_err(|_| refused("cannot encode route projection"))?;
+        Ok(Some(bytes))
+    }
+
+    /// Only consumes a projection computed under the host fence. During a
+    /// marked removal this projection excludes the retiring container; it is
+    /// the sole publication allowed before that mutation has completed.
+    fn publish(&self, projection: Option<Vec<u8>>, guard: &HostedHermesGuard) -> Result<()> {
+        let Some(bytes) = projection else {
+            return guard.stop_proxy();
+        };
         let unchanged = std::fs::read(CONFIG_FILE).is_ok_and(|old| old == bytes);
         if !unchanged {
             // Every withdrawal terminates accepted requests and open clients.
@@ -228,7 +266,15 @@ impl HostedHermesLifecycle {
                 .and_then(|_| std::fs::rename(&temporary, CONFIG_FILE))
                 .map_err(|_| refused("cannot replace ephemeral proxy configuration"))?;
         }
-        guard.before_publication()?;
+        // The pre-start gate compares this immutable binary identity before
+        // an upgrade/rollback may run a different Runner against live ingress.
+        let executable =
+            std::env::current_exe().map_err(|_| refused("cannot identify publisher"))?;
+        std::fs::write(
+            Path::new(STATE_DIR).join("publisher"),
+            executable.as_os_str().as_encoded_bytes(),
+        )
+        .map_err(|_| refused("cannot record publisher identity"))?;
         systemctl(&["start", PROXY_UNIT])?;
         Ok(())
     }

@@ -45,7 +45,7 @@ impl HostedHermesInventory {
         json: &[u8],
         mut read_ports: impl FnMut(&str) -> Result<String, InvalidInventory>,
     ) -> Result<(), InvalidInventory> {
-        if !segment(namespace) || json.len() > MAX_INSPECT_BYTES {
+        if !provider_identifier(namespace) || json.len() > MAX_INSPECT_BYTES {
             return Err(InvalidInventory("namespace or inspect size is invalid"));
         }
         let mut containers: Vec<Container> = serde_json::from_slice(json)
@@ -71,7 +71,7 @@ impl HostedHermesInventory {
         let mut reservations = self.reservations.clone();
         for container in &mut containers {
             if !segment(&container.id)
-                || !segment(container.name.trim_start_matches('/'))
+                || !provider_identifier(container.name.trim_start_matches('/'))
                 || !identities.insert((namespace.to_owned(), container.id.clone()))
                 || container.name.starts_with("//")
                 || !names.insert((
@@ -107,6 +107,15 @@ impl HostedHermesInventory {
                 .map(|container| (namespace.to_owned(), container)),
         );
         Ok(())
+    }
+
+    /// Omit every route belonging to a record about to be removed, while
+    /// retaining its reservation until the provider confirms removal.
+    pub fn exclude_container(&mut self, namespace: &str, name: &str) {
+        self.containers.retain(|(ns, container)| {
+            ns != namespace
+                || (container.id != name && container.name.trim_start_matches('/') != name)
+        });
     }
 
     /// The caller also checks real host listeners and creates the container
@@ -209,6 +218,13 @@ impl HostedHermesInventory {
 
 fn managed_port(port: u16) -> bool {
     (HOSTED_PORT_FIRST..=HOSTED_PORT_LAST).contains(&port)
+}
+fn provider_identifier(value: &str) -> bool {
+    !value.is_empty()
+        && value.len() <= 128
+        && value
+            .bytes()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, b'-' | b'_' | b'.'))
 }
 fn segment(value: &str) -> bool {
     !value.is_empty()
@@ -353,7 +369,7 @@ mod tests {
         let mut foreign = container("foreign", HOSTED_PORT_FIRST + 1);
         foreign["Config"]["Labels"] = json!({});
         let mut inventory = inventory(&[stopped]);
-        add(&mut inventory, "other", &[foreign]).unwrap();
+        add(&mut inventory, "k8s.io", &[foreign]).unwrap();
         assert_eq!(
             inventory.available_ports().next(),
             Some(HOSTED_PORT_FIRST + 2)
@@ -393,6 +409,17 @@ mod tests {
     }
 
     #[test]
+    fn removal_projection_excludes_target_but_keeps_its_reservation() {
+        let mut inventory = inventory(&[container("agent-a", HOSTED_PORT_FIRST)]);
+        inventory.exclude_container("finite", "agent-a");
+        assert!(routes(&inventory, &[target()]).unwrap().is_empty());
+        assert_eq!(
+            inventory.available_ports().next(),
+            Some(HOSTED_PORT_FIRST + 1)
+        );
+    }
+
+    #[test]
     fn contradictory_ownership_mounts_or_bindings_never_publish() {
         for path_and_value in [
             (
@@ -424,7 +451,7 @@ mod tests {
     #[test]
     fn partial_or_ambiguous_inventory_is_rejected_atomically() {
         let first = container("agent-a", HOSTED_PORT_FIRST);
-        let mut inventory = inventory(&[first.clone()]);
+        let mut inventory = inventory(std::slice::from_ref(&first));
         assert!(add(&mut inventory, "finite", &[first]).is_err());
         assert!(
             add(

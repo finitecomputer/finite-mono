@@ -5,8 +5,9 @@
 //! each upstream address for its entire published lifetime. Before an address
 //! can belong to another runtime, the previous Caddy process must have exited:
 //! an acknowledged reload does not drain accepted HTTP requests or their retries.
-//! Kata discovery, that process-exit fence, and interrupted-operation recovery
-//! are not integrated by this module. Do not activate it from the lease cycle.
+//! `hosted_hermes_lifecycle` owns that integration. Activation requires its
+//! opt-in deployment configuration, systemd lifetime guard, complete saved-port
+//! inventory, and a current host-scoped Core eligibility projection.
 
 use finite_saas_core::hosted_hermes::MAX_HOSTED_HERMES_ROUTES as MAX_ROUTES;
 use serde::{Deserialize, Serialize};

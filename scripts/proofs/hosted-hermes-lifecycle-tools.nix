@@ -9,7 +9,10 @@ let
     name = "finite-hosted-lifecycle-proof";
     tag = "fixture";
     contents = [ pkgs.busybox ];
-    config.Cmd = [ "${pkgs.busybox}/bin/sleep" "3600" ];
+    config.Cmd = [
+      "${pkgs.busybox}/bin/sleep"
+      "3600"
+    ];
   };
 in
 pkgs.buildEnv {

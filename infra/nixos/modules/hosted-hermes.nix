@@ -1,12 +1,29 @@
 # Opt-in native Hermes ingress. No host enables this until FIN-39 qualification.
-{ config, lib, pkgs, ... }:
+{
+  config,
+  lib,
+  pkgs,
+  finitePackages,
+  ...
+}:
 let
   cfg = config.finite.hostedHermes;
-  deployment = pkgs.writeText "hosted-hermes-deployment.json" (builtins.toJSON {
-    public_origin = cfg.publicOrigin;
-    listen = cfg.listen;
-    allowed_origins = cfg.allowedOrigins;
-  });
+  deployment = pkgs.writeText "hosted-hermes-deployment.json" (
+    builtins.toJSON {
+      public_origin = cfg.publicOrigin;
+      listen = "${cfg.listenAddress}:${toString cfg.listenPort}";
+      allowed_origins = cfg.allowedOrigins;
+    }
+  );
+  runnerGate = pkgs.writeShellApplication {
+    name = "hosted-hermes-runner-gate";
+    runtimeInputs = [
+      pkgs.coreutils
+      pkgs.gnugrep
+      pkgs.systemd
+    ];
+    text = builtins.readFile ./hosted-hermes-runner-gate.sh;
+  };
 in
 {
   options.finite.hostedHermes = {
@@ -16,10 +33,15 @@ in
       default = "";
       description = "Exact HTTPS origin also configured for this source host in Core.";
     };
-    listen = lib.mkOption {
+    listenAddress = lib.mkOption {
       type = lib.types.str;
-      default = "0.0.0.0:443";
-      description = "Dedicated Hermes TLS listener; must not overlap another host service.";
+      default = "0.0.0.0";
+      description = "Dedicated Hermes listener IP (bracket IPv6 addresses).";
+    };
+    listenPort = lib.mkOption {
+      type = lib.types.port;
+      default = 443;
+      description = "Dedicated TLS port, opened in the host TCP firewall.";
     };
     allowedOrigins = lib.mkOption {
       type = lib.types.listOf lib.types.str;
@@ -29,10 +51,13 @@ in
   };
 
   config = lib.mkIf cfg.enable {
-    assertions = [ {
-      assertion = cfg.publicOrigin != "" && config.finite.saasRunner;
-      message = "Hosted Hermes requires a Runner host and a configured public origin.";
-    } ];
+    assertions = [
+      {
+        assertion = cfg.publicOrigin != "" && config.finite.saasRunner;
+        message = "Hosted Hermes requires a Runner host and a configured public origin.";
+      }
+    ];
+    networking.firewall.allowedTCPPorts = [ cfg.listenPort ];
     systemd.tmpfiles.rules = [ "d /run/finite-hosted-hermes 0700 root root -" ];
     systemd.services.finite-saas-runner = {
       environment.FC_RUNNER_HOSTED_HERMES_CONFIG = toString deployment;
@@ -40,6 +65,9 @@ in
         # A successful main-process exit must not release the timer while a
         # nerdctl/CNI child can still mutate saved port ownership. Containerd,
         # its shims and agent VMs belong to separate services/cgroups.
+        ExecStartPre = [
+          "${runnerGate}/bin/hosted-hermes-runner-gate ${finitePackages.finite-saas-runner}/bin/finite-saas-runner"
+        ];
         Type = lib.mkForce "exec";
         ExitType = "cgroup";
         KillMode = lib.mkForce "control-group";
