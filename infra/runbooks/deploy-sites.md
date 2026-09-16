@@ -14,10 +14,10 @@ in CI from the reviewed revision, never on a production host.
 
 ## Fly
 
-The configured demo is `finite-sites-demo` in the `finite` organization. Set
-`APP=finite-sites-demo` and reuse its existing Machine and `sites_data` volume.
-For a new Fly app, provision an app and volume
-(the demo uses 10 GiB), then obtain its allocated IPs and certificate DNS records
+The configured app is `finite-sites` in the `finite` organization. Set
+`APP=finite-sites`. Inspect this app's resources and provision any missing app
+or `sites_data` volume before deployment; use 10 GiB as the initial volume size.
+Obtain the app's allocated IPs and certificate DNS records
 from Fly. Require issued certificates for both the API apex and wildcard Site
 hosts; do not copy another app's DNS records. Keep records DNS-only when
 qualifying Fly's TLS edge. [Fly provisioning documentation](https://fly.io/docs/launch/).
@@ -42,7 +42,7 @@ printed in that run's summary. Select the image for this rollout explicitly;
 do not assume the checked-in pin includes your source changes:
 
 ```sh
-APP=finite-sites-demo
+APP=finite-sites
 fly config validate --strict --app "$APP" --config infra/fly/sites/fly.toml
 fly deploy --app "$APP" --config infra/fly/sites/fly.toml \
   --image "$SITES_IMAGE" --ha=false
