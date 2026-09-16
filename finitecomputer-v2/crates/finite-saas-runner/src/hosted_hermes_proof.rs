@@ -90,6 +90,7 @@ fn systemd_lifecycle() {
         "rename" => launcher.rename_compute(&job.name, &job.runtime).unwrap(),
         "binding" => assert!(hosted.has_native_binding(&job.name).unwrap()),
         "reconcile" => hosted.reconcile().unwrap(),
+        "unavailable-core" => assert!(hosted.reconcile().is_err()),
         "failed-mutation" => {
             assert!(launcher.start_compute("deliberately-missing").is_err());
             assert!(launcher.start_compute(&job.name).is_err());

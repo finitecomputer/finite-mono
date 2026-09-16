@@ -70,6 +70,7 @@ def prove_runner(binary, tools, scratch, nerdctl, network):
     work = scratch / "work"
     work.mkdir()
     targets = []
+    core_available = [True]
     token = uuid.uuid4().hex
     evidence = {}
 
@@ -78,7 +79,7 @@ def prove_runner(binary, tools, scratch, nerdctl, network):
             assert self.path == "/api/core/v1/hosted-hermes-route-targets"
             assert self.headers["Authorization"] == "Bearer " + token
             body = json.dumps(targets).encode()
-            self.send_response(200)
+            self.send_response(200 if core_available[0] else 503)
             self.send_header("Content-Length", str(len(body)))
             self.end_headers()
             self.wfile.write(body)
@@ -237,6 +238,12 @@ Environment=FIN91_PROOF_JOB={job_file}
         assert port("agent-b").endswith(":30001")
         eventually(lambda: request("agent-b") == (200, "agent-b"))
         evidence["automatic_restart_preserves_binding_and_data"] = True
+        core_available[0] = False
+        job("unavailable-core")
+        status = finite_status.collect_hosted_hermes(finite_status.utc_now())
+        assert (status["status"], status["state"]) == ("red", "reconciliation-failed"), status
+        core_available[0] = True
+        job("reconcile")
 
         # Applied disable is represented by Core removing all eligible targets.
         targets[:] = []
