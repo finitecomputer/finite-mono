@@ -52,6 +52,20 @@ class FiniteStatusTests(unittest.TestCase):
         )
         self.assertTrue(fleet["distribution_consistent_with_detail_snapshot"])
 
+    def test_reservation_state_distinguishes_pre_release_schema_and_released_host(self) -> None:
+        raw = finite_status.load_fixture(FIXTURE)
+        raw["core"]["canary_host_reservations"] = [
+            {"source_host_id": "finite-lat-5", "launch_code_id": "root"},
+            {"source_host_id": "finite-lat-4", "launch_code_id": "other"},
+        ]
+        now = finite_status.parse_time(raw["now"])
+        fleet = finite_status.build_fleet(raw["core"], now)
+        self.assertEqual([row["reservation_state"] for row in fleet["canary_host_reservations"]], ["reserved", "reserved"])
+        raw["core"]["launch_host_reservation_releases"] = [{"source_host_id": "finite-lat-5"}]
+        fleet = finite_status.build_fleet(raw["core"], now)
+        self.assertEqual([row["reservation_state"] for row in fleet["canary_host_reservations"]], ["released", "reserved"])
+        self.assertEqual(fleet["launch_host_reservation_releases"], raw["core"]["launch_host_reservation_releases"])
+
     def test_core_queries_share_one_read_only_transaction(self) -> None:
         output = "\n".join(
             [
