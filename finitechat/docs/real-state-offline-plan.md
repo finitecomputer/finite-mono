@@ -661,5 +661,5 @@ set and prove:
 - `docs/storage-plan.md`
 - `docs/adr/0007-hint-channel-abstraction.md`
 - `docs/adr/0008-rust-owned-app-runtime.md`
-- `docs/feature-audit-marmot-pika.md`
+- `docs/adr/0003-protocol-v1-hardening-decisions.md`
 - [RMP Architecture Bible](https://github.com/rust-multiplatform/rmp/blob/master/rmp-architecture-bible.md)
