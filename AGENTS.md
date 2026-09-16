@@ -90,11 +90,13 @@ and the workflow files themselves.
 
 ## Agent skills
 
-- **Issue tracker:** GitHub. See `docs/agents/issue-tracker.md`.
-- **Triage labels:** Canonical Matt Pocock skill labels. See
-  `docs/agents/triage-labels.md`.
-- **Domain documentation:** Multi-context monorepo guidance. See
-  `docs/agents/domain.md`.
+- **Product authority:** Linear holds product plans, specifications, decisions,
+  and outstanding work; code, tests, and executable configuration establish
+  implemented behavior. Keep new planning in Linear instead of repo-local
+  PRDs, ADRs, or work logs. See `docs/agents/issue-tracker.md` for ticket
+  conventions and `docs/agents/triage-labels.md` when triaging.
+- **Existing documentation:** When changing a component, use
+  `docs/agents/domain.md` to consult retained context and contracts.
 - **Organization Brain:** Finite has an organization FiniteBrain instance that
   holds wiki/postmortem/runbook knowledge outside the git tree. `fbrain` is the
   CLI control plane that materializes FiniteBrain content into a local plaintext

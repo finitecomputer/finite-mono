@@ -1,17 +1,15 @@
-# Domain documentation
+# Existing domain documentation
 
-Finite Mono is a multi-context monorepo. Before exploring or changing a
-component:
+Start from the relevant Linear issue and the owning code, tests, and executable
+configuration. For cross-component work, use `CONTEXT-MAP.md` when helpful to
+locate the owners.
 
-1. Read the root `CONTEXT-MAP.md` when it exists and follow only the pointers
-   relevant to the task.
-2. Read the component's `CONTEXT.md` when it exists.
-3. Read relevant system-wide ADRs under `docs/adr/`.
-4. Read relevant component ADRs, such as `finite-brain/docs/adr/`.
+Consult existing component `CONTEXT.md`, ADRs, and runbooks when the change
+touches their terminology, compatibility, security, or recovery boundaries.
+If a retained contract conflicts with the requested change or implementation,
+name the conflict and resolve it explicitly in the Linear issue.
 
-Missing context documents are not an error. Create or update them lazily when
-domain-modeling work resolves terminology, boundaries, or durable decisions.
-
-Use glossary terms from the relevant `CONTEXT.md` in specifications, tickets,
-tests, and code. If a proposed change conflicts with an ADR, name the conflict
-explicitly instead of silently overriding it.
+Record new terminology, design decisions, and plans in Linear. Missing context
+documents do not need replacements. Retain operational instructions and
+contracts still consumed by code, tests, or production workflows until their
+replacement is verified.

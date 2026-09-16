@@ -60,7 +60,7 @@ Reference: https://github.com/tigerbeetle/tigerbeetle/blob/main/docs/TIGER_STYLE
   library, existing workspace dependencies, or a small Rust crate over
   shell/Python tooling. New scripts should be Rust binaries or tests unless
   a non-Rust tool is clearly the better fit.
-- Document tolerated technical debt in `docs/technical-debt-ledger.md`
+- Record tolerated technical debt in Linear
   before relying on it. Each item needs an observed source, risk, first
   proof, and delete condition. A shortcut without a delete condition is not
   accepted debt; it is unfinished design.

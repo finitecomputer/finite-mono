@@ -2,12 +2,12 @@
 
 This folder is the root documentation entry point for `finite-mono`.
 
-Docs here are current monorepo guidance, durable decisions, run records,
-postmortems, and audits. Imported orientation docs from `finite-eng-docs` were
-removed during the 2026-08-29 cleanup so agents start from current root docs,
-component `CONTEXT.md`, ADRs, and runbooks instead of stale navigation layers.
+Product planning and decisions live in [Linear](https://linear.app/finitecomputer).
+Code, tests, and executable configuration establish implemented behavior. This
+folder retains operational guidance, contracts, and historical material pending
+review; its presence does not establish current product scope.
 
-## Current Monorepo Docs
+## Retained Monorepo Docs
 
 - [Local integration harness](local-integration-harness.md): `devfinity`,
   `process-compose`, and `just dev` usage.
@@ -72,15 +72,15 @@ Some imported repos also have root-level source repo docs:
 - [`finite-brain/development.md`](../finite-brain/development.md)
 - [`finite-skills/README.md`](../finite-skills/README.md)
 
-Treat repo-local docs as owner-scoped background. Prefer current root docs,
-component `CONTEXT.md`, ADRs, and runbooks over historical plans or imported
-orientation.
+Use retained docs for relevant context and operational contracts. Reconcile
+conflicts with the Linear issue and implementation explicitly; dated plans and
+status reports are not current deployment evidence.
 
 ## Docs Rules
 
-- Keep durable monorepo orientation in this folder.
-- Keep implementation details with the owning source folder until they are
-  stable enough to promote.
-- Mark imported or unreviewed docs before linking them as canonical.
+- Follow the [root agent guide](../AGENTS.md) for product authority and the
+  [retained-documentation guidance](agents/domain.md) when changing a component.
+- Keep operational instructions, executable documentation inputs, and recovery
+  contracts until their replacements are verified.
 - Delete stale caches instead of preserving extra navigation layers; git
   history is the archive.

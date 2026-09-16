@@ -11,11 +11,10 @@ toward:
 
 # Working In This Repo
 
-- Read `CONTEXT.md` first and use its vocabulary.
+- Follow the product-authority and retained-documentation guidance in the
+  root `../AGENTS.md`.
 - Follow `docs/engineering-style.md`; it is enforced, not aspirational.
-- Decisions live in `docs/adr/`; add an ADR when you change one.
-- Shortcuts require an entry in `docs/technical-debt-ledger.md` with a
-  delete condition, before you rely on them.
+- Track shortcuts in Linear with a delete condition before relying on them.
 
 ## Commands
 
