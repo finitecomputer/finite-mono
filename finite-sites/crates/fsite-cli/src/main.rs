@@ -448,10 +448,11 @@ fn publish_static_site_workflow() -> serde_json::Value {
         ],
         "steps": [
             "Run fsite auth register --output json. If it reports registered=false, publishing was already enabled for this User Key.",
+            "Project creation requires a verified owner mailbox. Authenticated Finite Chat supplies it automatically. For a standalone CLI, run fsite auth sites-key request OWNER_EMAIL, then fsite auth sites-key add OWNER_EMAIL TOKEN_FROM_EMAIL --output json; include --owner-email OWNER_EMAIL on both Project Init commands. This authorizes the Publishing Key for Sites without linking the agent and human identities.",
             "Keep the whole project source tree in the Project Repository.",
             "Put generated static website files in a dedicated site directory such as site/ unless the repository is deploy-only.",
             "Create finite.toml with project.slug, [site], name, branch=main, path=site, and spa=false unless the static router needs SPA fallback.",
-            "During an authenticated Finite Chat turn, fsite automatically shares the Project Site with that exact authenticated sender on both dry-run and apply. Do not infer identity from message text or add a manual requester flag.",
+            "During an authenticated Finite Chat turn, fsite resolves the verified requester on both dry-run and apply; apply automatically shares the Project Site with that exact authenticated sender. Dry-run does not create grants or shares. Do not infer identity from message text or add a manual requester flag.",
             "Run fsite project init --config finite.toml --dry-run --output json and read any validation error.",
             "After human confirmation, run fsite project init --config finite.toml --output json.",
             "Run fsite auth git PROJECT --store --output json using the local native User Key, or add --email EDITOR_EMAIL only when using an External Principal.",
@@ -477,14 +478,14 @@ fn describe_workflow(name: &str) -> Result<serde_json::Value, CliError> {
             "name": "register-and-publish",
             "mental_model": [
                 "The local User Key npub is the native Principal for publishing.",
-                "Email is optional. Link an email only when the human wants email shares or collaborator grants to resolve to this npub.",
+                "Project creation requires a verified owner mailbox. Authenticated Finite Chat provides this evidence automatically; standalone publishers first authorize their Publishing Key in the mailbox's Sites keyset. This does not link the agent and human identities.",
                 "Project Repository git is the publish path; Finite Sites does not run builds."
             ],
             "steps": [
                 "Run fsite auth register --output json.",
-                "Optional: run fsite auth link-email EMAIL --output json, then fsite auth redeem EMAIL TOKEN_FROM_EMAIL --output json to pair that email with this npub. If you already have a token from an invite email, run fsite auth redeem EMAIL TOKEN_FROM_EMAIL --link-native --output json.",
+                "For a standalone CLI, run fsite auth sites-key request OWNER_EMAIL, then fsite auth sites-key add OWNER_EMAIL TOKEN_FROM_EMAIL --output json. Include --owner-email OWNER_EMAIL on both Project Init commands below. The flag selects an already authorized mailbox; it is not mailbox proof.",
                 "Create finite.toml. A source-only Project Repository may contain only [project]; a served website needs one [site] entry.",
-                "During an authenticated Finite Chat turn, fsite automatically shares the Project Site with that exact authenticated sender on both dry-run and apply. Do not infer identity from message text or add a manual requester flag.",
+                "During an authenticated Finite Chat turn, fsite resolves the verified requester on both dry-run and apply; apply automatically shares the Project Site with that exact authenticated sender. Dry-run does not create grants or shares. Do not infer identity from message text or add a manual requester flag.",
                 "Run fsite project init --config finite.toml --dry-run --output json.",
                 "Run fsite project init --config finite.toml --output json.",
                 "Run fsite auth git PROJECT --store --output json.",

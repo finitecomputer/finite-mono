@@ -51,10 +51,11 @@ jobs:
             *) echo "::error::release workflow must run at an fsite/v* tag"; exit 1 ;;
           esac
           python3 scripts/delivery.py verify-component-version --component fsite --version "$version"
-      - name: Install Rust
+      - name: Set up pinned Rust toolchain
+        # Use the repository's rust-toolchain.toml, shared with Nix and CI.
+        # rustup installs that pinned toolchain on first use in the checkout.
         run: |
-          rustup toolchain install 1.88.0 --profile minimal
-          rustup default 1.88.0
+          cargo --version
           rustup target add "${{ matrix.target }}"
       - name: Build fsite
         run: cargo build --locked --release --target "${{ matrix.target }}" --package fsite-cli --bin fsite
