@@ -5,9 +5,9 @@
 {
   virtualisation.oci-containers.containers.finite-saas-dashboard = {
     # Complete Sites cutover candidate; deploy only after migration/access gates.
-    # Source e40de564051ad643592a97fc2403bdbb3655115d.
-    # https://github.com/finitecomputer/finite-mono/actions/runs/35145889891
-    image = "ghcr.io/finitecomputer/finite-saas-dashboard@sha256:d3606c9d421dc4fa63e13ecb772597864e00753ff2abca8460653c476824508a";
+    # Source 7256ebe2b193dc64dafb561d95d25a5ef5cb1102.
+    # https://github.com/finitecomputer/finite-mono/actions/runs/35148339493
+    image = "ghcr.io/finitecomputer/finite-saas-dashboard@sha256:82075b0bea8c91c5198985096eefbacd39191ce9c1ae37f4a49375766b27cd6f";
 
     # Host networking: the dashboard must reach core on the HOST loopback
     # (127.0.0.1:4200) and itself bind 127.0.0.1:3000 (HOSTNAME below). With
