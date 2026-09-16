@@ -35,6 +35,25 @@ receiver change. A rollback to a pre-`/readyz` server closure must also roll the
 receiver target back to `/health`; otherwise Chat can be serving while the
 newer probe correctly reports that its expected semantic endpoint is absent.
 
+Finite Sites has two public checks every minute against its Fly deployment:
+`finite.site` requires HTTP 200 from `https://finite.site/api/v2/healthz`
+(including the server's Git dependency preflight), and `uptime-probe.finite.site`
+requires HTTP 404 from an unallocated wildcard hostname. The latter checks
+wildcard DNS, TLS and HTTP routing; keep that hostname unallocated. Neither
+check proves publishing, stored content, or private viewer access. Both appear
+in the overview's current status, 24-hour/7-day uptime and response-time panels.
+New series begin at rollout; historical `finite.chat` samples are not relabeled.
+
+The dashboard-only workflow does **not** deploy `ubuntu/prometheus.yml`.
+Updating Sites monitoring requires deploying the receiver's probe configuration
+as well as the dashboard. Back up the live configuration before replacing it,
+validate it with the installed `promtool check config`, reload Prometheus with
+SIGHUP, and verify both targets and their `probe_success` samples. Restore the
+previous configuration and reload if validation fails. Preserve unrelated live
+scrape jobs when reconciling receiver drift. Record `scripts/finite-status`
+before and after the rollout. Then use the
+[dashboard-only workflow](dashboards.md).
+
 The monitoring host stores operational credentials only as operator-provisioned
 host files:
 

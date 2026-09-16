@@ -149,11 +149,13 @@ in
       (publicProbe {
         name = "finite.site";
         target = "https://finite.site/api/v2/healthz";
+        scrapeInterval = "1m";
       })
       (publicProbe {
         name = "uptime-probe.finite.site";
         target = "https://uptime-probe.finite.site/";
         module = "http_404";
+        scrapeInterval = "1m";
       })
     ];
   };
