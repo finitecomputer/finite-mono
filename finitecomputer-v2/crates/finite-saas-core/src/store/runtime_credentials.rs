@@ -122,7 +122,7 @@ impl CoreStore {
         }
         let creation: String = creations[0].get(0);
         let existing = tx.query_opt(
-            "SELECT bootstrap_secret,creation_request_id,source_host_id,source_machine_id,owner_user_id,revoked,activated
+            "SELECT bootstrap_secret,creation_request_id,source_host_id,source_machine_id,owner_user_id,revoked,activated,agent_runtime_id
              FROM runtime_core_credentials WHERE agent_runtime_id=$1 OR creation_request_id=$2 FOR UPDATE",
             &[&request.agent_runtime_id, &creation],
         ).await.map_err(store_error)?;
@@ -141,6 +141,7 @@ impl CoreStore {
                 || row.get::<_, String>(4) != owner
                 || row.get::<_, bool>(5)
                 || !row.get::<_, bool>(6)
+                || row.get::<_, Option<String>>(7).as_deref() != Some(&request.agent_runtime_id)
             {
                 return Err(CoreError::ProviderOperationTransitionConflict);
             }
@@ -731,6 +732,21 @@ pub(crate) mod tests {
             // Relocation completion revokes the old credential. Primary history
             // must never resurrect that previous incarnation.
             db.revoke_runtime_credential(&lease.runtime.id, &creation).await.unwrap();
+            assert!(db.provision_upgrade_credential(upgrade_input(&lease)).await.is_err());
+        }).await;
+    }
+
+    #[tokio::test]
+    async fn existing_enrollment_rejects_unbound_stale_credential() {
+        with_isolated_postgres(|db| async move {
+            let creation = requested(&db).await;
+            register(&db, &creation).await;
+            complete(&db, &creation).await.unwrap();
+            let lease = upgrade(&db, &creation).await;
+            db.provision_upgrade_credential(upgrade_input(&lease)).await.unwrap();
+            db.connection().await.unwrap().execute(
+                "UPDATE runtime_core_credentials SET agent_runtime_id=NULL WHERE creation_request_id=$1", &[&creation],
+            ).await.unwrap();
             assert!(db.provision_upgrade_credential(upgrade_input(&lease)).await.is_err());
         }).await;
     }
