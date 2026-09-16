@@ -1,3 +1,4 @@
+mod hosted_access;
 use crate::auth::{CoreAuth, VerifiedRunnerCredential, WorkosAuthError};
 use crate::hosted_hermes::{HostedHermesLocation, HostedHermesOrigins};
 use crate::launch_codes::{
@@ -40,6 +41,8 @@ use axum::http::{HeaderMap, HeaderValue, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::{Json, Router};
+pub use hosted_access::runtime_router;
+use hosted_access::{hosted_access, hosted_session, set_hosted_access};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
@@ -64,6 +67,7 @@ pub struct CoreApiState {
     /// capability so a rollout can be stopped without stranding in-flight work.
     runtime_retirement_enabled: bool,
     hosted_hermes_origins: HostedHermesOrigins,
+    native_sessions: crate::hosted_hermes_session::NativeSessions,
 }
 
 #[derive(Debug)]
@@ -777,10 +781,23 @@ fn router_with_runtime_upgrades_and_agent_creation_placement(
         runtime_upgrades_enabled,
         runtime_retirement_enabled,
         hosted_hermes_origins,
+        native_sessions: Default::default(),
     };
 
     Router::new()
         .route("/healthz", get(healthz))
+        .route(
+            "/api/core/v1/agent-creation-requests/{request_id}/runtime-credential",
+            post(provision_runtime_credential),
+        )
+        .route(
+            "/api/core/v1/me/runtimes/{runtime_id}/hosted-access",
+            get(hosted_access).put(set_hosted_access),
+        )
+        .route(
+            "/api/core/v1/me/runtimes/{runtime_id}/hosted-hermes-session",
+            post(hosted_session),
+        )
         .route(
             "/api/core/v1/me/runtimes/{runtime_id}/hosted-hermes-location",
             get(hosted_hermes_location),
@@ -1728,14 +1745,43 @@ async fn me_response_for_identity(
     })
 }
 
+// No Debug/Serialize: lease credentials must not become loggable response data.
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct ProvisionRuntimeCredentialRequest {
+    runner_id: String,
+    lease_token: String,
+}
+
+async fn provision_runtime_credential(
+    State(state): State<CoreApiState>,
+    headers: HeaderMap,
+    Path(request_id): Path<String>,
+    Json(input): Json<ProvisionRuntimeCredentialRequest>,
+) -> Result<impl IntoResponse, ApiError> {
+    let credential = require_runner_auth(&state, &headers)?;
+    authorize_runner_id(&credential, &input.runner_id)?;
+    let result = state
+        .store
+        .provision_runtime_credential(
+            crate::store::runtime_credentials::ProvisionRuntimeCredential {
+                creation_request_id: request_id,
+                runner_id: input.runner_id,
+                lease_token: input.lease_token,
+                source_host_id: credential.source_host_id,
+            },
+        )
+        .await?;
+    Ok(([("cache-control", "no-store")], Json(result)))
+}
+
 async fn hosted_hermes_location(
     State(state): State<CoreApiState>,
     headers: HeaderMap,
     Path(runtime_id): Path<String>,
 ) -> Result<impl IntoResponse, ApiError> {
-    // The pilot requires both operator membership and ordinary ownership.
-    // An admin does not receive another customer's runtime location.
-    let identity = require_admin_identity(&state, &headers).await?;
+    // Native access uses the same current account/Project authority as the app.
+    let identity = require_verified_identity(&state, &headers).await?;
     let source_host = state
         .store
         .owned_runtime_source_host(&runtime_id, &identity.workos_user_id)
@@ -3161,7 +3207,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn hosted_hermes_location_requires_admin_and_current_owner() {
+    async fn hosted_hermes_location_requires_current_owner_not_admin() {
         with_isolated_postgres(|db| async move {
             let owner_subject = "hosted-hermes-owner";
             let owner_email = "hosted-hermes-owner@example.test";
@@ -3230,8 +3276,8 @@ mod tests {
             for (auth, expected) in [
                 (Vec::new(), StatusCode::UNAUTHORIZED),
                 (vec![("authorization".into(), format!("Bearer {TOKEN}"))], StatusCode::UNAUTHORIZED),
-                (headers(owner_subject, owner_email, None, true), StatusCode::FORBIDDEN),
-                (headers(owner_subject, owner_email, Some("customer-org"), true), StatusCode::FORBIDDEN),
+                (headers(owner_subject, owner_email, None, true), StatusCode::OK),
+                (headers(owner_subject, owner_email, Some("customer-org"), true), StatusCode::OK),
                 (headers("other-admin", "other-admin@example.test", Some(OPERATOR_ORG_ID), true), StatusCode::NOT_FOUND),
             ] {
                 let (status, _) = send_json(&app, "GET", &uri, &auth, None).await;

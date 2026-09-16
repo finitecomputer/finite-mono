@@ -1,6 +1,7 @@
 import { createHash } from "node:crypto";
 
 import { getAccountAuthContext, type AccountAuthContext } from "@/lib/dashboard-auth";
+import { parseHostedHermesAccess, parseHostedHermesSession } from "@/lib/hosted-hermes-status";
 import {
   invalidateServerSwrCache,
   readThroughServerSwr,
@@ -1084,6 +1085,37 @@ async function coreAdminFetch<T>(pathname: string, init: RequestInit = {}): Prom
   }
   const account = await getAccountAuthContext();
   return coreFetch<T>(pathname, account, init);
+}
+
+export async function loadCoreHostedHermesAccess(runtimeId: string, signal?: AbortSignal) {
+  const id = requiredString(runtimeId, "Runtime id is required.");
+  const access = await coreAdminFetch<unknown>(
+    `/api/core/v1/me/runtimes/${encodeURIComponent(id)}/hosted-access`,
+    { signal }
+  );
+  return parseHostedHermesAccess(access, id);
+}
+
+export async function setCoreHostedHermesAccess(
+  runtimeId: string,
+  input: { enabled: boolean; expectedGeneration: number },
+  signal?: AbortSignal
+) {
+  const id = requiredString(runtimeId, "Runtime id is required.");
+  const access = await coreAdminFetch<unknown>(
+    `/api/core/v1/me/runtimes/${encodeURIComponent(id)}/hosted-access`,
+    { method: "PUT", body: JSON.stringify(input), signal }
+  );
+  return parseHostedHermesAccess(access, id);
+}
+
+export async function createCoreHostedHermesSession(runtimeId: string, signal?: AbortSignal) {
+  const id = requiredString(runtimeId, "Runtime id is required.");
+  const grant = await coreAdminFetch<unknown>(
+    `/api/core/v1/me/runtimes/${encodeURIComponent(id)}/hosted-hermes-session`,
+    { method: "POST", signal }
+  );
+  return parseHostedHermesSession(grant);
 }
 
 export async function loadCoreAdminRuntimes(): Promise<CoreAdminRuntimesResult> {

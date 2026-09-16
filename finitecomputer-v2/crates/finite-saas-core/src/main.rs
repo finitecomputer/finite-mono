@@ -719,15 +719,23 @@ async fn serve() -> Result<()> {
     let store = postgres_store_from_env(ImportMode::Commit).await?;
     let agent_creation_placement = optional_agent_creation_placement()?;
     let app = router_with_hosted_hermes_origins(
-        store,
+        store.clone(),
         auth,
         agent_creation_placement,
-        hosted_hermes_origins,
+        hosted_hermes_origins.clone(),
     )
     .layer(TraceLayer::new_for_http());
     let listener = TcpListener::bind(addr).await?;
     tracing::info!(%addr, "finite-saas-core listening");
-    axum::serve(listener, app).await?;
+    if let Ok(bind) = env::var("FC_CORE_RUNTIME_BIND") {
+        let runtime_listener = TcpListener::bind(bind.parse::<SocketAddr>()?).await?;
+        let runtime_app = finite_saas_core::api::runtime_router(store, hosted_hermes_origins);
+        tokio::try_join!(async { axum::serve(listener, app).await }, async {
+            axum::serve(runtime_listener, runtime_app).await
+        },)?;
+    } else {
+        axum::serve(listener, app).await?;
+    }
     Ok(())
 }
 
