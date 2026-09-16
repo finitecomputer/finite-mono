@@ -117,7 +117,9 @@ remain unchanged, and the canonical recovery status must stay healthy.
    proof. Confirm the config has the existing limiter, secrets by NAME,
    internal model network, and wildcard shim routing.
 4. Re-fetch the GLM rollback assets and check the recorded digests. Confirm
-   their image/model artifacts remain available. Retain both release bundles
+   their image/model artifacts remain available. Obtain explicit provider-side
+   confirmation that both pinned model packs are staged on the exact host;
+   release publication alone does not prove this. Retain both release bundles
    locally before stopping anything.
 5. Re-read Tinfoil state by the exact inventoried UUID. Require the expected
    name/repo/host/tag, eight H200s, `ready`, no staged update, no debug mode,
@@ -245,8 +247,87 @@ passing speed measurements as permission to leave DeepSeek serving.
   Deployment SHA256: `7cc6efab72885dcee0f2454c289805f5af6427fae8b5955b82c85906c370fc99`.
   Candidate config SHA256: `4caf0d4ed3ef3d43a8976202989c7ce173d77b8721d049e12ded46e83f979e89`.
 - Window duration: confirmed by the user, 03:00–06:00 Central; restore by 05:15.
-- Scheduling: **not armed**. No scheduled production operation exists yet.
-- Runtime H200/TDX proof: pending the maintenance test.
+- Execution: the user requested this session remain awake with 15-minute
+  sleeps. Preflight began at 03:00 Central on September 16; no scheduler was used.
+- Runtime H200/TDX proof: **blocked before engine startup** by the missing
+  host model pack; see the result below.
 
 - Final preparation check: original GLM tag still `ready`, auto-update false,
   no update staged. Sixteen focused Python tests pass.
+
+## September 16 execution result
+
+Preflight began at 03:00 Central. Exact container identity, the original GLM
+tag, sealed secret names, authentication, readiness, terminal streaming,
+release attestations, candidate config bytes, and rollback image availability
+passed. Fleet differences were heartbeat timestamps only: after excluding
+`reported_at` and `age_seconds`, host detail matched the preparation snapshot.
+The unchanged version-convergence discrepancy is outside this inference-only
+swap, and the unknown container collection is from app-only lat2 lacking
+`nerdctl`. Chat, recovery, and rollout status remained green.
+
+GLM completed three repetitions at each of 1, 8, 16, 32, and 64 requests.
+The pre-swap baseline deadline guard skipped 128; that tier was completed
+after GLM recovery as described below. All 380 pre-swap baseline/canary requests
+settled; zero new reservations remained. Fifty old reservations predated the
+window and were not modified.
+
+| Concurrent requests | Median of per-repetition median output tok/s | Median aggregate tok/s | Worst repetition p95 TTFT (s) |
+| --- | --- | --- | --- |
+| 1 | 81.72 | 79.33 | 0.378 |
+| 8 | 72.20 | 553.32 | 0.626 |
+| 16 | 65.78 | 1011.37 | 0.650 |
+| 32 | 52.50 | 1623.06 | 0.750 |
+| 64 | 45.56 | 2820.83 | 0.977 |
+
+All measured tiers passed without request errors. These short synthetic,
+1,024-output-token, thinking-high results do not establish long-context or
+real production workload capacity.
+
+The candidate relaunch was accepted at 03:07:14 Central. By 03:08:24 the
+container was `failed`: the pinned model pack did not exist on the selected
+host. The control plane explicitly required downloading the model before
+deploying. The engine never started, so this provides no DeepSeek throughput,
+DSpark acceptance, or H200 kernel compatibility result.
+
+Rollback to `v2026-08-28-glm-5-3-flash-5` was requested immediately and accepted.
+The first readiness success was observed around 03:36 Central, followed by a
+transient upstream-health timeout. By 03:39, the full gate, terminal streaming,
+Responses API, older `glm-5-2` alias compatibility, and settlement checks passed.
+The conservative disruption interval was approximately 03:07–03:39 (32 minutes).
+Canonical fleet status after restoration had green chat, recovery, and rollout
+sections. Fleet convergence matched entry after excluding heartbeat timestamps;
+the same app-host collection limitation remained. No durable user state was
+rewritten. This window did not independently replay a persisted chat transcript;
+canonical chat/recovery probes and API compatibility were the recovery evidence.
+
+The requested 128-request tier then ran on restored GLM, with the same workload
+and three repetitions, under a 300-second process timeout. It returned no
+request errors but failed the 10-second p95 first-token gate:
+
+| Repetition at 128 | Median output tok/s per request | Aggregate tok/s | p95 TTFT (s) |
+| --- | --- | --- | --- |
+| 1 | 42.098 | 5125.607 | 1.227 |
+| 2 | 42.181 | 3300.354 | 15.455 |
+| 3 | 26.103 | 3230.807 | 1.584 |
+
+Thus 64 was the highest fully passing tier tested. The 128 results were
+collected after a restart and should be labeled separately from the pre-swap
+baseline. They do not establish a DeepSeek comparison.
+
+At 03:42 Central the final health and settlement checks passed. All 773 window
+requests were settled with actual usage, zero new reservations remained, and
+the 50 pre-existing reservations were unchanged. The exact original container
+UUID, host, and GLM release were `ready`, with no pending update or error.
+The maintenance attempt is complete; no later automatic swap is armed.
+
+### Required before another attempt
+
+Stage `deepseek-ai/DeepSeek-V4.1-Flash` revision
+`dba1be0a40aa45a94ad051997016db3960a90277` on the exact Tinfoil host and verify
+its MPK against the candidate descriptor. The observed missing host path was
+`/mnt/large/tinfoil/models/deepseek-ai/DeepSeek-V4.1-Flash/dba1be0a40aa45a94ad051997016db3960a90277.mpk`.
+A measured release proves the configuration, not host-local model availability.
+Add explicit provider-side confirmation of both model packs to future entry
+checks before stopping the serving model. No second candidate attempt is
+planned during this window.
