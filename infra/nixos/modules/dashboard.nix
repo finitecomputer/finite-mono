@@ -31,7 +31,7 @@
       FC_HOSTED_WEB_DEVICE_URL = "http://127.0.0.1:38918";
       FC_BRAIN_UPSTREAM_URL = "http://127.0.0.1:3015";
       FC_BRAIN_PUBLIC_ORIGIN = "https://brain.finite.computer";
-      # Legacy previews and Hosted Chat requester assertions stay on this origin.
+      # Retained legacy viewer origin; publishing assertion routing is dashboard-owned.
       FC_SITES_UPSTREAM_URL = "http://127.0.0.1:8787";
       # Deploy with the qualified v2 registry and shared viewer credential.
       FC_SITES_V2_UPSTREAM_URL = "https://finite.site";

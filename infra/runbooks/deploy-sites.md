@@ -120,10 +120,9 @@ The Hosted Chat requester-assertion issuer must also move to the publishing
 registry before qualifying an existing agent against v2. Assertions are random
 tokens stored in the issuing registry, not portable signed claims: using the
 same service credential on both servers does not make an old-registry token
-valid on Fly. The current dashboard's `createHostedRequesterContext` still
-selects `FC_SITES_UPSTREAM_URL`; changing that variable globally would also
-move retained legacy previews. Qualify an explicit issuer transition with the
-Runtime rollout while preserving the legacy viewer exchange and Chat when
+valid on Fly. Deploy the separately reviewed dashboard issuer change with
+the Runtime rollout; keep `FC_SITES_UPSTREAM_URL` on the retained legacy
+viewer registry. Qualify the transition while preserving that exchange and Chat when
 Sites is unavailable. A standalone CLI test does not cover this boundary.
 
 The [container smoke test](../images/sites-smoke.sh) covers synthetic publishing,
