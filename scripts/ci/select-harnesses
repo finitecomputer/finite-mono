@@ -383,6 +383,10 @@ def apply_path(selection: HarnessSelection, path: str) -> None:
         selection.run_skills_check = True
         return
 
+    if path.startswith("finite-browser-iroh/") or path == "scripts/build-browser-iroh":
+        selection.run_dashboard = True
+        return
+
     if path.startswith("finitecomputer-v2/apps/dashboard/"):
         selection.run_dashboard = True
         if is_dashboard_browser_path(path):

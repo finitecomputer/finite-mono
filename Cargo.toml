@@ -3,6 +3,7 @@ resolver = "2"
 members = [
     "devfinity",
     "finite-agentd",
+    "finite-browser-iroh",
     "finite-brain/crates/finite-brain-app",
     "finite-brain/crates/finite-brain-cli",
     "finite-brain/crates/finite-brain-core",

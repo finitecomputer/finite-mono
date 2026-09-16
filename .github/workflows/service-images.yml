@@ -67,6 +67,11 @@ jobs:
           GHCR_TOKEN: ${{ github.token }}
           GHCR_USERNAME: ${{ github.actor }}
         run: echo "$GHCR_TOKEN" | docker login ghcr.io -u "$GHCR_USERNAME" --password-stdin
+      - uses: DeterminateSystems/nix-installer-action@v16
+        if: inputs.image == 'dashboard'
+      - name: Build browser Iroh transport into dashboard image context
+        if: inputs.image == 'dashboard'
+        run: nix develop .#browser-iroh --command scripts/build-browser-iroh
       - name: Build and save
         id: build
         uses: depot/build-push-action@v1

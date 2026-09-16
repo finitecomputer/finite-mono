@@ -193,7 +193,7 @@ async function ImportedMachineOverview({
       {!finitePrivateUsage.usage && finitePrivateUsage.error ? (
         <FinitePrivateUsageUnavailablePanel error={finitePrivateUsage.error} />
       ) : null}
-      {canRecoverRuntime || canRetireRuntime ? (
+      {canRecoverRuntime || canRetireRuntime || access.viewer.isAdmin ? (
         <details className="group">
           <summary className="inline-flex cursor-pointer list-none items-center gap-2 rounded-lg border bg-card px-3 py-2 text-sm font-medium text-muted-foreground transition-colors hover:text-foreground [&::-webkit-details-marker]:hidden">
             <Settings2Icon className="size-4" />
@@ -201,6 +201,13 @@ async function ImportedMachineOverview({
             <ChevronDownIcon className="size-4 transition-transform group-open:rotate-180" />
           </summary>
           <div className="mt-4 space-y-4">
+            {access.viewer.isAdmin ? (
+              <Button asChild variant="outline">
+                <Link href={`/dashboard/machines/${encodeURIComponent(access.machineId)}/status`}>
+                  Agent status (internal)
+                </Link>
+              </Button>
+            ) : null}
             {canRecoverRuntime ? (
               <section className="rounded-xl border bg-card p-5">
                 <h2 className="font-semibold">Chat recovery</h2>

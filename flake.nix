@@ -332,6 +332,14 @@
                 RUST_SRC_PATH = "${rustToolchain}/lib/rustlib/src/rust/library";
               };
 
+              browser-iroh = pkgs.mkShell {
+                CC_wasm32_unknown_unknown = "${pkgs.llvmPackages.clang-unwrapped}/bin/clang";
+                packages = [
+                  (rustToolchain.override { targets = [ "wasm32-unknown-unknown" ]; })
+                  pkgs.wasm-bindgen-cli pkgs.nodejs_24 pkgs.pnpm pkgs.pkg-config pkgs.openssl
+                ];
+              };
+
               rust-ci = pkgs.mkShell {
                 packages = rustCiPackages;
               };

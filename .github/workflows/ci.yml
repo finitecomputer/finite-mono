@@ -173,6 +173,12 @@ jobs:
         if: needs.changes.outputs.run_dashboard_browser == 'true'
         run: pnpm run test:browser
 
+      - uses: DeterminateSystems/nix-installer-action@v16
+
+      - name: Build browser Iroh transport
+        working-directory: .
+        run: nix develop .#browser-iroh --command scripts/build-browser-iroh
+
       - name: Build dashboard
         run: pnpm run build
 

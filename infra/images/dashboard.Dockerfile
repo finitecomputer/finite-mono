@@ -18,7 +18,7 @@ WORKDIR /src
 COPY finitecomputer-v2/apps/dashboard ./finitecomputer-v2/apps/dashboard
 COPY finitechat/packages/finitechat-chat-ui ./finitechat/packages/finitechat-chat-ui
 WORKDIR /src/finitecomputer-v2/apps/dashboard
-RUN pnpm run build
+RUN test -s public/iroh/client_bg.wasm && test -s public/iroh/client.js && pnpm run build
 
 FROM node:22-bookworm-slim AS runner
 

@@ -1681,3 +1681,29 @@ function safeHttpUrl(value: string) {
     return false;
   }
 }
+
+export type AgentEndpoint = {
+  generation: number;
+  endpointId: string;
+  relayUrl: string;
+  enabled: boolean;
+  service: "hermes";
+};
+
+// Only admission metadata crosses Core; agent responses travel over browser Iroh.
+export async function agentTransportControl(
+  projectId: string,
+  method: "GET" | "POST" | "DELETE" | "PUT",
+  payload?: unknown,
+) {
+  const account = await getAccountAuthContext();
+  const project = encodeURIComponent(projectId);
+  const path = method === "PUT"
+    ? `/api/core/v1/admin/projects/${project}/hosted-access`
+    : `/api/core/v1/projects/${project}/hermes-admission`;
+  return coreFetch<AgentEndpoint>(path, account, {
+    method,
+    ...(payload === undefined ? {} : { body: JSON.stringify(payload) }),
+    signal: AbortSignal.timeout(15_000),
+  });
+}

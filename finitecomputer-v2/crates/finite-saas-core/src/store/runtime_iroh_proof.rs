@@ -163,6 +163,27 @@ async fn prove(db: TestDb, daemon_bin: String, hermes_bin: String, relay: RelayU
     })
     .await
     .unwrap();
+    // Optional real dashboard/browser leg of this explicit external gate.
+    // Only the existing test WorkOS key/user source is a fixture; Core HTTP,
+    // admissions, Postgres, agentd, Hermes and browser WASM are production code.
+    if let Ok(script) = std::env::var("FINITE_TEST_BROWSER_SCRIPT") {
+        let token = crate::auth::test_support::access_token_with_subject(
+            "runtime-auth-user", "runtime-auth@finite.test", true,
+            Some(crate::auth::test_support::OPERATOR_ORG_ID),
+        );
+        let mut browser = tokio::process::Command::new("node")
+            .args(["--import", "tsx", &script])
+            .current_dir(std::env::var("FINITE_TEST_DASHBOARD_DIR").unwrap())
+            .env("FC_CORE_BASE_URL", &core_url)
+            .env("FC_DASHBOARD_DEV_WORKOS_ACCESS_TOKEN", token)
+            .env("FC_WORKOS_OPERATOR_ORG_ID", crate::auth::test_support::OPERATOR_ORG_ID)
+            .env("FINITE_TEST_PROJECT_ID", &project)
+            .env("FINITE_TEST_RUNTIME_ID", launch.request.agent_runtime_id.as_ref().unwrap())
+            .kill_on_drop(true).spawn().unwrap();
+        let result = tokio::time::timeout(Duration::from_secs(180), browser.wait())
+            .await.expect("browser acceptance timed out").unwrap();
+        assert!(result.success(), "dashboard/browser acceptance failed");
+    }
     let endpoint: EndpointId = binding["endpointId"].as_str().unwrap().parse().unwrap();
     let client = Endpoint::builder(presets::Minimal)
         .clear_ip_transports()
