@@ -1,36 +1,25 @@
 # Deploying Finite Sites on Fly
 
-Fly is the destination for the complete Sites switchover. The
-[`fly.toml`](../fly/sites/fly.toml) configuration owns the deployment's domains,
-ports and resource sizes: one Machine with one persistent volume.
-The public service uses real mail. Enable dashboard account login only after
-its route and shared credential are deployed and verified. The dedicated
-rsync.net restore proof remains a migration gate; public validation alone does
-not satisfy it.
+Production is `finite.site`, hosted by the `finite-sites-demo` Fly app in the
+`finite` organization. [`fly.toml`](../fly/sites/fly.toml) is the deployment
+configuration: one Machine and one persistent volume. All publishing and live
+validation use this service. Restore drills use disposable isolated targets,
+removed after their recovery artifacts are retained.
 
-Preserve the source data and archives until the Fly restore and access checks
-pass. Never open the live source registry with the static-only daemon: its
-startup migrations remove unsupported output kinds.
-
-Run `scripts/finite-status` on the authenticated app-plane host before and after
-rollouts; Fly health alone does not establish platform health. Build artifacts
-in CI from the reviewed revision, never on a production host.
+Run `scripts/finite-status` on the app-plane host before and after rollouts.
+Build images in CI. Never overwrite accepted writes with a test database or
+open an unmigrated source registry with the static-only daemon.
 
 ## Fly
 
-The production Fly app retains its historical name `finite-sites-demo` in the
-`finite` organization; set `APP=finite-sites-demo`. It serves `finite.site` and
-already contains live writes. Do not create a replacement app or overwrite its
-volume with a rehearsal database. The separate `finite-sites` app holds private
-rehearsal state and must not be promoted as production. Inspect the production
-Machine, attached
-`sites_data` volume, IPs and issued apex/wildcard certificates before deploying.
+Set `APP=finite-sites-demo`; the historical app name does not indicate a demo.
+Inspect its Machine, `sites_data` volume, IPs and issued certificates for
+`finite.site` and `*.finite.site` before deployment. Preserve existing data.
 
-Install `RESEND_API_KEY` from the
+Import `RESEND_API_KEY` from the
 [secret inventory](../nixos/README.md#secrets-bootstrap-checklist-values-never-in-this-repo)
-using `fly secrets import --stage --app "$APP"` with secret assignments on stdin.
-Keep values out of logs and files. Configure any dashboard account exchange
-separately, after verifying the intended registry and account route.
+using `fly secrets import --stage --app "$APP"`, with assignments on stdin and
+values excluded from logs. Account login and backups have separate gates below.
 
 Set `REVIEWED_REF` to a branch or tag at the reviewed revision and `VERSION` to
 an image version label. From the repository root:
@@ -55,40 +44,25 @@ fly volumes list --app "$APP"
 fly checks list --app "$APP"
 ```
 
-Require exactly one application Machine attached to the intended volume.
-`--ha=false` suppresses automatic spare creation; it does not remove existing
-Machines. A single volume has restart/deploy downtime and must not be scaled
-into independent writable copies.
-
-The [entrypoint](../images/sites-entrypoint) requires the data mount, adjusts
-only its root ownership, and runs Sites as UID/GID 65532. Imported files must
-already be accessible to that user, including the Git trees and mail outbox.
-Check ownership after all staging writes. After maintenance using a Machine entrypoint
-override, explicitly restore `/usr/local/bin/sites-entrypoint`, the serving
-arguments, image, services and mount; restoring the command alone is insufficient.
+Require exactly one serving Machine on the intended volume. `--ha=false` does
+not remove existing Machines; do not create independent writable copies.
+Imported files must be accessible to UID/GID 65532. After maintenance overrides,
+restore `/usr/local/bin/sites-entrypoint`, serving arguments, image, services
+and mount—not just the command.
 
 ## Account bridge
 
-Follow [ADR 0029](../../finite-sites/docs/adr/0029-account-session-viewer-bridge.md)
-and the [dashboard configuration](../../finitecomputer-v2/apps/dashboard/README.md#sites-account-viewer-boundary).
-Deploy and qualify the dashboard's `/site-auth` route before applying the
-account login setting in `fly.toml`. The pre-cutover dashboard lacks this route;
-setting an upstream alone is insufficient. Stage the reviewed dashboard image
-and include its deployment in the authorized cutover.
-Both services must receive the same `FINITE_SITES_VIEWER_SESSION_TOKEN` from the
-secret inventory. The NixOS dashboard module owns the single non-secret origin:
-`FC_SITES_UPSTREAM_URL=https://finite.site`, used for viewing and publishing
-assertions. Remove stale Sites endpoint assignments from
-`/etc/finite/dashboard.env`, preserving its other settings and root:root `0600`.
-Deploy a dashboard image built from the reviewed single-origin implementation;
-the previous image's separate-origin behavior is incompatible with this config.
+Deploy the reviewed dashboard image and verify `/site-auth` before enabling
+`FINITE_SITES_ACCOUNT_LOGIN_URL=https://finite.computer/site-auth` on Sites.
+The dashboard and Sites share `FINITE_SITES_VIEWER_SESSION_TOKEN`.
+Nix owns `FC_SITES_UPSTREAM_URL=https://finite.site` for both viewer sessions
+and publishing assertions; remove stale endpoint assignments from
+`/etc/finite/dashboard.env`, retaining its other settings and mode `0600`.
 
-Verify authorized and unshared accounts, email fallback, share revocation,
-direct Site visits and dashboard iframes on the real domains. Missing Sites
-availability must leave Chat usable. Previous content links navigate through
-the edge redirect and then Sites-owned sign-in; no account credentials are sent
-to the previous content host. Cookies and login links do not migrate across
-hosts. Historical-state fixtures and local tests do not replace live checks.
+Verify shared/unshared accounts, revocation, email fallback, direct visits and
+iframes. Previous content links redirect before Sites-owned sign-in; old-host
+cookies and tokens do not transfer. Sites failure must not prevent Chat.
+The protocol is defined in [ADR 0029](../../finite-sites/docs/adr/0029-account-session-viewer-bridge.md).
 
 ## Verify
 
@@ -106,25 +80,13 @@ After restart and artifact replacement, verify content, grants, existing viewer
 sessions and Git credentials still work. Exercise real mail and any enabled
 account exchange through the public domains.
 
-The pre-cutover Runtime's `fsite/v0.5.3` calls `/api/v1` and cannot use the new
-`/api/v2` service. Build the staged Runtime with this revision's CLI and qualify it before cutover;
-promote that Runtime and the public `fsite-latest` alias only with the canonical
-endpoint.
-Saved Git remotes also require an explicit update to the server-returned URL
-and host-scoped credential storage. Content redirects do not migrate Git or
-API requests. Retire the previous publishing listener at cutover; old clients must fail
-clearly rather than create a second history.
-
-The Hosted Chat requester-assertion issuer must also move to the publishing
-registry before qualifying an existing agent. Assertions are random tokens
-stored in the issuing registry, not portable signed claims. Deploy the reviewed
-dashboard issuer and Runtime together. Prove one existing agent can publish and
-update through Hosted Chat, then verify Chat still works when Sites is unavailable.
-A standalone CLI test does not cover this boundary.
-
-The [container smoke test](../images/sites-smoke.sh) covers synthetic publishing,
-visibility and restart/replacement. It does not qualify real mail, Fly TLS, the
-dashboard account bridge or migration from a legacy database.
+Qualify the Runtime with the matching CLI before promoting it or `fsite-latest`.
+Older `/api/v1` clients cannot publish to `/api/v2`. Update saved Git remotes
+and host-scoped credentials using the server-returned URL; content redirects
+cannot migrate them. Deploy the dashboard assertion issuer with the Runtime
+and prove an existing agent can publish and update through Hosted Chat.
+Assertions belong to the publishing registry; sharing a service credential
+does not make tokens portable between registries.
 
 ## Backups and restore
 
@@ -164,13 +126,10 @@ credential directory as root-only and the files as `0600`. Allow space for a
 full snapshot in `/var/backups/finite-sites`; this staging/status directory is
 private, outside serving data, and ephemeral across Machine replacement.
 
-Once enabled, backups run daily at 03:07 UTC. Sites stops only for the consistent
-file/SQLite copy, then resumes before hashing, verification and upload. Stop and
-capture share a five-minute deadline; on timeout the job aborts capture and
-attempts a bounded restart before cleanup. The full-data rehearsal paused
-serving for about 108–113 seconds; this daily pause was accepted for the initial launch. Re-measure
-after material data growth. Runs are serialized; Borg warnings fail the job. There
-is no automatic retry, prune or compact.
+Backups run daily at 03:07 UTC. Serving pauses for the consistent copy
+(approximately two minutes, accepted for launch), then resumes before upload.
+Capture has a five-minute deadline and attempts restart on failure. Runs are
+serialized; warnings fail the job. There is no automatic retry, prune or compact.
 
 ### Check or retry
 
@@ -182,11 +141,10 @@ supervisorctl -c /etc/sites-supervisor.conf status sites-backup
 finite-status --sites-backup-state /var/backups/finite-sites/status.json --json
 ```
 
-`start` is asynchronous: check after completion for a fresh archive ID and both
-source and upload timestamps. The freshness limit defaults to 36 hours; a
-missing receipt is unknown. Set up external failure/freshness alerts; this
-command sends no notifications. After host loss or forced termination, check
-Sites health and restart through Supervisor or restart the Machine before retrying.
+`start` is asynchronous. Require a fresh archive ID and source/upload timestamps
+after completion; freshness defaults to 36 hours and a missing receipt is
+unknown. This command sends no alerts. After forced termination, check and
+restore Sites health before retrying.
 
 ### Restore or drill
 
@@ -245,8 +203,7 @@ Prepare the cutover review package outside git because it contains customer data
   tips; drift requires review, never a force-push.
 - Capture the destination's current projects, shares, sessions, Git credentials
   and cookie key as well as the frozen source. Rehearse their reconciliation on
-  copies; never replace current Fly state with an older one-project snapshot or
-  with the rehearsal database, which contains synthetic writes.
+  disposable copies; never install test writes or an older snapshot over live data.
 
 ### Activate redirects and retire the app-host service
 

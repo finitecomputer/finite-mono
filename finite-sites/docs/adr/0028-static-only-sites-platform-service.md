@@ -95,14 +95,10 @@ only finite-identity dependency is directory-style fact lookup such as NIP-05.
 Sites calls identity/core for facts it does not own, but every Sites request is
 authorized against Sites state.
 
-The validation service starts essentially empty, except for reserved names and
-collision-protection data imported by a simple operator process. There is no
-general migration framework, dual-write path, or runtime compatibility flag.
-Legacy production Sites continues to run the old deployed binary until cutover.
-At cutover, operators may run a narrow one-off reconciliation for static sites
-created during validation, then switch DNS/edge targets. After the canonical
-service is live and verified, obsolete app/document/output code paths can be
-deleted rather than retained as dormant architecture.
+The production service is the sole publishing authority. Migration preserves
+its accepted writes while reconciling retained source Sites. There is no
+general migration framework or dual-write path. Isolated recovery drills use
+disposable targets; they do not establish a second deployment lane.
 
 ## Consequences
 
@@ -132,5 +128,5 @@ deleted rather than retained as dormant architecture.
 - Preserve app/document kinds behind compatibility modes: rejected because they
   keep the failed output-kind architecture alive and complicate the new service
   before it has proven the static path.
-- Build a reusable migration subsystem: rejected because Sites can be validated on
-  separate endpoints and the final reconciliation is a one-time operator event.
+- Build a reusable migration subsystem: rejected because final reconciliation is a
+  one-time operator event.

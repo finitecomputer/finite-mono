@@ -9,7 +9,7 @@ are historical context only.
 Finite Sites is a static-only platform service:
 
 - one independently deployed `finitesitesd` service;
-- one v2 control/API origin;
+- one control/API origin;
 - one wildcard static-site origin;
 - Project Repositories for source and collaboration;
 - zero-or-one Project Site per Project;
