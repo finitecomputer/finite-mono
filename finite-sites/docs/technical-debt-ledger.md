@@ -83,9 +83,9 @@ Under [ADR 0028](adr/0028-static-only-sites-platform-service.md), the Sites
 service and CLI support static Sites only. App/document output kinds, app
 runners and proxies, and wake-on-request are outside that boundary.
 
-Dynamic compute belongs in a separate product boundary. Retained legacy
-app/document consumers stay on their existing service until retirement; they
-are not converted into static Sites during cutover.
+Dynamic compute belongs in a separate product boundary. The cutover can retain
+reviewed static assets or pre-rendered documents, preserving their access
+restrictions. Server execution is retired; source and recovery archives remain.
 
 ## 9. RESOLVED — Project Repository pushes use durable post-receive events
 
@@ -106,16 +106,3 @@ acknowledgement.
 - **Delete condition**: replace those fixture callers with equivalent invariant
   coverage before removing the helpers. They are not a daemon command or a
   startup migration.
-
-## 11. Retained legacy viewer-session exchange
-
-- **Boundary**: dashboard account previews select one of two fixed configured
-  Sites origins using the existing allowed site hostname distinction. After the
-  static cutover, retained apps/documents still use their legacy registry;
-  migrated static Sites use Fly. No retry
-  across registries, new roster, or grant copy is introduced.
-- **Delete condition**: remove legacy selection and request spelling after
-  legacy previews and Hosted Chat requester consumers are retired. Until then,
-  paired exchange tests must prove requests and failures stay on their backend.
-- **Contract**: [ADR 0029](adr/0029-account-session-viewer-bridge.md).
-  Production cutover requires separate authorization.

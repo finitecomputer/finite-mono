@@ -41,7 +41,6 @@ let
     "finite-saas-core.service"
     "finitechat-server.service"
     "finitechat-hosted-device.service"
-    "finite-saas-sites.service"
     "finite-brain-app.service"
     "finite-identity.service"
     "podman-finite-saas-dashboard.service"
@@ -76,7 +75,6 @@ in
     ../../modules/finite-identity.nix
     ../../modules/finitechat-server.nix
     ../../modules/finitechat-hosted-device.nix
-    ../../modules/finitesitesd.nix
     ../../modules/finite-brain.nix
     ../../modules/dashboard.nix
     ../../modules/caddy.nix
@@ -103,12 +101,6 @@ in
   # repository dedicated to lat-2 so lat-1's frozen archives are never
   # appended to by a different machine.
   finite.recoveryBackup.borgRepository = "fm2890@fm2890.rsync.net:finitecomputer/finite-lat-2";
-
-  # Retained apps/documents still need the v1 daemon after static Sites move
-  # to Fly. Keep its registry and recovery coverage until separate retirement.
-  finite.sites = {
-    package = finitePackages.finitesitesd-legacy-canonical;
-  };
 
   # Continuous chat + Brain SQLite replication. New bucket for the new
   # authority host; lat-1's bucket stays frozen as the outage point-in-time

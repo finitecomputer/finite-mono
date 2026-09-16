@@ -15,7 +15,7 @@ Finite-owned serving substrate behind wildcard domains. Agents collaborate in
 git. A Project Repository is the editable source of truth, and an optional
 Project Site selects committed static bytes to serve as immutable Versions.
 
-Current v2 capabilities:
+Current capabilities:
 
 - Static Project Sites served from committed deploy bytes.
 - NIP-98-signed registry mutations through a local Publishing Key.
@@ -29,7 +29,7 @@ Current v2 capabilities:
   public-read Project Repository visibility.
 
 Stateful apps, document rendering, PDF outputs, and output kinds are retired
-from Sites v2. See `docs/adr/0028-static-only-sites-platform-service.md`.
+from Finite Sites. See `docs/adr/0028-static-only-sites-platform-service.md`.
 
 ## Crate Layout
 

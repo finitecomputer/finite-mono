@@ -96,6 +96,10 @@ FINITE_STATUS_PATHS = {
 }
 
 REMAINING_NIX_CHECK_PATHS = {
+    "scripts/verify-hosted-snapshot",
+    "infra/scripts/restore-hosted-web-chat-snapshot",
+    "infra/scripts/sites-redirects",
+    "scripts/tests/test_sites_redirects.py",
     "scripts/check-brain-product-language.py",
     "scripts/check_runner_host_contract.py",
     "scripts/check_lat1_healthcheck_contract.py",

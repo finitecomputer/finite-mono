@@ -61,7 +61,7 @@ in
       '';
 
       # The operator token is shared only with trusted provisioning services.
-      # The existing Resend send-only credential remains owned by Sites and is
+      # The existing Resend send-only credential remains at its bootstrap path and is
       # read here by systemd without copying its value into the Nix store.
       # The retired identity-sites-notification.env load is gone: the
       # directory shrink removed the Sites notification relay, and Sites now
@@ -189,11 +189,6 @@ in
           && builtins.elem operatorEnvironmentFile config.systemd.services.finite-saas-runner-phala.serviceConfig.EnvironmentFile
         );
       message = "both managed-agent workers must load the shared Identity Authority operator credential";
-    }
-    {
-      assertion =
-        !(builtins.elem operatorEnvironmentFile config.systemd.services.finite-saas-sites.serviceConfig.EnvironmentFile);
-      message = "Sites must not receive the Identity Authority operator credential";
     }
   ];
 }

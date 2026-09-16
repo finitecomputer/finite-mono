@@ -21,6 +21,7 @@ pub mod git;
 pub mod limiter;
 pub mod llms;
 pub mod mailer;
+mod metrics;
 pub mod pages;
 pub mod server;
 pub mod sites;
@@ -47,6 +48,8 @@ pub struct ServeOptions {
     /// Dedicated account-boundary credential for the internal viewer-session
     /// exchange. It comes from the environment, never argv.
     pub viewer_session_service_token: Option<String>,
+    /// Separate read-only monitoring credential; absent disables metrics.
+    pub metrics_token: Option<String>,
     pub account_login_url: Option<String>,
     pub git_hook_helper_path: PathBuf,
     pub git_auto_reconcile: bool,
@@ -257,6 +260,7 @@ fn parse_serve_options(args: &[String]) -> Result<ServeOptions, String> {
         api_url,
         git_base_url,
         viewer_session_service_token,
+        metrics_token: metrics::token_from_env()?,
         account_login_url: std::env::var("FINITE_SITES_ACCOUNT_LOGIN_URL")
             .ok()
             .filter(|v| !v.is_empty()),

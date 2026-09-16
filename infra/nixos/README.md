@@ -304,8 +304,7 @@ that final operation read-only unless the tester explicitly intends a write.
 | 8080 | 127.0.0.1 | searxng (podman) | lat2 |
 | 8790 | 127.0.0.1 | Finite Identity Directory (full router; operator routes are loopback-only) | new |
 | 8791 | 127.0.0.1 | Finite Identity Directory public router (Caddy proxies this verbatim) | new |
-| 8787 | 127.0.0.1 | finitesitesd | lat2 |
-| **8788** | 127.0.0.1 | **finitechat-server (moved off 8787** — sitesd owns it here; public URL unchanged) | clawland 8787 |
+| **8788** | 127.0.0.1 | **finitechat-server** (public URL unchanged) | clawland 8787 |
 | 38918 | 127.0.0.1 | Finite Chat Hosted Web Device (dashboard-internal) | new |
 | 9100 | 127.0.0.1 | node-exporter | new |
 | 2019 | 127.0.0.1 | caddy admin API | app-plane host |
@@ -316,15 +315,14 @@ that final operation read-only unless the tester explicitly intends a write.
 Caddy vhost → backend: `finite.computer` -> 4200 for
 `/internal/finite-private/*` and the exact API-key usage/reset paths under
 `/api/core/v1/finite-private/`, else 3000; `chat.finite.computer` -> 8788;
-`api.finite.chat`, `*.finite.chat`, and `*.docs.finite.chat` -> 8787
-(Cloudflare Origin CA); `identity.finite.vip` public identity routes -> 8791.
-Static Sites run on [Fly](../runbooks/deploy-sites.md). Migrated static hosts
-use the reviewed content redirects; retained apps/documents and legacy
-account previews still need the local Sites service and its recovery coverage.
-A static Sites cutover alone does not retire those consumers.
-Brain has no independent edge: authenticated `/client` and `/_admin/*` requests
-go through the dashboard to loopback :3015, then Brain applies its Nostr
-authorization.
+`identity.finite.vip` public identity routes -> 8791.
+[Finite Sites runs on Fly](../runbooks/deploy-sites.md). The finite.chat content
+vhosts import the reviewed private `/etc/finite/sites-redirects.caddy` mapping
+and return temporary redirects; unmapped content and retired API/Git routes
+return 410. The old data directory and recovery archives are retained; there
+is no Sites daemon or Sites listener on this host.
+`/etc/finite-saas/sites.env` remains an Identity mail credential input despite
+its historical filename; do not remove it with the daemon.
 
 ## Open follow-ups (post-cutover; grep for TODO)
 

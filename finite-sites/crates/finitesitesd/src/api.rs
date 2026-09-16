@@ -37,6 +37,7 @@ use crate::server::{AppState, now_unix};
 pub fn router(state: Arc<AppState>) -> Router {
     Router::new()
         .route("/api/v2/healthz", get(healthz))
+        .route("/internal/v1/metrics", get(crate::metrics::get_metrics))
         .route("/api/v2/auth/register", post(register_auth))
         .route("/api/v2/email-auth/request", post(request_email_login))
         .route("/api/v2/email-auth/redeem", post(redeem_email_login))
@@ -385,7 +386,7 @@ fn authenticate_viewer_session_service(
     Ok(())
 }
 
-fn constant_time_eq(left: &[u8], right: &[u8]) -> bool {
+pub(crate) fn constant_time_eq(left: &[u8], right: &[u8]) -> bool {
     let max_len = left.len().max(right.len());
     let mut difference = left.len() ^ right.len();
     for index in 0..max_len {

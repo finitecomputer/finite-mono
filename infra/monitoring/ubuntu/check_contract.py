@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import json
 import re
 from pathlib import Path
 
@@ -133,8 +134,8 @@ def check_prometheus() -> None:
         "finite.computer",
         "chat.finite.computer",
         "brain.finite.computer",
-        "finitechat-native-mockup.finite.chat",
-        "uptime-probe.docs.finite.chat",
+        "finite.site",
+        "uptime-probe.finite.site",
         "finite-tinfoil-collector",
     ]:
         require_contains(prometheus, f"job_name: {job}", "Prometheus public probes")
@@ -154,6 +155,49 @@ def check_prometheus() -> None:
     require_contains(prometheus, "scrape_interval: 1m", "Chat readiness cadence")
     require_contains(blackbox, "chat_ready:", "Chat readiness probe module")
     require_contains(blackbox, "timeout: 1500ms", "Chat readiness latency budget")
+    metrics_job = prometheus.split("  - job_name: finite-sites-metrics\n", 1)[1].split(
+        "  - job_name:", 1
+    )[0]
+    for setting in [
+        "scrape_interval: 1m",
+        "scrape_timeout: 3s",
+        "scheme: https",
+        "metrics_path: /internal/v1/metrics",
+        "follow_redirects: false",
+        "type: Bearer",
+        "credentials_file: /etc/finite/monitoring/sites-metrics-token",
+        "targets: [finite.site]",
+    ]:
+        require_contains(metrics_job, setting, "Sites usage scrape")
+    for job, target, module in [
+        ("finite.site", "https://finite.site/api/v2/healthz", "http_200"),
+        ("uptime-probe.finite.site", "https://uptime-probe.finite.site/", "http_404"),
+    ]:
+        block = prometheus.split(f"  - job_name: {job}\n", 1)[1].split(
+            "  - job_name:", 1
+        )[0]
+        require_contains(block, f"targets: [{target}]", f"{job} probe target")
+        require_contains(block, f"module: [{module}]", f"{job} probe module")
+        require_contains(block, "scrape_interval: 1m", f"{job} probe cadence")
+
+    # A receiver cutover is invisible if the dashboard still filters old jobs.
+    public_jobs = set(re.findall(r"job_name: ([^\n]+)", prometheus)) - {
+        "finite-tinfoil-collector",
+        "finite-sites-metrics",
+    }
+    dashboard = json.loads(
+        read(ROOT / "infra/monitoring/grafana/dashboards/finite-production-mvp.json")
+    )
+    for panel in dashboard["panels"]:
+        if panel["id"] not in (1, 2, 3, 4):
+            continue
+        selector = re.search(r'job=~"([^"]+)"', panel["targets"][0]["expr"])
+        require(selector is not None, f"{panel['title']}: missing public job selector")
+        selected_jobs = selector[1].replace("[.]", ".").split("|")
+        require(
+            set(selected_jobs) == public_jobs,
+            f"{panel['title']}: dashboard and receiver public jobs differ",
+        )
     require(
         "blackbox-exporter:9115" not in prometheus,
         "Prometheus must not use Compose service DNS",

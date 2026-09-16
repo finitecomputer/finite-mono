@@ -130,6 +130,23 @@ impl TestServer {
         single_origin_git: bool,
         viewer_session_service_token: Option<&str>,
     ) -> TestServer {
+        Self::start_inner_with_metrics(
+            allowed_pubkey,
+            git_auto_reconcile,
+            single_origin_git,
+            viewer_session_service_token,
+            None,
+        )
+        .await
+    }
+
+    async fn start_inner_with_metrics(
+        allowed_pubkey: Option<&str>,
+        git_auto_reconcile: bool,
+        single_origin_git: bool,
+        viewer_session_service_token: Option<&str>,
+        metrics_token: Option<&str>,
+    ) -> TestServer {
         let data_dir = tempfile::tempdir().unwrap();
         let mut store = Store::open(&data_dir.path().join("registry.db")).unwrap();
         if let Some(allowed_pubkey) = allowed_pubkey {
@@ -169,6 +186,7 @@ impl TestServer {
             api_url,
             git_base_url,
             viewer_session_service_token: viewer_session_service_token.map(str::to_string),
+            metrics_token: metrics_token.map(str::to_owned),
             account_login_url: None,
             git_hook_helper_path: hook_helper_path(),
             git_auto_reconcile,
@@ -4015,4 +4033,123 @@ async fn generated_llms_txt_requires_project_site_and_respects_user_file() {
         assert_eq!(custom.into_string().unwrap(), "custom project instructions");
     });
     task.await.unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn aggregate_metrics_auth_creation_replay_and_host_isolation() {
+    let pubkey = finitesites_proto::event::pubkey_for_secret(&user_secret()).unwrap();
+    let metrics_token = "c".repeat(64);
+    let server = TestServer::start_inner_with_metrics(
+        Some(&pubkey),
+        true,
+        true,
+        Some(VIEWER_SESSION_SERVICE_TOKEN),
+        Some(&metrics_token),
+    )
+    .await;
+    tokio::task::spawn_blocking(move || {
+        let url = format!("{}/internal/v1/metrics", server.api_url);
+        for token in [None, Some(VIEWER_SESSION_SERVICE_TOKEN), Some("wrong")] {
+            let mut request = server.agent.get(&url);
+            if let Some(token) = token {
+                request = request.set("Authorization", &format!("Bearer {token}"));
+            }
+            assert!(matches!(request.call(), Err(ureq::Error::Status(401, _))));
+        }
+        let scrape = || {
+            let response = server
+                .agent
+                .get(&url)
+                .set("Authorization", &format!("Bearer {metrics_token}"))
+                .call()
+                .unwrap();
+            assert_eq!(response.header("Cache-Control"), Some("no-store"));
+            assert_eq!(
+                response.header("Content-Type"),
+                Some("text/plain; version=0.0.4; charset=utf-8")
+            );
+            response.into_string().unwrap()
+        };
+        assert!(scrape().contains("finite_sites_existing 0\n"));
+        let bare = serde_json::to_vec(&bare_project_init_request("metrics-bare", false)).unwrap();
+        server
+            .signed(&user_secret(), "POST", "/api/v2/projects/init", Some(&bare))
+            .unwrap();
+        assert!(scrape().contains("finite_sites_existing 0\n"));
+        let request = serde_json::to_vec(&project_init_request(false)).unwrap();
+        for _ in 0..2 {
+            server
+                .signed(
+                    &user_secret(),
+                    "POST",
+                    "/api/v2/projects/init",
+                    Some(&request),
+                )
+                .unwrap();
+        }
+        let text = scrape();
+        assert!(text.contains("finite_sites_existing 1\n"));
+        assert!(text.contains("finite_sites_published 0\n"));
+        let daily: Vec<_> = text
+            .lines()
+            .filter(|line| line.starts_with("finite_sites_created_by_day{"))
+            .collect();
+        assert_eq!(daily.len(), 90);
+        assert_eq!(
+            daily
+                .iter()
+                .map(|line| line.rsplit_once(' ').unwrap().1.parse::<u64>().unwrap())
+                .sum::<u64>(),
+            1
+        );
+        assert!(!text.contains("owner@example.com"));
+        assert!(!text.contains(&pubkey));
+        // Read-only metrics authorization cannot mint viewer sessions.
+        assert!(matches!(
+            server
+                .agent
+                .post(&format!("{}/internal/v1/viewer-sessions", server.api_url))
+                .set("Authorization", &format!("Bearer {metrics_token}"))
+                .send_string("{}"),
+            Err(ureq::Error::Status(401, _))
+        ));
+        // The same path on a wildcard site must not expose control-plane data.
+        let port = url::Url::parse(&server.api_url).unwrap().port().unwrap();
+        assert!(matches!(
+            server
+                .agent
+                .get(&format!(
+                    "http://unallocated.{BASE_DOMAIN}:{port}/internal/v1/metrics"
+                ))
+                .set("Authorization", &format!("Bearer {metrics_token}"))
+                .call(),
+            Err(ureq::Error::Status(404, _))
+        ));
+    })
+    .await
+    .unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn aggregate_metrics_disabled_by_default() {
+    let pubkey = finitesites_proto::event::pubkey_for_secret(&user_secret()).unwrap();
+    let server = TestServer::start(&pubkey).await;
+    tokio::task::spawn_blocking(move || {
+        let result = server
+            .agent
+            .get(&format!("{}/internal/v1/metrics", server.api_url))
+            .call();
+        assert!(matches!(result, Err(ureq::Error::Status(503, _))));
+        assert_eq!(
+            server
+                .agent
+                .get(&format!("{}/api/v2/healthz", server.api_url))
+                .call()
+                .unwrap()
+                .status(),
+            200
+        );
+    })
+    .await
+    .unwrap();
 }

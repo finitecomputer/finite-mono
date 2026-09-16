@@ -284,11 +284,12 @@ except PermissionError:
     access = "denied"
 finally:
     client.close()
-(events / "sites.json").write_text(json.dumps({{
+(events / "sites.json.tmp").write_text(json.dumps({{
     "argv": sys.argv[1:], "uid": os.getuid(), "gid": os.getgid(),
     "groups": os.getgroups(), "socket": access,
     "status": Path("/proc/self/status").read_text(),
 }}))
+(events / "sites.json.tmp").replace(events / "sites.json")
 print("sites fixture stdout", flush=True)
 print("sites fixture stderr", file=sys.stderr, flush=True)
 while True:
@@ -306,7 +307,8 @@ def stopped(signum, frame):
         stream.write("backup-stop\\n")
     sys.exit(0)
 signal.signal(signal.SIGTERM, stopped)
-(events / "backup.json").write_text(json.dumps(dict(os.environ)))
+(events / "backup.json.tmp").write_text(json.dumps(dict(os.environ)))
+(events / "backup.json.tmp").replace(events / "backup.json")
 while True:
     time.sleep(0.05)
 """)

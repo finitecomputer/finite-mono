@@ -114,6 +114,7 @@ install -d -m 0750 -o finite-monitoring -g finite-monitoring \
 for required in \
   /etc/finite/monitoring/grafana-admin-password \
   /etc/finite/monitoring/grafana-secret-key \
+  /etc/finite/monitoring/sites-metrics-token \
   /etc/finite/monitoring/caddy.env
 do
   if [[ ! -s "${required}" ]]; then
@@ -129,10 +130,12 @@ for key in METRICS_USERNAME METRICS_PASSWORD_HASH LOGS_USERNAME LOGS_PASSWORD_HA
   fi
 done
 chown root:finite-monitoring \
+  /etc/finite/monitoring/sites-metrics-token \
   /etc/finite/monitoring/grafana-admin-password \
   /etc/finite/monitoring/grafana-secret-key \
   /etc/finite/monitoring/caddy.env
 chmod 0640 \
+  /etc/finite/monitoring/sites-metrics-token \
   /etc/finite/monitoring/grafana-admin-password \
   /etc/finite/monitoring/grafana-secret-key \
   /etc/finite/monitoring/caddy.env

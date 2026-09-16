@@ -45,6 +45,7 @@ pub struct AppState {
     pub api_url: String,
     pub git_base_url: String,
     pub viewer_session_service_token: Option<String>,
+    pub metrics_token: Option<String>,
     pub account_login_url: Option<url::Url>,
     pub base_domain: String,
     pub data_dir: std::path::PathBuf,
@@ -280,6 +281,12 @@ pub async fn serve_on(
     options: ServeOptions,
 ) -> Result<(), String> {
     crate::validate_viewer_session_service_token(options.viewer_session_service_token.as_deref())?;
+    crate::metrics::validate_token(options.metrics_token.as_deref())?;
+    if options.metrics_token.is_some()
+        && options.metrics_token == options.viewer_session_service_token
+    {
+        return Err("Sites metrics and viewer-session credentials must be different".into());
+    }
     git::preflight_git_dependency().map_err(|error| {
         format!(
             "Git dependency preflight failed: {error}. Install Git and make it available on PATH"
@@ -308,6 +315,7 @@ pub async fn serve_on(
         api_url: options.api_url.clone(),
         git_base_url: options.git_base_url.clone(),
         viewer_session_service_token: options.viewer_session_service_token.clone(),
+        metrics_token: options.metrics_token.clone(),
         account_login_url,
         base_domain: options.base_domain.clone(),
         data_dir: options.data_dir.clone(),
