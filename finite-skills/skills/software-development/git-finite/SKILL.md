@@ -9,9 +9,8 @@ The supported Finite-hosted Git surface is a Finite Sites Project Repository.
 Use `fsite` for Project and credential operations, then ordinary Git for the
 working tree. Do not scrape credentials or call a retired repository wrapper.
 
-Read `finite-sites-publishing-finite` when the Project serves a site, document,
-or stateful app. A source-only repository uses the same model with no declared
-Project Output.
+Read `finite-sites-publishing-finite` when the Project serves a static website.
+A source-only repository uses the same model with no declared Project Site.
 
 ## Create A Source-Only Project
 
@@ -31,7 +30,7 @@ fsite project init --config finite.toml --output json
 fsite project status notes-project --output json
 ```
 
-Add a Project Output later by adding an `[outputs.<id>]` section and replaying
+Add a Project Site later by adding a `[site]` section and replaying
 `project init` with the same Project Slug.
 
 ## List And Clone
@@ -39,10 +38,11 @@ Add a Project Output later by adding an `[outputs.<id>]` section and replaying
 ```sh
 fsite project list --output json
 fsite auth git notes-project --store --output json
-git clone https://git.finite.chat/notes-project.git
+git clone "$GIT_REMOTE_URL"
 ```
 
-Prefer `--store`; do not print Git Credential passwords into chat or logs.
+Set `GIT_REMOTE_URL` to the returned `git_remote_url`. Prefer `--store`;
+do not print Git Credential passwords into chat or logs.
 
 ## Work With Git
 
@@ -75,7 +75,7 @@ fsite auth git notes-project --email editor@example.com --store --output json
 ```
 
 Project Repository edit access is separate from viewer access to a served
-Project Output. Do not make a repository or output public merely to collaborate
+Project Site. Do not make a repository or Site public merely to collaborate
 or preview. Public-read repository policy for selected Finite-owned baselines
 is an operator concern, not a general user command.
 

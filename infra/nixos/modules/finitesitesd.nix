@@ -1,8 +1,9 @@
 # finitesitesd — Finite Sites registry, publishing API, Git smart HTTP, and
 # static site serving.
 #
-# Retained legacy service for canonical finite.chat traffic until the Fly
-# cutover. The static-only service is deployed through infra/fly/sites/.
+# Retained service for unmigrated apps/documents and legacy account previews.
+# Static Sites run on Fly (infra/fly/sites/). Remove this module only after
+# those retained consumers are retired, not at the static Sites cutover.
 {
   config,
   finitePackages,

@@ -39,7 +39,7 @@ let
     # receive these same public values from Core's FC_CORE_RUNTIME_ENV_JSON
     # and ignore this Runner-side map entirely.
     FC_RUNNER_RUNTIME_ENV_JSON = builtins.toJSON {
-      FINITE_SITES_API = "https://api.finite.chat";
+      FINITE_SITES_API = "https://finite.site";
       FINITE_BRAIN_SERVER_URL = "https://brain.finite.computer";
       FINITE_BRAIN_PUBLIC_BASE_URL = "https://brain.finite.computer";
     };

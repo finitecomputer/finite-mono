@@ -74,11 +74,12 @@ account login setting in `fly.toml`. The pre-cutover dashboard lacks this route;
 setting an upstream alone is insufficient. Stage the reviewed dashboard image
 and include its deployment in the authorized cutover.
 Both services must receive the same `FINITE_SITES_VIEWER_SESSION_TOKEN` from the
-secret inventory. At the authorized cutover, merge the
-[dashboard assignment](../fly/sites/dashboard.env.example) into its existing
-`/etc/finite/dashboard.env`, preserving all other values and root:root `0600`.
-This sets `FC_SITES_V2_UPSTREAM_URL=https://finite.site`; keep
-`FC_SITES_UPSTREAM_URL=http://127.0.0.1:8787` for legacy previews and Hosted Chat.
+secret inventory. The NixOS dashboard module owns both non-secret origins:
+`FC_SITES_V2_UPSTREAM_URL=https://finite.site` and
+`FC_SITES_UPSTREAM_URL=http://127.0.0.1:8787` for retained legacy previews.
+At cutover, remove stale copies of these two assignments from
+`/etc/finite/dashboard.env`, preserving its other settings and root:root `0600`.
+Do not maintain a second endpoint configuration in an operator file.
 Restart the dashboard through its normal deployment procedure and verify both
 origins. A failed v2 exchange must not retry against legacy.
 
@@ -114,6 +115,15 @@ Saved Git remotes also require an explicit update to the server-returned URL
 and host-scoped credential storage. Content redirects do not migrate Git or
 API requests. Keep legacy publishing frozen until retained publishers have
 transitioned, so old agents cannot create a second history on legacy.
+
+The Hosted Chat requester-assertion issuer must also move to the publishing
+registry before qualifying an existing agent against v2. Assertions are random
+tokens stored in the issuing registry, not portable signed claims: using the
+same service credential on both servers does not make an old-registry token
+valid on Fly. Deploy the separately reviewed dashboard issuer change with
+the Runtime rollout; keep `FC_SITES_UPSTREAM_URL` on the retained legacy
+viewer registry. Qualify the transition while preserving that exchange and Chat when
+Sites is unavailable. A standalone CLI test does not cover this boundary.
 
 The [container smoke test](../images/sites-smoke.sh) covers synthetic publishing,
 visibility and restart/replacement. It does not qualify real mail, Fly TLS, the
@@ -248,3 +258,31 @@ contains test writes and must not become production. Define rollback around
 destination writes; do not overwrite them with an earlier database. Qualify
 saved Git remotes and existing agents before changing CLI defaults or runtime
 pins. This procedure does not authorize cutover or a CLI/runtime rollout.
+
+After cutover, remove obsolete publishing guidance and promote a Runtime whose
+bundled skills match its CLI. Existing agents adopt that bundle only through
+their own `finite skills sync`; image replacement does not overwrite skills.
+Core's `FC_CORE_RUNTIME_ENV_JSON` and the Runner's N-1
+`FC_RUNNER_RUNTIME_ENV_JSON` must both use `FINITE_SITES_API=https://finite.site`.
+Check operator environment files for overrides. Changing these defaults does
+not rewrite existing persisted RuntimeSpecs: verify each transitioned agent's
+effective endpoint as part of its supported rollout, without direct database
+edits. Do not apply the new defaults with an old `/api/v1` CLI.
+
+Retiring the Latitude service is a separate step from moving static Sites.
+Its daemon/package, registry backups, old-domain routes and probes, and legacy
+dashboard viewer exchange remain necessary for retained apps/documents and
+other excluded outputs. Delete them together only after every retained output
+has an approved replacement or retirement, legacy requester consumers are gone,
+and the retained Recovery Set has restored independently. Preserve redirects
+for migrated URLs and existing-state migration/restore tests; their age alone
+does not make them disposable.
+
+For Runtime promotion, use the same qualified Core artifact in the active
+Kata workers' `/etc/finite/runner.env` and, when enabled, Phala's
+`/etc/finite/phala-runner.env` as `FC_RUNNER_RUNTIME_ARTIFACT_ID`. Neither lane
+has a repository fallback pin. Set the Phala pin before applying a closure
+that removes the old default; otherwise the worker intentionally fails startup.
+The credential bootstrap does not promote a Runtime. Follow the existing
+[Runtime rollout procedure](runtime-image.md) for artifact registration,
+new-agent admission and existing-agent upgrades.

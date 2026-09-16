@@ -72,7 +72,7 @@ deleted, or rolled back by a baseline sync.
 
 ## Current Gaps And Open Questions
 
-The bundled baseline carries the canonical `fsite` 0.4.0 Finite Sites guidance.
+The bundled baseline carries the canonical `fsite` 0.6.0 Finite Sites guidance.
 Agents seeded from an older baseline can adopt it explicitly with
 `finite skills sync` after the tested image bundle is present. Runtime restart
 or image replacement still must not silently overwrite the durable baseline.

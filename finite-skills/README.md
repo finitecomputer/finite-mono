@@ -33,6 +33,11 @@ Run from the monorepo root:
 just skills check
 ```
 
+The Runtime image workflow also runs `scripts/check-sites-cli.py` against its
+actual `fsite` binary and bundled skills. This checks the release version,
+advertised workflows, config examples, and rejection of retired workflows.
+It is an offline contract check; live publishing remains a rollout check.
+
 For local human spot checks of web-design skill variants, use the Promptfoo +
 Playwright harness in `ab-testing/`:
 
@@ -64,7 +69,7 @@ The current v2 Runtime image bundles this tree at `/runtime/finite-skills`,
 seeds `/data/agent/managed-skills/finite/current` once for a new agent, and
 exposes that durable directory through Hermes `skills.external_dirs`.
 
-The corrected `fsite` 0.4.0 Finite Sites guidance reaches a newly initialized
+The corrected `fsite` 0.6.0 Finite Sites guidance reaches a newly initialized
 Agent Home automatically. An existing agent keeps the revision it was seeded
 with until the user or agent runs `finite skills sync` in a Runtime image that
 contains the newer tested bundle. The command replaces only

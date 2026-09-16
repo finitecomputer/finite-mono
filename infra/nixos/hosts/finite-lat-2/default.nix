@@ -104,8 +104,8 @@ in
   # appended to by a different machine.
   finite.recoveryBackup.borgRepository = "fm2890@fm2890.rsync.net:finitecomputer/finite-lat-2";
 
-  # Canonical Sites stays on the released v1 API/docs/static daemon until a
-  # deliberate cutover moves finite.chat traffic to the static-only v2 service.
+  # Retained apps/documents still need the v1 daemon after static Sites move
+  # to Fly. Keep its registry and recovery coverage until separate retirement.
   finite.sites = {
     package = finitePackages.finitesitesd-legacy-canonical;
   };

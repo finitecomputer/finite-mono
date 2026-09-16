@@ -1,6 +1,6 @@
 ---
 name: website-building-finite
-description: Build and ship websites, landing pages, dashboards, documents, and stateful web apps on Finite. Use when a human wants the product implemented, QAed in a real browser, and published through Finite Sites with fsite.
+description: Build and ship static websites, landing pages, and browser dashboards on Finite. Use when a human wants the product implemented, QAed in a real browser, and published through Finite Sites with fsite.
 ---
 
 # Website Building
@@ -22,7 +22,7 @@ rules override anything else:
 
 - publish through Finite Sites with `fsite`, never `deploy_website` or a
   Runtime port-exposure command
-- keep Project Outputs private by default; public sharing requires an explicit
+- keep Project Sites private by default; public sharing requires an explicit
   human decision and `--yes-public`
 - do not edit proxies, DNS, or host-level networking
 - prefer user-space installs (`npm`, `bun`, `uv`, `pipx`) over asking for host binaries
@@ -90,7 +90,7 @@ Choose one route, then load the matching references.
 7. Commit after each meaningful milestone.
 8. For complex sites, run progressive Playwright QA. Bound automatic correction
    loops and surface decisions or stubborn issues instead of polishing indefinitely.
-9. Declare the correct `finite.toml` output kind, validate it with
+9. Declare the static `[site]` in `finite.toml`, validate it with
    `fsite project init --dry-run`, then commit and push the Deploy Branch.
 10. Verify the private served preview before sharing. Only switch to public
    after explaining the exposure and receiving explicit human agreement.
@@ -107,14 +107,11 @@ Choose one route, then load the matching references.
 
 ## Operational Rules
 
-- Use a static `kind = "site"` output for built browser assets, a
-  `kind = "document"` output for Markdown, and `kind = "app"` only when a
-  server process or durable mutable state is required.
-- If a site needs a backend, prefer one app server that serves both UI and API.
-  For `kind = "app"`, listen on `0.0.0.0:$PORT` and write live mutable state
-  only under `DATA_DIR`.
-- Finite Sites does not run builds. Commit the source and selected deploy
-  bytes or intentional app runtime payload before pushing.
+- Finite Sites serves static files selected by `[site]`. Export documents
+  to HTML locally. Server processes and database hosting need a separately
+  supported backend; establish that deployment before promising the feature.
+- Finite Sites does not run builds. Commit source and selected static deploy
+  bytes before pushing.
 - For Playwright QA, start the local preview with a truly detached process
   group, not a plain `nohup ... &` shell one-liner that can leave the terminal
   tool hanging. Prefer `setsid sh -lc 'COMMAND >/tmp/app.log 2>&1 < /dev/null'
@@ -136,7 +133,7 @@ Choose one route, then load the matching references.
 - `references/shared/10-charts-and-dataviz.md`: charts and dashboard patterns
 - `references/shared/11-web-technologies.md`: compatibility notes
 - `references/shared/12-playwright-interactive.md`: finite-specific Playwright workflow
-- `references/shared/19-backend.md`: backend patterns for published apps
+- `references/shared/19-backend.md`: backend boundaries for static Sites
 - `references/shared/20-llm-api.md`: using shared API keys safely
 - `references/informational/informational.md`: informational / marketing site guidance
 - `references/game/game.md`: browser game guidance

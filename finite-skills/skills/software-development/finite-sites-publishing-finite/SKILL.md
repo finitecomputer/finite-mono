@@ -1,21 +1,20 @@
 ---
 name: finite-sites-publishing-finite
-description: Operate Finite Sites (finite-sites) with the fsite CLI to create, publish, update, preview, inspect, list, and share site/website outputs, Markdown document outputs, and stateful app outputs. Use for Finite Sites or finite-sites requests involving a site or website publish, private preview, project/output list, viewer sharing, collaborative editing, documents, or stateful apps.
+description: Operate Finite Sites (finite-sites) with the fsite CLI to create, publish, update, preview, inspect, list, and share static site/website projects. Use for Finite Sites or finite-sites requests involving a website publish, private preview, project list, viewer sharing, or collaborative editing.
 ---
 
 # Finite Sites Publishing
 
 Use `fsite` as the only agent-facing Finite Sites surface. This skill follows
-the `fsite` 0.4.0 Project Repository contract.
+the `fsite` 0.6.0 static Sites contract.
 
 Finite Sites is source-first:
 
 - a Project Repository is the editable Git source of truth;
-- `finite.toml` declares zero or more Project Outputs;
+- `finite.toml` declares zero or one Project Site;
 - pushing a configured Deploy Branch creates an immutable Version;
-- a Project Output can be a static site, rendered Markdown document, or
-  stateful app;
-- Project collaboration and output viewer access are separate grants.
+- a Project Site serves committed static files; builds run locally;
+- Project collaboration and Site viewer access are separate grants.
 
 Do not expose users to raw Nostr events, private keys, manifests, blobs, DNS,
 certificates, proxies, or host networking during normal work. If `fsite` is
@@ -32,10 +31,8 @@ fsite --version
 fsite describe workflow register-and-publish --output json
 fsite describe workflow project-config --output json
 fsite describe workflow publish-static-site --output json
-fsite describe workflow publish-stateful-app --output json
-fsite describe workflow publish-document --output json
 fsite describe workflow edit-shared-project --output json
-fsite describe workflow share-output --output json
+fsite describe workflow share-site --output json
 ```
 
 Use `--output json` when inspecting results programmatically. Validate
@@ -80,7 +77,7 @@ already authorizes; it is not proof by itself.
 
 ## Inspect, List, And Preview
 
-List Projects and inspect one Project's outputs, URLs, visibility, and active
+List Projects and inspect a Project Site's URL, visibility, and active
 Version:
 
 ```sh
@@ -90,95 +87,42 @@ fsite view URL_OR_NAME --output json
 ```
 
 For a new or changed website, run its own tests and preview it locally in a
-browser before pushing. After push, use the private output URL from `project
+browser before pushing. After push, use the private Site URL from `project
 status` as the served preview, then verify it with `fsite view` and a real
 browser. Do not make an output public merely to preview it.
 
-Treat the server-returned `output_url` as authoritative. `fsite view NAME`
-resolves an owned Project through the configured `FINITE_SITES_API`, so it may
-return a local `*.sites.localhost` URL instead of `*.finite.chat`. Never
-synthesize a production URL from a slug, and never present a Project Git
-remote as a site preview. If the Project has multiple outputs, pass the exact
-`output_url` to `fsite view`.
+Treat `site.url` from Project Status as authoritative. `fsite view NAME`
+resolves a Project through `FINITE_SITES_API` (production: `https://finite.site`).
+Use the returned URL; do not turn a local development URL into a production
+URL or present a Git Remote as a browser preview.
 
 If an existing site or document exposes `/llms.txt`, read it for the platform
 handoff. A project-authored `/llms.txt` remains the project's authority and
 must not be overwritten by generic guidance.
 
-## Choose The Output Kind
+## Static Site Configuration
 
-### Static Site Or Website
-
-Use `kind = "site"` for committed static bytes. Finite Sites does not run the
-build. Build and test locally, then commit the selected output directory.
+Build locally, then commit source and the selected deploy directory:
 
 ```toml
 [project]
 slug = "my-project"
 
-[outputs.site]
-kind = "site"
-site_name = "my-project"
+[site]
+name = "my-project"
 branch = "main"
 path = "dist"
 spa = false
 ```
 
-Set `spa = true` only for history-API client routing that needs unknown paths
-to serve the app shell. Plain multipage sites and hash routing do not need it.
+Use `spa = true` only when browser history routing needs an index-page
+fallback. A `[project]`-only configuration creates a Bare Project Repository;
+add `[site]` and replay Project Init to add its website.
 
-### Markdown Document
-
-Use `kind = "document"` for one Markdown file or a Markdown tree rendered as a
-read-only document. The authored Markdown remains the durable source.
-
-```toml
-[project]
-slug = "my-docs"
-
-[outputs.doc]
-kind = "document"
-document_name = "my-docs"
-branch = "main"
-path = "docs"
-entry = "index.md"
-```
-
-Document URLs use the configured document domain, such as
-`https://my-docs.docs.finite.chat/`. Clean routes render Markdown; `.md` routes
-return authored Markdown. Do not commit generated HTML as the Document source.
-
-### Stateful App
-
-Use `kind = "app"` for a server process with live mutable state. The committed
-app directory is an immutable runtime bundle; live state is separate.
-
-```toml
-[project]
-slug = "my-app"
-
-[outputs.web]
-kind = "app"
-site_name = "my-app"
-branch = "main"
-path = "app"
-start = "bun server.ts"
-```
-
-Runtime contract:
-
-- `start` is required and begins with a supported `node`, `bun`, or `uv`
-  command;
-- Finite sets `PORT`; listen on `0.0.0.0:$PORT`;
-- Finite sets `DATA_DIR`; write all live mutable state under `DATA_DIR`;
-- `DATA_DIR` survives deploys, restarts, and wake/sleep;
-- build before commit and include the source, migrations, seed data, and any
-  intentional runtime payload the start command needs;
-- never let a deploy overwrite existing `DATA_DIR` content.
-
-Do not assume Finite Sites runs dependency installation or a build step.
-Commit dependency directories only when they are intentionally required
-runtime payload, never as an accidental build cache.
+Finite Sites does not run application servers or render Markdown. Export
+static HTML for documents. If the product needs a backend, establish a
+separately supported backend deployment before promising a working product;
+never put server credentials in browser assets.
 
 ## Create And Publish
 
@@ -190,7 +134,7 @@ fsite project init --config finite.toml --dry-run --output json
 ```
 
 2. After the configuration is correct, create or reconcile the Project and
-   its outputs:
+   its Site:
 
 ```sh
 fsite project init --config finite.toml --output json
@@ -209,7 +153,7 @@ fsite project init --config finite.toml --owner-email OWNER_EMAIL --output json
 ```
 
 A `[project]`-only configuration creates a source-only Project Repository.
-Adding outputs later and replaying `project init` is supported.
+Adding a Site later and replaying `project init` is supported.
 
 Project Init has one bounded recovery replay:
 
@@ -223,11 +167,12 @@ Project Init has one bounded recovery replay:
 Never blindly retry either error, choose a replacement slug, delete local
 source, or attempt direct registry repair.
 
-3. Mint a scoped Git Credential, then use ordinary Git:
+3. Mint a scoped Git Credential, then use ordinary Git. Set `GIT_REMOTE_URL`
+   to the returned `git_remote_url`; do not guess a hostname:
 
 ```sh
 fsite auth git PROJECT --store --output json
-git clone https://git.finite.chat/PROJECT.git
+git clone "$GIT_REMOTE_URL"
 cd PROJECT
 # edit source, run tests/build, and inspect the local preview
 git add finite.toml .
@@ -239,7 +184,7 @@ For a new local repository, initialize `main`, add the returned Project remote,
 and push the configured Deploy Branch. Prefer `--store`; never print a Git
 Credential password into chat or logs.
 
-Pushing creates the Version. Confirm the expected output and private preview:
+Pushing creates the Version. Confirm the expected Site and private preview:
 
 ```sh
 fsite project status PROJECT --output json
@@ -247,18 +192,19 @@ fsite view URL_OR_NAME --output json
 ```
 
 Report the exact URL returned by those commands. Do not replace a local or
-staging hostname with a production-shaped `*.finite.chat` hostname.
+staging hostname with a production-shaped `*.finite.site` hostname.
 
 ## Edit A Shared Project
 
 Use the Project Repository; never reconstruct editable source from rendered
 HTML.
 
-For a native Project Collaborator:
+For a native Project Collaborator, use the returned `git_remote_url` as
+`GIT_REMOTE_URL`:
 
 ```sh
 fsite auth git PROJECT --store --output json
-git clone https://git.finite.chat/PROJECT.git
+git clone "$GIT_REMOTE_URL"
 ```
 
 For an External Principal acting through an email grant:
@@ -286,14 +232,14 @@ fsite project grant PROJECT --email editor@example.com --send-invite --output js
 fsite project revoke PROJECT --email editor@example.com --output json
 ```
 
-Viewer access applies to one output ID from `finite.toml` or `project status`:
+Viewer access applies to the Project's single Site, with no output ID:
 
 ```sh
-fsite project share PROJECT OUTPUT --shared --add-email viewer@example.com --send-invite --output json
-fsite project share PROJECT OUTPUT --shared --remove-email viewer@example.com --output json
-fsite project share PROJECT OUTPUT --private --output json
-fsite project share PROJECT OUTPUT --add-npub VIEWER_NPUB --output json
-fsite project share PROJECT OUTPUT --remove-npub VIEWER_NPUB --output json
+fsite project share PROJECT --shared --add-email viewer@example.com --send-invite --output json
+fsite project share PROJECT --shared --remove-email viewer@example.com --output json
+fsite project share PROJECT --private --output json
+fsite project share PROJECT --add-npub VIEWER_NPUB --output json
+fsite project share PROJECT --remove-npub VIEWER_NPUB --output json
 ```
 
 Native Principal Shares use bounded Sites viewer sessions and do not require
@@ -306,7 +252,7 @@ private files, credentials, drafts, personal information, or regulated data.
 Only after explicit human agreement run:
 
 ```sh
-fsite project share PROJECT OUTPUT --public --yes-public --output json
+fsite project share PROJECT --public --yes-public --output json
 ```
 
 Never pass `--yes-public` on your own initiative.
@@ -317,10 +263,9 @@ Never pass `--yes-public` on your own initiative.
   invoke a retired runtime-publish wrapper.
 - Keep `.finite/`, `.env*`, private keys, credentials, and build caches out of
   Project Repositories.
-- Treat output visibility separately from Project Repository edit access.
-- Use the output ID, not a DNS name, with `project share`.
+- Treat Site visibility separately from Project Repository edit access.
+- Use the Project Slug with `project share`.
 - Do not look for a direct upload command; Git push is the publish path.
 - Do not set `path = "."` unless the entire repository is intentionally served.
-- Do not claim state durability outside `DATA_DIR` for stateful apps.
-- Treat rollback, output deletion, name transfer, and custom domains as
+- Treat rollback, Site deletion, name transfer, and custom domains as
   operator work unless the installed `fsite` help explicitly exposes them.

@@ -14,10 +14,10 @@ Finite Sites currently lives in `finite-mono`, but its production shape is
 still coupled to the shared server infrastructure and to a public Project
 Output model that grew to include static sites, rendered documents, PDFs, and
 stateful apps. The app path introduced Kata runners and wake-on-request
-questions that are no longer part of the product direction. Production has no
-`kind = "app"` Sites state that must be preserved, so the next architecture can
-make a hard static-only cut instead of carrying compatibility modes for a
-failed experiment.
+questions that are no longer part of the product direction. The cutover inventory
+includes existing apps and documents. Those outputs remain on the legacy service with their recovery coverage; the Fly service
+imports only the agreed static Sites. The static-only target does not authorize
+deletion of unsupported user state.
 
 The goal is not to move Sites out of this repository. The goal is to make Sites
 a separate platform service: independently deployable, independently backed up,
@@ -46,8 +46,8 @@ but deployed separately on one Fly Machine with persistent state at
 `/var/lib/finite-sites`. CI builds the digest-pinned image; Fly terminates TLS
 and routes to the service. Deployments and backup/restore qualification live in
 [the Sites runbook](../../../infra/runbooks/deploy-sites.md). This replaces the
-previous NixOS validation-host plan; the legacy app-plane service stays until
-cutover.
+previous NixOS validation-host plan; the legacy app-plane service stays for
+retained apps/documents until those consumers are separately retired.
 
 The control origin is `https://finite.site` for API and Git smart HTTP; served
 Sites use `https://{site}.finite.site/`. The API lives under `/api/v2/*`, with

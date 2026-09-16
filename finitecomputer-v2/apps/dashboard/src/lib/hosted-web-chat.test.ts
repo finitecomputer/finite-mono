@@ -29,10 +29,12 @@ test("verified hosted requester assertion binds mailbox, human, and agent", asyn
     global.fetch = originalFetch;
     if (originalCore === undefined) delete process.env.FC_CORE_BASE_URL;
     else process.env.FC_CORE_BASE_URL = originalCore;
-    process.env.FC_SITES_UPSTREAM_URL = originalUpstream;
+    if (originalUpstream === undefined) delete process.env.FC_SITES_UPSTREAM_URL;
+    else process.env.FC_SITES_UPSTREAM_URL = originalUpstream;
     if (originalV2Upstream === undefined) delete process.env.FC_SITES_V2_UPSTREAM_URL;
     else process.env.FC_SITES_V2_UPSTREAM_URL = originalV2Upstream;
-    process.env.FINITE_SITES_VIEWER_SESSION_TOKEN = originalToken;
+    if (originalToken === undefined) delete process.env.FINITE_SITES_VIEWER_SESSION_TOKEN;
+    else process.env.FINITE_SITES_VIEWER_SESSION_TOKEN = originalToken;
   });
   process.env.FC_CORE_BASE_URL = "https://core.internal";
   process.env.FC_SITES_UPSTREAM_URL = "https://sites.internal";
@@ -75,7 +77,7 @@ test("verified hosted requester assertion binds mailbox, human, and agent", asyn
     sitesAssertion: "assertion-1",
   });
   assert.deepEqual(requests[2], {
-    url: "https://sites.internal/internal/v1/hosted-requester-assertions",
+    url: "https://finite.site/internal/v1/hosted-requester-assertions",
     body: {
       email: "after@example.test",
       requester_npub: "human-1",
@@ -86,7 +88,7 @@ test("verified hosted requester assertion binds mailbox, human, and agent", asyn
 
 test("requester assertions never fall back to stale session email when Core fails or returns another subject", async (context) => {
   const originalFetch = global.fetch;
-  const names = ["FC_CORE_BASE_URL", "FC_SITES_UPSTREAM_URL", "FINITE_SITES_VIEWER_SESSION_TOKEN"] as const;
+  const names = ["FC_CORE_BASE_URL", "FC_SITES_V2_UPSTREAM_URL", "FINITE_SITES_VIEWER_SESSION_TOKEN"] as const;
   const previous = names.map((name) => process.env[name]);
   context.after(() => {
     global.fetch = originalFetch;
@@ -96,7 +98,7 @@ test("requester assertions never fall back to stale session email when Core fail
     });
   });
   process.env.FC_CORE_BASE_URL = "https://core.internal";
-  process.env.FC_SITES_UPSTREAM_URL = "https://sites.internal";
+  process.env.FC_SITES_V2_UPSTREAM_URL = "https://finite.site";
   process.env.FINITE_SITES_VIEWER_SESSION_TOKEN = "fixture-service-token";
   for (const response of [
     Response.json({ error: "unavailable" }, { status: 503 }),
@@ -110,6 +112,51 @@ test("requester assertions never fall back to stale session email when Core fail
     });
     assert.equal(result, undefined);
     assert.deepEqual(requests, ["https://core.internal/api/core/v1/me"]);
+  }
+});
+
+test("missing or failing v2 requester exchange keeps Chat context optional without legacy fallback", async (context) => {
+  const previous = { ...process.env };
+  const originalFetch = global.fetch;
+  context.after(() => { process.env = previous; global.fetch = originalFetch; });
+  process.env.FC_CORE_BASE_URL = "https://core.internal";
+  process.env.FC_SITES_UPSTREAM_URL = "https://legacy.internal";
+  process.env.FINITE_SITES_VIEWER_SESSION_TOKEN = "fixture-service-token";
+  const input = {
+    config: { baseUrl: "https://device.internal", apiToken: "device-token" },
+    account: { email: "person@example.test", workosUserId: "user_fixture", emailVerified: true,
+      accessToken: "fixture-access-token", source: "workos" as const },
+  };
+  const requests: string[] = [];
+  global.fetch = (async (url) => {
+    requests.push(String(url));
+    throw new Error("missing configuration must not fetch");
+  }) as typeof fetch;
+  for (const origin of [undefined, "", "https://finite.site/internal", "file:///tmp/sites"]) {
+    if (origin === undefined) delete process.env.FC_SITES_V2_UPSTREAM_URL;
+    else process.env.FC_SITES_V2_UPSTREAM_URL = origin;
+    assert.equal(await createHostedRequesterContext(input), undefined);
+  }
+  assert.equal(requests.length, 0);
+
+  process.env.FC_SITES_V2_UPSTREAM_URL = "https://finite.site";
+  for (const failure of ["unavailable", "unauthorized", "disconnect", "bad-payload"] as const) {
+    requests.length = 0;
+    global.fetch = (async (url, init) => {
+      requests.push(String(url));
+      if (String(url).endsWith("/api/core/v1/me")) {
+        return Response.json({ email: input.account.email, workos_user_id: input.account.workosUserId });
+      }
+      if (String(url).endsWith("/v1/app/state")) return Response.json(targetState());
+      assert.equal(String(url), "https://finite.site/internal/v1/hosted-requester-assertions");
+      assert.equal(init?.redirect, "error");
+      if (failure === "disconnect") throw new Error("network down");
+      if (failure === "bad-payload") return Response.json({ email: "other@example.test", assertion: "wrong-subject" });
+      return new Response(null, { status: failure === "unavailable" ? 503 : 401 });
+    }) as typeof fetch;
+    assert.equal(await createHostedRequesterContext(input), undefined);
+    assert.equal(requests.length, 3);
+    assert(!requests.some((url) => url.includes("legacy.internal")));
   }
 });
 
