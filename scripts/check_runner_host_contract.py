@@ -27,7 +27,7 @@ EXPECTED_MAX_SANDBOXES = {
     # finite-lat-4 mirrors lat3's owner-authorized ceiling; it is admitted
     # drained (FC_RUNNER_DRAIN is operator env, not shared env).
     "finite-lat-4": "42",
-    "finite-lat-5": "1",
+    "finite-lat-5": "42",
 }
 
 SHARED_ENV_PATH = "/etc/finite/runner-shared.env"
