@@ -143,6 +143,10 @@ configuration file. Set `publicOrigin` to the exact Core host origin and set
 `allowedOrigins` explicitly; `listenAddress`/`listenPort` configure the listener,
 and the module opens that TCP port in the host firewall. DNS, host reachability,
 certificates, and production Kata behavior still require deployment qualification.
+Before activation, FIN-39 must also add a state-aware hosted-ingress probe to
+`scripts/finite-status` and include the dedicated unit in journal collection.
+An inactive proxy alone cannot distinguish an empty projection from failed
+reconciliation; it must not be reported as healthy without that evidence.
 Caddy has no timer, automatic restart, resume, or boot activation. Only a fresh
 Runner projection starts it. The pre-start gate compares the configured immutable
 Runner executable with the last publisher: changing or rolling back the binary
