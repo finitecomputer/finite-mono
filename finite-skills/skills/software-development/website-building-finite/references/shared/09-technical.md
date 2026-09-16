@@ -1,8 +1,8 @@
 # Technical Rules And Workflow
 
 This file is authoritative for Finite. It overrides foreign
-`deploy_website`, S3, iframe, opaque-URL, proxy, or Runtime port-exposure
-assumptions from the source material.
+`deploy_website`, object-storage hosting, iframe, opaque-URL, proxy, or Runtime
+port-exposure assumptions from the source material.
 
 ## Project Structure
 
