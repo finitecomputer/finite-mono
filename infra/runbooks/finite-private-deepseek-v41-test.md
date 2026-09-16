@@ -169,8 +169,12 @@ scripts/with-dev-env python3 scripts/finite_private_v41_benchmark.py \
   --evidence-dir "$FINITE_PRIVATE_EVIDENCE_DIR/deepseek" --execute
 ```
 
-The tiers are 1, 8, 16, 32, 64; three repetitions each, 1,024 output tokens,
+The tiers are 1, 8, 16, 32, 64, 128; three repetitions each, 1,024 output tokens,
 thinking on/high, one bounded warmup, and distinct synthetic short prompts.
+The 128 tier means 128 concurrent client requests. The measured candidate
+retains its 64-sequence engine limit, so this tier also measures queueing and
+admission under saturation; it does not claim 128 simultaneously decoding
+sequences. Reach it only if the earlier tiers pass and time remains.
 Report decode p10/p50, aggregate output, TTFT p50/p95, and errors separately.
 Stop escalation on any error, p10 below 10 tok/s, p50 below 20 tok/s, or p95
 TTFT above 10 seconds. Aggregate throughput is measured without a claimed

@@ -54,7 +54,7 @@ def main() -> int:
     parser.add_argument("--execute", action="store_true", help="Send measured inference traffic")
     args = parser.parse_args()
     model = MODELS[args.model]
-    tiers = (1, 8, 16, 32, 64)
+    tiers = (1, 8, 16, 32, 64, 128)
     if not args.execute:
         print(json.dumps({"execute": False, "model": model,
                           "not_before": START.isoformat(),
