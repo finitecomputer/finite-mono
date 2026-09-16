@@ -250,6 +250,7 @@ in
         check finitechat-server   http://127.0.0.1:8788/readyz
         check hosted-web-device   http://127.0.0.1:38918/healthz
         check finite-brain        http://127.0.0.1:3015/health
+        check finite-sites        https://finite.site/api/v2/healthz
         check node-exporter       http://127.0.0.1:9100/metrics
 
         publish_metrics
