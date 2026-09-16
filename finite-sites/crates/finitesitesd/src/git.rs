@@ -504,9 +504,12 @@ fn reconcile_ref_event(
         let message = "static-only project has multiple sites on this branch";
         return record_failed_event(engine, event_id, message, now);
     }
-    let config = match read_project_config_at(repo, new_sha) {
+    let config = match read_project_config_at(repo, new_sha, Path::new("git")) {
         Ok(config) => config,
-        Err(error) => return record_failed_event(engine, event_id, &error, now),
+        Err(ConfigReadError::Invalid(error)) => {
+            return record_failed_event(engine, event_id, &error, now);
+        }
+        Err(ConfigReadError::Unavailable(error)) => return Err(error),
     };
     let output_record = branch_outputs
         .into_iter()
@@ -554,26 +557,68 @@ fn reconcile_ref_event(
     Ok(ReconcileOutcome::Processed)
 }
 
+#[derive(Debug)]
+enum ConfigReadError {
+    Invalid(String),
+    Unavailable(String),
+}
+
 fn read_project_config_at(
     repo: &Path,
     commit: &str,
-) -> Result<finitesites_proto::project_config::ProjectConfig, String> {
-    let spec = format!("{commit}:finite.toml");
-    let output = Command::new("git")
-        .arg("--git-dir")
-        .arg(repo)
-        .arg("show")
-        .arg(spec)
-        .output()
-        .map_err(|error| format!("cannot read finite.toml: {error}"))?;
-    if !output.status.success() {
-        return Err(format!(
-            "finite.toml is required for deploys: {}",
-            String::from_utf8_lossy(&output.stderr)
-        ));
+    git_program: &Path,
+) -> Result<finitesites_proto::project_config::ProjectConfig, ConfigReadError> {
+    let git_output = |args: &[&str]| {
+        let output = Command::new(git_program)
+            .arg("--git-dir")
+            .arg(repo)
+            .args(args)
+            .output()
+            .map_err(|error| {
+                ConfigReadError::Unavailable(format!("cannot read finite.toml: {error}"))
+            })?;
+        if !output.status.success() {
+            return Err(ConfigReadError::Unavailable(format!(
+                "cannot read finite.toml: git {} failed: {}",
+                args[0],
+                String::from_utf8_lossy(&output.stderr)
+            )));
+        }
+        Ok(output.stdout)
+    };
+    // Only a successful tree lookup proves that this commit lacks config.
+    // Nonzero Git exits can also mean unavailable storage or missing objects;
+    // keep those events pending rather than classifying Git's stderr text.
+    let object_type = git_output(&[
+        "ls-tree",
+        "--format=%(objecttype)",
+        commit,
+        "--",
+        "finite.toml",
+    ])?;
+    match object_type.as_slice() {
+        b"blob\n" => {}
+        b"" => {
+            return Err(ConfigReadError::Invalid(
+                "finite.toml is required for deploys".into(),
+            ));
+        }
+        b"tree\n" | b"commit\n" => {
+            return Err(ConfigReadError::Invalid(
+                "finite.toml must be a file".into(),
+            ));
+        }
+        _ => {
+            return Err(ConfigReadError::Unavailable(
+                "unexpected Git tree response".into(),
+            ));
+        }
     }
-    let text = String::from_utf8(output.stdout).map_err(|_| "finite.toml is not utf8")?;
-    parse_project_config_toml(&text).map_err(|error| error.to_string())
+    let spec = format!("{commit}:finite.toml");
+    let bytes = git_output(&["show", &spec])?;
+    let text = String::from_utf8(bytes)
+        .map_err(|_| ConfigReadError::Invalid("finite.toml is not utf8".into()))?;
+    parse_project_config_toml(&text).map_err(|error| ConfigReadError::Invalid(error.to_string()))
 }
 
 fn files_from_git_archive(
@@ -872,6 +917,56 @@ fn unauthorized_git() -> Response {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn config_read_cannot_launch_git_is_retryable() {
+        let dir = tempfile::tempdir().unwrap();
+        let result = read_project_config_at(dir.path(), "HEAD", &dir.path().join("missing-git"));
+        assert!(matches!(result, Err(ConfigReadError::Unavailable(_))));
+    }
+
+    #[test]
+    fn config_read_unavailable_blob_is_retryable() {
+        let dir = tempfile::tempdir().unwrap();
+        let repo = dir.path();
+        run_test_git(&["init"], repo);
+        std::fs::write(
+            repo.join("finite.toml"),
+            "[project]\nslug = \"recovery-test\"\n",
+        )
+        .unwrap();
+        run_test_git(&["add", "finite.toml"], repo);
+        run_test_git(
+            &[
+                "-c",
+                "user.name=Test",
+                "-c",
+                "user.email=test@example.invalid",
+                "commit",
+                "-m",
+                "Config",
+            ],
+            repo,
+        );
+        let object =
+            String::from_utf8(run_test_git(&["rev-parse", "HEAD:finite.toml"], repo).stdout)
+                .unwrap();
+        let object = object.trim();
+        let git_dir = repo.join(".git");
+        let blob = git_dir
+            .join("objects")
+            .join(&object[..2])
+            .join(&object[2..]);
+        let offline = repo.join("temporarily-unavailable-blob");
+        std::fs::rename(&blob, &offline).unwrap();
+        // The tree can be read, but the config's blob cannot. This is not a
+        // missing finite.toml and must not become a terminal publish failure.
+        let result = read_project_config_at(&git_dir, "HEAD", Path::new("git"));
+        assert!(matches!(result, Err(ConfigReadError::Unavailable(_))));
+        std::fs::rename(&offline, &blob).unwrap();
+        let config = read_project_config_at(&git_dir, "HEAD", Path::new("git")).unwrap();
+        assert_eq!(config.project.slug, "recovery-test");
+    }
 
     #[test]
     fn deploy_error_truncation_preserves_utf8() {

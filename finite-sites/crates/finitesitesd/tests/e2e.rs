@@ -3309,7 +3309,7 @@ async fn project_init_rejects_legacy_app_and_document_outputs() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn git_ref_event_reconciles_after_restart_boundary() {
+async fn git_ref_event_retries_unavailable_repository_after_reopening() {
     let user_pubkey = finitesites_proto::event::pubkey_for_secret(&user_secret()).unwrap();
     let server = TestServer::start_with_git_auto_reconcile(&user_pubkey, false).await;
 
@@ -3392,6 +3392,34 @@ async fn git_ref_event_reconciles_after_restart_boundary() {
                 site_url_port: Some(server.port()),
             },
         );
+        let pending_before = engine.pending_git_ref_events(None).unwrap();
+        let repo = data_dir
+            .join("git/projects")
+            .join(format!("{}.git", pending_before[0].project_id));
+        let unavailable_repo = data_dir.join("temporarily-unavailable.git");
+        std::fs::rename(&repo, &unavailable_repo).unwrap();
+        let error =
+            finitesitesd::git::reconcile_pending_events(&mut engine, &data_dir, None, now_unix())
+                .expect_err("repository outage must remain retryable");
+        assert!(!error.is_empty());
+        assert_eq!(engine.pending_git_ref_events(None).unwrap(), pending_before);
+        assert_eq!(
+            project_site_status(&server, "finitechat-native-mockup").active_version,
+            None
+        );
+        drop(engine);
+        std::fs::rename(&unavailable_repo, &repo).unwrap();
+        let mut engine = Engine::new(
+            Store::open(&data_dir.join("registry.db")).unwrap(),
+            BlobStore::open(&data_dir.join("blobs")).unwrap(),
+            [9u8; 32],
+            EngineConfig {
+                base_domain: BASE_DOMAIN.to_string(),
+                site_url_scheme: "http".to_string(),
+                site_url_port: Some(server.port()),
+            },
+        );
+        assert_eq!(engine.pending_git_ref_events(None).unwrap(), pending_before);
         let processed =
             finitesitesd::git::reconcile_pending_events(&mut engine, &data_dir, None, now_unix())
                 .unwrap();
