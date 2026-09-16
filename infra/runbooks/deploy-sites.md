@@ -3,8 +3,10 @@
 Fly is the destination for the complete Sites switchover. The
 [`fly.toml`](../fly/sites/fly.toml) configuration owns the deployment's domains,
 ports and resource sizes: one Machine with one persistent volume.
-It enables real mail and account login; apply it only after the cutover gates,
-including the dashboard route and dedicated offsite recovery proof. An isolated
+It enables real mail. Account login is enabled separately after the dashboard
+route is deployed and qualified. Updating the existing public service is
+separate from migrating legacy Sites: that migration still requires the
+cutover gates, including dedicated offsite recovery proof. An isolated
 rehearsal uses private routing and dev mail instead.
 
 Preserve the source data and archives until the Fly restore and access checks
@@ -17,8 +19,11 @@ in CI from the reviewed revision, never on a production host.
 
 ## Fly
 
-The configured app is `finite-sites` in the `finite` organization. Set
-`APP=finite-sites`. Inspect this app's resources and provision any missing app
+The configured public app is `finite-sites-demo` in the `finite` organization;
+the internal name is retained to reuse its volume, IPs and certificates for
+`finite.site` without a DNS change. The separate `finite-sites` app holds a
+private rehearsal database and must not be promoted as production. Set
+`APP=finite-sites-demo`. Inspect this app's resources and provision any missing app
 or `sites_data` volume before deployment; use 10 GiB as the initial volume size.
 Obtain the app's allocated IPs and certificate DNS records from Fly. Require
 issued certificates for both the API apex and wildcard Site hosts; do not copy another app's DNS records. Keep records DNS-only when
@@ -44,7 +49,7 @@ printed in that run's summary. Select the image for this rollout explicitly;
 do not assume the checked-in pin includes your source changes:
 
 ```sh
-APP=finite-sites
+APP=finite-sites-demo
 fly config validate --strict --app "$APP" --config infra/fly/sites/fly.toml
 fly deploy --app "$APP" --config infra/fly/sites/fly.toml \
   --image "$SITES_IMAGE" --ha=false
@@ -69,8 +74,10 @@ arguments, image, services and mount; restoring the command alone is insufficien
 
 Follow [ADR 0029](../../finite-sites/docs/adr/0029-account-session-viewer-bridge.md)
 and the [dashboard configuration](../../finitecomputer-v2/apps/dashboard/README.md#sites-account-viewer-boundary).
-Deploy and qualify the dashboard's `/site-auth` route before applying the
-account login setting in `fly.toml`. The pre-cutover dashboard lacks this route;
+Deploy and qualify the dashboard's `/site-auth` route before setting
+`FINITE_SITES_ACCOUNT_LOGIN_URL=https://finite.computer/site-auth` in the
+`[env]` table in `fly.toml` and redeploying Sites. Until then, Sites uses guest
+email login. The pre-cutover dashboard lacks this route;
 setting an upstream alone is insufficient. Stage the reviewed dashboard image
 and include its deployment in the authorized cutover.
 Both services must receive the same `FINITE_SITES_VIEWER_SESSION_TOKEN` from the
