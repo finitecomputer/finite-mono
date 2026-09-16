@@ -99,9 +99,8 @@ state: issued API-key token hashes, grants, reservations, usage, and audit
 history. Old deploy lanes, runtime records, and machine-control state are not
 compatibility targets.
 
-## First Cleanup Targets
+## Deployment and runtime checks
 
-See [docs/carry-over-manifest.md](docs/carry-over-manifest.md).
 See [../infra/README.md](../infra/README.md) and
 [../infra/runbooks/](../infra/runbooks/) for the current deploy ownership split,
 and [docs/hermes-runtime-test-matrix.md](docs/hermes-runtime-test-matrix.md) for the
