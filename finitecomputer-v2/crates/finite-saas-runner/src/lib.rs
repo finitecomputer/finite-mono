@@ -30,6 +30,7 @@ use std::time::{Duration, Instant};
 
 mod apple_container;
 pub mod health_reports;
+pub mod hosted_hermes_caddy;
 mod kata;
 pub mod lifecycle_probe;
 pub mod phala;

@@ -15,6 +15,7 @@ use finite_saas_runner::{
 };
 use std::collections::BTreeMap;
 use std::env;
+use std::io::Read;
 use std::net::IpAddr;
 use std::path::PathBuf;
 use std::thread;
@@ -36,6 +37,12 @@ struct Args {
 
 #[derive(Debug, Subcommand)]
 enum Command {
+    /// Render a derived hosted-Hermes route manifest as Caddy JSON; does not activate it.
+    #[command(name = "render-hosted-hermes-caddy")]
+    RenderHostedHermesCaddy {
+        #[arg(long)]
+        manifest: PathBuf,
+    },
     /// Claim at most one Core agent creation request and try to launch it.
     #[command(name = "run-once")]
     RunOnce,
@@ -74,6 +81,7 @@ enum Command {
 fn main() -> Result<()> {
     let args = Args::parse();
     match args.command.unwrap_or(Command::RunOnce) {
+        Command::RenderHostedHermesCaddy { manifest } => render_hosted_hermes_caddy(&manifest),
         Command::RunOnce => run_once(),
         Command::Serve => serve(),
         Command::PhalaPreflight => phala_preflight(),
@@ -88,6 +96,26 @@ fn main() -> Result<()> {
             source_machine_id,
         } => lifecycle_probe(&project_id, &agent_runtime_id, &source_machine_id),
     }
+}
+
+fn render_hosted_hermes_caddy(path: &std::path::Path) -> Result<()> {
+    use finite_saas_runner::hosted_hermes_caddy::{HostedHermesRouteManifest, MAX_MANIFEST_BYTES};
+    let mut bytes = Vec::new();
+    std::fs::File::open(path)
+        .context("open hosted Hermes route manifest")?
+        .take((MAX_MANIFEST_BYTES + 1) as u64)
+        .read_to_end(&mut bytes)
+        .context("read hosted Hermes route manifest")?;
+    if bytes.len() > MAX_MANIFEST_BYTES {
+        bail!("hosted Hermes route manifest exceeds its bounded size");
+    }
+    let manifest: HostedHermesRouteManifest =
+        serde_json::from_slice(&bytes).context("parse hosted Hermes route manifest")?;
+    println!(
+        "{}",
+        serde_json::to_string_pretty(&manifest.caddy_config()?)?
+    );
+    Ok(())
 }
 
 fn lifecycle_probe(

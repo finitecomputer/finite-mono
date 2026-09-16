@@ -934,6 +934,32 @@ impl CoreStore {
         postgres_visible_projects_for_workos_user(&**client, workos_user_id).await
     }
 
+    /// Resolve only the exact current runtime of a self-service Project owned
+    /// by this WorkOS user. Location discovery never grants membership or uses
+    /// source-machine aliases, and cannot revive an inactive runtime link.
+    pub(crate) async fn owned_runtime_source_host(
+        &self,
+        runtime_id: &str,
+        workos_user_id: &str,
+    ) -> CoreResult<Option<String>> {
+        let client = self.connection().await?;
+        let row = client
+            .query_opt(
+                "SELECT runtime.source_host_id
+             FROM agent_runtimes AS runtime
+             JOIN projects AS project ON project.id = runtime.project_id
+             JOIN users AS owner ON owner.id = project.owner_user_id
+             JOIN project_runtime_links AS link
+               ON link.project_id = project.id AND link.agent_runtime_id = runtime.id
+             WHERE runtime.id = $1 AND owner.workos_user_id = $2
+               AND link.active AND project.import_candidate_id IS NULL",
+                &[&runtime_id, &workos_user_id],
+            )
+            .await
+            .map_err(store_error)?;
+        Ok(row.map(|row| row.get(0)))
+    }
+
     pub async fn agent_creation_requests_for_workos_user(
         &self,
         workos_user_id: &str,

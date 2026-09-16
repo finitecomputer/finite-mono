@@ -1,7 +1,8 @@
 use anyhow::{Context, Result, bail};
 use clap::{Parser, Subcommand};
-use finite_saas_core::api::router_with_agent_creation_placement;
+use finite_saas_core::api::router_with_hosted_hermes_origins;
 use finite_saas_core::auth::CoreAuth;
+use finite_saas_core::hosted_hermes::HostedHermesOrigins;
 use finite_saas_core::store::CoreStore;
 use finite_saas_core::{
     AdminArchiveUnrecoverableRuntimeInput, AdminOffboardRetiredRuntimeInput, AdminRuntimeOverview,
@@ -708,10 +709,22 @@ async fn serve() -> Result<()> {
     let bind = env::var("FC_CORE_BIND").unwrap_or_else(|_| "127.0.0.1:4200".to_string());
     let addr: SocketAddr = bind.parse()?;
 
+    let hosted_hermes_origins = match env::var("FC_CORE_HOSTED_HERMES_ORIGINS_JSON") {
+        Ok(value) => HostedHermesOrigins::from_json(&value).map_err(anyhow::Error::msg)?,
+        Err(env::VarError::NotPresent) => HostedHermesOrigins::default(),
+        Err(env::VarError::NotUnicode(_)) => {
+            bail!("FC_CORE_HOSTED_HERMES_ORIGINS_JSON must be UTF-8")
+        }
+    };
     let store = postgres_store_from_env(ImportMode::Commit).await?;
     let agent_creation_placement = optional_agent_creation_placement()?;
-    let app = router_with_agent_creation_placement(store, auth, agent_creation_placement)
-        .layer(TraceLayer::new_for_http());
+    let app = router_with_hosted_hermes_origins(
+        store,
+        auth,
+        agent_creation_placement,
+        hosted_hermes_origins,
+    )
+    .layer(TraceLayer::new_for_http());
     let listener = TcpListener::bind(addr).await?;
     tracing::info!(%addr, "finite-saas-core listening");
     axum::serve(listener, app).await?;

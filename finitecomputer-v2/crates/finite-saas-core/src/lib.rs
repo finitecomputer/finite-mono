@@ -1,6 +1,7 @@
 pub mod api;
 pub mod auth;
 pub mod billing;
+pub mod hosted_hermes;
 pub mod launch_codes;
 pub mod store;
 #[cfg(test)]
