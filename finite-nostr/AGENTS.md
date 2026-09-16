@@ -2,21 +2,8 @@
 
 ## Agent skills
 
-### Issue tracker
-
-Issues and PRDs live in GitHub Issues for `finitecomputer/finite-mono`. See
-the root `../docs/agents/issue-tracker.md`.
-
-### Triage labels
-
-Use the default Matt Pocock skill label vocabulary. See the root
-`../docs/agents/triage-labels.md`.
-
-### Domain docs
-
-This component is part of the multi-context monorepo: read root
-`../CONTEXT-MAP.md`, this component's `CONTEXT.md`, and relevant root or
-component ADRs. See the root `../docs/agents/domain.md`.
+Follow the product-authority, issue-tracker, and retained-documentation
+guidance in the root `../AGENTS.md`.
 
 ## Engineering Style
 

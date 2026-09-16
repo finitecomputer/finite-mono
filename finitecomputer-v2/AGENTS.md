@@ -84,7 +84,8 @@ with a delete condition.
   `finite-sites`, `finitechat`, or `finite-skills` code into this directory —
   depend on their sibling workspace crates/paths (see
   `../docs/monorepo-doctrine.md`).
-- Add docs before adding new compatibility bridges.
+- Record the compatibility contract and delete condition in Linear before
+  adding a compatibility bridge; prove its behavior with tests.
 - Keep secrets out of the repo. Use `.env.example` files with comments.
 - Build and promote one canonical Agent Runtime image through the mono-owned
   workflow. Local Docker, Kata, and Phala prove the same image digest; do not
