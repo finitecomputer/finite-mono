@@ -25,7 +25,7 @@ import {
   revokeFinitePrivateGrantAction,
   rotateFinitePrivateApiKeyAction,
 } from "@/app/actions";
-import { AgentOnboardingStageSync } from "@/components/agent-onboarding-progress";
+import { CoreAgentReadyPanel } from "@/components/core-agent-ready-panel";
 import { CoreAgentCreationForm } from "@/components/core-agent-creation-form";
 import { AgentHeroCard } from "@/components/agent-hero-card";
 import { FiniteLoader } from "@/components/finite-loader";
@@ -36,7 +36,6 @@ import {
 } from "@/components/finite-private-usage-panel";
 import { formatWeightedTokens } from "@/components/finite-private-usage-progress";
 import { PendingRefresh } from "@/components/pending-refresh";
-import { StatusPrism } from "@/components/status-prism";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
@@ -452,38 +451,6 @@ function AccountBillingPanel({
           </form>
         ) : null}
       </div>
-    </section>
-  );
-}
-
-function CoreAgentReadyPanel({
-  chatHref,
-  name,
-}: {
-  chatHref: string;
-  name: string;
-}) {
-  return (
-    <section
-      className="grid min-h-[32rem] w-full justify-items-center gap-7 text-center"
-      aria-labelledby="agent-ready-title"
-    >
-      <AgentOnboardingStageSync stage="ready" />
-      <StatusPrism state="happy" className="cursor-default" />
-      <div className="grid gap-2">
-        <h1
-          id="agent-ready-title"
-          className="font-sans text-3xl leading-tight font-medium tracking-[-0.02em] sm:text-5xl"
-        >
-          {name} is online.
-        </h1>
-        <p className="type-body-lg text-muted-foreground">
-          Go introduce yourself to your new Finite Agent.
-        </p>
-      </div>
-      <Button asChild size="xl">
-        <a href={chatHref}>Meet {name}</a>
-      </Button>
     </section>
   );
 }

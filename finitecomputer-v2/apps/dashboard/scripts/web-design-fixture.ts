@@ -224,6 +224,10 @@ async function serve() {
     [
       "node_modules/next/dist/bin/next",
       "dev",
+      // Turbopack's native bridge exhausted the 2 GiB JS heap in this monorepo
+      // during idle design sessions. Keep this local fixture on Webpack;
+      // production builds and the normal dashboard dev command are unchanged.
+      "--webpack",
       "--hostname",
       "127.0.0.1",
       "--port",

@@ -860,7 +860,7 @@ test("dashboard agent creation browser states", { timeout: 300_000 }, async () =
         `http://127.0.0.1:${dashboardPort}/dashboard?new=1&creation=agent_request_second`
       );
       await page
-        .getByRole("heading", { name: "Second Oslo Bot is online." })
+        .getByRole("heading", { name: "Second Oslo Bot is alive!" })
         .waitFor({ state: "visible" });
       assert.match(
         page.url(),
@@ -868,7 +868,7 @@ test("dashboard agent creation browser states", { timeout: 300_000 }, async () =
         "a ready agent should pause on the Ready interstitial"
       );
       await page.locator(".status-prism-scene--happy").waitFor({ state: "visible" });
-      const meetAgent = page.getByRole("link", { name: "Meet Second Oslo Bot" });
+      const meetAgent = page.getByRole("link", { name: "Continue to chat" });
       assert.equal(
         await meetAgent.getAttribute("href"),
         "/dashboard/machines/runtime_second-oslo-bot/chat"

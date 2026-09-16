@@ -27,18 +27,11 @@ import { AgentSidebar } from "@/components/agent-sidebar";
 import { FiniteBrand } from "@/components/finite-brand";
 import { HostedChatProvider } from "@/components/hosted-chat-provider";
 import { SignOutLink } from "@/components/sign-out-link";
-import type { CoreRuntimeStatus } from "@/lib/core-client";
+import { activeNavigationMachine, type MachineNavItem } from "@/lib/dashboard-machine-navigation";
 import { dashboardChatMachineIdFromPath } from "@/lib/dashboard-chat-route";
 import { dashboardMachineStatusPresentation } from "@/lib/dashboard-machine-status";
 import { cn } from "@/lib/utils";
 import "@/styles/ocean-shell.css";
-
-type MachineNavItem = {
-  id: string;
-  ownerLabel: string;
-  runtimeStatus: CoreRuntimeStatus;
-  siteUrl?: string;
-};
 
 type DashboardShellProps = {
   children: React.ReactNode;
@@ -460,8 +453,8 @@ export function DashboardShell({
   const selectedMachineId = activeMachineId ?? queryMachineId;
   const isNewAgentFlow = pathname === "/dashboard" && searchParams.get("new") === "1";
   const activeMachine = useMemo(
-    () => machines.find((machine) => machine.id === selectedMachineId) ?? null,
-    [selectedMachineId, machines]
+    () => activeNavigationMachine(machines, selectedMachineId, activeMachineId, saasMode),
+    [selectedMachineId, machines, saasMode, activeMachineId]
   );
   const showMachineFleet = saasMode || machines.length > 1;
   const isChatSurface = chatMachineId !== null;
