@@ -132,7 +132,10 @@ remain unchanged, and the canonical recovery status must stay healthy.
    found `chat_plane`, `recovery_boundary`, and `rollout_state` green,
    `fleet_convergence` red, and `host_health` unknown. Do not silently waive
    these: identify the exact pre-existing findings and their carry conditions
-   before starting. Any new/worsened finding, or uncertain scope, stops entry.
+   before starting. Recorded detail/distribution snapshots disagree and active
+   Agent artifacts span multiple versions; the app-only host lacks `nerdctl`,
+   causing container collection to be unknown. These observations do not prove
+   all findings harmless. Any new/worsened finding, or uncertain scope, stops entry.
 8. Source the canary credential privately. Run limiter readiness, negative
    authentication, one stream, and accounting settlement checks. A bad baseline
    means no model swap. Configure `FINITE_PRIVATE_CORE_HOST=root@64.34.80.19`.
@@ -231,7 +234,9 @@ passing speed measurements as permission to leave DeepSeek serving.
 
 - Private preparation evidence: `.local-state/deepseek-v41-20260916/` in the
   dedicated worktree. It contains fleet state and must not be committed.
-- Candidate release: pending measurement/publication.
+- Candidate release: `v2026-09-16-deepseek-v4-1-flash-test-1`;
+  measurement workflow: <https://github.com/finitecomputer/confidential-finite-private/actions/runs/35049160787>.
+  Publication and decoded-config verification must succeed before entry.
 - Window duration: confirmed by the user, 03:00–06:00 Central; restore by 05:15.
 - Scheduling: **not armed**. No scheduled production operation exists yet.
 - Runtime H200/TDX proof: pending the maintenance test.
