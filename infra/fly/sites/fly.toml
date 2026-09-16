@@ -1,6 +1,7 @@
-# Cutover target: apply only after the gates in infra/runbooks/deploy-sites.md.
+# Public Sites service; legacy data migration has separate runbook gates.
 # This deployment consumes an existing CI-built image; Fly does not build it.
-app = "finite-sites"
+# Reuse the existing public app, volume, IPs and certificates without DNS changes.
+app = "finite-sites-demo"
 primary_region = "iad"
 kill_signal = "SIGINT"
 # Covers ordered cron -> backup worker -> Sites shutdown when backups are enabled.
@@ -18,8 +19,8 @@ kill_timeout = 120
   app = "serve --data /var/lib/finite-sites --listen [::]:8787 --base-domain finite.site --api-url https://finite.site --git-url https://finite.site --site-scheme https --site-port none --git-auto-reconcile true --mailer resend --mail-from 'Finite Sites <links@finite.chat>'"
 
 [env]
-  # Qualify the dashboard /site-auth route and upstream before applying this file.
-  FINITE_SITES_ACCOUNT_LOGIN_URL = "https://finite.computer/site-auth"
+  # Set FINITE_SITES_ACCOUNT_LOGIN_URL=https://finite.computer/site-auth only
+  # after deploying and qualifying the dashboard route and v2 upstream.
   # Enable only with the dedicated repository, file secrets and remote restore proof.
   FINITE_SITES_BACKUP_ENABLED = "0"
 
