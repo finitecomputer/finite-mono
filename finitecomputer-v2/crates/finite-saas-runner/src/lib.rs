@@ -250,6 +250,8 @@ pub enum RunnerError {
     InvalidRuntimeEnvironment(String),
     #[error("Core request failed: {0}")]
     CoreRequest(String),
+    #[error("runtime Core bootstrap is temporarily unavailable; creation remains retryable")]
+    RuntimeBootstrapUnavailable,
     #[error("Core returned HTTP {status}: {body}")]
     CoreStatus { status: u16, body: String },
     #[error("Core response was invalid JSON: {0}")]
@@ -475,6 +477,7 @@ pub struct AgentCreationRunner<Q, L, T> {
     runtime_secret_environment: BTreeMap<String, String>,
     agent_identity_authority: Option<AgentIdentityAuthorityConfig>,
     health_reports: Option<HealthReportConfig>,
+    runtime_core_url: Option<String>,
 }
 
 impl<Q, L, T> AgentCreationRunner<Q, L, T>
@@ -505,6 +508,7 @@ where
             runtime_secret_environment: BTreeMap::new(),
             agent_identity_authority: None,
             health_reports: None,
+            runtime_core_url: None,
         })
     }
 
@@ -514,6 +518,14 @@ where
     pub fn with_health_reports(mut self, config: Option<HealthReportConfig>) -> Self {
         self.health_reports = config;
         self
+    }
+
+    /// Explicit rollout opt-in; old guests/launchers remain unenrolled.
+    pub fn with_runtime_core_bootstrap(mut self, url: String) -> Result<Self, RunnerError> {
+        let parsed = finite_saas_core::store::runtime_credentials::validate_runtime_core_url(&url)
+            .map_err(|_| RunnerError::CoreRequest("runtime Core URL must be an HTTPS origin (HTTP loopback is allowed for local development)".into()))?;
+        self.runtime_core_url = Some(parsed);
+        Ok(self)
     }
 
     pub fn with_agent_identity_authority(
@@ -609,6 +621,7 @@ where
         let request_id = lease.request.id.clone();
         let launch_options = match self.runtime_launch_options(&lease, &lease_token) {
             Ok(options) => options,
+            Err(error @ RunnerError::RuntimeBootstrapUnavailable) => return Err(error),
             Err(error) => {
                 let failure_message = error.to_string();
                 self.queue.fail_agent_creation(
@@ -1076,6 +1089,21 @@ where
             secret_environment,
             ..RuntimeLaunchOptions::default()
         };
+        if let Some(core_url) = self.runtime_core_url.as_ref()
+            && lease.request.relocation.is_none()
+        {
+            let bootstrap = self.queue.provision_runtime_core_credential(
+                &lease.request.id,
+                &self.runner_id,
+                lease_token,
+            )?;
+            options
+                .environment
+                .insert("FINITE_CORE_URL".into(), core_url.clone());
+            options
+                .secret_environment
+                .insert("FINITE_CORE_CREDENTIAL".into(), bootstrap.secret);
+        }
         let requires_finite_private = runtime_spec.is_some_and(|spec| {
             spec.secret_references
                 .iter()
@@ -1201,6 +1229,18 @@ pub trait AgentCreationQueue {
         request_id: &str,
         input: ProvisionFinitePrivateRuntimeKeyInput,
     ) -> Result<ProvisionFinitePrivateRuntimeKeyResult, RunnerError>;
+
+    fn provision_runtime_core_credential(
+        &mut self,
+        _request_id: &str,
+        _runner_id: &str,
+        _lease_token: &str,
+    ) -> Result<finite_saas_core::store::runtime_credentials::RuntimeBootstrapCredential, RunnerError>
+    {
+        Err(RunnerError::CoreRequest(
+            "runtime Core bootstrap is not supported by this queue".into(),
+        ))
+    }
 
     fn fail_agent_creation(
         &mut self,
@@ -1986,6 +2026,8 @@ fn reserved_runtime_environment_key(key: &str) -> bool {
     matches!(
         key,
         "FINITE_SERVER_URL"
+            | "FINITE_CORE_URL"
+            | "FINITE_CORE_CREDENTIAL"
             | "FINITECHAT_SERVER_URL"
             | "FINITE_AGENT_BOOT_INTENT_JSON"
             | "FINITE_AGENT_STATE_ROOT"
@@ -2096,6 +2138,41 @@ impl CoreHttpAgentCreationQueue {
 }
 
 impl AgentCreationQueue for CoreHttpAgentCreationQueue {
+    fn provision_runtime_core_credential(
+        &mut self,
+        request_id: &str,
+        runner_id: &str,
+        lease_token: &str,
+    ) -> Result<finite_saas_core::store::runtime_credentials::RuntimeBootstrapCredential, RunnerError>
+    {
+        let url = format!(
+            "{}/api/core/v1/agent-creation-requests/{request_id}/runtime-credential",
+            self.base_url
+        );
+        let agent = ureq::AgentBuilder::new()
+            .timeout(Duration::from_secs(15))
+            .redirects(0)
+            .build();
+        let response = agent
+            .post(&url)
+            .set("authorization", &format!("Bearer {}", self.api_token))
+            .send_json(serde_json::json!({"runnerId":runner_id,"leaseToken":lease_token}));
+        match response {
+            Ok(response) => response
+                .into_json()
+                .map_err(|_| RunnerError::RuntimeBootstrapUnavailable),
+            Err(ureq::Error::Transport(_)) => Err(RunnerError::RuntimeBootstrapUnavailable),
+            Err(ureq::Error::Status(status, _))
+                if status == 404 || status == 429 || status >= 500 =>
+            {
+                Err(RunnerError::RuntimeBootstrapUnavailable)
+            }
+            Err(ureq::Error::Status(status, _)) => Err(RunnerError::CoreStatus {
+                status,
+                body: "runtime bootstrap rejected".into(),
+            }),
+        }
+    }
     fn lease_runtime_control(
         &mut self,
         runner_id: &str,
@@ -4901,6 +4978,98 @@ mod tests {
         assert!(
             message.contains("last ready_reason: bridge_not_connected"),
             "timeout must name the runtime's ready_reason, got: {message}"
+        );
+    }
+
+    #[test]
+    fn old_core_missing_bootstrap_endpoint_keeps_creation_retryable() {
+        use std::sync::{
+            Arc,
+            atomic::{AtomicBool, Ordering},
+        };
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let done = Arc::new(AtomicBool::new(false));
+        let stopped = done.clone();
+        let server = std::thread::spawn(move || {
+            let mut paths = Vec::new();
+            while let Ok((mut stream, _)) = listener.accept() {
+                if stopped.load(Ordering::Relaxed) {
+                    break;
+                }
+                let request = read_http_request(&mut stream);
+                let path = request.split_whitespace().nth(1).unwrap().to_owned();
+                let (status, body) = match path.as_str() {
+                    "/api/core/v1/runtime-control-requests/lease" => (200, "null".into()),
+                    "/api/core/v1/agent-creation-requests/lease" => (
+                        200,
+                        serde_json::to_string(&sample_lease("agent_request_123")).unwrap(),
+                    ),
+                    _ => (404, "{}".into()),
+                };
+                paths.push(path);
+                write_http_json(&mut stream, status, &body);
+            }
+            paths
+        });
+        let mut runner = AgentCreationRunner::new(
+            CoreHttpAgentCreationQueue::new(format!("http://{address}"), "test-runner").unwrap(),
+            FakeLauncher::ready(RuntimeLaunchFacts::sample()),
+            FixedLeaseTokens::new(["lease-1"]),
+            "runner-1",
+            300,
+        )
+        .unwrap()
+        .with_runtime_core_bootstrap("https://core.example.test".into())
+        .unwrap();
+        let outcome = runner.run_once();
+        done.store(true, Ordering::Relaxed);
+        let _ = std::net::TcpStream::connect(address);
+        let paths = server.join().unwrap();
+        assert!(matches!(
+            outcome,
+            Err(RunnerError::RuntimeBootstrapUnavailable)
+        ));
+        assert_eq!(paths.len(), 3, "must not post a terminal creation failure");
+        assert!(paths[2].ends_with("/runtime-credential"));
+        assert!(runner.launcher.launch_options.is_empty());
+    }
+
+    #[test]
+    fn runtime_core_opt_in_preserves_unenrolled_relocation() {
+        let mut lease = sample_lease("agent_request_123");
+        lease.request.relocation = Some(finite_saas_core::RuntimeRelocationEnvelope::V1(
+            finite_saas_core::RuntimeRelocationV1 {
+                source_host_id: "old-host".into(),
+                source_machine_id: "old-machine".into(),
+                target_source_host_id: "new-host".into(),
+                expected_agent_npub: "npub-relocation-fixture".into(),
+                durable_state_manifest_sha256: "a".repeat(64),
+                source_compute_absent: true,
+            },
+        ));
+        let mut runner = AgentCreationRunner::new(
+            FakeQueue::with_lease(lease),
+            FakeLauncher::ready(RuntimeLaunchFacts::sample()),
+            FixedLeaseTokens::new(["lease-1"]),
+            "runner-1",
+            300,
+        )
+        .unwrap()
+        .with_runtime_core_bootstrap("https://core.finite.test".into())
+        .unwrap();
+        // FakeQueue does not support bootstrap: accidental issuance makes
+        // this orchestration fail before it reaches the existing launcher.
+        assert!(matches!(
+            runner.run_once().unwrap(),
+            RunOnceOutcome::Launched { .. }
+        ));
+        let options = &runner.launcher.launch_options[0];
+        assert!(!options.environment.contains_key("FINITE_CORE_URL"));
+        assert!(
+            !options
+                .secret_environment
+                .contains_key("FINITE_CORE_CREDENTIAL")
         );
     }
 

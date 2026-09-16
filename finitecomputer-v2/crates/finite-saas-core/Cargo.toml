@@ -28,6 +28,7 @@ tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 
 [dev-dependencies]
+tokio = { workspace = true, features = ["process", "io-util"] }
 base64 = "0.22"
 rand = "0.8"
 rsa = { version = "0.9", features = ["pem"] }

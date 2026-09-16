@@ -208,20 +208,36 @@ pub async fn run_daemon(config: DaemonConfig) -> Result<(), AgentdError> {
         config_manager.clone(),
     );
     let bridge = BridgeClient::new(config.bridge_url.clone())?;
+    // Register before any optional child starts so a stop during bridge
+    // warmup still reaches its awaited shutdown path.
+    let mut sigterm = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())?;
     let supervisor = start_supervisor(
         sidecar_spec(&config),
         health_spec(&config),
         hermes_spec(&config),
         simplex_spec(&config),
     );
+    let hosted_hermes = crate::hosted_hermes::HostedHermesHandle::start(&config.hermes_home)?;
     spawn_status_writer(
         config.status_path(),
         identity.clone(),
         ledger.clone(),
         supervisor.clone(),
+        hosted_hermes.clone(),
     );
 
-    wait_for_bridge(&bridge, config.bridge_ready_timeout).await?;
+    let readiness = tokio::select! {
+        result = wait_for_bridge(&bridge, config.bridge_ready_timeout) => result.map(|()| true),
+        signal = tokio::signal::ctrl_c() => signal.map(|()| false).map_err(AgentdError::from),
+        _ = sigterm.recv() => Ok(false),
+    };
+    if !matches!(readiness, Ok(true)) {
+        supervisor.shutdown().await;
+        if let Some(hosted) = &hosted_hermes {
+            hosted.shutdown().await;
+        }
+        return readiness.map(|_| ());
+    }
     let (delivery_tx, delivery_rx) = mpsc::channel::<RuntimeCommandDeliveryV1>(64);
     spawn_delivery_stream(bridge.clone(), delivery_tx);
     let executor = CommandExecutor {
@@ -232,6 +248,7 @@ pub async fn run_daemon(config: DaemonConfig) -> Result<(), AgentdError> {
         hermes_home: config.hermes_home,
         bridge: bridge.clone(),
         supervisor: supervisor.clone(),
+        hosted_hermes: hosted_hermes.clone(),
     };
 
     let delivery_worker =
@@ -242,21 +259,23 @@ pub async fn run_daemon(config: DaemonConfig) -> Result<(), AgentdError> {
     // supervisor's TERM-then-KILL drain is what gives Hermes/bridge/the
     // health server their bounded window to finish mid-stream writes.
     // Backported from PR 440 (83ef3024).
-    let mut sigterm = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())?;
-    tokio::select! {
+    let result = tokio::select! {
         result = &mut delivery_worker => {
             result
         }
         signal = tokio::signal::ctrl_c() => {
-            signal?;
             supervisor.shutdown().await;
-            Ok(())
+            signal.map_err(AgentdError::from)
         }
         _ = sigterm.recv() => {
             supervisor.shutdown().await;
             Ok(())
         }
+    };
+    if let Some(hosted) = &hosted_hermes {
+        hosted.shutdown().await;
     }
+    result
 }
 
 /// agentd leads its own session/process group when PID 1 (entrypoint.sh) is
@@ -357,6 +376,7 @@ struct CommandExecutor {
     hermes_home: PathBuf,
     bridge: BridgeClient,
     supervisor: SupervisorHandle,
+    hosted_hermes: Option<crate::hosted_hermes::HostedHermesHandle>,
 }
 
 impl CommandExecutor {
@@ -627,7 +647,12 @@ impl CommandExecutor {
     }
 
     async fn current_status(&self) -> AgentdStatus {
-        let processes = self.supervisor.status().await;
+        let mut processes = self.supervisor.status().await;
+        if let Some(hosted) = &self.hosted_hermes {
+            processes
+                .processes
+                .insert("hermes-serve".into(), hosted.status());
+        }
         AgentdStatus {
             service: "finite-agentd".to_owned(),
             version: env!("CARGO_PKG_VERSION").to_owned(),
@@ -908,12 +933,18 @@ fn spawn_status_writer(
     identity: DeviceRef,
     ledger: Ledger,
     supervisor: SupervisorHandle,
+    hosted_hermes: Option<crate::hosted_hermes::HostedHermesHandle>,
 ) {
     tokio::spawn(async move {
         let mut interval = tokio::time::interval(Duration::from_secs(1));
         loop {
             interval.tick().await;
-            let processes = supervisor.status().await;
+            let mut processes = supervisor.status().await;
+            if let Some(hosted) = &hosted_hermes {
+                processes
+                    .processes
+                    .insert("hermes-serve".into(), hosted.status());
+            }
             let status = AgentdStatus {
                 service: "finite-agentd".to_owned(),
                 version: env!("CARGO_PKG_VERSION").to_owned(),

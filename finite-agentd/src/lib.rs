@@ -1,6 +1,8 @@
 mod config;
 mod connections;
 mod daemon;
+mod hosted_hermes;
+mod hosted_hermes_pull;
 mod ledger;
 mod simplex;
 mod supervisor;
@@ -15,6 +17,7 @@ pub use config::{
 pub use daemon::{
     AgentdStatus, DaemonConfig, SpecializationBundleStatusV1, read_status, run_daemon,
 };
+pub use hosted_hermes::run_hosted_hermes;
 pub use ledger::{CommandDecision, Ledger};
 pub use supervisor::{ProcessState, ProcessStatus, SupervisorStatus};
 

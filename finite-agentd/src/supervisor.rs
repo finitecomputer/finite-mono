@@ -11,12 +11,27 @@ use tokio::sync::{RwLock, mpsc};
 
 use crate::AgentdError;
 
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct ProcessSpec {
     pub name: &'static str,
     pub program: PathBuf,
     pub args: Vec<String>,
     pub environment: BTreeMap<String, String>,
+}
+
+impl std::fmt::Debug for ProcessSpec {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("ProcessSpec")
+            .field("name", &self.name)
+            .field("program", &self.program)
+            .field("args", &self.args)
+            .field(
+                "environment_keys",
+                &self.environment.keys().collect::<Vec<_>>(),
+            )
+            .finish()
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -323,7 +338,7 @@ async fn supervise_process(
     }
 }
 
-fn spawn_process(spec: &ProcessSpec) -> Result<(Child, u32), AgentdError> {
+pub(crate) fn spawn_process(spec: &ProcessSpec) -> Result<(Child, u32), AgentdError> {
     let mut command = Command::new(&spec.program);
     command
         .args(&spec.args)
@@ -345,7 +360,7 @@ fn spawn_process(spec: &ProcessSpec) -> Result<(Child, u32), AgentdError> {
     Ok((child, pid))
 }
 
-fn signal_group(pid: u32, signal: rustix::process::Signal) {
+pub(crate) fn signal_group(pid: u32, signal: rustix::process::Signal) {
     // Signal the child's whole process group (it is spawned as group leader).
     // In-process syscall: the runtime image ships no `kill` binary (only the
     // sh builtin), so the old `Command::new("kill")` shell-out silently
@@ -356,7 +371,7 @@ fn signal_group(pid: u32, signal: rustix::process::Signal) {
     }
 }
 
-async fn terminate_child(child: &mut Child) {
+pub(crate) async fn terminate_child(child: &mut Child) {
     let pid = child.id();
     if let Some(pid) = pid {
         signal_group(pid, rustix::process::Signal::TERM);
@@ -387,7 +402,7 @@ async fn set_status(statuses: &Arc<RwLock<SupervisorStatus>>, name: &str, status
         .insert(name.to_owned(), status);
 }
 
-fn now_ms() -> u64 {
+pub(crate) fn now_ms() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map(|duration| duration.as_millis().min(u64::MAX as u128) as u64)

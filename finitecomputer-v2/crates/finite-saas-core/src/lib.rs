@@ -2,6 +2,7 @@ pub mod api;
 pub mod auth;
 pub mod billing;
 pub mod hosted_hermes;
+pub mod hosted_hermes_session;
 pub mod launch_codes;
 pub mod store;
 #[cfg(test)]
@@ -80,7 +81,9 @@ pub const CORE_SCHEMA_SQL: &str = concat!(
     "\n",
     include_str!("../migrations/0028_launch_code_cohort_targets.sql"),
     "\n",
-    include_str!("../migrations/0029_launch_host_reservation_releases.sql")
+    include_str!("../migrations/0029_launch_host_reservation_releases.sql"),
+    "\n",
+    include_str!("../migrations/0030_runtime_hosted_hermes.sql")
 );
 pub const RUNTIME_UPGRADE_ROLLBACK_RESCUE_SQL: &str =
     include_str!("../migrations/runtime_upgrade_rollback_rescue.sql");

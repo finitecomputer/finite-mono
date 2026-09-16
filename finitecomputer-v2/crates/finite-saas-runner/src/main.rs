@@ -579,6 +579,9 @@ where
     .with_runtime_environment(config.runtime_environment)?
     .with_runtime_secret_environment(config.runtime_secret_environment)?
     .with_health_reports(Some(config.health_reports));
+    if let Ok(core_url) = std::env::var("FC_RUNNER_RUNTIME_CORE_URL") {
+        runner = runner.with_runtime_core_bootstrap(core_url)?;
+    }
     if let Some(identity_authority) = config.agent_identity_authority {
         runner = runner.with_agent_identity_authority(identity_authority)?;
     }
