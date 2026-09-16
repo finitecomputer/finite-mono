@@ -40,7 +40,7 @@ fsite auth register --output json
 fsite project init --config finite.toml --dry-run --output json
 fsite project init --config finite.toml --output json
 fsite auth git PROJECT --store --output json
-git clone https://v2.finite.chat/PROJECT.git
+git clone https://finite.site/PROJECT.git
 git push origin main
 ```
 

@@ -115,7 +115,7 @@ curl -H "Host: finitechat-native-mockup.sites.localhost:8787" \
 Git smart HTTP. The daemon preflights `git --version` before it starts serving;
 `/api/v2/healthz` also returns 503 with `git_unavailable` if that dependency
 disappears. Packaged services must therefore put Git on the daemon's runtime
-`PATH` explicitly (the NixOS module uses `path = [ pkgs.git ];`).
+`PATH` explicitly (the Sites OCI image includes Git).
 
 Project Init commits registry state before provisioning the corresponding bare
 repository. That boundary is intentional so an interrupted repository setup
@@ -150,17 +150,12 @@ cargo build --locked --release --workspace
 
 ## Production And Operations
 
-Production runs `finitesitesd` as a systemd service behind Caddy and
-Cloudflare. The server owns the control-plane API, Git smart HTTP, and
-wildcard site serving. Publishing does not mutate host configuration; it is
-registry, blob, and git repository state.
+The static-only service deploys as a CI-built image on one Fly Machine with a
+persistent volume. It owns the control-plane API, Git smart HTTP, and wildcard
+site serving. Publishing changes registry, blob, and Git state.
 
-Runbook and deploy files:
-
-- `../infra/runbooks/deploy-sites.md`
-- `infra/hosts/lat2/` (mono root — unit files, Caddyfile, and env example;
-  historical capture moved from `deploy/finite-lat-2/`)
-- `docs/technical-debt-ledger.md`
+Use the [Sites runbook](../infra/runbooks/deploy-sites.md) for deployment,
+verification and cutover. The live legacy NixOS service remains until cutover.
 
 Important production rule: use `fsite` for agent-facing publishing and editor
 handoff. Do not bypass it with raw Nostr events, direct registry writes, DNS

@@ -42,23 +42,19 @@ static-only cutover by accident.
 
 Finite Sites becomes a static-only platform service in this repository. The
 service is implemented in the existing `finite-sites` and `fsite-cli` crates,
-but deployed separately from the current monolith/shared server host. The first
-production-like target is one dedicated NixOS VPS/VM running
-`finitesitesd.service`, with Sites state under `/var/lib/finite-sites`, a
-simple unauthenticated healthcheck, service-consistent backups, and restore
-drills. Deployments stay defined in `infra/`; nothing is built on the
-production host.
+but deployed separately on one Fly Machine with persistent state at
+`/var/lib/finite-sites`. CI builds the digest-pinned image; Fly terminates TLS
+and routes to the service. Deployments and backup/restore qualification live in
+[the Sites runbook](../../../infra/runbooks/deploy-sites.md). This replaces the
+previous NixOS validation-host plan; the legacy app-plane service stays until
+cutover.
 
-The v2 validation service uses one control origin, `https://v2.finite.chat`,
-for API and git smart HTTP, and one validation wildcard,
-`https://{site}.v2.finite.chat/`, for served sites. The v2 API lives under
-`/api/v2/*`; `GET /api/v2/healthz` is the healthcheck. Git remotes returned by
-the server are authoritative and may be same-origin during validation, for
-example `https://v2.finite.chat/{project}.git`. The existing
-`FINITE_SITES_API` environment variable is enough for selected agent boxes and
-operator testing to target the validation service. The public `fsite-latest`
-release must not be advanced to a static-only incompatible CLI until the
-canonical production endpoint is ready for that contract.
+The control origin is `https://finite.site` for API and Git smart HTTP; served
+Sites use `https://{site}.finite.site/`. The API lives under `/api/v2/*`, with
+`GET /api/v2/healthz` for health. Use server-returned Git remotes and
+`FINITE_SITES_API` for explicit validation targets. Do not advance the public
+`fsite-latest` release until the destination passes restore, access and
+compatibility checks for that CLI contract.
 
 Sites v2 has no public concept of output kinds. A Project Repository may have
 zero or one Project Site. Source-only Projects remain valid. Project Init stays

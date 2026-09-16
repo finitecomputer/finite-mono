@@ -107,7 +107,6 @@ in
   # Canonical Sites stays on the released v1 API/docs/static daemon until a
   # deliberate cutover moves finite.chat traffic to the static-only v2 service.
   finite.sites = {
-    mode = "legacy-canonical";
     package = finitePackages.finitesitesd-legacy-canonical;
   };
 

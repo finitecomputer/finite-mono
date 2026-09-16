@@ -16,15 +16,15 @@ select the dev mailer with `--mailer dev`; omitting the flag is an error.
 
 - **Source**: closed the login-link half (per-(site,email) and per-IP
   budgets in `crates/finitesitesd/src/limiter.rs`, applied in
-  `request_link`); general request limiting deliberately deferred because
-  Cloudflare's proxy fronts the serving plane in the planned deploy.
-- **Risk**: API-plane brute force (NIP-98 makes this low-value) and
-  origin-direct floods if Cloudflare is bypassed.
-- **Proof**: only `request_link` consults `login_limiter`.
+  `request_link`); general request limiting remains deferred. The Fly
+  deployment does not inherit the legacy Cloudflare proxy's protections.
+- **Risk**: API-plane brute force and serving-plane floods.
+- **Proof**: `login_limiter` covers login, access-request and viewer-session
+  issuance; other control-plane operations and content serving have no
+  general request budget.
 - **Delete condition**: per-IP budgets on the API plane (project init attempts and
-  git deploys per pubkey per hour) before registration opens beyond the operator
-  publish grant gate; Cloudflare rate-limiting rules on `/_finite/*` as
-  belt-and-braces when the zone goes live.
+  git deploys per pubkey per hour), plus qualified serving-plane limits at
+  the Fly edge or service.
 
 ## 3. RESOLVED for serving — one control-plane writer remains
 

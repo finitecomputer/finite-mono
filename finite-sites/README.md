@@ -7,9 +7,8 @@ Project Repository is the editable source of truth. `finite.toml` selects which
 committed directory becomes the served website. Finite Sites serves committed
 bytes; it does not run builds for you.
 
-The v2 validation API is `https://v2.finite.chat`, and this `fsite` build uses
-it by default. Do not set `FINITE_SITES_API` unless you are intentionally
-targeting a local or self-hosted server.
+This `fsite` build defaults to the Fly API at `https://finite.site`. Set
+`FINITE_SITES_API` when intentionally targeting another server.
 
 ## Install `fsite`
 
@@ -159,7 +158,7 @@ Deploy Branch:
 fsite auth git my-project --store --output json
 
 git init -b main
-git remote add finite https://v2.finite.chat/my-project.git
+git remote add finite https://finite.site/my-project.git
 git add finite.toml site
 git commit -m "Initial Finite Sites publish"
 git push finite main
@@ -185,8 +184,8 @@ configured `FINITE_SITES_API`; it does not invent a production hostname.
 If you start from a site URL, read the agent handoff first:
 
 ```sh
-curl -fsSL https://SITE.v2.finite.chat/llms.txt
-fsite view https://SITE.v2.finite.chat/ --output json
+curl -fsSL https://SITE.finite.site/llms.txt
+fsite view https://SITE.finite.site/ --output json
 ```
 
 Project collaboration controls who can clone and push source:

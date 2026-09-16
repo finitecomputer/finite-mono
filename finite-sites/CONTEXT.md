@@ -7,7 +7,7 @@ with exactly these meanings.
   publishing APIs, Git Remotes, Site serving, Sites authorization,
   and Sites durability as one service. It may live in `finite-mono`, but other
   Finite products depend on its service contracts rather than its internals.
-- **Dedicated Sites Host**: a Finite-operated VM or VPS whose primary role is
+- **Dedicated Sites Host**: the Fly Machine whose primary role is
   running the Sites Platform Service and its durable Sites state. It separates
   Sites serving from the shared Finite control/app host and from Agent Runtime
   hosts.
@@ -321,6 +321,7 @@ with exactly these meanings.
   sharing, status). **Serving Plane**: anonymous-or-cookie HTTP on site
   subdomains. One process serves both in v1, split by Host header.
 - **Base Domain**: the wildcard domain under which sites live —
-  `sites.localhost` in development, `finite.chat` in production.
+  `sites.localhost` in development, `finite.site` for the Fly deployment.
+  Legacy `finite.chat` URLs remain on the old service until cutover.
 - **Outbox**: the dev mailer's output directory; each would-be email is a
   text file containing the magic link.

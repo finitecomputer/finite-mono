@@ -1,9 +1,8 @@
 # finitesitesd — Finite Sites registry, publishing API, Git smart HTTP, and
 # static site serving.
 #
-# App-plane hosts intentionally default to the content-pinned legacy daemon so
-# routine lat2 deploys do not become the ADR 0028 cutover. The dedicated v2
-# validation host opts into the in-tree static-only daemon explicitly.
+# Retained legacy service for canonical finite.chat traffic until the Fly
+# cutover. The static-only service is deployed through infra/fly/sites/.
 {
   config,
   finitePackages,
@@ -16,14 +15,6 @@ let
 in
 {
   options.finite.sites = {
-    mode = lib.mkOption {
-      type = lib.types.enum [
-        "legacy-canonical"
-        "static-v2"
-      ];
-      default = "legacy-canonical";
-      description = "Sites deployment contract for this host.";
-    };
     package = lib.mkOption {
       type = lib.types.package;
       default = finitePackages.finitesitesd-legacy-canonical;
@@ -58,7 +49,7 @@ in
     documentBaseDomain = lib.mkOption {
       type = lib.types.str;
       default = "docs.finite.chat";
-      description = "Legacy document output domain; ignored by static-v2 mode.";
+      description = "Legacy document output domain.";
     };
     siteScheme = lib.mkOption {
       type = lib.types.str;
@@ -78,19 +69,6 @@ in
   };
 
   config = {
-    assertions = [
-      {
-        assertion =
-          cfg.mode != "static-v2"
-          || (
-            cfg.baseDomain == "finite.site"
-            && cfg.apiUrl == "https://finite.site"
-            && cfg.gitUrl == "https://finite.site"
-          );
-        message = "static-v2 Sites mode is only for the dedicated finite.site validation host before canonical cutover";
-      }
-    ];
-
     users.users.finite-sites = {
       isSystemUser = true;
       group = "finite-sites";
@@ -117,34 +95,19 @@ in
         User = "finite-sites";
         Group = "finite-sites";
         # `--mailer` is required; omitting it is an error, not an implicit DevMailer.
-        ExecStart =
-          if cfg.mode == "legacy-canonical" then
-            ''
-              ${cfg.package}/bin/finitesitesd serve \
-                --data ${cfg.dataDir} \
-                --listen ${cfg.listen} \
-                --base-domain ${cfg.baseDomain} \
-                --document-base-domain ${cfg.documentBaseDomain} \
-                --api-url ${cfg.apiUrl} \
-                --git-url ${cfg.gitUrl} \
-                --site-scheme ${cfg.siteScheme} \
-                --site-port ${cfg.sitePort} \
-                --mailer resend \
-                --mail-from "${cfg.mailFrom}"
-            ''
-          else
-            ''
-              ${cfg.package}/bin/finitesitesd serve \
-                --data ${cfg.dataDir} \
-                --listen ${cfg.listen} \
-                --base-domain ${cfg.baseDomain} \
-                --api-url ${cfg.apiUrl} \
-                --git-url ${cfg.gitUrl} \
-                --site-scheme ${cfg.siteScheme} \
-                --site-port ${cfg.sitePort} \
-                --mailer resend \
-                --mail-from "${cfg.mailFrom}"
-            '';
+        ExecStart = ''
+          ${cfg.package}/bin/finitesitesd serve \
+            --data ${cfg.dataDir} \
+            --listen ${cfg.listen} \
+            --base-domain ${cfg.baseDomain} \
+            --document-base-domain ${cfg.documentBaseDomain} \
+            --api-url ${cfg.apiUrl} \
+            --git-url ${cfg.gitUrl} \
+            --site-scheme ${cfg.siteScheme} \
+            --site-port ${cfg.sitePort} \
+            --mailer resend \
+            --mail-from "${cfg.mailFrom}"
+        '';
         # Operator-created, root:root 0600. systemd reads EnvironmentFile before
         # starting the service under the finite-sites account.
         # Variable NAMES only; values are operator-created on each host:
