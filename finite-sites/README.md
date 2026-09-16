@@ -138,6 +138,19 @@ config creates a source-only Project Repository with no served site.
 
 4. Validate and create the Project Repository:
 
+Project creation requires a verified owner mailbox. An authenticated Finite
+Chat turn supplies the requester evidence automatically. For a standalone CLI,
+first authorize this Publishing Key for the owner's mailbox:
+
+```sh
+fsite auth sites-key request OWNER_EMAIL
+fsite auth sites-key add OWNER_EMAIL TOKEN_FROM_EMAIL --output json
+```
+
+For that standalone flow, add `--owner-email OWNER_EMAIL` to both Project Init
+commands below. This selects an already authorized mailbox; it does not prove
+mailbox ownership or link an agent's identity to the human's identity.
+
 ```sh
 fsite project init --config finite.toml --dry-run --output json
 fsite project init --config finite.toml --output json
