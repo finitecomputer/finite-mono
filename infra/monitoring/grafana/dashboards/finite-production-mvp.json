@@ -80,7 +80,7 @@
       "targets": [
         {
           "editorMode": "code",
-          "expr": "probe_success{job=~\"finite[.]computer|chat[.]finite[.]computer|brain[.]finite[.]computer|finitechat-native-mockup[.]finite[.]chat|uptime-probe[.]docs[.]finite[.]chat\"}",
+          "expr": "probe_success{job=~\"finite[.]computer|chat[.]finite[.]computer|brain[.]finite[.]computer|finite[.]site|uptime-probe[.]finite[.]site\"}",
           "instant": true,
           "legendFormat": "{{job}}",
           "range": false,
@@ -96,7 +96,8 @@
         }
       ],
       "title": "Current Production Status",
-      "type": "stat"
+      "type": "stat",
+      "description": "Finite Sites: finite.site checks API health (HTTP 200); uptime-probe.finite.site checks wildcard DNS/TLS and routing to an unallocated site (expected HTTP 404). Both run every minute. These are availability checks, not publishing or private viewer tests. New Sites history starts when the probes are deployed."
     },
     {
       "datasource": {
@@ -188,7 +189,7 @@
       "targets": [
         {
           "editorMode": "code",
-          "expr": "probe_success{job=~\"finite[.]computer|chat[.]finite[.]computer|brain[.]finite[.]computer|finitechat-native-mockup[.]finite[.]chat|uptime-probe[.]docs[.]finite[.]chat\"}",
+          "expr": "probe_success{job=~\"finite[.]computer|chat[.]finite[.]computer|brain[.]finite[.]computer|finite[.]site|uptime-probe[.]finite[.]site\"}",
           "instant": false,
           "legendFormat": "{{job}}",
           "range": true,
@@ -197,7 +198,8 @@
       ],
       "timeFrom": "24h",
       "title": "Public Uptime - 24 Hours",
-      "type": "timeseries"
+      "type": "timeseries",
+      "description": "Finite Sites: finite.site checks API health (HTTP 200); uptime-probe.finite.site checks wildcard DNS/TLS and routing to an unallocated site (expected HTTP 404). Both run every minute. These are availability checks, not publishing or private viewer tests. New Sites history starts when the probes are deployed."
     },
     {
       "datasource": {
@@ -289,7 +291,7 @@
       "targets": [
         {
           "editorMode": "code",
-          "expr": "probe_success{job=~\"finite[.]computer|chat[.]finite[.]computer|brain[.]finite[.]computer|finitechat-native-mockup[.]finite[.]chat|uptime-probe[.]docs[.]finite[.]chat\"}",
+          "expr": "probe_success{job=~\"finite[.]computer|chat[.]finite[.]computer|brain[.]finite[.]computer|finite[.]site|uptime-probe[.]finite[.]site\"}",
           "instant": false,
           "legendFormat": "{{job}}",
           "range": true,
@@ -298,7 +300,8 @@
       ],
       "timeFrom": "7d",
       "title": "Public Uptime - 7 Days",
-      "type": "timeseries"
+      "type": "timeseries",
+      "description": "Finite Sites: finite.site checks API health (HTTP 200); uptime-probe.finite.site checks wildcard DNS/TLS and routing to an unallocated site (expected HTTP 404). Both run every minute. These are availability checks, not publishing or private viewer tests. New Sites history starts when the probes are deployed."
     },
     {
       "datasource": {
@@ -389,7 +392,7 @@
       "targets": [
         {
           "editorMode": "code",
-          "expr": "probe_duration_seconds{job=~\"finite[.]computer|chat[.]finite[.]computer|brain[.]finite[.]computer|finitechat-native-mockup[.]finite[.]chat|uptime-probe[.]docs[.]finite[.]chat\"}",
+          "expr": "probe_duration_seconds{job=~\"finite[.]computer|chat[.]finite[.]computer|brain[.]finite[.]computer|finite[.]site|uptime-probe[.]finite[.]site\"}",
           "instant": false,
           "legendFormat": "{{job}}",
           "range": true,
@@ -397,7 +400,8 @@
         }
       ],
       "title": "Public Response Time",
-      "type": "timeseries"
+      "type": "timeseries",
+      "description": "Finite Sites: finite.site checks API health (HTTP 200); uptime-probe.finite.site checks wildcard DNS/TLS and routing to an unallocated site (expected HTTP 404). Both run every minute. These are availability checks, not publishing or private viewer tests. New Sites history starts when the probes are deployed."
     },
     {
       "datasource": {

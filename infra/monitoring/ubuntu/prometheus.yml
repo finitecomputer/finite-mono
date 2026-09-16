@@ -48,11 +48,25 @@ scrape_configs:
     metric_relabel_configs: *probe_metrics
 
   - job_name: finite.site
+    scrape_interval: 1m
     metrics_path: /probe
     params:
       module: [http_200]
     static_configs:
       - targets: [https://finite.site/api/v2/healthz]
+        labels:
+          probe: finite-monitoring
+    relabel_configs: *blackbox_relabel
+    metric_relabel_configs: *probe_metrics
+
+  # An unallocated site must reach Sites through wildcard DNS/TLS and return 404.
+  - job_name: uptime-probe.finite.site
+    scrape_interval: 1m
+    metrics_path: /probe
+    params:
+      module: [http_404]
+    static_configs:
+      - targets: [https://uptime-probe.finite.site/]
         labels:
           probe: finite-monitoring
     relabel_configs: *blackbox_relabel
