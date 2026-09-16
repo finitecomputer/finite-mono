@@ -51,3 +51,27 @@ Only WorkOS's signing key/user lookup uses the existing test identity fixture;
 the proof exercises real JWT verification and production admission routes, not a
 mock Core or simulated status response. It does not prove live WorkOS login or
 production fleet enrollment. No model credential or inference call is required.
+
+## Hermes authentication boundary
+
+`/api/status` is public **inside Hermes**. Its success proves Core/Iroh admission
+and reachability, not access to protected Hermes APIs. The committed browser
+client does not yet retrieve Hermes's native bootstrap token. The native-client
+acceptance injects a test token; it does not prove browser token discovery.
+
+The approved Iroh mode keeps Hermes on loopback and Core admission as the remote
+boundary. The earlier isolated browser spike proved reading the native root
+bootstrap, using `X-Hermes-Session-Token` for protected HTTP, native token WebSocket
+authentication, and refreshing after a Hermes restart. That code still needs to
+be brought into the dashboard path. Tokens stay in browser memory and never pass
+through Core; admission revocation must reject even a browser holding the token.
+
+The parallel Caddy spike uses a public Hermes URL and native gated authentication
+(username/password/session secret), so its cookie/provider/ticket requirements
+are not automatically requirements of this loopback mode. Coordinate endpoint
+and evidence contracts, without silently changing the approved auth mode.
+
+Next shared acceptance target: a protected read (prefer the native skills list),
+401 without the Hermes token, success after native bootstrap through the real
+dashboard, re-bootstrap after Hermes restart, and denial after Core revocation
+with the old token still held. Browser-controller identity remains deferred.
