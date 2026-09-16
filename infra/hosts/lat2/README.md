@@ -25,7 +25,7 @@ ADR 0007 emergency cutover that made finite-lat-2 the replacement app server.
 
 | Service | What | Config in this tree |
 |---|---|---|
-| Legacy Sites and Caddy | The live NixOS service and canonical routes remain until the [Fly cutover](../../runbooks/deploy-sites.md). | [Sites module](../../nixos/modules/finitesitesd.nix), [Caddy module](../../nixos/modules/caddy.nix) |
+| Caddy content redirects | Previous Sites URLs redirect to the retained Site on Fly. | [Caddy module](../../nixos/modules/caddy.nix), [Sites runbook](../../runbooks/deploy-sites.md) |
 | `finite-core-tunnel.service` **(historical, retired)** | Pre-NixOS SSH tunnel capture. Current Core is native on finite-lat-2; do not recreate the tunnel. | `systemd/finite-core-tunnel.service` |
 | `finite-saas-runner.service` + `.timer` | **Previously undocumented, DORMANT.** "Finite agent creation runner": oneshot every 20s from the build-on-box checkout `/opt/finite/finitecomputer`. Timer is disabled and absent from `list-timers`. Stale `After=k3s.service` (no k3s here); depends on the core tunnel via drop-in. | `systemd/finite-saas-runner.service`, `.timer`, `systemd/finite-saas-runner-10-core-tunnel.conf` |
 | GitHub Actions runners **(removal inventory)** | `finite-lat-2-mono` (registered against finite-mono) **plus** the 3 legacy-repo runners (v2.335.1, `User=ubuntu`, under `/srv/github-runner/`, registered to finitechat / finitecomputer / finitecomputer-v2). Current workflows use Depot and should not target these runners; they are to be unregistered during decommission. | `runners.md` |
@@ -36,7 +36,6 @@ ADR 0007 emergency cutover that made finite-lat-2 the replacement app server.
 |---|---|---|---|
 | 0.0.0.0 / [::] | 22 | sshd | public |
 | * | 80, 443 | caddy | public; Cloudflare-proxied zone |
-| 127.0.0.1 | 8787 | finitesitesd | all canonical Caddy vhosts proxy here |
 | 127.0.0.1 | 14200 | ssh (finite-core-tunnel) | → lat1 ClusterIP 10.43.237.180:4200 |
 | 127.0.0.1 | 2019 | caddy admin API | |
 | 127.0.0.1 | 41943 | containerd | ephemeral |
@@ -45,10 +44,10 @@ ADR 0007 emergency cutover that made finite-lat-2 the replacement app server.
 
 | Location | Contents | Consumer |
 |---|---|---|
-| `/etc/finite-saas/sites.env` (0640) | exactly one var: `RESEND_API_KEY`. | finite-saas-sites.service |
+| `/etc/finite-saas/sites.env` (0640) | exactly one var: `RESEND_API_KEY`. | Finite Identity mail (historical filename retained) |
 | `/etc/finite-saas/certs/finite-chat-origin.pem` (0644 root:root) / `.key` (0640 root:caddy) | Cloudflare Origin CA cert pair for `finite.chat, *.finite.chat, docs.finite.chat, *.docs.finite.chat`; regenerated 2026-07-02 | Caddy |
 | `/etc/finite-computer/runner.env` (0600 root) | 18 `FC_*` vars: `FC_CORE_URL`, `FC_CORE_API_TOKEN`, `FC_RUNNER_ID`, `FC_RUNNER_SOURCE_HOST_ID`, `FC_RUNNER_RELAY_URL`, `FC_RUNNER_RUNTIME_ARTIFACT_ID`, `FC_RUNNER_RUNTIME_ARTIFACT_KIND`, `FC_RUNNER_RUNTIME_ARTIFACT_REFERENCE`, `FC_RUNNER_RUNTIME_STATE_SCHEMA_VERSION`, `FC_RUNNER_WORK_ROOT`, `FC_RUNNER_MSB_BIN`, `FC_RUNNER_MSB_MEMORY`, `FC_RUNNER_MSB_CPUS`, `FC_RUNNER_RUNTIME_READY_TIMEOUT_SECS`, `FC_RUNNER_RUNTIME_READY_INTERVAL_MS`, `FC_RUNNER_COMMAND_TIMEOUT_SECS`, `FC_RUNNER_RUNTIME_TEMPLATE_ROOT`, `FC_RUNNER_MAX_SANDBOXES` | finite-saas-runner.service (dormant) |
-| `/var/lib/finite-sites/cookie-secret` (64 bytes) | finitesitesd session secret | finitesitesd |
+| `/var/lib/finite-sites/cookie-secret` (64 bytes) | archived Sites session secret | preserved recovery material |
 | `/srv/github-runner/*/.credentials`, `.credentials_rsaparams` | runner registration credentials (never captured) | Actions runners |
 | `/opt/finite/finitecomputer/secrets/` (0700 root) | unenumerated by design (root-only) | legacy runner tooling |
 | `/home/ubuntu/smoke-identity.env` (0600, 90 bytes) | not read; contents unknown | unknown |

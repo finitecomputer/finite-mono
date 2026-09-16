@@ -14,7 +14,14 @@
 let
   originCert = "/etc/finite-saas/certs/finite-chat-origin.pem";
   originKey = "/etc/finite-saas/certs/finite-chat-origin.key";
-  sitesBackend = "reverse_proxy 127.0.0.1:8787";
+  sitesRedirects = ''
+    # Required private exact-host map; missing/unreadable mappings fail validation.
+    import /etc/finite/sites-redirects.caddy
+    handle {
+      header Cache-Control "no-store"
+      respond "This Finite Sites address has been retired." 410
+    }
+  '';
 in
 {
   services.caddy = {
@@ -55,8 +62,7 @@ in
       reverse_proxy 127.0.0.1:8791
     '';
 
-    # Public URL unchanged; backend port moved 8787 -> 8788 on this box
-    # (finitesitesd owns 8787). See modules/finitechat-server.nix.
+    # Public Chat listener. See modules/finitechat-server.nix.
     #
     # `log` enables access logging to the default logger (stderr ->
     # journald): it is the read-only evidence source for the sync-rate
@@ -77,15 +83,21 @@ in
 
     virtualHosts."api.finite.chat".extraConfig = ''
       tls ${originCert} ${originKey}
-      ${sitesBackend}
+      header Cache-Control "no-store"
+      respond "Use https://finite.site with the current fsite CLI." 410
+    '';
+    virtualHosts."git.finite.chat".extraConfig = ''
+      tls ${originCert} ${originKey}
+      header Cache-Control "no-store"
+      respond "Update this repository's remote using fsite auth git." 410
     '';
     virtualHosts."*.finite.chat".extraConfig = ''
       tls ${originCert} ${originKey}
-      ${sitesBackend}
+      ${sitesRedirects}
     '';
     virtualHosts."*.docs.finite.chat".extraConfig = ''
       tls ${originCert} ${originKey}
-      ${sitesBackend}
+      ${sitesRedirects}
     '';
   };
 }

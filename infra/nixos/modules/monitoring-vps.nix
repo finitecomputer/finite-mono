@@ -147,15 +147,6 @@ in
         target = "https://brain.finite.computer/health";
       })
       (publicProbe {
-        name = "finitechat-native-mockup.finite.chat";
-        target = "https://finitechat-native-mockup.finite.chat/";
-      })
-      (publicProbe {
-        name = "uptime-probe.docs.finite.chat";
-        target = "https://uptime-probe.docs.finite.chat/";
-        module = "http_404";
-      })
-      (publicProbe {
         name = "finite.site";
         target = "https://finite.site/api/v2/healthz";
       })

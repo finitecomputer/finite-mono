@@ -81,8 +81,7 @@ test("dashboard requester assertion authorizes only the publishing registry, inc
   }
   const publishing = await sites("publishing");
   const otherRegistry = await sites("other-registry");
-  process.env.FC_SITES_UPSTREAM_URL = otherRegistry;
-  process.env.FC_SITES_V2_UPSTREAM_URL = publishing;
+  process.env.FC_SITES_UPSTREAM_URL = publishing;
   const home = join(temp, "agent");
   const session = "synthetic-authenticated-turn";
   const cliEnv = { ...process.env, FINITE_HOME: home, FINITE_SITES_API: publishing,
@@ -106,13 +105,13 @@ test("dashboard requester assertion authorizes only the publishing registry, inc
     }), { mode: 0o600 });
   }
   const init = ["project", "init", "--config", config, "--output", "json"];
-  process.env.FC_SITES_V2_UPSTREAM_URL = otherRegistry;
+  process.env.FC_SITES_UPSTREAM_URL = otherRegistry;
   const wrong = await createHostedRequesterContext(context);
   assert(wrong);
   await lease(wrong.sitesAssertion);
   await assert.rejects(cli(...init, "--dry-run"), /not_authorized|not authorized/i);
 
-  process.env.FC_SITES_V2_UPSTREAM_URL = publishing;
+  process.env.FC_SITES_UPSTREAM_URL = publishing;
   const requester = await createHostedRequesterContext(context);
   assert(requester);
   await lease(requester.sitesAssertion);
@@ -128,6 +127,6 @@ test("dashboard requester assertion authorizes only the publishing registry, inc
 
   // A redirect must not move the service credential or issue a foreign token.
   redirectTo = otherRegistry;
-  process.env.FC_SITES_V2_UPSTREAM_URL = fixtureOrigin;
+  process.env.FC_SITES_UPSTREAM_URL = fixtureOrigin;
   assert.equal(await createHostedRequesterContext(context), undefined);
 });

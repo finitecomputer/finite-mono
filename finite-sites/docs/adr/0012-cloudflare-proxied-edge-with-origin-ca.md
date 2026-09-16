@@ -1,7 +1,7 @@
 # Cloudflare-Proxied Edge With Origin CA Certificates
 
-This applies to the retained legacy `finite.chat` deployment. The static-only
-Fly deployment uses the edge and TLS configuration in
+Historical serving decision. The finite.chat edge now retains only reviewed
+content redirects and retired-route responses. Finite Sites on Fly uses
 [the Sites runbook](../../../infra/runbooks/deploy-sites.md).
 
 `finite.chat` lives on Cloudflare. The wildcard and API records are

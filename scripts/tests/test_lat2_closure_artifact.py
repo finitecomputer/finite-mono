@@ -209,7 +209,6 @@ class Lat2ClosureArtifactTests(unittest.TestCase):
             "finite-saas-core.service",
             "finitechat-server.service",
             "finitechat-hosted-device.service",
-            "finite-saas-sites.service",
             "finite-brain-app.service",
             "finite-identity.service",
             "finite-litestream-finite-chat-server.service",

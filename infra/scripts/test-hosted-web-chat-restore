@@ -283,6 +283,39 @@ fi
 test ! -e "$injected_target"
 test ! -e "$scratch/.injected-target.restore-staging"
 
+# Current snapshots exclude Sites; historical complete snapshots remain readable.
+current="$scratch/current-snapshot"
+cp -a "$snapshot" "$current"
+rm -rf "$current/finite-sites" "$current/finite-sites-symlinks.bin"
+sed -i 's/snapshot.v3/snapshot.v4/g; /^finite-sites/d' "$current/recovery-set.tsv"
+printf '%s\n' finite.hosted-web-chat-recovery-snapshot.v4 > "$current/format"
+(
+  cd "$current"
+  find format recovery-set.tsv hosted-device finite-chat saas-core finite-brain finite-identity \
+    -type f -print0 | LC_ALL=C sort -z | xargs -0 sha256sum > manifest.sha256
+)
+FINITE_RESTORE_ISOLATED=1 "$restore" "$current" "$scratch/current-restored" >/dev/null
+test ! -e "$scratch/current-restored/finite-sites"
+test "$(sqlite3 "$scratch/current-restored/finite-chat/server.sqlite3" 'SELECT count(*) FROM messages')" = 1
+if FINITE_RESTORE_ISOLATED=1 FINITE_RESTORE_FAIL_AFTER_STAGE=1 "$restore" "$current" "$scratch/current-injected" >/dev/null 2>&1; then
+  echo 'current snapshot ignored failure injection' >&2; exit 1
+fi
+test ! -e "$scratch/current-injected"
+FINITE_RESTORE_ISOLATED=1 "$restore" "$current" "$scratch/current-injected" >/dev/null
+for artifact in finite-chat/server.sqlite3 finite-brain/finite-brain.sqlite3 finite-identity/identity.db saas-core/finite_core.dump; do
+  mv "$current/$artifact" "$scratch/missing-artifact"
+  if FINITE_RESTORE_ISOLATED=1 "$restore" "$current" "$scratch/current-partial" >/dev/null 2>&1; then
+    echo 'current snapshot accepted missing artifact' >&2; exit 1
+  fi
+  test ! -e "$scratch/current-partial"
+  mv "$scratch/missing-artifact" "$current/$artifact"
+done
+ln -s /tmp "$current/finite-brain/link"
+if FINITE_RESTORE_ISOLATED=1 "$restore" "$current" "$scratch/current-symlink" >/dev/null 2>&1; then
+  echo 'current snapshot accepted symlink' >&2; exit 1
+fi
+test ! -e "$scratch/current-symlink"
+
 printf '%s\n' finite.hosted-web-chat-recovery-snapshot.v1 > "$snapshot/format"
 if FINITE_RESTORE_ISOLATED=1 "$restore" "$snapshot" "$scratch/v1-target" >/dev/null 2>&1; then
   echo "recovery contract test failed: incomplete v1 snapshot was accepted" >&2
@@ -305,4 +338,4 @@ if FINITE_RESTORE_ISOLATED=1 "$restore" "$snapshot" "$scratch/partial-target" >/
 fi
 test ! -e "$scratch/partial-target"
 
-echo "hosted recovery v3 positive and negative contract checks passed"
+echo "hosted recovery v3/v4 positive and negative contract checks passed"

@@ -52,7 +52,6 @@ CONTRACT: dict[str, Any] = {
             "finitechat-server.service",
             "finitechat-hosted-device.service",
             "finite-brain-app.service",
-            "finite-saas-sites.service",
             "prometheus-node-exporter.service",
         ],
         "probes": {
@@ -61,7 +60,7 @@ CONTRACT: dict[str, Any] = {
             "finitechat-server": "http://127.0.0.1:8788/readyz",
             "hosted-web-device": "http://127.0.0.1:38918/healthz",
             "finite-brain": "http://127.0.0.1:3015/health",
-            "finitesitesd": "http://127.0.0.1:8787/api/v1/healthz",
+            "finite-sites": "https://finite.site/api/v2/healthz",
             "node-exporter": "http://127.0.0.1:9100/metrics",
         },
     },
@@ -70,7 +69,6 @@ CONTRACT: dict[str, Any] = {
         "finitechat-server.service",
         "finitechat-hosted-device.service",
         "finite-brain-app.service",
-        "finite-saas-sites.service",
         "finite-identity.service",
     ],
     "runner": {

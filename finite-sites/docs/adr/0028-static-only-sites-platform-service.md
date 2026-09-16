@@ -14,9 +14,10 @@ still coupled to the shared server infrastructure and to a public Project
 Output model that grew to include static sites, rendered documents, PDFs, and
 stateful apps. The app path introduced Kata runners and wake-on-request
 questions that are no longer part of the product direction. The cutover inventory
-includes existing apps and documents. Those outputs remain on the legacy service with their recovery coverage; the Fly service
-imports only the agreed static Sites. The static-only target does not authorize
-deletion of unsupported user state.
+includes existing apps and documents. At complete cutover, retain reviewed
+static deploy bytes where useful, render documents ahead of time, and retire
+server execution. Preserve visibility, shares, source history and recovery
+archives; retiring a service does not authorize purging its data.
 
 The goal is not to move Sites out of this repository. The goal is to make Sites
 a separate platform service: independently deployable, independently backed up,
@@ -45,8 +46,8 @@ but deployed separately on one Fly Machine with persistent state at
 `/var/lib/finite-sites`. CI builds the digest-pinned image; Fly terminates TLS
 and routes to the service. Deployments and backup/restore qualification live in
 [the Sites runbook](../../../infra/runbooks/deploy-sites.md). This replaces the
-previous NixOS validation-host plan; the legacy app-plane service stays for
-retained apps/documents until those consumers are separately retired.
+previous NixOS deployment. After migration and redirect verification, remove
+the app-plane daemon and its ongoing backup/health dependencies.
 
 The control origin is `https://finite.site` for API and Git smart HTTP; served
 Sites use `https://{site}.finite.site/`. The API lives under `/api/v2/*`, with
@@ -55,7 +56,7 @@ Sites use `https://{site}.finite.site/`. The API lives under `/api/v2/*`, with
 `fsite-latest` release until the destination passes restore, access and
 compatibility checks for that CLI contract.
 
-Sites v2 has no public concept of output kinds. A Project Repository may have
+Finite Sites has no public concept of output kinds. A Project Repository may have
 zero or one Project Site. Source-only Projects remain valid. Project Init stays
 the canonical create/update entry point. The canonical config shape is:
 
@@ -73,7 +74,7 @@ spa = false
 Legacy static config using `[outputs.*]` may be accepted only as deprecated
 input while agents and examples are updated. It must contain exactly one static
 site output; the legacy output id is ignored; app, document, PDF, multiple
-outputs, `start`, `entry`, and retired output fields fail validation. New v2
+outputs, `start`, `entry`, and retired output fields fail validation. New
 responses and docs use Site vocabulary, not Output vocabulary. Public responses
 return `site: null` for source-only Projects or one Project Site object with
 name, URL, visibility, active version, branch, path, and SPA setting.
@@ -93,28 +94,24 @@ only finite-identity dependency is directory-style fact lookup such as NIP-05.
 Sites calls identity/core for facts it does not own, but every Sites request is
 authorized against Sites state.
 
-The validation service starts essentially empty, except for reserved names and
-collision-protection data imported by a simple operator process. There is no
-general migration framework, dual-write path, or runtime compatibility flag.
-Legacy production Sites continues to run the old deployed binary until cutover.
-At cutover, operators may run a narrow one-off reconciliation for static sites
-created during validation, then switch DNS/edge targets. After the canonical
-service is live and verified, obsolete app/document/output code paths can be
-deleted rather than retained as dormant architecture.
+The production service is the sole publishing authority. Migration preserves
+its accepted writes while reconciling retained source Sites. There is no
+general migration framework or dual-write path. Isolated recovery drills use
+disposable targets; they do not establish a second deployment lane.
 
 ## Consequences
 
 - The app Sites experiment is intentionally not preserved. `kind = "app"` and
   Kata runner behavior are removed from the future Sites contract.
-- The v2 validation host needs its own DNS, wildcard certificate/edge routing,
+- The dedicated Sites host needs its own DNS, wildcard certificate/edge routing,
   service secrets, backup schedule, and restore proof before it can carry real
   production traffic.
 - Existing static users should see the same serving behavior after cutover, but
   static-only `fsite` validation builds may be incompatible with the current
-  public production API while v2 is opt-in.
+  public production API during the CLI transition.
 - Public API fields, CLI arguments, docs, and workflows move from Output
   vocabulary to Site vocabulary. Private Rust identifiers can be cleaned up as
-  touched, but the public v2 contract must not expose output ids or output
+  touched, but the public contract must not expose output ids or output
   kinds.
 
 ## Considered Options
@@ -122,11 +119,11 @@ deleted rather than retained as dormant architecture.
 - Move Sites out of `finite-mono`: rejected because the monorepo remains the
   first-party source of truth. Deployment and data-plane separation do not
   require repository separation.
-- Use Vercel or a serverless host for v1: rejected for the static-only target.
+- Use Vercel or a serverless host for launch: rejected for the static-only target.
   Static byte serving, git smart HTTP, Sites-local auth, and custom sharing are
   simpler to operate as one dedicated service first.
 - Preserve app/document kinds behind compatibility modes: rejected because they
   keep the failed output-kind architecture alive and complicate the new service
   before it has proven the static path.
-- Build a reusable migration subsystem: rejected because v2 can be validated on
-  separate endpoints and the final reconciliation is a one-time operator event.
+- Build a reusable migration subsystem: rejected because final reconciliation is a
+  one-time operator event.

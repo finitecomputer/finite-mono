@@ -1,15 +1,16 @@
 # Hosted Web Chat snapshot and empty-target restore
 
-This runbook covers snapshot format
-`finite.hosted-web-chat-recovery-snapshot.v3`. Its complete Recovery Set is:
-the Hosted Web Device identity, encrypted client stores, and Agent bindings;
-the complete Finite Chat server SQLite database; a custom-format SaaS Core
-Postgres dump; the FiniteBrain SQLite database; and the Finite Identity SQLite
-database; plus the complete finite-sites data directory, with its registry
-captured through SQLite's backup API. The separately retained Agent Runtime is
-not in this snapshot. v1 and v2 snapshots are incomplete for the current stack,
-and the restore tool rejects them instead of silently omitting Brain, Finite
-Identity, or Sites.
+Current snapshots use `finite.hosted-web-chat-recovery-snapshot.v4`: Hosted Web
+Device identities, encrypted client stores and bindings; Finite Chat SQLite;
+SaaS Core Postgres; FiniteBrain SQLite; and Finite Identity SQLite. Agent Runtime
+recovery remains separate. Finite Sites runs on Fly with its own
+[backup and restore procedure](deploy-sites.md#backups-and-restore).
+
+The verifier also accepts complete historical v3 snapshots, including the old
+Sites directory and symlink inventory. Restore these as archives on isolated
+scratch targets; do not start an old Sites writer against migrated data. v1/v2
+snapshots remain rejected. The Sites retirement must preserve a final complete
+v3 archive independently before new v4 captures omit that directory.
 
 **Current cadence, 2026-07-20:** the snapshot is deploy/manual-triggered. The
 former 15-minute timer was removed because stopping Chat and every Hosted
@@ -17,10 +18,10 @@ Device broke live streams. Snapshot health allows seven days; Borg re-ships the
 latest snapshot daily and its offsite health allows 50 hours. A verified first
 archive exists. This is not the accepted 15-minute RPO.
 
-**v3 rollout gate:** merging this contract does not protect Sites by itself.
-Until the v3 closure is deployed, a fresh v3 snapshot is created, its manifest
-passes, Borg ships it, and an empty-target restore succeeds, the latest live v2
-archive remains evidence for only the pre-Sites Recovery Set.
+**Format transition:** the pre-deploy snapshot uses the previous generation.
+After switching the closure, create and verify a v4 snapshot, archive it, and
+repeat the empty-target drill. Health and archival accept both v3 and v4 during
+this transition; changing the declaration alone is not recovery proof.
 
 ## New-capacity admission gate
 
@@ -113,7 +114,7 @@ test -z "$(find "$latest" ! -type l -perm /0222 -print -quit)"
 systemctl start finite-hosted-web-chat-snapshot-health.service
 systemctl start borgbackup-job-finite-hosted-web-chat-offsite.service
 systemctl start finite-hosted-web-chat-offsite-health.service
-scripts/snapshot-sqlite integrity-check "$latest/finite-sites/registry.db"
+scripts/snapshot-sqlite integrity-check "$latest/finite-chat/server.sqlite3"
 ```
 
 Record the deployed revision, resolved snapshot timestamp, snapshot-health
@@ -135,9 +136,9 @@ age=$(( $(date +%s) - $(stat -Lc %Y "$latest") ))
 test "$age" -le 604800      # current health threshold only
 test "$age" -le 900         # separate admission/RPO gate; expected to fail today
 (cd "$latest" && sha256sum --check manifest.sha256)
-test "$(cat "$latest/format")" = finite.hosted-web-chat-recovery-snapshot.v3
+scripts/verify-hosted-snapshot "$latest"
 test -f "$latest/recovery-set.tsv"
-scripts/snapshot-sqlite integrity-check "$latest/finite-sites/registry.db"
+scripts/snapshot-sqlite integrity-check "$latest/finite-chat/server.sqlite3"
 ```
 
 Never pass a database below `$latest` to plain `sqlite3`; the helper copies
@@ -145,16 +146,12 @@ the database and any WAL/SHM sidecars to private scratch space first.
 
 The snapshot unit briefly fences every writer in the Recovery Set, copies
 identity and encrypted binding files, uses SQLite's backup API for every
-Hosted Device, Chat, Brain, Finite Identity, and Sites registry database,
-copies the remainder of the stopped Sites data directory, takes a
-`pg_dump --format=custom`, verifies each artifact, and writes only relative
-paths and hashes to the integrity manifest. `recovery-set.tsv` binds the format
-version to the six component and artifact identities; snapshot health and the
-restore preflight must validate both files. Sites symlinks are preserved
-without dereferencing and bound to `finite-sites-symlinks.bin`; links are
-allowed nowhere else in the Recovery Set. This preserves the current app
-environments, including their dangling build-cache links, without treating
-those external targets as backed-up data.
+Hosted Device, Chat, Brain, and Finite Identity database, takes a
+`pg_dump --format=custom`, verifies each artifact, and writes relative paths and
+hashes to the integrity manifest. `recovery-set.tsv` binds the version to its
+component identities. `scripts/verify-hosted-snapshot` validates the exact
+manifest for health, archival and restore. Current snapshots allow no symlinks;
+historical v3 snapshots permit only inventoried links inside archived Sites.
 
 ## Empty-target drill
 
@@ -186,12 +183,11 @@ those external targets as backed-up data.
    `pg_restore --exit-on-error --single-transaction --clean --if-exists`.
    Install `recovery/finite-brain/finite-brain.sqlite3` and
    `recovery/finite-identity/identity.db` into their target StateDirectories.
-   Install the complete `recovery/finite-sites` directory as the target
-   `/var/lib/finite-sites`, preserving the target unit's ownership and modes.
-   Do not dereference its symlinks during transfer. A restored external or
-   dangling app-environment link is not evidence that its target was recovered.
+   For a historical v3 archive, retain `recovery/finite-sites` separately as
+   recovery material, preserving symlinks without dereferencing them. Its
+   restoration does not authorize restarting the retired Sites service.
 6. Start Postgres, SaaS Core, Finite Identity, FiniteBrain, Finite Chat, Hosted
-   Web Device, finite-sites, and dashboard in
+   Web Device and dashboard in
    isolated mode. Keep public traffic and outbound side effects off.
 7. Compare Account, human identity/Nostr identity binding, Device, Room, Topic,
    Chat, message, attachment, Project, Runtime, Agent, Brain, Folder, and
@@ -199,8 +195,8 @@ those external targets as backed-up data.
    as the restored hosted human identity, open the restored Brain through the
    normal product path, read its retained content, open all retained
    conversations, decrypt history, and download the attachment.
-   Compare Sites registry rows and published version identities, then load the
-   synthetic site's HTML and one blob-backed asset through the isolated target.
+   Qualify current Sites recovery separately through the Sites runbook; a hosted
+   snapshot no longer proves Fly data recovery.
 8. Reconnect only the fenced retained Agent Runtime. Verify the durable owner
    claim replays through the canonical Room and one fresh Agent turn completes.
 9. Paul performs the browser checks. Record date, archive name, component
@@ -209,7 +205,7 @@ those external targets as backed-up data.
 Do not switch traffic as part of the drill. A production traffic switch needs
 its own authorization and rollback plan.
 
-The backup boundary is the service-consistent v3 snapshot directory after its
+The backup boundary is the service-consistent versioned snapshot directory after its
 atomic staging rename. The restore boundary is the verified isolated staging
 directory before its atomic rename into the empty target. The rollback boundary
 is the untouched previous target plus the selected immutable snapshot/Borg
@@ -239,7 +235,8 @@ this public runbook does not invent an appointment.
 
 Before admission, prove that a wrong key, truncated archive, modified artifact,
 v1/v2/wrong format, mismatched `recovery-set.tsv`, missing
-Chat/Core/Brain/Identity/Sites database, corrupt Sites registry, unsafe
+Chat/Core/Brain/Identity database (plus Sites for historical v3), corrupt
+SQLite, unsafe
 manifest path, non-empty target, and injected post-staging failure each fail
 before target mutation. After any schema or snapshot-format change, repeat
 both positive and negative drills.

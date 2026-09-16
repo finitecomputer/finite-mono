@@ -29,7 +29,6 @@ expected_app_plane_units=(
   finite-saas-core.service
   finitechat-server.service
   finitechat-hosted-device.service
-  finite-saas-sites.service
   finite-brain-app.service
   finite-identity.service
   podman-finite-saas-dashboard.service
@@ -522,7 +521,7 @@ verify_running_executable() {
   }
   echo "==> verified $unit running executable=$running"
 }
-for unit in finite-saas-core.service finitechat-server.service finitechat-hosted-device.service finite-brain-app.service finite-saas-sites.service finite-identity.service; do
+for unit in finite-saas-core.service finitechat-server.service finitechat-hosted-device.service finite-brain-app.service finite-identity.service; do
   [[ -e "$system/etc/systemd/system/$unit" ]] || continue
   verify_running_executable "$unit" \
     || activation_failed 1 "$unit does not run the candidate executable; inspect before an explicitly scoped restart"

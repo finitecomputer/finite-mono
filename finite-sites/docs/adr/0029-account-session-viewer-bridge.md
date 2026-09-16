@@ -27,22 +27,17 @@ the email form.
 credential: exactly 64 lowercase hex characters, kept only in server
 environments. An absent value disables the exchange endpoint.
 
-Validated Site hostnames select the fixed server-configured origin and request
-field for `/internal/v1/viewer-sessions`:
+`FC_SITES_UPSTREAM_URL` selects the single server-configured Sites origin for
+`/internal/v1/viewer-sessions` (`site_url`) and Hosted Chat requester assertions.
+Requests cannot select an upstream, and credential-bearing exchanges reject
+redirects. Assertions are stored in the publishing registry; missing or failed
+issuance omits optional requester context without interrupting Chat.
 
-- Legacy finite.chat and docs.finite.chat Sites use `FC_SITES_UPSTREAM_URL`
-  with `output_url`.
-- Static finite.site and v2.finite.chat Sites use `FC_SITES_V2_UPSTREAM_URL`
-  with `site_url`. Explicitly enabled local development Sites use this setting.
-
-Requests cannot supply an upstream; v2 failures never retry against legacy.
-Hosted Chat requester assertions use `FC_SITES_V2_UPSTREAM_URL`: issuance
-writes a token hash into the publishing registry, so a token from the legacy
-registry cannot authorize Project Init on v2. Missing/failing v2 configuration
-omits requester context without interrupting Chat; no fallback or redirect
-may send the exchange to another origin. Deploy this change with the v2
-publishing Runtime. Legacy viewer selection and request spelling remain until
-their retained consumers are retired.
+Previous finite.chat content hosts are navigation-only. The edge maps each
+retained URL to its exact finite.site destination; the dashboard neither sends
+credentials to the previous host nor guesses the destination from its name.
+Unmapped hosts and retired auth/API/Git routes return 410. Viewing and publishing
+use the same Finite Sites service after the cutover described in the runbook.
 
 ## Tokens and cookies
 

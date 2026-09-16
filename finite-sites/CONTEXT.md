@@ -142,8 +142,7 @@ with exactly these meanings.
   Repository. A Project Repository has zero or one Project Site. The Project
   Site owns Site Name, Deploy Branch, Deploy Path, Visibility, Shares, active
   Version pointer, and version history.
-- **Project Site Identity**: the immutable public identity of a Project Site in
-  v2: Site Name, Deploy Branch, and Deploy Path.
+- **Project Site Identity**: the immutable public identity of a Project Site: Site Name, Deploy Branch, and Deploy Path.
 - **Retired Output Kind**: a former served-artifact variant such as app,
   document, or PDF. Remaining code or documents that depend on output kinds are
   legacy removal work rather than target Sites contracts.

@@ -20,7 +20,6 @@ PROBED_SERVICE_UNITS = [
     "finitechat-server.service",
     "finitechat-hosted-device.service",
     "finite-brain-app.service",
-    "finite-saas-sites.service",
     "prometheus-node-exporter.service",
 ]
 HEALTH_PROBES = tuple(finite_status.CONTRACT["healthcheck"]["probes"])

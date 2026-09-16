@@ -4,10 +4,10 @@
 { ... }:
 {
   virtualisation.oci-containers.containers.finite-saas-dashboard = {
-    # Sites account bridge cutover candidate; deploy only after the Sites gates.
-    # Source 91928989fdfe16e5c5b92968d353d4935c67e482.
-    # https://github.com/finitecomputer/finite-mono/actions/runs/35060382895
-    image = "ghcr.io/finitecomputer/finite-saas-dashboard@sha256:75447c59608b1d799afb47290ba8ec968f2b17efcbd960bf351b48a42194c4c6";
+    # Complete Sites cutover candidate; deploy only after migration/access gates.
+    # Source 7256ebe2b193dc64dafb561d95d25a5ef5cb1102.
+    # https://github.com/finitecomputer/finite-mono/actions/runs/35148339493
+    image = "ghcr.io/finitecomputer/finite-saas-dashboard@sha256:82075b0bea8c91c5198985096eefbacd39191ce9c1ae37f4a49375766b27cd6f";
 
     # Host networking: the dashboard must reach core on the HOST loopback
     # (127.0.0.1:4200) and itself bind 127.0.0.1:3000 (HOSTNAME below). With
@@ -31,10 +31,8 @@
       FC_HOSTED_WEB_DEVICE_URL = "http://127.0.0.1:38918";
       FC_BRAIN_UPSTREAM_URL = "http://127.0.0.1:3015";
       FC_BRAIN_PUBLIC_ORIGIN = "https://brain.finite.computer";
-      # Retained legacy viewer origin; publishing assertion routing is dashboard-owned.
-      FC_SITES_UPSTREAM_URL = "http://127.0.0.1:8787";
-      # Deploy with the qualified v2 registry and shared viewer credential.
-      FC_SITES_V2_UPSTREAM_URL = "https://finite.site";
+      # One Sites registry owns viewing and publishing authorization.
+      FC_SITES_UPSTREAM_URL = "https://finite.site";
       FC_CHAT_RELAY_TIMEOUT_MS = "30000";
       FC_DASHBOARD_BASE_URL = "https://finite.computer";
       NEXT_PUBLIC_WORKOS_REDIRECT_URI = "https://finite.computer/callback";

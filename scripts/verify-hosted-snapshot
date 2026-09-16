@@ -1,0 +1,43 @@
+#!/usr/bin/env bash
+# Validate sealed inventory without opening any snapshot database.
+set -euo pipefail
+[[ $# = 1 ]] || { echo 'usage: verify-hosted-snapshot SNAPSHOT_DIR' >&2; exit 64; }
+cd -- "$1"
+format=$(cat format)
+roots=(format recovery-set.tsv hosted-device finite-chat saas-core finite-brain finite-identity)
+case "$format" in
+  finite.hosted-web-chat-recovery-snapshot.v3)
+    roots+=(finite-sites finite-sites-symlinks.bin)
+    test -z "$(find . -type l ! -path './finite-sites/*' -print -quit)"
+    cmp --silent finite-sites-symlinks.bin <(
+      cd finite-sites
+      while IFS= read -r -d '' link; do
+        printf '%s\0' "${link#./}"
+        readlink --zero -- "$link"
+      done < <(find . -type l -print0 | LC_ALL=C sort -z)
+    )
+    ;;
+  finite.hosted-web-chat-recovery-snapshot.v4)
+    test -z "$(find . -type l -print -quit)"
+    # A current hosted snapshot must not silently carry unverified Sites state.
+    test ! -e finite-sites
+    test ! -e finite-sites-symlinks.bin
+    ;;
+  *) echo 'unsupported hosted snapshot format' >&2; exit 66 ;;
+esac
+expected=$(
+  printf '%s\n' "$format" \
+    $'hosted-device\tdirectory\thosted-device' \
+    $'finite-chat\tsqlite\tfinite-chat/server.sqlite3' \
+    $'saas-core\tpostgres-custom-dump\tsaas-core/finite_core.dump' \
+    $'finite-brain\tsqlite\tfinite-brain/finite-brain.sqlite3' \
+    $'finite-identity\tsqlite\tfinite-identity/identity.db'
+  if [[ "$format" = finite.hosted-web-chat-recovery-snapshot.v3 ]]; then
+    printf '%s\n' $'finite-sites\tdirectory\tfinite-sites'
+  fi
+)
+test "$(cat recovery-set.tsv)" = "$expected"
+test -z "$(find . ! -type d ! -type f ! -type l -print -quit)"
+cmp --silent manifest.sha256 <(
+  find "${roots[@]}" -type f -print0 | LC_ALL=C sort -z | xargs -0 sha256sum
+)
