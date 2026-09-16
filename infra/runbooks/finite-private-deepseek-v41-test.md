@@ -1,21 +1,23 @@
-# DeepSeek V4.1 Flash: September 16 H200 maintenance test
+# DeepSeek V4.1 Flash: H200 maintenance test and retry
 
-Preparation for **2026-09-16 03:00 America/Chicago (CDT, UTC−05:00)**,
+Retry preparation for **2026-09-17 03:00 America/Chicago (CDT, UTC−05:00)**,
 which is **08:00 UTC**. This is a temporary A/B test with GLM restoration,
-not a permanent model promotion. No production mutation or inference load was
-performed during preparation. A future start is not evidence that a scheduler
+not a permanent model promotion. Host model-pack preparation is separate from
+the serving container; GLM stays on its original release during preparation. A future start is not evidence that a scheduler
 has been armed; see the execution record below.
 
 ## Window and recovery
 
-Confirmed three-hour window: **03:00–06:00 Central (08:00–11:00 UTC)**.
+Working retry window, retaining the previous duration: **September 17,
+03:00–06:00 Central (08:00–11:00 UTC)**. Date confirmation was requested;
+preparation does not itself schedule or start a production swap.
 
 | Central | Action |
 | --- | --- |
 | 03:00–03:10 | Fresh status, GLM protocol canary and bounded baseline |
 | By 03:10 | Start the measured DeepSeek candidate only if all entry checks pass |
-| By 03:50 | Candidate must answer authenticated requests; otherwise restore GLM |
-| 03:50–05:15 | Protocol, model aliases, bounded performance tiers |
+| By 04:15 | Candidate must answer authenticated requests; otherwise restore GLM |
+| 04:15–05:15 | Protocol, model aliases, bounded performance tiers |
 | **05:15** | **Stop tests and start GLM restoration even if DeepSeek passes** |
 | **06:00** | GLM healthy; final status and accounting evidence retained |
 
@@ -24,6 +26,8 @@ loads, not a guaranteed recovery time. If GLM is not healthy by 06:00, treat it
 as an incident and continue recovery. Do not extend testing into that reserve.
 A late start shortens testing; it never moves the end of the window. No new
 candidate start after 03:10. No second engine/config attempt within this window.
+The retry allows up to 65 minutes for initial DeepSeek startup, while retaining
+one hour for protocol/throughput checks and the full restoration reserve.
 
 ## Exact inputs
 
@@ -72,7 +76,10 @@ The image's vision capability is not qualified by this test.
 [vLLM issue 56443](https://github.com/vllm-project/vllm/issues/56443) reports a
 DSpark profiling overrun when the request count times draft width exceeds the
 token buffer. Our explicit budget has margin (64 × 6 = 384 < 8,192), but this
-does not prove startup or performance on our CVM. A CUDA assert, OOM, repeated
+does not prove startup or performance on our CVM. On September 16 the
+reporter confirmed the profiling-cap fix runs DSpark on H200; the fix PR
+remained unmerged at preparation time. The existing candidate stays below
+the triggering buffer limit, so its measured image is unchanged. A CUDA assert, OOM, repeated
 restart, unsupported kernel, or readiness deadline means restore GLM, not
 patch/tune the running production machine. The CVM changes from 0.10.8 to
 0.14.6 with the upstream recipe; reverting the exact GLM release also reverts
@@ -103,7 +110,7 @@ remain unchanged, and the canonical recovery status must stay healthy.
 
 ## Entry checks
 
-1. Use the confirmed duration/rollback cutoff and identify an operator who will watch the
+1. Establish the retry date/rollback cutoff and identify an operator who will watch the
    entire window. Do not arm unattended production replacement with only this
    document as a timer.
 2. Publish the candidate from a dedicated satellite branch/tag, after its source
@@ -120,7 +127,9 @@ remain unchanged, and the canonical recovery status must stay healthy.
    their image/model artifacts remain available. Obtain explicit provider-side
    confirmation that both pinned model packs are staged on the exact host;
    release publication alone does not prove this. Retain both release bundles
-   locally before stopping anything.
+   locally before stopping anything. Use the host model-pack gate below, not
+   just a release hash or a historical job listing. Both jobs must be complete
+   and their exact host, revision, schema, root, offset and verity UUID must match.
 5. Re-read Tinfoil state by the exact inventoried UUID. Require the expected
    name/repo/host/tag, eight H200s, `ready`, no staged update, no debug mode,
    the exact three secret names, and auto-update disabled. A mismatch stops
@@ -142,16 +151,55 @@ remain unchanged, and the canonical recovery status must stay healthy.
    authentication, one stream, and accounting settlement checks. A bad baseline
    means no model swap. Configure `FINITE_PRIVATE_CORE_HOST=root@64.34.80.19`.
 
+## Host model-pack gate
+
+The supported [Tinfoil model preparation API](https://docs.tinfoil.sh/admin/admin-api#wrap-model)
+stages weights without relaunching the serving container. On September 16,
+preparation was requested with this exact body:
+
+```json
+{"host":"control.inf9.tinfoil.sh","repo":"deepseek-ai/DeepSeek-V4.1-Flash","commit":"dba1be0a40aa45a94ad051997016db3960a90277","schema":2}
+```
+
+DeepSeek job: `rigfuoralxtfifii`. GLM rollback job: `zlgwkqrylpqzwjzp`.
+The published CLI v0.18.5 source does not forward a schema selector, so the documented
+Admin API was used to request schema 2 explicitly. The key remains in the
+existing Tinfoil CLI credential file; no credential value is retained in git.
+
+Run this read-only gate during preparation and again immediately before the
+swap. It fetches each job live from the exact host. Pending/running/failed,
+missing metadata, identity mismatch, and API failures all fail closed. Logs
+are excluded from the report. Keep private reports under `.local-state`.
+
+```bash
+scripts/with-dev-env python3 scripts/check_finite_private_v41_modelpacks.py \
+  --deepseek-job rigfuoralxtfifii \
+  > "$FINITE_PRIVATE_EVIDENCE_DIR/modelpacks.json"
+```
+
+A completed job is provider evidence of staging, not proof that the engine can
+load the model. H200/TDX startup, DSpark, protocol correctness, and sustained
+performance still require the maintenance test. Do not delete either pack or
+regenerate the already-pinned rollback pack. If the new pack differs from the
+measured candidate, investigate the derivation before any release or swap.
+
 ## Measurement commands
 
 Use the same checkout and exact release tags for both models. Run project
 Python commands through `scripts/with-dev-env`. The benchmark driver defaults
 to dry-run; `--execute` sends inference requests but never deploys a model.
-It refuses execution before 03:00, verifies the live release before each tier,
+It refuses execution before 03:00 or a deadline after 05:15 on the explicit
+maintenance date, verifies the live release before each tier,
 requires stream model identity, bounds each tier by the supplied deadline,
 and refuses to overwrite evidence.
 
 ```bash
+set -euo pipefail
+export FINITE_PRIVATE_EVIDENCE_DIR="$PWD/.local-state/deepseek-v41-20260917/window"
+mkdir -p "$FINITE_PRIVATE_EVIDENCE_DIR"
+chmod 700 "$FINITE_PRIVATE_EVIDENCE_DIR"
+export FINITE_PRIVATE_V41_TAG=v2026-09-16-deepseek-v4-1-flash-test-1
+export FINITE_PRIVATE_ENDPOINT=https://finite-private.finite.containers.tinfoil.dev
 export FINITE_PRIVATE_CANARY_ENV_FILE=/Users/plebdev/Desktop/Projects/finite-mono/secrets/finite-private-canary.env
 set -a
 source "$FINITE_PRIVATE_CANARY_ENV_FILE"
@@ -160,14 +208,18 @@ export FINITE_PRIVATE_CORE_HOST=root@64.34.80.19
 
 # GLM baseline: deadline 03:10 Central. Omit --execute to inspect the plan.
 scripts/with-dev-env python3 scripts/finite_private_v41_benchmark.py \
-  --model glm --tag v2026-08-28-glm-5-3-flash-5 \
-  --deadline-utc 2026-09-16T08:10:00Z \
+  --model glm --tag v2026-08-28-glm-5-3-flash-5 --window-date 2026-09-17 \
+  --deadline-utc 2026-09-17T08:10:00Z \
   --evidence-dir "$FINITE_PRIVATE_EVIDENCE_DIR/baseline" --execute
+```
 
-# Candidate: deadline 05:15 Central under the confirmed three-hour window.
+Only after the separate swap procedure and protocol gates succeed:
+
+```bash
+# Candidate: deadline 05:15 Central under the planned three-hour retry window.
 scripts/with-dev-env python3 scripts/finite_private_v41_benchmark.py \
-  --model deepseek --tag "$FINITE_PRIVATE_V41_TAG" \
-  --deadline-utc 2026-09-16T10:15:00Z \
+  --model deepseek --tag "$FINITE_PRIVATE_V41_TAG" --window-date 2026-09-17 \
+  --deadline-utc 2026-09-17T10:15:00Z \
   --evidence-dir "$FINITE_PRIVATE_EVIDENCE_DIR/deepseek" --execute
 ```
 
@@ -197,14 +249,20 @@ status. Do not skip compatibility because the canonical model passed.
 
 ## Swap and unconditional restoration
 
-Only after entry checks pass, use the existing guarded relaunch command with
-the measured candidate tag. It keeps the existing container identity and route:
+Only after all entry checks pass, use the dedicated launch guard. It performs
+fresh host-pack checks, requires the exact original ready GLM container and
+secret names, and restricts the candidate swap to 03:00–03:10 Central on the
+explicit date. It rechecks the clock after remote calls. It does not replace
+the fleet, release-attestation, protocol, or accounting checks above.
+
+Omit `--execute` during preparation: this runs only read-only preflight checks.
+The wrapper then invokes the existing relaunch operation by UUID; it never
+creates, deletes, or renames a container.
 
 ```bash
-export FINITE_PRIVATE_CONTAINER=finite-private
-export FINITE_PRIVATE_ENDPOINT=https://finite-private.finite.containers.tinfoil.dev
-export FINITE_PRIVATE_RELAUNCH_APPROVED="$FINITE_PRIVATE_V41_TAG"
-infra/runbooks/finite-private-ops.sh relaunch "$FINITE_PRIVATE_V41_TAG"
+scripts/with-dev-env python3 scripts/finite_private_v41_start.py \
+  --window-date 2026-09-17 --deepseek-job rigfuoralxtfifii --execute \
+  > "$FINITE_PRIVATE_EVIDENCE_DIR/candidate-start.log" 2>&1
 ```
 
 Do not use `create --replace`, rename the container, or delete it for a routine
@@ -236,7 +294,24 @@ Summarize actual downtime, startup failure/success, every measured tier,
 first-token/decode tradeoffs, accounting, and restored state. Do not interpret
 passing speed measurements as permission to leave DeepSeek serving.
 
-## Execution record
+## September 17 retry preparation
+
+- The exact schema-2 DeepSeek pack is being prepared on `control.inf9.tinfoil.sh`,
+  job `rigfuoralxtfifii`. Readiness is not established until the live gate passes.
+- The exact schema-1 GLM rollback pack passes the new live host gate.
+- The candidate launch guard refuses incomplete/mismatched packs, changed
+  serving identity, and early/late starts before it can stop GLM.
+- The measured candidate remains byte-for-byte unchanged; its introductory
+  September 16 comments describe the original preparation, not a new release.
+- Benchmark execution now requires `--window-date`; UTC bounds derive from
+  America/Chicago, including daylight saving time. Dry-run remains the default.
+- Validation: 31 focused Python tests pass; dry-run confirms September 17
+  UTC bounds, the 05:15 cutoff, and concurrency tiers through 128. The live
+  launch dry-run correctly refuses the incomplete DeepSeek job.
+- No new timed execution is armed. The previous overnight sleep loop ended
+  after verified recovery; it will not wake this retry automatically.
+
+## September 16 preparation and execution record
 
 - Private preparation evidence: `.local-state/deepseek-v41-20260916/` in the
   dedicated worktree. It contains fleet state and must not be committed.

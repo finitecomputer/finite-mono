@@ -1,32 +1,50 @@
 from __future__ import annotations
 
 import argparse
-from datetime import timedelta
+from datetime import date, timedelta
 import io
 import json
 import unittest
 from unittest.mock import patch
 
 from scripts.check_finite_private_glm53_capacity import request_once
-from scripts.finite_private_v41_benchmark import START, END, check_window, command, utc
+from scripts.finite_private_v41_benchmark import check_window, command, measurement_cutoff, utc, window
+
+DAY = date(2026, 9, 17)
+START, END = window(DAY)
 
 
 class WindowTests(unittest.TestCase):
     def test_central_window_is_eight_utc(self):
-        self.assertEqual(utc("2026-09-16T03:00:00-05:00"), START)
+        self.assertEqual(utc("2026-09-17T03:00:00-05:00"), START)
+
+    def test_winter_window_uses_central_standard_time(self):
+        start, end = window(date(2026, 12, 17))
+        self.assertEqual(start, utc("2026-12-17T09:00:00Z"))
+        self.assertEqual(end, utc("2026-12-17T12:00:00Z"))
+
+    def test_previous_days_window_cannot_authorize_today(self):
+        with self.assertRaises(ValueError):
+            check_window(START, END, date(2026, 9, 16))
 
     def test_no_traffic_before_start_or_after_deadline(self):
         deadline = START + timedelta(minutes=75)
         for now in (START - timedelta(seconds=1), deadline, END):
             with self.subTest(now=now), self.assertRaises(ValueError):
-                check_window(now, deadline)
-        check_window(START, deadline)
+                check_window(now, deadline, DAY)
+        check_window(START, deadline, DAY)
 
     def test_refuse_unbounded_or_naive_deadline(self):
         with self.assertRaises(ValueError):
-            check_window(START, END + timedelta(seconds=1))
+            check_window(START, END + timedelta(seconds=1), DAY)
         with self.assertRaises(ValueError):
             utc("2026-09-16T04:15:00")
+
+    def test_measurement_cannot_consume_recovery_reserve(self):
+        cutoff = measurement_cutoff(DAY)
+        check_window(START, cutoff, DAY)
+        with self.assertRaises(ValueError):
+            check_window(START, cutoff + timedelta(seconds=1), DAY)
 
     def test_identical_workload_for_both_models(self):
         glm = command("glm-5-3-flash", "glm-tag", 32)
