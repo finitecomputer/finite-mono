@@ -4,6 +4,7 @@
 //! then delegates the git protocol itself to `git http-backend`. Repositories
 //! live on disk by internal Project ID; public URLs use Project Slugs.
 
+use std::collections::BTreeMap;
 use std::io::{BufRead as _, Read as _, Write as _};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
@@ -188,6 +189,8 @@ async fn handle_git(
         return (StatusCode::NOT_FOUND, "unknown git repository").into_response();
     }
     let wants_receive_pack = wants_receive_pack(&suffix, original_uri.query());
+    // Discovery must not mutate publishing state or prevent a correcting push.
+    let received_push = method == Method::POST && suffix == "/git-receive-pack";
     let auth = match parse_basic_auth(&headers) {
         Some((username, password)) => {
             let engine = state.engine.lock().expect("engine mutex never poisoned");
@@ -261,7 +264,7 @@ async fn handle_git(
     let backend = tokio::task::spawn_blocking(move || run_git_http_backend(request)).await;
     match backend {
         Ok(Ok(response)) => {
-            if wants_receive_pack && response.status().is_success() && state.git_auto_reconcile {
+            if received_push && response.status().is_success() && state.git_auto_reconcile {
                 let state = state.clone();
                 let project_id = auth.project_id().to_string();
                 let reconcile = tokio::task::spawn_blocking(move || {
@@ -421,13 +424,50 @@ pub fn reconcile_pending_events(
         .pending_git_ref_events(project_id)
         .map_err(|error| error.to_string())?;
     let mut processed: u32 = 0;
-    // Bounded by pending registry events.
+    let mut failures = BTreeMap::new();
+    // Bounded by pending registry events, in durable acceptance order. A bad
+    // commit must not strand a later correction or another project's publish.
     for event in events {
         let repo = project_root(data_dir).join(format!("{}.git", event.project_id));
-        reconcile_ref_event(engine, &repo, &event, now)?;
+        let outcome = reconcile_ref_event(engine, &repo, &event, now)?;
+        let key = (event.project_id, event.ref_name);
+        match outcome {
+            ReconcileOutcome::Processed => {
+                failures.remove(&key);
+            }
+            ReconcileOutcome::Failed(error) => {
+                eprintln!("git event {} failed: {error}", event.id);
+                failures.insert(key, error);
+            }
+        }
         processed += 1;
     }
-    Ok(processed)
+    // Report failures still unresolved by a later event on the same ref. The
+    // failed event remains in history even when a correcting commit publishes.
+    match failures.into_values().next() {
+        Some(error) => Err(error),
+        None => Ok(processed),
+    }
+}
+
+enum ReconcileOutcome {
+    Processed,
+    Failed(String),
+}
+
+fn record_failed_event(
+    engine: &mut finitesites_engine::Engine,
+    event_id: i64,
+    error: &str,
+    now: u64,
+) -> Result<ReconcileOutcome, String> {
+    let message = truncate_error(error);
+    // If recording the failure fails, stop: the event remains pending and must
+    // not be mistaken for a completed rejection.
+    engine
+        .mark_git_ref_event_failed(event_id, &message, now)
+        .map_err(|error| error.to_string())?;
+    Ok(ReconcileOutcome::Failed(message))
 }
 
 fn reconcile_ref_event(
@@ -435,7 +475,7 @@ fn reconcile_ref_event(
     repo: &Path,
     event: &finitesites_store::GitRefEventRecord,
     now: u64,
-) -> Result<(), String> {
+) -> Result<ReconcileOutcome, String> {
     let event_id = event.id;
     let project_id = event.project_id.as_str();
     let ref_name = event.ref_name.as_str();
@@ -445,7 +485,7 @@ fn reconcile_ref_event(
         engine
             .mark_git_ref_event_ignored(event_id, now)
             .map_err(|error| error.to_string())?;
-        return Ok(());
+        return Ok(ReconcileOutcome::Processed);
     }
     let branch = ref_name.strip_prefix("refs/heads/").unwrap_or(ref_name);
     let branch_outputs: Vec<_> = engine
@@ -458,27 +498,26 @@ fn reconcile_ref_event(
         engine
             .mark_git_ref_event_ignored(event_id, now)
             .map_err(|error| error.to_string())?;
-        return Ok(());
+        return Ok(ReconcileOutcome::Processed);
     }
     if branch_outputs.len() > 1 {
         let message = "static-only project has multiple sites on this branch";
-        let _ = engine.mark_git_ref_event_failed(event_id, message, now);
-        return Err(message.to_string());
+        return record_failed_event(engine, event_id, message, now);
     }
-    let config = read_project_config_at(repo, new_sha)?;
+    let config = match read_project_config_at(repo, new_sha) {
+        Ok(config) => config,
+        Err(error) => return record_failed_event(engine, event_id, &error, now),
+    };
     let output_record = branch_outputs
         .into_iter()
         .next()
         .expect("branch outputs is nonempty");
-    let site_config = match config
-        .normalized_site()
-        .map_err(|error| error.to_string())?
-    {
-        Some(site_config) if site_config.branch == output_record.branch => site_config,
+    let site_config = match config.normalized_site() {
+        Ok(Some(site_config)) if site_config.branch == output_record.branch => site_config,
+        Err(error) => return record_failed_event(engine, event_id, &error.to_string(), now),
         _ => {
             let message = "finite.toml is missing the registry site for this branch";
-            let _ = engine.mark_git_ref_event_failed(event_id, message, now);
-            return Err(message.to_string());
+            return record_failed_event(engine, event_id, message, now);
         }
     };
     if output_record.kind != ProjectOutputKind::Site
@@ -490,18 +529,14 @@ fn reconcile_ref_event(
         || output_record.start_command.is_some()
     {
         let message = "finite.toml site config does not match the registry";
-        let _ = engine.mark_git_ref_event_failed(event_id, message, now);
-        return Err(message.to_string());
+        return record_failed_event(engine, event_id, message, now);
     };
     // SPA fallback is Version state, not immutable Project Site identity. The
     // pushed config is recorded by the Version commit below, so a Project Site
     // can switch routing modes without registry mutation.
     let files = match files_from_git_archive(repo, new_sha, &site_config.path) {
         Ok(files) => files,
-        Err(error) => {
-            let _ = engine.mark_git_ref_event_failed(event_id, &truncate_error(&error), now);
-            return Err(error);
-        }
+        Err(error) => return record_failed_event(engine, event_id, &error, now),
     };
     let outcome = match engine.commit_project_output_version_for_git_event(
         &output_record.site_id,
@@ -511,16 +546,12 @@ fn reconcile_ref_event(
         now,
     ) {
         Ok(outcome) => outcome,
-        Err(error) => {
-            let message = truncate_error(&error.to_string());
-            let _ = engine.mark_git_ref_event_failed(event_id, &message, now);
-            return Err(error.to_string());
-        }
+        Err(error) => return record_failed_event(engine, event_id, &error.to_string(), now),
     };
     engine
         .mark_git_ref_event_deployed(event_id, &output_record.id, &outcome.version_id, now)
         .map_err(|error| error.to_string())?;
-    Ok(())
+    Ok(ReconcileOutcome::Processed)
 }
 
 fn read_project_config_at(
@@ -672,7 +703,11 @@ fn truncate_error(error: &str) -> String {
     if error.len() <= MAX_ERROR {
         return error.to_string();
     }
-    error[..MAX_ERROR].to_string()
+    let mut end = MAX_ERROR;
+    while !error.is_char_boundary(end) {
+        end -= 1;
+    }
+    error[..end].to_string()
 }
 
 struct GitBackendRequest {
@@ -837,6 +872,13 @@ fn unauthorized_git() -> Response {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn deploy_error_truncation_preserves_utf8() {
+        let error = format!("{}é", "x".repeat(511));
+        assert_eq!(truncate_error(&error), "x".repeat(511));
+        assert_eq!(truncate_error("short error"), "short error");
+    }
 
     fn run_test_git(args: &[&str], cwd: &Path) -> std::process::Output {
         let output = Command::new("git")
