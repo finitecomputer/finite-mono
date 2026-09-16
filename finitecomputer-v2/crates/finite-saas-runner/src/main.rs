@@ -341,32 +341,35 @@ fn run_cycle() -> Result<RunOnceOutcome> {
             )?
         }
         "kata" => {
-            let hosted_hermes =
-                if let Some(path) = optional_env_value("FC_RUNNER_HOSTED_HERMES_CONFIG") {
-                    let mut bytes = Vec::new();
-                    std::fs::File::open(path)?
-                        .take(65537)
-                        .read_to_end(&mut bytes)?;
-                    if bytes.len() > 65536 {
-                        bail!("hosted Hermes deployment configuration exceeds bound");
-                    }
-                    let hosted = std::sync::Arc::new(
-                        finite_saas_runner::hosted_hermes_lifecycle::HostedHermesLifecycle::new(
-                            serde_json::from_slice(&bytes)?,
-                            optional_path("FC_RUNNER_KATA_NERDCTL_BIN", "nerdctl"),
-                            optional_env("FC_RUNNER_KATA_NAMESPACE", "finite"),
-                            required_env("FC_RUNNER_SOURCE_HOST_ID")?,
-                            required_path("FC_RUNNER_WORK_ROOT")?,
-                            queue.clone(),
-                        )?,
+            let hosted_hermes = if let Some(path) =
+                optional_env_value("FC_RUNNER_HOSTED_HERMES_CONFIG")
+            {
+                let mut bytes = Vec::new();
+                std::fs::File::open(path)?
+                    .take(65537)
+                    .read_to_end(&mut bytes)?;
+                if bytes.len() > 65536 {
+                    bail!("hosted Hermes deployment configuration exceeds bound");
+                }
+                let hosted = std::sync::Arc::new(
+                    finite_saas_runner::hosted_hermes_lifecycle::HostedHermesLifecycle::new(
+                        serde_json::from_slice(&bytes)?,
+                        optional_path("FC_RUNNER_KATA_NERDCTL_BIN", "nerdctl"),
+                        optional_env("FC_RUNNER_KATA_NAMESPACE", "finite"),
+                        required_env("FC_RUNNER_SOURCE_HOST_ID")?,
+                        required_path("FC_RUNNER_WORK_ROOT")?,
+                        queue.clone(),
+                    )?,
+                );
+                if hosted.reconcile().is_err() {
+                    eprintln!(
+                        "hosted Hermes reconciliation failed; see service state for ingress availability"
                     );
-                    if hosted.reconcile().is_err() {
-                        eprintln!("hosted Hermes reconciliation failed; see service state for ingress availability");
-                    }
-                    Some(hosted)
-                } else {
-                    None
-                };
+                }
+                Some(hosted)
+            } else {
+                None
+            };
             let launcher = KataLauncher::new(KataConfig {
                 nerdctl_bin: optional_path("FC_RUNNER_KATA_NERDCTL_BIN", "nerdctl"),
                 kata_runtime_bin: optional_path("FC_RUNNER_KATA_RUNTIME_BIN", "kata-runtime"),
