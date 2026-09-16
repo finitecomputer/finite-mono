@@ -13,6 +13,8 @@ struct Args {
 enum Command {
     /// Run the resident Finite Chat command bridge and supervise Hermes.
     Serve,
+    /// Run the supervised Core-authorized Iroh transport.
+    Iroh,
     /// Print the latest redacted local daemon status.
     Status {
         #[arg(long)]
@@ -30,8 +32,12 @@ async fn main() {
 
 async fn run() -> Result<(), finite_agentd::AgentdError> {
     let args = Args::parse();
+    if matches!(args.command, Command::Iroh) {
+        return finite_agentd::run_iroh(finite_agentd::IrohConfig::from_env()?).await;
+    }
     let config = DaemonConfig::from_env()?;
     match args.command {
+        Command::Iroh => unreachable!(),
         Command::Serve => run_daemon(config).await,
         Command::Status { json } => {
             let status = finite_agentd::read_status(&config.status_path())?;

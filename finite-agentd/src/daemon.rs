@@ -38,7 +38,6 @@ const TELEGRAM_CONNECT_SCHEMA: &str = "finite.agent.telegram.connect.v1";
 const TELEGRAM_APPROVE_SCHEMA: &str = "finite.agent.telegram.approve.v1";
 const TELEGRAM_HOME_SCHEMA: &str = "finite.agent.telegram.home.v1";
 const GOOGLE_APPLY_SCHEMA: &str = "finite.agent.google.apply.v1";
-const BRIDGE_READY_TIMEOUT_ENV: &str = "FINITE_AGENTD_BRIDGE_READY_TIMEOUT_SECS";
 
 #[derive(Debug, Clone)]
 pub struct DaemonConfig {
@@ -64,10 +63,6 @@ pub struct DaemonConfig {
     /// from the container environment — agentd never derives admission
     /// values; it only marks hostedness.
     pub sidecar_admission_default: Option<String>,
-    /// How long startup waits for the Finite Chat bridge to serve readiness
-    /// before failing the daemon. Defaults to [`DEFAULT_BRIDGE_READY_TIMEOUT`];
-    /// `FINITE_AGENTD_BRIDGE_READY_TIMEOUT_SECS` overrides it.
-    pub bridge_ready_timeout: Duration,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -152,9 +147,6 @@ impl DaemonConfig {
                     .ok()
                     .as_deref(),
             ),
-            bridge_ready_timeout: bridge_ready_timeout_from_value(
-                std::env::var(BRIDGE_READY_TIMEOUT_ENV).ok().as_deref(),
-            )?,
         })
     }
 
@@ -208,10 +200,12 @@ pub async fn run_daemon(config: DaemonConfig) -> Result<(), AgentdError> {
         config_manager.clone(),
     );
     let bridge = BridgeClient::new(config.bridge_url.clone())?;
+    let mut sigterm = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())?;
     let supervisor = start_supervisor(
         sidecar_spec(&config),
         health_spec(&config),
         hermes_spec(&config),
+        networking_services()?,
     );
     spawn_status_writer(
         config.status_path(),
@@ -220,7 +214,8 @@ pub async fn run_daemon(config: DaemonConfig) -> Result<(), AgentdError> {
         supervisor.clone(),
     );
 
-    wait_for_bridge(&bridge, config.bridge_ready_timeout).await?;
+    // The stream reconnects independently; bridge readiness is health evidence,
+    // never a prerequisite for keeping the daemon and other services alive.
     let (delivery_tx, delivery_rx) = mpsc::channel::<RuntimeCommandDeliveryV1>(64);
     spawn_delivery_stream(bridge.clone(), delivery_tx);
     let executor = CommandExecutor {
@@ -241,21 +236,19 @@ pub async fn run_daemon(config: DaemonConfig) -> Result<(), AgentdError> {
     // supervisor's TERM-then-KILL drain is what gives Hermes/bridge/the
     // health server their bounded window to finish mid-stream writes.
     // Backported from PR 440 (83ef3024).
-    let mut sigterm = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())?;
-    tokio::select! {
+    let result = tokio::select! {
         result = &mut delivery_worker => {
             result
         }
         signal = tokio::signal::ctrl_c() => {
-            signal?;
-            supervisor.shutdown().await;
-            Ok(())
+            signal.map_err(AgentdError::from)
         }
         _ = sigterm.recv() => {
-            supervisor.shutdown().await;
             Ok(())
         }
-    }
+    };
+    supervisor.shutdown().await;
+    result
 }
 
 /// agentd leads its own session/process group when PID 1 (entrypoint.sh) is
@@ -794,47 +787,6 @@ fn spawn_delivery_stream(bridge: BridgeClient, tx: mpsc::Sender<RuntimeCommandDe
     });
 }
 
-/// Bridge cold start reprocesses retained room history before serving, so
-/// time-to-ready scales with data size and host I/O, not just spawn speed.
-/// 2026-08-18: a ~15k-message room needed ~55s on lat3 and boot-looped
-/// against the old 30s deadline; 180s gives large rooms headroom while a
-/// truly dead bridge still fails (and is retried) within minutes.
-/// `FINITE_AGENTD_BRIDGE_READY_TIMEOUT_SECS` overrides this default.
-const DEFAULT_BRIDGE_READY_TIMEOUT: Duration = Duration::from_secs(180);
-
-fn bridge_ready_timeout_from_value(value: Option<&str>) -> Result<Duration, AgentdError> {
-    let Some(raw) = value.map(str::trim).filter(|value| !value.is_empty()) else {
-        return Ok(DEFAULT_BRIDGE_READY_TIMEOUT);
-    };
-    let secs = raw
-        .parse::<u64>()
-        .ok()
-        .filter(|secs| *secs > 0)
-        .ok_or_else(|| {
-            AgentdError::Config(format!(
-                "{BRIDGE_READY_TIMEOUT_ENV} must be a positive integer"
-            ))
-        })?;
-    Ok(Duration::from_secs(secs))
-}
-
-async fn wait_for_bridge(bridge: &BridgeClient, timeout: Duration) -> Result<(), AgentdError> {
-    let mut retry = Duration::from_millis(50);
-    let deadline = tokio::time::Instant::now() + timeout;
-    loop {
-        if bridge.wait_until_ready().await.is_ok() {
-            return Ok(());
-        }
-        if tokio::time::Instant::now() >= deadline {
-            return Err(AgentdError::Transport(
-                "Finite Chat bridge did not become ready".to_owned(),
-            ));
-        }
-        tokio::time::sleep(retry).await;
-        retry = (retry * 2).min(Duration::from_secs(1));
-    }
-}
-
 fn spawn_status_writer(
     path: PathBuf,
     identity: DeviceRef,
@@ -890,6 +842,38 @@ fn now_ms() -> u64 {
         .unwrap_or(0)
 }
 
+fn networking_services() -> Result<Vec<ProcessSpec>, AgentdError> {
+    if std::env::var_os("FINITE_IROH_RELAY_URL").is_none() {
+        return Ok(Vec::new());
+    }
+    // The supervised child validates its own configuration. Invalid optional
+    // networking configuration must not prevent existing chat from starting.
+    // Credentials stay in the inherited private environment, not arguments.
+    Ok(vec![
+        ProcessSpec {
+            name: "iroh",
+            program: std::env::current_exe()?,
+            args: vec!["iroh".into()],
+            environment: BTreeMap::new(),
+        },
+        ProcessSpec {
+            name: "hermes-serve",
+            program: PathBuf::from("hermes"),
+            args: vec![
+                "serve".into(),
+                "--host".into(),
+                "127.0.0.1".into(),
+                "--port".into(),
+                "8642".into(),
+                "--no-open".into(),
+            ],
+            // Remote access ending must not reap accepted Hermes work.
+            // Qualify this upstream setting with the runtime Hermes pin.
+            environment: BTreeMap::from([("HERMES_TUI_WS_ORPHAN_REAP_GRACE_S".into(), "0".into())]),
+        },
+    ])
+}
+
 #[cfg(test)]
 mod tests {
     use std::sync::atomic::{AtomicUsize, Ordering};
@@ -898,25 +882,6 @@ mod tests {
     use finitechat_proto::{RuntimeCommandCancelV1, RuntimeCommandPayloadKindV1};
 
     use super::*;
-
-    #[test]
-    fn bridge_ready_timeout_defaults_to_180s_and_validates_override() {
-        assert_eq!(
-            bridge_ready_timeout_from_value(None).unwrap(),
-            Duration::from_secs(180)
-        );
-        assert_eq!(
-            bridge_ready_timeout_from_value(Some("  ")).unwrap(),
-            Duration::from_secs(180)
-        );
-        assert_eq!(
-            bridge_ready_timeout_from_value(Some("45")).unwrap(),
-            Duration::from_secs(45)
-        );
-        assert!(bridge_ready_timeout_from_value(Some("0")).is_err());
-        assert!(bridge_ready_timeout_from_value(Some("-5")).is_err());
-        assert!(bridge_ready_timeout_from_value(Some("soon")).is_err());
-    }
 
     #[test]
     fn boot_scoped_health_evidence_is_cleared_but_durable_state_survives() {
@@ -948,7 +913,6 @@ mod tests {
             health_script: PathBuf::from("/opt/health_server.py"),
             authorized_accounts: BTreeSet::new(),
             sidecar_admission_default: None,
-            bridge_ready_timeout: Duration::from_secs(1),
         };
         clear_boot_scoped_health_evidence(&config);
 
@@ -978,7 +942,6 @@ mod tests {
             health_script: PathBuf::from("/opt/health_server.py"),
             authorized_accounts: BTreeSet::new(),
             sidecar_admission_default: Some("locked".to_owned()),
-            bridge_ready_timeout: Duration::from_secs(1),
         };
         let spec = sidecar_spec(&config);
         assert_eq!(
@@ -1033,7 +996,6 @@ mod tests {
             health_script: PathBuf::from("/opt/health_server.py"),
             authorized_accounts: BTreeSet::new(),
             sidecar_admission_default: None,
-            bridge_ready_timeout: Duration::from_secs(1),
         };
         assert!(!format!("{config:?}").contains("aeon-multimodal"));
         let json = serde_json::to_value(AgentdStatus {

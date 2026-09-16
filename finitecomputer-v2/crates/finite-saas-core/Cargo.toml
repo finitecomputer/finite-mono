@@ -28,6 +28,9 @@ tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 
 [dev-dependencies]
+iroh = "=1.1.0"
+finite-agentd = { path = "../../../finite-agentd" }
+finite-saas-runner = { path = "../finite-saas-runner" }
 base64 = "0.22"
 rand = "0.8"
 rsa = { version = "0.9", features = ["pem"] }

@@ -760,6 +760,28 @@ fn router_with_runtime_upgrades_and_agent_creation_placement(
     Router::new()
         .route("/healthz", get(healthz))
         .route(
+            "/api/core/v1/runtime/iroh-admissions",
+            get(runtime_peer_admissions),
+        )
+        .route(
+            "/api/core/v1/projects/{project_id}/hermes-admission",
+            get(hermes_endpoint)
+                .post(admit_hermes_peer)
+                .delete(remove_hermes_peer),
+        )
+        .route(
+            "/api/core/v1/admin/projects/{project_id}/hosted-access",
+            axum::routing::put(set_hosted_access),
+        )
+        .route(
+            "/api/core/v1/agent-creation-requests/{request_id}/runtime-credential",
+            post(provision_runtime_credential),
+        )
+        .route(
+            "/api/core/v1/runtime/iroh-endpoint",
+            post(register_runtime_endpoint),
+        )
+        .route(
             "/api/core/v1/runtime-artifacts/{artifact_id}",
             get(runtime_artifact).put(upsert_runtime_artifact),
         )
@@ -984,6 +1006,61 @@ async fn runtime_artifact(
         return Err(ApiError::not_found("runtime artifact is not configured"));
     };
     Ok(Json(artifact))
+}
+
+// No Debug/Serialize: lease credentials must not become loggable response data.
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct ProvisionRuntimeCredentialRequest {
+    runner_id: String,
+    lease_token: String,
+}
+
+async fn provision_runtime_credential(
+    State(state): State<CoreApiState>,
+    headers: HeaderMap,
+    Path(request_id): Path<String>,
+    Json(input): Json<ProvisionRuntimeCredentialRequest>,
+) -> Result<impl IntoResponse, ApiError> {
+    let credential = require_runner_auth(&state, &headers)?;
+    authorize_runner_id(&credential, &input.runner_id)?;
+    let result = state
+        .store
+        .provision_runtime_credential(
+            crate::store::runtime_credentials::ProvisionRuntimeCredential {
+                creation_request_id: request_id,
+                runner_id: input.runner_id,
+                lease_token: input.lease_token,
+                source_host_id: credential.source_host_id,
+            },
+        )
+        .await?;
+    Ok(([("cache-control", "no-store")], Json(result)))
+}
+
+async fn register_runtime_endpoint(
+    State(state): State<CoreApiState>,
+    headers: HeaderMap,
+    Json(input): Json<crate::store::runtime_credentials::RuntimeEndpointRegistration>,
+) -> Result<StatusCode, ApiError> {
+    let secret = headers
+        .get("authorization")
+        .and_then(|h| h.to_str().ok())
+        .and_then(|h| h.strip_prefix("Bearer "))
+        .ok_or_else(|| ApiError {
+            status: StatusCode::UNAUTHORIZED,
+            message: "runtime authentication required".into(),
+            correlation_id: None,
+        })?;
+    let identity = state.store.register_runtime_endpoint(secret, input).await?;
+    if identity.is_none() {
+        return Err(ApiError {
+            status: StatusCode::UNAUTHORIZED,
+            message: "runtime authentication required".into(),
+            correlation_id: None,
+        });
+    }
+    Ok(StatusCode::NO_CONTENT)
 }
 
 /// The runner's standing-readiness ferry (2026-08 audit synthesis, H1 slice
@@ -2667,6 +2744,104 @@ impl IntoResponse for ApiError {
         };
         (self.status, Json(body)).into_response()
     }
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct EndpointQuery {
+    generation: i64,
+    endpoint_id: String,
+}
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct HostedAccessRequest {
+    generation: i64,
+    endpoint_id: String,
+    enabled: bool,
+}
+async fn runtime_peer_admissions(
+    State(state): State<CoreApiState>,
+    headers: HeaderMap,
+    axum::extract::Query(input): axum::extract::Query<EndpointQuery>,
+) -> Result<impl IntoResponse, ApiError> {
+    let secret = bearer_token(&headers)
+        .ok_or_else(|| ApiError::unauthorized("runtime authentication required"))?;
+    let result = state
+        .store
+        .runtime_admissions(&secret, input.generation, &input.endpoint_id)
+        .await?
+        .ok_or_else(|| ApiError::unauthorized("runtime authentication required"))?;
+    Ok(([("cache-control", "no-store")], Json(result)))
+}
+async fn hermes_endpoint(
+    State(state): State<CoreApiState>,
+    headers: HeaderMap,
+    Path(project): Path<String>,
+) -> Result<impl IntoResponse, ApiError> {
+    let actor = require_verified_identity(&state, &headers).await?;
+    let admin =
+        actor.workos_organization_id.as_deref() == Some(state.auth.workos().operator_org_id());
+    Ok((
+        [("cache-control", "no-store")],
+        Json(
+            state
+                .store
+                .runtime_hermes_endpoint(&project, &actor.workos_user_id, admin)
+                .await?,
+        ),
+    ))
+}
+async fn set_hosted_access(
+    State(state): State<CoreApiState>,
+    headers: HeaderMap,
+    Path(project): Path<String>,
+    Json(input): Json<HostedAccessRequest>,
+) -> Result<StatusCode, ApiError> {
+    require_admin_identity(&state, &headers).await?;
+    let expected = crate::store::runtime_admissions::PeerAdmissionRequest {
+        generation: input.generation,
+        endpoint_id: input.endpoint_id,
+        peer_id: String::new(),
+    };
+    state
+        .store
+        .set_runtime_hosted_access(&project, &expected, input.enabled)
+        .await?;
+    Ok(StatusCode::NO_CONTENT)
+}
+async fn admit_hermes_peer(
+    State(state): State<CoreApiState>,
+    headers: HeaderMap,
+    Path(project): Path<String>,
+    Json(input): Json<crate::store::runtime_admissions::PeerAdmissionRequest>,
+) -> Result<impl IntoResponse, ApiError> {
+    let actor = require_verified_identity(&state, &headers).await?;
+    let admin =
+        actor.workos_organization_id.as_deref() == Some(state.auth.workos().operator_org_id());
+    Ok((
+        [("cache-control", "no-store")],
+        Json(
+            state
+                .store
+                .admit_runtime_peer(&project, &actor.workos_user_id, admin, &input)
+                .await?,
+        ),
+    ))
+}
+async fn remove_hermes_peer(
+    State(state): State<CoreApiState>,
+    headers: HeaderMap,
+    Path(project): Path<String>,
+    Json(input): Json<crate::store::runtime_admissions::PeerAdmissionRequest>,
+) -> Result<StatusCode, ApiError> {
+    let actor = require_verified_identity(&state, &headers).await?;
+    let admin =
+        actor.workos_organization_id.as_deref() == Some(state.auth.workos().operator_org_id());
+    state
+        .store
+        .remove_runtime_peer(&project, &actor.workos_user_id, admin, &input)
+        .await?;
+    Ok(StatusCode::NO_CONTENT)
 }
 
 #[cfg(test)]

@@ -69,7 +69,9 @@ pub const CORE_SCHEMA_SQL: &str = concat!(
     "\n",
     include_str!("../migrations/0023_agent_creation_owner_chat_account_id.sql"),
     "\n",
-    include_str!("../migrations/0024_runtime_status_pending_first_report_remap.sql")
+    include_str!("../migrations/0024_runtime_status_pending_first_report_remap.sql"),
+    "\n",
+    include_str!("../migrations/0025_runtime_core_credentials.sql")
 );
 pub const RUNTIME_UPGRADE_ROLLBACK_RESCUE_SQL: &str =
     include_str!("../migrations/runtime_upgrade_rollback_rescue.sql");
@@ -3117,6 +3119,8 @@ fn runtime_spec_reserved_environment_key(key: &str) -> bool {
     matches!(
         key,
         "FINITE_SERVER_URL"
+            | "FINITE_CORE_URL"
+            | "FINITE_CORE_CREDENTIAL"
             | "FINITECHAT_SERVER_URL"
             | "FINITECHAT_HOME"
             | "FINITE_HOME"

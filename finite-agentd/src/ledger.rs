@@ -49,6 +49,10 @@ impl Ledger {
             "
             PRAGMA journal_mode = DELETE;
             PRAGMA synchronous = FULL;
+            CREATE TABLE IF NOT EXISTS endpoint_generations (
+                credential_hash TEXT PRIMARY KEY,
+                generation INTEGER NOT NULL CHECK(generation > 0)
+            );
             CREATE TABLE IF NOT EXISTS command_ledger (
                 request_id TEXT PRIMARY KEY,
                 fingerprint TEXT NOT NULL,
@@ -84,6 +88,19 @@ impl Ledger {
 
     pub fn path(&self) -> &Path {
         &self.path
+    }
+
+    /// One allocation per new networking process; retries retain the allocated
+    /// value. Only the credential hash and counter are durable, never Iroh keys.
+    pub(crate) fn next_endpoint_generation(&self, credential: &str) -> Result<i64, AgentdError> {
+        let connection = self.connection()?;
+        Ok(connection.query_row(
+            "INSERT INTO endpoint_generations(credential_hash,generation) VALUES (?1,1)
+             ON CONFLICT(credential_hash) DO UPDATE SET generation=generation+1
+             WHERE generation<9223372036854775807 RETURNING generation",
+            [hex_digest(credential.as_bytes())],
+            |row| row.get(0),
+        )?)
     }
 
     pub fn authorize_principal(&self, account_id: &str) -> Result<(), AgentdError> {

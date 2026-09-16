@@ -1,7 +1,10 @@
 mod config;
 mod connections;
+mod core_registration;
 mod daemon;
+mod iroh_transport;
 mod ledger;
+pub use iroh_transport::{IrohConfig, run_iroh};
 mod supervisor;
 mod transport;
 
@@ -11,6 +14,7 @@ pub use config::{
     ConfigApplyResultV1, ConfigManager, ConfigOfferPolicyV1, ConfigPreviewV1, HermesConfigOfferV1,
     HermesConfigRollbackV1, VISION_CONFIG_PATH, redact_value,
 };
+pub use core_registration::{CoreEndpointRegistration, EndpointRegistrationOutcome};
 pub use daemon::{
     AgentdStatus, DaemonConfig, SpecializationBundleStatusV1, read_status, run_daemon,
 };

@@ -34,22 +34,6 @@ impl BridgeClient {
         Ok(Self { base_url, client })
     }
 
-    pub async fn wait_until_ready(&self) -> Result<(), AgentdError> {
-        let response = self
-            .client
-            .get(format!("{}/readyz", self.base_url))
-            .timeout(Duration::from_secs(30))
-            .send()
-            .await?;
-        if !response.status().is_success() {
-            return Err(AgentdError::Transport(format!(
-                "Finite Chat bridge is not ready ({})",
-                response.status()
-            )));
-        }
-        Ok(())
-    }
-
     pub async fn stream_deliveries(
         &self,
         tx: mpsc::Sender<RuntimeCommandDeliveryV1>,

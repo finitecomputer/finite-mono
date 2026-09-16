@@ -148,3 +148,32 @@ means. It is transitional host-wide bootstrap, not a replacement for
 Core-owned per-Project secret references. Runtime restart preserves the
 credential set already held by the Runtime; it does not silently rotate shared
 or inference credentials.
+
+## Core-owned runtime bootstrap (not enabled in fleet configuration)
+
+`FC_RUNNER_RUNTIME_CORE_URL` opts a launcher into delivering Core bootstrap
+material. It must name the HTTPS origin the guest can reach; HTTP loopback is
+accepted only for native local development. Core owns the recoverable secret.
+The Runner fetches it under its authenticated live creation lease before launch,
+then delivers `FINITE_CORE_URL` as configuration and `FINITE_CORE_CREDENTIAL`
+through the existing private environment transport. Both names are reserved
+from ordinary RuntimeSpec environment/secret references. No Runner secret
+journal is created. Same-request, same-host retries retrieve the same secret,
+including a resumed Phala provider operation that already has its environment.
+
+Issuance is `POST /api/core/v1/agent-creation-requests/{id}/runtime-credential`
+with `runnerId` and `leaseToken`; the authenticated Runner determines the host.
+The dedicated response contains `secret` and is marked `Cache-Control: no-store`.
+Neither the secret nor its recoverable storage is an operator-blindness claim.
+Ordinary runtime, Project, and RuntimeSpec responses do not include it.
+
+The runtime registers its ephemeral Iroh endpoint at
+`POST /api/core/v1/runtime/iroh-endpoint` with its own Bearer credential and
+`generation`, `endpointId`, and `relayUrl`. Core derives the runtime/Project from
+authentication; the body cannot select them. Registration does not grant browser
+admission. The existing creation binding and lifecycle writers fence this
+credential. It survives ordinary restart and in-place upgrade of the same
+creation. Stop suspends access and removes peer admissions; successful restart
+restores credential use unless it was explicitly revoked. Replacement delivery
+and image qualification remain required before enabling this opt-in; existing
+unenrolled guests keep the old launch path.

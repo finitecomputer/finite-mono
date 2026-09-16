@@ -7,7 +7,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use serde::ser::SerializeStruct;
 use serde::{Deserialize, Serialize};
 use tokio::process::{Child, Command};
-use tokio::sync::{RwLock, mpsc};
+use tokio::sync::{Mutex, RwLock, mpsc};
 
 use crate::AgentdError;
 
@@ -145,6 +145,7 @@ pub struct SupervisorHandle {
     hermes_tx: mpsc::Sender<ProcessAction>,
     all_txs: Arc<Vec<mpsc::Sender<ProcessAction>>>,
     status: Arc<RwLock<SupervisorStatus>>,
+    tasks: Arc<Mutex<Vec<tokio::task::JoinHandle<()>>>>,
 }
 
 impl SupervisorHandle {
@@ -195,6 +196,10 @@ impl SupervisorHandle {
         for tx in self.all_txs.iter() {
             let _ = tx.send(ProcessAction::Stop).await;
         }
+        // Keep the daemon alive until children have actually drained. Merely
+        // queuing Stop lets runtime teardown cancel their graceful shutdown.
+        let mut tasks = self.tasks.lock().await;
+        futures_util::future::join_all(tasks.drain(..)).await;
     }
 }
 
@@ -202,20 +207,34 @@ pub fn start_supervisor(
     sidecar: ProcessSpec,
     health: ProcessSpec,
     hermes: ProcessSpec,
+    additional: Vec<ProcessSpec>,
 ) -> SupervisorHandle {
     let status = Arc::new(RwLock::new(SupervisorStatus::default()));
     let (sidecar_tx, sidecar_rx) = mpsc::channel(4);
     let (health_tx, health_rx) = mpsc::channel(4);
     let (hermes_tx, hermes_rx) = mpsc::channel(4);
 
-    tokio::spawn(supervise_process(sidecar, sidecar_rx, Arc::clone(&status)));
-    tokio::spawn(supervise_process(health, health_rx, Arc::clone(&status)));
-    tokio::spawn(supervise_process(hermes, hermes_rx, Arc::clone(&status)));
+    let mut tasks = vec![
+        tokio::spawn(supervise_process(sidecar, sidecar_rx, Arc::clone(&status))),
+        tokio::spawn(supervise_process(health, health_rx, Arc::clone(&status))),
+        tokio::spawn(supervise_process(hermes, hermes_rx, Arc::clone(&status))),
+    ];
 
+    let mut all_txs = vec![sidecar_tx, health_tx, hermes_tx.clone()];
+    for spec in additional {
+        let (tx, rx) = mpsc::channel(4);
+        tasks.push(tokio::spawn(supervise_process(
+            spec,
+            rx,
+            Arc::clone(&status),
+        )));
+        all_txs.push(tx);
+    }
     SupervisorHandle {
         hermes_tx: hermes_tx.clone(),
-        all_txs: Arc::new(vec![sidecar_tx, health_tx, hermes_tx]),
+        all_txs: Arc::new(all_txs),
         status,
+        tasks: Arc::new(Mutex::new(tasks)),
     }
 }
 
@@ -257,7 +276,9 @@ async fn supervise_process(
                     },
                 )
                 .await;
-                tokio::time::sleep(retry_delay).await;
+                if !wait_to_restart(&mut actions, retry_delay).await {
+                    break;
+                }
                 retry_delay = (retry_delay * 2).min(Duration::from_secs(5));
                 restart_count = restart_count.saturating_add(1);
                 continue;
@@ -277,6 +298,9 @@ async fn supervise_process(
 
         tokio::select! {
             result = child.wait() => {
+                // A wrapper can exit while a grandchild still owns its port.
+                // Automatic recovery needs the same sweep as explicit restart.
+                signal_group(pid, rustix::process::Signal::KILL);
                 let exit = result
                     .map(|status| status.to_string())
                     .unwrap_or_else(|error| error.to_string());
@@ -312,7 +336,26 @@ async fn supervise_process(
             }
         }
         restart_count = restart_count.saturating_add(1);
-        tokio::time::sleep(retry_delay).await;
+        if !wait_to_restart(&mut actions, retry_delay).await {
+            break;
+        }
+    }
+    set_status(
+        &statuses,
+        spec.name,
+        ProcessStatus {
+            state: ProcessState::Stopped,
+            restart_count,
+            updated_at_ms: now_ms(),
+        },
+    )
+    .await;
+}
+
+async fn wait_to_restart(actions: &mut mpsc::Receiver<ProcessAction>, delay: Duration) -> bool {
+    tokio::select! {
+        _ = tokio::time::sleep(delay) => true,
+        action = actions.recv() => matches!(action, Some(ProcessAction::Restart)),
     }
 }
 
@@ -392,11 +435,142 @@ mod tests {
     use super::*;
 
     #[tokio::test]
+    async fn automatic_restart_sweeps_grandchildren_left_by_an_exited_wrapper() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let pidfile = dir.path().join("orphan.pid");
+        let script = dir.path().join("wrapper.sh");
+        std::fs::write(&script, format!(
+            "#!/bin/sh\nif test -f '{}'; then exec sleep 30; fi\nsleep 30 &\necho $! > '{}'\nexit 1\n",
+            pidfile.display(), pidfile.display(),
+        )).unwrap();
+        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let handle = start_supervisor(
+            ProcessSpec {
+                name: "finitechat",
+                program: script,
+                args: vec![],
+                environment: BTreeMap::new(),
+            },
+            sleeping_process("health"),
+            sleeping_process("hermes"),
+            vec![],
+        );
+        tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                if let Some(service) = handle.status().await.processes.get("finitechat")
+                    && service.restart_count > 0
+                    && service.pid().is_some()
+                {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .unwrap();
+        let orphan = rustix::process::Pid::from_raw(
+            std::fs::read_to_string(pidfile)
+                .unwrap()
+                .trim()
+                .parse()
+                .unwrap(),
+        )
+        .unwrap();
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while rustix::process::test_kill_process(orphan).is_ok() {
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        })
+        .await
+        .expect("automatic recovery must remove the old process group");
+        handle.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn unavailable_service_recovers_without_restarting_healthy_siblings() {
+        let dir = tempfile::tempdir().unwrap();
+        let executable = dir.path().join("delayed-service");
+        let handle = start_supervisor(
+            ProcessSpec {
+                name: "finitechat",
+                program: executable.clone(),
+                args: vec![],
+                environment: BTreeMap::new(),
+            },
+            sleeping_process("health"),
+            sleeping_process("hermes"),
+            vec![],
+        );
+        let hermes = wait_for_running(&handle, "hermes").await.pid();
+        tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                if handle
+                    .status()
+                    .await
+                    .processes
+                    .get("finitechat")
+                    .is_some_and(|p| matches!(p.state, ProcessState::Unavailable { .. }))
+                {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .unwrap();
+        std::fs::write(&executable, "#!/bin/sh\nexec sleep 30\n").unwrap();
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&executable, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let recovered = wait_for_running(&handle, "finitechat").await;
+        assert!(recovered.restart_count > 0);
+        assert_eq!(handle.status().await.processes["hermes"].pid(), hermes);
+        handle.shutdown().await;
+        assert!(
+            handle
+                .status()
+                .await
+                .processes
+                .values()
+                .all(|p| p.state == ProcessState::Stopped)
+        );
+    }
+
+    #[tokio::test]
+    async fn shutdown_finishes_even_when_a_service_cannot_spawn() {
+        let dir = tempfile::tempdir().unwrap();
+        let handle = start_supervisor(
+            ProcessSpec {
+                name: "finitechat",
+                program: dir.path().join("missing"),
+                args: vec![],
+                environment: BTreeMap::new(),
+            },
+            sleeping_process("health"),
+            sleeping_process("hermes"),
+            vec![],
+        );
+        wait_for_running(&handle, "hermes").await;
+        tokio::time::timeout(Duration::from_secs(3), handle.shutdown())
+            .await
+            .unwrap();
+        assert!(
+            handle
+                .status()
+                .await
+                .processes
+                .values()
+                .all(|p| p.state == ProcessState::Stopped)
+        );
+    }
+
+    #[tokio::test]
     async fn restart_hermes_waits_for_a_new_running_process() {
         let handle = start_supervisor(
             sleeping_process("sidecar"),
             sleeping_process("health"),
             sleeping_process("hermes"),
+            vec![],
         );
         let original_pid = wait_for_running(&handle, "hermes").await.pid().unwrap();
 
@@ -441,6 +615,7 @@ mod tests {
             },
             sleeping_process("health"),
             sleeping_process("hermes"),
+            vec![],
         );
         wait_for_running(&handle, "finitechat").await;
         // Let the script arm its trap before signalling.
@@ -493,6 +668,7 @@ mod tests {
                 args: Vec::new(),
                 environment: BTreeMap::new(),
             },
+            vec![],
         );
         wait_for_running(&handle, "hermes").await;
         let grandchild = tokio::time::timeout(Duration::from_secs(5), async {

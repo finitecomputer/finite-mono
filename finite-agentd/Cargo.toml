@@ -15,6 +15,9 @@ name = "finite-agentd"
 path = "src/main.rs"
 
 [dependencies]
+iroh = "=1.1.0"
+iroh-proxy-utils = "=0.3.0"
+n0-error = "1"
 clap.workspace = true
 finitechat-proto = { path = "../finitechat/crates/finitechat-proto" }
 futures-util.workspace = true

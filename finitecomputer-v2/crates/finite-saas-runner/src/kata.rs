@@ -7278,13 +7278,16 @@ esac
         let inspected = KataInspectConfig {
             labels: BTreeMap::from([(
                 RUNTIME_ENVIRONMENT_KEYS_LABEL.to_string(),
-                "USER_VISIBLE_OVERRIDE".to_string(),
+                "USER_VISIBLE_OVERRIDE,FINITE_IROH_RELAY_URL".to_string(),
             )]),
             image: "old-image".to_string(),
             environment: vec![
                 "FINITE_HOME=/data/agent".to_string(),
                 "HERMES_HOME=/data/agent/hermes-home".to_string(),
                 "FINITE_PRIVATE_API_KEY=secret-kept".to_string(),
+                "FINITE_CORE_URL=https://core.finite.test".to_string(),
+                "FINITE_CORE_CREDENTIAL=synthetic-core-credential-kept".to_string(),
+                "FINITE_IROH_RELAY_URL=https://relay.finite.test/".to_string(),
                 "USER_VISIBLE_OVERRIDE=keep-me".to_string(),
                 "OLD_IMAGE_DEFAULT=must-not-leak".to_string(),
                 "HOSTNAME=discard-me".to_string(),
@@ -7316,6 +7319,14 @@ esac
                 .contains(&("FAL_KEY".to_string(), "fal-added-by-upgrade".to_string()))
         );
         assert!(environment.secret_keys.contains("FAL_KEY"));
+        assert!(environment.secret_keys.contains("FINITE_CORE_CREDENTIAL"));
+        for (key, expected) in [
+            ("FINITE_CORE_URL", "https://core.finite.test"),
+            ("FINITE_CORE_CREDENTIAL", "synthetic-core-credential-kept"),
+            ("FINITE_IROH_RELAY_URL", "https://relay.finite.test/"),
+        ] {
+            assert!(environment.entries.contains(&(key.into(), expected.into())));
+        }
         assert!(
             environment
                 .entries
@@ -7351,6 +7362,10 @@ esac
         assert!(args.windows(2).any(|pair| pair == ["--pull", "never"]));
         assert_eq!(args.last(), Some(&target_artifact().reference));
         assert!(args.iter().all(|value| !value.contains("secret-kept")));
+        assert!(
+            args.iter()
+                .all(|value| !value.contains("synthetic-core-credential-kept"))
+        );
         assert!(
             args.iter()
                 .all(|value| !value.contains("fal-added-by-upgrade"))

@@ -1,3 +1,5 @@
+pub mod runtime_admissions;
+pub mod runtime_credentials;
 use crate::billing;
 use crate::launch_codes::{
     IssueLaunchCodeBatchInput, IssuedLaunchCodeBatch, LaunchCodeBatch, LaunchCodeBatchDetails,
@@ -1710,6 +1712,13 @@ where
         .unwrap_or_else(|| artifact.state_schema_version.clone());
     let request = locked_agent_creation_request(client, &input.request_id).await?;
     verify_agent_creation_lease(&request, &input.runner_id, &input.lease_token)?;
+    runtime_credentials::validate_bootstrap_source(
+        client,
+        &input.request_id,
+        &source_host_id,
+        &source_machine_id,
+    )
+    .await?;
     let provider_operation = select_provider_operation(client, &input.request_id).await?;
     let provider_operation_now = provider_operation
         .as_ref()
@@ -1836,6 +1845,7 @@ where
     let request =
         update_agent_creation_runtime_registered(client, &input.request_id, &runtime_id, &now)
             .await?;
+    runtime_credentials::bind_bootstrap(client, &input.request_id).await?;
     Ok(AgentCreationLease {
         project,
         request,
@@ -1859,6 +1869,13 @@ where
     }
     let request = locked_agent_creation_request(client, &input.request_id).await?;
     verify_agent_creation_lease(&request, &input.runner_id, &input.lease_token)?;
+    runtime_credentials::validate_bootstrap_source(
+        client,
+        &input.request_id,
+        &source_host_id,
+        &source_machine_id,
+    )
+    .await?;
     let provider_operation = select_provider_operation(client, &input.request_id).await?;
     let provider_operation_now = provider_operation
         .as_ref()
@@ -4125,6 +4142,58 @@ async fn update_agent_creation_completed<C>(
 where
     C: GenericClient + Sync,
 {
+    // Completion may cross registration and activation in one transaction.
+    client
+        .execute(
+            "UPDATE agent_creation_requests SET agent_runtime_id=$2 WHERE id=$1",
+            &[&request_id, &runtime_id],
+        )
+        .await
+        .map_err(store_error)?;
+    runtime_credentials::bind_bootstrap(client, request_id).await?;
+    // The creation lease is cleared below. Preserve proof that the credential
+    // belongs to the exact completing lease in the same transaction.
+    let lease: Option<String> = client
+        .query_one(
+            "SELECT lease_token FROM agent_creation_requests WHERE id=$1",
+            &[&request_id],
+        )
+        .await
+        .map_err(store_error)?
+        .get(0);
+    let lease_hash = lease.as_deref().map(runtime_credentials::digest);
+    // Acquire the credential lock before evaluating wall-clock expiry: a
+    // wait on concurrent revocation must not extend launch authority.
+    client
+        .query_opt(
+            "SELECT agent_runtime_id FROM runtime_core_credentials
+         WHERE agent_runtime_id=$1 FOR UPDATE",
+            &[&runtime_id],
+        )
+        .await
+        .map_err(store_error)?;
+    // Cold relocation completes through this creation writer, including
+    // same-host replacements whose runtime and provider names stay equal.
+    // Source identity equality must never revive an older incarnation.
+    client
+        .execute(
+            "UPDATE runtime_core_credentials SET revoked=TRUE
+         WHERE agent_runtime_id=$1 AND creation_request_id<>$2",
+            &[&runtime_id, &request_id],
+        )
+        .await
+        .map_err(store_error)?;
+    client
+        .execute(
+            "UPDATE runtime_core_credentials
+         SET activated = COALESCE(lease_sha256 = $3, FALSE)
+             AND EXISTS (SELECT 1 FROM agent_creation_requests
+                         WHERE id=$2 AND lease_expires_at > clock_timestamp())
+         WHERE agent_runtime_id=$1 AND creation_request_id=$2 AND NOT revoked",
+            &[&runtime_id, &request_id, &lease_hash],
+        )
+        .await
+        .map_err(store_error)?;
     let row = client
         .query_one(
             "UPDATE agent_creation_requests
@@ -5696,6 +5765,41 @@ async fn apply_runtime_control_completion<C>(
 where
     C: GenericClient + Sync,
 {
+    // The credential belongs to the creation, not the supervised process.
+    // Restart/upgrade retain it; stop suspends it until a successful restart.
+    // Explicit revocation remains irreversible. Replacement creations revoke
+    // their predecessor in the creation-completion transaction instead.
+    // Match registration's runtime-before-credential lock order.
+    client
+        .query_opt(
+            "SELECT id FROM agent_runtimes WHERE id=$1 FOR UPDATE",
+            &[&agent_runtime_id],
+        )
+        .await
+        .map_err(store_error)?;
+    client
+        .execute(
+            "UPDATE runtime_core_credentials
+             SET revoked=revoked OR $2, activated=$3 AND NOT revoked AND NOT $2
+             WHERE agent_runtime_id=$1",
+            &[
+                &agent_runtime_id,
+                &destroy,
+                &(status == RuntimeSummaryStatus::Online),
+            ],
+        )
+        .await
+        .map_err(store_error)?;
+    if status != RuntimeSummaryStatus::Online || destroy {
+        client
+            .execute(
+                "DELETE FROM runtime_peer_admissions WHERE creation_request_id IN
+             (SELECT creation_request_id FROM runtime_core_credentials WHERE agent_runtime_id=$1)",
+                &[&agent_runtime_id],
+            )
+            .await
+            .map_err(store_error)?;
+    }
     if let Some(mut runtime) = select_agent_runtime(client, agent_runtime_id).await? {
         runtime.host_facts.runtime_status = status;
         if let Some(upgrade) = upgrade {
@@ -6326,6 +6430,20 @@ async fn postgres_offboard_runtime<C>(
 where
     C: GenericClient + Sync,
 {
+    client
+        .query_opt(
+            "SELECT id FROM agent_runtimes WHERE id=$1 FOR UPDATE",
+            &[&agent_runtime_id],
+        )
+        .await
+        .map_err(store_error)?;
+    client
+        .execute(
+            "UPDATE runtime_core_credentials SET revoked=TRUE WHERE agent_runtime_id=$1",
+            &[&agent_runtime_id],
+        )
+        .await
+        .map_err(store_error)?;
     client
         .execute(
             "UPDATE project_room_memberships AS membership
@@ -10793,6 +10911,18 @@ mod tests {
                 .unwrap();
             let project_id = completed.project.id;
             let runtime_id = completed.request.agent_runtime_id.unwrap();
+            // Existing-state fixture: an activated credential from the original
+            // launch. The public relocation flow below must revoke it even
+            // though host, machine, runtime ID, and Project link stay equal.
+            let mut credential_bytes = [0u8; 32];
+            getrandom::getrandom(&mut credential_bytes).unwrap();
+            let old_secret: String = credential_bytes.iter().map(|b| format!("{b:02x}")).collect();
+            store.connection().await.unwrap().execute(
+                "INSERT INTO runtime_core_credentials (agent_runtime_id,creation_request_id,source_host_id,source_machine_id,token_sha256,lease_sha256,activated,bootstrap_secret)
+                 VALUES ($1,$2,$3,$4,$5,$6,TRUE,$7)",
+                &[&runtime_id, &completed.request.id, &host, &machine, &runtime_credentials::digest(&old_secret), &runtime_credentials::digest("create-lease"), &old_secret],
+            ).await.unwrap();
+            assert!(store.authenticate_runtime_credential(&old_secret).await.unwrap().is_some());
             let relocate_input = |absent: bool| AdminRuntimeRelocateExactInput {
                 admin_verified_email: "relocate-admin@finite.vip".to_string(),
                 admin_workos_user_id: "workos-relocate-admin".to_string(),
@@ -10903,6 +11033,9 @@ mod tests {
                 })
                 .await
                 .unwrap();
+            assert!(store.authenticate_runtime_credential(&old_secret).await.unwrap().is_none());
+            let credential = store.query_json("SELECT to_jsonb(c) FROM runtime_core_credentials c WHERE agent_runtime_id=$1", &[&runtime_id]).await;
+            assert_eq!(credential[0]["revoked"], true);
             // The relocated incarnation latches `online` with no standing
             // report of its own (the old host's last report must not project
             // as its status) and its attribution pin is the relocation's
