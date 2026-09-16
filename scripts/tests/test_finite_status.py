@@ -60,9 +60,11 @@ class FiniteStatusTests(unittest.TestCase):
                 "__FINITE_STATUS_DISTRIBUTION__",
                 "finite-lat-1,v2,1",
                 "__FINITE_STATUS_CANARY_HOST_RESERVATIONS__",
-                "finite-lat-5,code-canary,batch-canary,workos-operator,org-canary,f,f,request-done,project-done,running,,runner-4,runtime-done,finite-lat-4,",
+                "finite-lat-5,code-canary,batch-canary,workos-operator,org-canary,f,f,request-done,project-done,running,,runner-4,runtime-done,finite-lat-4,,",
                 "__FINITE_STATUS_UNUSED_SINGLE_CODE_BATCHES__",
                 'code-retry,batch-retry,"Retry, canary",workos-operator,standard,2026-08-02T00:00:00Z',
+                "__FINITE_STATUS_LAUNCH_CODE_BATCHES__",
+                "batch-cohort,Cohort,workos-operator,standard,17,17,0,2026-08-02T00:00:00Z,f",
                 "__FINITE_STATUS_AGENT_CREATION_REQUESTS__",
                 "request-canary,project-canary,Lat5 Canary,requested,finite-lat-5,,",
                 "__FINITE_STATUS_RUNTIMES__",
@@ -79,6 +81,8 @@ class FiniteStatusTests(unittest.TestCase):
             "launch_code_id": "code-retry", "batch_id": "batch-retry", "batch_name": "Retry, canary",
             "issuer_workos_user_id": "workos-operator", "hosting_tier": "standard", "expires_at": "2026-08-02T00:00:00Z",
         })
+        self.assertEqual(result["launch_code_batches"][0]["actual_count"], "17")
+        self.assertEqual(result["launch_code_batches"][0]["redeemed_count"], "0")
         reservation = result["canary_host_reservations"][0]
         self.assertEqual(reservation["retry_of_launch_code_id"], "")
         # Completed misplaced launches remain visible after leaving the queue.
@@ -960,6 +964,20 @@ class FiniteStatusTests(unittest.TestCase):
         self.assertEqual(report["sections"]["host_health"]["storage"]["status"], "red")
         self.assertEqual(report["sections"]["host_health"]["status"], "red")
 
+    def test_capacity_probe_reports_bytes_and_pressure_without_qualification(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / "meminfo").write_text("MemTotal: 1000 kB\nMemAvailable: 700 kB\nSwapTotal: 200 kB\nSwapFree: 190 kB\n")
+            (root / "loadavg").write_text("1.00 2.00 3.00 1/20 123")
+            (root / "pressure").mkdir()
+            for resource in ("cpu", "memory", "io"):
+                (root / "pressure" / resource).write_text("some avg10=0.10 avg60=0.20 avg300=0.30 total=100\n")
+            result = finite_status.collect_host_capacity(root)
+        self.assertEqual(result["memory_bytes"]["MemAvailable"], 700 * 1024)
+        self.assertEqual(result["load_average"], [1.0, 2.0, 3.0])
+        self.assertEqual(result["pressure"]["memory"]["some"]["avg10"], 0.1)
+        self.assertNotIn("qualified_slots", result)
+
     def test_collect_single_disk_does_not_read_mdstat(self) -> None:
         stats = mock.Mock(f_blocks=100, f_frsize=1024, f_bavail=50)
         with (
@@ -971,6 +989,7 @@ class FiniteStatusTests(unittest.TestCase):
             mock.patch.object(
                 finite_status, "collect_healthcheck_journal", return_value={}
             ),
+            mock.patch.object(finite_status, "collect_host_capacity", return_value={}),
             mock.patch.object(finite_status.os, "statvfs", return_value=stats),
             mock.patch.object(finite_status.Path, "exists", return_value=True),
             mock.patch.object(

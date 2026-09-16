@@ -432,7 +432,7 @@ def psql_query_sets(environment: dict[str, str]) -> dict[str, list[dict[str, Any
             "batch.revoked_at IS NOT NULL, batch.expires_at <= CURRENT_TIMESTAMP, "
             "request.id, request.project_id, request.status, request.target_source_host_id, "
             "request.runner_id, request.agent_runtime_id, runtime.source_host_id, "
-            "to_jsonb(target)->>'retry_of_launch_code_id' "
+            "to_jsonb(target)->>'retry_of_launch_code_id', to_jsonb(target)->>'cohort_of_launch_code_id' "
             "FROM launch_code_host_targets target JOIN launch_codes code ON code.id=target.launch_code_id "
             "JOIN launch_code_batches batch ON batch.id=code.batch_id "
             "LEFT JOIN agent_creation_requests request ON request.requested_launch_code=code.id "
@@ -441,7 +441,7 @@ def psql_query_sets(environment: dict[str, str]) -> dict[str, list[dict[str, Any
             "\\endif",
             ["source_host_id", "launch_code_id", "batch_id", "issuer_workos_user_id", "redeemed_customer_org_id", "batch_revoked", "batch_expired",
              "creation_request_id", "project_id", "request_status", "request_target_source_host_id",
-             "request_runner_id", "agent_runtime_id", "actual_source_host_id", "retry_of_launch_code_id"],
+             "request_runner_id", "agent_runtime_id", "actual_source_host_id", "retry_of_launch_code_id", "cohort_of_launch_code_id"],
         ),
         (
             "unused_single_code_batches",
@@ -451,6 +451,17 @@ def psql_query_sets(environment: dict[str, str]) -> dict[str, list[dict[str, Any
             "AND batch.revoked_at IS NULL AND batch.expires_at>CURRENT_TIMESTAMP "
             "ORDER BY batch.created_at, code.id;",
             ["launch_code_id", "batch_id", "batch_name", "issuer_workos_user_id", "hosting_tier", "expires_at"],
+        ),
+        (
+            "launch_code_batches",
+            "SELECT batch.id, batch.name, batch.created_by_workos_user_id, batch.hosting_tier, "
+            "batch.code_count, count(code.id), count(code.redeemed_at), batch.expires_at, "
+            "batch.revoked_at IS NOT NULL "
+            "FROM launch_code_batches batch LEFT JOIN launch_codes code ON code.batch_id=batch.id "
+            "WHERE batch.revoked_at IS NULL AND batch.expires_at>CURRENT_TIMESTAMP "
+            "GROUP BY batch.id ORDER BY batch.created_at, batch.id;",
+            ["batch_id", "batch_name", "issuer_workos_user_id", "hosting_tier", "declared_count",
+             "actual_count", "redeemed_count", "expires_at", "revoked"],
         ),
         (
             "agent_creation_requests",
@@ -643,6 +654,29 @@ def line_count(command: list[str]) -> int:
     return sum(bool(line.strip()) for line in result.stdout.splitlines())
 
 
+def collect_host_capacity(proc: Path = Path("/proc")) -> dict[str, Any]:
+    """Read resource evidence, without inferring qualified admission capacity."""
+    result: dict[str, Any] = {"logical_cpus": os.cpu_count()}
+    try:
+        memory = {}
+        for line in (proc / "meminfo").read_text().splitlines():
+            key, value = line.split(":", 1)
+            if key in {"MemTotal", "MemAvailable", "SwapTotal", "SwapFree"}:
+                memory[key] = int(value.split()[0]) * 1024
+        result["memory_bytes"] = memory
+        result["load_average"] = [float(value) for value in (proc / "loadavg").read_text().split()[:3]]
+        result["pressure"] = {}
+        for resource in ("cpu", "memory", "io"):
+            rows = {}
+            for line in (proc / "pressure" / resource).read_text().splitlines():
+                kind, *values = line.split()
+                rows[kind] = {key: float(value) for key, value in (item.split("=") for item in values)}
+            result["pressure"][resource] = rows
+    except (OSError, ValueError) as error:
+        result["error"] = str(error)
+    return result
+
+
 def collect_host_health(hostname: str) -> dict[str, Any]:
     profile = CONTRACT["hosts"].get(hostname)
     if profile is None:
@@ -687,6 +721,7 @@ def collect_host_health(hostname: str) -> dict[str, Any]:
     else:
         raw["probes"] = {}
 
+    raw["capacity"] = collect_host_capacity()
     raw["filesystems"] = []
     for mount in profile["mounts"]:
         try:
@@ -744,6 +779,9 @@ def collect_host_health(hostname: str) -> dict[str, Any]:
     raw["runner_environment_files_read"] = []
     if "runner" in raw["roles"]:
         runner_keys = {
+            "FC_RUNNER_MAX_SANDBOXES",
+            "FC_RUNNER_KATA_CPUS",
+            "FC_RUNNER_KATA_MEMORY",
             runner["drain_variable"],
             runner["artifact_variable"],
             runner["base_url_variable"],
@@ -1657,6 +1695,7 @@ def build_fleet(
         "hosts": host_reports,
         "canary_host_reservations": core.get("canary_host_reservations", []),
         "unused_single_code_batches": core.get("unused_single_code_batches", []),
+        "launch_code_batches": core.get("launch_code_batches", []),
         "agent_creation_requests": core.get("agent_creation_requests", []),
     }
     if probe is not None:
@@ -1910,6 +1949,11 @@ def build_host_health(
         "http_probes": probes,
         "filesystems": filesystems,
         "storage": storage,
+        "capacity": {
+            **raw.get("capacity", {}),
+            "runner_limits": {key: raw.get("runner_environment", {}).get(key) for key in
+                              ("FC_RUNNER_MAX_SANDBOXES", "FC_RUNNER_KATA_CPUS", "FC_RUNNER_KATA_MEMORY")},
+        },
         "containers": containers,
         "runner": runner,
         "collection_errors": raw.get("errors", []),
