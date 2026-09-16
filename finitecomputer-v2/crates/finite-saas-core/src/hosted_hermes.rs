@@ -31,6 +31,9 @@ pub fn parse_hosted_hermes_origin(value: &str) -> Result<reqwest::Url, &'static 
 #[derive(Clone, Debug, Default)]
 pub struct HostedHermesOrigins(BTreeMap<String, reqwest::Url>);
 
+/// Shared bound for Core's complete host projection and Runner's route renderer.
+pub const MAX_HOSTED_HERMES_ROUTES: usize = 1024;
+
 impl HostedHermesOrigins {
     /// Parse trusted deployment configuration. Invalid configuration must stop
     /// startup rather than silently routing a runtime to an unintended origin.

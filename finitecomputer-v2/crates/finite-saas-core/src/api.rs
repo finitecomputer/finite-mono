@@ -44,7 +44,7 @@ use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::{Json, Router};
 pub use hosted_access::runtime_router;
-use hosted_access::{hosted_access, hosted_session, set_hosted_access};
+use hosted_access::{hosted_access, hosted_route_targets, hosted_session, set_hosted_access};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
@@ -818,6 +818,10 @@ fn router_from_state(state: CoreApiState) -> Router {
         .route(
             "/api/core/v1/runtime-health-targets",
             get(runtime_health_targets),
+        )
+        .route(
+            "/api/core/v1/hosted-hermes-route-targets",
+            get(hosted_route_targets),
         )
         .route(
             "/api/core/v1/finite-private/grants",

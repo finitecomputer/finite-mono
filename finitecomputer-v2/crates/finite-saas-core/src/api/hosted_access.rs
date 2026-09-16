@@ -1,6 +1,25 @@
 use super::*;
 use crate::store::hosted_hermes::{HostedReport, SetHostedAccess};
 
+pub(super) async fn hosted_route_targets(
+    State(state): State<CoreApiState>,
+    headers: HeaderMap,
+) -> Result<impl IntoResponse, ApiError> {
+    let credential = require_runner_auth(&state, &headers)?;
+    let mut targets = state
+        .store
+        .hosted_route_targets_for_host(&credential.source_host_id)
+        .await?;
+    targets.retain(|target| {
+        state
+            .hosted_hermes_origins
+            .location(&credential.source_host_id, &target.runtime_id)
+            .base_url
+            .is_some()
+    });
+    Ok(([("cache-control", "no-store")], Json(targets)))
+}
+
 pub(super) async fn hosted_access(
     State(state): State<CoreApiState>,
     headers: HeaderMap,
@@ -133,6 +152,71 @@ mod tests {
     use axum::body::{Body, to_bytes};
     use axum::http::Request;
     use tower::ServiceExt;
+
+    #[tokio::test]
+    async fn hosted_route_targets_are_runner_host_scoped_and_credential_free() {
+        use crate::auth::test_support::{
+            core_auth_with_runner_credentials, runner_credential_config,
+        };
+        use crate::store::hosted_hermes::ApplyStatus;
+        use crate::store::runtime_credentials::new_secret;
+        with_isolated_postgres(|db| async move {
+            let request = requested(&db).await;
+            let secret = db.provision_runtime_credential(provision(&request)).await.unwrap().secret;
+            let runtime = register(&db, &request).await;
+            let project = complete(&db, &request).await.unwrap().project.id;
+            db.set_hosted_access(&runtime, "runtime-auth-user", SetHostedAccess { enabled: true, expected_generation: 1 }).await.unwrap();
+            db.report_hosted(&secret, HostedReport { generation: 2, status: ApplyStatus::Applied }).await.unwrap();
+            let runner_token = new_secret().unwrap();
+            let other_host_token = new_secret().unwrap();
+            let revoked_token = new_secret().unwrap();
+            let service_token = new_secret().unwrap();
+            let auth = core_auth_with_runner_credentials(&service_token, vec![
+                runner_credential_config("runner", &runner_token, "auth-runner", &[crate::RunnerClass::Kata], "auth-host", false),
+                runner_credential_config("other", &other_host_token, "other-runner", &[crate::RunnerClass::Kata], "other-host", false),
+                runner_credential_config("revoked", &revoked_token, "old-runner", &[crate::RunnerClass::Kata], "auth-host", true),
+            ], new_secret().unwrap());
+            let origins = HostedHermesOrigins::from_json(r#"{"auth-host":"https://agent.example.test"}"#).unwrap();
+            let app = router_with_hosted_hermes_origins(db.store.clone(), auth.clone(), None, origins.clone());
+            let owner = access_token_with_subject("runtime-auth-user", "runtime-auth@finite.test", true, None);
+            let path = "/api/core/v1/hosted-hermes-route-targets";
+            for token in [&owner, &secret, &service_token, &revoked_token, ""] {
+                let response = app.clone().oneshot(Request::builder().uri(path)
+                    .header("authorization", format!("Bearer {token}"))
+                    .body(Body::empty()).unwrap()).await.unwrap();
+                assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+            }
+            for (token, expected) in [
+                (&runner_token, json!([{
+                    "runtimeId":runtime, "projectId":project, "sourceMachineId":"auth-machine", "generation":2,
+                }])),
+                (&other_host_token, json!([])),
+            ] {
+                let response = app.clone().oneshot(Request::builder()
+                    // Caller-supplied placement cannot expand the credential's scope.
+                    .uri(format!("{path}?sourceHostId=auth-host"))
+                    .header("authorization", format!("Bearer {token}"))
+                    .body(Body::empty()).unwrap()).await.unwrap();
+                assert_eq!(response.status(), StatusCode::OK);
+                assert_eq!(response.headers()["cache-control"], "no-store");
+                let body: Value = serde_json::from_slice(&to_bytes(response.into_body(), 32768).await.unwrap()).unwrap();
+                // Exact equality also excludes native and bootstrap credentials.
+                assert_eq!(body, expected);
+            }
+            let unconfigured = router_with_hosted_hermes_origins(db.store.clone(), auth, None, HostedHermesOrigins::default());
+            let response = unconfigured.oneshot(Request::builder().uri(path)
+                .header("authorization", format!("Bearer {runner_token}"))
+                .body(Body::empty()).unwrap()).await.unwrap();
+            assert_eq!(response.status(), StatusCode::OK);
+            let body: Value = serde_json::from_slice(&to_bytes(response.into_body(), 32768).await.unwrap()).unwrap();
+            assert_eq!(body, json!([]));
+            let response = runtime_router(db.store.clone(), origins).oneshot(Request::builder().uri(path)
+                .header("authorization", format!("Bearer {runner_token}"))
+                .body(Body::empty()).unwrap()).await.unwrap();
+            assert_eq!(response.status(), StatusCode::NOT_FOUND);
+        }).await;
+    }
+
     #[tokio::test]
     async fn hosted_api_allows_nonadmin_owner_and_separates_runtime_listener() {
         with_isolated_postgres(|db| async move {

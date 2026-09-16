@@ -8,6 +8,7 @@
 //! Kata discovery, that process-exit fence, and interrupted-operation recovery
 //! are not integrated by this module. Do not activate it from the lease cycle.
 
+use finite_saas_core::hosted_hermes::MAX_HOSTED_HERMES_ROUTES as MAX_ROUTES;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::collections::BTreeSet;
@@ -15,7 +16,6 @@ use std::net::SocketAddr;
 use std::path::PathBuf;
 
 pub const MAX_MANIFEST_BYTES: usize = 1024 * 1024;
-const MAX_ROUTES: usize = 1024;
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
