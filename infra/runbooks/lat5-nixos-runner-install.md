@@ -324,12 +324,12 @@ Code grants entitlement without selecting a host; the operator must bind the
 unused canary code to lat5 before redemption. Keep lat5 reserved for targeted
 creation. Establish this path before inviting TRF IT to create the cohort. Begin with one canary, then qualify the intended workload in stages.
 The earlier 24–28-runtime estimate was for the advertised 128 GB hardware
-and is superseded. The captured host has 192 GB, like lat4. Start with the
-Nix-owned one-runtime ceiling and drain enabled; lat4's 42-runtime setting is
-only a qualification target, not proof of capacity on this host.
+and is superseded. The captured host has 192 GB, like lat4. Its owner-selected estimated ceiling
+is 42 total runtimes, including canaries. Keep drain enabled until controlled
+admission; 42 is a planning ceiling, not proof of 42 simultaneously busy guests.
 Measure host and guest memory, CPU pressure, launch failures and Chat behavior
-under representative concurrent load. Choose the admission ceiling from that
-evidence before opening the host to the cohort. Record whether lat6 is needed.
+under representative concurrent load. Use that evidence to confirm or lower the estimated ceiling before opening
+the host to the cohort. Record whether lat6 is needed.
 
 Complete FIN-74 when new agents reliably land on lat5 and pass those checks
 at the accepted capacity. Then TRF IT can create empty Agent Runtimes and

@@ -361,7 +361,7 @@ impl CoreStore {
              JOIN agent_creation_requests request ON request.requested_launch_code=code.id
              JOIN agent_runtimes runtime ON runtime.id=request.agent_runtime_id
              WHERE code.id=$1 AND target.source_host_id=$2
-               AND target.retry_of_launch_code_id IS NULL
+               AND target.retry_of_launch_code_id IS NULL AND target.cohort_of_launch_code_id IS NULL
                AND batch.created_by_workos_user_id=$3
                AND batch.code_count=1 AND COALESCE(batch.hosting_tier, 'standard')='standard'
                AND target.created_by_workos_user_id=$3
@@ -434,6 +434,121 @@ impl CoreStore {
                 },
             )
             .await?;
+        }
+        self.finish(tx).await
+    }
+
+    /// Append cohort bindings under an existing reservation. All codes must be
+    /// unused; the batch lock serializes revocation and redemption. Existing
+    /// request, account, entitlement and Runtime rows are never rewritten.
+    pub async fn target_launch_code_batch_exact(
+        &self,
+        input: &crate::TargetLaunchCodeBatchInput,
+    ) -> CoreResult<()> {
+        if input.expected_code_count < 1 {
+            return Err(CoreError::InvalidLaunchCode);
+        }
+        let host = normalize_source_host_id(&input.target_source_host_id)?;
+        let email = normalize_owner_email(Some(&input.operator_email))
+            .ok_or(CoreError::MissingVerifiedEmail)?;
+        let mut client = self.connection().await?;
+        let tx = client.transaction().await.map_err(store_error)?;
+        let operator = select_user_by_email(&*tx, &email)
+            .await?
+            .filter(|user| {
+                user.workos_user_id.as_deref() == Some(input.operator_workos_user_id.as_str())
+            })
+            .ok_or(CoreError::WorkosUserConflict)?;
+        let reservation = tx
+            .query_opt(
+                "SELECT launch_code_id FROM launch_code_host_targets
+             WHERE launch_code_id=$1 AND source_host_id=$2 AND created_by_workos_user_id=$3
+               AND retry_of_launch_code_id IS NULL AND cohort_of_launch_code_id IS NULL
+             FOR UPDATE",
+                &[
+                    &input.reservation_code_id,
+                    &host,
+                    &input.operator_workos_user_id,
+                ],
+            )
+            .await
+            .map_err(store_error)?;
+        if reservation.is_none() {
+            return Err(CoreError::RuntimeSpecMismatch);
+        }
+        let codes = tx
+            .query(
+                "SELECT code.id FROM launch_codes code
+             JOIN launch_code_batches batch ON batch.id=code.batch_id
+             WHERE batch.id=$1 AND batch.created_by_workos_user_id=$2
+               AND COALESCE(batch.hosting_tier, 'standard')='standard'
+               AND batch.code_count::bigint=$3 AND batch.revoked_at IS NULL
+               AND batch.expires_at>CURRENT_TIMESTAMP
+               AND code.redeemed_at IS NULL AND code.redeemed_customer_org_id IS NULL
+               AND code.redemption_idempotency_key IS NULL
+             ORDER BY code.id FOR UPDATE OF code, batch",
+                &[
+                    &input.batch_id,
+                    &input.operator_workos_user_id,
+                    &input.expected_code_count,
+                ],
+            )
+            .await
+            .map_err(store_error)?;
+        let actual_count: i64 = tx
+            .query_one(
+                "SELECT count(*) FROM launch_codes WHERE batch_id=$1",
+                &[&input.batch_id],
+            )
+            .await
+            .map_err(store_error)?
+            .get(0);
+        if codes.len() as i64 != input.expected_code_count
+            || actual_count != input.expected_code_count
+        {
+            return Err(CoreError::InvalidLaunchCode);
+        }
+        let mut inserted = 0;
+        for code in codes {
+            let code_id: String = code.get("id");
+            let existing = tx
+                .query_opt(
+                    "SELECT source_host_id, retry_of_launch_code_id, cohort_of_launch_code_id
+                 FROM launch_code_host_targets WHERE launch_code_id=$1",
+                    &[&code_id],
+                )
+                .await
+                .map_err(store_error)?;
+            if let Some(existing) = existing {
+                if existing.get::<_, String>("source_host_id") != host
+                    || existing
+                        .get::<_, Option<String>>("retry_of_launch_code_id")
+                        .is_some()
+                    || existing
+                        .get::<_, Option<String>>("cohort_of_launch_code_id")
+                        .as_deref()
+                        != Some(input.reservation_code_id.as_str())
+                {
+                    return Err(CoreError::RuntimeSpecMismatch);
+                }
+            } else {
+                tx.execute(
+                    "INSERT INTO launch_code_host_targets
+                     (launch_code_id, source_host_id, created_by_workos_user_id, created_at, cohort_of_launch_code_id)
+                     VALUES ($1,$2,$3,CURRENT_TIMESTAMP,$4)",
+                    &[&code_id, &host, &input.operator_workos_user_id, &input.reservation_code_id],
+                ).await.map_err(store_error)?;
+                inserted += 1;
+            }
+        }
+        if inserted > 0 {
+            insert_finite_private_admin_audit_event(&*tx, FinitePrivateAdminAuditInsert {
+                action: "launch_code.target_batch", target_type: "launch_code_batch",
+                target_id: &input.batch_id, grant_id: None, api_key_id: None, actor: Some(&email),
+                metadata: serde_json::json!({"sourceHostId":host,"reservationCodeId":input.reservation_code_id,
+                    "codeCount":input.expected_code_count,"operatorUserId":operator.id}),
+                now: &current_time_iso()?,
+            }).await?;
         }
         self.finish(tx).await
     }
@@ -15733,6 +15848,141 @@ mod tests {
             },
             fresh.codes[0].code.clone(),
         )
+    }
+
+    async fn cohort_fixture(
+        db: &crate::test_support::TestDb,
+    ) -> (crate::TargetLaunchCodeBatchInput, IssuedLaunchCodeBatch) {
+        let (canary, _) = retry_canary_fixture(db).await;
+        let batch = db
+            .issue_launch_code_batch(IssueLaunchCodeBatchInput {
+                name: "migration cohort".into(),
+                code_count: 3,
+                expires_in_hours: Some(1),
+                hosting_tier: Some(HostingTier::Standard),
+                created_by_workos_user_id: canary.operator_workos_user_id.clone(),
+                now: None,
+            })
+            .await
+            .unwrap();
+        (
+            crate::TargetLaunchCodeBatchInput {
+                batch_id: batch.batch.id.clone(),
+                expected_code_count: 3,
+                reservation_code_id: canary.previous_code_id,
+                target_source_host_id: canary.target_source_host_id,
+                operator_email: canary.operator_email,
+                operator_workos_user_id: canary.operator_workos_user_id,
+            },
+            batch,
+        )
+    }
+
+    #[tokio::test]
+    async fn postgres_cohort_admission_preserves_reservation_and_old_readers() {
+        with_isolated_postgres(|db| async move {
+            let (input, batch) = cohort_fixture(&db).await;
+            let before = db.query_json("SELECT to_jsonb(t) FROM launch_code_host_targets t", &[]).await;
+            CoreStore::connect_dry_run(&db.url).await.unwrap().target_launch_code_batch_exact(&input).await.unwrap();
+            assert_eq!(db.query_json("SELECT to_jsonb(t) FROM launch_code_host_targets t", &[]).await, before);
+            db.target_launch_code_batch_exact(&input).await.unwrap();
+            db.target_launch_code_batch_exact(&input).await.unwrap();
+            let client = db.connection().await.unwrap();
+            // Run the exact N-1 startup migrations on expanded state. The old
+            // redemption and lease readers need no new column or wire shape.
+            client.batch_execute(include_str!("../migrations/0026_launch_code_host_targets.sql")).await.unwrap();
+            client.batch_execute(include_str!("../migrations/0027_launch_code_target_retry.sql")).await.unwrap();
+            for code in &batch.codes {
+                let host: String = client.query_one("SELECT source_host_id FROM launch_code_host_targets WHERE launch_code_id=$1", &[&code.id]).await.unwrap().get(0);
+                assert_eq!(host, input.target_source_host_id);
+            }
+            drop(client);
+            db.migrate().await.unwrap();
+            assert_eq!(db.query_json("SELECT to_jsonb(t) FROM launch_code_host_targets t WHERE launch_code_id=$1", &[&input.reservation_code_id]).await, before);
+            assert_eq!(db.query_json("SELECT to_jsonb(t) FROM finite_private_admin_audit_events t WHERE action='launch_code.target_batch'", &[]).await.len(), 1);
+            for (i, code) in batch.codes.iter().enumerate() {
+                let created = db.request_agent_creation(RequestAgentCreationInput {
+                    verified_email: format!("cohort-{i}@example.com"), workos_user_id: format!("cohort-{i}"),
+                    display_name: format!("Cohort {i}"), launch_code: code.code.clone(), idempotency_key: format!("cohort-{i}"), now: None,
+                }).await.unwrap();
+                assert_eq!(created.request.target_source_host_id.as_deref(), Some(input.target_source_host_id.as_str()));
+            }
+            for host in [None, Some("wrong-host"), Some("retry-target")] {
+                let leased = db.lease_agent_creation_request(LeaseAgentCreationRequestInput {
+                    runner_id: "cohort-runner".into(), source_host_id: host.map(String::from), lease_token: "cohort-lease".into(),
+                    lease_seconds: Some(300), runner_capacity: None, now: None,
+                }).await.unwrap();
+                assert_eq!(leased.is_some(), host == Some("retry-target"));
+            }
+            assert!(db.target_launch_code_batch_exact(&input).await.is_err());
+        }).await;
+    }
+
+    #[tokio::test]
+    async fn postgres_cohort_admission_rejects_wrong_scope_and_partial_redemption() {
+        with_isolated_postgres(|db| async move {
+            let (input, batch) = cohort_fixture(&db).await;
+            for field in 0..6 {
+                let mut wrong = input.clone();
+                match field {
+                    0 => wrong.expected_code_count = 2,
+                    1 => wrong.target_source_host_id = "wrong-host".into(),
+                    2 => wrong.reservation_code_id = "wrong-reservation".into(),
+                    3 => wrong.operator_workos_user_id = "wrong-operator".into(),
+                    4 => wrong.batch_id = "wrong-batch".into(),
+                    _ => wrong.operator_email = "wrong@example.com".into(),
+                }
+                assert!(db.target_launch_code_batch_exact(&wrong).await.is_err());
+            }
+            db.request_agent_creation(RequestAgentCreationInput {
+                verified_email: "already-used@example.com".into(), workos_user_id: "already-used".into(),
+                display_name: "Used".into(), launch_code: batch.codes[0].code.clone(), idempotency_key: "already-used".into(), now: None,
+            }).await.unwrap();
+            assert!(db.target_launch_code_batch_exact(&input).await.is_err());
+            assert!(db.query_json("SELECT to_jsonb(t) FROM launch_code_host_targets t WHERE cohort_of_launch_code_id IS NOT NULL", &[]).await.is_empty());
+        }).await;
+    }
+
+    #[tokio::test]
+    async fn postgres_cohort_admission_serializes_with_redemption() {
+        for binding_first in [true, false] {
+            with_isolated_postgres(|db| async move {
+                let (input, mut batch) = cohort_fixture(&db).await;
+                batch.codes.sort_by(|a, b| a.id.cmp(&b.id));
+                let mut client = db.connection().await.unwrap();
+                let tx = client.transaction().await.unwrap();
+                tx.query_one("SELECT id FROM launch_codes WHERE id=$1 FOR UPDATE", &[&batch.codes[0].id]).await.unwrap();
+                let bind_store = db.clone();
+                let binding_input = input.clone();
+                let bind = async move { bind_store.target_launch_code_batch_exact(&binding_input).await };
+                let create_store = db.clone();
+                let plaintext = batch.codes[0].code.clone();
+                let create = async move { create_store.request_agent_creation(RequestAgentCreationInput {
+                    verified_email: "race-cohort@example.com".into(), workos_user_id: "race-cohort".into(),
+                    display_name: "Race".into(), launch_code: plaintext, idempotency_key: "race-cohort".into(), now: None,
+                }).await };
+                let (binding, creation) = if binding_first {
+                    let binding = tokio::spawn(bind);
+                    wait_for_targeting_lock(&tx, "%WHERE batch.id=$1 AND batch.created_by_workos_user_id=$2%").await;
+                    let creation = tokio::spawn(create);
+                    wait_for_targeting_lock(&tx, "%WHERE code.code_hash = $1%").await;
+                    (binding, creation)
+                } else {
+                    let creation = tokio::spawn(create);
+                    wait_for_targeting_lock(&tx, "%WHERE code.code_hash = $1%").await;
+                    let binding = tokio::spawn(bind);
+                    wait_for_targeting_lock(&tx, "%WHERE batch.id=$1 AND batch.created_by_workos_user_id=$2%").await;
+                    (binding, creation)
+                };
+                tx.commit().await.unwrap();
+                let bound = binding.await.unwrap();
+                let created = creation.await.unwrap().unwrap();
+                assert_eq!(bound.is_ok(), binding_first);
+                assert_eq!(created.request.target_source_host_id.as_deref(), binding_first.then_some("retry-target"));
+                let bindings = db.query_json("SELECT to_jsonb(t) FROM launch_code_host_targets t WHERE cohort_of_launch_code_id=$1", &[&input.reservation_code_id]).await;
+                assert_eq!(bindings.len(), if binding_first { 3 } else { 0 });
+            }).await;
+        }
     }
 
     #[tokio::test]

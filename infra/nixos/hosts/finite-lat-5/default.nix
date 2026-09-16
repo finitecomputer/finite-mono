@@ -1,6 +1,7 @@
 # Dedicated lat5 Runner, captured 2026-09-15. Delivered hardware has
 # 192 GB RAM, two 480 GB SATA boot SSDs and two 7.68 TB NVMe data drives.
-# Start with one canary slot; cohort admission requires capacity qualification.
+# Owner-selected estimated ceiling mirrors lat4's declared 42-slot policy.
+# Workload qualification and opening admission remain separate gates.
 {
   config,
   finitePackages,
@@ -47,7 +48,7 @@ in
     sourceHostId = "finite-lat-5";
     workRoot = "/data/finite-saas-runner";
     kataHostAddress = "10.254.3.5";
-    maxSandboxes = 1;
+    maxSandboxes = 42;
   };
 
   finite.metrics = {

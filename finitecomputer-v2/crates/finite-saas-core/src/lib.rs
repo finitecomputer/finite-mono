@@ -75,7 +75,9 @@ pub const CORE_SCHEMA_SQL: &str = concat!(
     "\n",
     include_str!("../migrations/0026_launch_code_host_targets.sql"),
     "\n",
-    include_str!("../migrations/0027_launch_code_target_retry.sql")
+    include_str!("../migrations/0027_launch_code_target_retry.sql"),
+    "\n",
+    include_str!("../migrations/0028_launch_code_cohort_targets.sql")
 );
 pub const RUNTIME_UPGRADE_ROLLBACK_RESCUE_SQL: &str =
     include_str!("../migrations/runtime_upgrade_rollback_rescue.sql");
@@ -1824,6 +1826,18 @@ pub struct AdminRuntimeUpgradeInput {
     pub project_id: String,
     pub target_runtime_artifact_id: String,
     pub now: Option<String>,
+}
+
+/// Append an exact unused Standard batch to an existing host reservation.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TargetLaunchCodeBatchInput {
+    pub batch_id: String,
+    pub expected_code_count: i64,
+    pub reservation_code_id: String,
+    pub target_source_host_id: String,
+    pub operator_email: String,
+    pub operator_workos_user_id: String,
 }
 
 /// One retry of a consumed canary code whose untargeted creation completed

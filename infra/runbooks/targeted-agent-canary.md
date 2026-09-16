@@ -73,6 +73,31 @@ Verify the exact resulting Runtime, identity readiness and a real Chat reply.
 Re-drain after the claim/test. This proves launch for an existing account;
 it does not prove fresh account enrollment or the eventual fleet capacity.
 
+## Admit a qualified cohort
+
+Keep the root reservation to exclude unrelated launches. Batch targeting is a
+general placement control, not a legacy-data import bridge. Its bindings remain
+authoritative after redemption and must survive command retirement.
+
+After qualifying workload capacity, keep the host drained and verify the exact
+approved batch, issuer, unused count and root reservation through `finite-status`.
+Preserve existing destinations when determining the required slots. Deploy and
+verify the running Core executable before using its root-only command:
+
+```sh
+finite-saas-core launch-code-batch-target-exact \
+  --batch-id BATCH_ID --expected-code-count COUNT \
+  --reservation-code-id ROOT_CODE_ID --target-source-host-id HOST_ID \
+  --operator-email OPERATOR_EMAIL --operator-workos-user-id WORKOS_USER_ID
+```
+
+Inspect the rollback-only preview, then repeat with `--execute`. The whole batch
+must still be unused, active and Standard. Verify every child binding and the
+qualified Runner ceiling with canonical status before undraining. Targeting
+neither raises capacity nor proves account enrollment. Stop and drain on any
+placement or readiness mismatch; revocation blocks unused codes but does not
+undo redemption. Preserve bindings, created requests and Chat history.
+
 ## Writers, readers and rollback
 
 Migration 0026 adds only `launch_code_host_targets` and its host index. Existing
@@ -88,9 +113,13 @@ remain authoritative and are not bypassed by targeting.
 Deploy the candidate Core before binding any code, using the normal CI-built
 lat2 closure. Capture the pre-deploy Postgres backup/checksum and previous exact
 system closure per `postgres-backup-restore.md` and `deploy-core.md`.
-An old Core ignores code bindings and the host reservation: before binary
+Core versions before migration 0026 ignore code bindings and the host reservation: before binary
 rollback, drain every reserved host and revoke all unused bound code batches.
 Already-created requests retain their host target, but keep the qualification
 host drained until a compatible Core is restored. Leave the additive table and
 audit history in place. Do not restore a whole database backup over newer user
 writes to undo a canary; retain any created Runtime and Chat history.
+
+Migration 0028 adds cohort children without changing redemption or lease readers.
+Core versions supporting 0026/0027 can read those bindings and replay startup
+migrations; retain the expanded schema during binary rollback.

@@ -72,6 +72,25 @@ enum Command {
         #[arg(long)]
         execute: bool,
     },
+    /// Root-only: bind an exact unused batch under an existing Kata reservation.
+    #[command(name = "launch-code-batch-target-exact")]
+    LaunchCodeBatchTargetExact {
+        #[arg(long)]
+        batch_id: String,
+        #[arg(long)]
+        expected_code_count: i64,
+        #[arg(long)]
+        reservation_code_id: String,
+        #[arg(long)]
+        target_source_host_id: String,
+        #[arg(long)]
+        operator_email: String,
+        #[arg(long)]
+        operator_workos_user_id: String,
+        /// Commit admission; omit for a rollback-only preview.
+        #[arg(long)]
+        execute: bool,
+    },
     /// Run the Core HTTP API.
     Serve,
     /// Add or update a promoted runtime artifact record.
@@ -482,6 +501,33 @@ async fn main() -> Result<()> {
             )
             .await?;
             print_json(&artifact)
+        }
+        Command::LaunchCodeBatchTargetExact {
+            batch_id,
+            expected_code_count,
+            reservation_code_id,
+            target_source_host_id,
+            operator_email,
+            operator_workos_user_id,
+            execute,
+        } => {
+            let auth = CoreAuth::from_env()?;
+            if !auth.has_kata_host(&target_source_host_id) {
+                bail!("target must match an active host-bound Kata credential");
+            }
+            let input = finite_saas_core::TargetLaunchCodeBatchInput {
+                batch_id,
+                expected_code_count,
+                reservation_code_id,
+                target_source_host_id,
+                operator_email,
+                operator_workos_user_id,
+            };
+            let store = postgres_store_from_env(ImportMode::from_dry_run(!execute)).await?;
+            store.target_launch_code_batch_exact(&input).await?;
+            print_json(
+                &serde_json::json!({"binding":input,"dryRun":!execute,"targetedCreationOnly":true}),
+            )
         }
         Command::LaunchCodeTargetExact {
             code_id,
