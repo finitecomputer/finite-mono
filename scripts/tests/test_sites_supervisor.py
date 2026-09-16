@@ -20,6 +20,8 @@ from unittest.mock import patch
 ROOT = Path(__file__).resolve().parents[2]
 HELPER = ROOT / "infra/images/sites-supervisor.py"
 ENTRYPOINT = ROOT / "infra/images/sites-entrypoint"
+CONFIG = ROOT / "infra/images/sites-supervisor.conf"
+CRON = ROOT / "infra/images/sites-backup.cron"
 
 
 def load_helper():
@@ -107,7 +109,6 @@ class ConfigurationTests(unittest.TestCase):
             (self.credentials / name).write_text("synthetic-unused")
         self.run = self.directory / "run"
         self.run.mkdir()
-        self.cron = self.directory / "sites-backup.cron"
         self.env = {
             "FINITE_SITES_BACKUP_REPOSITORY": "backup@example.test:sites",
             "FINITE_SITES_BACKUP_CREDENTIALS_DIR": str(self.credentials),
@@ -122,7 +123,6 @@ class ConfigurationTests(unittest.TestCase):
                 args or ["serve", "--data", "/var/lib/finite-sites", "--mailer", "dev"],
                 self.env,
                 run_dir=self.run,
-                cron_path=self.cron,
             )
 
     def test_private_config_and_clean_scheduled_backup(self):
@@ -140,11 +140,11 @@ class ConfigurationTests(unittest.TestCase):
                 "service": "sites",
             },
         )
-        for file in (path, self.run / "sites-backup.json", self.cron):
+        for file in (self.run / "sites-backup.json", self.run / "sites-argv.json"):
             self.assertEqual(stat.S_IMODE(file.stat().st_mode), 0o600)
             self.assertNotIn("must-not-be-in-config", file.read_text())
         conf = configparser.ConfigParser(interpolation=None)
-        conf.read(path)
+        conf.read(CONFIG)
         self.assertEqual(conf["unix_http_server"]["chmod"], "0600")
         self.assertNotIn("inet_http_server", conf)
         sites, backup, cron = [
@@ -166,8 +166,8 @@ class ConfigurationTests(unittest.TestCase):
         self.assertIn("TZ=UTC", cron["command"])
         self.assertIn("/usr/bin/env -i ", backup["command"])
         self.assertIn("/usr/local/bin/sites-backup run --config ", backup["command"])
-        self.assertIn("7 3 * * * root ", self.cron.read_text())
-        self.assertIn("start sites-backup", self.cron.read_text())
+        self.assertIn("7 3 * * * root ", CRON.read_text())
+        self.assertIn("start sites-backup", CRON.read_text())
 
     def test_arguments_survive_supervisor_and_privilege_drop(self):
         args = [
@@ -179,16 +179,16 @@ class ConfigurationTests(unittest.TestCase):
             "--empty",
             "",
         ]
-        path = self.configure(args)
+        self.configure(args)
         conf = configparser.ConfigParser()
-        conf.read(path)
+        conf.read(CONFIG)
         command = shlex.split(conf["program:sites"]["command"])
         self.assertEqual(
             command[:3],
             ["/usr/bin/python3", "/usr/local/bin/sites-supervisor.py", "exec-sites"],
         )
         with patch.object(self.module.os, "execvp") as execute:
-            self.module.main(command[2:])
+            self.module.main([command[2], str(self.run / "sites-argv.json")])
         execute.assert_called_once_with(
             "setpriv",
             [
@@ -322,17 +322,19 @@ while True:
                 "",
             ]
             module = load_helper()
-            path = module.configure(
+            module.configure(
                 args,
                 {
                     "FINITE_SITES_BACKUP_REPOSITORY": "backup@example.test:sites",
                     "FINITE_SITES_BACKUP_CREDENTIALS_DIR": str(credentials),
                 },
                 run_dir=run,
-                cron_path=directory / "cron",
             )
-            content = path.read_text().replace(
-                "/usr/local/bin/sites-supervisor.py", str(HELPER)
+            path = directory / "supervisor.conf"
+            content = (
+                CONFIG.read_text()
+                .replace("/run", str(run))
+                .replace("/usr/local/bin/sites-supervisor.py", str(HELPER))
             )
             content = content.replace(
                 "/usr/local/bin/sites-backup run --config",
@@ -404,11 +406,11 @@ while True:
                     control("start", "sites")
                     wait_for(lambda: (events / "sites.json").exists())
                     log.write_text("")
-                    # Exercise the generated job with Debian cron, advancing only
+                    # Exercise the shipped job with Debian cron, advancing only
                     # the fixture schedule to every minute to avoid a daily wait.
                     cron_fixture.write_text(
-                        (directory / "cron")
-                        .read_text()
+                        CRON.read_text()
+                        .replace("/etc/sites-supervisor.conf", str(path))
                         .replace("7 3 * * * root", "* * * * * root")
                     )
                     cron_fixture.chmod(0o600)

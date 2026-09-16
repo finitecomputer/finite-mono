@@ -26,6 +26,7 @@ Games run inside a sandboxed iframe with limited permissions. All code must work
 
 ### What Is Blocked
 
+- **`fetch()` of local binary files** — the site proxy redirects `.glb`, `.wasm`, `.mp3`, `.png` etc. to S3, and these redirects fail in the sandbox due to CORS. **Load all binary assets from external CDN URLs, or use HTML elements** (`<img>`, `<audio>`) which bypass this restriction
 - **localStorage / sessionStorage / IndexedDB** — blocked (opaque origin). The deploy tool also rejects code containing these. Use in-memory state only. No game saves
 - **Pointer Lock API** — blocked. FPS-style mouse capture is unavailable. Use relative mouse movement (`movementX`/`movementY` on `mousemove` events) within the iframe instead
 - **Fullscreen API** — blocked. Design the game to fill the iframe viewport
@@ -34,18 +35,16 @@ Games run inside a sandboxed iframe with limited permissions. All code must work
 
 ### Asset Loading Strategy
 
-Finite Sites serves committed binary assets from the site's own origin. Use
-relative paths for project assets and test both direct visits and embedded
-previews; do not assume a redirect to a separate storage provider.
+Because `fetch()` fails for local binary files, follow this rule:
 
-- **3D models, textures, audio, WASM** → commit them as project assets, or use a CDN that permits cross-origin loading.
-- **HTML, CSS, JS, JSON, text files** → commit them in the site's deploy tree.
-- **Generated images** → deploy alongside the site as local files. For genuinely cross-origin images used in Canvas or WebGL, set `crossOrigin` before `src` and ensure the image server permits CORS:
+- **3D models, textures, audio, WASM** → load from external CDN URLs (Poly Pizza, Kenney, ambientCG, esm.sh, etc.)
+- **HTML, CSS, JS, JSON, text files** → can be local (served inline by the proxy)
+- **Generated images** (from `generate_image`) → deployed alongside the site as local files. Use `<img>` elements to display them, NOT `fetch()` + canvas. For Three.js textures from local images, **always set `crossOrigin`** before `src` — the sandbox proxy redirects to S3, which taints the canvas for WebGL unless CORS is explicitly requested:
 
 ```js
 const img = new Image();
 img.crossOrigin = 'anonymous';
-img.src = 'https://cdn.example.com/texture.png';
+img.src = './generated-bg.png';
 img.onload = () => {
   const texture = new THREE.Texture(img);
   texture.needsUpdate = true;
@@ -53,8 +52,7 @@ img.onload = () => {
 };
 ```
 
-Same-origin images do not require this CORS opt-in. Cross-origin images without
-appropriate CORS permission cannot be used as readable Canvas or WebGL textures.
+Without `img.crossOrigin = 'anonymous'`, the cross-origin S3 redirect silently taints the image — `texImage2D` fails and WebGL renders a black texture with no error.
 
 ---
 
@@ -265,10 +263,10 @@ Add SFX for all player interactions: jumps, hits, pickups, UI clicks, explosions
 
 ### Audio Implementation
 
-Audio requires a user gesture to start. Show a "Click to Play" screen, then initialize audio on that interaction. Use `<audio>` elements for music and Web Audio API for procedural SFX:
+Audio requires a user gesture to start. Show a "Click to Play" screen, then initialize audio on that interaction. Use `<audio>` elements for music (they bypass the binary fetch restriction) and Web Audio API for procedural SFX:
 
 ```js
-// Music via <audio> element
+// Music via <audio> element (bypasses fetch CORS issues)
 function startMusic() {
   const audio = document.createElement('audio');
   audio.src = 'https://cdn.example.com/bgm.mp3'; // external CDN URL
@@ -446,8 +444,7 @@ function updatePhysics() {
 
 ### 3D Models (GLTF/GLB preferred)
 
-Load committed models using relative paths, or use CDN URLs that permit CORS.
-No-login-required sources:
+Load models from external CDN URLs — not from local files (binary fetch fails in sandbox). No-login-required sources:
 
 | Site                 | Content                        | License   |
 | -------------------- | ------------------------------ | --------- |
@@ -474,7 +471,7 @@ draco.setDecoderPath('https://www.gstatic.com/draco/versioned/decoders/1.5.7/');
 const loader = new GLTFLoader();
 loader.setDRACOLoader(draco);
 
-// CDN example; a committed model can use a relative path instead
+// Always use full CDN URLs for models, not local paths
 loader.load('https://cdn.example.com/model.glb', (gltf) => {
   scene.add(gltf.scene);
   if (gltf.animations.length) {
@@ -557,3 +554,4 @@ composer.addPass(new SMAAPass(innerWidth, innerHeight));
 - **Sandbox testing** — defensive API usage, asset loading verification, pre-ship quality checklist.
 
 **Shared files reference:** See `SKILL.md` for the full shared file table. Key files for games: `game/game-testing.md` (mandatory), `shared/07-toolkit.md` (CDN/Three.js imports), `game/2d-canvas.md` (2D Canvas games).
+

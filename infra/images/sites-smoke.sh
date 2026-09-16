@@ -62,8 +62,8 @@ start() {
     done
     curl -fsS "$endpoint/api/v2/healthz"
     if [ "$backup_mode" = 1 ]; then
-        docker exec "$name" sh -c 'pid=$(supervisorctl -c /run/sites-supervisor.conf pid sites); test "$(awk "/^Uid:/ {print \$2}" /proc/$pid/status)" = 65532'
-        if docker exec --user 65532:65532 "$name" supervisorctl -c /run/sites-supervisor.conf status; then
+        docker exec "$name" sh -c 'pid=$(supervisorctl -c /etc/sites-supervisor.conf pid sites); test "$(awk "/^Uid:/ {print \$2}" /proc/$pid/status)" = 65532'
+        if docker exec --user 65532:65532 "$name" supervisorctl -c /etc/sites-supervisor.conf status; then
             echo 'Serving user unexpectedly accessed the supervisor' >&2
             exit 1
         fi

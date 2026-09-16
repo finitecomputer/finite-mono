@@ -1,18 +1,16 @@
 #!/usr/bin/env python3
-"""Configure the opt-in Sites image Supervisor and daily cron backup."""
+"""Validate backup credentials and save daemon arguments for fixed Supervisor jobs."""
 
-import base64
 import json
 import os
 from pathlib import Path
-import shlex
 import stat
 import sys
 import tempfile
 
 
 ROOT_UID = 0
-PATH = "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+SUPERVISOR_CONFIG = Path("/etc/sites-supervisor.conf")
 
 
 def private_write(path, contents):
@@ -30,7 +28,6 @@ def configure(
     environment,
     *,
     run_dir=Path("/run"),
-    cron_path=Path("/etc/cron.d/sites-backup"),
 ):
     if os.geteuid() != ROOT_UID:
         raise ValueError("Sites backup supervision requires root")
@@ -84,7 +81,7 @@ def configure(
     if not argv or argv[0] != "serve" or len(data) != 1 or not data[0]:
         raise ValueError("Sites backup requires exactly one --data DIR")
 
-    config_path = run_dir / "sites-supervisor.conf"
+    config_path = SUPERVISOR_CONFIG
     backup_path = run_dir / "sites-backup.json"
     config = {
         "data": data[0],
@@ -97,114 +94,16 @@ def configure(
         "control": ["supervisorctl", "-c", str(config_path)],
         "service": "sites",
     }
-    # Supervisor interpolates percent signs and truncates semicolon comments even
-    # inside quotes. Only a base64 JSON argument crosses its command parser.
-    encoded = base64.b64encode(json.dumps(argv).encode()).decode("ascii")
-
-    def command(args):
-        return shlex.join(args).replace("%", "%%")
-
-    clean_environment = ["/usr/bin/env", "-i", f"PATH={PATH}", "HOME=/root", "TZ=UTC"]
-    programs = [
-        (
-            "sites",
-            [
-                "/usr/bin/python3",
-                "/usr/local/bin/sites-supervisor.py",
-                "exec-sites",
-                encoded,
-            ],
-            100,
-            "true",
-            "true",
-            "INT",
-            30,
-            1,
-        ),
-        (
-            "sites-backup",
-            [
-                *clean_environment,
-                "/usr/local/bin/sites-backup",
-                "run",
-                "--config",
-                str(backup_path),
-            ],
-            200,
-            "false",
-            "false",
-            "TERM",
-            60,
-            0,
-        ),
-        (
-            "cron",
-            [*clean_environment, "/usr/sbin/cron", "-f"],
-            300,
-            "true",
-            "true",
-            "TERM",
-            10,
-            1,
-        ),
-    ]
-    socket_path = str(run_dir / "sites-supervisor.sock").replace("%", "%%")
-    supervisor_config = f"""[unix_http_server]
-file={socket_path}
-chmod=0600
-chown=0:0
-
-[supervisord]
-nodaemon=true
-user=0
-umask=0077
-logfile=/dev/stdout
-logfile_maxbytes=0
-pidfile={str(run_dir / "sites-supervisor.pid").replace("%", "%%")}
-childlogdir={str(run_dir).replace("%", "%%")}
-
-[rpcinterface:supervisor]
-supervisor.rpcinterface_factory=supervisor.rpcinterface:make_main_rpcinterface
-
-[supervisorctl]
-serverurl=unix://{socket_path}
-"""
-    for name, args, priority, autostart, restart, stop, timeout, startsecs in programs:
-        supervisor_config += f"""
-[program:{name}]
-command={command(args)}
-priority={priority}
-autostart={autostart}
-autorestart={restart}
-startsecs={startsecs}
-stopsignal={stop}
-stopwaitsecs={timeout}
-stopasgroup=true
-killasgroup=true
-stdout_logfile=/dev/stdout
-stdout_logfile_maxbytes=0
-stderr_logfile=/dev/stderr
-stderr_logfile_maxbytes=0
-"""
-    # Cron starts a Supervisor-owned one-shot, so shutdown also owns any active
-    # backup process. Higher priorities stop first: cron, then backup, then Sites.
-    cron_command = shlex.join(
-        ["/usr/bin/supervisorctl", "-c", str(config_path), "start", "sites-backup"]
-    ).replace("%", r"\%")
-    cron_config = (
-        f'SHELL=/bin/sh\nPATH={PATH}\nMAILTO=""\n'
-        f"7 3 * * * root {cron_command} >/proc/1/fd/1 2>/proc/1/fd/2\n"
-    )
+    # Keep arbitrary daemon arguments out of Supervisor's command parser.
+    private_write(run_dir / "sites-argv.json", json.dumps(argv) + "\n")
     private_write(backup_path, json.dumps(config, indent=2) + "\n")
-    private_write(config_path, supervisor_config)
-    private_write(cron_path, cron_config)
     return config_path
 
 
 def main(argv=None):
     argv = sys.argv[1:] if argv is None else argv
     if argv and argv[0] == "exec-sites":
-        original = json.loads(base64.b64decode(argv[1], validate=True))
+        original = json.loads(Path(argv[1]).read_text())
         os.execvp(
             "setpriv",
             [

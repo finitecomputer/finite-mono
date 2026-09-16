@@ -29,6 +29,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 COPY --from=builder /src/target/release/finitesitesd /src/target/release/fsite /usr/local/bin/
 COPY --chmod=755 infra/images/sites-entrypoint /usr/local/bin/sites-entrypoint
 COPY --chmod=755 infra/images/sites-supervisor.py /usr/local/bin/sites-supervisor.py
+COPY --chmod=600 infra/images/sites-supervisor.conf /etc/sites-supervisor.conf
+COPY --chmod=600 infra/images/sites-backup.cron /etc/cron.d/sites-backup
 COPY --chmod=755 infra/scripts/sites-backup /usr/local/bin/sites-backup
 COPY --chmod=755 scripts/snapshot-sqlite /usr/local/bin/snapshot-sqlite
 COPY --chmod=755 scripts/finite-status /usr/local/bin/finite-status

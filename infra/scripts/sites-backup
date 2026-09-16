@@ -30,6 +30,22 @@ class BackupInterrupted(Exception):
     """Do not use InterruptedError: subprocess selectors retry that exception."""
 
 
+@contextlib.contextmanager
+def capture_deadline():
+    """Bound stop + capture together; disarm before restart/cleanup."""
+
+    def expired(*_):
+        raise TimeoutError("Sites capture deadline exceeded")
+
+    previous = signal.signal(signal.SIGALRM, expired)
+    signal.setitimer(signal.ITIMER_REAL, CAPTURE_TIMEOUT)
+    try:
+        yield
+    finally:
+        signal.setitimer(signal.ITIMER_REAL, 0)
+        signal.signal(signal.SIGALRM, previous)
+
+
 def command(args, **kwargs):
     timeout = kwargs.pop("timeout", CAPTURE_TIMEOUT)
     process = subprocess.Popen(
@@ -84,8 +100,7 @@ def inventory(root):
     return sorted(files, key=os.fsencode), sorted(links, key=os.fsencode)
 
 
-def manifests(snapshot):
-    files, links = inventory(snapshot)
+def link_manifest(snapshot, links):
     symlinks = bytearray()
     for path in links:
         relative = path.relative_to(snapshot)
@@ -93,6 +108,12 @@ def manifests(snapshot):
             raise ValueError("symlink outside Sites data")
         symlinks.extend(os.fsencode(path.relative_to(snapshot / "finite-sites")))
         symlinks.extend(b"\0" + os.fsencode(os.readlink(path)) + b"\0")
+    return bytes(symlinks)
+
+
+def manifests(snapshot):
+    files, links = inventory(snapshot)
+    symlinks = link_manifest(snapshot, links)
     checksums = bytearray()
     for path in files:
         if path == snapshot / "manifest.sha256":
@@ -176,8 +197,8 @@ def separate(source, target):
     return source, target
 
 
-def snapshot(data, target):
-    data, target = separate(data, target)
+def capture(data, stage):
+    """Copy consistent state only. Hashing and verification happen after restart."""
     regular(data / "registry.db")
     regular(data / "cookie-secret")
     for suffix in ("-wal", "-shm"):
@@ -185,46 +206,50 @@ def snapshot(data, target):
         if path.exists() or path.is_symlink():
             regular(path)
     inventory(data)
-    started = time.monotonic()
+    stage.mkdir(mode=0o700)
+    copy = stage / "finite-sites"
+    copy.mkdir(mode=0o700)
+    command(
+        [
+            "rsync",
+            "-a",
+            "--exclude=/registry.db",
+            "--exclude=/registry.db-wal",
+            "--exclude=/registry.db-shm",
+            "--",
+            str(data) + "/",
+            str(copy) + "/",
+        ]
+    )
+    with contextlib.closing(
+        sqlite3.connect((data / "registry.db").as_uri() + "?mode=ro", uri=True)
+    ) as source:
+        with contextlib.closing(sqlite3.connect(copy / "registry.db")) as destination:
+            # Re-enter Python between batches so the capture alarm can interrupt.
+            source.backup(destination, pages=256, progress=lambda *_: None)
+    registry = (data / "registry.db").stat()
+    os.chown(copy / "registry.db", registry.st_uid, registry.st_gid)
+    (copy / "registry.db").chmod(stat.S_IMODE(registry.st_mode))
+    (stage / "created-at").write_text(str(int(time.time())) + "\n")
+
+
+def finalize(stage):
+    (stage / "format").write_bytes(FORMAT)
+    _, links = inventory(stage)
+    (stage / "finite-sites-symlinks.bin").write_bytes(link_manifest(stage, links))
+    (stage / "manifest.sha256").write_bytes(manifests(stage)[0])
+    return verify(stage)
+
+
+def snapshot(data, target):
+    data, target = separate(data, target)
     with tempfile.TemporaryDirectory(
         prefix=".sites-snapshot-", dir=target.parent
     ) as scratch:
         stage = Path(scratch) / "snapshot"
-        stage.mkdir(mode=0o700)
-        copy = stage / "finite-sites"
-        copy.mkdir(mode=0o700)
-        command(
-            [
-                "rsync",
-                "-a",
-                "--exclude=/registry.db",
-                "--exclude=/registry.db-wal",
-                "--exclude=/registry.db-shm",
-                "--",
-                str(data) + "/",
-                str(copy) + "/",
-            ]
-        )
-        with contextlib.closing(
-            sqlite3.connect((data / "registry.db").as_uri() + "?mode=ro", uri=True)
-        ) as source:
-            with contextlib.closing(
-                sqlite3.connect(copy / "registry.db")
-            ) as destination:
-
-                def progress(*_):
-                    if time.monotonic() - started > CAPTURE_TIMEOUT:
-                        raise TimeoutError("SQLite snapshot timed out")
-
-                source.backup(destination, pages=256, progress=progress)
-        registry = (data / "registry.db").stat()
-        os.chown(copy / "registry.db", registry.st_uid, registry.st_gid)
-        (copy / "registry.db").chmod(stat.S_IMODE(registry.st_mode))
-        (stage / "format").write_bytes(FORMAT)
-        (stage / "created-at").write_text(str(int(time.time())) + "\n")
-        (stage / "finite-sites-symlinks.bin").write_bytes(manifests(stage)[1])
-        (stage / "manifest.sha256").write_bytes(manifests(stage)[0])
-        verify(stage)
+        with capture_deadline():
+            capture(data, stage)
+        finalize(stage)
         install(stage, target)
 
 
@@ -368,15 +393,16 @@ def run_job(config_path):
                 target = Path(scratch) / "snapshot"
                 was_running = service_state(config) == "RUNNING"
                 try:
-                    if was_running:
-                        service(config, "stop")
-                    if service_state(config) != "STOPPED":
-                        raise ValueError("Sites writers are not stopped")
-                    snapshot(data, target)
+                    with capture_deadline():
+                        if was_running:
+                            service(config, "stop")
+                        if service_state(config) != "STOPPED":
+                            raise ValueError("Sites writers are not stopped")
+                        capture(data, target)
                 finally:
                     if was_running:
                         resume_service(config)
-                captured = verify(target)
+                captured = finalize(target)
                 archive = (
                     "sites-"
                     + time.strftime("%Y%m%dT%H%M%SZ", time.gmtime(captured))

@@ -138,18 +138,20 @@ credential directory as root-only and the files as `0600`. Allow space for a
 full snapshot in `/var/backups/finite-sites`; this staging/status directory is
 private, outside serving data, and ephemeral across Machine replacement.
 
-Once enabled, backups run daily at 03:07 UTC. Sites stops during capture and
-verification, then resumes before upload. Confirm this pause and recovery
-interval are acceptable. Runs are serialized; Borg warnings fail the job.
-There is no automatic retry, prune or compact.
+Once enabled, backups run daily at 03:07 UTC. Sites stops only for the consistent
+file/SQLite copy, then resumes before hashing, verification and upload. Stop and
+capture share a five-minute deadline; on timeout the job aborts capture and
+attempts a bounded restart before cleanup. Confirm this pause and recovery
+interval are acceptable. Runs are serialized; Borg warnings fail the job. There
+is no automatic retry, prune or compact.
 
 ### Check or retry
 
 Inside the backup-enabled Machine as root:
 
 ```sh
-supervisorctl -c /run/sites-supervisor.conf start sites-backup
-supervisorctl -c /run/sites-supervisor.conf status sites-backup
+supervisorctl -c /etc/sites-supervisor.conf start sites-backup
+supervisorctl -c /etc/sites-supervisor.conf status sites-backup
 finite-status --sites-backup-state /var/backups/finite-sites/status.json --json
 ```
 

@@ -1,5 +1,7 @@
 import contextlib
 import fcntl
+import importlib.machinery
+import importlib.util
 import json
 import os
 from pathlib import Path
@@ -12,10 +14,19 @@ import sys
 import tempfile
 import time
 import unittest
+from unittest.mock import patch
 
 
 ROOT = Path(__file__).resolve().parents[2]
 SCRIPT = ROOT / "infra/scripts/sites-backup"
+
+
+def load_backup():
+    loader = importlib.machinery.SourceFileLoader("sites_backup", str(SCRIPT))
+    spec = importlib.util.spec_from_loader(loader.name, loader)
+    module = importlib.util.module_from_spec(spec)
+    loader.exec_module(module)
+    return module
 
 
 class SitesBackupTests(unittest.TestCase):
@@ -179,6 +190,82 @@ class SitesBackupTests(unittest.TestCase):
             subprocess.check_output(["borg", "list", "--json"], env=self.borg_env)
         )["archives"]
         self.assertEqual(len(archives), 1)
+
+    def test_hashing_and_verification_run_only_after_restart_without_capture_alarm(
+        self,
+    ):
+        config = self.job_config()
+        module = load_backup()
+        digest = module.hashlib.file_digest
+        observed = []
+
+        def checked_digest(stream, algorithm):
+            self.assertEqual(self.state.read_text(), "RUNNING")
+            self.assertEqual(signal.getitimer(signal.ITIMER_REAL), (0, 0))
+            if str(stream.name).endswith("/blobs/index.html"):
+                observed.append(stream.name)
+            return digest(stream, algorithm)
+
+        with patch.object(module.hashlib, "file_digest", checked_digest):
+            module.run_job(config)
+        # One manifest pass and one verification pass, both after restart.
+        self.assertEqual(len(observed), 2)
+        self.assertEqual(
+            json.loads((self.backups / "status.json").read_text())["status"], "ok"
+        )
+
+    def test_capture_deadline_interrupts_python_and_subprocess_then_restarts(self):
+        config = self.job_config()
+        module = load_backup()
+        original_command = module.command
+
+        def slow_copy(args, **kwargs):
+            if args[0] == "rsync":
+                args = [sys.executable, "-c", "import time; time.sleep(30)"]
+            return original_command(args, **kwargs)
+
+        for operation in ("inventory", "rsync"):
+            with self.subTest(operation=operation):
+                delayed = (
+                    patch.object(
+                        module, "inventory", side_effect=lambda _: time.sleep(30)
+                    )
+                    if operation == "inventory"
+                    else patch.object(module, "command", side_effect=slow_copy)
+                )
+                started = time.monotonic()
+                with patch.object(module, "CAPTURE_TIMEOUT", 1), delayed:
+                    with self.assertRaises(TimeoutError):
+                        module.run_job(config)
+                self.assertLess(time.monotonic() - started, 10)
+                self.assertEqual(self.state.read_text(), "RUNNING")
+                self.assertEqual(signal.getitimer(signal.ITIMER_REAL), (0, 0))
+                receipt = json.loads((self.backups / "status.json").read_text())
+                self.assertEqual(receipt["status"], "failed")
+                self.assertNotIn("uploaded_at", receipt)
+                self.assertEqual(list(self.backups.glob("capture-*")), [])
+        archives = json.loads(
+            subprocess.check_output(["borg", "list", "--json"], env=self.borg_env)
+        )["archives"]
+        self.assertEqual(archives, [])
+
+    def test_verification_failure_after_restart_does_not_upload(self):
+        config = self.job_config()
+        module = load_backup()
+        verify = module.verify
+
+        def corrupt_snapshot(stage):
+            self.assertEqual(self.state.read_text(), "RUNNING")
+            (stage / "finite-sites/registry.db").write_bytes(b"corrupt copy")
+            return verify(stage)
+
+        with patch.object(module, "verify", side_effect=corrupt_snapshot):
+            with self.assertRaises(ValueError):
+                module.run_job(config)
+        self.assertEqual(self.state.read_text(), "RUNNING")
+        receipt = json.loads((self.backups / "status.json").read_text())
+        self.assertEqual(receipt["status"], "failed")
+        self.assertNotIn("uploaded_at", receipt)
 
     def test_upload_failure_happens_after_service_resumes_and_is_not_success(self):
         config = self.job_config()

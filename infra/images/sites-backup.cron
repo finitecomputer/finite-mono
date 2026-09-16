@@ -1,0 +1,4 @@
+SHELL=/bin/sh
+PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+MAILTO=""
+7 3 * * * root /usr/bin/supervisorctl -c /etc/sites-supervisor.conf start sites-backup >/proc/1/fd/1 2>/proc/1/fd/2
