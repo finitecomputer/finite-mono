@@ -444,6 +444,15 @@ def psql_query_sets(environment: dict[str, str]) -> dict[str, list[dict[str, Any
              "request_runner_id", "agent_runtime_id", "actual_source_host_id", "retry_of_launch_code_id", "cohort_of_launch_code_id"],
         ),
         (
+            "launch_host_reservation_releases",
+            "SELECT to_regclass('launch_host_reservation_releases') IS NOT NULL AS finite_has_host_releases \\gset\n"
+            "\\if :finite_has_host_releases\n"
+            "SELECT source_host_id, reservation_code_id, canary_runtime_id, released_by_workos_user_id, released_at "
+            "FROM launch_host_reservation_releases ORDER BY source_host_id;\n"
+            "\\endif",
+            ["source_host_id", "reservation_code_id", "canary_runtime_id", "released_by_workos_user_id", "released_at"],
+        ),
+        (
             "unused_single_code_batches",
             "SELECT code.id, batch.id, batch.name, batch.created_by_workos_user_id, batch.hosting_tier, batch.expires_at "
             "FROM launch_codes code JOIN launch_code_batches batch ON batch.id=code.batch_id "
@@ -1693,7 +1702,14 @@ def build_fleet(
         "recorded_distribution": distribution,
         "distribution_consistent_with_detail_snapshot": distribution_consistent,
         "hosts": host_reports,
-        "canary_host_reservations": core.get("canary_host_reservations", []),
+        "canary_host_reservations": [
+            {**row, "reservation_state": "released" if any(
+                release["source_host_id"] == row["source_host_id"]
+                for release in core.get("launch_host_reservation_releases", [])
+            ) else "reserved"}
+            for row in core.get("canary_host_reservations", [])
+        ],
+        "launch_host_reservation_releases": core.get("launch_host_reservation_releases", []),
         "unused_single_code_batches": core.get("unused_single_code_batches", []),
         "launch_code_batches": core.get("launch_code_batches", []),
         "agent_creation_requests": core.get("agent_creation_requests", []),

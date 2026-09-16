@@ -321,20 +321,19 @@ Use an explicit test account to prove enrollment, Agent admission, launch,
 identity readiness and a Chat reply. Verify the actual destination through
 the [targeted canary procedure](targeted-agent-canary.md): an ordinary Launch
 Code grants entitlement without selecting a host; the operator must bind the
-unused canary code to lat5 before redemption. Keep lat5 reserved for targeted
-creation. Establish this path before inviting TRF IT to create the cohort. Begin with one canary, then qualify the intended workload in stages.
-The earlier 24–28-runtime estimate was for the advertised 128 GB hardware
-and is superseded. The captured host has 192 GB, like lat4. Its owner-selected estimated ceiling
-is 42 total runtimes, including canaries. Keep drain enabled until controlled
-admission; 42 is a planning ceiling, not proof of 42 simultaneously busy guests.
-Measure host and guest memory, CPU pressure, launch failures and Chat behavior
-under representative concurrent load. Use that evidence to confirm or lower the estimated ceiling before opening
-the host to the cohort. Record whether lat6 is needed.
+unused canary code to lat5 before redemption. Begin with one canary, then
+release the temporary reservation and disable drain after verification.
+The earlier 24–28-runtime estimate was for advertised 128 GB hardware and is
+superseded. The captured host has 192 GB, like lat4. Its owner-selected ceiling
+is 42 total runtimes, including canaries. This is an estimated ceiling, not proof
+of 42 simultaneously busy guests. Monitor host and guest memory, CPU pressure,
+launch failures and Chat behavior as the pool fills; lower the ceiling if needed.
 
-Complete FIN-74 when new agents reliably land on lat5 and pass those checks
-at the accepted capacity. Then TRF IT can create empty Agent Runtimes and
-hand them back to Austin for migration. Retain suitable prepared destinations
-on other hosts, including Rene's existing slot.
+Complete FIN-74 when the canary passes enrollment, launch and Chat checks and
+lat5 accepts ordinary launches at the approved ceiling. TRF IT can then create
+empty Agent Runtimes in the shared pool and hand them back to Austin for migration.
+TRF is not pinned to lat5; retain suitable prepared destinations on other hosts,
+including Rene's existing slot. New-user onboarding uses the same pool.
 
 Source Telegram bots stay running during host setup and migration rehearsal.
 Each later migration owns a brief, single-consumer Telegram switch and Google
