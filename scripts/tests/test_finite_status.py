@@ -61,6 +61,8 @@ class FiniteStatusTests(unittest.TestCase):
                 "finite-lat-1,v2,1",
                 "__FINITE_STATUS_CANARY_HOST_RESERVATIONS__",
                 "finite-lat-5,code-canary,batch-canary,workos-operator,org-canary,f,f,request-done,project-done,running,,runner-4,runtime-done,finite-lat-4,",
+                "__FINITE_STATUS_UNUSED_SINGLE_CODE_BATCHES__",
+                'code-retry,batch-retry,"Retry, canary",workos-operator,standard,2026-08-02T00:00:00Z',
                 "__FINITE_STATUS_AGENT_CREATION_REQUESTS__",
                 "request-canary,project-canary,Lat5 Canary,requested,finite-lat-5,,",
                 "__FINITE_STATUS_RUNTIMES__",
@@ -73,6 +75,10 @@ class FiniteStatusTests(unittest.TestCase):
         ) as run:
             result = finite_status.psql_query_sets({})
         self.assertEqual(result["canary_host_reservations"][0]["batch_id"], "batch-canary")
+        self.assertEqual(result["unused_single_code_batches"][0], {
+            "launch_code_id": "code-retry", "batch_id": "batch-retry", "batch_name": "Retry, canary",
+            "issuer_workos_user_id": "workos-operator", "hosting_tier": "standard", "expires_at": "2026-08-02T00:00:00Z",
+        })
         reservation = result["canary_host_reservations"][0]
         self.assertEqual(reservation["retry_of_launch_code_id"], "")
         # Completed misplaced launches remain visible after leaving the queue.

@@ -1,7 +1,9 @@
 # Retry the lat5 control canary
 
-Status: prepared for review; **not executed**. The new retry command and schema
-must be reviewed, tested, merged and deployed before this procedure can run.
+Status: **control canary passed on September 15, 2026** (final receipt crossed
+into September 16 UTC). Lat5 is drained again with one retained canary. The
+execution receipt below supersedes the preparation status; do not repeat the
+one-time issuance or binding steps.
 This procedure authorizes neither cohort admission nor cleanup of the first
 canary. The source TRF and Box 1 agents remain in place.
 
@@ -122,3 +124,67 @@ whole database over newer writes. Retain migration 0027 and its history during
 binary rollback; Core versions before targeted-code support remain prohibited.
 The existing [targeted-canary rollback rules](targeted-agent-canary.md#writers-readers-and-rollback)
 also apply. Neither a failed retry nor a successful one releases cohort capacity.
+
+## Execution receipt — September 15, 2026
+
+[PR #899](https://github.com/finitecomputer/finite-mono/pull/899) merged as
+`2a89fbe2bd45140376937dfdf0037ef4d0f99a8c`. The
+[CI closure build](https://github.com/finitecomputer/finite-mono/actions/runs/35034520806)
+succeeded. The installed system is
+`/nix/store/3xn70b3sr4z3b9pw8jff0v3nnrf9hwa5-nixos-system-finite-lat-2-26.05.20260719.fd14620`.
+
+Before activation, a fresh lat2 custom-format backup was copied off-host and
+restored into isolated local Postgres; migration 0027 applied successfully.
+The source dump is
+`/data/backups/postgres/finite_core-pre-lat5-retry-20260915.dump`, with an
+operator-private off-host copy under
+`~/.local/state/finite/lat5-canary-20260915/core-pre-retry.dump`.
+Both copies had SHA-256
+`10a405f04cba56e649e5dfc2137700826ff74aa829b4a55362c4a9a0f524af3a`.
+The previous system remains
+`/nix/store/9vhadh0lrd8fqm9iqdxck7ldzfi2zhz0-nixos-system-finite-lat-2-26.05.20260719.fd14620`;
+it is a binary recovery reference, not permission to rewind newer database writes.
+
+Dry activation changed only the Core application executable. The two additional
+reviewed units were `dbus-broker.service` (reload of package-path references)
+and `systemd-tmpfiles-resetup.service` (revision metric symlink refresh).
+The other five application units were byte-identical. Activation and canonical
+status both verified all six running executables. Core now runs
+`/nix/store/y2950n3mniky5wpmmkapk7s68dgv24cq-finite-saas-core-0.1.0/bin/finite-saas-core`.
+Chat, hosted-device, Brain, Sites and Identity retained their original PIDs;
+Chat's PID remained `1108826`.
+
+The signed-in dashboard issued exactly one Standard code with a 24-hour expiry.
+Canonical status now exposes unused one-code batch identifiers and issuer
+metadata without plaintext codes, so the operator can bind exact records before
+redemption. Preview passed, execute appended one retry binding, and canonical
+status proved the original binding and misplaced lat4 Runtime remained intact.
+
+| Retry record | Verified value |
+| --- | --- |
+| Batch | `launch_batch_cf32944485aecf41834a` |
+| Code | `launch_code_1b61135ee574150fe107` |
+| Parent code | `launch_code_54432c99f217fa5cbb6f` |
+| Request | `agent_request_0d08e066bb8b01014ddf` |
+| Project | `project_7447b276571011033370` |
+| Runtime | `runtime_304dc2797ddc2e7d4f7c` |
+| Request target | `finite-lat-5` |
+| Claiming Runner | `finite-kata-runner-5` |
+| Actual Runtime host | `finite-lat-5` |
+
+Before enabling lat5, the exact request was `requested`, explicitly targeted to
+lat5, unclaimed, and had no Runtime. Lat5 was empty and drained, with the
+Nix-owned `FC_RUNNER_MAX_SANDBOXES=1` and no operator capacity override.
+Only its drain setting was changed. The request completed on lat5, with one
+Kata container and one VM; canonical health reported 1/1 ready.
+
+The signed-in owner sent a simple Chat check to **Lat5 Canary Retry** and
+received `LAT5-CANARY-20260915-OK`. After navigating away and loading that exact
+Runtime's Chat page afresh, both the sent message and reply remained visible.
+Lat5 was then drained again without stopping or deleting the canary.
+
+Final canonical checks: Chat green; lat3 31/31 ready; lat4 28/28 ready; lat5
+1/1 ready, drained, one running Kata container and VM. The original misplaced
+lat4 canary and both code bindings remain. Existing fleet version skew and
+lat5's deliberate admission drain mean this is not an all-green fleet claim.
+No TRF/Box 1 agent migrated, no cohort capacity opened, and lat1 was untouched.
