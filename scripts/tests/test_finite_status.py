@@ -1646,6 +1646,7 @@ class FiniteStatusTests(unittest.TestCase):
         raw = finite_status.load_fixture(FIXTURE)
         raw["host_health"]["hostname"] = "finite-lat-3"
         raw["host_health"]["roles"] = ["runner"]
+        raw["host_health"]["hosted_hermes"] = {"status": "green", "state": "not-configured"}
         # The runner host has none of the app-plane units observed; that must
         # not drag its health to unknown.
         now = finite_status.parse_time(raw["now"])
@@ -1692,3 +1693,87 @@ class FiniteStatusTests(unittest.TestCase):
 
 def raw_sync_since() -> str:
     return "2026-08-01T14:00:00Z"
+
+class HostedHermesStatusTests(unittest.TestCase):
+    def setUp(self):
+        self.directory = tempfile.TemporaryDirectory()
+        self.addCleanup(self.directory.cleanup)
+        self.root = Path(self.directory.name)
+        self.now = finite_status.utc_now()
+        self.unit = {"LoadState": "loaded", "MainPID": "42", "ActiveState": "active", "InvocationID": "a" * 32}
+        self.record = {"version": 1, "state": "serving", "checkedAt": int(self.now.timestamp()),
+                       "proxyPid": "42", "proxyInvocation": "a" * 32}
+
+    def collect(self, states=None):
+        (self.root / "status.json").write_text(json.dumps(self.record))
+        with mock.patch.object(finite_status, "systemd_properties", side_effect=states or [self.unit, self.unit]):
+            return finite_status.collect_hosted_hermes(self.now, self.root)
+
+    def test_disabled_empty_and_serving_are_distinct(self):
+        self.assertEqual(self.collect()["state"], "serving")
+        self.unit.update(MainPID="0", ActiveState="inactive", InvocationID="")
+        self.record.update(state="empty", proxyPid="0", proxyInvocation="")
+        self.assertEqual(self.collect()["state"], "no-eligible-routes")
+        self.assertEqual(self.collect()["status"], "green")
+        self.unit["LoadState"] = "not-found"
+        result = self.collect()
+        self.assertEqual((result["status"], result["state"]), ("green", "not-configured"))
+
+    def test_failure_or_stale_evidence_never_scores_green(self):
+        self.record["state"] = "failed"
+        self.assertEqual(self.collect()["status"], "red")
+        for state in ("reconciling", "unknown"):
+            self.record["state"] = state
+            self.assertEqual(self.collect()["status"], "unknown")
+        self.record["state"] = "serving"
+        for delta in (-120, 120):
+            self.record["checkedAt"] = int(self.now.timestamp()) + delta
+            self.assertEqual(self.collect()["state"], "stale")
+
+    def test_restarted_or_dead_proxy_invalidates_success(self):
+        self.unit["InvocationID"] = "b" * 32
+        self.assertEqual(self.collect()["state"], "process-changed")
+        self.unit["InvocationID"] = "a" * 32
+        self.unit["ActiveState"] = "failed"
+        self.assertEqual(self.collect()["status"], "red")
+        self.record["state"] = "empty"
+        self.assertEqual(self.collect()["status"], "red")
+
+    def test_surviving_mutation_and_collection_race_are_unknown(self):
+        marker = self.root / "mutation-in-progress"
+        marker.touch()
+        self.assertEqual(self.collect()["state"], "mutation-unresolved")
+        marker.unlink()
+        self.assertEqual(self.collect([self.unit, {**self.unit, "MainPID": "43"}])["status"], "unknown")
+        calls = 0
+        def mutate(_unit):
+            nonlocal calls
+            calls += 1
+            if calls == 2:
+                marker.touch()
+            return self.unit
+        self.assertEqual(self.collect(mutate)["status"], "unknown")
+
+    def test_missing_malformed_or_unreadable_evidence_is_unknown(self):
+        with mock.patch.object(finite_status, "systemd_properties", return_value=self.unit):
+            self.assertEqual(finite_status.collect_hosted_hermes(self.now, self.root)["status"], "unknown")
+            for encoded in ("not-json", "[]", "{}", '"' + "a" * 4097 + '"',
+                            json.dumps({**self.record, "checkedAt": 10 ** 350}),
+                            "[" * 1500 + "]" * 1500):
+                (self.root / "status.json").write_text(encoded)
+                self.assertEqual(finite_status.collect_hosted_hermes(self.now, self.root)["status"], "unknown")
+            with mock.patch.object(Path, "stat", side_effect=PermissionError()):
+                self.assertEqual(finite_status.collect_hosted_hermes(self.now, self.root)["status"], "unknown")
+
+    def test_runner_report_and_text_include_ingress_and_old_evidence_is_unknown(self):
+        raw = finite_status.load_fixture(FIXTURE)
+        raw["host_health"]["roles"] = ["runner"]
+        raw["host_health"]["hosted_hermes"] = {"status": "red", "state": "reconciliation-failed"}
+        now = finite_status.parse_time(raw["now"])
+        report = finite_status.build_report(raw, now)
+        self.assertEqual(report["sections"]["host_health"]["hosted_hermes"]["status"], "red")
+        self.assertIn("hosted Hermes:", finite_status.render_human(report))
+        self.assertIn("reconciliation-failed", finite_status.render_human(report))
+        del raw["host_health"]["hosted_hermes"]
+        report = finite_status.build_report(raw, now)
+        self.assertEqual(report["sections"]["host_health"]["hosted_hermes"]["state"], "not-observed")

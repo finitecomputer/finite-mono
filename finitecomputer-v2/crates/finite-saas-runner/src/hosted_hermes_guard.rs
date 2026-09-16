@@ -154,6 +154,20 @@ impl HostedHermesGuard {
         Ok(())
     }
 
+    pub(crate) fn proxy_identity(&self) -> Result<(String, String)> {
+        let state = service_state(&self.proxy_unit)?;
+        Ok((
+            state
+                .get("MainPID")
+                .cloned()
+                .ok_or_else(|| refused("missing proxy PID"))?,
+            state
+                .get("InvocationID")
+                .cloned()
+                .ok_or_else(|| refused("missing proxy invocation"))?,
+        ))
+    }
+
     fn quiescent(&self) -> Result<()> {
         if cgroup_processes(&self.cgroup)? != BTreeSet::from([std::process::id()]) {
             return Err(refused(

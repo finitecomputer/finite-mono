@@ -21,6 +21,10 @@ import ssl
 import urllib.request
 import urllib.error
 import uuid
+import sys
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
+from scripts import finite_status
 
 
 def run(*args, check=True, timeout=60):
@@ -194,6 +198,8 @@ Environment=FIN91_PROOF_JOB={job_file}
         pid = properties(proxy)["MainPID"]
         job("reconcile")
         assert properties(proxy)["MainPID"] == pid, "no-op ticks must not interrupt connections"
+        status = finite_status.collect_hosted_hermes(finite_status.utc_now())
+        assert (status["status"], status["state"]) == ("green", "serving"), status
         job("binding")
         job("stop")
         assert port("agent-a").endswith(":30000")
@@ -236,6 +242,8 @@ Environment=FIN91_PROOF_JOB={job_file}
         targets[:] = []
         job("reconcile")
         assert properties(proxy)["MainPID"] == "0"
+        status = finite_status.collect_hosted_hermes(finite_status.utc_now())
+        assert (status["status"], status["state"]) == ("green", "no-eligible-routes"), status
         assert inspect("agent-b")["State"]["Status"] == "running"
         assert (work / "kata/agent-b/api/status").read_text() == "agent-b"
         targets[:] = [target("agent-b"), target("agent-c")]
@@ -246,6 +254,8 @@ Environment=FIN91_PROOF_JOB={job_file}
         # invocation recovers by killing the proxy and rebuilding authority.
         job("failed-mutation", "agent-b")
         assert (state / "mutation-in-progress").exists()
+        status = finite_status.collect_hosted_hermes(finite_status.utc_now())
+        assert status["state"] == "mutation-unresolved", status
         job("reconcile")
         assert not (state / "mutation-in-progress").exists()
         evidence["failed_operation_recovery"] = True
@@ -305,6 +315,12 @@ Environment=FIN91_PROOF_JOB={job_file}
         assert port("agent-b").endswith(":30002")
         assert (work / "kata/agent-b/api/status").read_text() == "agent-b"
         evidence["replacement_helper_is_unpublished_until_canonical_promotion"] = True
+        job("reconcile")
+        run("systemctl", "stop", proxy)
+        status = finite_status.collect_hosted_hermes(finite_status.utc_now())
+        assert status["status"] != "green", status
+        job("reconcile")
+        evidence["canonical_status_distinguishes_serving_empty_mutation_and_dead_proxy"] = True
         return evidence
     finally:
         core.shutdown()

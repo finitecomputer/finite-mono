@@ -91,11 +91,23 @@ impl HostedHermesLifecycle {
             .guard
             .lock()
             .map_err(|_| refused("fence lock is poisoned"))?;
-        let result = self.reconcile_locked(&guard);
-        if result.is_err() {
-            guard.stop_proxy()?;
+        self.observe("reconciling", None);
+        match self.reconcile_locked(&guard) {
+            Ok(serving) => {
+                match guard.proxy_identity() {
+                    Ok(identity) => {
+                        self.observe(if serving { "serving" } else { "empty" }, Some(identity))
+                    }
+                    Err(_) => self.observe("unknown", None),
+                }
+                Ok(())
+            }
+            Err(error) => {
+                self.observe("failed", None);
+                guard.stop_proxy()?;
+                Err(error)
+            }
         }
-        result
     }
 
     pub(crate) fn execute(
@@ -198,10 +210,30 @@ impl HostedHermesLifecycle {
                 }))
     }
 
-    fn reconcile_locked(&self, guard: &HostedHermesGuard) -> Result<()> {
+    fn reconcile_locked(&self, guard: &HostedHermesGuard) -> Result<bool> {
         guard.before_publication()?;
         let projection = self.projection(None)?;
-        self.publish(projection, guard)
+        let serving = projection.is_some();
+        self.publish(projection, guard)?;
+        Ok(serving)
+    }
+
+    // Diagnostic evidence for finite-status only. Never read by allocation,
+    // publication or recovery. Missing/unwritable evidence must not stop Chat.
+    fn observe(&self, state: &str, identity: Option<(String, String)>) {
+        let checked_at = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|time| time.as_secs())
+            .unwrap_or(0);
+        let (pid, invocation) = identity.unwrap_or_default();
+        let observation = serde_json::json!({
+            "version": 1, "state": state, "checkedAt": checked_at,
+            "proxyPid": pid, "proxyInvocation": invocation,
+        });
+        let path = Path::new(STATE_DIR);
+        if write_observation(path, &observation).is_err() {
+            eprintln!("hosted Hermes diagnostic evidence unavailable");
+        }
     }
 
     fn projection(&self, excluded: Option<&str>) -> Result<Option<Vec<u8>>> {
@@ -363,5 +395,30 @@ impl HostedHermesLifecycle {
             return Err(refused("provider inventory read failed"));
         }
         String::from_utf8(output.stdout).map_err(|_| refused("provider inventory is not UTF-8"))
+    }
+}
+
+fn write_observation(root: &Path, observation: &serde_json::Value) -> std::io::Result<()> {
+    let next = root.join("status.next.json");
+    std::fs::write(&next, serde_json::to_vec(observation)?)?;
+    std::fs::rename(next, root.join("status.json"))
+}
+
+#[cfg(test)]
+mod observation_tests {
+    use super::*;
+
+    #[test]
+    fn diagnostic_replacement_leaves_no_partial_record_or_mutation_marker() {
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path();
+        write_observation(root, &serde_json::json!({"state":"serving"})).unwrap();
+        write_observation(root, &serde_json::json!({"state":"failed"})).unwrap();
+        let record: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(root.join("status.json")).unwrap()).unwrap();
+        assert_eq!(record["state"], "failed");
+        assert!(!root.join("status.next.json").exists());
+        assert!(!root.join("mutation-in-progress").exists());
+        assert!(write_observation(&root.join("absent"), &record).is_err());
     }
 }

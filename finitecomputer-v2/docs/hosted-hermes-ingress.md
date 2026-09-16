@@ -143,10 +143,16 @@ configuration file. Set `publicOrigin` to the exact Core host origin and set
 `allowedOrigins` explicitly; `listenAddress`/`listenPort` configure the listener,
 and the module opens that TCP port in the host firewall. DNS, host reachability,
 certificates, and production Kata behavior still require deployment qualification.
-Before activation, FIN-39 must also add a state-aware hosted-ingress probe to
-`scripts/finite-status` and include the dedicated unit in journal collection.
-An inactive proxy alone cannot distinguish an empty projection from failed
-reconciliation; it must not be reported as healthy without that evidence.
+`scripts/finite-status` reports hosted ingress separately on Runner hosts and
+the opt-in module adds the dedicated unit to journal collection. Runner writes an
+atomic diagnostic `status.json` in its private `/run` directory after reconciliation;
+allocation, publication and recovery never read this record. The status reader
+requires evidence less than 60 seconds old, matching actual proxy PID/invocation,
+a stable observation and no unfinished mutation. It distinguishes not configured,
+no eligible routes, serving, failed reconciliation, stale/missing evidence and
+changed processes. Green is recent local routing evidence, not an end-to-end
+account, native API or DNS/TLS availability claim. Older collectors must be
+upgraded before activation; older evidence without the probe is unknown.
 Caddy has no timer, automatic restart, resume, or boot activation. Only a fresh
 Runner projection starts it. The pre-start gate compares the configured immutable
 Runner executable with the last publisher: changing or rolling back the binary

@@ -52,6 +52,10 @@ def main() -> None:
         contract["hosts"]["finite-lat-1"]["disks"],
     )
 
+    ingress = contract["hosted_hermes"]
+    require_all(ROOT / "infra/nixos/modules/hosted-hermes.nix", [ingress["unit"], ingress["state_root"], "finite.metrics.journalLogUnits"])
+    require_all(ROOT / "finitecomputer-v2/crates/finite-saas-runner/src/hosted_hermes_lifecycle.rs", [ingress["state_root"], "status.json", "checkedAt", "proxyInvocation"])
+
     recovery = contract["recovery"]
     require_all(
         ROOT / "infra" / "nixos" / "modules" / "backups.nix",

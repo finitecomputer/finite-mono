@@ -57,6 +57,7 @@ in
         message = "Hosted Hermes requires a Runner host and a configured public origin.";
       }
     ];
+    finite.metrics.journalLogUnits = [ "finite-hosted-hermes.service" ];
     networking.firewall.allowedTCPPorts = [ cfg.listenPort ];
     systemd.tmpfiles.rules = [ "d /run/finite-hosted-hermes 0700 root root -" ];
     systemd.services.finite-saas-runner = {
