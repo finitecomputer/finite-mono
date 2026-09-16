@@ -88,9 +88,11 @@ Keep `FC_SITES_UPSTREAM_URL` on the existing legacy Sites origin. Set
 `FC_SITES_V2_UPSTREAM_URL` to the v2 origin separately. Validated finite.chat
 and docs.finite.chat previews use legacy; finite.site and v2.finite.chat use
 v2. Local development sites also use the v2 setting. Missing or failing v2
-configuration never retries on legacy. Hosted Chat requester assertions keep
-using the legacy origin. Keep legacy selection and request spelling until
-legacy previews and requester consumers are retired. Give the dashboard and
+configuration never retries on legacy. Hosted Chat requester assertions use the v2 origin as well: their tokens
+are stored in the publishing registry. Missing/failing v2 configuration omits
+that optional context so Chat remains available; it never retries on legacy.
+Deploy this issuer change with the v2 publishing Runtime. Keep legacy viewer
+selection and request spelling until retained previews are retired. Give the dashboard and
 both Sites services the same dedicated
 `FINITE_SITES_VIEWER_SESSION_TOKEN`. The dashboard may exchange a signed-in,
 verified account email for a one-time viewer link. Dashboard previews also

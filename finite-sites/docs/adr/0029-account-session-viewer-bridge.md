@@ -36,8 +36,13 @@ field for `/internal/v1/viewer-sessions`:
   with `site_url`. Explicitly enabled local development Sites use this setting.
 
 Requests cannot supply an upstream; v2 failures never retry against legacy.
-Hosted Chat requester assertions retain the legacy setting. Remove legacy
-selection and request spelling only after their consumers are retired.
+Hosted Chat requester assertions use `FC_SITES_V2_UPSTREAM_URL`: issuance
+writes a token hash into the publishing registry, so a token from the legacy
+registry cannot authorize Project Init on v2. Missing/failing v2 configuration
+omits requester context without interrupting Chat; no fallback or redirect
+may send the exchange to another origin. Deploy this change with the v2
+publishing Runtime. Legacy viewer selection and request spelling remain until
+their retained consumers are retired.
 
 ## Tokens and cookies
 
