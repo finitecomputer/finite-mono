@@ -15945,20 +15945,44 @@ mod tests {
 
     #[tokio::test]
     async fn postgres_cohort_admission_serializes_with_redemption() {
-        with_isolated_postgres(|db| async move {
-            let (input, batch) = cohort_fixture(&db).await;
-            let other = CoreStore::connect(&db.url).await.unwrap();
-            let redeem = other.request_agent_creation(RequestAgentCreationInput {
-                verified_email: "race-cohort@example.com".into(), workos_user_id: "race-cohort".into(),
-                display_name: "Race".into(), launch_code: batch.codes[0].code.clone(), idempotency_key: "race-cohort".into(), now: None,
-            });
-            let (bound, redeemed) = tokio::join!(db.target_launch_code_batch_exact(&input), redeem);
-            let bindings = db.query_json("SELECT to_jsonb(t) FROM launch_code_host_targets t WHERE cohort_of_launch_code_id=$1", &[&input.reservation_code_id]).await;
-            assert_eq!(bindings.len(), if bound.is_ok() { 3 } else { 0 });
-            if let Ok(created) = redeemed {
-                assert_eq!(created.request.target_source_host_id.as_deref(), if bound.is_ok() { Some(input.target_source_host_id.as_str()) } else { None });
-            }
-        }).await;
+        for binding_first in [true, false] {
+            with_isolated_postgres(|db| async move {
+                let (input, mut batch) = cohort_fixture(&db).await;
+                batch.codes.sort_by(|a, b| a.id.cmp(&b.id));
+                let mut client = db.connection().await.unwrap();
+                let tx = client.transaction().await.unwrap();
+                tx.query_one("SELECT id FROM launch_codes WHERE id=$1 FOR UPDATE", &[&batch.codes[0].id]).await.unwrap();
+                let bind_store = db.clone();
+                let binding_input = input.clone();
+                let bind = async move { bind_store.target_launch_code_batch_exact(&binding_input).await };
+                let create_store = db.clone();
+                let plaintext = batch.codes[0].code.clone();
+                let create = async move { create_store.request_agent_creation(RequestAgentCreationInput {
+                    verified_email: "race-cohort@example.com".into(), workos_user_id: "race-cohort".into(),
+                    display_name: "Race".into(), launch_code: plaintext, idempotency_key: "race-cohort".into(), now: None,
+                }).await };
+                let (binding, creation) = if binding_first {
+                    let binding = tokio::spawn(bind);
+                    wait_for_targeting_lock(&tx, "%WHERE batch.id=$1 AND batch.created_by_workos_user_id=$2%").await;
+                    let creation = tokio::spawn(create);
+                    wait_for_targeting_lock(&tx, "%WHERE code.code_hash = $1%").await;
+                    (binding, creation)
+                } else {
+                    let creation = tokio::spawn(create);
+                    wait_for_targeting_lock(&tx, "%WHERE code.code_hash = $1%").await;
+                    let binding = tokio::spawn(bind);
+                    wait_for_targeting_lock(&tx, "%WHERE batch.id=$1 AND batch.created_by_workos_user_id=$2%").await;
+                    (binding, creation)
+                };
+                tx.commit().await.unwrap();
+                let bound = binding.await.unwrap();
+                let created = creation.await.unwrap().unwrap();
+                assert_eq!(bound.is_ok(), binding_first);
+                assert_eq!(created.request.target_source_host_id.as_deref(), binding_first.then_some("retry-target"));
+                let bindings = db.query_json("SELECT to_jsonb(t) FROM launch_code_host_targets t WHERE cohort_of_launch_code_id=$1", &[&input.reservation_code_id]).await;
+                assert_eq!(bindings.len(), if binding_first { 3 } else { 0 });
+            }).await;
+        }
     }
 
     #[tokio::test]
