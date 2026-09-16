@@ -16,6 +16,7 @@ CONTAINER_ID = "acc651a6-9de6-4da5-9fdc-bb9888245962"
 ENDPOINT = "https://finite-private.finite.containers.tinfoil.dev"
 MODELS = {"glm": "glm-5-3-flash", "deepseek": "deepseek-v4-1-flash"}
 ROOT = Path(__file__).resolve().parent.parent
+TIERS = (1, 8, 16, 32, 64, 128)
 
 
 def utc(value: str) -> datetime:
@@ -23,6 +24,16 @@ def utc(value: str) -> datetime:
     if parsed.tzinfo is None:
         raise ValueError("deadline must include a UTC offset")
     return parsed.astimezone(timezone.utc)
+
+
+def parse_tiers(value: str) -> tuple[int, ...]:
+    try:
+        tiers = tuple(int(part) for part in value.split(","))
+    except ValueError as error:
+        raise argparse.ArgumentTypeError("tiers must be comma-separated integers") from error
+    if not tiers or any(tier not in TIERS for tier in tiers) or tuple(sorted(set(tiers))) != tiers:
+        raise argparse.ArgumentTypeError("tiers must be an increasing subset of 1,8,16,32,64,128")
+    return tiers
 
 
 def window(day: date) -> tuple[datetime, datetime]:
@@ -64,13 +75,15 @@ def main() -> int:
                         help="Authorized maintenance date in America/Chicago, YYYY-MM-DD")
     parser.add_argument("--deadline-utc", required=True, type=utc)
     parser.add_argument("--evidence-dir", type=Path, required=True)
+    parser.add_argument("--tiers", type=parse_tiers, default=TIERS,
+                        help="Increasing subset of 1,8,16,32,64,128; default is the full sweep")
     parser.add_argument("--execute", action="store_true", help="Send measured inference traffic")
     args = parser.parse_args()
     start, _ = window(args.window_date)
     if not start < args.deadline_utc <= measurement_cutoff(args.window_date):
         parser.error("deadline must be after 03:00 and no later than 05:15 Central")
     model = MODELS[args.model]
-    tiers = (1, 8, 16, 32, 64, 128)
+    tiers = args.tiers
     if not args.execute:
         print(json.dumps({"execute": False, "model": model,
                           "not_before": start.isoformat(),

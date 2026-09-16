@@ -3,8 +3,8 @@
 Retry preparation for **2026-09-17 03:00 America/Chicago (CDT, UTC−05:00)**,
 which is **08:00 UTC**. This is a temporary A/B test with GLM restoration,
 not a permanent model promotion. Host model-pack preparation is separate from
-the serving container; GLM stays on its original release during preparation. A future start is not evidence that a scheduler
-has been armed; see the execution record below.
+the serving container; GLM stays on its original release during preparation.
+A future start is not evidence that a scheduler has been armed; see the execution record below.
 
 ## Window and recovery
 
@@ -26,7 +26,7 @@ loads, not a guaranteed recovery time. If GLM is not healthy by 06:00, treat it
 as an incident and continue recovery. Do not extend testing into that reserve.
 A late start shortens testing; it never moves the end of the window. No new
 candidate start after 03:10. No second engine/config attempt within this window.
-The retry allows up to 65 minutes for initial DeepSeek startup, while retaining
+The retry allows initial DeepSeek startup until 04:15, while retaining
 one hour for protocol/throughput checks and the full restoration reserve.
 
 ## Exact inputs
@@ -206,10 +206,11 @@ source "$FINITE_PRIVATE_CANARY_ENV_FILE"
 set +a
 export FINITE_PRIVATE_CORE_HOST=root@64.34.80.19
 
-# GLM baseline: deadline 03:10 Central. Omit --execute to inspect the plan.
+# Fresh GLM sanity baseline at 1 and 8 requests; deadline 03:08 Central.
+# Omit --execute to inspect the plan.
 scripts/with-dev-env python3 scripts/finite_private_v41_benchmark.py \
   --model glm --tag v2026-08-28-glm-5-3-flash-5 --window-date 2026-09-17 \
-  --deadline-utc 2026-09-17T08:10:00Z \
+  --deadline-utc 2026-09-17T08:08:00Z --tiers 1,8 \
   --evidence-dir "$FINITE_PRIVATE_EVIDENCE_DIR/baseline" --execute
 ```
 
@@ -223,7 +224,12 @@ scripts/with-dev-env python3 scripts/finite_private_v41_benchmark.py \
   --evidence-dir "$FINITE_PRIVATE_EVIDENCE_DIR/deepseek" --execute
 ```
 
-The tiers are 1, 8, 16, 32, 64, 128; three repetitions each, 1,024 output tokens,
+The retry refreshes GLM at 1 and 8 requests before the swap; its full September
+16 sweep below is the prior-day reference, not a simultaneous matched run.
+This avoids consuming the swap deadline or mistaking the known 128-request
+latency limit for a protocol failure. DeepSeek retains the full sweep.
+
+The full tiers are 1, 8, 16, 32, 64, 128; three repetitions each, 1,024 output tokens,
 thinking on/high, one bounded warmup, and distinct synthetic short prompts.
 The 128 tier means 128 concurrent client requests. The measured candidate
 retains its 64-sequence engine limit, so this tier also measures queueing and
@@ -305,7 +311,7 @@ passing speed measurements as permission to leave DeepSeek serving.
   September 16 comments describe the original preparation, not a new release.
 - Benchmark execution now requires `--window-date`; UTC bounds derive from
   America/Chicago, including daylight saving time. Dry-run remains the default.
-- Validation: 31 focused Python tests pass; dry-run confirms September 17
+- Validation: 32 focused Python tests pass; dry-run confirms September 17
   UTC bounds, the 05:15 cutoff, and concurrency tiers through 128. The live
   launch dry-run correctly refuses the incomplete DeepSeek job.
 - No new timed execution is armed. The previous overnight sleep loop ended

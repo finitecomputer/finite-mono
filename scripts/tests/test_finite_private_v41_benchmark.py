@@ -8,7 +8,9 @@ import unittest
 from unittest.mock import patch
 
 from scripts.check_finite_private_glm53_capacity import request_once
-from scripts.finite_private_v41_benchmark import check_window, command, measurement_cutoff, utc, window
+from scripts.finite_private_v41_benchmark import (
+    check_window, command, measurement_cutoff, parse_tiers, utc, window,
+)
 
 DAY = date(2026, 9, 17)
 START, END = window(DAY)
@@ -45,6 +47,12 @@ class WindowTests(unittest.TestCase):
         check_window(START, cutoff, DAY)
         with self.assertRaises(ValueError):
             check_window(START, cutoff + timedelta(seconds=1), DAY)
+
+    def test_baseline_subset_keeps_bounded_increasing_tiers(self):
+        self.assertEqual(parse_tiers("1,8"), (1, 8))
+        for value in ("", "0", "256", "8,1", "1,1", "1,no"):
+            with self.subTest(value=value), self.assertRaises(argparse.ArgumentTypeError):
+                parse_tiers(value)
 
     def test_identical_workload_for_both_models(self):
         glm = command("glm-5-3-flash", "glm-tag", 32)
