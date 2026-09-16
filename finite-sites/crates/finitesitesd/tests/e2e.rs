@@ -3309,7 +3309,7 @@ async fn project_init_rejects_legacy_app_and_document_outputs() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn git_ref_event_reconciles_after_restart_boundary() {
+async fn git_ref_event_retries_unavailable_repository_after_reopening() {
     let user_pubkey = finitesites_proto::event::pubkey_for_secret(&user_secret()).unwrap();
     let server = TestServer::start_with_git_auto_reconcile(&user_pubkey, false).await;
 
@@ -3392,6 +3392,34 @@ async fn git_ref_event_reconciles_after_restart_boundary() {
                 site_url_port: Some(server.port()),
             },
         );
+        let pending_before = engine.pending_git_ref_events(None).unwrap();
+        let repo = data_dir
+            .join("git/projects")
+            .join(format!("{}.git", pending_before[0].project_id));
+        let unavailable_repo = data_dir.join("temporarily-unavailable.git");
+        std::fs::rename(&repo, &unavailable_repo).unwrap();
+        let error =
+            finitesitesd::git::reconcile_pending_events(&mut engine, &data_dir, None, now_unix())
+                .expect_err("repository outage must remain retryable");
+        assert!(!error.is_empty());
+        assert_eq!(engine.pending_git_ref_events(None).unwrap(), pending_before);
+        assert_eq!(
+            project_site_status(&server, "finitechat-native-mockup").active_version,
+            None
+        );
+        drop(engine);
+        std::fs::rename(&unavailable_repo, &repo).unwrap();
+        let mut engine = Engine::new(
+            Store::open(&data_dir.join("registry.db")).unwrap(),
+            BlobStore::open(&data_dir.join("blobs")).unwrap(),
+            [9u8; 32],
+            EngineConfig {
+                base_domain: BASE_DOMAIN.to_string(),
+                site_url_scheme: "http".to_string(),
+                site_url_port: Some(server.port()),
+            },
+        );
+        assert_eq!(engine.pending_git_ref_events(None).unwrap(), pending_before);
         let processed =
             finitesitesd::git::reconcile_pending_events(&mut engine, &data_dir, None, now_unix())
                 .unwrap();
@@ -3598,6 +3626,235 @@ async fn static_publish_revalidates_to_new_active_bytes_when_push_returns() {
         );
     });
     task.await.unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn invalid_git_configs_allow_correcting_pushes() {
+    exercise_git_config_recovery(false).await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn inherited_pending_git_configs_allow_discovery_and_correcting_push() {
+    exercise_git_config_recovery(true).await;
+}
+
+async fn exercise_git_config_recovery(inherited: bool) {
+    let user_pubkey = finitesites_proto::event::pubkey_for_secret(&user_secret()).unwrap();
+    let server = TestServer::start(&user_pubkey).await;
+    tokio::task::spawn_blocking(move || {
+        let body = serde_json::to_vec(&project_init_request(false)).unwrap();
+        let created: ProjectInitResponse = json_body(
+            server
+                .signed(&user_secret(), "POST", "/api/v2/projects/init", Some(&body))
+                .unwrap(),
+        );
+        let credential = mint_skyler_git_credential(&server);
+        push_project_files(
+            &server,
+            &credential,
+            &created.finite_toml,
+            "main",
+            &[("index.html", "last good version")],
+            "Initial version",
+        );
+        let original = wait_for_active_version(&server, "finitechat-native-mockup", Some(1));
+        let sharing = serde_json::json!({"visibility":"public","confirm_public":true});
+        server
+            .signed(
+                &user_secret(),
+                "POST",
+                "/api/v2/projects/finitechat-native/site/sharing",
+                Some(&serde_json::to_vec(&sharing).unwrap()),
+            )
+            .unwrap();
+
+        let dir = tempfile::tempdir().unwrap();
+        let remote = format!(
+            "http://{}:{}@127.0.0.1:{}/finitechat-native.git",
+            credential.username,
+            credential.password,
+            server.port()
+        );
+        let header = format!("http.extraHeader=Host: git.{BASE_DOMAIN}:{}", server.port());
+        run_git(&["-c", &header, "clone", &remote, "repo"], Some(dir.path()));
+        let repo = dir.path().join("repo");
+        run_git(
+            &["config", "user.email", "recovery@example.invalid"],
+            Some(&repo),
+        );
+        run_git(&["config", "user.name", "Recovery test"], Some(&repo));
+        let mut store = Store::open(&server.data_dir().join("registry.db")).unwrap();
+        let identity = store
+            .git_credential_by_id(&credential.username)
+            .unwrap()
+            .unwrap();
+        let bare_repo = server
+            .data_dir()
+            .join("git/projects")
+            .join(format!("{}.git", identity.project_id));
+        let mut failed_refs = Vec::new();
+        let mut version = 1;
+        for config in [
+            None,
+            Some(b"[project\n".as_slice()),
+            Some(b"\xff".as_slice()),
+        ] {
+            let old =
+                String::from_utf8(run_git_capture(&["rev-parse", "HEAD"], Some(&repo)).stdout)
+                    .unwrap();
+            match config {
+                Some(bytes) => std::fs::write(repo.join("finite.toml"), bytes).unwrap(),
+                None => std::fs::remove_file(repo.join("finite.toml")).unwrap(),
+            }
+            std::fs::write(
+                repo.join("index.html"),
+                "must not replace the published version",
+            )
+            .unwrap();
+            run_git(&["add", "-A"], Some(&repo));
+            run_git(&["commit", "-m", "Invalid config"], Some(&repo));
+            let new =
+                String::from_utf8(run_git_capture(&["rev-parse", "HEAD"], Some(&repo)).stdout)
+                    .unwrap();
+            if inherited {
+                // Exercise the unchanged durable post-receive writer without the
+                // HTTP reconciler, as after an interrupted or older-server push.
+                let output =
+                    git_command(&["push", bare_repo.to_str().unwrap(), "main"], Some(&repo))
+                        .env("FINITE_SITES_DATA_DIR", server.data_dir())
+                        .env("FINITE_GIT_PROJECT_ID", &identity.project_id)
+                        .env("FINITE_GIT_ACTOR_PRINCIPAL_ID", &identity.principal_id)
+                        .env("FINITE_GIT_CREDENTIAL_ID", &credential.username)
+                        .output()
+                        .unwrap();
+                assert!(
+                    output.status.success(),
+                    "{}",
+                    String::from_utf8_lossy(&output.stderr)
+                );
+            } else {
+                run_git_expect_failure(&["-c", &header, "push", "origin", "main"], Some(&repo));
+                assert!(store.pending_git_ref_events(None).unwrap().is_empty());
+            }
+            failed_refs.push((old.trim().to_string(), new.trim().to_string()));
+            let remote_ref = run_git_capture(
+                &["-c", &header, "ls-remote", "origin", "refs/heads/main"],
+                Some(&repo),
+            );
+            assert!(
+                String::from_utf8(remote_ref.stdout)
+                    .unwrap()
+                    .starts_with(new.trim())
+            );
+            assert_eq!(
+                project_site_status(&server, "finitechat-native-mockup").active_version,
+                Some(version)
+            );
+            assert_eq!(
+                server
+                    .site_get("finitechat-native-mockup", "/", server.port())
+                    .unwrap()
+                    .into_string()
+                    .unwrap(),
+                "last good version"
+            );
+            if !inherited {
+                std::fs::write(repo.join("finite.toml"), &created.finite_toml).unwrap();
+                std::fs::write(repo.join("index.html"), "last good version").unwrap();
+                run_git(&["add", "-A"], Some(&repo));
+                run_git(&["commit", "-m", "Correct config"], Some(&repo));
+                run_git(&["-c", &header, "push", "origin", "main"], Some(&repo));
+                version += 1;
+                wait_for_active_version(&server, "finitechat-native-mockup", Some(version));
+            }
+        }
+        if inherited {
+            assert_eq!(store.pending_git_ref_events(None).unwrap().len(), 3);
+            let auth = base64::Engine::encode(
+                &base64::engine::general_purpose::STANDARD,
+                format!("{}:{}", credential.username, credential.password),
+            );
+            server
+                .agent
+                .get(&format!(
+                    "{}/finitechat-native.git/info/refs?service=git-receive-pack",
+                    server.api_url
+                ))
+                .set("Host", &format!("git.{BASE_DOMAIN}:{}", server.port()))
+                .set("Authorization", &format!("Basic {auth}"))
+                .call()
+                .unwrap();
+            assert_eq!(
+                store.pending_git_ref_events(None).unwrap().len(),
+                3,
+                "discovery must not reconcile"
+            );
+            std::fs::write(repo.join("finite.toml"), &created.finite_toml).unwrap();
+            std::fs::write(repo.join("index.html"), "last good version").unwrap();
+            run_git(&["add", "-A"], Some(&repo));
+            run_git(&["commit", "-m", "Correct inherited config"], Some(&repo));
+            run_git(&["-c", &header, "push", "origin", "main"], Some(&repo));
+            version += 1;
+            wait_for_active_version(&server, "finitechat-native-mockup", Some(version));
+        }
+        for (old, new) in failed_refs {
+            let (event, inserted) = store
+                .record_git_ref_event(
+                    &identity.project_id,
+                    "refs/heads/main",
+                    &old,
+                    &new,
+                    &identity.principal_id,
+                    None,
+                    &credential.username,
+                    now_unix(),
+                )
+                .unwrap();
+            assert!(
+                !inserted,
+                "replaying the durable writer must not enqueue the failure again"
+            );
+            assert_eq!(event.status, finitesites_store::GitRefEventStatus::Failed);
+            assert!(event.error.is_some());
+            assert!(event.version_id.is_none());
+        }
+        assert!(store.pending_git_ref_events(None).unwrap().is_empty());
+        drop(store);
+        // Reopen the durable state as at restart; replay must create no Version.
+        let mut engine = Engine::new(
+            Store::open(&server.data_dir().join("registry.db")).unwrap(),
+            BlobStore::open(&server.data_dir().join("blobs")).unwrap(),
+            [9u8; 32],
+            EngineConfig {
+                base_domain: BASE_DOMAIN.to_string(),
+                site_url_scheme: "http".to_string(),
+                site_url_port: Some(server.port()),
+            },
+        );
+        assert_eq!(
+            finitesitesd::git::reconcile_pending_events(
+                &mut engine,
+                server.data_dir(),
+                None,
+                now_unix()
+            )
+            .unwrap(),
+            0
+        );
+        let summary = project_site_status(&server, "finitechat-native-mockup");
+        assert_eq!(summary.active_version, Some(version));
+        assert_eq!(summary.url, original.url);
+        assert_eq!(
+            server
+                .site_get("finitechat-native-mockup", "/", server.port())
+                .unwrap()
+                .into_string()
+                .unwrap(),
+            "last good version"
+        );
+    })
+    .await
+    .unwrap();
 }
 
 #[tokio::test(flavor = "multi_thread")]
