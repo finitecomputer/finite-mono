@@ -361,7 +361,7 @@ fn run_cycle() -> Result<RunOnceOutcome> {
                         )?,
                     );
                     if hosted.reconcile().is_err() {
-                        eprintln!("hosted Hermes reconciliation unavailable; ingress is stopped");
+                        eprintln!("hosted Hermes reconciliation failed; see service state for ingress availability");
                     }
                     Some(hosted)
                 } else {
