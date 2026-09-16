@@ -19,11 +19,14 @@ in CI from the reviewed revision, never on a production host.
 
 ## Fly
 
-The configured public app is `finite-sites-demo` in the `finite` organization;
-the internal name is retained to reuse its volume, IPs and certificates for
-`finite.site` without a DNS change. The separate `finite-sites` app holds a
-private rehearsal database and must not be promoted as production. Set
-`APP=finite-sites-demo`. Inspect this app's resources and provision any missing app
+The configured public app is `finite-sites` in the `finite` organization. Set
+`APP=finite-sites`. Before its first public activation, replace the rehearsal
+data with a fresh, consistent Recovery Set from the current live `finite.site`
+service, restored onto an empty volume. Preserve all existing Sites, shares,
+credentials and newly accepted publishes. Verify the restored service before
+moving the domain attachment; never expose the rehearsal database. Retain the
+source volume for recovery and allow only one serving writer during the move.
+Inspect this app's resources and provision any missing app
 or `sites_data` volume before deployment; use 10 GiB as the initial volume size.
 Obtain the app's allocated IPs and certificate DNS records from Fly. Require
 issued certificates for both the API apex and wildcard Site hosts; do not copy another app's DNS records. Keep records DNS-only when
@@ -49,7 +52,7 @@ printed in that run's summary. Select the image for this rollout explicitly;
 do not assume the checked-in pin includes your source changes:
 
 ```sh
-APP=finite-sites-demo
+APP=finite-sites
 fly config validate --strict --app "$APP" --config infra/fly/sites/fly.toml
 fly deploy --app "$APP" --config infra/fly/sites/fly.toml \
   --image "$SITES_IMAGE" --ha=false

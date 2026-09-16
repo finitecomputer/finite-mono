@@ -1,7 +1,7 @@
-# Public Sites service; legacy data migration has separate runbook gates.
+# Canonical public Sites target. Restore current live data and qualify domain
+# attachment before first activation; never expose the rehearsal database.
 # This deployment consumes an existing CI-built image; Fly does not build it.
-# Reuse the existing public app, volume, IPs and certificates without DNS changes.
-app = "finite-sites-demo"
+app = "finite-sites"
 primary_region = "iad"
 kill_signal = "SIGINT"
 # Covers ordered cron -> backup worker -> Sites shutdown when backups are enabled.
