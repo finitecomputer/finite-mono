@@ -223,6 +223,12 @@ impl Engine {
         &mut self.store
     }
 
+    /// Aggregate monitoring reads use the same registry as publishing, without
+    /// changing it or exposing site/principal identifiers.
+    pub fn site_metrics(&self, now: u64) -> Result<finitesites_store::SiteMetrics, EngineError> {
+        Ok(self.store.site_metrics(now)?)
+    }
+
     // ---- auth --------------------------------------------------------------
 
     pub fn register_publishing_principal(

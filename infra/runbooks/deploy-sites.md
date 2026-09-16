@@ -50,6 +50,43 @@ Imported files must be accessible to UID/GID 65532. After maintenance overrides,
 restore `/usr/local/bin/sites-entrypoint`, serving arguments, image, services
 and mount—not just the command.
 
+## Usage metrics
+
+`GET /internal/v1/metrics` serves aggregate Prometheus usage metrics on the API
+host. It is disabled (503) unless `FINITE_SITES_METRICS_TOKEN` is configured.
+Use a dedicated 32-byte random value encoded as exactly 64 lowercase hex
+characters; empty/malformed values fail startup. Never reuse
+`FINITE_SITES_VIEWER_SESSION_TOKEN`: the server rejects matching credentials.
+The metrics token grants only this read-only endpoint; viewer-session and
+publishing credentials do not authorize it. Responses use `Cache-Control: no-store`.
+
+1. Store the new credential in the team password manager. Provision the value
+   through Fly's existing secret-import flow on stdin, without printing it or
+   placing it in arguments. Its name is `FINITE_SITES_METRICS_TOKEN`.
+2. Provision the same raw token at
+   `/etc/finite/monitoring/sites-metrics-token` on the monitoring receiver,
+   `root:finite-monitoring` mode `0640` on Ubuntu (`root:prometheus` on the
+   declared NixOS receiver). This file must never enter Git or the Nix store.
+3. Build the reviewed Sites image in CI and deploy the immutable digest using
+   the Fly procedure above. Public uptime probes must stay healthy; verify the
+   metrics request with authentication returns Prometheus text, while absent
+   or incorrect credentials receive 401. Requests on wildcard site hosts must
+   remain site traffic, not expose API metrics.
+4. Back up/reconcile the receiver's Prometheus configuration, validate it with
+   `promtool check config`, reload, and require `up{job="finite-sites-metrics"}`
+   to be 1 with fresh aggregate samples. Redirect following is disabled for
+   this authenticated scrape. Preserve unrelated live receiver configuration.
+5. Deploy the merged overview through the dashboard workflow. Verify existing
+   and published totals, the 90-day UTC bars, and the collection-health tile.
+   Record canonical `scripts/finite-status` before and after rollout.
+
+Do not change creation timestamps to repair a chart. The metrics read retained
+registry rows directly; they cannot reconstruct purged pre-cutover history.
+Rollback restores the previous image and scrape configuration. No schema or
+data migration is involved; a disabled/older endpoint leaves usage panels
+unavailable rather than reporting zero. The dashboard workflow alone does not
+deploy the service image, provision this credential, or change scrape jobs.
+
 ## Account bridge
 
 Deploy the reviewed dashboard image and verify `/site-auth` before enabling
