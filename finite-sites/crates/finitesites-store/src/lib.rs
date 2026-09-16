@@ -5,7 +5,9 @@
 //! Database and corruption errors are surfaced as typed errors, never hidden
 //! behind `Option`.
 
+mod metrics;
 mod schema;
+pub use metrics::{SiteCreationDay, SiteMetrics};
 
 mod account_email;
 pub use account_email::{AccountEmailPreflight, AccountEmailPreflightRequest};

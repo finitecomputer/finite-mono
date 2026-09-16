@@ -110,6 +110,25 @@ let
   };
 in
 {
+  # The pinned nixpkgs scrape type omits this supported Prometheus field.
+  # Extend it so the authenticated Sites scrape can reject redirects on both
+  # receivers without replacing the module's generated configuration.
+  imports = [
+    {
+      options.services.prometheus.scrapeConfigs = lib.mkOption {
+        type = lib.types.listOf (
+          lib.types.submodule {
+            options.follow_redirects = lib.mkOption {
+              type = lib.types.nullOr lib.types.bool;
+              default = null;
+              description = "Whether a scrape follows HTTP redirects.";
+            };
+          }
+        );
+      };
+    }
+  ];
+
   services.prometheus.exporters.blackbox = {
     enable = true;
     listenAddress = "127.0.0.1";
@@ -157,6 +176,26 @@ in
         module = "http_404";
         scrapeInterval = "1m";
       })
+      {
+        job_name = "finite-sites-metrics";
+        scrape_interval = "1m";
+        scrape_timeout = "3s";
+        scheme = "https";
+        metrics_path = "/internal/v1/metrics";
+        follow_redirects = false;
+        authorization = {
+          type = "Bearer";
+          credentials_file = "/etc/finite/monitoring/sites-metrics-token";
+        };
+        static_configs = [ { targets = [ "finite.site" ]; } ];
+        metric_relabel_configs = [
+          {
+            source_labels = [ "__name__" ];
+            regex = "finite_sites_existing|finite_sites_published|finite_sites_created_by_day|finite_sites_metrics_collected_at_seconds";
+            action = "keep";
+          }
+        ];
+      }
     ];
   };
 

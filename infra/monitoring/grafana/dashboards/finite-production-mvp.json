@@ -410,6 +410,301 @@
       },
       "fieldConfig": {
         "defaults": {
+          "color": {
+            "mode": "fixed",
+            "fixedColor": "blue"
+          },
+          "mappings": [],
+          "min": 0,
+          "decimals": 0,
+          "unit": "short",
+          "noValue": "Unavailable"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 4,
+        "w": 8,
+        "x": 0,
+        "y": 21
+      },
+      "id": 27,
+      "options": {
+        "colorMode": "value",
+        "graphMode": "none",
+        "justifyMode": "auto",
+        "orientation": "auto",
+        "percentChangeColorMode": "standard",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "showPercentChange": false,
+        "textMode": "value",
+        "wideLayout": true
+      },
+      "pluginVersion": "13.0.2",
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "max(finite_sites_existing{job=\"finite-sites-metrics\"} and on(job, instance) ((up{job=\"finite-sites-metrics\"} == 1) and on(job, instance) ((time() - finite_sites_metrics_collected_at_seconds{job=\"finite-sites-metrics\"} >= 0) < 180)))",
+          "instant": true,
+          "range": false,
+          "legendFormat": "Total Existing Sites",
+          "editorMode": "code"
+        }
+      ],
+      "title": "Total Existing Sites",
+      "type": "stat",
+      "description": "Sites in the retained registry excluding soft-deleted sites; includes unpublished and disabled sites. Bare Project Repositories are excluded. Unavailable when the metrics scrape fails or its registry snapshot is older than 3 minutes."
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "finite-prometheus"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "fixed",
+            "fixedColor": "blue"
+          },
+          "mappings": [],
+          "min": 0,
+          "decimals": 0,
+          "unit": "short",
+          "noValue": "Unavailable"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 4,
+        "w": 8,
+        "x": 8,
+        "y": 21
+      },
+      "id": 28,
+      "options": {
+        "colorMode": "value",
+        "graphMode": "none",
+        "justifyMode": "auto",
+        "orientation": "auto",
+        "percentChangeColorMode": "standard",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "showPercentChange": false,
+        "textMode": "value",
+        "wideLayout": true
+      },
+      "pluginVersion": "13.0.2",
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "max(finite_sites_published{job=\"finite-sites-metrics\"} and on(job, instance) ((up{job=\"finite-sites-metrics\"} == 1) and on(job, instance) ((time() - finite_sites_metrics_collected_at_seconds{job=\"finite-sites-metrics\"} >= 0) < 180)))",
+          "instant": true,
+          "range": false,
+          "legendFormat": "Published Sites",
+          "editorMode": "code"
+        }
+      ],
+      "title": "Published Sites",
+      "type": "stat",
+      "description": "Sites whose current status is published, including private, shared and public sites. Disabled and deleted sites are excluded. Unavailable when the metrics scrape fails or its registry snapshot is older than 3 minutes."
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "finite-prometheus"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "thresholds"
+          },
+          "mappings": [
+            {
+              "options": {
+                "0": {
+                  "color": "red",
+                  "text": "UNAVAILABLE"
+                },
+                "1": {
+                  "color": "green",
+                  "text": "FRESH"
+                }
+              },
+              "type": "value"
+            }
+          ],
+          "max": 1,
+          "min": 0,
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "red",
+                "value": 0
+              },
+              {
+                "color": "green",
+                "value": 1
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 4,
+        "w": 8,
+        "x": 16,
+        "y": 21
+      },
+      "id": 29,
+      "options": {
+        "colorMode": "background",
+        "graphMode": "none",
+        "justifyMode": "auto",
+        "orientation": "auto",
+        "percentChangeColorMode": "standard",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "showPercentChange": false,
+        "textMode": "name_and_value",
+        "wideLayout": true
+      },
+      "pluginVersion": "13.0.2",
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "max((up{job=\"finite-sites-metrics\"} == 1) and on(job, instance) ((time() - finite_sites_metrics_collected_at_seconds{job=\"finite-sites-metrics\"} >= 0) < 180)) or vector(0)",
+          "instant": true,
+          "range": false,
+          "editorMode": "code",
+          "legendFormat": "Collection"
+        }
+      ],
+      "title": "Sites Metrics Collection",
+      "type": "stat",
+      "description": "Monitoring data availability, separate from Sites public uptime. Requires a successful scrape and registry snapshot less than 3 minutes old."
+    },
+    {
+      "id": 30,
+      "title": "Sites Created per Day \u2014 90 Days (UTC)",
+      "description": "Calendar-day allocation counts from stored creation dates, including soft-deleted Sites. Republishes and bare Project Repositories do not count. Today is partial; zero bars are real zero-creation days. Uses the registry snapshot at the selected end time, covering 90 days regardless of the selected duration. Retained history is available on the first scrape; end times before collection began have no data. Purged legacy rows cannot be reconstructed. No data means collection is unavailable.",
+      "type": "barchart",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "finite-prometheus"
+      },
+      "gridPos": {
+        "h": 9,
+        "w": 24,
+        "x": 0,
+        "y": 25
+      },
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "fixed",
+            "fixedColor": "blue"
+          },
+          "min": 0,
+          "decimals": 0,
+          "unit": "short",
+          "noValue": "Unavailable"
+        },
+        "overrides": []
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "max by (date) (finite_sites_created_by_day{job=\"finite-sites-metrics\"} and on(job, instance) ((up{job=\"finite-sites-metrics\"} == 1) and on(job, instance) ((time() - finite_sites_metrics_collected_at_seconds{job=\"finite-sites-metrics\"} >= 0) < 180)))",
+          "instant": true,
+          "range": false,
+          "format": "table",
+          "editorMode": "code"
+        }
+      ],
+      "transformations": [
+        {
+          "id": "organize",
+          "options": {
+            "excludeByName": {
+              "Time": true
+            },
+            "indexByName": {
+              "date": 0,
+              "Value": 1
+            },
+            "renameByName": {
+              "date": "UTC date",
+              "Value": "Sites created"
+            }
+          }
+        },
+        {
+          "id": "sortBy",
+          "options": {
+            "sort": [
+              {
+                "field": "UTC date",
+                "desc": false
+              }
+            ]
+          }
+        },
+        {
+          "id": "convertFieldType",
+          "options": {
+            "conversions": [
+              {
+                "targetField": "UTC date",
+                "destinationType": "time",
+                "dateFormat": "YYYY-MM-DD"
+              }
+            ]
+          }
+        }
+      ],
+      "options": {
+        "orientation": "vertical",
+        "xField": "UTC date",
+        "xTickLabelRotation": 0,
+        "xTickLabelSpacing": 100,
+        "showValue": "never",
+        "groupWidth": 0.8,
+        "barWidth": 0.9,
+        "stacking": "none",
+        "legend": {
+          "showLegend": false
+        },
+        "tooltip": {
+          "mode": "single",
+          "sort": "none"
+        }
+      }
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "finite-prometheus"
+      },
+      "fieldConfig": {
+        "defaults": {
           "custom": {
             "align": "auto",
             "cellOptions": {
@@ -449,7 +744,7 @@
         "h": 9,
         "w": 24,
         "x": 0,
-        "y": 21
+        "y": 34
       },
       "id": 5,
       "options": {
@@ -539,7 +834,7 @@
         "h": 8,
         "w": 12,
         "x": 0,
-        "y": 30
+        "y": 43
       },
       "id": 6,
       "options": {
@@ -631,7 +926,7 @@
         "h": 8,
         "w": 12,
         "x": 12,
-        "y": 30
+        "y": 43
       },
       "id": 7,
       "options": {
@@ -737,7 +1032,7 @@
         "h": 4,
         "w": 24,
         "x": 0,
-        "y": 38
+        "y": 51
       },
       "id": 8,
       "options": {
@@ -838,7 +1133,7 @@
         "h": 8,
         "w": 12,
         "x": 0,
-        "y": 42
+        "y": 55
       },
       "id": 9,
       "options": {
@@ -933,7 +1228,7 @@
         "h": 8,
         "w": 12,
         "x": 12,
-        "y": 42
+        "y": 55
       },
       "id": 10,
       "options": {
@@ -1046,7 +1341,7 @@
         "h": 8,
         "w": 12,
         "x": 0,
-        "y": 50
+        "y": 63
       },
       "id": 11,
       "options": {
@@ -1143,7 +1438,7 @@
         "h": 8,
         "w": 12,
         "x": 12,
-        "y": 50
+        "y": 63
       },
       "id": 12,
       "options": {
@@ -1240,7 +1535,7 @@
         "h": 8,
         "w": 12,
         "x": 0,
-        "y": 58
+        "y": 71
       },
       "id": 13,
       "options": {
@@ -1335,7 +1630,7 @@
         "h": 8,
         "w": 12,
         "x": 12,
-        "y": 58
+        "y": 71
       },
       "id": 14,
       "options": {
@@ -1439,7 +1734,7 @@
         "h": 8,
         "w": 12,
         "x": 0,
-        "y": 66
+        "y": 79
       },
       "id": 15,
       "options": {
@@ -1534,7 +1829,7 @@
         "h": 8,
         "w": 12,
         "x": 12,
-        "y": 66
+        "y": 79
       },
       "id": 16,
       "options": {
@@ -1638,7 +1933,7 @@
         "h": 8,
         "w": 24,
         "x": 0,
-        "y": 74
+        "y": 87
       },
       "id": 17,
       "options": {
@@ -1752,7 +2047,7 @@
         "h": 8,
         "w": 12,
         "x": 0,
-        "y": 82
+        "y": 95
       },
       "id": 24,
       "options": {
@@ -1848,7 +2143,7 @@
         "h": 8,
         "w": 12,
         "x": 12,
-        "y": 82
+        "y": 95
       },
       "id": 25,
       "options": {
@@ -1936,7 +2231,7 @@
         "h": 4,
         "w": 24,
         "x": 0,
-        "y": 90
+        "y": 103
       },
       "id": 26,
       "options": {
@@ -2017,7 +2312,7 @@
         "h": 4,
         "w": 24,
         "x": 0,
-        "y": 94
+        "y": 107
       },
       "id": 18,
       "options": {
@@ -2060,7 +2355,7 @@
         "h": 8,
         "w": 24,
         "x": 0,
-        "y": 98
+        "y": 111
       },
       "id": 19,
       "options": {
@@ -2093,7 +2388,7 @@
         "h": 8,
         "w": 24,
         "x": 0,
-        "y": 106
+        "y": 119
       },
       "id": 20,
       "options": {
@@ -2126,7 +2421,7 @@
         "h": 8,
         "w": 24,
         "x": 0,
-        "y": 114
+        "y": 127
       },
       "id": 21,
       "options": {
@@ -2159,7 +2454,7 @@
         "h": 8,
         "w": 24,
         "x": 0,
-        "y": 122
+        "y": 135
       },
       "id": 22,
       "options": {
@@ -2192,7 +2487,7 @@
         "h": 8,
         "w": 24,
         "x": 0,
-        "y": 130
+        "y": 143
       },
       "id": 23,
       "options": {

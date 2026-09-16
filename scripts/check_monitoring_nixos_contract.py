@@ -223,6 +223,13 @@ def nix_eval() -> dict[str, Any]:
           retentionTime = cfg.services.prometheus.retentionTime;
           extraFlags = cfg.services.prometheus.extraFlags;
           scrapeJobs = map (job: job.job_name) cfg.services.prometheus.scrapeConfigs;
+          sitesMetrics = let job = builtins.head (
+            builtins.filter (job: job.job_name == "finite-sites-metrics")
+              cfg.services.prometheus.scrapeConfigs
+          ); in {
+            inherit (job) scrape_interval scrape_timeout scheme metrics_path follow_redirects authorization;
+            targets = (builtins.head job.static_configs).targets;
+          };
           chatProbe = {
             interval = chatProbe.scrape_interval;
             module = builtins.head chatProbe.params.module;
@@ -756,6 +763,7 @@ def main() -> int:
             "brain.finite.computer",
             "finite.site",
             "uptime-probe.finite.site",
+            "finite-sites-metrics",
         ],
         "public probe job set drifted",
     )
@@ -767,6 +775,22 @@ def main() -> int:
             "target": "https://chat.finite.computer/readyz",
         },
         "Chat probe must exercise semantic readiness every minute",
+    )
+    require(
+        prometheus["sitesMetrics"]
+        == {
+            "scrape_interval": "1m",
+            "scrape_timeout": "3s",
+            "scheme": "https",
+            "metrics_path": "/internal/v1/metrics",
+            "follow_redirects": False,
+            "authorization": {
+                "type": "Bearer",
+                "credentials_file": "/etc/finite/monitoring/sites-metrics-token",
+            },
+            "targets": ["finite.site"],
+        },
+        "Sites aggregate metrics scrape/auth contract drifted",
     )
 
     blackbox = contract["blackbox"]

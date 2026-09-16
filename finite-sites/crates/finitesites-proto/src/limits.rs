@@ -3,6 +3,10 @@
 //! Limits live in one place so reviews can see the whole bounded surface.
 //! Each limit notes why it has its value.
 
+/// Calendar-day creation buckets exposed to monitoring. A fixed 90-day window
+/// bounds label cardinality and the response, including zero-creation days.
+pub const SITE_METRICS_HISTORY_DAYS: u32 = 90;
+
 /// One manifest may not list more than this many files. Generous for static
 /// sites (here.now caps similar flows around the low thousands) while keeping
 /// publish sessions and missing-blob scans visibly bounded.

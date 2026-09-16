@@ -104,6 +104,11 @@ credentials are the existing GitHub `production` environment secrets
 password stays in `/etc/finite/monitoring/grafana-admin-password` on the
 monitoring host. Source documents names and locations only.
 
+Sites usage monitoring uses a separate read-only `FINITE_SITES_METRICS_TOKEN`
+Fly secret and the matching `/etc/finite/monitoring/sites-metrics-token` file
+on the monitoring receiver. Custody and activation are documented in the
+[Sites usage-metrics runbook](runbooks/deploy-sites.md#usage-metrics).
+
 `infra/nixos/` is the declared source of truth for the NixOS fleet (lat2,
 lat3, lat4; lat1 is retired). Every
 `infra/hosts/<name>/` directory is a dated capture or migration record unless

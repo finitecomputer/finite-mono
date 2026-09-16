@@ -54,11 +54,53 @@ scrape jobs when reconciling receiver drift. Record `scripts/finite-status`
 before and after the rollout. Then use the
 [dashboard-only workflow](dashboards.md).
 
+## Sites usage metrics
+
+The `finite-sites-metrics` scrape reads `https://finite.site/internal/v1/metrics`
+every minute with a dedicated bearer credential. It cannot publish or access
+private Sites. Provisioning and rollout order are in the
+[Sites deployment runbook](../runbooks/deploy-sites.md#usage-metrics).
+
+| Metric | Meaning |
+| --- | --- |
+| `finite_sites_existing` | Registry Sites excluding soft-deleted rows; includes unpublished and disabled Sites. |
+| `finite_sites_published` | Rows with published status, across all visibility settings. |
+| `finite_sites_created_by_day{date="YYYY-MM-DD"}` | Site allocations grouped by stored UTC creation date, including soft-deleted rows. |
+| `finite_sites_metrics_collected_at_seconds` | Time of the registry snapshot used for this scrape. |
+
+These are gauges derived from the existing registry, not process-local event
+counters. The daily series cover 90 UTC calendar days including partial today,
+with explicit zeroes for empty days. Bare Project Repositories, project-init
+replays, and republishes do not add creations. No owner, name, email, site ID,
+or per-site series is exported. Imported/restored rows use their stored dates;
+purged historical rows cannot be recovered by monitoring. Verify retained
+creation dates before interpreting pre-cutover counts as complete history.
+
+The overview uses an instant table query and a date-sorted bar chart, so all
+90 retained days appear on the first successful scrape, regardless of the
+selected dashboard duration or Prometheus's 15-day sample retention. The
+selected end time determines which snapshot is queried; dates before
+collection began (or outside sample retention) have no snapshot. It does not
+estimate calendar counts with a rolling `increase()` or rewrite old samples.
+The two totals and the chart show no data if scraping fails or the snapshot is
+at least three minutes old (or future-dated); the collection tile explicitly
+shows `UNAVAILABLE`. A genuine empty registry displays zeroes.
+
+Collection runs on an existing read-only SQLite reader, on the blocking pool,
+outside the publishing mutex. A read transaction keeps totals and date buckets
+consistent. Its source of truth is `sites.created_at` written at allocation
+and `sites.status` updated by publishing/operator lifecycle operations; metrics
+add no schema, durable counters, or writes. Rollbacks to older Sites images
+make collection unavailable without affecting the public uptime probes.
+
+## Credentials and deployment
+
 The monitoring host stores operational credentials only as operator-provisioned
 host files:
 
 - `/etc/finite/monitoring/grafana-admin-password`
 - `/etc/finite/monitoring/grafana-secret-key`
+- `/etc/finite/monitoring/sites-metrics-token` (raw read-only Sites bearer token)
 - `/etc/finite/monitoring/caddy.env`
 
 `caddy.env` contains only Caddy basic-auth usernames and password hashes:

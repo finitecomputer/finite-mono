@@ -72,6 +72,23 @@ scrape_configs:
     relabel_configs: *blackbox_relabel
     metric_relabel_configs: *probe_metrics
 
+  # Dedicated read-only token, provisioned before this scrape job is enabled.
+  - job_name: finite-sites-metrics
+    scrape_interval: 1m
+    scrape_timeout: 3s
+    scheme: https
+    metrics_path: /internal/v1/metrics
+    follow_redirects: false
+    authorization:
+      type: Bearer
+      credentials_file: /etc/finite/monitoring/sites-metrics-token
+    static_configs:
+      - targets: [finite.site]
+    metric_relabel_configs:
+      - source_labels: [__name__]
+        regex: finite_sites_existing|finite_sites_published|finite_sites_created_by_day|finite_sites_metrics_collected_at_seconds
+        action: keep
+
   - job_name: finite-tinfoil-collector
     scrape_interval: 1m
     static_configs:
