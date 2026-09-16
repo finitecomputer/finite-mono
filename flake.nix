@@ -370,6 +370,8 @@
                 rustBasePackages
                 ++ [
                   pkgs.age
+                  pkgs.borgbackup
+                  pkgs.python3Packages.supervisor
                   gcxCli
                   litestreamCli
                   pyToolPkgs.ruff

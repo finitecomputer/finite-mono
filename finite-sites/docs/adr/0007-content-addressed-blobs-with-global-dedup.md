@@ -5,9 +5,10 @@ A publish session reports which manifest hashes the server lacks, and the
 client uploads only those. Uploads are verified byte-for-byte against the
 hash they claim before the blob row is recorded.
 
-v1 stores blobs on the local filesystem behind a four-operation interface
-(`put`/`has`/`get`/path); a Garage/S3 implementation replaces that crate
-for production without touching the engine.
+Blobs live on the Sites data volume behind a four-operation interface
+(`put`/`has`/`get`/path). Off-host recovery uses the complete stopped-Sites
+snapshot archived by Borg, as described in
+[the recovery runbook](../../../infra/runbooks/deploy-sites.md#backups-and-restore).
 
 Known tradeoff: the missing-blob list reveals whether a given hash exists
 anywhere on the platform (here.now and Workers static assets accept the
