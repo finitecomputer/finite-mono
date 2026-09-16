@@ -2,6 +2,8 @@
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
 import { once } from "node:events";
+import { access, writeFile } from "node:fs/promises";
+import { join } from "node:path";
 import { createServer } from "node:net";
 import { chromium } from "playwright";
 import { chromiumLaunchOptions } from "./playwright-browser";
@@ -54,6 +56,9 @@ try {
   // Repeat a full read: new WASM peer/admission, no persistent identity.
   await page.getByRole("button", { name: "Check agent status" }).click();
   await page.getByText("Live Hermes status received", { exact: true }).waitFor({ timeout: 45_000 });
+  await page.getByRole("button", { name: "Read agent skills" }).click();
+  await page.getByTestId("agent-skills").getByText("finite-iroh-acceptance", { exact: true }).waitFor({ timeout: 45_000 });
+  assert(await page.getByTestId("agent-skills").getByText("Real agent-local skills acceptance fixture", { exact: true }).isVisible());
   if (process.env.FINITE_TEST_STATUS_SCREENSHOT) {
     await page.screenshot({ path: process.env.FINITE_TEST_STATUS_SCREENSHOT, fullPage: true });
   }
@@ -69,29 +74,73 @@ try {
     if (!response.ok) throw new Error("Held peer admission failed");
     Object.assign(window, { heldStatusPeer: peer, heldStatusEndpoint: binding.endpointId });
     await new Promise((r) => setTimeout(r, 6_000));
-    const result = JSON.parse(await peer.request(binding.endpointId, "GET", "/api/status", "{}", new Uint8Array()));
-    if (result.status !== 200) throw new Error("Held peer did not reach Hermes");
+    const unauthenticated = JSON.parse(await peer.request(binding.endpointId, "GET", "/api/skills", "{}", new Uint8Array()));
+    if (unauthenticated.status !== 401) throw new Error("Protected skills did not require native authentication");
+    const root = JSON.parse(await peer.request(binding.endpointId, "GET", "/", "{}", new Uint8Array()));
+    const html = new TextDecoder().decode(new Uint8Array(root.body));
+    const match = html.match(/window\.__HERMES_SESSION_TOKEN__=("[^"\r\n]+");/);
+    if (!match) throw new Error("Native token bootstrap missing");
+    const token = JSON.parse(match[1]);
+    Object.assign(window, { heldHermesToken: token });
+    const result = JSON.parse(await peer.request(binding.endpointId, "GET", "/api/skills", JSON.stringify({ "X-Hermes-Session-Token": token }), new Uint8Array()));
+    if (result.status !== 200) throw new Error("Authenticated skills read failed");
   }, api);
+  // Test-only file rendezvous asks the Rust process owner to restart Hermes.
+  // No runtime or Core production restart hook is introduced.
+  const restartDir = process.env.FINITE_TEST_HERMES_RESTART_DIR;
+  assert(restartDir);
+  await writeFile(join(restartDir, "restart-hermes"), "restart");
+  for (let n = 0; ; n++) {
+    if (await access(join(restartDir, "hermes-restarted")).then(() => true).catch(() => false)) break;
+    assert(n < 100, "Hermes restart did not complete");
+    await new Promise((r) => setTimeout(r, 100));
+  }
+  await page.evaluate(async () => {
+    const state = window as unknown as {
+      heldStatusPeer: { request(...args: unknown[]): Promise<string> };
+      heldStatusEndpoint: string; heldHermesToken: string;
+    };
+    for (let n = 0; ; n++) {
+      try {
+        const response = JSON.parse(await state.heldStatusPeer.request(state.heldStatusEndpoint, "GET", "/", "{}", new Uint8Array()));
+        if (response.status === 200) break;
+      } catch { /* Hermes is still starting. */ }
+      if (n === 100) throw new Error("Hermes did not restart behind existing Iroh endpoint");
+      await new Promise((r) => setTimeout(r, 100));
+    }
+    const old = JSON.parse(await state.heldStatusPeer.request(state.heldStatusEndpoint, "GET", "/api/skills", JSON.stringify({ "X-Hermes-Session-Token": state.heldHermesToken }), new Uint8Array()));
+    if (old.status !== 401) throw new Error("Old token survived Hermes restart");
+    const root = JSON.parse(await state.heldStatusPeer.request(state.heldStatusEndpoint, "GET", "/", "{}", new Uint8Array()));
+    const html = new TextDecoder().decode(new Uint8Array(root.body));
+    const match = html.match(/window\.__HERMES_SESSION_TOKEN__=("[^"\r\n]+");/);
+    if (!match) throw new Error("Replacement token missing");
+    const fresh = JSON.parse(match[1]);
+    if (fresh === state.heldHermesToken) throw new Error("Token did not rotate");
+    state.heldHermesToken = fresh;
+  });
+  await page.getByRole("button", { name: "Read agent skills" }).click();
+  await page.getByTestId("agent-skills").getByText("finite-iroh-acceptance", { exact: true }).waitFor({ timeout: 45_000 });
   await page.getByRole("button", { name: "Disable hosted access" }).click();
   await page.getByRole("button", { name: "Enable hosted access" }).waitFor();
   assert(await page.getByRole("button", { name: "Check agent status" }).isDisabled());
   assert.equal(await page.getByTestId("agent-status").count(), 0);
+  assert.equal(await page.getByTestId("agent-skills").count(), 0);
   const binding = await page.evaluate(async (api) => fetch(api).then((r) => r.json()), api);
   assert.equal(binding.enabled, false);
   await new Promise((r) => setTimeout(r, 6_000));
   const revoked = await page.evaluate(async () => {
     const state = window as unknown as { heldStatusPeer: {
       request(...args: unknown[]): Promise<string>; close(): Promise<void>; free(): void;
-    }; heldStatusEndpoint: string };
+    }; heldStatusEndpoint: string; heldHermesToken: string };
     try {
-      await state.heldStatusPeer.request(state.heldStatusEndpoint, "GET", "/api/status", "{}", new Uint8Array());
+      await state.heldStatusPeer.request(state.heldStatusEndpoint, "GET", "/api/skills", JSON.stringify({ "X-Hermes-Session-Token": state.heldHermesToken }), new Uint8Array());
       return false;
     } catch { return true; }
     finally { await state.heldStatusPeer.close(); state.heldStatusPeer.free(); }
   });
   assert(revoked, "Disabled access still reached native Hermes");
   assert.deepEqual(errors, []);
-  console.log("REAL DASHBOARD/WASM PASS: default-off denial, enable, two live Hermes status reads, disable, revoked peer denied");
+  console.log("REAL DASHBOARD/WASM PASS: default-off denial, enable, status + seeded skills, missing-token401, native bootstrap200, Hermes restart/token rotation, fresh skills read, revoked authenticated peer denied");
 } catch (error) {
   console.error(logs.slice(-8000)); throw error;
 } finally {

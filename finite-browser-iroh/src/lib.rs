@@ -46,8 +46,13 @@ impl BrowserPeer {
         body: Vec<u8>,
     ) -> Result<String, JsError> {
         let port = 8642;
-        if method != "GET" || !path.starts_with("/api/") || path.contains(['\r', '\n', '#']) {
-            return Err(err("Only agent API GET requests are supported"));
+        if method != "GET"
+            || !(path == "/" || path.starts_with("/api/"))
+            || path.contains(['\r', '\n', '#'])
+        {
+            return Err(err(
+                "Only native bootstrap and agent API GET requests are supported",
+            ));
         }
         let (io, connection) = self.tunnel(&agent, port).await?;
         let (mut sender, driver) =
