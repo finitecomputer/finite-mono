@@ -103,6 +103,12 @@ dashboard account bridge or migration from a legacy database.
 
 ## Recovery and cutover
 
+Fly backups are opt-in and disabled in the checked-in configuration. Follow the
+[Borg recovery runbook](sites-borg-recovery.md) for the dedicated rsync.net
+repository, root-only credentials, schedule, external alerts and independent
+empty-volume restore. The image workflow also tests backup and restore locally;
+that does not prove the remote recovery path is ready.
+
 Roll back to a previous image digest only when it can read the current state. Preserve the data volume; binary rollback does not undo migrations or
 writes. If a Git push was accepted but publication failed, reconcile it after
 service recovery. Never restore an old database over newer accepted writes.
