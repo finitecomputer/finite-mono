@@ -318,6 +318,20 @@ class CiHarnessSelectionTests(unittest.TestCase):
             {"run_nix_checks"},
         )
 
+    def test_sites_offline_reconciliation_paths_run_nix_checks(self) -> None:
+        for path in (
+            "scripts/sites-reconcile-static-output-ids.py",
+            "scripts/tests/test_sites_reconcile_static_output_ids.py",
+        ):
+            with self.subTest(path=path):
+                self.assertEqual(selected(path), {"run_nix_checks"})
+
+    def test_sites_offline_reconciliation_runs_in_nix_contract_job(self) -> None:
+        self.assertIn(
+            "run: nix develop --command just sites-offline-reconciliation-contract",
+            ci_job_block("nix-checks"),
+        )
+
     def test_stripe_price_contract_path_runs_nix_checks(self) -> None:
         self.assertEqual(
             selected(
