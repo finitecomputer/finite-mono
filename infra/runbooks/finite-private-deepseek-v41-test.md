@@ -236,7 +236,13 @@ passing speed measurements as permission to leave DeepSeek serving.
   dedicated worktree. It contains fleet state and must not be committed.
 - Candidate release: `v2026-09-16-deepseek-v4-1-flash-test-1`;
   measurement workflow: <https://github.com/finitecomputer/confidential-finite-private/actions/runs/35049160787>.
-  Publication and decoded-config verification must succeed before entry.
+  Published successfully; deployment hash and GitHub attestation verified, and
+  decoded configuration equals the reviewed candidate byte for byte.
+  Deployment SHA256: `7cc6efab72885dcee0f2454c289805f5af6427fae8b5955b82c85906c370fc99`.
+  Candidate config SHA256: `4caf0d4ed3ef3d43a8976202989c7ce173d77b8721d049e12ded46e83f979e89`.
 - Window duration: confirmed by the user, 03:00–06:00 Central; restore by 05:15.
 - Scheduling: **not armed**. No scheduled production operation exists yet.
 - Runtime H200/TDX proof: pending the maintenance test.
+
+- Final preparation check: original GLM tag still `ready`, auto-update false,
+  no update staged. Sixteen focused Python tests pass.
