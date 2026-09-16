@@ -266,7 +266,6 @@
           # Sites CLI, built with the Runtime's libc family.
           runtimeFinitePackages = import ./infra/nixos/packages.nix {
             pkgs = hermesPkgs;
-            craneLib = crane.mkLib hermesPkgs;
             sourceRoot = ./.;
           };
           withFinitePatches =
