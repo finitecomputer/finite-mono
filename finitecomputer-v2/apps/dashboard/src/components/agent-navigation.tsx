@@ -50,9 +50,9 @@ export function AgentNavigation({
     },
     {
       label: "Sites",
+      href: `${root}/sites`,
       icon: Globe2Icon,
-      active: false,
-      note: "Open a site from Preview in chat",
+      active: pathname === `${root}/sites`,
     },
     {
       label: "Brain",
