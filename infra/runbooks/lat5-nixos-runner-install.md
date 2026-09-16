@@ -8,8 +8,6 @@ fully synchronized mirrors, storage health, and SSH identity are verified.
 The bootstrap credential fix merged in
 [PR #889](https://github.com/finitecomputer/finite-mono/pull/889).
 Lat5 is connected to the hub and Core and reports drained capacity.
-Controlled launch and cohort capacity qualification remain in step 4.
-No Agent Runtime has been created on lat5.
 
 Use lat4's dedicated NixOS/Kata Runner architecture with an empty `/data`.
 Lat2 remains the app plane and WireGuard hub. Existing Agent Runtimes remain
@@ -308,36 +306,6 @@ verified as root-owned mode 0600.
 | Runtime pin | `finite-agent-runtime-2026-09-14.1`, matching Core's current promoted, non-retired artifact |
 | Storage and telemetry | Storage green; metrics `up=1`; Runner logs received with `host="finite-lat-5"` and `role="runner"` |
 | Existing fleet | Chat, recovery, and rollout sections green; lat3 31/31 and lat4 27/27 ready |
-
-Canonical status intentionally marks lat5's drain as red for new admission.
-Its local-only artifact comparison is unknown because Core's catalog is on
-lat2; the pin was checked against lat2's canonical status separately. Existing
-fleet version skew remains red. These are not an all-green fleet claim or
-permission to open cohort capacity. Step 4 remains outstanding.
-
-## 4. Qualify launch and release capacity
-
-Use an explicit test account to prove enrollment, Agent admission, launch,
-identity readiness and a Chat reply. Verify the actual destination through
-the [targeted canary procedure](targeted-agent-canary.md): an ordinary Launch
-Code grants entitlement without selecting a host; the operator must bind the
-unused canary code to lat5 before redemption. Begin with one canary, then
-release the temporary reservation and disable drain after verification.
-The earlier 24–28-runtime estimate was for advertised 128 GB hardware and is
-superseded. The captured host has 192 GB, like lat4. Its owner-selected ceiling
-is 42 total runtimes, including canaries. This is an estimated ceiling, not proof
-of 42 simultaneously busy guests. Monitor host and guest memory, CPU pressure,
-launch failures and Chat behavior as the pool fills; lower the ceiling if needed.
-
-Complete FIN-74 when the canary passes enrollment, launch and Chat checks and
-lat5 accepts ordinary launches at the approved ceiling. TRF IT can then create
-empty Agent Runtimes in the shared pool and hand them back to Austin for migration.
-TRF is not pinned to lat5; retain suitable prepared destinations on other hosts,
-including Rene's existing slot. New-user onboarding uses the same pool.
-
-Source Telegram bots stay running during host setup and migration rehearsal.
-Each later migration owns a brief, single-consumer Telegram switch and Google
-reconnection under the [shared fleet plan](https://linear.app/finitecomputer/document/trf-fleet-migration-plan-and-evidence-21410d33bc9b).
 
 ### Controlled-canary attempt, 2026-09-15
 
