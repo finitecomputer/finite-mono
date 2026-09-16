@@ -39,10 +39,9 @@ in
       FC_RUNNER_MAX_SANDBOXES = "1";
       FC_RUNNER_PHALA_EXPECTED_WORKSPACE_ID = "wks_YKRQqRea";
       FC_RUNNER_PHALA_EXPECTED_WORKSPACE_SLUG = "finite";
-      # This is the effective pin for the Phala lane: phala-runner.env holds
-      # only credentials, so changing this value is a Phala Runtime rollout,
-      # not a records edit. It is independent of the Kata fleet's pin.
-      FC_RUNNER_RUNTIME_ARTIFACT_ID = "finite-agent-runtime-2026-07-22.1";
+      # The qualified canonical Runtime artifact is required in phala-runner.env,
+      # just as Kata requires its promoted pin in runner.env. Never retain an
+      # old image fallback beside a new Sites endpoint. Missing pins fail closed.
       FC_RUNNER_RUNTIME_ENV_JSON = builtins.toJSON {
         FINITE_SITES_API = "https://finite.site";
         FINITE_BRAIN_SERVER_URL = "https://brain.finite.computer";
@@ -62,8 +61,8 @@ in
       Type = "simple";
       ExecStart = "${finitePackages.finite-saas-runner}/bin/finite-saas-runner serve";
 
-      # Operator-created root:root 0600. It contains only this worker's
-      # route-scoped Core token and Phala API key.
+      # Operator-created root:root 0600: this worker's route-scoped Core token,
+      # Phala API key, and required FC_RUNNER_RUNTIME_ARTIFACT_ID promotion pin.
       EnvironmentFile = [ "/etc/finite/phala-runner.env" ];
       LoadCredential = "runtime-secrets.env:/etc/finite/runtime-secrets.env";
 

@@ -74,11 +74,12 @@ account login setting in `fly.toml`. The pre-cutover dashboard lacks this route;
 setting an upstream alone is insufficient. Stage the reviewed dashboard image
 and include its deployment in the authorized cutover.
 Both services must receive the same `FINITE_SITES_VIEWER_SESSION_TOKEN` from the
-secret inventory. At the authorized cutover, merge the
-[dashboard assignment](../fly/sites/dashboard.env.example) into its existing
-`/etc/finite/dashboard.env`, preserving all other values and root:root `0600`.
-This sets `FC_SITES_V2_UPSTREAM_URL=https://finite.site`; keep
-`FC_SITES_UPSTREAM_URL=http://127.0.0.1:8787` for legacy previews and Hosted Chat.
+secret inventory. The NixOS dashboard module owns both non-secret origins:
+`FC_SITES_V2_UPSTREAM_URL=https://finite.site` and
+`FC_SITES_UPSTREAM_URL=http://127.0.0.1:8787` for retained legacy previews.
+At cutover, remove stale copies of these two assignments from
+`/etc/finite/dashboard.env`, preserving its other settings and root:root `0600`.
+Do not maintain a second endpoint configuration in an operator file.
 Restart the dashboard through its normal deployment procedure and verify both
 origins. A failed v2 exchange must not retry against legacy.
 
@@ -277,3 +278,12 @@ has an approved replacement or retirement, legacy requester consumers are gone,
 and the retained Recovery Set has restored independently. Preserve redirects
 for migrated URLs and existing-state migration/restore tests; their age alone
 does not make them disposable.
+
+For Runtime promotion, use the same qualified Core artifact in the active
+Kata workers' `/etc/finite/runner.env` and, when enabled, Phala's
+`/etc/finite/phala-runner.env` as `FC_RUNNER_RUNTIME_ARTIFACT_ID`. Neither lane
+has a repository fallback pin. Set the Phala pin before applying a closure
+that removes the old default; otherwise the worker intentionally fails startup.
+The credential bootstrap does not promote a Runtime. Follow the existing
+[Runtime rollout procedure](runtime-image.md) for artifact registration,
+new-agent admission and existing-agent upgrades.
