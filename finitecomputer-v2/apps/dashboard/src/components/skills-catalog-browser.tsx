@@ -2,9 +2,10 @@
 
 import { memo, useMemo, useState } from "react";
 
-import { SearchIcon } from "lucide-react";
+import { SearchIcon, XIcon } from "lucide-react";
 
-import { Input } from "@/components/ui/input";
+import headingStyles from "@/styles/agent-page-heading.module.css";
+import styles from "@/styles/skills-catalog.module.css";
 import type { BaselineSkillCatalogEntry } from "@/lib/skills-catalog";
 
 const SkillCard = memo(function SkillCard({ skill }: { skill: BaselineSkillCatalogEntry }) {
@@ -31,7 +32,7 @@ const SkillCard = memo(function SkillCard({ skill }: { skill: BaselineSkillCatal
   );
 });
 
-export function SkillsCatalogBrowser({ skills }: { skills: BaselineSkillCatalogEntry[] }) {
+export function SkillsCatalogBrowser({ skills, summary }: { skills: BaselineSkillCatalogEntry[]; summary: string }) {
   const [query, setQuery] = useState("");
 
   const filteredSkills = useMemo(() => {
@@ -48,22 +49,18 @@ export function SkillsCatalogBrowser({ skills }: { skills: BaselineSkillCatalogE
   }, [query, skills]);
 
   return (
-    <section className="ocean-catalog-section">
-      <div className="ocean-catalog-toolbar">
-        <div className="ocean-catalog-toolbar__copy">
-          <h2>Catalog</h2>
-          <p>{filteredSkills.length} of {skills.length} skills</p>
+    <section className={styles.catalog}>
+      <header className={headingStyles.stack}>
+        <h1 className={headingStyles.title}>Skills</h1>
+        <div className={styles.toolbar}>
+          <p className={headingStyles.subtitle}>{summary}</p>
+          <div className={styles.search}>
+            <SearchIcon aria-hidden="true" size={16} />
+            <input aria-label="Search skills" placeholder="Search skills" value={query} onChange={(event) => setQuery(event.target.value)} type="search" />
+            <button type="button" aria-label="Clear search" style={{ visibility: query ? "visible" : "hidden" }} onClick={() => setQuery("")}><XIcon size={16} /></button>
+          </div>
         </div>
-        <div className="ocean-catalog-search">
-          <SearchIcon className="pointer-events-none absolute left-3 top-1/2 size-4 -translate-y-1/2 text-muted-foreground" />
-          <Input
-            value={query}
-            onChange={(event) => setQuery(event.target.value)}
-            placeholder="Search skills"
-            className="h-10 rounded-lg pl-10"
-          />
-        </div>
-      </div>
+      </header>
 
       {filteredSkills.length > 0 ? (
         <div className="ocean-skill-grid">
