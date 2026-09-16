@@ -796,6 +796,10 @@ fn router_from_state(state: CoreApiState) -> Router {
             post(provision_runtime_credential),
         )
         .route(
+            "/api/core/v1/runtime-control-requests/{request_id}/runtime-credential",
+            post(provision_upgrade_credential),
+        )
+        .route(
             "/api/core/v1/me/runtimes/{runtime_id}/hosted-access",
             get(hosted_access).put(set_hosted_access),
         )
@@ -1775,6 +1779,28 @@ async fn provision_runtime_credential(
         .provision_runtime_credential(
             crate::store::runtime_credentials::ProvisionRuntimeCredential {
                 creation_request_id: request_id,
+                runner_id: input.runner_id,
+                lease_token: input.lease_token,
+                source_host_id: credential.source_host_id,
+            },
+        )
+        .await?;
+    Ok(([("cache-control", "no-store")], Json(result)))
+}
+
+async fn provision_upgrade_credential(
+    State(state): State<CoreApiState>,
+    headers: HeaderMap,
+    Path(request_id): Path<String>,
+    Json(input): Json<ProvisionRuntimeCredentialRequest>,
+) -> Result<impl IntoResponse, ApiError> {
+    let credential = require_runner_auth(&state, &headers)?;
+    authorize_runner_id(&credential, &input.runner_id)?;
+    let result = state
+        .store
+        .provision_upgrade_credential(
+            crate::store::runtime_credentials::ProvisionUpgradeCredential {
+                request_id,
                 runner_id: input.runner_id,
                 lease_token: input.lease_token,
                 source_host_id: credential.source_host_id,
