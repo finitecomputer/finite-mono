@@ -128,7 +128,7 @@ export async function startHermes({ binary, publicUrl = 'http://hermes-proof.inv
 
 // A server-side cookie jar deliberately never crosses into the WS client.
 // No browser storage, proxy, or bespoke ticket implementation is involved.
-export async function probeAuth({ baseUrl, credentials, expiry = true, wsOrigin, rejectedOrigin, restOrigin, requestHeaders = {},
+export async function probeAuth({ baseUrl, credentials, expiry = true, wsOrigin, rejectedOrigin, restOrigin, allowedRestOrigin = false, requestHeaders = {},
   onProgress = () => {} }) {
   const base = baseUrl.replace(/\/$/, '');
   const expectedPath = new URL(base).pathname.replace(/\/$/, '') || '/';
@@ -181,9 +181,35 @@ export async function probeAuth({ baseUrl, credentials, expiry = true, wsOrigin,
     const accessToken = access.split(';')[0].slice(access.indexOf('=') + 1);
     const response = await request('/api/config', { headers: { Authorization: `Bearer ${accessToken}`, Origin: restOrigin } });
     assert.equal(response.status, 200, 'Native REST must accept its own access token as bearer');
-    assert.equal(response.headers.get('access-control-allow-origin'), null,
-      'This proof must not silently add cross-origin REST access');
-    pass('native REST bearer accepted; production Origin remains unavailable to browser CORS', { origin: restOrigin });
+    assert.equal(response.headers.get('access-control-allow-origin'), allowedRestOrigin ? restOrigin : null,
+      'REST CORS must match the explicitly configured edge policy');
+    pass('native REST bearer accepted with expected CORS policy', { origin: restOrigin, corsAllowed: allowedRestOrigin });
+    for (const [name, authorization, expected] of [
+      ['anonymous', undefined, 401], ['invalid', 'Bearer not-a-native-session', 401],
+      ['native session', `Bearer ${accessToken}`, 200],
+    ]) {
+      const response = await request('/api/auth/me', { headers: { Origin: restOrigin,
+        ...(authorization ? { Authorization: authorization } : {}) } });
+      assert.equal(response.status, expected, `${name} protected identity check`);
+      assert.equal(response.headers.get('access-control-allow-origin'), allowedRestOrigin ? restOrigin : null);
+      await response.arrayBuffer();
+    }
+    pass('protected native identity rejects anonymous/invalid and accepts native session');
+    if (allowedRestOrigin) {
+      const preflight = await request('/api/auth/me', { method: 'OPTIONS', headers: {
+        Origin: restOrigin, 'Access-Control-Request-Method': 'GET', 'Access-Control-Request-Headers': 'authorization',
+      } });
+      assert.equal(preflight.status, 204);
+      assert.equal(preflight.headers.get('access-control-allow-origin'), restOrigin);
+      assert.match(preflight.headers.get('access-control-allow-headers'), /Authorization/);
+      assert.equal(preflight.headers.get('access-control-allow-credentials'), null);
+      for (const origin of ['https://untrusted.invalid', 'http://localhost:9999', 'null']) {
+        const denied = await request('/api/status', { headers: { Origin: origin } });
+        assert.equal(denied.headers.get('access-control-allow-origin'), null, 'Unlisted origins must not inherit native CORS');
+        await denied.arrayBuffer();
+      }
+      pass('explicit-origin preflight accepted and unlisted origins have no CORS permission');
+    }
   }
 
   const mint = async () => {

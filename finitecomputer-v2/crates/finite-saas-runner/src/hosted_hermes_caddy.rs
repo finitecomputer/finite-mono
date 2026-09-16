@@ -24,6 +24,10 @@ pub struct HostedHermesRouteManifest {
     pub listen: SocketAddr,
     /// A socket in a Runner-owned private directory, not Caddy's TCP admin API.
     pub admin_socket: PathBuf,
+    /// Exact browser origins permitted to read native API responses. Empty is
+    /// closed to cross-origin browsers; HTTP is restricted to local development.
+    #[serde(default)]
+    pub allowed_origins: Vec<String>,
     pub routes: Vec<HostedHermesRoute>,
 }
 
@@ -80,6 +84,7 @@ impl HostedHermesRouteManifest {
         if self.routes.len() > MAX_ROUTES {
             return Err(InvalidManifest("too many routes"));
         }
+        let allowed_origins = validate_browser_origins(&self.allowed_origins)?;
         let mut ids = BTreeSet::new();
         let mut ports = BTreeSet::new();
         for route in &self.routes {
@@ -107,17 +112,53 @@ impl HostedHermesRouteManifest {
             .into_iter()
             .map(|entry| {
                 let prefix = format!("/runtimes/{}", entry.runtime_id);
+                let mut native_routes = vec![json!({ "handle": [{
+                    "handler": "headers", "response": {
+                        "add": { "Vary": ["Origin"] }, "deferred": true
+                    }
+                }] })];
+                for origin in &allowed_origins {
+                    native_routes.push(json!({
+                        "match": [{ "header": { "Origin": [origin] } }],
+                        "handle": [{ "handler": "headers", "response": {
+                            "set": { "Access-Control-Allow-Origin": [origin] },
+                            "deferred": true
+                        } }]
+                    }));
+                    native_routes.push(json!({
+                        "match": [{ "method": ["OPTIONS"], "header": {
+                            "Origin": [origin], "Access-Control-Request-Method": ["*"]
+                        } }],
+                        "handle": [{ "handler": "static_response", "status_code": 204,
+                            "headers": {
+                                "Access-Control-Allow-Methods": ["GET, HEAD, POST, PUT, PATCH, DELETE, OPTIONS"],
+                                "Access-Control-Allow-Headers": ["Authorization, Content-Type"],
+                                "Access-Control-Max-Age": ["300"]
+                            }
+                        }]
+                    }));
+                }
+                native_routes.push(json!({ "handle": [
+                    { "handler": "rewrite", "strip_path_prefix": &prefix },
+                    {
+                        "handler": "reverse_proxy",
+                        "upstreams": [{ "dial": format!("127.0.0.1:{}", entry.host_port) }],
+                        "headers": {
+                            "request": { "set": { "X-Forwarded-Prefix": [&prefix] } },
+                            // The explicit edge policy replaces native localhost
+                            // CORS. Origin and native authentication pass through.
+                            "response": { "delete": [
+                                "Access-Control-Allow-Origin", "Access-Control-Allow-Credentials",
+                                "Access-Control-Allow-Methods", "Access-Control-Allow-Headers",
+                                "Access-Control-Expose-Headers", "Access-Control-Max-Age"
+                            ] }
+                        }
+                    }
+                ] }));
                 json!({
                     "match": [{ "path": [&prefix, format!("{prefix}/*")] }],
                     "terminal": true,
-                    "handle": [{ "handler": "subroute", "routes": [{ "handle": [
-                        { "handler": "rewrite", "strip_path_prefix": &prefix },
-                        {
-                            "handler": "reverse_proxy",
-                            "upstreams": [{ "dial": format!("127.0.0.1:{}", entry.host_port) }],
-                            "headers": { "request": { "set": { "X-Forwarded-Prefix": [&prefix] } } }
-                        }
-                    ] }] }]
+                    "handle": [{ "handler": "subroute", "routes": native_routes }]
                 })
             })
             .collect();
@@ -152,6 +193,46 @@ impl HostedHermesRouteManifest {
     }
 }
 
+fn validate_browser_origins(values: &[String]) -> Result<BTreeSet<String>, InvalidManifest> {
+    if values.len() > 32 {
+        return Err(InvalidManifest("too many browser origins"));
+    }
+    let mut origins = BTreeSet::new();
+    for value in values {
+        // Reuse the strict literal-origin parser while separately restricting
+        // cleartext HTTP to explicit loopback development origins.
+        let https_value = value
+            .strip_prefix("http://")
+            .map(|rest| format!("https://{rest}"));
+        let parsed = finite_saas_core::hosted_hermes::parse_hosted_hermes_origin(
+            https_value.as_deref().unwrap_or(value),
+        )
+        .map_err(InvalidManifest)?;
+        if https_value.is_some()
+            && !parsed.host_str().is_some_and(|host| {
+                host == "localhost"
+                    || host
+                        .trim_matches(['[', ']'])
+                        .parse::<std::net::IpAddr>()
+                        .is_ok_and(|ip| ip.is_loopback())
+            })
+        {
+            return Err(InvalidManifest("HTTP browser origins must be loopback"));
+        }
+        let canonical = parsed
+            .join(value)
+            .map_err(|_| InvalidManifest("invalid browser origin"))?
+            .origin()
+            .ascii_serialization();
+        if *value != canonical || !origins.insert(canonical) {
+            return Err(InvalidManifest(
+                "browser origins must be unique canonical origins",
+            ));
+        }
+    }
+    Ok(origins)
+}
+
 fn valid_runtime_id(value: &str) -> bool {
     !value.is_empty()
         && value.len() <= 128
@@ -170,6 +251,7 @@ mod tests {
             public_origin: "https://agents.lat3.finite.computer".into(),
             listen: "0.0.0.0:443".parse().unwrap(),
             admin_socket: "/run/finite-hermes-caddy/admin.sock".into(),
+            allowed_origins: vec!["https://finite.computer".into()],
             routes: vec![HostedHermesRoute {
                 runtime_id: "runtime_1".into(),
                 host_port: 30000,
@@ -246,6 +328,38 @@ mod tests {
     }
 
     #[test]
+    fn browser_origins_are_explicit_and_cleartext_is_local_only() {
+        for origin in [
+            "*",
+            "null",
+            "https://*.finite.computer",
+            "https://{host}",
+            "https://finite.computer/",
+            "https://finite.computer/path",
+            "https://user@finite.computer",
+            "https://finite.computer?x",
+            "http://finite.computer",
+            "http://127.0.0.1.evil.test",
+            "https://finite.computer\n",
+            "https://finite.computer:0",
+        ] {
+            let mut value = manifest();
+            value.allowed_origins = vec![origin.into()];
+            assert!(value.caddy_config().is_err(), "accepted {origin:?}");
+        }
+        let mut value = manifest();
+        value.allowed_origins = vec![
+            "http://localhost:3000".into(),
+            "http://127.0.0.1:13003".into(),
+            "http://[::1]:3000".into(),
+            "http://localhost:443".into(),
+        ];
+        assert!(value.caddy_config().is_ok());
+        value.allowed_origins.push("http://localhost:3000".into());
+        assert!(value.caddy_config().is_err());
+    }
+
+    #[test]
     fn full_native_surface_has_one_prefix_and_no_auth_or_origin_rewrite() {
         let config = manifest().caddy_config().unwrap();
         assert_eq!(
@@ -259,7 +373,11 @@ mod tests {
             route["match"][0]["path"],
             json!(["/runtimes/runtime_1", "/runtimes/runtime_1/*"])
         );
-        let handlers = &route["handle"][0]["routes"][0]["handle"];
+        let handlers = &route["handle"][0]["routes"]
+            .as_array()
+            .unwrap()
+            .last()
+            .unwrap()["handle"];
         assert_eq!(handlers[0]["strip_path_prefix"], "/runtimes/runtime_1");
         assert_eq!(
             handlers[1]["upstreams"],

@@ -33,11 +33,39 @@ client-prefix overwrite, and credential omission from real proxy-error logs.
 It sends the production dashboard `Origin` header unchanged using Node's native
 WebSocket client: loopback-bound Hermes rejects it; the isolated guest-style
 `0.0.0.0` bind accepts it. This is a protocol proof, not an actual browser test.
-Native REST bearer authentication is checked separately and the existing absence
-of production-origin CORS is asserted, not bypassed.
+Native REST bearer authentication is checked separately: `/api/auth/me` rejects
+anonymous/invalid sessions and accepts a real native session. The configured
+production origin receives CORS permission and an Authorization preflight;
+unlisted origins do not inherit Hermes's native localhost CORS policy.
 
 It does not qualify Core issuance/pull, provider/Kata host-port allocation,
 production DNS/TLS, native Desktop, the dashboard UI, or model-turn durability.
+
+## Actual-browser component proof
+
+After installing the dashboard's locked dependencies through the repository
+development environment, run `scripts/proofs/hosted-hermes-caddy-browser.mjs`
+with Node24 and these explicit tool paths in the environment:
+
+- `RUNNER_PROOF_BINARY`: built Runner executable.
+- `CADDY_BIN`: repository-pinned Caddy executable.
+- `HERMES_PROOF_BINARY`: `hermes-agent-minimal-runtime/bin/hermes` from the flake.
+- `HERMES_PROOF_SOURCE`: the locked `hermes-agent` input source path.
+- `PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH`: an installed Chrome/Chromium executable.
+
+This launches a fresh browser profile against unchanged Runner-rendered Caddy
+configuration and real native Hermes. Only the temporary fixture certificates
+are trusted in that browser profile; system trust is unchanged. It proves the
+allowed origin can read public status and perform a protected native identity
+read; anonymous/invalid sessions get401 and a real native bearer gets200. A real
+`SKILL.md` in the synthetic agent home also appears through protected
+`/api/skills`. A second, unlisted page origin is blocked by the browser's CORS
+enforcement even for public status. Services and homes are removed on exit.
+
+This component page is deliberately separate from dashboard/Core authorization
+acceptance. It uses a loopback backend with a local browser Origin; the namespace
+proof above covers the production Origin and guest bind. Neither test proves
+production publication, revocation, or the full dashboard enablement flow.
 
 ## Address reuse negative control
 

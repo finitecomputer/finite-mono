@@ -71,6 +71,7 @@ and synthetic identifiers, not live routing):
   "public_origin": "https://agents.lat3.finite.computer",
   "listen": "0.0.0.0:443",
   "admin_socket": "/run/finite-hermes-caddy/admin.sock",
+  "allowed_origins": ["https://finite.computer", "http://localhost:3000"],
   "routes": [{"runtime_id": "runtime_example", "host_port": 30000}]
 }
 ```
@@ -80,6 +81,15 @@ under `/runtimes/<runtime-id>/` are forwarded to that runtime's loopback port;
 the external prefix is removed and `X-Forwarded-Prefix` is set by the proxy.
 Unknown routes are not sent to an arbitrary default upstream. A dedicated
 Caddy instance keeps hosted-chat lifecycle changes separate from other sites.
+
+`allowed_origins` is an explicit, canonical origin list (empty by default).
+HTTPS is required except for explicitly named loopback development origins.
+Caddy preserves the request Origin, replaces upstream CORS response headers,
+and handles browser preflight for the native route surface without a per-route
+allowlist. Browser REST uses the native bearer with `credentials: "omit"`;
+cross-origin cookie credentials are not enabled. CORS does not replace native
+authentication: `/api/status` is public, while protected native reads must
+reject anonymous and invalid credentials independently of origin.
 
 The command alone is **not safe production publication**. No deployment module
 or existing launch path invokes it in this draft.

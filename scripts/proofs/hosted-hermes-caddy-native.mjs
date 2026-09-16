@@ -91,7 +91,7 @@ try {
     assert.equal(wrongHostStatus, 404, 'Unpublished HTTP Host must not reach Hermes');
     const auth = await probeAuth({ baseUrl, credentials: hermes.credentials,
       expiry: bindHost === '0.0.0.0',
-      ...(bindHost === '0.0.0.0' ? { wsOrigin: productionOrigin, restOrigin: productionOrigin }
+      ...(bindHost === '0.0.0.0' ? { wsOrigin: productionOrigin, restOrigin: productionOrigin, allowedRestOrigin: true }
         : { rejectedOrigin: productionOrigin }),
       requestHeaders: { 'X-Forwarded-Prefix': '/forged-client-prefix' },
       onProgress: (name) => console.log(`PASS/PROGRESS (${bindHost}): ${name}`),
@@ -122,7 +122,7 @@ try {
     productionRenderer: true, transport: 'real TLS/WSS with temporary process-only CA trust', reports,
     limits: ['Explicit Node Origin header; not actual browser or dashboard authentication',
       'Guest bind semantics in isolated loopback-only Linux namespace; not Kata/CNI host-port allocation',
-      'Native REST production CORS remains unsupported', 'No Core grant or credential lifecycle integration',
+      'CORS headers verified over HTTP; actual browser enforcement remains separate', 'No Core grant or credential lifecycle integration',
       'No production DNS/certificate, Desktop, or accepted model-turn durability claim'] }, null, 2));
 } catch (error) {
   console.error(`Native rendered-Caddy proof failed: ${error.message}`);

@@ -23,7 +23,7 @@ if [[ "${1:-}" != --linux ]]; then
 import { writeFileSync } from 'node:fs';
 const dir = process.argv[2];
 writeFileSync(`${dir}/manifest.json`, JSON.stringify({ public_origin: 'https://localhost:55443',
-  listen: '127.0.0.1:55443', admin_socket: `${dir}/admin.sock`,
+  listen: '127.0.0.1:55443', admin_socket: `${dir}/admin.sock`, allowed_origins: ['https://finite.computer'],
   routes: [{ runtime_id: 'runtime_native_proof', host_port: 30000 }] }));
 JS
   "$RUNNER_PROOF_BINARY" render-hosted-hermes-caddy --manifest "$proof_rendered/manifest.json" > "$proof_rendered/caddy.json"
