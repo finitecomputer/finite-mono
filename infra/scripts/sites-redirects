@@ -17,8 +17,8 @@ def render(rows):
         source, target = row["from_host"], row["to_host"]
         if not isinstance(source, str) or not isinstance(target, str):
             raise ValueError("hosts must be strings")
-        if not re.fullmatch(rf"({LABEL})\.(?:(?:docs|v2)\.)?finite\.chat", source):
-            raise ValueError("source must be a previous content host")
+        if not re.fullmatch(rf"({LABEL})\.(?:docs\.)?finite\.chat", source):
+            raise ValueError("source must be a one-label finite.chat or docs.finite.chat content host")
         if not re.fullmatch(rf"({LABEL})\.finite\.site", target):
             raise ValueError("destination must be a Finite Site")
         if source.split('.')[0] in RESERVED or target.split('.')[0] in RESERVED or source in hosts:

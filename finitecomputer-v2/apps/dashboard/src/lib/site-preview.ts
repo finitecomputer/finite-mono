@@ -270,7 +270,6 @@ export function parseSitePreviewTarget(
 function allowedOutputHost(url: URL, allowLocalOutputs: boolean) {
   if (url.protocol === "https:" && !url.port) {
     return oneLabelUnder(url.hostname, "finite.site")
-      || oneLabelUnder(url.hostname, "v2.finite.chat")
       || oneLabelUnder(url.hostname, "docs.finite.chat")
       || oneLabelUnder(url.hostname, "finite.chat");
   }

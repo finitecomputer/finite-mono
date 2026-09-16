@@ -125,6 +125,7 @@ test("site preview targets reject non-output and ambiguous URLs", () => {
     "https://api.finite.chat/",
     "https://git.finite.chat/project.git",
     "https://a.b.finite.chat/",
+    "https://hello.v2.finite.chat/",
     "https://user:secret@hello.finite.chat/",
     "https://hello.finite.chat/\\evil",
     "http://browser-proof.sites.localhost:18789/",
@@ -319,7 +320,7 @@ test("Sites exchanges reject failures and never follow credential redirects", as
   const target = parseSitePreviewTarget("https://hello.finite.site/docs?a=1#intro");
   const result = await createSiteAccountSession(target, account);
   assert.equal(new URL(result.url).searchParams.get("return_to"), target.returnTo);
-  for (const host of ["app.finite.chat", "guide.docs.finite.chat", "hello.v2.finite.chat"]) {
+  for (const host of ["app.finite.chat", "guide.docs.finite.chat"]) {
     const previous = parseSitePreviewTarget(`https://${host}/docs?a=1#intro`);
     const before = calls;
     assert.deepEqual(await createSiteAccountSession(previous, account), { url: previous.originalUrl, originalUrl: previous.originalUrl });

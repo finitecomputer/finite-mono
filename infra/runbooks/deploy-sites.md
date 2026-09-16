@@ -214,7 +214,10 @@ Only after authorized migration and access checks pass:
    archives; this rollout does not purge them. Record the final archive and
    credential custody before removing ongoing app-host Sites backups.
 2. Prepare a private JSON array of `from_host` / `to_host` mappings for retained
-   content. Generate the Caddy fragment with `infra/scripts/sites-redirects`.
+   content. Sources must be one-label hosts under `finite.chat` or
+   `docs.finite.chat`. Disposable `*.v2.finite.chat` validation URLs are excluded
+   from both redirects and dashboard previews; no DNS/TLS route is retained for
+   them. Generate the Caddy fragment with `infra/scripts/sites-redirects`.
    Install it atomically as `/etc/finite/sites-redirects.caddy`, root:caddy `0640`.
    The file is required, including when deploying this shared Caddy module on
    another host. Missing mappings must fail validation before activation.

@@ -1,6 +1,7 @@
 """Exercise generated content redirects against Caddy, including credential exclusions."""
 import http.client
 import importlib.machinery
+import json
 import os
 from pathlib import Path
 import socket
@@ -15,7 +16,7 @@ module = importlib.machinery.SourceFileLoader("sites_redirects", str(ROOT / "inf
 
 class Redirects(unittest.TestCase):
     def test_reject_ambiguous_or_unsafe_mapping(self):
-        for source, target in [("api.finite.chat", "hello.finite.site"), ("x.finite.chat", "evil.example"), ("x.finite.chat/foo", "hello.finite.site"), ("x.y.finite.chat", "hello.finite.site"), ("x.finite.chat", "hello.finite.site/path")]:
+        for source, target in [("api.finite.chat", "hello.finite.site"), ("x.finite.chat", "evil.example"), ("x.finite.chat/foo", "hello.finite.site"), ("x.y.finite.chat", "hello.finite.site"), ("hello.v2.finite.chat", "hello.finite.site"), ("x.finite.chat", "hello.finite.site/path")]:
             with self.assertRaises(ValueError):
                 module.render([dict(from_host=source, to_host=target)])
         row = dict(from_host="old.finite.chat", to_host="new.finite.site")
@@ -23,6 +24,13 @@ class Redirects(unittest.TestCase):
             module.render([row, row])
 
     def test_real_caddy_redirects(self):
+        # Read the actual host matchers and handlers. Only TLS/listening and the
+        # private mapping path change for this isolated, loopback-only fixture.
+        hosts = json.loads(subprocess.check_output([
+            "nix", "eval", "--json",
+            ".#nixosConfigurations.finite-lat-2.config.services.caddy.virtualHosts",
+            "--apply", "hosts: builtins.mapAttrs (_: host: host.extraConfig) hosts",
+        ], cwd=ROOT, text=True))
         with tempfile.TemporaryDirectory() as scratch:
             root = Path(scratch)
             with socket.socket() as listener:
@@ -30,7 +38,19 @@ class Redirects(unittest.TestCase):
                 port = listener.getsockname()[1]
             rows = [dict(from_host="old.finite.chat", to_host="new.finite.site"), dict(from_host="guide.docs.finite.chat", to_host="guide.finite.site")]
             config = root / "Caddyfile"
-            config.write_text(f"{{\n admin off\n auto_https off\n}}\nhttp://:{port} {{\n bind 127.0.0.1\n" + module.render(rows) + '\nhandle {\n respond "Retired" 410\n}\n}\n')
+            mapping = root / "sites-redirects.caddy"
+            mapping.write_text(module.render(rows))
+            blocks = []
+            for host, handler in hosts.items():
+                if not host.endswith(".finite.chat"):
+                    continue
+                handler = "\n".join(line for line in handler.splitlines()
+                                    if not line.strip().startswith("tls "))
+                handler = handler.replace("/etc/finite/sites-redirects.caddy", str(mapping))
+                blocks.append(f"http://{host}:{port} {{\n bind 127.0.0.1\n{handler}\n}}")
+            self.assertTrue(blocks, "no production Sites host handlers were evaluated")
+            config.write_text("{\n admin off\n auto_https off\n}\n" + "\n".join(blocks))
+
             with (root / "caddy.log").open("w") as log:
                 process = subprocess.Popen(["caddy", "run", "--config", str(config), "--adapter", "caddyfile"], stdout=log, stderr=log, env={**os.environ, "XDG_CONFIG_HOME": scratch, "XDG_DATA_HOME": scratch})
                 def request(host, path, method="GET"):
@@ -62,9 +82,21 @@ class Redirects(unittest.TestCase):
                             status, headers = request(row["from_host"], path)
                             self.assertEqual(status, 410)
                             self.assertNotIn("Location", headers)
-                        self.assertEqual(request(row["from_host"], "/", "POST")[0], 410)
-                    for host in ["unknown.finite.chat", "api.finite.chat", "git.finite.chat", "a.old.finite.chat"]:
-                        self.assertEqual(request(host, "/")[0], 410)
+                        for method in ["POST", "PUT", "PATCH", "DELETE"]:
+                            status, headers = request(row["from_host"], "/", method)
+                            self.assertEqual(status, 410)
+                            self.assertNotIn("Location", headers)
+                    for host in ["unknown.finite.chat", "unknown.docs.finite.chat", "api.finite.chat", "git.finite.chat"]:
+                        for method in ["GET", "HEAD", "POST"]:
+                            status, headers = request(host, "/", method)
+                            self.assertEqual(status, 410)
+                            self.assertNotIn("Location", headers)
+                    # Extra-label validation URLs are outside the edge contract,
+                    # and the generator must refuse to promise a redirect for them.
+                    for host in ["hello.v2.finite.chat", "a.old.finite.chat"]:
+                        with self.assertRaises(ValueError):
+                            module.render([dict(from_host=host, to_host="new.finite.site")])
+                        self.assertNotIn("Location", request(host, "/")[1])
                 finally:
                     process.terminate()
                     process.wait(timeout=10)
