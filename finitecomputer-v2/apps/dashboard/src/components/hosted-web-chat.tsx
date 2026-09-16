@@ -48,6 +48,7 @@ import {
   useHostedChat,
 } from "@/components/hosted-chat-provider";
 import { Button } from "@/components/ui/button";
+import { ChatLoading } from "@/components/chat-loading";
 import {
   Dialog,
   DialogContent,
@@ -992,13 +993,13 @@ export function HostedWebChat({
                 }}
               >
                 {!state && !transportError ? (
-                  <ChatLoading label="Opening your chat…" />
+                  <ChatLoading />
                 ) : null}
                 {state && !selectedRoom ? (
                   <EmptyChat title="Connecting to your agent" body="Your chat is getting ready." />
                 ) : null}
                 {selectedRoom && selectionPending && !hasRenderableChatContent ? (
-                  <ChatLoading label="Opening chat…" />
+                  <ChatLoading />
                 ) : null}
                 {selectedRoom && !selectionPending && !hasRenderableChatContent ? (
                   <EmptyChat title="What should we work on?" body="Start here, or make a new chat inside this topic." />
@@ -1644,16 +1645,6 @@ function EmptyChat({ body, title }: { body: string; title: string }) {
   );
 }
 
-function ChatLoading({ detail, label }: { detail?: string | null; label: string }) {
-  return (
-    <div className="finite-chat__notice">
-      <Loader2Icon className="finite-chat__spin" />
-      {detail ? <strong>{label}</strong> : <span>{label}</span>}
-      {detail ? <span>{detail}</span> : null}
-    </div>
-  );
-}
-
 function BrowserPanel({ activeSite, className, machineId, onClose, onSelectSite, sites }: { activeSite: PreviewSite; className: string; machineId: string; onClose: () => void; onSelectSite: (id: string) => void; sites: PreviewSite[] }) {
   const [frameState, setFrameState] = useState<{
     requestKey: string;
@@ -1720,7 +1711,10 @@ function BrowserPanel({ activeSite, className, machineId, onClose, onSelectSite,
           ) : frameError ? (
             <div className="finite-chat__notice">Preview isn&apos;t available right now.</div>
           ) : (
-            <ChatLoading label="Opening preview…" />
+            <div className="finite-chat__notice">
+              <Loader2Icon className="finite-chat__spin" />
+              <span>Opening preview…</span>
+            </div>
           )}
         </div>
       </div>
