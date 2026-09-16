@@ -4037,6 +4037,11 @@ rec {
             packageId = "tempfile";
           }
           {
+            name = "tokio";
+            packageId = "tokio";
+            features = [ "macros" "net" "rt-multi-thread" "signal" "time" "process" "io-util" ];
+          }
+          {
             name = "tower";
             packageId = "tower";
           }
