@@ -8,19 +8,19 @@ has been armed; see the execution record below.
 
 ## Window and recovery
 
-Proposed two-hour window, pending the operator's duration preference:
+Confirmed three-hour window: **03:00–06:00 Central (08:00–11:00 UTC)**.
 
 | Central | Action |
 | --- | --- |
 | 03:00–03:10 | Fresh status, GLM protocol canary and bounded baseline |
 | By 03:10 | Start the measured DeepSeek candidate only if all entry checks pass |
 | By 03:50 | Candidate must answer authenticated requests; otherwise restore GLM |
-| 03:50–04:15 | Protocol, model aliases, bounded performance tiers |
-| **04:15** | **Stop tests and start GLM restoration even if DeepSeek passes** |
-| **05:00** | GLM healthy; final status and accounting evidence retained |
+| 03:50–05:15 | Protocol, model aliases, bounded performance tiers |
+| **05:15** | **Stop tests and start GLM restoration even if DeepSeek passes** |
+| **06:00** | GLM healthy; final status and accounting evidence retained |
 
 The 45-minute restoration reserve is based on prior roughly 35-minute model
-loads, not a guaranteed recovery time. If GLM is not healthy by 05:00, treat it
+loads, not a guaranteed recovery time. If GLM is not healthy by 06:00, treat it
 as an incident and continue recovery. Do not extend testing into that reserve.
 A late start shortens testing; it never moves the end of the window. No new
 candidate start after 03:10. No second engine/config attempt within this window.
@@ -103,7 +103,7 @@ remain unchanged, and the canonical recovery status must stay healthy.
 
 ## Entry checks
 
-1. Confirm the duration/rollback cutoff and an operator who will watch the
+1. Use the confirmed duration/rollback cutoff and identify an operator who will watch the
    entire window. Do not arm unattended production replacement with only this
    document as a timer.
 2. Publish the candidate from a dedicated satellite branch/tag, after its source
@@ -111,7 +111,8 @@ remain unchanged, and the canonical recovery status must stay healthy.
    `mark-as-latest: false`; leave satellite `main`, the latest stable release,
    and the live container unchanged. Record the candidate tag and workflow.
 3. Download its `tinfoil-deployment.json` and `tinfoil.hash`. Verify the hash,
-   verify the GitHub attestation, and require the decoded `config` bytes to
+   verify the GitHub attestation using predicate type
+   `https://tinfoil.sh/predicate/snp-tdx-multiplatform/v1`, and require the decoded `config` bytes to
    equal the reviewed candidate exactly. A tag or image pin alone is not this
    proof. Confirm the config has the existing limiter, secrets by NAME,
    internal model network, and wildcard shim routing.
@@ -158,10 +159,10 @@ scripts/with-dev-env python3 scripts/finite_private_v41_benchmark.py \
   --deadline-utc 2026-09-16T08:10:00Z \
   --evidence-dir "$FINITE_PRIVATE_EVIDENCE_DIR/baseline" --execute
 
-# Candidate: deadline 04:15 Central under the proposed two-hour window.
+# Candidate: deadline 05:15 Central under the confirmed three-hour window.
 scripts/with-dev-env python3 scripts/finite_private_v41_benchmark.py \
   --model deepseek --tag "$FINITE_PRIVATE_V41_TAG" \
-  --deadline-utc 2026-09-16T09:15:00Z \
+  --deadline-utc 2026-09-16T10:15:00Z \
   --evidence-dir "$FINITE_PRIVATE_EVIDENCE_DIR/deepseek" --execute
 ```
 
@@ -179,7 +180,7 @@ Before the DeepSeek sweep, use `check_finite_private_glm53_protocol.py --model
 deepseek-v4-1-flash --endpoint "$FINITE_PRIVATE_ENDPOINT" --max-context-tokens
 128000 --timeout-seconds 90` for reasoning, tools, terminal streams, malformed
 requests, and a long-prefill recovery probe. Run it with a total process
-deadline before 04:15; an HTTP timeout alone is not a whole-suite deadline.
+deadline before 05:15; an HTTP timeout alone is not a whole-suite deadline.
 Its historical script/schema name is retained, but the report's model field
 and response checks must be DeepSeek. Also run one stream for each preserved
 model alias, expecting `deepseek-v4-1-flash` in the response, and settlement
@@ -203,7 +204,7 @@ tag/update state before retrying. Do not assume the mutation failed. The
 window operator must watch readiness independently of the 120-minute
 healthcheck start period in the upstream config.
 
-At the first rollback condition or at 04:15, whichever comes first:
+At the first rollback condition or at 05:15, whichever comes first:
 
 ```bash
 export FINITE_PRIVATE_RELAUNCH_APPROVED=v2026-08-28-glm-5-3-flash-5
@@ -231,6 +232,6 @@ passing speed measurements as permission to leave DeepSeek serving.
 - Private preparation evidence: `.local-state/deepseek-v41-20260916/` in the
   dedicated worktree. It contains fleet state and must not be committed.
 - Candidate release: pending measurement/publication.
-- Window duration: preference requested; two-hour schedule above is provisional.
+- Window duration: confirmed by the user, 03:00–06:00 Central; restore by 05:15.
 - Scheduling: **not armed**. No scheduled production operation exists yet.
 - Runtime H200/TDX proof: pending the maintenance test.
