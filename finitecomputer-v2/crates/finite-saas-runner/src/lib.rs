@@ -2162,7 +2162,9 @@ impl AgentCreationQueue for CoreHttpAgentCreationQueue {
                 .into_json()
                 .map_err(|_| RunnerError::RuntimeBootstrapUnavailable),
             Err(ureq::Error::Transport(_)) => Err(RunnerError::RuntimeBootstrapUnavailable),
-            Err(ureq::Error::Status(status, _)) if status == 429 || status >= 500 => {
+            Err(ureq::Error::Status(status, _))
+                if status == 404 || status == 429 || status >= 500 =>
+            {
                 Err(RunnerError::RuntimeBootstrapUnavailable)
             }
             Err(ureq::Error::Status(status, _)) => Err(RunnerError::CoreStatus {
@@ -4977,6 +4979,60 @@ mod tests {
             message.contains("last ready_reason: bridge_not_connected"),
             "timeout must name the runtime's ready_reason, got: {message}"
         );
+    }
+
+    #[test]
+    fn old_core_missing_bootstrap_endpoint_keeps_creation_retryable() {
+        use std::sync::{
+            Arc,
+            atomic::{AtomicBool, Ordering},
+        };
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let done = Arc::new(AtomicBool::new(false));
+        let stopped = done.clone();
+        let server = std::thread::spawn(move || {
+            let mut paths = Vec::new();
+            while let Ok((mut stream, _)) = listener.accept() {
+                if stopped.load(Ordering::Relaxed) {
+                    break;
+                }
+                let request = read_http_request(&mut stream);
+                let path = request.split_whitespace().nth(1).unwrap().to_owned();
+                let (status, body) = match path.as_str() {
+                    "/api/core/v1/runtime-control-requests/lease" => (200, "null".into()),
+                    "/api/core/v1/agent-creation-requests/lease" => (
+                        200,
+                        serde_json::to_string(&sample_lease("agent_request_123")).unwrap(),
+                    ),
+                    _ => (404, "{}".into()),
+                };
+                paths.push(path);
+                write_http_json(&mut stream, status, &body);
+            }
+            paths
+        });
+        let mut runner = AgentCreationRunner::new(
+            CoreHttpAgentCreationQueue::new(format!("http://{address}"), "test-runner").unwrap(),
+            FakeLauncher::ready(RuntimeLaunchFacts::sample()),
+            FixedLeaseTokens::new(["lease-1"]),
+            "runner-1",
+            300,
+        )
+        .unwrap()
+        .with_runtime_core_bootstrap("https://core.example.test".into())
+        .unwrap();
+        let outcome = runner.run_once();
+        done.store(true, Ordering::Relaxed);
+        let _ = std::net::TcpStream::connect(address);
+        let paths = server.join().unwrap();
+        assert!(matches!(
+            outcome,
+            Err(RunnerError::RuntimeBootstrapUnavailable)
+        ));
+        assert_eq!(paths.len(), 3, "must not post a terminal creation failure");
+        assert!(paths[2].ends_with("/runtime-credential"));
+        assert!(runner.launcher.launch_options.is_empty());
     }
 
     #[test]

@@ -33,7 +33,7 @@ export function parseHostedHermesSession(value: unknown): HostedHermesSession {
   if (
     typeof session.baseUrl !== "string" || typeof session.accessToken !== "string" ||
     (!session.accessToken || session.accessToken.length > 8192) || typeof session.expiresAt !== "number" ||
-    !Number.isSafeInteger(session.expiresAt) || (session.expiresAt <= Date.now() / 1000 || session.expiresAt > Date.now() / 1000 + 60)
+    !Number.isSafeInteger(session.expiresAt) || session.expiresAt <= 0
   ) throw invalid();
   let url: URL;
   try { url = new URL(session.baseUrl); } catch { throw invalid(); }
@@ -41,6 +41,8 @@ export function parseHostedHermesSession(value: unknown): HostedHermesSession {
     url.protocol !== "https:" || url.username || url.password || url.search || url.hash ||
     !url.pathname.endsWith("/")
   ) throw invalid();
+  // Native/Core enforce lifetime. A user device clock is not an authority;
+  // the operation-local request handles native expiry with one 401 retry.
   // Project only the intentionally browser-facing grant, never private native
   // password/refresh credentials or deployment metadata returned in the future.
   return { baseUrl: url.href, accessToken: session.accessToken, expiresAt: session.expiresAt };

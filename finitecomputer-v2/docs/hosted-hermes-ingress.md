@@ -88,7 +88,10 @@ HTTPS is required except for explicitly named loopback development origins.
 Caddy preserves the request Origin, replaces upstream CORS response headers,
 and handles browser preflight for the native route surface without a per-route
 allowlist. Browser REST uses the native bearer with `credentials: "omit"`;
-cross-origin cookie credentials are not enabled. CORS does not replace native
+cross-origin cookie credentials are not enabled. This is a uniform browser-origin
+policy on the complete native surface, not an edge endpoint allowlist. New browser
+operations must qualify their methods and headers against that policy.
+CORS does not replace native
 authentication: `/api/status` is public, while protected native reads must
 reject anonymous and invalid credentials independently of origin.
 
@@ -200,7 +203,9 @@ serialized per runtime, keyed by current assignment/generation/location. Native
 cookie middleware renews the session; Core never reproduces Hermes token
 encoding. The browser receives a full native session for that agent, not a
 read-only or conversation-scoped token. Existing bearer use can continue until
-its native expiry (60 seconds); already-open sockets require applied process
+its native expiry (60 seconds). Core permits 30 seconds of server clock skew
+when checking native expiry after a successful protected read; the browser never
+uses its device wall clock as an authorization decision. Already-open sockets require applied process
 shutdown. Core outage retains the last applied agent configuration and issues
 no new grants. These bounds must remain visible in later revocation UX.
 
@@ -213,7 +218,9 @@ this implementation does not claim independence from every Finite Chat outage.
 ### Compatibility and rollback boundary
 
 The new table is additive. Old launchers create no bootstrap row, old agents
-ignore the new optional launch variables, and unconfigured new components keep
+ignore the new optional launch variables. An opted-in Runner hitting an older
+Core without bootstrap support keeps the creation retryable and does not launch
+or terminally fail it; activate Core support before opting in Runner. Unconfigured new components keep
 the existing chat path. Existing credentials are not retroactively invented.
 No new chat database, home copy or history migration is introduced. Keep the
 Core database (including recoverable native/bootstrap material) in its existing

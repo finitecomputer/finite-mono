@@ -1,4 +1,6 @@
 mod hosted_access;
+#[cfg(test)]
+mod hosted_browser_proof;
 use crate::auth::{CoreAuth, VerifiedRunnerCredential, WorkosAuthError};
 use crate::hosted_hermes::{HostedHermesLocation, HostedHermesOrigins};
 use crate::launch_codes::{
@@ -783,7 +785,10 @@ fn router_with_runtime_upgrades_and_agent_creation_placement(
         hosted_hermes_origins,
         native_sessions: Default::default(),
     };
+    router_from_state(state)
+}
 
+fn router_from_state(state: CoreApiState) -> Router {
     Router::new()
         .route("/healthz", get(healthz))
         .route(

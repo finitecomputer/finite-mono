@@ -53,13 +53,15 @@ test("agent switch cancellation rejects a late grant before sending credentials"
   assert.equal(count,1);
 });
 
-test("grant validation rejects unsafe URLs, expired and excessively long sessions",()=>{
+test("grant validation projects safe fields independently of the device clock",()=>{
   const grant={baseUrl:"https://agents.test/runtimes/a/",accessToken:"synthetic",expiresAt:Math.floor(Date.now()/1000)+60};
   assert.deepEqual(parseHostedHermesSession({...grant,password:"never-forwarded"}),grant);
+  assert.equal(parseHostedHermesSession({...grant,expiresAt:grant.expiresAt-3600}).expiresAt,grant.expiresAt-3600);
+  assert.equal(parseHostedHermesSession({...grant,expiresAt:grant.expiresAt+3600}).expiresAt,grant.expiresAt+3600);
   for(const baseUrl of ["http://agents.test/","https://user:password@agents.test/","https://agents.test/?token=x","https://agents.test/#token"]) {
     assert.throws(()=>parseHostedHermesSession({...grant,baseUrl}));
   }
-  for(const expiresAt of [0,Date.now(),Math.floor(Date.now()/1000)+600]) assert.throws(()=>parseHostedHermesSession({...grant,expiresAt}));
+  for(const expiresAt of [0,-1,1.5,Infinity]) assert.throws(()=>parseHostedHermesSession({...grant,expiresAt}));
 });
 
 test("read rejects arbitrary URLs and oversized native responses", async (t)=>{

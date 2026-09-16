@@ -193,10 +193,20 @@ async fn native_ready(client: &Client, base: &str, desired: &Desired) -> Result<
         .await?
         .error_for_status()?;
     let identity: serde_json::Value = bounded_json(response).await?;
-    if identity.get("provider").and_then(|value| value.as_str()) != Some("basic") {
+    if !valid_native_identity(&identity, desired.username.as_deref(), now_ms() / 1000) {
         return Err(invalid("native session identity"));
     }
     Ok(())
+}
+
+fn valid_native_identity(identity: &serde_json::Value, username: Option<&str>, now: u64) -> bool {
+    username.is_some()
+        && identity.get("provider").and_then(|v| v.as_str()) == Some("basic")
+        && identity.get("user_id").and_then(|v| v.as_str()) == username
+        && identity
+            .get("expires_at")
+            .and_then(|v| v.as_u64())
+            .is_some_and(|expiry| expiry > now && expiry <= now + 60)
 }
 
 #[derive(Default)]
@@ -476,6 +486,28 @@ mod tests {
         assert_eq!(requests.await.unwrap().len(), 5);
     }
 
+    #[test]
+    fn readiness_rejects_wrong_principal_and_lifetime() {
+        let identity = |user: &str, expiry: u64| serde_json::json!({"provider":"basic","user_id":user,"expires_at":expiry});
+        assert!(valid_native_identity(
+            &identity("owner", 1060),
+            Some("owner"),
+            1000
+        ));
+        assert!(!valid_native_identity(
+            &identity("other", 1060),
+            Some("owner"),
+            1000
+        ));
+        for expiry in [999, 1000, 1061, 4600] {
+            assert!(!valid_native_identity(
+                &identity("owner", expiry),
+                Some("owner"),
+                1000
+            ));
+        }
+    }
+
     #[tokio::test]
     async fn readiness_requires_anonymous_rejection_then_native_login_and_protected_identity() {
         let (origin, requests) = server(3, |index, request| match index {
@@ -504,7 +536,7 @@ mod tests {
                         .contains("authorization: Bearer test-native-session\r\n")
                 );
                 assert!(!request.head.contains("test-password"));
-                (200, r#"{"provider":"basic"}"#.into(), String::new())
+                (200, serde_json::json!({"provider":"basic","user_id":"test-user","expires_at":now_ms()/1000+60}).to_string(), String::new())
             }
         })
         .await;

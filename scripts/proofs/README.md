@@ -67,6 +67,45 @@ acceptance. It uses a loopback backend with a local browser Origin; the namespac
 proof above covers the production Origin and guest bind. Neither test proves
 production publication, revocation, or the full dashboard enablement flow.
 
+## Integrated dashboard access proof
+
+`hosted_browser_composition` runs the production Core routers against disposable
+Postgres, agentd's real desired-state pull/supervisor, pinned native Hermes,
+Runner-rendered Caddy HTTP routes, the built Next dashboard API route, and the
+shipped browser request helper in Chromium. A real `SKILL.md` in the synthetic
+Hermes home must appear through protected `/api/skills`.
+
+Build the Runner/agentd and dashboard using the pinned development environment,
+start disposable Postgres, then set these tool paths (the same pin as the
+component proof): `RUNNER_PROOF_BINARY`, `AGENTD_PROOF_BINARY`, `CADDY_BIN`,
+`HERMES_PROOF_BINARY`, `HERMES_PROOF_SOURCE`, and
+`PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH`. Run from the repository root:
+
+```sh
+FC_CORE_POSTGRES_TEST_URL=postgresql://postgres@127.0.0.1:55439/postgres \
+  scripts/with-dev-env cargo test -p finite-saas-core hosted_browser_composition \
+  --locked -- --ignored --nocapture
+```
+
+The test checks an ordinary owner, signed-out/other-owner/wrong-agent denial,
+native anonymous/invalid-token rejection, exact browser CORS, applied enable,
+real 61-second expiry and automatic renewal, applied disable, and re-enable
+rotation while retaining the skill. It reserves the native fixed port 8642 and
+fails if occupied. Run this proof alone; do not rebuild the dashboard while it
+is serving. Generated credentials use inherited pipes/environment only.
+Services are stopped on exit; successful scratch homes are removed. A failure
+retains private diagnostics in the printed scratch directory; never publish
+raw logs or credential files.
+
+The account adapter is the dashboard's existing local development-account path;
+Core verifies signed JWTs with its isolated WorkOS source. This does not exercise
+live WorkOS OAuth. Unrelated gateway/Chat children are lifecycle fixtures, not a
+Chat continuity proof. Caddy uses a temporary local certificate issuer and test
+DNS resolution, while rendered HTTP routes/CORS remain unchanged. Only those
+fixture certificates are trusted by Core and the fresh browser, never the OS.
+Existing-agent enrollment, fleet/Kata publication, restore and model-turn
+continuity remain separate qualification work.
+
 ## Address reuse negative control
 
 ```sh
