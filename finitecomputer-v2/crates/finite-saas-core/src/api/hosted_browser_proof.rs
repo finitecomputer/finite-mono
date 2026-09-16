@@ -3,7 +3,9 @@
 //! agentd's pull/supervisor, native Hermes and the rendered Caddy routes are real.
 use super::*;
 use crate::auth::test_support::{access_token_with_subject, core_auth};
-use crate::store::runtime_credentials::tests::{complete, provision, register, requested};
+use crate::store::runtime_credentials::tests::{
+    complete, provision, register, requested, upgrade, upgrade_input,
+};
 use crate::test_support::with_isolated_postgres;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::process::Command;
@@ -11,11 +13,23 @@ use tokio::process::Command;
 #[tokio::test]
 #[ignore = "requires pinned Node/Hermes/Caddy, built Runner/agentd/dashboard and Chromium; see scripts/proofs/README.md"]
 async fn hosted_browser_composition() {
-    with_isolated_postgres(|db| async move {
+    // Both cases reserve Hermes port 8642, so run them sequentially.
+    for existing_agent in [false, true] {
+        with_isolated_postgres(move |db| async move {
         let request = requested(&db).await;
-        let bootstrap = db.provision_runtime_credential(provision(&request)).await.unwrap().secret;
+        let launch_credential = if existing_agent { None } else {
+            Some(db.provision_runtime_credential(provision(&request)).await.unwrap().secret)
+        };
         let runtime = register(&db, &request).await;
         complete(&db, &request).await.unwrap();
+        let bootstrap = match launch_credential {
+            Some(secret) => secret,
+            None => {
+                assert!(!db.hosted_access(&runtime, "runtime-auth-user").await.unwrap().enrolled);
+                let lease = upgrade(&db, &request).await;
+                db.provision_upgrade_credential(upgrade_input(&lease)).await.unwrap().secret
+            }
+        };
         let owner = access_token_with_subject("runtime-auth-user", "runtime-auth@finite.test", true, None);
         let other = access_token_with_subject("other-user", "other@finite.test", true, None);
         let directory = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../..");
@@ -29,7 +43,7 @@ async fn hosted_browser_composition() {
             .stderr(std::process::Stdio::inherit())
             .kill_on_drop(true).spawn().unwrap();
         let mut input = child.stdin.take().unwrap();
-        input.write_all(format!("{}\n", serde_json::json!({"runtimeId":runtime,"bootstrap":bootstrap,"runtimeUrl":runtime_url,"owner":owner,"other":other})).as_bytes()).await.unwrap();
+        input.write_all(format!("{}\n", serde_json::json!({"enrollment":if existing_agent { "existing-upgrade" } else { "new-launch" },"runtimeId":runtime,"bootstrap":bootstrap,"runtimeUrl":runtime_url,"owner":owner,"other":other})).as_bytes()).await.unwrap();
         let mut output = BufReader::new(child.stdout.take().unwrap()).lines();
         let prepared = tokio::time::timeout(std::time::Duration::from_secs(60), output.next_line()).await.unwrap().unwrap().expect("browser fixture exited before TLS setup");
         let prepared: Value = serde_json::from_str(&prepared).unwrap();
@@ -63,4 +77,5 @@ async fn hosted_browser_composition() {
         runtime_server.abort();
         assert!(result.expect("browser composition exceeded deadline").success());
     }).await;
+    }
 }
