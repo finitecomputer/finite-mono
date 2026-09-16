@@ -8,7 +8,7 @@ hash they claim before the blob row is recorded.
 Blobs live on the Sites data volume behind a four-operation interface
 (`put`/`has`/`get`/path). Off-host recovery uses the complete stopped-Sites
 snapshot archived by Borg, as described in
-[the recovery runbook](../../../infra/runbooks/sites-borg-recovery.md).
+[the recovery runbook](../../../infra/runbooks/deploy-sites.md#backups-and-restore).
 
 Known tradeoff: the missing-blob list reveals whether a given hash exists
 anywhere on the platform (here.now and Workers static assets accept the

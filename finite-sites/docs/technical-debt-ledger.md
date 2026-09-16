@@ -47,7 +47,7 @@ select the dev mailer with `--mailer dev`; omitting the flag is an error.
 - **Risk**: single-disk durability for all site content and the registry.
 - **Proof**: `crates/finitesites-blob/src/lib.rs` writes under `--data`.
 - **Delete condition**: the
-  [snapshot-and-Borg job](../../infra/runbooks/sites-borg-recovery.md) is deployed
+  [snapshot-and-Borg job](../../infra/runbooks/deploy-sites.md#backups-and-restore) is deployed
   and the complete Recovery Set has restored from rsync.net onto an empty
   target. Local tests alone do not establish independent durability.
 

@@ -17,9 +17,8 @@ in CI from the reviewed revision, never on a production host.
 The configured app is `finite-sites` in the `finite` organization. Set
 `APP=finite-sites`. Inspect this app's resources and provision any missing app
 or `sites_data` volume before deployment; use 10 GiB as the initial volume size.
-Obtain the app's allocated IPs and certificate DNS records
-from Fly. Require issued certificates for both the API apex and wildcard Site
-hosts; do not copy another app's DNS records. Keep records DNS-only when
+Obtain the app's allocated IPs and certificate DNS records from Fly. Require
+issued certificates for both the API apex and wildcard Site hosts; do not copy another app's DNS records. Keep records DNS-only when
 qualifying Fly's TLS edge. [Fly provisioning documentation](https://fly.io/docs/launch/).
 
 Install `RESEND_API_KEY` from the
@@ -101,22 +100,105 @@ The [container smoke test](../images/sites-smoke.sh) covers synthetic publishing
 visibility and restart/replacement. It does not qualify real mail, Fly TLS, the
 dashboard account bridge or migration from a legacy database.
 
+## Backups and restore
+
+Backups are disabled by default. Before production migration, prove the complete
+Sites Recovery Set (repositories, blobs, registry, permissions and cookie key)
+restores from rsync.net onto an empty target. Image smoke tests and Fly volumes
+alone do not prove remote recovery.
+
+### Enable backups
+
+Provision a dedicated Borg repository using `repokey-blake2`; the job never
+initializes one. Keep its exported repokey, passphrase, SSH identity, pinned host
+key and service/mail configuration independently of Fly. Verify the SSH key's
+access restrictions: a dedicated repository path alone provides no isolation
+or append-only protection.
+
+Add these settings to the Fly configuration's existing `[env]` table:
+
+```toml
+FINITE_SITES_BACKUP_ENABLED = "1"
+FINITE_SITES_BACKUP_REPOSITORY = "<approved dedicated Sites repository>"
+FINITE_SITES_BACKUP_REMOTE_PATH = "borg12"
+```
+
+Provision base64-encoded Fly file secrets through the secret custody process,
+keeping values out of git and command arguments. Add one `[[files]]` entry per
+row, with `guest_path` under `/var/lib/finitecomputer/backups/rsync-net/`:
+
+| `secret_name` | `guest_path` filename |
+| --- | --- |
+| `FINITE_SITES_BORG_SSH_KEY` | `id_ed25519` |
+| `FINITE_SITES_BORG_KNOWN_HOSTS` | `known_hosts` |
+| `FINITE_SITES_BORG_PASSPHRASE` | `borg-passphrase` |
+
+Deploy a qualified image using the procedure above. The image protects the
+credential directory as root-only and the files as `0600`. Allow space for a
+full snapshot in `/var/backups/finite-sites`; this staging/status directory is
+private, outside serving data, and ephemeral across Machine replacement.
+
+Once enabled, backups run daily at 03:07 UTC. Sites stops during capture and
+verification, then resumes before upload. Confirm this pause and recovery
+interval are acceptable. Runs are serialized; Borg warnings fail the job.
+There is no automatic retry, prune or compact.
+
+### Check or retry
+
+Inside the backup-enabled Machine as root:
+
+```sh
+supervisorctl -c /run/sites-supervisor.conf start sites-backup
+supervisorctl -c /run/sites-supervisor.conf status sites-backup
+finite-status --sites-backup-state /var/backups/finite-sites/status.json --json
+```
+
+`start` is asynchronous: check after completion for a fresh archive ID and both
+source and upload timestamps. The freshness limit defaults to 36 hours; a
+missing receipt is unknown. Set up external failure/freshness alerts; this
+command sends no notifications. After host loss or forced termination, check
+Sites health and restart through Supervisor or restart the Machine before retrying.
+
+### Restore or drill
+
+Use a matching Sites image on an isolated target with no Sites writer and an
+empty volume mounted at `/var/lib/finite-sites`. Run as root to preserve UID/GID
+65532. Keep production routing unchanged and control outbound mail during drills.
+
+Using independently held credentials, configure Borg 1.x with `BORG_REPO`,
+`BORG_REMOTE_PATH=borg12`, `BORG_PASSCOMMAND` reading the private passphrase file,
+`BORG_RSH` using strict pinned-host checking and the SSH key, and a fresh private
+`BORG_BASE_DIR`. Select `ARCHIVE` from `borg list`, independent of the lost
+Machine's status file. Never copy a Borg repository while it has writers.
+
+The restore tool requires a nonexistent target, so restore to scratch first:
+
+```sh
+set -eu
+umask 077
+RESTORE_ROOT=$(mktemp -d)
+cd "$RESTORE_ROOT"
+borg check --verify-data "::$ARCHIVE"
+borg extract "::$ARCHIVE"
+sites-backup restore --snapshot ./snapshot --target "$RESTORE_ROOT/data"
+mountpoint -q /var/lib/finite-sites
+test -z "$(ls -A /var/lib/finite-sites)"
+rsync -a "$RESTORE_ROOT/data/" /var/lib/finite-sites/
+```
+
+The tool verifies inventory, checksums and SQLite integrity. Stop on any error;
+never overwrite a nonempty volume or start a partial restore. Allow scratch
+space for both copies, protect them as secrets, and remove them after verification.
+Inspect snapshot SQLite only through `scripts/snapshot-sqlite` or a scratch copy.
+Restore service configuration, start Sites, and run the [verification](#verify)
+checks with pre-backup credentials before moving traffic.
+
 ## Recovery and cutover
 
-Fly backups are opt-in and disabled in the checked-in configuration. Follow the
-[Borg recovery runbook](sites-borg-recovery.md) for the dedicated rsync.net
-repository, root-only credentials, schedule, external alerts and independent
-empty-volume restore. The image workflow also tests backup and restore locally;
-that does not prove the remote recovery path is ready.
-
-Roll back to a previous image digest only when it can read the current state. Preserve the data volume; binary rollback does not undo migrations or
-writes. If a Git push was accepted but publication failed, reconcile it after
-service recovery. Never restore an old database over newer accepted writes.
-
-Before production migration, prove an independent backup of the complete Sites
-Recovery Set restores onto an empty target, including repositories, blobs,
-registry and cookie secret. Local snapshots and Fly volumes alone do not prove
-this. Inspect snapshot SQLite through `scripts/snapshot-sqlite` or a scratch copy.
+Roll back to a previous image digest only when it can read the current state.
+Preserve the data volume; binary rollback does not undo migrations or writes.
+If a Git push was accepted but publication failed, reconcile it after service
+recovery. Never restore an old database over newer accepted writes.
 
 Only agreed published static Sites migrate. Preserve archives for retired
 apps/documents and unpublished or missing-source projects. Rehearse on isolated
