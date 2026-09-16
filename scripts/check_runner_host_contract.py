@@ -107,7 +107,7 @@ def check_shared_env(envs: dict[str, dict[str, str]]) -> None:
     for host in HOSTS:
         runtime_env = json.loads(envs[host]["FC_RUNNER_RUNTIME_ENV_JSON"])
         if runtime_env.get("FINITE_SITES_API") != "https://finite.site":
-            raise SystemExit(f"{host}: Runtime fallback must use the qualified Sites v2 origin")
+            raise SystemExit(f"{host}: Runtime fallback must use the qualified Finite Sites origin")
         if envs[host].get("FC_RUNNER_MAX_SANDBOXES") != EXPECTED_MAX_SANDBOXES[host]:
             raise SystemExit(
                 f"{host}: FC_RUNNER_MAX_SANDBOXES is "
@@ -277,14 +277,14 @@ def main() -> None:
         "finite-lat-2", "systemd.services.finite-saas-core.environment"
     ))
     if json.loads(core["FC_CORE_RUNTIME_ENV_JSON"]).get("FINITE_SITES_API") != "https://finite.site":
-        raise SystemExit("Core RuntimeSpecs must use the qualified Sites v2 origin")
+        raise SystemExit("Core RuntimeSpecs must use the qualified Finite Sites origin")
     phala = json.loads(nix_eval(
         "finite-lat-1", "systemd.services.finite-saas-runner-phala.environment"
     ))
     if "FC_RUNNER_RUNTIME_ARTIFACT_ID" in phala:
         raise SystemExit("Phala Runtime promotion pin must live in phala-runner.env, not Nix")
     if json.loads(phala["FC_RUNNER_RUNTIME_ENV_JSON"]).get("FINITE_SITES_API") != "https://finite.site":
-        raise SystemExit("Phala Runtime fallback must use the qualified Sites v2 origin")
+        raise SystemExit("Phala Runtime fallback must use the qualified Finite Sites origin")
     dashboard = json.loads(nix_eval(
         "finite-lat-2", "virtualisation.oci-containers.containers.finite-saas-dashboard.environment"
     ))

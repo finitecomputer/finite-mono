@@ -29,7 +29,7 @@ Current v2 capabilities:
   public-read Project Repository visibility.
 
 Stateful apps, document rendering, PDF outputs, and output kinds are retired
-from Sites v2. See `docs/adr/0028-static-only-sites-platform-service.md`.
+from Finite Sites. See `docs/adr/0028-static-only-sites-platform-service.md`.
 
 ## Crate Layout
 
