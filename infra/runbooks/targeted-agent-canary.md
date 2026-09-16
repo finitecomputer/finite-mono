@@ -73,30 +73,37 @@ Verify the exact resulting Runtime, identity readiness and a real Chat reply.
 Re-drain after the claim/test. This proves launch for an existing account;
 it does not prove fresh account enrollment or the eventual fleet capacity.
 
-## Admit a qualified cohort
+## Return the host to the shared pool
 
-Keep the root reservation to exclude unrelated launches. Batch targeting is a
-general placement control, not a legacy-data import bridge. Its bindings remain
-authoritative after redemption and must survive command retirement.
-
-After qualifying workload capacity, keep the host drained and verify the exact
-approved batch, issuer, unused count and root reservation through `finite-status`.
-Preserve existing destinations when determining the required slots. Deploy and
-verify the running Core executable before using its root-only command:
+Keep the Runner drained. Verify the exact root reservation, successful canary's
+actual host, fresh ready health, and effective capacity through `finite-status`.
+Every bound code must be consumed, expired or revoked; no targeted creation or
+canary control operation may be in flight. Deploy and verify the running Core
+executable before using its root-only command:
 
 ```sh
-finite-saas-core launch-code-batch-target-exact \
-  --batch-id BATCH_ID --expected-code-count COUNT \
-  --reservation-code-id ROOT_CODE_ID --target-source-host-id HOST_ID \
+finite-saas-core launch-host-release-exact \
+  --reservation-code-id ROOT_CODE_ID --source-host-id HOST_ID \
+  --expected-canary-runtime-id RUNTIME_ID \
   --operator-email OPERATOR_EMAIL --operator-workos-user-id WORKOS_USER_ID
 ```
 
-Inspect the rollback-only preview, then repeat with `--execute`. The whole batch
-must still be unused, active and Standard. Verify every child binding and the
-qualified Runner ceiling with canonical status before undraining. Targeting
-neither raises capacity nor proves account enrollment. Stop and drain on any
-placement or readiness mismatch; revocation blocks unused codes but does not
-undo redemption. Preserve bindings, created requests and Chat history.
+Inspect the rollback-only preview, then repeat with `--execute`. Verify the
+release receipt and unchanged canary bindings, requests and Runtime destinations
+through `finite-status`. Only then disable drain on that exact host. Ordinary
+Launch Codes remain unbound: TRF migrations and new-user onboarding share the
+normal queue, claimed by an eligible Runner with capacity. Existing destinations
+remain intact. A release changes admission, not enrollment or migration state.
+
+Migration 0029 appends a release receipt and audit event without deleting target
+bindings or rewriting user state. Redemption continues to read those bindings;
+the creation lease reader ignores released reservations for untargeted work.
+Explicit request targets and Runner drain/capacity checks still apply. The database fence refuses new bindings after release, including writes from
+older Core executables. The successful canary must belong to the exact root
+reservation or its retry. Repeating the same exact release is a no-op.
+Core versions supporting 0026–0028 ignore the receipt and conservatively block
+ordinary launches on that host. Keep the additive schema on binary rollback;
+re-enable drain to stop new admission without deleting any Agent or Chat history.
 
 ## Writers, readers and rollback
 
@@ -120,6 +127,7 @@ host drained until a compatible Core is restored. Leave the additive table and
 audit history in place. Do not restore a whole database backup over newer user
 writes to undo a canary; retain any created Runtime and Chat history.
 
-Migration 0028 adds cohort children without changing redemption or lease readers.
+Migration 0028 retains cohort-child history; the unused batch-targeting command
+was retired when the host joined the shared pool.
 Core versions supporting 0026/0027 can read those bindings and replay startup
 migrations; retain the expanded schema during binary rollback.

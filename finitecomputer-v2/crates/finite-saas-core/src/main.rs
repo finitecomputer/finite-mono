@@ -72,22 +72,20 @@ enum Command {
         #[arg(long)]
         execute: bool,
     },
-    /// Root-only: bind an exact unused batch under an existing Kata reservation.
-    #[command(name = "launch-code-batch-target-exact")]
-    LaunchCodeBatchTargetExact {
-        #[arg(long)]
-        batch_id: String,
-        #[arg(long)]
-        expected_code_count: i64,
+    /// Root-only: end an exact canary reservation for shared-pool admission.
+    #[command(name = "launch-host-release-exact")]
+    LaunchHostReleaseExact {
         #[arg(long)]
         reservation_code_id: String,
         #[arg(long)]
-        target_source_host_id: String,
+        source_host_id: String,
+        #[arg(long)]
+        expected_canary_runtime_id: String,
         #[arg(long)]
         operator_email: String,
         #[arg(long)]
         operator_workos_user_id: String,
-        /// Commit admission; omit for a rollback-only preview.
+        /// Commit the release; omit for a rollback-only preview.
         #[arg(long)]
         execute: bool,
     },
@@ -502,32 +500,28 @@ async fn main() -> Result<()> {
             .await?;
             print_json(&artifact)
         }
-        Command::LaunchCodeBatchTargetExact {
-            batch_id,
-            expected_code_count,
+        Command::LaunchHostReleaseExact {
             reservation_code_id,
-            target_source_host_id,
+            source_host_id,
+            expected_canary_runtime_id,
             operator_email,
             operator_workos_user_id,
             execute,
         } => {
             let auth = CoreAuth::from_env()?;
-            if !auth.has_kata_host(&target_source_host_id) {
-                bail!("target must match an active host-bound Kata credential");
+            if !auth.has_kata_host(&source_host_id) {
+                bail!("host must match an active host-bound Kata credential");
             }
-            let input = finite_saas_core::TargetLaunchCodeBatchInput {
-                batch_id,
-                expected_code_count,
+            let input = finite_saas_core::ReleaseLaunchHostInput {
                 reservation_code_id,
-                target_source_host_id,
+                source_host_id,
+                expected_canary_runtime_id,
                 operator_email,
                 operator_workos_user_id,
             };
             let store = postgres_store_from_env(ImportMode::from_dry_run(!execute)).await?;
-            store.target_launch_code_batch_exact(&input).await?;
-            print_json(
-                &serde_json::json!({"binding":input,"dryRun":!execute,"targetedCreationOnly":true}),
-            )
+            store.release_launch_host_exact(&input).await?;
+            print_json(&serde_json::json!({"release":input,"dryRun":!execute}))
         }
         Command::LaunchCodeTargetExact {
             code_id,
@@ -1962,6 +1956,38 @@ mod tests {
             Some(Command::LaunchCodeRetryTargetExact { execute: true, .. })
         ));
         assert!(Args::try_parse_from(&args[..args.len() - 2]).is_err());
+    }
+
+    #[test]
+    fn host_release_requires_exact_ids_and_defaults_to_preview() {
+        let args = [
+            "finite-saas-core",
+            "launch-host-release-exact",
+            "--reservation-code-id",
+            "root",
+            "--source-host-id",
+            "host",
+            "--expected-canary-runtime-id",
+            "runtime",
+            "--operator-email",
+            "operator@finite.vip",
+            "--operator-workos-user-id",
+            "operator",
+        ];
+        assert!(matches!(
+            Args::try_parse_from(args).unwrap().command,
+            Some(Command::LaunchHostReleaseExact { execute: false, .. })
+        ));
+        assert!(matches!(
+            Args::try_parse_from(args.into_iter().chain(["--execute"]))
+                .unwrap()
+                .command,
+            Some(Command::LaunchHostReleaseExact { execute: true, .. })
+        ));
+        assert!(Args::try_parse_from(&args[..args.len() - 2]).is_err());
+        assert!(
+            Args::try_parse_from(["finite-saas-core", "launch-code-batch-target-exact"]).is_err()
+        );
     }
 
     #[test]
