@@ -112,9 +112,11 @@ sudo <runner-bin> state-manifest \
 
 Record the 64-character `SOURCE_MANIFEST`. The command follows no symlinks,
 hashes file contents, paths, modes, and symlink targets, and rejects special
-files except `agent/hermes-home/gateway.sock` when it is a Unix socket. Hermes
-recreates this control socket on startup; it carries no durable state. A regular
-file or symlink at that path is still hashed. GNU tar omits sockets, so the
+files except the known Hermes Unix sockets: `agent/hermes-home/gateway.sock`
+and `agent/hermes-home/state/gateway.loop-tick.<positive-decimal-pid>.sock`.
+Hermes recreates these control and loop-liveness sockets on startup; they carry
+no durable state. Regular files or symlinks at those paths are still hashed.
+GNU tar omits sockets, so the
 stopped source and restored tree have the same manifest without deleting the
 socket from the source. Any other special file remains a hard failure.
 

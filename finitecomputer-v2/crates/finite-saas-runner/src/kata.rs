@@ -3423,9 +3423,9 @@ fn staged_agent_identity_metadata(state_root: &Path) -> Result<std::fs::Metadata
 }
 
 /// Stable manifest used on both the stopped source and the staged target. It
-/// does not follow symlinks and rejects special files except the exact Hermes
-/// gateway control socket, which Hermes recreates on startup. Regular files
-/// and symlinks at that path remain part of the manifest. Ownership and xattrs
+/// does not follow symlinks and rejects special files except the known Hermes
+/// control and loop-liveness sockets, which Hermes recreates on startup. Regular
+/// files and symlinks at those paths remain part of the manifest. Ownership and xattrs
 /// are preserved by the transfer command
 /// but intentionally excluded so an operator can stage through an encrypted
 /// intermediate host without changing the content proof.
@@ -3462,7 +3462,7 @@ pub fn durable_state_manifest_sha256(root: &Path) -> Result<String, RunnerError>
             .map_err(|error| RunnerError::RuntimeLaunch(error.to_string()))?;
         let file_type = metadata.file_type();
         #[cfg(unix)]
-        if relative == Path::new("agent/hermes-home/gateway.sock") && file_type.is_socket() {
+        if file_type.is_socket() && is_ephemeral_hermes_socket_path(relative) {
             continue;
         }
         #[cfg(unix)]
@@ -3510,6 +3510,25 @@ pub fn durable_state_manifest_sha256(root: &Path) -> Result<String, RunnerError>
         }
     }
     Ok(hex::encode(manifest.finalize()))
+}
+
+#[cfg(unix)]
+fn is_ephemeral_hermes_socket_path(path: &Path) -> bool {
+    if path == Path::new("agent/hermes-home/gateway.sock") {
+        return true;
+    }
+    if path.parent() != Some(Path::new("agent/hermes-home/state")) {
+        return false;
+    }
+    path.file_name()
+        .and_then(|name| name.to_str())
+        .and_then(|name| name.strip_prefix("gateway.loop-tick."))
+        .and_then(|name| name.strip_suffix(".sock"))
+        .is_some_and(|pid| {
+            !pid.is_empty()
+                && pid.bytes().all(|byte| byte.is_ascii_digit())
+                && pid.parse::<u32>().is_ok_and(|pid| pid > 0)
+        })
 }
 
 /// Derive the plan for a source machine. The durable state root is
@@ -6318,6 +6337,63 @@ esac
                 .to_string()
                 .contains("unsupported special file agent/hermes-home/other.sock")
         );
+    }
+
+    #[test]
+    fn durable_state_manifest_excludes_only_known_hermes_loop_tick_sockets() {
+        use std::os::unix::fs::symlink;
+        use std::os::unix::net::UnixListener;
+
+        let root = tempfile::tempdir().unwrap();
+        let state = root.path().join("agent/hermes-home/state");
+        std::fs::create_dir_all(&state).unwrap();
+        std::fs::write(state.join("gateway.heartbeat"), b"retain heartbeat").unwrap();
+        let expected = durable_state_manifest_sha256(root.path()).unwrap();
+        for pid in [21, 22] {
+            let path = state.join(format!("gateway.loop-tick.{pid}.sock"));
+            let socket = UnixListener::bind(&path).unwrap();
+            drop(socket);
+        }
+        assert_eq!(
+            durable_state_manifest_sha256(root.path()).unwrap(),
+            expected
+        );
+        for pid in [21, 22] {
+            std::fs::remove_file(state.join(format!("gateway.loop-tick.{pid}.sock"))).unwrap();
+        }
+        let known = state.join("gateway.loop-tick.21.sock");
+        std::fs::write(&known, b"retain regular file").unwrap();
+        assert_ne!(
+            durable_state_manifest_sha256(root.path()).unwrap(),
+            expected
+        );
+        std::fs::remove_file(&known).unwrap();
+        symlink("gateway.heartbeat", &known).unwrap();
+        assert_ne!(
+            durable_state_manifest_sha256(root.path()).unwrap(),
+            expected
+        );
+        std::fs::remove_file(&known).unwrap();
+
+        for relative in [
+            "agent/hermes-home/gateway.loop-tick.21.sock",
+            "agent/hermes-home/state/gateway.loop-tick..sock",
+            "agent/hermes-home/state/gateway.loop-tick.name.sock",
+            "agent/hermes-home/state/gateway.loop-tick.0.sock",
+            "agent/hermes-home/state/gateway.loop-tick.+21.sock",
+            "agent/hermes-home/state/gateway.loop-tick.21.sock.extra",
+            "agent/hermes-home/state/other.sock",
+        ] {
+            let path = root.path().join(relative);
+            let socket = UnixListener::bind(&path).unwrap();
+            let error = durable_state_manifest_sha256(root.path()).unwrap_err();
+            assert!(
+                error.to_string().contains("unsupported special file"),
+                "{relative}: {error}"
+            );
+            drop(socket);
+            std::fs::remove_file(path).unwrap();
+        }
     }
 
     #[test]
