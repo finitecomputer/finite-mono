@@ -414,7 +414,7 @@
             # hermes-free so unrelated CI jobs never fetch hermes.
             hermes-bridge-ci =
               let
-                hermesAgentRuntime = hermes-agent.packages.${system}.default;
+                hermesAgentRuntime = (hermesPackagesFor system).hermes-agent-runtime;
                 hermesAgentRuntimePython = hermesAgentRuntime.hermesVenv;
               in
               pkgs.mkShell {

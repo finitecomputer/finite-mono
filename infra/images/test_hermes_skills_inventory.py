@@ -89,6 +89,19 @@ class SkillsInventoryTests(unittest.TestCase):
         for row in rows.values():
             self.assertEqual(set(row), {"name", "description", "category", "enabled"})
         self.assertEqual((home / "config.yaml").read_bytes(), before)
+        # An individual plugin skill can be disabled without disabling its plugin.
+        import yaml
+
+        config = yaml.safe_load(before)
+        config["skills"]["disabled"].append(plugin[0]["name"])
+        (home / "config.yaml").write_text(yaml.safe_dump(config))
+        disabled_plugin = next(
+            row
+            for row in self.inventory("compatibility").json()["skills"]
+            if row["name"] == plugin[0]["name"]
+        )
+        self.assertFalse(disabled_plugin["enabled"])
+
         again = self.client.get("/api/skills?profile=compatibility").json()
         self.assertEqual({row["name"] for row in again}, {row["name"] for row in legacy.json()})
         toggle = self.client.put(
