@@ -37,11 +37,25 @@ agent is the sole admin. Repeating a topic name reuses the existing group.
 
 The Finite plugin extends the released adapter only for managed SimpleX. It uses
 that adapter's existing socket and checks current membership before admission
-and outbound text/media. The group member ID must map to the paired contact ID;
+and outbound text/media. Checks use the local daemon rather than cached
+membership; this deliberately adds a local command round-trip per send. Expected
+policy refusals return unsuccessful `SendResult`s at public text/media send
+boundaries. Routing is enabled before issuing an invitation so an immediate
+first message is not lost while the tool awaits the invitation response.
+The group member ID must map to the paired contact ID;
 Hermes then applies ordinary pairing authorization to that verified contact.
 Unregistered groups are ignored. Additional members, owner promotion, or leaving
 permanently disable private processing for that topic. Membership read failures
 also deny processing. There is no multi-user conversion path in this slice.
+
+A blocked topic does not require a connection reset. The create tool explains
+that the owner can explicitly request a fresh replacement in their approved DM.
+Only then may it set `replace_blocked=true`: the old group stays disabled with
+its history intact, and a new group gets a separate session. The registry keeps
+the old blocked row under `retired:<group-id>` alongside the new topic row.
+Retries reuse the replacement, including reconciliation after a lost creation
+response. Other topics, approvals and Home are untouched. The tool never
+unblocks an old group or copies its transcript into the replacement.
 
 The plugin alone writes `/data/agent/simplex/topics.json` atomically. It records
 creation intent before issuing the command and reconciles uncertain creation
@@ -49,7 +63,13 @@ using a unique temporary group description, removed before the invitation.
 Unresolved/ambiguous creation refuses to create another group and requires repair;
 it never guesses from a title. Reset deletes this registry with the SimpleX state.
 Corrupt registry state disables topics while preserving private DM availability.
-Only one gateway writer may use the identity/registry at a time.
+The canonical wrapper runs `hermes gateway run --replace` under the same durable
+`HERMES_HOME`. Pinned Hermes acquires its process-held `gateway.lock` before
+starting platform adapters, and releases it after adapter teardown (or on process
+exit). Replacement startup must win that lock before loading this adapter;
+`--replace` does not bypass it. A two-process contract test verifies exclusion
+and release after abrupt exit. No second registry lock is needed on this path.
+Pointing independent Hermes profiles at the same SimpleX identity is unsupported.
 
 Each group retains its own Hermes session; creation does not write Home settings.
 Shared agent memory/tools remain shared. The stock adapter on rollback ignores

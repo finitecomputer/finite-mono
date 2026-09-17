@@ -19,6 +19,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 from gateway.pairing import PairingStore
+from gateway.platforms.base import SendResult
 from gateway.session_context import get_session_env
 
 if TYPE_CHECKING:
@@ -170,10 +171,21 @@ class OwnerTopics(_TopicBase):
         return await super()._send_ws(payload)
 
     async def _send_command(self, command, **kwargs):
-        await self.guard_send(command)
+        try:
+            await self.guard_send(command)
+        except (ValueError, RuntimeError, KeyError, TypeError, OSError):
+            # Upstream media senders turn an unconfirmed command into a failed
+            # SendResult. Never let a policy refusal reach the socket.
+            return None
         return await super()._send_command(command, **kwargs)
 
-    async def create_topic(self, title, owner):
+    async def send(self, chat_id, content, reply_to=None, metadata=None):
+        try:
+            return await super().send(chat_id, content, reply_to=reply_to, metadata=metadata)
+        except (ValueError, RuntimeError, KeyError, TypeError, OSError) as exc:
+            return SendResult(success=False, error=str(exc))
+
+    async def create_topic(self, title, owner, *, replace_blocked=False):
         if self.topic_error:
             raise ValueError("Retained topic state needs repair; no groups were changed")
         if owner != sole_owner():
@@ -188,6 +200,16 @@ class OwnerTopics(_TopicBase):
         key = hashlib.sha256((owner + ":" + title.casefold()).encode()).hexdigest()
         async with self.topic_lock:
             row = self.topics.get(key)
+            retired = None
+            if row is not None and row.get("blocked"):
+                if replace_blocked is not True:
+                    raise ValueError(
+                        "This topic is blocked after a membership change. Ask the owner in "
+                        "their private DM whether to create a fresh replacement with the "
+                        "same name (replace_blocked=true). The old group and its history "
+                        "stay disabled and intact; other topics and Home are unchanged."
+                    )
+                retired, row = row, None
             if row is None:
                 user = (await self.command("/u"))["user"]["userId"]
                 row = {
@@ -195,8 +217,12 @@ class OwnerTopics(_TopicBase):
                     "title": title,
                     "marker": "Finite owner topic " + uuid.uuid4().hex,
                 }
+                if retired is not None:
+                    # Keep the disabled group recorded: delayed messages or
+                    # retries must never reopen its private conversation.
+                    self.topics["retired:" + retired["group_id"]] = retired
+                    row["replaces_group_id"] = retired["group_id"]
                 self.topics[key] = row
-                write_state(self.topic_path, self.topics)
                 # Journal before the external mutation. An uncertain create is
                 # reconciled by its unique description, never blindly repeated.
                 row["creating"] = True
@@ -234,17 +260,25 @@ class OwnerTopics(_TopicBase):
                 await self.command(f"/_group_profile #{group_id} " + json.dumps(profile))
                 row["named"] = True
                 write_state(self.topic_path, self.topics)
+            # Route messages before issuing the invitation: the owner can join
+            # and speak before the command response reaches us. Admission still
+            # checks live membership and the recorded owner on every message.
+            self.group_allow_from.add(group_id)
             if not group["members"]:
                 # An interrupted invitation is inspected on retry. Only the
                 # paired contact is ever passed to /_add; never a model argument.
                 await self.command(f"/_add #{group_id} {owner} member")
             await self.check_group(group_id)
-            self.group_allow_from.add(group_id)
             return {
                 "group_id": group_id,
                 "topic": row["title"],
                 "status": "invited",
                 "home_unchanged": True,
+                **(
+                    {"replaced_group_id": row["replaces_group_id"]}
+                    if row.get("replaces_group_id")
+                    else {}
+                ),
             }
 
 
@@ -290,7 +324,10 @@ def register(ctx):
             if not live or live[0].topic_loop is None:
                 raise ValueError("Managed SimpleX is not connected")
             future = asyncio.run_coroutine_threadsafe(
-                live[0].create_topic(args.get("topic"), owner), live[0].topic_loop
+                live[0].create_topic(
+                    args.get("topic"), owner, replace_blocked=args.get("replace_blocked", False)
+                ),
+                live[0].topic_loop,
             )
             try:
                 return json.dumps(future.result(timeout=75))
@@ -307,10 +344,16 @@ def register(ctx):
         description="Create an owner-only SimpleX topic and invite the paired owner",
         schema={
             "name": "simplex_create_topic",
-            "description": "When the owner explicitly asks in their private SimpleX DM, create a topic group and invite them. Same topic name reuses the group. Keeps Home unchanged. Only the agent and owner are supported; no other invitees.",
+            "description": "When the owner explicitly asks in their private SimpleX DM, create a topic group and invite them. Same topic name reuses the group. Keeps Home unchanged. Only the agent and owner are supported; no other invitees. If blocked, explain that replacement starts a fresh group while retaining the disabled old group and history. Set replace_blocked only after the owner explicitly requests that replacement; never automatically retry a blocked topic with it.",
             "parameters": {
                 "type": "object",
-                "properties": {"topic": {"type": "string"}},
+                "properties": {
+                    "topic": {"type": "string"},
+                    "replace_blocked": {
+                        "type": "boolean",
+                        "description": "Create a fresh replacement only for a blocked topic, after the owner explicitly requests it. An already active replacement is reused.",
+                    },
+                },
                 "required": ["topic"],
                 "additionalProperties": False,
             },

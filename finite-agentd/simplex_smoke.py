@@ -1,7 +1,7 @@
 """Opt-in real relay test; uses three disposable identities, no inference or real users.
 
 Run just computer simplex-smoke. This proves topic tool/admission and adapter routing, not full gateway inference,
-inference, phone UX, or messages arriving during a gateway outage.
+phone UX, or messages arriving during a gateway outage.
 """
 
 import asyncio
@@ -225,13 +225,42 @@ async def run():
                 c["contactId"] for c in contacts if c["localDisplayName"] == "FiniteTest2"
             )
             await adapter.command(f"/_add #{gid} {stranger} member")
-            try:
-                await adapter.send(f"group:{gid}", "must never be sent")
-            except ValueError:
-                pass
-            else:
-                raise AssertionError("private reply escaped after membership changed")
+            result = await adapter.send(f"group:{gid}", "must never be sent")
+            assert not result.success, "private reply escaped after membership changed"
             assert any(r.get("blocked") for r in adapter.topics.values())
+            tokens = set_session_vars(
+                platform="simplex", chat_id=owner, chat_type="dm", user_id=owner
+            )
+            try:
+                recovery = json.loads(
+                    await asyncio.to_thread(
+                        handle_function_call,
+                        "simplex_create_topic",
+                        {"topic": "gardening", "replace_blocked": True},
+                    )
+                )
+            finally:
+                clear_session_vars(tokens)
+            replacement_gid = recovery["group_id"]
+            assert replacement_gid != gid and recovery["replaced_group_id"] == gid
+            invitation = await peers[1].until(lambda e: e.get("type") == "receivedGroupInvitation")
+            replacement_phone_gid = str(invitation["groupInfo"]["groupId"])
+            await peers[1].cmd(f"/_join #{replacement_phone_gid}")
+            await peers[1].until(lambda e: e.get("type") == "userJoinedGroup")
+            await peers[1].cmd(f"/_send #{replacement_phone_gid} json " + msg)
+            replacement_event = await asyncio.wait_for(incoming.get(), 30)
+            assert replacement_event.source.chat_id == f"group:{replacement_gid}"
+            await peers[1].until(reply)
+            await adapter.disconnect()
+            adapter = platform_registry.get("simplex").adapter_factory(cfg)
+            adapter.set_message_handler(handle)
+            assert await adapter.connect()
+            await asyncio.sleep(0.5)
+            retried = await adapter.create_topic("gardening", owner, replace_blocked=True)
+            assert retried["group_id"] == replacement_gid
+            assert not (await adapter.send(f"group:{gid}", "old topic stays disabled")).success
+            assert adapter.topics[f"retired:{gid}"]["blocked"]
+            print("PASS: explicit replacement survives restart; old topic stays disabled")
             print("PASS: unexpected third member blocks private outbound traffic")
             print(
                 "PASS: owner topic created, invitation accepted, contact identity mapped, round trip and adapter restart/retry preserve group"

@@ -2,6 +2,7 @@
 
 import asyncio
 import copy
+import hashlib
 import importlib.util
 import os
 import subprocess
@@ -139,10 +140,13 @@ class TopicTests(unittest.IsolatedAsyncioTestCase):
         self.save()
         self.group["members"].append({"memberContactId": 4})
         self.adapter._ws = AsyncMock()
-        with self.assertRaises(ValueError):
-            await self.adapter.send("group:7", "private answer")
-        with self.assertRaises(ValueError):
-            await self.adapter._send_command('/_send #7 json [{"filePath":"private.png"}]')
+        result = await self.adapter.send("group:7", "private answer")
+        self.assertFalse(result.success)
+        self.assertIn("membership changed", result.error)
+        attachment = Path(self.temp.name) / "private.txt"
+        attachment.write_text("private document")
+        result = await self.adapter.send_document("group:7", str(attachment))
+        self.assertFalse(result.success)
         self.adapter._ws.send.assert_not_called()
         restored = Adapter(self.adapter.config)
         with self.assertRaises(ValueError):
@@ -228,6 +232,158 @@ class TopicTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual((await self.adapter.create_topic("Garden", "3"))["group_id"], "7")
         self.assertEqual(Adapter(self.adapter.config).group_allow_from, {"7"})
         self.assertEqual(self.adapter.topic_path.stat().st_mode & 0o777, 0o600)
+
+    async def test_explicit_blocked_replacement_preserves_history_and_reconciles_retry(self):
+        from gateway.config import GatewayConfig
+        from gateway.session import SessionStore
+
+        key = hashlib.sha256(b"3:gardening").hexdigest()
+        blocked = {**self.row, "blocked": True}
+        other = {"owner": "3", "title": "Cooking", "group_id": "9"}
+        self.adapter.topics = {key: blocked, "other": other}
+        self.save()
+        before = self.adapter.topic_path.read_bytes()
+        store = SessionStore(Path(self.temp.name) / "sessions", GatewayConfig())
+        old_session = store.get_or_create_session(
+            self.adapter.build_source(chat_id="group:7", chat_type="group", user_id="3")
+        )
+        store.append_to_transcript(
+            old_session.session_id, {"role": "user", "content": "old garden"}
+        )
+        history = store.load_transcript(old_session.session_id)
+        self.adapter.command = AsyncMock()
+        for approval in (False, "true"):
+            with self.assertRaisesRegex(ValueError, "fresh replacement"):
+                await self.adapter.create_topic("Gardening", "3", replace_blocked=approval)
+        self.adapter.command.assert_not_called()
+        self.assertEqual(self.adapter.topic_path.read_bytes(), before)
+        calls = []
+
+        async def command(text):
+            calls.append(text)
+            if text == "/u":
+                return {"user": {"userId": 1}}
+            if text.startswith("/_group "):
+                raise RuntimeError("lost response after replacement created")
+            if text == "/groups":
+                row = self.adapter.topics[key]
+                return {"groups": [{"groupId": 8, "groupProfile": {"description": row["marker"]}}]}
+            if text.startswith("/_group_profile "):
+                return {"type": "groupUpdated"}
+            self.fail(text)
+
+        self.adapter.command = command
+        with self.assertRaises(RuntimeError):
+            await self.adapter.create_topic("Gardening", "3", replace_blocked=True)
+        # Retain the interrupted replacement across reconstruction; retrying the
+        # same explicit request must reconcile, not create yet another group.
+        restored = Adapter(self.adapter.config)
+        restored.command = command
+        restored.members = self.adapter.members
+        result = await restored.create_topic("Gardening", "3", replace_blocked=True)
+        self.assertEqual((result["group_id"], result["replaced_group_id"]), ("8", "7"))
+        self.assertEqual(
+            (await restored.create_topic("Gardening", "3", replace_blocked=True))["group_id"], "8"
+        )
+        self.assertEqual(sum(c.startswith("/_group ") for c in calls), 1)
+        self.assertEqual(restored.topics["retired:7"], blocked)
+        self.assertEqual(restored.topics["other"], other)
+        with self.assertRaises(ValueError):
+            restored.topic("7")
+        self.assertEqual(store.load_transcript(old_session.session_id), history)
+        new_session = store.get_or_create_session(
+            restored.build_source(chat_id="group:8", chat_type="group", user_id="3")
+        )
+        self.assertNotEqual(new_session.session_id, old_session.session_id)
+        self.assertFalse(store.load_transcript(new_session.session_id))
+        self.assertEqual(Adapter(self.adapter.config).topic("8")["owner"], "3")
+
+    async def test_first_message_before_invitation_response_reaches_owner_session(self):
+        self.adapter.topics = {}
+        received = asyncio.Queue()
+        self.adapter._text_batch_delay = 0
+
+        async def handler(event):
+            await received.put(event)
+
+        self.adapter.set_message_handler(handler)
+        self.adapter.members = AsyncMock(
+            side_effect=[{**self.group, "members": []}, self.group, self.group]
+        )
+
+        async def command(text):
+            if text == "/u":
+                return {"user": {"userId": 1}}
+            if text.startswith("/_group "):
+                return {"type": "groupCreated", "groupInfo": {"groupId": 7}}
+            if text.startswith("/_group_profile "):
+                return {"type": "groupUpdated"}
+            if text == "/_add #7 3 member":
+                # Dispatch through the real upstream allowlist and text batcher
+                # while create_topic is still waiting for the invite response.
+                await self.adapter._handle_chat_item(
+                    {
+                        "chatInfo": {"type": "group", "groupInfo": {"groupId": 7}},
+                        "chatItem": {
+                            "chatDir": {
+                                "type": "groupRcv",
+                                "groupMember": self.group["members"][0],
+                            },
+                            "content": {
+                                "type": "rcvMsgContent",
+                                "msgContent": {"type": "text", "text": "first hello"},
+                            },
+                        },
+                    }
+                )
+                first = await asyncio.wait_for(received.get(), 2)
+                self.assertEqual(
+                    (first.source.chat_id, first.source.user_id, first.text),
+                    ("group:7", "3", "first hello"),
+                )
+                return {"type": "sentGroupInvitation"}
+            self.fail(text)
+
+        self.adapter.command = command
+        await self.adapter.create_topic("Garden", "3")
+        await asyncio.sleep(0)
+
+    async def test_pinned_gateway_process_lock_excludes_second_writer_and_releases_on_exit(self):
+        # Use the real upstream lock in separate processes, under our temporary
+        # HERMES_HOME. The canonical gateway acquires it before starting adapters.
+        holder = await asyncio.create_subprocess_exec(
+            sys.executable,
+            "-c",
+            "from gateway.status import acquire_gateway_runtime_lock; "
+            "import sys; print(acquire_gateway_runtime_lock(), flush=True); sys.stdin.read()",
+            stdin=asyncio.subprocess.PIPE,
+            stdout=asyncio.subprocess.PIPE,
+        )
+        assert holder.stdout is not None
+        try:
+            self.assertEqual(await asyncio.wait_for(holder.stdout.readline(), 10), b"True\n")
+            probe = "from gateway.status import acquire_gateway_runtime_lock; print(acquire_gateway_runtime_lock())"
+            result = await asyncio.to_thread(
+                subprocess.run,
+                [sys.executable, "-c", probe],
+                capture_output=True,
+                text=True,
+                check=True,
+                timeout=10,
+            )
+            self.assertEqual(result.stdout.strip(), "False")
+        finally:
+            holder.kill()
+            await holder.wait()
+        result = await asyncio.to_thread(
+            subprocess.run,
+            [sys.executable, "-c", probe],
+            capture_output=True,
+            text=True,
+            check=True,
+            timeout=10,
+        )
+        self.assertEqual(result.stdout.strip(), "True")
 
     async def test_unresolved_creation_never_blindly_repeats(self):
         self.adapter.topics = {}
