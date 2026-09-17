@@ -7,7 +7,7 @@ Wants=network-online.target
 Type=oneshot
 User=finite-monitoring
 Group=finite-monitoring
-# Pinned jq lives in /opt/finite-monitoring/bin; tinfoil CLI is operator-installed.
+# Pinned jq and Tinfoil CLI live in /opt/finite-monitoring/bin.
 Environment=PATH=/opt/finite-monitoring/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin
 EnvironmentFile=/etc/finite/monitoring/tinfoil.env
 ExecStart=/opt/finite-monitoring/bin/tinfoil-usage-collector

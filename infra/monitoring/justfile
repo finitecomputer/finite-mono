@@ -15,4 +15,5 @@ monitoring-nixos-contract:
     cd ../.. && nix shell --inputs-from . nixpkgs#prometheus.cli --command python3 infra/monitoring/tests/test_runtime_slots_promql.py
     cd ../.. && nix shell --inputs-from . nixpkgs#prometheus.cli --command python3 infra/monitoring/tests/test_sites_metrics_promql.py
     cd ../.. && bash -n infra/monitoring/tinfoil/tinfoil-usage-collector
-    cd ../.. && infra/monitoring/tinfoil/tinfoil-usage-collector selftest
+    cd ../.. && python3 -m unittest discover -s infra/monitoring/tests -p 'test_tinfoil_collector.py'
+    cd ../.. && nix shell --inputs-from . nixpkgs#prometheus.cli --command python3 infra/monitoring/tests/test_tinfoil_promql.py

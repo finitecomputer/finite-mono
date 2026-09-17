@@ -25,6 +25,7 @@ TINFOIL_CONTAINER_NAME = "finite-private"
 # check so collector and dashboard cannot drift apart independently.
 TINFOIL_PANEL_METRIC_BINDINGS = {
     "Data Freshness": "finite_tinfoil_source_sample_timestamp_seconds",
+    "Status Freshness": "finite_tinfoil_status_sample_timestamp_seconds",
     "Sample Age": "finite_tinfoil_source_sample_timestamp_seconds",
     "Container Ready": "finite_tinfoil_container_ready",
     "GPU Allocation": "finite_tinfoil_container_gpus",
@@ -524,7 +525,7 @@ def check_tinfoil_dashboard_contract() -> None:
     dashboard = json.loads(TINFOIL_DASHBOARD.read_text(encoding="utf-8"))
     require(
         dashboard["refresh"] == "2m",
-        "Tinfoil Grafana dashboard must refresh every 2m (Tinfoil publishes 48m buckets)",
+        "Tinfoil Grafana dashboard must refresh every 2m (one-hour queries return 2m buckets)",
     )
     check_dashboard_layout(dashboard, "Tinfoil Grafana dashboard")
     panels = dashboard["panels"]
@@ -607,7 +608,7 @@ def check_tinfoil_dashboard_contract() -> None:
     freshness_expression = panels_by_title["Data Freshness"]["targets"][0]["expr"]
     require_contains(
         freshness_expression,
-        "clamp(floor((time() - finite_tinfoil_source_sample_timestamp_seconds",
+        "clamp(floor((time() - (finite_tinfoil_source_sample_timestamp_seconds",
         "Data Freshness",
     )
     require_contains(freshness_expression, "/ 300), 0, 2)", "Data Freshness")
@@ -678,7 +679,7 @@ def check_tinfoil_collector_contract() -> None:
         "Tinfoil collector components must stay upstream and usage_api",
     )
     require_contains(
-        collector, 'aggregation=\\"mean\\"', "collector utilization aggregation label"
+        collector, 'aggregation="mean"', "collector utilization aggregation label"
     )
     require_contains(
         collector,
@@ -687,8 +688,8 @@ def check_tinfoil_collector_contract() -> None:
     )
     require_contains(
         collector,
-        'LAST_GOOD_TS_FILE="${STATE_DIR}/last-good-sample-ts"',
-        "collector must persist the last good sample timestamp (fail closed)",
+        'container metrics "$id" --time 1h --output json',
+        "collector must read the pinned usage window by immutable ID",
     )
     require_contains(
         collector,

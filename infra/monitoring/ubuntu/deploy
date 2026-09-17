@@ -198,6 +198,7 @@ prometheus_archive="$(download "prometheus-${PROMETHEUS_VERSION}.linux-amd64.tar
 blackbox_archive="$(download "blackbox_exporter-${BLACKBOX_EXPORTER_VERSION}.linux-amd64.tar.gz" "${BLACKBOX_EXPORTER_URL}" sha256 "${BLACKBOX_EXPORTER_SHA256}")"
 caddy_archive="$(download "caddy_${CADDY_VERSION}_linux_amd64.tar.gz" "${CADDY_URL}" sha512 "${CADDY_SHA512}")"
 loki_archive="$(download "loki-${LOKI_VERSION}.linux-amd64.zip" "${LOKI_URL}" sha256 "${LOKI_SHA256}")"
+tinfoil_archive="$(download "tinfoil-cli-${TINFOIL_CLI_VERSION}.tar.gz" "${TINFOIL_CLI_URL}" sha256 "${TINFOIL_CLI_SHA256}")"
 node_exporter_archive="$(download "node_exporter-${NODE_EXPORTER_VERSION}.linux-amd64.tar.gz" "${NODE_EXPORTER_URL}" sha256 "${NODE_EXPORTER_SHA256}")"
 jq_binary="$(download "jq-${JQ_VERSION}-linux-amd64" "${JQ_URL}" sha256 "${JQ_SHA256}")"
 
@@ -229,6 +230,7 @@ install_from_tar "${prometheus_archive}" promtool /opt/finite-monitoring/bin/pro
 install_from_tar "${blackbox_archive}" blackbox_exporter /opt/finite-monitoring/bin/blackbox_exporter
 install_from_tar "${caddy_archive}" caddy /opt/finite-monitoring/bin/caddy
 install_from_zip "${loki_archive}" loki-linux-amd64 /opt/finite-monitoring/bin/loki
+install_from_tar "${tinfoil_archive}" "tinfoil" "/opt/finite-monitoring/bin/tinfoil"
 install_from_tar "${node_exporter_archive}" node_exporter /opt/finite-monitoring/bin/node_exporter
 install -m 0755 "${jq_binary}" /opt/finite-monitoring/bin/jq
 
