@@ -178,7 +178,7 @@ try {
   const reenabled = await page.evaluate(() => globalThis.proof.readHostedHermesJson(globalThis.runtimeId, 'api/skills', new AbortController().signal));
   assert(reenabled.some(skill => skill.name === 'finite-shared-access-proof')); checks.reenableRotatesAndPreservesSkill = true;
   await change(false); await applied(false);
-  process.stdout.write(`${JSON.stringify({ status: 'PASS', checks, browser: browser.version(), limits: ['Synthetic WorkOS account adapter; no live OAuth flow', 'Gateway/Chat children are lifecycle fixtures', 'Local test CA/DNS; rendered HTTP routes unchanged', 'No existing-agent enrollment, fleet, Kata, or model-turn qualification'] })}\n`);
+  process.stdout.write(`${JSON.stringify({ status: 'PASS', enrollment: initial.enrollment, checks, browser: browser.version(), limits: ['Synthetic WorkOS account adapter; no live OAuth flow', 'Gateway/Chat children are lifecycle fixtures', 'Local test CA/DNS; rendered HTTP routes unchanged', 'Enrollment uses Core store; no Runner upgrade delivery, fleet, Kata, or model-turn qualification'] })}\n`);
 } catch (error) {
   // Print no native response, headers, tokens or credential-bearing process logs.
   failed = true;

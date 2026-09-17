@@ -502,7 +502,7 @@ pub(crate) mod tests {
     async fn expire(db: &TestDb, request: &str) {
         db.connection().await.unwrap().execute("UPDATE agent_creation_requests SET lease_expires_at=clock_timestamp()-INTERVAL '1 second' WHERE id=$1", &[&request]).await.unwrap();
     }
-    async fn upgrade(db: &TestDb, creation: &str) -> RuntimeControlLease {
+    pub(crate) async fn upgrade(db: &TestDb, creation: &str) -> RuntimeControlLease {
         let project = db
             .agent_creation_request(creation)
             .await
@@ -560,7 +560,7 @@ pub(crate) mod tests {
         .unwrap()
         .unwrap()
     }
-    fn upgrade_input(lease: &RuntimeControlLease) -> ProvisionUpgradeCredential {
+    pub(crate) fn upgrade_input(lease: &RuntimeControlLease) -> ProvisionUpgradeCredential {
         ProvisionUpgradeCredential {
             request_id: lease.request.id.clone(),
             runner_id: "auth-runner".into(),
@@ -586,6 +586,7 @@ pub(crate) mod tests {
                 };
                 let runtime = register(&db, &creation).await;
                 complete(&db, &creation).await.unwrap();
+                assert!(db.hosted_route_targets_for_host("auth-host").await.unwrap().is_empty());
                 let lease = upgrade(&db, &creation).await;
                 let secret = db
                     .provision_upgrade_credential(upgrade_input(&lease))
@@ -608,6 +609,7 @@ pub(crate) mod tests {
                     .await
                     .unwrap();
                 assert!(state.enrolled && !state.enabled);
+                assert!(db.hosted_route_targets_for_host("auth-host").await.unwrap().is_empty());
                 let enabled = db
                     .set_hosted_access(
                         &runtime,
@@ -619,6 +621,25 @@ pub(crate) mod tests {
                     )
                     .await
                     .unwrap();
+                // FIN-90 enrollment must not bypass FIN-91's applied-generation gate.
+                assert!(db.hosted_route_targets_for_host("auth-host").await.unwrap().is_empty());
+                assert!(db.report_hosted(&secret, super::super::hosted_hermes::HostedReport {
+                    generation: enabled.generation - 1,
+                    status: super::super::hosted_hermes::ApplyStatus::Applied,
+                }).await.is_err());
+                assert!(db.hosted_route_targets_for_host("auth-host").await.unwrap().is_empty());
+                db.report_hosted(&secret, super::super::hosted_hermes::HostedReport {
+                    generation: enabled.generation,
+                    status: super::super::hosted_hermes::ApplyStatus::Applied,
+                }).await.unwrap();
+                let routes = db.hosted_route_targets_for_host("auth-host").await.unwrap();
+                assert_eq!(routes, vec![super::super::hosted_hermes::HostedRouteTarget {
+                    runtime_id: runtime.clone(),
+                    project_id: lease.request.project_id.clone(),
+                    source_machine_id: "auth-machine".into(),
+                    generation: enabled.generation,
+                }]);
+                assert!(db.hosted_route_targets_for_host("other-host").await.unwrap().is_empty());
                 let origins = crate::hosted_hermes::HostedHermesOrigins::from_json(
                     r#"{"auth-host":"https://agent.example.test"}"#,
                 )
@@ -637,6 +658,7 @@ pub(crate) mod tests {
                 assert!(db.provision_upgrade_credential(replacement).await.unwrap().secret == secret);
                 db.connection().await.unwrap().execute("UPDATE runtime_control_requests SET lease_token='upgrade-lease' WHERE id=$1", &[&lease.request.id]).await.unwrap();
 
+                assert_eq!(db.hosted_route_targets_for_host("auth-host").await.unwrap(), routes);
                 let after = db.hosted_desired(&secret, &origins).await.unwrap().unwrap();
                 assert_eq!(after.generation, enabled.generation);
                 assert!(
@@ -648,6 +670,7 @@ pub(crate) mod tests {
                         .await
                         .unwrap()
                 );
+                assert!(db.hosted_route_targets_for_host("auth-host").await.unwrap().is_empty());
                 assert!(
                     db.provision_upgrade_credential(upgrade_input(&lease))
                         .await
