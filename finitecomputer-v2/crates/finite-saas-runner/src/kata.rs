@@ -2482,6 +2482,12 @@ impl RuntimeLauncher for KataLauncher {
                 .map(String::as_str)
                 == Some(target.id.as_str())
         {
+            // A matching image alone does not prove a previous enrollment was
+            // delivered. Never acknowledge an unenrolled/contradictory retry.
+            options.enroll_environment(
+                &mut kata_inspected_environment(&inspected.config.environment)?,
+                false,
+            )?;
             let rollback = self.inspect(&rollback_name)?;
             if let Some(rollback) = rollback.as_ref() {
                 self.validate_owned(&canonical_plan, &lease.runtime.project_id, rollback)?;
@@ -3840,7 +3846,11 @@ fn kata_upgrade_environment(
         .collect();
     public_keys.extend(options.environment().keys().cloned());
     secret_keys.extend(options.secret_environment().keys().cloned());
-    let entries = merge_desired_runtime_environment(retained, options);
+    let mut entries = merge_desired_runtime_environment(retained, options);
+    options.enroll_environment(&mut entries, true)?;
+    if options.core_bootstrap.is_some() {
+        secret_keys.insert("FINITE_CORE_CREDENTIAL".into());
+    }
     Ok(KataUpgradeEnvironment {
         entries,
         public_keys,
@@ -6374,9 +6384,10 @@ esac
         );
         let lease = upgrade_lease("runtime_ctl_upgrade_success");
 
-        let facts = launcher
-            .upgrade_runtime(&lease, &RuntimeRestartOptions::default())
+        let options = RuntimeRestartOptions::default()
+            .with_core_bootstrap("https://core.example.test", "a".repeat(64))
             .unwrap();
+        let facts = launcher.upgrade_runtime(&lease, &options).unwrap();
         assert_eq!(facts.runtime_artifact_id, "artifact-v2");
         assert_eq!(
             std::fs::read_to_string(plan.state_root.join("identity-marker")).unwrap(),
@@ -6386,6 +6397,13 @@ esac
             std::fs::read_to_string(fake_state.join(format!("{}.image", plan.container_name)))
                 .unwrap(),
             target_artifact().reference
+        );
+        let installed = launcher.inspect(&plan.container_name).unwrap().unwrap();
+        let entries = kata_inspected_environment(&installed.config.environment).unwrap();
+        assert!(
+            entries
+                .iter()
+                .any(|(k, v)| k == "FINITE_CORE_CREDENTIAL" && v == &"a".repeat(64))
         );
         let commands_before_retry =
             std::fs::read_to_string(fake_state.join("commands.log")).unwrap();
@@ -6405,9 +6423,7 @@ esac
             &plan.state_root,
         );
         write_kata_upgrade_expected_npub(&plan, &lease.request.id, "npub1sameagent").unwrap();
-        launcher
-            .upgrade_runtime(&lease, &RuntimeRestartOptions::default())
-            .unwrap();
+        launcher.upgrade_runtime(&lease, &options).unwrap();
         assert!(!fake_state.join(format!("{rollback_name}.image")).exists());
         let commands_after_retry =
             std::fs::read_to_string(fake_state.join("commands.log")).unwrap();

@@ -404,6 +404,34 @@ def postgres_environment() -> dict[str, str]:
 def psql_query_sets(environment: dict[str, str]) -> dict[str, list[dict[str, Any]]]:
     definitions = [
         (
+            "hosted_enrollment",
+            "SELECT to_regclass('runtime_core_credentials') IS NOT NULL AS finite_has_runtime_credentials \\gset\n"
+            "\\if :finite_has_runtime_credentials\n"
+            "SELECT r.source_host_id,r.id,r.runtime_artifact_id,q.runner_class,q.running_creations,q.primary_creations,"
+            "CASE WHEN q.primary_creations<>1 THEN 'primary_conflict' WHEN c.creation_request_id IS NULL THEN 'missing' WHEN c.revoked THEN 'revoked' "
+            "WHEN c.agent_runtime_id IS DISTINCT FROM r.id OR c.creation_request_id IS DISTINCT FROM q.primary_creation_id "
+            "OR c.source_host_id<>r.source_host_id OR c.source_machine_id IS DISTINCT FROM r.source_machine_id "
+            "OR c.owner_user_id<>p.owner_user_id THEN 'assignment_conflict' "
+            "WHEN NOT c.activated THEN 'pending' ELSE 'bound' END "
+            "FROM agent_runtimes r JOIN projects p ON p.id=r.project_id "
+            "JOIN project_runtime_links l ON l.agent_runtime_id=r.id AND l.project_id=p.id AND l.active "
+            "LEFT JOIN LATERAL (SELECT string_agg(DISTINCT runner_class,',' ORDER BY runner_class) AS runner_class, "
+            "count(*) AS running_creations, count(*) FILTER (WHERE relocation_spec IS NULL) AS primary_creations, "
+            "min(id) FILTER (WHERE relocation_spec IS NULL) AS primary_creation_id FROM agent_creation_requests WHERE agent_runtime_id=r.id "
+            "AND project_id=p.id AND status='running' AND owner_user_id=p.owner_user_id) q ON TRUE "
+            "LEFT JOIN runtime_core_credentials c ON c.agent_runtime_id=r.id OR c.creation_request_id=q.primary_creation_id "
+            "ORDER BY r.source_host_id,r.id;\n"
+            "\\else\n"
+            "SELECT r.source_host_id,r.id,r.runtime_artifact_id,q.runner_class,q.running_creations,q.primary_creations,'schema_absent' "
+            "FROM agent_runtimes r JOIN projects p ON p.id=r.project_id "
+            "JOIN project_runtime_links l ON l.agent_runtime_id=r.id AND l.project_id=p.id AND l.active "
+            "LEFT JOIN LATERAL (SELECT string_agg(DISTINCT runner_class,',' ORDER BY runner_class) AS runner_class, "
+            "count(*) AS running_creations, count(*) FILTER (WHERE relocation_spec IS NULL) AS primary_creations FROM agent_creation_requests WHERE agent_runtime_id=r.id "
+            "AND project_id=p.id AND status='running' AND owner_user_id=p.owner_user_id) q ON TRUE "
+            "ORDER BY r.source_host_id,r.id;\n\\endif",
+            ["source_host_id", "agent_runtime_id", "runtime_artifact_id", "runner_class", "running_creations", "primary_creations", "bootstrap_state"],
+        ),
+        (
             "artifacts",
             ARTIFACTS_QUERY,
             [
@@ -1710,6 +1738,11 @@ def build_fleet(
         "unused_single_code_batches": core.get("unused_single_code_batches", []),
         "launch_code_batches": core.get("launch_code_batches", []),
         "agent_creation_requests": core.get("agent_creation_requests", []),
+        "hosted_enrollment": {
+            "evidence": "Core assignment metadata only; no credentials read or guest configuration inspected",
+            "local_configuration": "unknown; upgrade must reject partial or conflicting bootstrap values",
+            "runtimes": core.get("hosted_enrollment", []),
+        },
     }
     if probe is not None:
         report["lifecycle_probe"] = {

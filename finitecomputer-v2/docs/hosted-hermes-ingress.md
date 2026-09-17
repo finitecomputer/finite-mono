@@ -177,13 +177,71 @@ proxy this listener whole. This change supplies no infrastructure activation.
 The authenticated Runner's live creation lease provisions a scoped credential,
 injected through reserved `FINITE_CORE_URL`/`FINITE_CORE_CREDENTIAL` names when
 `FC_RUNNER_RUNTIME_CORE_URL` is configured. Existing unenrolled agents report
-`enrolled:false` and cannot be enabled; upgrade enrollment is release follow-up.
+`enrolled:false` and cannot be enabled until enrollment during an authorized
+Kata image upgrade, as described below.
+
+### Existing-agent enrollment (FIN-90)
+
+An opted-in Runner requests
+`POST /api/core/v1/runtime-control-requests/{request_id}/runtime-credential`
+before invoking the Kata upgrade adapter. Core requires that Runner's current,
+unexpired upgrade lease and exact host/machine/Project binding, an active link,
+and the unique running primary creation record with the current owner.
+The primary record (`relocation_spec IS NULL`, unique per Project) is a stable
+origin reference; it is not placement authority. This does
+not authorize an upgrade itself or enable native serving. No account API,
+RuntimeSpec, health report or status command exposes the bootstrap secret.
+
+Core inserts into the existing credential table with serving disabled. An
+exact retry, including a replacement worker's live lease, returns the same
+secret without changing native credentials or applied generation. Revoked,
+changed-owner, moved, inactive or ambiguous assignments fail closed without
+repair. Historical relocation records are not candidates for that primary reference.
+No date/ID ordering chooses an assignment. Missing or mismatched primary
+records fail closed. Future relocation still revokes the old credential;
+re-enrolling a revoked/reassigned identity requires the separate FIN-39
+relocation/recovery contract, not an automatic repair here.
+
+The Kata adapter carries the reserved pair in the existing transient private
+environment file during the already-planned image upgrade. Both absent means
+initial installation; both matching means replay. Partial, duplicate or
+different values fail before compute replacement. A matching-image retry must
+also prove the installed pair matches; image identity alone cannot acknowledge
+delivery. No second restart, live guest file editing, new service or credential
+authority is introduced. Local Hermes auth conflicts remain the existing
+agentd readiness errors; enrollment never repairs those settings.
+
+Ordinary restart/recovery and unconfigured Runner upgrades preserve installed
+reserved variables. Automatic failed-upgrade rollback restores the previous
+container and its previous environment; a newly enrolled Core row remains disabled/pending
+until an agent applies settings. Retry redelivers the same secret. Missing
+upgrade bootstrap support on an older Core (404), network failure, throttling
+or 5xx leaves the operation retryable before any guest mutation. Old Runners
+do not call the endpoint; old agents ignore the optional variables. Enrollment
+does not prove that an old image implements native serving: applied readiness
+remains required before any native session can be granted.
+
+`scripts/finite-status --json` adds `fleet_convergence.hosted_enrollment` with
+Core-recorded provider, artifact, matching creation/primary counts and credential state.
+It reads no credential values. An older schema is reported as `schema_absent`;
+guest configuration remains explicitly unknown until qualified. The supported
+implementation cohort is Kata with one current matching primary creation and no
+revoked/conflicting credential row; other providers and missing/conflicting primary history are
+not silently included. No production enrollment occurs by running this probe.
+
+The missing-bootstrap insertion is a compatibility bridge for pre-capability
+agents. Retire that insertion branch when all supported active assignments
+have Core bootstrap records, old images can no longer launch, and the existing
+recovery path has proven that restored assignments carry their bootstrap.
+Keep exact-assignment credential re-delivery/retry while upgrades can need it;
+removing the bridge must not remove recovery material or introduce rotation.
+Track that removal gate under FIN-39/FIN-57, not a separate preparatory rollout.
 
 ### Authoritative writers and readers
 
 | State | Writer | Readers |
 | --- | --- | --- |
-| Assignment bootstrap | Core, on authenticated Runner creation lease | Runner delivery; Core runtime authentication |
+| Assignment bootstrap | Core, on authenticated Runner creation or upgrade lease | Runner private launch/upgrade delivery; Core runtime authentication |
 | Native enablement/credential generation | Core, after current-owner authorization | Assigned agent pull; Core native login |
 | Applied generation/status | Assigned agent, after native auth or process exit | Core account state and session eligibility |
 | Native session cookies | Hermes | Core's disposable memory cache |
@@ -222,11 +280,14 @@ ignore the new optional launch variables. An opted-in Runner hitting an older
 Core without bootstrap support keeps the creation retryable and does not launch
 or terminally fail it; activate Core support before opting in Runner. Unconfigured new components keep
 the existing chat path. Existing credentials are not retroactively invented.
-No new chat database, home copy or history migration is introduced. Keep the
+Existing enrollment adds no schema or history migration and preserves the same
+credential authority and durable home. Keep the
 Core database (including recoverable native/bootstrap material) in its existing
 backup boundary; dropping that table is not a rollback procedure. Production
-existing-agent delivery, empty-target restore and mixed-version rollout remain
-FIN-57 qualification work.
+empty-target restore and integrated mixed-version rollout remain FIN-39/FIN-57
+qualification work. Core database recovery must include the credential table;
+the existing compute environment is needed to preserve its installed copy.
+Never roll back by dropping the table or regenerating credentials on retry.
 
 Rollback after activation must first apply hosted disable and withdraw ingress;
 rolling back Core alone cannot stop already-running hosted clients. Full
