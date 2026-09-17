@@ -109,8 +109,8 @@ export function SitesBrowser({ sites, onNewSite, onEditSite, creatingSite = fals
               ) : (
                 <div className={styles.empty}>
                   {normalizedQuery && sites ? <SearchIcon aria-hidden="true" /> : <Globe2Icon aria-hidden="true" />}
-                  <h2>{sites !== null && normalizedQuery ? "No sites found" : "Your sites will show up here"}</h2>
-                  <p>{sites !== null && normalizedQuery ? "Try another site name or web address." : "Start with an idea, push the limits, and make something awesome. Create your next site in chat."}</p>
+                  <h2>{sites === null ? "Sites are unavailable right now" : normalizedQuery ? "No sites found" : "Your sites will show up here"}</h2>
+                  <p>{sites === null ? "We couldn’t load your sites. Please try again later." : normalizedQuery ? "Try another site name or web address." : "Start with an idea, push the limits, and make something awesome. Create your next site in chat."}</p>
                   {normalizedQuery && sites && <button type="button" className={styles.share} onClick={() => setQuery("")}>Clear search</button>}
                   {(!normalizedQuery || !sites?.length) && <button type="button" className={styles.newSite} disabled={creatingSite} onClick={onNewSite}>{creatingSite ? "Opening chat…" : "Create a site"}</button>}
                 </div>

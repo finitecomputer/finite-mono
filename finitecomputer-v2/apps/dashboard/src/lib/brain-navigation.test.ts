@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
 import test from "node:test";
 
-test("Brain navigation opens the Brain overview", async () => {
+test("Brain navigation exposes the prototype only in development", async () => {
   const source = await readFile(
     new URL("../components/agent-navigation.tsx", import.meta.url),
     "utf8",
@@ -10,7 +10,7 @@ test("Brain navigation opens the Brain overview", async () => {
 
   const item = source.match(/\{\s*label: "Brain",[\s\S]*?\n\s*\},/u)?.[0];
   assert.ok(item, "Brain navigation item is present");
-  assert.match(item, /href: `\$\{root\}\/brain`/u);
+  assert.match(item, /href: process.env.NODE_ENV === "development" \? `\$\{root\}\/brain` : undefined/u);
   assert.match(item, /active: pathname === `\$\{root\}\/brain`/u);
-  assert.doesNotMatch(item, /Coming soon/u);
+  assert.match(item, /Coming soon/u);
 });

@@ -3,16 +3,10 @@ import { Layers3Icon } from "lucide-react";
 
 import { SkillsCatalogBrowser } from "@/components/skills-catalog-browser";
 import { loadBaselineSkillsCatalog } from "@/lib/skills-catalog";
-import { loadDashboardMachineAccess } from "@/lib/dashboard-machine-access";
 
 export const dynamic = "force-dynamic";
 
-export default async function SkillsDashboardPage({ searchParams }: {
-  searchParams: Promise<{ machine?: string | string[] }>;
-}) {
-  const { machine } = await searchParams;
-  const machineId = typeof machine === "string" ? machine : undefined;
-  const access = machineId ? await loadDashboardMachineAccess(machineId, { coreCacheMode: "swr" }) : null;
+export default async function SkillsDashboardPage() {
   const model = await loadBaselineSkillsCatalog().catch((error) => {
     console.error("[skills] failed to load skills catalog", error);
     return null;
@@ -28,7 +22,7 @@ export default async function SkillsDashboardPage({ searchParams }: {
       {model ? (
         <SkillsCatalogBrowser
           skills={model.skills}
-          summary={`${model.totalSkillCount} ${model.totalSkillCount === 1 ? "skill" : "skills"} available to ${access?.displayName ?? "your agent"}.`}
+          summary={`${model.totalSkillCount} ${model.totalSkillCount === 1 ? "skill" : "skills"} in the Finite catalog.`}
         />
       ) : (
         <section className="ocean-utility-card">

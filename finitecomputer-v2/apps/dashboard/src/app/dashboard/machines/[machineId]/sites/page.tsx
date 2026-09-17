@@ -1,4 +1,4 @@
-import { redirect } from "next/navigation";
+import { notFound, redirect } from "next/navigation";
 
 import { AgentSitesBrowser } from "@/components/agent-sites-browser";
 import { loadDashboardMachineAccess } from "@/lib/dashboard-machine-access";
@@ -7,6 +7,8 @@ export default async function SitesPage({ params, searchParams }: {
   params: Promise<{ machineId: string }>;
   searchParams: Promise<{ preview?: string; state?: string }>;
 }) {
+  // Keep the design preview private until FIN-69 connects the real listing.
+  if (process.env.NODE_ENV !== "development") notFound();
   const { machineId } = await params;
   const access = await loadDashboardMachineAccess(machineId, { coreCacheMode: "swr" });
   if (!access) redirect("/dashboard");

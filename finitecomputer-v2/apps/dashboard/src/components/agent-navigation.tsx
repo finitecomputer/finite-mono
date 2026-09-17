@@ -50,13 +50,15 @@ export function AgentNavigation({
     },
     {
       label: "Sites",
-      href: `${root}/sites`,
+      href: process.env.NODE_ENV === "development" ? `${root}/sites` : undefined,
+      note: "Coming soon",
       icon: Globe2Icon,
       active: pathname === `${root}/sites`,
     },
     {
       label: "Brain",
-      href: `${root}/brain`,
+      href: process.env.NODE_ENV === "development" ? `${root}/brain` : undefined,
+      note: "Coming soon",
       icon: BrainIcon,
       active: pathname === `${root}/brain`,
     },
