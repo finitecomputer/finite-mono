@@ -11,7 +11,7 @@ use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 #[cfg(unix)]
 use std::os::unix::ffi::OsStrExt;
 #[cfg(unix)]
-use std::os::unix::fs::PermissionsExt;
+use std::os::unix::fs::{FileTypeExt, PermissionsExt};
 use std::process::Output;
 use time::OffsetDateTime;
 use time::format_description::well_known::Rfc3339;
@@ -3423,8 +3423,10 @@ fn staged_agent_identity_metadata(state_root: &Path) -> Result<std::fs::Metadata
 }
 
 /// Stable manifest used on both the stopped source and the staged target. It
-/// does not follow symlinks and rejects sockets/devices instead of silently
-/// omitting state. Ownership and xattrs are preserved by the transfer command
+/// does not follow symlinks and rejects special files except the exact Hermes
+/// gateway control socket, which Hermes recreates on startup. Regular files
+/// and symlinks at that path remain part of the manifest. Ownership and xattrs
+/// are preserved by the transfer command
 /// but intentionally excluded so an operator can stage through an encrypted
 /// intermediate host without changing the content proof.
 ///
@@ -3456,19 +3458,23 @@ pub fn durable_state_manifest_sha256(root: &Path) -> Result<String, RunnerError>
         let relative = path
             .strip_prefix(root)
             .map_err(|error| RunnerError::RuntimeLaunch(error.to_string()))?;
+        let metadata = std::fs::symlink_metadata(path)
+            .map_err(|error| RunnerError::RuntimeLaunch(error.to_string()))?;
+        let file_type = metadata.file_type();
+        #[cfg(unix)]
+        if relative == Path::new("agent/hermes-home/gateway.sock") && file_type.is_socket() {
+            continue;
+        }
         #[cfg(unix)]
         let relative_bytes = relative.as_os_str().as_bytes();
         #[cfg(not(unix))]
         let relative_bytes = relative.to_string_lossy().as_bytes();
         manifest.update((relative_bytes.len() as u64).to_be_bytes());
         manifest.update(relative_bytes);
-        let metadata = std::fs::symlink_metadata(path)
-            .map_err(|error| RunnerError::RuntimeLaunch(error.to_string()))?;
         #[cfg(unix)]
         manifest.update(metadata.permissions().mode().to_be_bytes());
         #[cfg(not(unix))]
         manifest.update(0_u32.to_be_bytes());
-        let file_type = metadata.file_type();
         if file_type.is_dir() {
             manifest.update(b"d");
         } else if file_type.is_file() {
@@ -6262,6 +6268,55 @@ esac
         assert_ne!(
             expected,
             durable_state_manifest_sha256(second.path()).unwrap()
+        );
+    }
+
+    #[test]
+    fn durable_state_manifest_excludes_only_the_hermes_control_socket() {
+        use std::os::unix::fs::symlink;
+        use std::os::unix::net::UnixListener;
+
+        let source = tempfile::tempdir().unwrap();
+        let restored = tempfile::tempdir().unwrap();
+        for root in [source.path(), restored.path()] {
+            std::fs::create_dir_all(root.join("agent/hermes-home")).unwrap();
+            std::fs::write(root.join("agent/hermes-home/memory.md"), b"retain me").unwrap();
+        }
+        let expected = durable_state_manifest_sha256(restored.path()).unwrap();
+        let socket_path = source.path().join("agent/hermes-home/gateway.sock");
+        let socket = UnixListener::bind(&socket_path).unwrap();
+        assert_eq!(
+            durable_state_manifest_sha256(source.path()).unwrap(),
+            expected
+        );
+        drop(socket);
+        // A stopped gateway can leave its socket inode behind.
+        assert_eq!(
+            durable_state_manifest_sha256(source.path()).unwrap(),
+            expected
+        );
+        std::fs::remove_file(&socket_path).unwrap();
+
+        std::fs::write(&socket_path, b"this is user data").unwrap();
+        assert_ne!(
+            durable_state_manifest_sha256(source.path()).unwrap(),
+            expected
+        );
+        std::fs::remove_file(&socket_path).unwrap();
+        symlink("memory.md", &socket_path).unwrap();
+        assert_ne!(
+            durable_state_manifest_sha256(source.path()).unwrap(),
+            expected
+        );
+        std::fs::remove_file(&socket_path).unwrap();
+
+        let _unexpected =
+            UnixListener::bind(source.path().join("agent/hermes-home/other.sock")).unwrap();
+        assert!(
+            durable_state_manifest_sha256(source.path())
+                .unwrap_err()
+                .to_string()
+                .contains("unsupported special file agent/hermes-home/other.sock")
         );
     }
 

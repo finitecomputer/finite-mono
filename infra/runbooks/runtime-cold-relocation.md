@@ -112,7 +112,17 @@ sudo <runner-bin> state-manifest \
 
 Record the 64-character `SOURCE_MANIFEST`. The command follows no symlinks,
 hashes file contents, paths, modes, and symlink targets, and rejects special
-files.
+files except `agent/hermes-home/gateway.sock` when it is a Unix socket. Hermes
+recreates this control socket on startup; it carries no durable state. A regular
+file or symlink at that path is still hashed. GNU tar omits sockets, so the
+stopped source and restored tree have the same manifest without deleting the
+socket from the source. Any other special file remains a hard failure.
+
+Use the same socket-aware Runner binary for both manifests. Older binaries
+reject the socket rather than accepting a partial proof; trees without the
+socket retain their existing v1 hashes. This exception does not prove that a
+Runtime is stopped: the Core stop receipt and provider checks above remain
+required.
 
 ### 2. Stage a provider-independent copy
 
