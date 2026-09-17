@@ -97,7 +97,7 @@ def nix_eval(
         command,
         cwd=ROOT,
         check=True,
-        capture_output=True,
+        stdout=subprocess.PIPE,
         text=True,
     ).stdout
 
@@ -386,8 +386,7 @@ def check_hosted_canary() -> None:
         )
     )
     if any(
-        name == "finite-hosted-hermes"
-        or target == "finite-hosted-hermes.service"
+        name == "finite-hosted-hermes" or target == "finite-hosted-hermes.service"
         for name, target in sockets.items()
     ):
         raise SystemExit("lat5 proxy must not use socket activation")
