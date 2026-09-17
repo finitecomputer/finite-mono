@@ -182,6 +182,12 @@ binary SHA-256 pins before installation, backs up every replaced file and
 prior unit activity/enabled state, starts the collector and textfile exporter,
 and reloads Prometheus with SIGHUP. Its only allowed Prometheus config delta
 is the repository's Tinfoil scrape job; unrelated live drift stops the rollout.
+The separately activated `finite-sites-metrics` job stays absent or present as
+found; adding Tinfoil never activates Sites metrics or provisions its token.
+Every other job and global setting must match the reviewed source (full-line
+comments and blank lines may differ). The candidate retains existing live bytes
+and is checked with the installed `promtool` before any service changes. A live
+baseline change during tool preparation aborts before taking rollback ownership.
 Grafana, Loki, Caddy, and inference services are not restarted. The script waits
 for fresh source/status samples, valid utilization, GPU allocation, and both
 limiter dependency checks through the canonical status command. A failed

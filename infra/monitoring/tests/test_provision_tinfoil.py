@@ -15,6 +15,11 @@ SPEC = importlib.util.spec_from_file_location(
 )
 provision = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(provision)
+SCRAPE_SPEC = importlib.util.spec_from_file_location(
+    "reconcile_scrape", MONITORING / "tinfoil/reconcile_scrape.py"
+)
+scrape = importlib.util.module_from_spec(SCRAPE_SPEC)
+SCRAPE_SPEC.loader.exec_module(scrape)
 
 
 def absent(uid):
@@ -122,6 +127,57 @@ class ProvisionTest(unittest.TestCase):
             raise ValueError("missing series")
 
         self.assertEqual(collect(missing)["overall_status"], "unknown")
+
+
+class ScrapeReconciliationTest(unittest.TestCase):
+    def setUp(self):
+        self.source = (MONITORING / "ubuntu/prometheus.yml").read_bytes()
+        self.header, self.jobs = scrape.split_jobs(self.source)
+
+    def baseline(self, sites=False):
+        return self.header + b"".join(
+            body
+            for name, body in self.jobs.items()
+            if name != scrape.TINFOIL and (sites or name != scrape.SITES)
+        )
+
+    def test_sites_activation_is_preserved_and_only_tinfoil_is_added(self):
+        for sites in (False, True):
+            with self.subTest(sites=sites):
+                live = self.baseline(sites)
+                candidate = scrape.reconcile(self.source, live)
+                self.assertTrue(candidate.startswith(live))
+                _, jobs = scrape.split_jobs(candidate)
+                self.assertEqual(scrape.SITES in jobs, sites)
+                self.assertEqual(jobs[scrape.TINFOIL], self.jobs[scrape.TINFOIL])
+                self.assertEqual(scrape.reconcile(self.source, candidate), candidate)
+
+    def test_live_comments_and_whitespace_are_preserved(self):
+        live = self.baseline().replace(b"\n\n", b"\n# operator comment\n\n")
+        self.assertTrue(scrape.reconcile(self.source, live).startswith(live))
+
+    def test_changed_or_unknown_jobs_and_global_settings_fail_closed(self):
+        live = self.baseline()
+        cases = [
+            live.replace(b"scrape_timeout: 3s", b"scrape_timeout: 9s"),
+            live.replace(b"/readyz", b"/health"),
+            live + b"\n  - job_name: unknown\n    static_configs: []\n",
+            live.replace(b"job_name: finite.computer", b"job_name: changed"),
+            live + self.jobs[b"finite.computer"],
+            live.replace(self.jobs[b"finite.computer"], b""),
+            self.source.replace(b"127.0.0.1:9100", b"127.0.0.1:9200"),
+            self.baseline(True).replace(
+                b"follow_redirects: false", b"follow_redirects: true"
+            ),
+        ]
+        for candidate in cases:
+            with self.subTest(candidate=candidate):
+                with self.assertRaises(ValueError):
+                    scrape.reconcile(self.source, candidate)
+
+    def test_unexpected_source_layout_is_rejected(self):
+        with self.assertRaises(ValueError):
+            scrape.reconcile(self.baseline(), self.baseline())
 
 
 class BootstrapRollbackTest(unittest.TestCase):
