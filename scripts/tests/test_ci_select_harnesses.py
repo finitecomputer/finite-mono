@@ -347,6 +347,12 @@ class CiHarnessSelectionTests(unittest.TestCase):
             },
         )
 
+    def test_tinfoil_status_runs_monitoring_and_status_contracts(self) -> None:
+        self.assertEqual(
+            selected("scripts/finite_tinfoil_status.py"),
+            {"run_monitoring_nixos_contract", "run_finite_status_contract"},
+        )
+
     def test_finite_status_script_runs_only_finite_status_contract(self) -> None:
         self.assertEqual(
             selected("scripts/finite_status.py"),

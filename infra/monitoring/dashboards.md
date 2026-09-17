@@ -1,8 +1,8 @@
 # Dashboard deployment
 
 Agents edit JSON under `grafana/dashboards/` and submit a PR. The explicit
-production list, `grafana/production.json`, includes the overview and runtime
-slots dashboards and excludes the Tinfoil draft. `just monitoring-nixos-contract`
+production list, `grafana/production.json`, includes the overview, runtime
+slots, and Tinfoil dashboards. Tinfoil requires the initial provisioning below. `just monitoring-nixos-contract`
 validates the list, monitoring configuration, queries, and deployment recovery
 in both PR CI and the deployment workflow.
 
@@ -127,3 +127,98 @@ scripts/with-dev-env python3 infra/monitoring/deploy_dashboards.py status --outp
 
 `ubuntu/deploy` remains the full-stack/bootstrap path and also writes the MVP
 under the same lock. Use dashboard-only deployment for routine panel/query edits.
+
+## Initial Tinfoil provisioning (FIN-33)
+
+The Tinfoil dashboard is in the production manifest, but the normal workflow
+still requires its file and UID to exist. Merge the telemetry PR first, then
+this provisioning PR. Approve the queued dashboard workflow only after the
+operator bootstrap below succeeds. Use a clean checkout of current `main`.
+This is a monitoring-only rollout; the enclave, model, limiter, chat services,
+and persistent user data are not changed. Alert delivery is deferred from
+this basic-metrics MVP (scope and live acceptance remain in
+[FIN-33](https://linear.app/finitecomputer/issue/FIN-33)).
+
+An operator must explicitly authorize the rollout and provision
+`TINFOIL_API_KEY` in `/etc/finite/monitoring/tinfoil.env`, owned by
+`root:finite-monitoring`, mode `0640`. It is the Tinfoil **admin** credential
+for control-plane reads, not an inference API key. No login command, credential
+transfer, secret overwrite, or enclave relaunch is performed by the scripts.
+The CLI and jq are pinned in `ubuntu/versions.env`; the usage source is fixed
+in code, with no arbitrary usage-command configuration.
+
+Prepare the values-free bundle locally, outside the checkout:
+
+```sh
+scripts/with-dev-env just monitoring-nixos-contract
+scripts/with-dev-env python3 infra/monitoring/provision_tinfoil.py --export /tmp/tinfoil-dashboard.json
+git archive --format=tar.gz --output=/tmp/tinfoil-monitoring-source.tar.gz HEAD \
+  infra/monitoring scripts/finite-status scripts/finite_status.py scripts/finite_tinfoil_status.py
+scp /tmp/tinfoil-dashboard.json /tmp/tinfoil-monitoring-source.tar.gz ubuntu@152.236.5.27:/tmp/
+```
+
+On the monitoring host, create a new root-owned staging directory, unpack that
+reviewed archive, and place the bundle alongside it. Run these commands from
+the unpacked source root with existing operator access. The archive contains
+configuration/scripts only; nothing is compiled on the host.
+
+```sh
+sudo python3 scripts/finite-status --tinfoil --json
+sudo bash infra/monitoring/tinfoil/bootstrap-collector
+sudo python3 scripts/finite-status --tinfoil --json
+sudo python3 infra/monitoring/provision_tinfoil.py --bundle /tmp/tinfoil-dashboard.json
+sudo python3 infra/monitoring/provision_tinfoil.py --bundle /tmp/tinfoil-dashboard.json --apply
+sudo python3 scripts/finite-status --tinfoil --json
+```
+
+Also record the normal platform-wide `scripts/finite-status --json` before and
+after the rollout using existing app-plane access (including after a failed
+attempt). `--tinfoil` runs on the monitoring host and supplements that evidence;
+it does not replace the chat/fleet baseline. Keep full reports outside public
+CI artifacts. The bootstrap and provisioner save Tinfoil-only status receipts.
+
+`bootstrap-collector` holds the existing monitoring lock, verifies upstream
+binary SHA-256 pins before installation, backs up every replaced file and
+prior unit activity/enabled state, starts the collector and textfile exporter,
+and reloads Prometheus with SIGHUP. Its only allowed Prometheus config delta
+is the repository's Tinfoil scrape job; unrelated live drift stops the rollout.
+Grafana, Loki, Caddy, and inference services are not restarted. The script waits
+for fresh source/status samples, valid utilization, GPU allocation, and both
+limiter dependency checks through the canonical status command. A failed
+check restores previous files/services automatically. Transport interruption
+or process termination may require the printed standalone rollback command.
+
+The initial provisioner defaults to read-only preflight. `--apply` requires
+fresh live metrics, the exact provider/helper contract, an absent dashboard
+file, no other file using its UID, and a Grafana GET returning exactly 404 for
+that UID. It writes only `finite-tinfoil-gpu.json`, waits for Grafana's normal
+file polling, verifies loaded fields and file ownership, and rechecks metrics.
+It neither changes the provider nor gives the restricted CI key new powers.
+
+Open [Finite Private Tinfoil GPUs](https://monitoring.finite.computer/d/finite-tinfoil-gpu)
+and confirm values, units, the two independent freshness panels, and readable
+layout. `scripts/finite-status --tinfoil --json` requires exactly one selected
+series per metric, rejecting duplicate targets and absent/NaN samples. The
+usage window is one hour, returning two-minute allocation-wide means; normal
+sample lag is reflected in Sample Age. This does not prove per-GPU health,
+inference throughput, accounting writes, or attestation. Retain a screenshot
+and source/query comparison in FIN-33 before marking it Done.
+
+### Tinfoil rollback
+
+The collector bootstrap prints a root-only directory under
+`/var/backups/finite-tinfoil-bootstrap.*`. Run its `rollback` script to restore
+the exact prior binaries, units, scrape config, and textfile, restore prior
+unit activity/enabled state, and reload Prometheus. It preserves secrets,
+Prometheus history and all unrelated files. Use this receipt only for this
+rollout; it intentionally restores those recorded files and would overwrite
+a later change to the same paths. Record canonical status after rollback.
+
+Initial dashboard provisioning records prior **absence** and candidate bytes
+under `/var/backups/finite-monitoring-dashboards/tinfoil-initial-*`. On failure,
+it removes its file only if the bytes still match its candidate. Since the
+existing provider has `disableDeletion: true`, Grafana may retain the imported
+UID in its database. This is reported as incomplete Grafana rollback; do not
+retry by overwriting or deleting an ambiguous UID. Reconcile that exact UID
+with the receipt before retrying. For a successful initial deployment,
+subsequent query corrections use the normal Git revert/update workflow above.

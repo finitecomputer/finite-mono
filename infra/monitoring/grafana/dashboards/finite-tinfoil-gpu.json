@@ -2,7 +2,7 @@
   "annotations": {
     "list": []
   },
-  "description": "Draft operator dashboard for the Finite Private Tinfoil allocation. No production metrics source is wired yet. Tinfoil reports allocation-wide values, not individual-GPU series.",
+  "description": "Operator metrics for the Finite Private Tinfoil allocation, from the control plane and limiter health.",
   "editable": true,
   "fiscalYearStartMonth": 0,
   "graphTooltip": 1,
@@ -13,8 +13,8 @@
     {
       "id": 9,
       "type": "text",
-      "title": "Draft data contract",
-      "description": "This panel prevents the draft from looking production-ready before ingestion is approved.",
+      "title": "Data sources",
+      "description": "Metric sources and limitations.",
       "gridPos": {
         "h": 3,
         "w": 24,
@@ -23,7 +23,7 @@
       },
       "options": {
         "mode": "markdown",
-        "content": "This dashboard is a draft. It is not yet provisioned to production Grafana and no production Tinfoil metrics source is wired yet. Target: `finite-private`. Capacity and served-model identity remain collector-owned follow-up data. Credential handling and deployment belong in separate follow-ups."
+        "content": "Target: `finite-private`. Utilization is the allocation-wide mean from the newest two-minute bucket returned by the Tinfoil one-hour metrics query; fetch time never resets source age. Status Freshness is separate from usage Data Freshness. Dependency checks and latency come from the limiter\u2019s `/health` response. Missing/expired utilization is a gap. Accounting health does not prove accounting writes. No per-GPU series, inference requests/tokens, or delivered alerts are included in this MVP."
       },
       "pluginVersion": "13.0.2"
     },
@@ -908,8 +908,7 @@
   "tags": [
     "finite",
     "tinfoil",
-    "gpu",
-    "draft"
+    "gpu"
   ],
   "templating": {
     "list": []

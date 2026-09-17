@@ -531,7 +531,7 @@ def check_tinfoil_dashboard_contract() -> None:
     panels = dashboard["panels"]
     panels_by_title = {panel["title"]: panel for panel in panels}
     required_titles = {
-        "Draft data contract",
+        "Data sources",
         "Data Freshness",
         "Container Ready",
         "Model Upstream",
@@ -572,7 +572,7 @@ def check_tinfoil_dashboard_contract() -> None:
     )
     (container_name,) = container_selectors
     require(
-        container_name in panels_by_title["Draft data contract"]["options"]["content"],
+        container_name in panels_by_title["Data sources"]["options"]["content"],
         f"Tinfoil draft notice must name the selected container {container_name!r}",
     )
     panel_metric_bindings = TINFOIL_PANEL_METRIC_BINDINGS
@@ -637,11 +637,11 @@ def check_tinfoil_dashboard_contract() -> None:
         == {"0": "FRESH", "1": "AGING", "2": "STALE"},
         "Data Freshness mappings drifted",
     )
-    notice = panels_by_title["Draft data contract"]["options"]["content"]
+    notice = panels_by_title["Data sources"]["options"]["content"]
     require_contains(
         notice,
-        "It is not yet provisioned to production Grafana and no production Tinfoil metrics source is wired yet",
-        "Tinfoil draft notice",
+        "fetch time never resets source age",
+        "Tinfoil source notice",
     )
 
 
