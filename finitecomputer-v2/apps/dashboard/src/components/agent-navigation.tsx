@@ -56,9 +56,9 @@ export function AgentNavigation({
     },
     {
       label: "Brain",
+      href: `${root}/brain`,
       icon: BrainIcon,
-      active: false,
-      note: "Coming soon",
+      active: pathname === `${root}/brain`,
     },
     {
       label: "Skills",
