@@ -136,6 +136,8 @@ _Avoid_: PIN, runtime token
 
 **Finite Sites Project Repository**:
 The Git-backed source repository and publishing path owned by Finite Sites.
+Each repository has zero or one static Project Site. Production API and Git
+use `https://finite.site`; Sites serves committed bytes under `*.finite.site`.
 _Avoid_: `finitec repo`, dashboard published app
 
 **Runtime Management Pipe**:

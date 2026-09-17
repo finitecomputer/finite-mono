@@ -219,7 +219,7 @@ async fn dispatch(State(dispatcher): State<Dispatcher>, request: Request<Body>) 
     }
 }
 
-/// Host (no port) of a URL like `https://v2.finite.chat` or
+/// Host (no port) of a URL like `https://sites.example.test` or
 /// `http://127.0.0.1:8787`.
 pub fn host_of_url(url: &str) -> String {
     let after_scheme = url.split_once("://").map(|(_, rest)| rest).unwrap_or(url);
@@ -530,18 +530,21 @@ mod tests {
 
     #[test]
     fn host_of_url_extraction() {
-        assert_eq!(host_of_url("https://v2.finite.chat"), "v2.finite.chat");
+        assert_eq!(
+            host_of_url("https://sites.example.test"),
+            "sites.example.test"
+        );
         assert_eq!(host_of_url("http://127.0.0.1:8787"), "127.0.0.1");
         assert_eq!(
-            host_of_url("https://V2.Finite.Chat/path?q=1"),
-            "v2.finite.chat"
+            host_of_url("https://Sites.Example.Test/path?q=1"),
+            "sites.example.test"
         );
     }
 
     #[test]
     fn strip_port_handles_ipv6() {
-        assert_eq!(strip_port("v2.finite.chat:443"), "v2.finite.chat");
-        assert_eq!(strip_port("v2.finite.chat"), "v2.finite.chat");
+        assert_eq!(strip_port("sites.example.test:443"), "sites.example.test");
+        assert_eq!(strip_port("sites.example.test"), "sites.example.test");
         assert_eq!(strip_port("[::1]:8787"), "[::1]");
         assert_eq!(strip_port("[::1]"), "[::1]");
     }
@@ -551,35 +554,35 @@ mod tests {
     #[test]
     fn api_host_wins_over_wildcard() {
         use super::{Plane, plane_for_host};
-        let base = "v2.finite.chat";
-        let api_host = host_of_url("https://api.v2.finite.chat");
-        let git_host = host_of_url("https://git.v2.finite.chat");
+        let base = "sites.example.test";
+        let api_host = host_of_url("https://api.sites.example.test");
+        let git_host = host_of_url("https://git.sites.example.test");
         assert_eq!(
-            plane_for_host("api.v2.finite.chat", &api_host, &git_host, base),
+            plane_for_host("api.sites.example.test", &api_host, &git_host, base),
             Plane::Api
         );
         assert_eq!(
-            plane_for_host("api.v2.finite.chat:443", &api_host, &git_host, base),
+            plane_for_host("api.sites.example.test:443", &api_host, &git_host, base),
             Plane::Api
         );
         assert_eq!(
-            plane_for_host("API.v2.finite.chat", &api_host, &git_host, base),
+            plane_for_host("API.sites.example.test", &api_host, &git_host, base),
             Plane::Api
         );
         assert_eq!(
-            plane_for_host("git.v2.finite.chat", &api_host, &git_host, base),
+            plane_for_host("git.sites.example.test", &api_host, &git_host, base),
             Plane::Git
         );
         assert_eq!(
-            plane_for_host("hello.v2.finite.chat", &api_host, &git_host, base),
+            plane_for_host("hello.sites.example.test", &api_host, &git_host, base),
             Plane::Sites
         );
         assert_eq!(
-            plane_for_host("hello.extra.v2.finite.chat", &api_host, &git_host, base),
+            plane_for_host("hello.extra.sites.example.test", &api_host, &git_host, base),
             Plane::Api
         );
         assert_eq!(
-            plane_for_host("v2.finite.chat", &api_host, &git_host, base),
+            plane_for_host("sites.example.test", &api_host, &git_host, base),
             Plane::Api
         );
         assert_eq!(
@@ -631,11 +634,11 @@ mod tests {
 
         assert_eq!(
             plane_for_request(
-                "v2.finite.chat",
+                "sites.example.test",
                 "/demo.git/info/refs",
-                "v2.finite.chat",
-                "git.v2.finite.chat",
-                "v2.finite.chat",
+                "sites.example.test",
+                "git.sites.example.test",
+                "sites.example.test",
             ),
             Plane::Api
         );

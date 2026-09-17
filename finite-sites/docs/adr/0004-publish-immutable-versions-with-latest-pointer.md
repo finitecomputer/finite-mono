@@ -2,7 +2,7 @@
 
 Each finalized publish creates an immutable version; the site serves the
 version its active pointer names, and the pointer flip is one transactional
-update. Carried over from finite-site ADR-0003.
+update.
 
 Versions reference content-addressed blobs, so history is cheap (unchanged
 files are stored once) and rollback is a future pointer update, not a

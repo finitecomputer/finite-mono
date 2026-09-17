@@ -1,23 +1,17 @@
 # Content-Addressed Blobs With Global Dedup
 
-Blobs are stored once per sha256, shared across all sites and versions.
-A publish session reports which manifest hashes the server lacks, and the
-client uploads only those. Uploads are verified byte-for-byte against the
-hash they claim before the blob row is recorded.
+Blobs are stored once per sha256, shared across all Sites and Versions. Git
+publication reads committed deploy bytes, verifies hashes and records immutable
+blobs before activating a Version. Publishing has no client-facing missing-blob
+list or direct upload API. `Store::missing_blobs` remains an internal store
+helper; it is not a public hash-existence oracle.
 
 Blobs live on the Sites data volume behind a four-operation interface
 (`put`/`has`/`get`/path). Off-host recovery uses the complete stopped-Sites
 snapshot archived by Borg, as described in
 [the recovery runbook](../../../infra/runbooks/deploy-sites.md#backups-and-restore).
 
-Known tradeoff: the missing-blob list reveals whether a given hash exists
-anywhere on the platform (here.now and Workers static assets accept the
-same leak). Logged in the technical debt ledger; per-owner dedup scoping is
-the fallback if it ever matters.
-
-**Considered Options**
-
-- Per-site blob namespaces: no cross-tenant hash oracle, but no dedup of
-  framework assets shared by every generated site.
-- Global content-addressed store: maximal dedup, simplest serving path;
-  chosen with the leak documented.
+Serving authorizes the Site before reading its Version's blobs. Any future
+client-visible deduplication protocol must assess whether it exposes another
+owner's hash existence; the current internal storage choice does not authorize
+such an API.

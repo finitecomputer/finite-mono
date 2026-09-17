@@ -126,7 +126,7 @@ pub const MAX_PROJECT_OUTPUTS: u32 = 16;
 pub const MAX_PROJECT_COLLABORATORS: u32 = 50;
 
 /// Project Slugs use DNS-label-sized strings even though they live under the
-/// git host. Keeping them label-shaped makes `git.finite.chat/SLUG.git`
+/// git host. Keeping them label-shaped makes `finite.site/SLUG.git`
 /// unsurprising and avoids path escaping questions.
 pub const MAX_PROJECT_SLUG_BYTES: u32 = 63;
 

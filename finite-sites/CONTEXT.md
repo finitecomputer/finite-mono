@@ -15,7 +15,7 @@ with exactly these meanings.
   products and clients use the Sites Platform Service. The boundary includes
   public control-plane APIs, Git Remotes, serving URLs, and narrowly scoped
   internal APIs, but not registry tables or daemon implementation details.
-- **Static Sites API**: the Sites Service Boundary for the static-only target
+- **Static Sites API**: the Sites Service Boundary for the static-only
   model. It presents each Project Repository as having zero or one Project
   Site, not a list of typed outputs, and uses Site vocabulary in public
   request and response fields.
@@ -41,23 +41,7 @@ with exactly these meanings.
 - **Sites Recovery Set**: the durable Sites-owned state required to restore
   Project Repositories, Sites, versions, sharing, and audit history
   without relying on another product's database as the source of truth.
-- **Sites Behavior Compatibility**: the migration promise that existing
-  `fsite` static-site workflows, Git Remotes, serving URLs, visibility, and
-  sharing keep their user-visible meaning while the hosting architecture
-  changes.
-- **Sites Cutover**: the operator-led move from the legacy Sites deployment to
-  the Sites Platform Service after isolated qualification.
-  Already-published Sites keep serving while publishing writes may be briefly
-  frozen, Sites state may be reconciled once, and canonical Sites hostnames
-  move.
-- **Publishing Write Freeze**: a bounded Sites Cutover period during which Git
-  pushes and publishing mutations are rejected or paused while already-published
-  Sites continue serving.
-- **Static Launch Check**: a pre-cutover check that protects the static-only
-  target model. Retired output kinds, multiple Project Sites for one Project
-  Repository, or retired Core grant state are not converted into target Sites
-  state; this is not a reusable migration framework.
-- **Static-Only Sites Service**: the target shape of the Sites Platform
+- **Static-Only Sites Service**: the Sites Platform
   Service: Project Repositories publish static Finite Sites only. There is no
   output kind dimension, tenant app process, warm runtime path, or runtime
   compatibility flag for retired output kinds.
@@ -115,7 +99,7 @@ with exactly these meanings.
   Principal Link.
 - **Authorized Sites Key**: a revocable native npub allowed to exercise one
   Sites Email Principal's grants without making the key and mailbox the same
-  Principal. Older documents call this an Email Access Delegation.
+  Principal. This authorization is scoped to Sites.
 - **Project Repository**: the editable git history for a project. It may begin
   with data, grow logic around that data, and later produce zero or one Project
   Site. A Project Repository may exist before any public-facing UI exists.
@@ -143,13 +127,10 @@ with exactly these meanings.
   Site owns Site Name, Deploy Branch, Deploy Path, Visibility, Shares, active
   Version pointer, and version history.
 - **Project Site Identity**: the immutable public identity of a Project Site: Site Name, Deploy Branch, and Deploy Path.
-- **Retired Output Kind**: a former served-artifact variant such as app,
-  document, or PDF. Remaining code or documents that depend on output kinds are
-  legacy removal work rather than target Sites contracts.
 - **Legacy Static Output Config**: the old `[outputs.<id>]` static-site Project
   Config shape. Sites may accept it with a deprecation warning only when it
   describes exactly one static Site; it does not preserve public output IDs or
-  output kinds in the target model.
+  output kinds in the public model.
 - **Deploy Tree**: committed files selected from a Project Repository and
   materialized as a Version. Agents produce Deploy Trees; Finite Sites
   validates and serves them.
@@ -175,11 +156,7 @@ with exactly these meanings.
   globally unique within the Site Base Domain, first-come, and allocated before
   any Version is deployed. Reserved names are rejected.
 - **Reserved Site Name**: a Site Name unavailable for new allocation because
-  it is owned by legacy Sites, reserved for a service label such as `v2`, set
-  aside by operator policy, or owned by another current Sites authority.
-- **Pre-User Reset**: a destructive operator action that wipes Finite Sites
-  product state during pre-user development so examples can be redeployed
-  through the current model without legacy adapters.
+  it is set aside by operator policy or owned by another Sites authority.
 - **Publishing Key / Owner**: the Nostr keypair (npub) of the human or agent
   Publishing Principal. It owns Project Repositories, lists Sites, and may
   change Site sharing. The publish grant cache is keyed on it. It is the
@@ -231,9 +208,7 @@ with exactly these meanings.
   dry-run validation, and machine-readable descriptions of available commands
   and workflows.
 - **Project Workflow Description**: an Agent-Safe CLI description of a current
-  Project Repository workflow. A workflow remains valid when its underlying
-  Project Init, Git Remote, and sharing steps remain valid; only references to
-  retired outputs or output kinds are legacy removal work.
+  Project Repository workflow using Project Init, Git Remotes and Site sharing.
 - **CLI Product Verb**: one of the primary agent-facing actions:
   `project`, `auth`, or `view`. Product verbs name real product
   primitives rather than aliases or wrappers around a second surface. If a
@@ -244,7 +219,7 @@ with exactly these meanings.
   Verb.
 - **Project Config**: a project-level configuration file, conventionally
   `finite.toml`, describing static Site publishing choices for a Project
-  Repository. Its target shape declares the Project and optionally one Project
+  Repository. It declares the Project and optionally one Project
   Site.
 - **Key Challenge**: proof of control for a nostr key. The private key never
   leaves the user's machine; the actor signs a bounded challenge instead.
@@ -259,8 +234,9 @@ with exactly these meanings.
   creating Projects or allocating Sites fails closed.
 - **Allowlist**: the deployed operator command surface for adding/removing
   `operator` publish grants.
-- **Publish Session**: a pending upload: a validated manifest plus the set
-  of blobs the server still needs. Finalizing it creates a Version.
+- **Publish Session**: internal publication staging for a validated manifest.
+  Git deployment writes the required blobs and finalizes it into a Version;
+  it is not a client upload API.
 - **Manifest**: the list of `(path, sha256, size)` entries describing one
   complete site version. Paths are absolute and conservatively validated.
 - **Blob**: immutable bytes stored by sha256, deduplicated across all sites
@@ -308,6 +284,5 @@ with exactly these meanings.
 - **Base Domain**: the wildcard domain under which sites live —
   `sites.localhost` in development, `finite.site` for the Fly deployment.
   Migrated static `finite.chat` URLs redirect to their `finite.site` Sites.
-  Retained apps/documents stay on the old service until separately retired.
 - **Outbox**: the dev mailer's output directory; each would-be email is a
   text file containing the magic link.

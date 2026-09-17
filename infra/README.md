@@ -10,12 +10,13 @@ Everything Finite runs in production is defined here. The north star:
 ## Current headline (2026-08-29)
 
 **finite-lat-2 is the live app-plane host and runs the coupled cluster** (Core,
-Postgres, chat, hosted-device, Sites, Brain, Identity, dashboard, Caddy,
+Postgres, chat, hosted-device, Brain, Identity, dashboard, Caddy,
 backups — defined in `infra/nixos/`, per ADR 0007 and the 2026-08-29 emergency
 cutover from lat1's thermal failure). **lat3 and lat4 are the active Agent
 Runner (Kata) hosts.** lat1 is retired: it holds no production role, its
 runner is leftover/inactive, and it is not deployment authority. DNS for
-`finite.computer` and `*.finite.chat` points at lat2.
+`finite.computer` and `*.finite.chat` points at lat2. The latter serves content
+redirects only; [Sites runs on Fly](runbooks/deploy-sites.md) at `finite.site`.
 
 ## Historical: the 2026-07-09 lat1 consolidation
 
@@ -129,7 +130,7 @@ capacity. The one accepted next candidate and its hard gates live in
 | Host | Role | Services |
 |---|---|---|
 | **finite-lat-1** (64.34.82.77) | **RETIRED 2026-08-29 (thermal failure, ADR 0007) — leftover/inactive only.** Former consolidated app server and Kata Runner (`infra/nixos/` history); NixOS 25.11; single-disk root and `/data`. Its runner cannot lease relocations or creation work; do not address it for Core CLI, rollout, or closure activation. | Historical service stack (Core, Postgres, chat, hosted-device, Brain, Sites, dashboard, runner, Caddy) is dark. The physical disks hold stale 2026-07 metadata and may be touched only by a separately authorized reinstall. |
-| **finite-lat-2** (64.34.80.19) | **Live app-plane host (ADR 0007).** Core, Postgres, chat, hosted-device, sites, Brain, Identity, dashboard, Caddy, backups, litestream. No Agent Runner. Recovery Authority and the `wg-finite` hub at `10.254.3.1`. | `finite.computer` DNS points here. Post-cutover cleanup (old runners, leftover credentials, stale smoke row) is still open. |
+| **finite-lat-2** (64.34.80.19) | **Live app-plane host (ADR 0007).** Core, Postgres, chat, hosted-device, Brain, Identity, dashboard, Caddy, backups, litestream. Sites runs separately on Fly; Caddy retains old content redirects. No Agent Runner. Recovery Authority and the `wg-finite` hub at `10.254.3.1`. | `finite.computer` DNS points here. Post-cutover cleanup (old runners, leftover credentials, stale smoke row) is still open. |
 | **finite-lat-3** (207.188.7.157) | **NixOS 26.05 Agent Runner accepting new creation, hard limit 42.** Kernel 6.18.39; 187 GiB RAM; exact-size RAID1 root and `/data`; dual ESPs; 64-GiB swapfile plus zswap. | The Runner timer is enabled declaratively with `FC_RUNNER_DRAIN=false` and `FC_RUNNER_MAX_SANDBOXES=42`. This owner-authorized ceiling deliberately overcommits the declared 8-GiB guest maximum against physical RAM; swap is not counted as usable Agent capacity. No Recovery Authority exists here. |
 | **finite-lat-4** (152.236.34.15) | **Second live NixOS Agent Runner** (same chassis class as lat3). RAID1 root and `/data`; `10.254.3.4` on `wg-finite`. | `FC_RUNNER_DRAIN=false`. Holds the relocated lat1 cohort (21 active Runtimes as of 2026-08-29). No Recovery Authority. |
 | **smoke** (15.204.56.61) | Legacy Nix-fleet box; Brain rollback source | Legacy finite-brain on :3015 (`brain.smoke.finite.computer`). It is not a replica and must not be selected implicitly. |
@@ -173,8 +174,9 @@ First-party images are **built by CI**, tagged with the git SHA, pushed to
 GHCR, and deployed by digest (`infra/images/`). On-host builds (the old k3s
 pattern) are gone: the confidential-compute company's control plane
 does not run binaries built from "whatever was on the box." The dashboard
-runs a digest-pinned image under podman; core and the sites/chat/brain binaries
-are built by Nix from `infra/nixos/packages.nix`.
+runs a digest-pinned image under podman; Core and the Chat/Brain binaries
+are built by Nix from `infra/nixos/packages.nix`. Sites runs its CI-built image
+on Fly, configured in `infra/fly/sites/fly.toml`.
 
 ## Tinfoil satellite
 

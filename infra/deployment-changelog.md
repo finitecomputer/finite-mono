@@ -52,36 +52,6 @@ the sources above cannot carry lands here.
 
 ## Entries
 
-### 2026-09-17 — Finite Sites cutover and CLI/runtime rollout
-
-- `finite.site` now serves the 210 retained Sites on Fly. Existing visibility,
-  shares and source history were preserved; 210 old content hosts redirect to
-  their new URLs. Old publishing endpoints return 410 and the app-host Sites
-  daemon is retired. Static app/document fallbacks remain available.
-- `fsite/v0.6.0` is released. All 61 active production Agents (31 lat3, 29 lat4,
-  one lat5) completed guarded upgrades to artifact
-  `finite-agent-runtime-2026-09-17.sites-final`, using the existing image digest
-  `sha256:a8ae888c0296a94d94a7fc534d621de2073cc77184f1d342bd3779b28899ddcc`.
-  New-launch pins match; bundled skills were synced and 174 authorized Git
-  remotes updated. Each Agent retained its Principal and durable data, and
-  final lifecycle probes reported all 61 operable.
-- Sites backup `sites-20260917T163516Z-025a2737` was independently retrieved
-  from rsync.net and verified after the cutover. The hosted Recovery Snapshot
-  format v4 now covers Chat/Core/Brain/Identity separately; historical v3
-  recovery sets remain retained. Private migration and restore evidence stays
-  outside git.
-- Dashboard requester binding fix #933 is deployed as image
-  `sha256:341d735caaed58ff5a6c722201db4f32f2e93566d9b5baa5927e25c45d343c05`
-  in lat2 closure `sy2rz30sf0fygkh7rh38m5dh2j8f6sgs`. A real Chat update
-  advanced an existing private test site from version 1 to 2; the signed-in
-  browser displayed the new content and anonymous requests returned 401.
-  Automatic requester access on a new Chat publish remains unqualified:
-  the live Agent terminal did not receive its requester lease. The open
-  verification is retained in the deployment queue.
-- `scripts/finite-status` reports healthy Chat, recovery and production runner
-  cohorts. Its overall fleet result still includes the pre-existing stale
-  `smoke` host record; that record was not rewritten as part of this cutover.
-
 ### 2026-09-02 — iOS client, Electron app, APNs push, and NIP-AB pairing deleted from source
 
 - **Source-only change** (branch `cleanup/delete-ios-platform`): the SwiftUI

@@ -1,10 +1,11 @@
 # RFC 0001: Native Finite Sites Viewer Auth
 
-Status: implemented for direct native and Hosted Web adapters, 2026-07-14
+Status: retained native-session protocol. The dashboard uses the
+[account session viewer bridge](../../../finite-sites/docs/adr/0029-account-session-viewer-bridge.md).
 
 ## Problem
 
-The native Finite Chat app should open a private or shared Finite Site that has
+A native Finite Chat client can open a private or shared Finite Site that has
 been shared with the user without sending the user through the email magic-link
 flow. This must be invisible in the happy path and must not expose the user's
 secret key to the web page, the agent, or any Nostr relay.
@@ -13,7 +14,6 @@ secret key to the web page, the agent, or any Nostr relay.
 
 - Do not replace the current email magic-link flow for external viewers.
 - Do not use Nostr relays for this ceremony.
-- Do not support remote signers or NIP-46 in Friends Alpha.
 - Do not expose signed events or private keys to page JavaScript.
 - Do not make site content access depend on cached kind-0 profile metadata.
 
@@ -24,9 +24,9 @@ secret key to the web page, the agent, or any Nostr relay.
 - Key Challenge: proof that the actor controls a Nostr key.
 - Viewer Cookie: the existing host-scoped cookie used by Finite Sites serving.
 
-## Proposed Flow
+## Native session flow
 
-When the app opens `https://{site}.finite.chat/{path}` in the in-app browser:
+When the app opens `https://{site}.finite.site/{path}` in the in-app browser:
 
 1. The native app recognizes the Finite Sites host.
 2. The native app builds a bounded JSON challenge body:
@@ -43,7 +43,7 @@ When the app opens `https://{site}.finite.chat/{path}` in the in-app browser:
 3. The app signs a NIP-98 HTTP auth event locally with the User Key for:
 
    ```text
-   POST https://{site}.finite.chat/_finite/auth/native-session
+   POST https://{site}.finite.site/_finite/auth/native-session
    ```
 
    The signature binds the exact URL, method, timestamp, and payload hash.
@@ -59,20 +59,18 @@ When the app opens `https://{site}.finite.chat/{path}` in the in-app browser:
    - `purpose == "finite_site_view_session"`;
    - `return_to` is a same-site absolute path, not a URL;
    - signer pubkey maps to a Native Principal;
-   - the Native Principal has view access to the Project Output.
+   - the Native Principal has view access to the Project Site.
 
 6. Finite Sites mints the existing host-scoped HttpOnly Viewer Cookie and
    redirects to `return_to`.
-7. The `WKWebView` loads the site normally. Static assets and app-site requests
+7. The browser loads the Site normally. Static asset requests
    use the cookie, not per-request injected auth headers.
 
-Hosted Web uses the same proof contract without exposing custody to the
-browser. The dashboard asks the WorkOS-bound Hosted Device's
-`finite-sites-identity-provider-v1` adapter to authorize the exact Output
-session endpoint. It forwards the returned signed body and Authorization
-header to Sites' service-authenticated native viewer exchange. Sites returns a
-single-use Output-host redemption URL, which sets the ordinary and Partitioned
-Viewer Cookies before the iframe loads.
+The service also retains a native exchange for bounded Hosted Web proofs,
+returning a single-use Site-host redemption URL and ordinary/Partitioned Viewer
+Cookies. Current dashboard previews and direct account sign-in use the verified
+email bridge in ADR 0029 instead of Hosted Device signing. Native proof support
+does not imply a currently shipped iOS or Electron client.
 
 ## Trust Boundary
 
@@ -83,7 +81,7 @@ queried.
 
 Finite Sites verifies the signature locally using the event body; no relay
 state is authoritative for access. Access remains a serving-plane decision:
-the share table, delegation table, or future entitlement table is re-checked
+the current Site visibility and Native Principal Share are re-checked
 on every request, so revocation takes effect without waiting for cookie expiry.
 
 An Agent Principal publishing for an authenticated human supplies that human's
@@ -96,7 +94,7 @@ Share but can never create one.
 
 ```text
 POST /_finite/auth/native-session
-Host: {site}.finite.chat
+Host: {site}.finite.site
 Authorization: Nostr <base64-kind-27235-event>
 Content-Type: application/json
 ```
@@ -131,9 +129,9 @@ Finite Sites tests should cover:
 - revoked share;
 - malformed `return_to`;
 - oversized body;
-- replay behavior if nonce persistence is added.
+- nonce and hosted redemption replay rejection.
 
-Finite Chat iOS tests should cover:
+A client integrating this protocol must verify:
 
 - cookie is set before page load;
 - private shared site opens without email flow;

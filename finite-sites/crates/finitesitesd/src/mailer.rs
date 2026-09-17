@@ -414,7 +414,7 @@ mod tests {
             .send_login_link(
                 "friend@example.com",
                 "hello",
-                "https://hello.finite.chat/_finite/auth?token=abc",
+                "https://hello.finite.site/_finite/auth?token=abc",
             )
             .unwrap();
         let mut entries = std::fs::read_dir(dir.path()).unwrap();
@@ -431,34 +431,34 @@ mod tests {
         let viewer = viewer_invite_text(&ViewerInvite {
             email: "friend@example.com",
             site_name: "hello",
-            site_url: "https://hello.finite.chat/",
-            login_url: "https://hello.finite.chat/_finite/auth?token=abc",
+            site_url: "https://hello.finite.site/",
+            login_url: "https://hello.finite.site/_finite/auth?token=abc",
         });
         assert_eq!(
             viewer,
             "hello has been shared with you.\n\n\
 To view it, open this sign-in link:\n\n\
-https://hello.finite.chat/_finite/auth?token=abc\n\n\
+https://hello.finite.site/_finite/auth?token=abc\n\n\
 After signing in, you can view the site here:\n\n\
-https://hello.finite.chat/\n\n\
+https://hello.finite.site/\n\n\
 The sign-in link can be reused and expires in 15 minutes. If it expires, \
 open the site URL and request a fresh link for friend@example.com.\n\n\
 For your agent\n\n\
 If you use an agent with this site, ask it to read this email. The canonical \
 site URL is:\n\n\
-https://hello.finite.chat/\n\n\
+https://hello.finite.site/\n\n\
 Agent instructions:\n\n\
-https://hello.finite.chat/llms.txt\n"
+https://hello.finite.site/llms.txt\n"
         );
 
         let agent_section = viewer.find("For your agent").unwrap();
         assert!(viewer.find("To view it, open this sign-in link:").unwrap() < agent_section);
         assert!(viewer.contains("ask it to read this email"));
-        assert!(viewer.contains("https://hello.finite.chat/llms.txt"));
+        assert!(viewer.contains("https://hello.finite.site/llms.txt"));
 
         let site = ProjectSiteSummary {
             name: "finitechat-native-mockup".to_string(),
-            url: "https://finitechat-native-mockup.finite.chat/".to_string(),
+            url: "https://finitechat-native-mockup.finite.site/".to_string(),
             site_id: Some("site_1".to_string()),
             status: "claimed_unpublished".to_string(),
             visibility: "private".to_string(),
@@ -497,7 +497,7 @@ For your agent\n\n"
         ));
         assert!(project.contains("git clone https://finite.site/finitechat-native.git"));
         assert!(!project.contains("FINITE_SITES_API="));
-        for api in ["https://v2.finite.chat", "http://127.0.0.1:8787"] {
+        for api in ["https://sites.example.test", "http://127.0.0.1:8787"] {
             let invite = project_collaborator_invite_text(&ProjectCollaboratorInvite {
                 email: "skyler@example.com",
                 project_slug: "finitechat-native",
@@ -514,7 +514,7 @@ For your agent\n\n"
         assert!(project.contains("Project site:"));
         assert!(
             project.contains(
-                "finitechat-native-mockup -> https://finitechat-native-mockup.finite.chat/"
+                "finitechat-native-mockup -> https://finitechat-native-mockup.finite.site/"
             )
         );
     }

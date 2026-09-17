@@ -52,8 +52,8 @@ Reference: https://github.com/tigerbeetle/tigerbeetle/blob/main/docs/TIGER_STYLE
   plane; blob bytes and site serving are data plane.
 - Treat cache invalidation as a protocol decision. Any derived cache must
   name its source of truth, invalidation trigger, and stale-read behavior.
-  (Today: mutable output URLs use `no-store`; static ETags derive from blob
-  hashes and rendered Document ETags derive from the complete representation.
+  (Today: mutable Site URLs use `no-store`; static ETags derive from blob
+  hashes.
   Viewer cookies are deliberately NOT a cache of the share table — the table
   is re-checked per request.)
 - Audit every dependency addition before adding it. Prefer the standard
@@ -69,7 +69,7 @@ Reference: https://github.com/tigerbeetle/tigerbeetle/blob/main/docs/TIGER_STYLE
 
 Use handled errors for client mistakes and operating conditions:
 
-- output name already allocated, name reserved or invalid;
+- site name already allocated, name reserved or invalid;
 - pubkey has no active publish grant;
 - manifest over limits, blob hash/size mismatch;
 - deploy has missing blobs;
@@ -82,7 +82,7 @@ Use assertions or corruption errors for internal contradictions:
 - version file rows that do not match the deploy file rows they were copied
   from;
 - a stored blob whose bytes no longer hash to its name;
-- an allocated output missing immediately after its insert;
+- an allocated site missing immediately after its insert;
 - a login token referencing a missing site.
 
 Assertion policy:
@@ -130,7 +130,7 @@ Initial sniff-test target for one finitesitesd process:
   blob itself;
 - git deploy version creation: one transaction touching publish staging,
   version, version files, site pointer, and audit row;
-- project output allocation: one transaction, decided by unique indexes, not
+- project site allocation: one transaction, decided by unique indexes, not
   check-then-insert.
 
 If a local dev server cannot handle hundreds of small site requests per

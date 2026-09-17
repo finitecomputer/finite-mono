@@ -909,8 +909,8 @@ mod tests {
     #[test]
     fn viewer_cookies_split_top_level_and_partitioned_preview_access() {
         assert!(secure_viewer_cookie_context(
-            "https://v2.finite.chat",
-            "v2.finite.chat"
+            "https://sites.example.test",
+            "sites.example.test"
         ));
         assert!(secure_viewer_cookie_context(
             "http://127.0.0.1:8787",
@@ -924,8 +924,8 @@ mod tests {
         let secure = viewer_cookie_headers(
             "signed-value",
             60,
-            "https://v2.finite.chat",
-            "v2.finite.chat",
+            "https://sites.example.test",
+            "sites.example.test",
         );
         assert_eq!(secure.len(), 2);
         assert_eq!(
