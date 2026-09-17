@@ -2,7 +2,7 @@
 
 Status: accepted
 
-`fbrain search` will return ranked Markdown Section evidence and locations in
+`fbrain search` returns ranked Markdown Section evidence and locations in
 the original Brain Working Tree rather than generating an answer or durable
 summary. Each result identifies its Folder, Page path, heading, excerpt,
 local-sync disposition, and whether lexical, semantic, or both retrieval

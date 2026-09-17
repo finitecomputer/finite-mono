@@ -22,8 +22,6 @@ Current v1 capabilities:
 - SQLite-backed Brains, Folders, Folder Key Grants, invitations, shares, mounts,
   and encrypted sync records.
 - Nostr-authenticated protected HTTP routes.
-- Product Client at `/client` for browser-based trusted-client workflows.
-- Development Smoke UI at `/smoke/ui` for local inspection only.
 - `fbrain` CLI for agent-native Brain Working Trees.
 - Folder-scoped AGENTS/HUMANS guidance and LLM wiki conventions that trusted
   clients or agents can add when a user explicitly asks for them. New Brains
@@ -33,9 +31,7 @@ Current v1 capabilities:
 
 Current production service:
 
-- API and Product Client origin: `https://finite.computer`
-- Product Client: `https://finite.computer/client`
-- Client config: `https://finite.computer/client/config.json`
+- API: `https://brain.finite.computer`
 
 Repository and releases:
 
@@ -48,12 +44,14 @@ Repository and releases:
 | --- | --- |
 | `finite-brain-core` | Portable v1 domain model, validation, crypto-adjacent contracts, defaults, OKF, and Brain Working Tree projection |
 | `finite-brain-store` | SQLite schema, transactions, persistence, sync records, invitations, shares, and mounts |
-| `finite-brain-server` | HTTP router, protected routes, static Product Client assets, Smoke UI, CORS, and API tests |
+| `finite-brain-server` | HTTP router, protected routes, CORS, and API tests |
 | `finite-brain-app` | `finite-brain` application server binary |
 | `finite-brain-cli` | Agent-facing CLI crate and `fbrain` binary |
 | `../finite-nostr` | Reusable Nostr primitives used by FiniteBrain |
 
 ## Local Development
+
+Run commands in the root pinned development environment (`scripts/with-dev-env`).
 
 Common checks:
 
@@ -71,13 +69,6 @@ FINITE_BRAIN_ADDR=127.0.0.1:3015 \
 FINITE_BRAIN_PUBLIC_BASE_URL=http://127.0.0.1:3015 \
 FINITE_BRAIN_DB=.dev-data/finite-brain.sqlite3 \
 cargo run -p finite-brain-app
-```
-
-Open:
-
-```text
-http://127.0.0.1:3015/client
-http://127.0.0.1:3015/smoke/ui
 ```
 
 Use the CLI through Cargo during development:
@@ -137,7 +128,7 @@ loopback addresses, or the exact development host explicitly named by
 - `FINITE_BRAIN_ADDR`: server bind address, default `127.0.0.1:3015`.
 - `FINITE_BRAIN_SERVER_URL`: agent/CLI transport base URL. This may be an
   internal or host-bridge address.
-- `FINITE_BRAIN_PUBLIC_BASE_URL`: browser-visible canonical Brain origin. The
+- `FINITE_BRAIN_PUBLIC_BASE_URL`: canonical Brain signing origin. The
   CLI signs this origin into Nostr HTTP authorization events even when it sends
   the request through a different `FINITE_BRAIN_SERVER_URL`; it is also the
   legacy transport fallback when no server URL is configured.
@@ -152,7 +143,7 @@ loopback addresses, or the exact development host explicitly named by
 - `FINITE_BRAIN_INVITE_MAILER`: optional Brain invite delivery mode: `dev`,
   `resend`, or `none`.
 - `FINITE_BRAIN_INVITE_MAIL_FROM`: sender address for `resend`.
-- `FBRAIN_CONFIG_DIR`: local `fbrain` config directory for prototype signer
+- `FBRAIN_CONFIG_DIR`: local `fbrain` config directory for signer
   state. Prefer global `--config-dir` in scripts and agent runtimes.
 - `FBRAIN_WORKING_TREE_ROOT`: optional default parent for `fbrain open`; hosted
   Agent Runtimes set this below `/data/workspace`.
@@ -220,24 +211,6 @@ Do not commit:
 - Live SQLite databases, backups, runtime PVC contents, or smoke/prod user data.
 - Tokens, `.env*`, API keys, OAuth secrets, Telegram secrets, or deploy keys.
 
-Do commit:
-
-- Rust source, docs, tests, Product Client source assets, specs, ADRs, and
-  reusable agent skill instructions.
-- Redacted smoke findings and commands that do not expose live secrets or user
-  data.
-
-Public docs may reference the smoke service URL, local loopback development
-URLs, and release download URLs. They must not imply that the development Smoke
-UI is the production client.
-
-## Documentation Map
-
-- `CONTEXT.md`: glossary and product vocabulary.
-- `AGENTS.md`: repo agent guide.
-- `README.md`: agent-first install and usage guide.
-- `docs/specs/finitebrain-portability-spec.md`: Portable v1 contract.
-- `docs/adr/`: decisions and alternatives.
-- `docs/runbooks/`: operational smoke and local parity runbooks.
-- `../finite-skills/skills/software-development/finitebrain/SKILL.md`: the
-  FiniteBrain agent skill (single source, monorepo root).
+See [README](README.md) for CLI usage, [crypto and persistence decisions](docs/adr/)
+for retained contracts, and the [restore drill](docs/runbooks/brain-restore-drill.md)
+for recovery. Product plans and outstanding work belong in Linear.

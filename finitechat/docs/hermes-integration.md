@@ -187,6 +187,3 @@ The plugin tests prove:
 - wrong-room events are not dispatched or acked;
 - ephemeral activity is used for working state instead of durable status
   messages.
-
-See `docs/oops-i-faked-it-audit.md` for the current line between echo-handler
-transport coverage and real Hermes gateway proof.

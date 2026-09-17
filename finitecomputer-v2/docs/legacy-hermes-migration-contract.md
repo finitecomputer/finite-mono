@@ -142,10 +142,9 @@ media and prove that its attachment is preserved even though it is not active.
 
 The source Finite Brain Working Tree and identity state are preserved inside
 `source-home.tar` but never activated. The new Agent Principal must receive its
-own Email Access Delegation and Folder Key Grants, then open and sync a fresh
-Working Tree. Imported memory documents are not rewritten as prose; operators use the
-[post-cutover repair brief](legacy-hermes-post-cutover-repair.md) to find and
-repair stale source paths.
+own explicit Brain access and Folder Key Grants, then open and sync a fresh
+Working Tree. Imported memory documents remain preserved as source evidence; stale absolute
+paths must be checked before using imported content in the target environment.
 
 ## Transaction
 

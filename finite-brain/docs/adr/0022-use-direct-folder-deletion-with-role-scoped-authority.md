@@ -42,12 +42,6 @@ additional human approval ticket; removing that Personal Agent ends its future
 authority. Brain still binds deletion to the exact Folder and expected current
 state so a stale or ambiguous request fails without mutation.
 
-The human Product Client presents one confirmation before direct Folder
-deletion. It names the Folder, reports the number of nested Folders and content
-items in the subtree, states that deletion is permanent, and offers one
-**Delete permanently** action; it does not require typing the Folder name or a
-second confirmation.
-
 A valid signed deletion wins over later stale or offline edits. Sync removes
 the deleted subtree from active Brain projections, rejects new revisions under
 deleted Folder and object identities, and requires intentionally recreated
@@ -98,7 +92,7 @@ needed to make affected offline Working Trees converge after their live access
 rows have been removed. It is not visible to unrelated principals and does not
 contain Folder names, content, keys, grants, or signed request bodies.
 
-The Product Client's protected HTTP request also binds the exact Folder
+The protected HTTP request also binds the exact Folder
 identities and live-object count shown in its destructive confirmation. The
 store compares that expected scope after acquiring the serialized mutation
 boundary; a changed subtree returns a conflict and leaves live state intact.

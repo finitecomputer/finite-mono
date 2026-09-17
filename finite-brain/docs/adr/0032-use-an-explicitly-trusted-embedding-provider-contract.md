@@ -2,7 +2,7 @@
 
 Status: accepted
 
-Hybrid Wiki Search will obtain vectors through a deployment-neutral Embedding
+Hybrid Wiki Search obtains vectors through a deployment-neutral Embedding
 Provider contract rather than binding FiniteBrain to one model runtime. The
 internal beta uses the centralized Finite Specialization service and enables
 semantic indexing by default for every readable Folder; beta participants are

@@ -2,12 +2,8 @@
 
 Finite Brain runs as `finite-brain-app.service` on finite-lat-2, bound only to
 `127.0.0.1:3015`. Caddy exposes its canonical signing/API origin at
-`https://brain.finite.computer`. The dashboard also proxies the embedded
-Product Client under `https://finite.computer/client`, where WorkOS protects
-the user session and issues a bounded capability naming the canonical Brain
-origin. Brain still enforces its own route-level Nostr, invitation-proof, or
-other narrowly specified authorization; no oauth2-proxy or parent-domain
-WorkOS cookie is added to the Brain subdomain.
+`https://brain.finite.computer`. Brain enforces its own signed-request and
+capability authorization. A dashboard session is not a Folder Key Grant.
 
 The SQLite database is `/var/lib/private/finitebrain/finite-brain.sqlite3`.
 Compute deployment and data migration are separate operations. Never replace
@@ -28,21 +24,7 @@ does not replace the stop-the-world Recovery Snapshot.
 - A consistent SQLite backup has been copied from the current source and its
   size plus SHA-256 recorded outside the database contents.
 - The previous NixOS generation and source Brain service remain available for
-  rollback until the app-plane Product Client and `fbrain` proofs pass.
-
-## Historical first migration from smoke
-
-1. On smoke, make a SQLite online backup (or briefly stop the service if the
-   installed SQLite lacks `.backup`), then restart it immediately. Do not move
-   the live file while the service is writing.
-2. Copy the backup to a root-only staging path on the destination app-plane
-   host and record its SHA-256.
-3. Deploy the pinned mono revision. Let systemd create the DynamicUser state
-   directory and an empty database if necessary.
-4. Stop `finite-brain-app`, keep a rollback copy of any destination database,
-   replace it with the staged backup, match the destination file's owner/mode,
-   and start the service.
-5. Leave smoke unchanged until verification completes.
+  rollback until the `fbrain` proofs pass.
 
 ## Normal deploy
 
@@ -74,37 +56,21 @@ set -euo pipefail
 ssh root@64.34.80.19 systemctl is-active finite-brain-app
 ssh root@64.34.80.19 curl -fsS http://127.0.0.1:3015/health
 curl -fsS https://brain.finite.computer/health
-curl -fsS -o /dev/null -w '%{http_code}\n' https://brain.finite.computer/client
-curl -fsS -o /dev/null -w '%{http_code}\n' https://finite.computer/client
 ```
 
-The canonical `/health` route must report the Brain service healthy. The
-canonical `/client` may serve the public shell, but it never receives a hosted
-user capability; the dashboard `/client` must require a WorkOS session. A
-signed `fbrain` request to `/_admin/*` must reach Brain without a WorkOS
-session. In an authenticated browser, verify the embedded Product Client loads
-and completes a real `/_admin/*` request through the dashboard while signing
-for `https://brain.finite.computer`. Then run `fbrain doctor` and a write/read
-proof from an authorized Nostr identity against
-`https://brain.finite.computer`.
-
-For an invite-delivery change, use a disposable Brain and an operator-owned
-inbox. Create one email-targeted Brain Invitation and one email-targeted Folder
-Invitation. Both responses and Product Client receipts must report email
-delivery as `sent`; both emails must contain the invite code and public
-instructions but no URL fragment or Invite Secret. Copy the private invite link
-from the unlocked Product Client as the required separate client-only channel,
-then revoke both disposable invitations after verification.
+The canonical `/health` must report Brain healthy. Run `fbrain doctor` and an
+authorized write/read proof against `https://brain.finite.computer`. Signed
+`/_admin/*` requests use Brain's own authorization and do not require a
+WorkOS browser session.
 
 ## Rollback
 
 1. Switch lat2 to the previous NixOS generation and record the resulting
    `/run/current-system`; for a deliberate rollback, build/download/deploy the
    previous known-good rev's exact lat2 closure artifact and verify that path.
-2. If Brain data was written on lat2, preserve that database before restoring
-   the pre-migration rollback copy; do not discard either side.
-3. Keep or restore the smoke service as the temporary endpoint while deciding
-   how to reconcile post-cutover writes.
+2. Preserve the current database and all accepted writes. A binary rollback is
+   safe only if the old binary can read the current schema. Otherwise restore
+   and diagnose on an isolated target; never start a second writable service.
 
 A NixOS rollback is not a data rollback. Continuous Litestream replication is
 the between-deploy restore lane (see

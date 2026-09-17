@@ -2,7 +2,7 @@
 
 Status: accepted
 
-FiniteBrain will model Member and Guest as distinct relationships in both
+FiniteBrain models Member and Guest as distinct relationships in both
 Personal and Organization Brains. A Member belongs to the Brain and is entitled
 to current and future all-members Folders; a Guest receives only explicit
 Folder Access Readiness and never inherits all-members access. Brain

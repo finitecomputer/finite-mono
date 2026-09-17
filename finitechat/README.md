@@ -70,7 +70,7 @@ at `~/.finite/identity/identity.json` (or
 hosted runtimes). Whichever Finite tool runs first in that home mints the key;
 every other Finite tool in the same home finds it. Human and Agent Runtime
 homes remain separate. The on-disk format and concurrency rules are the
-[Finite Identity Contract](https://github.com/finitecomputer/finite-identity),
+[Finite Identity Contract](../finite-identity/SPEC.md),
 shared with `fsite` and the rest of the Finite tools. `finitechat` never
 copies the secret into its own stores.
 
@@ -281,27 +281,12 @@ linux-x86_64, macos-aarch64, and macos-x86_64 and publishes them to
 `finitecomputer/finite-releases`. The install block at the top of this README
 consumes the refreshed `finitechat-latest` alias from the release repository.
 
-### Publish Safety
-
-The repo is intended to publish as `finitecomputer/finitechat`.
-
-Tracked source excludes local and generated state:
-
-- `.env`, key files, SQLite stores, and `.state/` are ignored.
-- `target/` is ignored.
-
-Before pushing, verify the GitHub target is the new repo. If
-`finitecomputer/finitechat` resolves to `finitecomputer/finitechat-old`, do not
-push or force-push; create or restore the new `finitecomputer/finitechat` repo
-first.
-
 ### Deployment
 
 This repo owns the Finite Chat server source, HTTP contract, and release gate
 for `https://chat.finite.computer`. Hosted Finite Computer SaaS rollout
-mechanics belong in `../finitecomputer-v2`, which owns the current chat-server
-deploy lane, stack deploy coordination, and hosted runtime matrix. The legacy
-`../finitecomputer` repo remains for box1/TRF users while they are unmigrated.
+mechanics live in `../infra/`, including deployment, recovery and stack
+coordination.
 Do not cut a release that depends on server behavior until the deployed chat
 server has been verified against the finite-chat commit being shipped.
 

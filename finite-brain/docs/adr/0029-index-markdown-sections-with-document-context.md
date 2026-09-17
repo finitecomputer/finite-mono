@@ -2,7 +2,7 @@
 
 Status: accepted
 
-Hybrid Wiki Search will use the Markdown Section as its canonical retrieval
+Hybrid Wiki Search uses the Markdown Section as its canonical retrieval
 unit rather than whole files or anonymous fixed-size chunks. Every indexed
 section retains its Folder, Page path, Page title, and heading ancestry; a
 section too large for the configured bound may be split internally only when

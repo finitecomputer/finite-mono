@@ -5,7 +5,7 @@
 # a runner): the wg-finite /29 widening to 10.254.3.0/29 landed with #715
 # (lat2=.1 hub, lat3=.2), lat4 takes 10.254.3.4, and the 42-guest ceiling
 # mirrors lat3's owner-authorized value. Public addresses were captured from
-# the interim OS; see docs/runs/lat4-provisioning-prep.md for evidence and gates.
+# the interim OS; see infra/runbooks/install-host.md for evidence and gates.
 {
   config,
   finitePackages,

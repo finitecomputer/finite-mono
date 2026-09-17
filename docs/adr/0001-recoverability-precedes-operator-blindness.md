@@ -1,19 +1,15 @@
 # Recoverability precedes operator-blindness
 
-Status: principle accepted; Recovery Snapshot/key-backup design deferred as an
-MVP TODO and open question.
+User data availability is the first security invariant. A TEE or provider
+persistent volume is not a backup. A recovery claim requires the complete
+Recovery Set, independently held recovery authority, and a successful restore
+onto an empty target.
 
-Finite treats user data availability as the long-term first security invariant,
-but a complete Recovery Snapshot, key-wrapping, and empty-target restore system
-is not a launch gate for the first working SaaS slice. The first slice may rely
-on provider durable storage and best-effort operational recovery for a trusted
-cohort, provided we say plainly that full disaster recovery is not yet proven
-and do not market zero-loss or operator-blind guarantees. The immediate product
-gate is that ordinary restart/upgrade preserves mounted state and that users can
-keep using the product.
+Do not remove an operator recovery path or claim stronger operator-blindness
+until an equivalent recovery path has been exercised. Routine restart and
+upgrade must preserve mounted state and identity. Compute retirement preserves
+recovery material; irreversible data purge requires separate authorization and
+retention checks.
 
-Recovery Snapshot scope, Restic suitability, Recovery Authorities, key backup,
-export, retention, and empty-target restore remain explicit TODOs. TEEs may
-improve the normal privacy boundary, but Finite must not remove practical
-operator escape routes or claim cryptographic operator-blindness until an
-equivalent user-controlled recovery path is actually designed and exercised.
+State the tested failure coverage and recovery limits honestly. Missing
+recovery capabilities are tracked in [Linear](https://linear.app/finitecomputer/issue/FIN-62).

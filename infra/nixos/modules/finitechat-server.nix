@@ -1,12 +1,5 @@
-# finitechat-server — chat.finite.computer (moving here from clawland,
-# infra/hosts/clawland/finitechat-server.md).
-#
-# ## PORT REASSIGNMENT: 8787 -> 8788 ##
-# The chat server historically listened on 8787 (clawland bound
-# 10.42.0.1:8787). On this consolidated box finitesitesd owns its own
-# historical 8787, so the chat server moves to 127.0.0.1:8788. The PUBLIC URL
-# is unchanged: Caddy routes chat.finite.computer -> 127.0.0.1:8788
-# (modules/caddy.nix).
+# Chat server: the app-plane listener for chat.finite.computer.
+# Deployment and single-writer rules: infra/runbooks/deploy-finitechat-server.md.
 { finitePackages, ... }:
 {
   systemd.services.finitechat-server = {
@@ -25,9 +18,7 @@
       LimitNOFILE = 65536;
       ExecStart = "${finitePackages.finitechat-server}/bin/finitechat-server serve 127.0.0.1:8788 --sqlite /var/lib/finite-chat/data/server.sqlite3";
       DynamicUser = true;
-      # Nested StateDirectory creates finite-chat/ and finite-chat/data/;
-      # the clawland SQLite is restored into data/ at cutover (real path under
-      # DynamicUser: /var/lib/private/finite-chat/data/server.sqlite3).
+      # DynamicUser stores this under /var/lib/private/finite-chat/data/.
       StateDirectory = "finite-chat/data";
       Restart = "always";
       RestartSec = 2;

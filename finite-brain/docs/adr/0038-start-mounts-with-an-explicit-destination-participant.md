@@ -2,7 +2,7 @@
 
 Status: accepted
 
-Accepting a Mount Offer will initially include only the accepting destination
+Accepting a Mount Offer includes only the accepting destination
 owner or admin as a Mount Participant rather than exposing the source Folder to
 every destination Brain Member. Destination governance may explicitly add or
 remove its own Members afterward; source governance may not micromanage the

@@ -4,8 +4,7 @@
 
 - [FiniteBrain](./finite-brain/CONTEXT.md) — encrypted, Folder-scoped
   knowledge spaces for humans and agents
-- [Finite Identity](./finite-identity/CONTEXT.md) — public Principal
-  resolution and identity lifecycle
+- [Finite Identity](./finite-identity/CONTEXT.md) — local keys and the NIP-05 Directory
 - [Finite Nostr](./finite-nostr/CONTEXT.md) — reusable Nostr primitives
 - [Finite Sites](./finite-sites/CONTEXT.md) — Sites publishing and hosting
 - [Finite Skills](./finite-skills/CONTEXT.md) — managed Agent behavior and
@@ -19,7 +18,7 @@
 
 ## Relationships
 
-- **FiniteBrain → Finite Identity**: resolves public User and Agent identities;
+- **FiniteBrain → Finite Identity**: reuses local key and signing conventions;
   Brain retains ownership of Membership, Brain Roles, Folder Access, and
   Folder Key Grants.
 - **FiniteBrain → Finite Nostr**: consumes reusable signing, identity encoding,

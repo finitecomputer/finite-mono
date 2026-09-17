@@ -2,7 +2,7 @@
 
 Status: accepted
 
-Brain Invitations, Folder Invitations, and Folder Mounts will work across both
+Brain Invitations, Folder Invitations, and Folder Mounts work across both
 Personal and Organization Brains in every source and destination combination.
 Brain kind determines governance—Personal Brain ownership and Personal Agent
 authority versus Organization Brain roles—not which sharing capabilities are

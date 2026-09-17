@@ -2,7 +2,7 @@
 
 Status: accepted
 
-FiniteBrain will keep derived Hybrid Wiki Search indexes physically separated
+FiniteBrain keeps derived Hybrid Wiki Search indexes physically separated
 by Folder so searchable plaintext follows the same boundary as Folder Access
 and Folder Keys. One `fbrain search` operation may fan out across every Folder
 currently readable by the acting Member Identity and merge those results, but

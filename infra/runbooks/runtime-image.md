@@ -335,14 +335,14 @@ in `infra/tinfoil/README.md`.
    digest, CLIs, plugin, bundled Finite Skills source, and the Nix-staged
    baseline toolchains (node, bun, deno, uv, Playwright browsers, weasyprint).
 2. After promotion: the next runner-launched Kata Runtime comes up ready within
-   `FC_RUNNER_RUNTIME_READY_TIMEOUT_SECS` and runs the new image. TODO:
+   `FC_RUNNER_RUNTIME_READY_TIMEOUT_SECS` and runs the new image.
    verify the Core runtime row, `journalctl -u finite-saas-runner` on the
-   target host (lat3 or lat4), `nerdctl --namespace finite inspect`, and the
+   target Runner host, `nerdctl --namespace finite inspect`, and the
    Runtime `/healthz` response.
 3. Runtime status and the Product Release manifest agree on the image and
    component versions; no mutable branch or second runtime package is used.
 4. `scripts/finite-status` shows the new pin on every Kata host, and
-   `infra/deployment-changelog.md` says why the image shipped.
+   the rollout evidence records the selected artifact and verification.
 
 ## ROLLBACK
 

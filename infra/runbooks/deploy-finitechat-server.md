@@ -11,7 +11,7 @@ unchanged), DynamicUser with SQLite at the real path
 Caddy (`chat.finite.computer` → 127.0.0.1:8788, Let's Encrypt cert via ACME
 HTTP-01). Config: `infra/nixos/modules/finitechat-server.nix`; topology:
 `infra/nixos/README.md`. The
-[2026-07-09 bare-metal transcript](lat1-nixos-reinstall.md) supplies historical
+[Host installation](install-host.md) supplies historical
 facts only and is not current rebuild/recovery authority.
 
 The migration from clawland is **DONE**: `finitechat-server` on clawland is
@@ -143,19 +143,3 @@ unrecoverable. Concretely, any migration follows this exact order:
 5. Rollback inverts the same discipline: stop+disable the NEW server BEFORE
    re-enabling the old one, and carry the database back (any writes the new
    server accepted must move with it or be consciously discarded).
-
-## Host MOVES — SEPARATELY SCHEDULED, NOT ROUTINE
-
-The clawland → lat1 and lat1 → lat2 moves are DONE. Any FUTURE host move (for
-example splitting chat back onto dedicated hardware) is a
-deliberate cutover, NOT a routine deploy, and follows the single-writer
-doctrine above exactly: disable the old writer FIRST, WAL-checkpoint, carry
-the quiesced SQLite, start + verify the new writer via direct IP, and only
-then flip `chat.finite.computer` DNS (keep the TTL low ahead of the move).
-Chat had no users at the 2026-07-09 move, so the outage window was free —
-treat that as rehearsal, not license to skip the discipline when it is not.
-
-The historical `lat1-nixos-reinstall.md` “Data restore → Chat” note records the
-2026-07-09 path mapping only; it is not a current rebuild checklist. A future
-host move follows the finite-lat recovery plan and gets its own accepted,
-rehearsed cutover record before any writer moves.

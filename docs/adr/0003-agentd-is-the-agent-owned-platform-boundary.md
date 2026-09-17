@@ -18,7 +18,7 @@ products with their own CLIs and protocols.
 
 ## Decision
 
-Add one runtime-resident Rust daemon named `finite-agentd`.
+The runtime-resident Rust daemon is named `finite-agentd`.
 
 `finite-agentd`:
 
@@ -105,8 +105,7 @@ not widen RMP.
   heals an acknowledgement lost after the result was sent.
 - Configuration writes are atomic and validated before Hermes is restarted.
 - Failed validation restores the exact previous bytes.
-- Export remains an explicit future recovery workflow; this daemon boundary
-  does not itself claim a Recovery Snapshot implementation.
+- This daemon boundary does not itself provide a Recovery Snapshot.
 
 ## Rejected shapes
 

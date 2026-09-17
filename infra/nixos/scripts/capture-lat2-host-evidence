@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
-# Read-only evidence capture from finite-lat-2 BEFORE it is wiped, feeding
-# Gate A of infra/runbooks/lat2-replacement-cutover.md.
+# Read-only evidence capture from finite-lat-2 before installation.
+# Host identity evidence: infra/runbooks/install-host.md.
 #
 # Collects exactly what infra/nixos/hosts/finite-lat-2/ needs to stop being
 # placeholder data: disk by-id paths and sizes, NIC MACs, static addressing,

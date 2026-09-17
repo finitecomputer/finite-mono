@@ -2,8 +2,7 @@
 
 Status: accepted
 
-The next Agent State version removes raw Folder Keys and performs a hard
-migration from legacy state: an upgraded `fbrain` scrubs legacy key material,
+Agent State excludes raw Folder Keys. When opening supported older state, an upgraded `fbrain` scrubs legacy key material,
 clears stale unlocked status, and reopens encrypted Folder Key Grants through
 the acting Member Identity's signer. There is no compatibility fallback that
 uses serialized legacy keys; a missing signer or grant leaves the Folder

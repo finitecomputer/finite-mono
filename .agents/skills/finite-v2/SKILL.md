@@ -8,7 +8,7 @@ description: Apply Finite Computer v2 product boundaries when changing Core, Run
 The `finitecomputer-v2/` tree owns the self-serve SaaS implementation.
 
 It is not the legacy whiteglove product. Do not preserve box1/TRF compatibility
-inside v2 unless a migration document explicitly asks for a temporary bridge.
+inside v2 without an explicit compatibility contract and tested recovery boundary.
 
 ## Product Boundary
 
@@ -19,14 +19,13 @@ v2 owns:
 - product-owned connection UX through focused services, stable APIs, and skills;
   never through Runtime Management Pipe feature commands
 - Finite Sites publishing/list/preview and Finite Brain chat-surface integration (render cards; viewer components per the current product specification)
-- separate, revocable product-scoped Email Access Delegations for Sites and
-  Brain; never a global human-agent Principal Link
+- product-owned authorization: Sites shares and authorized key sets; Brain
+  membership and Folder Key Grants; never a global human-agent Principal Link
 - Core user, organization, Project, entitlement, and runtime-launch state
 - runner integration for SaaS Agent Runtimes
 - Finite Private grants and runtime-scoped Finite Private keys
-- provider-neutral Runner contract with Kata first and Phala confidential fast
-  follow
-- deployment coordination for finite-lat-1 and finite-lat-2 product services
+- provider-neutral Runner contract with capability-gated Kata and Phala adapters
+- deployment coordination for the finite-lat-2 app plane and Runner hosts
 - the narrow runtime-local `finite` utility for explicit agent-owned workflows
   such as `finite skills sync`
 - `finite-agentd`, the agent-owned platform boundary for typed, authorized,
@@ -36,10 +35,10 @@ v2 owns:
 v2 depends on sibling product components in this monorepo:
 
 - `finite-sites` for Project Repositories and publishing through `fsite`
-- `finitechat` for Finite Chat server, protocol, native clients,
+- `finitechat` for Finite Chat server, protocol, Hosted Web Device,
   CLI/core, and the Hermes plugin
 - `finite-skills` for Finite-specific agent skills
-- `finite-brain` for knowledgebase sharing when it enters the product
+- `finite-brain` for encrypted knowledge and explicit product grants
 
 ## Hard Cuts
 
@@ -62,8 +61,8 @@ Do not add or preserve these as first-class v2 surfaces:
 - compute restart/replacement through `finite-agentd`; those remain Core to
   Runner lifecycle operations
 
-Existing users stay on legacy `finitecomputer` until migrated. Migration code
-must be explicit bridge code with a delete condition.
+Retained legacy workloads use `finitecomputer`. Import/compatibility code must
+have an explicit supported-state contract and a verified delete condition.
 
 Runtime Management Pipe v1 is outbound-only Agent Runtime telemetry for generic
 health and Product Release identity. It has no inbound command path. Product
@@ -78,13 +77,14 @@ The only legacy Core continuity requirement is Finite Private limiter state:
 grants, API-key hashes/tokens, reservations, usage/audit records, and the
 operator path needed to keep issued Finite Private keys valid. Do not preserve
 old deploy lanes, runtime records, machine control-plane state, or dashboard
-surfaces for compatibility unless a migration doc creates a temporary bridge
-with a delete condition.
+surfaces for compatibility without an explicit contract and verified delete
+condition recorded in Linear.
 
 ## Working Rules
 
-- Prefer copying proven code over rewriting from scratch, but delete legacy
-  compatibility as soon as the v2 path has replacement tests.
+- Prefer copying proven code over rewriting from scratch, but remove
+  compatibility only after proving the supported existing-state readers and
+  recovery sets.
 - Components stay separate trees inside finite-mono. Do not copy
   `finite-sites`, `finitechat`, or `finite-skills` code into this directory —
   depend on their sibling workspace crates/paths (see
@@ -119,7 +119,7 @@ with a delete condition.
 - Do not couple compute teardown to user-data deletion. Runtime Retirement must
   retain recovery material; Purge User Data requires its own explicit,
   retention-gated authorization.
-- Describe the first slice honestly as O1 operator-minimized with audited
+- Describe the current product honestly as O1 operator-minimized with audited
   Finite-assisted recovery. A TEE alone does not justify an operator-blind
   claim.
 - For dashboard code, read `finitecomputer-v2/apps/dashboard/AGENTS.md` before editing.
