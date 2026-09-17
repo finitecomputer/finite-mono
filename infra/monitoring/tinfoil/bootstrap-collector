@@ -12,17 +12,14 @@ flock -n 9
 test -s /etc/finite/monitoring/tinfoil.env
 id finite-monitoring >/dev/null
 systemctl is-active --quiet finite-monitoring-prometheus.service
-# Refuse unrelated Prometheus drift. The only allowed delta is our scrape job.
-python3 - <<'PY'
-from pathlib import Path
-source = Path('infra/monitoring/ubuntu/prometheus.yml').read_bytes()
-live = Path('/etc/finite/monitoring/prometheus.yml').read_bytes()
-marker = b'\n  - job_name: finite-tinfoil-collector\n'
-assert source.count(marker) == 1, 'unexpected source scrape layout'
-assert live in (source, source.split(marker)[0] + b'\n', source.split(marker)[0]), 'unrelated Prometheus drift; reconcile before bootstrap'
-PY
 staging="$(mktemp -d /tmp/finite-tinfoil-bootstrap.XXXXXX)"
 trap 'rm -rf "$staging"' EXIT
+# Refuse unrelated drift, preserving the separately deployed Sites job's state.
+cp /etc/finite/monitoring/prometheus.yml "$staging/prometheus.before.yml"
+python3 infra/monitoring/tinfoil/reconcile_scrape.py \
+  infra/monitoring/ubuntu/prometheus.yml "$staging/prometheus.before.yml" \
+  "$staging/prometheus.yml"
+/opt/finite-monitoring/bin/promtool check config "$staging/prometheus.yml"
 fetch() {
   curl -fsSL --retry 3 --max-time 120 "$2" -o "$staging/$1"
   printf '%s  %s\n' "$3" "$staging/$1" | sha256sum -c - >/dev/null
@@ -38,6 +35,8 @@ test -f "$staging/exporter/node_exporter-$NODE_EXPORTER_VERSION.linux-amd64/node
 units=(finite-monitoring-tinfoil-collector.timer finite-monitoring-tinfoil-collector.service finite-monitoring-node-exporter.service)
 files=(/opt/finite-monitoring/bin/tinfoil /opt/finite-monitoring/bin/jq /opt/finite-monitoring/bin/node_exporter /opt/finite-monitoring/bin/tinfoil-usage-collector /etc/finite/monitoring/prometheus.yml /var/lib/finite-monitoring/tinfoil/textfile/tinfoil.prom)
 for unit in "${units[@]}"; do files+=("/etc/systemd/system/$unit"); done
+# Fail before taking rollback ownership if the live baseline changed meanwhile.
+cmp /etc/finite/monitoring/prometheus.yml "$staging/prometheus.before.yml"
 backup="$(mktemp -d /var/backups/finite-tinfoil-bootstrap.XXXXXX)"
 chmod 0700 "$backup"
 cp infra/monitoring/ubuntu/versions.env "$backup/candidate-versions.env"
@@ -99,7 +98,7 @@ install -d -o finite-monitoring -g finite-monitoring /var/lib/finite-monitoring/
 systemctl daemon-reload
 systemctl start finite-monitoring-tinfoil-collector.service
 systemctl enable --now finite-monitoring-node-exporter.service finite-monitoring-tinfoil-collector.timer
-install -m 0644 infra/monitoring/ubuntu/prometheus.yml /etc/finite/monitoring/prometheus.yml
+install -m 0644 "$staging/prometheus.yml" /etc/finite/monitoring/prometheus.yml
 systemctl kill --kill-whom=main --signal=HUP finite-monitoring-prometheus.service
 ready=0
 for attempt in {1..20}; do
