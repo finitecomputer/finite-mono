@@ -93,7 +93,7 @@ def provider_fact(
     principal = f"npub1{runtime}principal"
     work_root = (
         "/data/finite-saas-runner"
-        if host in {"finite-lat-3", "finite-lat-4"}
+        if host in {"finite-lat-3", "finite-lat-4", "finite-lat-5"}
         else "/var/lib/finite-saas-runner"
     )
     return {
@@ -314,6 +314,7 @@ class RuntimeRolloutScriptTests(unittest.TestCase):
             "LAT2": "root@test-lat2",
             "LAT3": "root@test-lat3",
             "LAT4": "root@test-lat4",
+            "LAT5": "root@test-lat5",
             "ROLLOUT_STATE_ROOT": str(state_root),
             "FAKE_SSH_LOG": str(log),
             "FAKE_STATE_DIR": str(state_dir),
@@ -1758,85 +1759,87 @@ class RuntimeRolloutScriptTests(unittest.TestCase):
             self.assertEqual(execute_events[-1]["status"], "success")
 
     def test_mixed_host_plan_is_refused(self) -> None:
-        with tempfile.TemporaryDirectory() as directory:
-            temp = Path(directory)
-            entries = [
-                plan_entry("project-a", "runtime-a", "kata-a", host="finite-lat-3"),
-                plan_entry("project-b", "runtime-b", "kata-b", host="finite-lat-1"),
-            ]
-            facts = [
-                provider_fact("project-a", "runtime-a", "kata-a", host="finite-lat-3"),
-                provider_fact("project-b", "runtime-b", "kata-b", host="finite-lat-1"),
-            ]
-            env, log, _ = self.fake_ssh_environment(
-                temp, rollout_report(entries, host="finite-lat-3"), facts
-            )
-            env["LAT3"] = "root@test-lat3"
-            env["FAKE_SOURCE_HOST_ID"] = "finite-lat-3"
-            result, _ = self.prepare(
-                env,
-                "--host",
-                "lat3",
-                "--roll-project-id",
-                "project-a",
-                "--roll-project-id",
-                "project-b",
-            )
-            self.assertNotEqual(result.returncode, 0)
-            self.assertIn("complete-shape", result.stderr)
-            self.assertFalse(
-                any(
-                    "--expected-agent-runtime-id" in call
-                    for call in log.read_text(encoding="utf-8").splitlines()
+        for host, source_host in (("lat3", "finite-lat-3"), ("lat5", "finite-lat-5")):
+            with self.subTest(host=host), tempfile.TemporaryDirectory() as directory:
+                temp = Path(directory)
+                entries = [
+                    plan_entry("project-a", "runtime-a", "kata-a", host=source_host),
+                    plan_entry("project-b", "runtime-b", "kata-b", host="finite-lat-1"),
+                ]
+                facts = [
+                    provider_fact("project-a", "runtime-a", "kata-a", host=source_host),
+                    provider_fact("project-b", "runtime-b", "kata-b", host="finite-lat-1"),
+                ]
+                env, log, _ = self.fake_ssh_environment(
+                    temp, rollout_report(entries, host=source_host), facts
                 )
-            )
+                env[host.upper()] = f"root@test-{host}"
+                env["FAKE_SOURCE_HOST_ID"] = source_host
+                result, _ = self.prepare(
+                    env,
+                    "--host",
+                    host,
+                    "--roll-project-id",
+                    "project-a",
+                    "--roll-project-id",
+                    "project-b",
+                )
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn("complete-shape", result.stderr)
+                self.assertFalse(
+                    any(
+                        "--expected-agent-runtime-id" in call
+                        for call in log.read_text(encoding="utf-8").splitlines()
+                    )
+                )
 
-    def test_host_lat4_scopes_plan_and_addresses_runner(self) -> None:
-        with tempfile.TemporaryDirectory() as directory:
-            temp = Path(directory)
-            entries = [
-                plan_entry("project-a", "runtime-a", "kata-a", host="finite-lat-4")
-            ]
-            facts = [
-                provider_fact("project-a", "runtime-a", "kata-a", host="finite-lat-4")
-            ]
-            env, log, state_root = self.fake_ssh_environment(
-                temp, rollout_report(entries, host="finite-lat-4"), facts
-            )
-            env["LAT4"] = "root@test-lat4"
-            env["FAKE_SOURCE_HOST_ID"] = "finite-lat-4"
-            scope = ("--host", "lat4", "--roll-project-id", "project-a")
-            prepared, plan_hash = self.prepare(env, *scope)
-            self.assertEqual(prepared.returncode, 0, prepared.stderr)
-            saved = json.loads(
-                (state_root / plan_hash / "plan.json").read_text(encoding="utf-8")
-            )
-            self.assertEqual(saved["source_host_id"], "finite-lat-4")
+    def test_newer_hosts_scope_plan_and_address_runner(self) -> None:
+        for host, source_host in (("lat4", "finite-lat-4"), ("lat5", "finite-lat-5")):
+            with self.subTest(host=host), tempfile.TemporaryDirectory() as directory:
+                temp = Path(directory)
+                entries = [
+                    plan_entry("project-a", "runtime-a", "kata-a", host=source_host)
+                ]
+                facts = [
+                    provider_fact("project-a", "runtime-a", "kata-a", host=source_host)
+                ]
+                env, log, state_root = self.fake_ssh_environment(
+                    temp, rollout_report(entries, host=source_host), facts
+                )
+                env[host.upper()] = f"root@test-{host}"
+                env["FAKE_SOURCE_HOST_ID"] = source_host
+                scope = ("--host", host, "--roll-project-id", "project-a")
+                prepared, plan_hash = self.prepare(env, *scope)
+                self.assertEqual(prepared.returncode, 0, prepared.stderr)
+                saved = json.loads(
+                    (state_root / plan_hash / "plan.json").read_text(encoding="utf-8")
+                )
+                self.assertEqual(saved["source_host_id"], source_host)
 
-            calls = log.read_text(encoding="utf-8").splitlines()
-            core_calls = [call for call in calls if "--plan-only" in call]
-            self.assertTrue(core_calls)
-            self.assertTrue(
-                all(call.startswith("root@test-lat2\t") for call in core_calls), calls
-            )
-            provider_calls = [
-                call
-                for call in calls
-                if "provider-snapshot-v1" in call or "provider-contact-v1" in call
-            ]
-            self.assertTrue(provider_calls)
-            self.assertTrue(
-                all(call.startswith("root@test-lat4\t") for call in provider_calls),
-                calls,
-            )
+                calls = log.read_text(encoding="utf-8").splitlines()
+                core_calls = [call for call in calls if "--plan-only" in call]
+                self.assertTrue(core_calls)
+                self.assertTrue(
+                    all(call.startswith("root@test-lat2\t") for call in core_calls), calls
+                )
+                provider_calls = [
+                    call
+                    for call in calls
+                    if "provider-snapshot-v1" in call or "provider-contact-v1" in call
+                ]
+                self.assertTrue(provider_calls)
+                self.assertTrue(
+                    all(call.startswith(f"root@test-{host}\t") for call in provider_calls),
+                    calls,
+                )
 
-            executed = self.run_rollout(
-                "--execute-plan-hash", plan_hash, *self.actor_args(), *scope, env=env
-            )
-            self.assertEqual(executed.returncode, 0, executed.stderr)
-            events = self.read_events(state_root, plan_hash)
-            execute_events = [event for event in events if event["phase"] == "execute"]
-            self.assertEqual(execute_events[-1]["status"], "success")
+                executed = self.run_rollout(
+                    "--execute-plan-hash", plan_hash, *self.actor_args(), *scope, env=env
+                )
+                self.assertEqual(executed.returncode, 0, executed.stderr)
+                events = self.read_events(state_root, plan_hash)
+                execute_events = [event for event in events if event["phase"] == "execute"]
+                self.assertEqual(execute_events[-1]["status"], "success")
 
     def test_unknown_host_is_rejected(self) -> None:
         result = self.run_rollout(

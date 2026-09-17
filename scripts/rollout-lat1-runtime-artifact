@@ -11,6 +11,7 @@ LAT2="${LAT2:-root@64.34.80.19}"
 LAT1="${LAT1:-root@64.34.82.77}"
 LAT3="${LAT3:-root@207.188.7.157}"
 LAT4="${LAT4:-root@152.236.34.15}"
+LAT5="${LAT5:-root@64.34.93.213}"
 ROLLOUT_HOST=lat1
 SOURCE_HOST_ID=finite-lat-1
 RUNNER_DEST="$LAT1"
@@ -19,7 +20,7 @@ ROLLOUT_STATE_ROOT="${ROLLOUT_STATE_ROOT:-$REPO_ROOT/.local-state/runtime-rollou
 
 usage() {
   cat >&2 <<'EOF'
-usage: scripts/rollout-lat1-runtime-artifact [--validate-only] [--host lat1|lat3|lat4] \
+usage: scripts/rollout-lat1-runtime-artifact [--validate-only] [--host lat1|lat3|lat4|lat5] \
   (--prepare | --execute-plan-hash 64_LOWERCASE_HEX | --summarize) \
   --roll-runtime-artifact ID \
   --roll-admin-email EMAIL \
@@ -49,6 +50,7 @@ validate_local_inputs() {
   [[ $LAT1 =~ ^[A-Za-z0-9][A-Za-z0-9_.@:-]{0,254}$ ]] || { invalid_value "LAT1 destination"; return; }
   [[ $LAT3 =~ ^[A-Za-z0-9][A-Za-z0-9_.@:-]{0,254}$ ]] || { invalid_value "LAT3 destination"; return; }
   [[ $LAT4 =~ ^[A-Za-z0-9][A-Za-z0-9_.@:-]{0,254}$ ]] || { invalid_value "LAT4 destination"; return; }
+  [[ $LAT5 =~ ^[A-Za-z0-9][A-Za-z0-9_.@:-]{0,254}$ ]] || { invalid_value "LAT5 destination"; return; }
   [[ $RUNNER_DEST =~ ^[A-Za-z0-9][A-Za-z0-9_.@:-]{0,254}$ ]] || { invalid_value "rollout host destination"; return; }
   validate_id "runtime artifact id" "$ROLLOUT_ARTIFACT_ID" || return
   [[ $ROLLOUT_ADMIN_EMAIL =~ ^[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+$ ]] || { invalid_value "admin email"; return; }
@@ -88,7 +90,7 @@ parse_args() {
       --host)
         [[ $# -ge 2 && -n $2 ]] || { usage; return 64; }
         case "$2" in
-          lat1|lat3|lat4) ROLLOUT_HOST="$2" ;;
+          lat1|lat3|lat4|lat5) ROLLOUT_HOST="$2" ;;
           *)
             echo "unknown runtime rollout host: $2" >&2
             return 64
@@ -176,6 +178,11 @@ parse_args() {
     lat4)
       SOURCE_HOST_ID=finite-lat-4
       RUNNER_DEST="$LAT4"
+      RUNNER_WORK_ROOT=/data/finite-saas-runner
+      ;;
+    lat5)
+      SOURCE_HOST_ID=finite-lat-5
+      RUNNER_DEST="$LAT5"
       RUNNER_WORK_ROOT=/data/finite-saas-runner
       ;;
   esac
@@ -498,7 +505,7 @@ while (($#)); do
   shift 4
   printf '\036CONTACT\t%s\t%s\t%s\n' "$runtime_id" "$machine" "$project_id"
   # Kata guests publish their host port on the runner's configured address:
-  # lat1 bound loopback; lat3 and lat4 bind FC_RUNNER_KATA_HOST_ADDRESS. Read
+  # lat1 bound loopback; newer hosts bind FC_RUNNER_KATA_HOST_ADDRESS. Read
   # it from the runner's own env instead of assuming loopback.
   bind_host="127.0.0.1"
   if [[ -r /etc/finite/runner.env ]]; then
