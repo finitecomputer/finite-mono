@@ -39,6 +39,15 @@ in
 
   networking.hostName = "finite-lat-5";
 
+  # FIN-39's selected canary is Lat5 Canary Retry. This installs the host
+  # capability; Core still requires per-agent enabled intent and readiness.
+  finite.hostedHermes = {
+    enable = true;
+    publicOrigin = "https://agents-lat5.finite.computer";
+    runtimeCoreUrl = "https://runtime-api.finite.computer";
+    allowedOrigins = [ "https://finite.computer" ];
+  };
+
   # Shared Kata Runner role (modules/kata-runner-host.nix); only genuine host
   # differences are declared here. Core is remote, so sandboxes are reached
   # through this host's private WireGuard overlay address.
