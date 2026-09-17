@@ -21,6 +21,7 @@ PLUGIN = Path(__file__).resolve().parents[2] / "integrations/hermes/finitechat"
 
 def module(name, path):
     spec = importlib.util.spec_from_file_location(name, path)
+    assert spec is not None and spec.loader is not None
     value = importlib.util.module_from_spec(spec)
     sys.modules[name] = value
     spec.loader.exec_module(value)
@@ -50,6 +51,7 @@ class TopicTests(unittest.IsolatedAsyncioTestCase):
         self.addCleanup(self.env.stop)
         self.pairing = PairingStore()
         code = self.pairing.generate_code("simplex", "3", "Owner")
+        assert code is not None
         self.pairing.approve_code("simplex", code)
         self.adapter = Adapter(PlatformConfig(enabled=True, extra={"finite_managed": True}))
         self.row = {"owner": "3", "title": "Gardening", "marker": "unique", "group_id": "7"}
@@ -120,7 +122,9 @@ class TopicTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertFalse(store.load_transcript(entries[0].session_id))
         self.assertFalse(store.load_transcript(entries[2].session_id))
-        self.assertEqual(runner.config.platforms[source.platform].home_channel.chat_id, "3")
+        retained_home = runner.config.platforms[source.platform].home_channel
+        assert retained_home is not None
+        self.assertEqual(retained_home.chat_id, "3")
 
     async def test_sender_collision_unknown_group_and_revocation_fail_closed(self):
         with self.assertRaises(ValueError):
@@ -176,6 +180,7 @@ class TopicTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_multiple_approved_contacts_are_not_an_owner_selection_rule(self):
         code = self.pairing.generate_code("simplex", "4", "Also approved")
+        assert code is not None
         self.pairing.approve_code("simplex", code)
         with self.assertRaises(ValueError):
             await self.adapter.create_topic("garden", "3")

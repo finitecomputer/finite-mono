@@ -16,9 +16,16 @@ import re
 import uuid
 from dataclasses import fields
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 from gateway.pairing import PairingStore
 from gateway.session_context import get_session_env
+
+if TYPE_CHECKING:
+    from plugins.platforms.simplex.adapter import SimplexAdapter as _TopicBase
+else:
+    # register() supplies the actual adapter from Hermes' lazy plugin registry.
+    _TopicBase = object
 
 
 def sole_owner():
@@ -44,7 +51,7 @@ def write_state(path, value):
         os.close(fd)
 
 
-class OwnerTopics:
+class OwnerTopics(_TopicBase):
     """Mixin: inherited adapter owns transport, batching, sessions and media."""
 
     def __init__(self, config, **kwargs):
