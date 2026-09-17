@@ -127,7 +127,14 @@ does not make tokens portable between registries.
 
 ## Backups and restore
 
-Backups are disabled by default. Before production migration, prove the complete
+The production Fly configuration enables daily backups to
+`fm2890@fm2890.rsync.net:finitecomputer/finite-sites`. Its upload SSH key is
+restricted to that repository with `borg12 serve --append-only`; keep the
+separate repository-restricted recovery key outside Fly. Append-only preserves
+repository segments, but does not prevent logical archive deletion; recovery
+may still require operator repair. No job prunes or compacts the repository.
+
+Before production migration, prove the complete
 Sites Recovery Set (repositories, blobs, registry, permissions and cookie key)
 restores from rsync.net onto an empty target. Image smoke tests and Fly volumes
 alone do not prove remote recovery.
@@ -140,17 +147,18 @@ key and service/mail configuration independently of Fly. Verify the SSH key's
 access restrictions: a dedicated repository path alone provides no isolation
 or append-only protection.
 
-Add these settings to the Fly configuration's existing `[env]` table:
+The Fly configuration declares these settings in its `[env]` table:
 
 ```toml
 FINITE_SITES_BACKUP_ENABLED = "1"
-FINITE_SITES_BACKUP_REPOSITORY = "<approved dedicated Sites repository>"
+FINITE_SITES_BACKUP_REPOSITORY = "fm2890@fm2890.rsync.net:finitecomputer/finite-sites"
 FINITE_SITES_BACKUP_REMOTE_PATH = "borg12"
 ```
 
 Provision base64-encoded Fly file secrets through the secret custody process,
-keeping values out of git and command arguments. Add one `[[files]]` entry per
-row, with `guest_path` under `/var/lib/finitecomputer/backups/rsync-net/`:
+keeping values out of git and command arguments. The configuration has one
+`[[files]]` entry per row, with `guest_path` under
+`/var/lib/finitecomputer/backups/rsync-net/`:
 
 | `secret_name` | `guest_path` filename |
 | --- | --- |
@@ -189,7 +197,8 @@ Use a matching Sites image on an isolated target with no Sites writer and an
 empty volume mounted at `/var/lib/finite-sites`. Run as root to preserve UID/GID
 65532. Keep production routing unchanged and control outbound mail during drills.
 
-Using independently held credentials, configure Borg 1.x with `BORG_REPO`,
+Using the independently held recovery SSH key and encryption credentials,
+configure Borg 1.x with `BORG_REPO`,
 `BORG_REMOTE_PATH=borg12`, `BORG_PASSCOMMAND` reading the private passphrase file,
 `BORG_RSH` using strict pinned-host checking and the SSH key, and a fresh private
 `BORG_BASE_DIR`. Select `ARCHIVE` from `borg list`, independent of the lost

@@ -22,8 +22,21 @@ kill_timeout = 120
 [env]
   # Set FINITE_SITES_ACCOUNT_LOGIN_URL=https://finite.computer/site-auth only
   # after deploying and qualifying the dashboard route and Sites upstream.
-  # Enable only with the dedicated repository, file secrets and remote restore proof.
-  FINITE_SITES_BACKUP_ENABLED = "0"
+  FINITE_SITES_BACKUP_ENABLED = "1"
+  FINITE_SITES_BACKUP_REPOSITORY = "fm2890@fm2890.rsync.net:finitecomputer/finite-sites"
+  FINITE_SITES_BACKUP_REMOTE_PATH = "borg12"
+
+[[files]]
+  guest_path = "/var/lib/finitecomputer/backups/rsync-net/id_ed25519"
+  secret_name = "FINITE_SITES_BORG_SSH_KEY"
+
+[[files]]
+  guest_path = "/var/lib/finitecomputer/backups/rsync-net/known_hosts"
+  secret_name = "FINITE_SITES_BORG_KNOWN_HOSTS"
+
+[[files]]
+  guest_path = "/var/lib/finitecomputer/backups/rsync-net/borg-passphrase"
+  secret_name = "FINITE_SITES_BORG_PASSPHRASE"
 
 [mounts]
   source = "sites_data"
