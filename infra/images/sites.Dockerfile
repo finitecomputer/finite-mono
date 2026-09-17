@@ -4,6 +4,7 @@ WORKDIR /src
 COPY Cargo.toml Cargo.lock ./
 # Cargo resolves every workspace member even when building only Sites.
 COPY devfinity ./devfinity
+COPY tools/source-structure ./tools/source-structure
 COPY finite-agentd ./finite-agentd
 COPY finite-brain ./finite-brain
 COPY finite-identity ./finite-identity

@@ -100,7 +100,7 @@ expected = int(sys.argv[1])
 endpoint = "http://127.0.0.1:8787/internal/v1/metrics"
 token = os.environ["FINITE_SITES_METRICS_TOKEN"]
 headers = {"Authorization": "Bearer " + token}
-with urllib.request.urlopen(urllib.request.Request(endpoint, headers=headers)) as response:
+with urllib.request.urlopen(urllib.request.Request(endpoint, headers=headers), timeout=10) as response:
     assert response.headers["Cache-Control"] == "no-store"
     body = response.read().decode()
 for metric in ("finite_sites_existing", "finite_sites_published"):
@@ -113,7 +113,7 @@ assert sum(int(count) for _, count in days) == expected
 assert re.search(r"^finite_sites_metrics_collected_at_seconds [0-9]+$", body, re.M)
 for rejected in ({}, {"Authorization": "Bearer " + secrets.token_hex(32)}):
     try:
-        urllib.request.urlopen(urllib.request.Request(endpoint, headers=rejected))
+        urllib.request.urlopen(urllib.request.Request(endpoint, headers=rejected), timeout=10)
     except urllib.error.HTTPError as error:
         assert error.code == 401
         assert error.headers["Cache-Control"] == "no-store"
@@ -123,7 +123,7 @@ for rejected in ({}, {"Authorization": "Bearer " + secrets.token_hex(32)}):
 try:
     urllib.request.urlopen(urllib.request.Request(endpoint, headers={
         **headers, "Host": "unallocated.sites.localhost",
-    }))
+    }), timeout=10)
 except urllib.error.HTTPError as error:
     assert error.code == 404
 else:
