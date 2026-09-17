@@ -1116,27 +1116,25 @@ def collect_lifecycle_probe(
         return raw
     raw["available"] = True
     environment = dict(os.environ)
-    try:
-        # Forward every probe-relevant runner env key so finite-status probes
-        # the same roots the rollout wrapper probes; site-specific overrides
-        # must not split the two views.
-        environment.update(
-            read_environment_values(
-                Path(CONTRACT["runner"]["environment_file"]),
-                {
-                    "FC_RUNNER_SOURCE_HOST_ID",
-                    "FC_RUNNER_WORK_ROOT",
-                    "FC_RUNNER_KATA_NAMESPACE",
-                    "FC_RUNNER_KATA_NERDCTL_BIN",
-                    "FC_RUNNER_KATA_CTR_BIN",
-                    "FC_RUNNER_KATA_SANDBOX_ROOT",
-                    "FC_RUNNER_KATA_NETNS_ROOT",
-                    "FC_RUNNER_KATA_PROC_ROOT",
-                },
+    # Match systemd EnvironmentFile ordering, including hosts whose required
+    # identity and paths live entirely in the shared role defaults.
+    probe_keys = {
+        "FC_RUNNER_SOURCE_HOST_ID",
+        "FC_RUNNER_WORK_ROOT",
+        "FC_RUNNER_KATA_NAMESPACE",
+        "FC_RUNNER_KATA_NERDCTL_BIN",
+        "FC_RUNNER_KATA_CTR_BIN",
+        "FC_RUNNER_KATA_SANDBOX_ROOT",
+        "FC_RUNNER_KATA_NETNS_ROOT",
+        "FC_RUNNER_KATA_PROC_ROOT",
+    }
+    for path_key in ("shared_environment_file", "environment_file"):
+        try:
+            environment.update(
+                read_environment_values(Path(CONTRACT["runner"][path_key]), probe_keys)
             )
-        )
-    except CollectionError as error:
-        raw["errors"].append(str(error))
+        except CollectionError as error:
+            raw["errors"].append(str(error))
     for row in candidates:
         runtime_id = row["agent_runtime_id"]
         command = [
