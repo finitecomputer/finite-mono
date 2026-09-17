@@ -1,17 +1,21 @@
 # DeepSeek V4.1 Flash: H200 maintenance test and retry
 
-Retry preparation for **2026-09-17 03:00 America/Chicago (CDT, UTC−05:00)**,
-which is **08:00 UTC**. This is a temporary A/B test with GLM restoration,
+The **September 17 retry completed**, with DeepSeek passing protocol checks and
+concurrency 1–64. Concurrency 128 completed without request errors but failed
+the first-token latency threshold. The original GLM release was restored and
+verified by **04:13 America/Chicago (CDT, UTC−05:00)**. See the execution result
+below. No further swap is armed.
+
+The retained procedure describes a temporary A/B test with GLM restoration,
 not a permanent model promotion. Host model-pack preparation is separate from
-the serving container; GLM stays on its original release during preparation.
-A future start is not evidence that a scheduler has been armed; see the execution record below.
+the serving container. A future start is not evidence that a scheduler has
+been armed.
 
 ## Window and recovery
 
-Working retry window, retaining the previous duration: **September 17,
-03:00–06:00 Central (08:00–11:00 UTC)**. This uses the previous window as
-the working assumption for tonight. Preparation does not itself schedule or
-start a production swap.
+Executed retry window: **September 17, 03:00–06:00 Central
+(08:00–11:00 UTC)**. The user instructed the live session to wait until
+02:30 for preflight and continue the prepared attempt. No scheduler was used.
 
 | Central | Action |
 | --- | --- |
@@ -245,7 +249,7 @@ not establish long-context concurrency, image performance, or equal reasoning
 quality between models' `high` settings.
 
 Before the DeepSeek sweep, use `check_finite_private_glm53_protocol.py --model
-deepseek-v4-1-flash --endpoint "$FINITE_PRIVATE_ENDPOINT" --max-context-tokens
+deepseek-v4-1-flash --endpoint "$FINITE_PRIVATE_ENDPOINT/v1" --max-context-tokens
 128000 --timeout-seconds 90` for reasoning, tools, terminal streams, malformed
 requests, and a long-prefill recovery probe. Run it with a total process
 deadline before 05:15; an HTTP timeout alone is not a whole-suite deadline.
@@ -329,8 +333,105 @@ passing speed measurements as permission to leave DeepSeek serving.
   Canonical status after preparation had green chat/recovery/rollout sections;
   existing fleet convergence red and app-host collection unknown remain
   explicit entry-review items.
-- No new timed execution is armed. The previous overnight sleep loop ended
-  after verified recovery; it will not wake this retry automatically.
+- At preparation time, no timed execution was armed. The user subsequently
+  requested a live sleep loop to 02:30; that execution is recorded below.
+
+## September 17 execution result
+
+### Entry and startup
+
+The operator session waited in 30-minute intervals, with a shorter final wait,
+and began read-only preflight at 02:30 Central. Fresh candidate and rollback
+deployment/config hashes, GitHub attestations, image manifests, both live host
+model-pack receipts, and exact serving identity passed. GLM authentication and
+terminal streaming passed. Canonical fleet host detail and rollout state
+matched preparation after removing heartbeat timestamps. Two launch batches
+had reached their recorded expiry times; the canonical unexpired-only batch
+listing omitted them, while their existing running placements were unchanged.
+The existing version-convergence discrepancy and missing `nerdctl` collection
+on app-only lat2 were carried explicitly, with no new unhealthy active Agents.
+
+At 03:00, the fresh GLM baseline passed at concurrency 1 and 8. All 35 entry
+and baseline requests settled with actual usage and no new reserved rows.
+The guarded DeepSeek relaunch was accepted at **03:03:11**. CPU attestation,
+all eight GPU attestations, model mounting, and the limiter passed boot checks.
+The image pull took about five minutes. Candidate readiness was observed at
+**03:34:03**, approximately 31 minutes after the relaunch request.
+
+The unchanged measured candidate ran on the eight-H200 TDX host with its
+DSpark-enabled configuration. This is runtime evidence for that configuration,
+not a DSpark-on/off ablation or a measurement of speculative acceptance rates.
+
+### Protocol and performance
+
+Authenticated chat, terminal streaming, Responses API, and all four preserved
+aliases passed, returning `deepseek-v4-1-flash`. All 12 protocol cases passed:
+thinking off/high, forced tool, tool-result continuation, streaming tool,
+parallel tools, JSON object, thinking-history handling, malformed JSON,
+cancellation recovery, a 128,010-token prefill, and post-prefill recovery.
+The protocol endpoint requires `/v1`; the command above now includes it.
+The report's legacy reasoning-token counter reads a top-level usage field,
+while this vLLM response nests that count under `completion_tokens_details`;
+its reported zero is not evidence of zero reasoning. Separated reasoning was
+checked directly. This limitation does not affect output-token throughput.
+
+Each performance tier used three repetitions of the same short synthetic,
+1,024-output-token, thinking-high workload. Decode and aggregate columns below
+are medians across repetition results; TTFT is the worst repetition p95.
+
+| Model/date | Concurrent clients | Decode tok/s per request | Aggregate tok/s | Worst p95 TTFT (s) | Result |
+| --- | --- | --- | --- | --- | --- |
+| GLM, September 17 | 1 | 62.427 | 60.984 | 0.393 | pass |
+| GLM, September 17 | 8 | 62.131 | 478.506 | 0.768 | pass |
+| DeepSeek, September 17 | 1 | 134.930 | 132.766 | 0.133 | pass |
+| DeepSeek, September 17 | 8 | 106.303 | 766.381 | 1.606 | pass |
+| DeepSeek, September 17 | 16 | 87.193 | 1253.068 | 0.631 | pass |
+| DeepSeek, September 17 | 32 | 63.741 | 1820.100 | 0.827 | pass |
+| DeepSeek, September 17 | 64 | 53.178 | 3058.300 | 0.938 | pass |
+| DeepSeek, September 17 | 128 | 52.281 | 3128.020 | 22.502 | fail: TTFT |
+
+All measured DeepSeek requests completed without errors and with terminal
+streams. Concurrency 128 failed the 10-second p95 first-token threshold in all
+three repetitions. The engine's 64-sequence limit means the second wave waits;
+aggregate throughput rose only about 2.3% from 64 to 128 clients. The highest
+fully passing tested tier is **64**, the same tested ceiling as GLM.
+
+Against the fresh same-night baseline, DeepSeek single-stream decode was
+**2.16×** GLM, and at eight clients decode was **1.71×**, with **1.60×** aggregate
+throughput. Against the separately dated September 16 GLM 64-client result,
+DeepSeek decode was about 17% higher and aggregate throughput about 8% higher.
+That higher-concurrency comparison is cross-day evidence, not a matched
+same-night measurement. GLM's own single-stream result varied from about 82
+tok/s on September 16 to 62 tok/s on September 17. These live-endpoint tests
+do not isolate production traffic, equalize tokenizers/reasoning quality,
+establish sustained real-user capacity, or prove long-context concurrency.
+
+### Restoration and closeout
+
+The full sweep finished before 03:43, so GLM restoration began early rather
+than waiting for 05:15. Rollback was accepted at **03:43:30**. GLM health first
+returned HTTP 200 around 04:12, and the original release was observed `ready`
+at **04:12:39**. By **04:13**, authentication, terminal chat streaming,
+Responses API, older `glm-5-2` compatibility, and settlement checks passed.
+The two readiness interruptions were approximately 31 and 29 minutes.
+
+The exact original UUID, host, GLM tag, sealed-secret names, and update settings
+were verified; no staged update or error remained. Canonical chat, recovery,
+and rollout sections stayed green. Fleet convergence matched entry after
+removing heartbeat timestamps; app-host collection remained the same known
+limitation. No durable user state was rewritten. As on the first attempt,
+persisted chat transcript replay was not independently exercised.
+
+Final canary accounting recorded **826 settled requests**: 783 DeepSeek actual,
+2 DeepSeek estimated, and 41 GLM actual. No new reservations remained; the 50
+pre-existing reserved rows were unchanged. The aggregate settlement probe does
+not attribute the two estimates to individual protocol cases, so this result
+does not claim actual-usage settlement for every request.
+
+Private evidence is under `.local-state/deepseek-v41-20260917/window/`, including
+per-repetition JSONL, protocol report, release attestations, entry/recovery
+status, poll timelines, and settlement reports. The live wait and maintenance
+attempt are complete. **No later automatic model swap is armed.**
 
 ## September 16 preparation and execution record
 
