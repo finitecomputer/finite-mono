@@ -1,8 +1,9 @@
 # Private SimpleX connections
 
-Private owner DMs only; groups and typing indicators are deferred. No Hermes
-fork or adapter patch. The canonical Hermes pin advances from v2026.8.3 / 0.20.0
-to v2026.8.31 / 0.21.0. SimpleX v7.0.2 assets are checksum-pinned through Nix.
+Private owner DMs and agent-created owner-only topic groups. Multi-user groups
+and typing indicators remain deferred. Topic support extends the existing pinned
+adapter through Hermes platform/tool registration; it adds no Hermes source patch.
+The canonical pin is v2026.8.31 / 0.21.0. SimpleX v7.0.2 assets are checksum-pinned through Nix.
 The upstream Hermes flake brings a Home Manager input for its own module checks;
 Finite does not enable a Home Manager module.
 
@@ -16,7 +17,7 @@ the setup UI. Unknown contacts cannot invoke the agent.
 
 Dashboard commands use the existing authenticated Hosted Web Device → Agent
 Platform Channel → agentd path. Core and Runner gain no SimpleX-specific API.
-The only new product operations are connect, approve-request, and confirmed reset.
+Dashboard operations are connect, approve-request, and confirmed reset.
 There is no code-entry or pause API. Unsupported runtimes fail rather than
 silently substituting a different operation.
 
@@ -25,13 +26,45 @@ restarts Hermes. This can interrupt an active turn. Its fixed-operation Python
 helper bootstraps and supervises the daemon; the daemon alone opens its databases.
 Existing user-managed YAML or `.env` configurations are rejected for review.
 
+## Owner-only topics
+
+Ask in the approved SimpleX DM to create a named topic. The registered
+`simplex_create_topic` tool resolves the requester from Hermes turn context and
+requires exactly one approved numeric SimpleX contact. It never accepts an
+invitee ID from the model. Requests from other transports/groups are rejected.
+The agent creates the group and invites that contact as a regular member; the
+agent is the sole admin. Repeating a topic name reuses the existing group.
+
+The Finite plugin extends the released adapter only for managed SimpleX. It uses
+that adapter's existing socket and checks current membership before admission
+and outbound text/media. The group member ID must map to the paired contact ID;
+Hermes then applies ordinary pairing authorization to that verified contact.
+Unregistered groups are ignored. Additional members, owner promotion, or leaving
+permanently disable private processing for that topic. Membership read failures
+also deny processing. There is no multi-user conversion path in this slice.
+
+The plugin alone writes `/data/agent/simplex/topics.json` atomically. It records
+creation intent before issuing the command and reconciles uncertain creation
+using a unique temporary group description, removed before the invitation.
+Unresolved/ambiguous creation refuses to create another group and requires repair;
+it never guesses from a title. Reset deletes this registry with the SimpleX state.
+Corrupt registry state disables topics while preserving private DM availability.
+Only one gateway writer may use the identity/registry at a time.
+
+Each group retains its own Hermes session; creation does not write Home settings.
+Shared agent memory/tools remain shared. The stock adapter on rollback ignores
+these groups because managed `SIMPLEX_GROUP_ALLOWED` remains empty; it leaves the
+additive topic registry and daemon databases intact. Upgrading again restores
+recorded group routing. No existing approval or session schema is rewritten.
+
 ## Environment and transport
 
 - One daemon per runtime, WebSocket at `127.0.0.1:5225`, outbound public SMP/XFTP.
 - The canonical toolchain closure includes the daemon; no runtime downloads.
 - For managed connections the gateway wrapper supplies `SIMPLEX_WS_URL`,
   `SIMPLEX_AUTO_ACCEPT=true`, `SIMPLEX_ALLOW_ALL_USERS=false`, empty
-  `SIMPLEX_ALLOWED_USERS`, and empty `SIMPLEX_GROUP_ALLOWED`.
+  `SIMPLEX_ALLOWED_USERS`, and empty `SIMPLEX_GROUP_ALLOWED`. The managed plugin
+  enables exact group IDs from its durable topic registry in memory.
 - No provider credential is needed for SimpleX itself. Inference retains the
   platform's existing configuration and credentials.
 - `FINITE_AGENTD_SIMPLEX_SCRIPT` is a local helper-path override, not browser input.
@@ -85,8 +118,11 @@ path proof.
 - `just computer simplex-test`: offline control, exact-request authorization, and
   reset tests using pinned upstream stores. Includes cross-platform isolation,
   legacy metadata, live-daemon refusal, and interrupted transcript cleanup.
-- `just computer simplex-smoke`: opt-in public-relay test with two disposable
-  daemons and the released adapter; no inference or user contacts.
+- `just computer simplex-smoke`: opt-in public-relay test with three disposable
+  daemons and the plugin extension: private DM, registered topic tool, invitation,
+  group reply, adapter reconstruction, retry and third-member rejection. No
+  inference or user contacts. Real phone/model and canonical-image restart remain
+  canary checks. Topic policy/discovery/session tests run in the Hermes suite.
 - PR CI checks Python formatting/lint, control tests, and Linux daemon packaging,
   alongside the existing Rust, dashboard, and Hermes bridge suites.
 - Manual native trial validated QR → pending approval → private conversation and

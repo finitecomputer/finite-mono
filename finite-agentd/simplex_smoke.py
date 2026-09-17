@@ -1,15 +1,14 @@
-"""Opt-in real relay test; uses two disposable identities, no inference or real users.
+"""Opt-in real relay test; uses three disposable identities, no inference or real users.
 
-Run just computer simplex-smoke. This proves adapter routing, not gateway authorization,
+Run just computer simplex-smoke. This proves topic tool/admission and adapter routing, not full gateway inference,
 inference, phone UX, or messages arriving during a gateway outage.
 """
 
 import asyncio
-import importlib.util
 import json
 import os
+import shutil
 import socket
-import sys
 import tempfile
 from pathlib import Path
 
@@ -77,14 +76,21 @@ async def run():
         os.environ["HERMES_BUNDLED_PLUGINS"] = str(PLUGINS)
         os.environ["SIMPLEX_AUTO_ACCEPT"] = "false"
         from gateway.config import PlatformConfig
+        from gateway.pairing import PairingStore
+        from gateway.platform_registry import platform_registry
+        from hermes_cli.plugins import get_plugin_manager
 
-        spec = importlib.util.spec_from_file_location(
-            "finite_test_simplex", PLUGINS / "platforms/simplex/adapter.py"
+        os.environ["FINITECHAT_HOME"] = td + "/agent"
+        home = Path(os.environ["HERMES_HOME"])
+        home.mkdir(exist_ok=True)
+        (home / "config.yaml").write_text("plugins:\n  enabled: [finitechat]\n")
+        shutil.copytree(
+            Path(__file__).resolve().parents[1] / "finitechat/integrations/hermes/finitechat",
+            home / "plugins/finitechat",
         )
-        mod = importlib.util.module_from_spec(spec)
-        sys.modules[spec.name] = mod
-        spec.loader.exec_module(mod)
-        ports = [port(), port()]
+        get_plugin_manager().discover_and_load()
+
+        ports = [port(), port(), port()]
         procs = []
         peers = []
         adapter = None
@@ -112,8 +118,11 @@ async def run():
             acceptance = await peers[0].cmd("/auto_accept on")
             assert acceptance["type"] == "userContactLinkUpdated"
             await peers[0].close()
-            adapter = mod.SimplexAdapter(
-                PlatformConfig(enabled=True, extra={"ws_url": f"ws://127.0.0.1:{ports[0]}"})
+            adapter = platform_registry.get("simplex").adapter_factory(
+                PlatformConfig(
+                    enabled=True,
+                    extra={"ws_url": f"ws://127.0.0.1:{ports[0]}", "finite_managed": True},
+                )
             )
             incoming = asyncio.Queue()
 
@@ -144,9 +153,90 @@ async def run():
                 )
 
             await peers[1].until(reply)
-            print(
-                "PASS: actual released Hermes adapter received numeric-contact DM and replied through two real SimpleX daemons"
+            # Owner-only topics use the exact same live adapter/socket.
+            owner = event.source.user_id
+            pairing = PairingStore()
+            code = pairing.generate_code("simplex", owner, "Synthetic owner")
+            assert pairing.approve_code("simplex", code)
+            from gateway.session_context import clear_session_vars, set_session_vars
+            from model_tools import handle_function_call
+            from tools.registry import registry
+
+            tool = registry.get_entry("simplex_create_topic")
+            assert "error" in json.loads(
+                await asyncio.to_thread(tool.handler, {"topic": "gardening"})
             )
+            tokens = set_session_vars(
+                platform="simplex", chat_id=owner, chat_type="dm", user_id=owner
+            )
+            try:
+                result = json.loads(
+                    await asyncio.to_thread(
+                        handle_function_call, "simplex_create_topic", {"topic": "gardening"}
+                    )
+                )
+            finally:
+                clear_session_vars(tokens)
+            gid = result["group_id"]
+            assert (await adapter.create_topic("Gardening", owner))["group_id"] == gid
+            invitation = await peers[1].until(lambda e: e.get("type") == "receivedGroupInvitation")
+            invited = invitation["groupInfo"]
+            phone_gid = str(invited["groupId"])
+            joined = await peers[1].cmd(f"/_join #{phone_gid}")
+            assert joined["type"] != "chatCmdError", joined
+            await peers[1].until(lambda e: e.get("type") == "userJoinedGroup")
+            await asyncio.sleep(1)
+            await peers[1].cmd(f"/_send #{phone_gid} json " + msg)
+            topic_event = await asyncio.wait_for(incoming.get(), 30)
+            assert topic_event.source.chat_id == f"group:{gid}"
+            assert topic_event.source.user_id == owner
+            assert topic_event.source.chat_type == "group"
+            await peers[1].until(reply)
+            # Reconstruct adapter against retained daemon + registry.
+            cfg = adapter.config
+            await adapter.disconnect()
+            stock_class = next(c for c in type(adapter).__mro__ if c.__name__ == "SimplexAdapter")
+            adapter = stock_class(cfg)
+            assert not adapter.group_allow_from
+            adapter.set_message_handler(handle)
+            assert await adapter.connect()
+            await asyncio.sleep(0.5)
+            await peers[1].cmd(f"/_send #{phone_gid} json " + msg)
+            await peers[1].cmd(f"/_send @{human_contact} json " + msg)
+            rollback_event = await asyncio.wait_for(incoming.get(), 30)
+            assert rollback_event.source.chat_type == "dm"
+            await peers[1].until(reply)
+            await adapter.disconnect()
+            adapter = platform_registry.get("simplex").adapter_factory(cfg)
+            adapter.set_message_handler(handle)
+            assert gid in adapter.group_allow_from
+            assert await adapter.connect()
+            await asyncio.sleep(0.5)
+            assert (await adapter.create_topic("gardening", owner))["group_id"] == gid
+            await peers[1].cmd(f"/_send #{phone_gid} json " + msg)
+            assert (await asyncio.wait_for(incoming.get(), 30)).source.user_id == owner
+            await peers[1].until(reply)
+            # A third party added outside the supported tool must close the
+            # private topic before any response can leave the adapter.
+            await peers[2].cmd("/connect " + link)
+            await peers[2].until(lambda e: e.get("type") == "contactConnected")
+            contacts = (await adapter.command("/contacts"))["contacts"]
+            stranger = next(
+                c["contactId"] for c in contacts if c["localDisplayName"] == "FiniteTest2"
+            )
+            await adapter.command(f"/_add #{gid} {stranger} member")
+            try:
+                await adapter.send(f"group:{gid}", "must never be sent")
+            except ValueError:
+                pass
+            else:
+                raise AssertionError("private reply escaped after membership changed")
+            assert any(r.get("blocked") for r in adapter.topics.values())
+            print("PASS: unexpected third member blocks private outbound traffic")
+            print(
+                "PASS: owner topic created, invitation accepted, contact identity mapped, round trip and adapter restart/retry preserve group"
+            )
+            print("PASS: pinned Hermes adapter extension preserved the private DM round trip")
         finally:
             if adapter:
                 await adapter.disconnect()
