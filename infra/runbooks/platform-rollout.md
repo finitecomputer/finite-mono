@@ -2,7 +2,7 @@
 
 This page orchestrates a **manual platform rollout**: the coordinated wave that
 carries saas-runner upgrades, a saas-core migration generation, the lat2 NixOS
-closure (Core, chat server, Hosted Web Device, Sites, Brain, Identity,
+closure (Core, chat server, Hosted Web Device, Brain, Identity,
 Caddy), the dashboard digest, and an agent-runtime image pin through the fleet
 in one sitting. Component-level procedures remain the authority for their own
 mechanics — this page supplies the ORDER, the GATES between them, and the
@@ -11,6 +11,8 @@ verification ritual. Record every completed wave in
 authority), keep `scripts/finite-status` evidence before and after (standing
 rule). There is currently no protected production-branch CD record; record the
 actual deployed system path and verification evidence in the changelog.
+Finite Sites runs on Fly; use [`deploy-sites.md`](deploy-sites.md) for its
+independent deployment and backup boundary.
 
 **The one invariant everything else serves: runners roll BEFORE Core
 restarts.** An upgraded Core writes a control-request vocabulary and runs

@@ -505,13 +505,15 @@ while (($#)); do
   shift 4
   printf '\036CONTACT\t%s\t%s\t%s\n' "$runtime_id" "$machine" "$project_id"
   # Kata guests publish their host port on the runner's configured address:
-  # lat1 bound loopback; newer hosts bind FC_RUNNER_KATA_HOST_ADDRESS. Read
-  # it from the runner's own env instead of assuming loopback.
+  # Read the Nix defaults followed by the operator overrides, matching the
+  # runner unit's EnvironmentFile order (lat5 uses the shared default).
   bind_host="127.0.0.1"
-  if [[ -r /etc/finite/runner.env ]]; then
-    configured_bind="$(sed -n 's/^FC_RUNNER_KATA_HOST_ADDRESS=//p' /etc/finite/runner.env | head -1)"
-    [[ -n $configured_bind ]] && bind_host="$configured_bind"
-  fi
+  for env_file in /etc/finite/runner-shared.env /etc/finite/runner.env; do
+    if [[ -r $env_file ]]; then
+      configured_bind="$(sed -n 's/^FC_RUNNER_KATA_HOST_ADDRESS=//p' "$env_file" | tail -1)"
+      [[ -n $configured_bind ]] && bind_host="$configured_bind"
+    fi
+  done
   curl -fsS --max-time 10 "http://$bind_host:$host_port/contact" || {
     echo "runtime rollout provider preflight failed: /contact was unavailable for $machine" >&2
     exit 1

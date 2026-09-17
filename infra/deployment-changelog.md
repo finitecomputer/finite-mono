@@ -17,10 +17,11 @@ Newest first. Never record a secret value.
 | Surface | Source of truth | How to read it |
 |---|---|---|
 | Dashboard image | `infra/nixos/modules/dashboard.nix` (`image = …@sha256:…`) | `git log -- infra/nixos/modules/dashboard.nix`; on lat2 `podman inspect finite-saas-dashboard --format '{{.ImageDigest}}'` |
-| Agent Runtime image for **new** launches | Core's promoted runtime-artifact record plus `FC_RUNNER_RUNTIME_ARTIFACT_ID` in `/etc/finite/runner.env` on each Kata host (lat3, lat4) | `scripts/finite-status` reports the pin per host; promotion per [`runbooks/runtime-image.md`](runbooks/runtime-image.md) |
+| Agent Runtime image for **new** launches | Core's promoted runtime-artifact record plus `FC_RUNNER_RUNTIME_ARTIFACT_ID` in `/etc/finite/runner.env` on each Kata host (lat3, lat4, lat5) | `scripts/finite-status` reports the pin per host; promotion per [`runbooks/runtime-image.md`](runbooks/runtime-image.md) |
 | Agent Runtime image for **existing** Agents | Core's per-Runtime record — Agents pin at launch and never auto-update | `scripts/finite-status`; serial upgrades per [`runbooks/runtime-image.md`](runbooks/runtime-image.md) §4a |
 | CLI releases (`finitechat`, `fsite`, `fbrain`) | component-scoped source tags in finite-mono and public rolling alias releases in `finitecomputer/finite-releases` (`finitechat-latest`, `fsite-latest`, `fbrain-latest`) | `gh release list --repo finitecomputer/finite-releases`; `git tag -l 'finitechat/*' 'fsite/*' 'fbrain/*'` |
-| Server binaries on lat2 (Core, chat, Hosted Device, Sites, Brain, Identity) | the NixOS closure built from `infra/nixos/` at the deployed revision | `readlink -f /run/current-system` on the host; `scripts/finite-status` |
+| Server binaries on lat2 (Core, chat, Hosted Device, Brain, Identity) | the NixOS closure built from `infra/nixos/` at the deployed revision | `readlink -f /run/current-system` on the host; `scripts/finite-status` |
+| Finite Sites | the live Fly Machine image digest and configuration; desired configuration in `infra/fly/sites/fly.toml` | Machine inspection and `scripts/finite-status --sites-backup-state` per [`runbooks/deploy-sites.md`](runbooks/deploy-sites.md) |
 | Finite Private (Tinfoil) | [`tinfoil/model-inventory.md`](tinfoil/model-inventory.md) plus checked-in candidate configs under `infra/tinfoil/` | `just finite-private-deepseek-contract` |
 | Phala canary Runtime | `FC_RUNNER_RUNTIME_ARTIFACT_ID` in `infra/nixos/modules/finite-saas-phala-runner.nix` | the unit environment is the pin; [`runbooks/phala-confidential-runner.md`](runbooks/phala-confidential-runner.md) |
 
@@ -50,6 +51,36 @@ the sources above cannot carry lands here.
   `2026-07-22.1`) live only in Core's runtime-artifact table.
 
 ## Entries
+
+### 2026-09-17 — Finite Sites cutover and CLI/runtime rollout
+
+- `finite.site` now serves the 210 retained Sites on Fly. Existing visibility,
+  shares and source history were preserved; 210 old content hosts redirect to
+  their new URLs. Old publishing endpoints return 410 and the app-host Sites
+  daemon is retired. Static app/document fallbacks remain available.
+- `fsite/v0.6.0` is released. All 61 active production Agents (31 lat3, 29 lat4,
+  one lat5) completed guarded upgrades to artifact
+  `finite-agent-runtime-2026-09-17.sites-final`, using the existing image digest
+  `sha256:a8ae888c0296a94d94a7fc534d621de2073cc77184f1d342bd3779b28899ddcc`.
+  New-launch pins match; bundled skills were synced and 174 authorized Git
+  remotes updated. Each Agent retained its Principal and durable data, and
+  final lifecycle probes reported all 61 operable.
+- Sites backup `sites-20260917T163516Z-025a2737` was independently retrieved
+  from rsync.net and verified after the cutover. The hosted Recovery Snapshot
+  format v4 now covers Chat/Core/Brain/Identity separately; historical v3
+  recovery sets remain retained. Private migration and restore evidence stays
+  outside git.
+- Dashboard requester binding fix #933 is deployed as image
+  `sha256:341d735caaed58ff5a6c722201db4f32f2e93566d9b5baa5927e25c45d343c05`
+  in lat2 closure `sy2rz30sf0fygkh7rh38m5dh2j8f6sgs`. A real Chat update
+  advanced an existing private test site from version 1 to 2; the signed-in
+  browser displayed the new content and anonymous requests returned 401.
+  Automatic requester access on a new Chat publish remains unqualified:
+  the live Agent terminal did not receive its requester lease. The open
+  verification is retained in the deployment queue.
+- `scripts/finite-status` reports healthy Chat, recovery and production runner
+  cohorts. Its overall fleet result still includes the pre-existing stale
+  `smoke` host record; that record was not rewritten as part of this cutover.
 
 ### 2026-09-02 — iOS client, Electron app, APNs push, and NIP-AB pairing deleted from source
 

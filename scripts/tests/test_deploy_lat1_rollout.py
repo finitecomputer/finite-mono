@@ -1841,6 +1841,80 @@ class RuntimeRolloutScriptTests(unittest.TestCase):
                 execute_events = [event for event in events if event["phase"] == "execute"]
                 self.assertEqual(execute_events[-1]["status"], "success")
 
+    def test_contact_uses_shared_bind_address_and_operator_override(self) -> None:
+        script = ROLLOUT.read_text().split(
+            "read -r -d '' contact_script <<'REMOTE' || true\n", 1
+        )[1].split("\nREMOTE", 1)[0]
+        with tempfile.TemporaryDirectory() as directory:
+            temp = Path(directory)
+            shared = temp / "runner-shared.env"
+            operator = temp / "runner.env"
+            script = script.replace("/etc/finite/runner-shared.env", str(shared))
+            script = script.replace("/etc/finite/runner.env", str(operator))
+            shared.write_text("FC_RUNNER_KATA_HOST_ADDRESS=10.254.3.5\n")
+            operator.write_text("FC_RUNNER_RUNTIME_ARTIFACT_ID=artifact-v2\n")
+            curl = temp / "curl"
+            curl.write_text('#!/bin/sh\nprintf "%s\\n" "$@"\n')
+            curl.chmod(0o755)
+            env = dict(os.environ, PATH=f"{temp}:{os.environ['PATH']}")
+            for override, expected in [(None, "10.254.3.5"), ("10.254.3.9", "10.254.3.9")]:
+                with self.subTest(override=override):
+                    if override:
+                        operator.write_text(f"FC_RUNNER_KATA_HOST_ADDRESS={override}\n")
+                    result = subprocess.run(
+                        ["bash", "-s", "--", "provider-contact-v1", "runtime-a", "kata-a", "project-a", "49153"],
+                        input=script, text=True, capture_output=True, env=env,
+                    )
+                    self.assertEqual(result.returncode, 0, result.stderr)
+                    self.assertIn(f"http://{expected}:49153/contact", result.stdout)
+
+    def test_host_lat5_scopes_plan_and_addresses_runner(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            temp = Path(directory)
+            entries = [
+                plan_entry("project-a", "runtime-a", "kata-a", host="finite-lat-5")
+            ]
+            facts = [
+                provider_fact("project-a", "runtime-a", "kata-a", host="finite-lat-5")
+            ]
+            env, log, state_root = self.fake_ssh_environment(
+                temp, rollout_report(entries, host="finite-lat-5"), facts
+            )
+            env["LAT5"] = "root@test-lat5"
+            env["FAKE_SOURCE_HOST_ID"] = "finite-lat-5"
+            scope = ("--host", "lat5", "--roll-project-id", "project-a")
+            prepared, plan_hash = self.prepare(env, *scope)
+            self.assertEqual(prepared.returncode, 0, prepared.stderr)
+            saved = json.loads(
+                (state_root / plan_hash / "plan.json").read_text(encoding="utf-8")
+            )
+            self.assertEqual(saved["source_host_id"], "finite-lat-5")
+
+            calls = log.read_text(encoding="utf-8").splitlines()
+            core_calls = [call for call in calls if "--plan-only" in call]
+            self.assertTrue(core_calls)
+            self.assertTrue(
+                all(call.startswith("root@test-lat2\t") for call in core_calls), calls
+            )
+            provider_calls = [
+                call
+                for call in calls
+                if "provider-snapshot-v1" in call or "provider-contact-v1" in call
+            ]
+            self.assertTrue(provider_calls)
+            self.assertTrue(
+                all(call.startswith("root@test-lat5\t") for call in provider_calls),
+                calls,
+            )
+
+            executed = self.run_rollout(
+                "--execute-plan-hash", plan_hash, *self.actor_args(), *scope, env=env
+            )
+            self.assertEqual(executed.returncode, 0, executed.stderr)
+            events = self.read_events(state_root, plan_hash)
+            execute_events = [event for event in events if event["phase"] == "execute"]
+            self.assertEqual(execute_events[-1]["status"], "success")
+
     def test_unknown_host_is_rejected(self) -> None:
         result = self.run_rollout(
             "--validate-only",

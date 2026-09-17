@@ -20,8 +20,7 @@ kill_timeout = 120
   app = "serve --data /var/lib/finite-sites --listen [::]:8787 --base-domain finite.site --api-url https://finite.site --git-url https://finite.site --site-scheme https --site-port none --git-auto-reconcile true --mailer resend --mail-from 'Finite Sites <links@finite.chat>'"
 
 [env]
-  # Set FINITE_SITES_ACCOUNT_LOGIN_URL=https://finite.computer/site-auth only
-  # after deploying and qualifying the dashboard route and Sites upstream.
+  FINITE_SITES_ACCOUNT_LOGIN_URL = "https://finite.computer/site-auth"
   FINITE_SITES_BACKUP_ENABLED = "1"
   FINITE_SITES_BACKUP_REPOSITORY = "fm2890@fm2890.rsync.net:finitecomputer/finite-sites"
   FINITE_SITES_BACKUP_REMOTE_PATH = "borg12"

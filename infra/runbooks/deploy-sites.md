@@ -267,7 +267,9 @@ Only after authorized migration and access checks pass:
    Install it atomically as `/etc/finite/sites-redirects.caddy`, root:caddy `0640`.
    The file is required, including when deploying this shared Caddy module on
    another host. Missing mappings must fail validation before activation.
-3. Validate the candidate's complete Caddy configuration with that fragment.
+3. Validate the candidate's complete Caddy configuration with that fragment
+   as the `caddy` user; root validation can create root-owned access logs that
+   prevent reload. Require `ReloadResult=success` after activation.
    Deploy the reviewed app-host closure only after the new dashboard image and
    Runtime are qualified. This removes `finite-saas-sites`, its package,
    health checks and ongoing host snapshot dependency. Caddy redirects mapped
