@@ -51,20 +51,28 @@ jobs:
             } else {
               const markdown = files.filter(file => /\.(md|markdown)$/i.test(file.filename));
               const addedFiles = markdown.filter(file => file.status === 'added').length;
+              const removedFiles = markdown.filter(file => file.status === 'removed').length;
               const addedLines = markdown.reduce((sum, file) => sum + file.additions, 0);
-              // Avoid noise on unrelated PRs, but clear a previous report after docs are removed.
-              if (addedFiles === 0 && addedLines === 0 && !previous) return;
+              const removedLines = markdown.reduce((sum, file) => sum + file.deletions, 0);
+              const netLines = addedLines - removedLines;
+              // Avoid noise on unrelated PRs, but clear a previous report after docs changes disappear.
+              if (addedFiles === 0 && removedFiles === 0 && addedLines === 0 && removedLines === 0 && !previous) return;
 
               const count = value => value.toLocaleString('en-US');
               body = `${marker}\n### Documentation census\n\n` +
                 `This PR adds **${count(addedFiles)} new Markdown file${addedFiles === 1 ? '' : 's'}** ` +
-                `and **${count(addedLines)} line${addedLines === 1 ? '' : 's'} of Markdown**.\n\n` +
-                (addedFiles || addedLines
-                  ? 'Are you sure all of this needs to live in the repo? Future us already has enough required reading.\n\n'
-                  : 'No Markdown additions remain. The repo can breathe again.\n\n') +
+                `and **${count(addedLines)} line${addedLines === 1 ? '' : 's'} of Markdown**, ` +
+                `and removes **${count(removedFiles)} Markdown file${removedFiles === 1 ? '' : 's'}** ` +
+                `and **${count(removedLines)} line${removedLines === 1 ? '' : 's'} of Markdown**.\n\n` +
+                `Net documentation change: **${netLines > 0 ? '+' : ''}${count(netLines)} line${Math.abs(netLines) === 1 ? '' : 's'}**.\n\n` +
+                (netLines < -100
+                  ? `Thanks @${pr.user.login} for keeping the slop at bay!\n\n`
+                  : netLines > 100
+                    ? 'Are you sure all of this needs to live in the repo? Future us already has enough required reading.\n\n'
+                    : '') +
                 '_Counts `.md` and `.markdown` files anywhere in the repo, case-insensitively. ' +
-                'Lines are additions across new and existing files, not net growth; ' +
-                'renamed files are not counted as new. Advisory only; never a merge gate._';
+                'Lines include additions and deletions across all matching files; net change is additions minus deletions. ' +
+                'Renamed files are not counted as new or removed. Advisory only; never a merge gate._';
             }
 
             // A push or base change during pagination invalidates the snapshot.

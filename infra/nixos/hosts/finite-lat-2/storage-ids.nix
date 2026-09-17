@@ -1,7 +1,6 @@
 {
   # Captured 2026-08-28 from the physical host in Latitude rescue mode
-  # (infra/nixos/scripts/capture-lat2-host-evidence, Gate A of
-  # infra/runbooks/lat2-replacement-cutover.md), reviewed by Paul.
+  # (infra/nixos/scripts/capture-lat2-host-evidence); see git history.
   # Geometry carried over from the lat3 qualification and re-proven against
   # these disks: root member end 935331839s <= 937703088 sectors on the
   # 480G Micron pair; data member end 3747612671s <= 3750748848 sectors on

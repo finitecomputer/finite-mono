@@ -1,57 +1,22 @@
-# Service Dependencies
+# Service ownership
 
-Status: active planning note.
+| Boundary | Authority |
+| --- | --- |
+| Accounts, Projects, entitlements, Runtime placement and lifecycle intent | Core |
+| Provider compute and lifecycle execution | Runner |
+| Device identity, MLS and chat delivery | Finite Chat |
+| Static publishing, Git repositories and viewer permissions | Sites at `finite.site` |
+| Encrypted knowledge, Folder permissions and grants | Brain |
+| Public NIP-05 resolution and local identity primitives | Identity |
+| Managed skill source | `finite-skills/`; explicit runtime-local sync |
+| Runtime-local supervision and typed agent actions | `finite-agentd` |
 
-v2 is the SaaS control plane and dashboard. It does not absorb every Finite
-service into one repo.
+These are sibling components in one workspace. Consumers use their public
+contracts, never copies of product code, shared permission databases or Runtime
+Management Pipe feature commands. Preserve issued Finite Private grants, key
+hashes, reservations, settlements and audit history across deployments.
 
-## Services
-
-| Service/repo | Runtime role | v2 responsibility |
-| --- | --- | --- |
-| `finite-sites` | Project Repositories, `fsite`, static Site publishing and Git smart HTTP at `https://finite.site`, independently deployed on Fly. | Point users/runtimes at the production Finite Sites API and server-returned Git remotes. Keep publishing and repository features in this service rather than adding Runtime Management commands. |
-| `finitechat` | Encrypted chat server, protocol, Hosted Web Device, native clients, CLI/core, Hermes plugin. | v2 owns Hosted Web Device and server deployment mechanics plus runtime integration. The `finitechat` tree owns source, protocol compatibility, device behavior, and the flake-pinned Nix Hermes resident sidecar. Production uses the held inbound stream with bounded reconnect and no Python polling or CLI-per-message fallback. |
-| `finite-skills` | Finite-managed Hermes baseline. | Treat the monorepo tree as the only editable source and bundle one tested snapshot into the canonical Runtime image. A fresh agent installs it once; restart and image replacement do not overwrite it. Existing agents update only through explicit `finite skills sync`. Core, Runner, RMP, and automatic polling have no skills role. The dashboard's current local/sibling/GitHub catalog fallback is migration debt, not Runtime status. |
-| Canonical Agent Runtime image | Hermes, Finite CLIs, Finite Chat plugin, and fresh-agent skills baseline. | Build and promote one source-SHA/digest through `.github/workflows/runtime-image.yml` and `finitecomputer-v2/scripts/build_runtime_image.py`. Docker, Kata, and Phala consume that same digest; no service or Runner gets a feature-specific image lane. |
-| `finite-brain` | Agent and user knowledgebase sharing. | Deploy on lat1 under Account Auth and expose the smoke-proven Brain experience in the dashboard as part of the launch path. |
-| Finite Private limiter | Private inference gate. | v2 owns source and deploy now. Preserve issued limiter token/grant state across the v2 hard cut. TODO: extract to its own repo/deploy boundary after the v2 Core grant contract and image release path are stable. |
-| Kata/containerd | First production Runner implementation. | Launch isolated Agent Runtimes through the generic Runner contract while treating the privileged host operator as trusted. |
-| Phala | Confidential Runner fast-follow implementation. | Launch and inspect Agent Runtimes through the same runner/recovery boundary; claim stronger privacy only after attestation, key release, volume, backup, and restore evidence pass. |
-| Enclavia | Confidential Runner evaluation target. | Push the promoted Agent Runtime image to a pre-created enclave and inspect the hosted proxy/attestation surface before considering it for production scheduling. |
-| Future off-host Recovery Snapshot storage and recovery-key service | Provider-independent copies of Agent Runtime and service Recovery Sets. | Post-MVP TODO/open question: evaluate Restic and alternatives, key backup, Recovery Authorities, and empty-target restore without turning the Runtime Management Pipe into a backup API. |
-
-## Finite Private Routing Debt
-
-GLM-5.3-Flash is deployed on the generated
-`https://finite-private.finite.containers.tinfoil.dev/v1` limiter URL. That is
-the runner default after the 2026-08-28 cutover. The preferred custom route
-`inference.finite.computer` is still unattached. The historical
-`kimi-k2-6` hostname is retired; issued Runtime env is rewritten onto
-`finite-private` by the Hermes image reconciler until those agents upgrade.
-Do not restore the historical URL. The served model is `glm-5-3-flash`
-(hyphenated). `deepseek-v4-flash-0731`, `glm-5-2`, and dotted `glm-5.3-flash`
-remain limiter aliases while older Agent Runtime images drain.
-
-The staged custom-domain procedure is
-[`infra/runbooks/finite-private-routing-migration.md`](../../infra/runbooks/finite-private-routing-migration.md).
-
-## Core Continuity Boundary
-
-Do not preserve old Core/deploy-lane state for its own sake. The only old Core
-data that must survive the v2 hard cut is Finite Private limiter state:
-grants, API-key hashes/tokens, reservations, usage counters, and audit events
-needed to keep already issued private-inference keys valid.
-
-## Non-Goals
-
-- Do not copy Finite Sites code into this component. (Since the finite-mono
-  cutover, `finite-sites/` is a sibling directory in the same repo — depend on
-  it through the root Cargo workspace, never by duplicating its code here.)
-- Same for Finite Chat: depend on the sibling `finitechat/` workspace crates,
-  do not duplicate them here.
-- Dashboard web chat must be a Finite Chat Hosted Web Device, not a substitute
-  transport.
-- Runtime Management Pipe v1 is outbound generic health and Product Release
-  telemetry only. Do not put product features, credentials, chat, skills, or
-  lifecycle commands on it.
-- Do not use `finitec repo` or `finitec publish` as migration shortcuts.
+The Runtime image is built once from a source revision, smoke-tested and
+promoted by digest. New Agents receive its skills baseline once; existing
+Agents update skills explicitly. Account identity, agent identity, product
+permission and compute ownership remain distinct.

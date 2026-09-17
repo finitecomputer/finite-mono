@@ -9,7 +9,7 @@
 # redirects to the homepage).
 #
 # Trade-off, revert, and mature path:
-#   docs/runs/glm-5-3-flash-degraded-admission.md
+#   infra/tinfoil/confidential-finite-private/README.md
 # Do not promote this file over the candidate. Revert by recreating the
 # container from v2026-08-28-glm-5-3-flash-3 (same overlay without the
 # chunked-prefill pin), from flash-1 (usage-api GLM), or from a later
@@ -90,7 +90,7 @@ containers:
       # DEGRADED ADMISSION (temporary, revert when the usage API recovers):
       # admits only keys listed in the FINITE_ADMISSION_ALLOWLIST secret, no
       # reservation, settlement skipped, x-finite-admission header on every
-      # response. See docs/runs/glm-5-3-flash-degraded-admission.md.
+      # response. See infra/tinfoil/confidential-finite-private/README.md.
       - FINITE_ADMISSION_MODE: "allowlist"
       - LISTEN_ADDR: "0.0.0.0:8002"
       - FINITE_USAGE_API_URL: "https://finite.computer"

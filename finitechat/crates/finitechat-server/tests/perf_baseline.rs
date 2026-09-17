@@ -1,4 +1,4 @@
-//! Ignored timing harness for the perf plan (`docs/perf-plan.md`).
+//! Ignored timing harness for local performance measurements.
 //!
 //! Run with:
 //! `cargo test --release -p finitechat-server --test perf_baseline -- --ignored --nocapture`

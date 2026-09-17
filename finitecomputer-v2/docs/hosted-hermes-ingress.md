@@ -269,12 +269,12 @@ secret without changing native credentials or applied generation. Revoked,
 changed-owner, moved, inactive or ambiguous assignments fail closed without
 repair. Historical relocation records are not candidates for that primary reference.
 No date/ID ordering chooses an assignment. Missing or mismatched primary
-records fail closed. Future relocation still revokes the old credential;
+records fail closed. Relocation revokes the old credential;
 re-enrolling a revoked/reassigned identity requires the separate FIN-39
 relocation/recovery contract, not an automatic repair here.
 
 The Kata adapter carries the reserved pair in the existing transient private
-environment file during the already-planned image upgrade. Both absent means
+environment file during the authorized image upgrade. Both absent means
 initial installation; both matching means replay. Partial, duplicate or
 different values fail before compute replacement. A matching-image retry must
 also prove the installed pair matches; image identity alone cannot acknowledge

@@ -1,6 +1,6 @@
 {
   # CAPTURED 2026-08-28 from the physical host pre-wipe (read-only SSH
-  # evidence; see docs/runs/lat4-provisioning-prep.md §1-2). The disk paths
+  # evidence recorded in git history). The disk paths
   # are the live nvme-eui by-id identities; identifiers are freshly generated
   # and unique. The geometry constants are carried over from finite-lat-3
   # (same chassis class) and were re-proven against the real disk sizes:

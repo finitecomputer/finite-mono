@@ -12,7 +12,3 @@ Agent atomically. Organization Brain bootstrap still establishes its initial
 member-admin set atomically, including both the creating agent and authenticated
 requester when an agent creates the Brain on the requester's behalf. Neither
 relationship requires a Folder or Folder Key Grant at Brain creation time.
-
-The Product Client must provide a useful empty state, and unreleased development
-fixtures may be reset rather than migrated. Folders and content appear only
-through explicit user actions or product workflows the user authorizes.

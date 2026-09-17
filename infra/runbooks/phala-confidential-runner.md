@@ -1,15 +1,10 @@
 # Phala confidential Runner — single canary and API-only operations
 
 This runbook covers the separately fenced Phala worker defined by
-`infra/nixos/modules/finite-saas-phala-runner.nix`. The ACTIVE readiness run
-authorizes this checked-in generation to start automatically and admit exactly
-one internal Confidential launch-code canary owned by `paul@finite.vip`. It
-does not authorize a second resource, Stripe activation, customer admission,
-provider-console creation, deletion, or a higher cap.
-
-Phala and Kata may initially share finite-lat-1. That is a common host failure
-domain, not high availability. They remain different worker identities,
-credentials, classes, state directories, privileges, and provider adapters.
+`infra/nixos/modules/finite-saas-phala-runner.nix`. Check the deployed worker's
+state and current authorization before operating it; this document does not
+authorize paid resource creation or broader customer admission. Kata and Phala
+use distinct credentials, classes and adapters.
 
 This is an HTTPS API runbook. Never install or invoke the Phala CLI. There is
 no provider-delete procedure here: shutdown, recovery, rollback, billing, and
@@ -49,15 +44,12 @@ The unit has no shell/provider tools in `PATH`, no capabilities or devices,
 and makes containerd, Docker, Podman, Kata/CNI paths inaccessible. Network
 configuration supplies only loopback Core, while the typed Rust adapter pins
 the official Phala HTTPS origin and API version without an override. Phala's
-CDN addresses are not stable enough for a checked-in IP allowlist; if a future
-security review requires kernel-enforced destination filtering, put a
-name-validating egress proxy in front of the worker before enabling it. Do not
+CDN addresses are not stable enough for a checked-in IP allowlist. Do not
 replace the pinned origin with a general outbound proxy or configurable URL.
 
 ## Preconditions — all required before a live start
 
-1. The Phala readiness run is ACTIVE and records explicit authorization for
-   this one internal paid canary. The Stripe activation run remains PAUSED.
+1. Explicit authorization names the resource, account and cost boundary.
 2. The shipped `finite-saas-runner` uses the reviewed typed HTTPS adapter for
    every Phala operation. Source/static checks show no Phala subprocess,
    `FC_RUNNER_PHALA_BIN`, provider CLI package, or delete capability.

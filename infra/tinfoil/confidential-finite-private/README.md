@@ -1,26 +1,26 @@
-# Finite Private GLM-5.3-Flash candidate
+# Finite Private serving configuration
 
-This directory is the model-independent `finite-private` Tinfoil container.
-The outer infrastructure identity is Finite Private; the internal model
-container and API identity remain `glm-5-3-flash`.
+The stable container/route identity is `finite-private`; the canonical model
+label is `glm-5-3-flash`. `tinfoil-config.glm-5.3-flash.candidate.yml` pins the
+checkpoint, MPK, images and serving command for usage-api admission. The
+separate degraded-allowlist configuration is an explicit operational override,
+not evidence of current production state.
 
-`tinfoil-config.glm-5.3-flash.candidate.yml` is the usage-api production
-default: checkpoint, MPK, images, and serving command are digest-pinned.
-Live `finite-private` currently runs the temporary degraded-allowlist overlay
-in `tinfoil-config.glm-5.3-flash.degraded-allowlist.yml` because usage
-admission on `finite.computer` is missing. Do not promote the overlay over
-the candidate. Revert path:
-`docs/runs/glm-5-3-flash-degraded-admission.md`.
+Inspect the live measured tag and configuration with `scripts/finite-status`
+and `infra/runbooks/finite-private-ops.sh status` before a deployment. Preserve
+the exact previous tag, container identity, configuration and credential custody
+for rollback. Do not infer deployed state from a dated README or candidate name.
 
-The serving command is the official SGLang H200 high-throughput recipe plus
-Finite's 393,216-token product ceiling, the LMSYS-measured Hopper DSA pair
-(`flashmla_sparse` / `fa3`), and `--chunked-prefill-size 16384` from the
-same 8xH200 A/B. Speculative decoding stays off until a separate measured
-window. `--mamba-full-memory-ratio` stays at the default until the two pool
-sizes are readable off this CVM.
+Run the candidate config, protocol and quality checks before promotion. Build
+limiter images through `service-images.yml`; pin immutable digests in the
+satellite and publish a measured release. Authorized relaunch requires
+`FINITE_PRIVATE_RELAUNCH_APPROVED` to equal the exact selected tag. Confirm
+readiness, streaming, mixed-version model aliases, negative authentication and
+usage settlement afterward, plus `scripts/finite-status` before and after.
 
-The external Tinfoil container is `finite-private`
-(`v2026-08-28-glm-5-3-flash-4`). The historical `kimi-k2-6` hostname is
-retired; the CPU-only compatibility bridge was deleted rather than
-iterated. Issued Runtime readers still need a follow-up onto this route.
-Replace procedure: `../../runbooks/finite-private-glm-5.3-flash-production-cutover.md`.
+Rollback uses the preserved measured tag and the same explicit authorization
+boundary. Keep old client aliases and secrets until supported readers and
+recovery sets are proven. Never copy live credentials into configs or evidence.
+
+See [satellite operations](../README.md). Outstanding admission/route
+qualification is tracked in [FIN-95](https://linear.app/finitecomputer/issue/FIN-95).

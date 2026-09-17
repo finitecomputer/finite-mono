@@ -1,8 +1,8 @@
 # finitecomputer-v2
 
-Hard-cut self-serve SaaS codebase for Finite Computer.
+Self-serve SaaS platform for Finite Computer.
 
-This repo is for the product we are building now:
+The current product flow:
 
 1. A user signs in through Account Auth, names their agent, and selects an icon.
 2. Core creates a Project and Finite Private grant state.
@@ -10,9 +10,9 @@ This repo is for the product we are building now:
 4. A newly initialized Runtime copies the Product Release's bundled Finite
    Skills baseline once and exposes it before the first user turn. Existing
    agents keep that baseline until they explicitly run `finite skills sync`.
-5. Core declares first-slice readiness from real Runtime/application health and
-   preserved provider-durable state. Full Recovery Snapshot, key-backup, and
-   empty-target restore support is an explicit post-MVP TODO, not a launch gate.
+5. Core reports Runtime/application readiness. Same-volume persistence is not
+   disaster recovery; restore qualification is tracked in
+   [FIN-62](https://linear.app/finitecomputer/issue/FIN-62).
 6. A Finite Chat Hosted Web Device gives the dashboard the proven web-chat
    experience.
 7. Product features ship through their owning services, UI, stable CLIs, and
@@ -21,21 +21,21 @@ This repo is for the product we are building now:
    Private as one compatibility-tested product release.
 
 The original `finitecomputer` repo remains the product already shipped to box1
-and TRF while those users are unmigrated.
+and TRF for retained legacy workloads.
 
 ## Security And Recovery Posture
 
 User data availability is the first security invariant. The trusted first
 cohort targets O1: normal product paths minimize operator access, while an
 explicit and audited Finite-Assisted Recovery path may expose restored data to
-prevent permanent loss. Kata isolation and later Phala/TEE evidence improve the
+prevent permanent loss. Kata isolation and Phala/TEE evidence improve the
 normal privacy boundary; neither substitutes for key recovery, off-host
 snapshots, usable exports, or empty-target restore drills.
 
 See the system
 [recoverability ADR](../docs/adr/0001-recoverability-precedes-operator-blindness.md)
 and the active
-[runtime recovery plan](docs/runtime-recovery-and-observability-plan.md).
+[recovery work](https://linear.app/finitecomputer/issue/FIN-62).
 
 ## What This Repo Owns
 

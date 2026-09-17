@@ -24,8 +24,7 @@ FROM node:22-bookworm-slim AS runner
 
 ENV NODE_ENV=production
 ENV PORT=3000
-# Serve the skills catalog from the mono tree this image was built from,
-# not the archived GitHub fallback (docs/audits/skills-audit-2026-07-13.md).
+# Serve the skills catalog from the mono tree this image was built from.
 ENV FC_FINITE_SKILLS_SOURCE_DIR=/app/finite-skills/skills
 
 WORKDIR /app

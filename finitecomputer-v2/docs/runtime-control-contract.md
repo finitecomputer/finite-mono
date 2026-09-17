@@ -2,47 +2,9 @@
 
 Status: active v2 product contract.
 
-## Problem Statement
-
-finitecomputer-v2 should host Hermes agents for non-technical users without
-owning the agent's day-to-day configuration state. Core and the dashboard own
-account state, agent creation, runtime identity, Finite Private grants, runtime
-health, restart, and emergency recovery. The user and agent do real work over
-Finite Chat and inside the runtime image.
-
-The dashboard presents chat, connections, Sites, and Brain, but it must not
-become a second runtime configuration store. Finite Chat owns chat state;
-focused services own their data; and Hermes owns its runtime-local state.
-Product features belong in those services, the product UI, stable CLIs, or
-skills. They do not become Runtime Management Pipe commands or status fields.
-
-## Acceptance Criteria
-
-- A user can create a hosted agent from the dashboard.
-- Core records the provider runtime handle, image/runtime artifact, and Finite
-  Private grant/key state.
-- Dashboard web chat uses a Hosted Web Device.
-- Dashboard-owned runtime controls are limited to the exact operations in
-  Core's persisted Runtime capability envelope. Missing capabilities expose no
-  controls. Purge User Data is a separate retention/export workflow, not a
-  normal runtime control.
-- Runtime Management Pipe v1 is outbound only and carries generic runtime
-  health and Product Release telemetry. It carries no product feature command,
-  feature-specific status, credential, chat state, or arbitrary payload.
-- Every new runtime exposes the Product Release's baked Managed Skills Baseline
-  before its first turn. Existing agents keep their installed baseline until
-  they explicitly choose `finite skills sync`.
-- Core leases a control only when the persisted Runtime and the worker both
-  explicitly advertise that exact kind. Restart completes only after the
-  runtime proves it is alive again; stop completes after the provider operation
-  succeeds. Kata advertises the image-owned recover-known-good operation;
-  Runtime Retirement remains unadvertised and unavailable.
-- Recovery does not mutate chat identity, room membership, Hermes memory,
-  workspace files, user-installed tools, or skills.
-- The recover-known-good database kind remains for rollout compatibility, but
-  Core does not enqueue or lease it and current Runner binaries refuse an N-1
-  lease before adapter dispatch. A future implementation must prove behavior
-  stronger than restart before advertising the capability.
+Core and the dashboard own account state, creation, runtime identity, grants,
+health, and capability-gated lifecycle operations. Product services and Hermes
+own their data; the dashboard is not a second runtime configuration store.
 
 ## Control Boundary
 
@@ -77,23 +39,14 @@ baseline for new agents. Existing agents will opt into updates locally through
 `finite skills sync`; Core and Runner do not select a revision,
 write the skill tree, poll for changes, or trigger reloads.
 
-### Current wiring gap
-
-Core already contains authenticated heartbeat, typed event/result,
-status-snapshot, and chat-ledger routes from a broader design, but the current
-Agent Runtime image has no Runtime Management Pipe client. The Runner also
-mints a relay token after launch and records only its hash without injecting
-the raw credential into the runtime.
-
-Treat that broader surface as dormant scaffolding, not a contract to finish.
-The first implementation must narrow it to outbound generic health and Product
-Release telemetry, arrange the bootstrap credential before launch, and avoid
-commands, results, chat ledgers, feature schemas, or product-specific status.
+The image has no direct Runtime Management Pipe client. Standing health is
+Runner-ferried; see [the current telemetry boundary](runtime-management-contract-v1.md).
+TODO: [FIN-21](https://linear.app/finitecomputer/issue/FIN-21).
 
 ## Lifecycle State Machine
 
 Core owns one canonical state machine for every Runtime control operation
-(2026-08 audit item H1; migration `0021_runtime_lifecycle.sql`):
+(migration `0021_runtime_lifecycle.sql`):
 
 ```text
 requested → launching → compute_up → ready → succeeded   (restart, recover, upgrade)
@@ -102,7 +55,7 @@ any non-terminal state → failed (always with a named failure_stage)
 ```
 
 - `succeeded` is reachable only through `ready`; it never again means
-  "compute exists" (the 2026-08-18 Agent M outage shape). Stop and Destroy
+  "compute exists". Stop and Destroy
   confirm into `stopped`, so a stopped Runtime can never display as
   ready/succeeded.
 - `failed` always names a `failure_stage`: `launch`, `compute`, `readiness`,
@@ -114,18 +67,14 @@ any non-terminal state → failed (always with a named failure_stage)
   completion shapes cannot be confused inside Core.
 - The Runner reports completion only after its bounded readiness wait
   (default 180s, aligned with agentd's Finite Chat bridge deadline), so Core
-  records the up-bound chain atomically today. Persisting `compute_up` and
-  `ready` as separately observable writes — with the ready signal carried
-  from agentd's readiness probe — is the tracked follow-up slice.
+  records the up-bound chain atomically.
 - Dashboard and `scripts/finite-status` project these states directly; no
   surface re-derives operation state locally.
 
 ## Standing Readiness Reports
 
-The lifecycle machine records operations; it says nothing about a runtime that
-dies at 3am with no operation in flight (the frozen-`succeeded` gap). Closing
-that is runner-ferried standing readiness (2026-08 audit synthesis, H1 slice
-3; migration `0022_runtime_health_reports.sql`):
+Runner-ferried standing readiness reports current health independently of any
+lifecycle operation (`0022_runtime_health_reports.sql`).
 
 - Core names the poll targets. Every cycle the Runner fetches the
   runner-authed, host-scoped `GET /api/core/v1/runtime-health-targets`
@@ -188,26 +137,12 @@ when Finite Chat, Hermes, or health checks appear stuck.
 
 ### Recover Known-Good Runtime
 
-The current API and database kind are named
-`recover_known_good_chat_runtime`. That chat-specific name remains legacy
-coupling and is not a relaunch-from-backup contract.
-
-It is intended for a Kata runtime whose canonical compute still exists but
-whose image-owned generated chat boot state is suspected broken. The operation
-is Core-bound to a compatible artifact and RuntimeSpec, reconciles a fenced
-candidate against the same durable `/data`, verifies the retained Agent
-Principal, and preserves the old canonical handle until the candidate passes.
-It keeps chat identity, Hermes memory, workspace files, skills, and user data
-intact. Other adapters continue to advertise it as false.
-
-This operation deliberately fails when canonical compute is absent. Restoring
-an off-host Recovery Snapshot remains a separate recovery contract. The narrow
-operator-only cold-relocation contract below can launch an exact stopped Kata
-Runtime from separately staged, manifest-bound durable state; it is not a
-generic missing-compute repair.
-
-If recovery still does not restore the runtime, the next escalation is a deeper
-image or data migration, not dashboard feature state.
+`recover_known_good_chat_runtime` is Kata-only and gated by the Runtime, worker
+and target artifact capabilities. It requires canonical compute and reconciles
+an image-owned candidate against the same `/data`, checking the retained Agent
+Principal before replacing the old canonical handle. It preserves chat keys,
+membership, Hermes memory, workspace and user skills. Missing canonical compute
+fails closed. This operation is neither off-host restore nor generic data repair.
 
 ### Stop
 
@@ -239,23 +174,23 @@ off-host Recovery Set, or make relocation a fleet scheduler. The exact operator
 procedure is
 [`infra/runbooks/runtime-cold-relocation.md`](../../infra/runbooks/runtime-cold-relocation.md).
 
-### Runtime Retirement
+### Runtime Retirement and data retention
 
-Runtime Retirement deprovisions compute and public endpoints while retaining a
-provider-independent Recovery Snapshot for the declared retention period. Core
-keeps plaintext-safe historical metadata, marks the runtime `offline`, clears
-public runtime URLs, and marks Hermes unavailable. The current `destroy` API
-must behave as retirement or remain unavailable until it is split from volume
-deletion.
+The Kata retirement implementation binds the exact request, RuntimeSpec,
+canonical compute and durable tree. It requires stopped writers and matching
+source manifests, produces a versioned ZIP with file hashes, modes and safe
+symlinks, and verifies encrypted off-host Borg readback before deleting compute.
+Core validates and retains an immutable receipt bound to the request and Runtime.
+The local durable tree remains retained; retirement is not data purge.
 
-### Purge User Data
+Capability advertisement and recovery configuration gate availability. Do not
+infer permission to destroy from the existence of an adapter implementation.
+An archive receipt alone does not prove a complete empty-target restore; the
+Recovery Authority must independently possess the required keys and artifacts.
 
-Purge User Data irreversibly deletes the Provider Durable Volume and every
-retained Recovery Snapshot. It is not a runtime health control. Core must reject
-it until retention, fresh Recovery Readiness, explicit user confirmation,
-export offer, and separately scoped purge authorization are all satisfied.
-Subscription cancellation, non-payment, stop, and Runtime Retirement never
-imply purge.
+Purge User Data is not an ordinary Runtime operation. Subscription cancellation,
+non-payment, stop and retirement do not authorize deleting durable state or
+retained Recovery Sets. TODO: [recovery qualification](https://linear.app/finitecomputer/issue/FIN-62).
 
 ## Managed Skills
 
@@ -308,80 +243,19 @@ Durable Volumes at `/data`. No v2 provider should use a different in-container
 durable-state path unless this contract changes first. The mounted volume is
 primary runtime state and never counts as its own Recovery Snapshot.
 
-## Hermes Image Audit
+## Image boundary
 
-The [Hermes Docker docs](https://hermes-agent.nousresearch.com/docs/user-guide/docker)
-describe the official image as stateless with user data stored in a mounted data
-directory, and recommend explicit tool-loop hard stops for unattended gateway
-deployments. v2 follows the same rule: immutable runtime bits live under
-`/runtime`, and per-agent state lives under `/data`.
+The image packages the pinned Hermes runtime, Finite CLIs, Chat plugin and
+Managed Skills Baseline. `/runtime` is immutable; `/data` is user state.
+Generated config references `${FINITE_PRIVATE_API_KEY}` without storing its
+value. First seed requires the selected provider's credential; after config
+exists, its model/provider choice is user-owned and is not overwritten by a
+stale Runner default. Hermes currently runs as root.
 
-The [Hermes configuration docs](https://hermes-agent.nousresearch.com/docs/user-guide/configuration)
-separate non-secret config from secrets, support environment-variable
-substitution, and expose provider timeout settings. The v2 generated config
-references `${FINITE_PRIVATE_API_KEY}` instead of persisting the raw key in
-`config.yaml`; the runner supplies the key through runtime provider env.
+## Validation
 
-Current v2 runtime image expectations:
-
-- `/runtime` is immutable image state.
-- local Docker, Kata, and Phala mount durable state at `/data`.
-- generated Hermes config enables the `finitechat` plugin and tool-loop
-  hard-stop guardrails.
-- on first seed, the runtime refuses OpenRouter or any other fallback when
-  Finite Private is the requested default profile and no key is present; after
-  `config.yaml` exists, its model/provider block is Hermes/user-owned and a
-  stale Runner default neither rewrites nor blocks that durable choice.
-- the runtime image packages the root flake's pinned Nix Hermes runtime, `finitechat`, `fsite`,
-  `fbrain`, the Finite Chat Hermes plugin, and the one-time Finite Skills
-  baseline.
-
-Current debt:
-
-- the first-class image still uses the Finite Chat owned entrypoint and gateway
-  launcher. That is the right product shape for this release.
-- recover-known-good is currently Kata-only and requires canonical compute. It
-  is not an off-host restore. Operator-only stopped Kata relocation now has an
-  exact host/state/identity-fenced path, but generic missing-compute recovery
-  and Recovery Set restore remain separate lifecycle work.
-- v2 does not currently configure independent Agent Runtime backup. The
-  optional entrypoint Restic path now includes the complete `/data` root,
-  including `/data/workspace`, but it does not yet provide the required
-  application-consistent barrier, independently recoverable key authority, or
-  empty-target restore proof. Runtime Retirement and Purge User Data remain
-  unavailable until that Recovery Set design restores. This does not block
-  normal first-slice launch/restart on preserved provider-durable state.
-- Hermes currently runs as root. The narrow sync command is shipped, but the
-  pinned Hermes runtime still requires explicit `/reload-skills` for newly added or removed
-  slash-command names. Do not replace that limitation with an automatic
-  updater, Core desired state, Runtime Management Pipe command, or
-  Runner-mounted checkout.
-
-## Evaluation Design
-
-The runtime-control path is accepted only when all of these pass:
-
-- Core unit tests prove lifecycle request/lease/dedupe behavior.
-- Runner tests prove lifecycle dispatch to provider hooks.
-- Runtime Management Pipe tests prove telemetry is outbound, generic, and
-  limited to health and Product Release facts; feature commands and
-  feature-specific status are rejected by construction.
-- Runtime image tests prove entrypoint, healthcheck, and finite-private config
-  guardrails plus one-time bundled skill discovery, restart non-overwrite, and
-  preserved user-owned skills.
-- `finite skills sync` tests prove updates happen only after explicit invocation
-  and never through Core, Runner, polling, or Runtime Management Pipe behavior.
-- Local Apple Container SaaS proves real dashboard create-agent, Agent
-  Principal contact, Hosted Web chat, image replacement with preserved `/data`,
-  independent service restart healing, and Finite Private.
-- Kata proves the same image and Provider Durable Volume restart for the first
-  slice. Cold relocation additionally proves stopped source/target manifests,
-  exact-host leasing, unchanged Agent Principal, and failure preservation.
-  Runtime Retirement and full Recovery Snapshot restore onto empty replacement
-  compute remain post-MVP recovery gates.
-- Phala proves the same thin Runner contract plus its claimed confidential
-  evidence. Recovery Snapshot format and off-host restore remain a recorded
-  post-first-slice TODO; normal lifecycle operations must preserve Provider
-  Durable State in the meantime.
-
-Do not climb to Phala if the local Apple Container or Kata rung fails.
+Core and Runner tests cover capability gating, leases, fencing and typed
+completion. Image and integration tests cover startup/readiness, preserved
+identity and durable state, and explicit-only skills updates. Use the current
+[test matrix](hermes-runtime-test-matrix.md) and
+[recovery runbook](../../infra/runbooks/hosted-web-chat-recovery.md).

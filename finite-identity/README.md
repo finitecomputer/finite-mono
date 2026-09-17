@@ -40,11 +40,11 @@ explicit Identity Recovery plus product-grant/key migration path.
 
 ## Install
 
-Pin to a specific revision in your `Cargo.toml`:
+Use the root workspace dependency from a member crate:
 
 ```toml
 [dependencies]
-finite-identity = { git = "https://github.com/finitecomputer/finite-identity", rev = "<commit-sha>" }
+finite-identity = { workspace = true }
 ```
 
 ## Usage
@@ -145,9 +145,3 @@ fn import(input: &str) -> Result<(), finite_identity::Error> {
     Ok(())
 }
 ```
-
-## Roadmap
-
-v1 is a single locally-stored key; Frostr-based backup arrives as a new
-`kind` in the same file (contract v2), and key rotation arrives on top of
-Frostr — nothing in v1 forecloses that path.

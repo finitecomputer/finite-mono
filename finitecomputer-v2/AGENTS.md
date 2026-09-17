@@ -1,131 +1,22 @@
 # Finite Computer v2 Agent Guide
 
-This repo is the hard-cut self-serve SaaS codebase for Finite Computer.
+This tree owns the self-serve SaaS product: Core, dashboard, Runner integration,
+and Agent Runtime orchestration. Sibling products retain their own ownership.
 
-It is not the legacy whiteglove product. Do not preserve box1/TRF compatibility
-inside v2 unless a migration document explicitly asks for a temporary bridge.
+Before editing here, read
+[the v2 skill](../.agents/skills/finite-v2/SKILL.md) for product boundaries,
+forbidden legacy surfaces, Runtime Management Pipe rules, and image ownership.
+Load the root safety skill when changing persistence, compatibility, runtime
+lifecycle, onboarding, or recovery.
 
-## Product Boundary
-
-v2 owns:
-
-- WorkOS/account-auth dashboard for self-serve users
-- BoxOne-parity dashboard web chat through a Finite Chat Hosted Web Device
-- product-owned connection UX through focused services, stable APIs, and skills;
-  never through Runtime Management Pipe feature commands
-- Finite Sites publishing/list/preview and Finite Brain chat-surface integration (render cards; viewer components per brain-surface proposal)
-- separate, revocable product-scoped Email Access Delegations for Sites and
-  Brain; never a global human-agent Principal Link
-- Core user, organization, Project, entitlement, and runtime-launch state
-- runner integration for SaaS Agent Runtimes
-- Finite Private grants and runtime-scoped Finite Private keys
-- provider-neutral Runner contract with Kata first and Phala confidential fast
-  follow
-- deployment coordination for finite-lat-1 and finite-lat-2 product services
-- the narrow runtime-local `finite` utility for explicit agent-owned workflows
-  such as `finite skills sync`
-- `finite-agentd`, the agent-owned platform boundary for typed, authorized,
-  agent-local status, recovery, process supervision, and configuration offers;
-  never compute lifecycle, arbitrary remote execution, or a product monolith
-
-v2 depends on separate product repos:
-
-- `finite-sites` for Project Repositories and publishing through `fsite`
-- `finitechat` for Finite Chat server, protocol, native clients,
-  CLI/core, and the Hermes plugin
-- `finite-skills` for Finite-specific agent skills
-- `finite-brain` for knowledgebase sharing when it enters the product
-
-## Hard Cuts
-
-Do not add or preserve these as first-class v2 surfaces:
-
-- OpenCode
-- a dashboard-only chat transport separate from Finite Chat
-- dashboard-to-runtime shell, filesystem, Kubernetes, or provider APIs
-- legacy dashboard-managed Published Apps in place of Finite Sites
-- `finitec publish`
-- `finitec repo`
-- `finitec gateway`
-- `finitec hermes`
-- `finitec finitechat`
-- old machine provision/deprovision/upload/site-auth flows
-- k3s/Traefik host mutation as a product API
-- OpenRouter fallback when Finite Private is required
-- product feature commands, feature-specific status, or skills control over the
-  Runtime Management Pipe
-- compute restart/replacement through `finite-agentd`; those remain Core to
-  Runner lifecycle operations
-
-Existing users stay on legacy `finitecomputer` until migrated. Migration code
-must be explicit bridge code with a delete condition.
-
-Runtime Management Pipe v1 is outbound-only Agent Runtime telemetry for generic
-health and Product Release identity. It has no inbound command path. Product
-features remain in their owning services, UI, stable APIs, local CLIs, skills,
-or typed Finite Chat requests to `finite-agentd` when an agent-local action is
-required. Core must not grow feature schemas, runtime file editing, or
-orchestrator access to support them. `finite-agentd` delegates Finite Sites,
-Finite Brain, and Finite Chat product behavior to their independent tools; it
-does not absorb them.
-
-The only legacy Core continuity requirement is Finite Private limiter state:
-grants, API-key hashes/tokens, reservations, usage/audit records, and the
-operator path needed to keep issued Finite Private keys valid. Do not preserve
-old deploy lanes, runtime records, machine control-plane state, or dashboard
-surfaces for compatibility unless a migration doc creates a temporary bridge
-with a delete condition.
-
-## Working Rules
-
-- Prefer copying proven code over rewriting from scratch, but delete legacy
-  compatibility as soon as the v2 path has replacement tests.
-- Components stay separate trees inside finite-mono. Do not copy
-  `finite-sites`, `finitechat`, or `finite-skills` code into this directory —
-  depend on their sibling workspace crates/paths (see
-  `../docs/monorepo-doctrine.md`).
-- Record the compatibility contract and delete condition in Linear before
-  adding a compatibility bridge; prove its behavior with tests.
-- Keep secrets out of the repo. Use `.env.example` files with comments.
-- Build and promote one canonical Agent Runtime image through the mono-owned
-  workflow. Local Docker, Kata, and Phala prove the same image digest; do not
-  create provider- or feature-specific image lanes.
-- Keep Hermes pinned through the root flake across image, smoke, and release
-  paths. Every Hermes version fact derives from that pin: the image build
-  stamps the pinned Nix package's evaluated version into
-  `deploy/finite-computer/images/runtime.Dockerfile`; never hand-copy one. Baseline agent CLIs (Node from Hermes, bun,
-  deno, uv, Playwright browsers, and the weasyprint HTML→PDF CLI) are
-  `.#agent-runtime-toolchains` on the
-  same flake (`deploy/finite-computer/images/agent-runtime-toolchains.nix`);
-  the image copies that closure and does not pin tarball hashes, and that
-  derivation's `bins` passthru is the only list of exposed CLI names. The production Finite Chat bridge is
-  supervised by `finite-agentd` and is the only process that holds the inbound
-  Finite Chat sync stream. Hermes and `finite-agentd` consume separate durable
-  loopback inboxes; reconnect uses
-  bounded backoff and never falls back to Python polling or CLI-per-message
-  subprocesses.
-- A fresh agent receives the image's Finite Skills baseline once. Restarts and
-  image replacement do not overwrite it. Existing agents update only when they
-  explicitly invoke `finite skills sync`; Core, Runner, and Runtime
-  Management Pipe never select, poll, push, or activate a skills revision.
-- Treat user data availability as the first security invariant. A Provider
-  Durable Volume is not a backup; do not claim recovery until the full Recovery
-  Set has restored onto an empty target.
-- Do not couple compute teardown to user-data deletion. Runtime Retirement must
-  retain recovery material; Purge User Data requires its own explicit,
-  retention-gated authorization.
-- Describe the first slice honestly as O1 operator-minimized with audited
-  Finite-assisted recovery. A TEE alone does not justify an operator-blind
-  claim.
-- For dashboard code, read `apps/dashboard/AGENTS.md` before editing.
-- For Rust changes, keep workspace tests and formatting passing.
-
-## Prompting Contract
-
-When a prompt is not a simple question or very small ask, guide the user toward:
-
-1. A self-contained problem statement
-2. Acceptance criteria
-3. Constraints: musts, must-nots, preferences, escalation points
-4. Decomposition into clean phases
-5. Evaluation design for tests and checks
+- Core owns desired compute lifecycle; Runner performs it. `finite-agentd`
+  accepts only typed, authorized agent-local actions.
+- Runtime Management Pipe v1 is outbound health/release telemetry only.
+  Product features, credentials, and skills controls stay in their owners.
+- Preserve Finite Private limiter continuity. Other legacy bridges require an
+  explicit compatibility contract, tests, and a delete condition.
+- For persistence work, read `crates/finite-saas-core/PERSISTENCE.md` and test
+  against real Postgres. Pure structural changes preserve wire/SQL contracts.
+- For dashboard changes, read `apps/dashboard/AGENTS.md`.
+- Core source and tests use external modules and bounded files. Run
+  `just source-structure-check`; see `../docs/agents/source-structure.md`.

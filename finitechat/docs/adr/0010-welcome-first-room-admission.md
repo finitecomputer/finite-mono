@@ -70,10 +70,6 @@ room admission.
   account/device, and exchange messages.
 - Daemon/Hermes tests use AddRoomMembers and Welcome activation, not invite
   create/join/respond endpoints.
-- Electron can add an agent or human by npub/account locator when the target
-  has KeyPackages available.
-- iOS uses the same AppState/AppAction room/topic/chat model and the same
-  add/welcome admission path.
 - The server route table has no `/invites/*` admission endpoints and no durable
   invite-session table.
 - Sync streams may watch both known rooms and the Device's own durable inbox.
@@ -86,19 +82,3 @@ room admission.
 - This ADR does not define people/contact lists.
 - This ADR does not require account-level push notifications for "please add
   me" requests.
-- This ADR does not define a future pretty invite link format. A future link is
-  acceptable only if it is a locator or Welcome delivery UX over this admission
-  model, not a second admission protocol.
-
-## Implementation Order
-
-1. Add the core stale-add regression and keep the existing pending-commit sync
-   regression.
-2. Delete invite-session DTOs, server state, routes, durable storage, and sync
-   hint watches.
-3. Delete client/core AppState fields and actions that exist only for
-   invite-session admission.
-4. Replace CLI, daemon/Hermes, Electron, and iOS flows with AddRoomMembers and
-   Welcome activation.
-5. Run bottom-up tests: core, client/server route tests, CLI integration,
-   daemon/Hermes, Electron, and iOS simulator.

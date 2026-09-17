@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
-# Bare-metal install driver for finite-lat-5 (Gate C of
-# infra/runbooks/lat5-nixos-runner-install.md). Consumes a downloaded
+# Bare-metal install driver for finite-lat-5 (see
+# infra/runbooks/install-host.md). Consumes a downloaded
 # `lat5-nixos-closure-REV` artifact:
 #
 #   1. validates the artifact manifest (schema finite.lat5.nixos-closure.v2;

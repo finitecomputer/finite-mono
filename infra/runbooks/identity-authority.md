@@ -1,4 +1,4 @@
-# Finite Identity Authority on finite-lat-1
+# Finite Identity Authority on finite-lat-2
 
 This runbook covers the production `finite-identity.service`, its public edge,
 the shared managed-agent provisioning credential, and recovery of its
@@ -28,14 +28,6 @@ trusted Runner processes. It must never enter `FC_RUNNER_RUNTIME_ENV_JSON`,
 the Runtime secret environment, an Agent Runtime, a command argument, logs, or
 this repository.
 
-The legacy Sites notification credential
-(`/etc/finite/identity-sites-notification.env`,
-`FINITE_IDENTITY_SITES_NOTIFICATION_TOKEN`) is retired: the directory shrink
-removed the Identity side of that relay, and the auth-kernel Sites work moved
-first-publication and access-request mail to the Sites-local mailer, so no
-unit reads the file anymore. A leftover file on an existing host is inert;
-delete it at operator convenience.
-
 ## Public and private routes
 
 The Directory's public surface, proxied verbatim by Caddy, is exactly:
@@ -51,49 +43,18 @@ Principal Resolution, Mailbox Proofs, Email-Only Principals, WorkOS account
 bindings, brain resolution, and the sites-notification relay. A public request
 to any of those must return `404`.
 
-`identity.finite.vip` currently belongs to the legacy `*.finite.vip` DNS
-shape. Before public acceptance, replace only its exact A record with
-`64.34.82.77`. Do not move the `finite.vip` apex or wildcard: those still
-address the legacy fleet. The exact record must resolve to lat1 before Caddy
-can obtain its public certificate.
+## Deployment and credentials
 
-NIP-05 discovery for managed addresses is canonical at
-`https://finite.vip/.well-known/nostr.json`. The apex remains on clawland, so
-`infra/hosts/clawland/finite-identity-nip05-route.yaml` owns one exact,
-high-priority Traefik route for that path. It forwards to the same lat1 Caddy
-and Authority database as `identity.finite.vip`, pins backend TLS SNI, and
-rewrites only the upstream Host header. It does not proxy any other apex path.
+Use [Core deployment](deploy-core.md) for the reviewed app-plane closure.
+The credential installer `scripts/install-identity-authority-credentials`
+preserves a valid existing token and creates one only when absent. After host
+loss, provision the same replacement token to the Authority and trusted Runner
+processes before starting them; it is not identity data.
 
-## First installation
-
-From an exact reviewed checkout:
-
-```sh
-scripts/install-identity-authority-credentials root@64.34.82.77
-```
-
-The installer validates its existing file, creates an independent random
-32-byte credential on lat1 if absent, and never displays the value.
-An existing valid file is preserved. The operator token is replaceable
-configuration, not identity data: after a host loss, generate a new value and
-install the same new value for the Authority and trusted Runner processes
-before starting either.
-
-After the DNS record and credential exist, deploy only an exact reviewed commit
-on `origin/main` through the closure-artifact path in
-[`deploy-core.md`](deploy-core.md#steps).
-
-After lat1 health is green, apply the apex route from the same exact checkout:
-
-```sh
-kubectl apply -f infra/hosts/clawland/finite-identity-nip05-route.yaml
-kubectl -n fc-identity-edge get \
-  ingressroute,service,endpoints,serverstransport,middleware
-```
-
-The route contains no Deployment. If the installed Traefik CRD rejects the
-manifest, stop and leave the existing apex route untouched. Do not improvise
-against the live legacy fleet.
+Verify exact DNS and NIP-05 routing before changing the edge. The historical
+clawland manifest still names retired lat1; it is not current deployment
+authority and must not be applied unchanged. TODO: reconcile retained apex
+routing evidence in [FIN-95](https://linear.app/finitecomputer/issue/FIN-95).
 
 ## Verification
 

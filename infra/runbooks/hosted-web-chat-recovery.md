@@ -1,126 +1,24 @@
 # Hosted Web Chat snapshot and empty-target restore
 
-Current snapshots use `finite.hosted-web-chat-recovery-snapshot.v4`: Hosted Web
-Device identities, encrypted client stores and bindings; Finite Chat SQLite;
-SaaS Core Postgres; FiniteBrain SQLite; and Finite Identity SQLite. Agent Runtime
-recovery remains separate. Finite Sites runs on Fly with its own
-[backup and restore procedure](deploy-sites.md#backups-and-restore).
+Snapshots use `finite.hosted-web-chat-recovery-snapshot.v4`: Hosted Web Device
+identities and stores, Chat SQLite, Core Postgres, Brain SQLite and Identity
+SQLite. Agent Runtime recovery is separate; Sites has its own
+[backup procedure](deploy-sites.md#backups-and-restore).
 
-The verifier also accepts complete historical v3 snapshots, including the old
-Sites directory and symlink inventory. Restore these as archives on isolated
-scratch targets; do not start an old Sites writer against migrated data. v1/v2
-snapshots remain rejected. The Sites retirement must preserve a final complete
-v3 archive independently before new v4 captures omit that directory.
+The verifier accepts complete historical v3 archives, including Sites. Restore
+those on isolated scratch targets and retain their Sites material without
+starting an old writer. v1/v2 archives are rejected.
 
-**Current cadence, 2026-07-20:** the snapshot is deploy/manual-triggered. The
-former 15-minute timer was removed because stopping Chat and every Hosted
-Device broke live streams. Snapshot health allows seven days; Borg re-ships the
-latest snapshot daily and its offsite health allows 50 hours. A verified first
-archive exists. This is not the accepted 15-minute RPO.
+Snapshots are deploy/manual-triggered and briefly fence writers. Daily Borg
+archival does not create a new recovery point. Current health thresholds are
+seven days for a snapshot and 50 hours for offsite archival; those are not a
+15-minute RPO. TODO: non-disruptive recovery cadence is tracked in
+[FIN-95](https://linear.app/finitecomputer/issue/FIN-95).
 
-**Format transition:** the pre-deploy snapshot uses the previous generation.
-After switching the closure, create and verify a v4 snapshot, archive it, and
-repeat the empty-target drill. Health and archival accept both v3 and v4 during
-this transition; changing the declaration alone is not recovery proof.
-
-## New-capacity admission gate
-
-The July 13 first-cohort exception is historical. Under the accepted July 20
-capacity plan, do not authorize additional paid or Launch Code Agent creation
-until all of these are true, regardless of Stripe. This runbook does not claim
-that a Core/UI maintenance gate has already been deployed:
-
-- a proven non-disruptive snapshot mechanism produces a recovery point at most
-  15 minutes old without breaking an open stream or cold-restarting Hosted
-  Devices. No current timer satisfies this bullet.
-- `finite.recoveryBackup.borgRepository` names the dedicated
-  `finitecomputer/finite-lat-1` repository at the same rsync.net destination as
-  existing finitecomputer backups. It reuses the established finitecomputer
-  SSH key, pinned host key, and passphrase bundle. The production job never
-  prunes or compacts. Destination-enforced append-only credentials are strongly
-  recommended, but Paul accepted the current overprovisioned credential as
-  hardening debt on 2026-07-13. The existing off-host passphrase copy and a Borg
-  key export remain available independently of finite-lat-1.
-- A current archive has passed the empty-target drill below with the dedicated
-  synthetic account. A green timer or successful `borg check` is insufficient.
-
-The host definition selects the destination, Borg 1.2 executable, and the same
-credential paths used by `../finitecomputer`. On 2026-07-13 the existing bundle
-was copied byte-for-byte to finite-lat-1, revision `7d58aa1` was deployed, and
-the dedicated repository was initialized with a verified first archive. The
-reused SSH credential also accepted an arbitrary read-only remote command, so
-server-enforced append-only protection is **not** present. Restricting it while
-preserving separate administrative retention access remains recommended
-hardening; it is not an admission blocker. The empty-target drill still is.
-
-## Historical Borg activation record
-
-The activation below completed in July 2026. It records custody and exact
-paths; do not repeat credential copies or repository initialization as a
-routine repair.
-
-1. Reuse the existing finitecomputer credential bundle. Its source-of-truth
-   host path is `/var/lib/finitecomputer/backups/rsync-net`; the ignored
-   off-host passphrase copy is already at
-   `../finitecomputer/workspaces/trf/secrets/rsync-net-borg-passphrase`. Do not
-   print or commit any value. The ignored off-host export for this repository's
-   encrypted repokey is
-   `../finitecomputer/workspaces/trf/secrets/rsync-net-borg-finite-lat-1-key`.
-2. Copy the bundle unchanged to the same root-owned path on finite-lat-1, with
-   each file mode `0600` beneath a mode `0700` directory:
-
-   ```text
-   /var/lib/finitecomputer/backups/rsync-net/id_ed25519
-   /var/lib/finitecomputer/backups/rsync-net/known_hosts
-   /var/lib/finitecomputer/backups/rsync-net/borg-passphrase
-   ```
-
-3. Record how the existing SSH key is restricted at rsync.net. The 2026-07-13
-   activation proved that it can run an arbitrary remote command, so the
-   archival credential is not append-only. Treat destination restriction as
-   recommended hardening, not as evidence supplied by the no-prune host job;
-   do not invent a second local passphrase.
-4. Deploy an exact committed revision under the normal Nix deployment
-   authority, start `finite-hosted-web-chat-snapshot.service`, then start
-   `borgbackup-job-finite-hosted-web-chat-offsite.service`. The job initializes
-   the dedicated encrypted repository if necessary and uses remote executable
-   `borg12`.
-5. Export the Borg key with an administrative recovery environment and retain
-   it with the passphrase off-host. Never commit either value or print them in
-   evidence.
-6. Verify both health units below. A repository configured in Nix is not an
-   off-host copy until this succeeds.
-
-The host job intentionally does not prune or compact. Prefer an append-only
-archival credential that cannot erase recovery history. Perform reviewed
-retention and compaction from an off-host administrative credential after
-restore proof. Once a non-disruptive cadence exists, the accepted plan retains
-48 hours of fine-grained points, then 7 daily, 4 weekly, and 6 monthly points;
-no current 15-minute archive series is claimed.
-
-## Read-only sealing rollout
-
-Merging this change does not alter finite-lat-1. After deploying its exact
-committed revision through the normal authorized lat1 flow, an operator must
-create and archive the first sealed recovery point. The normal deploy takes its
-pre-deploy snapshot with the previous system generation, so run these steps as
-root after the new generation has switched, during a window authorized for the
-snapshot's brief service write fence:
-
-```sh
-systemctl start finite-hosted-web-chat-snapshot.service
-latest=$(readlink -e /data/recovery-snapshots/hosted-web-chat/latest)
-test -z "$(find "$latest" ! -type l -perm /0222 -print -quit)"
-systemctl start finite-hosted-web-chat-snapshot-health.service
-systemctl start borgbackup-job-finite-hosted-web-chat-offsite.service
-systemctl start finite-hosted-web-chat-offsite-health.service
-scripts/snapshot-sqlite integrity-check "$latest/finite-chat/server.sqlite3"
-```
-
-Record the deployed revision, resolved snapshot timestamp, snapshot-health
-result, Borg archive result, and helper result. Do not unseal an older snapshot
-as part of rollout; the mode-bit rollback below is only for a demonstrated
-sealing incompatibility.
+The host's `finite.recoveryBackup` settings select the Borg repository and
+credential paths. Retain the repokey export, passphrase and independent recovery
+access outside that host. No host job prunes or compacts. Do not claim
+server-enforced append-only protection without verifying credential restrictions.
 
 ## Snapshot checks
 
@@ -134,7 +32,6 @@ journalctl -u finite-hosted-web-chat-snapshot -u borgbackup-job-finite-hosted-we
 latest=/data/recovery-snapshots/hosted-web-chat/latest
 age=$(( $(date +%s) - $(stat -Lc %Y "$latest") ))
 test "$age" -le 604800      # current health threshold only
-test "$age" -le 900         # separate admission/RPO gate; expected to fail today
 (cd "$latest" && sha256sum --check manifest.sha256)
 scripts/verify-hosted-snapshot "$latest"
 test -f "$latest/recovery-set.tsv"
@@ -199,7 +96,7 @@ historical v3 snapshots permit only inventoried links inside archived Sites.
    snapshot no longer proves Fly data recovery.
 8. Reconnect only the fenced retained Agent Runtime. Verify the durable owner
    claim replays through the canonical Room and one fresh Agent turn completes.
-9. Paul performs the browser checks. Record date, archive name, component
+9. The operator performs the browser checks. Record date, archive name, component
    versions, count-only results, and pass/fail without plaintext or live ids.
 
 Do not switch traffic as part of the drill. A production traffic switch needs
@@ -225,15 +122,9 @@ Do not use that rollback to inspect SQLite in place; preserve the snapshot and
 use `scripts/snapshot-sqlite`. A subsequent successful snapshot run must
 replace this temporary unsealed recovery point with a newly sealed one.
 
-Schedule the first drill immediately after the first verified archive and
-repeat it before Phase 11 authorizes additional paid/Launch Code creation and
-after any snapshot-format/schema change.
-The operator records the scheduled date in the active run's Acceptance Request;
-this public runbook does not invent an appointment.
-
 ## Negative drill
 
-Before admission, prove that a wrong key, truncated archive, modified artifact,
+Prove that a wrong key, truncated archive, modified artifact,
 v1/v2/wrong format, mismatched `recovery-set.tsv`, missing
 Chat/Core/Brain/Identity database (plus Sites for historical v3), corrupt
 SQLite, unsafe
