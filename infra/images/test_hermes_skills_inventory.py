@@ -2,9 +2,9 @@
 
 import json
 import os
-from pathlib import Path
 import tempfile
 import unittest
+from pathlib import Path
 from unittest.mock import patch
 
 
@@ -23,9 +23,7 @@ class SkillsInventoryTests(unittest.TestCase):
         cls.patches = [
             patch.object(profiles, "_get_default_hermes_home", lambda: cls.home),
             patch.object(profiles, "_get_profiles_root", lambda: cls.home / "profiles"),
-            patch.object(
-                plugins, "get_bundled_plugins_dir", lambda: cls.home / "empty"
-            ),
+            patch.object(plugins, "get_bundled_plugins_dir", lambda: cls.home / "empty"),
         ]
         for mock in cls.patches:
             mock.start()
@@ -65,9 +63,7 @@ class SkillsInventoryTests(unittest.TestCase):
         )
 
     def inventory(self, profile):
-        return self.client.get(
-            "/api/skills", params={"profile": profile, "inventory": "true"}
-        )
+        return self.client.get("/api/skills", params={"profile": profile, "inventory": "true"})
 
     def test_inventory_and_legacy_compatibility(self):
         home = self.prepare("compatibility")
@@ -94,9 +90,7 @@ class SkillsInventoryTests(unittest.TestCase):
             self.assertEqual(set(row), {"name", "description", "category", "enabled"})
         self.assertEqual((home / "config.yaml").read_bytes(), before)
         again = self.client.get("/api/skills?profile=compatibility").json()
-        self.assertEqual(
-            {row["name"] for row in again}, {row["name"] for row in legacy.json()}
-        )
+        self.assertEqual({row["name"] for row in again}, {row["name"] for row in legacy.json()})
         toggle = self.client.put(
             "/api/skills/toggle",
             json={"profile": "compatibility", "name": "local", "enabled": False},
@@ -157,9 +151,7 @@ class SkillsInventoryTests(unittest.TestCase):
         self.assertNotIn("local", names)
         self.assertEqual(
             next(
-                row["description"]
-                for row in response.json()["skills"]
-                if row["name"] == "disabled"
+                row["description"] for row in response.json()["skills"] if row["name"] == "disabled"
             ),
             "Edited description",
         )
@@ -173,10 +165,7 @@ class SkillsInventoryTests(unittest.TestCase):
         response = self.inventory("platform")
         self.assertEqual(response.status_code, 200, response.text)
         self.assertFalse(
-            any(
-                row["name"].endswith(":plugin-skill")
-                for row in response.json()["skills"]
-            )
+            any(row["name"].endswith(":plugin-skill") for row in response.json()["skills"])
         )
 
     def test_external_precedence_and_disabled_plugin(self):
@@ -203,9 +192,7 @@ class SkillsInventoryTests(unittest.TestCase):
     def test_refresh_does_not_reload_plugin_registration(self):
         home = self.prepare("registration")
         first = self.inventory("registration").json()
-        self.write_skill(
-            home / "plugins" / "inventory" / "skills" / "new-plugin", "new-plugin"
-        )
+        self.write_skill(home / "plugins" / "inventory" / "skills" / "new-plugin", "new-plugin")
         self.assertEqual(self.inventory("registration").json(), first)
 
     def test_default_request_uses_current_home(self):
@@ -213,9 +200,7 @@ class SkillsInventoryTests(unittest.TestCase):
         self.write_skill(self.home / "skills" / "current-home", "current-home")
         response = self.client.get("/api/skills?inventory=true")
         self.assertEqual(response.status_code, 200, response.text)
-        self.assertEqual(
-            [row["name"] for row in response.json()["skills"]], ["current-home"]
-        )
+        self.assertEqual([row["name"] for row in response.json()["skills"]], ["current-home"])
 
     def test_authentication_required(self):
         from starlette.testclient import TestClient
