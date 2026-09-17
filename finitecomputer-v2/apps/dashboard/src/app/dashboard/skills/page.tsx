@@ -1,44 +1,32 @@
-import headingStyles from "@/styles/agent-page-heading.module.css";
-import { Layers3Icon } from "lucide-react";
+import Link from "next/link";
+import { redirect } from "next/navigation";
 
-import { SkillsCatalogBrowser } from "@/components/skills-catalog-browser";
-import { loadBaselineSkillsCatalog } from "@/lib/skills-catalog";
+import { AgentSkillsBrowser } from "@/components/agent-skills-browser";
+import { getAccountAuthContext } from "@/lib/dashboard-auth";
+import { loadDashboardMachineAccess } from "@/lib/dashboard-machine-access";
+import headingStyles from "@/styles/agent-page-heading.module.css";
 
 export const dynamic = "force-dynamic";
 
-export default async function SkillsDashboardPage() {
-  const model = await loadBaselineSkillsCatalog().catch((error) => {
-    console.error("[skills] failed to load skills catalog", error);
-    return null;
-  });
+export default async function SkillsDashboardPage({ searchParams }: {
+  searchParams: Promise<{ machine?: string | string[] }>;
+}) {
+  const { machine } = await searchParams;
+  if (typeof machine !== "string" || !machine.trim()) {
+    return <div className={`${headingStyles.page} space-y-4`}>
+      <h1 className={headingStyles.title}>Skills</h1>
+      <p className={headingStyles.subtitle}>Choose an agent to see its skills.</p>
+      <Link href="/dashboard" className="underline">Choose an agent</Link>
+    </div>;
+  }
+  const [access, account] = await Promise.all([
+    loadDashboardMachineAccess(machine), getAccountAuthContext(),
+  ]);
+  if (!access) redirect("/dashboard");
+  if (access.machineId !== machine) redirect(`/dashboard/skills?machine=${encodeURIComponent(access.machineId)}`);
+  const scope = JSON.stringify([account.workosUserId ?? account.email, account.organizationId ?? null, access.machineId]);
 
-  return (
-    <div className={`ocean-page-stack ${headingStyles.page}`}>
-      {!model && <header className={`${headingStyles.stack} mb-2`}>
-        <h1 className={headingStyles.title}>Skills</h1>
-        <p className={headingStyles.subtitle}>Skills are currently unavailable.</p>
-      </header>}
-
-      {model ? (
-        <SkillsCatalogBrowser
-          skills={model.skills}
-          summary={`${model.totalSkillCount} ${model.totalSkillCount === 1 ? "skill" : "skills"} in the Finite catalog.`}
-        />
-      ) : (
-        <section className="ocean-utility-card">
-          <div className="ocean-utility-card__header">
-            <span className="ocean-utility-card__icon" aria-hidden>
-              <Layers3Icon className="size-5" />
-            </span>
-            <div>
-              <h2 className="ocean-utility-card__title">Skill catalog unavailable</h2>
-              <p className="text-sm text-muted-foreground">
-                The runtime still syncs skills from GitHub, but the dashboard catalog could not be loaded.
-              </p>
-            </div>
-          </div>
-        </section>
-      )}
-    </div>
-  );
+  return <div className={`ocean-page-stack ${headingStyles.page}`}>
+    <AgentSkillsBrowser key={scope} runtimeId={access.machineId} agentName={access.displayName} />
+  </div>;
 }

@@ -248,6 +248,7 @@ async function serve() {
         FC_WORKOS_AUTH_ENABLED: "0",
         WORKOS_COOKIE_PASSWORD: "web-design-cookie-password-32-characters",
         NEXT_DIST_DIR: ".next-web-design",
+        NEXT_PUBLIC_FC_DESIGN_PREVIEWS: "1",
         NEXT_TELEMETRY_DISABLED: "1",
         NODE_OPTIONS:
           process.env.FC_WEB_DESIGN_NODE_OPTIONS ?? "--max-old-space-size=2048",
@@ -544,7 +545,10 @@ function coreMe() {
     projects: [{
       project: { id: "project_web_design", display_name: "Moss", hosting_tier: "standard", created_at: "2026-07-01T12:00:00Z", updated_at: "2026-07-01T12:00:00Z" },
       runtime: { id: RUNTIME_ID, project_id: "project_web_design", contact_endpoint: `http://127.0.0.1:${hostedPort}/runtime-status`, runtime_status: "online", hermes_available: true, created_at: "2026-07-01T12:00:00Z", updated_at: "2026-07-01T12:00:00Z" },
-    }],
+    }, ...(process.env.FC_WEB_DESIGN_SECOND_AGENT === "1" ? [{
+      project: { id: "project_web_design_second", display_name: "Fern", hosting_tier: "standard", created_at: "2026-07-01T12:00:00Z", updated_at: "2026-07-01T12:00:00Z" },
+      runtime: { id: "runtime_web_design_second", project_id: "project_web_design_second", runtime_status: "offline", hermes_available: true, created_at: "2026-07-01T12:00:00Z", updated_at: "2026-07-01T12:00:00Z" },
+    }] : [])],
   };
 }
 

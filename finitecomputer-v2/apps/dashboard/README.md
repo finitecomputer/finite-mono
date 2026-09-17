@@ -16,8 +16,8 @@ Current intended scope:
   Delegations; Brain also provisions Folder Key Grants to the agent npub
 - Recovery Readiness, export, Runtime Retirement, and explicit Break-Glass
   Recovery disclosures
-- signed-in access to the Finite Skills catalog and guidance for the explicit
-  agent-local `finite skills sync` workflow
+- signed-in access to the selected agent’s native Skills inventory; skill updates
+  remain the explicit agent-local `finite skills sync` workflow
 
 Out of scope for v2:
 
@@ -39,18 +39,33 @@ Out of scope for v2:
 ## Managed Skills Boundary
 
 The canonical Runtime image bundles one tested Finite Skills baseline and copies
-it once when a fresh agent initializes. The dashboard catalog is informational:
-it does not read Runtime files, claim which revision an existing agent has
-installed, store a Core desired revision, or request activation through Runtime
-Management.
+it once when a fresh agent initializes. The Skills page reads the selected
+agent's `GET /api/skills` through the shared Core-authorized Hermes session.
+It reads only the configured Hermes home/profile, on entry, agent change and
+manual Refresh. It does not invoke inference, sync skills, enable hosted access,
+or create a Core inventory/desired-state store. The enclosing agent sidebar
+retains its existing independent Chat behavior; Skills does not depend on it.
+
+The page displays native names, descriptions, categories and disabled state,
+with search and an in-memory last-loaded snapshot. Request failures mark that
+snapshot stale; access loss clears it. Account/organization/agent changes remount
+the view and abort previous reads. The helper bounds requests to 15 seconds and
+1 MiB, uses operation-local credentials, and retries native expiry once.
+Dashboard rollback requires no data migration.
+
+FIN-87 release gate: the pinned Hermes `29112bef` REST route includes disabled
+local/external skills but omits plugin metadata that its tool listing includes.
+Do not call this complete inventory coverage or close FIN-87 until a bounded
+native listing correction is tested and included in an appropriate FIN-57
+runtime release. Preserve existing native dashboard consumers, including their
+edit/toggle behavior for local versus plugin skills. Recheck the deployed
+candidate; the prior 100-skill canary response proves authenticated access only.
+No separate transport or Skills-only fleet rollout is required.
 
 Existing agents update at their own pace through the explicit
-`finite skills sync` command. The dashboard may explain that workflow, but it
-does not poll, push, schedule, or report automatic rollout status.
-
-Current code still loads a local checkout or the old split repository's GitHub
-`main` and hides the page from normal SaaS users. That is migration scaffolding,
-not accepted product behavior.
+`finite skills sync` command. This page does not poll, push, schedule, or report
+automatic skill rollout status. Native authentication and Hermes's derived
+scan/cache behavior remain owned by Hermes.
 
 ## Brain account boundary
 
@@ -136,9 +151,13 @@ Runtime, or production service. The fixture backs the canonical dashboard
 components and routes; it is not a second UI and does not prove runtime
 acceptance.
 
-The fixture is intentionally scoped to chat, the machine overview, restart
-presentation, and bounded recovery states. Runtime-owned Stop and Connections
-behavior require the complete devfinity stack. The fixture and devfinity both
+The fixture covers chat, the machine overview, restart/recovery presentation,
+and Skyler’s Brain/Sites design previews. It sets the development-only
+`NEXT_PUBLIC_FC_DESIGN_PREVIEWS=1`; ordinary dev servers and production keep those
+unfinished routes disabled. `FC_WEB_DESIGN_SECOND_AGENT=1` adds Fern for agent
+switching checks. The Skills browser regression intercepts owner/native replies
+and runs with Chat unavailable; it does not prove production authorization.
+Runtime-owned Stop and Connections behavior require the complete devfinity stack. The fixture and devfinity both
 default to port 13002, so run only one at a time or choose another fixture port:
 
 ```bash

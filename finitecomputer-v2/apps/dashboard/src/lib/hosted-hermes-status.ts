@@ -9,7 +9,11 @@ export type HostedHermesAccess = {
 
 export type HostedHermesSession = { baseUrl: string; accessToken: string; expiresAt: number };
 export type HostedHermesStatus = { version: string; gatewayRunning: boolean };
-export class HostedHermesStatusError extends Error {}
+export class HostedHermesStatusError extends Error {
+  constructor(message: string, readonly kind: "request" | "access" | "unsupported" = "request") {
+    super(message);
+  }
+}
 
 export function parseHostedHermesAccess(value: unknown, runtimeId: string): HostedHermesAccess {
   const access = record(value);
@@ -101,7 +105,16 @@ export async function readHostedHermesJson(runtimeId: string, path: string, sign
         await response.body?.cancel();
         continue;
       }
-      if (!response.ok) throw new HostedHermesStatusError("Agent access is unavailable. Try again.");
+      if (!response.ok) {
+        await response.body?.cancel();
+        if ([401, 403].includes(response.status)) {
+          throw new HostedHermesStatusError("Access to this agent is no longer available.", "access");
+        }
+        if (response.status === 404) {
+          throw new HostedHermesStatusError("This agent does not support this page yet.", "unsupported");
+        }
+        throw new HostedHermesStatusError("Agent access is unavailable. Try again.");
+      }
       const result = await boundedJson(response);
       requestSignal.throwIfAborted();
       return result;
@@ -147,7 +160,8 @@ async function controlRequest(runtimeId: string, init: RequestInit): Promise<unk
       : [401, 403, 404].includes(response.status)
         ? "Hosted access is unavailable for this account or agent."
         : "Hosted access is not ready. Refresh access and try again.";
-    throw new HostedHermesStatusError(message);
+    await response.body?.cancel();
+    throw new HostedHermesStatusError(message, [401, 403, 404, 409].includes(response.status) ? "access" : "request");
   }
   return boundedJson(response);
 }

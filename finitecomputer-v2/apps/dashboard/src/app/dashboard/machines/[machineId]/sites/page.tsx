@@ -1,3 +1,4 @@
+import { dashboardDesignPreviewEnabled } from "@/lib/dashboard-design-preview";
 import { notFound, redirect } from "next/navigation";
 
 import { AgentSitesBrowser } from "@/components/agent-sites-browser";
@@ -8,7 +9,7 @@ export default async function SitesPage({ params, searchParams }: {
   searchParams: Promise<{ preview?: string; state?: string }>;
 }) {
   // Keep the design preview private until FIN-69 connects the real listing.
-  if (process.env.NODE_ENV !== "development") notFound();
+  if (!dashboardDesignPreviewEnabled) notFound();
   const { machineId } = await params;
   const access = await loadDashboardMachineAccess(machineId, { coreCacheMode: "swr" });
   if (!access) redirect("/dashboard");
