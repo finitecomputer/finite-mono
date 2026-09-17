@@ -47,6 +47,13 @@ test("verified hosted requester assertion binds mailbox, human, and agent", asyn
       return Response.json({ email: "after@example.test", workos_user_id: "user_fixture" });
     }
     if (url.endsWith("/v1/app/state")) {
+      const state = targetState();
+      delete state.hosted_agent_binding;
+      return Response.json(state);
+    }
+    if (url.endsWith("/v1/app/agent-bindings/open")) {
+      assert.equal(init?.method, "POST");
+      assert.deepEqual(JSON.parse(String(init?.body)), { project_id: "project-1" });
       return Response.json(targetState());
     }
     return Response.json({
@@ -59,6 +66,7 @@ test("verified hosted requester assertion binds mailbox, human, and agent", asyn
   }) as typeof fetch;
 
   const requester = await createHostedRequesterContext({
+    projectId: "project-1",
     config: { baseUrl: "https://device.internal", apiToken: "device-token" },
     account: {
       email: "before@example.test",
@@ -72,6 +80,7 @@ test("verified hosted requester assertion binds mailbox, human, and agent", asyn
     email: "after@example.test",
     sitesAssertion: "assertion-1",
   });
+  assert.equal(requests[1].url, "https://device.internal/v1/app/agent-bindings/open");
   assert.deepEqual(requests[2], {
     url: "https://finite.site/internal/v1/hosted-requester-assertions",
     body: {
@@ -103,6 +112,7 @@ test("requester assertions never fall back to stale session email when Core fail
     const requests: string[] = [];
     global.fetch = (async (input) => { requests.push(String(input)); return response; }) as typeof fetch;
     const result = await createHostedRequesterContext({
+      projectId: "project-1",
       config: { baseUrl: "https://device.internal", apiToken: "fixture-device-token" },
       account: { email: "before@example.test", workosUserId: "user_fixture", emailVerified: true, accessToken: "fixture-access-token", source: "workos" },
     });
@@ -119,6 +129,7 @@ test("missing or failing Sites requester exchange keeps Chat context optional", 
   process.env.FC_SITES_UPSTREAM_URL = "https://legacy.internal";
   process.env.FINITE_SITES_VIEWER_SESSION_TOKEN = "fixture-service-token";
   const input = {
+    projectId: "project-1",
     config: { baseUrl: "https://device.internal", apiToken: "device-token" },
     account: { email: "person@example.test", workosUserId: "user_fixture", emailVerified: true,
       accessToken: "fixture-access-token", source: "workos" as const },
@@ -143,7 +154,7 @@ test("missing or failing Sites requester exchange keeps Chat context optional", 
       if (String(url).endsWith("/api/core/v1/me")) {
         return Response.json({ email: input.account.email, workos_user_id: input.account.workosUserId });
       }
-      if (String(url).endsWith("/v1/app/state")) return Response.json(targetState());
+      if (String(url).endsWith("/v1/app/agent-bindings/open")) return Response.json(targetState());
       assert.equal(String(url), "https://finite.site/internal/v1/hosted-requester-assertions");
       assert.equal(init?.redirect, "error");
       if (failure === "disconnect") throw new Error("network down");
@@ -153,6 +164,24 @@ test("missing or failing Sites requester exchange keeps Chat context optional", 
     assert.equal(await createHostedRequesterContext(input), undefined);
     assert.equal(requests.length, 3);
     assert(!requests.some((url) => url.includes("legacy.internal")));
+  }
+  for (const invalid of ["missing", "other-project", "other-human", "unavailable"] as const) {
+    requests.length = 0;
+    global.fetch = (async (url) => {
+      requests.push(String(url));
+      if (String(url).endsWith("/api/core/v1/me")) {
+        return Response.json({ email: input.account.email, workos_user_id: input.account.workosUserId });
+      }
+      assert.equal(String(url), "https://device.internal/v1/app/agent-bindings/open");
+      if (invalid === "unavailable") return new Response(null, { status: 503 });
+      const state = targetState();
+      if (invalid === "missing") delete state.hosted_agent_binding;
+      if (invalid === "other-project") state.hosted_agent_binding!.project_id = "project-other";
+      if (invalid === "other-human") state.hosted_agent_binding!.human_account_id = "other-human";
+      return Response.json(state);
+    }) as typeof fetch;
+    assert.equal(await createHostedRequesterContext(input), undefined);
+    assert.equal(requests.length, 2);
   }
 });
 
