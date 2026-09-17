@@ -10,6 +10,9 @@ backup_volume="$name-backup"
 restore_volume="$name-restore"
 backup_mode="${SITES_BACKUP_SMOKE:-0}"
 completed=0
+# Generated only for these disposable containers; never use a production token.
+FINITE_SITES_METRICS_TOKEN="$(docker run --rm --entrypoint python3 "$image" -c 'import secrets; print(secrets.token_hex(32))')"
+export FINITE_SITES_METRICS_TOKEN
 cleanup() {
     status=$?
     if [ "$status" -eq 0 ] && [ "$completed" != 1 ]; then status=1; fi
@@ -51,6 +54,7 @@ start() {
     fi
     docker run -d --name "$name" -p 127.0.0.1::8787 \
         --mount "type=volume,src=$volume,dst=/var/lib/finite-sites" \
+        -e FINITE_SITES_METRICS_TOKEN \
         "${extra[@]}" \
         "$image" serve --data /var/lib/finite-sites --listen 0.0.0.0:8787 \
         --api-url http://127.0.0.1:8787 --git-url http://127.0.0.1:8787 \
@@ -82,12 +86,57 @@ private_site() {
     test "$(curl -sS -o /dev/null -w '%{http_code}' \
         -H 'Host: smoke.sites.localhost' "$endpoint/")" = 401
 }
+metrics() {
+    docker exec -i --user 65532:65532 "$name" python3 - "$1" <<'PY'
+import datetime
+import os
+import re
+import secrets
+import sys
+import urllib.error
+import urllib.request
+
+expected = int(sys.argv[1])
+endpoint = "http://127.0.0.1:8787/internal/v1/metrics"
+token = os.environ["FINITE_SITES_METRICS_TOKEN"]
+headers = {"Authorization": "Bearer " + token}
+with urllib.request.urlopen(urllib.request.Request(endpoint, headers=headers)) as response:
+    assert response.headers["Cache-Control"] == "no-store"
+    body = response.read().decode()
+for metric in ("finite_sites_existing", "finite_sites_published"):
+    assert re.search(rf"^{metric} {expected}$", body, re.M), metric
+days = re.findall(r'^finite_sites_created_by_day\{date="([0-9-]+)"\} ([0-9]+)$', body, re.M)
+assert len(days) == len(dict(days)) == 90
+dates = sorted(datetime.date.fromisoformat(day) for day, _ in days)
+assert (dates[-1] - dates[0]).days == 89
+assert sum(int(count) for _, count in days) == expected
+assert re.search(r"^finite_sites_metrics_collected_at_seconds [0-9]+$", body, re.M)
+for rejected in ({}, {"Authorization": "Bearer " + secrets.token_hex(32)}):
+    try:
+        urllib.request.urlopen(urllib.request.Request(endpoint, headers=rejected))
+    except urllib.error.HTTPError as error:
+        assert error.code == 401
+        assert error.headers["Cache-Control"] == "no-store"
+    else:
+        raise AssertionError("Metrics accepted an unauthenticated request")
+# Even with the correct token, a wildcard site host must not expose API metrics.
+try:
+    urllib.request.urlopen(urllib.request.Request(endpoint, headers={
+        **headers, "Host": "unallocated.sites.localhost",
+    }))
+except urllib.error.HTTPError as error:
+    assert error.code == 404
+else:
+    raise AssertionError("A site host exposed API metrics")
+PY
+}
 stop() {
     docker stop --time 30 "$name" >/dev/null
     test "$(docker inspect --format '{{.State.ExitCode}}' "$name")" = 0
 }
 
 start
+metrics 0
 client <<'SH'
 mkdir -p "$HOME/site"
 cd "$HOME"
@@ -112,6 +161,7 @@ git push finite main
 fsite project share smoke --public --yes-public --output json
 SH
 test "$(curl -fsS -H 'Host: smoke.sites.localhost' "$endpoint/")" = sites-image-first-version
+metrics 1
 client <<'SH'
 fsite project share smoke --private --output json
 SH
@@ -126,11 +176,13 @@ for _ in {1..30}; do
     sleep 1
 done
 private_site
+metrics 1
 stop
 docker rm "$name" >/dev/null
 start
 test "$secret_hash" = "$(docker exec "$name" sha256sum /var/lib/finite-sites/cookie-secret)"
 private_site
+metrics 1
 client <<'SH'
 fsite project status smoke --output json
 fsite project share smoke --public --yes-public --output json
@@ -144,6 +196,7 @@ git commit -m 'Update after container replacement'
 git push finite main
 SH
 test "$(curl -fsS -H 'Host: smoke.sites.localhost' "$endpoint/")" = sites-image-second-version
+metrics 1
 if [ "$backup_mode" = 1 ]; then
     docker exec "$name" sites-backup run --config /run/sites-backup.json
     docker exec "$name" finite-status --sites-backup-state /var/backups/finite-sites/status.json --json
@@ -169,6 +222,7 @@ if [ "$backup_mode" = 1 ]; then
     volume="$restore_volume"
     backup_mode=0
     start
+    metrics 1
     test "$(curl -fsS -H 'Host: smoke.sites.localhost' "$endpoint/")" = sites-image-second-version
     client <<'SH'
 cd "$HOME"
@@ -191,5 +245,5 @@ SH
     echo 'Sites backup smoke passed: supervised capture/restart, encrypted Borg, fresh-client restore, original-credential clone/push and preserved sharing.'
 fi
 stop
-echo 'Sites image smoke passed: publishing, visibility, non-root serving, restart, replacement, cookie-secret persistence and SIGINT shutdown.'
+echo 'Sites image smoke passed: publishing, authenticated usage metrics, visibility, non-root serving, restart, replacement, cookie-secret persistence and SIGINT shutdown.'
 completed=1
