@@ -1,58 +1,35 @@
-import {
-  ExternalLinkIcon,
-  Layers3Icon,
-} from "lucide-react";
+import headingStyles from "@/styles/agent-page-heading.module.css";
+import { Layers3Icon } from "lucide-react";
 
 import { SkillsCatalogBrowser } from "@/components/skills-catalog-browser";
 import { loadBaselineSkillsCatalog } from "@/lib/skills-catalog";
+import { loadDashboardMachineAccess } from "@/lib/dashboard-machine-access";
 
 export const dynamic = "force-dynamic";
 
-export default async function SkillsDashboardPage() {
+export default async function SkillsDashboardPage({ searchParams }: {
+  searchParams: Promise<{ machine?: string | string[] }>;
+}) {
+  const { machine } = await searchParams;
+  const machineId = typeof machine === "string" ? machine : undefined;
+  const access = machineId ? await loadDashboardMachineAccess(machineId, { coreCacheMode: "swr" }) : null;
   const model = await loadBaselineSkillsCatalog().catch((error) => {
     console.error("[skills] failed to load skills catalog", error);
     return null;
   });
 
   return (
-    <div className="ocean-page-stack">
-      <section className="ocean-page-hero">
-        <div className="ocean-page-hero__main">
-          <span className="ocean-page-hero__icon">
-            <Layers3Icon className="size-5" />
-          </span>
-          <div>
-            <h1 className="ocean-page-hero__title">Skills</h1>
-            <p className="ocean-page-hero__description">Shared baseline skills available to every machine.</p>
-          </div>
-        </div>
-
-        <div className="ocean-metric-grid">
-          <div className="ocean-metric">
-            <span>{model?.totalSkillCount ?? "..."}</span>
-            <small>Skills</small>
-          </div>
-          <div className="ocean-metric">
-            <span>{model?.categoryCount ?? "..."}</span>
-            <small>Categories</small>
-          </div>
-          <a
-            href="https://hermes-agent.nousresearch.com/docs/user-guide/features/skills/"
-            target="_blank"
-            rel="noreferrer"
-            className="ocean-metric ocean-metric--link"
-          >
-            <span>Docs</span>
-            <small>
-              Hermes
-              <ExternalLinkIcon className="size-3.5" />
-            </small>
-          </a>
-        </div>
-      </section>
+    <div className={`ocean-page-stack ${headingStyles.page}`}>
+      {!model && <header className={`${headingStyles.stack} mb-2`}>
+        <h1 className={headingStyles.title}>Skills</h1>
+        <p className={headingStyles.subtitle}>Skills are currently unavailable.</p>
+      </header>}
 
       {model ? (
-        <SkillsCatalogBrowser skills={model.skills} />
+        <SkillsCatalogBrowser
+          skills={model.skills}
+          summary={`${model.totalSkillCount} ${model.totalSkillCount === 1 ? "skill" : "skills"} available to ${access?.displayName ?? "your agent"}.`}
+        />
       ) : (
         <section className="ocean-utility-card">
           <div className="ocean-utility-card__header">
