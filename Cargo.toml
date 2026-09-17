@@ -2,6 +2,7 @@
 resolver = "2"
 members = [
     "devfinity",
+    "tools/source-structure",
     "finite-agentd",
     "finite-brain/crates/finite-brain-app",
     "finite-brain/crates/finite-brain-cli",

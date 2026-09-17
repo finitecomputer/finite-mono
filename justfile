@@ -22,6 +22,11 @@ default:
 check:
     cargo check --workspace --locked
 
+# Checks bounded Core files, Rust module/struct structure, and short agent guides.
+source-structure-check:
+    cargo test --locked -p source-structure
+    cargo run --quiet --locked -p source-structure
+
 # Formats all rust code
 fmt:
     cargo fmt --all

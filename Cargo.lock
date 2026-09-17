@@ -3890,6 +3890,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "source-structure"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "proc-macro2",
+ "serde",
+ "serde_json",
+ "syn",
+ "tempfile",
+]
+
+[[package]]
 name = "spin"
 version = "0.9.8"
 source = "registry+https://github.com/rust-lang/crates.io-index"
