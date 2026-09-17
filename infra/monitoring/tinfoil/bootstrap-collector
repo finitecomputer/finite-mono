@@ -40,6 +40,8 @@ files=(/opt/finite-monitoring/bin/tinfoil /opt/finite-monitoring/bin/jq /opt/fin
 for unit in "${units[@]}"; do files+=("/etc/systemd/system/$unit"); done
 backup="$(mktemp -d /var/backups/finite-tinfoil-bootstrap.XXXXXX)"
 chmod 0700 "$backup"
+cp infra/monitoring/ubuntu/versions.env "$backup/candidate-versions.env"
+sha256sum infra/monitoring/tinfoil/tinfoil-usage-collector > "$backup/candidate-collector.sha256"
 for file in "${files[@]}"; do
   [[ ! -L "$file" ]] || { echo "refusing symlink $file" >&2; exit 65; }
   if [[ -e "$file" ]]; then

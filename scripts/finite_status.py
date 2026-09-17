@@ -2840,7 +2840,8 @@ def parse_args(arguments: list[str]) -> argparse.Namespace:
     )
     mode = parser.add_mutually_exclusive_group()
     mode.add_argument(
-        "--tinfoil", action="store_true",
+        "--tinfoil",
+        action="store_true",
         help="read Tinfoil Prometheus evidence locally on the monitoring host",
     )
     mode.add_argument(
