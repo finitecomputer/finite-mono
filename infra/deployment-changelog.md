@@ -72,9 +72,10 @@ the sources above cannot carry lands here.
   outside git.
 - Dashboard requester binding fix #933 is deployed as image
   `sha256:341d735caaed58ff5a6c722201db4f32f2e93566d9b5baa5927e25c45d343c05`
-  in lat2 closure `sy2rz30sf0fygkh7rh38m5dh2j8f6sgs`. Existing private-site
-  viewing passed with the signed-in account and anonymous requests returned
-  401. Automatic requester access on a new Chat publish remains unqualified:
+  in lat2 closure `sy2rz30sf0fygkh7rh38m5dh2j8f6sgs`. A real Chat update
+  advanced an existing private test site from version 1 to 2; the signed-in
+  browser displayed the new content and anonymous requests returned 401.
+  Automatic requester access on a new Chat publish remains unqualified:
   the live Agent terminal did not receive its requester lease. The open
   verification is retained in the deployment queue.
 - `scripts/finite-status` reports healthy Chat, recovery and production runner
