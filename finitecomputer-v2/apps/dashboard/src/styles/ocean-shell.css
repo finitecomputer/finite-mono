@@ -2612,10 +2612,15 @@ button.ocean-pill-button {
   scrollbar-color: color-mix(in srgb, var(--text-secondary), transparent 42%) transparent;
 }
 
-.finite-chat__scroll:has(> .finite-chat__empty.finite-chat__empty--solo) {
+.finite-chat__scroll:has(> .finite-chat__empty.finite-chat__empty--solo),
+.finite-chat__scroll:has(> .finite-chat__loading) {
   display: flex;
   align-items: center;
   justify-content: center;
+}
+
+.finite-chat__scroll > .finite-chat__loading {
+  margin: 24px;
 }
 
 .finite-chat__scroll::-webkit-scrollbar,
@@ -2812,6 +2817,88 @@ button.ocean-pill-button {
   color: var(--text-primary);
   padding: 12px 14px;
   text-align: left;
+}
+
+.finite-chat__loading {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  margin: 52px 24px 0;
+  color: var(--text-muted);
+  font-size: 13px;
+  line-height: 1.5;
+}
+
+.finite-chat__loading svg {
+  width: 14px;
+  height: 14px;
+  flex: none;
+}
+
+.finite-chat__loading .finite-chat__loading-wheel {
+  animation-timing-function: steps(8);
+  animation-duration: 1s;
+}
+
+.finite-chat__loading-copy {
+  display: grid;
+  text-align: left;
+}
+
+.finite-chat__loading-copy > span {
+  grid-area: 1 / 1;
+  white-space: pre-wrap;
+  --loading-text-base: color-mix(in srgb, var(--text-muted) 82%, black);
+  background: linear-gradient(
+    100deg,
+    var(--loading-text-base) 0%,
+    color-mix(in srgb, var(--loading-text-base) 65%, white) 25%,
+    color-mix(in srgb, var(--text-primary) 15%, white) 50%,
+    color-mix(in srgb, var(--loading-text-base) 65%, white) 75%,
+    var(--loading-text-base) 100%
+  );
+  background-size: 200% 100%;
+  background-clip: text;
+  -webkit-background-clip: text;
+  color: transparent;
+  animation: chat-loader-shimmer 2.4s linear infinite;
+}
+
+@keyframes chat-loader-shimmer {
+  from { background-position: 100% 0; }
+  to { background-position: -100% 0; }
+}
+
+.finite-chat__loading-measure {
+  visibility: hidden;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .finite-chat__loading-measure {
+    visibility: visible;
+  }
+
+  .finite-chat__loading-typed {
+    visibility: hidden;
+  }
+
+  .finite-chat__loading .finite-chat__spin {
+    animation: none;
+  }
+
+  .finite-chat__loading-copy > span {
+    animation: none;
+    background: none;
+    color: var(--text-muted);
+  }
+}
+
+@media (forced-colors: active) {
+  .finite-chat__loading-copy > span {
+    background: none;
+    color: CanvasText;
+  }
 }
 
 .finite-chat__notice.is-error {
