@@ -5,10 +5,14 @@ export type AgentSkill = { name: string; description: string; category: string; 
 /** Project only display metadata. Native paths, content, usage and provenance
  * are not part of this page's contract. Reject malformed/partial inventories. */
 export function parseAgentSkills(value: unknown): AgentSkill[] {
+  if (!value || typeof value !== "object" || !("inventory_version" in value) || value.inventory_version !== 1) {
+    throw new HostedHermesStatusError("This agent needs a Skills listing update before its inventory can be shown.", "unsupported");
+  }
+  const entries = "skills" in value ? value.skills : undefined;
   const invalid = () => new HostedHermesStatusError("The agent returned an unexpected skills list. Try refreshing.");
-  if (!Array.isArray(value) || value.length > 4000) throw invalid();
+  if (!Array.isArray(entries) || entries.length > 4000) throw invalid();
   const names = new Set<string>();
-  return value.map((entry: unknown) => {
+  return entries.map((entry: unknown) => {
     if (!entry || typeof entry !== "object") throw invalid();
     const skill = entry as Record<string, unknown>;
     if (
@@ -44,5 +48,5 @@ export function groupAgentSkills(skills: readonly AgentSkill[], query: string) {
 }
 
 export async function readAgentSkills(runtimeId: string, signal: AbortSignal) {
-  return parseAgentSkills(await readHostedHermesJson(runtimeId, "api/skills", signal));
+  return parseAgentSkills(await readHostedHermesJson(runtimeId, "api/skills?inventory=true", signal));
 }

@@ -85,7 +85,7 @@ export async function changeHostedHermesAccess(access: HostedHermesAccess, enabl
  * call. A caller changing accounts/agents aborts its signal; no shared browser
  * token cache can carry authorization across that switch. */
 export async function readHostedHermesJson(runtimeId: string, path: string, signal: AbortSignal): Promise<unknown> {
-  if (!/^api\/[a-zA-Z0-9_/-]+$/.test(path) || path.includes("//")) {
+  if (path !== "api/skills?inventory=true" && (!/^api\/[a-zA-Z0-9_/-]+$/.test(path) || path.includes("//"))) {
     throw new HostedHermesStatusError("Invalid agent API path.");
   }
   return bounded(signal, async (requestSignal) => {

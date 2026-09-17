@@ -39,6 +39,7 @@ test("agent Skills loads independently of Chat, refreshes manually, and clears p
     page.on("pageerror", error => errors.push(error.message));
     let ownerStatus = 200;
     let nativeStatus = 200;
+    let legacyResponse = false;
     let nativeReads = 0;
     const ownerMethods: string[] = [];
     let data = [
@@ -61,19 +62,19 @@ test("agent Skills loads independently of Chat, refreshes manually, and clears p
     await page.route("https://skills.fixture.test/**", async route => {
       if (route.request().method() === "OPTIONS") { await fulfill(route, 200, {}); return; }
       nativeReads++;
-      assert(route.request().url().endsWith("/api/skills"));
+      assert(route.request().url().endsWith("/api/skills?inventory=true"));
       assert.equal(route.request().method(), "GET");
       assert.equal(route.request().headers().authorization, "Bearer synthetic-browser-test");
       assert.equal(route.request().headers().cookie, undefined);
       if (holdNext) {
         holdNext = false; held = true;
         await new Promise<void>(resolve => { releaseHeld = resolve; });
-        await fulfill(route, 200, [{ name: "old-agent-secret", description: "Late response", category: null, enabled: true }]).catch(() => {});
+        await fulfill(route, 200, { inventory_version: 1, skills: [{ name: "old-agent-secret", description: "Late response", category: null, enabled: true }] }).catch(() => {});
         return;
       }
       const records = route.request().url().includes("runtime_web_design_second")
         ? [{ name: "fern-only", description: "Second agent", category: null, enabled: true }] : data;
-      await fulfill(route, nativeStatus, nativeStatus === 200 ? records : { error: "private diagnostics" });
+      await fulfill(route, nativeStatus, nativeStatus === 200 ? (legacyResponse ? records : { inventory_version: 1, skills: records }) : { error: "private diagnostics" });
     });
     await page.goto(`${base}/dashboard/skills?machine=runtime_web_design`);
     await page.getByText("3 skills discovered for Moss.", { exact: true }).waitFor();
@@ -106,7 +107,11 @@ test("agent Skills loads independently of Chat, refreshes manually, and clears p
     ownerStatus = 200; nativeStatus = 404;
     await refresh.click();
     await page.getByRole("alert").filter({ hasText: "does not support" }).waitFor();
-    nativeStatus = 200; data = [];
+    nativeStatus = 200; legacyResponse = true;
+    await refresh.click();
+    await page.getByRole("alert").filter({ hasText: "needs a Skills listing update" }).waitFor();
+    assert.equal(await page.locator("main article").count(), 0);
+    legacyResponse = false; data = [];
     await refresh.click();
     await page.getByText("No skills were discovered for Moss.", { exact: true }).waitFor();
     holdNext = true;

@@ -1,7 +1,9 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { groupAgentSkills, parseAgentSkills, readAgentSkills } from "./agent-skills";
+import { groupAgentSkills, parseAgentSkills as parseInventory, readAgentSkills } from "./agent-skills";
 import { HostedHermesStatusError } from "./hosted-hermes-status";
+
+const parseAgentSkills = (skills: unknown) => parseInventory({ inventory_version: 1, skills });
 
 const entry = { name: "zulu", description: "Research papers", category: "research", enabled: true };
 
@@ -33,10 +35,10 @@ test("skills uses only the fixed native read after an owner grant", async (t) =>
     calls.push({ url: String(url), method: init.method });
     return calls.length === 1
       ? Response.json({ baseUrl: "https://agent.test/a/", accessToken: "synthetic", expiresAt: 100 })
-      : Response.json([entry]);
+      : Response.json({ inventory_version: 1, skills: [entry] });
   });
   assert.deepEqual(await readAgentSkills("a", new AbortController().signal), [entry]);
-  assert.deepEqual(calls, [{ url: "/api/agents/a/hermes-access", method: "POST" }, { url: "https://agent.test/a/api/skills", method: undefined }]);
+  assert.deepEqual(calls, [{ url: "/api/agents/a/hermes-access", method: "POST" }, { url: "https://agent.test/a/api/skills?inventory=true", method: undefined }]);
 });
 
 test("access loss and unsupported endpoints are distinguishable from transient failures", async (t) => {
@@ -68,7 +70,13 @@ test("a late native body cannot survive agent-switch cancellation", async (t) =>
   t.mock.method(globalThis, "fetch", async () => {
     if (++calls === 1) return Response.json({ baseUrl: "https://agent.test/a/", accessToken: "synthetic", expiresAt: 100 });
     controller.abort();
-    return Response.json([entry]);
+    return Response.json({ inventory_version: 1, skills: [entry] });
   });
   await assert.rejects(readAgentSkills("a", controller.signal));
+});
+
+test("older runtimes cannot silently return an incomplete legacy list", () => {
+  for (const response of [[], [entry], {}, { inventory_version: 2, skills: [entry] }]) {
+    assert.throws(() => parseInventory(response), (error: unknown) => error instanceof HostedHermesStatusError && error.kind === "unsupported");
+  }
 });

@@ -40,7 +40,7 @@ Out of scope for v2:
 
 The canonical Runtime image bundles one tested Finite Skills baseline and copies
 it once when a fresh agent initializes. The Skills page reads the selected
-agent's `GET /api/skills` through the shared Core-authorized Hermes session.
+agent's `GET /api/skills?inventory=true` through the shared Core-authorized Hermes session.
 It reads only the configured Hermes home/profile, on entry, agent change and
 manual Refresh. It does not invoke inference, sync skills, enable hosted access,
 or create a Core inventory/desired-state store. The enclosing agent sidebar
@@ -53,14 +53,21 @@ the view and abort previous reads. The helper bounds requests to 15 seconds and
 1 MiB, uses operation-local credentials, and retries native expiry once.
 Dashboard rollback requires no data migration.
 
-FIN-87 release gate: the pinned Hermes `29112bef` REST route includes disabled
-local/external skills but omits plugin metadata that its tool listing includes.
-Do not call this complete inventory coverage or close FIN-87 until a bounded
-native listing correction is tested and included in an appropriate FIN-57
-runtime release. Preserve existing native dashboard consumers, including their
-edit/toggle behavior for local versus plugin skills. Recheck the deployed
-candidate; the prior 100-skill canary response proves authenticated access only.
-No separate transport or Skills-only fleet rollout is required.
+The canonical Hermes package applies a narrow patch to the pinned `29112bef`
+route: opt-in inventory reads return `{inventory_version: 1, skills: [...]}`
+with local/external and registered plugin metadata. The default route remains
+unchanged for Hermes's existing editor/toggle UI. Older runtimes return the
+legacy array; Finite shows an update-required state instead of a partial list.
+The inventory invokes idempotent native plugin discovery, never forced reload.
+Local/external edits follow Hermes's bounded scan cache; plugin metadata follows
+the native registration lifecycle and requires the usual plugin reload/restart
+after registration changes. Refresh does not reload tools or hooks.
+
+FIN-87 remains gated on an appropriate FIN-57 runtime release and a signed-in
+check of that deployed candidate. The prior 100-skill canary response proves
+authenticated access only. Package contract tests cover authentication, legacy
+list/toggle compatibility, profile isolation, plugin inclusion/filtering and
+local refresh. No separate transport or Skills-only fleet rollout is required.
 
 Existing agents update at their own pace through the explicit
 `finite skills sync` command. This page does not poll, push, schedule, or report
