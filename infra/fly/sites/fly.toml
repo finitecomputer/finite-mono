@@ -9,9 +9,9 @@ kill_signal = "SIGINT"
 kill_timeout = 120
 
 [build]
-  # 91928989fdfe16e5c5b92968d353d4935c67e482; includes Git recovery fix #909.
-  # https://github.com/finitecomputer/finite-mono/actions/runs/35059052591
-  image = "ghcr.io/finitecomputer/finite-sites@sha256:61365f5c79a035bf72cf23c083c9b3f73a086a2b1414bd00ead922f068c0b665"
+  # 50fe66794bc9b626e0ebd350f149a6f75e774055; authenticated usage metrics + backup/restore qualified.
+  # https://github.com/finitecomputer/finite-mono/actions/runs/35282731405
+  image = "ghcr.io/finitecomputer/finite-sites@sha256:416fad616a26ddc43707ef3871541d584cb77b64f51c8f72bc1e315bb0406b41"
 
 [deploy]
   strategy = "rolling"
