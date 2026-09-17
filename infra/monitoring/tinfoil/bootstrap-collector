@@ -1,0 +1,109 @@
+#!/usr/bin/env bash
+# Operator-only monitoring bootstrap from the reviewed source bundle.
+# Changes only the Tinfoil collector, its pinned tools, and its scrape job.
+set -euo pipefail
+[[ $EUID == 0 ]] || { echo 'run as root on the monitoring host' >&2; exit 64; }
+ROOT="$(cd "$(dirname "$0")/../../.." && pwd)"
+cd "$ROOT"
+source infra/monitoring/ubuntu/versions.env
+exec 9>/run/lock/finite-monitoring-dashboards.lock
+flock -n 9
+[[ $(uname -m) == x86_64 ]]
+test -s /etc/finite/monitoring/tinfoil.env
+id finite-monitoring >/dev/null
+systemctl is-active --quiet finite-monitoring-prometheus.service
+# Refuse unrelated Prometheus drift. The only allowed delta is our scrape job.
+python3 - <<'PY'
+from pathlib import Path
+source = Path('infra/monitoring/ubuntu/prometheus.yml').read_bytes()
+live = Path('/etc/finite/monitoring/prometheus.yml').read_bytes()
+marker = b'\n  - job_name: finite-tinfoil-collector\n'
+assert source.count(marker) == 1, 'unexpected source scrape layout'
+assert live in (source, source.split(marker)[0] + b'\n', source.split(marker)[0]), 'unrelated Prometheus drift; reconcile before bootstrap'
+PY
+staging="$(mktemp -d /tmp/finite-tinfoil-bootstrap.XXXXXX)"
+trap 'rm -rf "$staging"' EXIT
+fetch() {
+  curl -fsSL --retry 3 --max-time 120 "$2" -o "$staging/$1"
+  printf '%s  %s\n' "$3" "$staging/$1" | sha256sum -c - >/dev/null
+}
+fetch tinfoil.tar.gz "$TINFOIL_CLI_URL" "$TINFOIL_CLI_SHA256"
+fetch exporter.tar.gz "$NODE_EXPORTER_URL" "$NODE_EXPORTER_SHA256"
+fetch jq "$JQ_URL" "$JQ_SHA256"
+mkdir "$staging/tinfoil" "$staging/exporter"
+tar -xzf "$staging/tinfoil.tar.gz" -C "$staging/tinfoil"
+tar -xzf "$staging/exporter.tar.gz" -C "$staging/exporter"
+test -f "$staging/tinfoil/tinfoil"
+test -f "$staging/exporter/node_exporter-$NODE_EXPORTER_VERSION.linux-amd64/node_exporter"
+units=(finite-monitoring-tinfoil-collector.timer finite-monitoring-tinfoil-collector.service finite-monitoring-node-exporter.service)
+files=(/opt/finite-monitoring/bin/tinfoil /opt/finite-monitoring/bin/jq /opt/finite-monitoring/bin/node_exporter /opt/finite-monitoring/bin/tinfoil-usage-collector /etc/finite/monitoring/prometheus.yml /var/lib/finite-monitoring/tinfoil/textfile/tinfoil.prom)
+for unit in "${units[@]}"; do files+=("/etc/systemd/system/$unit"); done
+backup="$(mktemp -d /var/backups/finite-tinfoil-bootstrap.XXXXXX)"
+chmod 0700 "$backup"
+for file in "${files[@]}"; do
+  [[ ! -L "$file" ]] || { echo "refusing symlink $file" >&2; exit 65; }
+  if [[ -e "$file" ]]; then
+    mkdir -p "$backup$(dirname "$file")"
+    cp -p "$file" "$backup$file"
+  fi
+  printf '%s\n' "$file" >> "$backup/files"
+done
+for unit in "${units[@]}"; do
+  systemctl is-active "$unit" > "$backup/$unit.active" || true
+  systemctl is-enabled "$unit" > "$backup/$unit.enabled" || true
+done
+# Store an executable, exact-file rollback receipt. It never touches secrets,
+# Prometheus history, Grafana data, or inference services.
+cat > "$backup/rollback" <<'ROLLBACK'
+#!/usr/bin/env bash
+set -euo pipefail
+backup="$(cd "$(dirname "$0")" && pwd)"
+exec 9>/run/lock/finite-monitoring-dashboards.lock
+flock 9
+units=(finite-monitoring-tinfoil-collector.timer finite-monitoring-tinfoil-collector.service finite-monitoring-node-exporter.service)
+systemctl stop "${units[@]}" || true
+systemctl disable finite-monitoring-tinfoil-collector.timer finite-monitoring-node-exporter.service || true
+while IFS= read -r file; do
+  if [[ -f "$backup$file" ]]; then cp -p "$backup$file" "$file"; else rm -f "$file"; fi
+done < "$backup/files"
+systemctl daemon-reload
+for unit in "${units[@]}"; do
+  if grep -qx enabled "$backup/$unit.enabled"; then systemctl enable "$unit"; fi
+  if grep -qx active "$backup/$unit.active"; then systemctl start "$unit"; fi
+done
+systemctl kill --kill-whom=main --signal=HUP finite-monitoring-prometheus.service
+ROLLBACK
+chmod 0700 "$backup/rollback"
+python3 scripts/finite-status --tinfoil --json > "$backup/before.json" || true
+printf 'Rollback receipt: %s\n' "$backup"
+rollback_on_error() {
+  trap - ERR
+  # Release our lock so the standalone rollback can acquire it.
+  flock -u 9
+  "$backup/rollback" || echo "Automatic rollback failed; inspect $backup" >&2
+  exit 1
+}
+trap rollback_on_error ERR
+for unit in "${units[@]}"; do
+  if [[ $(systemctl show -p LoadState --value "$unit") != not-found ]]; then systemctl stop "$unit"; fi
+done
+install -d /opt/finite-monitoring/bin
+install -m 0755 "$staging/tinfoil/tinfoil" /opt/finite-monitoring/bin/tinfoil
+install -m 0755 "$staging/jq" /opt/finite-monitoring/bin/jq
+install -m 0755 "$staging/exporter/node_exporter-$NODE_EXPORTER_VERSION.linux-amd64/node_exporter" /opt/finite-monitoring/bin/node_exporter
+install -m 0755 infra/monitoring/tinfoil/tinfoil-usage-collector /opt/finite-monitoring/bin/tinfoil-usage-collector
+for unit in "${units[@]}"; do install -m 0644 "infra/monitoring/ubuntu/systemd/$unit" "/etc/systemd/system/$unit"; done
+install -d -o finite-monitoring -g finite-monitoring /var/lib/finite-monitoring/tinfoil /var/lib/finite-monitoring/tinfoil/textfile
+systemctl daemon-reload
+systemctl start finite-monitoring-tinfoil-collector.service
+systemctl enable --now finite-monitoring-node-exporter.service finite-monitoring-tinfoil-collector.timer
+install -m 0644 infra/monitoring/ubuntu/prometheus.yml /etc/finite/monitoring/prometheus.yml
+systemctl kill --kill-whom=main --signal=HUP finite-monitoring-prometheus.service
+ready=0
+for attempt in {1..20}; do
+  if python3 scripts/finite-status --tinfoil --json > "$backup/after.json"; then ready=1; break; fi
+  sleep 5
+done
+[[ $ready == 1 ]]
+trap - ERR
+printf 'Tinfoil collection verified. Rollback: %s/rollback\n' "$backup"

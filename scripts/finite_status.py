@@ -2840,6 +2840,10 @@ def parse_args(arguments: list[str]) -> argparse.Namespace:
     )
     mode = parser.add_mutually_exclusive_group()
     mode.add_argument(
+        "--tinfoil", action="store_true",
+        help="read Tinfoil Prometheus evidence locally on the monitoring host",
+    )
+    mode.add_argument(
         "--sites-backup-state",
         type=Path,
         help="read only a local Sites Borg backup receipt instead of fleet evidence",
@@ -2869,7 +2873,11 @@ def parse_args(arguments: list[str]) -> argparse.Namespace:
 def main(arguments: list[str] | None = None) -> None:
     options = parse_args(sys.argv[1:] if arguments is None else arguments)
     try:
-        if options.sites_backup_state:
+        if options.tinfoil:
+            from finite_tinfoil_status import collect
+
+            report = collect()
+        elif options.sites_backup_state:
             report = build_sites_backup_report(
                 options.sites_backup_state, utc_now(), options.sites_backup_max_age
             )
@@ -2896,7 +2904,7 @@ def main(arguments: list[str] | None = None) -> None:
                 "chat_plane": {"status": "unknown", "error": str(error)},
             },
         }
-    if options.json:
+    if options.json or options.tinfoil:
         print(json.dumps(report, indent=2, sort_keys=True))
     else:
         print(render_human(report))

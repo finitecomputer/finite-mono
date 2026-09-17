@@ -1,4 +1,5 @@
 {
   "finite-production-mvp.json": "finite-production-mvp",
-  "finite-agent-runtime-slots.json": "finite-agent-runtime-slots"
+  "finite-agent-runtime-slots.json": "finite-agent-runtime-slots",
+  "finite-tinfoil-gpu.json": "finite-tinfoil-gpu"
 }
