@@ -332,6 +332,51 @@ def check_hosted_canary() -> None:
         raise SystemExit("lat5 hosted ingress lost its Runner rollback gate")
     if not environment.get("FC_RUNNER_HOSTED_HERMES_CONFIG"):
         raise SystemExit("lat5 is missing its hosted ingress manifest")
+    proxy = json.loads(
+        nix_eval(host, "systemd.services.finite-hosted-hermes.serviceConfig")
+    )
+    proxy_expected = {
+        "Type": "notify",
+        "Restart": "no",
+        "KillMode": "control-group",
+        "SendSIGKILL": True,
+        "TimeoutStartSec": "10s",
+        "TimeoutStopSec": "5s",
+        "User": "root",
+        "Group": "root",
+        "UMask": "0077",
+        "StateDirectory": "finite-hosted-hermes",
+        "Environment": [
+            "HOME=/var/lib/finite-hosted-hermes",
+            "XDG_DATA_HOME=/var/lib/finite-hosted-hermes/data",
+            "XDG_CONFIG_HOME=/var/lib/finite-hosted-hermes/config",
+        ],
+    }
+    for key, value in proxy_expected.items():
+        if proxy.get(key) != value:
+            raise SystemExit(f"lat5 dedicated proxy lost its {key} boundary")
+    caddy = nix_eval(host, "services.caddy.package.outPath", raw=True)
+    if proxy.get("ExecStart") != (
+        f"{caddy}/bin/caddy run --config /run/finite-hosted-hermes/caddy.json"
+    ):
+        raise SystemExit("lat5 proxy must start from the fresh Runner projection")
+    if proxy.get("ExecReload"):
+        raise SystemExit("lat5 proxy must stop before address reuse, never reload")
+    for attribute in ("wantedBy", "requiredBy", "upheldBy"):
+        if json.loads(
+            nix_eval(host, f"systemd.services.finite-hosted-hermes.{attribute}")
+        ):
+            raise SystemExit(
+                f"lat5 proxy must not have automatic {attribute} activation"
+            )
+    sockets = json.loads(nix_eval(host, "systemd.sockets"))
+    if any(
+        name == "finite-hosted-hermes"
+        or socket.get("socketConfig", {}).get("Service")
+        == "finite-hosted-hermes.service"
+        for name, socket in sockets.items()
+    ):
+        raise SystemExit("lat5 proxy must not use socket activation")
     if (
         environment.get("FC_RUNNER_RUNTIME_CORE_URL")
         != "https://runtime-api.finite.computer"
