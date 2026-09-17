@@ -45,7 +45,7 @@ Implementation shape:
 - `fsite project status` should show Project Visibility so agents can explain
   why a clone does or does not need credentials.
 - Release automation publishes exact promoted revisions from the monorepo to
-  `https://git.finite.chat/finite-skills.git`. Runtimes fetch only an immutable
+  `https://finite.site/finite-skills.git`. Runtimes fetch only an immutable
   revision selected by Core and verify its manifest/digest; they never follow
   `main` or treat the mirror as writable source.
 - Private managed skills for hosted runtimes can later use Core-granted read

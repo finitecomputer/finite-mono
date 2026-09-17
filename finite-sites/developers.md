@@ -98,8 +98,7 @@ open http://finitechat-native-mockup.sites.localhost:8787/
 ```
 
 The name form of `fsite view` resolves through the configured API for Projects
-owned by the local Finite identity. Never infer a `finite.chat` URL from a
-local slug; use the server-returned site URL.
+owned by the local Finite identity. Use the server-returned site URL rather than inferring a host from a local slug.
 
 `*.sites.localhost` resolves to loopback in modern browsers. For curl, pass a
 Host header against `127.0.0.1:8787`.
@@ -155,7 +154,7 @@ persistent volume. It owns the control-plane API, Git smart HTTP, and wildcard
 site serving. Publishing changes registry, blob, and Git state.
 
 Use the [Sites runbook](../infra/runbooks/deploy-sites.md) for deployment,
-verification and cutover. The live legacy NixOS service remains until cutover.
+verification, backup, recovery, and content redirect maintenance.
 
 Important production rule: use `fsite` for agent-facing publishing and editor
 handoff. Do not bypass it with raw Nostr events, direct registry writes, DNS
@@ -188,10 +187,9 @@ cargo build --locked --release --workspace
 - `AGENTS.md`: prompting contract and repo commands.
 - `docs/engineering-style.md`: engineering rules and test shape.
 - `docs/adr/`: decisions and alternatives.
-- `docs/roadmap.md`: current target and retired out-of-scope paths.
 - `docs/bare-repos-and-skills-hosting.md`: source-only Project Repository
   requirements and public-read policy for finitecomputer-managed skills.
-- `docs/technical-debt-ledger.md`: accepted shortcuts with delete conditions.
+- `docs/technical-debt-ledger.md`: links to outstanding work in Linear.
 - `../finite-skills/skills/software-development/finite-sites-publishing-finite/SKILL.md`:
   canonical managed agent skill for publishing. Finite Sites owns the API and
   CLI contract; `finite-skills` is the only editable deployed skill source.

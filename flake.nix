@@ -266,7 +266,7 @@
         let
           # Same pin as hermes-agent so toolchain ELFs share that glibc.
           hermesPkgs = import hermes-nixpkgs { inherit system; };
-          # Sites v2 cutover candidate, built with the Runtime's libc family.
+          # Sites CLI, built with the Runtime's libc family.
           runtimeFinitePackages = import ./infra/nixos/packages.nix {
             pkgs = hermesPkgs;
             craneLib = crane.mkLib hermesPkgs;

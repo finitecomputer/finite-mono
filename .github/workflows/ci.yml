@@ -511,8 +511,6 @@ jobs:
         run: nix develop --command just sites-backup-contract
       - name: Sites content redirect contract
         run: nix shell --inputs-from . nixpkgs#caddy --command python3 scripts/tests/test_sites_redirects.py
-      - name: Sites offline reconciliation contract
-        run: nix develop --command just sites-offline-reconciliation-contract
       - name: Litestream recovery contract
         run: nix develop --command just litestream-recovery-contract
       - name: lat1 secret bootstrap contract

@@ -1,54 +1,54 @@
-# ADR 0027: Daemon-local email proofs, no runtime Identity Authority
+# ADR 0027: Daemon-local email proofs and Sites authorization
 
 ## Status
 
-Accepted. Supersedes the Identity-Authority coupling in ADR 0020 (email
-challenge/redeem via finite-identity, `satisfies-grant` consult in git-auth)
-and the "fresh Identity Email Challenge" proof source in ADR 0026. Follows the
-auth kernel (`docs/auth-kernel.md`): a product may only ever check a request
-against its own tables, and email is how a capability reaches a human — never
-an identity.
+Accepted. Email proofs and authorization are owned by Sites. Requests are
+authorized against Sites state; directory identity is not permission authority.
 
-## Decision
+## Mailbox proofs and keys
 
-All email proofs for Finite Sites are daemon-local. finitesitesd issues and
-redeems its own 15-minute, single-use, hash-stored tokens
-(`email_login_tokens`, delivered by the configured local `Mailer`) and never
-calls another service at request time:
+`finitesitesd` issues 15-minute, single-use, hash-stored email challenge tokens
+in `email_login_tokens`, delivered by its configured `Mailer`.
 
-- `fsite auth login` / `auth link-email` / `auth sites-key request` ask
-  finitesitesd (`POST /api/v1/email-auth/request`) for the challenge; the
-  token arrives by email from Sites' own mailer.
-- `fsite auth redeem` redeems at finitesitesd
-  (`POST /api/v1/email-auth/redeem`), which records the mailbox-scoped Email
-  Key and, when the signer is a registered native Principal, the Email Link.
-- Sites Authorized Key register/revoke carry `{email, token}` directly and
-  consume the daemon-local proof atomically with the mutation. The
-  Identity-issued Mailbox Proof exchange is gone.
-- Git-auth satisfies an email grant only from local rows: an active Email
-  Link (`principal_email_links`) lets the linked native key mint a scoped
-  credential via the verified-email path; Sites Authorized Keys and Email
-  Keys keep their existing behavior; a revoked key record remains a
-  tombstone that fails closed.
-- The `first_publication` courtesy email and site access-request email are
-  delivered by the local mailer. The identity notification relay
-  (`IdentityNotifier`, `FINITE_IDENTITY_SITES_NOTIFICATION_TOKEN`) is
-  removed; the `site_notification_outbox` drain is unchanged.
-- The only remaining finite-identity call anywhere in Sites is NIP-05 name
-  resolution (the directory). `finitesitesd serve` no longer reads
-  `FINITE_IDENTITY_AUTHORITY` or `--identity-authority-url`. The operator-only
-  `reconcile-identity` command named here as the one exception was a completed
-  one-shot migration and has since been removed (technical-debt ledger item
-  13); its Core cross-check endpoint no longer exists.
+- `fsite auth login`, `auth link-email` and `auth sites-key request` request
+  challenges at `POST /api/v2/email-auth/request`.
+- `fsite auth redeem` redeems at `POST /api/v2/email-auth/redeem`, recording the
+  mailbox-scoped Email Key and, when explicitly requested for a registered
+  native Principal, an Email Link.
+- Sites Authorized Key registration/revocation carries `{email, token}` and
+  consumes the local proof atomically with the mutation.
 
-## Consequences
+`sites_email_principals` records a durable Sites owner named by a verified
+mailbox. `sites_authorized_keys` records revocable native keys, proof provenance
+and revocation time. Projects and Sites retain their originating native
+publisher for audit and may additionally name a mailbox publisher. An active
+key may exercise that mailbox owner's Sites permissions.
 
-- A mailbox whose only proof lived at finite-identity (a VIP binding or
-  Identity-side Principal Link, with no Sites-local key or link) must be
-  re-proven once against the daemon; the emailed token is the same UX.
-- `fsite auth redeem --link-native` no longer binds `@finite.vip` names at
-  the Directory; name claiming is the Directory's own surface, not Sites'.
-- `fsite auth git --email` tries this Finite Home's native key first and
-  falls back to the mailbox-scoped Email Key on a 403, replacing the
-  CLI-side `satisfies-grant` key selection.
-- Deployments may keep exporting the old identity env vars; they are inert.
+Revoking one key leaves other keys, email/native shares, URLs, visibility,
+project collaborators and other Principals' Git credentials intact. A revoked
+key is a durable tombstone; automated evidence must never reactivate it. Only
+a fresh mailbox proof can do so. Ambiguous evidence fails closed.
+
+## Principal links and Git credentials
+
+An Email Link asserts that an email and native key identify the same Principal.
+It requires explicit proof, including `fsite auth redeem --link-native`; never
+link a human mailbox to an agent merely to grant that agent access. Authorized
+Sites Keys provide revocable product-scoped access without making identities
+equal and without granting Chat or Brain authority.
+
+Future email collaborator grants resolve through an active Email Link.
+Linking moves active email collaborator grants to the native Principal and
+revokes old email-scoped Git credentials; replay is idempotent. Git-auth checks
+local Email Links, Email Keys and Sites Authorized Keys. `fsite auth git --email`
+tries the Finite Home's native key first, then the mailbox-scoped Email Key on
+403. Private keys never leave the client's Finite Home.
+
+## Service dependencies
+
+Sites sends first-publication and access-request mail through its own mailer
+and durable notification outbox. The only finite-identity dependency is NIP-05
+directory lookup. Directory name claiming is independent of Sites email proofs.
+The account viewer exchange is defined in
+[ADR 0029](0029-account-session-viewer-bridge.md); authentication never creates
+a Share.
