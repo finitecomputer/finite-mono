@@ -90,6 +90,11 @@ and the workflow files themselves.
 
 ## Agent skills
 
+- **Engineering workflow:** Shared skills live in `.agents/skills/`:
+  `finite-grill`, `finite-spec`, `finite-tickets`, and `finite-triage`.
+  They use this guide for engineering constraints and the pointers below for
+  planning context. These are engineering tools, separate from the customer
+  Managed Skills Baseline in `finite-skills/skills`.
 - **Product authority:** Linear holds product plans, specifications, decisions,
   and outstanding work; code, tests, and executable configuration establish
   implemented behavior. Keep new planning in Linear instead of repo-local
