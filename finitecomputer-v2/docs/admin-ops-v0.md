@@ -122,17 +122,15 @@ claims fail closed. Administrator authorization never checks role slugs.
   once with a copy button and a one-time warning, and never writes it to a
   URL, cookie, or log.
 
-## Weekly Limits Are Future Work
+## Usage limits
 
-Weekly limits are computed from a rolling window over reservations, not from
-a stored counter. There is therefore no weekly reset lever in Admin Ops v0 —
-only the burst window reset, matching the `finite-private-window-reset` CLI.
-A weekly override/reset needs its own design (probably an explicit
-adjustment ledger over reservations) before it can exist anywhere.
+Weekly usage uses a rolling reservation window. Admin Ops exposes the burst
+window reset, not a weekly counter reset. TODO: weekly overrides are tracked
+with [inference accounting](https://linear.app/finitecomputer/issue/FIN-13).
 
-## Evaluation Design
+## Validation
 
-Admin Ops v0 is accepted when:
+Tests cover:
 
 - Core tests prove `require_admin_identity` rejects missing/invalid JWTs,
   unverified or unknown users, missing/different operator organizations, and
@@ -160,10 +158,3 @@ Admin Ops v0 is accepted when:
 - Gates pass: `cargo fmt --check`, `cargo clippy --workspace --all-targets
   -- -D warnings`, `just test`, and dashboard `npm ci`, `npm run lint`,
   `npm test`, `npm run build`.
-
-## Open Decisions
-
-- Whether Admin Ops should also expose stop/Runtime Retirement (the UI starts
-  with restart/recover only). Purge User Data is explicitly not a routine Admin
-  Ops control.
-- A designed weekly-limit override mechanism.

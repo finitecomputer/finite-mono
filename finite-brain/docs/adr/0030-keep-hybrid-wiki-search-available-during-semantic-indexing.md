@@ -2,8 +2,8 @@
 
 Status: accepted
 
-The Agent Sync Daemon will update lexical search automatically as Brain Working
-Tree content changes and will generate embeddings asynchronously for new or
+The Agent Sync Daemon updates lexical search automatically as Brain Working
+Tree content changes and generates embeddings asynchronously for new or
 changed Markdown Sections. `fbrain search` must never wait for semantic
 indexing: it returns BM25-ranked results while embeddings are missing, stale,
 or unavailable and automatically incorporates semantic results when they are

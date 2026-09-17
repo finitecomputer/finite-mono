@@ -3,7 +3,7 @@
 Status: accepted
 
 Removing a Mount Participant, revoking a Shared Folder Connection, and directly
-revoking Folder access will use one client-owned Folder Access Revocation
+revoking Folder access use one client-owned Folder Access Revocation
 workflow. The trusted client opens the current Folder Key, generates the next
 key, prepares grants for every remaining authorized identity, and submits the
 access removal, new key version, and replacement grants atomically. Users will

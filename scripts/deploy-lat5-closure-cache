@@ -2,7 +2,7 @@
 # Activate an exact CI-built finite-lat-5 closure without building on a
 # production host. Existing Kata sandboxes remain owned by containerd.
 # Only valid AFTER the host is installed per
-# infra/runbooks/lat5-nixos-runner-install.md Gate C.
+# infra/runbooks/install-host.md.
 set -euo pipefail
 
 LAT5="${FINITE_LAT5_TARGET:-root@64.34.93.213}"

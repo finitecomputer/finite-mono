@@ -4,7 +4,7 @@ set -euo pipefail
 # finite-lat-5 closure artifact, extended past the lat1/lat3 shape with the
 # two bare-metal install inputs: the disko partitioning script and the
 # same-pin kexec installer tarball. The install runbook
-# (infra/runbooks/lat5-nixos-runner-install.md) consumes only this artifact —
+# (infra/runbooks/install-host.md) consumes only this artifact —
 # nothing is built on the Mac, on a prod box, or inside rescue mode.
 
 system_target="nixosConfigurations.finite-lat-5.config.system.build.toplevel"

@@ -20,12 +20,7 @@ or a blob-provider abstraction in this version.
 The initial shape stays deliberately close to Open Knowledge Format by using
 its Markdown concept model and `type`, `title`, `resource`, and `description`
 vocabulary. This is an alignment choice, not a claim that FiniteBrain's current
-readable export conforms to a particular OKF version. Full OKF export
-conformance is neither required nor scheduled by this decision; future work may
-pursue it if interoperability demand justifies the additional rules.
-
-This supersedes ADR 0008's decision to place Asset bytes inline in encrypted
-Folder Objects. Its Markdown-first reasoning decision remains in force.
+readable export conforms to a particular OKF version. Full OKF export conformance is not claimed.
 
 ## Initial Product Scope
 
@@ -41,12 +36,6 @@ The new working-tree profile does not create or reserve `raw/assets/`, because
 no Asset bytes are materialized there. This is agent authoring guidance, not a
 special storage rule or path validator.
 
-The Product Client does not need an Asset uploader, Asset editor, attachment
-manager, special preview, or availability UI in this release. It may render an
-Asset Source Note as ordinary Markdown and let the existing link behavior
-handle its `resource`. The existing binary Asset ingestion behavior is outside
-the hard-cut surface rather than being silently converted into a reference.
-
 ## Consequences
 
 - Folder Access governs the Asset Source Note but does not by itself grant
@@ -60,5 +49,3 @@ the hard-cut surface rather than being silently converted into a reference.
   records rather than bulk binary content.
 - Readable OKF export preserves the Asset Source Note and its reference by
   default; it does not copy the Asset bytes into the bundle.
-- A future blob provider can supply a new kind of `resource` without changing
-  this Markdown-first contract or putting bulk bytes back into Folder Objects.

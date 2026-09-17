@@ -1,26 +1,14 @@
-# Documentation
+# Current contracts
 
-- [Service dependencies](service-dependencies.md): separate repos and services
-  that v2 deploys or integrates.
-- [Hermes runtime test matrix](hermes-runtime-test-matrix.md): local,
-  Docker, Kata, and Phala proof ladder for the real hosted-agent runtime.
-- [Runtime control contract](runtime-control-contract.md): generic
-  dashboard/Core lifecycle controls and Runner operations.
-- [Runtime Management Contract v1](runtime-management-contract-v1.md): the
-  narrow outbound Runtime→Core health/release telemetry boundary.
-- [Finite managed-skills delivery contract](../../finite-skills/docs/runtime-delivery-contract.md):
-  one editable source, fresh-agent bundled availability, future explicit
-  `finite skills sync`, and user-skill isolation.
-- [Runner Contract v1](runner-contract-v1.md): Core-selected placement,
-  provider-neutral lifecycle, Kata-first and Phala-fast-follow conformance.
-- [Runtime recovery and observability plan](runtime-recovery-and-observability-plan.md):
-  deferred Recovery Snapshot/key-backup TODOs plus startup reports,
-  recover-chat, rollback, Break-Glass Recovery, and logs policy.
-- [Identity Boundary v1](identity-boundary-v1.md): active separation of WorkOS
-  Account Auth, human Finite Chat identity, Devices, and per-agent Finite
-  Identity keys.
-- [Stripe billing runbook](../../infra/runbooks/stripe-billing.md): live Stripe
-  readiness, webhook/Core reconciliation, dunning, cancellation/refund, and
-  secret rotation.
-- [Current infrastructure](../../infra/README.md): deployed host roles,
-  production boundaries, and current deploy/runbook ownership.
+Code and tests define implemented behavior. Plans and outstanding work live in
+[Linear](https://linear.app/finitecomputer).
+
+- [Identity](identity-boundary-v1.md) and [account email operations](account-email-change.md)
+- [Runtime control](runtime-control-contract.md), [Runner](runner-contract-v1.md)
+  and [health telemetry](runtime-management-contract-v1.md)
+- [SimpleX connections](simplex-platform.md)
+- [Hosted Hermes ingress](hosted-hermes-ingress.md)
+- [Admin operations](admin-ops-v0.md)
+- [Service ownership](service-dependencies.md)
+- [Runtime test matrix](hermes-runtime-test-matrix.md)
+- [Production runbooks](../../infra/runbooks/README.md)

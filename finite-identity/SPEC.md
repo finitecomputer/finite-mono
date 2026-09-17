@@ -17,18 +17,11 @@ Finite Home: whichever Finite tool runs first mints the key; every other tool
 in that same home finds it. A human Finite Chat home and an Agent Runtime home
 are separate and never converge on one secret.
 
-## Non-goals (deliberate, progressive)
+## Current scope
 
-- v1 ships a single locally-stored secret. Frostr-based backup arrives as a
-  new `kind` in the same file (contract v2), and key rotation arrives on top
-  of Frostr. Nothing in v1 may foreclose that path, but "future v2" is not a
-  waiver for the first-slice recovery gate.
-- No OS keychain in v1: signing happens in hot loops (finitechat) and must be
-  non-interactive; ad-hoc-signed CLI binaries cannot use the macOS keychain
-  without prompts. A keychain-backed storage backend may become an optional
-  `kind` later.
-- No per-service derived keys in v1: all tools use the account key directly.
-  The file format reserves room for HKDF domain-separated derivation later.
+The shared file contains one locally stored secret per Finite Home. Signing
+is noninteractive; this format provides neither OS-keychain custody nor
+per-service derived keys. It is not a complete Recovery Set.
 
 ## Location: convention over configuration
 
@@ -110,6 +103,4 @@ otherwise a fresh identity is minted at first run.
 ## Owner
 
 This contract and the `finite-identity` crate own the shared Finite key file
-and the NIP-05 name Directory boundary. Future key kinds, backup, and
-rotation require new Finite Identity contract versions; they do not depend on
-the retired `finite-auth` experiment or imply a shared human-agent signer.
+and the NIP-05 name Directory boundary. Human and Agent Runtime homes must not share a signer.

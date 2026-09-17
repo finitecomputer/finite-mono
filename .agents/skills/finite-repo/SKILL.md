@@ -49,6 +49,10 @@ changing release behavior. Images are built in CI and pinned by digest.
 
 ## Finding context
 
+Repository docs describe current behavior, supported operations and retained
+contracts. Product plans and transition narratives belong in Linear; at most,
+leave a TODO linked to its issue. Do not add repo-local PRDs or work logs.
+
 `docs/agents/issue-tracker.md` defines product authority and issue conventions;
 `docs/agents/triage-labels.md` defines triage labels. Use
 `docs/agents/domain.md` for retained contracts and `CONTEXT-MAP.md` for owners.

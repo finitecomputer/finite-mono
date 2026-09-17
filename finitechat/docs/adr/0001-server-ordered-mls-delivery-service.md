@@ -48,5 +48,5 @@ Negative:
 
 - leaks more metadata to the room server than a relay-first design;
 - requires durable server storage;
-- federation and server migration become explicit future workflows;
+- federation is unsupported; moving a Room requires preserving its ordering authority;
 - total device loss still needs re-add or a separate encrypted backup system.

@@ -75,7 +75,7 @@ the 2026-08-18 wave proved unexercised lanes fail serially on deploy night.
   workflow, smoke lane passed, immutable digest promoted — local → Docker →
   Kata, never skipping a rung (README release-checklist discipline).
 - **Drift hygiene:** every finite-status drift exception is dispositioned
-  BEFORE the wave (named in the changelog entry or fixed). Archive retired /
+  BEFORE the wave (named in the private rollout evidence record or fixed). Archive retired /
   broken-off records at discovery time; a silent upsert reactivating a retired
   runtime's link cost three consecutive waves their `--roll-all` passes.
 - **Host/environment sanity:** builder has >50G free; `LimitNOFILE=65536`
@@ -93,11 +93,9 @@ the 2026-08-18 wave proved unexercised lanes fail serially on deploy night.
   dumps from containers or units (this has leaked a live credential before —
   redaction missed the key NAME, not the value). Sealed manifests are checked
   by SHA-256 only; greps near identity material stay pubkey-shaped.
-- **TODO(rehearsal, once):** before the FIRST wave that could realistically
-  need it, exercise `runtime_lifecycle_reverse_remap.sql` against a scratch
-  copy of production state and attach the transcript to the changelog entry.
-  Until that drill exists, treat STEP R2 as break-glass assisted by the
-  census tool, not routine.
+- Before using reverse remap, prove `runtime_lifecycle_reverse_remap.sql`
+  against a scratch copy of the relevant state. Without that evidence, STEP R2
+  is break-glass assisted by the census tool, not routine rollback.
 
 ## STEPS
 
@@ -105,7 +103,7 @@ the 2026-08-18 wave proved unexercised lanes fail serially on deploy night.
 
 Announce window start; one operator holds the mutation pen for the entire
 wave. Save `scripts/finite-status --json` (BEFORE artifact) with timestamp and
-rev. Open the changelog entry skeleton now so the record is filled in as-you-go,
+rev. Open the private rollout evidence record now so the record is filled in as-you-go,
 not reconstructed later.
 
 ### STEP 1 — Stage and apply runners (both hosts) — BEFORE Core
@@ -201,7 +199,7 @@ product probe. A layer is green only when both agree.
    hot loops after a "successful" switch have previously meant a boot loop or
    a thundering restart pile-up.
 9. **AFTER evidence + record:** save `finite-status --json` (AFTER), diff
-   against BEFORE into the changelog entry: what shipped, when the roll
+   against BEFORE into the private rollout evidence record: what shipped, when the roll
    finished, compatibility promises still owed, named exceptions. Close the
    wave only when the record is written.
 
@@ -249,4 +247,4 @@ before choosing a lever; multiple levers below compose in this order.
 
 Every rollback reruns the scaled-down VERIFY battery (closure identity,
 serving probes, one fresh-agent launch, one human round-trip) and appends the
-record to the changelog entry alongside the forward attempt.
+record to the private rollout evidence record alongside the forward attempt.

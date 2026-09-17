@@ -10,5 +10,5 @@ native `npub`. A Managed Agent NIP-05 is explicitly classified as
 non-deliverable, so passing it to `--email` fails before any challenge or
 product invite is created and points the caller to `--nip05`.
 
-Third-Party NIP-05 resolution remains future work. Third-party Mailbox
+Third-party NIP-05 resolution is unsupported. Third-party Mailbox
 Addresses remain valid invitation targets through `--email`.

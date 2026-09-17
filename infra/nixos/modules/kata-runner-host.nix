@@ -56,7 +56,7 @@ let
     # exceeds 30s, and the short timeout caused false upgrade failures.
     FC_RUNNER_KATA_STOP_TIMEOUT_SECS = "180";
     # Runtime Retirement stays disabled until its dedicated, restricted Borg
-    # namespace passes the gates in docs/runs/runtime-retirement-readiness.md.
+    # namespace passes the gates in finitecomputer-v2/docs/runtime-control-contract.md.
     FC_RUNNER_KATA_RETIREMENT_ENABLED = "false";
 
     FC_RUNNER_FINITE_PRIVATE_BASE_URL = "https://finite-private.finite.containers.tinfoil.dev/v1";
