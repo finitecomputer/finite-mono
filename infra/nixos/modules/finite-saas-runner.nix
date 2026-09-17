@@ -9,7 +9,7 @@
   ...
 }:
 {
-  imports = [ ./kata-host-runtime.nix ];
+  imports = [ ./kata-host-runtime.nix ./hosted-hermes.nix ];
 
   # Marker for cross-module wiring: finite-identity attaches runner startup
   # dependencies only where this module is imported. Without it, runnerless

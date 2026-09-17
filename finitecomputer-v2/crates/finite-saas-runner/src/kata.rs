@@ -142,6 +142,8 @@ pub struct KataConfig {
     /// Runner treats it as having no live writer.
     pub durable_tree_quiescence_window: Duration,
     pub retirement: Option<KataRetirementConfig>,
+    pub hosted_hermes:
+        Option<std::sync::Arc<crate::hosted_hermes_lifecycle::HostedHermesLifecycle>>,
 }
 
 impl Default for KataConfig {
@@ -178,6 +180,7 @@ impl Default for KataConfig {
             stop_timeout_secs: 180,
             durable_tree_quiescence_window: DEFAULT_DURABLE_TREE_QUIESCENCE_WINDOW,
             retirement: None,
+            hosted_hermes: None,
         }
     }
 }
@@ -482,6 +485,21 @@ impl KataLauncher {
     }
 
     fn execute(&self, command: &PlannedCommand, timeout: Duration) -> Result<Output, RunnerError> {
+        if let Some(hosted) = &self.config.hosted_hermes
+            && command.program == self.config.nerdctl_bin
+        {
+            return hosted.execute(command, timeout, |command, timeout| {
+                self.execute_unfenced(command, timeout)
+            });
+        }
+        self.execute_unfenced(command, timeout)
+    }
+
+    fn execute_unfenced(
+        &self,
+        command: &PlannedCommand,
+        timeout: Duration,
+    ) -> Result<Output, RunnerError> {
         let mut process = Command::new(&command.program);
         process
             .args(&command.args)
@@ -598,6 +616,15 @@ impl KataLauncher {
     }
 
     fn remove_compute(&self, container_name: &str) -> Result<(), RunnerError> {
+        if self.config.hosted_hermes.is_some()
+            && self
+                .inspect(container_name)?
+                .is_some_and(|container| container.state.status == "running")
+        {
+            // Guest shutdown can take minutes. Retain its saved reservation
+            // and keep ingress available until the short remove/reuse boundary.
+            self.stop_compute(container_name)?;
+        }
         self.run_checked(
             self.command(vec![
                 OsString::from("rm"),
@@ -2475,6 +2502,13 @@ impl RuntimeLauncher for KataLauncher {
         // canonical handle already names the exact target image, verify it and
         // return the actual endpoint facts without replacing it again.
         if inspected.config.image == target.reference
+            && self
+                .config
+                .hosted_hermes
+                .as_ref()
+                .map(|hosted| hosted.has_native_binding(&canonical_name))
+                .transpose()?
+                .unwrap_or(true)
             && inspected
                 .config
                 .labels
@@ -8258,3 +8292,7 @@ esac
         assert!(fake_state.join(format!("{own}.image")).exists());
     }
 }
+
+#[cfg(all(test, target_os = "linux"))]
+#[path = "hosted_hermes_proof.rs"]
+mod hosted_hermes_proof;

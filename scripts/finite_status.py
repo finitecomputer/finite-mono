@@ -85,6 +85,11 @@ CONTRACT: dict[str, Any] = {
         "expected_model": "glm-5-3-flash",
         "mixed_version_models": ["glm-5-2", "deepseek-v4-flash-0731", "glm-5.3-flash"],
     },
+    "hosted_hermes": {
+        "unit": "finite-hosted-hermes.service",
+        "state_root": "/run/finite-hosted-hermes",
+        "maximum_age_seconds": 60,
+    },
     "recovery": {
         "snapshot_root": "/data/recovery-snapshots/hosted-web-chat",
         "latest_name": "latest",
@@ -712,6 +717,73 @@ def collect_host_capacity(proc: Path = Path("/proc")) -> dict[str, Any]:
     return result
 
 
+def collect_hosted_hermes(now: datetime, root: Path | None = None) -> dict[str, Any]:
+    """Diagnostic evidence only; never selects routes or mutates the host."""
+    contract = CONTRACT["hosted_hermes"]
+    root = root or Path(contract["state_root"])
+    result: dict[str, Any] = {"status": "unknown", "state": "unknown", "unit": contract["unit"]}
+    try:
+        before = systemd_properties(contract["unit"])
+        result["active_state"] = before.get("ActiveState")
+        result["main_pid"] = before.get("MainPID")
+        marker = root / "mutation-in-progress"
+        # stat distinguishes absent evidence from permission/IO failures.
+        def marked() -> bool:
+            try:
+                marker.stat()
+                return True
+            except FileNotFoundError:
+                return False
+        if marked():
+            result.update(state="mutation-unresolved", error="provider mutation is unfinished")
+            return result
+        if before.get("LoadState") == "not-found" and before.get("MainPID") == "0":
+            result.update(status="green", state="not-configured")
+            return result
+        if before.get("LoadState") != "loaded":
+            raise CollectionError("dedicated service is not loaded")
+        path = root / "status.json"
+        with path.open("rb") as source:
+            encoded = source.read(4097)
+        if len(encoded) > 4096:
+            raise CollectionError("diagnostic record exceeds bound")
+        record = json.loads(encoded)
+        if (not isinstance(record, dict) or type(record.get("version")) is not int
+                or record["version"] != 1 or type(record.get("checkedAt")) is not int
+                or record.get("state") not in {"serving", "empty", "failed", "reconciling", "unknown"}
+                or not isinstance(record.get("proxyPid"), str)
+                or not isinstance(record.get("proxyInvocation"), str)):
+            raise CollectionError("diagnostic record has an unsupported shape")
+        age = now.timestamp() - record["checkedAt"]
+        result["age_seconds"] = age
+        result["observed_state"] = record["state"]
+        after = systemd_properties(contract["unit"])
+        with path.open("rb") as source:
+            unchanged = source.read(4097) == encoded
+        if before != after or not unchanged or marked():
+            raise CollectionError("ingress changed during observation; repeat status")
+        if age < 0 or age > contract["maximum_age_seconds"]:
+            result.update(state="stale", error="no recent reconciliation evidence")
+        elif record["state"] == "failed":
+            result.update(status="red", state="reconciliation-failed")
+        elif record["state"] in {"reconciling", "unknown"}:
+            result.update(state=record["state"], error="no completed reconciliation evidence")
+        elif record["proxyPid"] != after.get("MainPID") or record["proxyInvocation"] != after.get("InvocationID"):
+            result.update(state="process-changed", error="proxy differs from the reconciled process")
+        elif record["state"] == "empty" and after.get("MainPID") == "0" and after.get("ActiveState") in {"inactive", "failed"}:
+            result.update(status="green", state="no-eligible-routes")
+        elif (record["state"] == "serving" and after.get("ActiveState") == "active"
+                and record["proxyPid"].isdigit() and int(record["proxyPid"]) > 0
+                and re.fullmatch(r"[0-9a-fA-F]{32}", record["proxyInvocation"])):
+            result.update(status="green", state="serving")
+        else:
+            result.update(status="red", state="process-mismatch", error="proxy state contradicts reconciliation")
+    except (OSError, ValueError, TypeError, OverflowError, RecursionError, CollectionError) as error:
+        # No raw record or provider output: diagnostics contain no credentials.
+        result["error"] = str(error) if isinstance(error, CollectionError) else "hosted ingress evidence is unreadable"
+    return result
+
+
 def collect_host_health(hostname: str) -> dict[str, Any]:
     profile = CONTRACT["hosts"].get(hostname)
     if profile is None:
@@ -732,6 +804,7 @@ def collect_host_health(hostname: str) -> dict[str, Any]:
         units.extend(CONTRACT["healthcheck"]["services"])
         units.append(CONTRACT["healthcheck"]["unit"])
     if "runner" in raw["roles"]:
+        raw["hosted_hermes"] = collect_hosted_hermes(utc_now())
         units.extend([CONTRACT["runner"]["service"], CONTRACT["runner"]["timer"]])
     if profile.get("storage_health_unit"):
         units.append(profile["storage_health_unit"])
@@ -1980,6 +2053,13 @@ def build_host_health(
             "finite_private_shared_model": shared_model,
             "finite_private_operator_model": operator_model,
         }
+    hosted_hermes = None
+    if "runner" in roles:
+        hosted_hermes = raw.get("hosted_hermes", {
+            "status": "unknown", "state": "not-observed",
+            "unit": CONTRACT["hosted_hermes"]["unit"],
+        })
+        statuses.append(hosted_hermes["status"])
     return {
         "status": combine_status(statuses),
         "hostname": raw.get("hostname"),
@@ -1992,6 +2072,7 @@ def build_host_health(
         },
         "services": units,
         "service_executables": executables,
+        "hosted_hermes": hosted_hermes,
         "http_probes": probes,
         "filesystems": filesystems,
         "storage": storage,
@@ -2569,6 +2650,11 @@ def render_human(report: dict[str, Any]) -> str:
         for unit in failed_services:
             lines.append(
                 f"    {badge(unit['status'])} {unit['unit']}: {unit['active_state'] or unit.get('error') or 'unknown'}"
+            )
+        if ingress := health.get("hosted_hermes"):
+            lines.append(
+                f"  hosted Hermes: {badge(ingress['status'])} {ingress['state']}"
+                + (f" — {ingress['error']}" if ingress.get("error") else "")
             )
         for executable in health.get("service_executables", []):
             lines.append(

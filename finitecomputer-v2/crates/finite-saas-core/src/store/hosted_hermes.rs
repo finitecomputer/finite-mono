@@ -5,6 +5,17 @@ use super::runtime_credentials::{authenticated, new_secret};
 use super::*;
 use serde::{Deserialize, Serialize};
 
+/// Credential-free input to Runner's local container verification. This is a
+/// readiness snapshot, not a reservation or permission to reuse an address.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct HostedRouteTarget {
+    pub runtime_id: String,
+    pub project_id: String,
+    pub source_machine_id: String,
+    pub generation: i64,
+}
+
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct HostedAccess {
@@ -62,6 +73,56 @@ pub enum ApplyStatus {
 }
 
 impl CoreStore {
+    /// Only completed, current assignments with acknowledged serving intent
+    /// qualify. Pending launches may authenticate to pull intent, but cannot be
+    /// published yet. One SQL snapshot avoids mixing placement and readiness
+    /// across reads; Runner still verifies local ownership under its lifecycle
+    /// fence before publishing and rebuilds the projection on reconciliation.
+    pub async fn hosted_route_targets_for_host(
+        &self,
+        source_host_id: &str,
+    ) -> CoreResult<Vec<HostedRouteTarget>> {
+        let client = self.connection().await?;
+        let limit = crate::hosted_hermes::MAX_HOSTED_HERMES_ROUTES as i64 + 1;
+        let rows = client
+            .query(
+                "SELECT r.id, r.project_id, r.source_machine_id, c.hosted_generation
+             FROM runtime_core_credentials c
+             JOIN agent_runtimes r ON r.id=c.agent_runtime_id
+             JOIN agent_creation_requests q ON q.id=c.creation_request_id
+             JOIN projects p ON p.id=r.project_id AND p.owner_user_id=c.owner_user_id
+             WHERE r.source_host_id=$1 AND c.source_host_id=r.source_host_id
+               AND c.source_machine_id=r.source_machine_id
+               AND q.agent_runtime_id=r.id AND q.project_id=r.project_id
+               AND q.status='running' AND c.activated AND NOT c.revoked
+               AND p.import_candidate_id IS NULL AND r.offboarding_phase IS NULL
+               AND COALESCE(r.host_facts->>'runtime_status', '') <> 'offline'
+               AND EXISTS(SELECT 1 FROM project_runtime_links l
+                   WHERE l.project_id=r.project_id AND l.agent_runtime_id=r.id AND l.active)
+               AND c.hosted_enabled AND c.hosted_apply_status='applied'
+               AND c.hosted_applied_generation=c.hosted_generation
+             ORDER BY r.id LIMIT $2",
+                &[&source_host_id, &limit],
+            )
+            .await
+            .map_err(store_error)?;
+        if rows.len() > crate::hosted_hermes::MAX_HOSTED_HERMES_ROUTES {
+            // Never silently truncate: consumers replace the whole route set.
+            return Err(CoreError::Store(
+                "hosted Hermes route limit exceeded".into(),
+            ));
+        }
+        Ok(rows
+            .iter()
+            .map(|row| HostedRouteTarget {
+                runtime_id: row.get(0),
+                project_id: row.get(1),
+                source_machine_id: row.get(2),
+                generation: row.get(3),
+            })
+            .collect())
+    }
+
     pub async fn hosted_access(&self, runtime: &str, user: &str) -> CoreResult<HostedAccess> {
         let mut client = self.connection().await?;
         let tx = client.transaction().await.map_err(store_error)?;
@@ -257,6 +318,192 @@ mod tests {
         .unwrap()
     }
     #[tokio::test]
+    async fn hosted_routes_require_completed_enrollment_and_current_applied_intent() {
+        with_isolated_postgres(|db| async move {
+            let request = requested(&db).await;
+            let runtime = register(&db, &request).await;
+            // Existing, unenrolled assignments do not gain routes implicitly.
+            assert!(
+                db.hosted_route_targets_for_host("auth-host")
+                    .await
+                    .unwrap()
+                    .is_empty()
+            );
+            let secret = db
+                .provision_runtime_credential(provision(&request))
+                .await
+                .unwrap()
+                .secret;
+            db.set_hosted_access(
+                &runtime,
+                "runtime-auth-user",
+                SetHostedAccess {
+                    enabled: true,
+                    expected_generation: 1,
+                },
+            )
+            .await
+            .unwrap();
+            db.report_hosted(
+                &secret,
+                HostedReport {
+                    generation: 2,
+                    status: ApplyStatus::Applied,
+                },
+            )
+            .await
+            .unwrap();
+            // A live launch can report readiness before Core completes it.
+            assert!(
+                db.hosted_route_targets_for_host("auth-host")
+                    .await
+                    .unwrap()
+                    .is_empty()
+            );
+            let project = complete(&db, &request).await.unwrap().project.id;
+            assert_eq!(
+                db.hosted_route_targets_for_host("auth-host").await.unwrap(),
+                vec![HostedRouteTarget {
+                    runtime_id: runtime.clone(),
+                    project_id: project,
+                    source_machine_id: "auth-machine".into(),
+                    generation: 2,
+                }]
+            );
+            assert!(
+                db.hosted_route_targets_for_host("other-host")
+                    .await
+                    .unwrap()
+                    .is_empty()
+            );
+            db.set_hosted_access(
+                &runtime,
+                "runtime-auth-user",
+                SetHostedAccess {
+                    enabled: false,
+                    expected_generation: 2,
+                },
+            )
+            .await
+            .unwrap();
+            assert!(
+                db.hosted_route_targets_for_host("auth-host")
+                    .await
+                    .unwrap()
+                    .is_empty()
+            );
+            db.set_hosted_access(
+                &runtime,
+                "runtime-auth-user",
+                SetHostedAccess {
+                    enabled: true,
+                    expected_generation: 3,
+                },
+            )
+            .await
+            .unwrap();
+            assert!(
+                db.hosted_route_targets_for_host("auth-host")
+                    .await
+                    .unwrap()
+                    .is_empty()
+            );
+            db.report_hosted(
+                &secret,
+                HostedReport {
+                    generation: 4,
+                    status: ApplyStatus::Error,
+                },
+            )
+            .await
+            .unwrap();
+            assert!(
+                db.hosted_route_targets_for_host("auth-host")
+                    .await
+                    .unwrap()
+                    .is_empty()
+            );
+            db.report_hosted(
+                &secret,
+                HostedReport {
+                    generation: 4,
+                    status: ApplyStatus::Applied,
+                },
+            )
+            .await
+            .unwrap();
+            assert_eq!(
+                db.hosted_route_targets_for_host("auth-host").await.unwrap()[0].generation,
+                4
+            );
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn hosted_routes_withdraw_stale_readiness_and_inactive_assignments() {
+        for mutation in [
+            "UPDATE runtime_core_credentials SET activated=FALSE",
+            "UPDATE runtime_core_credentials SET revoked=TRUE",
+            "UPDATE runtime_core_credentials SET hosted_applied_generation=hosted_generation-1",
+            "UPDATE runtime_core_credentials SET hosted_applied_generation=NULL",
+            "UPDATE agent_creation_requests SET agent_runtime_id=NULL",
+            "UPDATE agent_runtimes SET offboarding_phase='retirement_requested'",
+            "UPDATE agent_runtimes SET host_facts=jsonb_set(host_facts, '{runtime_status}', '\"offline\"')",
+        ] {
+            with_isolated_postgres(|db| async move {
+                let request = requested(&db).await;
+                let secret = db
+                    .provision_runtime_credential(provision(&request))
+                    .await
+                    .unwrap()
+                    .secret;
+                let runtime = register(&db, &request).await;
+                complete(&db, &request).await.unwrap();
+                db.set_hosted_access(
+                    &runtime,
+                    "runtime-auth-user",
+                    SetHostedAccess {
+                        enabled: true,
+                        expected_generation: 1,
+                    },
+                )
+                .await
+                .unwrap();
+                db.report_hosted(
+                    &secret,
+                    HostedReport {
+                        generation: 2,
+                        status: ApplyStatus::Applied,
+                    },
+                )
+                .await
+                .unwrap();
+                assert_eq!(
+                    db.hosted_route_targets_for_host("auth-host")
+                        .await
+                        .unwrap()
+                        .len(),
+                    1
+                );
+                db.connection()
+                    .await
+                    .unwrap()
+                    .execute(mutation, &[])
+                    .await
+                    .unwrap();
+                assert!(
+                    db.hosted_route_targets_for_host("auth-host")
+                        .await
+                        .unwrap()
+                        .is_empty(),
+                    "{mutation}"
+                );
+            })
+            .await;
+        }
+    }
+    #[tokio::test]
     async fn hosted_intent_is_owner_scoped_and_rotation_is_applied_not_assumed() {
         with_isolated_postgres(|db| async move {
             let request = requested(&db).await;
@@ -423,6 +670,7 @@ mod tests {
                 let project = complete(&db,&request).await.unwrap().project.id;
                 db.set_hosted_access(&runtime,"runtime-auth-user",SetHostedAccess{enabled:true,expected_generation:1}).await.unwrap();
                 db.report_hosted(&secret,HostedReport{generation:2,status:ApplyStatus::Applied}).await.unwrap();
+                assert_eq!(db.hosted_route_targets_for_host("auth-host").await.unwrap().len(), 1);
                 match change {
                     "owner" => {
                         let user = db.link_verified_user(LinkVerifiedUserInput{verified_email:"next@finite.test".into(),workos_user_id:"next-owner".into(),now:None}).await.unwrap();
@@ -433,6 +681,8 @@ mod tests {
                     _ => { db.query_json("UPDATE project_runtime_links SET active=FALSE WHERE agent_runtime_id=$1 RETURNING to_jsonb(id)",&[&runtime]).await; }
                 }
                 assert!(db.authenticate_runtime_credential(&secret).await.unwrap().is_none());
+                assert!(db.hosted_route_targets_for_host("auth-host").await.unwrap().is_empty());
+                assert!(db.hosted_route_targets_for_host("changed").await.unwrap().is_empty());
                 assert!(db.hosted_desired(&secret,&origins()).await.unwrap().is_none());
                 assert!(!db.report_hosted(&secret,HostedReport{generation:2,status:ApplyStatus::Applied}).await.unwrap());
                 assert!(db.hosted_login(&runtime,"runtime-auth-user",&origins()).await.is_err());
