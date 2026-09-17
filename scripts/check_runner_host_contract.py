@@ -369,12 +369,26 @@ def check_hosted_canary() -> None:
             raise SystemExit(
                 f"lat5 proxy must not have automatic {attribute} activation"
             )
-    sockets = json.loads(nix_eval(host, "systemd.sockets"))
+    # Project only the activation target; complete NixOS socket submodules
+    # contain internal values that cannot be serialized to JSON.
+    sockets = json.loads(
+        subprocess.check_output(
+            [
+                "nix",
+                "eval",
+                "--json",
+                "--apply",
+                'builtins.mapAttrs (_: socket: socket.socketConfig.Service or "")',
+                f".#nixosConfigurations.{host}.config.systemd.sockets",
+            ],
+            cwd=ROOT,
+            text=True,
+        )
+    )
     if any(
         name == "finite-hosted-hermes"
-        or socket.get("socketConfig", {}).get("Service")
-        == "finite-hosted-hermes.service"
-        for name, socket in sockets.items()
+        or target == "finite-hosted-hermes.service"
+        for name, target in sockets.items()
     ):
         raise SystemExit("lat5 proxy must not use socket activation")
     if (
