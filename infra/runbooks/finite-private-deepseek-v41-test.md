@@ -3,7 +3,8 @@
 The **September 17 retry completed**, with DeepSeek passing protocol checks and
 concurrency 1–64. Concurrency 128 completed without request errors but failed
 the first-token latency threshold. The original GLM release was restored and
-verified by **04:13 America/Chicago (CDT, UTC−05:00)**. See the execution result
+verified with final stability checks by **04:22 America/Chicago
+(CDT, UTC−05:00)**. See the execution result
 below. No further swap is armed.
 
 The retained procedure describes a temporary A/B test with GLM restoration,
@@ -413,7 +414,15 @@ than waiting for 05:15. Rollback was accepted at **03:43:30**. GLM health first
 returned HTTP 200 around 04:12, and the original release was observed `ready`
 at **04:12:39**. By **04:13**, authentication, terminal chat streaming,
 Responses API, older `glm-5-2` compatibility, and settlement checks passed.
-The two readiness interruptions were approximately 31 and 29 minutes.
+The two initial readiness interruptions were approximately 31 and 29 minutes.
+A closeout recheck at 04:15 then caught repeated five-second GLM upstream
+health timeouts, while the usage API stayed healthy and an additional terminal
+stream canary passed. No further restart was performed. Health recovered at
+04:17:27, followed by four consecutive HTTP 200 samples from 04:18:44 through
+04:21:03 and another successful authenticated gate. Final settlement and
+canonical fleet checks completed by **04:22**. The intermittent health failures
+are retained in the evidence; first readiness at 04:12 is not claimed as
+uninterrupted health thereafter.
 
 The exact original UUID, host, GLM tag, sealed-secret names, and update settings
 were verified; no staged update or error remained. Canonical chat, recovery,
@@ -422,8 +431,8 @@ removing heartbeat timestamps; app-host collection remained the same known
 limitation. No durable user state was rewritten. As on the first attempt,
 persisted chat transcript replay was not independently exercised.
 
-Final canary accounting recorded **826 settled requests**: 783 DeepSeek actual,
-2 DeepSeek estimated, and 41 GLM actual. No new reservations remained; the 50
+Final canary accounting recorded **828 settled requests**: 783 DeepSeek actual,
+2 DeepSeek estimated, and 43 GLM actual. No new reservations remained; the 50
 pre-existing reserved rows were unchanged. The aggregate settlement probe does
 not attribute the two estimates to individual protocol cases, so this result
 does not claim actual-usage settlement for every request.
