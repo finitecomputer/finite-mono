@@ -370,6 +370,11 @@ def apply_path(selection: HarnessSelection, path: str) -> None:
         selection.run_nix_checks = True
         return
 
+    if path == "scripts/finite_tinfoil_status.py":
+        selection.run_monitoring_nixos_contract = True
+        selection.run_finite_status_contract = True
+        return
+
     if path in FINITE_STATUS_PATHS:
         selection.run_finite_status_contract = True
         return
