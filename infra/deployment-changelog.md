@@ -70,6 +70,13 @@ the sources above cannot carry lands here.
   format v4 now covers Chat/Core/Brain/Identity separately; historical v3
   recovery sets remain retained. Private migration and restore evidence stays
   outside git.
+- Dashboard requester binding fix #933 is deployed as image
+  `sha256:341d735caaed58ff5a6c722201db4f32f2e93566d9b5baa5927e25c45d343c05`
+  in lat2 closure `sy2rz30sf0fygkh7rh38m5dh2j8f6sgs`. Existing private-site
+  viewing passed with the signed-in account and anonymous requests returned
+  401. Automatic requester access on a new Chat publish remains unqualified:
+  the live Agent terminal did not receive its requester lease. The open
+  verification is retained in the deployment queue.
 - `scripts/finite-status` reports healthy Chat, recovery and production runner
   cohorts. Its overall fleet result still includes the pre-existing stale
   `smoke` host record; that record was not rewritten as part of this cutover.
