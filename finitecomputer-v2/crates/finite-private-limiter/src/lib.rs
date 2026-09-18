@@ -12,6 +12,7 @@ use serde_json::{Value, json};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+use tokio::sync::watch;
 use tokio::time::{sleep, timeout};
 
 const USAGE_FORMULA_VERSION: &str = "2026-05-26.v1";
@@ -1025,7 +1026,8 @@ struct Settlement {
     state: AppState,
     reservation_id: Arc<str>,
     request_id: Arc<str>,
-    completed: Arc<std::sync::atomic::AtomicBool>,
+    started: Arc<std::sync::atomic::AtomicBool>,
+    result: watch::Sender<Option<Result<(), String>>>,
 }
 
 impl Settlement {
@@ -1034,7 +1036,8 @@ impl Settlement {
             state,
             reservation_id: Arc::from(reservation_id),
             request_id: Arc::from(request_id),
-            completed: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            started: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            result: watch::channel(None).0,
         }
     }
 
@@ -1043,25 +1046,30 @@ impl Settlement {
     }
 
     async fn settle(&self, request: SettleRequest) -> Result<(), String> {
-        if self.completed.swap(true, Ordering::SeqCst) {
-            return Ok(());
+        let mut receiver = self.result.subscribe();
+        if !self.started.swap(true, Ordering::SeqCst) {
+            let settlement = self.clone();
+            // Keep the accounting retry loop alive if the response body is
+            // cancelled while it is waiting for Core.
+            tokio::spawn(async move {
+                let result = settle_usage_with_retries(
+                    &settlement.state,
+                    &settlement.reservation_id,
+                    request,
+                )
+                .await;
+                settlement.result.send_replace(Some(result));
+            });
         }
-        settle_usage_with_retries(&self.state, &self.reservation_id, request).await
-    }
-
-    fn settle_in_background(&self, request: SettleRequest) {
-        if self.completed.swap(true, Ordering::SeqCst) {
-            return;
-        }
-        let settlement = self.clone();
-        tokio::spawn(async move {
-            if let Err(error) =
-                settle_usage_with_retries(&settlement.state, &settlement.reservation_id, request)
-                    .await
-            {
-                eprintln!("finite-private-limiter background settle failed: {error}");
+        loop {
+            if let Some(result) = receiver.borrow_and_update().clone() {
+                return result;
             }
-        });
+            receiver
+                .changed()
+                .await
+                .map_err(|_| "settlement task unavailable".to_string())?;
+        }
     }
 }
 
@@ -1089,7 +1097,13 @@ impl SettlementGuard {
 
 impl Drop for SettlementGuard {
     fn drop(&mut self) {
-        self.settlement.settle_in_background(self.fallback.clone());
+        let settlement = self.settlement.clone();
+        let fallback = self.fallback.clone();
+        tokio::spawn(async move {
+            if let Err(error) = settlement.settle(fallback).await {
+                eprintln!("finite-private-limiter background settle failed: {error}");
+            }
+        });
     }
 }
 
@@ -1547,6 +1561,7 @@ mod tests {
     use std::sync::{Arc, Mutex};
     use std::time::Duration;
     use tokio::net::TcpListener;
+    use tower::ServiceExt;
 
     #[tokio::test]
     async fn limiter_reserves_proxies_settles_and_denies_before_upstream() {
@@ -2394,6 +2409,43 @@ mod tests {
             settlements[0]["upstreamErrorClass"],
             "client_disconnected_or_stream_cancelled"
         );
+    }
+
+    #[tokio::test]
+    async fn client_drop_during_settlement_retry_preserves_actual_accounting() {
+        let core = FakeCoreState::new("fpk_live_settlement_drop", 10_000_000);
+        core.settle_failures_remaining.store(1, Ordering::SeqCst);
+        let core_url = spawn(fake_core_router(core.clone())).await;
+        let upstream_url = spawn(fake_upstream_router(FakeUpstreamState::new())).await;
+        let mut config = test_config(core_url, upstream_url);
+        config.usage_api_timeout = Duration::from_secs(2);
+        let router = app(config).unwrap();
+        let response = router
+            .oneshot(
+                axum::http::Request::post("/v1/chat/completions")
+                    .header("authorization", "Bearer fpk_live_settlement_drop")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        json!({"model":"glm-5-2","stream":true,"messages":[]}).to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let consuming = tokio::spawn(async move {
+            axum::body::to_bytes(response.into_body(), 100_000).await
+        });
+        wait_for(|| core.settle_calls.load(Ordering::SeqCst) == 1).await;
+        consuming.abort();
+        let _ = consuming.await;
+
+        wait_for(|| {
+            core.settle_calls.load(Ordering::SeqCst) == 2
+                && core.settlements.lock().unwrap().len() == 1
+        })
+        .await;
+        let settlements = core.settlements.lock().unwrap();
+        assert_eq!(settlements[0]["settlement"], "actual");
     }
 
     #[derive(Clone)]
