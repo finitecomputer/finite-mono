@@ -1,4 +1,4 @@
-"""Add the reviewed Tinfoil job without activating the separate Sites rollout.
+"""Add the reviewed Tinfoil job without activating separate usage rollouts.
 
 This deliberately accepts only the repository's narrow YAML layout. Changes to
 any active job or global setting fail closed; only full-line comments and blank
@@ -12,6 +12,7 @@ import re
 
 TINFOIL = b"finite-tinfoil-collector"
 SITES = b"finite-sites-metrics"
+PRIVATE = b"finite-private-limiter"
 JOB = re.compile(rb"^  - job_name: ([a-zA-Z0-9_.-]+)\n", re.MULTILINE)
 
 
@@ -40,13 +41,14 @@ def significant(config):
 def reconcile(source, live):
     header, jobs = split_jobs(source)
     live_header, live_jobs = split_jobs(live)
-    if list(jobs)[-1] != TINFOIL or SITES not in jobs:
+    if TINFOIL not in jobs or SITES not in jobs or PRIVATE not in jobs:
         raise ValueError("unexpected source scrape layout")
-    # Sites has a separate credential and service rollout. Preserve its current
-    # activation state, while requiring every other source job in source order.
+    # Usage jobs have separate credentials and service rollouts. Preserve
+    # their activation states; this command authorizes only the Tinfoil job.
     expected = [name for name in jobs if name != TINFOIL]
-    if SITES not in live_jobs:
-        expected.remove(SITES)
+    for optional in (SITES, PRIVATE):
+        if optional not in live_jobs:
+            expected.remove(optional)
     actual = [name for name in live_jobs if name != TINFOIL]
     if actual != expected or significant(header) != significant(live_header):
         raise ValueError("unrelated Prometheus drift; reconcile before bootstrap")
