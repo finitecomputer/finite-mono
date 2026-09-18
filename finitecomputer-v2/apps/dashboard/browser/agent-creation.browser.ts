@@ -1618,6 +1618,16 @@ test("dashboard agent creation browser states", { timeout: 300_000 }, async () =
       // share the ordered navigation lane with a subsequent chat click.
       const topicTitle = "Launch planning";
       const topicActionsBefore = hostedDevice.state.actions.length;
+      const topicNavigationActions = () => hostedDevice.state.actions
+        .slice(topicActionsBefore)
+        .filter((action) => ["CreateTopic", "OpenChat"].includes(actionName(action)));
+      // Typing is independent of the ordered navigation lane. Include it
+      // explicitly so this proof cannot rely on incidental request order.
+      const typing = await page.request.post(
+        new URL("/api/chat/machines/completed-oslo-bot/hosted-device/actions", page.url()).href,
+        { data: { SetTyping: { room_id: "room_browser_agent", is_typing: false } } }
+      );
+      assert(typing.ok());
       const completedTopicMutations = hostedDevice.state.completedSelectionMutations;
       hostedDevice.holdNextNavigationAction();
       await page.getByRole("button", { name: "New topic", exact: true }).click();
@@ -1629,12 +1639,12 @@ test("dashboard agent creation browser states", { timeout: 300_000 }, async () =
         5_000,
         () => "CreateTopic did not enter the ordered navigation lane"
       );
-      assert.deepEqual(hostedDevice.state.actions[topicActionsBefore], {
+      assert.deepEqual(topicNavigationActions(), [{
         CreateTopic: {
           room_id: "room_browser_agent",
           title: topicTitle,
         },
-      });
+      }]);
 
       // The modal intentionally blocks a second human click. Trigger the
       // underlying existing-chat handler directly to prove the provider still
@@ -1646,12 +1656,12 @@ test("dashboard agent creation browser states", { timeout: 300_000 }, async () =
         .first()
         .evaluate((element) => (element as HTMLButtonElement).click());
       await waitFor(
-        () => hostedDevice.state.actions.length > topicActionsBefore + 1,
+        () => topicNavigationActions().length > 1,
         750
       ).catch(() => undefined);
       assert.equal(
-        hostedDevice.state.actions.length,
-        topicActionsBefore + 1,
+        topicNavigationActions().length,
+        1,
         "a later OpenChat reached the daemon before CreateTopic completed"
       );
       hostedDevice.releaseNavigationAction();
