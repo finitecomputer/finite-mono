@@ -119,7 +119,6 @@ def main():
             (ROOT / "infra/monitoring/ubuntu/prometheus.yml")
             .read_text()
             .replace("/etc/finite/monitoring/sites-metrics-token", str(token))
-            .replace("/etc/finite/monitoring/private-limiter-metrics-token", str(token))
         )
         subprocess.run(["promtool", "check", "config", str(config)], check=True)
         fixture = Path(directory) / "sites-metrics.yml"

@@ -18,7 +18,7 @@ let
       config.finite.secrets.files."logs-write".path
     else
       "/etc/finite/logs-write.env";
-  allowedMetricNamesRegex = lib.concatStringsSep "|" ([
+  allowedMetricNamesRegex = lib.concatStringsSep "|" [
     "finite_component_build_info"
     "finite_component_version_mismatch"
     "finite_component_version_mismatched_active_agents"
@@ -51,7 +51,7 @@ let
     "node_textfile_mtime_seconds"
     "node_textfile_scrape_error"
     "up"
-  ] ++ cfg.allowedMetricNames);
+  ];
   journalSourceFor = index: unit: ''
     loki.source.journal "finite_unit_${toString index}" {
       forward_to    = [loki.write.finite_monitoring_logs.receiver]
@@ -192,11 +192,6 @@ in
       );
       default = [ ];
       description = "Explicit journald source allowlist for host incident log shipping.";
-    };
-    allowedMetricNames = lib.mkOption {
-      type = lib.types.listOf lib.types.str;
-      default = [ ];
-      description = "Additional explicitly allowlisted metric names published by a host module.";
     };
   };
 

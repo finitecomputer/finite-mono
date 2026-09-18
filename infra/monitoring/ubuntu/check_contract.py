@@ -171,20 +171,6 @@ def check_prometheus() -> None:
         "targets: [finite.site]",
     ]:
         require_contains(metrics_job, setting, "Sites usage scrape")
-    private_job = prometheus.split("  - job_name: finite-private-limiter\n", 1)[
-        1
-    ].split("  - job_name:", 1)[0]
-    for setting in [
-        "scrape_interval: 15s",
-        "scrape_timeout: 3s",
-        "scheme: https",
-        "metrics_path: /metrics",
-        "follow_redirects: false",
-        "type: Bearer",
-        "credentials_file: /etc/finite/monitoring/private-limiter-metrics-token",
-        "targets: [finite-private.finite.containers.tinfoil.dev]",
-    ]:
-        require_contains(private_job, setting, "Finite Private authenticated scrape")
     for job, target, module in [
         ("finite.site", "https://finite.site/api/v2/healthz", "http_200"),
         ("uptime-probe.finite.site", "https://uptime-probe.finite.site/", "http_404"),
@@ -200,7 +186,6 @@ def check_prometheus() -> None:
     public_jobs = set(re.findall(r"job_name: ([^\n]+)", prometheus)) - {
         "finite-tinfoil-collector",
         "finite-sites-metrics",
-        "finite-private-limiter",
     }
     dashboard = json.loads(
         read(ROOT / "infra/monitoring/grafana/dashboards/finite-production-mvp.json")

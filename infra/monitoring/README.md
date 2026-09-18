@@ -18,10 +18,6 @@ slots dashboards and excludes the Tinfoil draft. Merges queue a deployment
 through GitHub's existing `production` environment approval gate. See
 [runtime slots](runtime-slots.md) for its query semantics and live checks.
 
-The separate [Finite Private requests and usage dashboard](finite-private-requests.md)
-documents limiter telemetry, seven-day request diagnostics, and its pending
-production handoff. Initial provisioning is separate from dashboard updates.
-
 Prometheus, Loki, Grafana, and blackbox exporter bind only to loopback. Caddy
 terminates TLS and protects the metrics/log ingest routes with separate basic
 auth credentials.
