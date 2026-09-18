@@ -123,9 +123,9 @@ jobs:
 
       - uses: Swatinem/rust-cache@v2
         with:
-          # The v0 cache repeatedly restored an unexecutable secp256k1 build
-          # script. Start fresh rather than bypassing the Rust checks.
-          prefix-key: v1-rust
+          # Cached build scripts link to the Nix closure used by Clippy/tests.
+          # Do not restore artifacts from a different flake or the old host build.
+          prefix-key: v2-rust-nix-${{ hashFiles('flake.lock') }}
 
       - name: Select Rust package scope
         id: rust_scope
@@ -140,7 +140,7 @@ jobs:
       - name: Clippy
         env:
           RUST_CI_CARGO_ARGS: ${{ steps.rust_scope.outputs.cargo_args }}
-        run: cargo clippy --locked $RUST_CI_CARGO_ARGS --all-targets -- -D warnings
+        run: nix develop .#rust-ci --command cargo clippy --locked $RUST_CI_CARGO_ARGS --all-targets -- -D warnings
 
       - name: Test workspace
         env:
