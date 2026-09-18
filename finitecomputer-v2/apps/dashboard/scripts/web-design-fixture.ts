@@ -19,6 +19,8 @@ type FixtureState = {
   rev: number;
   chatArchived: boolean;
   chatTitle: string;
+  newChatIntents?: Record<string, string>;
+  selectedNewChatId?: string | null;
   extraTopics: Array<{
     topicId: string;
     title: string;
@@ -246,6 +248,7 @@ async function serve() {
         FC_WORKOS_AUTH_ENABLED: "0",
         WORKOS_COOKIE_PASSWORD: "web-design-cookie-password-32-characters",
         NEXT_DIST_DIR: ".next-web-design",
+        NEXT_PUBLIC_FC_DESIGN_PREVIEWS: "1",
         NEXT_TELEMETRY_DISABLED: "1",
         NODE_OPTIONS:
           process.env.FC_WEB_DESIGN_NODE_OPTIONS ?? "--max-old-space-size=2048",
@@ -349,6 +352,12 @@ async function handleHostedRequest(request: IncomingMessage, response: ServerRes
     writeEvent(response);
     return;
   }
+  if (request.method === "POST" && requestPath === "/v1/app/new-chat") {
+    applyAction({ StartTopicChatIntent: await readJson(request) });
+    writeJson(response, 200, appState());
+    emitState();
+    return;
+  }
   if (request.method === "POST" && requestPath === "/v1/app/actions") {
     const action = await readJson(request);
     applyAction(action as Record<string, unknown>);
@@ -420,10 +429,19 @@ async function handleHostedRequest(request: IncomingMessage, response: ServerRes
 }
 
 function applyAction(action: Record<string, unknown>) {
-  const send = action.SendChatMessage as { text?: unknown } | undefined;
+  const start = action.StartTopicChatIntent as { room_id?: string; topic_id?: string; intent_key?: string } | undefined;
+  if (start?.room_id === "room_design" && start.topic_id === "home" && start.intent_key) {
+    state.newChatIntents ??= {};
+    state.newChatIntents[start.intent_key] ??= `chat_new_${state.rev + 1}`;
+    state.selectedNewChatId = state.newChatIntents[start.intent_key];
+  }
+  const open = action.OpenChat as { chat_id?: string } | undefined;
+  if (open?.chat_id) state.selectedNewChatId = open.chat_id === "chat_design" ? null : open.chat_id;
+  const send = action.SendChatMessage as { text?: unknown; topic_id?: string; chat_id?: string } | undefined;
   if (send && typeof send.text === "string" && send.text.trim()) {
-    state.messages.push(message(send.text.trim(), true, state.messages.length + 1));
-    state.messages.push(message("This is a deterministic fixture reply from your recovered local chat.", false, state.messages.length + 1));
+    const address = { conversation_id: send.topic_id ?? "topic_design", chat_id: send.chat_id ?? "chat_design" };
+    state.messages.push({ ...message(send.text.trim(), true, state.messages.length + 1), ...address });
+    state.messages.push({ ...message("This is a deterministic fixture reply from your recovered local chat.", false, state.messages.length + 1), ...address });
   }
   const rename = action.RenameChat as { title?: unknown } | undefined;
   if (rename && typeof rename.title === "string" && rename.title.trim()) {
@@ -456,6 +474,15 @@ function appState() {
     selected_room_id: "room_design",
     topics: [
       {
+        room_id: "room_design", topic_id: "home", title: "Home",
+        last_message_preview: "", unread_count: 0, message_count: 0,
+        created_seq: 0, updated_seq: state.rev, archived: false,
+        active_chat_id: state.selectedNewChatId ?? null,
+        chats: Object.values(state.newChatIntents ?? {}).map((chatId) => ({
+          chat_id: chatId, title: "New chat", active: chatId === state.selectedNewChatId, archived: false,
+        })),
+      },
+      {
         room_id: "room_design",
         topic_id: "topic_design",
         title: "General",
@@ -487,8 +514,8 @@ function appState() {
         chats: [],
       })),
     ],
-    selected_topic_id: "topic_design",
-    selected_chat_id: "chat_design",
+    selected_topic_id: state.selectedNewChatId ? "home" : "topic_design",
+    selected_chat_id: state.selectedNewChatId ?? "chat_design",
     active_profile_id: "agent_design",
     status: "Runtime running",
     toast: null,
@@ -518,7 +545,10 @@ function coreMe() {
     projects: [{
       project: { id: "project_web_design", display_name: "Moss", hosting_tier: "standard", created_at: "2026-07-01T12:00:00Z", updated_at: "2026-07-01T12:00:00Z" },
       runtime: { id: RUNTIME_ID, project_id: "project_web_design", contact_endpoint: `http://127.0.0.1:${hostedPort}/runtime-status`, runtime_status: "online", hermes_available: true, created_at: "2026-07-01T12:00:00Z", updated_at: "2026-07-01T12:00:00Z" },
-    }],
+    }, ...(process.env.FC_WEB_DESIGN_SECOND_AGENT === "1" ? [{
+      project: { id: "project_web_design_second", display_name: "Fern", hosting_tier: "standard", created_at: "2026-07-01T12:00:00Z", updated_at: "2026-07-01T12:00:00Z" },
+      runtime: { id: "runtime_web_design_second", project_id: "project_web_design_second", runtime_status: "offline", hermes_available: true, created_at: "2026-07-01T12:00:00Z", updated_at: "2026-07-01T12:00:00Z" },
+    }] : [])],
   };
 }
 
@@ -529,6 +559,8 @@ function loadState(): FixtureState {
       return {
         rev: parsed.rev,
         chatArchived: parsed.chatArchived === true,
+        newChatIntents: parsed.newChatIntents ?? {},
+        selectedNewChatId: parsed.selectedNewChatId ?? null,
         chatTitle:
           typeof parsed.chatTitle === "string" && parsed.chatTitle.trim()
             ? parsed.chatTitle

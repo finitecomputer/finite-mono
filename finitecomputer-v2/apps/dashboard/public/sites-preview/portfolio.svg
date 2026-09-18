@@ -1,0 +1,9 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="320" height="200" viewBox="0 0 320 200">
+  <rect width="320" height="200" fill="#f7f7f2"/>
+  <g font-family="sans-serif" fill="#272b26"><text x="14" y="15" font-size="7">MARA VALE</text><text x="237" y="15" font-size="5">Work · About · Contact</text><text x="14" y="77" font-size="10">Made with an independent spirit,</text><text x="14" y="90" font-size="10">and a thoughtful point of view.</text><text x="14" y="146" font-size="5">SELECTED WORK</text></g>
+  <path d="M14 24H306" stroke="#dedfd6"/>
+  <path d="M0 157H80V200H0Z" fill="#b7b3d4"/><circle cx="40" cy="190" r="24" fill="#e1dfec"/>
+  <path d="M80 157H160V200H80Z" fill="#ea6b35"/><path d="M88 157 111 200H134L111 157Z" fill="#ddbb20"/><path d="M129 157 154 200H160V175Z" fill="#6a3d78"/>
+  <path d="M160 157H240V200H160Z" fill="#c3c8c2"/><path d="M171 157V200M191 157V200M222 157V200M160 178H240" stroke="#4c5653" stroke-width="3"/>
+  <path d="M240 157H320V200H240Z" fill="#277c9b"/><path d="M252 157 288 200M289 157 267 200M311 157 299 200" stroke="#c24959" stroke-width="14"/>
+</svg>

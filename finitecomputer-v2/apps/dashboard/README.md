@@ -14,6 +14,32 @@ Brain invitation and approval routes use bounded server-side signed requests.
 WorkOS authentication does not replace Brain membership or Folder Key Grants.
 The removed `/client` browser UI is not a current dashboard surface.
 
+## Agent Skills inventory
+
+The Skills page reads the selected agent's `GET /api/skills?inventory=true`
+through the shared Core-authorized Hermes session, on entry, agent change and
+manual Refresh. It uses the configured home/profile without inference, skill
+sync, access enablement or a Core inventory store. Chat availability is not a
+prerequisite. It displays names, descriptions, categories and disabled state.
+
+Search uses the loaded in-memory snapshot. Failed refreshes mark it stale;
+access loss clears it. Account/organization/agent changes remount the view and
+abort previous reads. Requests are bounded to 15 seconds and 1 MiB, use
+operation-local credentials and retry native expiry once.
+
+The canonical Hermes package returns `{inventory_version: 1, skills: [...]}`
+with local/external and registered plugin metadata for this opt-in request.
+The default route remains unchanged for Hermes's editor/toggle UI. Older
+runtimes return a legacy array; Finite shows update-required instead of a
+partial list. Dashboard rollback requires no data migration.
+
+Native plugin discovery is idempotent, never a forced reload. Local/external
+edits follow Hermes's bounded scan cache; plugin registration changes require
+the normal plugin reload/restart. Refresh does not reload tools or hooks.
+See `infra/images/test_hermes_skills_inventory.py` for packaged compatibility
+checks and [FIN-87](https://linear.app/finitecomputer/issue/FIN-87) for the
+remaining deployed-candidate release gate.
+
 ## Sites account viewer boundary
 
 Direct visits through `/site-auth` and dashboard previews share the verified
@@ -76,9 +102,13 @@ Runtime, or production service. The fixture backs the canonical dashboard
 components and routes; it is not a second UI and does not prove runtime
 acceptance.
 
-The fixture is intentionally scoped to chat, the machine overview, restart
-presentation, and bounded recovery states. Runtime-owned Stop and Connections
-behavior require the complete devfinity stack. The fixture and devfinity both
+The fixture covers chat, the machine overview, restart/recovery presentation,
+and Skyler’s Brain/Sites design previews. It sets the development-only
+`NEXT_PUBLIC_FC_DESIGN_PREVIEWS=1`; ordinary dev servers and production keep those
+unfinished routes disabled. `FC_WEB_DESIGN_SECOND_AGENT=1` adds Fern for agent
+switching checks. The Skills browser regression intercepts owner/native replies
+and runs with Chat unavailable; it does not prove production authorization.
+Runtime-owned Stop and Connections behavior require the complete devfinity stack. The fixture and devfinity both
 default to port 13002, so run only one at a time or choose another fixture port:
 
 ```bash
