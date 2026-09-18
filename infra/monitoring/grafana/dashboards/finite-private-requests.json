@@ -128,7 +128,7 @@
   "panels": [
     {
       "id": 1,
-      "title": "Internal Operators \u00b7 source and coverage",
+      "title": "Internal Operators · source and coverage",
       "type": "text",
       "description": "",
       "gridPos": {
@@ -146,12 +146,12 @@
       },
       "options": {
         "mode": "markdown",
-        "content": "**All-traffic aggregates** count inference arrivals, refused admission, degraded admission and terminal outcomes at the limiter. Project / Agent Runtime / key filters apply **only to Core-reserved reporting** below. Shared keys cannot identify an individual caller. Model filters apply to panels marked \u201cmodel\u201d; arrivals, refusals, active and health remain all-model totals.\n\n**Request detail and attributed usage: last 7 days only.** Low-cardinality Prometheus aggregates: up to 15 days, subject to 20 GB storage. Unknown tokens/timings are unavailable, not zero. Final usage and completion measurements appear after termination. Timings are limiter-observed, not client receipt or engine decode speed. Core accounting remains the Runaway Guard authority. Historical data is available only after collection began."
+        "content": "**All-traffic aggregates** count inference arrivals, refused admission, degraded admission and terminal outcomes at the limiter. Project / Agent Runtime / key filters apply **only to Core-reserved reporting** below. Shared keys cannot identify an individual caller. Model filters apply to panels marked “model”; arrivals, refusals, active and health remain all-model totals.\n\n**Request detail and attributed usage: last 7 days only.** Low-cardinality Prometheus aggregates: up to 15 days, subject to 20 GB storage. Unknown tokens/timings are unavailable, not zero. Final usage and completion measurements appear after termination. Timings are limiter-observed, not client receipt or engine decode speed. Core accounting remains the Runaway Guard authority. Historical data is available only after collection began."
       }
     },
     {
       "id": 2,
-      "title": "Inference arrivals / minute \u00b7 all traffic",
+      "title": "Inference arrivals / minute · all traffic",
       "type": "stat",
       "description": "",
       "gridPos": {
@@ -200,7 +200,7 @@
     },
     {
       "id": 3,
-      "title": "Active \u00b7 all traffic",
+      "title": "Active · all traffic",
       "type": "stat",
       "description": "",
       "gridPos": {
@@ -249,7 +249,7 @@
     },
     {
       "id": 4,
-      "title": "Refused / minute \u00b7 all traffic",
+      "title": "Refused / minute · all traffic",
       "type": "stat",
       "description": "",
       "gridPos": {
@@ -298,7 +298,7 @@
     },
     {
       "id": 5,
-      "title": "Terminal errors / minute \u00b7 model",
+      "title": "Terminal errors / minute · model",
       "type": "stat",
       "description": "",
       "gridPos": {
@@ -552,7 +552,7 @@
     },
     {
       "id": 10,
-      "title": "Terminal outcomes / second \u00b7 model",
+      "title": "Terminal outcomes / second · model",
       "type": "timeseries",
       "description": "",
       "gridPos": {
@@ -593,7 +593,7 @@
     },
     {
       "id": 11,
-      "title": "Admission and refusals \u00b7 all traffic",
+      "title": "Admission and refusals · all traffic",
       "type": "timeseries",
       "description": "",
       "gridPos": {
@@ -641,7 +641,7 @@
     },
     {
       "id": 12,
-      "title": "Observed input / output tokens per second \u00b7 model",
+      "title": "Observed input / output tokens per second · model",
       "type": "timeseries",
       "description": "Reported upstream totals only. Missing/estimated usage does not contribute invented tokens. Cached/reasoning subcounts are not added to totals.",
       "gridPos": {
@@ -689,7 +689,7 @@
     },
     {
       "id": 13,
-      "title": "Reported input / output tokens in range \u00b7 model",
+      "title": "Reported input / output tokens in range · model",
       "type": "stat",
       "description": "Counter extrapolation over the selected range; unknown responses excluded. Diagnostic token sums below use retained completed events.",
       "gridPos": {
@@ -745,7 +745,7 @@
     },
     {
       "id": 14,
-      "title": "First meaningful output delay \u00b7 model",
+      "title": "First meaningful output delay · model",
       "type": "timeseries",
       "description": "Streams only, measured from limiter acceptance. Headers, roles, metadata and keepalives do not count. Reasoning and tool payload count as first output; only answer text counts as first answer.",
       "gridPos": {
@@ -793,7 +793,7 @@
     },
     {
       "id": 15,
-      "title": "First answer-text delay \u00b7 model",
+      "title": "First answer-text delay · model",
       "type": "timeseries",
       "description": "Streams only, measured from limiter acceptance. Headers, roles, metadata and keepalives do not count. Reasoning and tool payload count as first output; only answer text counts as first answer.",
       "gridPos": {
@@ -841,7 +841,7 @@
     },
     {
       "id": 16,
-      "title": "Request / stream duration \u00b7 model",
+      "title": "Request / stream duration · model",
       "type": "timeseries",
       "description": "Limiter acceptance through upstream completion/error or client cancellation. Frozen before accounting retries. Nonstreaming exposes duration only.",
       "gridPos": {
@@ -889,7 +889,7 @@
     },
     {
       "id": 17,
-      "title": "Usage settlement quality \u00b7 all traffic",
+      "title": "Usage settlement quality · all traffic",
       "type": "timeseries",
       "description": "Estimate means upstream actual token totals unavailable. Diagnostic persistence is best-effort and bounded; failures never block inference.",
       "gridPos": {
@@ -944,7 +944,7 @@
     },
     {
       "id": 18,
-      "title": "Core-reserved usage \u00b7 attributed filters",
+      "title": "Core-reserved usage · attributed filters",
       "type": "text",
       "description": "",
       "gridPos": {
@@ -967,7 +967,7 @@
     },
     {
       "id": 19,
-      "title": "Input tokens by Project \u00b7 retained events",
+      "title": "Input tokens by Project · retained events",
       "type": "bargauge",
       "description": "Exact sums of known reported totals within retained events. Missing values excluded, not converted to zero. Immutable reservation IDs deduplicate ambiguous exporter retries before totals are grouped.",
       "gridPos": {
@@ -1030,7 +1030,7 @@
     },
     {
       "id": 20,
-      "title": "Output tokens by Project \u00b7 retained events",
+      "title": "Output tokens by Project · retained events",
       "type": "bargauge",
       "description": "Exact sums of known reported totals within retained events. Missing values excluded, not converted to zero. Immutable reservation IDs deduplicate ambiguous exporter retries before totals are grouped.",
       "gridPos": {
@@ -1093,12 +1093,12 @@
     },
     {
       "id": 21,
-      "title": "Input / output tokens by key \u00b7 retained events",
+      "title": "Input / output tokens by key · retained events",
       "type": "bargauge",
       "description": "Immutable reservation IDs deduplicate ambiguous exporter retries before totals are grouped.",
       "gridPos": {
         "h": 8,
-        "w": 12,
+        "w": 24,
         "x": 0,
         "y": 58
       },
@@ -1186,71 +1186,8 @@
       }
     },
     {
-      "id": 22,
-      "title": "Settled Runaway Guard usage units by Project",
-      "type": "bargauge",
-      "description": "Weighted accounting units snapshotted when diagnostic recorded, not tokens or dollars. Unsettled snapshot values are unavailable. Current grant authority below may advance after a diagnostic. Immutable reservation IDs deduplicate ambiguous exporter retries before totals are grouped.",
-      "gridPos": {
-        "h": 8,
-        "w": 12,
-        "x": 12,
-        "y": 58
-      },
-      "fieldConfig": {
-        "defaults": {
-          "unit": "short",
-          "noValue": "Unavailable",
-          "color": {
-            "mode": "palette-classic"
-          },
-          "thresholds": {
-            "mode": "absolute",
-            "steps": [
-              {
-                "color": "blue",
-                "value": null
-              }
-            ]
-          },
-          "displayName": "${__field.name}",
-          "min": 0
-        },
-        "overrides": []
-      },
-      "datasource": {
-        "type": "loki",
-        "uid": "finite-loki"
-      },
-      "targets": [
-        {
-          "refId": "A",
-          "expr": "sum by (project) (max_over_time({service=\"finite-private-request-diagnostics\"} | json reservation=\"reservationId\", observed=\"observedAtUnixSeconds\", model=\"model\", endpoint=\"endpoint\", project=\"projectId\", runtime=\"agentRuntimeId\", key=\"apiKeyId\", value=\"settledUsageUnits\" | label_format diagnostic_age=\"{{sub (unixEpoch now) .observed}}\" | diagnostic_age >= 0 | diagnostic_age <= 604800 | drop diagnostic_age | model=~\"$model\" | endpoint=~\"$endpoint\" | project=~\"${project:raw}\" | runtime=~\"${runtime:raw}\" | key=~\"${key:raw}\" | value!=\"\" | unwrap value | __error__=\"\" [$__range]))",
-          "legendFormat": "{{project}}",
-          "queryType": "instant"
-        }
-      ],
-      "transformations": [
-        {
-          "id": "rowsToFields",
-          "options": {}
-        }
-      ],
-      "options": {
-        "orientation": "horizontal",
-        "displayMode": "basic",
-        "reduceOptions": {
-          "values": false,
-          "calcs": [
-            "lastNotNull"
-          ],
-          "fields": ""
-        },
-        "showUnfilled": true
-      }
-    },
-    {
       "id": 23,
-      "title": "Measurement quality \u00b7 retained requests",
+      "title": "Measurement quality · retained requests",
       "type": "bargauge",
       "description": "",
       "gridPos": {
@@ -1313,7 +1250,7 @@
     },
     {
       "id": 24,
-      "title": "Termination reasons \u00b7 retained requests",
+      "title": "Termination reasons · retained requests",
       "type": "bargauge",
       "description": "",
       "gridPos": {
@@ -1376,7 +1313,7 @@
     },
     {
       "id": 25,
-      "title": "Request details \u00b7 Core-reserved only \u00b7 last 7 days",
+      "title": "Request details · Core-reserved only · last 7 days",
       "type": "text",
       "description": "",
       "gridPos": {
@@ -1394,12 +1331,12 @@
       },
       "options": {
         "mode": "markdown",
-        "content": "The metadata table shows at most **1,000 newest matching records**, with table pagination. Narrow the time range / filters to inspect more; the operator Core endpoint also provides a stable timestamp+reservation cursor for complete traversal. Refused/degraded arrivals have no rows. Null means unavailable. **Per-request decode speed is unavailable:** upstream final token counts and SSE chunk boundaries do not establish exact engine generation bounds. Use observed output tokens per wall-clock second above. Requested aliases resolve to the recorded routed model; served-model identity is unavailable when upstream does not establish it."
+        "content": "The metadata table shows at most **1,000 newest matching records**, with table pagination. Narrow the time range / filters to inspect more. Refused/degraded arrivals have no rows. Null means unavailable. **Per-request decode speed is unavailable:** upstream final token counts and SSE chunk boundaries do not establish exact engine generation bounds. Use observed output tokens per wall-clock second above. Requested aliases resolve to the recorded routed model; served-model identity is unavailable when upstream does not establish it."
       }
     },
     {
       "id": 26,
-      "title": "Request metadata \u00b7 newest 1,000 matches; narrow range for more",
+      "title": "Request metadata · newest 1,000 matches; narrow range for more",
       "type": "table",
       "description": "",
       "gridPos": {
@@ -1470,7 +1407,7 @@
               "durationMs": "Duration (ms)",
               "measurementQuality": "Quality",
               "terminationReason": "Termination",
-              "settledUsageUnits": "Settled guard units",
+              "settledUsageUnits": "Settled units snapshot",
               "accountingStatus": "Accounting snapshot",
               "model": "Model",
               "endpoint": "Endpoint",
@@ -1508,193 +1445,15 @@
       ]
     },
     {
-      "id": 27,
-      "title": "Current Runaway Guard state \u00b7 all active grants",
-      "type": "text",
-      "description": "",
-      "gridPos": {
-        "h": 4,
-        "w": 24,
-        "x": 0,
-        "y": 90
-      },
-      "fieldConfig": {
-        "defaults": {
-          "unit": "short",
-          "noValue": "Unavailable"
-        },
-        "overrides": []
-      },
-      "options": {
-        "mode": "markdown",
-        "content": "Latest successfully collected snapshot per grant; **Project/runtime/key/model filters do not apply** because guard limits belong to the grant. Burst usage includes reservations, with expired windows shown as zero and no active reset. Weekly usage is a rolling 7\u00d724-hour accounting window when enabled; next expiry is the oldest included reservation aging out, not a calendar reset. Aging reservations are older than 15 minutes and are not a live-request count. This observer never settles or repairs them. Up to 1,000 active grants are collected; a zero guard-completeness indicator means a partial snapshot."
-      }
-    },
-    {
-      "id": 28,
-      "title": "Latest guard snapshots \u00b7 last minute; stale rows disappear",
-      "type": "table",
-      "description": "",
-      "gridPos": {
-        "h": 10,
-        "w": 24,
-        "x": 0,
-        "y": 94
-      },
-      "fieldConfig": {
-        "defaults": {
-          "unit": "short",
-          "noValue": "Unavailable"
-        },
-        "overrides": []
-      },
-      "datasource": {
-        "type": "loki",
-        "uid": "finite-loki"
-      },
-      "targets": [
-        {
-          "refId": "A",
-          "expr": "{service=\"finite-private-guard-status\"} | json observed=\"observedAtUnixSeconds\" | label_format diagnostic_age=\"{{sub (unixEpoch now) .observed}}\" | diagnostic_age >= 0 | diagnostic_age <= 60 | drop diagnostic_age",
-          "legendFormat": "",
-          "queryType": "range",
-          "maxLines": 5000,
-          "direction": "backward"
-        }
-      ],
-      "timeFrom": "1m",
-      "options": {
-        "showHeader": true,
-        "enablePagination": true,
-        "cellHeight": "sm"
-      },
-      "transformations": [
-        {
-          "id": "extractFields",
-          "options": {
-            "source": "Line",
-            "format": "json",
-            "replace": true,
-            "keepTime": false
-          }
-        },
-        {
-          "id": "sortBy",
-          "options": {
-            "sort": [
-              {
-                "field": "observedAt",
-                "desc": false
-              }
-            ]
-          }
-        },
-        {
-          "id": "groupBy",
-          "options": {
-            "fields": {
-              "grantId": {
-                "operation": "groupby",
-                "aggregations": []
-              },
-              "observedAt": {
-                "operation": "aggregate",
-                "aggregations": [
-                  "last"
-                ]
-              },
-              "burstLimitUnits": {
-                "operation": "aggregate",
-                "aggregations": [
-                  "last"
-                ]
-              },
-              "burstUsedUnits": {
-                "operation": "aggregate",
-                "aggregations": [
-                  "last"
-                ]
-              },
-              "burstResetAt": {
-                "operation": "aggregate",
-                "aggregations": [
-                  "last"
-                ]
-              },
-              "weeklyLimitUnits": {
-                "operation": "aggregate",
-                "aggregations": [
-                  "last"
-                ]
-              },
-              "rollingWeekUsedUnits": {
-                "operation": "aggregate",
-                "aggregations": [
-                  "last"
-                ]
-              },
-              "rollingWeekNextExpiryAt": {
-                "operation": "aggregate",
-                "aggregations": [
-                  "last"
-                ]
-              },
-              "agingReservations": {
-                "operation": "aggregate",
-                "aggregations": [
-                  "last"
-                ]
-              },
-              "oldestReservationAt": {
-                "operation": "aggregate",
-                "aggregations": [
-                  "last"
-                ]
-              }
-            }
-          }
-        },
-        {
-          "id": "organize",
-          "options": {
-            "renameByName": {
-              "grantId": "Grant ID",
-              "observedAt (last)": "Observed time",
-              "burstLimitUnits (last)": "Burst limit (units)",
-              "burstUsedUnits (last)": "Burst used (units)",
-              "burstResetAt (last)": "Active burst reset (UTC)",
-              "weeklyLimitUnits (last)": "Rolling-week limit (units)",
-              "rollingWeekUsedUnits (last)": "Rolling-week used (units)",
-              "rollingWeekNextExpiryAt (last)": "Next weekly expiry (UTC)",
-              "agingReservations (last)": "Reservations >15 min",
-              "oldestReservationAt (last)": "Oldest reservation (UTC)"
-            },
-            "indexByName": {
-              "grantId": 0,
-              "observedAt (last)": 1,
-              "burstLimitUnits (last)": 2,
-              "burstUsedUnits (last)": 3,
-              "burstResetAt (last)": 4,
-              "weeklyLimitUnits (last)": 5,
-              "rollingWeekUsedUnits (last)": 6,
-              "rollingWeekNextExpiryAt (last)": 7,
-              "agingReservations (last)": 8,
-              "oldestReservationAt (last)": 9
-            }
-          }
-        }
-      ]
-    },
-    {
       "id": 29,
-      "title": "Reporting health \u00b7 current",
+      "title": "Reporting health · current",
       "type": "stat",
       "description": "0 or unavailable means reporting is incomplete. A missing exporter process becomes stale even if its previous run succeeded.",
       "gridPos": {
         "h": 8,
         "w": 12,
         "x": 0,
-        "y": 104
+        "y": 90
       },
       "fieldConfig": {
         "defaults": {
@@ -1716,13 +1475,6 @@
           "refId": "A",
           "expr": "finite_private_request_diagnostics_exporter_query_success",
           "legendFormat": "export succeeded",
-          "instant": true,
-          "range": false
-        },
-        {
-          "refId": "B",
-          "expr": "finite_private_request_diagnostics_guard_snapshot_complete",
-          "legendFormat": "guard snapshot complete",
           "instant": true,
           "range": false
         }
@@ -1750,7 +1502,7 @@
         "h": 8,
         "w": 12,
         "x": 12,
-        "y": 104
+        "y": 90
       },
       "fieldConfig": {
         "defaults": {
@@ -1798,7 +1550,7 @@
         "h": 5,
         "w": 24,
         "x": 0,
-        "y": 112
+        "y": 98
       },
       "fieldConfig": {
         "defaults": {

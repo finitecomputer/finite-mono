@@ -106,20 +106,20 @@ successful batches. It obtains `FINITE_LOGS_WRITE_USERNAME` and
 `FINITE_LOGS_WRITE_PASSWORD` through the existing log-write environment file.
 The monitoring VPS receives neither a Postgres connection nor a Core service
 credential. Limiter diagnostic writes have a bound of eight concurrent tasks.
-Core reporting uses a 250 ms connection-acquisition budget and a two-second
+Core diagnostic writes use a 250 ms connection-acquisition budget and a two-second
 SQL budget so telemetry cannot hold shared database capacity indefinitely.
 Attribution uses trusted key-issue audit metadata at reservation time; later
 key reissue cannot transfer prior requests to a new Project or Agent Runtime.
 Ambiguous historical ownership stays unattributed.
 
 Immutable request events use the `finite-private-request-diagnostics` stream.
-The separate `finite-private-guard-status` stream contains current grant
-snapshots. Read the latest snapshot per grant; never sum repeated snapshots.
-Weekly usage is a rolling seven-day window. An inactive burst window has no
-scheduled reset until another admission starts a new window.
+Grafana queries this stream directly; there is no separate Core reporting API.
+The request table shows the newest 1,000 matching records. Narrow its time
+range and filters to inspect more. Current quota/guard snapshots, reset times
+and aging-reservation panels are deferred.
 
 The exporter publishes collection start, last successful export, failure
-count, backlog size/age and guard-snapshot completeness through the existing
+count and backlog size/age through the existing
 node-exporter/Alloy path. Failed collection must leave the last-success time
 unchanged. Independent `finite-private-request-diagnostics-prune.service`
 cleanup runs every ten minutes, including when inference and export are idle.

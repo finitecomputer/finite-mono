@@ -297,13 +297,12 @@ async fn finite_private_request_diagnostics_are_idempotent_and_separate_from_acc
             grant_id: grant.id.clone(), raw_key: "fpk_live_metrics".into(),
             project_id: None, agent_runtime_id: None, now: None,
         }).await.unwrap();
-        store
+        let first = store
             .record_finite_private_request_diagnostic(input.clone())
             .await
             .unwrap();
         // Accounting may advance after diagnostics have been recorded/exported.
         // Replaying diagnostics must not change either its payload or its TTL.
-        let first = store.finite_private_request_diagnostics(10).await.unwrap().remove(0);
         store.settle_finite_private_reservation(crate::SettleFinitePrivateReservationInput {
             reservation_id: reservation_id.clone(), request_id: "req-metrics-1".into(),
             settlement: crate::FinitePrivateSettlementKind::Actual,
@@ -313,92 +312,25 @@ async fn finite_private_request_diagnostics_are_idempotent_and_separate_from_acc
         }).await.unwrap();
         let mut replacement = input.clone();
         replacement.completion_tokens = Some(20);
-        store
+        let detail = store
             .record_finite_private_request_diagnostic(replacement)
             .await
             .unwrap();
-        let details = store.finite_private_request_diagnostics(10).await.unwrap();
-        assert_eq!(details.len(), 1);
-        assert_eq!(details[0].reservation_id, reservation_id);
-        // The first accepted diagnostic is immutable; a retry cannot rewrite
-        // an event that may already have been exported to Loki.
-        assert_eq!(details[0].completion_tokens, Some(19));
-        assert_eq!(details[0].model, "glm-5-3-flash");
-        assert_eq!(details[0], first);
-        assert_eq!(details[0].project_id.as_deref(), Some("project-metrics"));
-        let second = store.reserve_finite_private_usage(crate::ReserveFinitePrivateUsageInput {
-            request_id: "req-metrics-2".into(), presented_api_key: "fpk_live_metrics".into(),
-            endpoint: "/v1/chat/completions".into(), model: "glm-5-3-flash".into(),
-            estimated_prompt_tokens: 10, estimated_completion_tokens: 20, estimated_usage_units: 70,
-            usage_formula_version: "2026-05-26.v1".into(), dashboard_url: "https://dashboard.invalid".into(), now: None,
-        }).await.unwrap();
-        let mut second_input = input.clone();
-        second_input.reservation_id = second.reservation_id.unwrap();
-        second_input.request_id = "req-metrics-2".into();
-        store.record_finite_private_request_diagnostic(second_input).await.unwrap();
-        let page = store.finite_private_request_diagnostics_page(crate::FinitePrivateRequestDiagnosticQuery { limit: Some(1), model: Some("glm-5-3-flash".into()), ..Default::default() }).await.unwrap();
-        assert_eq!(page.items.len(), 1);
-        assert!(page.truncated);
-        let next = store.finite_private_request_diagnostics_page(crate::FinitePrivateRequestDiagnosticQuery {
-            limit: Some(1), before_observed_at: page.next_before_observed_at,
-            before_reservation_id: page.next_before_reservation_id, model: Some("glm-5-3-flash".into()), ..Default::default() }).await.unwrap();
-        assert_eq!(next.items.len(), 1);
-        assert!(!next.truncated);
-        assert_ne!(next.items[0].reservation_id, page.items[0].reservation_id);
-        assert!(store.finite_private_request_diagnostics_page(crate::FinitePrivateRequestDiagnosticQuery {
-            api_key_id: Some("unrelated-key".into()), ..Default::default() }).await.unwrap().items.is_empty());
-        assert!(store.finite_private_request_diagnostics_page(crate::FinitePrivateRequestDiagnosticQuery {
-            project_id: Some("unrelated-project".into()), ..Default::default() }).await.unwrap().items.is_empty());
-        // Age only the synthetic diagnostic, not its durable accounting record.
-        db.query_json("WITH aged AS (UPDATE finite_private_request_diagnostics SET observed_at = NOW() - INTERVAL '8 days' WHERE reservation_id=$1 RETURNING reservation_id) SELECT to_jsonb(aged) FROM aged", &[&reservation_id]).await;
-        assert_eq!(store.finite_private_request_diagnostics(10).await.unwrap().len(), 1);
+        assert_eq!(detail.reservation_id, reservation_id);
+        // Retry cannot rewrite an exported event or extend its retention.
+        assert_eq!(detail.completion_tokens, Some(19));
+        assert_eq!(detail.model, "glm-5-3-flash");
+        assert_eq!(detail, first);
+        assert_eq!(detail.project_id.as_deref(), Some("project-metrics"));
+        let persisted = db.query_json(
+            "SELECT json_build_object('count', COUNT(*)) FROM finite_private_request_diagnostics WHERE reservation_id=$1",
+            &[&reservation_id],
+        ).await;
+        assert_eq!(persisted[0]["count"], 1);
         let ledger = db.row("finite_private_reservations", &reservation_id).await.unwrap();
         assert_eq!(ledger["settled_usage_units"], 68);
         assert_eq!(ledger["status"], "settled");
 
-    })
-    .await;
-}
-
-#[tokio::test]
-async fn finite_private_request_details_require_operator_identity() {
-    with_isolated_postgres(|db| async move {
-        let app = admin_router(db.store.clone());
-        for headers in [vec![], identity_headers("member@finite.vip", "true")] {
-            let (status, _) = send_json(
-                &app,
-                "GET",
-                "/api/core/v1/finite-private/admin-request-details",
-                &headers,
-                None,
-            )
-            .await;
-            assert!(status == StatusCode::UNAUTHORIZED || status == StatusCode::FORBIDDEN);
-        }
-        let headers = vec![(
-            "authorization".into(),
-            format!(
-                "Bearer {}",
-                access_token_with_subject(
-                    "operator-request-reporting",
-                    "admin@finite.vip",
-                    true,
-                    Some(OPERATOR_ORG_ID)
-                )
-            ),
-        )];
-        let (status, body) = send_json(
-            &app,
-            "GET",
-            "/api/core/v1/finite-private/admin-request-details?limit=1",
-            &headers,
-            None,
-        )
-        .await;
-        assert_eq!(status, StatusCode::OK);
-        assert_eq!(body["coverage"], "core-reserved-only");
-        assert_eq!(body["retentionDays"], 7);
-        assert_eq!(body["items"], serde_json::json!([]));
     })
     .await;
 }

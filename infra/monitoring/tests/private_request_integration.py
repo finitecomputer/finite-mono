@@ -151,7 +151,6 @@ try:
         )
         == 1001
     )
-    assert parsed((ROOT / "infra/monitoring/private_requests/guards.sql").read_text())
     report = {"exported": total, "batches": batches, "replayed_before_ack": 500}
     dashboard = json.loads(
         (

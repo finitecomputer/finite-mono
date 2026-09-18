@@ -13,7 +13,6 @@ import urllib.request
 
 DIRECTORY = Path(__file__).resolve().parent
 SERVICE = "finite-private-request-diagnostics"
-GUARD_SERVICE = "finite-private-guard-status"
 
 
 def database(sql):
@@ -126,17 +125,12 @@ def run(state_path, metrics_path, query=database, send=push, clock=time.time):
     success = 0
     pending = -1
     oldest = -1
-    guards_complete = 0
     try:
         for _ in range(4):
             rows = query((DIRECTORY / "requests.sql").read_text())
             state["exported"] += export_batch(rows, send=send, query=query)
             if len(rows) < 500:
                 break
-        guard_rows = query((DIRECTORY / "guards.sql").read_text())
-        guards_complete = int(len(guard_rows) <= 1000)
-        if guard_rows:
-            send([stream(GUARD_SERVICE, guard_rows[:1000])])
         backlog = query(
             "SELECT json_build_object('pending', COUNT(*), 'oldest', "
             "COALESCE(EXTRACT(EPOCH FROM CURRENT_TIMESTAMP - MIN(observed_at)),0)) "
@@ -159,7 +153,6 @@ def run(state_path, metrics_path, query=database, send=push, clock=time.time):
         "exporter_query_success": success,
         "pending_requests": pending,
         "oldest_pending_age_seconds": oldest,
-        "guard_snapshot_complete": guards_complete,
     }
     atomic_write(
         metrics_path,

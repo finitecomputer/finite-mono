@@ -129,20 +129,6 @@ pub(super) async fn finite_private_admin_state(
     Ok(Json(state.store.finite_private_admin_state().await?))
 }
 
-pub(super) async fn finite_private_admin_request_details(
-    State(state): State<CoreApiState>,
-    headers: HeaderMap,
-    Query(query): Query<FinitePrivateRequestDiagnosticQuery>,
-) -> Result<Json<FinitePrivateRequestDiagnosticPage>, ApiError> {
-    require_admin_identity(&state, &headers).await?;
-    Ok(Json(
-        state
-            .store
-            .finite_private_request_diagnostics_page(query)
-            .await?,
-    ))
-}
-
 pub(super) async fn admin_issue_finite_private_friend_key(
     State(state): State<CoreApiState>,
     headers: HeaderMap,

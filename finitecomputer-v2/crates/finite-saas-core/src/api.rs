@@ -18,12 +18,11 @@ use crate::{
     CompleteRuntimeControlRequestInput, CoreError, CustomerBillingAccount,
     FailAgentCreationRequestInput, FailRuntimeControlRequestInput, FinitePrivateAdminAuditEvent,
     FinitePrivateAdminState, FinitePrivateApiKey, FinitePrivateDailyResetResult,
-    FinitePrivateGrant, FinitePrivateRequestDiagnostic, FinitePrivateRequestDiagnosticPage,
-    FinitePrivateRequestDiagnosticQuery, FinitePrivateSettlementKind, FinitePrivateUsageDecision,
-    FinitePrivateUsageStatus, HostingTier, IssueFinitePrivateApiKeyInput,
-    LeaseAgentCreationRequestInput, LeaseRuntimeControlRequestInput, LinkStripeCustomerInput,
-    LinkStripeCustomerRequest, LinkVerifiedUserInput, Project, ProviderOperationEnvelope,
-    ProviderOperationTransition, ProviderRuntimeHandleEnvelope,
+    FinitePrivateGrant, FinitePrivateRequestDiagnostic, FinitePrivateSettlementKind,
+    FinitePrivateUsageDecision, FinitePrivateUsageStatus, HostingTier,
+    IssueFinitePrivateApiKeyInput, LeaseAgentCreationRequestInput, LeaseRuntimeControlRequestInput,
+    LinkStripeCustomerInput, LinkStripeCustomerRequest, LinkVerifiedUserInput, Project,
+    ProviderOperationEnvelope, ProviderOperationTransition, ProviderRuntimeHandleEnvelope,
     ProvisionFinitePrivateRuntimeKeyInput, ProvisionFinitePrivateRuntimeKeyResult,
     RecordFinitePrivateRequestDiagnosticInput, RecordProviderOperationTransitionInput,
     RecordRuntimeHealthReportInput, RegisterAgentCreationRuntimeInput,
@@ -40,7 +39,7 @@ use crate::{
     derive_runtime_summary_status, normalize_owner_email, normalize_runtime_contact_endpoint,
     normalize_source_host_id,
 };
-use axum::extract::{Path, Query, State};
+use axum::extract::{Path, State};
 use axum::http::{HeaderMap, HeaderValue, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
@@ -273,10 +272,6 @@ fn router_from_state(state: CoreApiState) -> Router {
         .route(
             "/api/core/v1/finite-private/admin-state",
             get(finite_private_admin_state),
-        )
-        .route(
-            "/api/core/v1/finite-private/admin-request-details",
-            get(finite_private_admin_request_details),
         )
         .route(
             "/api/core/v1/finite-private/usage",
