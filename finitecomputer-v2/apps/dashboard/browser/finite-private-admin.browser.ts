@@ -91,13 +91,36 @@ test("admins issue Standard or Confidential Launch Codes", { timeout: 120_000 },
     });
 
     await page.goto(`http://127.0.0.1:${dashboardPort}/dashboard/admin`);
-    await page.getByRole("heading", { name: "Users" }).waitFor({ state: "visible" });
+    const usersTable = page.getByRole("table", { name: "Users and agents" });
+    await usersTable.waitFor({ state: "visible" });
+    await page.getByRole("row", { name: "Open controls for Private Agent" }).click();
+    await page.getByRole("button", { name: "Reset usage", exact: true }).waitFor({ state: "visible" });
+    await page.getByRole("dialog", { name: "Private Agent" }).getByRole("button", { name: "Close", exact: true }).click();
+    await page.setViewportSize({ width: 390, height: 844 });
+    const scrollRegion = page.getByRole("region", { name: "Users table, scroll for more columns" });
+    assert.equal(await scrollRegion.evaluate((element) => element.scrollWidth > element.clientWidth), true);
+    assert.equal(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth), true);
+    await page.setViewportSize({ width: 1440, height: 1000 });
+    await page.getByLabel("Filter agents").fill("PRIVATE@FINITE.VIP 84");
+    assert.equal(await usersTable.locator("tbody > tr").count(), 1);
+    await page.getByLabel("Filter agents").fill("no-such-agent");
+    await page.getByText("No agents match that filter.").waitFor({ state: "visible" });
+    await page.getByLabel("Filter agents").fill("private@finite.vip");
+    assert.equal(await page.getByRole("group", { name: "Users view" }).count(), 0);
+    assert.equal(await usersTable.locator("tbody > tr").count(), 1);
+    assert.equal(await page.getByLabel("Filter agents").inputValue(), "private@finite.vip");
+
     await page.getByRole("progressbar", {
       name: "Finite Private weighted token usage",
     }).waitFor({ state: "visible" });
     await page.getByText("84 of 100,000,000 weighted tokens").waitFor({ state: "visible" });
+    await page.getByRole("row", { name: "Open controls for Private Agent" }).click();
     await page.getByRole("button", { name: "Reset usage" }).waitFor({ state: "visible" });
-    await page.getByText("fp_key_1", { exact: true }).waitFor({ state: "visible" });
+    await page.getByRole("dialog", { name: "Private Agent" }).locator("span").filter({ hasText: /^fp_key_1$/u }).waitFor({ state: "visible" });
+    await page.getByRole("dialog", { name: "Private Agent" }).getByRole("button", { name: "Close", exact: true }).click();
+    await page.getByRole("tab", { name: "Email", exact: true }).click();
+    await page.getByRole("heading", { name: "Change sign-in email" }).waitFor({ state: "visible" });
+    assert.equal(await page.getByLabel("Filter agents").count(), 0);
     await page.getByRole("tab", { name: "Finite Private" }).click();
     await page.getByRole("heading", { name: "Finite Private" }).waitFor({ state: "visible" });
     await page.getByRole("tab", { name: "Invites" }).click();

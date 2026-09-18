@@ -179,6 +179,7 @@ export type CoreRuntimeControlRequest = {
 };
 
 export type CoreFinitePrivateGrant = {
+  burst_window_epoch?: number;
   id: string;
   user_id: string;
   limit_profile_id: string;
@@ -274,6 +275,7 @@ export type CoreFinitePrivateUsageResult = CoreBridgeStatus & {
 };
 
 export type CoreAdminRuntimeOverview = {
+  offboarding_phase?: string | null;
   project_id: string;
   project_display_name: string;
   owner_email?: string | null;
