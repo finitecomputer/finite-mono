@@ -51,8 +51,13 @@ reconnect. A view read never saves navigation, creates a binding, changes the
 Device revision, or emits updates to other tabs. Explicit navigation actions
 still save the Device's default cursor for the next initial load.
 
-Requests without a view keep the existing selected-transcript contract. No
-persisted data or response schema changes. Deploy the Hosted Web Device before
+Requests without a view keep the existing selected-transcript contract:
+state reads and the initial SSE event read the last published snapshot without
+waiting for the runtime actor. Subsequent unscoped events retain the existing
+update result and published-state fallback. Scoped reads wait for the actor to
+finish any in-flight command before projecting a coherent view; the dashboard
+keeps its last coherent transcript during that wait. No persisted data or
+response schema changes. Deploy the Hosted Web Device before
 the dashboard for independent live tab views. An older dashboard keeps using
 unscoped snapshots; an older service ignores the query parameters, so the new
 dashboard retains its last coherent transcript when that service returns a

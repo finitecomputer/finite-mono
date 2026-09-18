@@ -2,7 +2,7 @@ use super::*;
 
 /// A caller's transcript window. Reading it never changes the Device's saved
 /// navigation or publishes an AppUpdate to another caller.
-#[derive(Clone, Debug, Default, Deserialize)]
+#[derive(Clone, Debug, Default, Deserialize, PartialEq, Eq)]
 pub struct AppView {
     pub room_id: Option<String>,
     pub topic_id: Option<String>,

@@ -669,10 +669,22 @@ async fn app_state(
 ) -> Result<Json<AppState>, HostedDeviceError> {
     let user_id = authorized_user(&state, &headers)?;
     let runtime = state.runtime_for(&user_id)?;
+    Ok(Json(redacted_state(read_app_view(runtime, view).await?)))
+}
+
+async fn read_app_view(
+    runtime: Arc<FiniteChatRuntime>,
+    view: AppView,
+) -> Result<AppState, HostedDeviceError> {
+    // Preserve the published-snapshot fast path for existing clients, even
+    // when a slow send or sync is occupying the runtime actor.
+    if view == AppView::default() {
+        return Ok(runtime.state()?);
+    }
     let snapshot = tokio::task::spawn_blocking(move || runtime.state_for_view(view))
         .await
         .map_err(|error| HostedDeviceError::Task(error.to_string()))??;
-    Ok(Json(redacted_state(snapshot)))
+    Ok(snapshot)
 }
 
 #[derive(Clone, Debug, Deserialize)]
@@ -2544,19 +2556,19 @@ async fn app_updates(
     // Flush a state event immediately. Waiting for the first remote update (or
     // the SSE keepalive interval) makes a healthy idle Device look disconnected
     // every time the dashboard opens or reconnects.
-    let initial_runtime = Arc::clone(&runtime);
-    let initial_view = view.clone();
-    let initial = tokio::task::spawn_blocking(move || initial_runtime.state_for_view(initial_view))
-        .await
-        .map_err(|error| HostedDeviceError::Task(error.to_string()))??;
+    let initial = read_app_view(Arc::clone(&runtime), view.clone()).await?;
     let initial = state_event(&redacted_state(initial)).unwrap_or_else(error_event);
     let initial_stream = futures_util::stream::once(async move { Ok(initial) });
     let stream = futures_util::stream::unfold((runtime, view), |(runtime, view)| async move {
         let next_runtime = Arc::clone(&runtime);
         let next_view = view.clone();
         let update = tokio::task::spawn_blocking(move || {
-            let _ = next_runtime.wait_for_update(DEFAULT_UPDATE_TIMEOUT_MILLIS);
-            next_runtime.state_for_view(next_view)
+            let update = next_runtime.wait_for_update(DEFAULT_UPDATE_TIMEOUT_MILLIS);
+            if next_view == AppView::default() {
+                update.or_else(|_| next_runtime.state())
+            } else {
+                next_runtime.state_for_view(next_view)
+            }
         })
         .await;
         let event = match update {
