@@ -1111,6 +1111,7 @@ test("dashboard agent creation browser states", { timeout: 300_000 }, async () =
       const renameDialog = page.getByRole("dialog", { name: "Rename chat" });
       await renameDialog.getByRole("textbox", { name: "Name" }).fill("Browser QA");
       await renameDialog.getByRole("button", { name: "Save" }).click();
+      await renameDialog.waitFor({ state: "hidden" });
       await waitFor(() =>
         hostedDevice.state.actions.some(
           (action) => actionName(action) === "RenameChat"
@@ -1617,6 +1618,16 @@ test("dashboard agent creation browser states", { timeout: 300_000 }, async () =
       // share the ordered navigation lane with a subsequent chat click.
       const topicTitle = "Launch planning";
       const topicActionsBefore = hostedDevice.state.actions.length;
+      const topicNavigationActions = () => hostedDevice.state.actions
+        .slice(topicActionsBefore)
+        .filter((action) => ["CreateTopic", "OpenChat"].includes(actionName(action)));
+      // Typing is independent of the ordered navigation lane. Include it
+      // explicitly so this proof cannot rely on incidental request order.
+      const typing = await page.request.post(
+        new URL("/api/chat/machines/completed-oslo-bot/hosted-device/actions", page.url()).href,
+        { data: { SetTyping: { room_id: "room_browser_agent", is_typing: false } } }
+      );
+      assert(typing.ok());
       const completedTopicMutations = hostedDevice.state.completedSelectionMutations;
       hostedDevice.holdNextNavigationAction();
       await page.getByRole("button", { name: "New topic", exact: true }).click();
@@ -1628,12 +1639,12 @@ test("dashboard agent creation browser states", { timeout: 300_000 }, async () =
         5_000,
         () => "CreateTopic did not enter the ordered navigation lane"
       );
-      assert.deepEqual(hostedDevice.state.actions[topicActionsBefore], {
+      assert.deepEqual(topicNavigationActions(), [{
         CreateTopic: {
           room_id: "room_browser_agent",
           title: topicTitle,
         },
-      });
+      }]);
 
       // The modal intentionally blocks a second human click. Trigger the
       // underlying existing-chat handler directly to prove the provider still
@@ -1645,12 +1656,12 @@ test("dashboard agent creation browser states", { timeout: 300_000 }, async () =
         .first()
         .evaluate((element) => (element as HTMLButtonElement).click());
       await waitFor(
-        () => hostedDevice.state.actions.length > topicActionsBefore + 1,
+        () => topicNavigationActions().length > 1,
         750
       ).catch(() => undefined);
       assert.equal(
-        hostedDevice.state.actions.length,
-        topicActionsBefore + 1,
+        topicNavigationActions().length,
+        1,
         "a later OpenChat reached the daemon before CreateTopic completed"
       );
       hostedDevice.releaseNavigationAction();
@@ -1703,11 +1714,11 @@ test("dashboard agent creation browser states", { timeout: 300_000 }, async () =
       // Hold a selection-only OpenChat while a newer stream revision lands.
       // Starting outside chat also proves route navigation does not wait for
       // the high-latency mutation response. The clicked selection is pinned
-      // client-side immediately, so the pane switches at once, the stale
-      // stream snapshot applies its content without yanking the selection
-      // back, and the equal-revision response still triggers reconciliation.
+      // client-side immediately, so the pane switches at once. The scoped
+      // stream and HTTP read must return that transcript even before the
+      // shared Device cursor catches up.
       const stateFetchesBeforeSelectionRace = hostedDevice.state.authRequests.filter(
-        (request) => request.path === "/v1/app/agent-bindings/open"
+        (request) => request.path === "/v1/app/state"
       ).length;
       await page
         .getByRole("navigation", { name: "Agent navigation" })
@@ -1737,9 +1748,8 @@ test("dashboard agent creation browser states", { timeout: 300_000 }, async () =
         chat_id: "chat_browser_agent",
       });
       hostedDevice.emit();
-      // The stream snapshot still carries the previous selection while the
-      // OpenChat is held; its message is only visible if the browser-owned Browser QA
-      // pane stayed put instead of fighting back to Remembered work.
+      // While OpenChat is held, the stream must already serve Browser QA's
+      // transcript instead of the shared cursor's Remembered work transcript.
       await expectVisibleText(page, "Concurrent stream update.");
       hostedDevice.releaseNavigationAction();
       await waitFor(
@@ -1752,10 +1762,10 @@ test("dashboard agent creation browser states", { timeout: 300_000 }, async () =
       await waitFor(
         () =>
           hostedDevice.state.authRequests.filter(
-            (request) => request.path === "/v1/app/agent-bindings/open"
+            (request) => request.path === "/v1/app/state"
           ).length > stateFetchesBeforeSelectionRace,
         5_000,
-        () => "a rejected selection response did not trigger state reconciliation"
+        () => "navigation did not refresh its scoped transcript"
       );
       await page
         .locator(".finite-chat__topbar")
@@ -1770,12 +1780,8 @@ test("dashboard agent creation browser states", { timeout: 300_000 }, async () =
       hostedDevice.emit();
       await expectVisibleText(page, "Selection settled checkpoint.");
 
-      // Cross-device tripwire: with no click in flight, a snapshot whose
-      // daemon selection diverges from this browser's (for example, a scoped
-      // send in a concurrently active Chat on another device) may update
-      // background state but must NOT move the visible pane. Selection is
-      // device-scoped; only an explicit local click, a vanished local
-      // selection, or first load may move the foreground.
+      // Another tab's selection must not move this tab or erase its history.
+      // Check actual foreground content as well as the selected heading.
       hostedDevice.state.app.selected_chat_id = "chat_browser_remembered";
       hostedDevice.state.app.topics[0]!.active_chat_id = "chat_browser_remembered";
       hostedDevice.state.app.messages.push({
@@ -1797,6 +1803,7 @@ test("dashboard agent creation browser states", { timeout: 300_000 }, async () =
         false,
         "a divergent daemon selection moved the visible Chat without a local click"
       );
+      await expectVisibleText(page, "Selection settled checkpoint.");
 
       const completedBeforeBackgroundChatNavigation =
         hostedDevice.state.completedSelectionMutations;
@@ -2165,7 +2172,7 @@ async function startFakeHostedDevice() {
       },
     },
   };
-  const streams = new Set<ServerResponse>();
+  const streams = new Map<ServerResponse, URLSearchParams>();
   const server = http.createServer(async (request, response) => {
     try {
       await handleHostedDeviceRequest(request, response, state, streams);
@@ -2215,14 +2222,14 @@ async function startFakeHostedDevice() {
     setAvailable(available: boolean) {
       state.unavailable = !available;
       if (!available) {
-        for (const stream of streams) stream.end();
+        for (const stream of streams.keys()) stream.end();
         streams.clear();
       }
     },
     setUpdatesAvailable(available: boolean) {
       state.updatesUnavailable = !available;
       if (!available) {
-        for (const stream of streams) stream.end();
+        for (const stream of streams.keys()) stream.end();
         streams.clear();
       }
     },
@@ -2234,7 +2241,7 @@ async function startFakeHostedDevice() {
       state.bindingAuthorizationFailuresRemaining += 1;
     },
     close() {
-      for (const stream of streams) {
+      for (const stream of streams.keys()) {
         stream.end();
       }
       server.close();
@@ -2246,9 +2253,11 @@ async function handleHostedDeviceRequest(
   request: IncomingMessage,
   response: ServerResponse,
   state: HostedDeviceState,
-  streams: Set<ServerResponse>
+  streams: Map<ServerResponse, URLSearchParams>
 ) {
-  const path = request.url ?? "/";
+  const url = new URL(request.url ?? "/", "http://fixture");
+  const path = url.pathname;
+  const view = url.searchParams;
   if (request.method === "GET" && path === "/generated-image.png") {
     state.directImageGets += 1;
     response.writeHead(200, {
@@ -2329,7 +2338,7 @@ async function handleHostedDeviceRequest(
       return;
     }
     state.app.hosted_agent_binding = binding;
-    writeJson(response, 200, state.app);
+    writeJson(response, 200, hostedView(state.app, view));
     return;
   }
 
@@ -2386,7 +2395,7 @@ async function handleHostedDeviceRequest(
       state.agentBindings.set(projectId, binding);
     }
     state.app.hosted_agent_binding = binding;
-    writeJson(response, 200, state.app);
+    writeJson(response, 200, hostedView(state.app, view));
     return;
   }
 
@@ -2397,7 +2406,7 @@ async function handleHostedDeviceRequest(
     );
     state.app.rev += 1;
     emitHostedState(streams, state.app);
-    writeJson(response, 200, state.app);
+    writeJson(response, 200, hostedView(state.app, view));
     return;
   }
 
@@ -2422,12 +2431,12 @@ async function handleHostedDeviceRequest(
     });
     state.completedSelectionMutations += 1;
     emitHostedState(streams, state.app);
-    writeJson(response, 200, state.app);
+    writeJson(response, 200, hostedView(state.app, view));
     return;
   }
 
   if (request.method === "GET" && path === "/v1/app/state") {
-    writeJson(response, 200, state.app);
+    writeJson(response, 200, hostedView(state.app, view));
     return;
   }
 
@@ -2447,7 +2456,7 @@ async function handleHostedDeviceRequest(
     if (!["OpenChat", "OpenTopic"].includes(actionName(action))) {
       emitHostedState(streams, state.app);
     }
-    writeJson(response, 200, state.app);
+    writeJson(response, 200, hostedView(state.app, view));
     return;
   }
 
@@ -2461,9 +2470,9 @@ async function handleHostedDeviceRequest(
       connection: "keep-alive",
       "content-type": "text/event-stream",
     });
-    streams.add(response);
+    streams.set(response, view);
     response.on("close", () => streams.delete(response));
-    writeHostedState(response, state.app);
+    writeHostedState(response, state.app, view);
     return;
   }
 
@@ -2839,16 +2848,29 @@ function hostedPlayableMessage(
 }
 
 function emitHostedState(
-  streams: Set<ServerResponse>,
+  streams: Map<ServerResponse, URLSearchParams>,
   state: FakeHostedChatState
 ) {
-  for (const stream of streams) {
-    writeHostedState(stream, state);
+  for (const [stream, view] of streams) {
+    writeHostedState(stream, state, view);
   }
 }
 
-function writeHostedState(response: ServerResponse, state: FakeHostedChatState) {
-  response.write(`id: ${state.rev}\nevent: state\ndata: ${JSON.stringify(state)}\n\n`);
+function hostedView(state: FakeHostedChatState, view: URLSearchParams) {
+  const room = view.get("room_id") ?? state.selected_room_id;
+  const topicId = view.get("topic_id") ?? state.selected_topic_id;
+  const topic = state.topics.find(topic => topic.room_id === room && topic.topic_id === topicId);
+  const chat = view.get("chat_id") ?? (view.has("room_id") ? topic?.active_chat_id ?? null : state.selected_chat_id);
+  const messages = state.messages.filter(message => message.room_id === room && message.conversation_id === topicId && message.chat_id === chat);
+  const anchorIndex = messages.findIndex(message => message.message_id === view.get("oldest_message_id"));
+  const limit = Math.max(Number(view.get("limit") ?? 50), anchorIndex < 0 ? 0 : messages.length - anchorIndex);
+  return { ...state, selected_room_id: room, selected_topic_id: topicId, selected_chat_id: chat,
+    messages: messages.slice(-limit),
+  };
+}
+
+function writeHostedState(response: ServerResponse, state: FakeHostedChatState, view: URLSearchParams) {
+  response.write(`id: ${state.rev}\nevent: state\ndata: ${JSON.stringify(hostedView(state, view))}\n\n`);
 }
 
 function actionName(action: Record<string, unknown>) {

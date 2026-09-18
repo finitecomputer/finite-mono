@@ -1,3 +1,6 @@
+#[path = "http/scoped_views.rs"]
+mod scoped_views;
+
 use axum::body::Body;
 use axum::http::{Request, StatusCode};
 use finite_brain_core::{BRAIN_IDENTITY_PROVIDER_VERSION, FolderKey};

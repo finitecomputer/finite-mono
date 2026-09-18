@@ -39,19 +39,20 @@ import {
   type HostedChatRetryAttempt,
 } from "@/lib/hosted-web-chat-retry";
 import {
-  applyHostedChatSelectionIntent,
   HOSTED_CHAT_NAVIGATION_TIMEOUT_MS,
   hostedChatSelectionFromState,
   hostedChatSelectionIntentTarget,
-  settleHostedChatSnapshotSelection,
+  hostedChatSelectionIntentSatisfied,
+  hostedChatSnapshotMatchesSelection,
   type HostedChatSelection,
   type HostedChatSelectionIntent,
 } from "@/lib/hosted-web-chat-selection";
 import {
   pendingChatRefreshAdvancesTranscript,
-  preservePendingChatRefreshSelection,
   type PendingChatRefreshTarget,
 } from "@/lib/hosted-web-chat-refresh";
+
+import { hostedChatViewQuery } from "@/lib/hosted-chat-view";
 
 const STREAM_RECONNECT_DELAY_MS = 1_000;
 
@@ -129,61 +130,70 @@ export function HostedChatProvider({
   const snapshotSequenceRef = useRef(0);
   const selectionIntentRef = useRef<HostedChatSelectionIntent | null>(null);
   const selectionIntentTokenRef = useRef(0);
-  const serverSelectionRef = useRef<HostedChatSelection | null>(null);
+  const coherentStateRef = useRef<HostedChatState | null>(null);
+  const messageLimitRef = useRef(50);
+  const [messageLimit, setMessageLimit] = useState(50);
+  const oldestMessageIdRef = useRef<string | null>(null);
+  const [oldestMessageId, setOldestMessageId] = useState<string | null>(null);
   const localSelectionRef = useRef<HostedChatSelection | null>(null);
   const hasState = state !== null;
 
-  // Every applied snapshot funnels through here. While a navigation click is
-  // pending, snapshots keep their content but present the clicked selection:
-  // selection-only actions do not bump the daemon rev, so stream snapshots
-  // generated before the click persists otherwise yank the highlight back.
-  // With no click in flight the foreground is device-scoped: daemon snapshots
-  // merge their content freely but may not move a valid local selection.
-  const setMergedState = useCallback((next: HostedChatState) => {
-    serverSelectionRef.current = hostedChatSelectionFromState(next);
+  const viewQuery = hostedChatViewQuery(
+    state ? hostedChatSelectionFromState(state) : null,
+    messageLimit,
+    oldestMessageId
+  );
+  const currentViewQuery = useCallback(
+    () => hostedChatViewQuery(localSelectionRef.current, messageLimitRef.current, oldestMessageIdRef.current),
+    []
+  );
+
+  // A snapshot is one coherent selection and transcript. A late response or
+  // an older service ignoring the view query cannot replace another Chat's
+  // messages underneath our current heading.
+  const matchesView = useCallback((next: HostedChatState) => {
     const intent = selectionIntentRef.current;
-    let applied: HostedChatState;
-    if (intent) {
-      const result = applyHostedChatSelectionIntent(intent, next);
-      if (result.confirmed) {
-        selectionIntentRef.current = null;
-        setSelectionPending(false);
-        localSelectionRef.current = hostedChatSelectionFromState(result.state);
-      }
-      applied = result.state;
-    } else {
-      const settled = settleHostedChatSnapshotSelection(
-        localSelectionRef.current,
-        next
-      );
-      localSelectionRef.current = settled.selection;
-      applied = settled.state;
-    }
-    setState((current) => {
-      const merged = {
-        ...applied,
-        hosted_agent_binding: applied.hosted_agent_binding === undefined
-          ? current?.hosted_agent_binding ?? null
-          : applied.hosted_agent_binding,
-      };
-      stateRef.current = merged;
-      return merged;
-    });
+    const selectionMatches = intent
+      ? hostedChatSelectionIntentSatisfied(intent, next)
+      : hostedChatSnapshotMatchesSelection(localSelectionRef.current, next);
+    const anchor = oldestMessageIdRef.current;
+    // Delayed reads/stream events with a narrower window must not discard
+    // history already loaded in this Chat. A missing Chat may still fall back.
+    const sameChat = localSelectionRef.current?.selected_chat_id === next.selected_chat_id;
+    return selectionMatches && (!sameChat || !anchor || next.messages.some(message => message.message_id === anchor));
+  }, []);
+
+  const setMergedState = useCallback((next: HostedChatState) => {
+    localSelectionRef.current = hostedChatSelectionFromState(next);
+    const anchor = next.messages.length > 50 ? next.messages[0].message_id : null;
+    oldestMessageIdRef.current = anchor;
+    setOldestMessageId(anchor);
+    selectionIntentRef.current = null;
+    setSelectionPending(false);
+    const merged = {
+      ...next,
+      hosted_agent_binding: next.hosted_agent_binding === undefined
+        ? stateRef.current?.hosted_agent_binding ?? null
+        : next.hosted_agent_binding,
+    };
+    coherentStateRef.current = merged;
+    stateRef.current = merged;
+    setState(merged);
   }, []);
 
   const applyHttpSnapshot = useCallback((next: HostedChatState, requestGeneration: number) => {
     const source = snapshotSourceRef.current;
-    if (!shouldApplyHttpHostedChatSnapshot(source, requestGeneration, next.rev)) {
+    if (!matchesView(next) || !shouldApplyHttpHostedChatSnapshot(source, requestGeneration, next.rev)) {
       return false;
     }
     snapshotSourceRef.current = recordHostedChatSnapshot(source, next.rev, false);
     snapshotSequenceRef.current += 1;
     setMergedState(next);
     return true;
-  }, [setMergedState]);
+  }, [matchesView, setMergedState]);
 
-  // A mutation response is authoritative even when the daemon did not advance
-  // its revision for a selection-only action. Requests run concurrently so
+  // A fresh view can change selection or its history window without advancing
+  // the Device revision. Requests run concurrently so
   // navigation cannot wait behind typing/read receipts or uploads; the client
   // sequence prevents an older equal-revision response from rolling back a
   // newer mutation response.
@@ -192,7 +202,7 @@ export function HostedChatProvider({
     request: MutationSnapshotRequest
   ) => {
     const source = snapshotSourceRef.current;
-    if (!shouldApplyMutationHostedChatSnapshot(
+    if (!matchesView(next) || !shouldApplyMutationHostedChatSnapshot(
       source,
       request.generation,
       request.highestRev,
@@ -211,7 +221,7 @@ export function HostedChatProvider({
     snapshotSequenceRef.current += 1;
     setMergedState(next);
     return true;
-  }, [setMergedState]);
+  }, [matchesView, setMergedState]);
 
   // A 401 from a hosted-device chat route means the WorkOS session itself is
   // dead. That is not a transport error: retrying can never succeed, so the
@@ -259,7 +269,7 @@ export function HostedChatProvider({
         // mount effect while the shared request is still in flight; aborting
         // that request leaves the remount holding the same cancelled promise,
         // so the hosted browser load does not abort its request.
-        const next = await hostedChatRequest<HostedChatState>(`${apiBase}/state`);
+        const next = await hostedChatRequest<HostedChatState>(`${apiBase}/state${currentViewQuery()}`);
         applyHttpSnapshot(next, requestGeneration);
         setTransportError(null);
         setBindingRecoveryRequired(false);
@@ -284,7 +294,7 @@ export function HostedChatProvider({
       if (stateLoadRef.current === pending) stateLoadRef.current = null;
     });
     return pending;
-  }, [apiBase, applyHttpSnapshot, reportSessionAuthFailure]);
+  }, [apiBase, applyHttpSnapshot, currentViewQuery, reportSessionAuthFailure]);
 
   const claimOwner = useCallback((showError = true) => {
     if (ownerClaimRef.current) return ownerClaimRef.current;
@@ -312,34 +322,51 @@ export function HostedChatProvider({
     return pending;
   }, [apiBase, reportSessionAuthFailure]);
 
+  const requestViewSnapshot = useCallback(async (
+    signal?: AbortSignal | null,
+    actionSnapshot?: HostedChatState
+  ) => {
+    const query = currentViewQuery();
+    const source = snapshotSourceRef.current;
+    const request: MutationSnapshotRequest = {
+      generation: source.generation,
+      highestRev: source.highestRev,
+      sequence: ++nextMutationSequenceRef.current,
+      allowEqualRevision: true,
+    };
+    let projected = !query && actionSnapshot
+      ? actionSnapshot
+      : await hostedChatRequest<HostedChatState>(`${apiBase}/state${query}`, { signal });
+    if (actionSnapshot?.hosted_agent_binding !== undefined) {
+      projected = { ...projected, hosted_agent_binding: actionSnapshot.hosted_agent_binding };
+    }
+    applyMutationSnapshot(projected, request);
+    return projected;
+  }, [apiBase, applyMutationSnapshot, currentViewQuery]);
+
   const requestMutationSnapshot = useCallback(async (
     path: string,
     init: RequestInit,
     allowEqualRevision = true,
-    reconcileRejectedSnapshot = false
+    adoptSelection?: (next: HostedChatState) => boolean
   ) => {
-    const captureRequest = (): MutationSnapshotRequest => {
-      const source = snapshotSourceRef.current;
-      return {
-        generation: source.generation,
-        highestRev: source.highestRev,
-        sequence: ++nextMutationSequenceRef.current,
-        allowEqualRevision,
-      };
-    };
-    const request = captureRequest();
     const next = await hostedChatRequest<HostedChatState>(`${apiBase}${path}`, init);
-    const applied = applyMutationSnapshot(next, request);
-    if (applied || !reconcileRejectedSnapshot) return next;
-
-    // A selection-only action can return an older revision after a concurrent
-    // stream event advanced the client. Refetch after the server applied the
-    // selection so an equal-revision full snapshot can reconcile it.
-    const reconciliationRequest = captureRequest();
-    const reconciled = await hostedChatRequest<HostedChatState>(`${apiBase}/state`);
-    applyMutationSnapshot(reconciled, reconciliationRequest);
-    return reconciled;
-  }, [apiBase, applyMutationSnapshot]);
+    // Typing/read receipts do not replace the transcript. For a user mutation,
+    // read the current view: the mutation response belongs to the shared Device
+    // cursor and may have a different Chat or history window.
+    if (!allowEqualRevision || (adoptSelection && !adoptSelection(next))) return next;
+    try {
+      await requestViewSnapshot(init.signal, next);
+    } catch (caught) {
+      // The action already succeeded. A refresh outage must not report a
+      // failed send and invite a duplicate; retain the coherent transcript
+      // while the stream reconnects.
+      if (!reportSessionAuthFailure(caught)) setTransportError(hostedChatErrorMessage(caught));
+    }
+    // The view's status/toast may belong to another tab's later action.
+    // Callers decide whether to clear a draft from this action's own outcome.
+    return next;
+  }, [apiBase, requestViewSnapshot, reportSessionAuthFailure]);
 
   const recoverBinding = useCallback(async (): Promise<HostedChatRetryAttempt> => {
     try {
@@ -364,23 +391,43 @@ export function HostedChatProvider({
     allowEqualRevision = true
   ) => {
     const navigationAction = isHostedChatNavigationAction(action);
+    const target = hostedChatSelectionIntentTarget(action);
+    const token = navigationAction ? ++selectionIntentTokenRef.current : null;
+    if (navigationAction) {
+      messageLimitRef.current = 50;
+      setMessageLimit(50);
+      oldestMessageIdRef.current = null;
+      setOldestMessageId(null);
+    }
+    if ("LoadOlderMessages" in action) {
+      messageLimitRef.current = Math.max(messageLimitRef.current, coherentStateRef.current?.messages.length ?? 0)
+        + action.LoadOlderMessages.limit;
+      setMessageLimit(messageLimitRef.current);
+      // Paging is a tab-local read. The legacy action changes the shared
+      // Device cursor/window and publishes a revision to every caller.
+      return requestViewSnapshot();
+    }
     const request = () => requestMutationSnapshot("/actions", {
       method: "POST",
       body: JSON.stringify(action),
       signal: navigationAction
         ? AbortSignal.timeout(HOSTED_CHAT_NAVIGATION_TIMEOUT_MS)
         : undefined,
-    }, allowEqualRevision, navigationAction);
+    }, allowEqualRevision, navigationAction && !target ? (next) => {
+      if (selectionIntentTokenRef.current !== token) return false;
+      const selection = hostedChatSelectionFromState(next);
+      localSelectionRef.current = selection;
+      selectionIntentRef.current = { ...selection, token: token! };
+      return true;
+    } : undefined);
 
     if (!navigationAction) return request();
 
     // Pin the clicked selection immediately. The pin clears when a snapshot
     // confirms it (setMergedState); if the request fails, times out, or the
-    // server refuses the selection, fall back to the server's own selection
-    // so the UI never sticks on a selection the daemon rejected.
-    const target = hostedChatSelectionIntentTarget(action);
-    const token = ++selectionIntentTokenRef.current;
-    if (target) {
+    // read fails, restore the last coherent view rather than combining a
+    // different server selection with the current messages.
+    if (target && token !== null) {
       selectionIntentRef.current = { ...target, token };
       localSelectionRef.current = target;
       setSelectionPending(true);
@@ -398,33 +445,12 @@ export function HostedChatProvider({
       if (isHostedChatNavigationTimeout(caught)) {
         setTransportError(CHAT_NAVIGATION_TIMEOUT_MESSAGE);
       }
-      const serverSelection = serverSelectionRef.current;
-      if (serverSelection) {
-        localSelectionRef.current = serverSelection;
-        setState((current) => {
-          const selected = current ? { ...current, ...serverSelection } : current;
-          stateRef.current = selected;
-          return selected;
-        });
+      const coherent = coherentStateRef.current;
+      if (coherent) {
+        messageLimitRef.current = Math.max(50, coherent.messages.length);
+        setMessageLimit(messageLimitRef.current);
+        setMergedState(coherent);
       }
-    };
-
-    const finishNavigation = (next: HostedChatState) => {
-      if (selectionIntentTokenRef.current !== token) return;
-      if (!target) {
-        // Navigation without a knowable target (New chat, new topic): the
-        // completed request IS the explicit user action, so its response
-        // selection becomes the local foreground. This is the one non-click
-        // path allowed to move the foreground, and only on success.
-        const selection = hostedChatSelectionFromState(next);
-        localSelectionRef.current = selection;
-        setState((current) => {
-          const selected = current ? { ...current, ...selection } : current;
-          stateRef.current = selected;
-          return selected;
-        });
-      }
-      releaseIntent();
     };
 
     // Send selection-changing actions in click order so delayed network
@@ -433,11 +459,11 @@ export function HostedChatProvider({
     // typing, reads, and uploads still run independently of navigation.
     const pending = navigationMutationTailRef.current.then(request, request);
     navigationMutationTailRef.current = pending.then(
-      finishNavigation,
+      () => releaseIntent(),
       releaseIntent
     );
     return pending;
-  }, [requestMutationSnapshot]);
+  }, [requestMutationSnapshot, requestViewSnapshot, setMergedState]);
 
   const dispatch = useCallback((action: HostedChatAction) =>
     requestActionSnapshot(action), [requestActionSnapshot]);
@@ -454,11 +480,12 @@ export function HostedChatProvider({
     const requestGeneration = snapshotSourceRef.current.generation;
     const selectionToken = selectionIntentTokenRef.current;
     try {
-      const next = await hostedChatRequest<HostedChatState>(`${apiBase}/state`);
+      const next = await hostedChatRequest<HostedChatState>(`${apiBase}/state${currentViewQuery()}`);
       const source = snapshotSourceRef.current;
       const current = stateRef.current;
       if (
         !current
+        || !matchesView(next)
         || selectionIntentTokenRef.current !== selectionToken
         || source.generation !== requestGeneration
         || next.rev < source.highestRev
@@ -468,13 +495,13 @@ export function HostedChatProvider({
       }
       snapshotSourceRef.current = recordHostedChatSnapshot(source, next.rev, false);
       snapshotSequenceRef.current += 1;
-      setMergedState(preservePendingChatRefreshSelection(next, target));
+      setMergedState(next);
       setTransportError(null);
       return true;
     } catch {
       return false;
     }
-  }, [apiBase, setMergedState]);
+  }, [apiBase, currentViewQuery, matchesView, setMergedState]);
 
   const uploadAttachments = useCallback((formData: FormData) =>
     requestMutationSnapshot("/attachments", {
@@ -540,12 +567,12 @@ export function HostedChatProvider({
         snapshotSequenceRef.current
       );
       snapshotSourceRef.current = stream.source;
-      const nextEvents = new EventSource(`${apiBase}/updates`);
+      const nextEvents = new EventSource(`${apiBase}/updates${viewQuery}`);
       events = nextEvents;
       const onState = (event: MessageEvent<string>) => {
         try {
           const next = JSON.parse(event.data) as HostedChatState;
-          if (events !== nextEvents) return;
+          if (disposed || events !== nextEvents || !matchesView(next)) return;
           let source = snapshotSourceRef.current;
           if (hostedChatStreamSnapshotProvesRestart(
             source,
@@ -593,7 +620,7 @@ export function HostedChatProvider({
       if (reconnectTimer) clearTimeout(reconnectTimer);
       events?.close();
     };
-  }, [apiBase, hasState, setMergedState]);
+  }, [apiBase, hasState, matchesView, setMergedState, viewQuery]);
 
   return (
     <HostedChatContext.Provider value={{
