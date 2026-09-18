@@ -288,23 +288,24 @@ test("admin runtime search matches agent, box, user, grant, key, and profile fie
   assert.equal(adminRuntimeMatchesSearch(runtime, account, "agent missing"), false);
 });
 
-test("admin page has three tabs and enriches user cards instead of separate grant/key lists", async () => {
-  const [pageSource, usersPanelSource] = await Promise.all([
+test("admin page keeps account controls alongside searchable agents and separates email tools", async () => {
+  const [pageSource, usersPanelSource, tabsSource] = await Promise.all([
     readFile(path.resolve(process.cwd(), "src/app/dashboard/admin/page.tsx"), "utf8"),
     readFile(
       path.resolve(process.cwd(), "src/components/admin-users-panel.tsx"),
       "utf8"
     ),
+    readFile(path.resolve(process.cwd(), "src/components/admin-ops-tabs.tsx"), "utf8"),
   ]);
-  assert.match(pageSource, /<TabsTrigger value="users">Users<\/TabsTrigger>/u);
-  assert.match(pageSource, /<TabsTrigger value="invites">Invites<\/TabsTrigger>/u);
+  assert.match(tabsSource, /<TabsTrigger value="users">Users<\/TabsTrigger>/u);
+  assert.match(tabsSource, /<TabsTrigger value="invites">Invites<\/TabsTrigger>/u);
   assert.match(
-    pageSource,
+    tabsSource,
     /<TabsTrigger value="finite-private">Finite Private<\/TabsTrigger>/u
   );
   assert.match(pageSource, /<AdminUsersPanel result=\{runtimes\} finitePrivate=\{finitePrivate\} \/>/u);
-  assert.match(usersPanelSource, /function ProvisionedUserCard/u);
-  assert.match(usersPanelSource, /function FinitePrivateAccountControls/u);
+  assert.match(tabsSource, /<TabsTrigger value="email">Email<\/TabsTrigger>/u);
+  assert.match(usersPanelSource, /function AdminAgentDetails/u);
   assert.match(usersPanelSource, /Filter agents/u);
   assert.match(usersPanelSource, /adminRuntimeMatchesSearch/u);
   assert.match(usersPanelSource, /No agents match that filter/u);
