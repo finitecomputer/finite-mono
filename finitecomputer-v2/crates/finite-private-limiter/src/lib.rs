@@ -2970,6 +2970,7 @@ mod tests {
         let core_url = spawn(fake_core_router(core.clone())).await;
         let upstream_url = spawn(fake_upstream_router(FakeUpstreamState::new())).await;
         let mut config = test_config(core_url, upstream_url);
+        config.usage_api_timeout = Duration::from_secs(2);
         config.metrics_auth_token = Some("synthetic-metrics".into());
         let router = app(config).unwrap();
         let response = router
@@ -3040,7 +3041,9 @@ mod tests {
         core.settle_failures_remaining.store(1, Ordering::SeqCst);
         let core_url = spawn(fake_core_router(core.clone())).await;
         let upstream_url = spawn(fake_upstream_router(FakeUpstreamState::new())).await;
-        let router = app(test_config(core_url, upstream_url)).unwrap();
+        let mut config = test_config(core_url, upstream_url);
+        config.usage_api_timeout = Duration::from_secs(2);
+        let router = app(config).unwrap();
         let response = router
             .oneshot(
                 axum::http::Request::post("/v1/chat/completions")
