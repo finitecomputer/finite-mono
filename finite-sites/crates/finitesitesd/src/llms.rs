@@ -127,10 +127,10 @@ mod tests {
     fn generated_project_text_prefers_git_flow() {
         let text = generated_project_llms_txt(
             "demo",
-            "https://demo.finite.chat/",
+            "https://demo.finite.site/",
             "https://finite.site",
             "demo-project",
-            "https://git.finite.chat/demo-project.git",
+            "https://finite.site/demo-project.git",
             "main",
             "dist",
         );
@@ -147,7 +147,7 @@ mod tests {
         ));
         assert!(text.contains("fsite auth git demo-project --store --output json"));
         assert!(text.contains("fsite describe workflow edit-shared-project --output json"));
-        assert!(text.contains("git clone https://git.finite.chat/demo-project.git"));
+        assert!(text.contains("git clone https://finite.site/demo-project.git"));
         assert!(text.contains("git push origin main"));
         assert!(text.contains("only files under dist are served for this site"));
         assert!(text.contains("Do commit source/data/build files"));
@@ -158,7 +158,7 @@ mod tests {
 
     #[test]
     fn generated_text_configures_non_default_apis() {
-        for api in ["http://127.0.0.1:8787", "https://v2.finite.chat"] {
+        for api in ["http://127.0.0.1:8787", "https://sites.example.test"] {
             let text = generated_project_llms_txt(
                 "demo",
                 "http://demo.sites.localhost:8787/",
@@ -177,10 +177,10 @@ mod tests {
     fn generated_text_excludes_removed_runtime_contracts() {
         let text = generated_project_llms_txt(
             "crm",
-            "https://crm.finite.chat/",
+            "https://crm.finite.site/",
             "https://finite.site",
             "crm",
-            "https://git.finite.chat/crm.git",
+            "https://finite.site/crm.git",
             "main",
             "dist",
         );

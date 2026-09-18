@@ -258,7 +258,7 @@ function isTextSendAction(action: HostedChatAction) {
 export async function createHostedRequesterContext(
   context: Pick<
     Awaited<ReturnType<typeof hostedWebChatContext>>,
-    "config" | "account"
+    "config" | "account" | "projectId"
   >
 ): Promise<HostedRequesterContext | undefined> {
   // Requester assertions and publishing grants belong to the same Sites registry.
@@ -269,9 +269,19 @@ export async function createHostedRequesterContext(
   }
   try {
     const email = await loadCoreRequesterEmail(context.account);
-    const state = await hostedDeviceState(context.config, context.account);
-    const agentNpub = state.hosted_agent_binding?.agent_npub;
-    if (!agentNpub) return undefined;
+    // The general /state response contains only AppState. The verified binding
+    // is returned by /agent-bindings/open for this exact Core-authorized Project.
+    const state = await hostedDeviceOpenAgentBinding(
+      context.config,
+      context.account,
+      context.projectId
+    );
+    const binding = state.hosted_agent_binding;
+    if (
+      !binding?.agent_npub ||
+      binding.project_id !== context.projectId ||
+      binding.human_account_id !== state.identity.account_id
+    ) return undefined;
     const response = await fetch(
       `${upstream}/internal/v1/hosted-requester-assertions`,
       {
@@ -284,7 +294,7 @@ export async function createHostedRequesterContext(
         body: JSON.stringify({
           email,
           requester_npub: state.identity.account_id,
-          agent_npub: agentNpub,
+          agent_npub: binding.agent_npub,
         }),
         cache: "no-store",
         signal: AbortSignal.timeout(HOSTED_REQUESTER_ASSERTION_TIMEOUT_MS),

@@ -129,7 +129,7 @@ fn source_project_request(slug: &str, dry_run: bool) -> ProjectInitRequest {
 }
 
 fn remote(slug: &str) -> String {
-    format!("https://git.finite.chat/{slug}.git")
+    format!("https://finite.site/{slug}.git")
 }
 
 fn response_site_id(response: &finitesites_proto::dto::ProjectInitResponse) -> String {

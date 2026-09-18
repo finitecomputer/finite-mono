@@ -5,7 +5,7 @@ secret values, generated private keys, decrypted files, hashes, fingerprints, or
 password-derived evidence here.
 
 The operator workflow is documented in
-[`docs/runs/nixos-sops-operator-flow.md`](../../../docs/runs/nixos-sops-operator-flow.md).
+[Secret operations](../../secret/OPERATIONS.md).
 For the concise command reference, see
 [`infra/secret/OPERATIONS.md`](../../secret/OPERATIONS.md).
 

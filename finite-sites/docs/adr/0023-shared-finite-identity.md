@@ -2,7 +2,7 @@
 
 The Publishing Key is no longer minted or stored by `fsite` itself. It is the
 shared Finite identity defined by the Finite Identity Contract v1
-(https://github.com/finitecomputer/finite-identity): one Nostr key per Finite
+(../../../finite-identity/SPEC.md): one Nostr key per Finite
 Home, at `$FINITE_HOME/identity/identity.json` when `FINITE_HOME` is set and
 `~/.finite/identity/identity.json` otherwise. Whichever Finite tool
 (`finitechat`, `fsite`, `fbrain`, hosted runtimes) runs first in that home

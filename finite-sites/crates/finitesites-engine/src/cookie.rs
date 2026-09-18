@@ -1,7 +1,7 @@
 //! Viewer cookies: an HMAC-signed site-scoped viewer session.
 //!
-//! The cookie is scoped to one site id, so a cookie for `a.finite.chat`
-//! says nothing about `b.finite.chat` even though both are signed with the
+//! The cookie is scoped to one site id, so a cookie for `a.finite.site`
+//! says nothing about `b.finite.site` even though both are signed with the
 //! same server secret. Share-table membership is re-checked at view time;
 //! the cookie only proves that one email or Native Principal completed the
 //! bounded authentication ceremony for this site.

@@ -1,4 +1,4 @@
-# Opt-in native Hermes ingress. No host enables this until FIN-39 qualification.
+# Opt-in native Hermes ingress. Lat5 provides the bounded FIN-39 canary.
 {
   config,
   lib,
@@ -33,6 +33,11 @@ in
       default = "";
       description = "Exact HTTPS origin also configured for this source host in Core.";
     };
+    runtimeCoreUrl = lib.mkOption {
+      type = lib.types.nullOr lib.types.str;
+      default = null;
+      description = "HTTPS origin of Core's dedicated runtime router; enables scoped bootstrap delivery on launch/upgrade.";
+    };
     listenAddress = lib.mkOption {
       type = lib.types.str;
       default = "0.0.0.0";
@@ -61,7 +66,12 @@ in
     networking.firewall.allowedTCPPorts = [ cfg.listenPort ];
     systemd.tmpfiles.rules = [ "d /run/finite-hosted-hermes 0700 root root -" ];
     systemd.services.finite-saas-runner = {
-      environment.FC_RUNNER_HOSTED_HERMES_CONFIG = toString deployment;
+      environment = {
+        FC_RUNNER_HOSTED_HERMES_CONFIG = toString deployment;
+      }
+      // lib.optionalAttrs (cfg.runtimeCoreUrl != null) {
+        FC_RUNNER_RUNTIME_CORE_URL = cfg.runtimeCoreUrl;
+      };
       serviceConfig = {
         # A successful main-process exit must not release the timer while a
         # nerdctl/CNI child can still mutate saved port ownership. Containerd,

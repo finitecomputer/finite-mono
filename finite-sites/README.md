@@ -20,11 +20,7 @@ nix build .#fsite
 ./result/bin/fsite --version
 ```
 
-The public `fsite-latest` rolling release is for the canonical production
-contract. Do not advance or rely on it for this static-only API until the
-canonical production endpoint is ready for that contract.
-
-After cutover, install the latest release binary:
+Install the latest production release from the public `fsite-latest` alias:
 
 ```sh
 set -eu

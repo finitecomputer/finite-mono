@@ -1,9 +1,10 @@
 # Hosted Hermes through Caddy
 
-This branch implements the shared Core → agent → browser authenticated
+This implementation supplies the shared Core → agent → browser authenticated
 connection on the PR #914 Caddy foundation. Account eligibility is current
 Project ownership, not operator/admin status. It does not build feature pages,
-cut over chat, publish production routes or roll the fleet.
+cut over chat or roll the fleet. The production configuration selects Lat5 for
+a bounded canary; configuration, deployment and per-agent enablement are separate.
 The execution plan and release gates live in
 [FIN-39](https://linear.app/finitecomputer/issue/FIN-39/provide-hermes-web-authentication-and-desktop-connection-details)
 and the Agent rollout manifest in
@@ -96,8 +97,20 @@ authentication: `/api/status` is public, while protected native reads must
 reject anonymous and invalid credentials independently of origin.
 
 The command alone is **not safe production publication**. The opt-in lifecycle
-below supplies its ownership and process-lifetime preconditions. No production
-host enables it by default.
+below supplies its ownership and process-lifetime preconditions. The Lat5 host
+configuration enables this capability at `https://agents-lat5.finite.computer`,
+with only `https://finite.computer` allowed as a browser origin. Other Runner
+hosts keep it disabled. Core's host map contains only Lat5, and its dedicated
+runtime router is proxied verbatim from `https://runtime-api.finite.computer`
+to `127.0.0.1:4201`. This does not expose Core's private/account router.
+
+The selected canary is Lat5 Canary Retry; per-agent access remains default off
+and requires current-owner authorization and applied readiness. Host configuration
+does not change the Runtime Artifact default or upgrade any agent. FIN-57 records
+the deployed state, exact selected Runtime, immutable artifacts, recovery boundary
+and activation gates. In particular, reconcile unrelated changes between the live
+host and the proposed closure before activation; source configuration alone is
+not evidence that the canary is deployed or qualified.
 
 ## Address lifetime is a release gate
 
@@ -256,12 +269,12 @@ secret without changing native credentials or applied generation. Revoked,
 changed-owner, moved, inactive or ambiguous assignments fail closed without
 repair. Historical relocation records are not candidates for that primary reference.
 No date/ID ordering chooses an assignment. Missing or mismatched primary
-records fail closed. Future relocation still revokes the old credential;
+records fail closed. Relocation revokes the old credential;
 re-enrolling a revoked/reassigned identity requires the separate FIN-39
 relocation/recovery contract, not an automatic repair here.
 
 The Kata adapter carries the reserved pair in the existing transient private
-environment file during the already-planned image upgrade. Both absent means
+environment file during the authorized image upgrade. Both absent means
 initial installation; both matching means replay. Partial, duplicate or
 different values fail before compute replacement. A matching-image retry must
 also prove the installed pair matches; image identity alone cannot acknowledge

@@ -2,77 +2,17 @@
 
 This app is the self-serve SaaS dashboard for Finite Computer v2.
 
-Current intended scope:
+The dashboard owns Account Auth, Agent creation and lifecycle controls,
+Hosted Web Chat, connection setup, Sites previews and account administration.
+Core owns account/runtime state; product services retain their own authorization.
 
-- WorkOS login/logout
-- Project and Agent Runtime creation
-- Finite Private grant/status surfaces
-- Agent Overview for the launched runtime
-- BoxOne-parity web chat backed by a Finite Chat Hosted Web Device
-- product-owned connection UX through focused services, stable APIs, and skills;
-  never through Runtime Management Pipe feature commands
-- Finite Sites publish/list/preview and Finite Brain product surfaces
-- explicit issue/revoke UX for separate Sites and Brain Email Access
-  Delegations; Brain also provisions Folder Key Grants to the agent npub
-- Recovery Readiness, export, Runtime Retirement, and explicit Break-Glass
-  Recovery disclosures
-- signed-in access to the Finite Skills catalog and guidance for the explicit
-  agent-local `finite skills sync` workflow
+The image supplies the Managed Skills Baseline. Existing agents update only
+through explicit `finite skills sync`; the dashboard is not an updater or a
+second Runtime filesystem/configuration store.
 
-Out of scope for v2:
-
-- OpenCode
-- a dashboard-only chat transport outside Finite Chat
-- legacy dashboard-managed Published Apps in place of Finite Sites
-- `finitec publish`
-- `finitec repo`
-- host-local control-plane inspection or runtime shell/filesystem access
-- product feature commands, feature-specific status, or skills desired state on
-  the Runtime Management Pipe
-- direct provider-volume deletion or a normal lifecycle button that performs
-  Purge User Data
-- a global "link my email to my agent" control or any flow that turns a product
-  delegation into a Principal Link
-- editing managed skill bodies, selecting arbitrary Git refs/URLs, uploading
-  archives through Core, or treating GitHub `main` as the Runtime catalog
-
-## Managed Skills Boundary
-
-The canonical Runtime image bundles one tested Finite Skills baseline and copies
-it once when a fresh agent initializes. The dashboard catalog is informational:
-it does not read Runtime files, claim which revision an existing agent has
-installed, store a Core desired revision, or request activation through Runtime
-Management.
-
-Existing agents update at their own pace through the explicit
-`finite skills sync` command. The dashboard may explain that workflow, but it
-does not poll, push, schedule, or report automatic rollout status.
-
-Current code still loads a local checkout or the old split repository's GitHub
-`main` and hides the page from normal SaaS users. That is migration scaffolding,
-not accepted product behavior.
-
-## Brain account boundary
-
-Set `FC_BRAIN_UPSTREAM_URL` to the internal FiniteBrain origin. The dashboard
-serves the first-party `/client` through its existing WorkOS gate; encrypted
-Brain API operations still require their normal Nostr authorization. Do not
-point this at an independently login-gated public URL or treat WorkOS as a
-replacement for Brain Folder Key grants.
-
-Hosted `/client` reaches its bounded Brain Identity Provider through
-`POST /api/brain/identity-provider`. The route accepts only the versioned Brain
-operation set from a server-sandboxed, opaque-origin `/client` frame. A genuine
-iframe navigation receives a signed, expiring capability after WorkOS
-verification. Each provider call also requires a short-lived proof for its
-exact body, minted by the authenticated parent dashboard. The opaque frame
-keeps the capability while the parent proves its WorkOS session is still live;
-neither alone can invoke custody. Valid calls forward the bound WorkOS user plus
-the public Brain origin to the internal Hosted Device.
-`FC_HOSTED_WEB_DEVICE_URL` and
-`FINITECHAT_HOSTED_API_TOKEN` must therefore be configured alongside
-`FC_BRAIN_UPSTREAM_URL`. Logout or session expiry makes this bridge unavailable;
-it never replaces Brain's Nostr authorization or Folder Key Grants.
+Brain invitation and approval routes use bounded server-side signed requests.
+WorkOS authentication does not replace Brain membership or Folder Key Grants.
+The removed `/client` browser UI is not a current dashboard surface.
 
 ## Sites account viewer boundary
 
@@ -109,7 +49,7 @@ the user's own machine.
 
 ## Run locally
 
-For day-to-day web chat and recovery design, use the real dashboard UI with the
+For local web chat development, use the real dashboard UI with the
 deterministic local Core and Hosted Device fixture:
 
 ```bash

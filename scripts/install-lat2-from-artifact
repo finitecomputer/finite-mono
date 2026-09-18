@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
-# Bare-metal install driver for finite-lat-2 (Gate C of
-# infra/runbooks/lat2-replacement-cutover.md). Consumes a downloaded
+# Bare-metal install driver for finite-lat-2 (see
+# infra/runbooks/install-host.md). Consumes a downloaded
 # `lat2-nixos-closure-REV` artifact:
 #
 #   1. validates the artifact manifest (schema finite.lat2.nixos-closure.v2;

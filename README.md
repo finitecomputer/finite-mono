@@ -8,7 +8,7 @@ and infrastructure definition in one tree.
 | `finite-agentd/` | narrow agent-local platform daemon and process supervisor; never compute lifecycle |
 | `finitechat/` | finitechat CLI, server, Hermes agent bridge, agent runtime containers |
 | `finitecomputer-v2/` | finite.computer SaaS: Core control plane, dashboard, Phala runner, Finite Private limiter |
-| `finite-sites/` | fsite CLI + finitesitesd (`*.finite.chat` hosting) |
+| `finite-sites/` | fsite CLI + finitesitesd (`*.finite.site` hosting) |
 | `finite-brain/` | fbrain CLI + FiniteBrain server |
 | `finite-identity/`, `finite-nostr/` | active shared identity/protocol crates |
 | `finite-skills/` | sole authored managed-skills baseline; immutable revisions hot-activate in compatible runtimes |

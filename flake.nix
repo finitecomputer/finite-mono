@@ -266,7 +266,7 @@
         let
           # Same pin as hermes-agent so toolchain ELFs share that glibc.
           hermesPkgs = import hermes-nixpkgs { inherit system; };
-          # Sites v2 cutover candidate, built with the Runtime's libc family.
+          # Sites CLI, built with the Runtime's libc family.
           runtimeFinitePackages = import ./infra/nixos/packages.nix {
             pkgs = hermesPkgs;
             craneLib = crane.mkLib hermesPkgs;
@@ -483,14 +483,12 @@
       # new creation with its host-configured hard sandbox limit.
       nixosConfigurations.finite-lat-3 = lat3;
 
-      # The replacement app server. Installed and brought up only through
-      # infra/runbooks/lat2-replacement-cutover.md (ADR 0007); it boots in
-      # import mode and goes live at Gate E.
+      # App-plane host. Installation: infra/runbooks/install-host.md.
       nixosConfigurations.finite-lat-2 = lat2;
 
-      # The third storage-qualified Runner host (ADR 0007 model). Installed
+      # Storage-qualified Runner host. Installed
       # and admitted only through
-      # infra/runbooks/lat4-nixos-runner-install.md; it starts drained.
+      # infra/runbooks/install-host.md; it starts drained.
       nixosConfigurations.finite-lat-4 = lat4;
       nixosConfigurations.finite-lat-5 = lat5;
 

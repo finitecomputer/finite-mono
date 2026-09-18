@@ -1,16 +1,12 @@
 # Runner Contract v1
 
-Status: accepted boundary. Kata is the first production Runner; Phala is the
-fast follow. Both implementations are incomplete.
-
 ## Decision
 
 A Runner is a generic adapter between Core's desired compute lifecycle and a
 hosting substrate. Core assigns a Runner class from product policy when
 creating an agent and stores that placement with the Project. The user does not
-choose Kata, Phala, or another provider during onboarding. A future
-customer-facing hosting tier may select a class by promised product behavior,
-but provider names and handles remain internal. Placement is not a process-wide
+choose Kata, Phala, or another provider during onboarding. Provider names and
+handles remain internal. Placement is not a process-wide
 environment switch and does not change the dashboard or Runtime product
 contract.
 
@@ -37,7 +33,7 @@ before waiting for application readiness. The handle contains only what the
 same adapter needs to inspect or re-adopt that Runtime after a worker restart;
 it is not exposed as the product model.
 
-## First-Slice Lifecycle
+## Lifecycle
 
 Every adapter implements the same idempotent operations:
 
@@ -63,14 +59,11 @@ Leases and fencing prevent two workers from mutating one Runtime concurrently.
 A worker that crashes after a provider mutation resumes from the persisted
 operation id and Provider Runtime Handle instead of blindly creating again.
 
-## Adapter Order
+## Adapters
 
-Kata ships first on finite-lat-1. Its adapter may use containerd and
-`io.containerd.kata.v2` internally, but that vocabulary stops at the adapter.
-
-Phala follows against this exact contract. It may add confidential-compute
-evidence as provider facts, but it may not add a second Project model,
-scheduler, dashboard flow, Runtime image, or feature-specific launch path.
+Kata uses containerd and `io.containerd.kata.v2` behind the adapter boundary.
+Phala uses its typed HTTPS API adapter. Both use the same Project, RuntimeSpec,
+image and product contracts.
 
 ## Data And Recovery Boundary
 
@@ -78,12 +71,9 @@ Same-volume restart preservation is a first-slice requirement: agent identity,
 chat state, Hermes memory, workspace data, and locally held connection state
 must remain available after restart.
 
-A Provider Durable Volume is not a backup. Provider-independent Recovery
-Snapshots, key backup, export, retention, and empty-target restore remain an
-explicit TODO/open design question, not a gate for launching and iterating on
-the first SaaS slice. Until that work is proven, the product must not claim
-disaster recovery or cryptographic operator-blindness, and normal lifecycle
-operations must not delete user data.
+A Provider Durable Volume is not a backup. Normal lifecycle operations preserve
+user data. Recovery availability requires a complete Recovery Set and an
+independent empty-target restore. TODO: [FIN-62](https://linear.app/finitecomputer/issue/FIN-62).
 
 ## Conformance Gate
 
@@ -97,7 +87,7 @@ The same black-box suite runs against fake, Kata, and Phala adapters:
 - application health and release telemetry use the same contract; and
 - product features behave identically without adapter-specific branches.
 
-## Current Gaps
+## Placement and capabilities
 
 Each worker advertises the adapter classes it can actually reconcile and Core
 matches those classes to immutable Project placement. Empty capability claims
@@ -112,12 +102,9 @@ Runtime controls use a separate versioned `runtime_capabilities.v1` envelope
 persisted on the Runtime and advertised by the worker. Core leases an operation
 only when both envelopes explicitly enable that exact kind; missing or empty
 advertisements enable no controls. Docker, Apple Container, Enclavia, and Phala
-currently advertise restart and stop. Kata additionally advertises the
-image-owned recover-known-good operation and Runtime Upgrade. Runtime
-Retirement is false everywhere, and Phala upgrade remains false until its
-opaque environment-encryption boundary is implemented. A draining worker
-rejects new creation leases but may still service its explicitly advertised
-controls.
+advertise only their enabled operations. Consult the current adapter and Core
+capability envelopes; the presence of an implementation is not availability.
+A draining worker rejects new creations while servicing advertised controls.
 
 The expand migration backfills only already-running, Core-created Kata rows.
 The exact legacy Kata runner credential supplies the same narrow envelope for
@@ -127,14 +114,9 @@ compatibility metadata, never artifact, provider-handle, or browser inference.
 `FC_CORE_RUNTIME_ENV_JSON` is the operator-owned source for the bounded public
 environment copied into new RuntimeSpecs. It is validated with the same rules
 as Runner. `FC_RUNNER_RUNTIME_ENV_JSON` remains only for N-1 rows that genuinely
-lack a RuntimeSpec during the expand window; a present spec is authoritative
+lack a RuntimeSpec ; a present spec is authoritative
 and is never silently merged with process-global Runner defaults. Neither map
 may contain connection credentials or secret-looking keys.
-
-Core now persists provider handles early enough for the typed lifecycle path,
-but a complete adapter capability model for inspect/adopt/reconcile remains a
-separate readiness item. No worker advertises compute destroy or Runtime
-Retirement; the Recovery Snapshot/export/purge lifecycle remains open.
 
 Production may additionally point `FC_RUNNER_RUNTIME_SECRET_ENV_FILE` at one
 root-owned, mode-0600 `KEY=VALUE` file. The initial launch path validates the
@@ -144,7 +126,6 @@ Core's names-only `FC_CORE_RUNTIME_SECRET_REFERENCES_JSON` allowlist selects
 which entries are persisted in each new RuntimeSpec; Runner resolves only those
 references from the file. This restores the shared tool-provider set without
 giving Core the values or teaching Runner what FAL, xAI, or any product feature
-means. It is transitional host-wide bootstrap, not a replacement for
-Core-owned per-Project secret references. Runtime restart preserves the
+means. Core-owned per-Project secret references select the allowed entries. Runtime restart preserves the
 credential set already held by the Runtime; it does not silently rotate shared
 or inference credentials.

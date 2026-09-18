@@ -87,7 +87,9 @@ FC_CORE_POSTGRES_TEST_URL=postgresql://postgres@127.0.0.1:55439/postgres \
   --locked -- --ignored --nocapture
 ```
 
-The test checks an ordinary owner, signed-out/other-owner/wrong-agent denial,
+The test runs sequentially for new-launch credential provisioning and existing-agent
+upgrade enrollment through Core's store, then checks an ordinary owner,
+signed-out/other-owner/wrong-agent denial,
 native anonymous/invalid-token rejection, exact browser CORS, applied enable,
 real 61-second expiry and automatic renewal, applied disable, and re-enable
 rotation while retaining the skill. It reserves the native fixed port 8642 and
@@ -103,8 +105,10 @@ live WorkOS OAuth. Unrelated gateway/Chat children are lifecycle fixtures, not a
 Chat continuity proof. Caddy uses a temporary local certificate issuer and test
 DNS resolution, while rendered HTTP routes/CORS remain unchanged. Only those
 fixture certificates are trusted by Core and the fresh browser, never the OS.
-Existing-agent enrollment, fleet/Kata publication, restore and model-turn
-continuity remain separate qualification work.
+The existing-agent case starts from a completed, unenrolled assignment and issues
+its credential under an authorized upgrade lease. Runner's actual upgrade and
+credential delivery, fleet/Kata publication, restore and model-turn continuity
+remain separate qualification work.
 
 ## Address reuse negative control
 

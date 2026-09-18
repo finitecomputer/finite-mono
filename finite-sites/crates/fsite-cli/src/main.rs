@@ -2573,7 +2573,7 @@ mod tests {
     fn credential_config_ops_reset_helpers_before_adding_ours() {
         let context = super::GitCredentialContext {
             protocol: "https".to_string(),
-            host: "git.finite.chat".to_string(),
+            host: "finite.site".to_string(),
             path: "demo.git".to_string(),
         };
         let ops = super::git_credential_config_ops(
@@ -2588,7 +2588,7 @@ mod tests {
             vec![
                 "--global",
                 "--replace-all",
-                "credential.https://git.finite.chat.helper",
+                "credential.https://finite.site.helper",
                 ""
             ]
         );
@@ -2597,7 +2597,7 @@ mod tests {
             vec![
                 "--global",
                 "--add",
-                "credential.https://git.finite.chat.helper",
+                "credential.https://finite.site.helper",
                 "store --file /home/agent/.finite/git-credentials"
             ]
         );
@@ -2606,7 +2606,7 @@ mod tests {
             vec![
                 "--global",
                 "--replace-all",
-                "credential.https://git.finite.chat.useHttpPath",
+                "credential.https://finite.site.useHttpPath",
                 "true"
             ]
         );
@@ -2616,12 +2616,12 @@ mod tests {
     fn credential_store_line_percent_encodes_userinfo() {
         let context = super::GitCredentialContext {
             protocol: "https".to_string(),
-            host: "git.finite.chat".to_string(),
+            host: "finite.site".to_string(),
             path: "demo.git".to_string(),
         };
         assert_eq!(
             super::credential_store_line(&context, "gcred_abc", "p@ss:w/rd"),
-            "https://gcred_abc:p%40ss%3Aw%2Frd@git.finite.chat/demo.git"
+            "https://gcred_abc:p%40ss%3Aw%2Frd@finite.site/demo.git"
         );
     }
 
@@ -2629,15 +2629,16 @@ mod tests {
     fn merged_credential_store_replaces_same_project_and_keeps_others() {
         let context = super::GitCredentialContext {
             protocol: "https".to_string(),
-            host: "git.finite.chat".to_string(),
+            host: "finite.site".to_string(),
             path: "demo.git".to_string(),
         };
-        let existing = "https://old:secret@git.finite.chat/demo.git\nhttps://keep:me@git.finite.chat/other.git\n";
+        let existing =
+            "https://old:secret@finite.site/demo.git\nhttps://keep:me@finite.site/other.git\n";
         let line = super::credential_store_line(&context, "new", "cred");
         let merged = super::merged_credential_store(existing, &line, &context);
         assert!(!merged.contains("old:secret"));
-        assert!(merged.contains("https://keep:me@git.finite.chat/other.git"));
-        assert!(merged.ends_with("https://new:cred@git.finite.chat/demo.git\n"));
+        assert!(merged.contains("https://keep:me@finite.site/other.git"));
+        assert!(merged.ends_with("https://new:cred@finite.site/demo.git\n"));
     }
 
     use super::*;
@@ -2997,15 +2998,14 @@ mod tests {
 
     #[test]
     fn git_credential_context_is_path_aware() {
-        let context =
-            git_credential_context("https://git.finite.chat/finite-curriculum.git").unwrap();
+        let context = git_credential_context("https://finite.site/finite-curriculum.git").unwrap();
         assert_eq!(context.protocol, "https");
-        assert_eq!(context.host, "git.finite.chat");
+        assert_eq!(context.host, "finite.site");
         assert_eq!(context.path, "finite-curriculum.git");
         let line = credential_store_line(&context, "user", "secret");
         assert_eq!(
             line,
-            "https://user:secret@git.finite.chat/finite-curriculum.git"
+            "https://user:secret@finite.site/finite-curriculum.git"
         );
     }
 
@@ -3014,13 +3014,13 @@ mod tests {
         assert_eq!(
             git_config_command_args(&[
                 "--global",
-                "credential.https://git.finite.chat.useHttpPath",
+                "credential.https://finite.site.useHttpPath",
                 "true"
             ]),
             vec![
                 "config".to_string(),
                 "--global".to_string(),
-                "credential.https://git.finite.chat.useHttpPath".to_string(),
+                "credential.https://finite.site.useHttpPath".to_string(),
                 "true".to_string(),
             ]
         );
@@ -3080,8 +3080,8 @@ mod tests {
             "http://finitechat-native-mockup.sites.localhost:8787/"
         );
         assert_eq!(
-            append_url_path("https://finitechat-native-mockup.finite.chat/", "llms.txt"),
-            "https://finitechat-native-mockup.finite.chat/llms.txt"
+            append_url_path("https://finitechat-native-mockup.finite.site/", "llms.txt"),
+            "https://finitechat-native-mockup.finite.site/llms.txt"
         );
     }
 }

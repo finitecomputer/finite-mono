@@ -1,0 +1,20 @@
+{
+  "rust_roots": [
+    "finitecomputer-v2/crates/finite-saas-core/src",
+    "finitecomputer-v2/crates/finite-saas-core/tests",
+    "tools/source-structure/src",
+    "tools/source-structure/tests"
+  ],
+  "max_rust_lines": 1000,
+  "max_struct_fields": 20,
+  "guides": {
+    "AGENTS.md": 60,
+    "finitecomputer-v2/AGENTS.md": 35
+  },
+  "struct_exceptions": {
+    "finitecomputer-v2/crates/finite-saas-core/src/agent_creation.rs::AgentCreationRequest": {
+      "fields": 24,
+      "reason": "Existing serialized creation request and persisted row contract shared by Core, Runner, and dashboard; nesting fields would change JSON/row consumers. Preserve the deployed flat shape during structural cleanup."
+    }
+  }
+}

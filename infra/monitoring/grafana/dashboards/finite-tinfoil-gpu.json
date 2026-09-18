@@ -2,7 +2,7 @@
   "annotations": {
     "list": []
   },
-  "description": "Draft operator dashboard for the Finite Private Tinfoil allocation. No production metrics source is wired yet. Tinfoil reports allocation-wide values, not individual-GPU series.",
+  "description": "Operator metrics for the Finite Private Tinfoil allocation, from the control plane and limiter health.",
   "editable": true,
   "fiscalYearStartMonth": 0,
   "graphTooltip": 1,
@@ -13,8 +13,8 @@
     {
       "id": 9,
       "type": "text",
-      "title": "Draft data contract",
-      "description": "This panel prevents the draft from looking production-ready before ingestion is approved.",
+      "title": "Data sources",
+      "description": "Metric sources and limitations.",
       "gridPos": {
         "h": 3,
         "w": 24,
@@ -23,7 +23,7 @@
       },
       "options": {
         "mode": "markdown",
-        "content": "This dashboard is a draft. It is not yet provisioned to production Grafana and no production Tinfoil metrics source is wired yet. Target: `finite-private`. Capacity and served-model identity remain collector-owned follow-up data. Credential handling and deployment belong in separate follow-ups."
+        "content": "Target: `finite-private`. Utilization is the allocation-wide mean from the newest two-minute bucket returned by the Tinfoil one-hour metrics query; fetch time never resets source age. Status Freshness is separate from usage Data Freshness. Dependency checks and latency come from the limiter\u2019s `/health` response. Missing/expired utilization is a gap. Accounting health does not prove accounting writes. No per-GPU series, inference requests/tokens, or delivered alerts are included in this MVP."
       },
       "pluginVersion": "13.0.2"
     },
@@ -32,7 +32,7 @@
         "type": "prometheus",
         "uid": "finite-prometheus"
       },
-      "description": "FRESH below five minutes, AGING from five to ten minutes, and STALE after ten minutes or when the collector series is absent. This signal does not assume direct Prometheus access to the enclave.",
+      "description": "Age of the newest Tinfoil usage bucket: FRESH below 5m, AGING below 10m, otherwise STALE. Missing, NaN and future timestamps fail closed. Independent of successful status polling.",
       "fieldConfig": {
         "defaults": {
           "color": {
@@ -105,7 +105,7 @@
       "targets": [
         {
           "editorMode": "code",
-          "expr": "clamp(floor((time() - finite_tinfoil_source_sample_timestamp_seconds{container=\"finite-private\"}) / 300), 0, 2) or on() vector(2)",
+          "expr": "clamp(floor((time() - (finite_tinfoil_source_sample_timestamp_seconds{container=\"finite-private\"} > 0 and finite_tinfoil_source_sample_timestamp_seconds{container=\"finite-private\"} <= time())) / 300), 0, 2) or on() vector(2)",
           "instant": true,
           "legendFormat": "collector",
           "range": false,
@@ -185,7 +185,7 @@
       "targets": [
         {
           "editorMode": "code",
-          "expr": "finite_tinfoil_container_ready{container=\"finite-private\"}",
+          "expr": "finite_tinfoil_container_ready{container=\"finite-private\"} and on(container) (finite_tinfoil_status_sample_timestamp_seconds{container=\"finite-private\"} > time() - 300 and finite_tinfoil_status_sample_timestamp_seconds{container=\"finite-private\"} <= time())",
           "instant": true,
           "legendFormat": "Finite Private",
           "range": false,
@@ -265,7 +265,7 @@
       "targets": [
         {
           "editorMode": "code",
-          "expr": "finite_tinfoil_component_ready{container=\"finite-private\",component=\"upstream\"}",
+          "expr": "finite_tinfoil_component_ready{container=\"finite-private\",component=\"upstream\"} and on(container) (finite_tinfoil_status_sample_timestamp_seconds{container=\"finite-private\"} > time() - 300 and finite_tinfoil_status_sample_timestamp_seconds{container=\"finite-private\"} <= time())",
           "instant": true,
           "legendFormat": "Model",
           "range": false,
@@ -280,7 +280,7 @@
         "type": "prometheus",
         "uid": "finite-prometheus"
       },
-      "description": "Whether the limiter can reach Finite Core's usage reservation and settlement API.",
+      "description": "Limiter-reported authenticated Core usage health check. This does not prove reservation/settlement writes or billing correctness; in degraded allowlist mode accounting may be intentionally outside admission.",
       "fieldConfig": {
         "defaults": {
           "color": {
@@ -345,7 +345,7 @@
       "targets": [
         {
           "editorMode": "code",
-          "expr": "finite_tinfoil_component_ready{container=\"finite-private\",component=\"usage_api\"}",
+          "expr": "finite_tinfoil_component_ready{container=\"finite-private\",component=\"usage_api\"} and on(container) (finite_tinfoil_status_sample_timestamp_seconds{container=\"finite-private\"} > time() - 300 and finite_tinfoil_status_sample_timestamp_seconds{container=\"finite-private\"} <= time())",
           "instant": true,
           "legendFormat": "Accounting",
           "range": false,
@@ -410,7 +410,7 @@
       "targets": [
         {
           "editorMode": "code",
-          "expr": "finite_tinfoil_container_gpus{container=\"finite-private\"}",
+          "expr": "finite_tinfoil_container_gpus{container=\"finite-private\"} and on(container) (finite_tinfoil_status_sample_timestamp_seconds{container=\"finite-private\"} > time() - 300 and finite_tinfoil_status_sample_timestamp_seconds{container=\"finite-private\"} <= time())",
           "instant": true,
           "legendFormat": "Finite Private",
           "range": false,
@@ -425,7 +425,7 @@
         "type": "prometheus",
         "uid": "finite-prometheus"
       },
-      "description": "Age of the latest successfully collected Tinfoil source bucket. Five minutes is aging; ten minutes is stale.",
+      "description": "Age of the newest source bucket from the fixed one-hour Tinfoil metrics query (observed interval 2m). Fetch time never resets source age.",
       "fieldConfig": {
         "defaults": {
           "color": {
@@ -479,7 +479,7 @@
       "targets": [
         {
           "editorMode": "code",
-          "expr": "time() - finite_tinfoil_source_sample_timestamp_seconds{container=\"finite-private\"}",
+          "expr": "time() - (finite_tinfoil_source_sample_timestamp_seconds{container=\"finite-private\"} > 0 and finite_tinfoil_source_sample_timestamp_seconds{container=\"finite-private\"} <= time())",
           "instant": true,
           "legendFormat": "Finite Private",
           "range": false,
@@ -494,7 +494,7 @@
         "type": "prometheus",
         "uid": "finite-prometheus"
       },
-      "description": "Allocation-wide average and maximum GPU utilization; individual GPU series are not available from Tinfoil.",
+      "description": "Latest allocation-wide mean percentage from Tinfoil two-minute buckets. No individual-GPU series. Missing/failed/expired samples are gaps; this is not a request or token counter.",
       "fieldConfig": {
         "defaults": {
           "color": {
@@ -543,7 +543,7 @@
       "targets": [
         {
           "editorMode": "code",
-          "expr": "finite_tinfoil_gpu_utilization_percent{container=\"finite-private\"}",
+          "expr": "finite_tinfoil_gpu_utilization_percent{container=\"finite-private\"} and on(container) (finite_tinfoil_source_sample_timestamp_seconds{container=\"finite-private\"} > time() - 600 and finite_tinfoil_source_sample_timestamp_seconds{container=\"finite-private\"} <= time()) and on(container) (finite_tinfoil_status_sample_timestamp_seconds{container=\"finite-private\"} > time() - 300 and finite_tinfoil_status_sample_timestamp_seconds{container=\"finite-private\"} <= time())",
           "instant": false,
           "legendFormat": "Finite Private {{aggregation}}",
           "range": true,
@@ -558,7 +558,7 @@
         "type": "prometheus",
         "uid": "finite-prometheus"
       },
-      "description": "Allocation-wide average and maximum GPU memory utilization.",
+      "description": "Latest allocation-wide mean percentage from Tinfoil two-minute buckets. No individual-GPU series. Missing/failed/expired samples are gaps; this is not a request or token counter.",
       "fieldConfig": {
         "defaults": {
           "color": {
@@ -607,7 +607,7 @@
       "targets": [
         {
           "editorMode": "code",
-          "expr": "finite_tinfoil_gpu_memory_utilization_percent{container=\"finite-private\"}",
+          "expr": "finite_tinfoil_gpu_memory_utilization_percent{container=\"finite-private\"} and on(container) (finite_tinfoil_source_sample_timestamp_seconds{container=\"finite-private\"} > time() - 600 and finite_tinfoil_source_sample_timestamp_seconds{container=\"finite-private\"} <= time()) and on(container) (finite_tinfoil_status_sample_timestamp_seconds{container=\"finite-private\"} > time() - 300 and finite_tinfoil_status_sample_timestamp_seconds{container=\"finite-private\"} <= time())",
           "instant": false,
           "legendFormat": "Finite Private {{aggregation}}",
           "range": true,
@@ -622,7 +622,7 @@
         "type": "prometheus",
         "uid": "finite-prometheus"
       },
-      "description": "Allocation-wide average and maximum CPU utilization reported by Tinfoil.",
+      "description": "Latest allocation-wide mean percentage from Tinfoil two-minute buckets. No individual-GPU series. Missing/failed/expired samples are gaps; this is not a request or token counter.",
       "fieldConfig": {
         "defaults": {
           "color": {
@@ -671,7 +671,7 @@
       "targets": [
         {
           "editorMode": "code",
-          "expr": "finite_tinfoil_cpu_utilization_percent{container=\"finite-private\"}",
+          "expr": "finite_tinfoil_cpu_utilization_percent{container=\"finite-private\"} and on(container) (finite_tinfoil_source_sample_timestamp_seconds{container=\"finite-private\"} > time() - 600 and finite_tinfoil_source_sample_timestamp_seconds{container=\"finite-private\"} <= time()) and on(container) (finite_tinfoil_status_sample_timestamp_seconds{container=\"finite-private\"} > time() - 300 and finite_tinfoil_status_sample_timestamp_seconds{container=\"finite-private\"} <= time())",
           "instant": false,
           "legendFormat": "Finite Private {{aggregation}}",
           "range": true,
@@ -686,7 +686,7 @@
         "type": "prometheus",
         "uid": "finite-prometheus"
       },
-      "description": "Allocation-wide average and maximum host-memory utilization reported by Tinfoil.",
+      "description": "Latest allocation-wide mean percentage from Tinfoil two-minute buckets. No individual-GPU series. Missing/failed/expired samples are gaps; this is not a request or token counter.",
       "fieldConfig": {
         "defaults": {
           "color": {
@@ -735,7 +735,7 @@
       "targets": [
         {
           "editorMode": "code",
-          "expr": "finite_tinfoil_host_memory_utilization_percent{container=\"finite-private\"}",
+          "expr": "finite_tinfoil_host_memory_utilization_percent{container=\"finite-private\"} and on(container) (finite_tinfoil_source_sample_timestamp_seconds{container=\"finite-private\"} > time() - 600 and finite_tinfoil_source_sample_timestamp_seconds{container=\"finite-private\"} <= time()) and on(container) (finite_tinfoil_status_sample_timestamp_seconds{container=\"finite-private\"} > time() - 300 and finite_tinfoil_status_sample_timestamp_seconds{container=\"finite-private\"} <= time())",
           "instant": false,
           "legendFormat": "Finite Private {{aggregation}}",
           "range": true,
@@ -750,7 +750,7 @@
         "type": "prometheus",
         "uid": "finite-prometheus"
       },
-      "description": "Latency of the limiter's model-upstream and Finite accounting health probes.",
+      "description": "Seconds spent by the limiter checking each dependency, from /health latencyMs. A failed or malformed health fetch is unknown (gap), never a fabricated dependency latency.",
       "fieldConfig": {
         "defaults": {
           "color": {
@@ -804,7 +804,7 @@
       "targets": [
         {
           "editorMode": "code",
-          "expr": "finite_tinfoil_component_probe_duration_seconds{container=\"finite-private\"}",
+          "expr": "finite_tinfoil_component_probe_duration_seconds{container=\"finite-private\"} and on(container) (finite_tinfoil_status_sample_timestamp_seconds{container=\"finite-private\"} > time() - 300 and finite_tinfoil_status_sample_timestamp_seconds{container=\"finite-private\"} <= time())",
           "instant": true,
           "legendFormat": "{{component}}",
           "range": false,
@@ -813,6 +813,94 @@
       ],
       "title": "Current Dependency Probe Latency",
       "type": "stat"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "finite-prometheus"
+      },
+      "description": "Age of successful Tinfoil container-status polling. Independent of usage freshness. Missing/NaN/future data is STALE.",
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "thresholds"
+          },
+          "mappings": [
+            {
+              "options": {
+                "0": {
+                  "color": "green",
+                  "text": "FRESH"
+                },
+                "1": {
+                  "color": "orange",
+                  "text": "AGING"
+                },
+                "2": {
+                  "color": "red",
+                  "text": "STALE"
+                }
+              },
+              "type": "value"
+            }
+          ],
+          "max": 2,
+          "min": 0,
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": 0
+              },
+              {
+                "color": "orange",
+                "value": 1
+              },
+              {
+                "color": "red",
+                "value": 2
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 4,
+        "w": 24,
+        "x": 0,
+        "y": 29
+      },
+      "id": 13,
+      "options": {
+        "colorMode": "background",
+        "graphMode": "none",
+        "justifyMode": "auto",
+        "orientation": "auto",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "textMode": "name_and_value",
+        "wideLayout": true
+      },
+      "pluginVersion": "13.0.2",
+      "targets": [
+        {
+          "editorMode": "code",
+          "expr": "clamp(floor((time() - (finite_tinfoil_status_sample_timestamp_seconds{container=\"finite-private\"} > 0 and finite_tinfoil_status_sample_timestamp_seconds{container=\"finite-private\"} <= time())) / 300), 0, 2) or on() vector(2)",
+          "instant": true,
+          "legendFormat": "collector",
+          "range": false,
+          "refId": "A"
+        }
+      ],
+      "title": "Status Freshness",
+      "type": "stat"
     }
   ],
   "refresh": "2m",
@@ -820,8 +908,7 @@
   "tags": [
     "finite",
     "tinfoil",
-    "gpu",
-    "draft"
+    "gpu"
   ],
   "templating": {
     "list": []

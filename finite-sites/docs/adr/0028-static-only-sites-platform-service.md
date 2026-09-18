@@ -2,63 +2,36 @@
 
 ## Status
 
-Accepted. This supersedes the earlier app/document hosting and Kata app-runner
-plans, plus ADR 0016 and ADR 0019 where they depend on Core-synced publish grants
-or a multi-output public Sites model. ADR 0027 remains authoritative for
-Sites-owned email proofs and the remaining finite-identity dependency.
+Accepted. This is the current service and Project Repository contract.
+[ADR 0027](0027-daemon-local-email-proofs.md) defines Sites-owned email proofs;
+[ADR 0029](0029-account-session-viewer-bridge.md) defines account viewer access.
 
-## Context
+## Service boundary
 
-Finite Sites currently lives in `finite-mono`, but its production shape is
-still coupled to the shared server infrastructure and to a public Project
-Output model that grew to include static sites, rendered documents, PDFs, and
-stateful apps. The app path introduced Kata runners and wake-on-request
-questions that are no longer part of the product direction. The cutover inventory
-includes existing apps and documents. At complete cutover, retain reviewed
-static deploy bytes where useful, render documents ahead of time, and retire
-server execution. Preserve visibility, shares, source history and recovery
-archives; retiring a service does not authorize purging its data.
-
-The goal is not to move Sites out of this repository. The goal is to make Sites
-a separate platform service: independently deployable, independently backed up,
-with its own API contract and data plane, while continuing to depend on
-finite-identity only for facts it does not own. Under the auth kernel, Sites
-authorization is product-local; identity services may expose facts such as
-NIP-05 directory lookup, but Sites must not outsource request authorization to a
-shared Core authority.
-
-Static Sites behavior must remain recognizable to users and agents: project
-creation, git remotes, committed deploy bytes, immutable versions, active
-version pointers, visibility, sharing, generated `/llms.txt` when absent, SPA
-fallback, and existing static serving semantics are the product contract we are
-preserving. The architecture change should be validated as a second service
-before the canonical production endpoints move.
-
-As of ADR 0007, canonical legacy production Sites runs on finite-lat-2 with the
-rest of the app plane. Routine finite-lat-2 deploys must not become the
-static-only cutover by accident.
-
-## Decision
-
-Finite Sites becomes a static-only platform service in this repository. The
-service is implemented in the existing `finite-sites` and `fsite-cli` crates,
-but deployed separately on one Fly Machine with persistent state at
-`/var/lib/finite-sites`. CI builds the digest-pinned image; Fly terminates TLS
-and routes to the service. Deployments and backup/restore qualification live in
-[the Sites runbook](../../../infra/runbooks/deploy-sites.md). This replaces the
-previous NixOS deployment. After migration and redirect verification, remove
-the app-plane daemon and its ongoing backup/health dependencies.
+Finite Sites is an independently deployed and backed-up static hosting service
+in `finite-mono`. One Fly Machine runs the CI-built, digest-pinned image with
+persistent state at `/var/lib/finite-sites`. Fly terminates TLS and routes to
+`finitesitesd`. Deployment, backup, recovery and content redirect maintenance
+are defined in [the Sites runbook](../../../infra/runbooks/deploy-sites.md).
 
 The control origin is `https://finite.site` for API and Git smart HTTP; served
 Sites use `https://{site}.finite.site/`. The API lives under `/api/v2/*`, with
-`GET /api/v2/healthz` for health. Use server-returned Git remotes and
-`FINITE_SITES_API` for explicit validation targets. Do not advance the public
-`fsite-latest` release until the destination passes restore, access and
-compatibility checks for that CLI contract.
+`GET /api/v2/healthz` for health. The production service is the sole publishing
+authority. Isolated recovery drills use disposable targets.
 
-Finite Sites has no public concept of output kinds. A Project Repository may have
-zero or one Project Site. Source-only Projects remain valid. Project Init stays
-the canonical create/update entry point. The canonical config shape is:
+The service owns registry state, Git repositories, blobs, authorization,
+sharing, viewer sessions and audit history. Directory services provide facts
+such as NIP-05 resolution; every Sites request is authorized against Sites
+state. Sites availability and recovery do not depend on a shared Core database
+as the source of truth for Sites permissions.
+
+## Project Repositories and publishing
+
+A Project Repository is the editable source of truth and has zero or one
+Project Site. A source-only Project remains cloneable, editable and visible in
+Project Status/List without a viewer URL or active Version. Project Init is
+the replay-safe setup operation; adding `[site]` to a source-only Project and
+replaying Init adds its Site. Project Slug and Site Name are separate identities.
 
 ```toml
 [project]
@@ -71,59 +44,71 @@ path = "site"
 spa = false
 ```
 
-Legacy static config using `[outputs.*]` may be accepted only as deprecated
-input while agents and examples are updated. It must contain exactly one static
-site output; the legacy output id is ignored; app, document, PDF, multiple
-outputs, `start`, `entry`, and retired output fields fail validation. New
-responses and docs use Site vocabulary, not Output vocabulary. Public responses
-return `site: null` for source-only Projects or one Project Site object with
-name, URL, visibility, active version, branch, path, and SPA setting.
+Agents inspect `fsite describe workflow publish-static-site --output json`,
+edit `finite.toml`, validate with Project Init `--dry-run`, then commit and
+push. Sites serves committed bytes under the configured path; agents own
+builds. There is no direct bundle upload surface, app runtime, document/PDF
+renderer, framework detection or multi-output model. Static files, including
+pre-rendered documents, use the same Site contract.
 
-Static serving remains byte-serving, not build hosting. Agents and users build
-before committing. Sites validates and serves committed bytes under the
-configured path, publishes immutable Versions from deploy branch pushes, and
-moves the active pointer atomically. There is no Vercel-style builder,
-framework detection, lambda packaging, serverless function runtime, Kata
-runner, containerd app runner, app supervisor, document renderer, PDF output
-type, or wake-on-request machinery in the static-only service.
+Git Remotes use standard smart HTTP through `git-http-backend`, canonically
+`https://finite.site/{project}.git`. Use the server-returned remote, including
+on isolated deployments. `fsite auth git PROJECT --store` writes a scoped,
+revocable credential to Git's credential helper. Bare repositories live under
+`DATA_DIR/git/projects/{project_id}.git`; URLs use Project Slugs.
 
-Authentication and authorization are Sites-owned. Daemon-local email proofs,
-Sites Authorized Keys, Site sharing, Project collaboration, viewer sessions,
-and internal viewer session exchange remain product-local Sites concepts. The
-only finite-identity dependency is directory-style fact lookup such as NIP-05.
-Sites calls identity/core for facts it does not own, but every Sites request is
-authorized against Sites state.
+Project visibility controls repository read/clone/fetch independently of Site
+visibility. Public-read repositories never grant push access. Pushes remain
+authenticated and collaborator-gated. Collaborators edit the whole source
+repository; Site Shares grant only served read access.
 
-The production service is the sole publishing authority. Migration preserves
-its accepted writes while reconciling retained source Sites. There is no
-general migration framework or dual-write path. Isolated recovery drills use
-disposable targets; they do not establish a second deployment lane.
+Git post-receive hooks record durable ref-change events before client success.
+The daemon reconciles them after receive-pack and at startup. Deploy Branch
+pushes create immutable Versions and atomically advance the active pointer;
+other branches update source history without publication. Replay must not
+create duplicate Versions. Push audit records retain actor, delegation when
+present and Git credential attribution. Visibility and sharing are separate
+mutations, never side effects of a push.
 
-## Consequences
+Generated `/llms.txt` provides Project Repository editing instructions only
+when the project did not publish that path. SPA fallback is explicit. Mutable
+Site URLs return `Cache-Control: no-store`; viewers are authorized on every
+read.
 
-- The app Sites experiment is intentionally not preserved. `kind = "app"` and
-  Kata runner behavior are removed from the future Sites contract.
-- The dedicated Sites host needs its own DNS, wildcard certificate/edge routing,
-  service secrets, backup schedule, and restore proof before it can carry real
-  production traffic.
-- Existing static users should see the same serving behavior after cutover, but
-  static-only `fsite` validation builds may be incompatible with the current
-  public production API during the CLI transition.
-- Public API fields, CLI arguments, docs, and workflows move from Output
-  vocabulary to Site vocabulary. Private Rust identifiers can be cleaned up as
-  touched, but the public contract must not expose output ids or output
-  kinds.
+## Authorization
 
-## Considered Options
+`fsite auth register` explicitly creates or replays a self-sourced publish
+grant for the local Publishing Key. Operator `allow`, `disallow` and `allowed`
+commands manage the manual grant path. An active, unexpired grant is required
+for Project creation and Site allocation. Revocation does not by itself delete
+content or stop already-published Sites from serving; Site disable is separate.
+Publishing limits are defined in `finitesites-proto/src/limits.rs`.
 
-- Move Sites out of `finite-mono`: rejected because the monorepo remains the
-  first-party source of truth. Deployment and data-plane separation do not
-  require repository separation.
-- Use Vercel or a serverless host for launch: rejected for the static-only target.
-  Static byte serving, git smart HTTP, Sites-local auth, and custom sharing are
-  simpler to operate as one dedicated service first.
-- Preserve app/document kinds behind compatibility modes: rejected because they
-  keep the failed output-kind architecture alive and complicate the new service
-  before it has proven the static path.
-- Build a reusable migration subsystem: rejected because final reconciliation is a
-  one-time operator event.
+Standalone publishers verify a mailbox with `fsite auth sites-key request` /
+`add` and supply `--owner-email` to Project Init. Self-registration alone is not
+mailbox proof. Hosted publication may carry a verified requester assertion.
+Mailbox ownership and authorized keys are Sites-local records. Agents sign as
+their own Principals; a Sites key authorization never links a human and agent
+identity or grants Brain access. Account requester assertions and viewer
+exchange use bounded service contracts; they do not move permission authority
+out of Sites.
+
+## Compatibility and recovery
+
+The parser accepts deprecated `[outputs.*]` configuration only when it describes
+exactly one static Site. The output id is ignored. App/document/PDF kinds,
+multiple outputs and retired runtime/rendering fields fail validation. Current
+responses expose `site: null` or one Project Site, never public output IDs or
+kinds. Retained repositories may still depend on that input compatibility.
+
+Previous content URLs redirect through exact reviewed mappings. Old-host
+cookies, tokens and Git credentials do not transfer. Startup schema migrations,
+old-writer fixtures and historical snapshot readers remain recovery contracts;
+the completed cutover is not evidence that every supported Recovery Set can
+be read without them. Preserve those readers until equivalent existing-state
+and mixed-version recovery is proved.
+
+The Sites Recovery Set includes the registry, blobs, repositories, permissions
+and cookie key. Restore onto an empty target using independently held recovery
+credentials. Image rollback must read current state and preserve accepted
+writes. Deleting or retiring compute does not authorize purging user data.

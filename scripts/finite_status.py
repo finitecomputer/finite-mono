@@ -1116,27 +1116,25 @@ def collect_lifecycle_probe(
         return raw
     raw["available"] = True
     environment = dict(os.environ)
-    try:
-        # Forward every probe-relevant runner env key so finite-status probes
-        # the same roots the rollout wrapper probes; site-specific overrides
-        # must not split the two views.
-        environment.update(
-            read_environment_values(
-                Path(CONTRACT["runner"]["environment_file"]),
-                {
-                    "FC_RUNNER_SOURCE_HOST_ID",
-                    "FC_RUNNER_WORK_ROOT",
-                    "FC_RUNNER_KATA_NAMESPACE",
-                    "FC_RUNNER_KATA_NERDCTL_BIN",
-                    "FC_RUNNER_KATA_CTR_BIN",
-                    "FC_RUNNER_KATA_SANDBOX_ROOT",
-                    "FC_RUNNER_KATA_NETNS_ROOT",
-                    "FC_RUNNER_KATA_PROC_ROOT",
-                },
+    # Match systemd EnvironmentFile ordering, including hosts whose required
+    # identity and paths live entirely in the shared role defaults.
+    probe_keys = {
+        "FC_RUNNER_SOURCE_HOST_ID",
+        "FC_RUNNER_WORK_ROOT",
+        "FC_RUNNER_KATA_NAMESPACE",
+        "FC_RUNNER_KATA_NERDCTL_BIN",
+        "FC_RUNNER_KATA_CTR_BIN",
+        "FC_RUNNER_KATA_SANDBOX_ROOT",
+        "FC_RUNNER_KATA_NETNS_ROOT",
+        "FC_RUNNER_KATA_PROC_ROOT",
+    }
+    for path_key in ("shared_environment_file", "environment_file"):
+        try:
+            environment.update(
+                read_environment_values(Path(CONTRACT["runner"][path_key]), probe_keys)
             )
-        )
-    except CollectionError as error:
-        raw["errors"].append(str(error))
+        except CollectionError as error:
+            raw["errors"].append(str(error))
     for row in candidates:
         runtime_id = row["agent_runtime_id"]
         command = [
@@ -2842,6 +2840,11 @@ def parse_args(arguments: list[str]) -> argparse.Namespace:
     )
     mode = parser.add_mutually_exclusive_group()
     mode.add_argument(
+        "--tinfoil",
+        action="store_true",
+        help="read Tinfoil Prometheus evidence locally on the monitoring host",
+    )
+    mode.add_argument(
         "--sites-backup-state",
         type=Path,
         help="read only a local Sites Borg backup receipt instead of fleet evidence",
@@ -2871,7 +2874,11 @@ def parse_args(arguments: list[str]) -> argparse.Namespace:
 def main(arguments: list[str] | None = None) -> None:
     options = parse_args(sys.argv[1:] if arguments is None else arguments)
     try:
-        if options.sites_backup_state:
+        if options.tinfoil:
+            from finite_tinfoil_status import collect
+
+            report = collect()
+        elif options.sites_backup_state:
             report = build_sites_backup_report(
                 options.sites_backup_state, utc_now(), options.sites_backup_max_age
             )
@@ -2898,7 +2905,7 @@ def main(arguments: list[str] | None = None) -> None:
                 "chat_plane": {"status": "unknown", "error": str(error)},
             },
         }
-    if options.json:
+    if options.json or options.tinfoil:
         print(json.dumps(report, indent=2, sort_keys=True))
     else:
         print(render_human(report))

@@ -32,7 +32,11 @@ test("dashboard requester assertion authorizes only the publishing registry, inc
     if (request.url === "/api/core/v1/me") {
       response.end(JSON.stringify({ email: account.email, workos_user_id: account.workosUserId }));
     } else if (request.url === "/v1/app/state") {
-      response.end(JSON.stringify({ identity: { account_id: human }, hosted_agent_binding: { agent_npub: agent } }));
+      response.end(JSON.stringify({ identity: { account_id: human } }));
+    } else if (request.url === "/v1/app/agent-bindings/open" && request.method === "POST") {
+      response.end(JSON.stringify({ identity: { account_id: human }, hosted_agent_binding: {
+        project_id: "project-requester", human_account_id: human, agent_npub: agent,
+      } }));
     } else if (request.url === "/internal/v1/hosted-requester-assertions" && redirectTo) {
       response.writeHead(307, { location: `${redirectTo}/internal/v1/hosted-requester-assertions` });
       response.end();
@@ -94,7 +98,7 @@ test("dashboard requester assertion authorizes only the publishing registry, inc
   agent = (await cli("auth", "status", "--output", "json")).npub;
   const config = join(temp, "finite.toml");
   await writeFile(config, '[project]\nslug = "requester-proof"\n\n[site]\npath = "site"\nbranch = "main"\n');
-  const context = { config: { baseUrl: fixtureOrigin, apiToken: "synthetic-device-token" }, account };
+  const context = { config: { baseUrl: fixtureOrigin, apiToken: "synthetic-device-token" }, account, projectId: "project-requester" };
   const leaseDir = join(home, "requester-context-v2");
   await mkdir(leaseDir, { recursive: true, mode: 0o700 });
   async function lease(assertion: string) {

@@ -2,7 +2,7 @@
 
 Status: accepted
 
-FiniteBrain clients will receive content-free **Brain Update Notifications**
+FiniteBrain clients receive content-free **Brain Update Notifications**
 through one authenticated Server-Sent Events connection per active client
 identity instead of polling or using bidirectional WebSockets. Notifications
 name the affected Brain and distinguish `content_updated` from

@@ -12,7 +12,7 @@ preview to consume before the intended browser establishes its Viewer Cookie.
   mints the existing host-scoped Viewer Cookie.
 - Serving continues to check the current Share on every request, so removing
   the email Share immediately revokes access granted through any redemption.
-- Issuance limits and per-output/email durable token bounds remain unchanged.
+- Issuance limits and per-site/email durable token bounds remain unchanged.
 - Publishing email-verification tokens and Native Viewer Session tokens remain
   single-use. This decision changes only email viewer Magic Links.
 - Login-token rows consumed before this change remain invalid. The existing
@@ -23,4 +23,4 @@ preview to consume before the intended browser establishes its Viewer Cookie.
 
 An agent can inspect or follow a viewer invitation without burning the link for
 the person who received it. Reuse does not extend a link's lifetime, create a
-Share, bypass revocation, or widen the token to another Project Output.
+Share, bypass revocation, or widen the token to another Project Site.

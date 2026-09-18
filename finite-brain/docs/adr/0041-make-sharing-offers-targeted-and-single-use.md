@@ -2,9 +2,9 @@
 
 Status: accepted
 
-Every Brain Invitation and Folder Invitation will be addressed to exactly one
-email or concrete Member Identity and will be consumable exactly once by that
-recipient. FiniteBrain will not provide reusable or unscoped public invitation
+Every Brain Invitation and Folder Invitation is addressed to exactly one
+email or concrete Member Identity and is consumable exactly once by that
+recipient. FiniteBrain does not provide reusable or unscoped public invitation
 links; inviting several recipients creates separately inspectable and revocable
 invitations. This preserves email-proof and identity-bound acceptance, prevents
 a forwarded link from extending access, and gives each recipient an independent

@@ -711,6 +711,38 @@ INSERT INTO agent_creation_requests VALUES ('primary','runtime','project','runni
         self.assertEqual(command[:2], ["/bin/sh", "lifecycle-probe"])
         self.assertIn("machine-a", command)
 
+    def test_lifecycle_probe_reads_shared_defaults_then_operator_overrides(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            shared = Path(directory) / "shared.env"
+            operator = Path(directory) / "operator.env"
+            shared.write_text(
+                "FC_RUNNER_SOURCE_HOST_ID=finite-lat-5\n"
+                "FC_RUNNER_WORK_ROOT=/shared-root\n"
+                "UNRELATED_SECRET=must-not-be-forwarded\n"
+            )
+            operator.write_text("FC_RUNNER_WORK_ROOT=/operator-root\n")
+            with (
+                mock.patch.dict(finite_status.os.environ, {
+                    "FINITE_STATUS_LIFECYCLE_PROBE_BIN": "/bin/sh",
+                }, clear=True),
+                mock.patch.dict(finite_status.CONTRACT["runner"], {
+                    "shared_environment_file": str(shared),
+                    "environment_file": str(operator),
+                }),
+                mock.patch.object(finite_status, "run_read_only", return_value=
+                    subprocess.CompletedProcess([], 0, self.probe_report("operable"), "")
+                ) as run,
+            ):
+                raw = finite_status.collect_lifecycle_probe(
+                    [self.runtime_row("runtime-a", host="finite-lat-5")], "finite-lat-5"
+                )
+            self.assertEqual(raw["errors"], [])
+            self.assertEqual(raw["agents"]["runtime-a"]["verdict"], "operable")
+            environment = run.call_args.kwargs["environment"]
+            self.assertEqual(environment["FC_RUNNER_SOURCE_HOST_ID"], "finite-lat-5")
+            self.assertEqual(environment["FC_RUNNER_WORK_ROOT"], "/operator-root")
+            self.assertNotIn("UNRELATED_SECRET", environment)
+
     def test_collect_lifecycle_probe_marks_failures_unknown(self) -> None:
         runtimes = [
             self.runtime_row("runtime-a"),

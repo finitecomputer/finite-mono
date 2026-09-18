@@ -33,20 +33,6 @@ Install URL shape:
 - The version is newer than `git tag -l '<component>/v*'`, and the matching
   release-repository tag does not already identify different metadata.
 
-## Release-host backfill
-
-The `finite-releases` cutover is backfilled from the old finite-mono releases
-with:
-
-```sh
-python3 scripts/backfill_releases.py
-```
-
-The script copies versioned assets first, then refreshes each
-rolling alias once to the newest copied version. Use `--dry-run` before a
-mutation and repeated `--tag <component>/vX.Y.Z` arguments for a targeted
-repair.
-
 ## Steps
 
 1. Pick the version `vX.Y.Z` against the latest existing `<component>/v*` tag.

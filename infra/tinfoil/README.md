@@ -12,36 +12,22 @@ is to be measurable.
 The current model/container/alias map and retired lab state are recorded in
 [`model-inventory.md`](model-inventory.md).
 
-## The satellites
+## Satellites and deployment
 
-| Repo | Enclave | Inputs pinned from mono |
-|---|---|---|
-| `finitecomputer/confidential-finite-private` | Finite Private GLM-5.3-Flash inference (8×H200) + finite-private-limiter shim (:8002) | Live as external container `finite-private` (`v2026-08-28-glm-5-3-flash-4`). Canonical model `glm-5-3-flash`; aliases `deepseek-v4-flash-0731`, `glm-5-2`, and dotted `glm-5.3-flash`. |
-| `finitecomputer/confidential-kimi-k2-6` | Historical Finite Private satellite (DeepSeek V4 Flash 0731, 8×H200) | The generated hostname is retired. DeepSeek rollback still recreates from this satellite under the historical name. Measured 128/2048 scheduler candidate lives under `infra/tinfoil/confidential-kimi-k2-6/`. |
-| `finitecomputer/finite-searxng-tinfoil` | Token-gated SearXNG | Self-contained satellite (config/proxy sources and release workflows live in that repo). Its former mono mirror `finite-search/tinfoil/searxng-public/` was removed with the finite-search retirement (2026-08-29); nothing in mono consumes this enclave. |
-| `finitecomputer/tinfoil-agent-runtime-canary` | Agent runtime canary | The same `ghcr.io/finitecomputer/agent-runtime@sha256:...` digest proved and published by the canonical mono workflows; no Hermes-only rebuild. |
+- `finitecomputer/confidential-finite-private`: current Finite Private config.
+- `finitecomputer/confidential-kimi-k2-6`: retained model/rollback configurations.
+- `finitecomputer/finite-searxng-tinfoil`: independently owned search satellite.
+- `finitecomputer/tinfoil-agent-runtime-canary`: runtime canary satellite.
 
-## Update flow (limiter example)
+Build limiter images in mono's `Service Images` workflow, select the exact
+reviewed digest, and publish the measured satellite release. Follow
+[Finite Private deployment and rollback](confidential-finite-private/README.md).
+Run `scripts/finite-status` around every authorized rollout. The ops wrapper
+requires the exact tag in `FINITE_PRIVATE_RELAUNCH_APPROVED` for mutation.
 
-1. Change limiter code in `finitecomputer-v2/crates/finite-private-limiter`.
-2. Run the `Service Images` workflow (image=`private-limiter`) → CI pushes
-   `ghcr.io/finitecomputer/private-limiter:<version>@<digest>` (mono-owned
-   package; the legacy finite-private-limiter package stays frozen).
-   Do not reuse the earlier 2026-07-09 mono image: its source predates the
-   legacy-parity import. Build a fresh digest from the exact merged SHA.
-3. Update the digest pin in `confidential-finite-private`'s config; its measured
-   release workflow produces the new enclave release.
-4. Follow `infra/runbooks/finite-private-limiter-mono-switch.md`. The ops
-   wrapper now lives at `infra/runbooks/finite-private-ops.sh` and requires an
-   exact approved tag in `FINITE_PRIVATE_RELAUNCH_APPROVED` before it will run
-   the mutating relaunch command. Expect about 35 minutes of downtime.
-
-Do not revert `FINITE_ADMISSION_MODE=allowlist` while `FINITE_USAGE_API_URL`
-(`https://finite.computer` in the measured config) is the public HTML outage
-origin. That origin 307s `/internal/finite-private/v1/health` onto the Vercel
-page; that is not Core. Point the usage-API hostname at Core, or split API
-paths off the outage page, before switching back to `usage-api`. The limiter
-treats only Core's JSON `{"ok": true}` as usage-API health, never an HTML 200.
+Usage-api admission requires Core's JSON health response. An HTML 200 or
+redirected outage page is not admission health; do not change admission mode
+without proving its configured API route and credentials.
 
 ## Secrets
 

@@ -1,18 +1,15 @@
-# Project Outputs Are Private By Default With Google-Doc-Style Sharing
+# Project Sites Are Private By Default
 
-A new Project Output is `private`. Sharing is a per-output Visibility setting
-plus an email ACL: `private` (nobody), `shared` (listed emails via magic
-link), or `public`. Making an output public requires an explicit
-`confirm_public` flag, which the agent may only set after warning the human.
+A new Project Site is `private`. Site visibility and explicit Shares govern
+viewer access: `private` admits authorized Native Principals, `shared` also
+supports email Shares and viewer sessions, and `public` permits anonymous
+reads. Publisher-email authority and account sessions follow
+[ADR 0029](0029-account-session-viewer-bridge.md).
 
-This inverts the finite-site prototype's public-only v1 — safer for
-training rooms, and it makes the sharing model (the thing users actually
-asked for) a first-class primitive instead of a proxy bolt-on.
+Making a Site public requires `confirm_public`, set only after explicit human
+confirmation. Site sharing never grants repository edit or Git access. Every
+content request checks current permission state, so revocation takes effect
+without waiting for a Viewer Cookie to expire.
 
-**Considered Options**
-
-- Public-only v1 with a warning (the prototype): simplest, but the
-  dangerous default, and private sharing was the most-requested behavior.
-- Private by default with explicit public confirmation: chosen.
-- Per-path ACLs: Google Docs sharing is per-document; per-output matches
-  that mental model and keeps the gate one check per request.
+Sharing applies to the Site, not individual paths. Project collaboration and
+repository visibility remain independent controls.

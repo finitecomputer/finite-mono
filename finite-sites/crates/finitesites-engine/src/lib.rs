@@ -76,7 +76,7 @@ pub enum EngineError {
 
 #[derive(Debug, Clone)]
 pub struct EngineConfig {
-    /// Domain under which sites live, e.g. `sites.localhost` or `finite.chat`.
+    /// Domain under which sites live, e.g. `sites.localhost` or `finite.site`.
     pub base_domain: String,
     /// `http` for local development, `https` behind real TLS.
     pub site_url_scheme: String,

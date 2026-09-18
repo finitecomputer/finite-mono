@@ -1,431 +1,52 @@
-# Protocol V1
-
-## Entities
-
-`Account`
-
-A Nostr public key. This is user-level identity.
-
-`Device`
-
-One application install for one account. Every device is its own MLS leaf.
-
-## Identity And Secret Roots
-
-Finite Chat v1 uses the Nostr account key as the user identity root. WorkOS or
-finitecomputer login may authorize product access, but cryptographic chat
-identity is proof that the user controls the Nostr private key for the account
-public key in the room.
-
-The room server is authoritative for room ordering only. It is not authoritative
-for who an account or device is. Identity claims are accepted by clients only
-when the Nostr-rooted credential and MLS state validate locally.
-
-Persistent Finite Chat device secrets must be rooted in that Nostr private key,
-using explicit domain separation for Finite Chat, version, account, and device
-purpose. MLS is still allowed to create ephemeral or per-epoch secrets internally;
-those are MLS protocol state, not a replacement account identity.
-
-`FiniteDeviceCredentialV1` is the credential payload carried in MLS credential
-identity bytes. It binds:
-
-- Nostr account public key;
-- Finite Chat device id;
-- MLS leaf signing public key or credential key material;
-- credential version and expiry/rotation metadata;
-- Nostr account signature over the binding.
-
-Clients must reject MLS credentials whose Nostr account signature, device id,
-or MLS leaf key binding does not match the expected account/device. Changed
-LeafNodes use the same binding rule.
-
-The Nostr key authenticates the device and any persistent device root. The MLS
-key material performs room encryption. These are not independent identities.
-They are one account identity with per-device MLS participation.
-
-`Room`
-
-One MLS group plus one server-ordered log. V1 has exactly one authoritative
-server per room.
-
-`Conversation`
-
-An application-level session inside a room. A Hermes or finitecomputer "new
-chat" is a conversation, not a separate MLS group. Conversations do not define
-membership, encryption, ordering authority, or delivery boundaries; the room
-does.
-
-`Topic`
-
-A first-class user-facing conversation lane inside a room. Protocol messages use
-`conversation_id` for topics; "topic" is product language, not a second delivery
-or encryption boundary.
-
-`Segment`
-
-A bounded context window inside a conversation. A `/new` command inside an
-existing topic starts a new segment, not a new conversation or room.
-Finite Chat records only the durable segment boundary and current active
-segment id. The app/runtime owns prompt trimming, memory selection, and any
-Hermes session reset mapped from that boundary.
-
-`Chat`
-
-Product language for a resumable context session backed by one segment inside
-a topic. A chat does not add a membership, encryption, ordering, or delivery
-boundary.
-
-`Room Server`
-
-Delivery Service for KeyPackages, ordered room log entries, Welcomes, sessions,
-membership intervals, repair reports, and push wake outbox records.
-
-`Durable Application Event`
-
-An encrypted room event that is part of the durable room log. Chat messages,
-conversation updates, command requests, and command results are durable
-application events unless their kind explicitly says otherwise.
-
-`Ephemeral Activity Event`
-
-An encrypted, TTL-bound room event for intermediate state such as typing,
-thinking, working, uploading, or presence refreshes. The room server may route
-and cache it briefly, but it does not consume the canonical room sequence, is
-not durable history, and never creates unread state or push notifications.
-Ephemeral activity uses the same active-member authorization boundary as
-durable sends. Senders refresh long-running activity by sending a newer
-activity event before expiry, and end it early with an explicit clear.
-
-`Activity Kind`
-
-An encrypted application value inside an ephemeral activity event. Finite Chat
-reserves a small generic namespace for shared UX: `typing`, `thinking`,
-`working`, `uploading`, `recording`, and `present`. Application-specific kinds
-must use a namespaced value such as `finitecomputer.indexing` or
-`hermes.tool_calling`.
-
-## Invariants
-
-- A room has one canonical server sequence.
-- At most one Commit is accepted per room epoch.
-- Clients process entries in sequence order.
-- Clients validate cryptography and application policy.
-- The server is authoritative for ordering, not identity.
-- The server validates only routing envelopes and structural metadata in v1.
-- A Welcome is released only after the linked Commit row is durable.
-- Mutations are idempotent by account, device, method, path, and key.
-- Rejected mutations after idempotency admission are replayable.
-- Removed devices can fetch through their removal Commit.
-- Removed devices cannot send new events or Commits after the removal Commit is
-  the room head.
-- Removed devices must not be able to decrypt post-removal application
-  ciphertext, even if they obtain those bytes outside normal sync.
-- `NeedsRepair` blocks normal sends.
-- Protocol limits are enforced before state mutation. Limit failures must not
-  create log entries, consume KeyPackages, release Welcomes, or write
-  idempotency responses.
-- Encrypted application messages use MLS protection. Do not add an extra
-  application-message encryption layer unless a future threat model names the
-  additional boundary. Local database encryption is separate at-rest protection.
-- Durable application events and ephemeral activity events are distinct
-  envelope classes. The server can see the class and push policy, but not the
-  encrypted activity kind.
-- Ephemeral activity payloads use MLS protection under the sender's current
-  room epoch. They must not use plaintext activity kinds or a second
-  application-message encryption layer.
-- Ephemeral activity events must carry `push_policy = never` and an explicit
-  expiry. They must not create push outbox records, unread counts, durable
-  transcript entries, or command inbox work.
-- The canonical room sequence advances only for MLS Commits and durable
-  application events. Ephemeral activity events must not occupy `seq`, create
-  cursor gaps, or block durable sync.
-- Ephemeral activity events must be rejected unless the sending device is
-  active, non-revoked, and currently a member at the room head. Devices waiting
-  to activate a Welcome and removed devices cannot send activity.
-- `conversation_id` is optional server-visible routing/index metadata scoped to
-  a room. It must not grant access, define identity, replace MLS membership, or
-  carry activity semantics.
-- Client activity projection state is keyed by device first, then rolled up for
-  identity-level UX. A specific device can be active without every device for
-  that account or agent becoming active.
-- Ephemeral activity expiry is a lease. A newer activity event for the same
-  projection key replaces the previous expiry, and an explicit clear removes
-  the matching device-scoped activity before expiry. Clears must not remove
-  sibling devices, unrelated activity kinds, or a different activity id.
-- Decrypted durable terminal events may clear matching activity projection
-  state for the sender. This is a client-side projection update, not a server
-  mutation or room-log side effect.
-- Generic activity kinds are reserved Finite Chat values. Unknown namespaced
-  activity kinds must be preserved in projection state and ignored by generic
-  UI unless an application-specific renderer understands them.
-- `present` is a v1 ephemeral activity kind, not a separate global presence
-  system. Without `conversation_id`, `present` means the device is live in the
-  room; with `conversation_id`, it means the device is live in that app-level
-  conversation.
-- Runtime command requests, command results, and command cancellations are
-  durable application events. Ephemeral activity can describe progress, but it
-  must not create command inbox work.
-- Command execution is driven from ordered durable sync. A runtime must decrypt,
-  validate, and persist request ledger state before scheduling work; it must not
-  execute directly from a stream or push callback.
-- Command targeting lives in encrypted payloads. Optional server-visible wake
-  hints may reduce unnecessary device wakes, but clients must treat them as
-  non-authoritative routing hints, not access control or execution policy.
-- `chat.receipt` is a durable encrypted application event for read/delivered
-  state. It must use `push_policy = never`, must not create unread state, and
-  should be optional by client or account policy.
-- V1 transport uses HTTP mutations, cursor-based pull sync, and SSE hints.
-  Streams and push wakes are never authoritative; clients repair gaps through
-  bounded sync pages. A stream hint can make a client pull; it must not advance
-  the applied cursor or directly execute command work.
-- Attachment blobs are encrypted before upload to a Blossom-compatible blob
-  service. Blob encryption protects bytes stored outside MLS; the room message
-  still uses MLS for the attachment reference and metadata.
-
-## V1 Limits
-
-These are protocol constants, not tuning hints:
-
-- envelope payload: `256 KiB`;
-- sync page: `100` entries and `4 MiB` of envelope payload bytes;
-- devices per account per room: `32`;
-- direct room devices per account: `8`;
-- explicit KeyPackage claims per request: `1`;
-- account fanout KeyPackage claims per request: `8`, one available package per
-  device;
-- KeyPackage inventory per device: `64` unconsumed packages, counting
-  available and leased packages;
-- KeyPackage payload: `64 KiB`;
-- Welcomes claimed per request: `32`;
-- staged Welcomes per Commit: `32`;
-- account room discovery page: `256` rooms;
-- Welcome payload: `1 MiB`;
-- ratchet-tree payload: `1 MiB`;
-- idempotency records per room/device: `4096`;
-- link-session payload: `1 MiB`;
-- attachment plaintext: `32 MiB`;
-- device liveness heartbeat freshness window: `60 seconds`;
-- runtime state snapshot payload: `64 KiB`;
-- runtime state snapshot freshness window: `5 minutes`;
-- runtime state keys per room/device: `128`;
-- conversation projection entries per client: `4096`;
-- conversation metadata payload: `16 KiB`;
-- segments per conversation: `1024`;
-- conversation segment payload: `16 KiB`;
-- runtime command JSON payload: `128 KiB`;
-- runtime command activity clears per result: `16`;
-- runtime command ledger records per daemon/client: `1024`;
-- decrypted ephemeral activity payload: `64 KiB`;
-- decrypted ephemeral activity projection entries per client: `4096`;
-- ephemeral activity expiry: `30 minutes` from server receipt;
-- ephemeral activity cache entries per room/conversation/device route: `64`;
-- idempotency key: `128` bytes;
-- account id, device id, room id, MLS group id, object ids, state keys:
-  `128` bytes each.
-
-The numbers are intentionally small for v1. They keep WASM memory behavior
-predictable, bound retry/fanout work, and make accidental full-room reads show
-up as test failures.
-
-## Product Trust Modes
-
-Finite Chat distinguishes protocol capability from product disclosure.
-
-- `local_device_e2ee`: device secrets stay on the user's device, so the client
-  may describe the chat as end-to-end encrypted.
-- `hosted_trusted_server_client`: a hosted server-side Rust client decrypts on
-  behalf of the web UI. This is useful web chat, but it must not be labeled
-  E2EE.
-- `plaintext_archive`: imported legacy finitecomputer chats are read-only
-  archive material. They must not be labeled E2EE or treated as writable
-  Finite Chat room state.
-
-These modes do not change MLS semantics. They keep product copy and migration
-behavior honest while finitecomputer moves from trusted-server web chat toward
-true local-device clients.
-
-Common product client kinds map to those modes without changing room protocol
-semantics:
-
-- `hosted_web_bridge`: a server-side trusted client for hosted web chat;
-- `native_device`: a local-device E2EE user client;
-- `runtime_device`: an agent/runtime participant whose device secrets stay on
-  the runtime host; it is not a user-facing disclosure surface;
-- `plaintext_archive`: read-only imported legacy chat.
-
-## Server API Sketch
-
-Session:
-
-- `POST /v1/session/challenge`
-- `POST /v1/session/login`
-- `POST /v1/devices`
-- `POST /v1/devices/{device_id}/revoke`
-
-Device records are a server-side control-plane ledger, not identity proof.
-Clients still decide whether a device identity is valid by verifying its
-Nostr-rooted MLS credential. The server records only whether a device is
-currently usable for server mutations. Revocation is terminal in v1: a revoked
-device cannot upload or claim KeyPackages, claim or activate Welcomes, create
-rooms, send application events, submit Commits, or be added to a room again.
-MLS remove Commits are still required for the cryptographic cutoff; the device
-status ledger prevents the revoked install from acquiring new server-mediated
-material while room removals fan out.
-
-KeyPackages:
-
-- `POST /v1/key-packages`
-- `POST /v1/key-packages/availability`
-- `GET /v1/devices/{account_id}/{device_id}/key-packages/inventory`
-- `POST /v1/key-packages/claim`
-- `POST /v1/accounts/{account_id}/key-packages/claim`
-- `POST /v1/devices/{account_id}/{device_id}/key-packages/claim`
-- `POST /v1/key-packages/release`
-
-Uploaded KeyPackages include opaque serialized MLS KeyPackage bytes plus the
-metadata the server uses for routing/cache checks. Claiming a KeyPackage returns
-those exact bytes to the adding client; clients parse and verify MLS credential
-identity locally.
-
-Delivery-layer `MemberId` values are compact opaque route ids derived from the
-typed `DeviceRef` with the versioned `fcdev1` projection. They are not identity
-proof and must not be JSON-encoded `DeviceRef` blobs. Server paths that need
-typed Finite identity must read it from Finite payloads, KeyPackage metadata,
-Welcome records, or room-membership projections, then verify the compact route
-id matches where relevant. This keeps routing under the HTTP id size bound for
-real desktop/iOS device ids and prevents product device-name length from
-changing protocol validity.
-
-The room server is a delivery/admission service, not an application-protocol
-interpreter. It may validate server-visible envelopes, limits, ordering,
-membership intervals, KeyPackage metadata, Welcome routing, idempotency, and
-push policy. It must store and route encrypted durable and ephemeral application
-payloads without understanding their inner client protocol version. Two clients
-that share an encrypted application protocol version should keep working through
-any server whose advertised transport/admission contract is at least the minimum
-they require.
-
-Each device has a bounded KeyPackage inventory. The cap counts available
-packages plus leased packages because both are unconsumed server-held material;
-accepted add Commits consume leased packages and free inventory space. Clients
-use the inventory view to keep a small target number of available packages
-without pushing an unbounded upload pile into the Delivery Service. Runtime
-clients persist generated upload requests in encrypted local state before
-uploading generated packages, then clear each request only after server
-acceptance. Exact duplicate uploads are idempotent retry; a duplicate id with
-different owner, ref, hash, or payload is rejected. V1 client helpers derive
-package ids from the serialized MLS KeyPackage payload hash so replenishment
-does not need a persisted counter.
-
-Account fanout claim returns at most one available KeyPackage per registered
-device for the target account, ordered deterministically by device id and
-KeyPackage id. This is the Add/Welcome admission primitive for multi-device
-users: the server routes packages to devices, but the adding client still
-verifies every Nostr-rooted MLS credential before constructing the Commit.
-
-KeyPackage availability is a read-only batch projection over account
-KeyPackage inventory. Given account ids, the home server returns whether each
-account has at least one available KeyPackage for a non-revoked device. It
-never returns device ids, KeyPackage ids, or KeyPackage bytes, and it never
-claims or leases inventory. Product UI uses this to distinguish people who can
-currently be added to a Room from Nostr follows who do not yet have Finite Chat
-KeyPackages.
-
-Device fanout claim returns one available KeyPackage for a specific target
-device, ordered deterministically by KeyPackage id. The runtime link-fanout
-worker uses this when adding a later-linked device to all existing rooms: each
-room gets one claimed KeyPackage, one staged Welcome, and one ordered add
-Commit.
-
-Rooms:
-
-- `POST /v1/rooms`
-- `GET /v1/accounts/{account_id}/rooms?after_room_id=...&limit=N`
-- `GET /v1/rooms/{room_id}/events?after_seq=N`
-- `GET /v1/rooms/{room_id}/stream`
-- `POST /v1/rooms/{room_id}/events`
-- `POST /v1/rooms/{room_id}/commits`
-
-V1 room transport is explicit:
-
-- durable mutations use HTTP `POST`;
-- durable recovery uses cursor-based `GET` sync pages;
-- live updates use SSE as a hint channel;
-- ephemeral activity may be sent by HTTP mutation and delivered through SSE or
-  a short TTL cache;
-- WebSockets are out of scope for v1.
-
-SSE does not carry authority. If a client misses, duplicates, or reorders SSE
-items, it repairs by polling durable sync with its last applied cursor. A stream
-callback must not directly execute application work.
-
-Welcomes:
-
-- `POST /v1/welcomes/claim`
-- `POST /v1/welcomes/{welcome_id}/ack`
-- `POST /v1/welcomes/{welcome_id}/release`
-
-Repair:
-
-- `POST /v1/rooms/{room_id}/repair-reports`
-
-## History Policy
-
-V1 room history starts for a device at that device's accepted add Commit. A
-newly added device may sync the add Commit and later room entries, including
-messages sent before it acked its Welcome, but the room server must not replay
-pre-membership room log entries as ordinary history for that device.
-
-Pre-membership history recovery is a separate product protocol. It must be
-provided by encrypted backup or an explicit member-to-member history-share
-message, not by making the server authoritative over old plaintext or hidden
-key access. A product that promises retained history must implement and test
-one of those paths before treating Device-store loss as recoverable.
-
-## Message Ids
-
-`seq` is a room-local cursor. It is not a stable message id.
-
-`message_id` is derived from serialized message bytes:
-
-```text
-SHA256("finite-message-id-v1" || canonical_finite_envelope_bytes)
-```
-
-`message_id` is unique per room log. A second mutation with a different
-idempotency key but identical envelope bytes is rejected as a duplicate message,
-not appended as a second log entry.
-
-## Sync Page
-
-Sync returns an explicit page:
-
-```json
-{
-  "entries": [],
-  "next_after_seq": 42,
-  "has_more": false
-}
-```
-
-Clients must use `next_after_seq` as their next cursor, not the last visible
-entry they happened to receive. This matters for removed devices: the server may
-scan entries after the requested cursor that the requester is no longer allowed
-to receive, and the requester must still be able to advance past those filtered
-entries.
-
-`has_more` means the server stopped because a page bound was reached. It does
-not mean the room is quiescent forever.
-
-## Idempotency Capacity
-
-Idempotency records are durable retry state. The room server must replay an
-existing record even when the room/device ledger is full.
-
-When a room/device already has `4096` idempotency records, a new mutation with a
-new idempotency key is rejected with `IdempotencyCapacityExceeded` before side
-effects. The server must not silently delete old records to make room, because
-that would turn a lost response retry into a possible duplicate mutation.
+# Chat protocol contract
+
+Executable wire types and bounds live in `crates/finitechat-proto/` and
+`crates/finitechat-http/`; public routes live in `crates/finitechat-server/`.
+The application payload contract below complements those definitions.
+See [vocabulary](protocol-glossary.md) and [storage](storage.md).
+
+## Identity and ordering
+
+A Principal is a Nostr key; each Device has its own MLS leaf. The account
+signature binds the Device id, MLS signing key and credential lifetime in
+`FiniteDeviceCredentialV1`. Clients validate that binding on KeyPackages,
+Welcome activation and changed leaves. The server does not attest identity.
+
+Human and Agent Runtime Finite Homes have separate local identity secrets.
+Client persistent secrets use explicit versioned domain separation from that
+identity. MLS epoch secrets remain MLS state, not a replacement identity root.
+
+A Room has one authoritative ordered log and one MLS group. Clients apply
+entries in order and validate cryptography and application policy locally.
+Topics and segments are application context, not membership boundaries.
+
+- At most one Commit is admitted per source epoch. Commit side effects and
+  linked Welcomes are durably committed before publication.
+- Removed Devices cannot send after removal and cannot decrypt later epochs.
+  Fetch authorization respects membership intervals, including the removal
+  Commit needed to learn the membership change.
+- Typed rooms accept typed routes. Raw publish is an internal conformance
+  surface, not a public membership-check bypass.
+- `/events` requires explicit application delivery policy. A DM is an ordinary
+  Room; the server does not enforce uniqueness of account pairs.
+- Welcome admission is claim then activate; a transient activation failure
+  remains retryable. Current admission is KeyPackage/Add/Welcome, not PIN or
+  invite-session rendezvous.
+- Idempotency and digest dedup preserve exact retry semantics. There is no
+  lifetime 4,096-message-per-sender limit.
+- Realtime hints and TTL-bound activity do not replace ordered sync. Activity
+  consumes no durable room sequence and creates no durable unread state.
+- Missing or invalid local MLS state fails closed. Repair must preserve the
+  Principal, supported historical readers and the recovery boundary.
+
+## Encryption boundary
+
+MLS protects application messages; encrypted blob references identify separately
+encrypted attachments. The server may validate bounded routing metadata but
+must not become the application-content or membership-policy authority.
+Claims of recovery require the same encrypted state plus independently
+recoverable key authority. Retained older-state fixtures are compatibility
+contracts, not obsolete material to delete during documentation cleanup.
 
 ## Application/RPC Payloads
 

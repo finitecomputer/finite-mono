@@ -61,11 +61,9 @@ These maxims are the standing review frame for production changes.
 
 ## What stays outside, and why
 
-- **Legacy `finitecomputer`** — runs box1/TRF/the OVH fleet until those users
-  migrate. Its Nix fleet pattern is the best IaC we have; we copy the pattern,
-  not the content. It also still owns two things mono must eventually take:
-  the Finite Private ops script (`finite_private_ops.sh`) and the deployed
-  limiter image build (now replaced by `service-images.yml` here).
+- **Legacy `finitecomputer`** — owns retained box1/TRF/OVH fleet workloads.
+  First-party development lands in mono. Finite Private limiter images are
+  built here by `service-images.yml`.
 - **Tinfoil satellite repos** (`confidential-kimi-k2-6`,
   `finite-searxng-tinfoil`, `tinfoil-agent-runtime-canary`) — Tinfoil enclave
   measurement requires `tinfoil-config.yml` at the ROOT of a repo, one config

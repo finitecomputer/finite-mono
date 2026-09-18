@@ -86,6 +86,18 @@ in
 
   networking.hostName = "finite-lat-2";
 
+  # FIN-39: only the dedicated runtime router is public. Account/Runner
+  # authority remains on Core's existing private listener.
+  systemd.services.finite-saas-core.environment = {
+    FC_CORE_RUNTIME_BIND = "127.0.0.1:4201";
+    FC_CORE_HOSTED_HERMES_ORIGINS_JSON = builtins.toJSON {
+      finite-lat-5 = "https://agents-lat5.finite.computer";
+    };
+  };
+  services.caddy.virtualHosts."runtime-api.finite.computer".extraConfig = ''
+    reverse_proxy 127.0.0.1:4201
+  '';
+
   # Go-live closure (Gate E): the state import passed every verification
   # gate — chat MAX(seq) 206563 exact vs the litestream replica, brain /
   # identity / sites / hosted-device integrity green, Postgres dump

@@ -96,8 +96,8 @@ install-lat2-from-artifact artifact_dir target_host *args:
     cd "$repo_root"
     exec scripts/install-lat2-from-artifact "$artifact_dir" "$target_host" "$@"
 
-# Drive the artifact-driven bare-metal install for finite-lat-4 (Gate C of
-# infra/runbooks/lat4-nixos-runner-install.md). Validates the manifest,
+# Drive the artifact-driven bare-metal install for finite-lat-4 (see
+# infra/runbooks/install-host.md). Validates the manifest,
 # realizes the install inputs from the artifact cache, and runs the pinned
 # nixos-anywhere against the rescue-mode host. Nothing is built.
 [positional-arguments]

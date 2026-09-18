@@ -28,6 +28,20 @@ env:
     access-tokens = github.com=${{ github.token }}
 
 jobs:
+  source-structure:
+    name: Source structure
+    runs-on: depot-ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: DeterminateSystems/nix-installer-action@v16
+      - name: Configure Cachix read-only cache
+        uses: cachix/cachix-action@v17
+        with:
+          name: ${{ env.CACHIX_CACHE_NAME }}
+          skipPush: true
+      - name: Check source structure and its regression tests
+        run: nix develop .#rust-ci --command just source-structure-check
+
   changes:
     name: Detect required CI harnesses
     runs-on: depot-ubuntu-24.04
@@ -511,8 +525,6 @@ jobs:
         run: nix develop --command just sites-backup-contract
       - name: Sites content redirect contract
         run: nix shell --inputs-from . nixpkgs#caddy --command python3 scripts/tests/test_sites_redirects.py
-      - name: Sites offline reconciliation contract
-        run: nix develop --command just sites-offline-reconciliation-contract
       - name: Litestream recovery contract
         run: nix develop --command just litestream-recovery-contract
       - name: lat1 secret bootstrap contract
@@ -816,6 +828,7 @@ jobs:
     if: ${{ always() }}
     needs:
       - changes
+      - source-structure
       - rust
       - dashboard
       - hermes-bridge
@@ -829,6 +842,7 @@ jobs:
     runs-on: depot-ubuntu-24.04
     env:
       CHANGES_RESULT: ${{ needs.changes.result }}
+      SOURCE_STRUCTURE_RESULT: ${{ needs['source-structure'].result }}
       RUN_RUST: ${{ needs.changes.outputs.run_rust }}
       RESULT_RUST: ${{ needs.rust.result }}
       RUN_DASHBOARD: ${{ needs.changes.outputs.run_dashboard }}
@@ -883,6 +897,7 @@ jobs:
             esac
           }
 
+          check_selected "Source structure" true "$SOURCE_STRUCTURE_RESULT"
           check_selected "Rust workspace" "$RUN_RUST" "$RESULT_RUST"
           check_selected "Dashboard" "$RUN_DASHBOARD" "$RESULT_DASHBOARD"
           check_selected "Hermes bridge" "$RUN_HERMES_BRIDGE" "$RESULT_HERMES_BRIDGE"

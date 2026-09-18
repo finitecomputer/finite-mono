@@ -37,7 +37,7 @@ Previous finite.chat content hosts are navigation-only. The edge maps each
 retained URL to its exact finite.site destination; the dashboard neither sends
 credentials to the previous host nor guesses the destination from its name.
 Unmapped hosts and retired auth/API/Git routes return 410. Viewing and publishing
-use the same Finite Sites service after the cutover described in the runbook.
+use the same Finite Sites service at `finite.site`.
 
 ## Tokens and cookies
 
@@ -58,8 +58,8 @@ email fallback cannot start another automatic account redirect.
 The [old-writer fixture](../../crates/finitesitesd/tests/fixtures/legacy-email-v053/README.md)
 tests persisted email access, cookies, and revocation across versions. Browser
 tests use development account evidence, not live WorkOS. Qualify the actual
-source restore and live account/guest access using the
-[cutover runbook](../../../infra/runbooks/deploy-sites.md).
+restored state and live account/guest access using the
+[deployment and recovery runbook](../../../infra/runbooks/deploy-sites.md).
 
 Changed account emails, aliases, key migration, and old-site redirects are not
 handled by this bridge.

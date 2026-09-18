@@ -73,18 +73,31 @@ PER_HOST_UNIT_ENV_KEYS = {"FINITE_IDENTITY_AUTHORITY"}
 
 
 def nix_eval(
-    host: str, attribute: str, *, raw: bool = False, stringify: bool = False
+    host: str,
+    attribute: str,
+    *,
+    raw: bool = False,
+    stringify: bool = False,
+    base_runner: bool = False,
 ) -> str:
     config = f".#nixosConfigurations.{host}.config"
     command = ["nix", "eval", "--raw" if raw else "--json"]
-    if stringify:
-        command += ["--apply", "builtins.map toString"]
-    command.append(f"{config}.{attribute}")
+    if base_runner:
+        # Compare the common Runner role with its optional ingress disabled.
+        # The real enabled host is checked separately below, without overrides.
+        value = f"(host.extendModules {{ modules = [ ({{ lib, ... }}: {{ finite.hostedHermes.enable = lib.mkForce false; }}) ]; }}).config.{attribute}"
+        if stringify:
+            value = f"builtins.map toString ({value})"
+        command += ["--apply", f"host: {value}", f".#nixosConfigurations.{host}"]
+    else:
+        if stringify:
+            command += ["--apply", "builtins.map toString"]
+        command.append(f"{config}.{attribute}")
     return subprocess.run(
         command,
         cwd=ROOT,
         check=True,
-        capture_output=True,
+        stdout=subprocess.PIPE,
         text=True,
     ).stdout
 
@@ -107,7 +120,9 @@ def check_shared_env(envs: dict[str, dict[str, str]]) -> None:
     for host in HOSTS:
         runtime_env = json.loads(envs[host]["FC_RUNNER_RUNTIME_ENV_JSON"])
         if runtime_env.get("FINITE_SITES_API") != "https://finite.site":
-            raise SystemExit(f"{host}: Runtime fallback must use the qualified Finite Sites origin")
+            raise SystemExit(
+                f"{host}: Runtime fallback must use the qualified Finite Sites origin"
+            )
         if envs[host].get("FC_RUNNER_MAX_SANDBOXES") != EXPECTED_MAX_SANDBOXES[host]:
             raise SystemExit(
                 f"{host}: FC_RUNNER_MAX_SANDBOXES is "
@@ -138,7 +153,9 @@ def check_shared_env(envs: dict[str, dict[str, str]]) -> None:
             envs[host].get("FC_RUNNER_FINITE_PRIVATE_MODEL")
             != CANONICAL_FINITE_PRIVATE_MODEL
         ):
-            raise SystemExit(f"{host}: Finite Private model is not canonical GLM-5.3-Flash")
+            raise SystemExit(
+                f"{host}: Finite Private model is not canonical GLM-5.3-Flash"
+            )
 
     for host in others:
         keys_a, keys_b = set(envs[reference]), set(envs[host])
@@ -192,22 +209,42 @@ def check_unit_fragments() -> None:
     # The module-owned ordering entries are asserted separately below.
     comparable_attributes = {
         "description": lambda host: nix_eval(
-            host, "systemd.services.finite-saas-runner.description", raw=True
+            host,
+            "systemd.services.finite-saas-runner.description",
+            raw=True,
+            base_runner=True,
         ),
         "path": lambda host: json.loads(
-            nix_eval(host, "systemd.services.finite-saas-runner.path", stringify=True)
+            nix_eval(
+                host,
+                "systemd.services.finite-saas-runner.path",
+                stringify=True,
+                base_runner=True,
+            )
         ),
         "environment": lambda host: json.loads(
-            nix_eval(host, "systemd.services.finite-saas-runner.environment")
+            nix_eval(
+                host,
+                "systemd.services.finite-saas-runner.environment",
+                base_runner=True,
+            )
         ),
         "serviceConfig": lambda host: json.loads(
-            nix_eval(host, "systemd.services.finite-saas-runner.serviceConfig")
+            nix_eval(
+                host,
+                "systemd.services.finite-saas-runner.serviceConfig",
+                base_runner=True,
+            )
         ),
         "timer": lambda host: json.loads(
-            nix_eval(host, "systemd.timers.finite-saas-runner.timerConfig")
+            nix_eval(
+                host, "systemd.timers.finite-saas-runner.timerConfig", base_runner=True
+            )
         ),
         "timerWantedBy": lambda host: json.loads(
-            nix_eval(host, "systemd.timers.finite-saas-runner.wantedBy")
+            nix_eval(
+                host, "systemd.timers.finite-saas-runner.wantedBy", base_runner=True
+            )
         ),
     }
 
@@ -264,6 +301,127 @@ def check_unit_fragments() -> None:
                 )
 
 
+def check_hosted_canary() -> None:
+    for host in HOSTS:
+        enabled = json.loads(nix_eval(host, "finite.hostedHermes.enable"))
+        if enabled != (host == "finite-lat-5"):
+            raise SystemExit(f"{host}: only lat5 may enable FIN-39 ingress")
+    host = "finite-lat-5"
+    environment = json.loads(
+        nix_eval(host, "systemd.services.finite-saas-runner.environment")
+    )
+    service = json.loads(
+        nix_eval(host, "systemd.services.finite-saas-runner.serviceConfig")
+    )
+    expected = {
+        "Type": "exec",
+        "ExitType": "cgroup",
+        "KillMode": "control-group",
+        "SendSIGKILL": True,
+        "Delegate": False,
+        "TimeoutStopSec": "5s",
+        "RuntimeMaxSec": "1h",
+    }
+    for key, value in expected.items():
+        if service.get(key) != value:
+            raise SystemExit(f"lat5 hosted ingress lost its {key} lifetime boundary")
+    if not any(
+        "hosted-hermes-runner-gate" in entry
+        for entry in service.get("ExecStartPre", [])
+    ):
+        raise SystemExit("lat5 hosted ingress lost its Runner rollback gate")
+    if not environment.get("FC_RUNNER_HOSTED_HERMES_CONFIG"):
+        raise SystemExit("lat5 is missing its hosted ingress manifest")
+    proxy = json.loads(
+        nix_eval(host, "systemd.services.finite-hosted-hermes.serviceConfig")
+    )
+    proxy_expected = {
+        "Type": "notify",
+        "Restart": "no",
+        "KillMode": "control-group",
+        "SendSIGKILL": True,
+        "TimeoutStartSec": "10s",
+        "TimeoutStopSec": "5s",
+        "User": "root",
+        "Group": "root",
+        "UMask": "0077",
+        "StateDirectory": "finite-hosted-hermes",
+        "Environment": [
+            "HOME=/var/lib/finite-hosted-hermes",
+            "XDG_DATA_HOME=/var/lib/finite-hosted-hermes/data",
+            "XDG_CONFIG_HOME=/var/lib/finite-hosted-hermes/config",
+        ],
+    }
+    for key, value in proxy_expected.items():
+        if proxy.get(key) != value:
+            raise SystemExit(f"lat5 dedicated proxy lost its {key} boundary")
+    caddy = nix_eval(host, "services.caddy.package.outPath", raw=True)
+    if proxy.get("ExecStart") != (
+        f"{caddy}/bin/caddy run --config /run/finite-hosted-hermes/caddy.json"
+    ):
+        raise SystemExit("lat5 proxy must start from the fresh Runner projection")
+    if proxy.get("ExecReload"):
+        raise SystemExit("lat5 proxy must stop before address reuse, never reload")
+    for attribute in ("wantedBy", "requiredBy", "upheldBy"):
+        if json.loads(
+            nix_eval(host, f"systemd.services.finite-hosted-hermes.{attribute}")
+        ):
+            raise SystemExit(
+                f"lat5 proxy must not have automatic {attribute} activation"
+            )
+    # Project only the activation target; complete NixOS socket submodules
+    # contain internal values that cannot be serialized to JSON.
+    sockets = json.loads(
+        subprocess.check_output(
+            [
+                "nix",
+                "eval",
+                "--json",
+                "--apply",
+                'builtins.mapAttrs (_: socket: socket.socketConfig.Service or "")',
+                f".#nixosConfigurations.{host}.config.systemd.sockets",
+            ],
+            cwd=ROOT,
+            text=True,
+        )
+    )
+    if any(
+        name == "finite-hosted-hermes" or target == "finite-hosted-hermes.service"
+        for name, target in sockets.items()
+    ):
+        raise SystemExit("lat5 proxy must not use socket activation")
+    if (
+        environment.get("FC_RUNNER_RUNTIME_CORE_URL")
+        != "https://runtime-api.finite.computer"
+    ):
+        raise SystemExit("lat5 bootstrap must use the dedicated runtime HTTPS origin")
+    core = json.loads(
+        nix_eval("finite-lat-2", "systemd.services.finite-saas-core.environment")
+    )
+    if core.get("FC_CORE_RUNTIME_BIND") != "127.0.0.1:4201":
+        raise SystemExit("Core's runtime router must use its own loopback listener")
+    origins = json.loads(core["FC_CORE_HOSTED_HERMES_ORIGINS_JSON"])
+    if origins != {"finite-lat-5": "https://agents-lat5.finite.computer"}:
+        raise SystemExit("Core must publish only the selected lat5 host")
+    public_origin = nix_eval(host, "finite.hostedHermes.publicOrigin", raw=True)
+    if public_origin != origins[host]:
+        raise SystemExit("Core and lat5 disagree on the native Hermes origin")
+    allowed = json.loads(nix_eval(host, "finite.hostedHermes.allowedOrigins"))
+    if allowed != ["https://finite.computer"]:
+        raise SystemExit("lat5 hosted CORS must match the production dashboard exactly")
+    edge = nix_eval(
+        "finite-lat-2",
+        'services.caddy.virtualHosts."runtime-api.finite.computer".extraConfig',
+        raw=True,
+    )
+    if edge.strip() != "reverse_proxy 127.0.0.1:4201":
+        raise SystemExit(
+            "The runtime edge must proxy only the dedicated router verbatim"
+        )
+    if 443 not in json.loads(nix_eval(host, "networking.firewall.allowedTCPPorts")):
+        raise SystemExit("lat5 hosted TLS port is not open")
+
+
 def main() -> None:
     check_operator_env_templates()
     envs = {
@@ -273,31 +431,60 @@ def main() -> None:
         for host in HOSTS
     }
     check_shared_env(envs)
-    core = json.loads(nix_eval(
-        "finite-lat-2", "systemd.services.finite-saas-core.environment"
-    ))
-    if json.loads(core["FC_CORE_RUNTIME_ENV_JSON"]).get("FINITE_SITES_API") != "https://finite.site":
+    core = json.loads(
+        nix_eval("finite-lat-2", "systemd.services.finite-saas-core.environment")
+    )
+    if (
+        json.loads(core["FC_CORE_RUNTIME_ENV_JSON"]).get("FINITE_SITES_API")
+        != "https://finite.site"
+    ):
         raise SystemExit("Core RuntimeSpecs must use the qualified Finite Sites origin")
-    phala = json.loads(nix_eval(
-        "finite-lat-1", "systemd.services.finite-saas-runner-phala.environment"
-    ))
+    phala = json.loads(
+        nix_eval(
+            "finite-lat-1", "systemd.services.finite-saas-runner-phala.environment"
+        )
+    )
     if "FC_RUNNER_RUNTIME_ARTIFACT_ID" in phala:
-        raise SystemExit("Phala Runtime promotion pin must live in phala-runner.env, not Nix")
-    if json.loads(phala["FC_RUNNER_RUNTIME_ENV_JSON"]).get("FINITE_SITES_API") != "https://finite.site":
-        raise SystemExit("Phala Runtime fallback must use the qualified Finite Sites origin")
-    dashboard = json.loads(nix_eval(
-        "finite-lat-2", "virtualisation.oci-containers.containers.finite-saas-dashboard.environment"
-    ))
+        raise SystemExit(
+            "Phala Runtime promotion pin must live in phala-runner.env, not Nix"
+        )
+    if (
+        json.loads(phala["FC_RUNNER_RUNTIME_ENV_JSON"]).get("FINITE_SITES_API")
+        != "https://finite.site"
+    ):
+        raise SystemExit(
+            "Phala Runtime fallback must use the qualified Finite Sites origin"
+        )
+    dashboard = json.loads(
+        nix_eval(
+            "finite-lat-2",
+            "virtualisation.oci-containers.containers.finite-saas-dashboard.environment",
+        )
+    )
     if dashboard.get("FC_SITES_UPSTREAM_URL") != "https://finite.site":
-        raise SystemExit("Dashboard viewing and publishing must use the Finite Sites registry")
-    services = json.loads(subprocess.run(
-        ["nix", "eval", "--json", "--apply", "builtins.attrNames",
-         ".#nixosConfigurations.finite-lat-2.config.systemd.services"],
-        cwd=ROOT, check=True, capture_output=True, text=True,
-    ).stdout)
+        raise SystemExit(
+            "Dashboard viewing and publishing must use the Finite Sites registry"
+        )
+    services = json.loads(
+        subprocess.run(
+            [
+                "nix",
+                "eval",
+                "--json",
+                "--apply",
+                "builtins.attrNames",
+                ".#nixosConfigurations.finite-lat-2.config.systemd.services",
+            ],
+            cwd=ROOT,
+            check=True,
+            capture_output=True,
+            text=True,
+        ).stdout
+    )
     if "finite-saas-sites" in services:
         raise SystemExit("The app host must not run a second Sites daemon")
     check_unit_fragments()
+    check_hosted_canary()
     print("Kata Runner host contract: ok")
 
 

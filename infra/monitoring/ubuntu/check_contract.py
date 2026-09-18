@@ -45,6 +45,8 @@ EXPECTED_VERSION_KEYS = {
     "LOKI_SHA256": r"[0-9a-f]{64}",
     "NODE_EXPORTER_VERSION": "1.9.1",
     "NODE_EXPORTER_SHA256": r"[0-9a-f]{64}",
+    "TINFOIL_CLI_VERSION": "0.18.5",
+    "TINFOIL_CLI_SHA256": r"[0-9a-f]{64}",
     "JQ_VERSION": "1.8.1",
     "JQ_SHA256": r"[0-9a-f]{64}",
 }

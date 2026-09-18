@@ -12,7 +12,7 @@ open an unmigrated source registry with the static-only daemon.
 
 ## Fly
 
-Set `APP=finite-sites-demo`; the historical app name does not indicate a demo.
+Set `APP=finite-sites-demo`.
 Inspect its Machine, `sites_data` volume, IPs and issued certificates for
 `finite.site` and `*.finite.site` before deployment. Preserve existing data.
 
@@ -81,11 +81,29 @@ publishing credentials do not authorize it. Responses use `Cache-Control: no-sto
    Record canonical `scripts/finite-status` before and after rollout.
 
 Do not change creation timestamps to repair a chart. The metrics read retained
-registry rows directly; they cannot reconstruct purged pre-cutover history.
+registry rows directly; they cannot reconstruct purged history.
 Rollback restores the previous image and scrape configuration. No schema or
 data migration is involved; a disabled/older endpoint leaves usage panels
 unavailable rather than reporting zero. The dashboard workflow alone does not
 deploy the service image, provision this credential, or change scrape jobs.
+
+### Diagnose missing usage data
+
+Check the serving image, endpoint, and Prometheus target separately. A successful
+dashboard workflow deploys the panels only; the API/wildcard uptime probes do
+not collect usage metrics.
+
+| Observation | Next action |
+| --- | --- |
+| `/internal/v1/metrics` returns 404 on `finite.site` | Compare the live image revision with the metrics-capable CI image; deploy the qualified digest. |
+| Endpoint returns 503 | Check whether `FINITE_SITES_METRICS_TOKEN` is configured and inspect service logs for collection errors. |
+| Authenticated scrape returns 401 | Reconcile the dedicated Fly token and receiver credential file. |
+| `up{job="finite-sites-metrics"}` returns no series | Install/reload the Sites scrape job on the receiver after provisioning its token. |
+| Target is up but panels remain unavailable | Check that `finite_sites_metrics_collected_at_seconds` is less than 180 seconds old and not in the future; use a dashboard end time after the first successful scrape. |
+
+Accept the rollout only when the live Grafana queries return existing/published
+totals, 90 daily buckets, and healthy collection. Preserve the receiver's other
+scrape jobs when reconciling its configuration.
 
 ## Account bridge
 
@@ -134,10 +152,12 @@ separate repository-restricted recovery key outside Fly. Append-only preserves
 repository segments, but does not prevent logical archive deletion; recovery
 may still require operator repair. No job prunes or compacts the repository.
 
-Before production migration, prove the complete
-Sites Recovery Set (repositories, blobs, registry, permissions and cookie key)
-restores from rsync.net onto an empty target. Image smoke tests and Fly volumes
-alone do not prove remote recovery.
+The complete Sites Recovery Set (repositories, blobs, registry, permissions
+and cookie key) has restored from rsync.net onto an empty target. Repeat that
+proof when changing the recovery contract; image smoke tests and Fly volumes
+alone do not prove remote recovery. Qualification evidence and the remaining
+external backup-alert verification are tracked in
+[FIN-54](https://linear.app/finitecomputer/issue/FIN-54).
 
 ### Enable backups
 
@@ -226,65 +246,44 @@ Inspect snapshot SQLite only through `scripts/snapshot-sqlite` or a scratch copy
 Restore service configuration, start Sites, and run the [verification](#verify)
 checks with pre-backup credentials before moving traffic.
 
-## Recovery and cutover
+## Recovery
 
 Roll back to a previous image digest only when it can read the current state.
 Preserve the data volume; binary rollback does not undo migrations or writes.
 If a Git push was accepted but publication failed, reconcile it after service
-recovery. Never restore an old database over newer accepted writes.
+recovery. Never restore an old database over newer accepted writes. Fence
+publishing and diagnose on copies before choosing a recovery image.
 
-Prepare the cutover review package outside git because it contains customer data:
+Sites recovery uses the independent [Sites backup procedure](#backups-and-restore).
+Hosted Recovery Snapshot format v4 covers Chat/Core/Brain/Identity separately.
+Historical v3 snapshots remain readable by the restore tool. Retain the old
+Sites data directory and complete recovery archives; service retirement does
+not authorize purging user data.
 
-- Assign every output a retained static Site or archive-only disposition, with
-  exact old/new URLs. Render documents ahead of time; copy only reviewed public
-  HTML/assets from app bundles. Preserve browser JavaScript where useful, but
-  do not copy server code, databases, dependency trees or credentials into a
-  deploy path. Unsupported server behavior is retired. Check document deep
-  links, relative assets and app pages with their backends absent.
-- Preserve source history, owner, visibility, shares and grants for retained
-  Sites. A fallback is not permission to make private content public. Mixed
-  projects need an explicit retained Site and proof of a subsequent publish.
-  Use the [offline reconciliation procedure](sites-static-output-reconciliation.md)
-  for supported output IDs. Record proposed source commits and observed branch
-  tips; drift requires review, never a force-push.
-- Capture the destination's current projects, shares, sessions, Git credentials
-  and cookie key as well as the frozen source. Rehearse their reconciliation on
-  disposable copies; never install test writes or an older snapshot over live data.
+## Content redirect maintenance
 
-### Activate redirects and retire the app-host service
+The app-plane Caddy serves reviewed redirects for previous content URLs. It
+runs no Sites daemon. Keep `/etc/finite-saas/sites.env`: Identity and Brain
+still read that mail credential despite its historical filename.
 
-Only after authorized migration and access checks pass:
-
-1. Under the final publishing freeze, capture and independently archive the
-   complete source Recovery Set. Preserve the old data directory and complete
-   archives; this rollout does not purge them. Record the final archive and
-   credential custody before removing ongoing app-host Sites backups.
-2. Prepare a private JSON array of `from_host` / `to_host` mappings for retained
+1. Prepare a private JSON array of `from_host` / `to_host` mappings for retained
    content. Sources must be one-label hosts under `finite.chat` or
    `docs.finite.chat`. Disposable `*.v2.finite.chat` validation URLs are excluded
    from both redirects and dashboard previews; no DNS/TLS route is retained for
    them. Generate the Caddy fragment with `infra/scripts/sites-redirects`.
    Install it atomically as `/etc/finite/sites-redirects.caddy`, root:caddy `0640`.
-   The file is required, including when deploying this shared Caddy module on
+   The file is required, including when deploying the shared Caddy module on
    another host. Missing mappings must fail validation before activation.
-3. Validate the candidate's complete Caddy configuration with that fragment.
-   Deploy the reviewed app-host closure only after the new dashboard image and
-   Runtime are qualified. This removes `finite-saas-sites`, its package,
-   health checks and ongoing host snapshot dependency. Caddy redirects mapped
-   GET/HEAD content requests with 302 and `no-store`; paths and queries survive.
-   Old auth routes, API/Git hosts and unmapped content return 410. Neither old
-   login tokens nor Git credentials are forwarded to another host.
-4. Verify mapped URLs, document deep links, private/unshared access, current
-   public content, saved Git remotes and an existing agent's next publish.
-   Run `scripts/finite-status`. Keep the Identity mail credential at
-   `/etc/finite-saas/sites.env`; Identity still reads it despite the old filename.
-5. Create and verify a new hosted Recovery Snapshot and archive it. Format v4
-   covers Chat/Core/Brain/Identity without Sites. Historical v3 snapshots remain
-   readable by the restore tool; current Sites recovery follows the independent
-   [Sites backup procedure](#backups-and-restore).
+2. Validate the complete candidate Caddy configuration with that fragment as
+   the `caddy` user; root validation can create root-owned access logs that
+   prevent reload. Require `ReloadResult=success` after activation.
+3. Verify mapped GET/HEAD content requests return 302 and `no-store`, preserving
+   paths and queries. Old auth routes, API/Git hosts and unmapped content must
+   return 410. Old login tokens and Git credentials must never be forwarded.
+   Check document deep links, public content and private/unshared access at the
+   destination. Run `scripts/finite-status` before and after rollout.
 
-Rollback must preserve all destination writes. Do not restart an old writable
-registry as an automatic closure rollback, or restore an old database over new
-commits. Fence publishing, diagnose on copies, and choose a recovery image that
-can read the current state. This runbook does not itself authorize production
-mutation or a Runtime rollout.
+Redirects do not move cookies, Git credentials or remotes. Maintain the exact
+reviewed destination for each source host; a hostname is not authority to infer
+ownership or rewrite durable state. This runbook does not itself authorize
+production mutation or a Runtime rollout.

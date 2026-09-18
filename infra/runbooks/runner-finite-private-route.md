@@ -35,12 +35,12 @@ file tests prove byte and metadata preservation; they are not live-host proof.
 ### 1. Run the read-only preflight
 
 Run the authoritative platform status command and retain its JSON before the
-change. Then check both active Runner hosts:
+change. Then check each authorized Runner host:
 
 ```bash
 scripts/finite-status --json > finite-status-before-runner-route.json
 
-for host in root@207.188.7.157 root@152.236.34.15; do
+for host in root@AUTHORIZED_RUNNER_HOST; do
   ssh -o BatchMode=yes "$host" \
     'bash -s -- --check /etc/finite/runner.env' \
     < scripts/reconcile-runner-finite-private-env
@@ -53,14 +53,14 @@ condition; inspect the file on-host without printing its secret values.
 
 ### 2. Apply the guarded change
 
-**TODO: this two-host Production Deploy has not been exercised.** The first
-authorized run must retain each helper result and confirm that both hosts
+Live qualification is tracked in [FIN-95](https://linear.app/finitecomputer/issue/FIN-95). The first
+authorized run must retain each helper result and confirm that all selected hosts
 report `migrated` with their expected rollback path. The file replacement is
 atomic, so a Runner invocation sees either the complete old file or the
 complete new file.
 
 ```bash
-for host in root@207.188.7.157 root@152.236.34.15; do
+for host in root@AUTHORIZED_RUNNER_HOST; do
   ssh -o BatchMode=yes "$host" \
     'bash -s -- --apply /etc/finite/runner.env' \
     < scripts/reconcile-runner-finite-private-env
@@ -73,7 +73,7 @@ that expectation instead of treating it as prior evidence.
 
 ## VERIFY
 
-Re-run `--check` on both hosts and require `clean`. Then run the same
+Re-run `--check` on all selected hosts and require `clean`. Then run the same
 authoritative status command and require the effective Finite Private
 route/model to be green:
 
@@ -81,8 +81,7 @@ route/model to be green:
 scripts/finite-status --json > finite-status-after-runner-route.json
 ```
 
-**TODO: live verification is not complete** until both active hosts report the
-canonical route/model and one fresh-Agent launch reaches chat readiness on GLM
+Require all selected hosts to report the canonical route/model and one fresh-Agent launch reaches chat readiness on GLM
 without manual Runtime repair. Record that evidence in the deployment record.
 
 ## ROLLBACK
@@ -90,8 +89,7 @@ without manual Runtime repair. Record that evidence in the deployment record.
 Rollback is host-local and restores the exact pre-change inode contents. Stop
 if the rollback copy is missing or is not a regular, non-symlink file.
 
-**TODO: the rollback path is synthetic-tested but has not been exercised on a
-live Runner host.** The first authorized rollback must retain before/after
+Live qualification is tracked in [FIN-95](https://linear.app/finitecomputer/issue/FIN-95). The first authorized rollback must retain before/after
 `scripts/finite-status` output and confirm that the target bytes match the
 rollback copy without printing secret values.
 

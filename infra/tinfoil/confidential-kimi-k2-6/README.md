@@ -28,7 +28,7 @@ container name, and generated hostname are historical infrastructure identities
 and must not be changed as part of the scheduler rollout.
 
 Exact performance, context, protocol, and soak evidence is recorded in
-[`2026-08-07-deepseek-v4-eight-h200-optimization.md`](../../../docs/research/2026-08-07-deepseek-v4-eight-h200-optimization.md).
+[Inference configuration](../confidential-finite-private/README.md).
 Deployment facts live in
 [`deployment-changelog.md`](../../deployment-changelog.md), and the checked-in
 candidate is validated by `just finite-private-deepseek-contract`.

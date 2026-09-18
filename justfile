@@ -22,6 +22,11 @@ default:
 check:
     cargo check --workspace --locked
 
+# Checks bounded Core files, Rust module/struct structure, and short agent guides.
+source-structure-check:
+    cargo test --locked -p source-structure
+    cargo run --quiet --locked -p source-structure
+
 # Formats all rust code
 fmt:
     cargo fmt --all
@@ -156,9 +161,6 @@ runner-host-contract:
 
 runtime-image-contract:
     just runtime-images runtime-image-contract
-
-sites-offline-reconciliation-contract:
-    python3 -m unittest scripts.tests.test_sites_reconcile_static_output_ids scripts.tests.test_ci_select_harnesses
 
 stripe-billing-clock:
     just dashboard stripe-billing-clock
