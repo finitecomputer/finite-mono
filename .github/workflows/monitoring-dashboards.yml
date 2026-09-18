@@ -40,6 +40,7 @@ jobs:
     needs: validate
     runs-on: depot-ubuntu-24.04
     timeout-minutes: 20
+    # Secrets and branch restrictions only; no environment reviewer approval.
     environment: production
     steps:
       - uses: actions/checkout@v4
