@@ -279,6 +279,31 @@ impl CoreStore {
     }
 }
 
+/// Called only inside credential insertion transactions. Provisioning retries
+/// never call this: existing disables, revocations and native keys survive.
+pub(super) async fn prepare_initial_access<C: GenericClient + Sync>(
+    tx: &C,
+    creation: &str,
+) -> CoreResult<()> {
+    let username = format!("finite-{}", new_secret()?);
+    let password = new_secret()?;
+    let signing = new_secret()?;
+    let changed = tx
+        .execute(
+            "UPDATE runtime_core_credentials SET hosted_enabled=TRUE,
+         hosted_username=$2,hosted_password=$3,hosted_signing_secret=$4
+         WHERE creation_request_id=$1 AND NOT revoked AND NOT hosted_enabled
+           AND hosted_generation=1 AND hosted_applied_generation IS NULL",
+            &[&creation, &username, &password, &signing],
+        )
+        .await
+        .map_err(store_error)?;
+    if changed != 1 {
+        return Err(CoreError::ProviderOperationTransitionConflict);
+    }
+    Ok(())
+}
+
 fn access(runtime: &str, row: Option<&Row>) -> HostedAccess {
     HostedAccess {
         runtime_id: runtime.into(),
