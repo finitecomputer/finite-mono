@@ -21,9 +21,15 @@ fn candidate(runtime_id: &str) -> UpsertRuntimeArtifactInput {
 
 async fn create_agent(db: &TestDb, name: &str) -> AgentRuntime {
     let id = complete_self_serve_agent(
-        db, &format!("{name}@finite.vip"), &format!("workos-{name}"), name,
-        &format!("machine-{name}"), "artifact-v1", "2026-05-25T13:02:00Z",
-    ).await;
+        db,
+        &format!("{name}@finite.vip"),
+        &format!("workos-{name}"),
+        name,
+        &format!("machine-{name}"),
+        "artifact-v1",
+        "2026-05-25T13:02:00Z",
+    )
+    .await;
     db.agent_runtime(&id).await.unwrap()
 }
 
@@ -41,22 +47,43 @@ fn upgrade(runtime: &AgentRuntime, artifact_id: &str) -> AdminRuntimeUpgradeExac
 }
 
 async fn execute_upgrade(db: &TestDb, runtime: &AgentRuntime, artifact_id: &str) {
-    let request = db.admin_request_runtime_upgrade_exact(upgrade(runtime, artifact_id)).await.unwrap();
-    let lease = db.lease_runtime_control_request(LeaseRuntimeControlRequestInput {
-        runner_id: "canary-runner".into(),
-        lease_token: "canary-lease".into(),
-        lease_seconds: Some(300),
-        source_host_id: Some(runtime.source_host_id.clone()),
-        runner_capacity: Some(RunnerLeaseCapacity {
-            runner_classes: vec![RunnerClass::Kata],
-            runtime_capabilities: Some(kata_runtime_capabilities()),
-            ..RunnerLeaseCapacity::default()
-        }),
-        now: None,
-    }).await.unwrap().unwrap();
+    let request = db
+        .admin_request_runtime_upgrade_exact(upgrade(runtime, artifact_id))
+        .await
+        .unwrap();
+    finish_control(db, runtime, artifact_id, request).await;
+}
+
+async fn finish_control(
+    db: &TestDb,
+    runtime: &AgentRuntime,
+    artifact_id: &str,
+    request: RuntimeControlRequest,
+) {
+    let lease = db
+        .lease_runtime_control_request(LeaseRuntimeControlRequestInput {
+            runner_id: "canary-runner".into(),
+            lease_token: "canary-lease".into(),
+            lease_seconds: Some(300),
+            source_host_id: Some(runtime.source_host_id.clone()),
+            runner_capacity: Some(RunnerLeaseCapacity {
+                runner_classes: vec![RunnerClass::Kata],
+                runtime_capabilities: Some(kata_runtime_capabilities()),
+                ..RunnerLeaseCapacity::default()
+            }),
+            now: None,
+        })
+        .await
+        .unwrap()
+        .unwrap();
     assert_eq!(lease.request.id, request.id);
-    assert_eq!(lease.target_runtime_artifact.unwrap().id, artifact_id);
-    assert_eq!(runtime_spec_v1(lease.runtime_spec.as_ref().unwrap()).runtime_artifact_id, artifact_id);
+    if request.kind == RuntimeControlKind::Upgrade {
+        assert_eq!(lease.target_runtime_artifact.unwrap().id, artifact_id);
+    }
+    assert_eq!(
+        runtime_spec_v1(lease.runtime_spec.as_ref().unwrap()).runtime_artifact_id,
+        artifact_id
+    );
     db.complete_runtime_control_request(CompleteRuntimeControlRequestInput {
         request_id: request.id,
         runner_id: "canary-runner".into(),
@@ -68,8 +95,17 @@ async fn execute_upgrade(db: &TestDb, runtime: &AgentRuntime, artifact_id: &str)
         published_app_urls: Some(vec!["http://127.0.0.1:41002/contact".into()]),
         retirement_snapshot: None,
         now: None,
-    }).await.unwrap();
-    assert_eq!(db.agent_runtime(&runtime.id).await.unwrap().runtime_artifact_id.as_deref(), Some(artifact_id));
+    })
+    .await
+    .unwrap();
+    assert_eq!(
+        db.agent_runtime(&runtime.id)
+            .await
+            .unwrap()
+            .runtime_artifact_id
+            .as_deref(),
+        Some(artifact_id)
+    );
 }
 
 #[tokio::test]
@@ -84,18 +120,44 @@ async fn scoped_canary_upgrades_only_its_runtime_without_changing_new_launches_a
         // A new user's real creation → lease → completion still selects v1,
         // even though the scoped candidate was registered later.
         let other = create_agent(&db, "other").await;
-        assert!(matches!(db.admin_request_runtime_upgrade_exact(upgrade(&other, "artifact-canary")).await,
-            Err(CoreError::RuntimeArtifactNotPromoted)));
+        assert!(matches!(
+            db.admin_request_runtime_upgrade(AdminRuntimeUpgradeInput {
+                admin_verified_email: "admin@finite.vip".into(),
+                admin_workos_user_id: "workos-admin".into(),
+                project_id: canary.project_id.clone(),
+                target_runtime_artifact_id: "artifact-canary".into(),
+                now: None,
+            }).await,
+            Err(CoreError::RuntimeSpecMismatch)
+        ));
+        assert!(matches!(
+            db.admin_request_runtime_upgrade_exact(upgrade(&other, "artifact-canary"))
+                .await,
+            Err(CoreError::RuntimeArtifactNotPromoted)
+        ));
         let mut wrong_binding = upgrade(&canary, "artifact-canary");
         wrong_binding.expected_source_machine_id = "replaced-machine".into();
-        assert!(matches!(db.admin_request_runtime_upgrade_exact(wrong_binding).await,
-            Err(CoreError::RuntimeSpecMismatch)));
+        assert!(matches!(
+            db.admin_request_runtime_upgrade_exact(wrong_binding).await,
+            Err(CoreError::RuntimeSpecMismatch)
+        ));
         execute_upgrade(&db, &canary, "artifact-canary").await;
+        let restart = db
+            .request_runtime_restart(RequestRuntimeRestartInput {
+                verified_email: "canary@finite.vip".into(),
+                workos_user_id: "workos-canary".into(),
+                project_id: canary.project_id.clone(),
+                now: None,
+            })
+            .await
+            .unwrap();
+        finish_control(&db, &canary, "artifact-canary", restart).await;
         // Current candidate need not be globally promoted to return through
         // normal Core/Runner lifecycle control to the previous release.
         execute_upgrade(&db, &canary, "artifact-v1").await;
         assert_eq!(db.agent_runtime(&other.id).await.unwrap(), other);
-    }).await;
+    })
+    .await;
 }
 
 #[tokio::test]
@@ -142,15 +204,78 @@ async fn scoped_canary_stays_immutable_unpromoted_and_excluded_for_legacy_reader
 async fn scoped_canary_requires_existing_runtime_immutable_image_and_compatible_state() {
     with_isolated_postgres(|db| async move {
         promote_runtime_artifact(&db).await;
-        assert!(db.upsert_runtime_artifact(candidate("missing-runtime")).await.is_err());
+        assert!(
+            db.upsert_runtime_artifact(candidate("missing-runtime"))
+                .await
+                .is_err()
+        );
         let canary = create_agent(&db, "canary").await;
         let mut input = candidate(&canary.id);
         input.reference = "ghcr.io/finite/runtime:latest".into();
-        assert!(matches!(db.upsert_runtime_artifact(input).await, Err(CoreError::RuntimeUpgradeUnsupported)));
+        assert!(matches!(
+            db.upsert_runtime_artifact(input).await,
+            Err(CoreError::RuntimeUpgradeUnsupported)
+        ));
         let mut input = candidate(&canary.id);
         input.state_schema_version = "incompatible".into();
         db.upsert_runtime_artifact(input).await.unwrap();
-        assert!(matches!(db.admin_request_runtime_upgrade_exact(upgrade(&canary, "artifact-canary")).await,
-            Err(CoreError::RuntimeUpgradeStateSchemaIncompatible)));
+        assert!(matches!(
+            db.admin_request_runtime_upgrade_exact(upgrade(&canary, "artifact-canary"))
+                .await,
+            Err(CoreError::RuntimeUpgradeStateSchemaIncompatible)
+        ));
+    })
+    .await;
+}
+
+#[tokio::test]
+async fn scoped_canary_rejects_provisional_launch_without_blocking_failure_or_cancellation() {
+    with_isolated_postgres(|db| async move {
+        promote_runtime_artifact(&db).await;
+        for cancel in [false, true] {
+            let name = if cancel { "cancelled" } else { "failed" };
+            let requested = db.request_agent_creation(RequestAgentCreationInput {
+                verified_email: format!("{name}@finite.vip"),
+                workos_user_id: format!("workos-{name}"),
+                display_name: name.into(),
+                launch_code: issue_test_launch_code(&db).await,
+                idempotency_key: name.into(),
+                now: None,
+            }).await.unwrap();
+            let lease = db.lease_agent_creation_request(LeaseAgentCreationRequestInput {
+                runner_id: "runner".into(), source_host_id: None,
+                lease_token: "lease".into(), lease_seconds: Some(300),
+                runner_capacity: None, now: None,
+            }).await.unwrap().unwrap();
+            let registered = db.register_agent_creation_runtime(RegisterAgentCreationRuntimeInput {
+                request_id: lease.request.id.clone(), runner_id: "runner".into(),
+                lease_token: "lease".into(), source_host_id: "oslo-host-1".into(),
+                source_machine_id: format!("machine-{name}"),
+                runtime_artifact_id: Some("artifact-v1".into()), state_schema_version: None,
+                provider_runtime_handle: None, contact_endpoint: None,
+                runtime_capabilities: Some(kata_runtime_capabilities()),
+                display_name: None, hostname: None, runtime_host: None,
+                runtime_status: Some(RuntimeSummaryStatus::Unknown),
+                active_inference_profile: None, hermes_available: None,
+                published_app_urls: vec![], now: None,
+            }).await.unwrap();
+            let id = registered.request.agent_runtime_id.unwrap();
+            assert!(matches!(db.upsert_runtime_artifact(candidate(&id)).await,
+                Err(CoreError::RuntimeUpgradeUnsupported)));
+            let cleaned = if cancel {
+                db.cancel_agent_creation_request(CancelAgentCreationRequestInput {
+                    request_id: requested.request.id, now: None,
+                }).await.unwrap()
+            } else {
+                db.fail_agent_creation_request(FailAgentCreationRequestInput {
+                    request_id: requested.request.id, runner_id: "runner".into(),
+                    lease_token: "lease".into(), failure_message: "initial launch failed".into(),
+                    provisioned_finite_private_api_key_id: None, now: None,
+                }).await.unwrap()
+            };
+            assert!(cleaned.agent_runtime_id.is_none());
+            assert!(db.runtime_artifact("artifact-canary").await.unwrap().is_none());
+            assert!(db.all_agent_runtimes().await.is_empty());
+        }
     }).await;
 }

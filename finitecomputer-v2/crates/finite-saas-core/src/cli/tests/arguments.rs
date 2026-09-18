@@ -212,11 +212,27 @@ fn exact_retirement_cli_requires_the_complete_binding_and_bounded_timeout() {
 
 #[test]
 fn artifact_upsert_accepts_explicit_unpromoted_canary_without_changing_legacy_flags() {
-    let base = ["finite-saas-core", "runtime-artifact-upsert", "--artifact-id", "candidate",
-        "--reference", "image", "--version-label", "candidate"];
+    let base = [
+        "finite-saas-core",
+        "runtime-artifact-upsert",
+        "--artifact-id",
+        "candidate",
+        "--reference",
+        "image",
+        "--version-label",
+        "candidate",
+    ];
     for extra in [vec![], vec!["--promoted"], vec!["--promoted", "true"]] {
-        assert!(matches!(Args::try_parse_from(base.into_iter().chain(extra)).unwrap().command,
-            Some(Command::RuntimeArtifactUpsert { promoted: true, canary_runtime_id: None, .. })));
+        assert!(matches!(
+            Args::try_parse_from(base.into_iter().chain(extra))
+                .unwrap()
+                .command,
+            Some(Command::RuntimeArtifactUpsert {
+                promoted: true,
+                canary_runtime_id: None,
+                ..
+            })
+        ));
     }
     assert!(matches!(Args::try_parse_from(base.into_iter().chain([
         "--promoted", "false", "--canary-runtime-id", "runtime-exact",

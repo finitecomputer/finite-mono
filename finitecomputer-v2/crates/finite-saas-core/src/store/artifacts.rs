@@ -181,6 +181,23 @@ where
         if !runtime_artifact_reference_is_immutable_oci(&artifact.reference) {
             return Err(CoreError::RuntimeUpgradeUnsupported);
         }
+        // Initial-launch failure/cancellation deletes its provisional Runtime.
+        // Do not attach an immutable FK to that row before launch completes.
+        // Lock the creation row just as its failure/cancellation writers do.
+        if client
+            .query_opt(
+                "SELECT id FROM agent_creation_requests
+                 WHERE agent_runtime_id = $1 AND status = 'running'
+                   AND relocation_spec IS NULL
+                 FOR SHARE",
+                &[&artifact.canary_runtime_id],
+            )
+            .await
+            .map_err(store_error)?
+            .is_none()
+        {
+            return Err(CoreError::RuntimeUpgradeUnsupported);
+        }
     }
     if let Some(existing) = existing.as_ref() {
         let referenced: bool = client

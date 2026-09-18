@@ -131,6 +131,9 @@ where
             let target = select_runtime_artifact(client, &target_id)
                 .await?
                 .ok_or(CoreError::RuntimeArtifactNotFound)?;
+            if target.canary_runtime_id.is_some() && expected.is_none() {
+                return Err(CoreError::RuntimeSpecMismatch);
+            }
             ensure_runtime_upgrade_target_compatible(&runtime, &target)?;
             Some(target.id)
         }
