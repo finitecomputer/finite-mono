@@ -75,9 +75,10 @@ async def run():
         os.environ["HERMES_HOME"] = td + "/hermes"
         os.environ["HERMES_BUNDLED_PLUGINS"] = str(PLUGINS)
         os.environ["SIMPLEX_AUTO_ACCEPT"] = "false"
-        from gateway.config import PlatformConfig
+        from gateway.config import GatewayConfig, Platform, PlatformConfig
         from gateway.pairing import PairingStore
         from gateway.platform_registry import platform_registry
+        from gateway.run import GatewayRunner
         from hermes_cli.plugins import get_plugin_manager
 
         os.environ["FINITECHAT_HOME"] = td + "/agent"
@@ -89,6 +90,7 @@ async def run():
             home / "plugins/finitechat",
         )
         get_plugin_manager().discover_and_load()
+        runner = GatewayRunner(config=GatewayConfig())
 
         ports = [port(), port(), port()]
         procs = []
@@ -132,6 +134,7 @@ async def run():
 
             adapter.set_message_handler(handle)
             assert await adapter.connect()
+            runner.adapters[Platform("simplex")] = adapter
             await asyncio.sleep(0.5)
             result = await peers[1].cmd("/connect " + link)
             assert result["type"] != "chatCmdError", result["type"]
@@ -200,6 +203,7 @@ async def run():
             assert not adapter.group_allow_from
             adapter.set_message_handler(handle)
             assert await adapter.connect()
+            runner.adapters[Platform("simplex")] = adapter
             await asyncio.sleep(0.5)
             await peers[1].cmd(f"/_send #{phone_gid} json " + msg)
             await peers[1].cmd(f"/_send @{human_contact} json " + msg)
@@ -211,6 +215,7 @@ async def run():
             adapter.set_message_handler(handle)
             assert gid in adapter.group_allow_from
             assert await adapter.connect()
+            runner.adapters[Platform("simplex")] = adapter
             await asyncio.sleep(0.5)
             assert (await adapter.create_topic("gardening", owner))["group_id"] == gid
             await peers[1].cmd(f"/_send #{phone_gid} json " + msg)
@@ -255,6 +260,7 @@ async def run():
             adapter = platform_registry.get("simplex").adapter_factory(cfg)
             adapter.set_message_handler(handle)
             assert await adapter.connect()
+            runner.adapters[Platform("simplex")] = adapter
             await asyncio.sleep(0.5)
             retried = await adapter.create_topic("gardening", owner, replace_blocked=True)
             assert retried["group_id"] == replacement_gid

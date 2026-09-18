@@ -21,6 +21,7 @@ from typing import TYPE_CHECKING
 from gateway.pairing import PairingStore
 from gateway.platforms.base import SendResult
 from gateway.session_context import get_session_env
+from hermes_constants import get_hermes_home
 
 if TYPE_CHECKING:
     from plugins.platforms.simplex.adapter import SimplexAdapter as _TopicBase
@@ -57,6 +58,7 @@ class OwnerTopics(_TopicBase):
 
     def __init__(self, config, **kwargs):
         super().__init__(config, **kwargs)
+        self.topic_home = get_hermes_home().resolve()
         self.topic_path = (
             Path(os.environ.get("FINITECHAT_HOME", "/data/agent")) / "simplex/topics.json"
         )
@@ -293,14 +295,10 @@ def register(ctx):
     class TopicAdapter(OwnerTopics, upstream.SimplexAdapter):
         pass
 
-    live = []
-
     def factory(config):
         if config.extra.get("finite_managed") is not True:
             return entry.adapter_factory(config)
-        adapter = TopicAdapter(config)
-        live[:] = [adapter]
-        return adapter
+        return TopicAdapter(config)
 
     metadata = {
         f.name: getattr(entry, f.name)
@@ -321,13 +319,27 @@ def register(ctx):
                 raise ValueError(
                     "Ask to create a topic in your approved private SimpleX conversation"
                 )
-            if not live or live[0].topic_loop is None:
+            # Discovery may reload this tool while the gateway keeps its
+            # connected adapter. The gateway owns that lifetime, not this
+            # registration closure. Never construct a second socket here.
+            from gateway.config import Platform
+            from gateway.run import _gateway_runner_ref
+
+            runner = _gateway_runner_ref()
+            adapter = runner.adapters.get(Platform("simplex")) if runner else None
+            loop = getattr(adapter, "topic_loop", None)
+            if (
+                adapter is None
+                or loop is None
+                or not loop.is_running()
+                or getattr(adapter, "topic_home", None) != get_hermes_home().resolve()
+            ):
                 raise ValueError("Managed SimpleX is not connected")
             future = asyncio.run_coroutine_threadsafe(
-                live[0].create_topic(
+                adapter.create_topic(
                     args.get("topic"), owner, replace_blocked=args.get("replace_blocked", False)
                 ),
-                live[0].topic_loop,
+                loop,
             )
             try:
                 return json.dumps(future.result(timeout=75))
