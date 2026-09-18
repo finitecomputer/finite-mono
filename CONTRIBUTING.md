@@ -22,6 +22,11 @@ once or add the substituter and public key from `flake.nix` to your Nix config.
 
 No direnv? Prefix commands with `scripts/with-dev-env`.
 
+For slow direnv reloads, use nix-direnv to cache flake evaluations: install
+`nixpkgs#nix-direnv` in the Nix profile and source
+`$HOME/.nix-profile/share/nix-direnv/direnvrc` from
+`~/.config/direnv/direnvrc`. Plain direnv re-evaluates the flake on each reload.
+
 ## 2. Choose a local loop
 
 ### Web dashboard and chat design
@@ -113,6 +118,7 @@ Run the gate proportionate to the surface you changed:
 just web-check       # dashboard unit tests, lint, and production build
 just check           # cargo check --workspace --locked
 just fmt             # rustfmt
+just source-structure-check # bounded Core source and short agent guides
 just test            # isolated Postgres + cargo test --workspace --locked
 just dev smoke       # portable services-only integration smoke (Linux CI)
 just dev saas-smoke  # real Apple Runtime + Hosted Web chat + restart healing

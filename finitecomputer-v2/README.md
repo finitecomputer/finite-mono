@@ -57,7 +57,7 @@ and the active
 
 ## External Product Dependencies
 
-These stay separate repos:
+These are sibling components in the monorepo:
 
 - `finite-sites`: Finite Sites and the `fsite` CLI.
 - `finitechat`: Finite Chat server, protocol, native clients, CLI, and Hermes
@@ -92,7 +92,10 @@ Do not add new v2 dependencies on:
 - legacy `machine` control-plane operations
 
 If a migrated existing user needs one of those surfaces temporarily, document it
-as bridge code with a delete condition.
+in Linear as bridge code with an explicit compatibility contract, tests and a
+verified delete condition. Keep legacy box1/TRF workloads in `finitecomputer`.
+OpenRouter fallback when Finite Private is required and k3s/Traefik host mutation
+as a product API remain outside the v2 boundary.
 
 The only old Core state that must survive into v2 is Finite Private limiter
 state: issued API-key token hashes, grants, reservations, usage, and audit

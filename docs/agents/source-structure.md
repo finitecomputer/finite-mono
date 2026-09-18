@@ -19,8 +19,8 @@ claimed to conform. Add their source/test roots to
   shrinkage, and stale paths fail until the exception is reviewed or removed.
   Do not reshape serialized or persisted data merely to satisfy this limit.
 - Agent guides: root at most 60 lines and v2 at most 35. Keep essential
-  invariants and precise triggers there; put conditional detail in project
-  skills under `.agents/skills/`.
+  invariants and precise triggers there; use component `AGENTS.md` files and
+  link existing contracts or runbooks for conditional detail.
 
 The checker uses `syn` rather than text matching. It visits all written syntax,
 including cfg-disabled items and local structs; comments, strings, and enum
