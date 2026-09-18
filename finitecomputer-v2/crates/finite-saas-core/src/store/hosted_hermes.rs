@@ -281,6 +281,7 @@ impl CoreStore {
 
 /// Called only inside credential insertion transactions. Provisioning retries
 /// never call this: existing disables, revocations and native keys survive.
+#[tracing::instrument(skip_all, fields(creation_request_id = creation))]
 pub(super) async fn prepare_initial_access<C: GenericClient + Sync>(
     tx: &C,
     creation: &str,
