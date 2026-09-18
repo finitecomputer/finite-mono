@@ -8,6 +8,7 @@ pub struct AppView {
     pub topic_id: Option<String>,
     pub chat_id: Option<String>,
     pub limit: Option<u32>,
+    pub oldest_message_id: Option<String>,
 }
 
 impl FiniteChatRuntime {
@@ -25,7 +26,11 @@ impl FiniteChatRuntime {
 impl AppRuntimeState {
     pub(super) fn state_for_view(&self, view: AppView) -> Result<AppState, FiniteChatCoreError> {
         let Some(room_id) = view.room_id else {
-            if view.topic_id.is_some() || view.chat_id.is_some() || view.limit.is_some() {
+            if view.topic_id.is_some()
+                || view.chat_id.is_some()
+                || view.limit.is_some()
+                || view.oldest_message_id.is_some()
+            {
                 return Err(client_error("a transcript view requires room_id"));
             }
             return Ok(self.app.clone());
@@ -37,6 +42,11 @@ impl AppRuntimeState {
         }
         if view.chat_id.is_some() && view.topic_id.is_none() {
             return Err(client_error("a chat view requires topic_id"));
+        }
+        if view.oldest_message_id.is_some() && (view.topic_id.is_none() || view.chat_id.is_none()) {
+            return Err(client_error(
+                "an anchored transcript requires topic_id and chat_id",
+            ));
         }
         let topic_id = view.topic_id.or_else(|| {
             self.topic_exists(&room_id, HOME_TOPIC_ID)
@@ -61,9 +71,35 @@ impl AppRuntimeState {
                 "transcript chat is not available in this topic",
             ));
         }
-        let count = view.limit.map_or(DEFAULT_TRANSCRIPT_WINDOW, |limit| {
+        let mut count = view.limit.map_or(DEFAULT_TRANSCRIPT_WINDOW, |limit| {
             (limit as usize).clamp(DEFAULT_TRANSCRIPT_WINDOW, MAX_APP_MESSAGES)
         });
+        if let Some(oldest_message_id) = view.oldest_message_id {
+            let Some(anchor) = self.chat_projection.message(&room_id, &oldest_message_id) else {
+                return Err(client_error(
+                    "transcript anchor is not available in this chat",
+                ));
+            };
+            if anchor.conversation_id != topic_id || anchor.chat_id != chat_id {
+                return Err(client_error(
+                    "transcript anchor is not available in this chat",
+                ));
+            }
+            // Keep the already loaded range as new Messages arrive. This only
+            // changes the projection count, never the Device's saved window.
+            let retained = self
+                .chat_projection
+                .messages
+                .values()
+                .filter(|message| {
+                    message.room_id == room_id
+                        && message.conversation_id == topic_id
+                        && message.chat_id == chat_id
+                        && !message_sort(message, anchor).is_lt()
+                })
+                .count();
+            count = count.max(retained).min(MAX_APP_MESSAGES);
+        }
         let mut state = self.app.clone();
         state.messages =
             self.transcript_messages(&room_id, topic_id.as_deref(), chat_id.as_deref(), count);

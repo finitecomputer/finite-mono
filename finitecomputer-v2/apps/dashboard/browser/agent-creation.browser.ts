@@ -2851,9 +2851,11 @@ function hostedView(state: FakeHostedChatState, view: URLSearchParams) {
   const topicId = view.get("topic_id") ?? state.selected_topic_id;
   const topic = state.topics.find(topic => topic.room_id === room && topic.topic_id === topicId);
   const chat = view.get("chat_id") ?? (view.has("room_id") ? topic?.active_chat_id ?? null : state.selected_chat_id);
+  const messages = state.messages.filter(message => message.room_id === room && message.conversation_id === topicId && message.chat_id === chat);
+  const anchorIndex = messages.findIndex(message => message.message_id === view.get("oldest_message_id"));
+  const limit = Math.max(Number(view.get("limit") ?? 50), anchorIndex < 0 ? 0 : messages.length - anchorIndex);
   return { ...state, selected_room_id: room, selected_topic_id: topicId, selected_chat_id: chat,
-    messages: state.messages.filter(message => message.room_id === room && message.conversation_id === topicId && message.chat_id === chat)
-      .slice(-Number(view.get("limit") ?? 50)),
+    messages: messages.slice(-limit),
   };
 }
 

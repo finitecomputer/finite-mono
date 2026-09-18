@@ -470,12 +470,13 @@ function appState(view = new URLSearchParams()) {
   const selectedChat = view.get("chat_id") ?? state.selectedNewChatId ?? "chat_design";
   const selectedTopic = view.get("topic_id") ?? (selectedChat === "chat_design" ? "topic_design" : "home");
   const messages = state.messages.filter((message) => message.chat_id === selectedChat);
-  const limit = Number(view.get("limit") ?? 50);
+  const anchorIndex = messages.findIndex(message => message.message_id === view.get("oldest_message_id"));
+  const limit = Math.max(Number(view.get("limit") ?? 50), anchorIndex < 0 ? 0 : messages.length - anchorIndex);
   const last = state.messages.at(-1)?.display_content ?? "Chat restored";
   return {
     rev: state.rev,
     identity: { account_id: "web-design-user", device_id: "hosted-web" },
-    rooms: [{ room_id: "room_design", display_name: "Moss", state: "Connected", status: "Connected", user_status_text: "Connected", last_message_preview: last, unread_count: 0, is_agent_chat: true }],
+    rooms: [{ room_id: "room_design", display_name: "Moss", state: "Connected", status: "Connected", user_status_text: "Connected", last_message_preview: last, unread_count: 0, is_agent_chat: true, can_load_older: messages.length > limit }],
     selected_room_id: "room_design",
     topics: [
       {

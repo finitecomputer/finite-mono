@@ -162,12 +162,102 @@ async fn scoped_views_read_and_reconnect_without_changing_the_shared_or_saved_se
     assert_eq!(expanded["rooms"][0]["can_load_older"], false);
     assert_eq!(state_for(device.clone(), "viewer").await, baseline);
 
+    // A caller's oldest loaded Message anchors an expanded view. New arrivals
+    // must not evict it, even while another tab owns the saved Device cursor.
+    let oldest = expanded["messages"][0]["message_id"].as_str().unwrap();
+    let anchored_query = format!(
+        "{}&oldest_message_id={oldest}",
+        query.replace("limit=50", "limit=100")
+    );
+    for index in 51..111 {
+        action_for(
+            device.clone(),
+            "viewer",
+            send(chat_a, &format!("A update {index}")),
+        )
+        .await;
+    }
+    let before_anchored_reads = state_for(device.clone(), "viewer").await;
+    for _ in 0..2 {
+        let anchored = first_state(
+            view_response(
+                device.clone(),
+                "viewer",
+                &format!("/v1/app/updates{anchored_query}"),
+            )
+            .await,
+        )
+        .await;
+        assert_eq!(anchored["messages"].as_array().unwrap().len(), 112);
+        assert_eq!(anchored["messages"][0]["message_id"], oldest);
+        assert_eq!(anchored["rooms"][0]["can_load_older"], false);
+    }
+    let http = view_response(
+        device.clone(),
+        "viewer",
+        &format!("/v1/app/state{anchored_query}"),
+    )
+    .await;
+    assert_eq!(http.status(), StatusCode::OK);
+    let bytes = http.into_body().collect().await.unwrap().to_bytes();
+    let http: Value = serde_json::from_slice(&bytes).unwrap();
+    assert_eq!(http["messages"].as_array().unwrap().len(), 112);
+    assert_eq!(http["messages"][0]["message_id"], oldest);
+    let other_chat_message = before["messages"][0]["message_id"].as_str().unwrap();
+    for invalid_anchor in ["missing", other_chat_message] {
+        let invalid = view_response(
+            device.clone(),
+            "viewer",
+            &format!("/v1/app/state{query}&oldest_message_id={invalid_anchor}"),
+        )
+        .await;
+        assert!(
+            !invalid.status().is_success(),
+            "an anchor must belong to this transcript"
+        );
+    }
+    for incomplete_scope in [
+        format!("?oldest_message_id={oldest}"),
+        format!("?room_id={room}&oldest_message_id={oldest}"),
+        format!("?room_id={room}&topic_id={topic}&oldest_message_id={oldest}"),
+    ] {
+        let invalid = view_response(
+            device.clone(),
+            "viewer",
+            &format!("/v1/app/state{incomplete_scope}"),
+        )
+        .await;
+        assert_eq!(invalid.status(), StatusCode::BAD_REQUEST);
+    }
+    let other_user = view_response(
+        device.clone(),
+        "another-user",
+        &format!("/v1/app/state{anchored_query}"),
+    )
+    .await;
+    assert!(!other_user.status().is_success());
+    assert_eq!(
+        state_for(device.clone(), "viewer").await,
+        before_anchored_reads
+    );
+
     // New reads must not change the durable cursor that unmodified clients
     // and a restarted Hosted Web Device consume.
     drop(device);
     let restarted = app(config);
     let saved = state_for(restarted.clone(), "viewer").await;
     assert_eq!(saved["selected_chat_id"], chat_b);
+    let anchored = first_state(
+        view_response(
+            restarted.clone(),
+            "viewer",
+            &format!("/v1/app/updates{anchored_query}"),
+        )
+        .await,
+    )
+    .await;
+    assert_eq!(anchored["messages"].as_array().unwrap().len(), 112);
+    assert_eq!(anchored["messages"][0]["message_id"], oldest);
     let legacy = first_state(view_response(restarted, "viewer", "/v1/app/updates").await).await;
     assert_eq!(legacy["selected_chat_id"], chat_b);
     assert_eq!(legacy["messages"][0]["text"], "History in B");

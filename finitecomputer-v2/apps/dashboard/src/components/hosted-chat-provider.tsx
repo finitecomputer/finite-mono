@@ -133,15 +133,18 @@ export function HostedChatProvider({
   const coherentStateRef = useRef<HostedChatState | null>(null);
   const messageLimitRef = useRef(50);
   const [messageLimit, setMessageLimit] = useState(50);
+  const oldestMessageIdRef = useRef<string | null>(null);
+  const [oldestMessageId, setOldestMessageId] = useState<string | null>(null);
   const localSelectionRef = useRef<HostedChatSelection | null>(null);
   const hasState = state !== null;
 
   const viewQuery = hostedChatViewQuery(
     state ? hostedChatSelectionFromState(state) : null,
-    messageLimit
+    messageLimit,
+    oldestMessageId
   );
   const currentViewQuery = useCallback(
-    () => hostedChatViewQuery(localSelectionRef.current, messageLimitRef.current),
+    () => hostedChatViewQuery(localSelectionRef.current, messageLimitRef.current, oldestMessageIdRef.current),
     []
   );
 
@@ -150,13 +153,21 @@ export function HostedChatProvider({
   // messages underneath our current heading.
   const matchesView = useCallback((next: HostedChatState) => {
     const intent = selectionIntentRef.current;
-    return intent
+    const selectionMatches = intent
       ? hostedChatSelectionIntentSatisfied(intent, next)
       : hostedChatSnapshotMatchesSelection(localSelectionRef.current, next);
+    const anchor = oldestMessageIdRef.current;
+    // Delayed reads/stream events with a narrower window must not discard
+    // history already loaded in this Chat. A missing Chat may still fall back.
+    const sameChat = localSelectionRef.current?.selected_chat_id === next.selected_chat_id;
+    return selectionMatches && (!sameChat || !anchor || next.messages.some(message => message.message_id === anchor));
   }, []);
 
   const setMergedState = useCallback((next: HostedChatState) => {
     localSelectionRef.current = hostedChatSelectionFromState(next);
+    const anchor = next.messages.length > 50 ? next.messages[0].message_id : null;
+    oldestMessageIdRef.current = anchor;
+    setOldestMessageId(anchor);
     selectionIntentRef.current = null;
     setSelectionPending(false);
     const merged = {
@@ -311,6 +322,28 @@ export function HostedChatProvider({
     return pending;
   }, [apiBase, reportSessionAuthFailure]);
 
+  const requestViewSnapshot = useCallback(async (
+    signal?: AbortSignal | null,
+    actionSnapshot?: HostedChatState
+  ) => {
+    const query = currentViewQuery();
+    const source = snapshotSourceRef.current;
+    const request: MutationSnapshotRequest = {
+      generation: source.generation,
+      highestRev: source.highestRev,
+      sequence: ++nextMutationSequenceRef.current,
+      allowEqualRevision: true,
+    };
+    let projected = !query && actionSnapshot
+      ? actionSnapshot
+      : await hostedChatRequest<HostedChatState>(`${apiBase}/state${query}`, { signal });
+    if (actionSnapshot?.hosted_agent_binding !== undefined) {
+      projected = { ...projected, hosted_agent_binding: actionSnapshot.hosted_agent_binding };
+    }
+    applyMutationSnapshot(projected, request);
+    return projected;
+  }, [apiBase, applyMutationSnapshot, currentViewQuery]);
+
   const requestMutationSnapshot = useCallback(async (
     path: string,
     init: RequestInit,
@@ -322,32 +355,18 @@ export function HostedChatProvider({
     // read the current view: the mutation response belongs to the shared Device
     // cursor and may have a different Chat or history window.
     if (!allowEqualRevision || (adoptSelection && !adoptSelection(next))) return next;
-    const query = currentViewQuery();
-    const source = snapshotSourceRef.current;
-    const request: MutationSnapshotRequest = {
-      generation: source.generation,
-      highestRev: source.highestRev,
-      sequence: ++nextMutationSequenceRef.current,
-      allowEqualRevision,
-    };
-    let projected = next;
-    if (query) {
-      try {
-        projected = await hostedChatRequest<HostedChatState>(`${apiBase}/state${query}`, { signal: init.signal });
-      } catch (caught) {
-        // The action already succeeded. A refresh outage must not report a
-        // failed send and invite a duplicate; retain the coherent transcript
-        // while the stream reconnects.
-        if (!reportSessionAuthFailure(caught)) setTransportError(hostedChatErrorMessage(caught));
-        return next;
-      }
-      if (next.hosted_agent_binding !== undefined) {
-        projected = { ...projected, hosted_agent_binding: next.hosted_agent_binding };
-      }
+    try {
+      await requestViewSnapshot(init.signal, next);
+    } catch (caught) {
+      // The action already succeeded. A refresh outage must not report a
+      // failed send and invite a duplicate; retain the coherent transcript
+      // while the stream reconnects.
+      if (!reportSessionAuthFailure(caught)) setTransportError(hostedChatErrorMessage(caught));
     }
-    applyMutationSnapshot(projected, request);
-    return projected;
-  }, [apiBase, applyMutationSnapshot, currentViewQuery, reportSessionAuthFailure]);
+    // The view's status/toast may belong to another tab's later action.
+    // Callers decide whether to clear a draft from this action's own outcome.
+    return next;
+  }, [apiBase, requestViewSnapshot, reportSessionAuthFailure]);
 
   const recoverBinding = useCallback(async (): Promise<HostedChatRetryAttempt> => {
     try {
@@ -377,10 +396,16 @@ export function HostedChatProvider({
     if (navigationAction) {
       messageLimitRef.current = 50;
       setMessageLimit(50);
+      oldestMessageIdRef.current = null;
+      setOldestMessageId(null);
     }
     if ("LoadOlderMessages" in action) {
-      messageLimitRef.current += action.LoadOlderMessages.limit;
+      messageLimitRef.current = Math.max(messageLimitRef.current, coherentStateRef.current?.messages.length ?? 0)
+        + action.LoadOlderMessages.limit;
       setMessageLimit(messageLimitRef.current);
+      // Paging is a tab-local read. The legacy action changes the shared
+      // Device cursor/window and publishes a revision to every caller.
+      return requestViewSnapshot();
     }
     const request = () => requestMutationSnapshot("/actions", {
       method: "POST",
@@ -421,7 +446,11 @@ export function HostedChatProvider({
         setTransportError(CHAT_NAVIGATION_TIMEOUT_MESSAGE);
       }
       const coherent = coherentStateRef.current;
-      if (coherent) setMergedState(coherent);
+      if (coherent) {
+        messageLimitRef.current = Math.max(50, coherent.messages.length);
+        setMessageLimit(messageLimitRef.current);
+        setMergedState(coherent);
+      }
     };
 
     // Send selection-changing actions in click order so delayed network
@@ -434,7 +463,7 @@ export function HostedChatProvider({
       releaseIntent
     );
     return pending;
-  }, [requestMutationSnapshot, setMergedState]);
+  }, [requestMutationSnapshot, requestViewSnapshot, setMergedState]);
 
   const dispatch = useCallback((action: HostedChatAction) =>
     requestActionSnapshot(action), [requestActionSnapshot]);

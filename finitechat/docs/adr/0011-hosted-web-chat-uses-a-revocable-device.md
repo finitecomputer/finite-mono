@@ -44,12 +44,29 @@ choose or repair a binding.
 
 Each dashboard tab reads its own transcript through the existing
 `GET /v1/app/state` and `GET /v1/app/updates` routes. Optional `room_id`,
-`topic_id`, `chat_id`, and `limit` query parameters select a read-only view of
+`topic_id`, `chat_id`, `limit`, and `oldest_message_id` query parameters select a read-only view of
 the authenticated Device's existing projection. Selection and messages in
 each snapshot describe the same view, including the first event after an SSE
 reconnect. A view read never saves navigation, creates a binding, changes the
 Device revision, or emits updates to other tabs. Explicit navigation actions
 still save the Device's default cursor for the next initial load.
+
+An expanded window includes its oldest loaded Message as an optional anchor.
+The anchor must belong to the explicitly requested Room, Topic, and Chat on
+this Device; missing or out-of-scope anchors fail without mutation. The runtime
+returns at least `limit` Messages (when available) and retains the anchor through
+the newest Message using the existing transcript order and maximum bound. New
+arrivals therefore grow the loaded range instead of evicting its oldest Message.
+The tab forwards that anchor on reads and reconnects, rejects delayed narrower
+snapshots, and clears it on navigation. Loading earlier history changes only
+this scoped read window; the dashboard does not dispatch the legacy Device
+`LoadOlderMessages` action. This adds no durable cursor or second message
+authority.
+
+A mutation's own response remains the authority for its send feedback. A later
+view read or stream snapshot may carry another tab's transient status/toast;
+it cannot turn an accepted send into a refusal or discard a refused attachment's
+draft. Refresh failures likewise leave the action result intact.
 
 Requests without a view keep the existing selected-transcript contract:
 state reads and the initial SSE event read the last published snapshot without
