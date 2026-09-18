@@ -156,10 +156,10 @@ async function controlRequest(runtimeId: string, init: RequestInit): Promise<unk
   });
   if (!response.ok) {
     const message = response.status === 409
-      ? "Hosted access changed or is not available yet. Refresh access and try again."
+      ? "This agent’s dashboard connection is not ready yet. Try again shortly."
       : [401, 403, 404].includes(response.status)
         ? "Hosted access is unavailable for this account or agent."
-        : "Hosted access is not ready. Refresh access and try again.";
+        : "The agent’s dashboard connection is unavailable. Try again.";
     await response.body?.cancel();
     throw new HostedHermesStatusError(message, [401, 403, 404, 409].includes(response.status) ? "access" : "request");
   }

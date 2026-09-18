@@ -54,6 +54,10 @@ impl HostedHermesOrigins {
         Ok(Self(origins))
     }
 
+    pub(crate) fn has_host(&self, source_host: &str) -> bool {
+        self.0.contains_key(source_host)
+    }
+
     pub(crate) fn location(&self, source_host: &str, runtime_id: &str) -> HostedHermesLocation {
         let base_url = self.0.get(source_host).map(|origin| {
             let mut url = origin.clone();
