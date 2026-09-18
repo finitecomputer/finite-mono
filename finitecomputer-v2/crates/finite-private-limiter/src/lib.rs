@@ -939,8 +939,11 @@ fn streaming_response(
     };
     let idle_timeout = settlement.state.config.upstream_stream_idle_timeout;
     let default_model = settlement.state.config.default_model.clone();
+    // Construct the guard before polling begins so dropping the response
+    // before the first body poll still settles the reservation.
+    let settlement_guard = SettlementGuard::new(settlement, fallback_settle);
     let body_stream = async_stream::stream! {
-        let settlement_guard = SettlementGuard::new(settlement, fallback_settle);
+        let settlement_guard = settlement_guard;
         let mut accumulator = StreamingUsageAccumulator::new(default_model);
         loop {
             let item = match timeout(idle_timeout, stream.next()).await {
@@ -2432,9 +2435,8 @@ mod tests {
             )
             .await
             .unwrap();
-        let consuming = tokio::spawn(async move {
-            axum::body::to_bytes(response.into_body(), 100_000).await
-        });
+        let consuming =
+            tokio::spawn(async move { axum::body::to_bytes(response.into_body(), 100_000).await });
         wait_for(|| core.settle_calls.load(Ordering::SeqCst) == 1).await;
         consuming.abort();
         let _ = consuming.await;
@@ -2446,6 +2448,42 @@ mod tests {
         .await;
         let settlements = core.settlements.lock().unwrap();
         assert_eq!(settlements[0]["settlement"], "actual");
+    }
+
+    #[tokio::test]
+    async fn unpolled_stream_drop_settles_fallback() {
+        let core = FakeCoreState::new("fpk_live_unpolled", 10_000_000);
+        let core_url = spawn(fake_core_router(core.clone())).await;
+        let upstream_url = spawn(fake_upstream_router(FakeUpstreamState::new())).await;
+        let router = app(test_config(core_url, upstream_url)).unwrap();
+        let response = router
+            .oneshot(
+                axum::http::Request::post("/v1/chat/completions")
+                    .header("authorization", "Bearer fpk_live_unpolled")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        json!({"model":"glm-5-2","stream":true,"messages":[]}).to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        // Deliberately never poll the body. This is the boundary where a
+        // client can disconnect before the first SSE poll.
+        drop(response);
+
+        wait_for(|| {
+            core.settle_calls.load(Ordering::SeqCst) == 1
+                && core.settlements.lock().unwrap().len() == 1
+        })
+        .await;
+        let settlements = core.settlements.lock().unwrap();
+        assert_eq!(settlements[0]["settlement"], "estimate");
+        assert_eq!(
+            settlements[0]["upstreamErrorClass"],
+            "client_disconnected_or_stream_cancelled"
+        );
     }
 
     #[derive(Clone)]
