@@ -105,8 +105,12 @@ pub(crate) enum Command {
         /// Exact image implements recover-known-good-chat receiver semantics.
         #[arg(long, default_value_t = false)]
         recover_known_good_chat: bool,
+        /// Approve an unpromoted artifact for upgrades of this exact runtime only.
+        /// Requires --promoted false; general release uses a separate artifact ID.
+        #[arg(long)]
+        canary_runtime_id: Option<String>,
         /// Store the artifact as promoted and launchable.
-        #[arg(long, default_value_t = true)]
+        #[arg(long, default_value_t = true, action = clap::ArgAction::Set, num_args = 0..=1, default_missing_value = "true")]
         promoted: bool,
         /// Optional RFC3339 timestamp for deterministic tests/operator dry runs.
         #[arg(long)]

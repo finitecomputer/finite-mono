@@ -238,6 +238,8 @@ pub struct UpsertRuntimeArtifactRequest {
     pub base_image: Option<String>,
     #[serde(default)]
     pub recover_known_good_chat: bool,
+    #[serde(default)]
+    pub canary_runtime_id: Option<String>,
     pub promoted: bool,
     pub now: Option<String>,
 }
