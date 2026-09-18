@@ -1095,7 +1095,7 @@
       "id": 21,
       "title": "Input / output tokens by key \u00b7 retained events",
       "type": "bargauge",
-      "description": " Immutable reservation IDs deduplicate ambiguous exporter retries before totals are grouped. Immutable reservation IDs deduplicate ambiguous exporter retries before totals are grouped.",
+      "description": "Immutable reservation IDs deduplicate ambiguous exporter retries before totals are grouped.",
       "gridPos": {
         "h": 8,
         "w": 12,

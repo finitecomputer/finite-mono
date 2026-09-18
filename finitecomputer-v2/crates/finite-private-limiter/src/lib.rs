@@ -3119,7 +3119,11 @@ mod tests {
         core.diagnostic_delay = Duration::from_secs(5);
         let core_url = spawn(fake_core_router(core.clone())).await;
         let upstream_url = spawn(fake_upstream_router(FakeUpstreamState::new())).await;
-        let limiter_url = spawn(app(test_config(core_url, upstream_url)).unwrap()).await;
+        let mut config = test_config(core_url, upstream_url);
+        // Keep each diagnostic permit occupied beyond this test's response
+        // deadline so cumulative arrivals also prove the concurrency bound.
+        config.usage_api_timeout = Duration::from_secs(10);
+        let limiter_url = spawn(app(config).unwrap()).await;
         let client = reqwest::Client::new();
         let started = Instant::now();
         let requests = (0..40).map(|_| {
