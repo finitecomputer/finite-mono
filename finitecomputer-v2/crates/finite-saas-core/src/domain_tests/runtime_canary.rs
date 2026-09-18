@@ -127,7 +127,8 @@ async fn scoped_canary_upgrades_only_its_runtime_without_changing_new_launches_a
                 project_id: canary.project_id.clone(),
                 target_runtime_artifact_id: "artifact-canary".into(),
                 now: None,
-            }).await,
+            })
+            .await,
             Err(CoreError::RuntimeSpecMismatch)
         ));
         assert!(matches!(
@@ -234,48 +235,85 @@ async fn scoped_canary_rejects_provisional_launch_without_blocking_failure_or_ca
         promote_runtime_artifact(&db).await;
         for cancel in [false, true] {
             let name = if cancel { "cancelled" } else { "failed" };
-            let requested = db.request_agent_creation(RequestAgentCreationInput {
-                verified_email: format!("{name}@finite.vip"),
-                workos_user_id: format!("workos-{name}"),
-                display_name: name.into(),
-                launch_code: issue_test_launch_code(&db).await,
-                idempotency_key: name.into(),
-                now: None,
-            }).await.unwrap();
-            let lease = db.lease_agent_creation_request(LeaseAgentCreationRequestInput {
-                runner_id: "runner".into(), source_host_id: None,
-                lease_token: "lease".into(), lease_seconds: Some(300),
-                runner_capacity: None, now: None,
-            }).await.unwrap().unwrap();
-            let registered = db.register_agent_creation_runtime(RegisterAgentCreationRuntimeInput {
-                request_id: lease.request.id.clone(), runner_id: "runner".into(),
-                lease_token: "lease".into(), source_host_id: "oslo-host-1".into(),
-                source_machine_id: format!("machine-{name}"),
-                runtime_artifact_id: Some("artifact-v1".into()), state_schema_version: None,
-                provider_runtime_handle: None, contact_endpoint: None,
-                runtime_capabilities: Some(kata_runtime_capabilities()),
-                display_name: None, hostname: None, runtime_host: None,
-                runtime_status: Some(RuntimeSummaryStatus::Unknown),
-                active_inference_profile: None, hermes_available: None,
-                published_app_urls: vec![], now: None,
-            }).await.unwrap();
+            let requested = db
+                .request_agent_creation(RequestAgentCreationInput {
+                    verified_email: format!("{name}@finite.vip"),
+                    workos_user_id: format!("workos-{name}"),
+                    display_name: name.into(),
+                    launch_code: issue_test_launch_code(&db).await,
+                    idempotency_key: name.into(),
+                    now: None,
+                })
+                .await
+                .unwrap();
+            let lease = db
+                .lease_agent_creation_request(LeaseAgentCreationRequestInput {
+                    runner_id: "runner".into(),
+                    source_host_id: None,
+                    lease_token: "lease".into(),
+                    lease_seconds: Some(300),
+                    runner_capacity: None,
+                    now: None,
+                })
+                .await
+                .unwrap()
+                .unwrap();
+            let registered = db
+                .register_agent_creation_runtime(RegisterAgentCreationRuntimeInput {
+                    request_id: lease.request.id.clone(),
+                    runner_id: "runner".into(),
+                    lease_token: "lease".into(),
+                    source_host_id: "oslo-host-1".into(),
+                    source_machine_id: format!("machine-{name}"),
+                    runtime_artifact_id: Some("artifact-v1".into()),
+                    state_schema_version: None,
+                    provider_runtime_handle: None,
+                    contact_endpoint: None,
+                    runtime_capabilities: Some(kata_runtime_capabilities()),
+                    display_name: None,
+                    hostname: None,
+                    runtime_host: None,
+                    runtime_status: Some(RuntimeSummaryStatus::Unknown),
+                    active_inference_profile: None,
+                    hermes_available: None,
+                    published_app_urls: vec![],
+                    now: None,
+                })
+                .await
+                .unwrap();
             let id = registered.request.agent_runtime_id.unwrap();
-            assert!(matches!(db.upsert_runtime_artifact(candidate(&id)).await,
-                Err(CoreError::RuntimeUpgradeUnsupported)));
+            assert!(matches!(
+                db.upsert_runtime_artifact(candidate(&id)).await,
+                Err(CoreError::RuntimeUpgradeUnsupported)
+            ));
             let cleaned = if cancel {
                 db.cancel_agent_creation_request(CancelAgentCreationRequestInput {
-                    request_id: requested.request.id, now: None,
-                }).await.unwrap()
+                    request_id: requested.request.id,
+                    now: None,
+                })
+                .await
+                .unwrap()
             } else {
                 db.fail_agent_creation_request(FailAgentCreationRequestInput {
-                    request_id: requested.request.id, runner_id: "runner".into(),
-                    lease_token: "lease".into(), failure_message: "initial launch failed".into(),
-                    provisioned_finite_private_api_key_id: None, now: None,
-                }).await.unwrap()
+                    request_id: requested.request.id,
+                    runner_id: "runner".into(),
+                    lease_token: "lease".into(),
+                    failure_message: "initial launch failed".into(),
+                    provisioned_finite_private_api_key_id: None,
+                    now: None,
+                })
+                .await
+                .unwrap()
             };
             assert!(cleaned.agent_runtime_id.is_none());
-            assert!(db.runtime_artifact("artifact-canary").await.unwrap().is_none());
+            assert!(
+                db.runtime_artifact("artifact-canary")
+                    .await
+                    .unwrap()
+                    .is_none()
+            );
             assert!(db.all_agent_runtimes().await.is_empty());
         }
-    }).await;
+    })
+    .await;
 }
