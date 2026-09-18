@@ -992,7 +992,8 @@
               }
             ]
           },
-          "displayName": "${__field.labels.project}"
+          "displayName": "${__field.name}",
+          "min": 0
         },
         "overrides": []
       },
@@ -1007,7 +1008,25 @@
           "legendFormat": "{{project}}",
           "queryType": "instant"
         }
-      ]
+      ],
+      "transformations": [
+        {
+          "id": "rowsToFields",
+          "options": {}
+        }
+      ],
+      "options": {
+        "orientation": "horizontal",
+        "displayMode": "basic",
+        "reduceOptions": {
+          "values": false,
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": ""
+        },
+        "showUnfilled": true
+      }
     },
     {
       "id": 20,
@@ -1036,7 +1055,8 @@
               }
             ]
           },
-          "displayName": "${__field.labels.project}"
+          "displayName": "${__field.name}",
+          "min": 0
         },
         "overrides": []
       },
@@ -1051,7 +1071,25 @@
           "legendFormat": "{{project}}",
           "queryType": "instant"
         }
-      ]
+      ],
+      "transformations": [
+        {
+          "id": "rowsToFields",
+          "options": {}
+        }
+      ],
+      "options": {
+        "orientation": "horizontal",
+        "displayMode": "basic",
+        "reduceOptions": {
+          "values": false,
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": ""
+        },
+        "showUnfilled": true
+      }
     },
     {
       "id": 21,
@@ -1080,30 +1118,31 @@
               }
             ]
           },
-          "displayName": "${__field.labels.key}"
+          "displayName": "${__field.name}",
+          "min": 0
         },
         "overrides": [
           {
             "matcher": {
               "id": "byFrameRefID",
-              "options": "A"
+              "options": "rowsToFields-A"
             },
             "properties": [
               {
                 "id": "displayName",
-                "value": "${__field.labels.key} input"
+                "value": "${__field.name} input"
               }
             ]
           },
           {
             "matcher": {
               "id": "byFrameRefID",
-              "options": "B"
+              "options": "rowsToFields-B"
             },
             "properties": [
               {
                 "id": "displayName",
-                "value": "${__field.labels.key} output"
+                "value": "${__field.name} output"
               }
             ]
           }
@@ -1126,7 +1165,25 @@
           "legendFormat": "{{key}} output",
           "queryType": "instant"
         }
-      ]
+      ],
+      "transformations": [
+        {
+          "id": "rowsToFields",
+          "options": {}
+        }
+      ],
+      "options": {
+        "orientation": "horizontal",
+        "displayMode": "basic",
+        "reduceOptions": {
+          "values": false,
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": ""
+        },
+        "showUnfilled": true
+      }
     },
     {
       "id": 22,
@@ -1155,7 +1212,8 @@
               }
             ]
           },
-          "displayName": "${__field.labels.project}"
+          "displayName": "${__field.name}",
+          "min": 0
         },
         "overrides": []
       },
@@ -1170,7 +1228,25 @@
           "legendFormat": "{{project}}",
           "queryType": "instant"
         }
-      ]
+      ],
+      "transformations": [
+        {
+          "id": "rowsToFields",
+          "options": {}
+        }
+      ],
+      "options": {
+        "orientation": "horizontal",
+        "displayMode": "basic",
+        "reduceOptions": {
+          "values": false,
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": ""
+        },
+        "showUnfilled": true
+      }
     },
     {
       "id": 23,
@@ -1199,7 +1275,8 @@
               }
             ]
           },
-          "displayName": "${__field.labels.quality}"
+          "displayName": "${__field.name}",
+          "min": 0
         },
         "overrides": []
       },
@@ -1214,7 +1291,25 @@
           "legendFormat": "{{quality}}",
           "queryType": "instant"
         }
-      ]
+      ],
+      "transformations": [
+        {
+          "id": "rowsToFields",
+          "options": {}
+        }
+      ],
+      "options": {
+        "orientation": "horizontal",
+        "displayMode": "basic",
+        "reduceOptions": {
+          "values": false,
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": ""
+        },
+        "showUnfilled": true
+      }
     },
     {
       "id": 24,
@@ -1243,7 +1338,8 @@
               }
             ]
           },
-          "displayName": "${__field.labels.reason}"
+          "displayName": "${__field.name}",
+          "min": 0
         },
         "overrides": []
       },
@@ -1258,7 +1354,25 @@
           "legendFormat": "{{reason}}",
           "queryType": "instant"
         }
-      ]
+      ],
+      "transformations": [
+        {
+          "id": "rowsToFields",
+          "options": {}
+        }
+      ],
+      "options": {
+        "orientation": "horizontal",
+        "displayMode": "basic",
+        "reduceOptions": {
+          "values": false,
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": ""
+        },
+        "showUnfilled": true
+      }
     },
     {
       "id": 25,

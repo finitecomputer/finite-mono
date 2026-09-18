@@ -337,18 +337,6 @@ pub(super) async fn record_finite_private_request_diagnostic(
     ))
 }
 
-pub(super) async fn prune_finite_private_request_diagnostics(
-    State(state): State<CoreApiState>,
-    headers: HeaderMap,
-) -> Result<Json<Value>, ApiError> {
-    require_finite_private_usage_auth(&state, &headers)?;
-    let deleted = state
-        .store
-        .prune_finite_private_request_diagnostics()
-        .await?;
-    Ok(Json(json!({ "deleted": deleted })))
-}
-
 pub(super) async fn finite_private_usage_status_for_api_key(
     State(state): State<CoreApiState>,
     headers: HeaderMap,

@@ -352,17 +352,10 @@ async fn finite_private_request_diagnostics_are_idempotent_and_separate_from_acc
         // Age only the synthetic diagnostic, not its durable accounting record.
         db.query_json("WITH aged AS (UPDATE finite_private_request_diagnostics SET observed_at = NOW() - INTERVAL '8 days' WHERE reservation_id=$1 RETURNING reservation_id) SELECT to_jsonb(aged) FROM aged", &[&reservation_id]).await;
         assert_eq!(store.finite_private_request_diagnostics(10).await.unwrap().len(), 1);
-        assert_eq!(store.prune_finite_private_request_diagnostics().await.unwrap(), 1);
         let ledger = db.row("finite_private_reservations", &reservation_id).await.unwrap();
         assert_eq!(ledger["settled_usage_units"], 68);
         assert_eq!(ledger["status"], "settled");
-        assert_eq!(
-            store
-                .prune_finite_private_request_diagnostics()
-                .await
-                .unwrap(),
-            0
-        );
+
     })
     .await;
 }

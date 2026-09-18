@@ -302,10 +302,6 @@ fn router_from_state(state: CoreApiState) -> Router {
             "/internal/finite-private/v1/request-diagnostics",
             post(record_finite_private_request_diagnostic),
         )
-        .route(
-            "/internal/finite-private/v1/request-diagnostics/prune",
-            post(prune_finite_private_request_diagnostics),
-        )
         .route("/api/core/v1/admin/runtimes", get(admin_runtimes))
         .route(
             "/api/core/v1/admin/account-email-target",

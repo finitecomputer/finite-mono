@@ -12,7 +12,7 @@ use serde_json::{Value, json};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
-use tokio::sync::Semaphore;
+use tokio::sync::{Semaphore, watch};
 use tokio::time::{sleep, timeout};
 
 mod metrics;
@@ -1191,6 +1191,7 @@ fn streaming_response(
                         idle_timeout.as_millis()
                     );
                     settlement_guard.timer().finish(TerminalOutcome::UpstreamTimeout);
+                    settlement_guard.preserve_terminal_diagnostic("upstream_stream_timeout");
                     let _ = settlement_guard.settle(SettleRequest {
                         request_id: settlement_guard.request_id().to_string(),
                         settlement: "estimate".to_string(),
@@ -1246,6 +1247,7 @@ fn streaming_response(
                 Err(error) => {
                     eprintln!("finite-private-limiter upstream stream failed: {error}");
                     settlement_guard.timer().finish(TerminalOutcome::UpstreamError);
+                    settlement_guard.preserve_terminal_diagnostic("upstream_stream_error");
                     let _ = settlement_guard
                         .settle(SettleRequest {
                             request_id: settlement_guard.request_id().to_string(),
@@ -1341,7 +1343,8 @@ struct Settlement {
     state: AppState,
     reservation_id: Arc<str>,
     request_id: Arc<str>,
-    completed: Arc<std::sync::atomic::AtomicBool>,
+    started: Arc<std::sync::atomic::AtomicBool>,
+    result: watch::Sender<Option<Result<(), String>>>,
 }
 
 impl Settlement {
@@ -1350,7 +1353,8 @@ impl Settlement {
             state,
             reservation_id: Arc::from(reservation_id),
             request_id: Arc::from(request_id),
-            completed: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            started: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            result: watch::channel(None).0,
         }
     }
 
@@ -1363,25 +1367,30 @@ impl Settlement {
     }
 
     async fn settle(&self, request: SettleRequest) -> Result<(), String> {
-        if self.completed.swap(true, Ordering::SeqCst) {
-            return Ok(());
+        let mut receiver = self.result.subscribe();
+        if !self.started.swap(true, Ordering::SeqCst) {
+            let settlement = self.clone();
+            // Accounting survives a client dropping the response while Core
+            // retries. Every waiter observes this same operation and result.
+            tokio::spawn(async move {
+                let result = settle_usage_with_retries(
+                    &settlement.state,
+                    &settlement.reservation_id,
+                    request,
+                )
+                .await;
+                settlement.result.send_replace(Some(result));
+            });
         }
-        settle_usage_with_retries(&self.state, &self.reservation_id, request).await
-    }
-
-    fn settle_in_background(&self, request: SettleRequest) {
-        if self.completed.swap(true, Ordering::SeqCst) {
-            return;
-        }
-        let settlement = self.clone();
-        tokio::spawn(async move {
-            if let Err(error) =
-                settle_usage_with_retries(&settlement.state, &settlement.reservation_id, request)
-                    .await
-            {
-                eprintln!("finite-private-limiter background settle failed: {error}");
+        loop {
+            if let Some(result) = receiver.borrow_and_update().clone() {
+                return result;
             }
-        });
+            receiver
+                .changed()
+                .await
+                .map_err(|_| "settlement task unavailable".to_string())?;
+        }
     }
 }
 
@@ -1420,6 +1429,20 @@ impl SettlementGuard {
         &self.request_timer
     }
 
+    fn preserve_terminal_diagnostic(&mut self, reason: &str) {
+        let (first_output_ms, first_answer_ms, duration_ms) = self.request_timer.timing();
+        self.pending_diagnostic = Some(DiagnosticRequest {
+            request_id: self.request_id().to_string(),
+            prompt_tokens: None,
+            completion_tokens: None,
+            first_output_ms,
+            first_answer_ms,
+            duration_ms,
+            termination_reason: reason.to_string(),
+            measurement_quality: "estimated_usage".into(),
+        });
+    }
+
     fn mark_diagnostic_recorded(&mut self) {
         self.diagnostic_recorded = true;
     }
@@ -1448,9 +1471,19 @@ impl Drop for SettlementGuard {
                     termination_reason: "client_disconnected_or_stream_cancelled".to_string(),
                     measurement_quality: "estimated_usage".to_string(),
                 });
-            record_diagnostic_best_effort(self.state(), self.reservation_id(), diagnostic);
+            let settlement = self.settlement.clone();
+            let fallback = self.fallback.clone();
+            tokio::spawn(async move {
+                if let Err(error) = settlement.settle(fallback).await {
+                    eprintln!("finite-private-limiter background settle failed: {error}");
+                }
+                record_diagnostic_best_effort(
+                    &settlement.state,
+                    settlement.reservation_id(),
+                    diagnostic,
+                );
+            });
         }
-        self.settlement.settle_in_background(self.fallback.clone());
     }
 }
 
@@ -1757,13 +1790,7 @@ fn output_signals(value: &Value) -> (bool, bool) {
                         calls.iter().any(|call| {
                             call.get("function")
                                 .and_then(|function| {
-                                    function
-                                        .get("name")
-                                        .and_then(Value::as_str)
-                                        .filter(|text| !text.is_empty())
-                                        .or_else(|| {
-                                            function.get("arguments").and_then(Value::as_str)
-                                        })
+                                    function.get("arguments").and_then(Value::as_str)
                                 })
                                 .is_some_and(|text| !text.is_empty())
                         })
@@ -1791,10 +1818,8 @@ fn output_signals(value: &Value) -> (bool, bool) {
                         })
                     });
             let has_tool_payload = item
-                .get("name")
+                .get("arguments")
                 .and_then(Value::as_str)
-                .filter(|text| !text.is_empty())
-                .or_else(|| item.get("arguments").and_then(Value::as_str))
                 .is_some_and(|text| !text.is_empty());
             match item.get("type").and_then(Value::as_str) {
                 Some("output_text") => {
@@ -2015,7 +2040,7 @@ mod tests {
             output_signals(
                 &json!({"choices":[{"delta":{"tool_calls":[{"function":{"name":"lookup"}}]}}]})
             ),
-            (true, false)
+            (false, false)
         );
         assert_eq!(
             output_signals(&json!({"output":[{"type":"output_text"}]})),
@@ -2885,7 +2910,7 @@ mod tests {
             let core_url = spawn(fake_core_router(core.clone())).await;
             let upstream_url = spawn(Router::new().route("/v1/chat/completions", post(move || async move {
                 let stream = async_stream::stream! {
-                    yield Ok::<Bytes, std::io::Error>(Bytes::from_static(b": keepalive\n\ndata: {\"choices\":[{\"delta\":{\"role\":\"assistant\"}}]}\n\n"));
+                    yield Ok::<Bytes, std::io::Error>(Bytes::from_static(b": keepalive\n\ndata: {\"choices\":[{\"delta\":{\"role\":\"assistant\",\"tool_calls\":[{\"function\":{\"name\":\"lookup\"}}]}}]}\n\n"));
                     sleep(Duration::from_millis(50)).await;
                     let delta = if answer { json!({"reasoning_content":"private reasoning fixture"}) }
                         else { json!({"tool_calls":[{"function":{"name":"","arguments":"private tool fixture"}}]}) };
@@ -2939,7 +2964,9 @@ mod tests {
 
     #[tokio::test]
     async fn unpolled_stream_drop_records_one_cancellation_and_settles() {
-        let core = FakeCoreState::new("fpk_live_unpolled", 10_000_000);
+        let mut core = FakeCoreState::new("fpk_live_unpolled", 10_000_000);
+        core.settle_delay = Duration::from_millis(250);
+        let started = Instant::now();
         let core_url = spawn(fake_core_router(core.clone())).await;
         let upstream_url = spawn(fake_upstream_router(FakeUpstreamState::new())).await;
         let mut config = test_config(core_url, upstream_url);
@@ -2970,6 +2997,11 @@ mod tests {
         })
         .await;
         let diagnostic = core.diagnostics.lock().unwrap()[0].clone();
+        assert!(!core.diagnostic_before_settlement.load(Ordering::SeqCst));
+        assert!(
+            started.elapsed().as_millis() as i64 - diagnostic["durationMs"].as_i64().unwrap()
+                >= 200
+        );
         assert_eq!(
             diagnostic["terminationReason"],
             "client_disconnected_or_stream_cancelled"
@@ -3001,6 +3033,43 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn client_drop_during_settlement_retry_preserves_actual_accounting_and_diagnostic_order()
+    {
+        let mut core = FakeCoreState::new("fpk_live_settlement_drop", 10_000_000);
+        core.settle_delay = Duration::from_millis(100);
+        core.settle_failures_remaining.store(1, Ordering::SeqCst);
+        let core_url = spawn(fake_core_router(core.clone())).await;
+        let upstream_url = spawn(fake_upstream_router(FakeUpstreamState::new())).await;
+        let router = app(test_config(core_url, upstream_url)).unwrap();
+        let response = router
+            .oneshot(
+                axum::http::Request::post("/v1/chat/completions")
+                    .header("authorization", "Bearer fpk_live_settlement_drop")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        json!({"model":"glm-5-2","stream":true,"messages":[]}).to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let consuming =
+            tokio::spawn(async move { axum::body::to_bytes(response.into_body(), 100_000).await });
+        wait_for(|| core.settle_calls.load(Ordering::SeqCst) == 1).await;
+        consuming.abort();
+        let _ = consuming.await;
+        wait_for(|| core.diagnostics.lock().unwrap().len() == 1).await;
+        assert_eq!(core.settle_calls.load(Ordering::SeqCst), 2);
+        assert_eq!(core.settlements.lock().unwrap().len(), 1);
+        assert_eq!(core.settlements.lock().unwrap()[0]["settlement"], "actual");
+        assert!(!core.diagnostic_before_settlement.load(Ordering::SeqCst));
+        let diagnostic = core.diagnostics.lock().unwrap()[0].clone();
+        assert_eq!(diagnostic["completionTokens"], 10);
+        assert_eq!(diagnostic["measurementQuality"], "observed_usage");
+        assert_eq!(diagnostic["terminationReason"], "complete");
+    }
+
+    #[tokio::test]
     async fn prior_core_without_diagnostic_route_keeps_inference_and_accounting_working() {
         let mut core = FakeCoreState::new("fpk_live_prior_core", 10_000_000);
         core.diagnostic_supported = false;
@@ -3010,17 +3079,33 @@ mod tests {
         config.metrics_auth_token = Some("synthetic-metrics".into());
         let limiter_url = spawn(app(config).unwrap()).await;
         let client = reqwest::Client::new();
-        let response = client.post(format!("{limiter_url}/v1/chat/completions"))
-            .bearer_auth("fpk_live_prior_core").json(&json!({"model":"glm-5-2","messages":[]}))
-            .send().await.unwrap();
+        let response = client
+            .post(format!("{limiter_url}/v1/chat/completions"))
+            .bearer_auth("fpk_live_prior_core")
+            .json(&json!({"model":"glm-5-2","messages":[]}))
+            .send()
+            .await
+            .unwrap();
         assert_eq!(response.status(), StatusCode::OK);
-        assert_eq!(response.json::<Value>().await.unwrap()["usage"]["completion_tokens"],20);
-        assert_eq!(core.settle_calls.load(Ordering::SeqCst),1);
+        assert_eq!(
+            response.json::<Value>().await.unwrap()["usage"]["completion_tokens"],
+            20
+        );
+        assert_eq!(core.settle_calls.load(Ordering::SeqCst), 1);
         for _ in 0..50 {
-            let metrics = client.get(format!("{limiter_url}/metrics"))
-                .bearer_auth("synthetic-metrics").send().await.unwrap().text().await.unwrap();
+            let metrics = client
+                .get(format!("{limiter_url}/metrics"))
+                .bearer_auth("synthetic-metrics")
+                .send()
+                .await
+                .unwrap()
+                .text()
+                .await
+                .unwrap();
             if metrics.contains("finite_private_limiter_diagnostic_persistence_failures_total 1") {
-                assert!(metrics.contains("finite_private_limiter_settlements_total{kind=\"actual\"} 1"));
+                assert!(
+                    metrics.contains("finite_private_limiter_settlements_total{kind=\"actual\"} 1")
+                );
                 return;
             }
             sleep(Duration::from_millis(10)).await;
@@ -3075,6 +3160,8 @@ mod tests {
         diagnostics: Arc<Mutex<Vec<Value>>>,
         diagnostic_delay: Duration,
         diagnostic_supported: bool,
+        settle_delay: Duration,
+        diagnostic_before_settlement: Arc<AtomicBool>,
     }
 
     impl FakeCoreState {
@@ -3091,6 +3178,8 @@ mod tests {
                 diagnostics: Arc::new(Mutex::new(Vec::new())),
                 diagnostic_delay: Duration::ZERO,
                 diagnostic_supported: true,
+                settle_delay: Duration::ZERO,
+                diagnostic_before_settlement: Arc::new(AtomicBool::new(false)),
             }
         }
     }
@@ -3109,11 +3198,22 @@ mod tests {
             .route(
                 "/internal/finite-private/v1/request-diagnostics",
                 post(
-                    |State(state): State<FakeCoreState>, headers: HeaderMap, Json(body): Json<Value>| async move {
+                    |State(state): State<FakeCoreState>,
+                     headers: HeaderMap,
+                     Json(body): Json<Value>| async move {
+                        if state.settlements.lock().unwrap().is_empty() {
+                            state
+                                .diagnostic_before_settlement
+                                .store(true, Ordering::SeqCst);
+                        }
                         state.diagnostics.lock().unwrap().push(body);
                         assert_service_auth(&headers);
                         sleep(state.diagnostic_delay).await;
-                        if state.diagnostic_supported { StatusCode::OK } else { StatusCode::NOT_FOUND }
+                        if state.diagnostic_supported {
+                            StatusCode::OK
+                        } else {
+                            StatusCode::NOT_FOUND
+                        }
                     },
                 ),
             )
@@ -3227,6 +3327,7 @@ mod tests {
     ) -> Response {
         assert_service_auth(&headers);
         state.settle_calls.fetch_add(1, Ordering::SeqCst);
+        sleep(state.settle_delay).await;
         if state
             .settle_failures_remaining
             .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |remaining| {

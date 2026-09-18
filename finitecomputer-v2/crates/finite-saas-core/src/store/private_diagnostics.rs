@@ -7,6 +7,7 @@ impl CoreStore {
             .map_err(|_| CoreError::Store("diagnostic connection budget exceeded".into()))?
     }
 
+    #[tracing::instrument(skip(self, input), fields(operation = "record_finite_private_request_diagnostic", reservation_id = %input.reservation_id))]
     pub async fn record_finite_private_request_diagnostic(
         &self,
         input: RecordFinitePrivateRequestDiagnosticInput,
@@ -114,24 +115,6 @@ impl CoreStore {
             retention_days: 7,
             coverage: "core-reserved-only",
         })
-    }
-
-    pub async fn prune_finite_private_request_diagnostics(&self) -> CoreResult<u64> {
-        let mut client = self.diagnostic_connection().await?;
-        let tx = client.transaction().await.map_err(store_error)?;
-        tx.batch_execute("SET LOCAL statement_timeout = '2s'; SET LOCAL lock_timeout = '250ms';")
-            .await
-            .map_err(store_error)?;
-        let deleted = tx
-            .execute(
-                "DELETE FROM finite_private_request_diagnostics
-                 WHERE observed_at < CURRENT_TIMESTAMP - INTERVAL '7 days'",
-                &[],
-            )
-            .await
-            .map_err(store_error)?;
-        self.finish(tx).await?;
-        Ok(deleted)
     }
 }
 

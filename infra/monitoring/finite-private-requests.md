@@ -152,7 +152,10 @@ For request counts, unwrap a constant one and take its per-reservation
 maximum before summing; for immutable token or usage values, take the
 per-reservation maximum before summing. Reservation IDs exist only as
 temporary query fields, never persistent stream or Prometheus labels. Preserve
-this query contract when editing panels.
+this query contract when editing panels. Loki instant metrics become table
+frames in Grafana; the usage bar gauges convert rows to fields so every
+returned key, Project, or quality category keeps its own label and value.
+Removing that transform can silently reduce a multi-row result to one bar.
 
 Cleanup must continue without new inference requests and without a working
 exporter. Accounting rows, quota calculations and durable chat state are not
