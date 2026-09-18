@@ -2,6 +2,7 @@
 
 import { memo, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { RefreshCwIcon, SearchIcon, XIcon } from "lucide-react";
+import Link from "next/link";
 
 import { groupAgentSkills, readAgentSkills, skillCategoryLabel, type AgentSkill } from "@/lib/agent-skills";
 import { HostedHermesStatusError } from "@/lib/hosted-hermes-status";
@@ -27,6 +28,7 @@ export function AgentSkillsBrowser({ runtimeId, agentName }: { runtimeId: string
   const [loadedAt, setLoadedAt] = useState<Date | null>(null);
   const [busy, setBusy] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  const [accessUnavailable, setAccessUnavailable] = useState(false);
   const [query, setQuery] = useState("");
   const pending = useRef<AbortController | null>(null);
 
@@ -36,6 +38,7 @@ export function AgentSkillsBrowser({ runtimeId, agentName }: { runtimeId: string
     pending.current = controller;
     setBusy(true);
     setError(null);
+    setAccessUnavailable(false);
     try {
       const result = await readAgentSkills(runtimeId, controller.signal);
       if (controller.signal.aborted) return;
@@ -47,6 +50,7 @@ export function AgentSkillsBrowser({ runtimeId, agentName }: { runtimeId: string
         setSkills(null);
         setLoadedAt(null);
       }
+      setAccessUnavailable(caught instanceof HostedHermesStatusError && caught.kind === "access");
       setError(caught instanceof HostedHermesStatusError ? caught.message : "Skills could not be loaded. Try again.");
     } finally {
       if (!controller.signal.aborted) setBusy(false);
@@ -78,6 +82,7 @@ export function AgentSkillsBrowser({ runtimeId, agentName }: { runtimeId: string
       </header>
 
       {error && <p role="alert" className="text-sm text-muted-foreground">{skills !== null ? "Showing the last successful list; it may be out of date. " : ""}{error}</p>}
+      {accessUnavailable && <Link className="text-sm underline underline-offset-4" href={`/dashboard/machines/${encodeURIComponent(runtimeId)}/connections#web-access`}>Manage agent web access</Link>}
       {skills !== null && (skills.length === 0
         ? <div className="ocean-empty-state">No skills were discovered for {agentName}.</div>
         : groups.length === 0
