@@ -30,7 +30,7 @@ where
         .query_opt(
             "SELECT id, kind, reference, version_label, source_git_sha, finitec_version,
                     hermes_source_ref, finite_platform_plugin_ref, state_schema_version,
-                    base_image, recover_known_good_chat,
+                    base_image, recover_known_good_chat, canary_runtime_id,
                     core_rfc3339(created_at) AS created_at, core_rfc3339(promoted_at) AS promoted_at, core_rfc3339(retired_at) AS retired_at
              FROM runtime_artifacts WHERE id = $1",
             &[&artifact_id],
@@ -51,7 +51,7 @@ where
         .query_opt(
             "SELECT id, kind, reference, version_label, source_git_sha, finitec_version,
                     hermes_source_ref, finite_platform_plugin_ref, state_schema_version,
-                    base_image, recover_known_good_chat,
+                    base_image, recover_known_good_chat, canary_runtime_id,
                     core_rfc3339(created_at) AS created_at, core_rfc3339(promoted_at) AS promoted_at, core_rfc3339(retired_at) AS retired_at
              FROM runtime_artifacts
              WHERE promoted_at IS NOT NULL AND retired_at IS NULL AND kind = 'oci_image'
@@ -85,7 +85,13 @@ pub(super) fn ensure_runtime_upgrade_target_compatible(
     runtime: &AgentRuntime,
     artifact: &RuntimeArtifact,
 ) -> CoreResult<()> {
-    ensure_artifact_launchable(artifact)?;
+    if artifact.canary_runtime_id.as_deref() == Some(runtime.id.as_str()) {
+        if artifact.retired_at.is_some() {
+            return Err(CoreError::RuntimeArtifactRetired);
+        }
+    } else {
+        ensure_artifact_launchable(artifact)?;
+    }
     ensure_runtime_upgrade_target_material(runtime, artifact)
 }
 
@@ -125,7 +131,7 @@ where
         .query_opt(
             "SELECT id, kind, reference, version_label, source_git_sha, finitec_version,
                     hermes_source_ref, finite_platform_plugin_ref, state_schema_version,
-                    base_image, recover_known_good_chat,
+                    base_image, recover_known_good_chat, canary_runtime_id,
                     core_rfc3339(created_at) AS created_at, core_rfc3339(promoted_at) AS promoted_at, core_rfc3339(retired_at) AS retired_at
              FROM runtime_artifacts WHERE id = $1 FOR UPDATE",
             &[&id],
@@ -160,11 +166,39 @@ where
         finite_platform_plugin_ref: trim_to_option(input.finite_platform_plugin_ref.as_deref()),
         state_schema_version,
         base_image: trim_to_option(input.base_image.as_deref()),
+        canary_runtime_id: trim_to_option(input.canary_runtime_id.as_deref()),
         recover_known_good_chat: input.recover_known_good_chat,
         created_at,
         promoted_at,
         retired_at: existing_retired_at,
     };
+    if artifact.canary_runtime_id.is_some() {
+        // A canary must never enter default launch selection, even through
+        // an idempotent retry of an already-promoted record.
+        if artifact.promoted_at.is_some() {
+            return Err(CoreError::RuntimeArtifactImmutable);
+        }
+        if !runtime_artifact_reference_is_immutable_oci(&artifact.reference) {
+            return Err(CoreError::RuntimeUpgradeUnsupported);
+        }
+        // Initial-launch failure/cancellation deletes its provisional Runtime.
+        // Do not attach an immutable FK to that row before launch completes.
+        // Lock the creation row just as its failure/cancellation writers do.
+        if client
+            .query_opt(
+                "SELECT id FROM agent_creation_requests
+                 WHERE agent_runtime_id = $1 AND status = 'running'
+                   AND relocation_spec IS NULL
+                 FOR SHARE",
+                &[&artifact.canary_runtime_id],
+            )
+            .await
+            .map_err(store_error)?
+            .is_none()
+        {
+            return Err(CoreError::RuntimeUpgradeUnsupported);
+        }
+    }
     if let Some(existing) = existing.as_ref() {
         let referenced: bool = client
             .query_one(
@@ -176,7 +210,7 @@ where
             .await
             .map_err(store_error)?
             .get("referenced");
-        if (existing.promoted_at.is_some() || referenced)
+        if (existing.promoted_at.is_some() || existing.canary_runtime_id.is_some() || referenced)
             && !runtime_artifact_material_matches(existing, &artifact)
         {
             return Err(CoreError::RuntimeArtifactImmutable);
@@ -187,10 +221,10 @@ where
             "INSERT INTO runtime_artifacts (
                id, kind, reference, version_label, source_git_sha, finitec_version,
                hermes_source_ref, finite_platform_plugin_ref, state_schema_version,
-               base_image, recover_known_good_chat, created_at, promoted_at, retired_at
+               base_image, recover_known_good_chat, canary_runtime_id, created_at, promoted_at, retired_at
              )
              VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10,
-                     $11, $12::text::timestamptz, $13::text::timestamptz,
+                     $11, $15, $12::text::timestamptz, $13::text::timestamptz,
                      $14::text::timestamptz)
              ON CONFLICT (id) DO UPDATE SET
                kind = EXCLUDED.kind,
@@ -203,11 +237,12 @@ where
                state_schema_version = EXCLUDED.state_schema_version,
                base_image = EXCLUDED.base_image,
                recover_known_good_chat = EXCLUDED.recover_known_good_chat,
+               canary_runtime_id = EXCLUDED.canary_runtime_id,
                promoted_at = EXCLUDED.promoted_at,
                retired_at = EXCLUDED.retired_at
              RETURNING id, kind, reference, version_label, source_git_sha, finitec_version,
                        hermes_source_ref, finite_platform_plugin_ref, state_schema_version,
-                       base_image, recover_known_good_chat,
+                       base_image, recover_known_good_chat, canary_runtime_id,
                        core_rfc3339(created_at) AS created_at, core_rfc3339(promoted_at) AS promoted_at, core_rfc3339(retired_at) AS retired_at",
             &[
                 &artifact.id,
@@ -224,6 +259,7 @@ where
                 &artifact.created_at,
                 &artifact.promoted_at,
                 &artifact.retired_at,
+                &artifact.canary_runtime_id,
             ],
         )
         .await

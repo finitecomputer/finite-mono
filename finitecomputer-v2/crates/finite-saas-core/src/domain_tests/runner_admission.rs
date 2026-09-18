@@ -237,6 +237,7 @@ async fn kata_is_the_only_runtime_recovery_capability_boundary() {
             Err(CoreError::RuntimeCapabilitiesNotAuthorized)
         ));
         let capable_artifact = RuntimeArtifact {
+            canary_runtime_id: None,
             recover_known_good_chat: true,
             ..legacy_artifact.clone()
         };

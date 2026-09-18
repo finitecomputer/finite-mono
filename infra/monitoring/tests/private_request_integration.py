@@ -219,7 +219,7 @@ try:
             == "1002|68136"
         )
         sql(
-            "\n".join(p.read_text() for p in files if p.name < "0031"),
+            "\n".join(p.read_text() for p in files if p.name < "0032"),
             url(restore_name),
         )
         assert (

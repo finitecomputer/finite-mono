@@ -87,6 +87,24 @@ data migration is involved; a disabled/older endpoint leaves usage panels
 unavailable rather than reporting zero. The dashboard workflow alone does not
 deploy the service image, provision this credential, or change scrape jobs.
 
+### Diagnose missing usage data
+
+Check the serving image, endpoint, and Prometheus target separately. A successful
+dashboard workflow deploys the panels only; the API/wildcard uptime probes do
+not collect usage metrics.
+
+| Observation | Next action |
+| --- | --- |
+| `/internal/v1/metrics` returns 404 on `finite.site` | Compare the live image revision with the metrics-capable CI image; deploy the qualified digest. |
+| Endpoint returns 503 | Check whether `FINITE_SITES_METRICS_TOKEN` is configured and inspect service logs for collection errors. |
+| Authenticated scrape returns 401 | Reconcile the dedicated Fly token and receiver credential file. |
+| `up{job="finite-sites-metrics"}` returns no series | Install/reload the Sites scrape job on the receiver after provisioning its token. |
+| Target is up but panels remain unavailable | Check that `finite_sites_metrics_collected_at_seconds` is less than 180 seconds old and not in the future; use a dashboard end time after the first successful scrape. |
+
+Accept the rollout only when the live Grafana queries return existing/published
+totals, 90 daily buckets, and healthy collection. Preserve the receiver's other
+scrape jobs when reconciling its configuration.
+
 ## Account bridge
 
 Deploy the reviewed dashboard image and verify `/site-auth` before enabling

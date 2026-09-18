@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Prepare and execute a reviewed, exact rollout of one promoted Runtime Artifact
+# Prepare and execute a reviewed, exact rollout of one explicit Runtime Artifact
 # to existing agents on one source host. Core remains the lifecycle authority;
 # this wrapper only freezes its exact plan and provider facts between two
 # operator commands.
