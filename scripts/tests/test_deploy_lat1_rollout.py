@@ -228,6 +228,7 @@ class RuntimeRolloutScriptTests(unittest.TestCase):
                     root="$(jq -r '.data_source' <<<"$fact")"
                     mounts="$(jq -cn --arg root "$root" '[{Source:$root,Destination:"/data",RW:true}]')"
                     ports='{"8080/tcp":[{"HostIp":"127.0.0.1","HostPort":"41001"}]}'
+                    if [[ -n ${FAKE_PROVIDER_PORTS:-} ]]; then ports="$FAKE_PROVIDER_PORTS"; fi
                     printf 'CANONICAL\\t%s\\t%s\\t%s\\t%s\\t%s\\t%s\\t%s\\ttrue\\t%s\\t%s\\t%s\\t%s\\t%s\\n' "$runtime" "$machine" "$project" "$state" "$image" "$artifact" "$schema" "$FAKE_SOURCE_HOST_ID" "$machine" "$project" "$mounts" "$ports"
                   done
                   while IFS=$'\\t' read -r runtime machine project root; do
@@ -393,6 +394,32 @@ class RuntimeRolloutScriptTests(unittest.TestCase):
             "--validate-only", "--prepare", *self.actor_args(), "--roll-all"
         )
         self.assertEqual(incomplete.returncode, 64)
+
+    def test_prepare_selects_service_port_with_hermes_and_rejects_ambiguous_service(self) -> None:
+        cases = [
+            ({"8080/tcp": [{"HostPort": "41001"}], "8642/tcp": [{"HostPort": "41002"}]}, True),
+            ({"8642/tcp": [{"HostPort": "41002"}]}, False),
+            ({"8080/tcp": [{"HostPort": "41001"}, {"HostPort": "41002"}]}, False),
+        ]
+        for ports, accepted in cases:
+            with self.subTest(ports=ports), tempfile.TemporaryDirectory() as directory:
+                env, log, state_root = self.fake_ssh_environment(
+                    Path(directory),
+                    rollout_report([plan_entry("project-a", "runtime-a", "kata-a")]),
+                    [provider_fact("project-a", "runtime-a", "kata-a")],
+                )
+                env["FAKE_PROVIDER_PORTS"] = json.dumps(ports)
+                result, plan_hash = self.prepare(env, "--roll-project-id", "project-a")
+                if accepted:
+                    self.assertEqual(result.returncode, 0, result.stderr)
+                    self.assertTrue(plan_hash)
+                    contact = [line for line in log.read_text().splitlines() if "provider-contact-v1" in line]
+                    self.assertTrue(contact)
+                    self.assertIn("41001", contact[0].split("provider-contact-v1")[-1])
+                    self.assertNotIn("41002", contact[0].split("provider-contact-v1")[-1])
+                else:
+                    self.assertNotEqual(result.returncode, 0)
+                    self.assertIn("published runtime service host port", result.stderr)
 
     def test_prepare_sorts_and_persists_canonical_plan_without_enqueue(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

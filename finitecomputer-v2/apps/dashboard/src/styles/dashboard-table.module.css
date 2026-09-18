@@ -1,0 +1,11 @@
+.surface {
+  --table-heading-size: 13px;
+  --table-body-size: 14px;
+  --table-name-size: 15px;
+  --table-name-weight: 500;
+  --table-row-padding: 16px;
+  --table-column-gap: 20px;
+  --table-text: var(--foreground);
+  --table-muted-text: var(--muted-foreground);
+  --table-divider: var(--border);
+}

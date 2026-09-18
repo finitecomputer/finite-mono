@@ -13,6 +13,7 @@ RUN apt-get update \
     && rm -rf /var/lib/apt/lists/*
 COPY Cargo.toml Cargo.lock ./
 COPY devfinity ./devfinity
+COPY tools ./tools
 COPY finite-agentd ./finite-agentd
 COPY finite-brain ./finite-brain
 COPY finite-identity ./finite-identity

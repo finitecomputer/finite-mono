@@ -1,0 +1,3 @@
+# Match the Hermes checks regardless of the caller's working directory.
+extend = "../../finitechat/pyproject.toml"
+target-version = "py312"

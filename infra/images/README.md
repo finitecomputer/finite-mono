@@ -32,6 +32,15 @@ frozen packages while any deployed digest references them.
 
 Notes:
 
+- `hermes-skills-package.nix` applies the Skills inventory patch inside the
+  upstream sealed Python environment. Both full and minimal Hermes packages,
+  their launchers and exported Python environments use this same override.
+  It preserves the upstream source/dependency pin and default `/api/skills`
+  response. Opt-in `?inventory=true` returns versioned display metadata and
+  uses native idempotent plugin discovery, without forced reload. Remove the
+  patch when an upstream release supplies this contract, retaining the
+  packaged regression suite `test_hermes_skills_inventory.py`.
+
 - `runtime.Dockerfile` stays next to `build_runtime_image.py` because the
   script assembles its own staged build context and references that path.
 - The Runtime's baseline CLIs are defined by
