@@ -129,6 +129,20 @@ pub(super) async fn finite_private_admin_state(
     Ok(Json(state.store.finite_private_admin_state().await?))
 }
 
+pub(super) async fn finite_private_admin_request_details(
+    State(state): State<CoreApiState>,
+    headers: HeaderMap,
+    Query(query): Query<FinitePrivateRequestDiagnosticQuery>,
+) -> Result<Json<FinitePrivateRequestDiagnosticPage>, ApiError> {
+    require_admin_identity(&state, &headers).await?;
+    Ok(Json(
+        state
+            .store
+            .finite_private_request_diagnostics_page(query)
+            .await?,
+    ))
+}
+
 pub(super) async fn admin_issue_finite_private_friend_key(
     State(state): State<CoreApiState>,
     headers: HeaderMap,
@@ -296,6 +310,43 @@ pub(super) async fn settle_finite_private_reservation(
             })
             .await?,
     ))
+}
+
+pub(super) async fn record_finite_private_request_diagnostic(
+    State(state): State<CoreApiState>,
+    headers: HeaderMap,
+    Json(input): Json<RecordFinitePrivateRequestDiagnosticRequest>,
+) -> Result<Json<FinitePrivateRequestDiagnostic>, ApiError> {
+    require_finite_private_usage_auth(&state, &headers)?;
+    Ok(Json(
+        state
+            .store
+            .record_finite_private_request_diagnostic(RecordFinitePrivateRequestDiagnosticInput {
+                reservation_id: input.reservation_id,
+                request_id: input.request_id,
+                prompt_tokens: input.prompt_tokens,
+                completion_tokens: input.completion_tokens,
+                first_output_ms: input.first_output_ms,
+                first_answer_ms: input.first_answer_ms,
+                duration_ms: input.duration_ms,
+                termination_reason: input.termination_reason,
+                measurement_quality: input.measurement_quality,
+                observed_at: input.observed_at,
+            })
+            .await?,
+    ))
+}
+
+pub(super) async fn prune_finite_private_request_diagnostics(
+    State(state): State<CoreApiState>,
+    headers: HeaderMap,
+) -> Result<Json<Value>, ApiError> {
+    require_finite_private_usage_auth(&state, &headers)?;
+    let deleted = state
+        .store
+        .prune_finite_private_request_diagnostics()
+        .await?;
+    Ok(Json(json!({ "deleted": deleted })))
 }
 
 pub(super) async fn finite_private_usage_status_for_api_key(

@@ -99,3 +99,20 @@ scrape_configs:
       - source_labels: [__name__]
         regex: finite_tinfoil_.*
         action: keep
+
+  # Dedicated read-only limiter credential; never use an inference/accounting key.
+  - job_name: finite-private-limiter
+    scrape_interval: 15s
+    scrape_timeout: 3s
+    scheme: https
+    metrics_path: /metrics
+    follow_redirects: false
+    authorization:
+      type: Bearer
+      credentials_file: /etc/finite/monitoring/private-limiter-metrics-token
+    static_configs:
+      - targets: [finite-private.finite.containers.tinfoil.dev]
+    metric_relabel_configs:
+      - source_labels: [__name__]
+        regex: finite_private_limiter_(live|admission_mode|active_requests|requests_started_total|admissions_total|refusals_total|requests_total|route_admissions_total|route_requests_total|input_tokens_total|output_tokens_total|route_input_tokens_total|route_output_tokens_total|settlements_total|settlement_failures_total|diagnostic_persistence_failures_total|(route_)?(request_duration|first_output|first_answer)_seconds_(bucket|count|sum))
+        action: keep

@@ -1,0 +1,1724 @@
+{
+  "uid": "finite-private-requests",
+  "title": "Finite Private Requests & Usage",
+  "description": "Internal operator request, token and timing diagnostics. Seven-day Core-reserved detail; bounded all-traffic aggregates.",
+  "schemaVersion": 41,
+  "version": 1,
+  "editable": true,
+  "tags": [
+    "finite",
+    "private",
+    "operators"
+  ],
+  "timezone": "utc",
+  "refresh": "15s",
+  "time": {
+    "from": "now-1h",
+    "to": "now"
+  },
+  "timepicker": {
+    "refresh_intervals": [
+      "15s",
+      "30s",
+      "1m",
+      "5m"
+    ],
+    "time_options": [
+      "5m",
+      "15m",
+      "1h",
+      "6h",
+      "24h",
+      "2d",
+      "7d",
+      "15d"
+    ]
+  },
+  "templating": {
+    "list": [
+      {
+        "name": "model",
+        "label": "Model",
+        "type": "query",
+        "datasource": {
+          "type": "prometheus",
+          "uid": "finite-prometheus"
+        },
+        "query": "label_values(finite_private_limiter_route_requests_total, model)",
+        "refresh": 1,
+        "includeAll": true,
+        "allValue": ".*",
+        "multi": true,
+        "current": {
+          "text": "All",
+          "value": "$__all"
+        }
+      },
+      {
+        "name": "endpoint",
+        "label": "Endpoint",
+        "type": "query",
+        "datasource": {
+          "type": "prometheus",
+          "uid": "finite-prometheus"
+        },
+        "query": "label_values(finite_private_limiter_route_requests_total, endpoint)",
+        "refresh": 1,
+        "includeAll": true,
+        "allValue": ".*",
+        "multi": true,
+        "current": {
+          "text": "All",
+          "value": "$__all"
+        }
+      },
+      {
+        "name": "admission_mode",
+        "label": "Admission mode",
+        "type": "query",
+        "datasource": {
+          "type": "prometheus",
+          "uid": "finite-prometheus"
+        },
+        "query": "label_values(finite_private_limiter_admission_mode, mode)",
+        "refresh": 1,
+        "includeAll": true,
+        "allValue": ".*",
+        "multi": true,
+        "current": {
+          "text": "All",
+          "value": "$__all"
+        }
+      },
+      {
+        "name": "project",
+        "label": "Project (details)",
+        "type": "textbox",
+        "query": ".*",
+        "current": {
+          "text": ".*",
+          "value": ".*"
+        },
+        "description": "Regular expression over trusted opaque IDs; .* means all."
+      },
+      {
+        "name": "runtime",
+        "label": "Agent Runtime (details)",
+        "type": "textbox",
+        "query": ".*",
+        "current": {
+          "text": ".*",
+          "value": ".*"
+        },
+        "description": "Regular expression over trusted opaque IDs; .* means all."
+      },
+      {
+        "name": "key",
+        "label": "Key (details)",
+        "type": "textbox",
+        "query": ".*",
+        "current": {
+          "text": ".*",
+          "value": ".*"
+        },
+        "description": "Regular expression over trusted opaque IDs; .* means all."
+      }
+    ]
+  },
+  "panels": [
+    {
+      "id": 1,
+      "title": "Internal Operators \u00b7 source and coverage",
+      "type": "text",
+      "description": "",
+      "gridPos": {
+        "h": 6,
+        "w": 24,
+        "x": 0,
+        "y": 0
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "noValue": "Unavailable"
+        },
+        "overrides": []
+      },
+      "options": {
+        "mode": "markdown",
+        "content": "**All-traffic aggregates** count inference arrivals, refused admission, degraded admission and terminal outcomes at the limiter. Project / Agent Runtime / key filters apply **only to Core-reserved reporting** below. Shared keys cannot identify an individual caller. Model filters apply to panels marked \u201cmodel\u201d; arrivals, refusals, active and health remain all-model totals.\n\n**Request detail and attributed usage: last 7 days only.** Low-cardinality Prometheus aggregates: up to 15 days, subject to 20 GB storage. Unknown tokens/timings are unavailable, not zero. Final usage and completion measurements appear after termination. Timings are limiter-observed, not client receipt or engine decode speed. Core accounting remains the Runaway Guard authority. Historical data is available only after collection began."
+      }
+    },
+    {
+      "id": 2,
+      "title": "Inference arrivals / minute \u00b7 all traffic",
+      "type": "stat",
+      "description": "",
+      "gridPos": {
+        "h": 4,
+        "w": 6,
+        "x": 0,
+        "y": 6
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "reqpm",
+          "noValue": "Unavailable",
+          "color": {
+            "mode": "fixed",
+            "fixedColor": "blue"
+          }
+        },
+        "overrides": []
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "finite-prometheus"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum(rate(finite_private_limiter_requests_started_total[5m])) * 60",
+          "legendFormat": "",
+          "instant": true,
+          "range": false
+        }
+      ],
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "orientation": "auto",
+        "textMode": "auto",
+        "colorMode": "value",
+        "graphMode": "none"
+      }
+    },
+    {
+      "id": 3,
+      "title": "Active \u00b7 all traffic",
+      "type": "stat",
+      "description": "",
+      "gridPos": {
+        "h": 4,
+        "w": 6,
+        "x": 6,
+        "y": 6
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "noValue": "Unavailable",
+          "color": {
+            "mode": "fixed",
+            "fixedColor": "blue"
+          }
+        },
+        "overrides": []
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "finite-prometheus"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum(finite_private_limiter_active_requests)",
+          "legendFormat": "",
+          "instant": true,
+          "range": false
+        }
+      ],
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "orientation": "auto",
+        "textMode": "auto",
+        "colorMode": "value",
+        "graphMode": "none"
+      }
+    },
+    {
+      "id": 4,
+      "title": "Refused / minute \u00b7 all traffic",
+      "type": "stat",
+      "description": "",
+      "gridPos": {
+        "h": 4,
+        "w": 6,
+        "x": 12,
+        "y": 6
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "reqpm",
+          "noValue": "Unavailable",
+          "color": {
+            "mode": "fixed",
+            "fixedColor": "blue"
+          }
+        },
+        "overrides": []
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "finite-prometheus"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum(rate(finite_private_limiter_admissions_total{outcome=\"refused\",mode=~\"$admission_mode\"}[5m])) * 60",
+          "legendFormat": "",
+          "instant": true,
+          "range": false
+        }
+      ],
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "orientation": "auto",
+        "textMode": "auto",
+        "colorMode": "value",
+        "graphMode": "none"
+      }
+    },
+    {
+      "id": 5,
+      "title": "Terminal errors / minute \u00b7 model",
+      "type": "stat",
+      "description": "",
+      "gridPos": {
+        "h": 4,
+        "w": 6,
+        "x": 18,
+        "y": 6
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "reqpm",
+          "noValue": "Unavailable",
+          "color": {
+            "mode": "fixed",
+            "fixedColor": "blue"
+          }
+        },
+        "overrides": []
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "finite-prometheus"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum(rate(finite_private_limiter_route_requests_total{model=~\"$model\",endpoint=~\"$endpoint\",outcome=~\"upstream_error|upstream_timeout|client_cancellation\"}[5m])) * 60",
+          "legendFormat": "",
+          "instant": true,
+          "range": false
+        }
+      ],
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "orientation": "auto",
+        "textMode": "auto",
+        "colorMode": "value",
+        "graphMode": "none"
+      }
+    },
+    {
+      "id": 6,
+      "title": "Admission mode",
+      "type": "stat",
+      "description": "",
+      "gridPos": {
+        "h": 4,
+        "w": 6,
+        "x": 0,
+        "y": 10
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "noValue": "Unavailable",
+          "color": {
+            "mode": "fixed",
+            "fixedColor": "blue"
+          }
+        },
+        "overrides": []
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "finite-prometheus"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "finite_private_limiter_admission_mode",
+          "legendFormat": "{{mode}}",
+          "instant": true,
+          "range": false
+        }
+      ],
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "orientation": "auto",
+        "textMode": "name",
+        "colorMode": "value",
+        "graphMode": "none"
+      }
+    },
+    {
+      "id": 7,
+      "title": "Limiter scrape healthy",
+      "type": "stat",
+      "description": "",
+      "gridPos": {
+        "h": 4,
+        "w": 6,
+        "x": 6,
+        "y": 10
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "noValue": "Unavailable",
+          "color": {
+            "mode": "fixed",
+            "fixedColor": "blue"
+          }
+        },
+        "overrides": []
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "finite-prometheus"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "up{job=\"finite-private-limiter\"}",
+          "legendFormat": "",
+          "instant": true,
+          "range": false
+        }
+      ],
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "orientation": "auto",
+        "textMode": "auto",
+        "colorMode": "value",
+        "graphMode": "none"
+      }
+    },
+    {
+      "id": 8,
+      "title": "Reporting last success age",
+      "type": "stat",
+      "description": "",
+      "gridPos": {
+        "h": 4,
+        "w": 6,
+        "x": 12,
+        "y": 10
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s",
+          "noValue": "Unavailable",
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "red",
+                "value": 60
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "finite-prometheus"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "time() - finite_private_request_diagnostics_last_export_timestamp_seconds",
+          "legendFormat": "",
+          "instant": true,
+          "range": false
+        }
+      ],
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "orientation": "auto",
+        "textMode": "auto",
+        "colorMode": "value",
+        "graphMode": "none"
+      }
+    },
+    {
+      "id": 9,
+      "title": "Collection began",
+      "type": "stat",
+      "description": "",
+      "gridPos": {
+        "h": 4,
+        "w": 6,
+        "x": 18,
+        "y": 10
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "dateTimeAsIso",
+          "noValue": "Unavailable",
+          "color": {
+            "mode": "fixed",
+            "fixedColor": "blue"
+          }
+        },
+        "overrides": []
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "finite-prometheus"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "finite_private_request_diagnostics_collection_started_timestamp_seconds * 1000",
+          "legendFormat": "",
+          "instant": true,
+          "range": false
+        }
+      ],
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "orientation": "auto",
+        "textMode": "auto",
+        "colorMode": "value",
+        "graphMode": "none"
+      }
+    },
+    {
+      "id": 10,
+      "title": "Terminal outcomes / second \u00b7 model",
+      "type": "timeseries",
+      "description": "",
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 14
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "reqps",
+          "noValue": "Unavailable"
+        },
+        "overrides": []
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "finite-prometheus"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum by(model,endpoint,outcome)(rate(finite_private_limiter_route_requests_total{model=~\"$model\",endpoint=~\"$endpoint\"}[5m]))",
+          "legendFormat": "{{model}} {{endpoint}} {{outcome}}",
+          "instant": false,
+          "range": true
+        }
+      ],
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom"
+        },
+        "tooltip": {
+          "mode": "multi"
+        }
+      }
+    },
+    {
+      "id": 11,
+      "title": "Admission and refusals \u00b7 all traffic",
+      "type": "timeseries",
+      "description": "",
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 14
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "reqps",
+          "noValue": "Unavailable"
+        },
+        "overrides": []
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "finite-prometheus"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum by(mode,outcome)(rate(finite_private_limiter_admissions_total{mode=~\"$admission_mode\"}[5m]))",
+          "legendFormat": "{{mode}} {{outcome}}",
+          "instant": false,
+          "range": true
+        },
+        {
+          "refId": "B",
+          "expr": "sum by(reason)(rate(finite_private_limiter_refusals_total{mode=~\"$admission_mode\"}[5m]))",
+          "legendFormat": "refused: {{reason}}",
+          "instant": false,
+          "range": true
+        }
+      ],
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom"
+        },
+        "tooltip": {
+          "mode": "multi"
+        }
+      }
+    },
+    {
+      "id": 12,
+      "title": "Observed input / output tokens per second \u00b7 model",
+      "type": "timeseries",
+      "description": "Reported upstream totals only. Missing/estimated usage does not contribute invented tokens. Cached/reasoning subcounts are not added to totals.",
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 22
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "tps",
+          "noValue": "Unavailable"
+        },
+        "overrides": []
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "finite-prometheus"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum(rate(finite_private_limiter_route_input_tokens_total{model=~\"$model\",endpoint=~\"$endpoint\"}[5m]))",
+          "legendFormat": "input",
+          "instant": false,
+          "range": true
+        },
+        {
+          "refId": "B",
+          "expr": "sum(rate(finite_private_limiter_route_output_tokens_total{model=~\"$model\",endpoint=~\"$endpoint\"}[5m]))",
+          "legendFormat": "output",
+          "instant": false,
+          "range": true
+        }
+      ],
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom"
+        },
+        "tooltip": {
+          "mode": "multi"
+        }
+      }
+    },
+    {
+      "id": 13,
+      "title": "Reported input / output tokens in range \u00b7 model",
+      "type": "stat",
+      "description": "Counter extrapolation over the selected range; unknown responses excluded. Diagnostic token sums below use retained completed events.",
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 22
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "noValue": "Unavailable",
+          "color": {
+            "mode": "fixed",
+            "fixedColor": "blue"
+          }
+        },
+        "overrides": []
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "finite-prometheus"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum(increase(finite_private_limiter_route_input_tokens_total{model=~\"$model\",endpoint=~\"$endpoint\"}[$__range]))",
+          "legendFormat": "input",
+          "instant": true,
+          "range": false
+        },
+        {
+          "refId": "B",
+          "expr": "sum(increase(finite_private_limiter_route_output_tokens_total{model=~\"$model\",endpoint=~\"$endpoint\"}[$__range]))",
+          "legendFormat": "output",
+          "instant": true,
+          "range": false
+        }
+      ],
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "orientation": "auto",
+        "textMode": "auto",
+        "colorMode": "value",
+        "graphMode": "none"
+      }
+    },
+    {
+      "id": 14,
+      "title": "First meaningful output delay \u00b7 model",
+      "type": "timeseries",
+      "description": "Streams only, measured from limiter acceptance. Headers, roles, metadata and keepalives do not count. Reasoning and tool payload count as first output; only answer text counts as first answer.",
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 30
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s",
+          "noValue": "Unavailable"
+        },
+        "overrides": []
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "finite-prometheus"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "histogram_quantile(0.5, sum by(le,model)(rate(finite_private_limiter_route_first_output_seconds_bucket{model=~\"$model\",endpoint=~\"$endpoint\"}[5m])))",
+          "legendFormat": "{{model}} p50",
+          "instant": false,
+          "range": true
+        },
+        {
+          "refId": "B",
+          "expr": "histogram_quantile(0.95, sum by(le,model)(rate(finite_private_limiter_route_first_output_seconds_bucket{model=~\"$model\",endpoint=~\"$endpoint\"}[5m])))",
+          "legendFormat": "{{model}} p95",
+          "instant": false,
+          "range": true
+        }
+      ],
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom"
+        },
+        "tooltip": {
+          "mode": "multi"
+        }
+      }
+    },
+    {
+      "id": 15,
+      "title": "First answer-text delay \u00b7 model",
+      "type": "timeseries",
+      "description": "Streams only, measured from limiter acceptance. Headers, roles, metadata and keepalives do not count. Reasoning and tool payload count as first output; only answer text counts as first answer.",
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 30
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s",
+          "noValue": "Unavailable"
+        },
+        "overrides": []
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "finite-prometheus"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "histogram_quantile(0.5, sum by(le,model)(rate(finite_private_limiter_route_first_answer_seconds_bucket{model=~\"$model\",endpoint=~\"$endpoint\"}[5m])))",
+          "legendFormat": "{{model}} p50",
+          "instant": false,
+          "range": true
+        },
+        {
+          "refId": "B",
+          "expr": "histogram_quantile(0.95, sum by(le,model)(rate(finite_private_limiter_route_first_answer_seconds_bucket{model=~\"$model\",endpoint=~\"$endpoint\"}[5m])))",
+          "legendFormat": "{{model}} p95",
+          "instant": false,
+          "range": true
+        }
+      ],
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom"
+        },
+        "tooltip": {
+          "mode": "multi"
+        }
+      }
+    },
+    {
+      "id": 16,
+      "title": "Request / stream duration \u00b7 model",
+      "type": "timeseries",
+      "description": "Limiter acceptance through upstream completion/error or client cancellation. Frozen before accounting retries. Nonstreaming exposes duration only.",
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 38
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s",
+          "noValue": "Unavailable"
+        },
+        "overrides": []
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "finite-prometheus"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "histogram_quantile(0.5, sum by(le,model)(rate(finite_private_limiter_route_request_duration_seconds_bucket{model=~\"$model\",endpoint=~\"$endpoint\"}[5m])))",
+          "legendFormat": "{{model}} p50",
+          "instant": false,
+          "range": true
+        },
+        {
+          "refId": "B",
+          "expr": "histogram_quantile(0.95, sum by(le,model)(rate(finite_private_limiter_route_request_duration_seconds_bucket{model=~\"$model\",endpoint=~\"$endpoint\"}[5m])))",
+          "legendFormat": "{{model}} p95",
+          "instant": false,
+          "range": true
+        }
+      ],
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom"
+        },
+        "tooltip": {
+          "mode": "multi"
+        }
+      }
+    },
+    {
+      "id": 17,
+      "title": "Usage settlement quality \u00b7 all traffic",
+      "type": "timeseries",
+      "description": "Estimate means upstream actual token totals unavailable. Diagnostic persistence is best-effort and bounded; failures never block inference.",
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 38
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "noValue": "Unavailable"
+        },
+        "overrides": []
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "finite-prometheus"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum by(kind)(rate(finite_private_limiter_settlements_total[5m]))",
+          "legendFormat": "{{kind}} / sec",
+          "instant": false,
+          "range": true
+        },
+        {
+          "refId": "B",
+          "expr": "sum(rate(finite_private_limiter_settlement_failures_total[5m]))",
+          "legendFormat": "settlement failed / sec",
+          "instant": false,
+          "range": true
+        },
+        {
+          "refId": "C",
+          "expr": "sum(rate(finite_private_limiter_diagnostic_persistence_failures_total[5m]))",
+          "legendFormat": "diagnostic missing / sec",
+          "instant": false,
+          "range": true
+        }
+      ],
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom"
+        },
+        "tooltip": {
+          "mode": "multi"
+        }
+      }
+    },
+    {
+      "id": 18,
+      "title": "Core-reserved usage \u00b7 attributed filters",
+      "type": "text",
+      "description": "",
+      "gridPos": {
+        "h": 4,
+        "w": 24,
+        "x": 0,
+        "y": 46
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "noValue": "Unavailable"
+        },
+        "overrides": []
+      },
+      "options": {
+        "mode": "markdown",
+        "content": "The following panels apply Model, Project, Agent Runtime and Key filters to **trusted Core associations**. Filters are regular expressions over opaque IDs; `.*` includes all and `shared-unattributed` includes shared/unattributed associations. No Project or key appears in Prometheus labels. Usage here covers retained diagnostic events only; missing diagnostics and refused/degraded requests are excluded. Narrow the time range if queries reach Loki limits."
+      }
+    },
+    {
+      "id": 19,
+      "title": "Input tokens by Project \u00b7 retained events",
+      "type": "bargauge",
+      "description": "Exact sums of known reported totals within retained events. Missing values excluded, not converted to zero. Immutable reservation IDs deduplicate ambiguous exporter retries before totals are grouped.",
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 50
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "noValue": "Unavailable",
+          "color": {
+            "mode": "palette-classic"
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "blue",
+                "value": null
+              }
+            ]
+          },
+          "displayName": "${__field.labels.project}"
+        },
+        "overrides": []
+      },
+      "datasource": {
+        "type": "loki",
+        "uid": "finite-loki"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum by (project) (max_over_time({service=\"finite-private-request-diagnostics\"} | json reservation=\"reservationId\", observed=\"observedAtUnixSeconds\", model=\"model\", endpoint=\"endpoint\", project=\"projectId\", runtime=\"agentRuntimeId\", key=\"apiKeyId\", value=\"promptTokens\" | label_format diagnostic_age=\"{{sub (unixEpoch now) .observed}}\" | diagnostic_age >= 0 | diagnostic_age <= 604800 | drop diagnostic_age | model=~\"$model\" | endpoint=~\"$endpoint\" | project=~\"${project:raw}\" | runtime=~\"${runtime:raw}\" | key=~\"${key:raw}\" | value!=\"\" | unwrap value | __error__=\"\" [$__range]))",
+          "legendFormat": "{{project}}",
+          "queryType": "instant"
+        }
+      ]
+    },
+    {
+      "id": 20,
+      "title": "Output tokens by Project \u00b7 retained events",
+      "type": "bargauge",
+      "description": "Exact sums of known reported totals within retained events. Missing values excluded, not converted to zero. Immutable reservation IDs deduplicate ambiguous exporter retries before totals are grouped.",
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 50
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "noValue": "Unavailable",
+          "color": {
+            "mode": "palette-classic"
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "blue",
+                "value": null
+              }
+            ]
+          },
+          "displayName": "${__field.labels.project}"
+        },
+        "overrides": []
+      },
+      "datasource": {
+        "type": "loki",
+        "uid": "finite-loki"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum by (project) (max_over_time({service=\"finite-private-request-diagnostics\"} | json reservation=\"reservationId\", observed=\"observedAtUnixSeconds\", model=\"model\", endpoint=\"endpoint\", project=\"projectId\", runtime=\"agentRuntimeId\", key=\"apiKeyId\", value=\"completionTokens\" | label_format diagnostic_age=\"{{sub (unixEpoch now) .observed}}\" | diagnostic_age >= 0 | diagnostic_age <= 604800 | drop diagnostic_age | model=~\"$model\" | endpoint=~\"$endpoint\" | project=~\"${project:raw}\" | runtime=~\"${runtime:raw}\" | key=~\"${key:raw}\" | value!=\"\" | unwrap value | __error__=\"\" [$__range]))",
+          "legendFormat": "{{project}}",
+          "queryType": "instant"
+        }
+      ]
+    },
+    {
+      "id": 21,
+      "title": "Input / output tokens by key \u00b7 retained events",
+      "type": "bargauge",
+      "description": " Immutable reservation IDs deduplicate ambiguous exporter retries before totals are grouped. Immutable reservation IDs deduplicate ambiguous exporter retries before totals are grouped.",
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 58
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "noValue": "Unavailable",
+          "color": {
+            "mode": "palette-classic"
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "blue",
+                "value": null
+              }
+            ]
+          },
+          "displayName": "${__field.labels.key}"
+        },
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byFrameRefID",
+              "options": "A"
+            },
+            "properties": [
+              {
+                "id": "displayName",
+                "value": "${__field.labels.key} input"
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byFrameRefID",
+              "options": "B"
+            },
+            "properties": [
+              {
+                "id": "displayName",
+                "value": "${__field.labels.key} output"
+              }
+            ]
+          }
+        ]
+      },
+      "datasource": {
+        "type": "loki",
+        "uid": "finite-loki"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum by (key) (max_over_time({service=\"finite-private-request-diagnostics\"} | json reservation=\"reservationId\", observed=\"observedAtUnixSeconds\", model=\"model\", endpoint=\"endpoint\", project=\"projectId\", runtime=\"agentRuntimeId\", key=\"apiKeyId\", value=\"promptTokens\" | label_format diagnostic_age=\"{{sub (unixEpoch now) .observed}}\" | diagnostic_age >= 0 | diagnostic_age <= 604800 | drop diagnostic_age | model=~\"$model\" | endpoint=~\"$endpoint\" | project=~\"${project:raw}\" | runtime=~\"${runtime:raw}\" | key=~\"${key:raw}\" | value!=\"\" | unwrap value | __error__=\"\" [$__range]))",
+          "legendFormat": "{{key}} input",
+          "queryType": "instant"
+        },
+        {
+          "refId": "B",
+          "expr": "sum by (key) (max_over_time({service=\"finite-private-request-diagnostics\"} | json reservation=\"reservationId\", observed=\"observedAtUnixSeconds\", model=\"model\", endpoint=\"endpoint\", project=\"projectId\", runtime=\"agentRuntimeId\", key=\"apiKeyId\", value=\"completionTokens\" | label_format diagnostic_age=\"{{sub (unixEpoch now) .observed}}\" | diagnostic_age >= 0 | diagnostic_age <= 604800 | drop diagnostic_age | model=~\"$model\" | endpoint=~\"$endpoint\" | project=~\"${project:raw}\" | runtime=~\"${runtime:raw}\" | key=~\"${key:raw}\" | value!=\"\" | unwrap value | __error__=\"\" [$__range]))",
+          "legendFormat": "{{key}} output",
+          "queryType": "instant"
+        }
+      ]
+    },
+    {
+      "id": 22,
+      "title": "Settled Runaway Guard usage units by Project",
+      "type": "bargauge",
+      "description": "Weighted accounting units snapshotted when diagnostic recorded, not tokens or dollars. Unsettled snapshot values are unavailable. Current grant authority below may advance after a diagnostic. Immutable reservation IDs deduplicate ambiguous exporter retries before totals are grouped.",
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 58
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "noValue": "Unavailable",
+          "color": {
+            "mode": "palette-classic"
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "blue",
+                "value": null
+              }
+            ]
+          },
+          "displayName": "${__field.labels.project}"
+        },
+        "overrides": []
+      },
+      "datasource": {
+        "type": "loki",
+        "uid": "finite-loki"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum by (project) (max_over_time({service=\"finite-private-request-diagnostics\"} | json reservation=\"reservationId\", observed=\"observedAtUnixSeconds\", model=\"model\", endpoint=\"endpoint\", project=\"projectId\", runtime=\"agentRuntimeId\", key=\"apiKeyId\", value=\"settledUsageUnits\" | label_format diagnostic_age=\"{{sub (unixEpoch now) .observed}}\" | diagnostic_age >= 0 | diagnostic_age <= 604800 | drop diagnostic_age | model=~\"$model\" | endpoint=~\"$endpoint\" | project=~\"${project:raw}\" | runtime=~\"${runtime:raw}\" | key=~\"${key:raw}\" | value!=\"\" | unwrap value | __error__=\"\" [$__range]))",
+          "legendFormat": "{{project}}",
+          "queryType": "instant"
+        }
+      ]
+    },
+    {
+      "id": 23,
+      "title": "Measurement quality \u00b7 retained requests",
+      "type": "bargauge",
+      "description": "",
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 66
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "noValue": "Unavailable",
+          "color": {
+            "mode": "palette-classic"
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "blue",
+                "value": null
+              }
+            ]
+          },
+          "displayName": "${__field.labels.quality}"
+        },
+        "overrides": []
+      },
+      "datasource": {
+        "type": "loki",
+        "uid": "finite-loki"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum by(quality)(max_over_time({service=\"finite-private-request-diagnostics\"} | json reservation=\"reservationId\", observed=\"observedAtUnixSeconds\", model=\"model\", endpoint=\"endpoint\", project=\"projectId\", runtime=\"agentRuntimeId\", key=\"apiKeyId\", quality=\"measurementQuality\" | label_format diagnostic_age=\"{{sub (unixEpoch now) .observed}}\" | diagnostic_age >= 0 | diagnostic_age <= 604800 | drop diagnostic_age | model=~\"$model\" | endpoint=~\"$endpoint\" | project=~\"${project:raw}\" | runtime=~\"${runtime:raw}\" | key=~\"${key:raw}\" | label_format record=\"1\" | unwrap record | __error__=\"\" [$__range]))",
+          "legendFormat": "{{quality}}",
+          "queryType": "instant"
+        }
+      ]
+    },
+    {
+      "id": 24,
+      "title": "Termination reasons \u00b7 retained requests",
+      "type": "bargauge",
+      "description": "",
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 66
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "noValue": "Unavailable",
+          "color": {
+            "mode": "palette-classic"
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "blue",
+                "value": null
+              }
+            ]
+          },
+          "displayName": "${__field.labels.reason}"
+        },
+        "overrides": []
+      },
+      "datasource": {
+        "type": "loki",
+        "uid": "finite-loki"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum by(reason)(max_over_time({service=\"finite-private-request-diagnostics\"} | json reservation=\"reservationId\", observed=\"observedAtUnixSeconds\", model=\"model\", endpoint=\"endpoint\", project=\"projectId\", runtime=\"agentRuntimeId\", key=\"apiKeyId\", reason=\"terminationReason\" | label_format diagnostic_age=\"{{sub (unixEpoch now) .observed}}\" | diagnostic_age >= 0 | diagnostic_age <= 604800 | drop diagnostic_age | model=~\"$model\" | endpoint=~\"$endpoint\" | project=~\"${project:raw}\" | runtime=~\"${runtime:raw}\" | key=~\"${key:raw}\" | label_format record=\"1\" | unwrap record | __error__=\"\" [$__range]))",
+          "legendFormat": "{{reason}}",
+          "queryType": "instant"
+        }
+      ]
+    },
+    {
+      "id": 25,
+      "title": "Request details \u00b7 Core-reserved only \u00b7 last 7 days",
+      "type": "text",
+      "description": "",
+      "gridPos": {
+        "h": 4,
+        "w": 24,
+        "x": 0,
+        "y": 74
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "noValue": "Unavailable"
+        },
+        "overrides": []
+      },
+      "options": {
+        "mode": "markdown",
+        "content": "The metadata table shows at most **1,000 newest matching records**, with table pagination. Narrow the time range / filters to inspect more; the operator Core endpoint also provides a stable timestamp+reservation cursor for complete traversal. Refused/degraded arrivals have no rows. Null means unavailable. **Per-request decode speed is unavailable:** upstream final token counts and SSE chunk boundaries do not establish exact engine generation bounds. Use observed output tokens per wall-clock second above. Requested aliases resolve to the recorded routed model; served-model identity is unavailable when upstream does not establish it."
+      }
+    },
+    {
+      "id": 26,
+      "title": "Request metadata \u00b7 newest 1,000 matches; narrow range for more",
+      "type": "table",
+      "description": "",
+      "gridPos": {
+        "h": 12,
+        "w": 24,
+        "x": 0,
+        "y": 78
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "noValue": "Unavailable",
+          "custom": {
+            "width": 135
+          }
+        },
+        "overrides": []
+      },
+      "datasource": {
+        "type": "loki",
+        "uid": "finite-loki"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "{service=\"finite-private-request-diagnostics\"} | json reservation=\"reservationId\", observed=\"observedAtUnixSeconds\", model=\"model\", endpoint=\"endpoint\", project=\"projectId\", runtime=\"agentRuntimeId\", key=\"apiKeyId\" | label_format diagnostic_age=\"{{sub (unixEpoch now) .observed}}\" | diagnostic_age >= 0 | diagnostic_age <= 604800 | drop diagnostic_age | model=~\"$model\" | endpoint=~\"$endpoint\" | project=~\"${project:raw}\" | runtime=~\"${runtime:raw}\" | key=~\"${key:raw}\"",
+          "legendFormat": "",
+          "queryType": "range",
+          "maxLines": 1000,
+          "direction": "backward"
+        }
+      ],
+      "options": {
+        "showHeader": true,
+        "cellHeight": "sm",
+        "footer": {
+          "show": false
+        },
+        "enablePagination": true
+      },
+      "transformations": [
+        {
+          "id": "extractFields",
+          "options": {
+            "source": "Line",
+            "format": "json",
+            "replace": true,
+            "keepTime": false
+          }
+        },
+        {
+          "id": "organize",
+          "options": {
+            "excludeByName": {
+              "version": true,
+              "observedAtUnixSeconds": true
+            },
+            "renameByName": {
+              "observedAt": "Observed time",
+              "projectId": "Project",
+              "agentRuntimeId": "Agent Runtime",
+              "apiKeyId": "Key ID",
+              "requestId": "Request ID",
+              "promptTokens": "Input tokens",
+              "completionTokens": "Output tokens",
+              "firstOutputMs": "First output (ms)",
+              "firstAnswerMs": "First answer (ms)",
+              "durationMs": "Duration (ms)",
+              "measurementQuality": "Quality",
+              "terminationReason": "Termination",
+              "settledUsageUnits": "Settled guard units",
+              "accountingStatus": "Accounting snapshot",
+              "model": "Model",
+              "endpoint": "Endpoint",
+              "grantId": "Grant ID",
+              "reservationId": "Reservation ID",
+              "settlementKind": "Settlement",
+              "upstreamStatus": "Upstream HTTP",
+              "upstreamErrorClass": "Upstream error"
+            },
+            "indexByName": {
+              "observedAt": 0,
+              "requestId": 1,
+              "model": 2,
+              "endpoint": 3,
+              "apiKeyId": 4,
+              "projectId": 5,
+              "terminationReason": 6,
+              "promptTokens": 7,
+              "completionTokens": 8,
+              "firstOutputMs": 9,
+              "firstAnswerMs": 10,
+              "durationMs": 11,
+              "measurementQuality": 12,
+              "agentRuntimeId": 13,
+              "accountingStatus": 14,
+              "settlementKind": 15,
+              "settledUsageUnits": 16,
+              "upstreamStatus": 17,
+              "upstreamErrorClass": 18,
+              "grantId": 19,
+              "reservationId": 20
+            }
+          }
+        }
+      ]
+    },
+    {
+      "id": 27,
+      "title": "Current Runaway Guard state \u00b7 all active grants",
+      "type": "text",
+      "description": "",
+      "gridPos": {
+        "h": 4,
+        "w": 24,
+        "x": 0,
+        "y": 90
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "noValue": "Unavailable"
+        },
+        "overrides": []
+      },
+      "options": {
+        "mode": "markdown",
+        "content": "Latest successfully collected snapshot per grant; **Project/runtime/key/model filters do not apply** because guard limits belong to the grant. Burst usage includes reservations, with expired windows shown as zero and no active reset. Weekly usage is a rolling 7\u00d724-hour accounting window when enabled; next expiry is the oldest included reservation aging out, not a calendar reset. Aging reservations are older than 15 minutes and are not a live-request count. This observer never settles or repairs them. Up to 1,000 active grants are collected; a zero guard-completeness indicator means a partial snapshot."
+      }
+    },
+    {
+      "id": 28,
+      "title": "Latest guard snapshots \u00b7 last minute; stale rows disappear",
+      "type": "table",
+      "description": "",
+      "gridPos": {
+        "h": 10,
+        "w": 24,
+        "x": 0,
+        "y": 94
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "noValue": "Unavailable"
+        },
+        "overrides": []
+      },
+      "datasource": {
+        "type": "loki",
+        "uid": "finite-loki"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "{service=\"finite-private-guard-status\"} | json observed=\"observedAtUnixSeconds\" | label_format diagnostic_age=\"{{sub (unixEpoch now) .observed}}\" | diagnostic_age >= 0 | diagnostic_age <= 60 | drop diagnostic_age",
+          "legendFormat": "",
+          "queryType": "range",
+          "maxLines": 5000,
+          "direction": "backward"
+        }
+      ],
+      "timeFrom": "1m",
+      "options": {
+        "showHeader": true,
+        "enablePagination": true,
+        "cellHeight": "sm"
+      },
+      "transformations": [
+        {
+          "id": "extractFields",
+          "options": {
+            "source": "Line",
+            "format": "json",
+            "replace": true,
+            "keepTime": false
+          }
+        },
+        {
+          "id": "sortBy",
+          "options": {
+            "sort": [
+              {
+                "field": "observedAt",
+                "desc": false
+              }
+            ]
+          }
+        },
+        {
+          "id": "groupBy",
+          "options": {
+            "fields": {
+              "grantId": {
+                "operation": "groupby",
+                "aggregations": []
+              },
+              "observedAt": {
+                "operation": "aggregate",
+                "aggregations": [
+                  "last"
+                ]
+              },
+              "burstLimitUnits": {
+                "operation": "aggregate",
+                "aggregations": [
+                  "last"
+                ]
+              },
+              "burstUsedUnits": {
+                "operation": "aggregate",
+                "aggregations": [
+                  "last"
+                ]
+              },
+              "burstResetAt": {
+                "operation": "aggregate",
+                "aggregations": [
+                  "last"
+                ]
+              },
+              "weeklyLimitUnits": {
+                "operation": "aggregate",
+                "aggregations": [
+                  "last"
+                ]
+              },
+              "rollingWeekUsedUnits": {
+                "operation": "aggregate",
+                "aggregations": [
+                  "last"
+                ]
+              },
+              "rollingWeekNextExpiryAt": {
+                "operation": "aggregate",
+                "aggregations": [
+                  "last"
+                ]
+              },
+              "agingReservations": {
+                "operation": "aggregate",
+                "aggregations": [
+                  "last"
+                ]
+              },
+              "oldestReservationAt": {
+                "operation": "aggregate",
+                "aggregations": [
+                  "last"
+                ]
+              }
+            }
+          }
+        },
+        {
+          "id": "organize",
+          "options": {
+            "renameByName": {
+              "grantId": "Grant ID",
+              "observedAt (last)": "Observed time",
+              "burstLimitUnits (last)": "Burst limit (units)",
+              "burstUsedUnits (last)": "Burst used (units)",
+              "burstResetAt (last)": "Active burst reset (UTC)",
+              "weeklyLimitUnits (last)": "Rolling-week limit (units)",
+              "rollingWeekUsedUnits (last)": "Rolling-week used (units)",
+              "rollingWeekNextExpiryAt (last)": "Next weekly expiry (UTC)",
+              "agingReservations (last)": "Reservations >15 min",
+              "oldestReservationAt (last)": "Oldest reservation (UTC)"
+            },
+            "indexByName": {
+              "grantId": 0,
+              "observedAt (last)": 1,
+              "burstLimitUnits (last)": 2,
+              "burstUsedUnits (last)": 3,
+              "burstResetAt (last)": 4,
+              "weeklyLimitUnits (last)": 5,
+              "rollingWeekUsedUnits (last)": 6,
+              "rollingWeekNextExpiryAt (last)": 7,
+              "agingReservations (last)": 8,
+              "oldestReservationAt (last)": 9
+            }
+          }
+        }
+      ]
+    },
+    {
+      "id": 29,
+      "title": "Reporting health \u00b7 current",
+      "type": "stat",
+      "description": "0 or unavailable means reporting is incomplete. A missing exporter process becomes stale even if its previous run succeeded.",
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 104
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "noValue": "Unavailable",
+          "color": {
+            "mode": "fixed",
+            "fixedColor": "blue"
+          }
+        },
+        "overrides": []
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "finite-prometheus"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "finite_private_request_diagnostics_exporter_query_success",
+          "legendFormat": "export succeeded",
+          "instant": true,
+          "range": false
+        },
+        {
+          "refId": "B",
+          "expr": "finite_private_request_diagnostics_guard_snapshot_complete",
+          "legendFormat": "guard snapshot complete",
+          "instant": true,
+          "range": false
+        }
+      ],
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "orientation": "auto",
+        "textMode": "auto",
+        "colorMode": "value",
+        "graphMode": "none"
+      }
+    },
+    {
+      "id": 30,
+      "title": "Unexported backlog and oldest age",
+      "type": "timeseries",
+      "description": "-1 means the failed run could not establish backlog. Events are retried until retained expiry; monitoring never changes accounting.",
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 104
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "noValue": "Unavailable"
+        },
+        "overrides": []
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "finite-prometheus"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "finite_private_request_diagnostics_pending_requests",
+          "legendFormat": "pending requests",
+          "instant": false,
+          "range": true
+        },
+        {
+          "refId": "B",
+          "expr": "finite_private_request_diagnostics_oldest_pending_age_seconds",
+          "legendFormat": "oldest pending seconds",
+          "instant": false,
+          "range": true
+        }
+      ],
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom"
+        },
+        "tooltip": {
+          "mode": "multi"
+        }
+      }
+    },
+    {
+      "id": 31,
+      "title": "Exporter failures",
+      "type": "timeseries",
+      "description": "",
+      "gridPos": {
+        "h": 5,
+        "w": 24,
+        "x": 0,
+        "y": 112
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "noValue": "Unavailable"
+        },
+        "overrides": []
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "finite-prometheus"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "increase(finite_private_request_diagnostics_export_failures_total[$__rate_interval])",
+          "legendFormat": "failed runs",
+          "instant": false,
+          "range": true
+        }
+      ],
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom"
+        },
+        "tooltip": {
+          "mode": "multi"
+        }
+      }
+    }
+  ],
+  "annotations": {
+    "list": []
+  },
+  "links": []
+}

@@ -39,6 +39,10 @@ schema_config:
 limits_config:
   allow_structured_metadata: false
   retention_period: 336h
+  retention_stream:
+    - selector: '{service=~"finite-private-request-diagnostics|finite-private-guard-status"}'
+      priority: 100
+      period: 168h
 
 compactor:
   working_directory: /var/lib/finite-monitoring/loki/compactor

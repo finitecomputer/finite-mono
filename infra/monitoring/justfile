@@ -19,3 +19,9 @@ monitoring-nixos-contract:
     cd ../.. && bash -n infra/monitoring/tinfoil/tinfoil-usage-collector
     cd ../.. && python3 -m unittest discover -s infra/monitoring/tests -p 'test_tinfoil_collector.py'
     cd ../.. && nix shell --inputs-from . nixpkgs#prometheus.cli --command python3 infra/monitoring/tests/test_tinfoil_promql.py
+
+    cd ../.. && python3 -m unittest discover -s infra/monitoring/tests -p 'test_private_request*.py'
+
+# Opt-in synthetic replay/backup/retention proof; Loki must be disposable loopback.
+private-request-integration loki_url:
+    cd ../.. && cargo run --quiet --locked -p devfinity -- run -- python3 infra/monitoring/tests/private_request_integration.py --loki-url {{quote(loki_url)}}

@@ -18,16 +18,18 @@ use crate::{
     CompleteRuntimeControlRequestInput, CoreError, CustomerBillingAccount,
     FailAgentCreationRequestInput, FailRuntimeControlRequestInput, FinitePrivateAdminAuditEvent,
     FinitePrivateAdminState, FinitePrivateApiKey, FinitePrivateDailyResetResult,
-    FinitePrivateGrant, FinitePrivateSettlementKind, FinitePrivateUsageDecision,
+    FinitePrivateGrant, FinitePrivateRequestDiagnostic, FinitePrivateRequestDiagnosticPage,
+    FinitePrivateRequestDiagnosticQuery, FinitePrivateSettlementKind, FinitePrivateUsageDecision,
     FinitePrivateUsageStatus, HostingTier, IssueFinitePrivateApiKeyInput,
     LeaseAgentCreationRequestInput, LeaseRuntimeControlRequestInput, LinkStripeCustomerInput,
     LinkStripeCustomerRequest, LinkVerifiedUserInput, Project, ProviderOperationEnvelope,
     ProviderOperationTransition, ProviderRuntimeHandleEnvelope,
     ProvisionFinitePrivateRuntimeKeyInput, ProvisionFinitePrivateRuntimeKeyResult,
-    RecordProviderOperationTransitionInput, RecordRuntimeHealthReportInput,
-    RegisterAgentCreationRuntimeInput, RenewRuntimeControlRequestInput, RequestAgentCreationInput,
-    RequestAgentCreationResult, RequestRuntimeRecoverKnownGoodChatInput,
-    RequestRuntimeRestartInput, ReserveFinitePrivateUsageInput, ResetFinitePrivateUsageWindowInput,
+    RecordFinitePrivateRequestDiagnosticInput, RecordProviderOperationTransitionInput,
+    RecordRuntimeHealthReportInput, RegisterAgentCreationRuntimeInput,
+    RenewRuntimeControlRequestInput, RequestAgentCreationInput, RequestAgentCreationResult,
+    RequestRuntimeRecoverKnownGoodChatInput, RequestRuntimeRestartInput,
+    ReserveFinitePrivateUsageInput, ResetFinitePrivateUsageWindowInput,
     RetryRuntimeControlRequestInput, RevokeFinitePrivateApiKeyInput, RevokeFinitePrivateGrantInput,
     RotateFinitePrivateApiKeyInput, RunnerLeaseCapacity, RuntimeArtifact, RuntimeArtifactKind,
     RuntimeCapabilitiesEnvelope, RuntimeCapabilitiesV1, RuntimeHealthProjection,
@@ -38,7 +40,7 @@ use crate::{
     derive_runtime_summary_status, normalize_owner_email, normalize_runtime_contact_endpoint,
     normalize_source_host_id,
 };
-use axum::extract::{Path, State};
+use axum::extract::{Path, Query, State};
 use axum::http::{HeaderMap, HeaderValue, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
@@ -273,6 +275,10 @@ fn router_from_state(state: CoreApiState) -> Router {
             get(finite_private_admin_state),
         )
         .route(
+            "/api/core/v1/finite-private/admin-request-details",
+            get(finite_private_admin_request_details),
+        )
+        .route(
             "/api/core/v1/finite-private/usage",
             get(finite_private_usage_status_for_api_key),
         )
@@ -291,6 +297,14 @@ fn router_from_state(state: CoreApiState) -> Router {
         .route(
             "/internal/finite-private/v1/reservations/{reservation_id}/settle",
             post(settle_finite_private_reservation),
+        )
+        .route(
+            "/internal/finite-private/v1/request-diagnostics",
+            post(record_finite_private_request_diagnostic),
+        )
+        .route(
+            "/internal/finite-private/v1/request-diagnostics/prune",
+            post(prune_finite_private_request_diagnostics),
         )
         .route("/api/core/v1/admin/runtimes", get(admin_runtimes))
         .route(

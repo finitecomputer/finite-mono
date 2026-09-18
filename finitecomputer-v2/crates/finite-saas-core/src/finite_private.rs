@@ -158,6 +158,72 @@ pub struct FinitePrivateReservation {
     pub updated_at: String,
 }
 
+/// Bounded operator reporting filters and stable descending cursor.
+#[derive(Debug, Default, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FinitePrivateRequestDiagnosticQuery {
+    pub limit: Option<i64>,
+    pub before_observed_at: Option<String>,
+    pub before_reservation_id: Option<String>,
+    pub model: Option<String>,
+    pub api_key_id: Option<String>,
+    pub project_id: Option<String>,
+    pub agent_runtime_id: Option<String>,
+}
+
+/// Operator-only diagnostic metadata for one Core-reserved inference request.
+/// This excludes credentials, request/response content, and arbitrary headers.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct FinitePrivateRequestDiagnostic {
+    pub reservation_id: String,
+    pub request_id: String,
+    pub api_key_id: String,
+    pub grant_id: String,
+    pub project_id: Option<String>,
+    pub agent_runtime_id: Option<String>,
+    pub endpoint: String,
+    pub model: String,
+    pub prompt_tokens: Option<i64>,
+    pub completion_tokens: Option<i64>,
+    pub first_output_ms: Option<i64>,
+    pub first_answer_ms: Option<i64>,
+    pub duration_ms: Option<i64>,
+    pub termination_reason: String,
+    pub measurement_quality: String,
+    pub observed_at: String,
+    pub accounting_status: FinitePrivateReservationStatus,
+    pub settlement_kind: Option<FinitePrivateSettlementKind>,
+    pub upstream_status: Option<i32>,
+    pub upstream_error_class: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct FinitePrivateRequestDiagnosticPage {
+    pub items: Vec<FinitePrivateRequestDiagnostic>,
+    pub next_before_observed_at: Option<String>,
+    pub next_before_reservation_id: Option<String>,
+    pub truncated: bool,
+    pub retention_days: i64,
+    pub coverage: &'static str,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct RecordFinitePrivateRequestDiagnosticInput {
+    pub reservation_id: String,
+    pub request_id: String,
+    pub prompt_tokens: Option<i64>,
+    pub completion_tokens: Option<i64>,
+    pub first_output_ms: Option<i64>,
+    pub first_answer_ms: Option<i64>,
+    pub duration_ms: Option<i64>,
+    pub termination_reason: String,
+    pub measurement_quality: String,
+    pub observed_at: Option<String>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct FinitePrivateUsageDecision {
     pub decision: String,
