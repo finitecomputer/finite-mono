@@ -1,5 +1,5 @@
 # Local, bounded reporting observer. Never starts/restarts Core or inference.
-{ pkgs, ... }:
+{ lib, pkgs, ... }:
 let
   psql = "${pkgs.postgresql}/bin/psql --no-psqlrc --quiet --set=ON_ERROR_STOP=1 --dbname=finite_core";
 
