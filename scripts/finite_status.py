@@ -858,6 +858,26 @@ def collect_host_health(hostname: str) -> dict[str, Any]:
 
     namespace = CONTRACT["runner"]["namespace"]
     raw["containers"] = {}
+    raw["container_image_references"] = {}
+    # Include stopped containers: their images may still be needed for restart.
+    image_commands = {}
+    if "app" in raw["roles"]:
+        image_commands["podman"] = ["podman", "ps", "--all", "--format", "{{.Image}}"]
+    if "runner" in raw["roles"]:
+        image_commands["kata"] = [
+            "nerdctl", "--namespace", namespace, "ps", "--all", "--format", "{{.Image}}",
+        ]
+    for engine, command in image_commands.items():
+        try:
+            result = run_read_only(command)
+            if result.returncode:
+                raise CollectionError(f"{engine} image inventory exited {result.returncode}")
+            raw["container_image_references"][engine] = {
+                "references": sorted(set(result.stdout.split())),
+                "evidence": "container engine recorded references; tags are not resolved digests",
+            }
+        except CollectionError as error:
+            raw["container_image_references"][engine] = {"error": str(error)}
     container_commands = {
         "podman_running": ["podman", "ps", "--quiet"],
         "podman_total": ["podman", "ps", "--all", "--quiet"],
@@ -1791,11 +1811,27 @@ def build_fleet(
         "status_basis": "active-link artifact convergence only",
         "target_artifact": {
             "id": target["id"],
+            "reference": target.get("reference"),
             "version_label": target_version,
             "promoted_at": target["promoted_at"],
             "retired_at": target.get("retired_at") or None,
         },
         "recorded_distribution": distribution,
+        # Retired artifacts and inactive Runtime rows may still need their bytes
+        # for recovery. This is Core-recorded state, not live-engine evidence.
+        "artifact_inventory": [
+            {
+                "id": artifact["id"],
+                "reference": artifact.get("reference"),
+                "version_label": artifact["version_label"],
+                "retired_at": artifact.get("retired_at") or None,
+                "recorded_runtime_count": sum(
+                    row.get("runtime_artifact_id") == artifact["id"]
+                    for row in core.get("runtimes", [])
+                ),
+            }
+            for artifact in artifacts
+        ],
         "distribution_consistent_with_detail_snapshot": distribution_consistent,
         "hosts": host_reports,
         "canary_host_reservations": [
@@ -2080,6 +2116,7 @@ def build_host_health(
                               ("FC_RUNNER_MAX_SANDBOXES", "FC_RUNNER_KATA_CPUS", "FC_RUNNER_KATA_MEMORY")},
         },
         "containers": containers,
+        "container_image_references": raw.get("container_image_references", {}),
         "runner": runner,
         "collection_errors": raw.get("errors", []),
     }

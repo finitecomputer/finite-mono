@@ -8,10 +8,12 @@ in both PR CI and the deployment workflow.
 
 Merges to `main` touching `infra/monitoring/` or the deployment workflow queue
 `.github/workflows/monitoring-dashboards.yml`. It validates the merged revision,
-then waits for the existing `production` environment reviewer approval. After
-approval it deploys without a separate shell command or Grafana restart.
+then deploys automatically without a separate approval, shell command, or
+Grafana restart. The `production` environment retains its secrets and branch
+restrictions but has no required reviewers; this also works with private
+repositories on GitHub Team.
 Manual dispatch on `main` retries this workflow; other branches do not run.
-The environment permits `main` and `production`, with its existing reviewers.
+The environment permits `main` and `production`.
 
 ## Restricted CI access
 
@@ -60,7 +62,7 @@ secret API/UI; never commit it or print it. Obtain host pins through existing
 strictly verified SSH connections or an independent trusted channel. Each run
 fails before dashboard mutation if host trust, key access, helper version, or
 status collection is invalid. The restricted key should be tested against both
-hosts before approving the first Actions deployment.
+hosts before enabling the first Actions deployment.
 
 Re-run the installer with the existing public key after reviewed changes to
 `deploy_dashboards.py`, `ci_dispatch`, or the installed status implementation.
@@ -72,7 +74,7 @@ if rolling back an installation; do not overwrite unrelated newer operator keys.
 ## Dashboard transaction
 
 The source must be a clean merged revision. If newer monitoring/workflow changes
-exist on `main`, an old run fails rather than overwriting them. Approve the newer
+exist on `main`, an old run fails rather than overwriting them. Use the newer
 run or dispatch current main. Actions never cancels an in-progress deployment;
 a host lock serializes the dashboard transaction, helper installation, and the
 existing full-stack deployment script.
@@ -99,10 +101,10 @@ useful query results; review live query behavior separately.
 
 The workflow records the installed canonical `scripts/finite-status` before and
 after deployment on the app-plane host, retaining only overall/section status
-summaries as Actions artifacts for 14 days. This repository is public: full
-reports with agent names, project IDs, addresses, and diagnostic details are
-never uploaded. Existing red/unknown platform state is recorded and does not prevent
-a dashboard repair. Transport and invalid-report failures fail the step.
+summaries as Actions artifacts for 14 days. Regardless of repository visibility,
+full reports with agent names, project IDs, addresses, and diagnostic details
+are never uploaded. Existing red/unknown platform state is recorded and does
+not prevent a dashboard repair. Transport and invalid-report failures fail the step.
 
 ## Rollback
 
@@ -112,7 +114,7 @@ the backup boundary. Runner/SSH loss or process termination may require operator
 recovery from the named backup. Backups have no automatic retention deletion.
 
 For a successful deploy whose queries later prove incorrect, revert the JSON
-change in Git, merge the revert, and approve its new deployment. Retrying an old
+change in Git and merge the revert to trigger its deployment. Retrying an old
 workflow is not rollback: the stale-revision guard rejects it.
 
 An explicitly authorized manual deployment uses the same helper and records
@@ -132,8 +134,9 @@ under the same lock. Use dashboard-only deployment for routine panel/query edits
 
 The Tinfoil dashboard is in the production manifest, but the normal workflow
 still requires its file and UID to exist. Merge the telemetry PR first, then
-this provisioning PR. Approve the queued dashboard workflow only after the
-operator bootstrap below succeeds. Use a clean checkout of current `main`.
+this provisioning PR. The dashboard workflow fails closed until the operator
+bootstrap below succeeds; then dispatch the workflow on current `main`.
+Use a clean checkout of current `main`.
 This is a monitoring-only rollout; the enclave, model, limiter, chat services,
 and persistent user data are not changed. Alert delivery is deferred from
 this basic-metrics MVP (scope and live acceptance remain in
