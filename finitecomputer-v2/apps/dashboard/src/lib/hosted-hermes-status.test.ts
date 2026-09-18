@@ -70,7 +70,7 @@ test("read rejects arbitrary URLs and oversized native responses", async (t)=>{
     calls++;
     return calls===1?Response.json({baseUrl:"https://agents.test/runtimes/a/",accessToken:"synthetic",expiresAt:Math.floor(Date.now()/1000)+60}):new Response("x".repeat(1024*1024+1));
   });
-  for(const path of ["https://other.test/api/auth/me","//other.test/","api/../auth/me","api/auth/me?x=1"]) await assert.rejects(readHostedHermesJson("a",path,new AbortController().signal),/Invalid agent API path/);
+  for(const path of ["https://other.test/api/auth/me","//other.test/","api/../auth/me","api/auth/me?x=1","api/skills?inventory=true&profile=other","api/skills?inventory=false"]) await assert.rejects(readHostedHermesJson("a",path,new AbortController().signal),/Invalid agent API path/);
   assert.equal(calls,0);
   await assert.rejects(readHostedHermesJson("a","api/auth/me",new AbortController().signal),/too large/);
 });

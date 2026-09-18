@@ -4,10 +4,10 @@
 { ... }:
 {
   virtualisation.oci-containers.containers.finite-saas-dashboard = {
-    # Sites publishing requester uses the verified Hosted Device binding.
-    # Source 3510e6780287e124e892371800e88ecb05ae21e2.
-    # https://github.com/finitecomputer/finite-mono/actions/runs/35251810948
-    image = "ghcr.io/finitecomputer/finite-saas-dashboard@sha256:341d735caaed58ff5a6c722201db4f32f2e93566d9b5baa5927e25c45d343c05";
+    # Agent Skills inventory preserves the reviewed Skyler dashboard design.
+    # Source 26a8db8b790561042fe713b4abe079eeac6e48d3.
+    # https://github.com/finitecomputer/finite-mono/actions/runs/35350878190
+    image = "ghcr.io/finitecomputer/finite-saas-dashboard@sha256:d68df4da56045dcb202a34ef328c6f1679ad3765fc4cc3526878fbf12ea52248";
 
     # Host networking: the dashboard must reach core on the HOST loopback
     # (127.0.0.1:4200) and itself bind 127.0.0.1:3000 (HOSTNAME below). With

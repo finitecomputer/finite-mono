@@ -453,7 +453,9 @@ REMOTE
       | . as $entry
       | [.mounts[]? | select(.Destination == "/data")] as $data_mounts
       | ($data_mounts[0].Source // "") as $root
-      | ([(.ports // {}) | to_entries[]?.value[]? | select(.HostPort != null) | .HostPort] | unique) as $ports
+      # RuntimeSpec publishes the runtime service (/contact) on 8080/tcp.
+      # Hermes publishes a separate port; never use it as the identity endpoint.
+      | ([(.ports // {})["8080/tcp"][]? | select(.HostPort != null) | .HostPort] | unique) as $ports
       | ([$topology[] | select(.source_machine_id == $entry.source_machine_id)] | length) as $source_owners
       | ([$topology[] | select(any(.mounts[]?; .Source == $root))] | length) as $durable_owners
       | if (.state | type) != "string" or (.state | length) == 0 then error("canonical state is missing")
@@ -467,7 +469,7 @@ REMOTE
           then error("durable /data bind is not exact")
         elif $source_owners != 1 or $durable_owners != 1 then error("ambiguous container topology")
         elif .state == "running" and (($ports | length) != 1 or ($ports[0] | test("^[0-9]{1,5}$") | not))
-          then error("expected exactly one published host port")
+          then error("expected exactly one published runtime service host port (8080/tcp)")
         else {
           project_id, agent_runtime_id, source_machine_id, current_artifact_id, image,
           state_schema_version, state, data_source: $root,
