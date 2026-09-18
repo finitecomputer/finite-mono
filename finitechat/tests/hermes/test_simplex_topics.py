@@ -406,6 +406,75 @@ class TopicTests(unittest.IsolatedAsyncioTestCase):
 
 
 class DiscoveryTests(unittest.TestCase):
+    def test_rediscovered_tool_uses_connected_gateway_adapter(self):
+        script = r"""
+import asyncio, json, os, shutil, tempfile
+from pathlib import Path
+from unittest.mock import AsyncMock, patch
+with tempfile.TemporaryDirectory() as home:
+    os.environ["HERMES_HOME"] = home
+    os.environ["FINITECHAT_HOME"] = home + "/agent"
+    Path(home, "config.yaml").write_text("plugins:\n  enabled: [finitechat]\n")
+    shutil.copytree(os.environ["TEST_PLUGIN"], Path(home, "plugins/finitechat"))
+    from hermes_cli.plugins import get_plugin_manager
+    from gateway.config import GatewayConfig, Platform, PlatformConfig
+    from gateway.pairing import PairingStore
+    from gateway.platform_registry import platform_registry
+    from gateway.run import GatewayRunner
+    from tools.registry import registry
+    manager = get_plugin_manager()
+    manager.discover_and_load()
+    runner = GatewayRunner(config=GatewayConfig())
+    pairing = PairingStore()
+    code = pairing.generate_code("simplex", "3", "Owner")
+    assert code is not None
+    pairing.approve_code("simplex", code)
+    async def check():
+        entry = platform_registry.get("simplex")
+        adapter = entry.adapter_factory(PlatformConfig(enabled=True, extra={"finite_managed": True}))
+        # Keep real plugin discovery, gateway ownership, connect lifecycle and
+        # tool dispatch. Only the external daemon and group operation are fake.
+        upstream = type(adapter).__mro__[2]
+        with patch.object(upstream, "connect", new=AsyncMock(return_value=True)):
+            await adapter.connect()
+        runner.adapters[Platform("simplex")] = adapter
+        adapter.create_topic = AsyncMock(return_value={"status": "invited", "group_id": "7"})
+        manager.discover_and_load(force=True)
+        tool = registry.get_entry("simplex_create_topic")
+        # A newly constructed, unconnected adapter must not replace the live
+        # gateway connection either (e.g. a replacement being prepared).
+        platform_registry.get("simplex").adapter_factory(
+            PlatformConfig(enabled=True, extra={"finite_managed": True})
+        )
+        context = {"HERMES_SESSION_PLATFORM": "simplex", "HERMES_SESSION_CHAT_TYPE": "dm",
+                   "HERMES_SESSION_USER_ID": "3", "HERMES_SESSION_CHAT_ID": "3"}
+        async def invoke():
+            return json.loads(await asyncio.to_thread(tool.handler, {"topic": "Release Canary"}))
+        with patch.dict(os.environ, context):
+            assert (await invoke())["status"] == "invited"
+            adapter.create_topic.assert_awaited_once_with("Release Canary", "3", replace_blocked=False)
+            # Never borrow the default gateway's connection for another home.
+            with patch.object(adapter, "topic_home", Path(home) / "another-profile"):
+                assert "error" in await invoke()
+            with patch.dict(os.environ, {"HERMES_SESSION_USER_ID": "4"}):
+                assert "error" in await invoke()
+            with patch.object(upstream, "disconnect", new=AsyncMock()):
+                await adapter.disconnect()
+            assert "error" in await invoke()
+            runner.adapters.clear()
+            assert "error" in await invoke()
+            adapter.create_topic.assert_awaited_once()
+    asyncio.run(check())
+"""
+        env = dict(os.environ, TEST_PLUGIN=str(PLUGIN))
+        env.setdefault(
+            "HERMES_BUNDLED_PLUGINS", str(Path(hermes_cli.__file__).parents[1] / "plugins")
+        )
+        result = subprocess.run(
+            [sys.executable, "-c", script], env=env, capture_output=True, text=True, timeout=30
+        )
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
     def test_real_plugin_discovery_tool_visibility_and_unmanaged_dm_compatibility(self):
         script = r"""
 import os, shutil, tempfile
