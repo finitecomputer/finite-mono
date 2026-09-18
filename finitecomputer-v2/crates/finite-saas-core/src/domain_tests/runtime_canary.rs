@@ -84,15 +84,16 @@ async fn finish_control(
         runtime_spec_v1(lease.runtime_spec.as_ref().unwrap()).runtime_artifact_id,
         artifact_id
     );
+    let is_upgrade = request.kind == RuntimeControlKind::Upgrade;
     db.complete_runtime_control_request(CompleteRuntimeControlRequestInput {
         request_id: request.id,
         runner_id: "canary-runner".into(),
         lease_token: "canary-lease".into(),
-        runtime_artifact_id: Some(artifact_id.into()),
-        state_schema_version: Some("db-v1".into()),
-        runtime_capabilities: Some(kata_runtime_capabilities()),
-        runtime_host: Some("http://127.0.0.1:41002".into()),
-        published_app_urls: Some(vec!["http://127.0.0.1:41002/contact".into()]),
+        runtime_artifact_id: is_upgrade.then(|| artifact_id.into()),
+        state_schema_version: is_upgrade.then(|| "db-v1".into()),
+        runtime_capabilities: is_upgrade.then(kata_runtime_capabilities),
+        runtime_host: is_upgrade.then(|| "http://127.0.0.1:41002".into()),
+        published_app_urls: is_upgrade.then(|| vec!["http://127.0.0.1:41002/contact".into()]),
         retirement_snapshot: None,
         now: None,
     })
@@ -242,7 +243,7 @@ async fn scoped_canary_rejects_provisional_launch_without_blocking_failure_or_ca
                     display_name: name.into(),
                     launch_code: issue_test_launch_code(&db).await,
                     idempotency_key: name.into(),
-                    now: None,
+                    now: Some(LATER.to_string()),
                 })
                 .await
                 .unwrap();
@@ -253,7 +254,7 @@ async fn scoped_canary_rejects_provisional_launch_without_blocking_failure_or_ca
                     lease_token: "lease".into(),
                     lease_seconds: Some(300),
                     runner_capacity: None,
-                    now: None,
+                    now: Some(LATER.to_string()),
                 })
                 .await
                 .unwrap()
@@ -277,7 +278,7 @@ async fn scoped_canary_rejects_provisional_launch_without_blocking_failure_or_ca
                     active_inference_profile: None,
                     hermes_available: None,
                     published_app_urls: vec![],
-                    now: None,
+                    now: Some(LATER.to_string()),
                 })
                 .await
                 .unwrap();
@@ -289,7 +290,7 @@ async fn scoped_canary_rejects_provisional_launch_without_blocking_failure_or_ca
             let cleaned = if cancel {
                 db.cancel_agent_creation_request(CancelAgentCreationRequestInput {
                     request_id: requested.request.id,
-                    now: None,
+                    now: Some(LATER.to_string()),
                 })
                 .await
                 .unwrap()
@@ -300,7 +301,7 @@ async fn scoped_canary_rejects_provisional_launch_without_blocking_failure_or_ca
                     lease_token: "lease".into(),
                     failure_message: "initial launch failed".into(),
                     provisioned_finite_private_api_key_id: None,
-                    now: None,
+                    now: Some(LATER.to_string()),
                 })
                 .await
                 .unwrap()
