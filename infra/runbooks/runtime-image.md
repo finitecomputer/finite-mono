@@ -14,6 +14,44 @@ definitions map: `infra/images/README.md`. Rung-ladder discipline: see
 > cannot lease work. Phala is a fast follow and must consume the same
 > artifact contract and image digest.
 
+
+## Qualifying one existing canary without changing new launches
+
+General artifact promotion changes Core's default selection for new Agents.
+A host pin or an exact-project rollout plan does not isolate that change.
+Before a scoped canary test, deploy Core support for `canary_runtime_id` and
+register a **new**, digest-pinned artifact with both:
+
+```
+--promoted false --canary-runtime-id <exact-existing-runtime-id>
+```
+
+Use these with the normal `runtime-artifact-upsert` metadata arguments. The
+service-authenticated artifact API accepts the equivalent `promoted: false`
+and `canaryRuntimeId`. Only the named Runtime can upgrade to that artifact;
+normal creation, relocation admission and automatic image selection still
+require a promoted artifact. Admin authorization, expected host/machine binding,
+lifecycle preflight, retirement and same-state-schema checks still apply.
+Use `scripts/rollout-lat1-runtime-artifact --host lat5 --prepare` with the exact
+project, review its frozen plan, then execute that plan under the existing
+production authorization and recovery requirements. Do not use `--roll-all`.
+
+A scoped artifact's material identity and runtime scope are immutable from
+registration, and it can never be promoted in place. After qualification,
+register the same digest under a separate general-release artifact ID through
+the normal promotion process. This preserves an unambiguous canary record.
+
+The additive migration leaves existing artifacts unchanged. Older Core readers
+exclude scoped artifacts because `promoted_at` stays null; older writers cannot
+promote or rewrite one because database constraints and an update guard enforce
+that boundary. Older Core will reject an upgrade *to* the candidate. Before
+rolling Core back, finish or return the canary to its previous promoted,
+same-schema image through normal Core/Runner control and verify Chat. A Core
+rollback must retain the additive column/guard; do not drop recovery data or
+substitute an old data tree after newer writes. Relocation/new-launch recovery
+of an unpromoted image is intentionally unavailable; use the previous qualified
+release and the verified Recovery Set if recovery is needed.
+
 ## PRECONDITIONS
 
 - Depot-managed GitHub Actions runner access is available for the

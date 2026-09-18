@@ -31,6 +31,7 @@ async fn postgres_persisted_machine_named_durable_state_id_is_repaired_on_read()
                 finite_platform_plugin_ref: None,
                 state_schema_version: "state-v1".to_string(),
                 base_image: None,
+                canary_runtime_id: None,
                 recover_known_good_chat: false,
                 promoted: true,
                 now: None,

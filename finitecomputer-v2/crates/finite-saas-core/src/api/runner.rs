@@ -77,6 +77,7 @@ pub(super) async fn upsert_runtime_artifact(
                 finite_platform_plugin_ref: input.finite_platform_plugin_ref,
                 state_schema_version: input.state_schema_version,
                 base_image: input.base_image,
+                canary_runtime_id: input.canary_runtime_id,
                 recover_known_good_chat: input.recover_known_good_chat,
                 promoted: input.promoted,
                 now: input.now,
