@@ -3126,6 +3126,8 @@ mod tests {
         // Keep each diagnostic permit occupied beyond this test's response
         // deadline so cumulative arrivals also prove the concurrency bound.
         config.usage_api_timeout = Duration::from_secs(10);
+        config.upstream_first_byte_timeout = Duration::from_secs(2);
+        config.upstream_body_timeout = Duration::from_secs(2);
         let limiter_url = spawn(app(config).unwrap()).await;
         let client = reqwest::Client::new();
         let started = Instant::now();
