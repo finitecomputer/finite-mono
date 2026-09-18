@@ -114,10 +114,10 @@ async function serve() {
 
   let state = loadState();
   let recoveringFailuresRemaining = 2;
-  const streams = new Set<ServerResponse>();
+  const streams = new Map<ServerResponse, URLSearchParams>();
   const attachments = loadAttachments(state);
   const closeStreams = () => {
-    for (const stream of streams) stream.end();
+    for (const stream of streams.keys()) stream.end();
     streams.clear();
   };
 
@@ -280,7 +280,7 @@ async function serve() {
   });
 
 async function handleHostedRequest(request: IncomingMessage, response: ServerResponse) {
-  const requestPath = request.url ?? "/";
+  const requestPath = new URL(request.url ?? "/", "http://fixture").pathname;
   if (request.method === "GET" && requestPath === "/runtime-status") {
     writeJson(response, 200, { agent_npub: "npub1webdesignfixture" });
     return;
@@ -321,7 +321,7 @@ async function handleHostedRequest(request: IncomingMessage, response: ServerRes
   }
 
   if (request.method === "GET" && requestPath === "/v1/app/state") {
-    writeJson(response, 200, appState());
+    writeJson(response, 200, appState(new URL(request.url ?? "/", "http://fixture").searchParams));
     return;
   }
   if (request.method === "GET" && requestPath.startsWith("/v1/app/attachments/")) {
@@ -347,9 +347,10 @@ async function handleHostedRequest(request: IncomingMessage, response: ServerRes
       connection: "keep-alive",
       "content-type": "text/event-stream",
     });
-    streams.add(response);
+    const view = new URL(request.url ?? "/", "http://fixture").searchParams;
+    streams.set(response, view);
     response.on("close", () => streams.delete(response));
-    writeEvent(response);
+    writeEvent(response, view);
     return;
   }
   if (request.method === "POST" && requestPath === "/v1/app/new-chat") {
@@ -465,7 +466,11 @@ function applyAction(action: Record<string, unknown>) {
   saveState();
 }
 
-function appState() {
+function appState(view = new URLSearchParams()) {
+  const selectedChat = view.get("chat_id") ?? state.selectedNewChatId ?? "chat_design";
+  const selectedTopic = view.get("topic_id") ?? (selectedChat === "chat_design" ? "topic_design" : "home");
+  const messages = state.messages.filter((message) => message.chat_id === selectedChat);
+  const limit = Number(view.get("limit") ?? 50);
   const last = state.messages.at(-1)?.display_content ?? "Chat restored";
   return {
     rev: state.rev,
@@ -514,12 +519,12 @@ function appState() {
         chats: [],
       })),
     ],
-    selected_topic_id: state.selectedNewChatId ? "home" : "topic_design",
-    selected_chat_id: state.selectedNewChatId ?? "chat_design",
+    selected_topic_id: selectedTopic,
+    selected_chat_id: selectedChat,
     active_profile_id: "agent_design",
     status: "Runtime running",
     toast: null,
-    messages: state.messages,
+    messages: messages.slice(-limit),
     profiles: [{ account_id: "agent_design", npub: "npub1webdesignfixture", display_name: "Moss", about: "A deterministic local design collaborator", picture: null, stale: false, is_agent: true }],
     devices: [{ account_id: "web-design-user", device_id: "hosted-web", active: true, current_device: true, revoked: false, room_count: 1 }],
     typing_members: [],
@@ -663,11 +668,11 @@ function saveState() {
 }
 
 function emitState() {
-  for (const stream of streams) writeEvent(stream);
+  for (const [stream, view] of streams) writeEvent(stream, view);
 }
 
-function writeEvent(response: ServerResponse) {
-  response.write(`id: ${state.rev}\nevent: state\ndata: ${JSON.stringify(appState())}\n\n`);
+function writeEvent(response: ServerResponse, view: URLSearchParams) {
+  response.write(`id: ${state.rev}\nevent: state\ndata: ${JSON.stringify(appState(view))}\n\n`);
 }
 
 function readScenario(): Scenario {

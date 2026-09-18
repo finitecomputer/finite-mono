@@ -8,7 +8,9 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use axum::body::{Body, Bytes};
-use axum::extract::{DefaultBodyLimit, FromRequest, Multipart, Path as AxumPath, Request, State};
+use axum::extract::{
+    DefaultBodyLimit, FromRequest, Multipart, Path as AxumPath, Query, Request, State,
+};
 use axum::http::header::{
     CACHE_CONTROL, CONTENT_DISPOSITION, CONTENT_LENGTH, CONTENT_TYPE, HeaderValue,
 };
@@ -28,8 +30,8 @@ use finite_identity::{FiniteIdentity, IdentityPaths};
 use finite_nostr::NostrPublicKey;
 use finitechat_core::{
     AppAction, AppProfileChatBootstrapInput, AppProfileChatBootstrapPreparedCommit, AppState,
-    AppTopicSummary, ChatMediaAttachment, ChatMediaKind, FiniteChatCoreError, FiniteChatRuntime,
-    OpenOptions, OutboundAttachment, account_id_from_npub,
+    AppTopicSummary, AppView, ChatMediaAttachment, ChatMediaKind, FiniteChatCoreError,
+    FiniteChatRuntime, OpenOptions, OutboundAttachment, account_id_from_npub,
     finite_sites_native_viewer_session_proof,
 };
 use finitechat_proto::{
@@ -662,11 +664,15 @@ async fn healthz(State(state): State<HostedDeviceState>) -> Json<HealthResponse>
 
 async fn app_state(
     State(state): State<HostedDeviceState>,
+    Query(view): Query<AppView>,
     headers: HeaderMap,
 ) -> Result<Json<AppState>, HostedDeviceError> {
     let user_id = authorized_user(&state, &headers)?;
     let runtime = state.runtime_for(&user_id)?;
-    Ok(Json(redacted_state(runtime.state()?)))
+    let snapshot = tokio::task::spawn_blocking(move || runtime.state_for_view(view))
+        .await
+        .map_err(|error| HostedDeviceError::Task(error.to_string()))??;
+    Ok(Json(redacted_state(snapshot)))
 }
 
 #[derive(Clone, Debug, Deserialize)]
@@ -2530,6 +2536,7 @@ fn is_safe_inline_mime(mime_type: &str) -> bool {
 
 async fn app_updates(
     State(state): State<HostedDeviceState>,
+    Query(view): Query<AppView>,
     headers: HeaderMap,
 ) -> Result<Sse<impl Stream<Item = Result<Event, Infallible>>>, HostedDeviceError> {
     let user_id = authorized_user(&state, &headers)?;
@@ -2537,14 +2544,19 @@ async fn app_updates(
     // Flush a state event immediately. Waiting for the first remote update (or
     // the SSE keepalive interval) makes a healthy idle Device look disconnected
     // every time the dashboard opens or reconnects.
-    let initial = state_event(&redacted_state(runtime.state()?)).unwrap_or_else(error_event);
+    let initial_runtime = Arc::clone(&runtime);
+    let initial_view = view.clone();
+    let initial = tokio::task::spawn_blocking(move || initial_runtime.state_for_view(initial_view))
+        .await
+        .map_err(|error| HostedDeviceError::Task(error.to_string()))??;
+    let initial = state_event(&redacted_state(initial)).unwrap_or_else(error_event);
     let initial_stream = futures_util::stream::once(async move { Ok(initial) });
-    let stream = futures_util::stream::unfold(runtime, |runtime| async move {
+    let stream = futures_util::stream::unfold((runtime, view), |(runtime, view)| async move {
         let next_runtime = Arc::clone(&runtime);
+        let next_view = view.clone();
         let update = tokio::task::spawn_blocking(move || {
-            next_runtime
-                .wait_for_update(DEFAULT_UPDATE_TIMEOUT_MILLIS)
-                .or_else(|_| next_runtime.state())
+            let _ = next_runtime.wait_for_update(DEFAULT_UPDATE_TIMEOUT_MILLIS);
+            next_runtime.state_for_view(next_view)
         })
         .await;
         let event = match update {
@@ -2552,7 +2564,7 @@ async fn app_updates(
             Ok(Err(error)) => error_event(error),
             Err(error) => error_event(error),
         };
-        Some((Ok(event), runtime))
+        Some((Ok(event), (runtime, view)))
     });
     Ok(Sse::new(initial_stream.chain(stream)).keep_alive(KeepAlive::default()))
 }

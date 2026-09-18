@@ -39,3 +39,22 @@ ambiguous unbound retained state fails closed without automatic selection or
 mutation. Durable protocol sync and reconnect processing for already-authorized
 membership remain normal operation: they are not legacy migration and cannot
 choose or repair a binding.
+
+## Browser transcript views
+
+Each dashboard tab reads its own transcript through the existing
+`GET /v1/app/state` and `GET /v1/app/updates` routes. Optional `room_id`,
+`topic_id`, `chat_id`, and `limit` query parameters select a read-only view of
+the authenticated Device's existing projection. Selection and messages in
+each snapshot describe the same view, including the first event after an SSE
+reconnect. A view read never saves navigation, creates a binding, changes the
+Device revision, or emits updates to other tabs. Explicit navigation actions
+still save the Device's default cursor for the next initial load.
+
+Requests without a view keep the existing selected-transcript contract. No
+persisted data or response schema changes. Deploy the Hosted Web Device before
+the dashboard for independent live tab views. An older dashboard keeps using
+unscoped snapshots; an older service ignores the query parameters, so the new
+dashboard retains its last coherent transcript when that service returns a
+different chat. Independent live updates require the scoped service. Either
+component can roll back without a history or identity migration.
