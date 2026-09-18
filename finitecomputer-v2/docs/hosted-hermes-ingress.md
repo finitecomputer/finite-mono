@@ -97,12 +97,15 @@ authentication: `/api/status` is public, while protected native reads must
 reject anonymous and invalid credentials independently of origin.
 
 The command alone is **not safe production publication**. The opt-in lifecycle
-below supplies its ownership and process-lifetime preconditions. The Lat5 host
-configuration enables this capability at `https://agents-lat5.finite.computer`,
-with only `https://finite.computer` allowed as a browser origin. Other Runner
-hosts keep it disabled. Core's host map contains only Lat5, and its dedicated
-runtime router is proxied verbatim from `https://runtime-api.finite.computer`
-to `127.0.0.1:4201`. This does not expose Core's private/account router.
+below supplies its ownership and process-lifetime preconditions. The Lat3,
+Lat4 and Lat5 host configurations enable this capability at
+`https://agents-lat3.finite.computer`, `https://agents-lat4.finite.computer` and
+`https://agents-lat5.finite.computer`, respectively. Only
+`https://finite.computer` is allowed as a browser origin. Lat1 keeps it disabled.
+Core's host map matches those three origins, and its dedicated runtime router is
+proxied verbatim from `https://runtime-api.finite.computer` to `127.0.0.1:4201`.
+This does not expose Core's private/account router. Each origin needs DNS pointing
+to its Runner host and a valid TLS certificate before owner access is qualified.
 
 The selected canary is Lat5 Canary Retry. New enrollment on configured hosts
 prepares native serving automatically; browser access still requires current-owner
