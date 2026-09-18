@@ -65,6 +65,11 @@ test("owners explicitly change web access with fresh generations, independently 
     await card.getByText("Turning on web access.", { exact: false }).waitFor();
     assert.equal(await card.getByText("Connected", { exact: true }).count(), 0);
     assert.deepEqual(writes, [{ enabled: true, expectedGeneration: 3 }]);
+    access = { ...access, applyStatus: "applied" };
+    await card.getByRole("button", { name: "Refresh status" }).click();
+    await card.getByText("Turning on web access.", { exact: false }).waitFor();
+    assert.equal(await card.getByText("Connected", { exact: true }).count(), 0,
+      "an applied status for an older generation does not confirm the current choice");
     access = { ...access, appliedGeneration: access.generation, applyStatus: "applied" };
     await card.getByRole("button", { name: "Refresh status" }).click();
     await card.getByText("Web access is on for your account.", { exact: true }).waitFor();

@@ -57,9 +57,9 @@ export function HermesAccessConnection({ runtimeId }: { runtimeId: string }) {
       <ConnectionCard
         name="Agent web access"
         icon={<GlobeIcon className="size-5" />}
-        state={busy || (access?.applyStatus === "pending") ? "loading"
+        state={busy ? "loading"
           : !access || !access.enrolled || access.applyStatus === "error" ? "unavailable"
-          : applied && access.enabled ? "connected" : "disconnected"}
+          : !applied ? "loading" : access.enabled ? "connected" : "disconnected"}
         description="Allow your signed-in account to access this agent through the dashboard, including its Skills page."
         footer={<div className="space-y-2" aria-live="polite">
           <p className="text-sm text-muted-foreground">{detail}</p>
