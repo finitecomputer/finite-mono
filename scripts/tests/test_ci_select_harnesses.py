@@ -446,11 +446,14 @@ class CiPackagingGateTests(unittest.TestCase):
 
     def test_pull_request_package_input_changes_keep_nix_service_packages(self) -> None:
         # Every package-derivation input family keeps the PR-time package
-        # build: workspace manifests (mkDummySrc scopes cargoArtifacts to
-        # them), the single Rust pin, cargo config, the flake graph, and the
+        # build: workspace/generated manifests, the Rust pin, cache contract,
+        # cargo config, the flake graph, and the
         # infra/nixos packaging surface itself.
         for changed in (
             "Cargo.toml",
+            "Cargo.nix",
+            "crate-hashes.json",
+            "scripts/ci/check-rust-cache",
             "finitechat/crates/finitechat-server/Cargo.toml",
             "rust-toolchain.toml",
             ".cargo/config.toml",
