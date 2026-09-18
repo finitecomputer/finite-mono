@@ -43,6 +43,15 @@ in
 
   networking.hostName = "finite-lat-4";
 
+  # Native agent API access is prepared during enrollment. Core publishes a
+  # route only after the assigned agent acknowledges the current generation.
+  finite.hostedHermes = {
+    enable = true;
+    publicOrigin = "https://agents-lat4.finite.computer";
+    runtimeCoreUrl = "https://runtime-api.finite.computer";
+    allowedOrigins = [ "https://finite.computer" ];
+  };
+
   # Shared Kata Runner role (modules/kata-runner-host.nix); only genuine host
   # differences are declared here. Core is remote, so sandboxes are reached
   # through this host's private WireGuard overlay address.

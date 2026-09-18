@@ -91,6 +91,8 @@ in
   systemd.services.finite-saas-core.environment = {
     FC_CORE_RUNTIME_BIND = "127.0.0.1:4201";
     FC_CORE_HOSTED_HERMES_ORIGINS_JSON = builtins.toJSON {
+      finite-lat-3 = "https://agents-lat3.finite.computer";
+      finite-lat-4 = "https://agents-lat4.finite.computer";
       finite-lat-5 = "https://agents-lat5.finite.computer";
     };
   };

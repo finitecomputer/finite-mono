@@ -301,12 +301,37 @@ def check_unit_fragments() -> None:
                 )
 
 
-def check_hosted_canary() -> None:
+def check_hosted_ingress() -> None:
+    expected_origins = {
+        f"finite-lat-{number}": f"https://agents-lat{number}.finite.computer"
+        for number in (3, 4, 5)
+    }
     for host in HOSTS:
         enabled = json.loads(nix_eval(host, "finite.hostedHermes.enable"))
-        if enabled != (host == "finite-lat-5"):
-            raise SystemExit(f"{host}: only lat5 may enable FIN-39 ingress")
-    host = "finite-lat-5"
+        if enabled != (host in expected_origins):
+            raise SystemExit(f"{host}: unexpected hosted Hermes capability")
+    core = json.loads(
+        nix_eval("finite-lat-2", "systemd.services.finite-saas-core.environment")
+    )
+    if core.get("FC_CORE_RUNTIME_BIND") != "127.0.0.1:4201":
+        raise SystemExit("Core's runtime router must use its own loopback listener")
+    origins = json.loads(core["FC_CORE_HOSTED_HERMES_ORIGINS_JSON"])
+    if origins != expected_origins:
+        raise SystemExit("Core must publish exactly the configured Runner hosts")
+    edge = nix_eval(
+        "finite-lat-2",
+        'services.caddy.virtualHosts."runtime-api.finite.computer".extraConfig',
+        raw=True,
+    )
+    if edge.strip() != "reverse_proxy 127.0.0.1:4201":
+        raise SystemExit(
+            "The runtime edge must proxy only the dedicated router verbatim"
+        )
+    for host in expected_origins:
+        check_hosted_ingress_host(host, origins)
+
+
+def check_hosted_ingress_host(host: str, origins: dict[str, str]) -> None:
     environment = json.loads(
         nix_eval(host, "systemd.services.finite-saas-runner.environment")
     )
@@ -324,14 +349,14 @@ def check_hosted_canary() -> None:
     }
     for key, value in expected.items():
         if service.get(key) != value:
-            raise SystemExit(f"lat5 hosted ingress lost its {key} lifetime boundary")
+            raise SystemExit(f"{host} hosted ingress lost its {key} lifetime boundary")
     if not any(
         "hosted-hermes-runner-gate" in entry
         for entry in service.get("ExecStartPre", [])
     ):
-        raise SystemExit("lat5 hosted ingress lost its Runner rollback gate")
+        raise SystemExit(f"{host} hosted ingress lost its Runner rollback gate")
     if not environment.get("FC_RUNNER_HOSTED_HERMES_CONFIG"):
-        raise SystemExit("lat5 is missing its hosted ingress manifest")
+        raise SystemExit(f"{host} is missing its hosted ingress manifest")
     proxy = json.loads(
         nix_eval(host, "systemd.services.finite-hosted-hermes.serviceConfig")
     )
@@ -354,20 +379,20 @@ def check_hosted_canary() -> None:
     }
     for key, value in proxy_expected.items():
         if proxy.get(key) != value:
-            raise SystemExit(f"lat5 dedicated proxy lost its {key} boundary")
+            raise SystemExit(f"{host} dedicated proxy lost its {key} boundary")
     caddy = nix_eval(host, "services.caddy.package.outPath", raw=True)
     if proxy.get("ExecStart") != (
         f"{caddy}/bin/caddy run --config /run/finite-hosted-hermes/caddy.json"
     ):
-        raise SystemExit("lat5 proxy must start from the fresh Runner projection")
+        raise SystemExit(f"{host} proxy must start from the fresh Runner projection")
     if proxy.get("ExecReload"):
-        raise SystemExit("lat5 proxy must stop before address reuse, never reload")
+        raise SystemExit(f"{host} proxy must stop before address reuse, never reload")
     for attribute in ("wantedBy", "requiredBy", "upheldBy"):
         if json.loads(
             nix_eval(host, f"systemd.services.finite-hosted-hermes.{attribute}")
         ):
             raise SystemExit(
-                f"lat5 proxy must not have automatic {attribute} activation"
+                f"{host} proxy must not have automatic {attribute} activation"
             )
     # Project only the activation target; complete NixOS socket submodules
     # contain internal values that cannot be serialized to JSON.
@@ -389,37 +414,20 @@ def check_hosted_canary() -> None:
         name == "finite-hosted-hermes" or target == "finite-hosted-hermes.service"
         for name, target in sockets.items()
     ):
-        raise SystemExit("lat5 proxy must not use socket activation")
+        raise SystemExit(f"{host} proxy must not use socket activation")
     if (
         environment.get("FC_RUNNER_RUNTIME_CORE_URL")
         != "https://runtime-api.finite.computer"
     ):
-        raise SystemExit("lat5 bootstrap must use the dedicated runtime HTTPS origin")
-    core = json.loads(
-        nix_eval("finite-lat-2", "systemd.services.finite-saas-core.environment")
-    )
-    if core.get("FC_CORE_RUNTIME_BIND") != "127.0.0.1:4201":
-        raise SystemExit("Core's runtime router must use its own loopback listener")
-    origins = json.loads(core["FC_CORE_HOSTED_HERMES_ORIGINS_JSON"])
-    if origins != {"finite-lat-5": "https://agents-lat5.finite.computer"}:
-        raise SystemExit("Core must publish only the selected lat5 host")
+        raise SystemExit(f"{host} bootstrap must use the dedicated runtime HTTPS origin")
     public_origin = nix_eval(host, "finite.hostedHermes.publicOrigin", raw=True)
     if public_origin != origins[host]:
-        raise SystemExit("Core and lat5 disagree on the native Hermes origin")
+        raise SystemExit(f"Core and {host} disagree on the native Hermes origin")
     allowed = json.loads(nix_eval(host, "finite.hostedHermes.allowedOrigins"))
     if allowed != ["https://finite.computer"]:
-        raise SystemExit("lat5 hosted CORS must match the production dashboard exactly")
-    edge = nix_eval(
-        "finite-lat-2",
-        'services.caddy.virtualHosts."runtime-api.finite.computer".extraConfig',
-        raw=True,
-    )
-    if edge.strip() != "reverse_proxy 127.0.0.1:4201":
-        raise SystemExit(
-            "The runtime edge must proxy only the dedicated router verbatim"
-        )
+        raise SystemExit(f"{host} hosted CORS must match the production dashboard exactly")
     if 443 not in json.loads(nix_eval(host, "networking.firewall.allowedTCPPorts")):
-        raise SystemExit("lat5 hosted TLS port is not open")
+        raise SystemExit(f"{host} hosted TLS port is not open")
 
 
 def main() -> None:
@@ -484,7 +492,7 @@ def main() -> None:
     if "finite-saas-sites" in services:
         raise SystemExit("The app host must not run a second Sites daemon")
     check_unit_fragments()
-    check_hosted_canary()
+    check_hosted_ingress()
     print("Kata Runner host contract: ok")
 
 
