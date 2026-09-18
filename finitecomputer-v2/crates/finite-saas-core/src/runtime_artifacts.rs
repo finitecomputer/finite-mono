@@ -26,6 +26,9 @@ pub struct RuntimeArtifact {
     #[serde(default)]
     pub recover_known_good_chat: bool,
     pub created_at: String,
+    /// Unpromoted artifact approved only for this existing runtime.
+    #[serde(default)]
+    pub canary_runtime_id: Option<String>,
     pub promoted_at: Option<String>,
     pub retired_at: Option<String>,
 }
@@ -45,6 +48,8 @@ pub struct UpsertRuntimeArtifactInput {
     pub base_image: Option<String>,
     #[serde(default)]
     pub recover_known_good_chat: bool,
+    #[serde(default)]
+    pub canary_runtime_id: Option<String>,
     pub promoted: bool,
     pub now: Option<String>,
 }
@@ -72,7 +77,8 @@ pub(crate) fn runtime_artifact_material_matches(
     existing: &RuntimeArtifact,
     candidate: &RuntimeArtifact,
 ) -> bool {
-    existing.id == candidate.id
+    existing.canary_runtime_id == candidate.canary_runtime_id
+        && existing.id == candidate.id
         && existing.kind == candidate.kind
         && existing.reference == candidate.reference
         && existing.version_label == candidate.version_label

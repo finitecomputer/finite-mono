@@ -14,6 +14,7 @@ mod launch_admission;
 mod provider_operations;
 mod runner_admission;
 mod runtime_artifacts;
+mod runtime_canary;
 mod runtime_controls;
 mod runtime_health;
 mod runtime_lifecycle;
@@ -154,6 +155,7 @@ async fn promote_runtime_artifact_version(
         finite_platform_plugin_ref: Some("plugin-ref".to_string()),
         state_schema_version: state_schema_version.to_string(),
         base_image: Some("python:3.11-trixie".to_string()),
+        canary_runtime_id: None,
         recover_known_good_chat: false,
         promoted: true,
         now: Some(now.to_string()),

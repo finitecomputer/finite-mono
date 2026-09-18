@@ -170,6 +170,7 @@ where
             finite_platform_plugin_ref: None,
             state_schema_version: "state-v1".to_string(),
             base_image: Some("python:3.11-trixie".to_string()),
+            canary_runtime_id: None,
             recover_known_good_chat: false,
             promoted: true,
             now: Some("2000-01-01T00:00:00Z".to_string()),

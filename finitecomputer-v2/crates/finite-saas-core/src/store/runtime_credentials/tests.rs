@@ -139,6 +139,7 @@ pub(crate) async fn upgrade(db: &TestDb, creation: &str) -> RuntimeControlLease 
         finite_platform_plugin_ref: None,
         state_schema_version: "state-v1".into(),
         base_image: None,
+        canary_runtime_id: None,
         recover_known_good_chat: false,
         promoted: true,
         now: None,

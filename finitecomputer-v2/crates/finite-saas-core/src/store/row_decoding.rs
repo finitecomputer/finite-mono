@@ -155,6 +155,7 @@ pub(super) fn runtime_artifact_from_row(row: &Row) -> CoreResult<RuntimeArtifact
         finite_platform_plugin_ref: row.get("finite_platform_plugin_ref"),
         state_schema_version: row.get("state_schema_version"),
         base_image: row.get("base_image"),
+        canary_runtime_id: row.get("canary_runtime_id"),
         recover_known_good_chat: row.get("recover_known_good_chat"),
         created_at: row.get("created_at"),
         promoted_at: row.get("promoted_at"),
