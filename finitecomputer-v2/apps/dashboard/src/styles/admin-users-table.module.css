@@ -1,0 +1,122 @@
+.panel {
+  display: grid;
+  gap: 1rem;
+  min-width: 0;
+  max-width: 100%;
+  padding-bottom: 1rem;
+}
+
+.scroll {
+  min-width: 0;
+  max-width: 100%;
+  overflow-x: auto;
+
+}
+
+.scroll:focus-visible {
+  outline: 2px solid var(--ring);
+  outline-offset: 2px;
+
+}
+
+.table {
+  width: 100%;
+  border-collapse: collapse;
+  text-align: left;
+  font-size: 14px;
+
+}
+
+.table th, .table td {
+  padding: 16px 20px;
+  border-bottom: 1px solid var(--border);
+  white-space: nowrap;
+  vertical-align: top;
+
+}
+
+.table th {
+  font-size: 13px;
+  font-weight: 500;
+  color: var(--muted-foreground);
+
+}
+
+.table th:first-child, .table td:first-child {
+  padding-left: 12px;
+
+}
+
+.table tbody tr { cursor: pointer; }
+
+.table tbody tr:focus-visible { outline: 2px solid var(--ring); outline-offset: -2px; }
+
+.table tbody tr:hover {
+  background: color-mix(in srgb, var(--foreground) 3%, transparent);
+
+}
+
+.table .numeric {
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+
+}
+
+
+
+.frame {
+  min-width: 0;
+}
+
+.stickyHeader {
+  position: sticky;
+  top: 0;
+  z-index: 10;
+  overflow-x: auto;
+  scrollbar-width: none;
+  background: var(--background);
+  cursor: grab;
+  user-select: none;
+  border-bottom: 1px solid var(--border);
+}
+
+.stickyHeader::-webkit-scrollbar { display: none; }
+.stickyHeader[data-dragging="true"] { cursor: grabbing; }
+.stickyHeader:focus-visible { outline: 2px solid var(--ring); outline-offset: -2px; }
+
+.headerColumns {
+  display: flex;
+  color: var(--muted-foreground);
+  font-size: 13px;
+  font-weight: 500;
+}
+
+.headerColumns > span, .headerColumns > button {
+  flex-shrink: 0;
+  box-sizing: border-box;
+  padding: 16px 20px;
+  white-space: nowrap;
+}
+
+.headerColumns > button { display: flex; align-items: center; gap: 8px; text-align: left; cursor: inherit; }
+.headerColumns > button:hover { color: var(--foreground); }
+.headerColumns > button:focus-visible { outline: 2px solid var(--ring); outline-offset: -2px; }
+.sortLabel { padding-right: 22px; }
+
+.headerColumns > :first-child { padding-left: 12px; }
+
+/* Preserve native column headings for assistive technology and width measurement. */
+.tableBody thead { opacity: 0; }
+
+/* Fade clipped columns without intercepting row clicks or header dragging. */
+.frame {
+  --edge-left: #000;
+  --edge-right: #000;
+}
+
+.frame[data-fade-left="true"] { --edge-left: transparent; }
+.frame[data-fade-right="true"] { --edge-right: transparent; }
+
+.stickyHeader, .tableBody {
+  mask-image: linear-gradient(to right, var(--edge-left), #000 28px, #000 calc(100% - 28px), var(--edge-right));
+}
