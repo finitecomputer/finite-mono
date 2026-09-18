@@ -1,0 +1,11 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="320" height="200" viewBox="0 0 320 200">
+  <rect width="320" height="200" fill="#060d19"/>
+  <text x="14" y="16" fill="#a0acbe" font-size="6" font-family="sans-serif">AZIMUTH / THE WORLD FROM NASHVILLE</text>
+  <path d="M14 24H306" stroke="#263347"/>
+  <ellipse cx="160" cy="119" rx="104" ry="60" fill="#f04412"/>
+  <g fill="none" stroke="#ffac72" stroke-width=".6"><ellipse cx="160" cy="119" rx="80" ry="60"/><ellipse cx="160" cy="119" rx="43" ry="60"/><path d="M56 119H264M67 93H253M67 145H253M160 59V179"/></g>
+  <path d="M103 89 125 77 143 82 151 95 133 101 122 117 100 112 92 101ZM149 117 169 112 184 120 180 137 163 153 151 142ZM185 81 218 89 231 104 210 114 195 102 177 99Z" fill="#edf0e6"/>
+  <g stroke="#92c6e9" fill="none"><path d="M149 99Q155 50 220 99M149 99Q122 61 105 95M149 99Q202 121 169 145M149 99Q183 59 194 95"/></g>
+  <circle cx="149" cy="99" r="3" fill="white"/>
+  <rect x="270" y="36" width="34" height="55" rx="3" fill="#111d30"/><path d="M277 47H297M277 57H289M277 67H294M277 77H286" stroke="#69819e" stroke-width="2"/>
+</svg>

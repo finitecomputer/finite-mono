@@ -54,15 +54,3 @@ export function pendingChatRefreshIsDue(
   return nowMs >= lastProgressAtMs
     && nowMs - lastProgressAtMs >= delayMs;
 }
-
-export function preservePendingChatRefreshSelection(
-  next: HostedChatState,
-  target: PendingChatRefreshTarget
-): HostedChatState {
-  return {
-    ...next,
-    selected_room_id: target.room_id,
-    selected_topic_id: target.topic_id,
-    selected_chat_id: target.chat_id,
-  };
-}

@@ -19,6 +19,8 @@ type FixtureState = {
   rev: number;
   chatArchived: boolean;
   chatTitle: string;
+  newChatIntents?: Record<string, string>;
+  selectedNewChatId?: string | null;
   extraTopics: Array<{
     topicId: string;
     title: string;
@@ -112,10 +114,10 @@ async function serve() {
 
   let state = loadState();
   let recoveringFailuresRemaining = 2;
-  const streams = new Set<ServerResponse>();
+  const streams = new Map<ServerResponse, URLSearchParams>();
   const attachments = loadAttachments(state);
   const closeStreams = () => {
-    for (const stream of streams) stream.end();
+    for (const stream of streams.keys()) stream.end();
     streams.clear();
   };
 
@@ -246,6 +248,7 @@ async function serve() {
         FC_WORKOS_AUTH_ENABLED: "0",
         WORKOS_COOKIE_PASSWORD: "web-design-cookie-password-32-characters",
         NEXT_DIST_DIR: ".next-web-design",
+        NEXT_PUBLIC_FC_DESIGN_PREVIEWS: "1",
         NEXT_TELEMETRY_DISABLED: "1",
         NODE_OPTIONS:
           process.env.FC_WEB_DESIGN_NODE_OPTIONS ?? "--max-old-space-size=2048",
@@ -277,7 +280,7 @@ async function serve() {
   });
 
 async function handleHostedRequest(request: IncomingMessage, response: ServerResponse) {
-  const requestPath = request.url ?? "/";
+  const requestPath = new URL(request.url ?? "/", "http://fixture").pathname;
   if (request.method === "GET" && requestPath === "/runtime-status") {
     writeJson(response, 200, { agent_npub: "npub1webdesignfixture" });
     return;
@@ -318,7 +321,7 @@ async function handleHostedRequest(request: IncomingMessage, response: ServerRes
   }
 
   if (request.method === "GET" && requestPath === "/v1/app/state") {
-    writeJson(response, 200, appState());
+    writeJson(response, 200, appState(new URL(request.url ?? "/", "http://fixture").searchParams));
     return;
   }
   if (request.method === "GET" && requestPath.startsWith("/v1/app/attachments/")) {
@@ -344,9 +347,16 @@ async function handleHostedRequest(request: IncomingMessage, response: ServerRes
       connection: "keep-alive",
       "content-type": "text/event-stream",
     });
-    streams.add(response);
+    const view = new URL(request.url ?? "/", "http://fixture").searchParams;
+    streams.set(response, view);
     response.on("close", () => streams.delete(response));
-    writeEvent(response);
+    writeEvent(response, view);
+    return;
+  }
+  if (request.method === "POST" && requestPath === "/v1/app/new-chat") {
+    applyAction({ StartTopicChatIntent: await readJson(request) });
+    writeJson(response, 200, appState());
+    emitState();
     return;
   }
   if (request.method === "POST" && requestPath === "/v1/app/actions") {
@@ -420,10 +430,19 @@ async function handleHostedRequest(request: IncomingMessage, response: ServerRes
 }
 
 function applyAction(action: Record<string, unknown>) {
-  const send = action.SendChatMessage as { text?: unknown } | undefined;
+  const start = action.StartTopicChatIntent as { room_id?: string; topic_id?: string; intent_key?: string } | undefined;
+  if (start?.room_id === "room_design" && start.topic_id === "home" && start.intent_key) {
+    state.newChatIntents ??= {};
+    state.newChatIntents[start.intent_key] ??= `chat_new_${state.rev + 1}`;
+    state.selectedNewChatId = state.newChatIntents[start.intent_key];
+  }
+  const open = action.OpenChat as { chat_id?: string } | undefined;
+  if (open?.chat_id) state.selectedNewChatId = open.chat_id === "chat_design" ? null : open.chat_id;
+  const send = action.SendChatMessage as { text?: unknown; topic_id?: string; chat_id?: string } | undefined;
   if (send && typeof send.text === "string" && send.text.trim()) {
-    state.messages.push(message(send.text.trim(), true, state.messages.length + 1));
-    state.messages.push(message("This is a deterministic fixture reply from your recovered local chat.", false, state.messages.length + 1));
+    const address = { conversation_id: send.topic_id ?? "topic_design", chat_id: send.chat_id ?? "chat_design" };
+    state.messages.push({ ...message(send.text.trim(), true, state.messages.length + 1), ...address });
+    state.messages.push({ ...message("This is a deterministic fixture reply from your recovered local chat.", false, state.messages.length + 1), ...address });
   }
   const rename = action.RenameChat as { title?: unknown } | undefined;
   if (rename && typeof rename.title === "string" && rename.title.trim()) {
@@ -447,14 +466,28 @@ function applyAction(action: Record<string, unknown>) {
   saveState();
 }
 
-function appState() {
+function appState(view = new URLSearchParams()) {
+  const selectedChat = view.get("chat_id") ?? state.selectedNewChatId ?? "chat_design";
+  const selectedTopic = view.get("topic_id") ?? (selectedChat === "chat_design" ? "topic_design" : "home");
+  const messages = state.messages.filter((message) => message.chat_id === selectedChat);
+  const anchorIndex = messages.findIndex(message => message.message_id === view.get("oldest_message_id"));
+  const limit = Math.max(Number(view.get("limit") ?? 50), anchorIndex < 0 ? 0 : messages.length - anchorIndex);
   const last = state.messages.at(-1)?.display_content ?? "Chat restored";
   return {
     rev: state.rev,
     identity: { account_id: "web-design-user", device_id: "hosted-web" },
-    rooms: [{ room_id: "room_design", display_name: "Moss", state: "Connected", status: "Connected", user_status_text: "Connected", last_message_preview: last, unread_count: 0, is_agent_chat: true }],
+    rooms: [{ room_id: "room_design", display_name: "Moss", state: "Connected", status: "Connected", user_status_text: "Connected", last_message_preview: last, unread_count: 0, is_agent_chat: true, can_load_older: messages.length > limit }],
     selected_room_id: "room_design",
     topics: [
+      {
+        room_id: "room_design", topic_id: "home", title: "Home",
+        last_message_preview: "", unread_count: 0, message_count: 0,
+        created_seq: 0, updated_seq: state.rev, archived: false,
+        active_chat_id: state.selectedNewChatId ?? null,
+        chats: Object.values(state.newChatIntents ?? {}).map((chatId) => ({
+          chat_id: chatId, title: "New chat", active: chatId === state.selectedNewChatId, archived: false,
+        })),
+      },
       {
         room_id: "room_design",
         topic_id: "topic_design",
@@ -487,12 +520,12 @@ function appState() {
         chats: [],
       })),
     ],
-    selected_topic_id: "topic_design",
-    selected_chat_id: "chat_design",
+    selected_topic_id: selectedTopic,
+    selected_chat_id: selectedChat,
     active_profile_id: "agent_design",
     status: "Runtime running",
     toast: null,
-    messages: state.messages,
+    messages: messages.slice(-limit),
     profiles: [{ account_id: "agent_design", npub: "npub1webdesignfixture", display_name: "Moss", about: "A deterministic local design collaborator", picture: null, stale: false, is_agent: true }],
     devices: [{ account_id: "web-design-user", device_id: "hosted-web", active: true, current_device: true, revoked: false, room_count: 1 }],
     typing_members: [],
@@ -518,7 +551,10 @@ function coreMe() {
     projects: [{
       project: { id: "project_web_design", display_name: "Moss", hosting_tier: "standard", created_at: "2026-07-01T12:00:00Z", updated_at: "2026-07-01T12:00:00Z" },
       runtime: { id: RUNTIME_ID, project_id: "project_web_design", contact_endpoint: `http://127.0.0.1:${hostedPort}/runtime-status`, runtime_status: "online", hermes_available: true, created_at: "2026-07-01T12:00:00Z", updated_at: "2026-07-01T12:00:00Z" },
-    }],
+    }, ...(process.env.FC_WEB_DESIGN_SECOND_AGENT === "1" ? [{
+      project: { id: "project_web_design_second", display_name: "Fern", hosting_tier: "standard", created_at: "2026-07-01T12:00:00Z", updated_at: "2026-07-01T12:00:00Z" },
+      runtime: { id: "runtime_web_design_second", project_id: "project_web_design_second", runtime_status: "offline", hermes_available: true, created_at: "2026-07-01T12:00:00Z", updated_at: "2026-07-01T12:00:00Z" },
+    }] : [])],
   };
 }
 
@@ -529,6 +565,8 @@ function loadState(): FixtureState {
       return {
         rev: parsed.rev,
         chatArchived: parsed.chatArchived === true,
+        newChatIntents: parsed.newChatIntents ?? {},
+        selectedNewChatId: parsed.selectedNewChatId ?? null,
         chatTitle:
           typeof parsed.chatTitle === "string" && parsed.chatTitle.trim()
             ? parsed.chatTitle
@@ -631,11 +669,11 @@ function saveState() {
 }
 
 function emitState() {
-  for (const stream of streams) writeEvent(stream);
+  for (const [stream, view] of streams) writeEvent(stream, view);
 }
 
-function writeEvent(response: ServerResponse) {
-  response.write(`id: ${state.rev}\nevent: state\ndata: ${JSON.stringify(appState())}\n\n`);
+function writeEvent(response: ServerResponse, view: URLSearchParams) {
+  response.write(`id: ${state.rev}\nevent: state\ndata: ${JSON.stringify(appState(view))}\n\n`);
 }
 
 function readScenario(): Scenario {

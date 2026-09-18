@@ -1,3 +1,4 @@
+import headingStyles from "@/styles/agent-page-heading.module.css";
 import { redirect } from "next/navigation";
 
 import { ConnectionsPanel } from "@/components/connections-panel";
@@ -20,8 +21,8 @@ export default async function MachineConnectionsPage({
   }
 
   return (
-    <div className="space-y-6">
-      <PageHeader title="Connections" description={`Choose how ${access.displayName} works with you.`} />
+    <div className={`${headingStyles.page} space-y-6`}>
+      <PageHeader hierarchy="agent" title="Connections" description={`Choose how ${access.displayName} works with you.`} />
       <ConnectionsPanel
         machineId={access.machineId}
         googleConfigured={googleWorkspaceOAuthConfigured()}

@@ -4,6 +4,7 @@ import importlib.util
 import re
 import sys
 import tempfile
+import tomllib
 import unittest
 from pathlib import Path
 
@@ -83,6 +84,25 @@ class RuntimeImageContractTests(unittest.TestCase):
 
         self.assertNotIn("legacy_hermes_migration.py", dockerfile)
         self.assertNotIn("/opt/legacy-hermes-migration", dockerfile)
+
+    def test_rust_builder_contains_every_workspace_member(self) -> None:
+        dockerfile = (ROOT / CANONICAL_DOCKERFILE).read_text(encoding="utf-8")
+        builder = dockerfile.split("AS finite-rust-builder", 1)[1].split("\nFROM ", 1)[0]
+        # Directory copies must preserve the root workspace's relative paths.
+        copied = [
+            Path(source)
+            for source, destination in re.findall(
+                r"^COPY (\S+) (\S+)$", builder, re.MULTILINE
+            )
+            if Path(source) == Path(destination) and (ROOT / source).is_dir()
+        ]
+        workspace = tomllib.loads((ROOT / "Cargo.toml").read_text(encoding="utf-8"))
+        for member in workspace["workspace"]["members"]:
+            with self.subTest(member=member):
+                self.assertTrue(
+                    any(Path(member).is_relative_to(directory) for directory in copied),
+                    f"Rust image builder does not copy workspace member {member}",
+                )
 
     def test_rust_version_flows_from_the_single_toolchain_pin(self) -> None:
         dockerfile = (ROOT / CANONICAL_DOCKERFILE).read_text(encoding="utf-8")

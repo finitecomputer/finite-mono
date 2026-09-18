@@ -272,18 +272,27 @@
             craneLib = crane.mkLib hermesPkgs;
             sourceRoot = ./.;
           };
-          hermesAgentPackage = hermes-agent.packages.${system}.default.overrideAttrs (old: {
-            postInstall = (old.postInstall or "") + ''
-              # Keep the Python environment unchanged; patch only the bundled adapter.
-              plugins="$out/share/hermes-agent/plugins"
-              cp -RL "$plugins" "$out/share/hermes-agent/plugins-patched"
-              rm "$plugins"
-              mv "$out/share/hermes-agent/plugins-patched" "$plugins"
-              chmod -R u+w "$plugins"
-              ${hermesPkgs.patch}/bin/patch -d "$plugins" -p1 < ${./finite-agentd/patches/simplex-media-path.patch}
-            '';
-          });
-          hermesAgentMinimal = hermes-agent.packages.${system}.minimal;
+          withSkillsInventory =
+            upstream:
+            import ./infra/images/hermes-skills-package.nix {
+              pkgs = hermesPkgs;
+              inherit upstream;
+              source = hermes-agent.outPath;
+            };
+          hermesAgentPackage =
+            (withSkillsInventory hermes-agent.packages.${system}.default).overrideAttrs
+              (old: {
+                postInstall = (old.postInstall or "") + ''
+                  # Keep the Python environment unchanged; patch only the bundled adapter.
+                  plugins="$out/share/hermes-agent/plugins"
+                  cp -RL "$plugins" "$out/share/hermes-agent/plugins-patched"
+                  rm "$plugins"
+                  mv "$out/share/hermes-agent/plugins-patched" "$plugins"
+                  chmod -R u+w "$plugins"
+                  ${hermesPkgs.patch}/bin/patch -d "$plugins" -p1 < ${./finite-agentd/patches/simplex-media-path.patch}
+                '';
+              });
+          hermesAgentMinimal = withSkillsInventory hermes-agent.packages.${system}.minimal;
         in
         {
           simplex-chat =
@@ -405,7 +414,7 @@
             # hermes-free so unrelated CI jobs never fetch hermes.
             hermes-bridge-ci =
               let
-                hermesAgentRuntime = hermes-agent.packages.${system}.default;
+                hermesAgentRuntime = (hermesPackagesFor system).hermes-agent-runtime;
                 hermesAgentRuntimePython = hermesAgentRuntime.hermesVenv;
               in
               pkgs.mkShell {

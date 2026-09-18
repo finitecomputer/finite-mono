@@ -1,4 +1,5 @@
 use super::*;
+mod automatic_access;
 use crate::auth::test_support::{access_token_with_subject, core_auth};
 use crate::store::runtime_credentials::tests::{complete, provision, register, requested};
 use crate::test_support::with_isolated_postgres;
