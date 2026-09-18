@@ -128,7 +128,7 @@
   "panels": [
     {
       "id": 1,
-      "title": "Internal Operators · source and coverage",
+      "title": "Internal Operators \u00b7 source and coverage",
       "type": "text",
       "description": "",
       "gridPos": {
@@ -146,12 +146,12 @@
       },
       "options": {
         "mode": "markdown",
-        "content": "**All-traffic aggregates** count inference arrivals, refused admission, degraded admission and terminal outcomes at the limiter. Project / Agent Runtime / key filters apply **only to Core-reserved reporting** below. Shared keys cannot identify an individual caller. Model filters apply to panels marked “model”; arrivals, refusals, active and health remain all-model totals.\n\n**Request detail and attributed usage: last 7 days only.** Low-cardinality Prometheus aggregates: up to 15 days, subject to 20 GB storage. Unknown tokens/timings are unavailable, not zero. Final usage and completion measurements appear after termination. Timings are limiter-observed, not client receipt or engine decode speed. Core accounting remains the Runaway Guard authority. Historical data is available only after collection began."
+        "content": "**All-traffic aggregates** count inference arrivals, refused admission, degraded admission and terminal outcomes at the limiter. Project / Agent Runtime / key filters apply **only to Core-reserved reporting** below. Shared keys cannot identify an individual caller. Model filters apply to panels marked \u201cmodel\u201d; arrivals, refusals, active and health remain all-model totals.\n\n**Request detail and attributed usage: last 7 days only.** Low-cardinality Prometheus aggregates: up to 15 days, subject to 20 GB storage. Unknown tokens/timings are unavailable, not zero. Final usage and completion measurements appear after termination. Timings are limiter-observed, not client receipt or engine decode speed. Core accounting remains the Runaway Guard authority. Historical data is available only after collection began."
       }
     },
     {
       "id": 2,
-      "title": "Inference arrivals / minute · all traffic",
+      "title": "Inference arrivals / minute \u00b7 all traffic",
       "type": "stat",
       "description": "",
       "gridPos": {
@@ -200,7 +200,7 @@
     },
     {
       "id": 3,
-      "title": "Active · all traffic",
+      "title": "Active \u00b7 all traffic",
       "type": "stat",
       "description": "",
       "gridPos": {
@@ -249,7 +249,7 @@
     },
     {
       "id": 4,
-      "title": "Refused / minute · all traffic",
+      "title": "Refused / minute \u00b7 all traffic",
       "type": "stat",
       "description": "",
       "gridPos": {
@@ -298,7 +298,7 @@
     },
     {
       "id": 5,
-      "title": "Terminal errors / minute · model",
+      "title": "Terminal errors / minute \u00b7 model",
       "type": "stat",
       "description": "",
       "gridPos": {
@@ -552,7 +552,7 @@
     },
     {
       "id": 10,
-      "title": "Terminal outcomes / second · model",
+      "title": "Terminal outcomes / second \u00b7 model",
       "type": "timeseries",
       "description": "",
       "gridPos": {
@@ -593,7 +593,7 @@
     },
     {
       "id": 11,
-      "title": "Admission and refusals · all traffic",
+      "title": "Admission and refusals \u00b7 all traffic",
       "type": "timeseries",
       "description": "",
       "gridPos": {
@@ -641,7 +641,7 @@
     },
     {
       "id": 12,
-      "title": "Observed input / output tokens per second · model",
+      "title": "Observed input / output tokens per second \u00b7 model",
       "type": "timeseries",
       "description": "Reported upstream totals only. Missing/estimated usage does not contribute invented tokens. Cached/reasoning subcounts are not added to totals.",
       "gridPos": {
@@ -689,7 +689,7 @@
     },
     {
       "id": 13,
-      "title": "Reported input / output tokens in range · model",
+      "title": "Reported input / output tokens in range \u00b7 model",
       "type": "stat",
       "description": "Counter extrapolation over the selected range; unknown responses excluded. Diagnostic token sums below use retained completed events.",
       "gridPos": {
@@ -745,7 +745,7 @@
     },
     {
       "id": 14,
-      "title": "First meaningful output delay · model",
+      "title": "First meaningful output delay \u00b7 model",
       "type": "timeseries",
       "description": "Streams only, measured from limiter acceptance. Headers, roles, metadata and keepalives do not count. Reasoning and tool payload count as first output; only answer text counts as first answer.",
       "gridPos": {
@@ -793,7 +793,7 @@
     },
     {
       "id": 15,
-      "title": "First answer-text delay · model",
+      "title": "First answer-text delay \u00b7 model",
       "type": "timeseries",
       "description": "Streams only, measured from limiter acceptance. Headers, roles, metadata and keepalives do not count. Reasoning and tool payload count as first output; only answer text counts as first answer.",
       "gridPos": {
@@ -841,7 +841,7 @@
     },
     {
       "id": 16,
-      "title": "Request / stream duration · model",
+      "title": "Request / stream duration \u00b7 model",
       "type": "timeseries",
       "description": "Limiter acceptance through upstream completion/error or client cancellation. Frozen before accounting retries. Nonstreaming exposes duration only.",
       "gridPos": {
@@ -889,7 +889,7 @@
     },
     {
       "id": 17,
-      "title": "Usage settlement quality · all traffic",
+      "title": "Usage settlement quality \u00b7 all traffic",
       "type": "timeseries",
       "description": "Estimate means upstream actual token totals unavailable. Diagnostic persistence is best-effort and bounded; failures never block inference.",
       "gridPos": {
@@ -944,7 +944,7 @@
     },
     {
       "id": 18,
-      "title": "Core-reserved usage · attributed filters",
+      "title": "Core-reserved usage \u00b7 attributed filters",
       "type": "text",
       "description": "",
       "gridPos": {
@@ -967,12 +967,12 @@
     },
     {
       "id": 19,
-      "title": "Input tokens by Project · retained events",
+      "title": "Input / output tokens by Project \u00b7 retained events",
       "type": "bargauge",
       "description": "Exact sums of known reported totals within retained events. Missing values excluded, not converted to zero. Immutable reservation IDs deduplicate ambiguous exporter retries before totals are grouped.",
       "gridPos": {
         "h": 8,
-        "w": 12,
+        "w": 24,
         "x": 0,
         "y": 50
       },
@@ -995,7 +995,32 @@
           "displayName": "${__field.name}",
           "min": 0
         },
-        "overrides": []
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byFrameRefID",
+              "options": "rowsToFields-A"
+            },
+            "properties": [
+              {
+                "id": "displayName",
+                "value": "${__field.name} input"
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byFrameRefID",
+              "options": "rowsToFields-B"
+            },
+            "properties": [
+              {
+                "id": "displayName",
+                "value": "${__field.name} output"
+              }
+            ]
+          }
+        ]
       },
       "datasource": {
         "type": "loki",
@@ -1005,70 +1030,13 @@
         {
           "refId": "A",
           "expr": "sum by (project) (max_over_time({service=\"finite-private-request-diagnostics\"} | json reservation=\"reservationId\", observed=\"observedAtUnixSeconds\", model=\"model\", endpoint=\"endpoint\", project=\"projectId\", runtime=\"agentRuntimeId\", key=\"apiKeyId\", value=\"promptTokens\" | label_format diagnostic_age=\"{{sub (unixEpoch now) .observed}}\" | diagnostic_age >= 0 | diagnostic_age <= 604800 | drop diagnostic_age | model=~\"$model\" | endpoint=~\"$endpoint\" | project=~\"${project:raw}\" | runtime=~\"${runtime:raw}\" | key=~\"${key:raw}\" | value!=\"\" | unwrap value | __error__=\"\" [$__range]))",
-          "legendFormat": "{{project}}",
+          "legendFormat": "Input {{project}}",
           "queryType": "instant"
-        }
-      ],
-      "transformations": [
-        {
-          "id": "rowsToFields",
-          "options": {}
-        }
-      ],
-      "options": {
-        "orientation": "horizontal",
-        "displayMode": "basic",
-        "reduceOptions": {
-          "values": false,
-          "calcs": [
-            "lastNotNull"
-          ],
-          "fields": ""
         },
-        "showUnfilled": true
-      }
-    },
-    {
-      "id": 20,
-      "title": "Output tokens by Project · retained events",
-      "type": "bargauge",
-      "description": "Exact sums of known reported totals within retained events. Missing values excluded, not converted to zero. Immutable reservation IDs deduplicate ambiguous exporter retries before totals are grouped.",
-      "gridPos": {
-        "h": 8,
-        "w": 12,
-        "x": 12,
-        "y": 50
-      },
-      "fieldConfig": {
-        "defaults": {
-          "unit": "short",
-          "noValue": "Unavailable",
-          "color": {
-            "mode": "palette-classic"
-          },
-          "thresholds": {
-            "mode": "absolute",
-            "steps": [
-              {
-                "color": "blue",
-                "value": null
-              }
-            ]
-          },
-          "displayName": "${__field.name}",
-          "min": 0
-        },
-        "overrides": []
-      },
-      "datasource": {
-        "type": "loki",
-        "uid": "finite-loki"
-      },
-      "targets": [
         {
-          "refId": "A",
+          "refId": "B",
           "expr": "sum by (project) (max_over_time({service=\"finite-private-request-diagnostics\"} | json reservation=\"reservationId\", observed=\"observedAtUnixSeconds\", model=\"model\", endpoint=\"endpoint\", project=\"projectId\", runtime=\"agentRuntimeId\", key=\"apiKeyId\", value=\"completionTokens\" | label_format diagnostic_age=\"{{sub (unixEpoch now) .observed}}\" | diagnostic_age >= 0 | diagnostic_age <= 604800 | drop diagnostic_age | model=~\"$model\" | endpoint=~\"$endpoint\" | project=~\"${project:raw}\" | runtime=~\"${runtime:raw}\" | key=~\"${key:raw}\" | value!=\"\" | unwrap value | __error__=\"\" [$__range]))",
-          "legendFormat": "{{project}}",
+          "legendFormat": "Output {{project}}",
           "queryType": "instant"
         }
       ],
@@ -1093,7 +1061,7 @@
     },
     {
       "id": 21,
-      "title": "Input / output tokens by key · retained events",
+      "title": "Input / output tokens by key \u00b7 retained events",
       "type": "bargauge",
       "description": "Immutable reservation IDs deduplicate ambiguous exporter retries before totals are grouped.",
       "gridPos": {
@@ -1187,7 +1155,7 @@
     },
     {
       "id": 23,
-      "title": "Measurement quality · retained requests",
+      "title": "Measurement quality \u00b7 retained requests",
       "type": "bargauge",
       "description": "",
       "gridPos": {
@@ -1250,7 +1218,7 @@
     },
     {
       "id": 24,
-      "title": "Termination reasons · retained requests",
+      "title": "Termination reasons \u00b7 retained requests",
       "type": "bargauge",
       "description": "",
       "gridPos": {
@@ -1313,7 +1281,7 @@
     },
     {
       "id": 25,
-      "title": "Request details · Core-reserved only · last 7 days",
+      "title": "Request details \u00b7 Core-reserved only \u00b7 last 7 days",
       "type": "text",
       "description": "",
       "gridPos": {
@@ -1336,7 +1304,7 @@
     },
     {
       "id": 26,
-      "title": "Request metadata · newest 1,000 matches; narrow range for more",
+      "title": "Request metadata \u00b7 newest 1,000 matches; narrow range for more",
       "type": "table",
       "description": "",
       "gridPos": {
@@ -1407,13 +1375,9 @@
               "durationMs": "Duration (ms)",
               "measurementQuality": "Quality",
               "terminationReason": "Termination",
-              "settledUsageUnits": "Settled units snapshot",
-              "accountingStatus": "Accounting snapshot",
               "model": "Model",
               "endpoint": "Endpoint",
-              "grantId": "Grant ID",
               "reservationId": "Reservation ID",
-              "settlementKind": "Settlement",
               "upstreamStatus": "Upstream HTTP",
               "upstreamErrorClass": "Upstream error"
             },
@@ -1432,12 +1396,8 @@
               "durationMs": 11,
               "measurementQuality": 12,
               "agentRuntimeId": 13,
-              "accountingStatus": 14,
-              "settlementKind": 15,
-              "settledUsageUnits": 16,
               "upstreamStatus": 17,
               "upstreamErrorClass": 18,
-              "grantId": 19,
               "reservationId": 20
             }
           }
@@ -1446,7 +1406,7 @@
     },
     {
       "id": 29,
-      "title": "Reporting health · current",
+      "title": "Reporting health \u00b7 current",
       "type": "stat",
       "description": "0 or unavailable means reporting is incomplete. A missing exporter process becomes stale even if its previous run succeeded.",
       "gridPos": {

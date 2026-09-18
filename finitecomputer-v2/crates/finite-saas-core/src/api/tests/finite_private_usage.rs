@@ -290,19 +290,45 @@ async fn finite_private_request_diagnostics_are_idempotent_and_separate_from_acc
             duration_ms: Some(900),
             termination_reason: "complete".to_string(),
             measurement_quality: "observed_usage".to_string(),
-            observed_at: Some("2026-09-17T12:01:01Z".to_string()),
         };
         // Existing key issuance can update the association before completion.
         store.issue_finite_private_api_key(crate::IssueFinitePrivateApiKeyInput {
             grant_id: grant.id.clone(), raw_key: "fpk_live_metrics".into(),
             project_id: None, agent_runtime_id: None, now: None,
         }).await.unwrap();
-        let first = store
-            .record_finite_private_request_diagnostic(input.clone())
+        let response = router(store.clone(), scoped_test_auth())
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/internal/finite-private/v1/request-diagnostics")
+                    .header("authorization", usage_authorization())
+                    .header("content-type", "application/json")
+                    .body(Body::from(serde_json::to_vec(&input).unwrap()))
+                    .unwrap(),
+            )
             .await
             .unwrap();
+        assert_eq!(response.status(), StatusCode::NO_CONTENT);
+        assert!(
+            axum::body::to_bytes(response.into_body(), usize::MAX)
+                .await
+                .unwrap()
+                .is_empty()
+        );
+        let first = db
+            .query_json(
+                "SELECT to_jsonb(d) FROM finite_private_request_diagnostics d WHERE reservation_id=$1",
+                &[&reservation_id],
+            )
+            .await
+            .pop()
+            .unwrap();
+        assert_eq!(first["prompt_tokens"], 11);
+        assert_eq!(first["completion_tokens"], 19);
+        assert_eq!(first["project_id"], "project-metrics");
+        assert_eq!(first["agent_runtime_id"], serde_json::Value::Null);
         // Accounting may advance after diagnostics have been recorded/exported.
-        // Replaying diagnostics must not change either its payload or its TTL.
+        // Replaying diagnostics must not change accounting or the diagnostic payload.
         store.settle_finite_private_reservation(crate::SettleFinitePrivateReservationInput {
             reservation_id: reservation_id.clone(), request_id: "req-metrics-1".into(),
             settlement: crate::FinitePrivateSettlementKind::Actual,
@@ -312,21 +338,60 @@ async fn finite_private_request_diagnostics_are_idempotent_and_separate_from_acc
         }).await.unwrap();
         let mut replacement = input.clone();
         replacement.completion_tokens = Some(20);
-        let detail = store
+        store
             .record_finite_private_request_diagnostic(replacement)
             .await
             .unwrap();
-        assert_eq!(detail.reservation_id, reservation_id);
-        // Retry cannot rewrite an exported event or extend its retention.
-        assert_eq!(detail.completion_tokens, Some(19));
-        assert_eq!(detail.model, "glm-5-3-flash");
-        assert_eq!(detail, first);
-        assert_eq!(detail.project_id.as_deref(), Some("project-metrics"));
-        let persisted = db.query_json(
-            "SELECT json_build_object('count', COUNT(*)) FROM finite_private_request_diagnostics WHERE reservation_id=$1",
+        let retry = db
+            .query_json(
+                "SELECT to_jsonb(d) FROM finite_private_request_diagnostics d WHERE reservation_id=$1",
+                &[&reservation_id],
+            )
+            .await
+            .pop()
+            .unwrap();
+        assert_eq!(retry, first);
+
+        // An old event remains old when replayed; a retry cannot extend its TTL.
+        db.query_json(
+            "UPDATE finite_private_request_diagnostics SET observed_at=CURRENT_TIMESTAMP - INTERVAL '8 days' WHERE reservation_id=$1 RETURNING to_jsonb(finite_private_request_diagnostics)",
             &[&reservation_id],
-        ).await;
-        assert_eq!(persisted[0]["count"], 1);
+        )
+        .await;
+        let aged = db
+            .query_json(
+                "SELECT to_jsonb(d) FROM finite_private_request_diagnostics d WHERE reservation_id=$1",
+                &[&reservation_id],
+            )
+            .await
+            .pop()
+            .unwrap();
+        store
+            .record_finite_private_request_diagnostic(input.clone())
+            .await
+            .unwrap();
+        let aged_retry = db
+            .query_json(
+                "SELECT to_jsonb(d) FROM finite_private_request_diagnostics d WHERE reservation_id=$1",
+                &[&reservation_id],
+            )
+            .await
+            .pop()
+            .unwrap();
+        assert_eq!(aged_retry, aged);
+
+        let mut wrong_request = input.clone();
+        wrong_request.request_id = "req-metrics-wrong".into();
+        assert!(matches!(
+            store.record_finite_private_request_diagnostic(wrong_request).await,
+            Err(crate::CoreError::FinitePrivateReservationNotFound)
+        ));
+        let mut negative_tokens = input;
+        negative_tokens.prompt_tokens = Some(-1);
+        assert!(matches!(
+            store.record_finite_private_request_diagnostic(negative_tokens).await,
+            Err(crate::CoreError::InvalidFinitePrivateUsageEstimate)
+        ));
         let ledger = db.row("finite_private_reservations", &reservation_id).await.unwrap();
         assert_eq!(ledger["settled_usage_units"], 68);
         assert_eq!(ledger["status"], "settled");

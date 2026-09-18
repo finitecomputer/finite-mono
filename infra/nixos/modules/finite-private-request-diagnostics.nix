@@ -41,7 +41,7 @@ in
         SET statement_timeout = '5s';
         SET lock_timeout = '1s';
         GRANT USAGE ON SCHEMA public TO finite_private_diagnostics;
-        GRANT SELECT (reservation_id, request_id, api_key_id, grant_id, project_id, agent_runtime_id, endpoint, model, prompt_tokens, completion_tokens, first_output_ms, first_answer_ms, duration_ms, termination_reason, measurement_quality, accounting_status, settlement_kind, settled_usage_units, upstream_status, upstream_error_class, observed_at, exported_at) ON finite_private_request_diagnostics TO finite_private_diagnostics;
+        GRANT SELECT (reservation_id, request_id, api_key_id, project_id, agent_runtime_id, endpoint, model, prompt_tokens, completion_tokens, first_output_ms, first_answer_ms, duration_ms, termination_reason, measurement_quality, upstream_status, upstream_error_class, observed_at, exported_at) ON finite_private_request_diagnostics TO finite_private_diagnostics;
         GRANT UPDATE (exported_at), DELETE ON finite_private_request_diagnostics TO finite_private_diagnostics;
         SQL
       '';

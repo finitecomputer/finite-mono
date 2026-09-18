@@ -20,27 +20,15 @@ struct RequestCounters {
     refusals: [AtomicU64; 5],
     terminal: [AtomicU64; 5],
     active: AtomicU64,
-    input_tokens: AtomicU64,
-    output_tokens: AtomicU64,
     actual_settlements: AtomicU64,
     estimated_settlements: AtomicU64,
     settlement_failures: AtomicU64,
     diagnostics_failures: AtomicU64,
-    duration_count: AtomicU64,
-    duration_sum_ms: AtomicU64,
-    duration_buckets: [AtomicU64; DURATION_BUCKETS_MS.len() + 1],
-    first_output_count: AtomicU64,
-    first_output_sum_ms: AtomicU64,
-    first_output_buckets: [AtomicU64; DURATION_BUCKETS_MS.len() + 1],
-    first_answer_count: AtomicU64,
-    first_answer_sum_ms: AtomicU64,
-    first_answer_buckets: [AtomicU64; DURATION_BUCKETS_MS.len() + 1],
     routes: Mutex<BTreeMap<(String, String), RouteStats>>,
 }
 
 #[derive(Default)]
 struct RouteStats {
-    admissions: [u64; 2],
     terminal: [u64; 5],
     input_tokens: u64,
     output_tokens: u64,
@@ -51,24 +39,22 @@ struct RouteStats {
 
 #[derive(Default)]
 struct RouteHistogram {
-    buckets: [AtomicU64; DURATION_BUCKETS_MS.len() + 1],
-    count: AtomicU64,
-    sum_ms: AtomicU64,
+    buckets: [u64; DURATION_BUCKETS_MS.len() + 1],
+    count: u64,
+    sum_ms: u64,
 }
 
 impl RouteHistogram {
-    fn observe(&self, elapsed: u64) {
-        observe_histogram(&self.buckets, &self.count, &self.sum_ms, elapsed);
+    fn observe(&mut self, elapsed: u64) {
+        observe_histogram(
+            &mut self.buckets,
+            &mut self.count,
+            &mut self.sum_ms,
+            elapsed,
+        );
     }
     fn render(&self, output: &mut String, name: &str, labels: &str) {
-        histogram(
-            output,
-            name,
-            &self.buckets,
-            self.count.load(Ordering::Relaxed),
-            self.sum_ms.load(Ordering::Relaxed),
-            labels,
-        );
+        histogram(output, name, &self.buckets, self.count, self.sum_ms, labels);
     }
 }
 
@@ -77,20 +63,15 @@ pub(crate) struct RequestTimer {
     started: Instant,
     model: String,
     endpoint: String,
-    finished: Arc<AtomicU64>,
-    first_output: Arc<AtomicU64>,
-    first_answer: Arc<AtomicU64>,
-    duration: Arc<AtomicU64>,
+    finished: AtomicU64,
+    first_output: AtomicU64,
+    first_answer: AtomicU64,
+    duration: AtomicU64,
 }
 
 impl LimiterMetrics {
     pub(crate) fn request_observed(&self) {
         self.requests.started.fetch_add(1, Ordering::Relaxed);
-    }
-
-    #[cfg(test)]
-    pub(crate) fn request_started(&self) -> RequestTimer {
-        self.request_started_for_route("unknown", "unknown")
     }
 
     pub(crate) fn request_started_for_route(&self, model: &str, endpoint: &str) -> RequestTimer {
@@ -101,10 +82,10 @@ impl LimiterMetrics {
             started: Instant::now(),
             model: model.to_string(),
             endpoint: endpoint.to_string(),
-            finished: Arc::new(AtomicU64::new(0)),
-            first_output: Arc::new(AtomicU64::new(0)),
-            first_answer: Arc::new(AtomicU64::new(0)),
-            duration: Arc::new(AtomicU64::new(0)),
+            finished: AtomicU64::new(0),
+            first_output: AtomicU64::new(0),
+            first_answer: AtomicU64::new(0),
+            duration: AtomicU64::new(0),
         }
     }
 
@@ -123,15 +104,6 @@ impl LimiterMetrics {
         self.requests.refusals[index].fetch_add(1, Ordering::Relaxed);
     }
 
-    pub(crate) fn admission_for_route(&self, model: &str, endpoint: &str, admitted: bool) {
-        self.admission(admitted);
-        let mut routes = self.requests.routes.lock().expect("metrics mutex poisoned");
-        routes
-            .entry((model.to_string(), endpoint.to_string()))
-            .or_default()
-            .admissions[usize::from(!admitted)] += 1;
-    }
-
     pub(crate) fn terminal(&self, outcome: TerminalOutcome) {
         self.requests.terminal[outcome as usize].fetch_add(1, Ordering::Relaxed);
     }
@@ -143,19 +115,6 @@ impl LimiterMetrics {
             .entry((model.to_string(), endpoint.to_string()))
             .or_default()
             .terminal[outcome as usize] += 1;
-    }
-
-    pub(crate) fn tokens(&self, input: Option<i64>, output: Option<i64>) {
-        if let Some(input) = input.filter(|value| *value >= 0) {
-            self.requests
-                .input_tokens
-                .fetch_add(input as u64, Ordering::Relaxed);
-        }
-        if let Some(output) = output.filter(|value| *value >= 0) {
-            self.requests
-                .output_tokens
-                .fetch_add(output as u64, Ordering::Relaxed);
-        }
     }
 
     pub(crate) fn settlement(&self, actual: bool, success: bool) {
@@ -237,14 +196,6 @@ impl LimiterMetrics {
         for ((model, endpoint), route) in routes.iter() {
             let model = escape_label(model);
             let endpoint = escape_label(endpoint);
-            for (outcome, index) in [("admitted", 0), ("refused", 1)] {
-                metric(
-                    &mut output,
-                    "finite_private_limiter_route_admissions_total",
-                    &format!("model=\"{model}\",endpoint=\"{endpoint}\",outcome=\"{outcome}\""),
-                    route.admissions[index],
-                );
-            }
             let labels = format!("model=\"{model}\",endpoint=\"{endpoint}\"");
             metric(
                 &mut output,
@@ -287,18 +238,6 @@ impl LimiterMetrics {
         }
         metric(
             &mut output,
-            "finite_private_limiter_input_tokens_total",
-            "",
-            c.input_tokens.load(Ordering::Relaxed),
-        );
-        metric(
-            &mut output,
-            "finite_private_limiter_output_tokens_total",
-            "",
-            c.output_tokens.load(Ordering::Relaxed),
-        );
-        metric(
-            &mut output,
             "finite_private_limiter_settlements_total",
             "kind=\"actual\"",
             c.actual_settlements.load(Ordering::Relaxed),
@@ -320,30 +259,6 @@ impl LimiterMetrics {
             "finite_private_limiter_diagnostic_persistence_failures_total",
             "",
             c.diagnostics_failures.load(Ordering::Relaxed),
-        );
-        histogram(
-            &mut output,
-            "finite_private_limiter_request_duration_seconds",
-            &c.duration_buckets,
-            c.duration_count.load(Ordering::Relaxed),
-            c.duration_sum_ms.load(Ordering::Relaxed),
-            "",
-        );
-        histogram(
-            &mut output,
-            "finite_private_limiter_first_output_seconds",
-            &c.first_output_buckets,
-            c.first_output_count.load(Ordering::Relaxed),
-            c.first_output_sum_ms.load(Ordering::Relaxed),
-            "",
-        );
-        histogram(
-            &mut output,
-            "finite_private_limiter_first_answer_seconds",
-            &c.first_answer_buckets,
-            c.first_answer_count.load(Ordering::Relaxed),
-            c.first_answer_sum_ms.load(Ordering::Relaxed),
-            "",
         );
         output
     }
@@ -380,7 +295,6 @@ impl TerminalOutcome {
 
 impl RequestTimer {
     pub(crate) fn tokens(&self, input: Option<i64>, output: Option<i64>) {
-        self.metrics.tokens(input, output);
         let mut routes = self
             .metrics
             .requests
@@ -421,12 +335,6 @@ impl RequestTimer {
                 .or_default()
                 .first_output
                 .observe(elapsed);
-            observe_histogram(
-                &self.metrics.requests.first_output_buckets,
-                &self.metrics.requests.first_output_count,
-                &self.metrics.requests.first_output_sum_ms,
-                elapsed,
-            );
         }
     }
 
@@ -446,12 +354,6 @@ impl RequestTimer {
                 .or_default()
                 .first_answer
                 .observe(elapsed);
-            observe_histogram(
-                &self.metrics.requests.first_answer_buckets,
-                &self.metrics.requests.first_answer_count,
-                &self.metrics.requests.first_answer_sum_ms,
-                elapsed,
-            );
         }
     }
 
@@ -475,12 +377,6 @@ impl RequestTimer {
                 .or_default()
                 .duration
                 .observe(elapsed);
-            observe_histogram(
-                &self.metrics.requests.duration_buckets,
-                &self.metrics.requests.duration_count,
-                &self.metrics.requests.duration_sum_ms,
-                elapsed,
-            );
         }
     }
 }
@@ -491,20 +387,20 @@ impl Drop for RequestTimer {
     }
 }
 
-fn observe_histogram(buckets: &[AtomicU64], count: &AtomicU64, sum_ms: &AtomicU64, value_ms: u64) {
-    count.fetch_add(1, Ordering::Relaxed);
-    sum_ms.fetch_add(value_ms, Ordering::Relaxed);
+fn observe_histogram(buckets: &mut [u64], count: &mut u64, sum_ms: &mut u64, value_ms: u64) {
+    *count += 1;
+    *sum_ms += value_ms;
     let index = DURATION_BUCKETS_MS
         .iter()
         .position(|bound| value_ms <= *bound)
         .unwrap_or(DURATION_BUCKETS_MS.len());
-    buckets[index].fetch_add(1, Ordering::Relaxed);
+    buckets[index] += 1;
 }
 
 fn histogram(
     output: &mut String,
     name: &str,
-    buckets: &[AtomicU64],
+    buckets: &[u64],
     count: u64,
     sum_ms: u64,
     labels: &str,
@@ -516,7 +412,7 @@ fn histogram(
     };
     let mut cumulative = 0;
     for (index, bound) in DURATION_BUCKETS_MS.iter().enumerate() {
-        cumulative += buckets[index].load(Ordering::Relaxed);
+        cumulative += buckets[index];
         metric(
             output,
             &format!("{name}_bucket"),
@@ -524,7 +420,7 @@ fn histogram(
             cumulative,
         );
     }
-    cumulative += buckets[DURATION_BUCKETS_MS.len()].load(Ordering::Relaxed);
+    cumulative += buckets[DURATION_BUCKETS_MS.len()];
     metric(
         output,
         &format!("{name}_bucket"),
@@ -560,15 +456,19 @@ mod tests {
     use super::*;
 
     #[test]
-    fn renders_bounded_counters_and_histograms() {
+    fn renders_authoritative_route_metrics_once_per_request() {
         let metrics = LimiterMetrics::default();
         metrics.admission(true);
         metrics.admission(false);
-        metrics.tokens(Some(4), Some(7));
         metrics.settlement(true, true);
-        let timer = metrics.request_started();
+        let timer = metrics.request_started_for_route("glm-5-3-flash", "/v1/chat/completions");
+        timer.tokens(Some(4), Some(7));
         timer.observe_first_output();
+        timer.observe_first_output();
+        timer.observe_first_answer();
+        timer.observe_first_answer();
         timer.finish(TerminalOutcome::Success);
+        timer.finish(TerminalOutcome::UpstreamError);
         let output = metrics.render("usage-api");
         assert!(output.contains(
             "finite_private_limiter_admissions_total{mode=\"usage-api\",outcome=\"admitted\"} 1"
@@ -578,9 +478,68 @@ mod tests {
         ));
         assert!(output.contains("finite_private_limiter_admission_mode{mode=\"usage-api\"} 1"));
         assert!(output.contains("finite_private_limiter_requests_started_total 1"));
-        assert!(output.contains("finite_private_limiter_input_tokens_total 4"));
-        assert!(output.contains("finite_private_limiter_output_tokens_total 7"));
-        assert!(output.contains("finite_private_limiter_request_duration_seconds_count 1"));
-        assert!(output.contains("finite_private_limiter_first_output_seconds_count 1"));
+        let route = "model=\"glm-5-3-flash\",endpoint=\"/v1/chat/completions\"";
+        assert!(output.contains(&format!(
+            "finite_private_limiter_route_input_tokens_total{{{route}}} 4"
+        )));
+        assert!(output.contains(&format!(
+            "finite_private_limiter_route_output_tokens_total{{{route}}} 7"
+        )));
+        assert!(output.contains(&format!(
+            "finite_private_limiter_route_requests_total{{{route},outcome=\"success\"}} 1"
+        )));
+        assert!(output.contains(&format!(
+            "finite_private_limiter_route_requests_total{{{route},outcome=\"upstream_error\"}} 0"
+        )));
+        for metric in [
+            "route_request_duration_seconds",
+            "route_first_output_seconds",
+            "route_first_answer_seconds",
+        ] {
+            assert!(output.contains(&format!(
+                "finite_private_limiter_{metric}_count{{{route}}} 1"
+            )));
+            assert!(output.contains(&format!(
+                "finite_private_limiter_{metric}_bucket{{{route},le=\"+Inf\"}} 1"
+            )));
+        }
+        assert!(!output.contains("finite_private_limiter_input_tokens_total"));
+        assert!(!output.contains("finite_private_limiter_output_tokens_total"));
+        assert!(!output.contains("finite_private_limiter_route_admissions_total"));
+    }
+
+    #[test]
+    fn dropped_request_finishes_once_as_cancellation() {
+        let metrics = LimiterMetrics::default();
+        let timer = metrics.request_started_for_route("glm-5-3-flash", "/v1/chat/completions");
+        timer.observe_first_output();
+        drop(timer);
+        let output = metrics.render("usage-api");
+        let route = "model=\"glm-5-3-flash\",endpoint=\"/v1/chat/completions\"";
+        assert!(output.contains("finite_private_limiter_active_requests 0"));
+        assert!(output.contains(&format!(
+            "finite_private_limiter_route_requests_total{{{route},outcome=\"client_cancellation\"}} 1"
+        )));
+        assert!(output.contains(&format!(
+            "finite_private_limiter_route_request_duration_seconds_count{{{route}}} 1"
+        )));
+        assert!(output.contains(&format!(
+            "finite_private_limiter_route_first_output_seconds_count{{{route}}} 1"
+        )));
+    }
+
+    #[test]
+    fn histogram_keeps_cumulative_buckets_and_sum() {
+        let mut histogram = RouteHistogram::default();
+        histogram.observe(50);
+        histogram.observe(300);
+        let mut output = String::new();
+        histogram.render(&mut output, "latency_seconds", "model=\"test\"");
+        assert!(output.contains("latency_seconds_bucket{model=\"test\",le=\"0.1\"} 1"));
+        assert!(output.contains("latency_seconds_bucket{model=\"test\",le=\"0.25\"} 1"));
+        assert!(output.contains("latency_seconds_bucket{model=\"test\",le=\"0.5\"} 2"));
+        assert!(output.contains("latency_seconds_bucket{model=\"test\",le=\"+Inf\"} 2"));
+        assert!(output.contains("latency_seconds_count{model=\"test\"} 2"));
+        assert!(output.contains("latency_seconds_sum{model=\"test\"} 0.35"));
     }
 }

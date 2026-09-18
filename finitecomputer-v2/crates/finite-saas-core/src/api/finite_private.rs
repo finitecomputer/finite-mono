@@ -301,26 +301,14 @@ pub(super) async fn settle_finite_private_reservation(
 pub(super) async fn record_finite_private_request_diagnostic(
     State(state): State<CoreApiState>,
     headers: HeaderMap,
-    Json(input): Json<RecordFinitePrivateRequestDiagnosticRequest>,
-) -> Result<Json<FinitePrivateRequestDiagnostic>, ApiError> {
+    Json(input): Json<RecordFinitePrivateRequestDiagnosticInput>,
+) -> Result<StatusCode, ApiError> {
     require_finite_private_usage_auth(&state, &headers)?;
-    Ok(Json(
-        state
-            .store
-            .record_finite_private_request_diagnostic(RecordFinitePrivateRequestDiagnosticInput {
-                reservation_id: input.reservation_id,
-                request_id: input.request_id,
-                prompt_tokens: input.prompt_tokens,
-                completion_tokens: input.completion_tokens,
-                first_output_ms: input.first_output_ms,
-                first_answer_ms: input.first_answer_ms,
-                duration_ms: input.duration_ms,
-                termination_reason: input.termination_reason,
-                measurement_quality: input.measurement_quality,
-                observed_at: input.observed_at,
-            })
-            .await?,
-    ))
+    state
+        .store
+        .record_finite_private_request_diagnostic(input)
+        .await?;
+    Ok(StatusCode::NO_CONTENT)
 }
 
 pub(super) async fn finite_private_usage_status_for_api_key(

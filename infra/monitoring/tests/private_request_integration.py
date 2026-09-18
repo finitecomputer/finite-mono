@@ -120,8 +120,8 @@ try:
       SELECT 'verify-res-'||lpad(n::text,4,'0'),'verify-req-'||n,'verify-key','verify-grant','/v1/chat/completions','synthetic-model',68,68,68,'actual','settled','test',CURRENT_TIMESTAMP,CURRENT_TIMESTAMP
       FROM generate_series(1,1002) n;
     INSERT INTO finite_private_request_diagnostics
-      (reservation_id,request_id,api_key_id,grant_id,endpoint,model,prompt_tokens,completion_tokens,first_output_ms,first_answer_ms,duration_ms,termination_reason,measurement_quality,accounting_status,settled_usage_units,settlement_kind,observed_at)
-      SELECT id,request_id,api_key_id,grant_id,endpoint,model,11,19,240,300,900,'complete','observed_usage',status,settled_usage_units,settlement_kind,
+      (reservation_id,request_id,api_key_id,endpoint,model,prompt_tokens,completion_tokens,first_output_ms,first_answer_ms,duration_ms,termination_reason,measurement_quality,observed_at)
+      SELECT id,request_id,api_key_id,endpoint,model,11,19,240,300,900,'complete','observed_usage',
       CASE WHEN id='verify-res-1002' THEN CURRENT_TIMESTAMP-INTERVAL '8 days' ELSE CURRENT_TIMESTAMP END
       FROM finite_private_reservations;
     """
@@ -158,12 +158,12 @@ try:
         ).read_text()
     )
     expressions = [
-        ("loki_count", "Measurement quality · retained requests", 1001),
-        ("loki_output_tokens", "Output tokens by Project · retained events", 19019),
+        ("loki_count", "Measurement quality · retained requests", 0, 1001),
+        ("loki_output_tokens", "Input / output tokens by Project · retained events", 1, 19019),
     ]
-    for label, title, expected in expressions:
+    for label, title, target, expected in expressions:
         panel = next(panel for panel in dashboard["panels"] if panel["title"] == title)
-        expression = panel["targets"][0]["expr"]
+        expression = panel["targets"][target]["expr"]
         for variable, value in {
             "$__range": "1h",
             "$model": "synthetic-model",

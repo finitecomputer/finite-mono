@@ -349,18 +349,3 @@ pub struct SettleFinitePrivateReservationRequest {
     pub upstream_error_class: Option<String>,
     pub now: Option<String>,
 }
-
-#[derive(Debug, Clone, Deserialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
-pub struct RecordFinitePrivateRequestDiagnosticRequest {
-    pub reservation_id: String,
-    pub request_id: String,
-    pub prompt_tokens: Option<i64>,
-    pub completion_tokens: Option<i64>,
-    pub first_output_ms: Option<i64>,
-    pub first_answer_ms: Option<i64>,
-    pub duration_ms: Option<i64>,
-    pub termination_reason: String,
-    pub measurement_quality: String,
-    pub observed_at: Option<String>,
-}

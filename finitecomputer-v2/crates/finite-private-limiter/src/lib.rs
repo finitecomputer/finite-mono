@@ -648,9 +648,7 @@ async fn proxy_openai(
             .contains(&presented_api_key)
     {
         state.metrics.refusal("invalid_api_key");
-        state
-            .metrics
-            .admission_for_route(telemetry_model, uri.path(), false);
+        state.metrics.admission(false);
         request_timer.finish(TerminalOutcome::AdmissionError);
         return openai_error(
             StatusCode::UNAUTHORIZED,
@@ -660,9 +658,7 @@ async fn proxy_openai(
         );
     }
     let reservation_id = if degraded_admission {
-        state
-            .metrics
-            .admission_for_route(telemetry_model, uri.path(), true);
+        state.metrics.admission(true);
         eprintln!(
             "finite-private-limiter degraded admission: request {request_id} admitted via allowlist (settlement skipped)"
         );
@@ -684,9 +680,7 @@ async fn proxy_openai(
             Ok(decision) => decision,
             Err(error) => {
                 state.metrics.refusal("usage_api_unavailable");
-                state
-                    .metrics
-                    .admission_for_route(telemetry_model, uri.path(), false);
+                state.metrics.admission(false);
                 request_timer.finish(TerminalOutcome::AdmissionError);
                 eprintln!("finite-private-limiter reserve failed: {error}");
                 return openai_error(
@@ -706,17 +700,13 @@ async fn proxy_openai(
                     .map(|error| error.code.as_str())
                     .unwrap_or("other"),
             );
-            state
-                .metrics
-                .admission_for_route(telemetry_model, uri.path(), false);
+            state.metrics.admission(false);
             request_timer.finish(TerminalOutcome::AdmissionError);
             return denied_response(reserve_decision);
         }
 
         let Some(reservation_id) = reserve_decision.reservation_id.clone() else {
-            state
-                .metrics
-                .admission_for_route(telemetry_model, uri.path(), false);
+            state.metrics.admission(false);
             request_timer.finish(TerminalOutcome::AdmissionError);
             return openai_error(
                 StatusCode::SERVICE_UNAVAILABLE,
@@ -725,9 +715,7 @@ async fn proxy_openai(
                 "usage_api_invalid_response",
             );
         };
-        state
-            .metrics
-            .admission_for_route(telemetry_model, uri.path(), true);
+        state.metrics.admission(true);
         reservation_id
     };
 
@@ -770,20 +758,16 @@ async fn proxy_openai(
                     },
                 )
                 .await;
-                let (first_output_ms, first_answer_ms, duration_ms) = request_timer.timing();
+
                 record_diagnostic_best_effort(
                     &state,
                     &reservation_id,
-                    DiagnosticRequest {
-                        request_id: diagnostic_request_id,
-                        prompt_tokens: None,
-                        completion_tokens: None,
-                        first_output_ms,
-                        first_answer_ms,
-                        duration_ms,
-                        termination_reason: "upstream_error".to_string(),
-                        measurement_quality: "estimated_usage".to_string(),
-                    },
+                    DiagnosticRequest::new(
+                        diagnostic_request_id,
+                        &request_timer,
+                        None,
+                        "upstream_error".to_string(),
+                    ),
                 );
                 return openai_error(
                     StatusCode::BAD_GATEWAY,
@@ -828,20 +812,16 @@ async fn proxy_openai(
                 },
             )
             .await;
-            let (first_output_ms, first_answer_ms, duration_ms) = request_timer.timing();
+
             record_diagnostic_best_effort(
                 &state,
                 &reservation_id,
-                DiagnosticRequest {
-                    request_id: diagnostic_request_id,
-                    prompt_tokens: None,
-                    completion_tokens: None,
-                    first_output_ms,
-                    first_answer_ms,
-                    duration_ms,
-                    termination_reason: "upstream_error".to_string(),
-                    measurement_quality: "estimated_usage".to_string(),
-                },
+                DiagnosticRequest::new(
+                    diagnostic_request_id,
+                    &request_timer,
+                    None,
+                    "upstream_error".to_string(),
+                ),
             );
             return openai_error(
                 StatusCode::BAD_GATEWAY,
@@ -887,30 +867,21 @@ async fn proxy_openai(
     if let Err(error) = settle_usage_with_retries(&state, &reservation_id, settle).await {
         eprintln!("finite-private-limiter settle failed: {error}");
     }
-    let (first_output_ms, first_answer_ms, duration_ms) = request_timer.timing();
+
     record_diagnostic_best_effort(
         &state,
         &reservation_id,
-        DiagnosticRequest {
-            request_id: diagnostic_request_id,
-            prompt_tokens: actual.as_ref().map(|usage| usage.prompt_tokens),
-            completion_tokens: actual.as_ref().map(|usage| usage.completion_tokens),
-            first_output_ms,
-            first_answer_ms,
-            duration_ms,
-            termination_reason: if upstream.status.is_success() {
+        DiagnosticRequest::new(
+            diagnostic_request_id,
+            &request_timer,
+            actual.as_ref(),
+            if upstream.status.is_success() {
                 "complete"
             } else {
                 "upstream_error"
             }
             .to_string(),
-            measurement_quality: if actual.is_some() {
-                "observed_usage"
-            } else {
-                "estimated_usage"
-            }
-            .to_string(),
-        },
+        ),
     );
 
     let mut response = Response::builder().status(upstream.status);
@@ -1035,6 +1006,32 @@ struct DiagnosticRequest {
     duration_ms: Option<i64>,
     termination_reason: String,
     measurement_quality: String,
+}
+
+impl DiagnosticRequest {
+    fn new(
+        request_id: String,
+        timer: &RequestTimer,
+        usage: Option<&ActualUsage>,
+        reason: String,
+    ) -> Self {
+        let (first_output_ms, first_answer_ms, duration_ms) = timer.timing();
+        Self {
+            request_id,
+            prompt_tokens: usage.map(|usage| usage.prompt_tokens),
+            completion_tokens: usage.map(|usage| usage.completion_tokens),
+            first_output_ms,
+            first_answer_ms,
+            duration_ms,
+            termination_reason: reason,
+            measurement_quality: if usage.is_some() {
+                "observed_usage"
+            } else {
+                "estimated_usage"
+            }
+            .into(),
+        }
+    }
 }
 
 fn record_diagnostic_best_effort(state: &AppState, reservation_id: &str, input: DiagnosticRequest) {
@@ -1203,20 +1200,11 @@ fn streaming_response(
                         upstream_error_class: Some("upstream_stream_timeout".to_string()),
                     })
                     .await;
-                    let (first_output_ms, first_answer_ms, duration_ms) = settlement_guard.timer().timing();
+
                     record_diagnostic_best_effort(
                         settlement_guard.state(),
                         settlement_guard.reservation_id(),
-                        DiagnosticRequest {
-                            request_id: settlement_guard.request_id().to_string(),
-                            prompt_tokens: None,
-                            completion_tokens: None,
-                            first_output_ms,
-                            first_answer_ms,
-                            duration_ms,
-                            termination_reason: "upstream_stream_timeout".to_string(),
-                            measurement_quality: "estimated_usage".to_string(),
-                        },
+                        DiagnosticRequest::new(settlement_guard.request_id().to_string(), settlement_guard.timer(), None, "upstream_stream_timeout".to_string()),
                     );
                     settlement_guard.mark_diagnostic_recorded();
                     yield Err(std::io::Error::new(
@@ -1260,20 +1248,11 @@ fn streaming_response(
                             upstream_error_class: Some("upstream_stream_error".to_string()),
                         })
                     .await;
-                    let (first_output_ms, first_answer_ms, duration_ms) = settlement_guard.timer().timing();
+
                     record_diagnostic_best_effort(
                         settlement_guard.state(),
                         settlement_guard.reservation_id(),
-                        DiagnosticRequest {
-                            request_id: settlement_guard.request_id().to_string(),
-                            prompt_tokens: None,
-                            completion_tokens: None,
-                            first_output_ms,
-                            first_answer_ms,
-                            duration_ms,
-                            termination_reason: "upstream_stream_error".to_string(),
-                            measurement_quality: "estimated_usage".to_string(),
-                        },
+                        DiagnosticRequest::new(settlement_guard.request_id().to_string(), settlement_guard.timer(), None, "upstream_stream_error".to_string()),
                     );
                     settlement_guard.mark_diagnostic_recorded();
                     yield Err(std::io::Error::other(error.to_string()));
@@ -1305,27 +1284,13 @@ fn streaming_response(
             actual.as_ref().map(|usage| usage.prompt_tokens),
             actual.as_ref().map(|usage| usage.completion_tokens),
         );
-        let (first_output_ms, first_answer_ms, duration_ms) = settlement_guard.timer().timing();
-        let diagnostic = DiagnosticRequest {
-                request_id: settlement_guard.request_id().to_string(),
-                prompt_tokens: actual.as_ref().map(|usage| usage.prompt_tokens),
-                completion_tokens: actual.as_ref().map(|usage| usage.completion_tokens),
-                first_output_ms,
-                first_answer_ms,
-                duration_ms,
-                termination_reason: if status.is_success() {
+
+        let diagnostic = DiagnosticRequest::new(settlement_guard.request_id().to_string(), settlement_guard.timer(), actual.as_ref(), if status.is_success() {
                     "complete"
                 } else {
                     "upstream_error"
                 }
-                .to_string(),
-                measurement_quality: if actual.is_some() {
-                    "observed_usage"
-                } else {
-                    "estimated_usage"
-                }
-                .to_string(),
-            };
+                .to_string());
         // Preserve known final usage if the client drops while Core retries.
         settlement_guard.pending_diagnostic = Some(diagnostic.clone());
         let settlement_ok = settlement_guard.settle(settle).await;
@@ -1430,17 +1395,12 @@ impl SettlementGuard {
     }
 
     fn preserve_terminal_diagnostic(&mut self, reason: &str) {
-        let (first_output_ms, first_answer_ms, duration_ms) = self.request_timer.timing();
-        self.pending_diagnostic = Some(DiagnosticRequest {
-            request_id: self.request_id().to_string(),
-            prompt_tokens: None,
-            completion_tokens: None,
-            first_output_ms,
-            first_answer_ms,
-            duration_ms,
-            termination_reason: reason.to_string(),
-            measurement_quality: "estimated_usage".into(),
-        });
+        self.pending_diagnostic = Some(DiagnosticRequest::new(
+            self.request_id().to_string(),
+            &self.request_timer,
+            None,
+            reason.to_string(),
+        ));
     }
 
     fn mark_diagnostic_recorded(&mut self) {
@@ -1457,20 +1417,15 @@ impl Drop for SettlementGuard {
         if !self.diagnostic_recorded {
             self.request_timer
                 .finish(TerminalOutcome::ClientCancellation);
-            let (first_output_ms, first_answer_ms, duration_ms) = self.request_timer.timing();
-            let diagnostic = self
-                .pending_diagnostic
-                .take()
-                .unwrap_or_else(|| DiagnosticRequest {
-                    request_id: self.request_id().to_string(),
-                    prompt_tokens: None,
-                    completion_tokens: None,
-                    first_output_ms,
-                    first_answer_ms,
-                    duration_ms,
-                    termination_reason: "client_disconnected_or_stream_cancelled".to_string(),
-                    measurement_quality: "estimated_usage".to_string(),
-                });
+
+            let diagnostic = self.pending_diagnostic.take().unwrap_or_else(|| {
+                DiagnosticRequest::new(
+                    self.request_id().to_string(),
+                    &self.request_timer,
+                    None,
+                    "client_disconnected_or_stream_cancelled".to_string(),
+                )
+            });
             let settlement = self.settlement.clone();
             let fallback = self.fallback.clone();
             tokio::spawn(async move {
