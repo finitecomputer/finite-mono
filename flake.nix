@@ -287,6 +287,7 @@
                 chmod -R u+w "$plugins"
                 cp -R ${./finite-brain/integrations/hermes/finite-brain} "$plugins/finite-brain"
                 cp -R ${./finite-sites/integrations/hermes/finite-sites} "$plugins/finite-sites"
+                chmod -R u+w "$plugins"
               '';
             });
           hermesAgentPackage =
@@ -295,10 +296,7 @@
                 postInstall = (old.postInstall or "") + ''
                   # Keep the Python environment unchanged; patch only the bundled adapter.
                   plugins="$out/share/hermes-agent/plugins"
-                  cp -RL "$plugins" "$out/share/hermes-agent/plugins-patched"
-                  rm -rf "$plugins"
-                  mv "$out/share/hermes-agent/plugins-patched" "$plugins"
-                  chmod -R u+w "$plugins"
+                  # withSkillsInventory already materialized a writable copy.
                   ${hermesPkgs.patch}/bin/patch -d "$plugins" -p1 < ${./finite-agentd/patches/simplex-media-path.patch}
                 '';
               });
