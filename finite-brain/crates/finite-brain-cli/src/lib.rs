@@ -2588,6 +2588,18 @@ fn write_access_summary_rows<W: Write>(
     write_mount_rows(output, &report.mounted_folders)
 }
 
+fn brain_inventory_read(
+    env: &CliEnvironment,
+    args: &[String],
+    path: &str,
+) -> Result<serde_json::Value, CliError> {
+    if args.iter().any(|arg| arg == "--existing-identity") {
+        http::signed_json_read_existing_identity(env, args, path)
+    } else {
+        signed_json_request(env, args, "GET", path, None)
+    }
+}
+
 fn brain<W: Write>(
     args: &[String],
     env: &CliEnvironment,
@@ -2596,7 +2608,7 @@ fn brain<W: Write>(
 ) -> Result<(), CliError> {
     match args.first().map(String::as_str).unwrap_or("metadata") {
         "list" | "ls" => {
-            let response = signed_json_request(env, args, "GET", "/v1/brains", None)?;
+            let response = brain_inventory_read(env, args, "/v1/brains")?;
             write_command_response(output, json, &response)
         }
         "create" => {
@@ -2681,7 +2693,7 @@ fn brain<W: Write>(
                     .ok_or(CliError::MissingArgument("brain-id or --brain"))?,
             };
             let path = format!("/v1/brains/{brain_id}/metadata");
-            let response = signed_json_request(env, args, "GET", &path, None)?;
+            let response = brain_inventory_read(env, args, &path)?;
             write_command_response(output, json, &response)
         }
         "export" => {
@@ -8232,6 +8244,30 @@ mod tests {
     }
 
     #[test]
+    fn brain_inventory_existing_identity_never_mints() {
+        for mut args in [
+            vec!["brain", "list", "--existing-identity", "--json"],
+            vec![
+                "brain",
+                "metadata",
+                "--existing-identity",
+                "example",
+                "--json",
+            ],
+        ] {
+            let tmp = TempDir::new().unwrap();
+            let env = env_for(&tmp);
+            let identity_file = signer::identity_paths(&env).unwrap().identity_file();
+            args.extend(["--server", "http://127.0.0.1:1"]);
+            let mut output = Vec::new();
+            let error = run_with_env(args, env, &mut output).unwrap_err();
+            assert!(matches!(error, CliError::Identity(_)), "{error:?}");
+            assert!(!identity_file.exists());
+            assert!(output.is_empty());
+        }
+    }
+
+    #[test]
     fn brain_list_discovers_an_explicitly_paired_personal_brain() {
         let tmp = TempDir::new().unwrap();
         import_identity_secret(
@@ -8266,6 +8302,60 @@ mod tests {
 
         run_with_env(
             ["brain", "list", "--server", &server_url, "--json"],
+            env_for(&tmp),
+            &mut output,
+        )
+        .unwrap();
+
+        let response: Value = serde_json::from_slice(&output).unwrap();
+        assert_eq!(response["brains"][0]["brainId"], "personal-user");
+        assert_eq!(response["brains"][0]["kind"], "personal");
+        assert_eq!(response["brains"][0]["role"], "member");
+        assert_eq!(server.join().unwrap(), "GET /v1/brains HTTP/1.1");
+    }
+
+    #[test]
+    fn brain_list_existing_identity_uses_the_imported_signer() {
+        let tmp = TempDir::new().unwrap();
+        import_identity_secret(
+            &tmp,
+            "0000000000000000000000000000000000000000000000000000000000000001",
+        );
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let server_url = format!("http://{}", listener.local_addr().unwrap());
+        let server = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let (request_line, _) = read_http_request(&mut stream);
+            let body = serde_json::json!({
+                "brains": [{
+                    "brainId": "personal-user",
+                    "kind": "personal",
+                    "name": "Personal Brain",
+                    "role": "member",
+                    "inviteCode": null
+                }]
+            })
+            .to_string();
+            write!(
+                stream,
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                body.len(),
+                body
+            )
+            .unwrap();
+            request_line
+        });
+        let mut output = Vec::new();
+
+        run_with_env(
+            [
+                "brain",
+                "list",
+                "--server",
+                &server_url,
+                "--json",
+                "--existing-identity",
+            ],
             env_for(&tmp),
             &mut output,
         )

@@ -1,15 +1,18 @@
 import { dashboardAgentDesignPreviewEnabled } from "@/lib/dashboard-design-preview";
 import headingStyles from "@/styles/agent-page-heading.module.css";
 import { redirect } from "next/navigation";
-import { BrainChatState } from "@/components/brain-chat-state";
+import { AgentBrainBrowser } from "@/components/agent-brain-browser";
+import { getAccountAuthContext } from "@/lib/dashboard-auth";
 import "@/styles/brain-overview.css";
 import { loadDashboardMachineAccess } from "@/lib/dashboard-machine-access";
+
+export const dynamic = "force-dynamic";
 
 export default async function MachineBrainPage({ params }: {
   params: Promise<{ machineId: string }>;
 }) {
   const { machineId } = await params;
-  const access = await loadDashboardMachineAccess(machineId, { coreCacheMode: "swr" });
+  const [access, account] = await Promise.all([loadDashboardMachineAccess(machineId), getAccountAuthContext()]);
   if (!access) redirect("/dashboard");
   if (access.machineId !== machineId) {
     redirect(`/dashboard/machines/${encodeURIComponent(access.machineId)}/brain`);
@@ -22,15 +25,10 @@ export default async function MachineBrainPage({ params }: {
       </section>
     );
   }
-  // FIN-89 owns the real agent-authorized membership read. Missing integration
-  // must never imply that this agent has no brains or particular permissions.
+  const scope = JSON.stringify([account.workosUserId ?? account.email, account.organizationId ?? null, access.machineId]);
   return (
     <section className={`brain-view ${headingStyles.page}`} aria-label="Brain">
-      <header className="brain-heading">
-        <h1 className={headingStyles.title}>Brain</h1>
-        <p className={headingStyles.subtitle}>Explore knowledge with {access.displayName}</p>
-      </header>
-      <BrainChatState key={access.machineId} agentName={access.displayName} machineId={access.machineId} unavailable />
+      <AgentBrainBrowser key={scope} runtimeId={access.machineId} agentName={access.displayName} />
     </section>
   );
 }

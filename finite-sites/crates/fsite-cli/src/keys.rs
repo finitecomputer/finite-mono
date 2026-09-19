@@ -152,6 +152,13 @@ pub fn load_or_generate_user_key() -> Result<KeyFile, CliError> {
     user_key_for(&identity)
 }
 
+/// Read-only inventory must never create an identity on an uninitialized Runtime.
+pub fn load_existing_user_key() -> Result<KeyFile, CliError> {
+    let identity = FiniteIdentity::load(&identity_paths()?)
+        .map_err(|error| CliError::Key(error.to_string()))?;
+    user_key_for(&identity)
+}
+
 /// Adopt a user-supplied secret string (`nsec1...` or 64-char hex) as the
 /// shared Finite identity via the contract crate. Locking, atomic write,
 /// permissions, and the refusal to overwrite an existing identity

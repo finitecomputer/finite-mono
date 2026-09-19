@@ -413,6 +413,15 @@ jobs:
           nix develop "$GITHUB_WORKSPACE#hermes-bridge-ci" --command ruff check "$GITHUB_WORKSPACE/infra/images/test_hermes_skills_inventory.py"
           "$HERMES_AGENT_PYTHON" -m unittest discover -s "$GITHUB_WORKSPACE/infra/images" -p 'test_hermes_skills_inventory.py'
 
+      - name: Packaged Brain and Sites inventory contracts
+        env:
+          HERMES_AGENT_PYTHON: ${{ steps.hermes_agent_runtime.outputs.python }}
+          HERMES_BUNDLED_PLUGINS: ${{ steps.hermes_agent_runtime.outputs.path }}/share/hermes-agent/plugins
+        run: |
+          nix develop "$GITHUB_WORKSPACE#hermes-bridge-ci" --command ruff format --check infra/images/test_hermes_product_inventory.py finite-brain/integrations/hermes finite-sites/integrations/hermes
+          nix develop "$GITHUB_WORKSPACE#hermes-bridge-ci" --command ruff check infra/images/test_hermes_product_inventory.py finite-brain/integrations/hermes finite-sites/integrations/hermes
+          "$HERMES_AGENT_PYTHON" -m unittest discover -s infra/images -p 'test_hermes_product_inventory.py'
+
       - name: Chat reliability fast gate (Hermes adapter)
         env:
           HERMES_AGENT_PYTHON: ${{ steps.hermes_agent_runtime.outputs.python }}

@@ -1,6 +1,6 @@
 "use client";
 
-import { useState } from "react";
+import { useState, type ReactNode } from "react";
 import { CopyIcon, Globe2Icon, LockKeyholeIcon, MessageSquareIcon, MoreHorizontalIcon, PlusIcon, SearchIcon, UploadIcon, UsersIcon, XIcon } from "lucide-react";
 
 import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } from "@/components/ui/dialog";
@@ -17,19 +17,26 @@ export type SiteListItem = {
   id: string;
   title: string;
   url: string;
-  updatedLabel: string;
+  updatedLabel?: string;
+  statusLabel?: string;
+  published?: boolean;
+  canEdit?: boolean;
+  repositoryUrl?: string;
   access: "private" | "shared" | "public";
   accessLabel: string;
   thumbnailUrl?: string;
 };
 
-export function SitesBrowser({ sites, onNewSite, onEditSite, creatingSite = false, newSiteError, listingNotConnected = false }: {
+export function SitesBrowser({ sites, onNewSite, onEditSite, creatingSite = false, newSiteError, listingNotConnected = false, loading = false, subtitle, inventoryStatus }: {
   sites: readonly SiteListItem[] | null;
   onNewSite: () => void;
   onEditSite: (site: SiteListItem) => void;
   creatingSite?: boolean;
   newSiteError?: string | null;
   listingNotConnected?: boolean;
+  loading?: boolean;
+  subtitle?: string;
+  inventoryStatus?: ReactNode;
 }) {
   const [query, setQuery] = useState("");
   const [shareSite, setShareSite] = useState<SiteListItem | null>(null);
@@ -51,8 +58,10 @@ export function SitesBrowser({ sites, onNewSite, onEditSite, creatingSite = fals
     <section className={`${styles.page} ${headingStyles.page}`} aria-labelledby="sites-title">
       <header className={`${styles.heading} ${headingStyles.stack}`}>
         <h1 id="sites-title" className={headingStyles.title}>Sites</h1>
-        <p className={headingStyles.subtitle}>Turn your ideas into live websites</p>
+        <p className={headingStyles.subtitle}>{subtitle ?? "Turn your ideas into live websites"}</p>
       </header>
+
+      {inventoryStatus}
 
       {Boolean(sites?.length) && <div className={styles.search} data-mobile-only={(sites?.length ?? 0) <= 10 && !query}>
         <SearchIcon aria-hidden="true" size={21} />
@@ -69,37 +78,37 @@ export function SitesBrowser({ sites, onNewSite, onEditSite, creatingSite = fals
                     const AccessIcon = site.access === "private" ? LockKeyholeIcon : site.access === "public" ? Globe2Icon : UsersIcon;
                     return (
                       <li key={site.id} className={styles.row}>
-                        <a href={site.url} target="_blank" rel="noreferrer" className={styles.site}>
+                        <a href={site.published === false ? undefined : site.url} aria-disabled={site.published === false || undefined} target="_blank" rel="noreferrer" className={styles.site}>
                           <span className={styles.thumbnail}>
                             {/* Native image keeps thumbnails independent of remote optimizer configuration. */}
                             {/* eslint-disable-next-line @next/next/no-img-element */}
                             {site.thumbnailUrl ? <img src={site.thumbnailUrl} alt="" loading="lazy" onError={(event) => { event.currentTarget.style.display = "none"; }} /> : null}
                             <Globe2Icon aria-hidden="true" size={28} />
                           </span>
-                          <span className={styles.details}><strong>{site.title}</strong><span>{site.updatedLabel}<span aria-hidden="true"> · </span>{site.url.replace(/^https?:\/\//u, "").replace(/\/$/u, "")}</span></span>
+                          <span className={styles.details}><strong>{site.title}</strong><span>{(site.statusLabel || site.updatedLabel) && <>{site.statusLabel || site.updatedLabel}<span aria-hidden="true"> · </span></>}{site.url.replace(/^https?:\/\//u, "").replace(/\/$/u, "")}</span></span>
                         </a>
                         <span className={styles.access}><AccessIcon size={16} strokeWidth={1.5} aria-hidden="true" />{site.accessLabel}</span>
                         <div className={styles.actions}>
                           <div className={styles.desktopActions}>
                             <Tooltip>
-                              <TooltipTrigger asChild><Button type="button" variant="outline" size="icon-sm" aria-label={`Copy link to ${site.title}`} onClick={() => void copyLink(site)}><CopyIcon className="size-3.5" aria-hidden="true" /></Button></TooltipTrigger>
+                              <TooltipTrigger asChild><Button type="button" variant="outline" size="icon-sm" aria-label={`Copy link to ${site.title}`} disabled={site.published === false} onClick={() => void copyLink(site)}><CopyIcon className="size-3.5" aria-hidden="true" /></Button></TooltipTrigger>
                               <TooltipContent sideOffset={6}>Copy link</TooltipContent>
                             </Tooltip>
                             <Tooltip>
-                              <TooltipTrigger asChild><Button type="button" variant="outline" size="icon-sm" aria-label={`Share ${site.title}`} onClick={() => { setNotice(""); setShareSite(site); }}><UploadIcon className="size-3.5" aria-hidden="true" /></Button></TooltipTrigger>
+                              <TooltipTrigger asChild><Button type="button" variant="outline" size="icon-sm" aria-label={`Share ${site.title}`} disabled={site.published === false} onClick={() => { setNotice(""); setShareSite(site); }}><UploadIcon className="size-3.5" aria-hidden="true" /></Button></TooltipTrigger>
                               <TooltipContent sideOffset={6}>Share site</TooltipContent>
                             </Tooltip>
                             <Tooltip>
-                              <TooltipTrigger asChild><Button type="button" variant="outline" size="sm" aria-label={`Edit ${site.title} in chat`} disabled={creatingSite} onClick={() => onEditSite(site)}><MessageSquareIcon aria-hidden="true" />Edit</Button></TooltipTrigger>
+                              <TooltipTrigger asChild><Button type="button" variant="outline" size="sm" aria-label={`Edit ${site.title} in chat`} disabled={creatingSite || site.canEdit === false} onClick={() => onEditSite(site)}><MessageSquareIcon aria-hidden="true" />Edit</Button></TooltipTrigger>
                               <TooltipContent sideOffset={6}>Edit in chat</TooltipContent>
                             </Tooltip>
                           </div>
                           <DropdownMenu>
                             <DropdownMenuTrigger asChild><button type="button" className={styles.more} aria-label={`More options for ${site.title}`}><MoreHorizontalIcon size={21} /></button></DropdownMenuTrigger>
                             <DropdownMenuContent align="end">
-                              <DropdownMenuItem onSelect={() => void copyLink(site)}><CopyIcon />Copy link</DropdownMenuItem>
-                              <DropdownMenuItem onSelect={() => { setNotice(""); setShareSite(site); }}><UploadIcon />Share</DropdownMenuItem>
-                              <DropdownMenuItem disabled={creatingSite} onSelect={() => onEditSite(site)}><MessageSquareIcon />Edit</DropdownMenuItem>
+                              <DropdownMenuItem disabled={site.published === false} onSelect={() => void copyLink(site)}><CopyIcon />Copy link</DropdownMenuItem>
+                              <DropdownMenuItem disabled={site.published === false} onSelect={() => { setNotice(""); setShareSite(site); }}><UploadIcon />Share</DropdownMenuItem>
+                              <DropdownMenuItem disabled={creatingSite || site.canEdit === false} onSelect={() => onEditSite(site)}><MessageSquareIcon />Edit</DropdownMenuItem>
                             </DropdownMenuContent>
                           </DropdownMenu>
                         </div>
@@ -110,10 +119,10 @@ export function SitesBrowser({ sites, onNewSite, onEditSite, creatingSite = fals
               ) : (
                 <div className={styles.empty}>
                   {normalizedQuery && sites ? <SearchIcon aria-hidden="true" /> : <Globe2Icon aria-hidden="true" />}
-                  <h2>{sites === null ? (listingNotConnected ? "Site listings aren’t available yet" : "Sites are unavailable right now") : normalizedQuery ? "No sites found" : "Your sites will show up here"}</h2>
-                  <p>{sites === null ? (listingNotConnected ? "You can still create and work on sites with your agent in chat." : "We couldn’t load your sites. Please try again later.") : normalizedQuery ? "Try another site name or web address." : "Start with an idea, push the limits, and make something awesome. Create your next site in chat."}</p>
+                  <h2>{loading ? "Loading sites…" : sites === null ? (listingNotConnected ? "Site listings aren’t available yet" : "Sites are unavailable right now") : normalizedQuery ? "No sites found" : "Your sites will show up here"}</h2>
+                  <p>{loading ? "Reading this agent’s sites." : sites === null ? (listingNotConnected ? "You can still create and work on sites with your agent in chat." : "We couldn’t load your sites. Please try again later.") : normalizedQuery ? "Try another site name or web address." : "Start with an idea, push the limits, and make something awesome. Create your next site in chat."}</p>
                   {normalizedQuery && sites && <button type="button" className={styles.share} onClick={() => setQuery("")}>Clear search</button>}
-                  {(!normalizedQuery || !sites?.length) && <button type="button" className={styles.newSite} disabled={creatingSite} onClick={onNewSite}>{creatingSite ? "Opening chat…" : "Create a site"}</button>}
+                  {!loading && (!normalizedQuery || !sites?.length) && <button type="button" className={styles.newSite} disabled={creatingSite} onClick={onNewSite}>{creatingSite ? "Opening chat…" : "Create a site"}</button>}
                 </div>
               )}
               </div>

@@ -6,10 +6,10 @@
 import { useEffect, useRef, useState } from "react";
 import { BrainChatState } from "@/components/brain-chat-state";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
-import { ChevronDownIcon, RefreshCwIcon } from "lucide-react";
+import { RefreshCwIcon } from "lucide-react";
 
 import headingStyles from "@/styles/agent-page-heading.module.css";
-import tableStyles from "@/styles/dashboard-table.module.css";
+import { BrainTable } from "@/components/brain-membership-table";
 
 
 type Brain = {
@@ -118,7 +118,7 @@ function MembershipPreview({ scenario, agentName, machineId }: { scenario: Scena
       {!initialLoading && <>
       <section aria-label="Brain memberships" aria-busy={busy}>
         {brains?.length === 0 ? <BrainChatState agentName={agentName} machineId={machineId} /> : null}
-        {ordered.length > 0 && <BrainTable brains={ordered} />}
+        {ordered.length > 0 && <BrainTable brains={ordered.map(brain => ({ ...brain, pending: Boolean(brain.pending), folders: brain.folders?.map((name, index) => ({ id: String(index), name })) ?? null }))} />}
       </section>
 
       <div className="brain-table-refresh">
@@ -135,26 +135,5 @@ function MembershipPreview({ scenario, agentName, machineId }: { scenario: Scena
       </div>
       </>}
     </>
-  );
-}
-
-function BrainTable({ brains }: { brains: Brain[] }) {
-  return (
-    <div className={`brain-table-scroll ${tableStyles.surface}`} role="region" aria-label="Agent brains and invitations" tabIndex={0}>
-      <table className="brain-table">
-        <caption className="sr-only">Brains accessible to the selected agent and pending invitations</caption>
-        <thead><tr><th scope="col">Brain</th><th scope="col">Type</th><th scope="col">Access</th><th scope="col">Folders shown</th></tr></thead>
-        <tbody>{brains.map((brain) => <tr key={brain.id}>
-          <th scope="row">{brain.name}</th>
-          <td>{brain.kind}</td>
-          <td>{brain.role}</td>
-          <td>{brain.pending ? null : brain.folders === null ? <span>Folder details unavailable</span> : brain.folders.length === 0 ? "0" :
-            <details className="brain-table-folders"><summary aria-label={`${brain.folders.length} folders in ${brain.name}`}>{brain.folders.length}<ChevronDownIcon className="size-3.5" aria-hidden /></summary>
-              <ul>{brain.folders.map((folder, index) => <li key={`${index}-${folder}`}>{folder}</li>)}</ul>
-            </details>}
-          </td>
-        </tr>)}</tbody>
-      </table>
-    </div>
   );
 }

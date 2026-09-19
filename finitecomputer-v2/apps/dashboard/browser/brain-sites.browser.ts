@@ -38,6 +38,9 @@ for (const preview of [false, true]) {
       }
       browser = await chromium.launch({ headless: true, ...chromiumLaunchOptions() });
       const page = await browser.newPage({ viewport: { width: 1440, height: 1000 }, reducedMotion: "reduce" });
+      // These cases prove unavailable/preview states; the live contract has its
+      // own test. Do not wait for an unimplemented fixture owner grant.
+      await page.route("**/api/agents/*/hermes-access", route => route.fulfill({ status: 403, json: {} }));
       const errors: string[] = [];
       const actions: Record<string, unknown>[] = [];
       page.on("pageerror", error => errors.push(error.message));
@@ -67,14 +70,14 @@ for (const preview of [false, true]) {
         // inherits Moss's invented memberships or site records.
         for (const surface of ["brain", "sites"]) {
           await page.goto(`${base}/dashboard/machines/runtime_web_design_second/${surface}?preview=1`);
-          await page.getByRole("heading", { name: surface === "brain" ? "Brain overview isn’t available yet" : "Site listings aren’t available yet", exact: true }).waitFor();
+          await page.getByRole("heading", { name: surface === "brain" ? "Brain overview isn’t available yet" : "Sites are unavailable right now", exact: true }).waitFor();
           assert.equal(await page.getByText(/Design preview · Sample/).count(), 0);
         }
       } else {
         const artifacts = process.env.FC_BROWSER_ARTIFACT_DIR;
         for (const surface of ["brain", "sites"]) {
           await page.goto(`${root}/${surface}?preview=1&state=populated`);
-          await page.getByRole("heading", { name: surface === "brain" ? "Brain overview isn’t available yet" : "Site listings aren’t available yet", exact: true }).waitFor();
+          await page.getByRole("heading", { name: surface === "brain" ? "Brain overview isn’t available yet" : "Sites are unavailable right now", exact: true }).waitFor();
           assert.equal(await page.getByText(/Design preview · Sample|Preview states|Personal brain|Azimuth/).count(), 0);
           assert.equal(await page.getByRole("table").count(), 0);
           if (artifacts) {

@@ -345,3 +345,28 @@ fn whoami_reports_the_shared_identity_file() {
     assert!(stdout.contains(".finite/identity/identity.json"));
     assert!(!stdout.contains("identity.env"));
 }
+
+#[test]
+fn project_list_existing_identity_never_mints_and_preserves_imported_key() {
+    let home = tempfile::tempdir().unwrap();
+    let finite_home = home.path().join("agent");
+    let args = ["project", "list", "--output", "json", "--existing-identity"];
+    let result = fsite(home.path(), Some(&finite_home), &args);
+    assert!(!result.status.success());
+    assert!(String::from_utf8_lossy(&result.stderr).contains("key error"));
+    assert!(
+        !finite_home.exists(),
+        "inventory cannot initialize an identity"
+    );
+
+    let paths = finite_identity::IdentityPaths::with_finite_home(&finite_home);
+    finite_identity::FiniteIdentity::import(&paths, test_secret(12).into(), "inventory-test")
+        .unwrap();
+    let before = std::fs::read(paths.identity_file()).unwrap();
+    let mut command = fsite_command(home.path(), Some(&finite_home), &args);
+    command.env("FINITE_SITES_API", "http://127.0.0.1:1");
+    let result = command.output().unwrap();
+    assert!(!result.status.success());
+    assert!(!String::from_utf8_lossy(&result.stderr).contains("key error"));
+    assert_eq!(before, std::fs::read(paths.identity_file()).unwrap());
+}

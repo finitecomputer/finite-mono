@@ -1,13 +1,13 @@
 "use client";
 
-import { useRef, useState } from "react";
+import { useRef, useState, type ReactNode } from "react";
 import { useRouter } from "next/navigation";
 
 import { useHostedChat } from "@/components/hosted-chat-provider";
 import { SitesBrowser, type SiteListItem } from "@/components/sites-browser";
 import { canonicalNewChatTopic } from "@/lib/hosted-web-chat-topics";
 
-export function AgentSitesBrowser({ machineId, sites, listingNotConnected = false }: { machineId: string; sites: readonly SiteListItem[] | null; listingNotConnected?: boolean }) {
+export function AgentSitesBrowser({ machineId, sites, listingNotConnected = false, loading, subtitle, inventoryStatus }: { machineId: string; sites: readonly SiteListItem[] | null; listingNotConnected?: boolean; loading?: boolean; subtitle?: string; inventoryStatus?: ReactNode }) {
   const { state, dispatch } = useHostedChat();
   const router = useRouter();
   const pending = useRef(false);
@@ -16,7 +16,7 @@ export function AgentSitesBrowser({ machineId, sites, listingNotConnected = fals
   const [error, setError] = useState<string | null>(null);
 
   async function openSiteChat(site?: SiteListItem) {
-    if (pending.current) return;
+    if (pending.current || site?.canEdit === false) return;
     const roomId = state?.hosted_agent_binding?.canonical_room_id;
     const topic = canonicalNewChatTopic((state?.topics ?? []).filter((item) => item.room_id === roomId && !item.archived));
     if (!roomId || !topic) {
@@ -33,7 +33,7 @@ export function AgentSitesBrowser({ machineId, sites, listingNotConnected = fals
     try {
       await dispatch({ StartTopicChatIntent: { room_id: roomId, topic_id: topic.topic_id, reason: null, intent_key: intent.current.key } });
       const prompt = site
-        ? `Help me edit this site: ${site.title}\n${site.url}\n\nAsk me what I’d like to change.`
+        ? `Help me edit this site: ${site.title}\n${site.url}${site.repositoryUrl ? `\nProject repository: ${site.repositoryUrl}` : ""}\n\nAsk me what I’d like to change.`
         : "Help me build a new website. Start by asking me what kind of site I want to create.";
       router.push(`/dashboard/machines/${encodeURIComponent(machineId)}/chat?${new URLSearchParams({ prompt })}`);
     } catch (caught) {
@@ -43,5 +43,5 @@ export function AgentSitesBrowser({ machineId, sites, listingNotConnected = fals
     }
   }
 
-  return <SitesBrowser sites={sites} listingNotConnected={listingNotConnected} onNewSite={() => void openSiteChat()} onEditSite={(site) => void openSiteChat(site)} creatingSite={creating} newSiteError={error} />;
+  return <SitesBrowser loading={loading} subtitle={subtitle} inventoryStatus={inventoryStatus} sites={sites} listingNotConnected={listingNotConnected} onNewSite={() => void openSiteChat()} onEditSite={(site) => void openSiteChat(site)} creatingSite={creating} newSiteError={error} />;
 }

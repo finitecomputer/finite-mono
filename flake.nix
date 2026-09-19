@@ -274,11 +274,21 @@
           };
           withSkillsInventory =
             upstream:
-            import ./infra/images/hermes-skills-package.nix {
+            (import ./infra/images/hermes-skills-package.nix {
               pkgs = hermesPkgs;
               inherit upstream;
               source = hermes-agent.outPath;
-            };
+            }).overrideAttrs (old: {
+              postInstall = (old.postInstall or "") + ''
+                plugins="$out/share/hermes-agent/plugins"
+                cp -RL "$plugins" "$out/share/hermes-agent/plugins-products"
+                rm -rf "$plugins"
+                mv "$out/share/hermes-agent/plugins-products" "$plugins"
+                chmod -R u+w "$plugins"
+                cp -R ${./finite-brain/integrations/hermes/finite-brain} "$plugins/finite-brain"
+                cp -R ${./finite-sites/integrations/hermes/finite-sites} "$plugins/finite-sites"
+              '';
+            });
           hermesAgentPackage =
             (withSkillsInventory hermes-agent.packages.${system}.default).overrideAttrs
               (old: {
@@ -286,7 +296,7 @@
                   # Keep the Python environment unchanged; patch only the bundled adapter.
                   plugins="$out/share/hermes-agent/plugins"
                   cp -RL "$plugins" "$out/share/hermes-agent/plugins-patched"
-                  rm "$plugins"
+                  rm -rf "$plugins"
                   mv "$out/share/hermes-agent/plugins-patched" "$plugins"
                   chmod -R u+w "$plugins"
                   ${hermesPkgs.patch}/bin/patch -d "$plugins" -p1 < ${./finite-agentd/patches/simplex-media-path.patch}
