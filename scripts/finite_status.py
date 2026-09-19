@@ -504,6 +504,18 @@ def psql_query_sets(environment: dict[str, str]) -> dict[str, list[dict[str, Any
              "actual_count", "redeemed_count", "expires_at", "revoked"],
         ),
         (
+            "unroutable_completed_creations",
+            "SELECT q.id,q.project_id,q.display_name,q.owner_user_id,q.agent_runtime_id,"
+            "p.owner_user_id,p.import_candidate_id,r.host_facts->>'runtime_status' "
+            "FROM agent_creation_requests q LEFT JOIN projects p ON p.id=q.project_id "
+            "LEFT JOIN project_runtime_links l ON l.project_id=q.project_id AND l.active "
+            "LEFT JOIN agent_runtimes r ON r.id=l.agent_runtime_id "
+            "WHERE q.status='running' AND q.agent_runtime_id IS NOT NULL AND q.relocation_spec IS NULL "
+            "AND (l.agent_runtime_id IS NULL OR p.owner_user_id IS DISTINCT FROM q.owner_user_id OR p.import_candidate_id IS NOT NULL) "
+            "ORDER BY q.created_at,q.id;",
+            ["id", "project_id", "display_name", "request_owner_user_id", "agent_runtime_id", "project_owner_user_id", "import_candidate_id", "runtime_status"],
+        ),
+        (
             "agent_creation_requests",
             "SELECT id, project_id, display_name, status, target_source_host_id, runner_id, agent_runtime_id "
             "FROM agent_creation_requests WHERE status IN ('requested', 'launching') ORDER BY created_at, id;",
@@ -1809,6 +1821,7 @@ def build_fleet(
         "unused_single_code_batches": core.get("unused_single_code_batches", []),
         "launch_code_batches": core.get("launch_code_batches", []),
         "agent_creation_requests": core.get("agent_creation_requests", []),
+        "unroutable_completed_creations": core.get("unroutable_completed_creations", []),
         "hosted_enrollment": {
             "evidence": "Core assignment metadata only; no credentials read or guest configuration inspected",
             "local_configuration": "unknown; upgrade must reject partial or conflicting bootstrap values",
@@ -2627,6 +2640,15 @@ def render_human(report: dict[str, Any]) -> str:
                 )
     else:
         lines.append(f"  {fleet.get('error', 'unavailable')}")
+    lines.append("")
+
+    completed = fleet.get("unroutable_completed_creations", [])
+    lines.append(f"Completed launches without a current owner route: {len(completed)} (informational; may be retired)")
+    for request in completed:
+        lines.append(
+            f"  {request['display_name']} [{request['id']}]: "
+            f"project={request['project_id']}; assigned runtime={request['agent_runtime_id']}"
+        )
     lines.append("")
 
     health = sections["host_health"]

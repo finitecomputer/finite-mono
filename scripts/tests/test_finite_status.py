@@ -58,6 +58,44 @@ INSERT INTO agent_creation_requests VALUES ('primary','runtime','project','runni
                 if expected != "primary_conflict":
                     self.assertEqual(values[4:6], ["2", "1"])
 
+    @unittest.skipUnless(os.environ.get("FC_CORE_POSTGRES_TEST_URL"), "requires disposable Core Postgres")
+    def test_completed_creation_query_distinguishes_retired_from_pending(self) -> None:
+        with mock.patch.object(finite_status, "run_read_only", return_value=subprocess.CompletedProcess([], 0, "__FINITE_STATUS_RUNTIMES__\n", "")) as run:
+            finite_status.psql_query_sets({})
+        query = run.call_args.kwargs["input_text"].split("\\echo __FINITE_STATUS_UNROUTABLE_COMPLETED_CREATIONS__\n", 1)[1].split("\\echo __FINITE_STATUS_AGENT_CREATION_REQUESTS__", 1)[0]
+        fixture = """
+BEGIN;
+SET LOCAL search_path=pg_temp;
+CREATE TEMP TABLE projects(id text,owner_user_id text,import_candidate_id text);
+CREATE TEMP TABLE project_runtime_links(project_id text,agent_runtime_id text,active boolean);
+CREATE TEMP TABLE agent_runtimes(id text,host_facts jsonb);
+CREATE TEMP TABLE agent_creation_requests(id text,project_id text,display_name text,owner_user_id text,agent_runtime_id text,status text,relocation_spec jsonb,created_at timestamptz);
+INSERT INTO projects VALUES ('retired','owner',NULL),('pending','owner',NULL),('healthy','owner',NULL),('import','owner','candidate'),('changed-owner','new-owner',NULL),('relocation','owner',NULL);
+INSERT INTO agent_runtimes VALUES ('live','{"runtime_status":"running"}');
+INSERT INTO project_runtime_links VALUES ('retired','old',FALSE),('healthy','live',TRUE),('import','live',TRUE),('changed-owner','live',TRUE);
+INSERT INTO agent_creation_requests
+SELECT id,id,id,'owner',CASE WHEN id='pending' THEN NULL ELSE 'assigned' END,'running',CASE WHEN id='relocation' THEN '{}'::jsonb ELSE NULL END,now() FROM projects;
+"""
+        result = subprocess.run(["psql", "--no-psqlrc", "--csv", "--tuples-only", "--quiet", "--set", "ON_ERROR_STOP=1", "--dbname", os.environ["FC_CORE_POSTGRES_TEST_URL"]], input=fixture + query + "ROLLBACK;", text=True, capture_output=True, check=True)
+        rows = [line.split(",") for line in result.stdout.strip().splitlines()]
+        self.assertEqual([row[0] for row in rows], ["changed-owner", "import", "retired"])
+        self.assertEqual(rows[-1][-1], "")
+        self.assertEqual(rows[0][-1], "running")
+
+    def test_completed_creation_history_is_informational_and_visible(self) -> None:
+        raw = finite_status.load_fixture(FIXTURE)
+        now = finite_status.parse_time(raw["now"])
+        baseline = finite_status.build_report(raw, now)
+        rows = [{"id": "retired-request", "project_id": "retired-project", "display_name": "Retired Agent", "agent_runtime_id": "retired-runtime"}]
+        raw["core"]["unroutable_completed_creations"] = rows
+        report = finite_status.build_report(raw, now)
+        self.assertEqual(report["sections"]["fleet_convergence"]["unroutable_completed_creations"], rows)
+        self.assertEqual(report["overall_status"], baseline["overall_status"])
+        self.assertEqual(report["exit_code"], baseline["exit_code"])
+        human = finite_status.render_human(report)
+        self.assertIn("Completed launches without a current owner route: 1", human)
+        self.assertIn("Retired Agent [retired-request]: project=retired-project; assigned runtime=retired-runtime", human)
+
     def test_aug1_convergence_math_and_inactive_exclusion(self) -> None:
         report = self.fixture_report()
         fleet = report["sections"]["fleet_convergence"]
@@ -116,6 +154,8 @@ INSERT INTO agent_creation_requests VALUES ('primary','runtime','project','runni
                 'code-retry,batch-retry,"Retry, canary",workos-operator,standard,2026-08-02T00:00:00Z',
                 "__FINITE_STATUS_LAUNCH_CODE_BATCHES__",
                 "batch-cohort,Cohort,workos-operator,standard,17,17,0,2026-08-02T00:00:00Z,f",
+                "__FINITE_STATUS_UNROUTABLE_COMPLETED_CREATIONS__",
+                "retired-request,retired-project,Retired Agent,owner,retired-runtime,owner,,",
                 "__FINITE_STATUS_AGENT_CREATION_REQUESTS__",
                 "request-canary,project-canary,Lat5 Canary,requested,finite-lat-5,,",
                 "__FINITE_STATUS_RUNTIMES__",
@@ -145,6 +185,10 @@ INSERT INTO agent_creation_requests VALUES ('primary','runtime','project','runni
         self.assertEqual(reservation["actual_source_host_id"], "finite-lat-4")
         self.assertEqual(result["agent_creation_requests"][0]["target_source_host_id"], "finite-lat-5")
         self.assertEqual(result["agent_creation_requests"][0]["status"], "requested")
+        completed = result["unroutable_completed_creations"][0]
+        self.assertEqual(completed["id"], "retired-request")
+        self.assertEqual(completed["agent_runtime_id"], "retired-runtime")
+        self.assertEqual(completed["runtime_status"], "")
         self.assertEqual(len(result["runtimes"]), 1)
         self.assertEqual(result["runtimes"][0]["runtime_artifact_id"], "artifact-v2")
         # The canonical lifecycle state arrives with the row, unmodified.

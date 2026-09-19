@@ -477,12 +477,25 @@ test("dashboard agent creation browser states", { timeout: 300_000 }, async () =
     });
     const runtimeLessProject = visibleProject("project_retained", "Retained Agent", hostedDevice.runtimeStatusUrl);
     runtimeLessProject.runtime = null;
-    core.reset({ projects: [runtimeLessProject] });
+    core.reset({
+      projects: [runtimeLessProject],
+      requests: [agentCreationRequest({
+        id: "retired_request", projectId: "project_retained", status: "running",
+        agentRuntimeId: "runtime_retired",
+      })],
+    });
     await withSignedInPage(browser, dashboardPort, async (page) => {
       await page.goto(`http://127.0.0.1:${dashboardPort}/dashboard`);
       await page.getByRole("heading", { name: "Retained Agent", exact: true }).waitFor();
       assert.equal(await page.getByLabel("Launch Code", { exact: true }).count(), 0);
       assert.equal(core.state.creationPosts.length, 0);
+      await page.goto(`http://127.0.0.1:${dashboardPort}/dashboard?new=1`);
+      await page.getByLabel("Launch Code", { exact: true }).waitFor({ timeout: 10_000 });
+      assert.equal(await page.getByText("Preparing your workspace", { exact: true }).count(), 0);
+      assert.equal(core.state.creationPosts.length, 0, "New agent must not replay the completed launch");
+      await page.goto(`http://127.0.0.1:${dashboardPort}/dashboard?creation=retired_request`);
+      await expectVisibleText(page, "Preparing your workspace");
+      assert.equal(await page.getByLabel("Launch Code", { exact: true }).count(), 0);
     });
     core.reset({ requests: [
       agentCreationRequest({ id: "ambiguous_1", projectId: "project_1", status: "running" }),

@@ -153,19 +153,24 @@ export default async function DashboardPage({
     const agentCreationRequests = core.me?.agent_creation_requests ?? [];
     const initialAgentCreationRequests =
       coreInitialAgentCreationRequests(agentCreationRequests);
-    const requestedAgentCreationRequests = initialAgentCreationRequests.filter(
+    const pendingInitialCreationRequests = initialAgentCreationRequests.filter(
       (request) => request.status === "requested" || request.status === "launching" ||
-        (request.status === "running" && !coreProjects.some((project) =>
-          project.project.id === request.project_id && coreProjectOverviewHref(project)))
+        (request.status === "running" &&
+          // A completed launch keeps its assigned Runtime after retirement.
+          // Only an explicitly tracked launch or one awaiting assignment is
+          // still onboarding; missing current compute does not restart setup.
+          (request.id === trackedCreationRequestId || !request.agent_runtime_id) &&
+          !coreProjects.some((project) =>
+            project.project.id === request.project_id && coreProjectOverviewHref(project)))
     );
     // Recover a lost launch URL from one unambiguous initial request. This
     // only restores read-only progress tracking; it never submits creation or
     // chooses among multiple requests. A runtime-less existing Project alone
     // is not evidence that this account should create another Agent.
     if (!requestedNewAgentFlow && !trackedCreationRequestId && !agentCreationError &&
-        core.me && !core.error && requestedAgentCreationRequests.length === 1 &&
+        core.me && !core.error && pendingInitialCreationRequests.length === 1 &&
         !coreProjects.some((project) => coreProjectOverviewHref(project))) {
-      redirect(`/dashboard?creation=${encodeURIComponent(requestedAgentCreationRequests[0].id)}`);
+      redirect(`/dashboard?creation=${encodeURIComponent(pendingInitialCreationRequests[0].id)}`);
     }
     const failedAgentCreationRequests = initialAgentCreationRequests.filter(
       (request) => request.status === "failed"
@@ -196,7 +201,7 @@ export default async function DashboardPage({
           }
         : null;
 
-    const pendingAgentCreationRequests = requestedAgentCreationRequests;
+    const pendingAgentCreationRequests = pendingInitialCreationRequests;
     const hasPendingAgentCreation = pendingAgentCreationRequests.length > 0;
 
     const billingReturn = resolveBillingReturnStateNow({
