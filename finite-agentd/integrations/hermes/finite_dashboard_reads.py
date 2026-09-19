@@ -20,11 +20,24 @@ _REQUESTS = asyncio.Semaphore(2)
 
 
 class AccessUnverified(Exception):
-    """CLI failed; its human-readable stderr is not an authorization contract."""
+    """CLI access failed, or its error contract is unrecognized."""
 
 
 class InvalidInventory(Exception):
     """Unexpected or oversized product response; never return a partial list."""
+
+
+class ProductUnavailable(Exception):
+    """A typed CLI transport/service failure allows a visibly stale result."""
+
+
+async def _read_pipe(stream, limit):
+    output = bytearray()
+    while chunk := await stream.read(64 * 1024):
+        if len(output) + len(chunk) > limit:
+            raise InvalidInventory()
+        output.extend(chunk)
+    return output
 
 
 async def read_json(*argv: str):
@@ -33,17 +46,27 @@ async def read_json(*argv: str):
             *argv,
             stdin=asyncio.subprocess.DEVNULL,
             stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.DEVNULL,
+            stderr=asyncio.subprocess.PIPE,
             cwd="/",
             limit=64 * 1024,
         )
+        stdout = asyncio.create_task(_read_pipe(process.stdout, MAX_OUTPUT_BYTES))
+        stderr = asyncio.create_task(_read_pipe(process.stderr, 8192))
         try:
-            output = bytearray()
-            while chunk := await process.stdout.read(64 * 1024):
-                if len(output) + len(chunk) > MAX_OUTPUT_BYTES:
-                    raise InvalidInventory()
-                output.extend(chunk)
+            output, diagnostics = await asyncio.gather(stdout, stderr)
             if await process.wait() != 0:
+                try:
+                    failure = json.loads(diagnostics)
+                except (ValueError, UnicodeDecodeError, RecursionError):
+                    failure = None
+                if (
+                    isinstance(failure, dict)
+                    and failure.get("inventory_error_version") == 1
+                    and failure.get("kind") == "request"
+                ):
+                    raise ProductUnavailable()
+                # Unknown/older CLI error contracts fail closed, never by
+                # heuristically parsing human-readable diagnostic text.
                 raise AccessUnverified()
             try:
                 return json.loads(output)
@@ -54,6 +77,9 @@ async def read_json(*argv: str):
             # deadlines and cancellation; abandoning a request must not leak CLI work.
             if process.returncode is None:
                 process.kill()
+            stdout.cancel()
+            stderr.cancel()
+            await asyncio.gather(stdout, stderr, return_exceptions=True)
             await process.wait()
 
 
@@ -70,10 +96,9 @@ async def inventory_response(request: Request, read: Callable[[], Awaitable[dict
             raise InvalidInventory()
         return response
     except AccessUnverified:
-        # Neither CLI promises machine-readable errors. Never parse stderr or
-        # retain old inventory when signer/service authorization is unverified.
+        # Do not expose diagnostics or retain inventory on unverified access.
         return JSONResponse({"error": "Product access could not be verified."}, 403, headers)
-    except (TimeoutError, OSError, InvalidInventory):
+    except (TimeoutError, OSError, InvalidInventory, ProductUnavailable):
         return JSONResponse({"error": "Product inventory is unavailable."}, 503, headers)
 
 

@@ -59,7 +59,7 @@ export function parseSitesInventory(value: unknown): SitesInventory {
   if (data.version !== 1 || !Number.isSafeInteger(data.sourceOnlyProjects) ||
       Number(data.sourceOnlyProjects) < 0 || Number(data.sourceOnlyProjects) > 500) return invalid();
   const sites = rows(data.sites, 500).map((site): SiteListItem => {
-    if (!["private", "shared", "public"].includes(String(site.visibility)) ||
+    if (typeof site.visibility !== "string" || !["private", "shared", "public"].includes(site.visibility) ||
         typeof site.canEdit !== "boolean" || typeof site.published !== "boolean") return invalid();
     const access = site.visibility as SiteListItem["access"];
     const status = text(site.status, 64);

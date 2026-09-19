@@ -7,6 +7,7 @@ from fastapi import APIRouter, Request
 from hermes_cli.finite_dashboard_reads import (
     AccessUnverified,
     InvalidInventory,
+    ProductUnavailable,
     inventory_response,
     read_json,
     record,
@@ -30,14 +31,14 @@ async def read_overview():
     brains = []
     seen = set()
     for item in records(listing.get("brains"), MAX_BRAINS):
-        brain_id = text(item.get("brainId"), 256)
-        # This becomes a positional CLI argument and an HTTP path segment.
-        if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_-]*", brain_id) or brain_id in seen:
+        brain_id = text(item.get("brainId"), 128)
+        # Match BrainId. The equals-form option keeps even flag-shaped IDs as data.
+        if not re.fullmatch(r"[A-Za-z0-9_-]+", brain_id) or brain_id in seen:
             raise InvalidInventory()
         seen.add(brain_id)
         if (
             item.get("kind") not in ("personal", "organization")
-            or item.get("role") not in ROLES
+            or text(item.get("role"), 64) not in ROLES
         ):
             raise InvalidInventory()
         brains.append(
@@ -60,7 +61,7 @@ async def read_overview():
                     "fbrain",
                     "brain",
                     "metadata",
-                    brain["id"],
+                    f"--brain={brain['id']}",
                     "--json",
                     "--existing-identity",
                 )
@@ -76,7 +77,7 @@ async def read_overview():
                 ids.add(folder_id)
                 projected.append({"id": folder_id, "name": text(folder.get("name"))})
             brain["folders"] = projected
-        except (AccessUnverified, InvalidInventory, OSError):
+        except (AccessUnverified, InvalidInventory, ProductUnavailable, OSError):
             # The fresh list proves this row; failed metadata proves no folders.
             # Never substitute zero, retain old folders, or include mounted folders.
             brain["folders"] = None

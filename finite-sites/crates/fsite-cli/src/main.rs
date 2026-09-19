@@ -64,7 +64,24 @@ fn main() -> ExitCode {
     match run(&args) {
         Ok(()) => ExitCode::SUCCESS,
         Err(error) => {
-            eprintln!("fsite: {error}");
+            if args.iter().any(|arg| arg == "--existing-identity")
+                && args.windows(2).any(|pair| pair == ["--output", "json"])
+            {
+                let kind = match &error {
+                    CliError::Key(_)
+                    | CliError::ApiStatus {
+                        status: 401 | 403 | 404,
+                        ..
+                    } => "access",
+                    _ => "request",
+                };
+                eprintln!(
+                    "{}",
+                    serde_json::json!({ "inventory_error_version": 1, "kind": kind })
+                );
+            } else {
+                eprintln!("fsite: {error}");
+            }
             ExitCode::FAILURE
         }
     }

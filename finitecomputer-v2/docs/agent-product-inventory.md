@@ -12,7 +12,7 @@ one fixed native GET route:
 
 | Product owner | Native route | Local supported read |
 | --- | --- | --- |
-| FiniteBrain | `/api/plugins/finite-brain/overview` | `fbrain brain list --json --existing-identity`, then `fbrain brain metadata ID --json --existing-identity` |
+| FiniteBrain | `/api/plugins/finite-brain/overview` | `fbrain brain list --json --existing-identity`, then `fbrain brain metadata --brain=ID --json --existing-identity` |
 | Finite Sites | `/api/plugins/finite-sites/overview` | `fsite project list --output json --existing-identity` |
 
 Native Hermes authenticates before plugin routing and respects disabled plugins.
@@ -64,11 +64,12 @@ and incompatible responses clear it. Switching scope unmounts the old state,
 aborts the old read and ignores late responses; folder expansion and Site dialogs
 cannot carry over.
 
-The CLIs currently expose human-readable errors, not a typed error contract. A
-nonzero list exit therefore conservatively returns 403 (“access could not be
-verified”) and clears stale inventory, including for some service errors. We do
-not classify authorization by parsing stderr. A failed per-Brain metadata read
-clears that row's folders while retaining the freshly authorized list row.
+For these `--existing-identity` JSON reads, nonzero CLI exits emit a bounded,
+versioned error classification on stderr without raw diagnostics. Identity failures
+and authoritative HTTP 401/403/404 clear prior inventory (native 403); transport
+and service failures are retryable (native 503). Unknown/older error contracts fail
+closed. A failed per-Brain metadata read clears that row's folders while retaining
+the freshly authorized list row. No classification parses human-readable errors.
 
 | Dashboard | Runtime | Result |
 | --- | --- | --- |
@@ -93,8 +94,7 @@ layout, keyboard expansion, stale refresh, access loss, unsupported older runtim
 late agent responses, preview isolation, and draft-only Chat actions.
 `infra/images/test_hermes_product_inventory.py` exercises the real native Hermes
 router/auth middleware with disposable CLIs and checks resource bounds and cleanup.
-CI runs it against packaged modules/plugins. For the optional real CLI signer proof,
-set `FBRAIN_TEST_BINARY` and `FSITE_TEST_BINARY` to the built binaries; it creates
+CI runs it against packaged modules/plugins. CI builds both CLIs and runs the real signer proof. To run it locally, set `FBRAIN_TEST_BINARY` and `FSITE_TEST_BINARY` to the built binaries; it creates
 two disposable agent identities and a distinct human identity and checks signed
 requests against a local synthetic product server. `FINITE_INVENTORY_SOURCE_TEST=1`
 is only a local source-test convenience and is not packaging evidence.

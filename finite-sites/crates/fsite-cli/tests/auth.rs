@@ -353,7 +353,10 @@ fn project_list_existing_identity_never_mints_and_preserves_imported_key() {
     let args = ["project", "list", "--output", "json", "--existing-identity"];
     let result = fsite(home.path(), Some(&finite_home), &args);
     assert!(!result.status.success());
-    assert!(String::from_utf8_lossy(&result.stderr).contains("key error"));
+    assert_eq!(
+        serde_json::from_slice::<serde_json::Value>(&result.stderr).unwrap()["kind"],
+        "access"
+    );
     assert!(
         !finite_home.exists(),
         "inventory cannot initialize an identity"
@@ -367,6 +370,9 @@ fn project_list_existing_identity_never_mints_and_preserves_imported_key() {
     command.env("FINITE_SITES_API", "http://127.0.0.1:1");
     let result = command.output().unwrap();
     assert!(!result.status.success());
-    assert!(!String::from_utf8_lossy(&result.stderr).contains("key error"));
+    assert_eq!(
+        serde_json::from_slice::<serde_json::Value>(&result.stderr).unwrap()["kind"],
+        "request"
+    );
     assert_eq!(before, std::fs::read(paths.identity_file()).unwrap());
 }

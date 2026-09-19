@@ -80,6 +80,9 @@ mode = (home / "mode").read_text() if (home / "mode").exists() else "ok"
 if mode == "failure":
     print("private CLI diagnostics", file=sys.stderr)
     sys.exit(1)
+if mode == "service-failure":
+    print(json.dumps({"inventory_error_version": 1, "kind": "request"}), file=sys.stderr)
+    sys.exit(1)
 if mode == "oversize":
     sys.stdout.write("x" * (512 * 1024 + 1))
     sys.exit(0)
@@ -91,7 +94,7 @@ if "--existing-identity" not in sys.argv:
 if sys.argv[1:3] == ["brain", "metadata"]:
     if (home / "missing-metadata").exists(): sys.exit(1)
     payload = json.loads((home / "metadata.json").read_text())
-    payload["brainId"] = sys.argv[3]
+    payload["brainId"] = sys.argv[3].removeprefix("--brain=")
 elif sys.argv[1:3] == ["brain", "list"]:
     payload = json.loads((home / "brains.json").read_text())
 elif sys.argv[1:3] == ["project", "list"]:
@@ -198,7 +201,7 @@ print(json.dumps(payload))
             calls,
             [
                 ["brain", "list", "--json", "--existing-identity"],
-                ["brain", "metadata", "agent-brain", "--json", "--existing-identity"],
+                ["brain", "metadata", "--brain=agent-brain", "--json", "--existing-identity"],
             ],
         )
         (self.agent / "missing-metadata").touch()
@@ -230,6 +233,13 @@ print(json.dumps(payload))
             self.assertEqual(response.status_code, 403)
             self.assertNotIn("private CLI", response.text)
             self.assertNotIn("Agent brain", response.text)
+
+    def test_typed_service_failure_is_retryable_without_leaking_diagnostics(self):
+        (self.agent / "mode").write_text("service-failure")
+        for product in ("brain", "sites"):
+            response = self.get(product)
+            self.assertEqual(response.status_code, 503)
+            self.assertNotIn("inventory_error", response.text)
 
     def test_bounds_fail_without_truncation_and_timeout_reaps_cli(self):
         self.brains["brains"] = [
@@ -270,6 +280,7 @@ print(json.dumps(payload))
             )
             identities[json.loads(result.stdout)["pubkey"]] = label
         observed = []
+        upstream_status = 200
 
         class Handler(BaseHTTPRequestHandler):
             def do_GET(handler):
@@ -277,11 +288,14 @@ print(json.dumps(payload))
                 event = json.loads(base64.b64decode(header.removeprefix("Nostr ")))
                 label = identities[event["pubkey"]]
                 observed.append((label, handler.path))
+                if upstream_status != 200:
+                    handler.send_error(upstream_status)
+                    return
                 if handler.path == "/v1/brains":
                     data = {
                         "brains": [
                             {
-                                "brainId": label,
+                                "brainId": "--server" if label == "agent-one" else label,
                                 "name": label,
                                 "kind": "personal",
                                 "role": "personal_agent",
@@ -354,13 +368,37 @@ print(json.dumps(payload))
             self.assertEqual(
                 [label for label, _ in observed], ["agent-one"] * 3 + ["agent-two"] * 3
             )
+            with patch.dict(
+                os.environ,
+                {
+                    "FINITE_HOME": str(self.home / "agent-two"),
+                    "FINITE_BRAIN_SERVER_URL": url,
+                    "FINITE_SITES_API": url,
+                    "PATH": f"{binaries}{os.pathsep}{os.environ['PATH']}",
+                },
+            ):
+                for upstream_status in (503, 403):
+                    for product in ("brain", "sites"):
+                        self.assertEqual(self.get(product).status_code, upstream_status)
+                with patch.dict(os.environ, {"FINITE_HOME": str(self.home / "missing-signer")}):
+                    for product in ("brain", "sites"):
+                        self.assertEqual(self.get(product).status_code, 403)
+                    self.assertFalse((self.home / "missing-signer").exists())
         finally:
             server.shutdown()
             worker.join()
             server.server_close()
 
+    def test_flag_shaped_valid_brain_ids_are_data_not_options(self):
+        self.brains["brains"][0]["brainId"] = "--server"
+        self.write_data()
+        response = self.get()
+        self.assertEqual(response.status_code, 200, response.text)
+        self.assertEqual(response.json()["brains"][0]["folders"][0]["name"], "Visible folder")
+        self.assertIn("--brain=--server", (self.agent / "calls").read_text())
+
     def test_ids_cannot_become_cli_flags_or_path_traversal(self):
-        for invalid_id in ("--server", "../other", "brain?query", ""):
+        for invalid_id in ("../other", "brain?query", "", "x" * 129):
             self.brains["brains"][0]["brainId"] = invalid_id
             self.write_data()
             self.assertEqual(self.get().status_code, 503)

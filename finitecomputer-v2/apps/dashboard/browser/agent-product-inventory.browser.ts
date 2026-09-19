@@ -37,6 +37,7 @@ test("Brain and Sites use agent-scoped reads, preserve stale results, clear lost
     let ownerStatus = 200;
     let nativeStatus = 200;
     let empty = false;
+    let malformed = false;
     let reads = 0;
     let holdNext = false;
     let held = false;
@@ -60,6 +61,7 @@ test("Brain and Sites use agent-scoped reads, preserve stale results, clear lost
       const brain = url.endsWith("/api/plugins/finite-brain/overview");
       assert(brain || url.endsWith("/api/plugins/finite-sites/overview"));
       const second = url.includes("runtime_web_design_second");
+      if (malformed) { await route.fulfill({ status: 200, body: "not JSON", headers }); return; }
       const payload = brain ? { version: 1, brains: empty ? [] : [
         { id: "org", name: second ? "Fern brain" : "Moss brain", kind: "organization", role: "guest", folders: [{ id: "shared", name: "Visible folder" }] },
         { id: "pending", name: "Pending invitation", kind: "organization", role: "invited", folders: null },
@@ -99,7 +101,10 @@ test("Brain and Sites use agent-scoped reads, preserve stale results, clear lost
         await page.screenshot({ path: path.join(artifacts, `${product}-live-desktop.png`), fullPage: true });
       }
       await page.setViewportSize({ width: 390, height: 844 });
-      await waitFor(async () => page.evaluate(() => document.documentElement.scrollWidth <= innerWidth));
+      await waitFor(async () => page.evaluate(() => {
+        const sidebar = document.querySelector(".finite-agent-shell__sidebar");
+        return (!sidebar || sidebar.getBoundingClientRect().right <= 0) && document.documentElement.scrollWidth <= innerWidth;
+      }));
       if (artifacts) await page.screenshot({ path: path.join(artifacts, `${product}-live-mobile.png`), fullPage: true });
       await page.setViewportSize({ width: 1440, height: 1000 });
       const refresh = page.getByRole("button", { name: `Refresh ${product === "brain" ? "brains" : "sites"}`, exact: true });
@@ -115,6 +120,14 @@ test("Brain and Sites use agent-scoped reads, preserve stale results, clear lost
       assert.equal(await marker.count(), 0);
       assert.equal(await page.locator("main time").count(), 0);
       assert.equal(reads, before + 1);
+      ownerStatus = 200; nativeStatus = 200;
+      await refresh.click(); await marker.waitFor();
+      malformed = true;
+      await refresh.click();
+      await page.getByRole("alert").filter({ hasText: "incompatible response" }).waitFor();
+      assert.equal(await marker.count(), 0);
+      assert.equal(await page.locator("main time").count(), 0);
+      malformed = false;
       ownerStatus = 200; nativeStatus = 404;
       await refresh.click();
       await page.getByRole("alert").filter({ hasText: "does not support" }).waitFor();

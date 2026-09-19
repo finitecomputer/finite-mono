@@ -24,6 +24,6 @@ export function AgentBrainBrowser({ runtimeId, agentName }: { runtimeId: string;
       {!brains && !inventory.busy && <BrainChatState agentName={agentName} machineId={runtimeId} unavailable />}
     </section>
     <AgentInventoryRefresh {...inventory} label="brains" />
-    {brains && brains.length > 0 && <p className="text-xs text-muted-foreground">Folders shown are metadata visible to this agent. Linked folders and local sync status aren’t included.</p>}
+    {brains && brains.length > 0 && <p className="text-xs text-muted-foreground">Shows folder information this agent can access. Linked folders aren’t included.</p>}
   </>;
 }

@@ -2685,8 +2685,12 @@ fn brain<W: Write>(
             write_command_response(output, json, &response)
         }
         "metadata" | "status" => {
-            let explicit_brain_id =
-                option_value(args, "--brain").or_else(|| positional_values(args).get(1).cloned());
+            let explicit_brain_id = option_value(args, "--brain")
+                .or_else(|| {
+                    args.iter()
+                        .find_map(|arg| arg.strip_prefix("--brain=").map(str::to_owned))
+                })
+                .or_else(|| positional_values(args).get(1).cloned());
             let brain_id = match explicit_brain_id {
                 Some(brain_id) => brain_id,
                 None => current_brain_id(env)?
