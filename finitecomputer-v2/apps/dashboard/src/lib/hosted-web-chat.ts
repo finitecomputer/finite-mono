@@ -101,8 +101,10 @@ export function isAgentBindingAuthorizationRequired(error: unknown) {
   );
 }
 
-export async function bootstrapHostedWebChat(machineId: string) {
+export async function bootstrapHostedWebChat(machineId: string, viewQuery = "") {
   const context = await hostedWebChatContext(machineId);
+  // Once bootstrapped, a transcript read must not reopen the shared Device cursor.
+  if (viewQuery) return hostedDeviceState(context.config, context.account, viewQuery);
   return bootstrapHostedWebChatWithContext(context);
 }
 
@@ -336,9 +338,9 @@ export function isCanonicalNewChatTarget(
   );
 }
 
-export async function streamHostedWebChat(machineId: string, signal: AbortSignal) {
+export async function streamHostedWebChat(machineId: string, signal: AbortSignal, viewQuery = "") {
   const context = await hostedWebChatContext(machineId);
-  return hostedDeviceUpdates(context.config, context.account, signal);
+  return hostedDeviceUpdates(context.config, context.account, signal, viewQuery);
 }
 
 export async function uploadHostedWebChatAttachments(machineId: string, formData: FormData) {

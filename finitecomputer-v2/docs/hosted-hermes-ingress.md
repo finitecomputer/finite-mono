@@ -4,7 +4,7 @@ This implementation supplies the shared Core → agent → browser authenticated
 connection on the PR #914 Caddy foundation. Account eligibility is current
 Project ownership, not operator/admin status. It does not build feature pages,
 cut over chat or roll the fleet. The production configuration selects Lat5 for
-a bounded canary; configuration, deployment and per-agent enablement are separate.
+a bounded canary; configuration, deployment and applied readiness are separate.
 The execution plan and release gates live in
 [FIN-39](https://linear.app/finitecomputer/issue/FIN-39/provide-hermes-web-authentication-and-desktop-connection-details)
 and the Agent rollout manifest in
@@ -97,15 +97,19 @@ authentication: `/api/status` is public, while protected native reads must
 reject anonymous and invalid credentials independently of origin.
 
 The command alone is **not safe production publication**. The opt-in lifecycle
-below supplies its ownership and process-lifetime preconditions. The Lat5 host
-configuration enables this capability at `https://agents-lat5.finite.computer`,
-with only `https://finite.computer` allowed as a browser origin. Other Runner
-hosts keep it disabled. Core's host map contains only Lat5, and its dedicated
-runtime router is proxied verbatim from `https://runtime-api.finite.computer`
-to `127.0.0.1:4201`. This does not expose Core's private/account router.
+below supplies its ownership and process-lifetime preconditions. The Lat3,
+Lat4 and Lat5 host configurations enable this capability at
+`https://agents-lat3.finite.computer`, `https://agents-lat4.finite.computer` and
+`https://agents-lat5.finite.computer`, respectively. Only
+`https://finite.computer` is allowed as a browser origin. Lat1 keeps it disabled.
+Core's host map matches those three origins, and its dedicated runtime router is
+proxied verbatim from `https://runtime-api.finite.computer` to `127.0.0.1:4201`.
+This does not expose Core's private/account router. Each origin needs DNS pointing
+to its Runner host and a valid TLS certificate before owner access is qualified.
 
-The selected canary is Lat5 Canary Retry; per-agent access remains default off
-and requires current-owner authorization and applied readiness. Host configuration
+The selected canary is Lat5 Canary Retry. New enrollment on configured hosts
+prepares native serving automatically; browser access still requires current-owner
+authorization and applied readiness. Existing serving intent is preserved. Host configuration
 does not change the Runtime Artifact default or upgrade any agent. FIN-57 records
 the deployed state, exact selected Runtime, immutable artifacts, recovery boundary
 and activation gates. In particular, reconcile unrelated changes between the live
@@ -209,7 +213,7 @@ claiming full chat support. Hermes Desktop setup is optional testing convenience
 agents, implement existing-Agent credential delivery, finish the integrated Kata
 publication fence, real-browser acceptance, mixed-version/recovery tests and
 DNS/TLS qualification. These require the explicitly reviewed R1 Agent capability
-rollout, default off. No fleet rollout or production activation is part of this
+rollout. No fleet rollout or production activation is part of this
 PR. Dashboard iteration after that capability rollout should not require a new
 Agent rollout for each UI change.
 
@@ -228,8 +232,8 @@ Account API (existing private Core listener, signed WorkOS identity):
 - `GET /api/core/v1/me/runtimes/{id}/hosted-access`: safe enrollment/intent/application state.
 - `PUT` at the same path: `{enabled, expectedGeneration}`. Only current owners
   can change intent. Repeating the same intent at the current generation is a
-  no-op; stale writes return conflict. Default off is rollout state, not an
-  admin role requirement.
+  no-op; stale writes return conflict. This retained control supports testing
+  and operational disable/re-enable; it is not a required customer setup step.
 - `POST /api/core/v1/me/runtimes/{id}/hosted-hermes-session`: real native
   password/cookie exchange, then `{baseUrl, accessToken, expiresAt}`. Core
   rechecks account identity and current assignment/intent after native IO.
@@ -240,7 +244,8 @@ signed account session to Core. It does not proxy agent product data.
 `readHostedHermesJson` obtains an operation-local grant and performs a bounded
 native GET; one 401 triggers one reauthorization/retry. No browser persistent
 credential cache. A caller must abort pending operations on account/agent
-change and ignore obsolete UI results.
+change and ignore obsolete UI results. Users open Skills directly; the dashboard
+does not offer a serving toggle or issue enable writes when loading a page.
 
 Runtime API: setting `FC_CORE_RUNTIME_BIND` starts a **separate listener** with
 only `GET /api/core/v1/runtime/hosted-hermes` and `POST .../report`. The edge must
@@ -260,10 +265,21 @@ unexpired upgrade lease and exact host/machine/Project binding, an active link,
 and the unique running primary creation record with the current owner.
 The primary record (`relocation_spec IS NULL`, unique per Project) is a stable
 origin reference; it is not placement authority. This does
-not authorize an upgrade itself or enable native serving. No account API,
+not authorize an upgrade itself. No account API,
 RuntimeSpec, health report or status command exposes the bootstrap secret.
 
-Core inserts into the existing credential table with serving disabled. An
+When Core inserts a new credential row for creation or upgrade enrollment, it
+also prepares native serving credentials if that authenticated Runner's host is
+in Core's trusted HTTPS origin map. This happens in the same scoped transaction,
+with generation 1 pending until the agent reports application. Unconfigured
+hosts retain the previous disabled default. The provisioning request cannot
+select this policy. No schema change, eager backfill, or browser-triggered
+mutation is involved.
+
+Existing credential rows are never changed by this initialization, even when
+they are disabled. Explicitly disabled or already-enrolled predecessors require
+an operator-reviewed activation as part of their rollout, not a customer toggle;
+revoked assignments still require the separate recovery contract. An
 exact retry, including a replacement worker's live lease, returns the same
 secret without changing native credentials or applied generation. Revoked,
 changed-owner, moved, inactive or ambiguous assignments fail closed without
@@ -284,7 +300,7 @@ agentd readiness errors; enrollment never repairs those settings.
 
 Ordinary restart/recovery and unconfigured Runner upgrades preserve installed
 reserved variables. Automatic failed-upgrade rollback restores the previous
-container and its previous environment; a newly enrolled Core row remains disabled/pending
+container and its previous environment; a newly enrolled Core row remains pending
 until an agent applies settings. Retry redelivers the same secret. Missing
 upgrade bootstrap support on an older Core (404), network failure, throttling
 or 5xx leaves the operation retryable before any guest mutation. Old Runners
@@ -313,7 +329,7 @@ Track that removal gate under FIN-39/FIN-57, not a separate preparatory rollout.
 | State | Writer | Readers |
 | --- | --- | --- |
 | Assignment bootstrap | Core, on authenticated Runner creation or upgrade lease | Runner private launch/upgrade delivery; Core runtime authentication |
-| Native enablement/credential generation | Core, after current-owner authorization | Assigned agent pull; Core native login |
+| Native enablement/credential generation | Core, during new credential provisioning on configured hosts; retained current-owner control for operational changes | Assigned agent pull; Core native login |
 | Applied generation/status | Assigned agent, after native auth or process exit | Core account state and session eligibility |
 | Native session cookies | Hermes | Core's disposable memory cache |
 | Short access token | Hermes; Core returns only the native access token | Browser's direct agent API requests |

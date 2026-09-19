@@ -1,4 +1,5 @@
 use super::*;
+mod automatic_access;
 use crate::test_support::{TestDb, with_isolated_postgres};
 use crate::{
     RunnerClass, RunnerLeaseCapacity, RuntimeArtifactKind, RuntimeCapabilitiesEnvelope,
@@ -47,6 +48,7 @@ pub(crate) async fn requested(db: &TestDb) -> String {
 pub(crate) fn provision(request: &str) -> ProvisionRuntimeCredential {
     ProvisionRuntimeCredential {
         creation_request_id: request.into(),
+        prepare_hosted_access: false,
         runner_id: "auth-runner".into(),
         source_host_id: "auth-host".into(),
         lease_token: "test-launch-lease".into(),
@@ -179,6 +181,7 @@ pub(crate) async fn upgrade(db: &TestDb, creation: &str) -> RuntimeControlLease 
 pub(crate) fn upgrade_input(lease: &RuntimeControlLease) -> ProvisionUpgradeCredential {
     ProvisionUpgradeCredential {
         request_id: lease.request.id.clone(),
+        prepare_hosted_access: false,
         runner_id: "auth-runner".into(),
         lease_token: "upgrade-lease".into(),
         source_host_id: "auth-host".into(),

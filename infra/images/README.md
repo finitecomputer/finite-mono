@@ -41,6 +41,13 @@ Notes:
   patch when an upstream release supplies this contract, retaining the
   packaged regression suite `test_hermes_skills_inventory.py`.
 
+- The sealed Hermes environment also includes the bounded product inventory
+  reader; full/minimal packages bundle Brain- and Sites-owned dashboard plugins.
+  Their fixed native routes reuse Hermes authentication and existing CLI signer
+  reads. See [the inventory contract](../../finitecomputer-v2/docs/agent-product-inventory.md)
+  and `test_hermes_product_inventory.py`. The CLI flags and plugins must ship in
+  the same canonical Runtime image; there is no separate feature image lane.
+
 - `runtime.Dockerfile` stays next to `build_runtime_image.py` because the
   script assembles its own staged build context and references that path.
 - The Runtime's baseline CLIs are defined by
