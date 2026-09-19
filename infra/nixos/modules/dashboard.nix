@@ -7,7 +7,7 @@
     # Production onboarding and agent-scoped Brain/Sites inventories.
     # Source 150da47329f46428d1368913099d489e3be0358b.
     # https://github.com/finitecomputer/finite-mono/actions/runs/35419244270
-    image = "ghcr.io/finitecomputer/finite-saas-dashboard@sha256:f749105f4a8f8ca476afb5ead39597c39a844daa552771a22e74d1931e38b7cf";
+    image = "ghcr.io/finitecomputer/finite-saas-dashboard@sha256:a092a49d181b026a5984501fe36f44d85db08e359c27354c1ba8961650dff6d1";
 
     # Host networking: the dashboard must reach core on the HOST loopback
     # (127.0.0.1:4200) and itself bind 127.0.0.1:3000 (HOSTNAME below). With
