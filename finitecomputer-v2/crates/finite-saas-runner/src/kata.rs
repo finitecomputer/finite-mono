@@ -2654,7 +2654,15 @@ impl RuntimeLauncher for KataLauncher {
             self.config.launch_timeout,
         )?;
         write_kata_env_file(&candidate_plan.env_file, &replacement_environment.entries)?;
-        if let Err(error) = self.stop_compute(&canonical_name) {
+        // Hosted mutations remain fenced after a command error, even when
+        // inspection says compute stopped. Preserve that error instead of
+        // replacing it with the inevitable candidate/rollback fence errors.
+        let stop = if self.config.hosted_hermes.is_some() {
+            self.stop_command(&canonical_name)
+        } else {
+            self.stop_compute(&canonical_name)
+        };
+        if let Err(error) = stop {
             let _ = std::fs::remove_file(&candidate_plan.env_file);
             let restore = self.restore_previous_compute(&canonical_plan, &old_npub);
             return Err(runtime_upgrade_failure(error, restore.err()));
@@ -6824,6 +6832,102 @@ esac
             old_server.contact_requests.load(Ordering::Relaxed) >= 2,
             "restored canonical must re-prove the original Agent Principal"
         );
+    }
+
+    #[test]
+    fn kata_upgrade_hosted_stop_failure_preserves_cause_and_fence() {
+        for (failure, cause, status) in [
+            ("fail-stop-after-exit", "injected stop failure", "exited"),
+            ("stuck-stop", "injected stuck stop", "running"),
+            ("timeout-stop-after-exit", "timed out", "exited"),
+        ] {
+            let old_server = TestHttpServer::start("npub1sameagent");
+            let temp = tempfile::tempdir().unwrap();
+            let (mut launcher, plan, fake_state) = test_launcher(&temp, old_server.port);
+            let fence_root = temp.path().join("hosted-fence");
+            launcher.config.hosted_hermes = Some(Arc::new(
+                crate::hosted_hermes_lifecycle::HostedHermesLifecycle::for_test(
+                    launcher.config.nerdctl_bin.clone(),
+                    launcher.config.namespace.clone(),
+                    &fence_root,
+                ),
+            ));
+            launcher.config.stop_timeout_secs = 0;
+            let old_image = "ghcr.io/finitecomputer/agent-runtime:v1@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+            write_fake_container(
+                &fake_state,
+                &plan.container_name,
+                old_image,
+                "artifact-v1",
+                "",
+                old_server.port,
+                &plan.state_root,
+            );
+            let retained = plan.state_root.join("retained-data");
+            std::fs::write(&retained, "existing user data").unwrap();
+            std::fs::write(fake_state.join(failure), "1").unwrap();
+
+            let error = launcher
+                .upgrade_runtime(
+                    &upgrade_lease("runtime_ctl_hosted_stop_failure"),
+                    &RuntimeRestartOptions::default(),
+                )
+                .unwrap_err()
+                .to_string();
+            assert!(error.contains(cause), "{failure}: {error}");
+            if status == "exited" {
+                assert!(
+                    error.contains("restoring the previous compute also failed")
+                        && error.contains("provider mutation is unresolved"),
+                    "{failure}: {error}"
+                );
+            } else {
+                assert!(
+                    !error.contains("restoring the previous compute also failed"),
+                    "{error}"
+                );
+            }
+            assert!(fence_root.join("mutation-in-progress").exists());
+            assert!(
+                launcher
+                    .start_compute(&plan.container_name)
+                    .unwrap_err()
+                    .to_string()
+                    .contains("provider mutation is unresolved")
+            );
+            assert_eq!(
+                read_kata_upgrade_expected_npub(&plan, "runtime_ctl_hosted_stop_failure").unwrap(),
+                "npub1sameagent"
+            );
+            assert_eq!(
+                std::fs::read_to_string(&retained).unwrap(),
+                "existing user data"
+            );
+            assert_eq!(
+                std::fs::read_to_string(fake_state.join(format!("{}.image", plan.container_name)))
+                    .unwrap(),
+                old_image
+            );
+            assert_eq!(
+                std::fs::read_to_string(fake_state.join(format!("{}.status", plan.container_name)))
+                    .unwrap(),
+                status
+            );
+            let commands = std::fs::read_to_string(fake_state.join("commands.log")).unwrap();
+            let mutations: Vec<_> = commands
+                .lines()
+                .filter(|line| {
+                    matches!(
+                        line.split_whitespace().next(),
+                        Some("stop" | "start" | "run" | "rm" | "rename")
+                    )
+                })
+                .collect();
+            assert_eq!(
+                mutations,
+                vec![format!("stop --time 0 {}", plan.container_name)]
+            );
+        }
     }
 
     #[test]
