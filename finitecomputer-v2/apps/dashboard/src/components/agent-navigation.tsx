@@ -1,6 +1,5 @@
 "use client";
 
-import { dashboardDesignPreviewEnabled } from "@/lib/dashboard-design-preview";
 import Link from "next/link";
 import { usePathname } from "next/navigation";
 import {
@@ -51,15 +50,13 @@ export function AgentNavigation({
     },
     {
       label: "Sites",
-      href: dashboardDesignPreviewEnabled ? `${root}/sites` : undefined,
-      note: "Coming soon",
+      href: `${root}/sites`,
       icon: Globe2Icon,
       active: pathname === `${root}/sites`,
     },
     {
       label: "Brain",
-      href: dashboardDesignPreviewEnabled ? `${root}/brain` : undefined,
-      note: "Coming soon",
+      href: `${root}/brain`,
       icon: BrainIcon,
       active: pathname === `${root}/brain`,
     },

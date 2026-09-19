@@ -1,30 +1,32 @@
-import { dashboardDesignPreviewEnabled } from "@/lib/dashboard-design-preview";
-import { notFound, redirect } from "next/navigation";
+import { dashboardAgentDesignPreviewEnabled } from "@/lib/dashboard-design-preview";
+import { redirect } from "next/navigation";
 
+import { AgentSitesInventory } from "@/components/agent-sites-inventory";
+import { getAccountAuthContext } from "@/lib/dashboard-auth";
 import { AgentSitesBrowser } from "@/components/agent-sites-browser";
 import { loadDashboardMachineAccess } from "@/lib/dashboard-machine-access";
+
+export const dynamic = "force-dynamic";
 
 export default async function SitesPage({ params, searchParams }: {
   params: Promise<{ machineId: string }>;
   searchParams: Promise<{ preview?: string; state?: string }>;
 }) {
-  // Keep the design preview private until FIN-69 connects the real listing.
-  if (!dashboardDesignPreviewEnabled) notFound();
   const { machineId } = await params;
-  const access = await loadDashboardMachineAccess(machineId, { coreCacheMode: "swr" });
+  const [access, account] = await Promise.all([loadDashboardMachineAccess(machineId), getAccountAuthContext()]);
   if (!access) redirect("/dashboard");
   if (access.machineId !== machineId) {
     redirect(`/dashboard/machines/${encodeURIComponent(access.machineId)}/sites`);
   }
 
-  // Account-wide listing and access metadata await the Sites service contract.
-  // Never infer ownership or sharing permissions from chat links or this agent.
   const query = await searchParams;
-  const showDesignPreview = process.env.NODE_ENV === "development"
-    && (query.preview === "1" || process.env.FC_DASHBOARD_ALLOW_DEV_ACCOUNT_AUTH === "1");
-  if (showDesignPreview) {
+  if (dashboardAgentDesignPreviewEnabled(access.machineId)) {
     const { sampleSites } = await import("@/components/dev/sites-sample");
-    return <AgentSitesBrowser machineId={access.machineId} sites={query.state === "empty" ? [] : query.state === "unavailable" ? null : sampleSites} />;
+    return <>
+      <p className="mb-5 text-sm text-muted-foreground">Design preview · Sample Sites records</p>
+      <AgentSitesBrowser key={access.machineId} machineId={access.machineId} sites={query.state === "empty" ? [] : query.state === "unavailable" ? null : sampleSites} />
+    </>;
   }
-  return <AgentSitesBrowser machineId={access.machineId} sites={null} />;
+  const scope = JSON.stringify([account.workosUserId ?? account.email, account.organizationId ?? null, access.machineId]);
+  return <AgentSitesInventory key={scope} runtimeId={access.machineId} agentName={access.displayName} />;
 }

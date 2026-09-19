@@ -1,0 +1,8 @@
+{
+  "name": "finite-sites",
+  "label": "Finite Sites",
+  "description": "Selected-agent Sites inventory for the Finite dashboard",
+  "version": "1.0.0",
+  "tab": {"hidden": true},
+  "api": "plugin_api.py"
+}

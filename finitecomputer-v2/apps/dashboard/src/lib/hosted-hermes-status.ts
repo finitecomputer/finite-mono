@@ -115,7 +115,7 @@ export async function readHostedHermesJson(runtimeId: string, path: string, sign
         }
         throw new HostedHermesStatusError("Agent access is unavailable. Try again.");
       }
-      const result = await boundedJson(response);
+      const result = await boundedJson(response, "unsupported");
       requestSignal.throwIfAborted();
       return result;
     }
@@ -127,9 +127,9 @@ export async function readHostedHermesStatus(runtimeId: string, signal: AbortSig
   return parseHostedHermesStatus(await readHostedHermesJson(runtimeId, "api/status", signal));
 }
 
-async function boundedJson(response: Response): Promise<unknown> {
+async function boundedJson(response: Response, invalidKind: "request" | "unsupported" = "request"): Promise<unknown> {
   const reader = response.body?.getReader();
-  if (!reader) throw new HostedHermesStatusError("Agent returned an empty response.");
+  if (!reader) throw new HostedHermesStatusError("Agent returned an empty response.", invalidKind);
   const chunks: Uint8Array[] = [];
   let size = 0;
   try {
@@ -137,13 +137,14 @@ async function boundedJson(response: Response): Promise<unknown> {
       const { done, value } = await reader.read();
       if (done) break;
       size += value.length;
-      if (size > 1024 * 1024) throw new HostedHermesStatusError("Agent response is too large.");
+      if (size > 1024 * 1024) throw new HostedHermesStatusError("Agent response is too large.", invalidKind);
       chunks.push(value);
     }
     const data = new Uint8Array(size);
     let offset = 0;
     for (const chunk of chunks) { data.set(chunk, offset); offset += chunk.length; }
-    return JSON.parse(new TextDecoder().decode(data));
+    try { return JSON.parse(new TextDecoder().decode(data)); }
+    catch { throw new HostedHermesStatusError("Agent returned an incompatible response.", invalidKind); }
   } finally {
     await reader.cancel();
     reader.releaseLock();
