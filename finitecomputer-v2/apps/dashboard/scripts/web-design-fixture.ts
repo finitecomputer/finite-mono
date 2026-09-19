@@ -248,7 +248,7 @@ async function serve() {
         FC_WORKOS_AUTH_ENABLED: "0",
         WORKOS_COOKIE_PASSWORD: "web-design-cookie-password-32-characters",
         NEXT_DIST_DIR: ".next-web-design",
-        NEXT_PUBLIC_FC_DESIGN_PREVIEWS: "1",
+        NEXT_PUBLIC_FC_DESIGN_PREVIEWS: process.env.FC_WEB_DESIGN_PREVIEWS === "0" ? "0" : "1",
         NEXT_TELEMETRY_DISABLED: "1",
         NODE_OPTIONS:
           process.env.FC_WEB_DESIGN_NODE_OPTIONS ?? "--max-old-space-size=2048",

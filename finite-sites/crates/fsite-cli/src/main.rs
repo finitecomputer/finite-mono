@@ -64,7 +64,24 @@ fn main() -> ExitCode {
     match run(&args) {
         Ok(()) => ExitCode::SUCCESS,
         Err(error) => {
-            eprintln!("fsite: {error}");
+            if args.iter().any(|arg| arg == "--existing-identity")
+                && args.windows(2).any(|pair| pair == ["--output", "json"])
+            {
+                let kind = match &error {
+                    CliError::Key(_)
+                    | CliError::ApiStatus {
+                        status: 401 | 403 | 404,
+                        ..
+                    } => "access",
+                    _ => "request",
+                };
+                eprintln!(
+                    "{}",
+                    serde_json::json!({ "inventory_error_version": 1, "kind": kind })
+                );
+            } else {
+                eprintln!("fsite: {error}");
+            }
             ExitCode::FAILURE
         }
     }
@@ -248,7 +265,7 @@ fn project_status_help() -> &'static str {
 }
 
 fn project_list_help() -> &'static str {
-    "usage: fsite project list [--output json]\n\nList Project Repositories this actor owns or may edit."
+    "usage: fsite project list [--output json] [--existing-identity]\n\nList Project Repositories this actor owns or may edit. --existing-identity refuses to mint a missing identity."
 }
 
 fn auth_help() -> &'static str {
@@ -369,7 +386,7 @@ fn describe_commands() -> serde_json::Value {
             },
             {
                 "name": "project list",
-                "summary": "List Project Repositories this actor owns or may edit.",
+                "summary": "List Project Repositories this actor owns or may edit. --existing-identity refuses to mint a missing identity.",
                 "usage": "fsite project list [--output json]"
             },
             {
@@ -1334,8 +1351,18 @@ fn project_list(args: &[String]) -> Result<(), CliError> {
     if help_requested(args) {
         return print_help(project_list_help());
     }
-    let output_json = parse_output_json_only(args, project_list_help())?;
-    let identity = keys::load_or_generate_user_key()?;
+    let existing_identity = args.iter().any(|arg| arg == "--existing-identity");
+    let output_args: Vec<String> = args
+        .iter()
+        .filter(|arg| arg.as_str() != "--existing-identity")
+        .cloned()
+        .collect();
+    let output_json = parse_output_json_only(&output_args, project_list_help())?;
+    let identity = if existing_identity {
+        keys::load_existing_user_key()?
+    } else {
+        keys::load_or_generate_user_key()?
+    };
     let client = api::Client::from_env();
     let response = client.project_list(&identity)?;
     if output_json {

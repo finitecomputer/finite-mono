@@ -130,6 +130,9 @@ pub(crate) fn positional_values(args: &[String]) -> Vec<String> {
             skip_next = false;
             continue;
         }
+        if arg == "--existing-identity" {
+            continue;
+        }
         if arg.starts_with("--") {
             if args
                 .get(index + 1)
