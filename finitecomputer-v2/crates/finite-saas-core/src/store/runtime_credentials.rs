@@ -11,6 +11,8 @@ pub struct ProvisionRuntimeCredential {
     pub lease_token: String,
     /// Derived from the authenticated Runner, not request JSON.
     pub source_host_id: String,
+    /// Trusted Core host configuration, never a caller-supplied preference.
+    pub prepare_hosted_access: bool,
 }
 
 // Existing-agent delivery is tied to a live upgrade lease, not a runtime ID
@@ -20,6 +22,7 @@ pub struct ProvisionUpgradeCredential {
     pub runner_id: String,
     pub lease_token: String,
     pub source_host_id: String,
+    pub prepare_hosted_access: bool,
 }
 
 // Serialize only for the dedicated, authenticated provisioning response.
@@ -156,6 +159,9 @@ impl CoreStore {
                 &[&creation,&request.agent_runtime_id,&input.source_host_id,&request.source_machine_id,
                   &owner,&secret,&digest(&secret),&digest(&input.lease_token)],
             ).await.map_err(store_error)?;
+            if input.prepare_hosted_access {
+                super::hosted_hermes::prepare_initial_access(&*tx, &creation).await?;
+            }
             secret
         };
         self.finish(tx).await?;
@@ -218,6 +224,9 @@ impl CoreStore {
             None => {
                 let secret = new_secret()?;
                 tx.execute("INSERT INTO runtime_core_credentials (creation_request_id,source_host_id,bootstrap_secret,token_sha256,lease_sha256,owner_user_id) SELECT $1,$2,$3,$4,$5,p.owner_user_id FROM projects p JOIN agent_creation_requests q ON q.project_id=p.id WHERE q.id=$1", &[&request.id,&input.source_host_id,&secret,&digest(&secret),&lease_hash]).await.map_err(store_error)?;
+                if input.prepare_hosted_access {
+                    super::hosted_hermes::prepare_initial_access(&*tx, &request.id).await?;
+                }
                 secret
             }
         };

@@ -34,15 +34,15 @@ test("admins issue Standard or Confidential Launch Codes", { timeout: 120_000 },
     page.setDefaultNavigationTimeout(90_000);
 
     await page.goto(`http://127.0.0.1:${dashboardPort}/dashboard?new=1`);
-    await page.getByLabel("Agent name").waitFor({ state: "visible" });
+    await page.getByLabel("Launch Code", { exact: true }).waitFor({ state: "visible" });
     await page.getByRole("link", { name: "Finite.Computer" }).waitFor({ state: "visible" });
     await page.getByRole("list", { name: "Agent setup progress" }).waitFor({
       state: "visible",
     });
     assert.equal(
       await page.getByRole("button", { name: "Account menu" }).count(),
-      0,
-      "immersive onboarding should not render the dashboard account menu"
+      1,
+      "onboarding keeps account access and sign-out available"
     );
     assert.equal(await page.getByText("Legacy Agent", { exact: true }).count(), 0);
     assert.equal(await page.getByRole("heading", { name: "Finite Private" }).count(), 0);

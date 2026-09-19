@@ -1,3 +1,6 @@
+mod view;
+pub use view::AppView;
+
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -1302,6 +1305,10 @@ pub struct FiniteChatRuntime {
 }
 
 enum AppRuntimeCommand {
+    ReadView {
+        view: AppView,
+        response: mpsc::SyncSender<Result<AppState, FiniteChatCoreError>>,
+    },
     Dispatch {
         action: AppAction,
         requester_context: Option<VerifiedRequesterContext>,
@@ -2494,6 +2501,9 @@ fn spawn_app_runtime_worker(
         publish_app_update(&state.app, &shared_state, &reconciler);
         while let Ok(command) = command_rx.recv() {
             match command {
+                AppRuntimeCommand::ReadView { view, response } => {
+                    let _ = response.send(state.state_for_view(view));
+                }
                 AppRuntimeCommand::Dispatch {
                     action,
                     requester_context,
@@ -7267,25 +7277,12 @@ impl AppRuntimeState {
             return;
         };
         let count = self.loaded_message_count(&room_id);
-        let mut messages = if let (Some(topic_id), Some(chat_id)) = (
+        self.app.messages = self.transcript_messages(
+            &room_id,
             self.app.selected_topic_id.as_deref(),
             self.app.selected_chat_id.as_deref(),
-        ) {
-            self.chat_projection
-                .messages_for_chat_window(&room_id, topic_id, chat_id, count)
-        } else if let Some(topic_id) = self.app.selected_topic_id.as_deref() {
-            self.chat_projection
-                .messages_for_topic_window(&room_id, topic_id, count)
-        } else {
-            self.chat_projection
-                .messages_for_room_window(&room_id, count)
-        };
-        self.core.apply_attachment_cache_paths(
-            self.chat_projection.attachment_blob_map(),
-            &mut messages,
+            count,
         );
-        self.apply_attachment_download_progress(&mut messages);
-        self.app.messages = messages;
         self.sync_selected_room_media_gallery(&room_id);
         self.sync_transcript_load_state();
         self.sync_selected_room_details();

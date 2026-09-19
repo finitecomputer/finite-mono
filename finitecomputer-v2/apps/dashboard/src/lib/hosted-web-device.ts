@@ -326,9 +326,10 @@ export function hostedDeviceHeaders(
 
 export async function hostedDeviceState(
   config: HostedDeviceConfig,
-  account: AccountAuthContext
+  account: AccountAuthContext,
+  viewQuery = ""
 ) {
-  return hostedDeviceJson<HostedChatState>(config, account, "/v1/app/state");
+  return hostedDeviceJson<HostedChatState>(config, account, `/v1/app/state${viewQuery}`);
 }
 
 const HOSTED_CHAT_ACCOUNT_ID_PATTERN = /^[0-9a-f]{64}$/u;
@@ -483,9 +484,10 @@ export async function hostedDeviceRuntimeCommand(
 export async function hostedDeviceUpdates(
   config: HostedDeviceConfig,
   account: AccountAuthContext,
-  signal: AbortSignal
+  signal: AbortSignal,
+  viewQuery = ""
 ) {
-  return fetch(`${config.baseUrl}/v1/app/updates`, {
+  return fetch(`${config.baseUrl}/v1/app/updates${viewQuery}`, {
     cache: "no-store",
     headers: hostedDeviceHeaders(config, account),
     signal,

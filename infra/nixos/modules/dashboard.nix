@@ -4,10 +4,10 @@
 { ... }:
 {
   virtualisation.oci-containers.containers.finite-saas-dashboard = {
-    # Agent Skills inventory preserves the reviewed Skyler dashboard design.
-    # Source 26a8db8b790561042fe713b4abe079eeac6e48d3.
-    # https://github.com/finitecomputer/finite-mono/actions/runs/35350878190
-    image = "ghcr.io/finitecomputer/finite-saas-dashboard@sha256:d68df4da56045dcb202a34ef328c6f1679ad3765fc4cc3526878fbf12ea52248";
+    # Scoped Chat views and automatic-access Skills messaging.
+    # Source 108b5d38c7a53fbe51bd3b2a3674d4e7cbf707f7.
+    # https://github.com/finitecomputer/finite-mono/actions/runs/35382204717
+    image = "ghcr.io/finitecomputer/finite-saas-dashboard@sha256:1bc14164bfd3f65344243f8da6645957460a908ccc15dfda254368a70a46ed8e";
 
     # Host networking: the dashboard must reach core on the HOST loopback
     # (127.0.0.1:4200) and itself bind 127.0.0.1:3000 (HOSTNAME below). With

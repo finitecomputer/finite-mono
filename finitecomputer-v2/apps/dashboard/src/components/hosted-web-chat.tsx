@@ -177,13 +177,8 @@ export function HostedWebChat({
     attachmentUrl,
   } = useHostedChat();
   const [actionError, setActionError] = useState<string | null>(null);
-  // A refused text send answers over HTTP with the raw core reason while the
-  // projection's status/toast arrive on the stream; the toast is the copy
-  // people should read, so it replaces whatever the request itself said.
-  const sendRefusal = state ? sendError(state) : null;
-  useEffect(() => {
-    if (sendRefusal) setActionError(sendRefusal);
-  }, [sendRefusal]);
+  // Send feedback comes from this composer's action response. Stream and
+  // view status/toast fields can describe another tab's action on the Device.
   const [sending, setSending] = useState(false);
   const [draft, setDraft] = useState(initialDraft ?? "");
   const [attachments, setAttachments] = useState<PendingAttachment[]>([]);

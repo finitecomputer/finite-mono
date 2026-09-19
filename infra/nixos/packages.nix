@@ -254,6 +254,7 @@ let
     "finitechat/integrations/hermes/finitechat/__init__.py"
     "finitechat/integrations/hermes/finitechat/adapter.py"
     "finitechat/integrations/hermes/finitechat/plugin.yaml"
+    "finitechat/integrations/hermes/finitechat/simplex_topics.py"
   ];
   finitechatCargoArtifacts = mkCargoArtifacts {
     pname = "finitechat-group";
