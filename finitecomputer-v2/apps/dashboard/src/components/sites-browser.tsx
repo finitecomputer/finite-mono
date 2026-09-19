@@ -23,12 +23,13 @@ export type SiteListItem = {
   thumbnailUrl?: string;
 };
 
-export function SitesBrowser({ sites, onNewSite, onEditSite, creatingSite = false, newSiteError }: {
+export function SitesBrowser({ sites, onNewSite, onEditSite, creatingSite = false, newSiteError, listingNotConnected = false }: {
   sites: readonly SiteListItem[] | null;
   onNewSite: () => void;
   onEditSite: (site: SiteListItem) => void;
   creatingSite?: boolean;
   newSiteError?: string | null;
+  listingNotConnected?: boolean;
 }) {
   const [query, setQuery] = useState("");
   const [shareSite, setShareSite] = useState<SiteListItem | null>(null);
@@ -61,7 +62,7 @@ export function SitesBrowser({ sites, onNewSite, onEditSite, creatingSite = fals
 
       <div className={`${styles.browser} ${tableStyles.surface}`}>
               <div className={styles.results}>
-              <div className={styles.columns} aria-hidden="true"><span>Site</span><span>Sharing</span><span>Actions</span></div>
+              {Boolean(sites?.length) && <div className={styles.columns} aria-hidden="true"><span>Site</span><span>Sharing</span><span>Actions</span></div>}
               {visible.length ? (
                 <ul className={styles.list} aria-label="Sites">
                   {visible.map((site) => {
@@ -109,8 +110,8 @@ export function SitesBrowser({ sites, onNewSite, onEditSite, creatingSite = fals
               ) : (
                 <div className={styles.empty}>
                   {normalizedQuery && sites ? <SearchIcon aria-hidden="true" /> : <Globe2Icon aria-hidden="true" />}
-                  <h2>{sites === null ? "Sites are unavailable right now" : normalizedQuery ? "No sites found" : "Your sites will show up here"}</h2>
-                  <p>{sites === null ? "We couldn’t load your sites. Please try again later." : normalizedQuery ? "Try another site name or web address." : "Start with an idea, push the limits, and make something awesome. Create your next site in chat."}</p>
+                  <h2>{sites === null ? (listingNotConnected ? "Site listings aren’t available yet" : "Sites are unavailable right now") : normalizedQuery ? "No sites found" : "Your sites will show up here"}</h2>
+                  <p>{sites === null ? (listingNotConnected ? "You can still create and work on sites with your agent in chat." : "We couldn’t load your sites. Please try again later.") : normalizedQuery ? "Try another site name or web address." : "Start with an idea, push the limits, and make something awesome. Create your next site in chat."}</p>
                   {normalizedQuery && sites && <button type="button" className={styles.share} onClick={() => setQuery("")}>Clear search</button>}
                   {(!normalizedQuery || !sites?.length) && <button type="button" className={styles.newSite} disabled={creatingSite} onClick={onNewSite}>{creatingSite ? "Opening chat…" : "Create a site"}</button>}
                 </div>

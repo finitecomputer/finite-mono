@@ -4,11 +4,9 @@
 // Compact table presentation of selected-agent metadata.
 // Synthetic memberships only. This prototype proves no Brain access contract.
 import { useEffect, useRef, useState } from "react";
-import { useRouter } from "next/navigation";
-import { useHostedChat } from "@/components/hosted-chat-provider";
-import { canonicalNewChatTopic } from "@/lib/hosted-web-chat-topics";
+import { BrainChatState } from "@/components/brain-chat-state";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
-import { BrainIcon, ChevronDownIcon, RefreshCwIcon } from "lucide-react";
+import { ChevronDownIcon, RefreshCwIcon } from "lucide-react";
 
 import headingStyles from "@/styles/agent-page-heading.module.css";
 import tableStyles from "@/styles/dashboard-table.module.css";
@@ -41,6 +39,7 @@ export function BrainOverviewTable({ agentName, machineId }: { agentName: string
 
   return (
     <div className="brain-table-preview">
+      <p className="text-sm text-muted-foreground">Design preview · Sample Brain memberships</p>
       <MembershipPreview key={scenario} scenario={scenario} agentName={agentName} machineId={machineId} />
       <details className="brain-preview-options">
         <summary>Preview states</summary>
@@ -118,7 +117,7 @@ function MembershipPreview({ scenario, agentName, machineId }: { scenario: Scena
 
       {!initialLoading && <>
       <section aria-label="Brain memberships" aria-busy={busy}>
-        {brains?.length === 0 ? <BrainEmptyState agentName={agentName} machineId={machineId} /> : null}
+        {brains?.length === 0 ? <BrainChatState agentName={agentName} machineId={machineId} /> : null}
         {ordered.length > 0 && <BrainTable brains={ordered} />}
       </section>
 
@@ -156,48 +155,6 @@ function BrainTable({ brains }: { brains: Brain[] }) {
           </td>
         </tr>)}</tbody>
       </table>
-    </div>
-  );
-}
-
-function BrainEmptyState({ agentName, machineId }: { agentName: string; machineId: string }) {
-  const { state, dispatch } = useHostedChat();
-  const router = useRouter();
-  const pending = useRef(false);
-  const intentKey = useRef<string | null>(null);
-  const [opening, setOpening] = useState(false);
-  const [error, setError] = useState<string | null>(null);
-
-  async function openChat() {
-    if (pending.current) return;
-    const roomId = state?.hosted_agent_binding?.canonical_room_id;
-    const topic = canonicalNewChatTopic((state?.topics ?? []).filter((item) => item.room_id === roomId && !item.archived));
-    if (!roomId || !topic) {
-      setError("Chat is still connecting. Please try again in a moment.");
-      return;
-    }
-    pending.current = true;
-    setOpening(true);
-    setError(null);
-    intentKey.current ??= crypto.randomUUID();
-    try {
-      await dispatch({ StartTopicChatIntent: { room_id: roomId, topic_id: topic.topic_id, reason: null, intent_key: intentKey.current } });
-      const prompt = "Help me create a brain. Start by asking whether I want a personal brain or an organization brain.";
-      router.push(`/dashboard/machines/${encodeURIComponent(machineId)}/chat?${new URLSearchParams({ prompt })}`);
-    } catch (caught) {
-      setError(caught instanceof Error ? caught.message : "Couldn’t open a new chat. Please try again.");
-      pending.current = false;
-      setOpening(false);
-    }
-  }
-
-  return (
-    <div className="brain-empty-state">
-      <BrainIcon aria-hidden="true" />
-      <h2>Your brains will show up here</h2>
-      <p>Talk to {agentName} to create your personal brain or an organization brain for your team.</p>
-      <button type="button" className="brain-empty-chat" disabled={opening} onClick={() => void openChat()}>{opening ? "Opening chat…" : "Open chat"}</button>
-      {error && <p role="alert">{error}</p>}
     </div>
   );
 }

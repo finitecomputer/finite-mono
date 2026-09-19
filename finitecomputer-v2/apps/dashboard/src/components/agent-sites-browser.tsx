@@ -7,7 +7,7 @@ import { useHostedChat } from "@/components/hosted-chat-provider";
 import { SitesBrowser, type SiteListItem } from "@/components/sites-browser";
 import { canonicalNewChatTopic } from "@/lib/hosted-web-chat-topics";
 
-export function AgentSitesBrowser({ machineId, sites }: { machineId: string; sites: readonly SiteListItem[] | null }) {
+export function AgentSitesBrowser({ machineId, sites, listingNotConnected = false }: { machineId: string; sites: readonly SiteListItem[] | null; listingNotConnected?: boolean }) {
   const { state, dispatch } = useHostedChat();
   const router = useRouter();
   const pending = useRef(false);
@@ -43,5 +43,5 @@ export function AgentSitesBrowser({ machineId, sites }: { machineId: string; sit
     }
   }
 
-  return <SitesBrowser sites={sites} onNewSite={() => void openSiteChat()} onEditSite={(site) => void openSiteChat(site)} creatingSite={creating} newSiteError={error} />;
+  return <SitesBrowser sites={sites} listingNotConnected={listingNotConnected} onNewSite={() => void openSiteChat()} onEditSite={(site) => void openSiteChat(site)} creatingSite={creating} newSiteError={error} />;
 }
