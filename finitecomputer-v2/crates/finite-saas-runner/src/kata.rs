@@ -6846,7 +6846,7 @@ esac
             let (mut launcher, plan, fake_state) = test_launcher(&temp, old_server.port);
             let fence_root = temp.path().join("hosted-fence");
             launcher.config.hosted_hermes = Some(Arc::new(
-                crate::hosted_hermes_lifecycle::HostedHermesLifecycle::for_test(
+                crate::hosted_hermes_lifecycle::HostedHermesLifecycle::for_failed_mutation_test(
                     launcher.config.nerdctl_bin.clone(),
                     launcher.config.namespace.clone(),
                     &fence_root,

@@ -55,14 +55,18 @@ impl HostedHermesLifecycle {
     /// Exercises failed mutations and their fence without a systemd host.
     /// Successful publication is covered by the disposable Linux proof.
     #[cfg(test)]
-    pub(crate) fn for_test(nerdctl: PathBuf, namespace: String, root: &Path) -> Self {
+    pub(crate) fn for_failed_mutation_test(
+        nerdctl: PathBuf,
+        namespace: String,
+        root: &Path,
+    ) -> Self {
         Self {
             config: HostedHermesConfig {
                 public_origin: "https://unused.invalid".into(),
                 listen: "127.0.0.1:0".parse().unwrap(),
                 allowed_origins: vec![],
             },
-            guard: Mutex::new(HostedHermesGuard::for_test(root)),
+            guard: Mutex::new(HostedHermesGuard::for_failed_mutation_test(root)),
             nerdctl,
             namespace,
             source_host: "finite-lat-1".into(),

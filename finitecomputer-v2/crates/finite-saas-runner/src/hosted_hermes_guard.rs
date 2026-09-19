@@ -27,7 +27,7 @@ impl HostedHermesGuard {
     /// Synthetic process state for unit tests. Real systemd acquisition and
     /// process lifetime remain covered by the disposable Linux proof.
     #[cfg(test)]
-    pub(crate) fn for_test(root: &Path) -> Self {
+    pub(crate) fn for_failed_mutation_test(root: &Path) -> Self {
         let cgroup = root.join("cgroup");
         std::fs::create_dir_all(&cgroup).unwrap();
         std::fs::write(cgroup.join("cgroup.procs"), std::process::id().to_string()).unwrap();
