@@ -32,3 +32,7 @@ The parser retains deprecated `[outputs.*]` input for exactly one static Site.
 Previous content URLs use reviewed redirects; cookies and Git credentials do
 not transfer across hosts. See [service contract](docs/adr/0028-static-only-sites-platform-service.md)
 and [operations](../infra/runbooks/deploy-sites.md).
+
+The dashboard Sites list is the selected agent's Project Sites inventory through
+a Sites-owned Hermes plugin and the supported CLI. It is not an account-wide
+human inventory; see the [inventory contract](../finitecomputer-v2/docs/agent-product-inventory.md).

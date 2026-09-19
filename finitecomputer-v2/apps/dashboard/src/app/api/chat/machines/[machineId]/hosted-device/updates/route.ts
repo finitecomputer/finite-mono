@@ -1,3 +1,4 @@
+import { hostedChatViewQueryFromRequest } from "@/lib/hosted-chat-view";
 import {
   HostedWebChatError,
   hostedWebChatErrorMessage,
@@ -13,7 +14,7 @@ export async function GET(
 ) {
   try {
     const { machineId } = await params;
-    const upstream = await streamHostedWebChat(machineId, request.signal);
+    const upstream = await streamHostedWebChat(machineId, request.signal, hostedChatViewQueryFromRequest(request));
     if (!upstream.ok || !upstream.body) {
       return Response.json(
         { error: CHAT_UNAVAILABLE_MESSAGE },

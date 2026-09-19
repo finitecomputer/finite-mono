@@ -5,6 +5,7 @@ export function AppShell() {
     <DashboardShell
       machines={[]}
       isAdmin={false}
+      firstAgentAccount={false}
       saasMode={false}
     >
       <div className="rounded-[1.5rem] border border-border/60 bg-card p-6 shadow-sm">

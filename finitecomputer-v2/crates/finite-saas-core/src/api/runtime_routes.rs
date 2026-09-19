@@ -23,6 +23,9 @@ pub(super) async fn provision_runtime_credential(
                 creation_request_id: request_id,
                 runner_id: input.runner_id,
                 lease_token: input.lease_token,
+                prepare_hosted_access: state
+                    .hosted_hermes_origins
+                    .has_host(&credential.source_host_id),
                 source_host_id: credential.source_host_id,
             },
         )
@@ -45,6 +48,9 @@ pub(super) async fn provision_upgrade_credential(
                 request_id,
                 runner_id: input.runner_id,
                 lease_token: input.lease_token,
+                prepare_hosted_access: state
+                    .hosted_hermes_origins
+                    .has_host(&credential.source_host_id),
                 source_host_id: credential.source_host_id,
             },
         )

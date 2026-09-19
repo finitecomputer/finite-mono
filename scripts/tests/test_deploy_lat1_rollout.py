@@ -1868,6 +1868,40 @@ class RuntimeRolloutScriptTests(unittest.TestCase):
                 execute_events = [event for event in events if event["phase"] == "execute"]
                 self.assertEqual(execute_events[-1]["status"], "success")
 
+    def test_lifecycle_probe_loads_shared_defaults_then_operator_overrides(self) -> None:
+        script = ROLLOUT.read_text().split(
+            "read -r -d '' probe_script <<'REMOTE' || true\n", 1
+        )[1].split("\nREMOTE", 1)[0]
+        with tempfile.TemporaryDirectory() as directory:
+            temp = Path(directory)
+            shared = temp / "runner-shared.env"
+            operator = temp / "runner.env"
+            runner = temp / "finite-saas-runner"
+            runner.write_text(
+                '#!/bin/sh\nset -eu\nprintf "%s\\n" "$FC_RUNNER_SOURCE_HOST_ID" "$FC_RUNNER_ID"\n'
+            )
+            runner.chmod(0o755)
+            script = script.replace("/etc/finite/runner-shared.env", str(shared))
+            script = script.replace("/etc/finite/runner.env", str(operator))
+            script = script.replace("/run/current-system/sw/bin/finite-saas-runner", str(runner))
+            shared.write_text("FC_RUNNER_SOURCE_HOST_ID=finite-lat-5\nFC_RUNNER_ID=shared-runner\n")
+            env = {k: v for k, v in os.environ.items() if not k.startswith("FC_RUNNER_")}
+            for shared_present in (True, False):
+                with self.subTest(shared_present=shared_present):
+                    if shared_present:
+                        operator.write_text("FC_RUNNER_ID=operator-runner\n")
+                    else:
+                        shared.unlink()
+                        operator.write_text(
+                            "FC_RUNNER_SOURCE_HOST_ID=finite-lat-5\nFC_RUNNER_ID=operator-runner\n"
+                        )
+                    result = subprocess.run(
+                        ["bash", "-s", "--", "provider-lifecycle-probe-v1", "project-a", "runtime-a", "kata-a"],
+                        input=script, text=True, capture_output=True, env=env,
+                    )
+                    self.assertEqual(result.returncode, 0, result.stderr)
+                    self.assertEqual(result.stdout.splitlines(), ["finite-lat-5", "operator-runner"])
+
     def test_contact_uses_shared_bind_address_and_operator_override(self) -> None:
         script = ROLLOUT.read_text().split(
             "read -r -d '' contact_script <<'REMOTE' || true\n", 1

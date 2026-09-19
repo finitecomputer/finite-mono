@@ -1,3 +1,4 @@
+import { hostedChatViewQueryFromRequest } from "@/lib/hosted-chat-view";
 import {
   bootstrapHostedWebChat,
   HostedWebChatError,
@@ -7,12 +8,12 @@ import {
 export const dynamic = "force-dynamic";
 
 export async function GET(
-  _request: Request,
+  request: Request,
   { params }: { params: Promise<{ machineId: string }> }
 ) {
   try {
     const { machineId } = await params;
-    return Response.json(await bootstrapHostedWebChat(machineId), {
+    return Response.json(await bootstrapHostedWebChat(machineId, hostedChatViewQueryFromRequest(request)), {
       headers: { "cache-control": "no-store" },
     });
   } catch (error) {

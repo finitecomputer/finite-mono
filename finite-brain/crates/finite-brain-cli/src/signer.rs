@@ -126,6 +126,13 @@ pub(crate) fn load_signer(env: &CliEnvironment) -> Result<LocalSigner, CliError>
     signer_for(&identity)
 }
 
+/// Inventory reads must fail without changing a missing Runtime identity.
+pub(crate) fn load_existing_signer(env: &CliEnvironment) -> Result<LocalSigner, CliError> {
+    let identity = FiniteIdentity::load(&identity_paths(env)?)
+        .map_err(|error| CliError::Identity(error.to_string()))?;
+    signer_for(&identity)
+}
+
 pub(crate) fn signer_keys(env: &CliEnvironment) -> Result<Keys, CliError> {
     Ok(load_signer(env)?.keys)
 }

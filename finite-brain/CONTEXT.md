@@ -30,5 +30,8 @@ server stores ciphertext and permission metadata; authorized clients decrypt.
 
 Account authentication and directory lookup supply facts, not Brain grants.
 Permissions, grant provenance, revocation and content crypto remain Brain-owned.
+The dashboard's selected-agent overview is a bounded Brain-owned Hermes plugin
+using existing CLI metadata reads. It does not expose content or change grants;
+see the [inventory contract](../finitecomputer-v2/docs/agent-product-inventory.md).
 See [the CLI guide](README.md), [development](development.md), and
 [restore drill](docs/runbooks/brain-restore-drill.md).
