@@ -36,7 +36,7 @@ import {
 } from "@/components/finite-private-usage-panel";
 import { formatWeightedTokens } from "@/components/finite-private-usage-progress";
 import { PendingRefresh } from "@/components/pending-refresh";
-import { StatusPrism } from "@/components/status-prism";
+import { CoreAgentReadyPanel } from "@/components/core-agent-ready-panel";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
@@ -128,7 +128,7 @@ export default async function DashboardPage({
   const billingSyncStartedAtMs = parseBillingSyncStartedAt(
     firstSearchParam(query.billingSyncStartedAt)
   );
-  const isNewAgentFlow = firstSearchParam(query.new) === "1";
+  const requestedNewAgentFlow = firstSearchParam(query.new) === "1";
   const originMachineId =
     firstSearchParam(query.machine)?.trim() ||
     firstSearchParam(query.machineId)?.trim() ||
@@ -146,6 +146,10 @@ export default async function DashboardPage({
       account.workosUserId
     );
     const coreProjects = coreProductProjects(core.me?.projects ?? []);
+    // First login and resumed creation use the same flow as New agent. The
+    // query flag is only an entry point for accounts that already have agents.
+    const isNewAgentFlow = requestedNewAgentFlow || Boolean(trackedCreationRequestId) ||
+      !coreProjects.some((project) => coreProjectOverviewHref(project));
     const agentCreationRequests = core.me?.agent_creation_requests ?? [];
     const initialAgentCreationRequests =
       coreInitialAgentCreationRequests(agentCreationRequests);
@@ -298,7 +302,6 @@ export default async function DashboardPage({
                 allowConfidentialHosting={viewer.isAdmin}
                 error={agentCreationError}
                 draft={draft}
-                immersive={isNewAgentFlow}
                 returnMachineId={returnProject?.runtime?.id ?? null}
                 requiresAccess={agentCreationRequiresAccess({
                   runtimeMode: process.env.FC_DASHBOARD_RUNTIME_MODE,
@@ -452,38 +455,6 @@ function AccountBillingPanel({
           </form>
         ) : null}
       </div>
-    </section>
-  );
-}
-
-function CoreAgentReadyPanel({
-  chatHref,
-  name,
-}: {
-  chatHref: string;
-  name: string;
-}) {
-  return (
-    <section
-      className="grid min-h-[32rem] w-full justify-items-center gap-7 text-center"
-      aria-labelledby="agent-ready-title"
-    >
-      <AgentOnboardingStageSync stage="ready" />
-      <StatusPrism state="happy" className="cursor-default" />
-      <div className="grid gap-2">
-        <h1
-          id="agent-ready-title"
-          className="font-sans text-3xl leading-tight font-medium tracking-[-0.02em] sm:text-5xl"
-        >
-          {name} is online.
-        </h1>
-        <p className="type-body-lg text-muted-foreground">
-          Go introduce yourself to your new Finite Agent.
-        </p>
-      </div>
-      <Button asChild size="xl">
-        <a href={chatHref}>Meet {name}</a>
-      </Button>
     </section>
   );
 }
@@ -925,18 +896,23 @@ function CoreAgentCreationStatusPanel({
     ? "Waiting for runner capacity"
     : first?.status === "launching"
       ? "Starting your agent"
-      : "Creating your agent";
+      : first?.status === "running"
+        ? "Preparing your workspace"
+        : "Creating your agent";
   const description = waitingForCapacity
     ? "All runner hosts are busy. Your agent is still queued and will start automatically when capacity opens."
-    : `${first?.display_name ?? "Your agent"} will appear here when it is ready.`;
+    : first?.status === "running"
+      ? "Your agent has started. We’re waiting for its workspace to become available."
+      : `${first?.display_name ?? "Your agent"} will appear here when it is ready.`;
 
   return (
-    <section className="ocean-utility-card">
-      <div className="ocean-agent-spinup" role="status" aria-live="polite">
-        <FiniteLoader label={title} size={38} variant="center-out" />
+    <section className="grid min-h-[28rem] content-center justify-items-center gap-7 text-center">
+      <AgentOnboardingStageSync stage="launch" />
+      <div className="grid justify-items-center gap-7" role="status" aria-live="polite">
+        <FiniteLoader label={title} size={72} variant="center-out" />
         <div>
-          <strong>{title}</strong>
-          <span>{description}</span>
+          <h1 className="text-balance text-3xl leading-tight font-medium tracking-[-0.02em] sm:text-5xl">{title}</h1>
+          <p className="mt-3 text-pretty text-muted-foreground">{description}</p>
         </div>
       </div>
     </section>
@@ -961,6 +937,7 @@ function CoreAgentCreationFailedPanel({
 }) {
   return (
     <section className="ocean-utility-card">
+      <AgentOnboardingStageSync stage="launch" />
       <div className="ocean-utility-card__header">
         <span className="ocean-utility-card__icon ocean-utility-card__icon--amber" aria-hidden>
           <RotateCcwIcon className="size-5" />
@@ -1001,14 +978,12 @@ function CoreAgentCreationPanel({
   allowConfidentialHosting,
   error,
   draft,
-  immersive,
   returnMachineId,
   requiresAccess,
 }: {
   allowConfidentialHosting: boolean;
   error: string | null;
   draft: AgentOnboardingDraft | null;
-  immersive: boolean;
   returnMachineId: string | null;
   requiresAccess: boolean;
 }) {
@@ -1018,7 +993,6 @@ function CoreAgentCreationPanel({
       allowConfidentialHosting={allowConfidentialHosting}
       error={error}
       idempotencyKey={draft?.idempotencyKey ?? idempotencyKey}
-      immersive={immersive}
       initialName={draft?.displayName}
       initialPictureUrl={draft?.profilePictureUrl}
       initialHostingTier={draft?.hostingTier}
@@ -1028,31 +1002,13 @@ function CoreAgentCreationPanel({
     />
   );
 
-  if (immersive) {
-    return form;
-  }
-
-  return (
-    <section className="ocean-utility-card">
-      <div className="ocean-utility-card__header">
-        <span className="ocean-utility-card__icon" aria-hidden>
-          <PlusIcon className="size-5" />
-        </span>
-        <div>
-          <h1 className="ocean-utility-card__title">Create an agent</h1>
-          <p className="text-sm text-muted-foreground">
-            Give your agent a name and make it yours.
-          </p>
-        </div>
-      </div>
-      {form}
-    </section>
-  );
+  return form;
 }
 
 function BillingSyncWaitPanel({ deadlineAtMs }: { deadlineAtMs: number }) {
   return (
     <section className="ocean-utility-card">
+      <AgentOnboardingStageSync stage="billing" />
       <PendingRefresh
         enabled
         intervalMs={BILLING_SYNC_POLL_INTERVAL_MS}
@@ -1088,6 +1044,7 @@ function BillingSyncTimeoutPanel({
   }
   return (
     <section className="ocean-utility-card">
+      <AgentOnboardingStageSync stage="billing" />
       <div className="ocean-utility-card__header">
         <span className="ocean-utility-card__icon ocean-utility-card__icon--amber" aria-hidden>
           <CreditCardIcon className="size-5" />

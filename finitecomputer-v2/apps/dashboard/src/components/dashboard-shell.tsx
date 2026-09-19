@@ -27,18 +27,11 @@ import { AgentSidebar } from "@/components/agent-sidebar";
 import { FiniteBrand } from "@/components/finite-brand";
 import { HostedChatProvider } from "@/components/hosted-chat-provider";
 import { SignOutLink } from "@/components/sign-out-link";
-import type { CoreRuntimeStatus } from "@/lib/core-client";
+import { activeNavigationMachine, type MachineNavItem } from "@/lib/dashboard-machine-navigation";
 import { dashboardChatMachineIdFromPath } from "@/lib/dashboard-chat-route";
 import { dashboardMachineStatusPresentation } from "@/lib/dashboard-machine-status";
 import { cn } from "@/lib/utils";
 import "@/styles/ocean-shell.css";
-
-type MachineNavItem = {
-  id: string;
-  ownerLabel: string;
-  runtimeStatus: CoreRuntimeStatus;
-  siteUrl?: string;
-};
 
 type DashboardShellProps = {
   children: React.ReactNode;
@@ -342,13 +335,15 @@ function DashboardAppSection({
 function OnboardingAppSection({
   children,
   initialStage,
+  viewerEmail,
 }: {
   children: React.ReactNode;
   initialStage: AgentOnboardingStage;
+  viewerEmail?: string | null;
 }) {
   return (
     <AgentOnboardingStageProvider initialStage={initialStage}>
-      <div className="relative grid h-[100dvh] min-h-0 grid-rows-[auto_minmax(0,1fr)] overflow-hidden bg-background text-foreground">
+      <div className="relative grid h-[100dvh] min-h-0 grid-cols-[minmax(0,1fr)] grid-rows-[auto_minmax(0,1fr)] overflow-hidden bg-background text-foreground">
         <div
           className="pointer-events-none absolute inset-0 opacity-70"
           aria-hidden
@@ -360,10 +355,13 @@ function OnboardingAppSection({
 
         <header className="relative z-10 flex items-center justify-between gap-4 px-5 py-5 sm:px-8 sm:py-7">
           <FiniteBrand href="/dashboard" />
-          <AgentOnboardingProgress />
+          <div className="flex min-w-0 items-center gap-2 sm:gap-4">
+            <AgentOnboardingProgress />
+            <AccountMenu viewerEmail={viewerEmail} compact />
+          </div>
         </header>
 
-        <main className="relative z-10 min-h-0 overflow-y-auto">
+        <main className="relative z-10 min-h-0 min-w-0 overflow-y-auto">
           <div className="mx-auto grid min-h-full w-full max-w-5xl place-items-center px-5 py-8 sm:px-8">
             {children}
           </div>
@@ -458,10 +456,13 @@ export function DashboardShell({
   const chatMachineId = dashboardChatMachineIdFromPath(pathname);
   const queryMachineId = searchParams.get("machine") ?? searchParams.get("machineId");
   const selectedMachineId = activeMachineId ?? queryMachineId;
-  const isNewAgentFlow = pathname === "/dashboard" && searchParams.get("new") === "1";
+  const isNewAgentFlow = pathname === "/dashboard" && (
+    searchParams.get("new") === "1" || Boolean(searchParams.get("creation")) ||
+    (saasMode && machines.length === 0)
+  );
   const activeMachine = useMemo(
-    () => machines.find((machine) => machine.id === selectedMachineId) ?? null,
-    [selectedMachineId, machines]
+    () => activeNavigationMachine(machines, selectedMachineId, activeMachineId, saasMode),
+    [selectedMachineId, machines, saasMode, activeMachineId]
   );
   const showMachineFleet = saasMode || machines.length > 1;
   const isChatSurface = chatMachineId !== null;
@@ -476,6 +477,7 @@ export function DashboardShell({
       <div className="ocean-shell">
         <OnboardingAppSection
           initialStage={agentOnboardingStageFromSearchParams(searchParams)}
+          viewerEmail={viewerEmail}
         >
           {children}
         </OnboardingAppSection>

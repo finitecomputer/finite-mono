@@ -105,10 +105,12 @@ export function AccountMenu({
   fallbackLabel = "Local development account",
   viewerEmail,
   side = "bottom",
+  compact = false,
 }: {
   fallbackLabel?: string;
   viewerEmail?: string | null;
   side?: "top" | "bottom";
+  compact?: boolean;
 }) {
   const label = viewerEmail || fallbackLabel;
   return (
@@ -116,8 +118,8 @@ export function AccountMenu({
       <DropdownMenuTrigger asChild>
         <button type="button" className="finite-chat__user-row" aria-label="Account menu">
           <span className="finite-chat__avatar" aria-hidden>{initials(label)}</span>
-          <span className="finite-chat__user-name">{label}</span>
-          <MoreHorizontalIcon className="size-4" />
+          <span className={cn("finite-chat__user-name", compact && "hidden md:block")}>{label}</span>
+          <MoreHorizontalIcon className={cn("size-4", compact && "hidden md:block")} />
         </button>
       </DropdownMenuTrigger>
       <DropdownMenuContent
