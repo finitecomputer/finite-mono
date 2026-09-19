@@ -134,11 +134,13 @@ class ScrapeReconciliationTest(unittest.TestCase):
         self.source = (MONITORING / "ubuntu/prometheus.yml").read_bytes()
         self.header, self.jobs = scrape.split_jobs(self.source)
 
-    def baseline(self, sites=False):
+    def baseline(self, sites=False, private=False):
         return self.header + b"".join(
             body
             for name, body in self.jobs.items()
-            if name != scrape.TINFOIL and (sites or name != scrape.SITES)
+            if name != scrape.TINFOIL
+            and (sites or name != scrape.SITES)
+            and (private or name != scrape.PRIVATE)
         )
 
     def test_sites_activation_is_preserved_and_only_tinfoil_is_added(self):
@@ -151,6 +153,20 @@ class ScrapeReconciliationTest(unittest.TestCase):
                 self.assertEqual(scrape.SITES in jobs, sites)
                 self.assertEqual(jobs[scrape.TINFOIL], self.jobs[scrape.TINFOIL])
                 self.assertEqual(scrape.reconcile(self.source, candidate), candidate)
+
+    def test_private_metrics_activation_is_preserved(self):
+        for sites in (False, True):
+            for private in (False, True):
+                with self.subTest(sites=sites, private=private):
+                    live = self.baseline(sites, private)
+                    candidate = scrape.reconcile(self.source, live)
+                    _, jobs = scrape.split_jobs(candidate)
+                    self.assertEqual(scrape.PRIVATE in jobs, private)
+                    self.assertEqual(scrape.SITES in jobs, sites)
+                    self.assertTrue(candidate.startswith(live))
+                    self.assertEqual(
+                        scrape.reconcile(self.source, candidate), candidate
+                    )
 
     def test_live_comments_and_whitespace_are_preserved(self):
         live = self.baseline().replace(b"\n\n", b"\n# operator comment\n\n")
