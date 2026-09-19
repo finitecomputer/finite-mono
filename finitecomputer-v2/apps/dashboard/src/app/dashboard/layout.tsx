@@ -39,6 +39,7 @@ export default async function DashboardLayout({
   return (
     <DashboardShell
       isAdmin={viewer.isAdmin}
+      firstAgentAccount={Boolean(core.me && !core.error && coreProductProjects(core.me.projects).length === 0)}
       machines={machines}
       saasMode={core.configured}
       viewerEmail={viewer.email}

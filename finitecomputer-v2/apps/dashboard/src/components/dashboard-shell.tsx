@@ -37,6 +37,7 @@ type DashboardShellProps = {
   children: React.ReactNode;
   viewerEmail?: string | null;
   isAdmin: boolean;
+  firstAgentAccount: boolean;
   machines: MachineNavItem[];
   saasMode: boolean;
 };
@@ -446,6 +447,7 @@ function AgentAppSection({
 export function DashboardShell({
   children,
   isAdmin,
+  firstAgentAccount,
   machines,
   saasMode,
   viewerEmail,
@@ -458,7 +460,7 @@ export function DashboardShell({
   const selectedMachineId = activeMachineId ?? queryMachineId;
   const isNewAgentFlow = pathname === "/dashboard" && (
     searchParams.get("new") === "1" || Boolean(searchParams.get("creation")) ||
-    (saasMode && machines.length === 0)
+    (saasMode && firstAgentAccount)
   );
   const activeMachine = useMemo(
     () => activeNavigationMachine(machines, selectedMachineId, activeMachineId, saasMode),

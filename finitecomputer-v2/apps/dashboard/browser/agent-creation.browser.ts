@@ -64,6 +64,7 @@ type CoreState = {
   creationPosts: unknown[];
   creationResults: Map<string, { projectId: string; requestId: string }>;
   meGets: number;
+  meError: boolean;
   runtimeRouteGets: number;
   runtimeRouteProjectIdOverride: string | null;
   cancelPosts: string[];
@@ -339,16 +340,27 @@ test("dashboard agent creation browser states", { timeout: 300_000 }, async () =
       await page.context().addCookies([{
         name: "finite-agent-draft", value: sealed, domain: "127.0.0.1", path: "/dashboard", httpOnly: true, sameSite: "Lax",
       }]);
+      hostedDevice.failNextBindingAuthorization();
       await page.goto(`http://127.0.0.1:${paidDashboardPort}/dashboard?billing=success`);
-      await page.waitForURL(/creation=agent_request_1/u);
+      await page.getByRole("link", { name: "Retry agent setup", exact: true }).waitFor();
       assert.equal(core.state.creationPosts.length, 1);
+      assert.equal(core.state.creationResults.size, 1);
+      assert.equal(await page.getByRole("button", { name: "Continue without a code" }).count(), 0);
+      assert.equal(await page.getByRole("button", { name: "Continue to secure payment" }).count(), 0);
+      core.state.canCreateAgent = false; // The first attempt used the last allowance.
+      await page.getByRole("link", { name: "Retry agent setup", exact: true }).click();
+      await page.waitForURL(/creation=agent_request_1/u);
+      assert.equal(core.state.creationPosts.length, 2);
+      assert.equal(core.state.creationResults.size, 1, "paid retry must reuse the original Project");
+      assert.equal((core.state.creationPosts[1] as Record<string, unknown>).idempotencyKey,
+        (core.state.creationPosts[0] as Record<string, unknown>).idempotencyKey);
       const post = core.state.creationPosts[0] as Record<string, unknown>;
       assert.equal(post.displayName, "Paid Return Bot");
       assert.equal(post.launchCode, "");
       assert.equal(post.idempotencyKey, "browser-previous-dashboard-paid-draft");
       assert.equal((await page.context().cookies()).some((cookie) => cookie.name === "finite-agent-draft"), false);
       await page.reload();
-      assert.equal(core.state.creationPosts.length, 1, "reloading a paid return must not duplicate creation");
+      assert.equal(core.state.creationPosts.length, 2, "reloading a paid return must not duplicate creation");
     });
 
     core.reset({
@@ -441,6 +453,34 @@ test("dashboard agent creation browser states", { timeout: 300_000 }, async () =
       );
       assert.equal(await page.getByRole("button", { name: "Recover chat" }).count(), 0);
       assert.equal(await page.getByRole("button", { name: "Retire agent" }).count(), 0);
+    });
+
+    core.reset({ meError: true });
+    await withSignedInPage(browser, dashboardPort, async (page) => {
+      await page.goto(`http://127.0.0.1:${dashboardPort}/dashboard`);
+      await page.getByRole("heading", { name: "Could not load your account" }).waitFor();
+      assert.equal(await page.getByLabel("Launch Code", { exact: true }).count(), 0);
+      assert.equal(core.state.creationPosts.length, 0);
+    });
+    const runtimeLessProject = visibleProject("project_retained", "Retained Agent", hostedDevice.runtimeStatusUrl);
+    runtimeLessProject.runtime = null;
+    core.reset({ projects: [runtimeLessProject] });
+    await withSignedInPage(browser, dashboardPort, async (page) => {
+      await page.goto(`http://127.0.0.1:${dashboardPort}/dashboard`);
+      await page.getByRole("heading", { name: "Retained Agent", exact: true }).waitFor();
+      assert.equal(await page.getByLabel("Launch Code", { exact: true }).count(), 0);
+      assert.equal(core.state.creationPosts.length, 0);
+    });
+    core.reset({ requests: [
+      agentCreationRequest({ id: "ambiguous_1", projectId: "project_1", status: "running" }),
+      agentCreationRequest({ id: "ambiguous_2", projectId: "project_2", status: "running" }),
+    ] });
+    await withSignedInPage(browser, dashboardPort, async (page) => {
+      await page.goto(`http://127.0.0.1:${dashboardPort}/dashboard`);
+      await expectVisibleText(page, "Preparing your workspace");
+      assert.equal(new URL(page.url()).searchParams.has("creation"), false);
+      assert.equal(await page.getByLabel("Launch Code", { exact: true }).count(), 0);
+      assert.equal(core.state.creationPosts.length, 0);
     });
 
     core.reset();
@@ -589,10 +629,14 @@ test("dashboard agent creation browser states", { timeout: 300_000 }, async () =
       id: "request_no_runtime", projectId: "project_no_runtime", status: "running",
     })] });
     await withSignedInPage(browser, dashboardPort, async (page) => {
-      await page.goto(`http://127.0.0.1:${dashboardPort}/dashboard?creation=request_no_runtime`);
+      await page.goto(`http://127.0.0.1:${dashboardPort}/dashboard`);
+      await page.waitForURL(/creation=request_no_runtime/u);
       await expectVisibleText(page, "Preparing your workspace");
       assert.equal(await page.getByRole("link", { name: "Continue to chat" }).count(), 0);
       await onboardingScreenshots(page, "launch");
+      core.state.projects = [visibleProject("project_no_runtime", "Oslo Bot", hostedDevice.runtimeStatusUrl, "untracked-bot")];
+      await page.getByRole("heading", { name: "Oslo Bot is alive!", exact: true }).waitFor();
+      assert.equal(core.state.creationPosts.length, 0, "resuming progress must not create an agent");
     });
 
     core.reset({
@@ -2946,6 +2990,10 @@ async function handleCoreRequest(
 
   if (request.method === "GET" && request.url === "/api/core/v1/me") {
     state.meGets += 1;
+    if (state.meError) {
+      writeJson(response, 503, { error: "Core account is unavailable for browser proof." });
+      return;
+    }
     writeJson(response, 200, {
       email: "browser@finite.vip",
       workos_user_id: "user_browser",
@@ -3160,6 +3208,7 @@ function emptyCoreState(): CoreState {
     creationPosts: [],
     creationResults: new Map(),
     meGets: 0,
+    meError: false,
     runtimeRouteGets: 0,
     runtimeRouteProjectIdOverride: null,
     cancelPosts: [],

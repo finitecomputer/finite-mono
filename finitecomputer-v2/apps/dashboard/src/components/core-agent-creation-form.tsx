@@ -18,7 +18,7 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 
 const headingClass =
-  "text-balance font-sans text-3xl leading-tight font-medium tracking-[-0.02em] sm:text-5xl";
+  "outline-none text-balance font-sans text-3xl leading-tight font-medium tracking-[-0.02em] sm:text-5xl";
 type Step = "code" | "billing" | "profile";
 type Access = "launch-code" | "stripe" | "entitled";
 

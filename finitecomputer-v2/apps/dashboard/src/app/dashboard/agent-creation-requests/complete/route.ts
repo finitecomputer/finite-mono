@@ -37,7 +37,7 @@ export async function GET(request: Request) {
   try {
     const billing = await loadCoreBillingOverview({ cacheMode: "fresh" });
     if (
-      !billing.billing?.can_create_agent ||
+      !billing.billing ||
       billing.billing.customer_org.billing_class !== "standard" ||
       billing.billing.requires_billing
     ) {
@@ -48,6 +48,9 @@ export async function GET(request: Request) {
       }
       return NextResponse.redirect(dashboard, { status: 303 });
     }
+    // The first attempt can consume the last allowance before chat binding
+    // succeeds. Core resolves this signed idempotency key before checking new
+    // capacity; can_create_agent must not block an exact existing-request retry.
     const creation = await requestCoreAgentCreation({
       displayName: draft.displayName,
       launchCode: "",

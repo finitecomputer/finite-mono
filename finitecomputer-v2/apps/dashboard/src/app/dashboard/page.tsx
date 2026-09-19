@@ -149,13 +149,24 @@ export default async function DashboardPage({
     // First login and resumed creation use the same flow as New agent. The
     // query flag is only an entry point for accounts that already have agents.
     const isNewAgentFlow = requestedNewAgentFlow || Boolean(trackedCreationRequestId) ||
-      !coreProjects.some((project) => coreProjectOverviewHref(project));
+      Boolean(core.me && !core.error && coreProjects.length === 0);
     const agentCreationRequests = core.me?.agent_creation_requests ?? [];
     const initialAgentCreationRequests =
       coreInitialAgentCreationRequests(agentCreationRequests);
     const requestedAgentCreationRequests = initialAgentCreationRequests.filter(
-      (request) => request.status === "requested" || request.status === "launching"
+      (request) => request.status === "requested" || request.status === "launching" ||
+        (request.status === "running" && !coreProjects.some((project) =>
+          project.project.id === request.project_id && coreProjectOverviewHref(project)))
     );
+    // Recover a lost launch URL from one unambiguous initial request. This
+    // only restores read-only progress tracking; it never submits creation or
+    // chooses among multiple requests. A runtime-less existing Project alone
+    // is not evidence that this account should create another Agent.
+    if (!requestedNewAgentFlow && !trackedCreationRequestId && !agentCreationError &&
+        core.me && !core.error && requestedAgentCreationRequests.length === 1 &&
+        !coreProjects.some((project) => coreProjectOverviewHref(project))) {
+      redirect(`/dashboard?creation=${encodeURIComponent(requestedAgentCreationRequests[0].id)}`);
+    }
     const failedAgentCreationRequests = initialAgentCreationRequests.filter(
       (request) => request.status === "failed"
     );
@@ -185,10 +196,7 @@ export default async function DashboardPage({
           }
         : null;
 
-    const pendingAgentCreationRequests =
-      trackedCreationRequest?.status === "running" && !trackedProjectHref
-        ? [...requestedAgentCreationRequests, trackedCreationRequest]
-        : requestedAgentCreationRequests;
+    const pendingAgentCreationRequests = requestedAgentCreationRequests;
     const hasPendingAgentCreation = pendingAgentCreationRequests.length > 0;
 
     const billingReturn = resolveBillingReturnStateNow({
@@ -217,15 +225,14 @@ export default async function DashboardPage({
     if (
       draftStartedStripeCheckout(draft) &&
       billingReturnParam === "success" &&
-      billing.billing?.can_create_agent &&
-      billing.billing.customer_org.billing_class === "standard" &&
+      billing.billing?.customer_org.billing_class === "standard" &&
       !billing.billing.requires_billing
     ) {
       redirect("/dashboard/agent-creation-requests/complete");
     }
 
     const homeView = resolveDashboardHomeView({
-      coreConfigured: core.configured,
+      coreConfigured: Boolean(core.configured && core.me && !core.error),
       hasAccountEmail: Boolean(core.account.email),
       isNewAgentFlow,
       hasProjects: coreProjects.length > 0,
@@ -298,7 +305,9 @@ export default async function DashboardPage({
               {billingReturn.kind === "cancelled" ? (
                 <BillingCheckoutCancelledNotice />
               ) : null}
-              <CoreAgentCreationPanel
+              {draftStartedStripeCheckout(draft) && agentCreationError ? (
+                <PaidAgentCreationRetryPanel error={agentCreationError} name={draft.displayName} />
+              ) : <CoreAgentCreationPanel
                 allowConfidentialHosting={viewer.isAdmin}
                 error={agentCreationError}
                 draft={draft}
@@ -309,7 +318,7 @@ export default async function DashboardPage({
                   requiresBilling: Boolean(billing.billing?.requires_billing),
                   recovery: agentCreationRecovery,
                 })}
-              />
+              />}
             </>
           );
         case "projects":
@@ -355,7 +364,7 @@ export default async function DashboardPage({
                     <ServerIcon className="size-5" />
                   </span>
                   <div>
-                    <h1 className="ocean-utility-card__title">No agent yet</h1>
+                    <h1 className="ocean-utility-card__title">{core.error ? "Could not load your account" : "No agent yet"}</h1>
                     <p className="text-sm text-muted-foreground">
                       {emptyAccountMessage(core)}
                     </p>
@@ -970,6 +979,22 @@ function CoreAgentCreationFailedPanel({
           </form>
         ))}
       </div>
+    </section>
+  );
+}
+
+function PaidAgentCreationRetryPanel({ error, name }: { error: string; name: string }) {
+  return (
+    <section className="grid w-full justify-items-center gap-6 text-center">
+      <AgentOnboardingStageSync stage="launch" />
+      <h1 className="text-balance text-3xl font-medium sm:text-5xl">Finish setting up {name}</h1>
+      <p className="max-w-md text-pretty text-muted-foreground">
+        Your checkout is saved. Retry this setup to continue with the same agent request.
+      </p>
+      <p role="alert" className="max-w-md text-sm text-destructive">{error}</p>
+      <Button asChild size="xl">
+        <a href="/dashboard/agent-creation-requests/complete">Retry agent setup</a>
+      </Button>
     </section>
   );
 }
