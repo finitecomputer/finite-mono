@@ -34,20 +34,20 @@ use crate::{
     ProviderOperationTransition, ProviderOperationTransitionRecord, ProviderOperationV1,
     ProvisionFinitePrivateRuntimeKeyInput, ProvisionFinitePrivateRuntimeKeyResult,
     RUNTIME_HEALTH_REPORT_MAX_INTERVAL_SECONDS, RUNTIME_HEALTH_REPORT_MIN_INTERVAL_SECONDS,
-    RecordProviderOperationTransitionInput, RecordRuntimeHealthReportInput,
-    RegisterAgentCreationRuntimeInput, RenewRuntimeControlRequestInput, RequestAgentCreationInput,
-    RequestAgentCreationResult, RequestRuntimeDestroyInput,
-    RequestRuntimeRecoverKnownGoodChatInput, RequestRuntimeRestartInput, RequestRuntimeStopInput,
-    ReserveFinitePrivateUsageInput, ResetFinitePrivateUsageWindowInput,
-    RetiredRuntimeOffboardReceipt, RetryRuntimeControlRequestInput, RevokeFinitePrivateApiKeyInput,
-    RevokeFinitePrivateGrantInput, RotateFinitePrivateApiKeyInput, RuntimeArtifact,
-    RuntimeBootIntent, RuntimeCapabilitiesEnvelope, RuntimeControlCompletion,
-    RuntimeControlExpectedBinding, RuntimeControlKind, RuntimeControlLease, RuntimeControlRequest,
-    RuntimeControlRequestStatus, RuntimeHealthProjection, RuntimeHealthReportAck,
-    RuntimeHealthTarget, RuntimeHealthTargetList, RuntimeLifecycleStage, RuntimePlacement,
-    RuntimeRelocationEnvelope, RuntimeRelocationV1, RuntimeRetirementSnapshot,
-    RuntimeRetirementSnapshotReceipt, RuntimeSpecEnvelope, RuntimeSpecIdentity,
-    RuntimeSummaryStatus, SettleFinitePrivateReservationInput,
+    RecordFinitePrivateRequestDiagnosticInput, RecordProviderOperationTransitionInput,
+    RecordRuntimeHealthReportInput, RegisterAgentCreationRuntimeInput,
+    RenewRuntimeControlRequestInput, RequestAgentCreationInput, RequestAgentCreationResult,
+    RequestRuntimeDestroyInput, RequestRuntimeRecoverKnownGoodChatInput,
+    RequestRuntimeRestartInput, RequestRuntimeStopInput, ReserveFinitePrivateUsageInput,
+    ResetFinitePrivateUsageWindowInput, RetiredRuntimeOffboardReceipt,
+    RetryRuntimeControlRequestInput, RevokeFinitePrivateApiKeyInput, RevokeFinitePrivateGrantInput,
+    RotateFinitePrivateApiKeyInput, RuntimeArtifact, RuntimeBootIntent,
+    RuntimeCapabilitiesEnvelope, RuntimeControlCompletion, RuntimeControlExpectedBinding,
+    RuntimeControlKind, RuntimeControlLease, RuntimeControlRequest, RuntimeControlRequestStatus,
+    RuntimeHealthProjection, RuntimeHealthReportAck, RuntimeHealthTarget, RuntimeHealthTargetList,
+    RuntimeLifecycleStage, RuntimePlacement, RuntimeRelocationEnvelope, RuntimeRelocationV1,
+    RuntimeRetirementSnapshot, RuntimeRetirementSnapshotReceipt, RuntimeSpecEnvelope,
+    RuntimeSpecIdentity, RuntimeSummaryStatus, SettleFinitePrivateReservationInput,
     SettleFinitePrivateReservationResult, StoreErrorDetail, StoredRuntimeHealth,
     SyncStripeSubscriptionInput, UnrecoverableRuntimeArchiveReceipt, UpsertRuntimeArtifactInput,
     agent_creation_entitlement_id_for, append_provider_operation_transition,
@@ -163,6 +163,7 @@ mod private_grants;
 use private_grants::*;
 mod private_keys;
 use private_keys::*;
+mod private_diagnostics;
 mod private_reservations;
 mod private_rows;
 use private_rows::*;

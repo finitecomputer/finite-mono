@@ -54,7 +54,7 @@
       set -euo pipefail
       dir=/data/backups/postgres
       ts=$(date -u +%Y%m%dT%H%M%SZ)
-      pg_dump --format=custom --file="$dir/finite_core-$ts.dump" finite_core
+      pg_dump --exclude-table-data=public.finite_private_request_diagnostics --format=custom --file="$dir/finite_core-$ts.dump" finite_core
       # Retention: 28 days of 6-hourly dumps (~1MB each at capture).
       find "$dir" -name 'finite_core-*.dump' -type f -mtime +28 -delete
     '';

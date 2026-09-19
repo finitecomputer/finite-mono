@@ -139,7 +139,7 @@ in
         test "$(sqlite3 "$staging/finite-brain/finite-brain.sqlite3" 'PRAGMA integrity_check;')" = ok
         sqlite3 /var/lib/finite-identity/identity.db ".backup '$staging/finite-identity/identity.db'"
         test "$(sqlite3 "$staging/finite-identity/identity.db" 'PRAGMA integrity_check;')" = ok
-        runuser -u postgres -- pg_dump --format=custom finite_core > "$staging/saas-core/finite_core.dump"
+        runuser -u postgres -- pg_dump --exclude-table-data=public.finite_private_request_diagnostics --format=custom finite_core > "$staging/saas-core/finite_core.dump"
         pg_restore --list "$staging/saas-core/finite_core.dump" >/dev/null
 
         printf '%s\n' 'finite.hosted-web-chat-recovery-snapshot.v4' > "$staging/format"

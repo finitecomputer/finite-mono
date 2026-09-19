@@ -72,6 +72,7 @@ in
     ./storage-health.nix
     ../../modules/import-mode.nix
     ../../modules/finite-saas-core.nix
+    ../../modules/finite-private-request-diagnostics.nix
     ../../modules/finite-identity.nix
     ../../modules/finitechat-server.nix
     ../../modules/finitechat-hosted-device.nix

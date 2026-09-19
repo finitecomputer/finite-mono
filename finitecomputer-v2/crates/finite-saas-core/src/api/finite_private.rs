@@ -298,6 +298,19 @@ pub(super) async fn settle_finite_private_reservation(
     ))
 }
 
+pub(super) async fn record_finite_private_request_diagnostic(
+    State(state): State<CoreApiState>,
+    headers: HeaderMap,
+    Json(input): Json<RecordFinitePrivateRequestDiagnosticInput>,
+) -> Result<StatusCode, ApiError> {
+    require_finite_private_usage_auth(&state, &headers)?;
+    state
+        .store
+        .record_finite_private_request_diagnostic(input)
+        .await?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
 pub(super) async fn finite_private_usage_status_for_api_key(
     State(state): State<CoreApiState>,
     headers: HeaderMap,
