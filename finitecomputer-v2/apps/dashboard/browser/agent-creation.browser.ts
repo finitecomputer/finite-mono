@@ -75,6 +75,7 @@ type CoreState = {
   canCreateAgent: boolean;
   requiresBilling: boolean;
   billingClass: "sponsored" | "standard";
+  billingError: boolean;
   creationError: string | null;
 };
 
@@ -340,14 +341,26 @@ test("dashboard agent creation browser states", { timeout: 300_000 }, async () =
       await page.context().addCookies([{
         name: "finite-agent-draft", value: sealed, domain: "127.0.0.1", path: "/dashboard", httpOnly: true, sameSite: "Lax",
       }]);
-      hostedDevice.failNextBindingAuthorization();
+      core.state.billingError = true;
       await page.goto(`http://127.0.0.1:${paidDashboardPort}/dashboard?billing=success`);
       await page.getByRole("link", { name: "Retry agent setup", exact: true }).waitFor();
+      assert.equal(await page.getByRole("button", { name: "Continue without a code" }).count(), 0);
+      assert.equal(core.state.creationPosts.length, 0);
+      core.state.billingError = false;
+      hostedDevice.failNextBindingAuthorization();
+      await page.getByRole("link", { name: "Retry agent setup", exact: true }).click();
+      await page.getByRole("alert").filter({ hasText: "binding authorization is temporarily unavailable" }).waitFor();
       assert.equal(core.state.creationPosts.length, 1);
       assert.equal(core.state.creationResults.size, 1);
       assert.equal(await page.getByRole("button", { name: "Continue without a code" }).count(), 0);
       assert.equal(await page.getByRole("button", { name: "Continue to secure payment" }).count(), 0);
       core.state.canCreateAgent = false; // The first attempt used the last allowance.
+      core.state.billingError = true;
+      await page.getByRole("link", { name: "Retry agent setup", exact: true }).click();
+      await page.getByRole("alert").filter({ hasText: "Billing is temporarily unavailable for browser proof." }).waitFor();
+      assert.equal(core.state.creationPosts.length, 1);
+      assert.equal(await page.getByRole("button", { name: "Continue without a code" }).count(), 0);
+      core.state.billingError = false;
       await page.getByRole("link", { name: "Retry agent setup", exact: true }).click();
       await page.waitForURL(/creation=agent_request_1/u);
       assert.equal(core.state.creationPosts.length, 2);
@@ -3032,6 +3045,10 @@ async function handleCoreRequest(
   }
 
   if (request.method === "GET" && request.url === "/api/core/v1/me/billing") {
+    if (state.billingError) {
+      writeJson(response, 503, { error: "Billing is temporarily unavailable for browser proof." });
+      return;
+    }
     writeJson(response, 200, {
       customer_org: {
         id: "org_browser",
@@ -3219,6 +3236,7 @@ function emptyCoreState(): CoreState {
     canCreateAgent: false,
     requiresBilling: true,
     billingClass: "sponsored",
+    billingError: false,
     creationError: null,
   };
 }

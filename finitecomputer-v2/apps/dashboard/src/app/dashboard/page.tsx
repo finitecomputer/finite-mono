@@ -305,8 +305,11 @@ export default async function DashboardPage({
               {billingReturn.kind === "cancelled" ? (
                 <BillingCheckoutCancelledNotice />
               ) : null}
-              {draftStartedStripeCheckout(draft) && agentCreationError ? (
-                <PaidAgentCreationRetryPanel error={agentCreationError} name={draft.displayName} />
+              {draftStartedStripeCheckout(draft) && (agentCreationError || billingReturnParam === "success") ? (
+                <PaidAgentCreationRetryPanel
+                  error={agentCreationError ?? billing.error ?? "Payment status is unavailable. Retry your saved setup in a moment."}
+                  name={draft.displayName}
+                />
               ) : <CoreAgentCreationPanel
                 allowConfidentialHosting={viewer.isAdmin}
                 error={agentCreationError}

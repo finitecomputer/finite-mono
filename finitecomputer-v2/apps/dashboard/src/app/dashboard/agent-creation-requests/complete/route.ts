@@ -36,11 +36,13 @@ export async function GET(request: Request) {
 
   try {
     const billing = await loadCoreBillingOverview({ cacheMode: "fresh" });
-    if (
-      !billing.billing ||
-      billing.billing.customer_org.billing_class !== "standard" ||
-      billing.billing.requires_billing
-    ) {
+    if (!billing.billing) {
+      throw new Error(billing.error ?? "Payment status is unavailable. Retry your saved setup in a moment.");
+    }
+    if (billing.billing.customer_org.billing_class !== "standard") {
+      throw new Error("Your billing access has changed. Contact Finite to finish this saved setup.");
+    }
+    if (billing.billing.requires_billing) {
       dashboard.searchParams.set("new", "1");
       dashboard.searchParams.set("billing", "success");
       if (draft.returnMachineId) {
