@@ -7,6 +7,7 @@ commands; no request can supply argv, cwd, environment, identity or an upstream.
 import asyncio
 import json
 from collections.abc import Awaitable, Callable
+from contextlib import suppress
 
 from fastapi import Request
 from fastapi.responses import JSONResponse
@@ -40,6 +41,14 @@ async def _read_pipe(stream, limit):
     return output
 
 
+async def _read_diagnostics(stream):
+    try:
+        return await _read_pipe(stream, 8192)
+    except InvalidInventory as error:
+        # Oversized diagnostics cannot attest a typed retryable failure.
+        raise AccessUnverified() from error
+
+
 async def read_json(*argv: str):
     async with _PROCESSES:
         process = await asyncio.create_subprocess_exec(
@@ -51,7 +60,7 @@ async def read_json(*argv: str):
             limit=64 * 1024,
         )
         stdout = asyncio.create_task(_read_pipe(process.stdout, MAX_OUTPUT_BYTES))
-        stderr = asyncio.create_task(_read_pipe(process.stderr, 8192))
+        stderr = asyncio.create_task(_read_diagnostics(process.stderr))
         try:
             output, diagnostics = await asyncio.gather(stdout, stderr)
             if await process.wait() != 0:
@@ -61,7 +70,8 @@ async def read_json(*argv: str):
                     failure = None
                 if (
                     isinstance(failure, dict)
-                    and failure.get("inventory_error_version") == 1
+                    and type(failure.get("inventory_error_version")) is int
+                    and failure["inventory_error_version"] == 1
                     and failure.get("kind") == "request"
                 ):
                     raise ProductUnavailable()
@@ -76,7 +86,8 @@ async def read_json(*argv: str):
             # Native CLIs do not spawn child processes. Reap on output limits,
             # deadlines and cancellation; abandoning a request must not leak CLI work.
             if process.returncode is None:
-                process.kill()
+                with suppress(ProcessLookupError):
+                    process.kill()
             stdout.cancel()
             stderr.cancel()
             await asyncio.gather(stdout, stderr, return_exceptions=True)

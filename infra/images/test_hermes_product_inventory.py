@@ -83,6 +83,12 @@ if mode == "failure":
 if mode == "service-failure":
     print(json.dumps({"inventory_error_version": 1, "kind": "request"}), file=sys.stderr)
     sys.exit(1)
+if mode == "oversize-error":
+    sys.stderr.write("x" * 8193)
+    sys.exit(1)
+if mode == "invalid-error-version":
+    print(json.dumps({"inventory_error_version": True, "kind": "request"}), file=sys.stderr)
+    sys.exit(1)
 if mode == "oversize":
     sys.stdout.write("x" * (512 * 1024 + 1))
     sys.exit(0)
@@ -233,6 +239,14 @@ print(json.dumps(payload))
             self.assertEqual(response.status_code, 403)
             self.assertNotIn("private CLI", response.text)
             self.assertNotIn("Agent brain", response.text)
+
+    def test_unrecognized_diagnostic_contracts_fail_closed(self):
+        for mode in ("oversize-error", "invalid-error-version"):
+            (self.agent / "mode").write_text(mode)
+            for product in ("brain", "sites"):
+                response = self.get(product)
+                self.assertEqual(response.status_code, 403)
+                self.assertNotIn("inventory_error", response.text)
 
     def test_typed_service_failure_is_retryable_without_leaking_diagnostics(self):
         (self.agent / "mode").write_text("service-failure")
