@@ -24,3 +24,28 @@ same-volume upgrades preserve the Agent Principal and `/data`.
 Server compatibility includes fielded clients, persisted state, and supported
 recovery sets. Record required reader/writer compatibility in the owning
 contract and tests, rather than duplicating version tables here.
+
+## Runner diagnostic deployment — 2026-09-20 UTC
+Deployed [PR #972](https://github.com/finitecomputer/finite-mono/pull/972),
+revision `c1b66ba309e9bfd8b26d08a085c23451f69a87c9`, serially on Lat5, Lat3, then Lat4.
+This preserves the original hosted upgrade-stop error; it does not add retries
+or recovery. No Runtime image, Core, or dashboard deployment was included.
+| Host | CI build | Deployed NixOS system |
+|---|---|---|
+| lat5 | [Run 35477708599](https://github.com/finitecomputer/finite-mono/actions/runs/35477708599) | `/nix/store/vs697wc6f56009iqlmsb208m59l9151j-nixos-system-finite-lat-5-26.05.20260719.fd14620` |
+| lat3 | [Run 35477709610](https://github.com/finitecomputer/finite-mono/actions/runs/35477709610) | `/nix/store/4ry535pqbfsya8spnisgdfwzpyrd2nhg-nixos-system-finite-lat-3-26.05.20260719.fd14620` |
+| lat4 | [Run 35477710510](https://github.com/finitecomputer/finite-mono/actions/runs/35477710510) | `/nix/store/n7dl8wyxx1dfyaz4i4x9jnsd9y5i4cqh-nixos-system-finite-lat-4-26.05.20260719.fd14620` |
+
+`finite-status` before/after evidence confirmed 63 running agents ready, with
+Chat, recovery, and rollout checks green. Container counts, Runtime pins, drain
+settings, host boot IDs, and containerd/networkd process IDs were unchanged;
+all Runner timers were active. Hosted API reconciliation returned to serving
+on Lat3/Lat4; Lat5 retained its expected no-eligible-routes state. API handoff
+interruption duration was not measured. No new end-user chat round-trip was
+performed for this Runner-only change.
+
+Dry activation additionally required a D-Bus reload and tmpfiles re-setup:
+content comparison proved unchanged D-Bus rules and only the version-metric
+symlink changing in tmpfiles rules. Previous system generations were retained
+for rollback. Existing Lat3 model-route drift, the legacy artifactless fleet
+row, and alternate-container-CLI collector warnings remained unchanged.
