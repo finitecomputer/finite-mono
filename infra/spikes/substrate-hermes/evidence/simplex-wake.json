@@ -1,0 +1,32 @@
+{
+  "checks": [
+    {
+      "name": "Real SimpleX contact connected",
+      "passed": true
+    },
+    {
+      "name": "Native Hermes pairing approval; no allow-all setting",
+      "passed": true
+    },
+    {
+      "name": "Real model reply over SimpleX before sleep",
+      "passed": true,
+      "reply": "simplexproof980f4c1d3b2e\n\nWelcome! I'm Hermes \u2014 ask me anything, and /help shows what I can do. If you'd like, I can put together a short profile of you (name, work, how you like me to operate) so I'm more useful from the start \u2014 but that's entirely optional, and you can decline or do it later."
+    },
+    {
+      "name": "SimpleX message automatically wakes suspended actor and preserves conversation",
+      "passed": true,
+      "cycle": 1,
+      "seconds": 11.119,
+      "reply": "simplexproof980f4c1d3b2e"
+    },
+    {
+      "name": "SimpleX message automatically wakes suspended actor and preserves conversation",
+      "passed": true,
+      "cycle": 2,
+      "seconds": 11.16,
+      "reply": "simplexproof980f4c1d3b2e"
+    }
+  ],
+  "wake_source": "real inbound SimpleX event; no test-harness HTTP wake"
+}

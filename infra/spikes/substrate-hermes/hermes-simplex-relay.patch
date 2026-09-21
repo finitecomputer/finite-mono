@@ -1,0 +1,59 @@
+diff --git a/plugins/platforms/simplex/adapter.py b/plugins/platforms/simplex/adapter.py
+index b4f493e4..c4f744e0 100644
+--- a/plugins/platforms/simplex/adapter.py
++++ b/plugins/platforms/simplex/adapter.py
+@@ -167,6 +167,9 @@ class SimplexAdapter(BasePlatformAdapter):
+         )
+         self.group_allow_from = set(_parse_comma_list(group_allowed_str))
+ 
++        self._ws_headers = ({'Authorization': 'Bearer ' + os.environ['SIMPLEX_WS_TOKEN']}
++                            if os.environ.get('SIMPLEX_WS_TOKEN') else None)
++
+         # Running state
+         self._ws = None  # websockets connection
+         self._ws_task: Optional[asyncio.Task] = None
+@@ -226,7 +229,7 @@ class SimplexAdapter(BasePlatformAdapter):
+         # Quick connectivity check — try to open and immediately close
+         try:
+             import websockets as _wsclient
+-            async with _wsclient.connect(self.ws_url, open_timeout=10):
++            async with _wsclient.connect(self.ws_url, open_timeout=10, additional_headers=self._ws_headers):
+                 pass
+         except Exception as e:
+             logger.error("SimpleX: cannot reach daemon at %s: %s", self.ws_url, e)
+@@ -302,6 +305,7 @@ class SimplexAdapter(BasePlatformAdapter):
+                 logger.debug("SimpleX WS: connecting to %s", self.ws_url)
+                 async with _wsclient.connect(
+                     self.ws_url,
++                    additional_headers=self._ws_headers,
+                     ping_interval=20,
+                     ping_timeout=20,
+                     close_timeout=10,
+@@ -318,6 +322,9 @@ class SimplexAdapter(BasePlatformAdapter):
+                         try:
+                             msg = json.loads(raw)
+                             await self._handle_event(msg)
++                            delivery_id = msg.get('_spike_delivery_id')
++                            if isinstance(delivery_id, int):
++                                await ws.send(json.dumps({'_spike_ack': delivery_id}))
+                         except json.JSONDecodeError:
+                             logger.debug("SimpleX WS: invalid JSON: %.100s", raw)
+                         except Exception:
+@@ -394,7 +401,7 @@ class SimplexAdapter(BasePlatformAdapter):
+         resp_type = resp.get("type") or event.get("type", "")
+ 
+         # Auto-accept contact requests
+-        if resp_type == "contactRequest" and self.auto_accept:
++        if resp_type in ("contactRequest", "receivedContactRequest") and self.auto_accept:
+             contact_req = resp.get("contactRequest", {}) or {}
+             contact_req_id = contact_req.get("contactRequestId")
+             if contact_req_id is not None:
+@@ -402,7 +409,7 @@ class SimplexAdapter(BasePlatformAdapter):
+                     "SimpleX: auto-accepting contact request %s",
+                     _redact_id(str(contact_req_id)),
+                 )
+-                await self._send_command(f"/accept {contact_req_id}")
++                await self._send_fire_and_forget(f"/_accept {contact_req_id}")
+             return
+ 
+         # Early file-descriptor ready: simplex fires this before newChatItems

@@ -15,11 +15,11 @@ See [measured results and remaining acceptance](EVIDENCE.md).
 - Run Xvfb + Openbox + a sample GUI window and take a real screenshot from inside the actor.
 - Run the pinned SimpleX daemon and Hermes gateway alongside native web chat.
 
-A running SimpleX daemon alone does **not** establish incoming-message wake.
-SimpleX uses an outbound relay connection; that connection is suspended with
-its actor. Manual/web wake can reconnect and drain queued messages. Automatic
-SimpleX wake needs a separately qualified notification mechanism or periodic
-wake with a declared delivery bound. This spike does not invent a relay.
+Both native model chat and automatic SimpleX message-triggered wake are now
+locally proven. The latter uses the external transport variant described below:
+the SimpleX daemon and a small relay remain awake while Hermes and its desktop
+are suspended. Putting everything inside the sleeping actor cannot provide a
+SimpleX wake source. This is an explicit extra always-running component.
 
 ## Architecture
 
@@ -53,7 +53,7 @@ shared template is desired. Do not call template cloning an ownership boundary.
 
 - Substrate: `bb0effed188e06a44e03862cb6ea993e58f86893`.
 - Hermes: root flake pin `29112bef099274229cadff79cdff7bf7b99c4b77` (0.21.0).
-- SimpleX: root `simplex-chat` package (7.0.2).
+- SimpleX: root `simplex-chat` package (Nix version 7.0.2; binary reports 7.0.0.12).
 - AX `d8ed0fe38bceb7842d3c47817d53d16ccdfcb601` was inspected, not deployed. Its runner contract adds a task/workspace
   controller and Redis and currently uses DATA snapshots, restarting the process
   tree on resume. Direct Substrate actors are the smaller fit for existing Hermes
@@ -93,6 +93,13 @@ Export all three closures into a Docker build context under `nix/store`, copy
 `runtime.py` and `Dockerfile`, then pass their store paths as `HERMES_PATH`,
 `PYTHON_PATH`, and `SIMPLEX_PATH`. No credentials enter the build context/image.
 
+Actors also need an egress policy: the default denies outbound traffic. The
+upstream CLI has no policy verb at this pin. Copy `egress-fixture.go` into
+`cmd/finite-spike-egress/main.go` in the pinned Substrate checkout, then run
+`go run ./cmd/finite-spike-egress alice-agent bob-agent` in the task Nix shell
+with the isolated `KUBECONFIG`. This grants all destinations to these named
+disposable actors only. It is not a production network-isolation policy.
+
 Build Substrate's `cmd/ateom-gvisor` through `hack/run-tool.sh ko build`, and build
 `cmd/kubectl-ate`. Run `hack/install-ate-kind.sh --deploy-ate-system` with the isolated
 kubeconfig and matching registry. Pin the resulting image digests for rendering.
@@ -131,3 +138,90 @@ Deleting an actor can delete its owned snapshot; ordinary sleep must use suspend
 not delete. No production agents, chat databases, rollout topology or Core schema
 are changed by this spike. No migration/compatibility or empty-target recovery
 claim is made from synthetic two-agent tests.
+
+## Message-triggered SimpleX variant
+
+```
+SimpleX human -> encrypted SMP network -> per-owner SimpleX daemon (PVC)
+                                            |
+                                single WS reader + SQLite event queue
+                                            |
+                                  HTTP request wakes the actor
+                                            |
+                    authenticated relay WS -> Hermes SimpleX adapter
+                                            |
+                                  model reply -> SimpleX human
+```
+
+`simplex-relay.py` keeps exactly one reader on the daemon. SimpleX's upstream
+[WebSocket server](https://github.com/simplex-chat/simplex-chat/blob/stable/apps/simplex-chat/Server.hs)
+uses a shared event queue, so multiple independent readers steal events from
+one another. The relay keeps the authenticated administration channel separate
+from the Hermes event channel, persists events before forwarding, and accepts
+adapter acknowledgements. Network-status chatter and outbound messages do not
+wake the actor. Pending inbound events trigger the standard Substrate HTTP path;
+there is no new Core scheduler, placement table, or IP bookkeeping.
+
+The small `hermes-simplex-relay.patch` adds an optional bearer token, acknowledges
+relay deliveries, handles the pinned daemon's `receivedContactRequest` event,
+and uses `/_accept` without waiting on a response from inside the receive loop.
+The last two changes repair reproduced contact-setup incompatibilities. Ordinary
+Hermes owner pairing still authorizes the sender; no allow-all is enabled.
+This experimental extension only qualifies text messages. Attachments would
+need a deliberate file-transfer boundary between the transport and actor.
+
+Build with `build-relay-image.sh` using `SPIKE_STATE_DIR`, `SPIKE_HERMES_SOURCE`
+(the pinned checkout), `SPIKE_BASE_IMAGE` (baseline image digest), and
+`SPIKE_IMAGE` (local output tag). The script was exercised and reproduced the
+exact accepted image digest. The Docker overlay deliberately targets the exact
+ARM64 Nix store paths in this spike; a production package should build the
+patch into a new Nix derivation.
+
+Run `render-simplex.py --state-dir STATE --image DIGEST --key-file KEY_FILE`.
+Apply its `simplex-transports.json`, create its two `*-simplex.template.json`
+templates, wait for golden tags, and create `alice-simplex` and `bob-simplex`.
+Run the egress fixture for those names. Apply `simplex-ingress.json` and restart
+only the local ingress deployment. `owners-simplex.json` selects this variant
+for `agent.py --owners ...` and `qualify-chat.py --owners ...`.
+
+Each transport is a two-container Deployment with one per-owner PVC and token.
+`gateway-start.py` waits for the external transport after resume, so golden
+snapshot construction does not require external networking or prematurely
+connect an owner's transport. `/home/agent` stays the actor's durable home.
+
+For test users, run the same image with `--entrypoint simplex-chat`, a fresh
+`-d` database prefix, `-p 5225`, `--mute`, and a unique `--user-display-name`.
+Copy `simplex-command.py` into `/home/agent/` in each disposable user container.
+It only talks to that container's loopback daemon. Forward Alice's relay service
+to loopback 18765 and Bob's to 18766. `qualify-simplex.py` takes `--state-dir`,
+`--output`, and optionally `--user bob --relay-port 18766
+--human-container finite-simplex-test-bob`. Repeated runs after native pairing
+use `--paired`. No actor HTTP request is made by the harness during its measured
+message-wake cycles. `qualify-transport-restart.py` additionally tests an offline
+transport and restored identity while the actor stays asleep.
+
+## State ownership and unproven failure edges
+
+| State | Writer / reader | Persistence in this spike |
+| --- | --- | --- |
+| User-to-actor ownership | trusted fixture / `agent.py` | checked-in stub rows |
+| Chat history, pairing grants, agent files | Hermes serve and gateway | actor home in Substrate snapshots |
+| SimpleX identity and message database | SimpleX daemon | per-owner transport PVC |
+| Undelivered adapter events | relay / adapter ACK | SQLite on the same transport PVC |
+
+The recovery set now spans **both** the actor snapshot and transport PVC. No
+empty-target restoration of that whole set was performed. Local PVC restart
+survival is not a backup, and transport PVC deletion must never follow compute
+teardown. Relay ACK currently means the adapter accepted the event, **not** that
+the resulting model turn committed durably. Lost ACKs can replay a delivery;
+process crashes after early ACK can require recovery from SimpleX history.
+Deduplication, durable turn acceptance, admission/rate limiting, cross-tenant
+network restrictions, file attachments, capacity exhaustion, and idle-based
+suspend arbitration remain production work. Tests suspend only after replies
+complete; they do not establish safe automatic suspension during a live turn.
+
+The baseline supervisor also shuts down the actor if a required child exits.
+A deliberate SimpleX `/_stop` diagnostic exits this CLI build; that experiment
+required reverting a disposable actor to its previous snapshot. Do not use
+that command as a production reconnect strategy. The external variant avoids
+coupling SimpleX daemon failure to the Hermes process supervisor.

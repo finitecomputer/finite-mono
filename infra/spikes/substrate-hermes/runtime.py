@@ -54,23 +54,26 @@ else:
     raise RuntimeError('X11 desktop failed to start')
 start(['openbox'])
 start(['xmessage', '-center', '-title', 'Finite agent desktop', 'Persistent Hermes desktop'], critical=False)
-simplex = home / 'simplex'
-simplex.mkdir(exist_ok=True)
-args = ['simplex-chat', '-d', str(simplex / 'identity'), '-p', '5225', '--mute']
-if not (simplex / 'identity_chat.db').exists():
-    args += ['--user-display-name', os.environ['SPIKE_AGENT_ID']]
-start(args)
-for _ in range(600):
-    try:
-        with socket.create_connection(('127.0.0.1', 5225), timeout=.2):
-            break
-    except OSError:
-        time.sleep(.1)
+if os.environ.get('SIMPLEX_WS_URL'):
+    start(['python3', '/opt/spike/gateway-start.py'])
 else:
-    raise RuntimeError('SimpleX daemon failed to become ready')
-os.environ['SIMPLEX_WS_URL'] = 'ws://127.0.0.1:5225'
-# No allow-all: owners pair through Hermes's native SimpleX pairing flow.
-start(['hermes', 'gateway', 'run'])
+    simplex = home / 'simplex'
+    simplex.mkdir(exist_ok=True)
+    args = ['simplex-chat', '-d', str(simplex / 'identity'), '-p', '5225', '--mute']
+    if not (simplex / 'identity_chat.db').exists():
+        args += ['--user-display-name', os.environ['SPIKE_AGENT_ID']]
+    start(args)
+    for _ in range(600):
+        try:
+            with socket.create_connection(('127.0.0.1', 5225), timeout=.2):
+                break
+        except OSError:
+            time.sleep(.1)
+    else:
+        raise RuntimeError('SimpleX daemon failed to become ready')
+    os.environ['SIMPLEX_WS_URL'] = 'ws://127.0.0.1:5225'
+    # No allow-all: owners pair through Hermes's native SimpleX pairing flow.
+    start(['hermes', 'gateway', 'run'])
 start(['hermes', 'serve', '--isolated', '--host', '0.0.0.0', '--port', '80', '--no-open'])
 while True:
     for p in required:

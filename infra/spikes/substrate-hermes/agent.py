@@ -11,9 +11,10 @@ import subprocess
 
 p = argparse.ArgumentParser()
 p.add_argument('--user', required=True)
+p.add_argument('--owners',type=Path,default=Path(__file__).with_name('owners.json'))
 p.add_argument('action', choices=['create','inspect','sleep','wake','url'])
 a = p.parse_args()
-owner = next((o for o in json.loads(Path(__file__).with_name('owners.json').read_text())
+owner = next((o for o in json.loads(a.owners.read_text())
               if o['user_id'] == a.user), None)
 if owner is None:
     p.error('unknown owner')

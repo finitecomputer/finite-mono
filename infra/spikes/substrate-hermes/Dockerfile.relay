@@ -1,0 +1,6 @@
+# Deliberate spike overlay of the exact, tested ARM64 base closure.
+ARG BASE_IMAGE
+FROM ${BASE_IMAGE}
+COPY *.py /opt/spike/
+RUN cp /opt/spike/simplex-adapter.py /nix/store/bs452k1svqd1bbj71p8x66y41za3c1sx-hermes-agent-0.21.0/lib/python3.12/site-packages/plugins/platforms/simplex/adapter.py \
+ && cp /opt/spike/simplex-adapter.py /nix/store/mz4g9ydjwn6zd2bb8p2x3rays3nn3s5c-hermes-agent-0.21.0/share/hermes-agent/plugins/platforms/simplex/adapter.py
