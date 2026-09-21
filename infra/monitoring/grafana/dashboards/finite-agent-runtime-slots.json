@@ -231,7 +231,7 @@
           "refId": "A"
         }
       ],
-      "title": "lat3 Unused Slots (estimate)",
+      "title": "lat3 Unused Slots (Nix-default estimate)",
       "type": "stat"
     },
     {
@@ -364,7 +364,7 @@
           "refId": "A"
         }
       ],
-      "title": "lat4 Unused Slots (estimate)",
+      "title": "lat4 Unused Slots (Nix-default estimate)",
       "type": "stat"
     },
     {
@@ -497,7 +497,7 @@
           "refId": "A"
         }
       ],
-      "title": "lat5 Unused Slots (estimate)",
+      "title": "lat5 Unused Slots (Nix-default estimate)",
       "type": "stat"
     },
     {
@@ -616,7 +616,7 @@
           "refId": "A"
         }
       ],
-      "title": "Unused Slots (estimate)",
+      "title": "Unused Slots (Nix-default estimate)",
       "type": "timeseries"
     }
   ],
