@@ -43,8 +43,9 @@ LAT_DASHBOARD_HOSTS = (
     "finite-lat-2",
     "finite-lat-3",
     "finite-lat-4",
+    "finite-lat-5",
 )
-LAT_DASHBOARD_HOST_REGEX = "finite-lat-[1-4]"
+LAT_DASHBOARD_HOST_REGEX = "finite-lat-[1-5]"
 
 HOST_METRIC_NAMES = [
     "node_cpu_seconds_total",

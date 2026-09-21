@@ -1,10 +1,10 @@
 # finite-lat-4 is a dedicated Agent Runner host cloned from the proven
 # finite-lat-3 runner-only personality: it holds sandboxes only — no app
 # services, no edge, no database. It follows ADR 0007's runner-twin model as
-# the SECOND runner host (after lat3; lat2 is the app-plane replacement, not
-# a runner): the wg-finite /29 widening to 10.254.3.0/29 landed with #715
-# (lat2=.1 hub, lat3=.2), lat4 takes 10.254.3.4, and the 42-guest ceiling
-# mirrors lat3's owner-authorized value. Public addresses were captured from
+# one of the active runner hosts (lat2 is the app-plane replacement, not a
+# runner): the wg-finite /29 widening to 10.254.3.0/29 landed with #715
+# (lat2=.1 hub, lat3=.2), lat4 takes 10.254.3.4, and its 42 value is a
+# declared estimate. Public addresses were captured from
 # the interim OS; see infra/runbooks/install-host.md for evidence and gates.
 {
   config,
@@ -339,9 +339,9 @@ in
   ];
 
   # The Runner stays dead until the operator installs /etc/finite/runner.env
-  # (credential, artifact pin, drain state). finite-lat-4 is admitted DRAINED
-  # (FC_RUNNER_DRAIN=true); undraining is the separate admission decision per
-  # ADR 0007's one-creator rule.
+  # (credential, artifact pin, drain state). Bootstrap with drain enabled.
+  # Live admission state comes from the installed environment, not this
+  # installation default; observe it through scripts/finite-status.
   systemd.services.finite-saas-runner.unitConfig.ConditionPathExists = "/etc/finite/runner.env";
 
   environment.systemPackages = with pkgs; [

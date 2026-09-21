@@ -130,7 +130,7 @@ credential. It is intentionally separate from the Prometheus remote-write
 credential.
 
 The repository-provisioned Grafana dashboard includes `finite-lat-1` through
-`finite-lat-4`. Retired hosts remain visible in the scrape-health panel as
+`finite-lat-5`. Retired hosts remain visible in the scrape-health panel as
 `DOWN` after their remote-written series goes stale, while replacement hosts
 appear as soon as their Alloy collectors begin writing with the corresponding
 host label.
@@ -143,6 +143,7 @@ ssh root@finite-lat-1 'bash -s' < infra/nixos/scripts/check-lat-monitoring-secre
 ssh root@finite-lat-2 'bash -s' < infra/nixos/scripts/check-lat-monitoring-secrets
 ssh root@finite-lat-3 'bash -s' < infra/nixos/scripts/check-lat-monitoring-secrets
 ssh root@finite-lat-4 'bash -s' < infra/nixos/scripts/check-lat-monitoring-secrets
+ssh root@finite-lat-5 'bash -s' < infra/nixos/scripts/check-lat-monitoring-secrets
 ```
 
 `scripts/deploy-lat1-closure-cache` runs this preflight automatically for lat1

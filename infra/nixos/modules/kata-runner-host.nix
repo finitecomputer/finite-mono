@@ -1,8 +1,8 @@
-# Shared Kata Runner host role for finite-lat-1 and finite-lat-3. Both hosts
-# run the same finite-saas-runner worker, but their operator-managed
-# /etc/finite/runner.env copies drifted (a hand-set 30s Kata stop timeout on
-# both hosts caused two false upgrade failures and halted a 25-Agent rollout
-# on 2026-08-05 until operators raised it to 180). This module is the ONE
+# Shared Kata Runner host role. The active Kata hosts run the same
+# finite-saas-runner worker, while their operator-managed /etc/finite/runner.env
+# files retain host-only credentials and deliberate overrides. A hand-set 30s
+# Kata stop timeout caused two false upgrade failures and halted a 25-Agent
+# rollout on 2026-08-05 until operators raised it to 180. This module is the ONE
 # declaration of the role: the shared non-secret environment is rendered once
 # to /etc/finite/runner-shared.env, and host configs pass only genuine
 # differences through finite.kataRunnerHost.*. Runner-role changes land here;
@@ -24,7 +24,7 @@
 let
   cfg = config.finite.kataRunnerHost;
 
-  # Non-secret environment identical on both Kata Runner hosts. The
+  # Non-secret environment identical across the Kata Runner hosts. The
   # runner.env.example files document the remaining operator-managed keys
   # (credentials, drain state, deliberate overrides).
   sharedEnvironment = {
