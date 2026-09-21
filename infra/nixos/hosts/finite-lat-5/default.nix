@@ -335,9 +335,10 @@ in
   ];
 
   # The Runner stays dead until the operator installs /etc/finite/runner.env
-  # (credential, artifact pin, drain state). Bootstrap with drain enabled.
-  # Live admission state comes from the installed environment, not this
-  # installation default; observe it through scripts/finite-status.
+  # (credential, artifact pin, drain state). The example operator file
+  # bootstraps with drain enabled. Live admission state comes from the
+  # installed environment, not this installation source; observe it through
+  # scripts/finite-status.
   systemd.services.finite-saas-runner.unitConfig.ConditionPathExists = "/etc/finite/runner.env";
 
   environment.systemPackages = with pkgs; [
