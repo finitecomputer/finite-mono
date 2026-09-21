@@ -1,0 +1,395 @@
+[
+  {
+    "report": "baseline-alice.json",
+    "label": "baseline",
+    "sleeping": false,
+    "n": 2,
+    "seconds": {
+      "first_text": {
+        "median": 4.924,
+        "min": 2.812,
+        "max": 7.036
+      },
+      "complete_reply": {
+        "median": 4.924,
+        "min": 2.812,
+        "max": 7.036
+      },
+      "notification": {
+        "median": 0.771,
+        "min": 0.334,
+        "max": 1.208
+      },
+      "dispatch": {
+        "median": 0.357,
+        "min": 0.112,
+        "max": 0.602
+      },
+      "batch": {
+        "median": 0.804,
+        "min": 0.803,
+        "max": 0.804
+      }
+    }
+  },
+  {
+    "report": "baseline-alice.json",
+    "label": "baseline",
+    "sleeping": true,
+    "n": 5,
+    "seconds": {
+      "first_text": {
+        "median": 9.567,
+        "min": 7.086,
+        "max": 10.282
+      },
+      "complete_reply": {
+        "median": 9.567,
+        "min": 7.086,
+        "max": 10.282
+      },
+      "notification": {
+        "median": 1.306,
+        "min": 0.403,
+        "max": 1.8
+      },
+      "dispatch": {
+        "median": 0.772,
+        "min": 0.107,
+        "max": 0.977
+      },
+      "batch": {
+        "median": 0.804,
+        "min": 0.802,
+        "max": 0.807
+      }
+    }
+  },
+  {
+    "report": "final-alice.json",
+    "label": "lifecycle-stream",
+    "sleeping": false,
+    "n": 1,
+    "seconds": {
+      "first_text": {
+        "median": 1.96,
+        "min": 1.96,
+        "max": 1.96
+      },
+      "complete_reply": {
+        "median": 1.96,
+        "min": 1.96,
+        "max": 1.96
+      },
+      "notification": {
+        "median": 1.684,
+        "min": 1.684,
+        "max": 1.684
+      },
+      "dispatch": {
+        "median": 0.001,
+        "min": 0.001,
+        "max": 0.001
+      },
+      "batch": {
+        "median": 0.051,
+        "min": 0.051,
+        "max": 0.051
+      }
+    }
+  },
+  {
+    "report": "final-alice.json",
+    "label": "lifecycle-stream",
+    "sleeping": true,
+    "n": 3,
+    "seconds": {
+      "first_text": {
+        "median": 5.344,
+        "min": 4.531,
+        "max": 5.887
+      },
+      "complete_reply": {
+        "median": 5.344,
+        "min": 4.531,
+        "max": 5.887
+      },
+      "notification": {
+        "median": 1.213,
+        "min": 0.502,
+        "max": 1.767
+      },
+      "dispatch": {
+        "median": 0.001,
+        "min": 0.0,
+        "max": 0.001
+      },
+      "restore_to_http": {
+        "median": 1.029,
+        "min": 0.992,
+        "max": 1.085
+      },
+      "http_to_message": {
+        "median": 1.151,
+        "min": 1.119,
+        "max": 1.159
+      },
+      "batch": {
+        "median": 0.055,
+        "min": 0.054,
+        "max": 0.056
+      }
+    }
+  },
+  {
+    "report": "final-bob.json",
+    "label": "lifecycle-stream",
+    "sleeping": false,
+    "n": 1,
+    "seconds": {
+      "first_text": {
+        "median": 6.578,
+        "min": 6.578,
+        "max": 6.578
+      },
+      "complete_reply": {
+        "median": 8.58,
+        "min": 8.58,
+        "max": 8.58
+      },
+      "notification": {
+        "median": 0.388,
+        "min": 0.388,
+        "max": 0.388
+      },
+      "dispatch": {
+        "median": 0.001,
+        "min": 0.001,
+        "max": 0.001
+      },
+      "batch": {
+        "median": 0.052,
+        "min": 0.052,
+        "max": 0.052
+      }
+    }
+  },
+  {
+    "report": "final-bob.json",
+    "label": "lifecycle-stream",
+    "sleeping": true,
+    "n": 3,
+    "seconds": {
+      "first_text": {
+        "median": 4.765,
+        "min": 4.7,
+        "max": 5.76
+      },
+      "complete_reply": {
+        "median": 4.765,
+        "min": 4.7,
+        "max": 5.76
+      },
+      "notification": {
+        "median": 0.789,
+        "min": 0.458,
+        "max": 1.517
+      },
+      "dispatch": {
+        "median": 0.001,
+        "min": 0.001,
+        "max": 0.003
+      },
+      "restore_to_http": {
+        "median": 0.952,
+        "min": 0.904,
+        "max": 1.022
+      },
+      "http_to_message": {
+        "median": 1.152,
+        "min": 1.124,
+        "max": 1.163
+      },
+      "batch": {
+        "median": 0.053,
+        "min": 0.053,
+        "max": 0.054
+      }
+    }
+  },
+  {
+    "report": "activate-stream-alice.json",
+    "label": "activate-stream",
+    "sleeping": false,
+    "n": 1,
+    "seconds": {
+      "first_text": {
+        "median": 2.236,
+        "min": 2.236,
+        "max": 2.236
+      },
+      "complete_reply": {
+        "median": 7.541,
+        "min": 7.541,
+        "max": 7.541
+      },
+      "notification": {
+        "median": 1.065,
+        "min": 1.065,
+        "max": 1.065
+      },
+      "dispatch": {
+        "median": 0.0,
+        "min": 0.0,
+        "max": 0.0
+      },
+      "batch": {
+        "median": 0.052,
+        "min": 0.052,
+        "max": 0.052
+      }
+    }
+  },
+  {
+    "report": "activate-stream-alice.json",
+    "label": "activate-stream",
+    "sleeping": true,
+    "n": 3,
+    "seconds": {
+      "first_text": {
+        "median": 5.342,
+        "min": 5.003,
+        "max": 5.376
+      },
+      "complete_reply": {
+        "median": 10.58,
+        "min": 10.277,
+        "max": 11.011
+      },
+      "notification": {
+        "median": 1.244,
+        "min": 1.107,
+        "max": 1.471
+      },
+      "dispatch": {
+        "median": 0.001,
+        "min": 0.0,
+        "max": 0.001
+      },
+      "restore_to_http": {
+        "median": 0.893,
+        "min": 0.867,
+        "max": 0.901
+      },
+      "http_to_message": {
+        "median": 1.175,
+        "min": 1.162,
+        "max": 1.399
+      },
+      "batch": {
+        "median": 0.053,
+        "min": 0.051,
+        "max": 0.056
+      }
+    }
+  },
+  {
+    "report": "buffered-long-bob.json",
+    "label": "buffered-long",
+    "sleeping": false,
+    "n": 2,
+    "seconds": {
+      "first_text": {
+        "median": 6.181,
+        "min": 4.016,
+        "max": 8.346
+      },
+      "complete_reply": {
+        "median": 6.181,
+        "min": 4.016,
+        "max": 8.346
+      },
+      "notification": {
+        "median": 1.233,
+        "min": 0.944,
+        "max": 1.523
+      },
+      "dispatch": {
+        "median": 0.001,
+        "min": 0.0,
+        "max": 0.001
+      },
+      "batch": {
+        "median": 0.055,
+        "min": 0.055,
+        "max": 0.055
+      }
+    }
+  },
+  {
+    "report": "stream-long-bob.json",
+    "label": "stream-long",
+    "sleeping": false,
+    "n": 2,
+    "seconds": {
+      "first_text": {
+        "median": 1.525,
+        "min": 1.504,
+        "max": 1.546
+      },
+      "complete_reply": {
+        "median": 5.039,
+        "min": 4.663,
+        "max": 5.415
+      },
+      "batch": {
+        "median": 0.055,
+        "min": 0.053,
+        "max": 0.056
+      }
+    }
+  },
+  {
+    "report": "stream-long-bob.json",
+    "label": "stream-long",
+    "sleeping": true,
+    "n": 2,
+    "seconds": {
+      "first_text": {
+        "median": 8.908,
+        "min": 8.633,
+        "max": 9.183
+      },
+      "complete_reply": {
+        "median": 13.03,
+        "min": 12.54,
+        "max": 13.519
+      },
+      "notification": {
+        "median": 1.05,
+        "min": 0.829,
+        "max": 1.272
+      },
+      "dispatch": {
+        "median": 0.001,
+        "min": 0.0,
+        "max": 0.001
+      },
+      "restore_to_http": {
+        "median": 1.071,
+        "min": 0.975,
+        "max": 1.168
+      },
+      "http_to_message": {
+        "median": 5.194,
+        "min": 5.188,
+        "max": 5.201
+      },
+      "batch": {
+        "median": 0.053,
+        "min": 0.053,
+        "max": 0.054
+      }
+    }
+  }
+]

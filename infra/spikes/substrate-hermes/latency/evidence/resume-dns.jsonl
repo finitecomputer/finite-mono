@@ -1,0 +1,2 @@
+[{"stage": "resume", "t": 1790030310.8136716, "gap": 6.146067142486572}, {"stage": "dns", "host": "smp5.simplex.im", "t": 1790030310.8137054, "seconds": 0.026974201202392578}, {"stage": "dns", "host": "smp6.simplex.im", "t": 1790030310.840739, "seconds": 0.011291027069091797}]
+[{"stage": "resume", "t": 1790030321.29812, "gap": 6.124511480331421}, {"stage": "dns", "host": "smp5.simplex.im", "t": 1790030321.298608, "seconds": 0.027909040451049805}, {"stage": "dns", "host": "smp6.simplex.im", "t": 1790030321.326559, "seconds": 0.018606901168823242}]

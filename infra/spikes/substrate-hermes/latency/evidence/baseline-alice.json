@@ -1,0 +1,425 @@
+{
+  "label": "baseline",
+  "user": "alice",
+  "trials": [
+    {
+      "send": 1790029211.6890585,
+      "first": 1790029218.7255177,
+      "complete": 1790029218.7255177,
+      "first_seconds": 7.03645920753479,
+      "complete_seconds": 7.03645920753479,
+      "events": [
+        {
+          "t": 1790029218.7255177,
+          "kind": "newChatItems",
+          "item": 58,
+          "chars": 17
+        }
+      ],
+      "actor": [
+        {
+          "stage": "simplex_received",
+          "t": 1790029212.0646348,
+          "mono": 121.403762085,
+          "item": 10
+        },
+        {
+          "stage": "batch_flushed",
+          "t": 1790029212.868873,
+          "mono": 122.208000357
+        },
+        {
+          "stage": "simplex_send",
+          "t": 1790029213.027134,
+          "mono": 122.366261285
+        },
+        {
+          "stage": "model_turn_start",
+          "t": 1790029217.0803764,
+          "mono": 126.419503592
+        },
+        {
+          "stage": "model_turn_end",
+          "t": 1790029218.2372735,
+          "mono": 127.576400946
+        },
+        {
+          "stage": "simplex_send",
+          "t": 1790029218.3086114,
+          "mono": 127.647738452
+        }
+      ],
+      "listener": [
+        {
+          "notification": "alice",
+          "t": 1790029212.8971004
+        },
+        {
+          "wake_start": "alice",
+          "t": 1790029213.499167
+        },
+        {
+          "wake": "alice",
+          "t": 1790029213.5457628
+        }
+      ],
+      "sleeping": false,
+      "index": 0
+    },
+    {
+      "send": 1790029220.108538,
+      "first": 1790029222.9208972,
+      "complete": 1790029222.9208972,
+      "first_seconds": 2.81235933303833,
+      "complete_seconds": 2.81235933303833,
+      "events": [
+        {
+          "t": 1790029222.9208972,
+          "kind": "newChatItems",
+          "item": 60,
+          "chars": 17
+        }
+      ],
+      "actor": [
+        {
+          "stage": "simplex_received",
+          "t": 1790029220.4830537,
+          "mono": 129.822181007,
+          "item": 13
+        },
+        {
+          "stage": "batch_flushed",
+          "t": 1790029221.2860231,
+          "mono": 130.625150339
+        },
+        {
+          "stage": "model_turn_start",
+          "t": 1790029221.340305,
+          "mono": 130.679432365
+        },
+        {
+          "stage": "model_turn_end",
+          "t": 1790029222.440202,
+          "mono": 131.779329413
+        },
+        {
+          "stage": "simplex_send",
+          "t": 1790029222.5307012,
+          "mono": 131.869828165
+        }
+      ],
+      "listener": [
+        {
+          "notification": "alice",
+          "t": 1790029220.4427748
+        },
+        {
+          "wake_start": "alice",
+          "t": 1790029220.5545266
+        },
+        {
+          "wake": "alice",
+          "t": 1790029220.5916905
+        }
+      ],
+      "sleeping": false,
+      "index": 1
+    },
+    {
+      "send": 1790029228.009295,
+      "first": 1790029237.5762405,
+      "complete": 1790029237.5762405,
+      "first_seconds": 9.566945552825928,
+      "complete_seconds": 9.566945552825928,
+      "events": [
+        {
+          "t": 1790029237.5762405,
+          "kind": "newChatItems",
+          "item": 62,
+          "chars": 17
+        }
+      ],
+      "actor": [
+        {
+          "stage": "simplex_received",
+          "t": 1790029235.6021326,
+          "mono": 144.941259742,
+          "item": 15
+        },
+        {
+          "stage": "batch_flushed",
+          "t": 1790029236.4086518,
+          "mono": 145.747779141
+        },
+        {
+          "stage": "model_turn_start",
+          "t": 1790029236.5970755,
+          "mono": 145.936203098
+        },
+        {
+          "stage": "model_turn_end",
+          "t": 1790029237.242333,
+          "mono": 146.581462545
+        },
+        {
+          "stage": "simplex_send",
+          "t": 1790029237.323984,
+          "mono": 146.663110919
+        }
+      ],
+      "listener": [
+        {
+          "notification": "alice",
+          "t": 1790029229.4935708
+        },
+        {
+          "wake_start": "alice",
+          "t": 1790029229.6042674
+        },
+        {
+          "wake": "alice",
+          "t": 1790029230.5312858
+        }
+      ],
+      "sleeping": true,
+      "index": 2
+    },
+    {
+      "send": 1790029242.7800124,
+      "first": 1790029249.8662884,
+      "complete": 1790029249.8662884,
+      "first_seconds": 7.086276054382324,
+      "complete_seconds": 7.086276054382324,
+      "events": [
+        {
+          "t": 1790029249.8662884,
+          "kind": "newChatItems",
+          "item": 64,
+          "chars": 17
+        }
+      ],
+      "actor": [
+        {
+          "stage": "simplex_received",
+          "t": 1790029247.8259091,
+          "mono": 157.165036449,
+          "item": 17
+        },
+        {
+          "stage": "batch_flushed",
+          "t": 1790029248.628103,
+          "mono": 157.9672302
+        },
+        {
+          "stage": "model_turn_start",
+          "t": 1790029248.8360977,
+          "mono": 158.175225137
+        },
+        {
+          "stage": "model_turn_end",
+          "t": 1790029249.5337377,
+          "mono": 158.872865212
+        },
+        {
+          "stage": "simplex_send",
+          "t": 1790029249.6050038,
+          "mono": 158.944130825
+        }
+      ],
+      "listener": [
+        {
+          "notification": "alice",
+          "t": 1790029244.5801156
+        },
+        {
+          "wake_start": "alice",
+          "t": 1790029245.5571783
+        },
+        {
+          "wake": "alice",
+          "t": 1790029246.538159
+        }
+      ],
+      "sleeping": true,
+      "index": 3
+    },
+    {
+      "send": 1790029255.3899162,
+      "first": 1790029265.672066,
+      "complete": 1790029265.672066,
+      "first_seconds": 10.28214979171753,
+      "complete_seconds": 10.28214979171753,
+      "events": [
+        {
+          "t": 1790029265.672066,
+          "kind": "newChatItems",
+          "item": 66,
+          "chars": 17
+        }
+      ],
+      "actor": [
+        {
+          "stage": "simplex_received",
+          "t": 1790029263.4904284,
+          "mono": 172.829555436,
+          "item": 19
+        },
+        {
+          "stage": "batch_flushed",
+          "t": 1790029264.2945244,
+          "mono": 173.633651523
+        },
+        {
+          "stage": "model_turn_start",
+          "t": 1790029264.4873052,
+          "mono": 173.826432086
+        },
+        {
+          "stage": "model_turn_end",
+          "t": 1790029265.2617388,
+          "mono": 174.600865856
+        },
+        {
+          "stage": "simplex_send",
+          "t": 1790029265.365827,
+          "mono": 174.704953884
+        }
+      ],
+      "listener": [
+        {
+          "notification": "alice",
+          "t": 1790029256.6959426
+        },
+        {
+          "wake_start": "alice",
+          "t": 1790029257.5575895
+        },
+        {
+          "wake": "alice",
+          "t": 1790029258.4891353
+        }
+      ],
+      "sleeping": true,
+      "index": 4
+    },
+    {
+      "send": 1790029270.9503846,
+      "first": 1790029280.6919389,
+      "complete": 1790029280.6919389,
+      "first_seconds": 9.741554260253906,
+      "complete_seconds": 9.741554260253906,
+      "events": [
+        {
+          "t": 1790029280.6919389,
+          "kind": "newChatItems",
+          "item": 68,
+          "chars": 17
+        }
+      ],
+      "actor": [
+        {
+          "stage": "simplex_received",
+          "t": 1790029278.6835356,
+          "mono": 188.022662418,
+          "item": 21
+        },
+        {
+          "stage": "batch_flushed",
+          "t": 1790029279.4884593,
+          "mono": 188.82758611
+        },
+        {
+          "stage": "model_turn_start",
+          "t": 1790029279.6434464,
+          "mono": 188.982573351
+        },
+        {
+          "stage": "model_turn_end",
+          "t": 1790029280.3954642,
+          "mono": 189.734591299
+        },
+        {
+          "stage": "simplex_send",
+          "t": 1790029280.4634929,
+          "mono": 189.802619728
+        }
+      ],
+      "listener": [
+        {
+          "notification": "alice",
+          "t": 1790029271.7417822
+        },
+        {
+          "wake_start": "alice",
+          "t": 1790029272.513416
+        },
+        {
+          "wake": "alice",
+          "t": 1790029273.901963
+        }
+      ],
+      "sleeping": true,
+      "index": 5
+    },
+    {
+      "send": 1790029286.4171417,
+      "first": 1790029294.9946988,
+      "complete": 1790029294.9946988,
+      "first_seconds": 8.57755708694458,
+      "complete_seconds": 8.57755708694458,
+      "events": [
+        {
+          "t": 1790029294.9946988,
+          "kind": "newChatItems",
+          "item": 70,
+          "chars": 17
+        }
+      ],
+      "actor": [
+        {
+          "stage": "simplex_received",
+          "t": 1790029292.9531724,
+          "mono": 202.292299132,
+          "item": 23
+        },
+        {
+          "stage": "batch_flushed",
+          "t": 1790029293.7550464,
+          "mono": 203.09417286
+        },
+        {
+          "stage": "model_turn_start",
+          "t": 1790029293.9545045,
+          "mono": 203.293631128
+        },
+        {
+          "stage": "model_turn_end",
+          "t": 1790029294.627848,
+          "mono": 203.966974652
+        },
+        {
+          "stage": "simplex_send",
+          "t": 1790029294.729513,
+          "mono": 204.068639469
+        }
+      ],
+      "listener": [
+        {
+          "notification": "alice",
+          "t": 1790029286.8199952
+        },
+        {
+          "wake_start": "alice",
+          "t": 1790029286.92718
+        },
+        {
+          "wake": "alice",
+          "t": 1790029288.0590732
+        }
+      ],
+      "sleeping": true,
+      "index": 6
+    }
+  ],
+  "sleep_actor_http_requests_by_harness": 0
+}

@@ -1,0 +1,43 @@
+{
+  "passed": true,
+  "checks": [
+    {
+      "owner": "alice",
+      "credential": "invalid",
+      "status": 401
+    },
+    {
+      "owner": "alice",
+      "credential": "other-owner",
+      "status": 401
+    },
+    {
+      "owner": "alice",
+      "credential": "valid",
+      "status": 200
+    },
+    {
+      "owner": "alice",
+      "wake_credential_grants_native_auth": false
+    },
+    {
+      "owner": "bob",
+      "credential": "invalid",
+      "status": 401
+    },
+    {
+      "owner": "bob",
+      "credential": "other-owner",
+      "status": 401
+    },
+    {
+      "owner": "bob",
+      "credential": "valid",
+      "status": 200
+    },
+    {
+      "owner": "bob",
+      "wake_credential_grants_native_auth": false
+    }
+  ]
+}

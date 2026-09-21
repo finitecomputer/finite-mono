@@ -1,0 +1,4 @@
+[
+  {"user_id":"alice","agent_id":"alice-notify","host":"alice.agents.test"},
+  {"user_id":"bob","agent_id":"bob-notify","host":"bob.agents.test"}
+]

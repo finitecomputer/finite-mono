@@ -1,0 +1,4 @@
+[
+  {"user_id": "alice", "agent_id": "alice-agent", "host": "alice.agents.test"},
+  {"user_id": "bob", "agent_id": "bob-agent", "host": "bob.agents.test"}
+]

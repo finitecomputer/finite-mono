@@ -1,0 +1,61 @@
+{
+  "passed": true,
+  "checks": [
+    {
+      "report": "stream-long-bob.json",
+      "trial": 0,
+      "same_item": true,
+      "final_edit_observed": true,
+      "updates": 12
+    },
+    {
+      "report": "stream-long-bob.json",
+      "trial": 1,
+      "same_item": true,
+      "final_edit_observed": true,
+      "updates": 16
+    },
+    {
+      "report": "stream-long-bob.json",
+      "trial": 2,
+      "same_item": true,
+      "final_edit_observed": true,
+      "updates": 17
+    },
+    {
+      "report": "stream-long-bob.json",
+      "trial": 3,
+      "same_item": true,
+      "final_edit_observed": true,
+      "updates": 18
+    },
+    {
+      "report": "activate-stream-alice.json",
+      "trial": 0,
+      "same_item": true,
+      "final_edit_observed": true,
+      "updates": 21
+    },
+    {
+      "report": "activate-stream-alice.json",
+      "trial": 1,
+      "same_item": true,
+      "final_edit_observed": true,
+      "updates": 23
+    },
+    {
+      "report": "activate-stream-alice.json",
+      "trial": 2,
+      "same_item": true,
+      "final_edit_observed": true,
+      "updates": 20
+    },
+    {
+      "report": "activate-stream-alice.json",
+      "trial": 3,
+      "same_item": true,
+      "final_edit_observed": true,
+      "updates": 21
+    }
+  ]
+}

@@ -1,0 +1,26 @@
+{
+  "passed": true,
+  "registration_fields": "notification capability only",
+  "checks": [
+    {
+      "owner": "bob",
+      "message_fetch": "ERR AUTH",
+      "incorrect_CA_pin": "rejected"
+    },
+    {
+      "owner": "bob",
+      "message_fetch": "ERR AUTH",
+      "incorrect_CA_pin": "rejected"
+    },
+    {
+      "owner": "alice",
+      "message_fetch": "ERR AUTH",
+      "incorrect_CA_pin": "rejected"
+    },
+    {
+      "owner": "alice",
+      "message_fetch": "ERR AUTH",
+      "incorrect_CA_pin": "rejected"
+    }
+  ]
+}

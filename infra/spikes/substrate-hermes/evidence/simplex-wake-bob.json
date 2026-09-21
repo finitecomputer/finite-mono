@@ -1,0 +1,32 @@
+{
+  "checks": [
+    {
+      "name": "Real SimpleX contact connected",
+      "passed": true
+    },
+    {
+      "name": "Native Hermes pairing approval; no allow-all setting",
+      "passed": true
+    },
+    {
+      "name": "Real model reply over SimpleX before sleep",
+      "passed": true,
+      "reply": "simplexproof3fc94b2583a2"
+    },
+    {
+      "name": "SimpleX message automatically wakes suspended actor and preserves conversation",
+      "passed": true,
+      "cycle": 1,
+      "seconds": 11.272,
+      "reply": "simplexproof3fc94b2583a2"
+    },
+    {
+      "name": "SimpleX message automatically wakes suspended actor and preserves conversation",
+      "passed": true,
+      "cycle": 2,
+      "seconds": 11.103,
+      "reply": "simplexproof3fc94b2583a2"
+    }
+  ],
+  "wake_source": "real inbound SimpleX event; no test-harness HTTP wake"
+}

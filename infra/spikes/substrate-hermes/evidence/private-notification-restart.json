@@ -1,0 +1,7 @@
+{
+  "passed": true,
+  "check": "Shared notification listener restarted from notification-only PVC; queued signal woke actor and model remembered conversation",
+  "seconds_from_listener_restart": 15.245,
+  "reply": "simplexproof4e90cc650359",
+  "actor_http_requests_by_harness": 0
+}

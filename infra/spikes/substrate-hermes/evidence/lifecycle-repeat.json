@@ -1,0 +1,28 @@
+{
+  "checks": [
+    {
+      "name": "alice native auth, isolation, WS, shell and desktop screenshot",
+      "passed": true
+    },
+    {
+      "name": "bob native auth, isolation, WS, shell and desktop screenshot",
+      "passed": true
+    },
+    {
+      "name": "provider confirms Alice suspended",
+      "passed": true,
+      "seconds": 0.818
+    },
+    {
+      "name": "Bob remains available while Alice sleeps",
+      "passed": true
+    },
+    {
+      "name": "URL wakes Alice; disk, live in-memory Hermes session, SimpleX and desktop survive",
+      "passed": true,
+      "seconds": 2.918
+    }
+  ],
+  "model_chat": "not tested by this transport/lifecycle probe",
+  "simplex_message_wake": "not tested"
+}

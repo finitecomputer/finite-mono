@@ -1,0 +1,35 @@
+{
+  "checks": [
+    {
+      "name": "Real SimpleX contact connected",
+      "passed": true
+    },
+    {
+      "name": "Shared listener has active notification-only subscription",
+      "passed": true,
+      "active": 2,
+      "received": 0,
+      "wakes": 0
+    },
+    {
+      "name": "Real model reply over SimpleX before sleep",
+      "passed": true,
+      "reply": "simplexproof4e90cc650359"
+    },
+    {
+      "name": "SimpleX message automatically wakes suspended actor and preserves conversation",
+      "passed": true,
+      "cycle": 1,
+      "seconds": 6.775,
+      "reply": "simplexproof4e90cc650359"
+    },
+    {
+      "name": "SimpleX message automatically wakes suspended actor and preserves conversation",
+      "passed": true,
+      "cycle": 2,
+      "seconds": 11.025,
+      "reply": "simplexproof4e90cc650359"
+    }
+  ],
+  "wake_source": "SMP NMSG only; no test-harness actor HTTP wake"
+}

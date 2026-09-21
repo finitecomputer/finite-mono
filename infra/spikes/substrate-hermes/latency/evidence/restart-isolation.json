@@ -1,0 +1,23 @@
+{
+  "passed": true,
+  "actor_http_requests_by_harness": 0,
+  "message_sent_while_listener_down": true,
+  "listener_recovered_registration_from_pvc": true,
+  "only_target_owner_woke": true,
+  "reply_timing": {
+    "send": 1790031587.2428682,
+    "first": 1790031601.1602924,
+    "complete": 1790031601.1602924,
+    "first_seconds": 13.917424201965332,
+    "complete_seconds": 13.917424201965332,
+    "events": [
+      {
+        "t": 1790031601.1602924,
+        "kind": "newChatItems",
+        "item": 206,
+        "chars": 16,
+        "cursor": false
+      }
+    ]
+  }
+}

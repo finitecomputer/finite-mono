@@ -1,0 +1,7 @@
+{
+  "passed": true,
+  "check": "Persistent transport identity restored; queued SimpleX message automatically woke actor; model remembered conversation",
+  "seconds_from_transport_restart": 8.807,
+  "reply": "simplexproof980f4c1d3b2e",
+  "actor_http_requests_by_harness": 0
+}

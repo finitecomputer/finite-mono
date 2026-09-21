@@ -1,0 +1,551 @@
+{
+  "label": "post-reset",
+  "user": "alice",
+  "trials": [
+    {
+      "send": 1790031101.1356921,
+      "first": 1790031109.6447613,
+      "complete": 1790031109.6447613,
+      "first_seconds": 8.509069204330444,
+      "complete_seconds": 8.509069204330444,
+      "events": [
+        {
+          "t": 1790031109.6447613,
+          "kind": "newChatItems",
+          "item": 186,
+          "chars": 17
+        }
+      ],
+      "actor": [
+        {
+          "stage": "simplex_event",
+          "t": 1790031101.5018678,
+          "mono": 90.493972122,
+          "kind": "newChatItems"
+        },
+        {
+          "stage": "simplex_received",
+          "t": 1790031101.502301,
+          "mono": 90.494405241,
+          "item": 10
+        },
+        {
+          "stage": "batch_flushed",
+          "t": 1790031101.5554483,
+          "mono": 90.54755278
+        },
+        {
+          "stage": "simplex_send",
+          "t": 1790031101.7307487,
+          "mono": 90.722853254
+        },
+        {
+          "stage": "simplex_event",
+          "t": 1790031102.200664,
+          "mono": 91.192768472,
+          "kind": "chatItemsStatusesUpdated"
+        },
+        {
+          "stage": "actor_http_ready",
+          "t": 1790031102.4234037,
+          "mono": 91.415508441
+        },
+        {
+          "stage": "simplex_reconnect_start",
+          "t": 1790031102.476224,
+          "mono": 91.468328401
+        },
+        {
+          "stage": "simplex_reconnect_done",
+          "t": 1790031102.4788349,
+          "mono": 91.470939239,
+          "command": "/_app suspend 0",
+          "ok": true
+        },
+        {
+          "stage": "simplex_reconnect_done",
+          "t": 1790031102.4802547,
+          "mono": 91.472358969,
+          "command": "/reconnect",
+          "ok": true
+        },
+        {
+          "stage": "simplex_event",
+          "t": 1790031102.4808614,
+          "mono": 91.472965919,
+          "kind": "subscriptionStatus"
+        },
+        {
+          "stage": "simplex_reconnect_done",
+          "t": 1790031102.583563,
+          "mono": 91.575667672,
+          "command": "/_app activate",
+          "ok": true
+        },
+        {
+          "stage": "simplex_event",
+          "t": 1790031103.640938,
+          "mono": 92.633042234,
+          "kind": "subscriptionStatus"
+        },
+        {
+          "stage": "simplex_event",
+          "t": 1790031103.729421,
+          "mono": 92.721524981,
+          "kind": "chatItemsStatusesUpdated"
+        },
+        {
+          "stage": "model_turn_start",
+          "t": 1790031105.8897243,
+          "mono": 94.881828459
+        },
+        {
+          "stage": "model_turn_end",
+          "t": 1790031108.306095,
+          "mono": 97.298199305
+        },
+        {
+          "stage": "simplex_send",
+          "t": 1790031108.365692,
+          "mono": 97.357796089
+        },
+        {
+          "stage": "simplex_event",
+          "t": 1790031109.4747753,
+          "mono": 98.466879919,
+          "kind": "chatItemsStatusesUpdated"
+        }
+      ],
+      "listener": [
+        {
+          "notification": "alice",
+          "t": 1790031102.3938818
+        },
+        {
+          "wake_start": "alice",
+          "t": 1790031102.3945374
+        },
+        {
+          "wake": "alice",
+          "t": 1790031102.6360197
+        }
+      ],
+      "sleeping": false,
+      "index": 0
+    },
+    {
+      "send": 1790031111.0505357,
+      "first": 1790031112.5665467,
+      "complete": 1790031112.5665467,
+      "first_seconds": 1.5160109996795654,
+      "complete_seconds": 1.5160109996795654,
+      "events": [
+        {
+          "t": 1790031112.5665467,
+          "kind": "newChatItems",
+          "item": 188,
+          "chars": 17
+        }
+      ],
+      "actor": [
+        {
+          "stage": "simplex_event",
+          "t": 1790031111.4267457,
+          "mono": 100.418850057,
+          "kind": "newChatItems"
+        },
+        {
+          "stage": "simplex_received",
+          "t": 1790031111.426944,
+          "mono": 100.419048429,
+          "item": 13
+        },
+        {
+          "stage": "actor_http_ready",
+          "t": 1790031111.4505136,
+          "mono": 100.442618387
+        },
+        {
+          "stage": "batch_flushed",
+          "t": 1790031111.4783561,
+          "mono": 100.470460534
+        },
+        {
+          "stage": "model_turn_start",
+          "t": 1790031111.5183635,
+          "mono": 100.510468134
+        },
+        {
+          "stage": "model_turn_end",
+          "t": 1790031112.1975062,
+          "mono": 101.189610679
+        },
+        {
+          "stage": "simplex_send",
+          "t": 1790031112.3328996,
+          "mono": 101.325004095
+        }
+      ],
+      "listener": [
+        {
+          "notification": "alice",
+          "t": 1790031111.4395761
+        },
+        {
+          "wake_start": "alice",
+          "t": 1790031111.439948
+        },
+        {
+          "wake": "alice",
+          "t": 1790031111.5073943
+        }
+      ],
+      "sleeping": false,
+      "index": 1
+    },
+    {
+      "send": 1790031117.8168979,
+      "first": 1790031126.6609344,
+      "complete": 1790031126.6609344,
+      "first_seconds": 8.84403657913208,
+      "complete_seconds": 8.84403657913208,
+      "events": [
+        {
+          "t": 1790031126.6609344,
+          "kind": "newChatItems",
+          "item": 190,
+          "chars": 17
+        }
+      ],
+      "actor": [
+        {
+          "stage": "resume_gap",
+          "t": 1790031119.868535,
+          "mono": 108.860642958,
+          "gap": 6.09272313117981
+        },
+        {
+          "stage": "actor_http_ready",
+          "t": 1790031119.9487417,
+          "mono": 108.940848613
+        },
+        {
+          "stage": "simplex_reconnect_start",
+          "t": 1790031119.9790223,
+          "mono": 108.971151684
+        },
+        {
+          "stage": "simplex_reconnect_done",
+          "t": 1790031119.9817588,
+          "mono": 108.973929436,
+          "command": "/_app suspend 0",
+          "ok": true
+        },
+        {
+          "stage": "simplex_reconnect_done",
+          "t": 1790031119.9833176,
+          "mono": 108.975486206,
+          "command": "/reconnect",
+          "ok": true
+        },
+        {
+          "stage": "simplex_reconnect_done",
+          "t": 1790031120.0890398,
+          "mono": 109.081146917,
+          "command": "/_app activate",
+          "ok": true
+        },
+        {
+          "stage": "simplex_event",
+          "t": 1790031124.9172437,
+          "mono": 113.909348178,
+          "kind": "subscriptionStatus"
+        },
+        {
+          "stage": "simplex_event",
+          "t": 1790031124.9883158,
+          "mono": 113.980420627,
+          "kind": "newChatItems"
+        },
+        {
+          "stage": "simplex_received",
+          "t": 1790031124.98869,
+          "mono": 113.980794497,
+          "item": 15
+        },
+        {
+          "stage": "batch_flushed",
+          "t": 1790031125.0449488,
+          "mono": 114.037053031
+        },
+        {
+          "stage": "model_turn_start",
+          "t": 1790031125.2282832,
+          "mono": 114.220388009
+        },
+        {
+          "stage": "model_turn_end",
+          "t": 1790031125.9608011,
+          "mono": 114.952905736
+        },
+        {
+          "stage": "simplex_send",
+          "t": 1790031126.0616596,
+          "mono": 115.053763978
+        },
+        {
+          "stage": "simplex_event",
+          "t": 1790031126.433609,
+          "mono": 115.425713224,
+          "kind": "chatItemsStatusesUpdated"
+        }
+      ],
+      "listener": [
+        {
+          "notification": "alice",
+          "t": 1790031118.992738
+        },
+        {
+          "wake_start": "alice",
+          "t": 1790031118.9945006
+        },
+        {
+          "wake": "alice",
+          "t": 1790031120.1337652
+        }
+      ],
+      "sleeping": true,
+      "index": 2
+    },
+    {
+      "send": 1790031132.063247,
+      "first": 1790031140.319438,
+      "complete": 1790031140.319438,
+      "first_seconds": 8.25619101524353,
+      "complete_seconds": 8.25619101524353,
+      "events": [
+        {
+          "t": 1790031140.319438,
+          "kind": "newChatItems",
+          "item": 192,
+          "chars": 17
+        }
+      ],
+      "actor": [
+        {
+          "stage": "resume_gap",
+          "t": 1790031133.3974876,
+          "mono": 122.389830994,
+          "gap": 5.459083795547485
+        },
+        {
+          "stage": "actor_http_ready",
+          "t": 1790031133.483525,
+          "mono": 122.475633862
+        },
+        {
+          "stage": "simplex_reconnect_start",
+          "t": 1790031133.504684,
+          "mono": 122.496817145
+        },
+        {
+          "stage": "simplex_reconnect_done",
+          "t": 1790031133.507468,
+          "mono": 122.499574898,
+          "command": "/_app suspend 0",
+          "ok": true
+        },
+        {
+          "stage": "simplex_reconnect_done",
+          "t": 1790031133.5082126,
+          "mono": 122.500332595,
+          "command": "/reconnect",
+          "ok": true
+        },
+        {
+          "stage": "simplex_reconnect_done",
+          "t": 1790031133.6171887,
+          "mono": 122.609295843,
+          "command": "/_app activate",
+          "ok": true
+        },
+        {
+          "stage": "simplex_event",
+          "t": 1790031138.4145253,
+          "mono": 127.406629171,
+          "kind": "subscriptionStatus"
+        },
+        {
+          "stage": "simplex_event",
+          "t": 1790031138.7240267,
+          "mono": 127.716130675,
+          "kind": "newChatItems"
+        },
+        {
+          "stage": "simplex_received",
+          "t": 1790031138.7241204,
+          "mono": 127.716224382,
+          "item": 17
+        },
+        {
+          "stage": "batch_flushed",
+          "t": 1790031138.7765548,
+          "mono": 127.768658599
+        },
+        {
+          "stage": "model_turn_start",
+          "t": 1790031138.9934034,
+          "mono": 127.98550762
+        },
+        {
+          "stage": "model_turn_end",
+          "t": 1790031139.9159427,
+          "mono": 128.90804671
+        },
+        {
+          "stage": "simplex_send",
+          "t": 1790031140.0264173,
+          "mono": 129.018521182
+        },
+        {
+          "stage": "simplex_event",
+          "t": 1790031140.2487626,
+          "mono": 129.240866606,
+          "kind": "chatItemsStatusesUpdated"
+        }
+      ],
+      "listener": [
+        {
+          "notification": "alice",
+          "t": 1790031132.5098562
+        },
+        {
+          "wake_start": "alice",
+          "t": 1790031132.5103073
+        },
+        {
+          "wake": "alice",
+          "t": 1790031133.6545737
+        }
+      ],
+      "sleeping": true,
+      "index": 3
+    },
+    {
+      "send": 1790031145.3874724,
+      "first": 1790031153.7451937,
+      "complete": 1790031153.7451937,
+      "first_seconds": 8.357721328735352,
+      "complete_seconds": 8.357721328735352,
+      "events": [
+        {
+          "t": 1790031153.7451937,
+          "kind": "newChatItems",
+          "item": 194,
+          "chars": 17
+        }
+      ],
+      "actor": [
+        {
+          "stage": "resume_gap",
+          "t": 1790031146.9839606,
+          "mono": 135.976086427,
+          "gap": 5.489606618881226
+        },
+        {
+          "stage": "actor_http_ready",
+          "t": 1790031147.0639455,
+          "mono": 136.056055335
+        },
+        {
+          "stage": "simplex_reconnect_start",
+          "t": 1790031147.0924482,
+          "mono": 136.084555015
+        },
+        {
+          "stage": "simplex_reconnect_done",
+          "t": 1790031147.0942454,
+          "mono": 136.086415114,
+          "command": "/_app suspend 0",
+          "ok": true
+        },
+        {
+          "stage": "simplex_reconnect_done",
+          "t": 1790031147.0956132,
+          "mono": 136.087719262,
+          "command": "/reconnect",
+          "ok": true
+        },
+        {
+          "stage": "simplex_reconnect_done",
+          "t": 1790031147.1989648,
+          "mono": 136.191072131,
+          "command": "/_app activate",
+          "ok": true
+        },
+        {
+          "stage": "simplex_event",
+          "t": 1790031152.0451696,
+          "mono": 141.037273891,
+          "kind": "subscriptionStatus"
+        },
+        {
+          "stage": "simplex_event",
+          "t": 1790031152.1143148,
+          "mono": 141.106418995,
+          "kind": "newChatItems"
+        },
+        {
+          "stage": "simplex_received",
+          "t": 1790031152.1145144,
+          "mono": 141.106618701,
+          "item": 19
+        },
+        {
+          "stage": "batch_flushed",
+          "t": 1790031152.1690357,
+          "mono": 141.161139845
+        },
+        {
+          "stage": "model_turn_start",
+          "t": 1790031152.3454838,
+          "mono": 141.337588137
+        },
+        {
+          "stage": "model_turn_end",
+          "t": 1790031153.0907736,
+          "mono": 142.082878208
+        },
+        {
+          "stage": "simplex_send",
+          "t": 1790031153.1834447,
+          "mono": 142.175548858
+        },
+        {
+          "stage": "simplex_event",
+          "t": 1790031153.5161414,
+          "mono": 142.508245492,
+          "kind": "chatItemsStatusesUpdated"
+        }
+      ],
+      "listener": [
+        {
+          "notification": "alice",
+          "t": 1790031146.084325
+        },
+        {
+          "wake_start": "alice",
+          "t": 1790031146.0848687
+        },
+        {
+          "wake": "alice",
+          "t": 1790031147.235782
+        }
+      ],
+      "sleeping": true,
+      "index": 4
+    }
+  ],
+  "sleep_actor_http_requests_by_harness": 0,
+  "prepare_simplex": false
+}
