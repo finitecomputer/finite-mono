@@ -1,0 +1,7 @@
+{
+  "passed": true,
+  "check": "Both actors suspended; messaging Alice woke only Alice, preserved her conversation, and left Bob suspended",
+  "seconds_from_send": 6.577,
+  "reply": "simplexproof7072ab1c1bff",
+  "actor_http_requests_by_harness": 0
+}

@@ -1,0 +1,26 @@
+{
+  "checks": [
+    {
+      "name": "alice real model chat through native Hermes WebSocket",
+      "passed": true,
+      "reply": "proof933d255fc12d"
+    },
+    {
+      "name": "bob real model chat through native Hermes WebSocket",
+      "passed": true,
+      "reply": "proofcdce66085a29"
+    },
+    {
+      "name": "alice URL wake and model conversation continuity",
+      "passed": true,
+      "reply": "proof933d255fc12d",
+      "seconds": 4.689
+    },
+    {
+      "name": "bob URL wake and model conversation continuity",
+      "passed": true,
+      "reply": "proofcdce66085a29",
+      "seconds": 4.501
+    }
+  ]
+}

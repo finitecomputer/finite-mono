@@ -1,0 +1,12 @@
+[
+  {
+    "user_id": "alice",
+    "agent_id": "alice-simplex",
+    "host": "alice.agents.test"
+  },
+  {
+    "user_id": "bob",
+    "agent_id": "bob-simplex",
+    "host": "bob.agents.test"
+  }
+]

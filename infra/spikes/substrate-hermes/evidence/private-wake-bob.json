@@ -1,0 +1,39 @@
+{
+  "checks": [
+    {
+      "name": "Real SimpleX contact connected",
+      "passed": true
+    },
+    {
+      "name": "Native Hermes pairing approval; no allow-all setting",
+      "passed": true
+    },
+    {
+      "name": "Shared listener has active notification-only subscription",
+      "passed": true,
+      "active": 2,
+      "received": 1,
+      "wakes": 1
+    },
+    {
+      "name": "Real model reply over SimpleX before sleep",
+      "passed": true,
+      "reply": "simplexproof377af9a26deb\n\nWelcome! /help shows my commands. If you'd like, I can put together a quick profile of you (how you like to work, what you're into) so I'm more useful later \u2014 totally optional, and you can skip or do it whenever."
+    },
+    {
+      "name": "SimpleX message automatically wakes suspended actor and preserves conversation",
+      "passed": true,
+      "cycle": 1,
+      "seconds": 11.178,
+      "reply": "simplexproof377af9a26deb"
+    },
+    {
+      "name": "SimpleX message automatically wakes suspended actor and preserves conversation",
+      "passed": true,
+      "cycle": 2,
+      "seconds": 21.688,
+      "reply": "simplexproof377af9a26deb"
+    }
+  ],
+  "wake_source": "SMP NMSG only; no test-harness actor HTTP wake"
+}

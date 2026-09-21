@@ -1,0 +1,47 @@
+{
+  "checks": [
+    {
+      "name": "Real SimpleX contact connected",
+      "passed": true
+    },
+    {
+      "name": "Native receive-queue rotation replaces shared notification registration",
+      "passed": true,
+      "before": {
+        "count": 2,
+        "digest": "19216ec0b6ff687a2f25eb5cca959e262e582c5bf816ee480e8fd3960f8695d6"
+      },
+      "after": {
+        "count": 2,
+        "digest": "70482bc59f37c948177fc54c88b3fd2e873f417b584f98b5a9578dd70bc65d10"
+      }
+    },
+    {
+      "name": "Shared listener has active notification-only subscription",
+      "passed": true,
+      "active": 3,
+      "received": 4,
+      "wakes": 4
+    },
+    {
+      "name": "Real model reply over SimpleX before sleep",
+      "passed": true,
+      "reply": "simplexproof7072ab1c1bff"
+    },
+    {
+      "name": "SimpleX message automatically wakes suspended actor and preserves conversation",
+      "passed": true,
+      "cycle": 1,
+      "seconds": 6.713,
+      "reply": "simplexproof7072ab1c1bff"
+    },
+    {
+      "name": "SimpleX message automatically wakes suspended actor and preserves conversation",
+      "passed": true,
+      "cycle": 2,
+      "seconds": 11.062,
+      "reply": "simplexproof7072ab1c1bff"
+    }
+  ],
+  "wake_source": "SMP NMSG only; no test-harness actor HTTP wake"
+}
