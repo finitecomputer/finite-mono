@@ -262,6 +262,26 @@ rebinding contract. The independent Recovery Authority must be able to obtain th
 backup and necessary decryption/bootstrap secrets after losing the source cluster.
 Templates contain credentials and belong in protected recovery storage, never logs.
 
+Substrate already persists actor UIDs, full actor protobufs (including volume
+bindings), templates and authorization state in its Postgres database. Prefer a
+coordinated provider-database/storage restore over introducing a Core copy of
+these bindings or a new per-agent rebinding API. On 2026-09-23, a private custom
+`pg_dump` of the local provider restored transactionally onto empty Postgres 18
+storage in a network-isolated container. Both named suspended proof actors
+retained byte-identical serialized state, UID and version. The database restored
+236 actors and 241 templates; there were zero authorization tuples in this local
+fixture, so it does not qualify recovery of populated authorization policy.
+Truncating the archive caused restore failure and left zero public tables.
+Evidence is in `provider-restore/` under the private local proof directory. This
+is only a metadata restore proof: no restored controller or runtime was started.
+Database role grants were excluded on the isolated target and remain a separate
+deployment-identity requirement.
+
+The existing two-owner test drops its isolated Core database on completion. A
+complete recovery drill must capture the coordinated Recovery Set inside that
+test lifetime, after fencing all selected writers; retained actor volumes from
+a completed run cannot establish recovery of the deleted Core authority.
+
 The next restore proof must fence the source writer, restore onto genuinely empty
 storage without reading the source, start exactly one writer, and exercise native
 history/files, SimpleX identity and owner isolation with the retained Core binding.
