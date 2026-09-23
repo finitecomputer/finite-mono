@@ -4,8 +4,8 @@
 //! tool call. `fbrain` uses the matching lease as a transport hint for the
 //! requester carried in the signed create request. The lease is not an
 //! authorization boundary: the Brain server independently classifies the
-//! signer and resolves a Managed Agent's account owner through operator
-//! authorities before accepting an Organization Brain requester.
+//! signer and admin standing. Requester provenance does not confer signing
+//! authority; the Sites assertion in v2 is not a Brain authorization credential.
 
 use std::fs::File;
 use std::io::Read as _;
@@ -18,8 +18,6 @@ use sha2::{Digest as _, Sha256};
 
 use crate::CliEnvironment;
 
-const REQUESTER_CONTEXT_DIR: &str = "requester-context-v1";
-const REQUESTER_CONTEXT_VERSION: u32 = 1;
 const MAX_CONTEXT_BYTES: u64 = 4096;
 
 #[derive(Debug, PartialEq, Eq)]
@@ -60,6 +58,10 @@ struct RequesterContext {
     platform: String,
     requesting_user_id: String,
     expires_at_unix: u64,
+    #[serde(default)]
+    owner_email: Option<String>,
+    #[serde(default)]
+    hosted_requester_assertion: Option<String>,
 }
 
 pub(crate) fn resolve(env: &CliEnvironment) -> Result<BrainCreationAuthority, String> {
@@ -90,8 +92,20 @@ fn resolve_at(
         .map(str::trim)
         .filter(|value| NostrPublicKey::parse(value).is_ok())
         .ok_or_else(missing_context)?;
-    let path = requester_context_path(finite_root, session_key);
-    let metadata = std::fs::symlink_metadata(&path).map_err(|_| missing_context())?;
+    // Native leases take precedence. Only absence permits the retained v1
+    // reader; a malformed, expired or unreadable v2 must not revive stale identity.
+    let mut path = requester_context_path(finite_root, session_key, 2);
+    let (metadata, version) = match std::fs::symlink_metadata(&path) {
+        Ok(metadata) => (metadata, 2),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            path = requester_context_path(finite_root, session_key, 1);
+            (
+                std::fs::symlink_metadata(&path).map_err(|_| missing_context())?,
+                1,
+            )
+        }
+        Err(_) => return Err(missing_context()),
+    };
     if !metadata.file_type().is_file() || metadata.len() > MAX_CONTEXT_BYTES {
         return Err(missing_context());
     }
@@ -103,15 +117,27 @@ fn resolve_at(
         return Err(missing_context());
     }
     let context: RequesterContext = serde_json::from_str(&bytes).map_err(|_| missing_context())?;
-    if context.version != REQUESTER_CONTEXT_VERSION
+    let valid_shape = match version {
+        1 => context.owner_email.is_none() && context.hosted_requester_assertion.is_none(),
+        2 => {
+            context
+                .owner_email
+                .as_ref()
+                .is_some_and(|value| !value.trim().is_empty())
+                && context
+                    .hosted_requester_assertion
+                    .as_ref()
+                    .is_some_and(|value| !value.trim().is_empty())
+        }
+        _ => false,
+    };
+    if !valid_shape
+        || context.version != version
         || context.platform != "finitechat"
         || context.session_key != session_key
         || context.requesting_user_id != user_id
         || context.expires_at_unix <= now
     {
-        if context.expires_at_unix <= now {
-            let _ = std::fs::remove_file(path);
-        }
         return Err(missing_context());
     }
     let requester = NostrPublicKey::parse(user_id)
@@ -133,10 +159,10 @@ fn finite_root(env: &CliEnvironment) -> PathBuf {
         .unwrap_or_else(|| env.cwd.join(".finite"))
 }
 
-fn requester_context_path(finite_root: &Path, session_key: &str) -> PathBuf {
+fn requester_context_path(finite_root: &Path, session_key: &str, version: u32) -> PathBuf {
     let digest = Sha256::digest(session_key.as_bytes());
     finite_root
-        .join(REQUESTER_CONTEXT_DIR)
+        .join(format!("requester-context-v{version}"))
         .join(format!("{digest:x}.json"))
 }
 
@@ -155,7 +181,7 @@ mod tests {
     }
 
     fn write_context(root: &Path, session_key: &str, user_id: &str, expires_at: u64) {
-        let path = requester_context_path(root, session_key);
+        let path = requester_context_path(root, session_key, 1);
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
         std::fs::write(
             path,
@@ -191,5 +217,49 @@ mod tests {
             BrainCreationAuthority::AuthenticatedRequester(_)
         ));
         assert!(resolve_at(&environment, root.path(), 101).is_err());
+    }
+    #[test]
+    fn native_lease_preserves_requester_and_never_falls_back_when_invalid() {
+        let root = tempfile::tempdir().unwrap();
+        let environment = environment("local", "native-turn", ALICE);
+        // A retained v1 lease must not mask an invalid native lease.
+        write_context(root.path(), "native-turn", ALICE, 1000);
+        let legacy = requester_context_path(root.path(), "native-turn", 1);
+        let native = root
+            .path()
+            .join("requester-context-v2")
+            .join(legacy.file_name().unwrap());
+        std::fs::create_dir_all(native.parent().unwrap()).unwrap();
+        let mut valid: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&legacy).unwrap()).unwrap();
+        valid["version"] = 2.into();
+        valid["owner_email"] = "owner@example.test".into();
+        valid["hosted_requester_assertion"] = "b2".repeat(32).into();
+        std::fs::remove_file(legacy).unwrap();
+        std::fs::write(&native, valid.to_string()).unwrap();
+        assert!(matches!(
+            resolve_at(&environment, root.path(), 100).unwrap(),
+            BrainCreationAuthority::AuthenticatedRequester(_)
+        ));
+        write_context(root.path(), "native-turn", ALICE, 1000);
+        for (field, bad) in [
+            ("session_key", serde_json::json!("other-turn")),
+            ("requesting_user_id", serde_json::json!("bb".repeat(32))),
+            ("expires_at_unix", serde_json::json!(100)),
+            ("version", serde_json::json!(1)),
+            ("owner_email", serde_json::Value::Null),
+            ("hosted_requester_assertion", serde_json::Value::Null),
+            ("unexpected", serde_json::json!(true)),
+        ] {
+            let mut invalid = valid.clone();
+            invalid[field] = bad;
+            std::fs::write(&native, invalid.to_string()).unwrap();
+            for _ in 0..2 {
+                assert!(
+                    resolve_at(&environment, root.path(), 100).is_err(),
+                    "accepted invalid {field}"
+                );
+            }
+        }
     }
 }

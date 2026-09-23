@@ -344,6 +344,14 @@ setup or retry. The native-user regression fails before/passes after this change
 TypeScript and targeted lint pass. This is not yet a live Brain-service approval
 proof.
 
+The Brain CLI now reads native v2 requester leases as well as retained v1 leases.
+A present invalid v2 lease rejects the request without consulting v1, including
+on repeated reads after expiry. The regression failed on the old reader; the
+full CLI suite passes (232 tests, two ignored), and Clippy passes. This change
+still needs qualification in a rebuilt runtime. Native requester issuance also
+currently depends on Sites availability; remove that dependency for Brain-only
+turns before claiming product parity.
+
 The native Sites handoff reuses the existing registry-issued assertion binding
 verified mailbox, human principal and exact agent. The dashboard obtains fresh
 context for each prompt through its owner-authorized Hermes access route. Hermes
