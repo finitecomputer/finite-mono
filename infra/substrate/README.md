@@ -18,11 +18,10 @@ pod, Finite worker registry, parallel lifecycle queue or credential-refresh daem
 The source-of-truth audit does not justify deleting the Core lease/journal fences:
 Substrate observations cannot authorize an owner stop reversal or change ownership.
 
-The operational cost is not limited to this Rust adapter. Six checked-in provider
-patches affect production behavior; the seventh is local CSI-only. The qualified
-cluster also retains spike-specific provider/egress changes. Stock managed egress
-does not yet satisfy SimpleX parity. Qualify a reproducible supported provider
-build and raw-TCP path before describing this as a low-operations replacement.
+The operational cost is not limited to this Rust adapter. Seven checked-in provider
+patches affect production behavior; one additional patch is local CSI-only. Its egress
+ConfigMap is upstream Envoy configuration, not a custom proxy. Pin that dataplane
+and qualify its raw-TCP policy and GKE support before production admission.
 
 Use the existing `FC_CORE_AGENT_CREATION_PLACEMENT_JSON` setting for staging
 admission and `FC_RUNNER_DRAIN` for capacity/drain. Existing placements stay on
@@ -160,10 +159,17 @@ There is no implicit allow-all policy.
 
 Upstream's [GA egress contract](https://github.com/agent-substrate/substrate/blob/6ec93a45/docs/egress-traffic.md)
 allows HTTP(S) but explicitly blocks WebSocket, forward-proxy CONNECT and other
-TCP. The local SimpleX proof depends on the custom non-MITM egress fixture;
-it does not establish SimpleX support in the stock managed installation. GKE
-qualification must retain and operate a supported raw-TCP path or resolve this
-upstream limitation before admitting agents with the promised transport parity.
+TCP, but the shipped Envoy implementation has a different present-day contract:
+its non-MITM gateway supports authenticated, policy-controlled TCP/TLS passthrough.
+The live `atenet-egress` ConfigMap's `envoy.yaml` and SDS configuration are
+byte-for-byte identical to `manifests/ate-install/atenet-egress.yaml` at both our
+pin and upstream `d277088b`. The installer exposes `--atenet-dataplane=envoy`
+(default Envoy); do not enable experimental sdsmint/MITM for this qualification.
+Upstream's e2e dataplane contract explicitly enables TLS passthrough policy on
+Envoy and disables it on AgentGateway. Therefore the local SimpleX evidence uses
+an upstream dataplane, not custom egress configuration or an extra proxy service.
+This does not settle the narrower GA support promise. Qualify this exact selection,
+CIDR policy and relay connectivity on GKE; changing dataplanes requires new proof.
 
 The base template requires CSI-backed `/data`, DATA suspension snapshots and
 COLD_BOOT resume. An empty durable-dir mount such as `/run/finite-checkpoint`
@@ -505,9 +511,22 @@ partition fencing, GKE CSI recovery, disk loss, or production recovery latency.
 
 ## Pinned provider dependencies
 
+Upstream audit on 2026-09-23 at `d277088b`: none of the first six production provider patches is
+incorporated unchanged. Patches 0002, 0005, 0006 and 0007 apply directly to that
+revision; 0001 and 0003 require rebasing around the readiness-to-wakeup-probe
+rename and router configuration changes. These are applicability checks, not
+compatibility tests or permission to update the deployment/protocol pin. Raw
+results are in `upstream-patch-audit.json` with the private local proof artifacts.
+The separate atelet cleanup fix is still absent at that revision. Its Linux
+before/after evidence is `atelet-readonly-before.log` and
+`atelet-readonly-after.log`. Capturing it adds no new behavior to the live cluster;
+it removes an undocumented build dependency.
+
 These are local qualification dependencies, not guarantees from an upstream
-release. The cluster also contains the original spike's atelet cleanup changes
-and custom egress fixture; repeat qualification against the intended release.
+release. Applying the seven provider patches to the pinned source reproduces
+every tracked source difference in the tested checkout, including the atelet
+cleanup fix. Its non-MITM egress configuration matches upstream; repeat qualification against
+the intended release and explicitly selected Envoy dataplane.
 
 | Patch | Contract and evidence |
 | --- | --- |
@@ -518,6 +537,7 @@ and custom egress fixture; repeat qualification against the intended release.
 | `0005-revert-interrupted-lifecycle.patch` | Permit Revert from RESUMING/SUSPENDING under the existing actor lease. State regressions and full control API suite pass; real bad-image recovery passes. |
 | `0006-skip-unused-golden-snapshots.patch` | Cold-boot templates never consume golden state. Skip unused warmup, which otherwise strands capacity on a bad image. Regression fails upstream/passes patched; full control API suite passes. Existing golden fixtures require explicit cleanup. |
 | `0007-replace-workers-after-ip-change.patch` | Locally qualified: drain a worker after pod IP drift, request graceful pod deletion with UID/resource-version preconditions, and retain its actor assignment until the existing pod-deletion reconcile runs. Requires controller pod-delete permission. Regression fails on the pinned upstream code and passes patched; controller suites, worker race tests and generated RBAC pass. Real CRI sandbox recreation, IP drift and two-owner recovery pass; whole-node restart also passes with retained local disks and Core outside the failure domain; partition and GKE fencing remain unqualified. |
+| `0008-reset-readonly-durable-directories.patch` | Captures the existing live atelet fix: use upstream `RemoveAllWritable` when resetting durable-dir mounts containing read-only skill directories. The Linux regression fails on the pin with `permission denied` and passes patched under `--cap-drop=ALL`; no extra privileges are granted. |
 
 Hermes's pinned stream-writer guard still allowed a cancelled late opener to
 supersede its replacement. `scripts/proofs/hermes-stream-writer.py` forces that
