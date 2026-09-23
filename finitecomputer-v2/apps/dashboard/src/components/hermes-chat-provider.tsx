@@ -7,6 +7,7 @@ import { attemptHostedChatSignIn, currentHostedChatReturnPath, isHostedChatSessi
 import { createHostedHermesWebSocket, readHostedHermesJson, setHostedHermesSessionArchived } from "@/lib/hosted-hermes-status";
 import { HOME_TOPIC_ID } from "@/lib/hosted-web-chat-topics";
 import { hermesAttachmentUrl, hermesMessageAttachments } from "@/lib/hermes-attachments";
+import { hermesBrainApprovals } from "@/lib/hermes-brain-approvals";
 import type { ReactNode } from "react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
@@ -206,7 +207,7 @@ export function HermesChatProvider({ children, machineId }: { children: ReactNod
       status: "ok",
       toast: null,
       messages: selected.chatId
-        ? (transcriptRef.current.get(selected.chatId) ?? []).map((message) =>
+        ? hermesBrainApprovals(transcriptRef.current.get(selected.chatId) ?? []).map((message) =>
             message.conversation_id === selectedTopicId
               ? message
               : { ...message, conversation_id: selectedTopicId }

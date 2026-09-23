@@ -63,6 +63,17 @@ test("native chat pages older history, archives, reconnects, and restores", { ti
     let expireClarify: ((requestId: string) => void) | undefined;
     let rejectClarify = true;
     const clarificationAnswers: string[] = [];
+    let brainApproved = false;
+    await page.route("**/api/brain/approvals/approve", route => {
+      assert.deepEqual(route.request().postDataJSON(), { brainId: "brain-1", requestId: "approval-1", payload: null });
+      brainApproved = true;
+      return route.fulfill({ json: { artifactId: "fixture-artifact" } });
+    });
+    await page.route("**/api/brain/approvals", route => route.fulfill({ json: { approvals: brainApproved ? [] : [{
+      id: "approval-1", brainId: "brain-1", brainName: "Native Brain",
+      action: "invite-commit", expiresAt: Math.floor(Date.now() / 1000) + 900,
+      requestedByNpub: "fixture", createdAt: "2026-09-22T00:00:00Z", payload: null,
+    }] } }));
     await page.route("**/api/chat/**", route => { legacyCalls++; return route.fulfill({ status: 503, json: {} }); });
     await page.route("**/api/agents/*/hermes-access", route => route.fulfill({ json: {
       baseUrl: "https://native.fixture.test/runtimes/agent/", accessToken: "synthetic", expiresAt: 100,
@@ -172,7 +183,7 @@ test("native chat pages older history, archives, reconnects, and restores", { ti
         const result = request.method === "projects.tree"
           ? { projects: [], scoped_session_ids: [] }
           : request.method === "session.resume"
-            ? { session_id: "handle-one", pending_approval: pendingApproval, pending_clarify: pendingClarify, ...(holdTurn ? { running: true, inflight: { user: "Start a long turn", assistant: heldAnswer, streaming: true, corrections, correction_offsets: corrections.map(() => Array.from(heldAnswer).length) } } : {}), ...(retainedFailure ? { inflight: { status: "error", error: "Model service unavailable", assistant: "Partial model reply", corrections: ["Correction before failure"], correction_offsets: [8] } } : {}), messages: [{ role: "assistant", text: "Durable reply" }, { role: "user", text: "An uploaded file\n@file:/data/agent/attachments/report.txt" }, ...(persistHeldUser ? [{ role: "user", text: "Start a long turn" }] : [])] }
+            ? { session_id: "handle-one", pending_approval: pendingApproval, pending_clarify: pendingClarify, ...(holdTurn ? { running: true, inflight: { user: "Start a long turn", assistant: heldAnswer, streaming: true, corrections, correction_offsets: corrections.map(() => Array.from(heldAnswer).length) } } : {}), ...(retainedFailure ? { inflight: { status: "error", error: "Model service unavailable", assistant: "Partial model reply", corrections: ["Correction before failure"], correction_offsets: [8] } } : {}), messages: [{ role: "tool", name: "terminal", text: "finite-brain-approval-filed brain=brain-1 request=approval-1" }, { role: "assistant", text: "Durable reply" }, { role: "user", text: "An uploaded file\n@file:/data/agent/attachments/report.txt" }, ...(persistHeldUser ? [{ role: "user", text: "Start a long turn" }] : [])] }
             : {};
         socket.send(JSON.stringify({ jsonrpc: "2.0", id: request.id, result }));
       });
@@ -184,6 +195,7 @@ test("native chat pages older history, archives, reconnects, and restores", { ti
       "native Home must be a valid target for the shared New chat control");
     await page.getByRole("button", { name: "Native history", exact: true }).click();
     await page.locator(".finite-chat__messages").getByText("Durable reply", { exact: true }).waitFor();
+    await page.getByRole("region", { name: "Brain actions" }).getByRole("button", { name: "Approve", exact: true }).waitFor();
     await page.getByRole("button", { name: "Native history", exact: true }).hover();
     await page.getByRole("button", { name: "Archive Native history", exact: true }).click();
     await page.getByRole("button", { name: "Archive", exact: true }).waitFor();
@@ -199,6 +211,7 @@ test("native chat pages older history, archives, reconnects, and restores", { ti
     assert.deepEqual(mutations, [true, false]);
     await page.getByRole("button", { name: "Native history", exact: true }).click();
     await page.locator(".finite-chat__messages").getByText("Durable reply", { exact: true }).waitFor();
+    await page.getByRole("region", { name: "Brain actions" }).getByRole("button", { name: "Approve", exact: true }).waitFor();
     if (process.env.FC_BROWSER_ARTIFACT_DIR) await page.screenshot({ path: `${process.env.FC_BROWSER_ARTIFACT_DIR}/native-chat-restored.png`, fullPage: true });
     const download = page.getByRole("link", { name: "report.txt", exact: true });
     await download.waitFor();
@@ -379,6 +392,18 @@ test("native chat pages older history, archives, reconnects, and restores", { ti
     rejectOlderPage = false;
     await page.reload();
     await page.getByRole("button", { name: "Native history", exact: true }).waitFor();
+    holdTurn = false;
+    await page.getByRole("button", { name: "Native history", exact: true }).click();
+    const brainCard = page.getByRole("region", { name: "Brain actions" });
+    await brainCard.getByRole("button", { name: "Approve", exact: true }).click();
+    await page.locator(".finite-chat__messages").getByText("Approved: invitation approval for Native Brain", { exact: true }).waitFor();
+    assert(brainApproved);
+    assert(prompts.includes("Approved: invitation approval for Native Brain"));
+    await page.reload();
+    await page.getByRole("button", { name: "Native history", exact: true }).click();
+    await brainCard.waitFor();
+    assert.equal(await brainCard.getByRole("button", { name: "Approve", exact: true }).count(), 0,
+      "a resolved server request cannot reopen through native history projection");
     assert.deepEqual(errors, []);
   } finally {
     await browser?.close();
