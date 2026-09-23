@@ -343,6 +343,83 @@ class FinitePlatformAdapterTests(unittest.TestCase):
                 broker.after_tool_call(**hook)
                 self.module._AUTHENTICATED_FINITE_TURN_USER.reset(token)
 
+    def test_requester_diagnostics_report_gate_without_requester_data(self):
+        session_context = cast(Any, sys.modules["gateway.session_context"])
+        session_key = "finitechat:private-room:private-thread"
+        user_id = "ab" * 32
+        session_context.values = {
+            "HERMES_SESSION_PLATFORM": "finitechat",
+            "HERMES_SESSION_KEY": session_key,
+            "HERMES_SESSION_USER_ID": user_id,
+        }
+        with (
+            tempfile.TemporaryDirectory() as finite_home,
+            patch.dict(os.environ, {"FINITECHAT_REQUESTER_DIAGNOSTICS": "1"}),
+            self.assertLogs(self.module.logger, level="INFO") as logs,
+        ):
+            broker = self.module._RequesterContextBroker(Path(finite_home) / "contexts")
+            hook = {"tool_name": "terminal", "tool_call_id": "private-call"}
+            broker.before_tool_call(**hook)
+            self.assertEqual(list(broker.root.glob("*.json")), [])
+            token = self.module._AUTHENTICATED_FINITE_TURN_USER.set(user_id)
+            try:
+                broker.before_tool_call(**hook)
+                self.assertEqual(len(list(broker.root.glob("*.json"))), 1)
+                broker.after_tool_call(**hook)
+                self.assertEqual(list(broker.root.glob("*.json")), [])
+            finally:
+                self.module._AUTHENTICATED_FINITE_TURN_USER.reset(token)
+
+        output = "\n".join(logs.output)
+        self.assertIn("stage=broker_created", output)
+        self.assertIn("stage=pre_tool gate=missing_turn", output)
+        self.assertIn("stage=pre_tool gate=accepted", output)
+        self.assertIn("stage=written", output)
+        self.assertIn("stage=removed", output)
+        for sensitive in (session_key, user_id, "private-call", finite_home):
+            self.assertNotIn(sensitive, output)
+
+    def test_requester_diagnostics_are_off_by_default(self):
+        with (
+            tempfile.TemporaryDirectory() as finite_home,
+            patch.dict(os.environ, {"FINITECHAT_REQUESTER_DIAGNOSTICS": ""}),
+            patch.object(self.module.logger, "info") as info,
+        ):
+            broker = self.module._RequesterContextBroker(Path(finite_home) / "contexts")
+            broker.before_tool_call(tool_name="terminal")
+        info.assert_not_called()
+
+    def test_requester_diagnostics_distinguish_rejections_without_changing_admission(self):
+        session_context = cast(Any, sys.modules["gateway.session_context"])
+        user_id = "ab" * 32
+        for platform, session_key, sender, marker, reason in (
+            ("telegram", "private-session", user_id, user_id, "foreign_platform"),
+            ("finitechat", "", user_id, user_id, "missing_session"),
+            ("finitechat", "private-session", "private-invalid-user", user_id, "invalid_user"),
+            ("finitechat", "private-session", user_id, None, "missing_turn"),
+            ("finitechat", "private-session", user_id, "cd" * 32, "sender_mismatch"),
+        ):
+            with (
+                self.subTest(reason=reason),
+                patch.dict(os.environ, {"FINITECHAT_REQUESTER_DIAGNOSTICS": "1"}),
+                self.assertLogs(self.module.logger, level="INFO") as logs,
+            ):
+                session_context.values = {
+                    "HERMES_SESSION_PLATFORM": platform,
+                    "HERMES_SESSION_KEY": session_key,
+                    "HERMES_SESSION_USER_ID": sender,
+                }
+                token = self.module._AUTHENTICATED_FINITE_TURN_USER.set(marker)
+                try:
+                    result = self.module._active_finite_session(diagnostic_stage="pre_tool")
+                finally:
+                    self.module._AUTHENTICATED_FINITE_TURN_USER.reset(token)
+                self.assertEqual(result, (None, None))
+            output = "\n".join(logs.output)
+            self.assertIn(f"stage=pre_tool gate={reason}", output)
+            for sensitive in ("private-session", "private-invalid-user", user_id, "cd" * 32):
+                self.assertNotIn(sensitive, output)
+
     def test_terminal_hook_writes_additive_v2_verified_mailbox_lease(self):
         with tempfile.TemporaryDirectory() as finite_home:
             broker = self.module._RequesterContextBroker(Path(finite_home) / "requester-context-v1")
