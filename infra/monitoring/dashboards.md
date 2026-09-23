@@ -8,10 +8,13 @@ in both PR CI and the deployment workflow.
 
 Merges to `main` touching `infra/monitoring/` or the deployment workflow queue
 `.github/workflows/monitoring-dashboards.yml`. It validates the merged revision,
-then waits for the existing `production` environment reviewer approval. After
-approval it deploys without a separate shell command or Grafana restart.
+then deploys through the GitHub `production` environment without a separate
+shell command or Grafana restart. The environment currently has no required
+reviewers, so merging can deploy dashboards automatically after validation.
 Manual dispatch on `main` retries this workflow; other branches do not run.
-The environment permits `main` and `production`, with its existing reviewers.
+The environment permits `main` and `production`. Check its current protection
+rules before relying on an approval gate; naming an environment in the workflow
+does not itself require approval.
 
 ## Restricted CI access
 
@@ -60,7 +63,7 @@ secret API/UI; never commit it or print it. Obtain host pins through existing
 strictly verified SSH connections or an independent trusted channel. Each run
 fails before dashboard mutation if host trust, key access, helper version, or
 status collection is invalid. The restricted key should be tested against both
-hosts before approving the first Actions deployment.
+hosts before the first Actions deployment.
 
 Re-run the installer with the existing public key after reviewed changes to
 `deploy_dashboards.py`, `ci_dispatch`, or the installed status implementation.
