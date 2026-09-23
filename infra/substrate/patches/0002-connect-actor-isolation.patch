@@ -1,0 +1,29 @@
+diff --git a/cmd/atenet/internal/router/xds.go b/cmd/atenet/internal/router/xds.go
+index 0bac1bd..b5be345 100644
+--- a/cmd/atenet/internal/router/xds.go
++++ b/cmd/atenet/internal/router/xds.go
+@@ -931,7 +931,9 @@ func actorRoutingFilterStateFilter(captureAuthority bool) *hcmv3.HttpFilter {
+ 			Key: &setfilterstatecommonv3.FilterStateValue_ObjectKey{
+ 				ObjectKey: routingField.key,
+ 			},
+-			FactoryKey: "envoy.string",
++			// Shared routing state must partition the internal connection pool.
++			// Plain strings can reuse a pool carrying another actor or port.
++			FactoryKey: "envoy.hashable_string",
+ 			Value: &setfilterstatecommonv3.FilterStateValue_FormatString{
+ 				FormatString: &corev3.SubstitutionFormatString{
+ 					Format: &corev3.SubstitutionFormatString_TextFormatSource{
+diff --git a/cmd/atenet/internal/router/xds_test.go b/cmd/atenet/internal/router/xds_test.go
+index fe83329..7491110 100644
+--- a/cmd/atenet/internal/router/xds_test.go
++++ b/cmd/atenet/internal/router/xds_test.go
+@@ -85,6 +85,9 @@ func TestActorRoutingFilterStateFilter(t *testing.T) {
+ 			}
+ 			for _, value := range config.GetOnRequestHeaders() {
+ 				key := value.GetObjectKey()
++				if value.GetFactoryKey() != "envoy.hashable_string" {
++					t.Errorf("routing state %q must partition upstream pools", key)
++				}
+ 				format := value.GetFormatString().GetTextFormatSource().GetInlineString()
+ 				if format != tc.want[key] {
+ 					t.Errorf("capture %q = %q, want %q", key, format, tc.want[key])

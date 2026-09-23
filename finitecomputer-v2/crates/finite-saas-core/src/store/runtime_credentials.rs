@@ -358,6 +358,21 @@ pub(super) async fn authenticated<C: GenericClient + Sync>(
     client: &C,
     secret: &str,
 ) -> CoreResult<Option<AuthenticatedRuntime>> {
+    authenticated_assignment(client, secret, false).await
+}
+
+pub(super) async fn authenticated_for_boot<C: GenericClient + Sync>(
+    client: &C,
+    secret: &str,
+) -> CoreResult<Option<AuthenticatedRuntime>> {
+    authenticated_assignment(client, secret, true).await
+}
+
+async fn authenticated_assignment<C: GenericClient + Sync>(
+    client: &C,
+    secret: &str,
+    allow_control_boot: bool,
+) -> CoreResult<Option<AuthenticatedRuntime>> {
     let row = client.query_opt(
         "SELECT r.id,r.project_id,q.id,q.status,q.lease_token,c.lease_sha256 FROM runtime_core_credentials c
          JOIN agent_runtimes r ON r.id=c.agent_runtime_id
@@ -369,8 +384,14 @@ pub(super) async fn authenticated<C: GenericClient + Sync>(
            AND EXISTS(SELECT 1 FROM project_runtime_links l WHERE l.project_id=r.project_id AND l.agent_runtime_id=r.id AND l.active)
            AND ((q.status='launching' AND q.lease_expires_at>clock_timestamp()
                  AND q.lease_token IS NOT NULL)
-                OR (q.status='running' AND c.activated))",
-        &[&digest(secret)],
+                OR (q.status='running' AND (c.activated OR ($2 AND EXISTS(
+                    SELECT 1 FROM runtime_control_requests b
+                    WHERE b.agent_runtime_id=r.id AND b.project_id=r.project_id
+                      AND b.source_host_id=r.source_host_id AND b.source_machine_id=r.source_machine_id
+                      AND b.kind IN ('restart','upgrade') AND b.status='launching'
+                      AND b.runner_id IS NOT NULL AND b.lease_token IS NOT NULL
+                      AND b.lease_expires_at>clock_timestamp())))))",
+        &[&digest(secret), &allow_control_boot],
     ).await.map_err(store_error)?;
     let Some(row) = row else {
         return Ok(None);

@@ -1,3 +1,7 @@
+#[cfg(unix)]
+mod bootstrap;
+#[cfg(unix)]
+pub use bootstrap::bootstrap;
 mod config;
 mod connections;
 mod daemon;

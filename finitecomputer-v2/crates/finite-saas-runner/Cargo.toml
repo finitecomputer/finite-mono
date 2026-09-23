@@ -4,6 +4,10 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
+axum.workspace = true
+tower-http = { version = "0.6", features = ["cors"] }
+hyper.workspace = true
+hyper-util.workspace = true
 aes-gcm = "0.10"
 anyhow = "1.0"
 clap = { version = "4.5", features = ["derive"] }
@@ -25,6 +29,16 @@ x25519-dalek = { version = "2", features = ["static_secrets"] }
 zeroize = "1"
 zip.workspace = true
 
+prost = "0.14"
+prost-types = "0.14"
+tokio.workspace = true
+tonic = { version = "0.14", features = ["tls-ring", "tls-native-roots"] }
+tonic-prost = "0.14"
+
+[build-dependencies]
+tonic-prost-build = "0.14"
+
 [dev-dependencies]
+tower.workspace = true
 rusqlite.workspace = true
 tempfile.workspace = true

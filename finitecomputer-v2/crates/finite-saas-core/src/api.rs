@@ -394,6 +394,10 @@ fn router_from_state(state: CoreApiState) -> Router {
             post(lease_agent_creation_request),
         )
         .route(
+            "/api/core/v1/runtimes/{runtime_id}/recover",
+            post(request_runtime_recovery),
+        )
+        .route(
             "/api/core/v1/runtime-control-requests/lease",
             post(lease_runtime_control_request),
         )

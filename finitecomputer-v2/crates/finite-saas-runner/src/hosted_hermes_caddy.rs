@@ -194,7 +194,9 @@ impl HostedHermesRouteManifest {
     }
 }
 
-fn validate_browser_origins(values: &[String]) -> Result<BTreeSet<String>, InvalidManifest> {
+pub(crate) fn validate_browser_origins(
+    values: &[String],
+) -> Result<BTreeSet<String>, InvalidManifest> {
     if values.len() > 32 {
         return Err(InvalidManifest("too many browser origins"));
     }

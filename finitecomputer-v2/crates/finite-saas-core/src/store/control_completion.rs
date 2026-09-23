@@ -234,7 +234,23 @@ where
             let state_schema_version = facts.state_schema_version.clone();
             let runtime_host = facts.runtime_host.clone();
             let published_app_urls = facts.published_app_urls.clone();
-            let contact_endpoint = runtime_upgrade_contact_endpoint(&published_app_urls)?;
+            let contact_endpoint = if runtime.placement.map(|placement| placement.runner_class)
+                == Some(crate::RunnerClass::Substrate)
+            {
+                // Substrate keeps the actor route across image changes. Its
+                // internal contact endpoint is not a published application URL.
+                if runtime_host != runtime.host_facts.runtime_host
+                    || published_app_urls != runtime.host_facts.published_app_urls
+                {
+                    return Err(CoreError::RuntimeUpgradeCompletionMismatch);
+                }
+                runtime
+                    .contact_endpoint
+                    .clone()
+                    .ok_or(CoreError::RuntimeUpgradeCompletionMismatch)?
+            } else {
+                runtime_upgrade_contact_endpoint(&published_app_urls)?
+            };
             if reported_id != target.id || state_schema_version != target.state_schema_version {
                 return Err(CoreError::RuntimeUpgradeCompletionMismatch);
             }

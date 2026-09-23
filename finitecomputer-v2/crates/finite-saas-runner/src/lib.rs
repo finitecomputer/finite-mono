@@ -39,6 +39,7 @@ pub mod lifecycle_probe;
 pub mod phala;
 mod phala_inventory;
 pub mod retirement;
+pub mod substrate;
 
 pub use apple_container::{AppleContainerConfig, AppleContainerLaunchPlan, AppleContainerLauncher};
 pub use health_reports::{HealthReportConfig, HealthReportState};
@@ -91,6 +92,7 @@ pub(crate) fn state_preserving_runtime_capabilities(
     runtime_upgrade: bool,
 ) -> RuntimeCapabilitiesEnvelope {
     RuntimeCapabilitiesEnvelope::V1(RuntimeCapabilitiesV1 {
+        native_hermes_chat: false,
         restart: true,
         recover_known_good_chat: false,
         runtime_upgrade,
@@ -108,6 +110,7 @@ pub(crate) fn kata_runtime_capabilities_with_retirement(
     runtime_retirement: bool,
 ) -> RuntimeCapabilitiesEnvelope {
     RuntimeCapabilitiesEnvelope::V1(RuntimeCapabilitiesV1 {
+        native_hermes_chat: false,
         restart: true,
         recover_known_good_chat: true,
         runtime_upgrade: true,
@@ -261,6 +264,8 @@ pub enum RunnerError {
     CoreJson(String),
     #[error("runtime launch failed: {0}")]
     RuntimeLaunch(String),
+    #[error("runtime launch remains pending: {0}")]
+    RuntimeLaunchPending(String),
     /// A Kata plan was requested for a runtime whose lease carries no
     /// Core-bound `durable_state_id`. The durable state root is derived from
     /// that id only; a machine-named root is never derived as a fallback.
@@ -605,6 +610,23 @@ where
         )? {
             return self.run_runtime_control(lease, lease_token);
         }
+        // Existing owner controls take priority over provider inventory. Only
+        // recheck the queue when Core admitted a newly observed recovery.
+        match self.launcher.enqueue_recovery(&mut self.queue) {
+            Ok(true) => {
+                if let Some(lease) = self.queue.lease_runtime_control(
+                    &self.runner_id,
+                    &lease_token,
+                    self.lease_seconds,
+                    source_host_id.as_deref(),
+                    Some(&runner_capacity),
+                )? {
+                    return self.run_runtime_control(lease, lease_token);
+                }
+            }
+            Ok(false) => {}
+            Err(error) => eprintln!("runtime recovery observation failed: {error}"),
+        }
         if let Some(reason) = runner_capacity.agent_creation_rejection_reason() {
             return Ok(RunOnceOutcome::CapacityUnavailable {
                 reason: reason.to_string(),
@@ -624,7 +646,10 @@ where
         let request_id = lease.request.id.clone();
         let launch_options = match self.runtime_launch_options(&lease, &lease_token) {
             Ok(options) => options,
-            Err(error @ RunnerError::RuntimeBootstrapUnavailable) => return Err(error),
+            Err(
+                error @ (RunnerError::RuntimeBootstrapUnavailable
+                | RunnerError::RuntimeLaunchPending(_)),
+            ) => return Err(error),
             Err(error) => {
                 let failure_message = error.to_string();
                 self.queue.fail_agent_creation(
@@ -729,6 +754,9 @@ where
                         runtime_id: completed.request.agent_runtime_id,
                     }),
                     Err(error) => {
+                        if self.launcher.reconciles_interrupted_launch() {
+                            return Err(RunnerError::RuntimeLaunchPending(error.to_string()));
+                        }
                         let failure_message = error.to_string();
                         let cleanup_error = self.launcher.cleanup_failed_launch(&facts).err();
                         self.queue.fail_agent_creation(
@@ -754,6 +782,7 @@ where
                     }
                 }
             }
+            Err(error @ RunnerError::RuntimeLaunchPending(_)) => Err(error),
             Err(error) => {
                 let failure_message = error.to_string();
                 self.queue.fail_agent_creation(
@@ -928,6 +957,9 @@ where
         // Fail before touching the guest; an old/unavailable Core leaves the
         // lease retryable. Restart/recovery preserve the installed environment.
         if kind == RuntimeControlKind::Upgrade
+            // Substrate agents are enrolled at creation; their immutable
+            // template retains the existing assignment credential.
+            && self.launcher.runner_class() != RunnerClass::Substrate
             && let Some(url) = self.runtime_core_url.as_ref()
         {
             if self.launcher.runner_class() != RunnerClass::Kata {
@@ -1143,6 +1175,10 @@ where
                 "RuntimeSpec omitted the Finite Private secret reference".to_string(),
             ));
         }
+        if let Some(key) = self.launcher.existing_inference_key(lease, &options)? {
+            options.finite_private = Some(key);
+            return Ok(options);
+        }
         if let Some(raw_api_key) = defaults
             .api_key_override
             .as_deref()
@@ -1286,6 +1322,12 @@ pub trait AgentCreationQueue {
         input: RuntimeHealthReportRequest,
     ) -> Result<RuntimeHealthReportAck, RunnerError>;
 
+    fn request_runtime_recovery(&mut self, _runtime_id: &str) -> Result<bool, RunnerError> {
+        Err(RunnerError::CoreRequest(
+            "runtime recovery admission is unavailable".into(),
+        ))
+    }
+
     /// Core's host-scoped list of the runtimes this runner polls for standing
     /// health, fetched every cycle. `Ok(None)` means the queue cannot list
     /// (an older Core, or a test double), which turns reporting off for the
@@ -1337,6 +1379,12 @@ where
 }
 
 pub trait RuntimeLauncher {
+    fn enqueue_recovery(
+        &mut self,
+        _queue: &mut dyn AgentCreationQueue,
+    ) -> Result<bool, RunnerError> {
+        Ok(false)
+    }
     fn validate_ready(&self) -> Result<(), RunnerError>;
     fn runtime_capabilities(&self) -> RuntimeCapabilitiesEnvelope;
     fn runner_class(&self) -> RunnerClass {
@@ -1410,6 +1458,16 @@ pub trait RuntimeLauncher {
     ) -> Result<RuntimeLaunchFacts, RunnerError> {
         self.launch(lease, options)
     }
+    fn existing_inference_key(
+        &self,
+        _lease: &AgentCreationLease,
+        _options: &RuntimeLaunchOptions,
+    ) -> Result<Option<FinitePrivateLaunchKey>, RunnerError> {
+        Ok(None)
+    }
+    fn reconciles_interrupted_launch(&self) -> bool {
+        false
+    }
     fn cleanup_failed_launch(&mut self, _facts: &RuntimeLaunchFacts) -> Result<(), RunnerError> {
         Ok(())
     }
@@ -1419,6 +1477,23 @@ impl<L> RuntimeLauncher for Box<L>
 where
     L: RuntimeLauncher + ?Sized,
 {
+    fn enqueue_recovery(
+        &mut self,
+        queue: &mut dyn AgentCreationQueue,
+    ) -> Result<bool, RunnerError> {
+        (**self).enqueue_recovery(queue)
+    }
+    fn existing_inference_key(
+        &self,
+        lease: &AgentCreationLease,
+        options: &RuntimeLaunchOptions,
+    ) -> Result<Option<FinitePrivateLaunchKey>, RunnerError> {
+        (**self).existing_inference_key(lease, options)
+    }
+    fn reconciles_interrupted_launch(&self) -> bool {
+        (**self).reconciles_interrupted_launch()
+    }
+
     fn validate_ready(&self) -> Result<(), RunnerError> {
         (**self).validate_ready()
     }
@@ -1776,7 +1851,10 @@ fn validate_runtime_spec_contract(
     let expected_resource_class = match runner_class {
         RunnerClass::Kata => Some(RuntimeResourceClass::Vcpu4Memory8Gib),
         RunnerClass::Phala => Some(RuntimeResourceClass::Vcpu2Memory4Gib),
-        RunnerClass::LocalDocker | RunnerClass::AppleContainer | RunnerClass::Enclavia => None,
+        RunnerClass::LocalDocker
+        | RunnerClass::AppleContainer
+        | RunnerClass::Enclavia
+        | RunnerClass::Substrate => None,
     };
     if spec.placement.runner_class != runner_class
         || expected_resource_class
@@ -2122,6 +2200,7 @@ fn reserved_runtime_environment_key(key: &str) -> bool {
         "FINITE_SERVER_URL"
             | "FINITE_CORE_URL"
             | "FINITE_CORE_CREDENTIAL"
+            | "FINITE_BOOTSTRAP_ENV_JSON"
             | "FINITECHAT_SERVER_URL"
             | "FINITE_AGENT_BOOT_INTENT_JSON"
             | "FINITE_AGENT_STATE_ROOT"
@@ -2447,6 +2526,14 @@ impl AgentCreationQueue for CoreHttpAgentCreationQueue {
             &format!("/api/core/v1/agent-creation-requests/{}/fail", request_id),
             &input,
         )
+    }
+
+    fn request_runtime_recovery(&mut self, runtime_id: &str) -> Result<bool, RunnerError> {
+        let request: Option<RuntimeControlRequest> = self.post_json(
+            &format!("/api/core/v1/runtimes/{runtime_id}/recover"),
+            &serde_json::json!({}),
+        )?;
+        Ok(request.is_some())
     }
 
     fn report_runtime_health(
@@ -4524,6 +4611,32 @@ mod tests {
     }
 
     #[test]
+    fn run_once_executes_newly_admitted_recovery_during_drain() {
+        let mut queue = FakeQueue::idle();
+        let mut recovery = sample_runtime_control_lease("runtime_ctl_recovery");
+        recovery.request.requested_by_user_id = None;
+        queue.observed_recovery = Some(recovery);
+        let mut launcher = FakeLauncher::ready(RuntimeLaunchFacts::sample());
+        launcher.runner_capacity.draining = true;
+        let mut runner = AgentCreationRunner::new(
+            queue,
+            launcher,
+            FixedLeaseTokens::new(["lease-1"]),
+            "runner-1",
+            300,
+        )
+        .unwrap();
+        assert!(matches!(
+            runner.run_once().unwrap(),
+            RunOnceOutcome::RuntimeRestarted { .. }
+        ));
+        assert_eq!(runner.launcher.recovery_observations, 1);
+        assert_eq!(runner.queue.runtime_control_leases.len(), 2);
+        assert_eq!(runner.queue.completed_runtime_control.len(), 1);
+        assert_eq!(runner.launcher.launch_count, 0);
+    }
+
+    #[test]
     fn run_once_stops_runtime_control_request_without_waiting_for_heartbeat() {
         let runtime_control =
             sample_runtime_control_lease_with_kind("runtime_ctl_123", RuntimeControlKind::Stop);
@@ -4546,6 +4659,7 @@ mod tests {
             }
         );
         assert_eq!(runner.launcher.stopped, vec!["oslo-agent-001".to_string()]);
+        assert_eq!(runner.launcher.recovery_observations, 0);
         assert_eq!(runner.queue.completed_runtime_control.len(), 1);
         assert_eq!(
             runner.queue.completed_runtime_control[0].runtime_capabilities, None,
@@ -5533,6 +5647,73 @@ mod tests {
     }
 
     #[test]
+    fn interrupted_launch_keeps_creation_and_installed_key_for_reconciliation() {
+        struct InterruptedLauncher;
+        impl RuntimeLauncher for InterruptedLauncher {
+            fn validate_ready(&self) -> Result<(), RunnerError> {
+                Ok(())
+            }
+            fn runtime_capabilities(&self) -> RuntimeCapabilitiesEnvelope {
+                state_preserving_runtime_capabilities(false)
+            }
+            fn runner_capacity(&self) -> RunnerLeaseCapacity {
+                RunnerLeaseCapacity {
+                    runner_classes: vec![RunnerClass::LocalDocker],
+                    ..Default::default()
+                }
+            }
+            fn existing_inference_key(
+                &self,
+                _: &AgentCreationLease,
+                _: &RuntimeLaunchOptions,
+            ) -> Result<Option<FinitePrivateLaunchKey>, RunnerError> {
+                Ok(Some(FinitePrivateLaunchKey {
+                    api_key_id: "installed-key".into(),
+                    raw_api_key: "synthetic-installed-key".into(),
+                    base_url: "https://inference.test".into(),
+                    model: "model".into(),
+                    revoke_on_launch_failure: false,
+                }))
+            }
+            fn launch(
+                &mut self,
+                _: &AgentCreationLease,
+                options: &RuntimeLaunchOptions,
+            ) -> Result<RuntimeLaunchFacts, RunnerError> {
+                assert_eq!(
+                    options.finite_private.as_ref().unwrap().raw_api_key,
+                    "synthetic-installed-key"
+                );
+                Err(RunnerError::RuntimeLaunchPending(
+                    "lost provider response".into(),
+                ))
+            }
+        }
+        let mut runner = AgentCreationRunner::new(
+            FakeQueue::with_lease(sample_lease("agent_request_123")),
+            InterruptedLauncher,
+            FixedLeaseTokens::new(["lease-1"]),
+            "runner-1",
+            300,
+        )
+        .unwrap()
+        .with_default_finite_private_inference(finite_private_defaults());
+        assert!(matches!(
+            runner.run_once(),
+            Err(RunnerError::RuntimeLaunchPending(_))
+        ));
+        assert!(
+            runner.queue.provisioned.is_empty(),
+            "must not mint an unused replacement key"
+        );
+        assert!(
+            runner.queue.failed.is_empty(),
+            "must not terminally fail or revoke an adopted actor's credentials"
+        );
+        assert!(runner.queue.registered.is_empty());
+    }
+
+    #[test]
     fn run_once_revokes_default_finite_private_key_when_launch_fails() {
         let lease = sample_lease("agent_request_123");
         let mut runner = AgentCreationRunner::new(
@@ -6343,6 +6524,7 @@ mod tests {
     struct FakeQueue {
         next_lease: Option<AgentCreationLease>,
         next_runtime_control_lease: Option<RuntimeControlLease>,
+        observed_recovery: Option<RuntimeControlLease>,
         provision_error: Option<String>,
         leases: Vec<(String, String, i64)>,
         lease_capacities: Vec<Option<RunnerLeaseCapacity>>,
@@ -6365,6 +6547,7 @@ mod tests {
             Self {
                 next_lease: None,
                 next_runtime_control_lease: None,
+                observed_recovery: None,
                 provision_error: None,
                 leases: Vec::new(),
                 lease_capacities: Vec::new(),
@@ -6387,6 +6570,7 @@ mod tests {
             Self {
                 next_lease: Some(lease),
                 next_runtime_control_lease: None,
+                observed_recovery: None,
                 provision_error: None,
                 leases: Vec::new(),
                 lease_capacities: Vec::new(),
@@ -6409,6 +6593,7 @@ mod tests {
             Self {
                 next_lease: None,
                 next_runtime_control_lease: Some(lease),
+                observed_recovery: None,
                 provision_error: None,
                 leases: Vec::new(),
                 lease_capacities: Vec::new(),
@@ -6434,6 +6619,14 @@ mod tests {
     }
 
     impl AgentCreationQueue for FakeQueue {
+        fn request_runtime_recovery(&mut self, _runtime_id: &str) -> Result<bool, RunnerError> {
+            let Some(recovery) = self.observed_recovery.take() else {
+                return Ok(false);
+            };
+            self.next_runtime_control_lease = Some(recovery);
+            Ok(true)
+        }
+
         fn lease_runtime_control(
             &mut self,
             runner_id: &str,
@@ -6572,6 +6765,7 @@ mod tests {
 
     #[derive(Debug)]
     struct FakeLauncher {
+        recovery_observations: usize,
         ready_error: Option<String>,
         launch_result: Result<RuntimeLaunchFacts, String>,
         restart_result: Result<(), String>,
@@ -6593,6 +6787,7 @@ mod tests {
     impl FakeLauncher {
         fn ready(facts: RuntimeLaunchFacts) -> Self {
             Self {
+                recovery_observations: 0,
                 ready_error: None,
                 launch_result: Ok(facts),
                 restart_result: Ok(()),
@@ -6620,6 +6815,7 @@ mod tests {
 
         fn not_ready(message: &str) -> Self {
             Self {
+                recovery_observations: 0,
                 ready_error: Some(message.to_string()),
                 launch_result: Ok(RuntimeLaunchFacts::sample()),
                 restart_result: Ok(()),
@@ -6647,6 +6843,7 @@ mod tests {
 
         fn launch_error(message: &str) -> Self {
             Self {
+                recovery_observations: 0,
                 ready_error: None,
                 launch_result: Err(message.to_string()),
                 restart_result: Ok(()),
@@ -6698,6 +6895,14 @@ mod tests {
     }
 
     impl RuntimeLauncher for FakeLauncher {
+        fn enqueue_recovery(
+            &mut self,
+            queue: &mut dyn AgentCreationQueue,
+        ) -> Result<bool, RunnerError> {
+            self.recovery_observations += 1;
+            queue.request_runtime_recovery("runtime_123")
+        }
+
         fn validate_ready(&self) -> Result<(), RunnerError> {
             if let Some(message) = &self.ready_error {
                 return Err(RunnerError::RuntimeLaunch(message.clone()));
@@ -6924,7 +7129,8 @@ mod tests {
                     RunnerClass::LocalDocker
                     | RunnerClass::AppleContainer
                     | RunnerClass::Kata
-                    | RunnerClass::Enclavia => RuntimeResourceClass::Vcpu4Memory8Gib,
+                    | RunnerClass::Enclavia
+                    | RunnerClass::Substrate => RuntimeResourceClass::Vcpu4Memory8Gib,
                 },
             },
             runtime_artifact_id: "artifact-v1".to_string(),
@@ -7010,7 +7216,7 @@ mod tests {
                 agent_runtime_id: "runtime_123".to_string(),
                 source_host_id: "oslo-host-1".to_string(),
                 source_machine_id: "oslo-agent-001".to_string(),
-                requested_by_user_id: "user_123".to_string(),
+                requested_by_user_id: Some("user_123".to_string()),
                 kind,
                 target_runtime_artifact_id: None,
                 status: RuntimeControlRequestStatus::Launching,

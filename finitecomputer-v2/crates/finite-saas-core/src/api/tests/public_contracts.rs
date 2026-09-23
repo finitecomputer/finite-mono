@@ -136,7 +136,7 @@ fn runtime_control_request_view_redacts_runner_lease_fields() {
         agent_runtime_id: "runtime_123".to_string(),
         source_host_id: "oslo-host-1".to_string(),
         source_machine_id: "oslo-agent-001".to_string(),
-        requested_by_user_id: "user_123".to_string(),
+        requested_by_user_id: Some("user_123".to_string()),
         kind: crate::RuntimeControlKind::Destroy,
         target_runtime_artifact_id: None,
         status: crate::RuntimeControlRequestStatus::Launching,

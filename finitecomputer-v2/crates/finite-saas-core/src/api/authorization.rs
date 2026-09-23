@@ -89,6 +89,7 @@ pub(super) fn authorize_runner_capacity(
 
 pub(super) fn legacy_kata_runtime_capabilities() -> RuntimeCapabilitiesEnvelope {
     RuntimeCapabilitiesEnvelope::V1(RuntimeCapabilitiesV1 {
+        native_hermes_chat: false,
         restart: true,
         recover_known_good_chat: false,
         runtime_upgrade: true,

@@ -215,7 +215,7 @@ pub async fn run_daemon(config: DaemonConfig) -> Result<(), AgentdError> {
         sidecar_spec(&config),
         health_spec(&config),
         hermes_spec(&config),
-        simplex_spec(&config),
+        simplex_spec(&config).into_iter().chain(desktop_specs()),
     );
     let hosted_hermes = crate::hosted_hermes::HostedHermesHandle::start(&config.hermes_home)?;
     spawn_status_writer(
@@ -848,6 +848,30 @@ fn simplex_spec(config: &DaemonConfig) -> Option<ProcessSpec> {
             ),
         ]),
     })
+}
+
+// Uses the same restart/shutdown supervisor as chat. No desktop port is
+// published: screenshots and input happen inside the agent's display session.
+fn desktop_specs() -> Vec<ProcessSpec> {
+    if std::env::var("FINITE_DESKTOP_ENABLED").as_deref() != Ok("1") {
+        return Vec::new();
+    }
+    [
+        (
+            "desktop-display",
+            "/usr/bin/Xvfb",
+            vec![":99", "-screen", "0", "1280x800x24", "-nolisten", "tcp"],
+        ),
+        ("desktop-window-manager", "/usr/bin/openbox", vec![]),
+    ]
+    .into_iter()
+    .map(|(name, program, args)| ProcessSpec {
+        name,
+        program: program.into(),
+        args: args.into_iter().map(str::to_owned).collect(),
+        environment: BTreeMap::from([("DISPLAY".into(), ":99".into())]),
+    })
+    .collect()
 }
 
 fn health_spec(config: &DaemonConfig) -> ProcessSpec {

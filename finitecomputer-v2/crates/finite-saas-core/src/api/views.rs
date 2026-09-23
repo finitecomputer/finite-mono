@@ -106,6 +106,10 @@ pub struct PublicAgentRuntime {
     /// Additive: the standing readiness `runtime_status` derives from.
     #[serde(default)]
     pub runtime_health: Option<PublicRuntimeHealth>,
+    /// Core's chat rollout policy. Clients consume this explicit product fact,
+    /// never provider handles or placement. Retained agents keep Finite Chat.
+    #[serde(default)]
+    pub native_hermes_chat: bool,
     pub hermes_available: Option<bool>,
     /// Populated only from Core's persisted, versioned Runtime capability
     /// record. N-1 rows remain absent and Dashboard fails closed.
@@ -128,6 +132,10 @@ impl PublicAgentRuntime {
             .runtime_capabilities
             .as_ref()
             .map(PublicRuntimeCapabilities::from);
+        let native_hermes_chat = runtime
+            .runtime_capabilities
+            .as_ref()
+            .is_some_and(|capabilities| capabilities.v1().native_hermes_chat);
         let lifecycle_status = runtime.host_facts.runtime_status;
         Self {
             id: runtime.id,
@@ -136,6 +144,7 @@ impl PublicAgentRuntime {
             runtime_status: derive_runtime_summary_status(lifecycle_status, health),
             lifecycle_status,
             runtime_health: Some(PublicRuntimeHealth::from(health)),
+            native_hermes_chat,
             hermes_available: runtime.host_facts.hermes_available,
             runtime_capabilities,
             created_at: runtime.created_at,

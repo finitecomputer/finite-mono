@@ -63,7 +63,7 @@ type MutationSnapshotRequest = {
   sequence: number;
 };
 
-type HostedChatContextValue = {
+export type HostedChatContextValue = {
   apiBase: string;
   state: HostedChatState | null;
   transportError: string | null;
@@ -91,6 +91,8 @@ type HostedChatContextValue = {
   dispatchQuiet: (action: HostedChatAction) => Promise<HostedChatState | null>;
   refreshPendingChat: (target: PendingChatRefreshTarget) => Promise<boolean>;
   uploadAttachments: (formData: FormData) => Promise<HostedChatState>;
+  interruptTurn?: () => Promise<void>;
+  pendingAgentAction?: ReactNode;
   attachmentUrl: (address: {
     room_id: string;
     message_id: string;
@@ -98,7 +100,7 @@ type HostedChatContextValue = {
   }) => string;
 };
 
-const HostedChatContext = createContext<HostedChatContextValue | null>(null);
+export const HostedChatContext = createContext<HostedChatContextValue | null>(null);
 
 export function HostedChatProvider({
   children,

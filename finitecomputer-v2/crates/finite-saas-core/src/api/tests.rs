@@ -57,6 +57,7 @@ fn usage_authorization() -> String {
 
 fn runtime_capabilities_json(runtime_upgrade: bool) -> serde_json::Value {
     serde_json::to_value(RuntimeCapabilitiesEnvelope::V1(RuntimeCapabilitiesV1 {
+        native_hermes_chat: false,
         restart: true,
         recover_known_good_chat: false,
         runtime_upgrade,

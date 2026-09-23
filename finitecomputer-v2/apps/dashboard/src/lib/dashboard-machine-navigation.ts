@@ -5,6 +5,7 @@ export type MachineNavItem = {
   ownerLabel: string;
   runtimeStatus: CoreRuntimeStatus;
   siteUrl?: string;
+  nativeHermesChat?: boolean;
 };
 
 export function activeNavigationMachine(

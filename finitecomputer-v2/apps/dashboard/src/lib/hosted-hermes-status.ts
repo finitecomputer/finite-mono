@@ -1,4 +1,5 @@
 export type HostedHermesAccess = {
+  nativeHermesChat?: boolean;
   runtimeId: string;
   enrolled: boolean;
   enabled: boolean;
@@ -10,7 +11,7 @@ export type HostedHermesAccess = {
 export type HostedHermesSession = { baseUrl: string; accessToken: string; expiresAt: number };
 export type HostedHermesStatus = { version: string; gatewayRunning: boolean };
 export class HostedHermesStatusError extends Error {
-  constructor(message: string, readonly kind: "request" | "access" | "unsupported" = "request") {
+  constructor(message: string, readonly kind: "request" | "access" | "unsupported" = "request", readonly status?: number) {
     super(message);
   }
 }
@@ -24,6 +25,7 @@ export function parseHostedHermesAccess(value: unknown, runtimeId: string): Host
     !["pending", "applied", "error"].includes(String(access.applyStatus))
   ) throw new HostedHermesStatusError("Hosted access details are unavailable. Try again.");
   return {
+    ...(typeof access.nativeHermesChat === "boolean" ? { nativeHermesChat: access.nativeHermesChat } : {}),
     runtimeId, enrolled: access.enrolled, enabled: access.enabled,
     generation: access.generation as number,
     appliedGeneration: access.appliedGeneration as number | null,
@@ -85,7 +87,15 @@ export async function changeHostedHermesAccess(access: HostedHermesAccess, enabl
  * call. A caller changing accounts/agents aborts its signal; no shared browser
  * token cache can carry authorization across that switch. */
 export async function readHostedHermesJson(runtimeId: string, path: string, signal: AbortSignal): Promise<unknown> {
-  if (path !== "api/skills?inventory=true" && (!/^api\/[a-zA-Z0-9_/-]+$/.test(path) || path.includes("//"))) {
+  return hostedHermesJson(runtimeId, path, signal);
+}
+
+export function setHostedHermesSessionArchived(runtimeId: string, sessionId: string, archived: boolean, signal: AbortSignal) {
+  return hostedHermesJson(runtimeId, `api/sessions/${encodeURIComponent(sessionId)}`, signal, { archived });
+}
+
+async function hostedHermesJson(runtimeId: string, path: string, signal: AbortSignal, patch?: { archived: boolean }): Promise<unknown> {
+  if (path !== "api/skills?inventory=true" && !/^api\/sessions\?limit=100&archived=include&order=created&offset=\d+$/.test(path) && (!/^api\/[a-zA-Z0-9_/-]+$/.test(path) || path.includes("//"))) {
     throw new HostedHermesStatusError("Invalid agent API path.");
   }
   return bounded(signal, async (requestSignal) => {
@@ -97,11 +107,13 @@ export async function readHostedHermesJson(runtimeId: string, path: string, sign
       const response = await fetch(new URL(path, grant.baseUrl), {
         credentials: "omit", cache: "no-store", redirect: "error",
         referrerPolicy: "no-referrer", signal: requestSignal,
-        headers: { authorization: `Bearer ${grant.accessToken}` },
+        method: patch ? "PATCH" : "GET",
+        headers: { authorization: `Bearer ${grant.accessToken}`, ...(patch ? { "content-type": "application/json" } : {}) },
+        ...(patch ? { body: JSON.stringify(patch) } : {}),
       });
       // A read may race native expiry/restart. Reauthorize once; never retry a
       // mutation or expose a native login form. Other failures remain visible.
-      if (response.status === 401 && attempt === 0) {
+      if (!patch && response.status === 401 && attempt === 0) {
         await response.body?.cancel();
         continue;
       }
@@ -120,6 +132,34 @@ export async function readHostedHermesJson(runtimeId: string, path: string, sign
       return result;
     }
     throw new HostedHermesStatusError("Agent authorization is unavailable. Try again.");
+  });
+}
+
+/** Every reconnect gets a new owner-authorized, single-use native ticket. */
+export async function createHostedHermesWebSocket(runtimeId: string, signal: AbortSignal): Promise<{ url: string; protocols: string[] }> {
+  return bounded(signal, async (requestSignal) => {
+    const grant = parseHostedHermesSession(await controlRequest(runtimeId, {
+      method: "POST", signal: requestSignal,
+    }));
+    requestSignal.throwIfAborted();
+    const response = await fetch(new URL("api/auth/ws-ticket", grant.baseUrl), {
+      method: "POST", credentials: "omit", cache: "no-store", redirect: "error",
+      referrerPolicy: "no-referrer", signal: requestSignal,
+      headers: { authorization: `Bearer ${grant.accessToken}` },
+    });
+    if (!response.ok) {
+      await response.body?.cancel();
+      throw new HostedHermesStatusError("Agent chat authorization is unavailable.");
+    }
+    const result = await boundedJson(response);
+    if (!result || typeof result !== "object" || !("ticket" in result)
+      || typeof result.ticket !== "string" || !result.ticket || result.ticket.length > 4096) {
+      throw new HostedHermesStatusError("Agent returned an invalid chat ticket.");
+    }
+    requestSignal.throwIfAborted();
+    const url = new URL("api/ws", grant.baseUrl);
+    url.protocol = "wss:";
+    return { url: url.toString(), protocols: ["hermes-gateway-v1", `hermes-gateway-ticket.${result.ticket}`] };
   });
 }
 
@@ -162,7 +202,7 @@ async function controlRequest(runtimeId: string, init: RequestInit): Promise<unk
         ? "Hosted access is unavailable for this account or agent."
         : "The agent’s dashboard connection is unavailable. Try again.";
     await response.body?.cancel();
-    throw new HostedHermesStatusError(message, [401, 403, 404, 409].includes(response.status) ? "access" : "request");
+    throw new HostedHermesStatusError(message, [401, 403, 404, 409].includes(response.status) ? "access" : "request", response.status);
   }
   return boundedJson(response);
 }

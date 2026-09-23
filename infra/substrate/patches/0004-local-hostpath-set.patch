@@ -1,0 +1,77 @@
+Local qualification fixture only; not a Substrate or GKE dependency.
+Applies to kubernetes-csi/csi-driver-host-path v1.17.1, commit
+c7383ef90bae7803195ede035a7d85ab3c7cffc9.
+
+Keep publication paths unique after worker loss and remove persisted duplicates
+through normal NodeUnpublishVolume calls. No manual state repair is required.
+
+diff --git a/pkg/state/strings.go b/pkg/state/strings.go
+index 4fa9869..fb8ef91 100644
+--- a/pkg/state/strings.go
++++ b/pkg/state/strings.go
+@@ -20,9 +20,11 @@ package state
+ // adding, searching and removing entries.
+ type Strings []string
+ 
+-// Add appends at the end.
++// Add appends a previously unseen value at the end.
+ func (s *Strings) Add(str string) {
+-	*s = append(*s, str)
++	if !s.Has(str) {
++		*s = append(*s, str)
++	}
+ }
+ 
+ // Has checks whether the string is already present.
+@@ -40,12 +42,13 @@ func (s *Strings) Empty() bool {
+ 	return len(*s) == 0
+ }
+ 
+-// Remove removes the first occurrence of the string, if present.
++// Remove removes every occurrence, including duplicates persisted by older versions.
+ func (s *Strings) Remove(str string) {
+-	for i, str2 := range *s {
+-		if str == str2 {
+-			*s = append((*s)[:i], (*s)[i+1:]...)
+-			return
++	remaining := (*s)[:0]
++	for _, value := range *s {
++		if value != str {
++			remaining = append(remaining, value)
+ 		}
+ 	}
++	*s = remaining
+ }
+diff --git a/pkg/state/strings_test.go b/pkg/state/strings_test.go
+new file mode 100644
+index 0000000..83213cd
+--- /dev/null
++++ b/pkg/state/strings_test.go
+@@ -0,0 +1,27 @@
++package state
++
++import (
++	"reflect"
++	"testing"
++)
++
++func TestPublicationPathsRemainASetAcrossRepublish(t *testing.T) {
++	var paths Strings
++	paths.Add("/actor/data")
++	paths.Add("/actor/data") // same actor after worker loss
++	if !reflect.DeepEqual(paths, Strings{"/actor/data"}) {
++		t.Fatalf("duplicate publication: %v", paths)
++	}
++}
++
++func TestUnpublishRemovesPersistedDuplicatePaths(t *testing.T) {
++	paths := Strings{"/other", "/actor/data", "/actor/data", "/last"}
++	paths.Remove("/actor/data")
++	if !reflect.DeepEqual(paths, Strings{"/other", "/last"}) {
++		t.Fatalf("stale publication remains: %v", paths)
++	}
++	paths.Remove("/actor/data") // retry is idempotent
++	if !reflect.DeepEqual(paths, Strings{"/other", "/last"}) {
++		t.Fatalf("unpublish changed unrelated paths: %v", paths)
++	}
++}

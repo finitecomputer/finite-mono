@@ -275,6 +275,9 @@ fn runtime_spec_reserved_environment_key(key: &str) -> bool {
     matches!(
         key,
         "FINITE_SERVER_URL"
+            | "FINITE_CORE_URL"
+            | "FINITE_CORE_CREDENTIAL"
+            | "FINITE_BOOTSTRAP_ENV_JSON"
             | "FINITECHAT_SERVER_URL"
             | "FINITECHAT_HOME"
             | "FINITE_HOME"

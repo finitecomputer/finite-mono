@@ -2862,6 +2862,10 @@ def parse_args(arguments: list[str]) -> argparse.Namespace:
     )
     mode = parser.add_mutually_exclusive_group()
     mode.add_argument(
+        "--substrate-context", metavar="CONTEXT",
+        help="read Substrate control-plane deployments in this Kubernetes context",
+    )
+    mode.add_argument(
         "--tinfoil",
         action="store_true",
         help="read Tinfoil Prometheus evidence locally on the monitoring host",
@@ -2896,7 +2900,11 @@ def parse_args(arguments: list[str]) -> argparse.Namespace:
 def main(arguments: list[str] | None = None) -> None:
     options = parse_args(sys.argv[1:] if arguments is None else arguments)
     try:
-        if options.tinfoil:
+        if options.substrate_context:
+            from finite_substrate_status import collect
+
+            report = collect(options.substrate_context)
+        elif options.tinfoil:
             from finite_tinfoil_status import collect
 
             report = collect()
@@ -2927,7 +2935,7 @@ def main(arguments: list[str] | None = None) -> None:
                 "chat_plane": {"status": "unknown", "error": str(error)},
             },
         }
-    if options.json or options.tinfoil:
+    if options.json or options.tinfoil or options.substrate_context:
         print(json.dumps(report, indent=2, sort_keys=True))
     else:
         print(render_human(report))

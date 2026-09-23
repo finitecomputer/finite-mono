@@ -3075,7 +3075,7 @@ mod tests {
                 agent_runtime_id: "runtime_123".to_string(),
                 source_host_id: "phala-worker-1".to_string(),
                 source_machine_id: "legacy-request-machine-id".to_string(),
-                requested_by_user_id: "user_123".to_string(),
+                requested_by_user_id: Some("user_123".to_string()),
                 kind,
                 target_runtime_artifact_id: None,
                 status: RuntimeControlRequestStatus::Launching,

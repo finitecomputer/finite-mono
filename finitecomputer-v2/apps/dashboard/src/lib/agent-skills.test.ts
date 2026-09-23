@@ -38,7 +38,7 @@ test("skills uses only the fixed native read after an owner grant", async (t) =>
       : Response.json({ inventory_version: 1, skills: [entry] });
   });
   assert.deepEqual(await readAgentSkills("a", new AbortController().signal), [entry]);
-  assert.deepEqual(calls, [{ url: "/api/agents/a/hermes-access", method: "POST" }, { url: "https://agent.test/a/api/skills?inventory=true", method: undefined }]);
+  assert.deepEqual(calls, [{ url: "/api/agents/a/hermes-access", method: "POST" }, { url: "https://agent.test/a/api/skills?inventory=true", method: "GET" }]);
 });
 
 test("access loss and unsupported endpoints are distinguishable from transient failures", async (t) => {

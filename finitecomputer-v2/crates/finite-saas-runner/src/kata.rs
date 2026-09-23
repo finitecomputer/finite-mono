@@ -5047,7 +5047,7 @@ esac
                 agent_runtime_id: "runtime-1".to_string(),
                 source_host_id: "finite-lat-1".to_string(),
                 source_machine_id: "finite-kata-upgrade-agent".to_string(),
-                requested_by_user_id: "admin-1".to_string(),
+                requested_by_user_id: Some("admin-1".to_string()),
                 kind: RuntimeControlKind::Upgrade,
                 target_runtime_artifact_id: Some("artifact-v2".to_string()),
                 status: RuntimeControlRequestStatus::Launching,

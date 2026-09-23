@@ -25,7 +25,9 @@ import {
 } from "@/components/agent-onboarding-progress";
 import { AgentSidebar } from "@/components/agent-sidebar";
 import { FiniteBrand } from "@/components/finite-brand";
+import { HermesChatProvider } from "@/components/hermes-chat-provider";
 import { HostedChatProvider } from "@/components/hosted-chat-provider";
+import { readHostedHermesAccess } from "@/lib/hosted-hermes-status";
 import { SignOutLink } from "@/components/sign-out-link";
 import { activeNavigationMachine, type MachineNavItem } from "@/lib/dashboard-machine-navigation";
 import { dashboardChatMachineIdFromPath } from "@/lib/dashboard-chat-route";
@@ -372,6 +374,28 @@ function OnboardingAppSection({
   );
 }
 
+function AgentChatProvider({ machine, children }: { machine: MachineNavItem; children: React.ReactNode }) {
+  const [resolved, setResolved] = useState<boolean>();
+  const [failed, setFailed] = useState(false);
+  const [attempt, setAttempt] = useState(0);
+  useEffect(() => {
+    if (machine.nativeHermesChat !== undefined) return;
+    const abort = new AbortController();
+    // A just-created agent may precede the cached navigation list. Resolve its
+    // authorized transport before opening either history store.
+    void readHostedHermesAccess(machine.id, abort.signal).then(access => {
+      if (!abort.signal.aborted) setResolved(access.nativeHermesChat === true);
+    }).catch(() => { if (!abort.signal.aborted) setFailed(true); });
+    return () => abort.abort();
+  }, [machine.id, machine.nativeHermesChat, attempt]);
+  const native = machine.nativeHermesChat ?? resolved;
+  if (native === undefined) return <p role="status">{failed
+    ? <button onClick={() => { setFailed(false); setAttempt(value => value + 1); }}>Retry agent connection</button>
+    : "Connecting to your agent…"}</p>;
+  const Provider = native ? HermesChatProvider : HostedChatProvider;
+  return <Provider machineId={machine.id}>{children}</Provider>;
+}
+
 function AgentAppSection({
   children,
   isChatSurface,
@@ -403,7 +427,7 @@ function AgentAppSection({
   }, []);
 
   return (
-    <HostedChatProvider key={machine.id} machineId={machine.id}>
+    <AgentChatProvider key={machine.id} machine={machine}>
       <div className={`finite-agent-shell ${collapsed ? "is-sidebar-collapsed" : ""}`}>
         <AgentSidebar
           collapsed={collapsed}
@@ -440,7 +464,7 @@ function AgentAppSection({
           {isChatSurface ? children : <div className="ocean-app-content">{children}</div>}
         </main>
       </div>
-    </HostedChatProvider>
+    </AgentChatProvider>
   );
 }
 
@@ -515,9 +539,9 @@ export function DashboardShell({
         viewerEmail={viewerEmail}
       >
         {chatMachineId ? (
-          <HostedChatProvider key={chatMachineId} machineId={chatMachineId}>
+          <AgentChatProvider key={chatMachineId} machine={{ ...(machines.find(machine => machine.id === chatMachineId) ?? { id: chatMachineId, ownerLabel: "Your agent", runtimeStatus: "unknown" }), ...(!saasMode ? { nativeHermesChat: false } : {}) }}>
             {children}
-          </HostedChatProvider>
+          </AgentChatProvider>
         ) : children}
       </DashboardAppSection>
     </div>

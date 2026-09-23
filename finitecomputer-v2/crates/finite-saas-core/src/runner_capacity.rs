@@ -52,10 +52,9 @@ impl RunnerLeaseCapacity {
             return Err(CoreError::RuntimeCapabilitiesNotAuthorized);
         }
         if capabilities.runtime_upgrade
-            && self
-                .runner_classes
-                .iter()
-                .any(|runner_class| *runner_class != RunnerClass::Kata)
+            && self.runner_classes.iter().any(|runner_class| {
+                !matches!(runner_class, RunnerClass::Kata | RunnerClass::Substrate)
+            })
         {
             return Err(CoreError::RuntimeCapabilitiesNotAuthorized);
         }

@@ -101,7 +101,7 @@ where
     let request = postgres_enqueue_runtime_control_request_bound(
         client,
         &project,
-        &admin_user.id,
+        Some(&admin_user.id),
         kind,
         target_runtime_artifact_id,
         &now,

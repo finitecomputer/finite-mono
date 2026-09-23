@@ -1151,7 +1151,13 @@ fn collect_agentd_inbound(
 ) -> Result<Vec<RuntimeCommandDeliveryV1>, CliError> {
     let _guard = lock_service_mutex(&state.inbox_lock)?;
     let mut inbox = load_agentd_inbox(&state.agent_home)?;
-    recover_stored_agentd_events(home, &state.account_id, room_filter, &mut inbox)?;
+    recover_stored_agentd_events(
+        home,
+        &state.account_id,
+        room_filter,
+        &mut inbox,
+        load_recent_agent_app_events(home)?,
+    )?;
     Ok(inbox
         .events
         .iter()
@@ -1975,9 +1981,10 @@ fn recover_stored_agentd_events(
     own_account: &str,
     room_filter: Option<&str>,
     inbox: &mut AgentdInboxState,
+    events: Vec<StoredAppEvent>,
 ) -> Result<(), CliError> {
     let mut changed = false;
-    for stored in load_recent_agent_app_events(home)? {
+    for stored in events {
         if let Some(room_id) = room_filter
             && room_id != stored.room_id
         {
@@ -1987,7 +1994,9 @@ fn recover_stored_agentd_events(
             continue;
         }
         if stored.sender.account_id == own_account {
-            changed |= advance_agentd_inbox_cursor(inbox, &stored.room_id, stored.seq);
+            // Local sends can be persisted before background sync receives an
+            // earlier remote command. Only received events advance the inbox
+            // cursor, matching Hermes recovery below.
             continue;
         }
         let delivery = runtime_command_delivery_from_stored(&stored);
@@ -6314,6 +6323,59 @@ mod tests {
         let mut chat_stored = stored;
         chat_stored.plaintext = serde_json::to_vec(&chat).unwrap();
         assert!(runtime_command_delivery_from_stored(&chat_stored).is_none());
+    }
+
+    #[test]
+    fn agentd_recovery_does_not_skip_request_behind_local_send() {
+        let dir = tempfile::tempdir().unwrap();
+        let home = recovery_test_home(dir.path());
+        let own = stored_hermes_text(7, "own-7", "agent-account", "local send");
+        let cancel = RuntimeCommandCancelV1 {
+            payload_kind: finitechat_proto::RuntimeCommandPayloadKindV1::Cancel,
+            request_id: "request-6".into(),
+            reason: Some("user_requested".into()),
+        };
+        let mut incoming = stored_hermes_text(6, "request-6", "user-account", "");
+        incoming.plaintext = serde_json::to_vec(&DecryptedApplicationEventV1 {
+            kind: DurableAppEventKind::RuntimeCommandCancel,
+            conversation_id: None,
+            segment_id: None,
+            payload: serde_json::to_vec(&cancel).unwrap(),
+        })
+        .unwrap();
+        let mut inbox = AgentdInboxState::default();
+        inbox.cursors.insert("room-a".into(), 5);
+        save_agentd_inbox(&home.dir, &inbox).unwrap();
+        // Local send returns seq 7 before background sync stores remote seq 6.
+        recover_stored_agentd_events(&home, "agent-account", None, &mut inbox, vec![own.clone()])
+            .unwrap();
+        let mut inbox = load_agentd_inbox(&home.dir).unwrap();
+        recover_stored_agentd_events(
+            &home,
+            "agent-account",
+            None,
+            &mut inbox,
+            vec![own.clone(), incoming.clone()],
+        )
+        .unwrap();
+        assert_eq!(
+            inbox.events.len(),
+            1,
+            "earlier remote command must reach agentd"
+        );
+        assert_eq!(inbox.events[0].seq, 6);
+        // Restart/replay keeps the unacknowledged delivery exactly once.
+        let mut inbox = load_agentd_inbox(&home.dir).unwrap();
+        recover_stored_agentd_events(
+            &home,
+            "agent-account",
+            None,
+            &mut inbox,
+            vec![own, incoming],
+        )
+        .unwrap();
+        assert_eq!(inbox.events.len(), 1);
+        assert_eq!(agentd_inbox_cursor(&inbox, "room-a"), 6);
     }
 
     #[test]

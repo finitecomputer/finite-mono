@@ -1,6 +1,73 @@
 use super::*;
 
 impl CoreStore {
+    /// Admit recovery through the same runtime lock and single-flight queue as
+    /// owner controls. Provider observations alone never authorize compute.
+    pub async fn request_substrate_recovery(
+        &self,
+        source_host_id: &str,
+        runtime_id: &str,
+    ) -> CoreResult<Option<RuntimeControlRequest>> {
+        let mut client = self.connection().await?;
+        let tx = client.transaction().await.map_err(store_error)?;
+        let Some(row) = tx
+            .query_opt(
+                "SELECT project_id FROM agent_runtimes WHERE id=$1 AND source_host_id=$2",
+                &[&runtime_id, &source_host_id],
+            )
+            .await
+            .map_err(store_error)?
+        else {
+            return Ok(None);
+        };
+        let project_id: String = row.get("project_id");
+        let Some(runtime) = postgres_active_runtime_for_project(&*tx, &project_id).await? else {
+            return Ok(None);
+        };
+        if runtime.id != runtime_id
+            || runtime.source_host_id != source_host_id
+            || runtime.placement.map(|placement| placement.runner_class)
+                != Some(crate::RunnerClass::Substrate)
+            || runtime.host_facts.runtime_status != RuntimeSummaryStatus::Online
+            || !runtime.supports_runtime_control(RuntimeControlKind::Restart)
+            || postgres_offboarding_phase(&*tx, runtime_id)
+                .await?
+                .is_some()
+        {
+            return Ok(None);
+        }
+        // Registration is not completed admission. Do not turn a failed or
+        // still-launching creation into an independently authorized restart.
+        if tx.query_opt(
+            "SELECT id FROM agent_creation_requests WHERE agent_runtime_id=$1 AND relocation_spec IS NULL AND status='running'",
+            &[&runtime_id],
+        ).await.map_err(store_error)?.is_none() { return Ok(None); }
+        if tx.query_opt(
+            "SELECT id FROM runtime_control_requests WHERE agent_runtime_id=$1 AND status IN ('requested','launching','compute_up','ready') LIMIT 1",
+            &[&runtime_id],
+        ).await.map_err(store_error)?.is_some() { return Ok(None); }
+        let project = select_project(&*tx, &project_id)
+            .await?
+            .ok_or(CoreError::ProjectNotFound)?;
+        let expected = RuntimeControlExpectedBinding {
+            agent_runtime_id: runtime.id,
+            source_host_id: runtime.source_host_id,
+            source_machine_id: runtime.source_machine_id,
+        };
+        let request = postgres_enqueue_runtime_control_request_bound(
+            &*tx,
+            &project,
+            None,
+            RuntimeControlKind::Restart,
+            None,
+            &current_time_iso()?,
+            Some(&expected),
+        )
+        .await?;
+        self.finish(tx).await?;
+        Ok(Some(request))
+    }
+
     pub async fn request_runtime_restart(
         &self,
         input: RequestRuntimeRestartInput,
@@ -71,7 +138,7 @@ where
     postgres_enqueue_runtime_control_request_bound(
         client,
         project,
-        requested_by_user_id,
+        Some(requested_by_user_id),
         kind,
         target_runtime_artifact_id,
         now,
@@ -83,7 +150,7 @@ where
 pub(super) async fn postgres_enqueue_runtime_control_request_bound<C>(
     client: &C,
     project: &Project,
-    requested_by_user_id: &str,
+    requested_by_user_id: Option<&str>,
     kind: RuntimeControlKind,
     target_runtime_artifact_id: Option<String>,
     now: &str,
@@ -183,7 +250,7 @@ where
         agent_runtime_id: runtime.id,
         source_host_id: runtime.source_host_id,
         source_machine_id: runtime.source_machine_id,
-        requested_by_user_id: requested_by_user_id.to_string(),
+        requested_by_user_id: requested_by_user_id.map(str::to_owned),
         kind,
         target_runtime_artifact_id,
         status: RuntimeControlRequestStatus::Requested,

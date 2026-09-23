@@ -658,3 +658,102 @@ async fn phala_expand_backfills_standard_without_moving_running_placement() {
     })
     .await;
 }
+
+#[tokio::test]
+async fn substrate_expansion_preserves_existing_placement_and_replays() {
+    const EXPAND: &str = include_str!("../migrations/0033_substrate_runner.sql");
+    let (before, _) = finite_saas_core::CORE_SCHEMA_SQL
+        .split_once(EXPAND)
+        .unwrap();
+    with_legacy_database(|client| async move {
+        client.batch_execute(before).await.unwrap();
+        client.batch_execute(r#"
+            INSERT INTO users (id, normalized_email, link_status, workos_user_id, created_at, updated_at)
+            VALUES ('owner', 'owner@example.test', 'linked', 'workos-owner', now(), now());
+            INSERT INTO customer_orgs (id, owner_user_id, name, billing_class, created_at, updated_at)
+            VALUES ('org', 'owner', 'Existing org', 'standard', now(), now());
+            INSERT INTO projects (id, customer_org_id, owner_user_id, display_name,
+                placement_runner_class, runtime_resource_class, created_at, updated_at)
+            VALUES ('project', 'org', 'owner', 'Existing agent', 'kata', 'vcpu4_memory8_gib', now(), now());
+            INSERT INTO agent_creation_requests (id, customer_org_id, owner_user_id, project_id,
+                idempotency_key, display_name, runner_class, placement_runner_class,
+                runtime_resource_class, status, created_at, updated_at)
+            VALUES ('creation', 'org', 'owner', 'project', 'request', 'Existing agent',
+                'kata', 'kata', 'vcpu4_memory8_gib', 'requested', now(), now());
+            INSERT INTO agent_creation_provider_operations (agent_creation_request_id, schema_name,
+                correlation_id, placement_runner_class, runtime_resource_class, created_at, updated_at)
+            VALUES ('creation', 'provider_operation.v1', 'existing-correlation', 'kata',
+                'vcpu4_memory8_gib', now(), now());
+        "#).await.unwrap();
+        client.batch_execute(r#"
+            INSERT INTO agent_runtimes (id, project_id, source_host_id, source_machine_id,
+                source_import_key, host_facts, created_at, updated_at)
+            VALUES ('runtime', 'project', 'existing-host', 'existing-machine',
+                'existing-import', '{}'::jsonb, now(), now());
+            INSERT INTO runtime_control_requests (id, project_id, agent_runtime_id,
+                source_host_id, source_machine_id, requested_by_user_id, kind, status,
+                created_at, updated_at)
+            VALUES ('control', 'project', 'runtime', 'existing-host', 'existing-machine',
+                'owner', 'restart', 'succeeded', now(), now());
+        "#).await.unwrap();
+        let snapshot = "SELECT jsonb_build_array(to_jsonb(p), to_jsonb(r), to_jsonb(o), to_jsonb(a))::text
+            FROM projects p JOIN agent_creation_requests r ON r.project_id = p.id
+            JOIN agent_creation_provider_operations o ON o.agent_creation_request_id = r.id
+            JOIN agent_runtimes a ON a.project_id = p.id";
+        let original: String = client.query_one(snapshot, &[]).await.unwrap().get(0);
+        let change = "UPDATE agent_creation_requests SET runner_class = 'substrate',
+            placement_runner_class = 'substrate' WHERE id = 'creation'";
+        let rejected = client.execute(change, &[]).await.unwrap_err();
+        assert_eq!(rejected.code(), Some(&SqlState::CHECK_VIOLATION));
+        for _ in 0..2 {
+            client.batch_execute(EXPAND).await.unwrap();
+            let unchanged: String = client.query_one(snapshot, &[]).await.unwrap().get(0);
+            assert_eq!(unchanged, original, "schema expansion must not migrate existing agents");
+        }
+        // Exercise the expanded writer contract, then replay with a Substrate
+        // row present. This is schema evidence, not old-binary rollout proof.
+        assert_eq!(client.execute(change, &[]).await.unwrap(), 1);
+        client.batch_execute(EXPAND).await.unwrap();
+        let runner: String = client.query_one(
+            "SELECT runner_class FROM agent_creation_requests WHERE id = 'creation'", &[]
+        ).await.unwrap().get(0);
+        assert_eq!(runner, "substrate");
+        const RECOVERY: &str = include_str!("../migrations/0034_runtime_automatic_recovery.sql");
+        let controls = "SELECT to_jsonb(c)::text FROM runtime_control_requests c WHERE id = 'control'";
+        let original_control: String = client.query_one(controls, &[]).await.unwrap().get(0);
+        let system_restart = "UPDATE runtime_control_requests SET requested_by_user_id = NULL
+            WHERE id = 'control'";
+        let rejected = client.execute(system_restart, &[]).await.unwrap_err();
+        assert_eq!(rejected.code(), Some(&SqlState::NOT_NULL_VIOLATION));
+        for _ in 0..2 {
+            client.batch_execute(RECOVERY).await.unwrap();
+            let unchanged: String = client.query_one(controls, &[]).await.unwrap().get(0);
+            assert_eq!(unchanged, original_control, "recovery expansion must preserve owner attribution");
+        }
+        assert_eq!(client.execute(system_restart, &[]).await.unwrap(), 1);
+        client.batch_execute(RECOVERY).await.unwrap();
+        // The old non-null reader fails once a system record exists. Rollback
+        // must retain the expanded reader; schema replay cannot make it safe.
+        let row = client.query_one(
+            "SELECT requested_by_user_id FROM runtime_control_requests WHERE id = 'control'", &[]
+        ).await.unwrap();
+        assert_eq!(row.get::<_, Option<String>>(0), None);
+        assert!(row.try_get::<_, String>(0).is_err());
+        for kind in ["stop", "destroy", "upgrade", "recover_known_good_chat_runtime"] {
+            let rejected = client.execute(
+                "UPDATE runtime_control_requests SET kind = $1 WHERE id = 'control'", &[&kind]
+            ).await.unwrap_err();
+            assert_eq!(rejected.code(), Some(&SqlState::CHECK_VIOLATION));
+        }
+        // Existing owner writes still work after expansion and system writes.
+        assert_eq!(client.execute(
+            "UPDATE runtime_control_requests SET requested_by_user_id = 'owner', kind = 'stop'
+             WHERE id = 'control'", &[]
+        ).await.unwrap(), 1);
+
+        let rejected = client.execute(
+            "UPDATE agent_creation_requests SET runner_class = 'unknown-provider' WHERE id = 'creation'", &[]
+        ).await.unwrap_err();
+        assert_eq!(rejected.code(), Some(&SqlState::CHECK_VIOLATION));
+    }).await;
+}

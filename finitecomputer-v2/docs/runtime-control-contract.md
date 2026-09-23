@@ -71,6 +71,29 @@ any non-terminal state → failed (always with a named failure_stage)
 - Dashboard and `scripts/finite-status` project these states directly; no
   surface re-derives operation state locally.
 
+## Substrate automatic recovery
+
+The existing Runner loop may report a crashed actor through the host-bound
+`POST /api/core/v1/runtimes/{runtime_id}/recover` endpoint. Only a Substrate Runner
+credential may call it. Core admits a restart only for that host's active
+Substrate Runtime after completed creation, while its lifecycle latch is online,
+with no pending control operation or offboarding. Admission uses the same runtime
+lock and single-flight control queue as owner requests. Health-report failure
+alone never authorizes recovery, and other providers retain their existing paths.
+
+Migration 0034 makes `requested_by_user_id` nullable: null records Core-authorized
+recovery; explicit owner/operator requests retain their user ID. Only restart
+records may omit a user. All Core and Runner readers must understand this shape
+before admission; existing user-attributed rows and wire values are unchanged.
+
+The Substrate adapter rechecks the actor under the leased operation. Revert/resume
+preserves the same actor and CSI data; it never replaces or deletes the runtime.
+An already-running actor is not restarted by a delayed observation. Completed
+stops and failed/uncertain controls are ineligible, and new-admission drain does
+not disable maintenance of existing agents. Recovery-observation errors do not prevent
+processing a queued owner control; a failed recovery follows the existing failed
+control path and requires operator intervention rather than an unbounded retry.
+
 ## Standing Readiness Reports
 
 Runner-ferried standing readiness reports current health independently of any

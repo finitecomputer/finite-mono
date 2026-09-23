@@ -550,7 +550,7 @@ function coreMe() {
     agent_creation_requests: [],
     projects: [{
       project: { id: "project_web_design", display_name: "Moss", hosting_tier: "standard", created_at: "2026-07-01T12:00:00Z", updated_at: "2026-07-01T12:00:00Z" },
-      runtime: { id: RUNTIME_ID, project_id: "project_web_design", contact_endpoint: `http://127.0.0.1:${hostedPort}/runtime-status`, runtime_status: "online", hermes_available: true, created_at: "2026-07-01T12:00:00Z", updated_at: "2026-07-01T12:00:00Z" },
+      runtime: { native_hermes_chat: process.env.FC_WEB_DESIGN_NATIVE_HERMES === "1", id: RUNTIME_ID, project_id: "project_web_design", contact_endpoint: `http://127.0.0.1:${hostedPort}/runtime-status`, runtime_status: "online", hermes_available: true, created_at: "2026-07-01T12:00:00Z", updated_at: "2026-07-01T12:00:00Z" },
     }, ...(process.env.FC_WEB_DESIGN_SECOND_AGENT === "1" ? [{
       project: { id: "project_web_design_second", display_name: "Fern", hosting_tier: "standard", created_at: "2026-07-01T12:00:00Z", updated_at: "2026-07-01T12:00:00Z" },
       runtime: { id: "runtime_web_design_second", project_id: "project_web_design_second", runtime_status: "offline", hermes_available: true, created_at: "2026-07-01T12:00:00Z", updated_at: "2026-07-01T12:00:00Z" },

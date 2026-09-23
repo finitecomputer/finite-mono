@@ -1,0 +1,46 @@
+diff --git a/cmd/ateapi/internal/controlapi/template_reconciler.go b/cmd/ateapi/internal/controlapi/template_reconciler.go
+index 5d8bd2b..0c5fdfe 100644
+--- a/cmd/ateapi/internal/controlapi/template_reconciler.go
++++ b/cmd/ateapi/internal/controlapi/template_reconciler.go
+@@ -117,7 +117,7 @@ func (r *ActorTemplateReconciler) resync(ctx context.Context) {
+ 		}
+ 		for _, tmpl := range page.Items {
+ 			ref := resources.ActorTemplateRefFromActorTemplate(tmpl)
+-			if goldenSnapshotDone(tmpl.GetStatus().GetGoldenSnapshotStatus()) {
++			if tmpl.GetSnapshotsConfig().GetOnResume().GetFromData() == ateapipb.ResumeSource_RESUME_SOURCE_COLD_BOOT || goldenSnapshotDone(tmpl.GetStatus().GetGoldenSnapshotStatus()) {
+ 				slog.DebugContext(ctx, "Skipping actor template with terminal golden snapshot status", slog.String("ActorTemplate", ref.String()))
+ 			} else {
+ 				r.queue.Add(ref)
+@@ -185,6 +185,12 @@ func (r *ActorTemplateReconciler) reconcileOne(ctx context.Context, ref resource
+ 		return 0, err
+ 	}
+ 
++	// Cold-boot templates never consume golden guest state. Preparing it would
++	// reserve capacity for an unused copy of the workload.
++	if tmpl.GetSnapshotsConfig().GetOnResume().GetFromData() == ateapipb.ResumeSource_RESUME_SOURCE_COLD_BOOT {
++		return 0, nil
++	}
++
+ 	goldenActorRef := &ateapipb.ObjectRef{
+ 		// Golden actors live in the reserved ate-golden atespace, because
+ 		// the suspend workflow relies on the ate-golden system atespace to
+diff --git a/cmd/ateapi/internal/controlapi/template_reconciler_test.go b/cmd/ateapi/internal/controlapi/template_reconciler_test.go
+index a792e6f..64ec397 100644
+--- a/cmd/ateapi/internal/controlapi/template_reconciler_test.go
++++ b/cmd/ateapi/internal/controlapi/template_reconciler_test.go
+@@ -400,6 +400,15 @@ func TestReconcileOne(t *testing.T) {
+ 		wantResumes  int
+ 		wantSuspends int
+ 	}{
++		{
++			name: "cold boot does not allocate a golden actor",
++			template: testTemplate(func(tmpl *ateapipb.ActorTemplate) {
++				tmpl.SnapshotsConfig = &ateapipb.SnapshotsConfig{OnResume: &ateapipb.OnResumeConfig{
++					FromData: ateapipb.ResumeSource_RESUME_SOURCE_COLD_BOOT,
++				}}
++			}),
++			control: &fakeGoldenControl{snapshot: goldenSnapshot},
++		},
+ 		{
+ 			name:         "happy path creates, resumes, and snapshots the golden actor",
+ 			template:     testTemplate(),

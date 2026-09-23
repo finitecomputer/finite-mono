@@ -726,7 +726,7 @@ async fn admin_runtime_control_skips_owner_check_and_matches_runner_lease_shape(
         assert_eq!(restart.status, RuntimeControlRequestStatus::Requested);
         assert_eq!(
             restart.requested_by_user_id,
-            db.user_by_email("admin@finite.vip").await.unwrap().id
+            Some(db.user_by_email("admin@finite.vip").await.unwrap().id)
         );
 
         // Idempotent while an equivalent request is pending, like the owner path.

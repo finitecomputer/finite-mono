@@ -1121,6 +1121,7 @@ SELECT id,id,id,'owner',CASE WHEN id='pending' THEN NULL ELSE 'assigned' END,'ru
             mock.patch.object(
                 finite_status, "collect_healthcheck_journal", return_value={}
             ),
+            mock.patch.object(finite_status, "collect_service_executable", return_value={}),
             mock.patch.object(finite_status, "collect_host_capacity", return_value={}),
             mock.patch.object(finite_status.os, "statvfs", return_value=stats),
             mock.patch.object(finite_status.Path, "exists", return_value=True),

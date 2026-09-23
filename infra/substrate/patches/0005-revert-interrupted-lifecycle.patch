@@ -1,0 +1,42 @@
+diff --git a/cmd/ateapi/internal/controlapi/workflow_revert.go b/cmd/ateapi/internal/controlapi/workflow_revert.go
+index efae353..4d83bd9 100644
+--- a/cmd/ateapi/internal/controlapi/workflow_revert.go
++++ b/cmd/ateapi/internal/controlapi/workflow_revert.go
+@@ -37,6 +37,9 @@ var revertableStates = []ateapipb.ActorState{
+ 	ateapipb.ActorState_ACTOR_STATE_RUNNING,
+ 	ateapipb.ActorState_ACTOR_STATE_PAUSED,
+ 	ateapipb.ActorState_ACTOR_STATE_CRASHED,
++	// The actor lease excludes a still-running resume or suspend workflow.
++	ateapipb.ActorState_ACTOR_STATE_RESUMING,
++	ateapipb.ActorState_ACTOR_STATE_SUSPENDING,
+ }
+ 
+ // RevertActor executes the workflow to discard an actor's current execution and
+diff --git a/cmd/ateapi/internal/controlapi/workflow_revert_test.go b/cmd/ateapi/internal/controlapi/workflow_revert_test.go
+index 4bb9eee..10785f8 100644
+--- a/cmd/ateapi/internal/controlapi/workflow_revert_test.go
++++ b/cmd/ateapi/internal/controlapi/workflow_revert_test.go
+@@ -34,9 +34,11 @@ import (
+ // report success for the opposite of what was asked.
+ func TestEnsureMarkedReverting_StateMatrix(t *testing.T) {
+ 	allowed := map[ateapipb.ActorState]bool{
+-		ateapipb.ActorState_ACTOR_STATE_RUNNING: true,
+-		ateapipb.ActorState_ACTOR_STATE_PAUSED:  true,
+-		ateapipb.ActorState_ACTOR_STATE_CRASHED: true,
++		ateapipb.ActorState_ACTOR_STATE_RUNNING:    true,
++		ateapipb.ActorState_ACTOR_STATE_PAUSED:     true,
++		ateapipb.ActorState_ACTOR_STATE_CRASHED:    true,
++		ateapipb.ActorState_ACTOR_STATE_RESUMING:   true,
++		ateapipb.ActorState_ACTOR_STATE_SUSPENDING: true,
+ 		// Re-entry: a previous attempt already marked it, so the step skips
+ 		// rather than re-committing.
+ 		ateapipb.ActorState_ACTOR_STATE_REVERTING: true,
+@@ -77,6 +79,8 @@ func TestRevertActor_ReturnsActorToItsSnapshot(t *testing.T) {
+ 		ateapipb.ActorState_ACTOR_STATE_RUNNING,
+ 		ateapipb.ActorState_ACTOR_STATE_PAUSED,
+ 		ateapipb.ActorState_ACTOR_STATE_CRASHED,
++		ateapipb.ActorState_ACTOR_STATE_RESUMING,
++		ateapipb.ActorState_ACTOR_STATE_SUSPENDING,
+ 		// A revert that died partway is retried, not rejected.
+ 		ateapipb.ActorState_ACTOR_STATE_REVERTING,
+ 	} {

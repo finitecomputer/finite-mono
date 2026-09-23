@@ -130,7 +130,8 @@ pub struct RuntimeControlRequest {
     pub agent_runtime_id: String,
     pub source_host_id: String,
     pub source_machine_id: String,
-    pub requested_by_user_id: String,
+    /// None denotes Core-authorized automatic recovery, never an owner action.
+    pub requested_by_user_id: Option<String>,
     pub kind: RuntimeControlKind,
     /// Present only for an explicit Upgrade operation. Restart deliberately
     /// remains bound to the Runtime's current artifact.

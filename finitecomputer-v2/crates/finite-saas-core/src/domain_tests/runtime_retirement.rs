@@ -274,7 +274,7 @@ async fn retirement_requires_exact_immutable_receipt_and_retries_same_request() 
         assert_eq!(snapshot["backend"], receipt.backend);
         assert!(db.active_runtime_for_project(&project_id).await.is_none());
         assert_eq!(
-            db.visible_projects_for_user(&completed.requested_by_user_id)
+            db.visible_projects_for_user(completed.requested_by_user_id.as_deref().unwrap())
                 .await
                 .len(),
             0

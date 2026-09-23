@@ -1,0 +1,21 @@
+--- a/agent/chat_completion_helpers.py
++++ b/agent/chat_completion_helpers.py
+@@ -4111,7 +4111,17 @@
+             agent._capture_credits(response)
+             agent._stream_diag_capture_response(_diag, response)
+             agent._check_openrouter_cache_status(response)
+-            _writer_token["value"] = claim_stream_writer(agent)
++            # A cancelled request may finish opening after its replacement
++            # has started. It must not reclaim the shared delta writer.
++            # Serialize the claim with cancellation so the replacement can
++            # only start after this attempt has claimed or been rejected.
++            with stream_attempt_lock:
++                if (
++                    stream_attempt_id != stream_attempt_state["current"]
++                    or stream_attempt_id in stream_attempt_state["cancelled"]
++                ):
++                    raise InterruptedError("Stream cancelled before writer claim")
++                _writer_token["value"] = claim_stream_writer(agent)
+ 
+         def _accept_stream_chunk(_chunk: Any) -> bool:
+             # A stale-attempt fence can win while Relay is handing an

@@ -1,5 +1,7 @@
 use super::*;
+use std::collections::BTreeMap;
 mod automatic_access;
+mod substrate;
 use crate::auth::test_support::{access_token_with_subject, core_auth};
 use crate::store::runtime_credentials::tests::{complete, provision, register, requested};
 use crate::test_support::with_isolated_postgres;
@@ -173,4 +175,79 @@ async fn hosted_api_allows_nonadmin_owner_and_separates_runtime_listener() {
         assert_eq!(response.status(), StatusCode::CONFLICT); // application has not reported
     })
     .await;
+}
+
+#[tokio::test]
+async fn runtime_environment_tracks_core_config_and_current_assignment() {
+    with_isolated_postgres(|db| async move {
+        let request = requested(&db).await;
+        let secret = db
+            .provision_runtime_credential(provision(&request))
+            .await
+            .unwrap()
+            .secret;
+        let configured = db
+            .store
+            .clone()
+            .with_runtime_environment(BTreeMap::from([
+                ("HERMES_MAX_ITERATIONS".into(), "50".into()),
+                ("FINITECHAT_OWNER_NPUBS".into(), "must-not-be-global".into()),
+            ]))
+            .unwrap();
+        let app = runtime_router(configured.clone(), HostedHermesOrigins::default());
+        let get = |token: &str| {
+            Request::builder()
+                .uri("/api/core/v1/runtime/environment")
+                .header("authorization", format!("Bearer {token}"))
+                .body(Body::empty())
+                .unwrap()
+        };
+        let response = app.clone().oneshot(get(&secret)).await.unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(response.headers()["cache-control"], "no-store");
+        let before: Value =
+            serde_json::from_slice(&to_bytes(response.into_body(), 65536).await.unwrap()).unwrap();
+        assert_eq!(before["environment"], json!({"HERMES_MAX_ITERATIONS":"50"}));
+        assert_eq!(
+            app.clone().oneshot(get("wrong")).await.unwrap().status(),
+            StatusCode::UNAUTHORIZED
+        );
+        let runtime = register(&db, &request).await;
+        complete(&db, &request).await.unwrap();
+        assert_eq!(before["runtimeId"], runtime);
+        let updated = configured
+            .with_runtime_environment(BTreeMap::from([(
+                "HERMES_MAX_ITERATIONS".into(),
+                "75".into(),
+            )]))
+            .unwrap();
+        let response = runtime_router(updated, HostedHermesOrigins::default())
+            .oneshot(get(&secret))
+            .await
+            .unwrap();
+        let body: Value =
+            serde_json::from_slice(&to_bytes(response.into_body(), 65536).await.unwrap()).unwrap();
+        assert_eq!(body["environment"], json!({"HERMES_MAX_ITERATIONS":"75"}));
+        db.revoke_runtime_credential(&runtime, &request)
+            .await
+            .unwrap();
+        assert_eq!(
+            app.oneshot(get(&secret)).await.unwrap().status(),
+            StatusCode::UNAUTHORIZED
+        );
+    })
+    .await;
+}
+
+#[tokio::test]
+async fn runtime_environment_rejects_expired_bootstrap_lease() {
+    with_isolated_postgres(|db| async move {
+        let request = requested(&db).await;
+        let secret = db.provision_runtime_credential(provision(&request)).await.unwrap().secret;
+        db.query_json(
+            "UPDATE agent_creation_requests SET lease_expires_at=clock_timestamp()-INTERVAL '1 second' WHERE id=$1 RETURNING to_jsonb(id)",
+            &[&request],
+        ).await;
+        assert!(db.runtime_environment(&secret).await.unwrap().is_none());
+    }).await;
 }

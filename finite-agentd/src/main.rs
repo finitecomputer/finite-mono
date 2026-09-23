@@ -13,6 +13,9 @@ struct Args {
 enum Command {
     /// Run the resident Finite Chat command bridge and supervise Hermes.
     Serve,
+    /// Fetch Core-managed public flags, then start the canonical runtime.
+    #[cfg(unix)]
+    Bootstrap,
     /// Run the optional native Hermes backend with trusted launch credentials.
     HostedHermes,
     /// Print the latest redacted local daemon status.
@@ -35,9 +38,15 @@ async fn run() -> Result<(), finite_agentd::AgentdError> {
     if matches!(args.command, Command::HostedHermes) {
         return finite_agentd::run_hosted_hermes();
     }
+    #[cfg(unix)]
+    if matches!(args.command, Command::Bootstrap) {
+        return finite_agentd::bootstrap().await;
+    }
     let config = DaemonConfig::from_env()?;
     match args.command {
         Command::HostedHermes => unreachable!(),
+        #[cfg(unix)]
+        Command::Bootstrap => unreachable!(),
         Command::Serve => run_daemon(config).await,
         Command::Status { json } => {
             let status = finite_agentd::read_status(&config.status_path())?;

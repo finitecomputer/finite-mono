@@ -15,11 +15,12 @@ name = "finite-agentd"
 path = "src/main.rs"
 
 [dependencies]
+axum.workspace = true
 clap.workspace = true
 qrcode.workspace = true
 finitechat-proto = { path = "../finitechat/crates/finitechat-proto" }
 futures-util.workspace = true
-reqwest = { workspace = true, features = ["stream"] }
+reqwest = { workspace = true, features = ["stream", "rustls-tls-native-roots"] }
 rusqlite.workspace = true
 rustix.workspace = true
 serde.workspace = true

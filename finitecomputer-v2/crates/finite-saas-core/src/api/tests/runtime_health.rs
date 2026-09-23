@@ -90,6 +90,7 @@ async fn core_api_runtime_health_reports_are_runner_authed_and_host_scoped() {
                 contact_endpoint: Some("http://127.0.0.1:41002/contact".to_string()),
                 runtime_capabilities: Some(RuntimeCapabilitiesEnvelope::V1(
                     RuntimeCapabilitiesV1 {
+                        native_hermes_chat: false,
                         restart: true,
                         recover_known_good_chat: false,
                         runtime_upgrade: true,

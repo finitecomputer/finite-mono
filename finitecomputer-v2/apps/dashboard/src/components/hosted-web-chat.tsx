@@ -174,12 +174,15 @@ export function HostedWebChat({
     dispatchQuiet,
     refreshPendingChat,
     uploadAttachments,
+    interruptTurn,
+    pendingAgentAction,
     attachmentUrl,
   } = useHostedChat();
   const [actionError, setActionError] = useState<string | null>(null);
   // Send feedback comes from this composer's action response. Stream and
   // view status/toast fields can describe another tab's action on the Device.
   const [sending, setSending] = useState(false);
+  const [interrupting, setInterrupting] = useState(false);
   const [draft, setDraft] = useState(initialDraft ?? "");
   const [attachments, setAttachments] = useState<PendingAttachment[]>([]);
   // Keep the provider current on unsent composer input so a session failure
@@ -1132,6 +1135,7 @@ export function HostedWebChat({
                 </div>
               ) : null}
 
+              {pendingAgentAction}
               <div className="finite-chat__composer-wrap">
                 <form
                   className={`finite-chat__composer ${isDragOver ? "is-drag-over" : ""}`}
@@ -1253,6 +1257,24 @@ export function HostedWebChat({
                         </span>
                       ) : null}
                     </div>
+                    {interruptTurn ? (
+                      <button
+                        type="button"
+                        className="finite-chat__tool-button"
+                        aria-label="Stop response"
+                        title="Stop response"
+                        disabled={!connected || interrupting}
+                        onClick={async () => {
+                          setInterrupting(true);
+                          setActionError(null);
+                          try { await interruptTurn(); }
+                          catch (error) { setActionError(hostedChatErrorMessage(error)); }
+                          finally { setInterrupting(false); }
+                        }}
+                      >
+                        <SquareIcon className="size-3.5" fill="currentColor" />
+                      </button>
+                    ) : null}
                     <button
                       type="submit"
                       className="finite-chat__send-button"

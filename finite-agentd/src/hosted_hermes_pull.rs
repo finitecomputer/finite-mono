@@ -154,11 +154,18 @@ impl CoreConnection {
 }
 
 async fn bounded_json<T: serde::de::DeserializeOwned>(
+    response: reqwest::Response,
+) -> Result<T, AgentdError> {
+    bounded_json_with_limit(response, 32 * 1024).await
+}
+
+async fn bounded_json_with_limit<T: serde::de::DeserializeOwned>(
     mut response: reqwest::Response,
+    limit: usize,
 ) -> Result<T, AgentdError> {
     let mut bytes = Vec::new();
     while let Some(chunk) = response.chunk().await? {
-        if bytes.len() + chunk.len() > 32 * 1024 {
+        if bytes.len() + chunk.len() > limit {
             return Err(invalid("bounded HTTP response"));
         }
         bytes.extend_from_slice(&chunk);
@@ -366,6 +373,52 @@ pub(super) fn start(home: PathBuf) -> HostedHermesHandle {
     }
 }
 
+/// Boot-only public configuration pull. The credential and redirect policy are
+/// identical to native Hermes enrollment; failures abort boot rather than using
+/// stale operator flags saved inside a provider template.
+pub(crate) async fn boot_environment() -> Result<BTreeMap<String, String>, AgentdError> {
+    CoreConnection::from_env()?.environment().await
+}
+
+impl CoreConnection {
+    async fn environment(&self) -> Result<BTreeMap<String, String>, AgentdError> {
+        #[derive(Deserialize)]
+        #[serde(rename_all = "camelCase", deny_unknown_fields)]
+        struct Environment {
+            runtime_id: String,
+            environment: BTreeMap<String, String>,
+        }
+        let core = self;
+        let url = Url::parse(&core.url)
+            .and_then(|url| url.join("environment"))
+            .map_err(|_| invalid("Core environment endpoint"))?;
+        let response = core
+            .client
+            .get(url)
+            .bearer_auth(&core.credential)
+            .send()
+            .await?
+            .error_for_status()?;
+        let desired: Environment = bounded_json_with_limit(response, 256 * 1024).await?;
+        if desired.runtime_id.is_empty()
+            || desired.runtime_id.len() > 128
+            || desired.environment.len() > 64
+            || desired.environment.iter().any(|(key, value)| {
+                key.is_empty()
+                    || key.contains(['=', '\0'])
+                    || value.contains('\0')
+                    || key.starts_with("FINITE_CORE_")
+                    || ["KEY", "TOKEN", "SECRET", "PASSWORD", "CREDENTIAL"]
+                        .iter()
+                        .any(|part| key.split('_').any(|segment| segment == *part))
+            })
+        {
+            return Err(invalid("Core environment response"));
+        }
+        Ok(desired.environment)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -430,6 +483,42 @@ mod tests {
             requests
         });
         (origin, task)
+    }
+
+    #[tokio::test]
+    async fn boot_flags_exceed_template_env_limit_and_reject_credential_override() {
+        let flags: BTreeMap<String, String> = (0..40)
+            .map(|i| (format!("FEATURE_{i}"), "1".into()))
+            .collect();
+        let expected = flags.clone();
+        let (origin, task) = server(2, move |index, request| {
+            assert!(
+                request
+                    .head
+                    .starts_with("GET /api/core/v1/runtime/environment ")
+            );
+            assert!(
+                request
+                    .head
+                    .contains(&format!("authorization: Bearer {}", "a".repeat(64)))
+            );
+            let environment = if index == 0 {
+                flags.clone()
+            } else {
+                BTreeMap::from([("FINITE_CORE_CREDENTIAL".into(), "must-not-install".into())])
+            };
+            (
+                200,
+                serde_json::json!({"runtimeId":"runtime_test", "environment":environment})
+                    .to_string(),
+                String::new(),
+            )
+        })
+        .await;
+        let client = CoreConnection::new(origin, "a".repeat(64)).unwrap();
+        assert_eq!(client.environment().await.unwrap(), expected);
+        assert!(client.environment().await.is_err());
+        task.await.unwrap();
     }
 
     fn disabled() -> String {

@@ -12,6 +12,9 @@ use serde::Serialize;
 /// internal adapter helpers are not product capabilities.
 #[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
 pub struct RuntimeCapabilitiesV1 {
+    /// Native Hermes is the primary chat transport for this assignment.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub native_hermes_chat: bool,
     #[serde(default)]
     pub restart: bool,
     #[serde(default)]
@@ -96,7 +99,12 @@ pub(crate) fn validate_runtime_capabilities_policy(
         return Err(CoreError::RuntimeCapabilitiesNotAuthorized);
     }
     if capabilities.runtime_upgrade
-        && placement.is_none_or(|placement| placement.runner_class != RunnerClass::Kata)
+        && placement.is_none_or(|placement| {
+            !matches!(
+                placement.runner_class,
+                RunnerClass::Kata | RunnerClass::Substrate
+            )
+        })
     {
         return Err(CoreError::RuntimeCapabilitiesNotAuthorized);
     }
@@ -127,3 +135,6 @@ pub(crate) fn bound_runtime_capabilities_to_artifact(
         envelope
     })
 }
+
+#[cfg(test)]
+mod tests;

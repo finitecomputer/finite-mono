@@ -184,7 +184,8 @@ pub struct RuntimeControlRequestView {
     pub agent_runtime_id: String,
     pub source_host_id: String,
     pub source_machine_id: String,
-    pub requested_by_user_id: String,
+    /// None denotes Core-authorized automatic recovery, never an owner action.
+    pub requested_by_user_id: Option<String>,
     pub kind: crate::RuntimeControlKind,
     pub target_runtime_artifact_id: Option<String>,
     pub status: crate::RuntimeControlRequestStatus,

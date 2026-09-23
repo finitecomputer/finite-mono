@@ -2,6 +2,12 @@ use super::*;
 
 #[tokio::test]
 async fn postgres_migration_replay_preserves_and_repairs_pending_explicit_placement() {
+    for runner_class in [RunnerClass::AppleContainer, RunnerClass::Substrate] {
+        migration_replay_preserves_placement(runner_class).await;
+    }
+}
+
+async fn migration_replay_preserves_placement(runner_class: RunnerClass) {
     with_isolated_postgres(|store| async move {
         let launch_code = issue_test_launch_code(&store, "2026-07-31T12:00:00Z").await;
         let created = store
@@ -16,7 +22,7 @@ async fn postgres_migration_replay_preserves_and_repairs_pending_explicit_placem
                 },
                 AgentCreationConfiguration {
                     placement: Some(RuntimePlacement {
-                        runner_class: RunnerClass::AppleContainer,
+                        runner_class,
                         runtime_resource_class: crate::RuntimeResourceClass::Vcpu4Memory8Gib,
                     }),
                     requested_hosting_tier: Some(HostingTier::Standard),
@@ -26,10 +32,10 @@ async fn postgres_migration_replay_preserves_and_repairs_pending_explicit_placem
             )
             .await
             .unwrap();
-        assert_eq!(created.request.runner_class, RunnerClass::AppleContainer);
+        assert_eq!(created.request.runner_class, runner_class);
         assert_eq!(
             created.request.placement.unwrap().runner_class,
-            RunnerClass::AppleContainer
+            runner_class
         );
 
         // Core replays the full concatenated schema on every startup. A
@@ -39,7 +45,7 @@ async fn postgres_migration_replay_preserves_and_repairs_pending_explicit_placem
         let connection = tokio::spawn(async move {
             let _ = connection.await;
         });
-        let runner_class: String = raw
+        let persisted_runner_class: String = raw
             .query_one(
                 "SELECT runner_class FROM agent_creation_requests WHERE id = $1",
                 &[&created.request.id],
@@ -47,7 +53,7 @@ async fn postgres_migration_replay_preserves_and_repairs_pending_explicit_placem
             .await
             .unwrap()
             .get(0);
-        assert_eq!(runner_class, "apple_container");
+        assert_eq!(persisted_runner_class, runner_class.as_str());
 
         // Reproduce the durable shape left by the bad replay, then prove
         // the guarded repair before exercising the real lease query.
@@ -66,31 +72,28 @@ async fn postgres_migration_replay_preserves_and_repairs_pending_explicit_placem
             .await
             .unwrap()
             .get(0);
-        assert_eq!(repaired_runner_class, "apple_container");
+        assert_eq!(repaired_runner_class, runner_class.as_str());
 
         let lease = store
             .lease_agent_creation_request(LeaseAgentCreationRequestInput {
-                runner_id: "devfinity-apple-runner".to_string(),
+                runner_id: "migration-replay-runner".to_string(),
                 lease_token: "migration-replay-lease".to_string(),
                 lease_seconds: Some(300),
                 runner_capacity: Some(RunnerLeaseCapacity {
-                    runner_classes: vec![RunnerClass::AppleContainer],
+                    runner_classes: vec![runner_class],
                     max_sandbox_count: Some(1),
                     active_sandbox_count: Some(0),
                     ..RunnerLeaseCapacity::default()
                 }),
-                source_host_id: Some("devfinity-apple".to_string()),
+                source_host_id: Some("migration-replay-host".to_string()),
                 now: Some("2026-07-31T12:02:00Z".to_string()),
             })
             .await
             .unwrap()
             .unwrap();
         assert_eq!(lease.request.id, created.request.id);
-        assert_eq!(lease.request.runner_class, RunnerClass::AppleContainer);
-        assert_eq!(
-            lease.request.placement.unwrap().runner_class,
-            RunnerClass::AppleContainer
-        );
+        assert_eq!(lease.request.runner_class, runner_class);
+        assert_eq!(lease.request.placement.unwrap().runner_class, runner_class);
 
         drop(raw);
         connection.abort();

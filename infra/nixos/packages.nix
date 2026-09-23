@@ -97,7 +97,10 @@ let
         args: "cargoWithProfile build ${args}"
       ) cargoBuildArgs;
       strictDeps = true;
-      nativeBuildInputs = [ pkgs.pkg-config ];
+      nativeBuildInputs = [
+        pkgs.pkg-config
+      ]
+      ++ lib.optional (builtins.elem "finitecomputer-v2/crates/finite-saas-runner" sourcePaths) pkgs.protobuf;
       buildInputs = [ pkgs.openssl ];
       # CI consumes release build artifacts; workspace checks/tests run in
       # their own lanes, so skip buildDepsOnly's additional cargo check.
@@ -135,7 +138,10 @@ let
         # vendored root lock remains the only available dependency universe.
         inherit cargoExtraArgs;
         strictDeps = true;
-        nativeBuildInputs = [ pkgs.pkg-config ];
+        nativeBuildInputs = [
+          pkgs.pkg-config
+        ]
+        ++ lib.optional (builtins.elem "finitecomputer-v2/crates/finite-saas-runner" sourcePaths) pkgs.protobuf;
         buildInputs = [ pkgs.openssl ];
       };
       cargoArtifacts =
@@ -182,16 +188,17 @@ let
       }
     );
 
+  # Cargo resolves path dev-dependencies even for a production-only build.
+  # Core's native-chat proof uses the real hosted Device and chat services.
   finiteSaasCoreSourcePaths = [
     "finitecomputer-v2/crates/finite-saas-core"
-  ];
-  finiteSaasRunnerSourcePaths = [
-    "finitecomputer-v2/crates/finite-saas-core"
+  ]
+  ++ finitechatHostedDeviceSourcePaths;
+  finiteSaasRunnerSourcePaths = finiteSaasCoreSourcePaths ++ [
     "finitecomputer-v2/crates/finite-saas-runner"
   ];
-  finiteSaasLocalSourcePaths = [
+  finiteSaasLocalSourcePaths = finiteSaasCoreSourcePaths ++ [
     "finitecomputer-v2/crates/finite-private-limiter"
-    "finitecomputer-v2/crates/finite-saas-core"
     "finitecomputer-v2/crates/finite-saas-local"
   ];
   finiteSaasCargoArtifacts = mkCargoArtifacts {

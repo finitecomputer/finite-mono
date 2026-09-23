@@ -1,0 +1,117 @@
+diff --git a/cmd/atenet/internal/router/cmd.go b/cmd/atenet/internal/router/cmd.go
+index d01dca4..ddbb3c5 100644
+--- a/cmd/atenet/internal/router/cmd.go
++++ b/cmd/atenet/internal/router/cmd.go
+@@ -84,6 +84,7 @@ func NewRouterCmd() *cobra.Command {
+ 	cmd.Flags().StringVar(&cfg.Auth.AteapiServerName, "ateapi-server-name", "", "SNI / hostname expected on the ateapi server cert. Optional.")
+ 	cmd.Flags().DurationVar(&cfg.RouteTimeout, "route-timeout", defaultRouteTimeout, "Envoy's end-to-end timeout on the workload route, bounding one request from the ingress listener to the actor's response. The default is generous because an agent relaying a model completion holds the request open for the whole generation; lower it to cap how long one turn may hold a request. This does not cover the resume that may precede the request; see --parked-request-budget. Shutdown is sized separately and does not follow this flag; to let long turns survive a drain, raise --drain-timeout and terminationGracePeriodSeconds too")
+ 	cmd.Flags().DurationVar(&cfg.ParkedRequest.Budget, "parked-request-budget", ingress.DefaultParkedRequestBudget, "Maximum time a resume flight keeps a request parked (held and retried) waiting for its actor to become routable; concurrent requests for the same actor share one flight and its budget")
++	cmd.Flags().BoolVar(&cfg.IngressDisableResume, "ingress-disable-resume", false, "Route only RUNNING actors; lifecycle operations must explicitly resume stopped actors")
+ 	cmd.Flags().IntVar(&cfg.ParkedRequest.Max, "parked-request-max", ingress.DefaultParkedRequestMax, "Maximum number of requests that may be parked simultaneously; excess requests are shed with 503. 0 disables parking (requests fail fast on worker-pool saturation)")
+ 	cmd.Flags().DurationVar(&cfg.ParkedRequest.RetryInterval, "parked-request-retry-interval", ingress.DefaultParkedRequestRetryInterval, "Delay before a parked request's first resume retry")
+ 	cmd.Flags().Float64Var(&cfg.ParkedRequest.RetryFactor, "parked-request-retry-factor", ingress.DefaultParkedRequestRetryFactor, "Multiplier applied to the retry delay after each attempt; must be >= 1")
+diff --git a/cmd/atenet/internal/router/config.go b/cmd/atenet/internal/router/config.go
+index fc7cd3b..e715fc7 100644
+--- a/cmd/atenet/internal/router/config.go
++++ b/cmd/atenet/internal/router/config.go
+@@ -96,6 +96,9 @@ type credentialProviderConfig struct {
+ 
+ // routerConfig holds deployment setup and endpoint options for the router node instance.
+ type routerConfig struct {
++	// IngressDisableResume leaves actor lifecycle under the caller control plane.
++	IngressDisableResume bool
++
+ 	// Mode restricts the instance to one traffic direction. Empty means ModeAll.
+ 	Mode           Mode
+ 	AtenetRouter   string
+diff --git a/cmd/atenet/internal/router/ingress/ingress.go b/cmd/atenet/internal/router/ingress/ingress.go
+index faf1c76..a5eb93b 100644
+--- a/cmd/atenet/internal/router/ingress/ingress.go
++++ b/cmd/atenet/internal/router/ingress/ingress.go
+@@ -59,8 +59,10 @@ const (
+ 
+ // Handler routes ingress requests to the worker hosting their actor.
+ type Handler struct {
+-	resumer *ActorResumer
+-	parking *parkingLot
++	// DisableResume makes ingress read-only with respect to actor lifecycle.
++	DisableResume bool
++	resumer       *ActorResumer
++	parking       *parkingLot
+ }
+ 
+ func New(apiClient ateapipb.ControlClient, parkCfg ParkedRequestConfig, parkMetrics *ParkingMetrics) *Handler {
+@@ -107,7 +109,16 @@ func (h *Handler) HandleRequestHeaders(ctx context.Context, md *extproc.RequestM
+ 	}
+ 
+ 	slog.InfoContext(ctx, "ResumeActor", slog.Any("actor", actorRef))
+-	actor, resumeOutcome, err := h.resumer.ResumeActor(ctx, actorRef)
++	var actor *ateapipb.Actor
++	resumeOutcome := ResumeOutcome("")
++	if h.DisableResume {
++		actor, err = h.resumer.apiClient.GetActor(ctx, &ateapipb.GetActorRequest{Actor: &ateapipb.ObjectRef{Atespace: actorRef.Atespace, Name: actorRef.Name}})
++		if err == nil && actor.GetStatus().GetState() != ateapipb.ActorState_ACTOR_STATE_RUNNING {
++			return extproc.Result{}, extproc.NewReqError(envoy_type.StatusCode_ServiceUnavailable, "actor is not running")
++		}
++	} else {
++		actor, resumeOutcome, err = h.resumer.ResumeActor(ctx, actorRef)
++	}
+ 	if err != nil {
+ 		return extproc.Result{Resume: string(resumeOutcome)}, mapResumeError(actorRef, err)
+ 	}
+diff --git a/cmd/atenet/internal/router/ingress/ingress_test.go b/cmd/atenet/internal/router/ingress/ingress_test.go
+index 6c87f2f..7a958df 100644
+--- a/cmd/atenet/internal/router/ingress/ingress_test.go
++++ b/cmd/atenet/internal/router/ingress/ingress_test.go
+@@ -41,9 +41,39 @@ import (
+ 
+ type mockClient struct {
+ 	ateapipb.ControlClient
++	getFn    func(ctx context.Context, in *ateapipb.GetActorRequest, opts ...grpc.CallOption) (*ateapipb.Actor, error)
+ 	resumeFn func(ctx context.Context, in *ateapipb.ResumeActorRequest, opts ...grpc.CallOption) (*ateapipb.ResumeActorResponse, error)
+ }
+ 
++func (m *mockClient) GetActor(ctx context.Context, in *ateapipb.GetActorRequest, opts ...grpc.CallOption) (*ateapipb.Actor, error) {
++	return m.getFn(ctx, in, opts...)
++}
++
++func TestDisabledResumeRoutesOnlyRunningActors(t *testing.T) {
++	for _, state := range []ateapipb.ActorState{ateapipb.ActorState_ACTOR_STATE_RUNNING, ateapipb.ActorState_ACTOR_STATE_SUSPENDED, ateapipb.ActorState_ACTOR_STATE_CRASHED, ateapipb.ActorState_ACTOR_STATE_RESUMING} {
++		t.Run(state.String(), func(t *testing.T) {
++			client := &mockClient{
++				getFn: func(_ context.Context, in *ateapipb.GetActorRequest, _ ...grpc.CallOption) (*ateapipb.Actor, error) {
++					if in.GetActor().GetAtespace() != "team-a" || in.GetActor().GetName() != "actor-1" {
++						t.Fatal("wrong actor")
++					}
++					return &ateapipb.Actor{Status: &ateapipb.ActorStatus{State: state, WorkerAssignment: &ateapipb.WorkerAssignment{WorkerPodIp: "10.0.0.52"}}}, nil
++				},
++				resumeFn: func(context.Context, *ateapipb.ResumeActorRequest, ...grpc.CallOption) (*ateapipb.ResumeActorResponse, error) {
++					t.Fatal("read-only ingress attempted resume")
++					return nil, nil
++				},
++			}
++			h := New(client, ParkedRequestConfig{}, nil)
++			h.DisableResume = true
++			_, err := h.HandleRequestHeaders(context.Background(), requestMetadata("actor-1", "team-a"))
++			if (err == nil) != (state == ateapipb.ActorState_ACTOR_STATE_RUNNING) {
++				t.Fatalf("state %v: %v", state, err)
++			}
++		})
++	}
++}
++
+ func (m *mockClient) ResumeActor(ctx context.Context, in *ateapipb.ResumeActorRequest, opts ...grpc.CallOption) (*ateapipb.ResumeActorResponse, error) {
+ 	return m.resumeFn(ctx, in, opts...)
+ }
+diff --git a/cmd/atenet/internal/router/router.go b/cmd/atenet/internal/router/router.go
+index 279e39b..5580148 100644
+--- a/cmd/atenet/internal/router/router.go
++++ b/cmd/atenet/internal/router/router.go
+@@ -200,6 +200,7 @@ func (s *RouterServer) Run(ctx context.Context) error {
+ 			return fmt.Errorf("failed to create parking metrics: %w", err)
+ 		}
+ 		s.ingressHandler = ingress.New(s.apiClient, parkCfg, parkMetrics)
++		s.ingressHandler.DisableResume = s.cfg.IngressDisableResume
+ 		handlers[s.ingressHandler.Direction()] = s.ingressHandler
+ 	}
+ 	if s.cfg.Mode.ServesEgress() {

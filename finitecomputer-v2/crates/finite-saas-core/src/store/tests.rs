@@ -11,6 +11,7 @@ use std::collections::{BTreeMap, BTreeSet};
 
 fn kata_runtime_capabilities() -> RuntimeCapabilitiesEnvelope {
     RuntimeCapabilitiesEnvelope::V1(RuntimeCapabilitiesV1 {
+        native_hermes_chat: false,
         restart: true,
         recover_known_good_chat: false,
         runtime_upgrade: true,

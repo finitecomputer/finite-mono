@@ -747,6 +747,10 @@ async fn creation_credential_survives_restart_and_stop_resume_without_reviving_r
             } else {
                 db.request_runtime_restart(input).await.unwrap()
             };
+            if index >= 2 {
+                assert!(db.runtime_environment(&secret).await.unwrap().is_none(),
+                    "queued restart is not a boot capability");
+            }
             let lease = db
                 .lease_runtime_control_request(LeaseRuntimeControlRequestInput {
                     runner_id: "auth-runner".into(),
@@ -770,6 +774,23 @@ async fn creation_credential_survives_restart_and_stop_resume_without_reviving_r
                 .unwrap()
                 .unwrap();
             assert_eq!(lease.request.id, operation.id);
+            assert_eq!(db.runtime_environment(&secret).await.unwrap().is_some(), index != 3);
+            if index == 2 {
+                assert!(db.authenticate_runtime_credential(&secret).await.unwrap().is_none(),
+                    "restart boot access must not activate chat credentials");
+                db.query_json("UPDATE runtime_control_requests SET lease_expires_at=clock_timestamp()-INTERVAL '1 second' WHERE id=$1 RETURNING to_jsonb(id)", &[&operation.id]).await;
+                assert!(db.runtime_environment(&secret).await.unwrap().is_none());
+                db.query_json("UPDATE runtime_control_requests SET lease_expires_at=clock_timestamp()+INTERVAL '300 seconds' WHERE id=$1 RETURNING to_jsonb(id)", &[&operation.id]).await;
+                // The same stopped assignment may cold-boot for an upgrade,
+                // but only while its exact control lease is live. It cannot
+                // use that bootstrap access to activate native chat early.
+                db.query_json("UPDATE runtime_control_requests SET kind='upgrade',target_runtime_artifact_id=(SELECT runtime_artifact_id FROM agent_runtimes WHERE id=agent_runtime_id) WHERE id=$1 RETURNING to_jsonb(id)", &[&operation.id]).await;
+                assert!(db.runtime_environment(&secret).await.unwrap().is_some());
+                assert!(db.authenticate_runtime_credential(&secret).await.unwrap().is_none());
+                db.query_json("UPDATE runtime_control_requests SET lease_expires_at=clock_timestamp()-INTERVAL '1 second' WHERE id=$1 RETURNING to_jsonb(id)", &[&operation.id]).await;
+                assert!(db.runtime_environment(&secret).await.unwrap().is_none());
+                db.query_json("UPDATE runtime_control_requests SET kind='restart',target_runtime_artifact_id=NULL,lease_expires_at=clock_timestamp()+INTERVAL '300 seconds' WHERE id=$1 RETURNING to_jsonb(id)", &[&operation.id]).await;
+            }
             db.complete_runtime_control_request(CompleteRuntimeControlRequestInput {
                 request_id: operation.id,
                 runner_id: "auth-runner".into(),

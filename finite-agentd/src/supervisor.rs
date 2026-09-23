@@ -217,7 +217,7 @@ pub fn start_supervisor(
     sidecar: ProcessSpec,
     health: ProcessSpec,
     hermes: ProcessSpec,
-    simplex: Option<ProcessSpec>,
+    extras: impl IntoIterator<Item = ProcessSpec>,
 ) -> SupervisorHandle {
     let status = Arc::new(RwLock::new(SupervisorStatus::default()));
     let (sidecar_tx, sidecar_rx) = mpsc::channel(4);
@@ -229,7 +229,7 @@ pub fn start_supervisor(
     tokio::spawn(supervise_process(hermes, hermes_rx, Arc::clone(&status)));
 
     let mut all_txs = vec![sidecar_tx, health_tx, hermes_tx.clone()];
-    if let Some(spec) = simplex {
+    for spec in extras {
         let (tx, rx) = mpsc::channel(4);
         tokio::spawn(supervise_process(spec, rx, Arc::clone(&status)));
         all_txs.push(tx);

@@ -59,6 +59,7 @@ wire_enum! {
     Kata => "kata",
     Phala => "phala",
     Enclavia => "enclavia",
+    Substrate => "substrate",
     }
     parse: parse_runner_class
 }
@@ -93,7 +94,10 @@ impl RuntimePlacement {
         match runner_class {
             RunnerClass::Kata => Some(Self::for_hosting_tier(HostingTier::Standard)),
             RunnerClass::Phala => Some(Self::for_hosting_tier(HostingTier::Confidential)),
-            RunnerClass::LocalDocker | RunnerClass::AppleContainer | RunnerClass::Enclavia => None,
+            RunnerClass::LocalDocker
+            | RunnerClass::AppleContainer
+            | RunnerClass::Enclavia
+            | RunnerClass::Substrate => None,
         }
     }
 }

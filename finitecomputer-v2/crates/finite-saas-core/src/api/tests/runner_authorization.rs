@@ -34,6 +34,7 @@ fn runner_capability_authorization_is_explicit_and_legacy_kata_is_narrow() {
     assert_eq!(
         capabilities,
         RuntimeCapabilitiesV1 {
+            native_hermes_chat: false,
             restart: true,
             recover_known_good_chat: false,
             runtime_upgrade: true,
@@ -311,6 +312,54 @@ async fn runner_keyring_enforces_worker_class_source_and_revocation_bindings() {
         )
         .await;
         assert_eq!(status, StatusCode::UNAUTHORIZED);
+    })
+    .await;
+}
+
+#[tokio::test]
+async fn core_api_automatic_recovery_requires_substrate_runner_authority() {
+    with_isolated_postgres(|db| async move {
+        let auth = core_auth_with_runner_credentials(
+            "service",
+            vec![
+                runner_credential_config(
+                    "kata",
+                    "kata-token",
+                    "kata",
+                    &[RunnerClass::Kata],
+                    "host",
+                    false,
+                ),
+                runner_credential_config(
+                    "substrate",
+                    "substrate-token",
+                    "substrate",
+                    &[RunnerClass::Substrate],
+                    "host",
+                    false,
+                ),
+            ],
+            "usage",
+        );
+        let app = router(db.store.clone(), auth);
+        for (token, expected) in [
+            ("service", StatusCode::UNAUTHORIZED),
+            ("kata-token", StatusCode::FORBIDDEN),
+            ("substrate-token", StatusCode::OK),
+        ] {
+            let (status, body) = send_json(
+                &app,
+                "POST",
+                "/api/core/v1/runtimes/runtime_missing/recover",
+                &[("authorization".into(), format!("Bearer {token}"))],
+                Some(serde_json::json!({})),
+            )
+            .await;
+            assert_eq!(status, expected);
+            if status == StatusCode::OK {
+                assert!(body.is_null());
+            }
+        }
     })
     .await;
 }

@@ -32,7 +32,8 @@ async function handle(request: Request, context: RouteContext) {
     } else if (request.method === "POST") {
       result = await createCoreHostedHermesSession(runtimeId, request.signal);
     } else {
-      result = await loadCoreHostedHermesAccess(runtimeId, request.signal);
+      result = { ...await loadCoreHostedHermesAccess(runtimeId, request.signal),
+        nativeHermesChat: access.coreProject.runtime?.native_hermes_chat === true };
     }
     return Response.json(result, { headers });
   } catch (error) {

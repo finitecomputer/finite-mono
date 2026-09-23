@@ -44,10 +44,10 @@ test("direct chat provides context from the route before the machine list refres
   );
   assert.match(
     dashboardShellSource,
-    /<HostedChatProvider key=\{chatMachineId\} machineId=\{chatMachineId\}>/u,
+    /<AgentChatProvider key=\{chatMachineId\} machine=/u,
   );
   assert.doesNotMatch(
     dashboardShellSource,
-    /isChatSurface && activeMachine[\s\S]*<HostedChatProvider/u,
+    /isChatSurface && activeMachine[\s\S]*<AgentChatProvider/u,
   );
 });

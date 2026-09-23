@@ -28,6 +28,7 @@ export default async function DashboardLayout({
       return [
         {
           id: runtimeId,
+          nativeHermesChat: project.runtime?.native_hermes_chat === true,
           ownerLabel: coreProjectLabel(project),
           runtimeStatus: project.runtime?.runtime_status ?? "unknown",
           siteUrl: coreProjectPrimaryUrl(project) ?? undefined,

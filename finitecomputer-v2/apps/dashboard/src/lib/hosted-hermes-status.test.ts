@@ -86,3 +86,61 @@ test("malformed, empty and oversized native bodies invalidate prior inventory", 
       error => error instanceof HostedHermesStatusError && error.kind === "unsupported");
   }
 });
+
+
+test("each native chat connection obtains a single-use ticket without exposing its grant in the URL", async (t) => {
+  const { createHostedHermesWebSocket } = await import("./hosted-hermes-status");
+  const calls: { url: string; init: RequestInit }[] = [];
+  t.mock.method(globalThis, "fetch", async (input: string | URL, init: RequestInit) => {
+    calls.push({ url: String(input), init });
+    return calls.length % 2 === 1
+      ? Response.json({ baseUrl: "https://agents.test/runtimes/a/", accessToken: "private-grant", expiresAt: 100 })
+      : Response.json({ ticket: `one-use-${calls.length}` });
+  });
+  for (const suffix of [2, 4]) {
+    assert.deepEqual(await createHostedHermesWebSocket("a", new AbortController().signal),
+      { url: "wss://agents.test/runtimes/a/api/ws", protocols: ["hermes-gateway-v1", `hermes-gateway-ticket.one-use-${suffix}`] });
+  }
+  assert.deepEqual(calls.map(c => c.url), [
+    "/api/agents/a/hermes-access", "https://agents.test/runtimes/a/api/auth/ws-ticket",
+    "/api/agents/a/hermes-access", "https://agents.test/runtimes/a/api/auth/ws-ticket",
+  ]);
+  assert.equal(new Headers(calls[1].init.headers).get("authorization"), "Bearer private-grant");
+  assert.equal(calls[1].init.credentials, "omit");
+  assert.equal(calls[1].init.redirect, "error");
+});
+
+test("native chat cancels a late grant on agent switch and preserves account 401 classification", async (t) => {
+  const { createHostedHermesWebSocket } = await import("./hosted-hermes-status");
+  const controller = new AbortController();
+  let calls = 0;
+  const mock = t.mock.method(globalThis, "fetch", async () => {
+    calls++;
+    controller.abort();
+    return Response.json({ baseUrl: "https://agents.test/a/", accessToken: "private-grant", expiresAt: 100 });
+  });
+  await assert.rejects(createHostedHermesWebSocket("a", controller.signal));
+  assert.equal(calls, 1);
+  mock.mock.mockImplementation(async () => Response.json({}, { status: 401 }));
+  await assert.rejects(createHostedHermesWebSocket("a", new AbortController().signal),
+    e => e instanceof HostedHermesStatusError && e.status === 401);
+});
+
+
+test("archive uses a fresh account grant and never retries a refused mutation", async (t) => {
+  const { setHostedHermesSessionArchived } = await import("./hosted-hermes-status");
+  const calls: { url: string; init: RequestInit }[] = [];
+  t.mock.method(globalThis, "fetch", async (input: string | URL, init: RequestInit) => {
+    calls.push({ url: String(input), init });
+    return calls.length === 1
+      ? Response.json({ baseUrl: "https://agents.test/runtimes/a/", accessToken: "synthetic", expiresAt: 100 })
+      : new Response(null, { status: 401 });
+  });
+  await assert.rejects(setHostedHermesSessionArchived("a", "session-1", true, new AbortController().signal), /no longer available/);
+  assert.equal(calls.length, 2);
+  assert.equal(calls[1].url, "https://agents.test/runtimes/a/api/sessions/session-1");
+  assert.equal(calls[1].init.method, "PATCH");
+  assert.equal(calls[1].init.credentials, "omit");
+  assert.equal(calls[1].init.redirect, "error");
+  assert.deepEqual(JSON.parse(String(calls[1].init.body)), { archived: true });
+});

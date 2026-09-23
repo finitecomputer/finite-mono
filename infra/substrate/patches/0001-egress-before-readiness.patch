@@ -1,0 +1,108 @@
+diff --git a/cmd/atenet/internal/router/egress/egress.go b/cmd/atenet/internal/router/egress/egress.go
+index b0b8f0f..5c82238 100644
+--- a/cmd/atenet/internal/router/egress/egress.go
++++ b/cmd/atenet/internal/router/egress/egress.go
+@@ -309,10 +309,11 @@ func (h *Handler) validateActor(ctx context.Context, identity *substratex509.Act
+ 			"egress denied: actor %q/%q is not the actor this certificate was issued to", atespace, actorName)
+ 	}
+ 
+-	// The actor performing egress must actually be running.
+-	if actor.GetStatus().GetState() != ateapipb.ActorState_ACTOR_STATE_RUNNING {
++	// Boot may fetch configuration before readiness transitions RESUMING to RUNNING.
++	state := actor.GetStatus().GetState()
++	if state != ateapipb.ActorState_ACTOR_STATE_RUNNING && state != ateapipb.ActorState_ACTOR_STATE_RESUMING {
+ 		return extproc.NewReqError(envoy_type.StatusCode_Forbidden,
+-			"egress denied: actor %q/%q is %s, not running", atespace, actorName, actor.GetStatus().GetState())
++			"egress denied: actor %q/%q is %s, not starting or running", atespace, actorName, state)
+ 	}
+ 	return nil
+ }
+diff --git a/cmd/atenet/internal/router/egress/egress_test.go b/cmd/atenet/internal/router/egress/egress_test.go
+index ab3f516..e57b459 100644
+--- a/cmd/atenet/internal/router/egress/egress_test.go
++++ b/cmd/atenet/internal/router/egress/egress_test.go
+@@ -788,3 +788,24 @@ func TestParseXFCCChainIncludesIntermediates(t *testing.T) {
+ 		t.Error("parseXFCCChain() did not return the leaf first")
+ 	}
+ }
++
++func TestStartingActorEgressAuthorization(t *testing.T) {
++	ca := newTestCA(t, "actor-identity-ca")
++	leaf := ca.issueActorCert(t, actorCertOptions{})
++	for _, state := range []ateapipb.ActorState{ateapipb.ActorState_ACTOR_STATE_RESUMING, ateapipb.ActorState_ACTOR_STATE_SUSPENDED, ateapipb.ActorState_ACTOR_STATE_CRASHED} {
++		t.Run(state.String(), func(t *testing.T) {
++			actor := runningActor()
++			actor.Status.State = state
++			h := egressHandler(ca.roots(), actor, nil)
++			_, err := h.HandleRequestHeaders(context.Background(), egressMetadata(xfccHeader(leaf)))
++			if state == ateapipb.ActorState_ACTOR_STATE_RESUMING {
++				if err != nil {
++					t.Fatalf("authenticated boot egress denied: %v", err)
++				}
++				actor.Metadata.Uid = "different-actor"
++				_, err = h.HandleRequestHeaders(context.Background(), egressMetadata(xfccHeader(leaf)))
++			}
++			wantStatus(t, err, envoy_type.StatusCode_Forbidden)
++		})
++	}
++}
+diff --git a/cmd/ateom-gvisor/main.go b/cmd/ateom-gvisor/main.go
+index 10f8bcf..f76c87f 100644
+--- a/cmd/ateom-gvisor/main.go
++++ b/cmd/ateom-gvisor/main.go
+@@ -729,6 +729,12 @@ func (s *AteomService) RunWorkload(ctx context.Context, req *ateompb.RunWorkload
+ 		return nil, fmt.Errorf("while starting pause container: %w", err)
+ 	}
+ 
++	// Boot may need authenticated outbound traffic before readiness succeeds.
++	// Ingress stays disabled until all containers are ready.
++	if err := s.activateActorEgress(egress); err != nil {
++		return nil, err
++	}
++
+ 	// Create and start each application container, each with its own log pipe so
+ 	// every line is tagged with the originating container (ate.actor.container.name).
+ 	for _, ac := range req.GetSpec().GetContainers() {
+@@ -753,7 +759,7 @@ func (s *AteomService) RunWorkload(ctx context.Context, req *ateompb.RunWorkload
+ 	if err := readyz.WaitAll(ctx, req.GetSpec().GetContainers(), ateomnet.ActorVethIP); err != nil {
+ 		return nil, fmt.Errorf("while waiting for container readyz: %w", err)
+ 	}
+-	if err := s.activateActorNetworking(req.GetAtespace(), req.GetActorName(), egress); err != nil {
++	if err := s.atunnelIngress.Activate(req.GetAtespace(), req.GetActorName()); err != nil {
+ 		return nil, err
+ 	}
+ 
+@@ -1045,6 +1051,12 @@ func (s *AteomService) RestoreWorkload(ctx context.Context, req *ateompb.Restore
+ 		return nil, fmt.Errorf("unexpected snapshot scope: %v", req.GetScope())
+ 	}
+ 
++	// Boot may need authenticated outbound traffic before readiness succeeds.
++	// Ingress stays disabled until all containers are ready.
++	if err := s.activateActorEgress(egress); err != nil {
++		return nil, err
++	}
++
+ 	// Create and restore each application container, each with its own log pipe so
+ 	// every line is tagged with the originating container (ate.actor.container.name).
+ 	for _, ac := range req.GetSpec().GetContainers() {
+@@ -1082,7 +1094,7 @@ func (s *AteomService) RestoreWorkload(ctx context.Context, req *ateompb.Restore
+ 	if err := readyz.WaitAll(ctx, req.GetSpec().GetContainers(), ateomnet.ActorVethIP); err != nil {
+ 		return nil, fmt.Errorf("while waiting for container readyz: %w", err)
+ 	}
+-	if err := s.activateActorNetworking(req.GetAtespace(), req.GetActorName(), egress); err != nil {
++	if err := s.atunnelIngress.Activate(req.GetAtespace(), req.GetActorName()); err != nil {
+ 		return nil, err
+ 	}
+ 
+@@ -1197,10 +1209,7 @@ func (s *AteomService) terminateWorkload(ctx context.Context, actorRef resources
+ 	return errors.Join(errs...)
+ }
+ 
+-func (s *AteomService) activateActorNetworking(atespace, actorName string, egress *actorEgress) error {
+-	if err := s.atunnelIngress.Activate(atespace, actorName); err != nil {
+-		return fmt.Errorf("while activating actor ingress: %w", err)
+-	}
++func (s *AteomService) activateActorEgress(egress *actorEgress) error {
+ 	if egress == nil {
+ 		return nil
+ 	}

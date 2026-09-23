@@ -110,6 +110,7 @@ struct RuntimeState {
 /// this listener or expose it by an edge route allowlist.
 pub fn runtime_router(store: CoreStore, origins: HostedHermesOrigins) -> Router {
     Router::new()
+        .route("/api/core/v1/runtime/environment", get(environment))
         .route("/api/core/v1/runtime/hosted-hermes", get(pull))
         .route("/api/core/v1/runtime/hosted-hermes/report", post(report))
         .layer(axum::middleware::map_response(
@@ -148,4 +149,18 @@ async fn report(
         return Err(ApiError::unauthorized("runtime credential rejected"));
     }
     Ok(StatusCode::NO_CONTENT)
+}
+
+async fn environment(
+    State(state): State<RuntimeState>,
+    headers: HeaderMap,
+) -> Result<impl IntoResponse, ApiError> {
+    let token = bearer_token(&headers)
+        .ok_or_else(|| ApiError::unauthorized("runtime credential required"))?;
+    let environment = state
+        .store
+        .runtime_environment(&token)
+        .await?
+        .ok_or_else(|| ApiError::unauthorized("runtime credential rejected"))?;
+    Ok(Json(environment))
 }

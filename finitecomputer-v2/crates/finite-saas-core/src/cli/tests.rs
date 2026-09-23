@@ -67,6 +67,7 @@ fn rollout_overview(
         active_finite_private_key_count: 1,
         runtime_link_active,
         runtime_capabilities: Some(RuntimeCapabilitiesV1 {
+            native_hermes_chat: false,
             restart: true,
             recover_known_good_chat: true,
             runtime_upgrade,
@@ -141,7 +142,7 @@ impl FakeRolloutStore {
             agent_runtime_id: overview.agent_runtime_id.clone(),
             source_host_id: overview.source_host_id.clone(),
             source_machine_id: overview.source_machine_id.clone(),
-            requested_by_user_id: "user-admin".to_string(),
+            requested_by_user_id: Some("user-admin".to_string()),
             kind: RuntimeControlKind::Upgrade,
             target_runtime_artifact_id: Some("artifact-v2".to_string()),
             status,

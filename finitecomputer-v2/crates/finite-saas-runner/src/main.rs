@@ -4,6 +4,7 @@ use finite_saas_runner::lifecycle_probe::{
     LifecycleProbeConfig, LifecycleProbeRequest, probe_runtime_lifecycle,
 };
 use finite_saas_runner::phala::PhalaApiClient;
+use finite_saas_runner::substrate::{SubstrateConfig, SubstrateConnection, SubstrateLauncher};
 use finite_saas_runner::{
     AgentCreationRunner, AgentIdentityAuthorityConfig, AppleContainerConfig,
     AppleContainerLauncher, CoreHttpAgentCreationQueue, DEFAULT_DURABLE_TREE_QUIESCENCE_WINDOW,
@@ -37,6 +38,20 @@ struct Args {
 
 #[derive(Debug, Subcommand)]
 enum Command {
+    /// Shared Substrate ingress; keep the control listener on a private network.
+    SubstrateIngress {
+        #[arg(long)]
+        router: String,
+        #[arg(long)]
+        atespace: String,
+        #[arg(long, default_value = "0.0.0.0:8080")]
+        listen: std::net::SocketAddr,
+        #[arg(long, default_value = "127.0.0.1:8081")]
+        control_listen: std::net::SocketAddr,
+        /// Exact permitted browser origin; repeat for additional origins.
+        #[arg(long)]
+        allowed_origin: Vec<String>,
+    },
     /// Render a derived hosted-Hermes route manifest as Caddy JSON; does not activate it.
     #[command(name = "render-hosted-hermes-caddy")]
     RenderHostedHermesCaddy {
@@ -82,6 +97,22 @@ fn main() -> Result<()> {
     let args = Args::parse();
     match args.command.unwrap_or(Command::RunOnce) {
         Command::RenderHostedHermesCaddy { manifest } => render_hosted_hermes_caddy(&manifest),
+        Command::SubstrateIngress {
+            router,
+            atespace,
+            listen,
+            control_listen,
+            allowed_origin,
+        } => tokio::runtime::Builder::new_multi_thread()
+            .enable_all()
+            .build()?
+            .block_on(finite_saas_runner::substrate::ingress::serve(
+                router,
+                atespace,
+                listen,
+                control_listen,
+                allowed_origin,
+            )),
         Command::RunOnce => run_once(),
         Command::Serve => serve(),
         Command::PhalaPreflight => phala_preflight(),
@@ -226,6 +257,52 @@ fn run_cycle() -> Result<RunOnceOutcome> {
         .to_ascii_lowercase()
         .replace('-', "_");
     let outcome = match runner_class.as_str() {
+        "substrate" => {
+            let launcher = SubstrateLauncher::new(SubstrateConfig {
+                finitechat_server_url: optional_env(
+                    "FC_RUNNER_FINITECHAT_SERVER_URL",
+                    DEFAULT_FINITECHAT_SERVER_URL,
+                ),
+                connection: SubstrateConnection {
+                    endpoint: required_env("FC_SUBSTRATE_ENDPOINT")?,
+                    server_name: optional_env("FC_SUBSTRATE_SERVER_NAME", "api.ate-system.svc"),
+                    ca_file: required_path("FC_SUBSTRATE_CA_FILE")?,
+                    token_file: required_path("FC_SUBSTRATE_TOKEN_FILE")?,
+                },
+                atespace: required_env("FC_SUBSTRATE_ATESPACE")?,
+                base_template: required_env("FC_SUBSTRATE_BASE_TEMPLATE")?,
+                egress_hosts: optional_env("FC_SUBSTRATE_EGRESS_HOSTS", "")
+                    .split(',')
+                    .map(str::trim)
+                    .filter(|host| !host.is_empty())
+                    .map(str::to_owned)
+                    .collect(),
+                egress_cidrs: optional_env("FC_SUBSTRATE_EGRESS_CIDRS", "")
+                    .split(',')
+                    .map(str::trim)
+                    .filter(|cidr| !cidr.is_empty())
+                    .map(str::to_owned)
+                    .collect(),
+                source_host_id: required_env("FC_RUNNER_SOURCE_HOST_ID")?,
+                runtime_origin: required_env("FC_SUBSTRATE_RUNTIME_ORIGIN")?,
+                draining: optional_bool("FC_RUNNER_DRAIN", false)?,
+            })?;
+            run_once_with_launcher(
+                queue,
+                launcher,
+                RunOnceConfig {
+                    runner_id,
+                    lease_seconds,
+                    finite_private_base_url,
+                    finite_private_model,
+                    finite_private_api_key_override,
+                    runtime_environment,
+                    runtime_secret_environment,
+                    agent_identity_authority,
+                    health_reports,
+                },
+            )?
+        }
         "local_docker" => {
             let launcher = DockerLauncher::new(DockerConfig {
                 docker_bin: optional_path("FC_RUNNER_DOCKER_BIN", "docker"),
@@ -530,7 +607,7 @@ fn run_cycle() -> Result<RunOnceOutcome> {
             )?
         }
         other => bail!(
-            "FC_RUNNER_CLASS must be local_docker, apple_container, kata, phala, or enclavia, got {other:?}"
+            "FC_RUNNER_CLASS must be local_docker, apple_container, kata, phala, enclavia, or substrate, got {other:?}"
         ),
     };
     Ok(outcome)

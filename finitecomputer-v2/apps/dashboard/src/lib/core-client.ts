@@ -62,6 +62,7 @@ export type CoreRuntimeCapabilities = {
 };
 
 export type CoreAgentRuntime = {
+  native_hermes_chat?: boolean;
   id: string;
   project_id: string;
   contact_endpoint?: string | null;
@@ -167,7 +168,7 @@ export type CoreRuntimeControlRequest = {
   agent_runtime_id: string;
   source_host_id: string;
   source_machine_id: string;
-  requested_by_user_id: string;
+  requested_by_user_id: string | null;
   kind: "restart" | "recover_known_good_chat_runtime" | "upgrade" | "stop" | "destroy";
   target_runtime_artifact_id?: string | null;
   status: CoreRuntimeLifecycleStatus;

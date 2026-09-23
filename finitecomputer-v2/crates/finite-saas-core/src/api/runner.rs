@@ -361,3 +361,25 @@ pub(super) async fn fail_agent_creation_request(
             .await?,
     ))
 }
+
+/// Only the bound host's Runner may report a recovery candidate; Core decides
+/// whether its current lifecycle still authorizes running that exact runtime.
+pub(super) async fn request_runtime_recovery(
+    State(state): State<CoreApiState>,
+    headers: HeaderMap,
+    Path(runtime_id): Path<String>,
+) -> Result<Json<Option<crate::RuntimeControlRequest>>, ApiError> {
+    let credential = require_runner_auth(&state, &headers)?;
+    if !credential
+        .runner_classes
+        .contains(&crate::RunnerClass::Substrate)
+    {
+        return Err(runner_binding_error());
+    }
+    Ok(Json(
+        state
+            .store
+            .request_substrate_recovery(&credential.source_host_id, &runtime_id)
+            .await?,
+    ))
+}

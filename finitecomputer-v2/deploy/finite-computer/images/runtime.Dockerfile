@@ -57,6 +57,9 @@ RUN apt-get update \
       curl \
       git \
       openssh-client \
+      openbox \
+      xvfb \
+      scrot \
       restic \
       ripgrep \
     && rm -rf /var/lib/apt/lists/*
