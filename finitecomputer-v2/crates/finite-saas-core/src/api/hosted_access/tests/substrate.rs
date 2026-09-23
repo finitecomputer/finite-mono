@@ -304,14 +304,11 @@ async fn substrate_two_owner_launch_and_native_access() {
             now: None,
         });
         register_artifact("substrate-proof", image).await.unwrap();
-        let store = db
-            .store
-            .clone()
-            .with_runtime_environment(BTreeMap::from([(
-                "FINITE_DESKTOP_ENABLED".into(),
-                "1".into(),
-            )]))
-            .unwrap();
+        let mut environment = BTreeMap::from([("FINITE_DESKTOP_ENABLED".into(), "1".into())]);
+        if std::env::var_os("FC_TEST_SUBSTRATE_REQUEST_TRACE").is_some() {
+            environment.insert("HERMES_DUMP_REQUESTS".into(), "1".into());
+        }
+        let store = db.store.clone().with_runtime_environment(environment).unwrap();
         let origins =
             HostedHermesOrigins::from_json(&json!({source_host: public_origin}).to_string())
                 .unwrap();

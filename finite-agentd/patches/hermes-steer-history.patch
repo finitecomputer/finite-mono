@@ -1,6 +1,6 @@
 --- a/agent/agent_runtime_helpers.py
 +++ b/agent/agent_runtime_helpers.py
-@@ -4874,68 +4874,29 @@
+@@ -4874,68 +4874,33 @@
  
  
  def apply_pending_steer_to_tool_results(agent, messages: list, num_tool_msgs: int) -> None:
@@ -28,6 +28,10 @@
          return
      steer_text = agent._drain_pending_steer()
      if not steer_text:
++        # A redirect may already have reached the transcript before Stop.
++        # Close that user turn so the next request cannot merge with it.
++        if stopped and messages and messages[-1].get("role") == "user":
++            messages.append({"role": "assistant", "content": "Stopped before applying this message."})
          return
 -    # Find the last tool-role message in the recent tail. Skipping
 -    # non-tool messages defends against future code appending

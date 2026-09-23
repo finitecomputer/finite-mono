@@ -94,6 +94,26 @@ export async function proveBrowser({ baseUrl, grantEndpoint, ownerToken, dashboa
     await uploadedImage.waitFor();
     await uploadedImage.evaluate(img => { if (!img.complete) return new Promise((resolve, reject) => { img.onload = resolve; img.onerror = reject; }); });
     assert.ok(await uploadedImage.evaluate(img => img.naturalWidth > 0), 'Uploaded image did not render');
+    const filename = `${marker}.txt`;
+    const generatedPath = `/data/agent/${filename}`;
+    await page.locator('.finite-chat__composer textarea').fill(`Use the terminal tool to write exactly ${marker} followed by a newline into ${generatedPath}. Then reply with only MEDIA:${generatedPath} on its own line.`);
+    await page.getByRole('button', { name: 'Send message', exact: true }).click();
+    const generated = page.locator('.finite-chat__message--agent').getByRole('link', { name: filename, exact: true });
+    await generated.waitFor({ timeout: 90000 });
+    await page.getByRole('button', { name: 'Stop response', exact: true }).waitFor({ state: 'hidden' });
+    const verifyGenerated = async () => {
+      const href = await generated.getAttribute('href');
+      assert.ok(href?.startsWith(`/api/agents/${runtimeId}/hermes-file?`));
+      assert.equal(new URL(href, base).searchParams.get('path'), generatedPath);
+      const file = await page.evaluate(async url => {
+        const response = await fetch(url);
+        return { status: response.status, text: await response.text(), disposition: response.headers.get('content-disposition') };
+      }, href);
+      assert.equal(file.status, 200, 'Generated file download');
+      assert.equal(file.text, `${marker}\n`, 'Agent-created file bytes');
+      if (dashboardBase) assert.ok(file.disposition?.startsWith('attachment;'), 'Actual Next route must download documents');
+    };
+    await verifyGenerated();
     const selected = page.locator('.finite-chat__thread-open[aria-current="page"]');
     await page.waitForFunction(() => {
       const title = document.querySelector('.finite-chat__thread-open[aria-current="page"]')?.textContent?.trim();
@@ -106,9 +126,11 @@ export async function proveBrowser({ baseUrl, grantEndpoint, ownerToken, dashboa
     await colors.waitFor();
     await uploadedImage.waitFor();
     await page.waitForFunction(() => document.querySelector('img[alt="quadrants.png"]')?.naturalWidth > 0);
+    await generated.waitFor();
+    await verifyGenerated();
     assert.equal(legacyCalls, 0, 'Native UI must not invoke Finite chat');
     assert.deepEqual(errors, []);
-    console.error('Real native browser turn and reload history passed');
+    console.error('Real native browser turn, generated-file bytes, and reload history passed');
   } catch (error) {
     const directory = await mkdtemp(join(tmpdir(), 'finite-substrate-browser-'));
     await writeFile(join(directory, 'diagnostic.json'), JSON.stringify({ network, body: await page?.locator('body').innerText().catch(() => '') }), { mode: 0o600 });

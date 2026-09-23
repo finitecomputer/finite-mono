@@ -150,7 +150,9 @@ existing transcript writer. The upstream tool handoff mutates a row already
 marked persisted; Hard Stop also clears an accepted model redirect before saving
 it. `hermes-steer-history.patch` appends tool corrections as user rows instead,
 and transfers canceled redirects into the existing steering buffer for the
-locked writer to save as stopped input. It closes tool sequences for strict role
+locked writer to save as stopped input. If the model loop has already consumed
+and saved the redirect, Stop closes the trailing user row with the same
+cancellation marker so a subsequent request cannot merge with it. It closes tool sequences for strict role
 alternation and never requeues canceled work. No Finite history store, additional
 database writer, or new queue is introduced.
 
@@ -159,13 +161,22 @@ steering, stopped tool steering, and a stopped model redirect with no tool histo
 It checks exactly-once storage, unchanged earlier rows, drained buffers and
 unchanged Stop state. The native proof requires ordinary and queued replies, then
 checks ordinary, queued, stopped-tool and stopped-model input after settlement
-and actor restart. The latest combined candidate passes both owners. Its sealed Linux package
+and actor restart. The earlier combined candidate passed both owners. Its sealed Linux package
 builds and passes all three SQLite cases, the stream-writer regression and Nix
 integrity verification (`model-stop-canonical-proof.log`,
 `model-stop-canonical-stream.log`, `model-stop-canonical-integrity.log`).
 The canonical image plus only the local fixture CA passes real dashboard onboarding,
 native chat and restart in `dashboard-onboarding-canonical-qualified.log` (123.23s).
 Its test digest is `sha256:6f94a71db3000af2e1847b20e067d95e65b966a07635e2fbf2d7c12969d18929`.
+
+A later generated-file browser proof passed authenticated file bytes and reload
+twice, but exposed the consumed-redirect/Stop race during the subsequent native
+clarification turn (`generated-file-dashboard-qualified.log` and
+`generated-file-dashboard-traced.log`). Native request dumps showed the canceled
+correction merged with the next user request. The fourth offline SQLite case
+reproduces that failure on the previous image and passes on the rebuilt sealed
+package (`consumed-redirect-before.log`, `consumed-redirect-after.log`). The new
+image and combined browser/provider run remain unqualified until rerun.
 
 ## Lifecycle and recovery
 

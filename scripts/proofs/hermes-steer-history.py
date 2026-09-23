@@ -10,7 +10,7 @@ from hermes_state import SessionDB
 from run_agent import AIAgent
 
 
-def prove(stopped, model=False):
+def prove(stopped, model=False, consumed=False):
     with TemporaryDirectory() as scratch:
         db = SessionDB(db_path=Path(scratch) / 'state.db')
         db.create_session('cancel-proof', 'cli', model='fixture')
@@ -25,6 +25,14 @@ def prove(stopped, model=False):
             assert agent.redirect('accepted correction')
         else:
             assert agent.steer('accepted correction')
+        if consumed:
+            # The model loop can consume and persist the redirect before the
+            # gateway handles Stop. No pending buffer remains for Stop to drain.
+            correction = agent._drain_pending_redirect()
+            assert correction == 'accepted correction'
+            messages.extend([{'role': 'assistant', 'content': 'partial response'},
+                             {'role': 'user', 'content': correction}])
+            agent._persist_session(messages)
         if stopped:
             agent.hard_interrupt()
         if not model:
@@ -37,7 +45,9 @@ def prove(stopped, model=False):
         after = db._conn.execute("select role, content from messages order by id").fetchall()
         assert after[:len(before)] == before, "steering rewrote durable history"
         assert agent._drain_pending_redirect() is None, "stopped redirect must not replay"
-        print(f'PASS: real SQLite writer persists correction once; stopped={stopped}; model={model}')
+        if stopped:
+            assert tuple(after[-1]) == ('assistant', 'Stopped before applying this message.'), 'Stop must separate the canceled correction from the next user turn'
+        print(f'PASS: real SQLite writer persists correction once; stopped={stopped}; model={model}; consumed={consumed}')
         db.close()
 
 
@@ -45,3 +55,5 @@ prove(False)
 prove(True)
 
 prove(True, model=True)
+
+prove(True, model=True, consumed=True)
