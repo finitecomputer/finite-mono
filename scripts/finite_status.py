@@ -2931,7 +2931,8 @@ def collect_runtime_route(machine: str, expected: str | None) -> dict[str, Any]:
         inspected = json.loads(result.stdout)
         labels = inspected["labels"]
         if (
-            labels.get("computer.finite.v2.runtime") != "true"
+            not isinstance(labels, dict)
+            or labels.get("computer.finite.v2.runtime") != "true"
             or labels.get("computer.finite.v2.source_machine_id") != machine
             or inspected["state"] != "running"
         ):
@@ -3058,14 +3059,17 @@ def collect_runtime_route(machine: str, expected: str | None) -> dict[str, Any]:
                         )
                     bindings = runtime_saved_port_bindings(saved.stdout, host_ports)
                     if bindings:
+                        owner_labels = owner.get("labels") or {}
+                        if not isinstance(owner_labels, dict):
+                            raise ValueError("container labels are malformed")
                         owners.append(
                             {
                                 "container": owner["name"],
                                 "state": owner["state"],
-                                "project_id": owner["labels"].get(
+                                "project_id": owner_labels.get(
                                     "computer.finite.v2.project_id"
                                 ),
-                                "source_machine_id": owner["labels"].get(
+                                "source_machine_id": owner_labels.get(
                                     "computer.finite.v2.source_machine_id"
                                 ),
                                 "bindings": bindings,

@@ -9,7 +9,14 @@ from scripts import finite_status
 
 class RuntimeRouteStatusTests(unittest.TestCase):
     def report(
-        self, published, direct, expected=None, *, ports=None, stopped_owner=False
+        self,
+        published,
+        direct,
+        expected=None,
+        *,
+        ports=None,
+        stopped_owner=False,
+        unlabelled_owner=False,
     ):
         inspected = {
             "labels": {
@@ -32,6 +39,8 @@ class RuntimeRouteStatusTests(unittest.TestCase):
                 "state": "exited",
                 "ports": {},
             }
+            if unlabelled_owner:
+                owner["labels"] = None
             results.extend(
                 [
                     subprocess.CompletedProcess([], 0, "stopped-agent\n", ""),
@@ -83,6 +92,17 @@ class RuntimeRouteStatusTests(unittest.TestCase):
             finite_status.runtime_saved_port_bindings(
                 "8080/tcp -> 10.4.0.8:49153\ntruncated", {49153}
             )
+
+    def test_unlabelled_container_still_reserves_its_saved_port(self):
+        principal = "npub1" + "a" * 58
+        report = self.report(
+            principal, principal, stopped_owner=True, unlabelled_owner=True
+        )
+        owners = report["sections"]["runtime_route"]["port_owners"]
+        self.assertEqual(owners["status"], "observed")
+        self.assertEqual(len(owners["containers"]), 1)
+        self.assertIsNone(owners["containers"][0]["project_id"])
+        self.assertEqual(owners["containers"][0]["bindings"][0]["HostPort"], "49153")
 
     def test_saved_binding_parser_distinguishes_protocol_and_ipv6(self):
         bindings = finite_status.runtime_saved_port_bindings(
