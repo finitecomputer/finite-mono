@@ -333,6 +333,27 @@ outage, populated provider authorization policy, automatic node-loss failover,
 GKE storage recovery or a production backup service. Keep the independent Recovery
 Authority and qualify those deployment-specific recovery boundaries before rollout.
 
+## Product identity parity
+
+Native chat does not open Finite Chat's hosted Device UI. Brain signing still uses
+that Device's existing durable human key authority. If the signer reports setup
+required (428), the dashboard initializes it through the existing state endpoint
+and retries once. Other failures, including incomplete durable state, do not cause
+setup or retry. The native-user regression fails before/passes after this change;
+21 signing/request client tests, the real Rust hosted signer boundary test,
+TypeScript and targeted lint pass. This is not yet a live Brain-service approval
+proof.
+
+Sites automatic requester attribution remains incomplete on native chat. The
+Finite Chat send path mints an assertion through the existing Sites registry,
+binding the verified mailbox, human principal and exact agent. Its Hermes adapter
+writes that context only around the matching terminal tool call, and `fsite`
+consumes it under the matching task-local session. Native `prompt.submit` currently
+bypasses that adapter and carries no equivalent context. Reuse that assertion
+contract with turn isolation; do not substitute a permanent owner environment
+variable or an unsigned prompt claim. This gap must be closed and proved against
+the Sites service before claiming native product parity.
+
 ## Pinned provider dependencies
 
 These are local qualification dependencies, not guarantees from an upstream
@@ -517,7 +538,8 @@ Do not enable production admission until the remaining gates are satisfied:
 - Qualify real WorkOS login and the deployed dashboard origin. Local actual-Next
   onboarding, native chat and correction/queue history pass on the canonical image
   with synthetic account authentication; this does not establish deployed auth
-  or Brain/Sites service parity.
+  or Brain/Sites service parity. Close native Sites requester attribution (above)
+  and prove real human signing/approval with a fresh native-only user.
 - Qualify stuck-start/capacity-exhaustion handling without overriding Core
   stop/control intent. Local worker-loss recovery and an interrupted foreground tool are qualified;
   node loss and failures during model-request persistence remain separate gates.

@@ -377,13 +377,21 @@ export async function hostedDeviceBrainIdentityProvider(
   }
   const headers = hostedDeviceHeaders(config, account, true);
   headers.set("x-finite-brain-public-origin", parsedOrigin.origin);
-  const response = await fetch(`${config.baseUrl}/v1/brain/identity-provider`, {
+  const send = () => fetch(`${config.baseUrl}/v1/brain/identity-provider`, {
     method: "POST",
     cache: "no-store",
     headers,
     body: JSON.stringify(request),
     signal: AbortSignal.timeout(HOSTED_DEVICE_TIMEOUT_MS),
   });
+  let response = await send();
+  if (response.status === 428) {
+    // Native chat need not open the hosted chat UI first. Reuse its durable
+    // human key authority; partial/corrupt identity state still fails closed.
+    await response.body?.cancel();
+    await hostedDeviceState(config, account);
+    response = await send();
+  }
   if (!response.ok) {
     throw await hostedDeviceRequestError(response);
   }

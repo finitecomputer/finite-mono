@@ -229,6 +229,44 @@ test("Brain identity operations use the narrow WorkOS-bound custody endpoint", a
   assert.equal(result.publicKeyHex, "11".repeat(32));
 });
 
+test("Brain initializes the existing human identity when native chat skipped setup", async (context) => {
+  const originalFetch = global.fetch;
+  context.after(() => { global.fetch = originalFetch; });
+  const calls: string[] = [];
+  const operation = { version: "finite-brain-identity-provider-v1" as const, operation: "identifyMember" as const, input: null };
+  let setup = false;
+  global.fetch = (async (input, init) => {
+    const path = new URL(String(input)).pathname;
+    calls.push(path);
+    assert.equal(new Headers(init?.headers).get("x-finite-workos-user-id"), "user_paul");
+    if (path === "/v1/app/state") {
+      setup = true;
+      return Response.json({ identity: { account_id: "11".repeat(32) } });
+    }
+    assert.deepEqual(JSON.parse(String(init?.body)), operation);
+    return setup ? Response.json({ publicKeyHex: "11".repeat(32) }) : Response.json({ error: "setup required" }, { status: 428 });
+  }) as typeof fetch;
+  const result = await hostedDeviceBrainIdentityProvider(
+    { baseUrl: "https://device.internal", apiToken: "internal-token" }, verifiedAccount, operation, "https://finite.computer"
+  );
+  assert.equal(result.publicKeyHex, "11".repeat(32));
+  assert.deepEqual(calls, ["/v1/brain/identity-provider", "/v1/app/state", "/v1/brain/identity-provider"]);
+});
+
+for (const status of [401, 403, 500]) {
+  test(`Brain does not initialize or retry on HTTP ${status}`, async (context) => {
+    const originalFetch = global.fetch;
+    context.after(() => { global.fetch = originalFetch; });
+    let calls = 0;
+    global.fetch = (async () => { calls++; return Response.json({ error: "unavailable" }, { status }); }) as typeof fetch;
+    await assert.rejects(hostedDeviceBrainIdentityProvider(
+      { baseUrl: "https://device.internal", apiToken: "internal-token" }, verifiedAccount,
+      { version: "finite-brain-identity-provider-v1", operation: "identifyMember", input: null }, "https://finite.computer"
+    ), (error: unknown) => error instanceof HostedDeviceRequestError && error.status === status);
+    assert.equal(calls, 1);
+  });
+}
+
 test("agent creation explicitly authorizes binding bootstrap with its durable ids", async (context) => {
   const originalFetch = global.fetch;
   context.after(() => {
