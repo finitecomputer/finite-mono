@@ -181,6 +181,12 @@ stops and failed/uncertain controls remain fenced; an exhausted recovery attempt
 requires operator intervention. Anonymous ingress cannot undo a Core stop.
 Resume retries ResourceExhausted once per second up to 30 times; other errors,
 including ambiguous transport failures, are not blindly retried.
+A creation that exhausts these retries remains `launching` in Core; its lease
+is not released early. Another creation attempt waits for lease expiry (Runner's
+current default is 600 seconds). Existing lifecycle controls are checked first on
+subsequent cycles, but a capacity-exhausted onboarding can therefore wait minutes
+after capacity returns. This latency remains an admission qualification gap; the
+short provider-capacity retry proof does not cover prolonged exhaustion.
 
 Upgrades remain behind `FC_CORE_ENABLE_RUNTIME_UPGRADES`. A template name derives
 from runtime and immutable Core artifact ID. Clone the actor's installed template,
@@ -362,7 +368,7 @@ Current local evidence (2026-09-22):
 | Complete workspace | 2,053 passed, 15 ignored in `workspace-bounded-concurrency.log` with `TMPDIR=/tmp` and `--test-threads=4`. Includes the latest browser/migration work; predates the control-priority fix, separately covered by 28 Runner-cycle tests and strict all-target Runner clippy. |
 | Current candidate regression run | `workspace-final-candidate.log` stopped at six parallel Kata lifecycle failures (four fake-command 2s timeouts, one cleanup assertion and one synchronization deadline). All six pass unchanged in `runner-serial-qualification.log`: 200 passed, 3 ignored in 85.93s. This does not establish a green default-parallel workspace run. The full-schema placement replay extension separately passes for Apple Container and Substrate. |
 | Dev stack | `DEVFINITY_PORT_OFFSET=4000 just dev smoke` and source-structure check passed. |
-| Dashboard | 325 tests, typecheck, lint (one existing unused-variable warning), native protocol browser fixture and production build passed. |
+| Dashboard | Current `dashboard-current-full.log`: 327 tests and production build pass after native Brain-card/tool-event changes. Typecheck, targeted lint and the native protocol browser fixture also pass. Build reports 15 Turbopack file-tracing warnings through `workspace-paths.ts`; no warning suppression was added. |
 | Native protocol + SimpleX restart | Two-owner real-relay run passed, including worker loss, explicit stop/restart, native approval/clarification/reconnect/interruption, history/files, desktop screenshot and repeated isolation checks. This did not prove SimpleX across image upgrades. |
 | Combined browser + SimpleX + image recovery | `native-home-simplex-upgrade-proof.log`: both owners passed in 627.42s. Native and SimpleX replies/addresses, actor UID/CSI records, Core artifact/contact/host, history/files and screenshot survived worker loss, restart, healthy upgrades and failed-image recovery. Live browser creation/reload also passed. |
 | Image upload | `native-browser-image-proof.log` passed in 152.98s: real UI upload, native vision reply, image rendering and reload. `native-image-reference-probe.log` observes the native vision call; partial mixed-upload failure, retry, TypeScript and lint also pass. `image-reference-upgrade-qualified.log` passed in 163.37s: exact image bytes and the persisted user reference survived restart and a healthy runtime upgrade. |
