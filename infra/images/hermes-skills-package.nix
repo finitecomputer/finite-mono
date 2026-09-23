@@ -27,6 +27,13 @@ upstream.override {
             rm -f "$site/hermes_cli/web_routers/__pycache__/skills."*.pyc
             cp ${../../finite-agentd/integrations/hermes/finite_dashboard_reads.py} "$site/hermes_cli/finite_dashboard_reads.py"
             cp ${../../finite-agentd/integrations/hermes/finite_requester_context.py} "$site/hermes_cli/finite_requester_context.py"
+            # gateway.platforms.base prepends its resolved package root to
+            # sys.path. Keep it here so startup cannot shadow our sealed patches
+            # with the original upstream packages through its symlink.
+            test -L "$site/gateway"
+            cp -RL "$site/gateway" "$site/gateway-local"
+            rm "$site/gateway"
+            mv "$site/gateway-local" "$site/gateway"
             test -L "$site/tui_gateway"
             cp -RL "$site/tui_gateway" "$site/tui_gateway-patched"
             rm "$site/tui_gateway"

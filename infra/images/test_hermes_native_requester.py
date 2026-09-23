@@ -1,6 +1,8 @@
 """Exercise the sealed Hermes requester handoff without model inference."""
 
 import concurrent.futures
+import subprocess
+import sys
 import threading
 import time
 import unittest
@@ -21,6 +23,23 @@ def envelope(user="a1"):
 
 
 class NativeRequesterTests(unittest.TestCase):
+    def test_gateway_startup_cannot_shadow_sealed_requester_handler(self):
+        # A fresh interpreter matters: importing server first hides the
+        # gateway's sys.path mutation behind Python's module cache.
+        result = subprocess.run(
+            [
+                sys.executable,
+                "-c",
+                "import gateway.platforms.base; "
+                "import inspect; from tui_gateway import server; "
+                "assert 'finite_requester' in inspect.signature(server._run_prompt_submit).parameters, server.__file__",
+            ],
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+
     def test_invalid_and_expired_context_has_no_identity(self):
         valid = envelope()
         self.assertEqual(requester.normalize(valid), valid)
