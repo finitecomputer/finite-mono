@@ -46,8 +46,8 @@ async fn finite_private_reserve_and_settle_keeps_core_as_usage_authority() {
             .unwrap();
 
         assert_eq!(reserved.decision, "allow");
-        assert_eq!(reserved.burst_limit_units, Some(100_000_000));
-        assert_eq!(reserved.burst_remaining_units, Some(99_750_000));
+        assert_eq!(reserved.burst_limit_units, Some(200_000_000));
+        assert_eq!(reserved.burst_remaining_units, Some(199_750_000));
         assert_eq!(reserved.weekly_limit_units, None);
         assert_eq!(reserved.weekly_remaining_units, None);
         let reservation_id = reserved.reservation_id.clone().unwrap();
