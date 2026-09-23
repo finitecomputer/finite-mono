@@ -41,6 +41,22 @@ The explicit native opt-in browser proof passes separately. Evidence:
 These exercise predecessor wire shapes through the actual dashboard; they do not
 establish a mixed-binary production fleet or authorize rollback after new rows exist.
 
+## GKE staging boundary
+
+Rechecked against [Google's installation guide](https://docs.cloud.google.com/kubernetes-engine/ai-ml/install-overview-substrate)
+on 2026-09-23: evaluation is available, but production support requires the
+private-GA allowlist. Autopilot is unsupported; use Standard with the documented
+certificate APIs and C3-class nodes. The installer deploys its own PostgreSQL
+workload; GKE does not turn that database into a managed backup service. New
+nodes also need the installed Substrate version label at the node-pool level.
+
+Project, region/zone, credentials and spending limit must be supplied before
+creating staging resources. Use the existing `runtime-image.yml` non-production
+CI lane for an amd64 image; the local arm64 digest is not a C3 deployment image.
+Pin installer/provider revisions and image digests, retain the independent
+Recovery Set, and qualify the existing patch set and egress before admission.
+No cloud resources or production placements have been changed by this branch.
+
 ## Runtime configuration and processes
 
 Public flags come from Core's existing `FC_CORE_RUNTIME_ENV_JSON`, through
