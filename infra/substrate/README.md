@@ -189,9 +189,13 @@ expired tokens cannot release a successor lease, and legacy placements cannot us
 this path. Ambiguous transport failures retain their original lease. An older
 Core that rejects the additive release endpoint also retains the lease (Runner's
 default is 600 seconds), without failing creation or deleting credentials.
-Real-Postgres and Runner tests cover release, fencing and old-Core rejection;
-prolonged provider exhaustion followed by successful onboarding still needs the
-full integration proof. The short provider-capacity retry proof does not cover it.
+Real-Postgres and Runner tests cover release, fencing and old-Core rejection.
+The real two-owner proof also exhausts the full provider retry window with every
+worker occupied, verifies the expired Core lease, then frees one worker. On
+2026-09-23 the same creation launched in 3.93 seconds with unchanged runtime ID,
+Core credential, provider correlation, runtime spec and actor UID. Native chat
+and history after restart passed for both owners (full proof: 139.87 seconds).
+This is one local observation, not a GKE latency guarantee.
 
 Upgrades remain behind `FC_CORE_ENABLE_RUNTIME_UPGRADES`. A template name derives
 from runtime and immutable Core artifact ID. Clone the actor's installed template,
@@ -328,6 +332,14 @@ Optional gates:
   automatic recovery alone (no owner restart), exactly one retained user prompt,
   an idle resumed session, a successful subsequent turn, and unchanged marker
   bytes before and after that turn. The second owner still exercises stop/restart.
+- `FC_TEST_SUBSTRATE_CAPACITY_HOLDER`: a suspended disposable actor in the local
+  two-worker pool, using a readiness-capable template independent of Core. Supply
+  the same CLI/kubeconfig variables used for worker fault injection. The proof
+  resumes this holder after the first owner launches, exhausts capacity for the
+  second owner, then suspends the holder and checks immediate retry and identity
+  continuity. Do not use an old Finite agent whose bootstrap credential belongs
+  to a deleted test database: that initial fixture attempt stalled at readiness
+  and was canceled; it did not qualify capacity recovery.
 - `FC_TEST_SUBSTRATE_IMAGES=1`: require a real four-quadrant image response
   through an uploaded file reference and an observed native vision-tool call.
   Require the image bytes and persisted reference to survive restart.

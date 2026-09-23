@@ -1,6 +1,7 @@
 //! Opt-in real-provider proof: isolated Postgres and two account identities,
 //! with the shipped Runner binary, canonical image, and native authentication.
 use super::*;
+mod capacity;
 use crate::auth::test_support::{core_auth_with_runner_credentials, runner_credential_config};
 use crate::launch_codes::IssueLaunchCodeBatchInput;
 use crate::{
@@ -493,6 +494,9 @@ async fn substrate_two_owner_launch_and_native_access() {
                     .unwrap();
             created["request"]["id"].as_str().unwrap().to_owned()
             };
+            let capacity_wait = if index == 1 {
+                capacity::exhaust(&db, &request, runner_command()).await
+            } else { None };
             // Golden-template workers are released asynchronously. Exercise the
             // normal runner polling contract while Core retains one creation.
             let mut attempts = 0;
@@ -530,6 +534,7 @@ async fn substrate_two_owner_launch_and_native_access() {
             );
             assert_eq!(serde_json::to_value(creation.status).unwrap(), "running");
             assert_eq!(creation.desired_runtime_artifact_id.as_deref(), Some("substrate-proof"), "proof must start on the original image");
+            if let Some(wait) = capacity_wait { wait.verify(&db, &request).await; }
             let runtime = creation.agent_runtime_id.unwrap();
             eprintln!("qualified launch for synthetic owner {index}: {runtime}");
             device_request(&device, &user, "/v1/app/actions", Some(json!({"StartRuntime": null}))).await;
