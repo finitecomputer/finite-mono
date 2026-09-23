@@ -398,7 +398,7 @@ async fn substrate_two_owner_launch_and_native_access() {
         let account_server = tokio::spawn(axum::serve(account_listener, account_app).into_future());
         let stalled_boot = stalled_boot::Fault::new();
         let mut runtime_server = tokio::spawn(
-            axum::serve(runtime_listener, stalled_boot.layer(runtime_router(store, origins.clone()))).into_future(),
+            axum::serve(runtime_listener, stalled_boot.layer(store, origins.clone(), &environment)).into_future(),
         );
         let codes = db
             .issue_launch_code_batch(IssueLaunchCodeBatchInput {

@@ -330,6 +330,24 @@ added. Production retains its configured lease (default 600 seconds), so the
 fixture does not establish production recovery latency. Permanently invalid
 configuration still requires correction rather than indefinite-success claims.
 
+Invalid central boot configuration is also qualified on the requester-dispatch
+image (`invalid-boot-proof.log`, 329.55 seconds). The real authenticated Core
+endpoint supplies a non-loopback `FINITE_AGENTD_BRIDGE_ADDR`; worker logs confirm
+the daemon rejects it. Runner returns failure naturally while Core retains the
+launching creation. Correcting Core's configuration and allowing the normal
+lease retry recovers that creation without changing its runtime ID, spec,
+credential hash or provider correlation. A before/after provider comparison also
+confirmed unchanged actor UID and durable volumes. Both owners then pass native
+chat, files/history, desktop, isolation and stop/restart checks. No production
+recovery code was added. This qualifies a correctable central flag, not an
+invalid immutable image or a lost credential. The failed RPC can consume the
+300-second client deadline; production also retains its default 600-second lease.
+Startup failure remains visible in operator logs rather than a terminal Core
+creation error. Do not delete the actor, revoke its credential or create a
+replacement request to repair this case: correct Core's environment source and
+let the existing Runner retry. Fast diagnosis and user-facing startup status
+remain rollout concerns.
+
 Upgrades remain behind `FC_CORE_ENABLE_RUNTIME_UPGRADES`. A template name derives
 from runtime and immutable Core artifact ID. Clone the actor's installed template,
 not the operator's latest base, preserving storage and bootstrap identity.
@@ -649,6 +667,11 @@ Optional gates:
   fail bootstrap environment fetches, kill the Runner while the actor is
   RESUMING, restore the endpoint, and retry after natural Core lease expiry.
   Assert durable creation identity and run the ordinary two-owner parity gates.
+- `FC_TEST_SUBSTRATE_INVALID_BOOT=1`, with the local fault CLI/kubeconfig:
+  serve a non-loopback `FINITE_AGENTD_BRIDGE_ADDR` through the real authenticated
+  Core environment endpoint. Let the daemon reject it and Runner return naturally;
+  require creation to remain retryable. Correct Core configuration, wait for the
+  lease to expire, then run the same two-owner parity gates on the same creation.
 - `FC_TEST_SUBSTRATE_CAPACITY_HOLDER`: a suspended disposable actor in the local
   two-worker pool, using a readiness-capable template independent of Core. Supply
   the same CLI/kubeconfig variables used for worker fault injection. The proof
@@ -758,9 +781,10 @@ Do not enable production admission until the remaining gates are satisfied:
   routes and native terminal Organization Brain creation/access with the current
   CLI. Historical card rendering has separate fixture coverage. The removed CLI
   request producer is not a new runner feature.
-- Qualify permanent boot failure handling and operator recovery. Local transient
-  bootstrap failure/RESUMING re-entry, full capacity exhaustion/retry, worker-loss
-  recovery and an interrupted foreground tool are qualified;
+- Qualify invalid immutable images, lost boot credentials and actionable startup
+  diagnostics. Correctable invalid central flags, transient bootstrap failure/
+  RESUMING re-entry, capacity exhaustion/retry, worker-loss recovery and an
+  interrupted foreground tool are qualified;
   node loss and failures during model-request persistence remain separate gates.
   Keep upgrades opt-in; retirement and backup recovery remain unadvertised.
 - Preserve the Recovery Authority and qualify the deployment Recovery Set. The
