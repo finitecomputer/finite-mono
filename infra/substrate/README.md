@@ -65,7 +65,7 @@ pass; both actors are suspended with data retained and final fleet status is
 healthy. This is real old-Runner/new-Core queue coexistence, not old-Core rollback,
 a deployed Kata/Phala qualification, or a legacy agent launch/chat proof.
 
-## Local node-restart limitation
+## Local node-restart recovery
 
 Restarting OrbStack during qualification changed worker pod IPs without changing
 pod UIDs. At provider pin `bb0effe`, `workersync.createOrUpdateWorker` detects the
@@ -83,10 +83,9 @@ recovery, not automatic whole-node recovery. The canonical status command now co
 using `kubectl ate get workers` and the Kubernetes worker pods; a mismatch,
 missing pod or empty worker inventory cannot report healthy. The `kubectl ate`
 plugin is required for this read-only probe. Qualify provider-supported
-reconciliation before accepting node restart as a supported recovery boundary.
+reconciliation before accepting a deployment as a supported recovery boundary.
 Do not repair this with a second worker registry in Core or Runner. The provider
-patch and later sandbox/IP-drift qualification are recorded below; simultaneous
-whole-node loss remains unqualified.
+patch and later sandbox/IP-drift and whole-node qualifications are recorded below.
 
 ## GKE staging boundary
 
@@ -601,9 +600,25 @@ refresh and isolation across recovery/restart. No manual pod deletion or actor
 replacement is part of the fault path. Both test actors were suspended afterward
 with data retained; canonical platform status is healthy.
 
-This qualifies real sandbox/network recreation with IP drift on a reachable
-node. It does not establish simultaneous whole-node/control-plane loss, a
-partitioned node, GKE CSI fencing, or production recovery latency.
+The separate whole-node drill also passes (`node-restart-proof-1.log`, 286.05
+seconds for the complete proof including the manual barrier). After both owners
+have verified native history, restart only the Docker container hosting kind's
+single control-plane/worker node. This takes Substrate's API, controller,
+Postgres, snapshot store, network proxies and workers down together. Kubernetes
+returns Ready first; projected certificate reissuance gates service startup.
+The patched controller replaces both stale worker pods and marks their actors
+CRASHED. Restore the host's disposable port-forwards, then release the nonce-bound
+test barrier. Two ordinary Runner cycles under admission drain recover both
+actors with unchanged UIDs and volumes and exactly one system-attributed restart
+per runtime. Owner restart/stop commands are skipped in this mode: the next
+native turns, retained files/history, desktop and cross-owner denials must pass
+after automatic recovery alone. Both actors are suspended with data retained at
+the end; canonical platform status is healthy.
+
+Core, identity and the test coordinator remain alive on the host, and the node's
+local disks survive the restart. Host port-forward restoration is test transport
+repair, not product recovery. This does not establish Core/identity loss,
+partition fencing, GKE CSI recovery, disk loss, or production recovery latency.
 
 ## Pinned provider dependencies
 
@@ -619,7 +634,7 @@ and custom egress fixture; repeat qualification against the intended release.
 | `0004-local-hostpath-set.patch` | Local CSI v1.17.1 fixture only: treat publish paths as a set and remove persisted duplicates on unpublish. Regression fails before/passes after; clean stop works after worker loss. Build with `-X main.version=v1.17.1-finite-local-set-fix`; an empty version is rejected by sidecars. |
 | `0005-revert-interrupted-lifecycle.patch` | Permit Revert from RESUMING/SUSPENDING under the existing actor lease. State regressions and full control API suite pass; real bad-image recovery passes. |
 | `0006-skip-unused-golden-snapshots.patch` | Cold-boot templates never consume golden state. Skip unused warmup, which otherwise strands capacity on a bad image. Regression fails upstream/passes patched; full control API suite passes. Existing golden fixtures require explicit cleanup. |
-| `0007-replace-workers-after-ip-change.patch` | Locally qualified: drain a worker after pod IP drift, request graceful pod deletion with UID/resource-version preconditions, and retain its actor assignment until the existing pod-deletion reconcile runs. Requires controller pod-delete permission. Regression fails on the pinned upstream code and passes patched; controller suites, worker race tests and generated RBAC pass. Real CRI sandbox recreation, IP drift and two-owner recovery pass; whole-node/partition and GKE fencing remain unqualified. |
+| `0007-replace-workers-after-ip-change.patch` | Locally qualified: drain a worker after pod IP drift, request graceful pod deletion with UID/resource-version preconditions, and retain its actor assignment until the existing pod-deletion reconcile runs. Requires controller pod-delete permission. Regression fails on the pinned upstream code and passes patched; controller suites, worker race tests and generated RBAC pass. Real CRI sandbox recreation, IP drift and two-owner recovery pass; whole-node restart also passes with retained local disks and Core outside the failure domain; partition and GKE fencing remain unqualified. |
 
 Hermes's pinned stream-writer guard still allowed a cancelled late opener to
 supersede its replacement. `scripts/proofs/hermes-stream-writer.py` forces that
@@ -695,6 +710,14 @@ Optional gates:
   drain without an owner request. Check Core system attribution, host/control
   fences, duplicate admission, delayed-observation idempotency, and stopped actors
   remaining suspended through later cycles.
+- `FC_TEST_SUBSTRATE_NODE_RESTART=1`, a fresh
+  `FC_TEST_SUBSTRATE_RECOVERY_DIRECTORY`, and local CLI/kubeconfig: wait for
+  `ready.json`, restart the disposable kind node, restore its test port-forwards,
+  verify canonical status and both actors CRASHED, then copy the private
+  `resumeNonce` into `resume`. The fixture records actor/volume identities before
+  the barrier, recovers both agents through normal Runner observation under
+  admission drain, and skips owner controls before post-recovery native checks.
+  Do not combine this mode with other worker/crash fault options.
 - `FC_TEST_SUBSTRATE_RESTART_SANDBOX=1` with automatic recovery and the local
   fault CLI/kubeconfig: restart only the selected synthetic worker's CRI sandbox
   in `kind-finite-hermes-restore`, rather than deleting its pod. Requires the
@@ -829,7 +852,8 @@ Do not enable production admission until the remaining gates are satisfied:
   diagnostics. Correctable invalid central flags, transient bootstrap failure/
   RESUMING re-entry, capacity exhaustion/retry, worker-loss recovery and an
   interrupted foreground tool are qualified;
-  node loss and failures during model-request persistence remain separate gates.
+  partition fencing, disk loss and failures during model-request persistence
+  remain separate gates. A retained-disk local node restart is qualified above.
   Keep upgrades opt-in; retirement and backup recovery remain unadvertised.
 - Preserve the Recovery Authority and qualify the deployment Recovery Set. The
   local empty-cluster drill passes with Core retained; full Core/identity outage,

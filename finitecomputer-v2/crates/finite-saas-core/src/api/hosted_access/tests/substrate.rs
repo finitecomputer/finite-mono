@@ -560,6 +560,7 @@ async fn substrate_two_owner_launch_and_native_access() {
                     axum::serve(listener, runtime_router(refreshed, origins.clone())).into_future(),
                 );
             }
+            let node_restarted = pass == 1 && recovery::recover_node(&db, &runtimes, &runner_command).await;
             for (index, runtime) in runtimes.iter().enumerate() {
                 if pass >= 2 {
                     let actor_name = runtime.replacen("runtime_", "runtime-", 1);
@@ -631,7 +632,7 @@ async fn substrate_two_owner_launch_and_native_access() {
                     assert_eq!(template["containers"][0]["image"].as_str(), upgrade_image.as_deref());
                     assert_eq!(after["status"]["currentActorTemplateUid"], template["metadata"]["uid"]);
                 }
-                if pass == 1 {
+                if pass == 1 && !node_restarted {
                     let automatic = std::env::var_os("FC_TEST_SUBSTRATE_AUTO_RECOVERY").is_some();
                     if index == 0 {
                         if automatic {
