@@ -457,8 +457,8 @@ async fn finite_private_threshold_notices_are_strongest_once_per_epoch() {
         .unwrap();
 
         for (request_id, units, at) in [
-            ("req-notice-25", 76_000_000, "2026-05-26T13:00:00Z"),
-            ("req-notice-10", 16_000_000, "2026-05-26T13:10:00Z"),
+            ("req-notice-25", 152_000_000, "2026-05-26T13:00:00Z"),
+            ("req-notice-10", 32_000_000, "2026-05-26T13:10:00Z"),
         ] {
             let reserved = db
                 .reserve_finite_private_usage(ReserveFinitePrivateUsageInput {
@@ -503,7 +503,7 @@ async fn finite_private_threshold_notices_are_strongest_once_per_epoch() {
                     .notice
                     .as_ref()
                     .map(|notice| notice.threshold_remaining_percent),
-                Some(if units == 76_000_000 { 25 } else { 10 })
+                Some(if units == 152_000_000 { 25 } else { 10 })
             );
             assert!(
                 status
