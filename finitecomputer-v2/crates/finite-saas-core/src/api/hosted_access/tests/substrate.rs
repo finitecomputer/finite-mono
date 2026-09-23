@@ -2,6 +2,7 @@
 //! with the shipped Runner binary, canonical image, and native authentication.
 use super::*;
 mod capacity;
+mod recovery;
 use crate::auth::test_support::{core_auth_with_runner_credentials, runner_credential_config};
 use crate::launch_codes::IssueLaunchCodeBatchInput;
 use crate::{
@@ -592,6 +593,7 @@ async fn substrate_two_owner_launch_and_native_access() {
         }
         for pass in 0..(2 + usize::from(upgrade_image.is_some()) + usize::from(failed_image.is_some())) {
             if pass == 1 {
+                recovery::wait_for_cluster_restore(&db.url, &runtimes).await;
                 // Replace Core's boot configuration authority, leaving the
                 // installed provider templates and creation specs untouched.
                 runtime_server.abort();

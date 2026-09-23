@@ -291,6 +291,30 @@ complete recovery drill must capture the coordinated Recovery Set inside that
 test lifetime, after fencing all selected writers; retained actor volumes from
 a completed run cannot establish recovery of the deleted Core authority.
 
+An isolated `kind-finite-hermes-restore` fixture is now installed from the pinned
+upstream installer and tested control-plane binaries. It has its own kubeconfig,
+API/CONNECT forwards, shared Rust ingress and local TLS port, two empty workers,
+and the same DATA/cold-boot base template. Initial inventory is zero actors; both
+its control plane and the original cluster report healthy. It contains no source
+cluster actors or user data. Setup evidence lives in the private
+`finite-substrate-restore` scratch directory.
+
+`FC_TEST_SUBSTRATE_RECOVERY_DIRECTORY` optionally pauses the two-owner proof
+after initial native history verification and before restart. A fresh private
+directory receives mode-0600 `ready.json` with the Core database URL, runtime IDs
+and a per-run resume nonce. Writing that nonce to `resume` releases the barrier;
+a stale marker or a 15-minute timeout fails the test. This is test coordination,
+not a product restore interface, and has compiled but has not yet completed a
+live restore drill. Core remains outside the simulated cluster failure.
+
+For that drill, fence both agents, retain the Core backup/bindings independently,
+and capture provider Postgres plus the complete CSI data/state directory before
+recreating only this disposable cluster. **Run upstream CSI setup before restoring
+data:** its setup command clears the driver data directory. Fence the target API,
+controller and CSI writer while installing the verified backup, then restore
+service and resume the test to check native history/files and owner isolation.
+Do not run the destructive setup command against the existing source cluster.
+
 The next restore proof must fence the source writer, restore onto genuinely empty
 storage without reading the source, start exactly one writer, and exercise native
 history/files, SimpleX identity and owner isolation with the retained Core binding.
