@@ -108,6 +108,55 @@ class NativeRequesterTests(unittest.TestCase):
         self.assertEqual(frame["text"], "publish my site")
         self.assertEqual(frame["history"], [])
 
+    def test_compute_completion_during_dispatch_does_not_restore_old_requester(self):
+        for next_user in (None, "c3" * 32):
+            with self.subTest(next_user=next_user):
+                session = {"history_lock": threading.RLock(), "history": [], "running": True}
+
+                def complete(frame, *, on_complete):
+                    on_complete({"type": "turn.done", "session_info_emitted": True})
+
+                def drain(*args):
+                    if next_user:
+                        session["_finite_requester_user"] = next_user
+
+                supervisor = Mock(submit_turn=Mock(side_effect=complete))
+                with (
+                    patch.object(server, "_load_dashboard_process_isolation_config"),
+                    patch.object(server, "_get_compute_host_supervisor", return_value=supervisor),
+                    patch.object(server, "_session_info", return_value={}),
+                    patch.object(server, "_drain_queued_prompt", side_effect=drain),
+                ):
+                    response = server._submit_prompt_to_compute_host(
+                        "r", "s", session, "hello", finite_requester=envelope()
+                    )
+                self.assertNotIn("error", response)
+                self.assertEqual(session.get("_finite_requester_user"), next_user)
+
+    def test_failed_compute_dispatch_clears_requester_for_in_process_retry(self):
+        session = {"history_lock": threading.RLock(), "history": [], "running": True}
+
+        observed = []
+
+        def fail(frame, *, on_complete):
+            observed.append(session.get("_finite_requester_user"))
+            on_complete({"type": "turn.error", "reason": "send_failed"})
+            raise OSError("closed fixture pipe")
+
+        with (
+            patch.object(server, "_load_dashboard_process_isolation_config"),
+            patch.object(
+                server, "_get_compute_host_supervisor", return_value=Mock(submit_turn=fail)
+            ),
+        ):
+            response = server._submit_prompt_to_compute_host(
+                "r", "s", session, "hello", finite_requester=envelope()
+            )
+        self.assertIn("error", response)
+        self.assertEqual(observed, [envelope()["userId"]])
+        self.assertNotIn("_finite_requester_user", session)
+        self.assertTrue(session["running"])
+
     def test_other_requester_cannot_steer_an_active_turn(self):
         agent = Mock()
         session = {

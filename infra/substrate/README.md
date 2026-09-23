@@ -441,9 +441,15 @@ are present); they never create an unsigned v1 fallback.
 Different requesters cannot steer the active turn or merge their queued envelopes.
 Sites remains the authority when `fsite` submits Project Init.
 
-Current evidence: the sealed Linux Python package builds; seven packaged-runtime
+Current evidence: the sealed Linux Python package builds; nine packaged-runtime
 regressions cover optional Sites claims, validation, concurrent isolation, queue separation, steering,
-compute-frame/history separation, and gateway-first import order. All 86 adapter tests pass, including native
+compute-frame/history separation, gateway-first import order, immediate compute
+completion and failed dispatch. The latter two pass in the rebuilt macOS sealed
+package (`requester-dispatch-after.log`); immediate completion reproduces stale
+requester state before the fix. The assignment now precedes dispatch, leaving
+completion responsible for cleanup and preserving the next queued requester.
+The runtime image/browser proof must be refreshed for this change.
+All 86 adapter tests pass, including native
 lease cleanup and sender mismatch. The dashboard browser fixture checks fresh
 context on each prompt and successful chat without Sites context. The real Sites
 service accepts the exact assertion and rejects another agent. These are separate
