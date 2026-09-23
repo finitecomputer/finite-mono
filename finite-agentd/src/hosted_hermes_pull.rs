@@ -382,6 +382,27 @@ pub(crate) async fn boot_environment() -> Result<BTreeMap<String, String>, Agent
 
 impl CoreConnection {
     async fn environment(&self) -> Result<BTreeMap<String, String>, AgentdError> {
+        // Allow brief cold-start transport failures. Retry only transient
+        // HTTP failures; never substitute cached flags or retry an auth refusal.
+        for attempt in 0..3 {
+            match self.fetch_environment().await {
+                Err(AgentdError::Http(error))
+                    if attempt < 2
+                        && (error.is_timeout()
+                            || error.is_connect()
+                            || error
+                                .status()
+                                .is_some_and(|status| status.is_server_error())) =>
+                {
+                    tokio::time::sleep(Duration::from_secs(1)).await;
+                }
+                result => return result,
+            }
+        }
+        unreachable!("last attempt always returns")
+    }
+
+    async fn fetch_environment(&self) -> Result<BTreeMap<String, String>, AgentdError> {
         #[derive(Deserialize)]
         #[serde(rename_all = "camelCase", deny_unknown_fields)]
         struct Environment {
@@ -428,6 +449,41 @@ mod tests {
     struct Request {
         head: String,
         body: String,
+    }
+
+    #[tokio::test]
+    async fn boot_environment_retries_transient_http_but_preserves_auth_refusals() {
+        let (origin, requests) = server(2, |index, _| {
+            if index == 0 {
+                (503, "{}".into(), String::new())
+            } else {
+                (
+                    200,
+                    r#"{"runtimeId":"runtime_test","environment":{"FINITE_DESKTOP_ENABLED":"1"}}"#
+                        .into(),
+                    String::new(),
+                )
+            }
+        })
+        .await;
+        let core = CoreConnection::new(origin, "a".repeat(64)).unwrap();
+        assert_eq!(
+            core.environment().await.unwrap()["FINITE_DESKTOP_ENABLED"],
+            "1"
+        );
+        assert_eq!(requests.await.unwrap().len(), 2);
+
+        for status in [401, 403, 503] {
+            let count = if status == 503 { 3 } else { 1 };
+            let (origin, requests) =
+                server(count, move |_, _| (status, "{}".into(), String::new())).await;
+            let core = CoreConnection::new(origin, "a".repeat(64)).unwrap();
+            let error = core.environment().await.unwrap_err();
+            assert!(
+                matches!(error, AgentdError::Http(error) if error.status().map(|value| value.as_u16()) == Some(status))
+            );
+            assert_eq!(requests.await.unwrap().len(), count);
+        }
     }
 
     // Real loopback HTTP tests qualify our client/schema/lifecycle contract.
