@@ -1,10 +1,10 @@
-"""Ephemeral native-turn Sites assertion; the Sites registry remains authority."""
+"""Ephemeral native requester identity with an optional registry-issued Sites assertion."""
 
 import contextvars
 import re
 import time
 
-_CONTEXT = contextvars.ContextVar("finite_native_sites_requester", default=None)
+_CONTEXT = contextvars.ContextVar("finite_native_requester", default=None)
 
 
 def normalize(value):
@@ -17,16 +17,22 @@ def normalize(value):
     if (
         not isinstance(user, str)
         or re.fullmatch(r"[0-9a-f]{64}", user) is None
-        or not isinstance(email, str)
-        or "@" not in email
-        or len(email) > 254
-        or not isinstance(assertion, str)
-        or re.fullmatch(r"[0-9a-f]{64}", assertion) is None
         or type(expires) is not int
         or expires <= time.time()
     ):
         return None
-    return {"userId": user, "email": email, "sitesAssertion": assertion, "expiresAt": expires}
+    identity = {"userId": user, "expiresAt": expires}
+    if email is None and assertion is None:
+        return identity
+    if (
+        not isinstance(email, str)
+        or "@" not in email
+        or len(email) > 254
+        or not isinstance(assertion, str)
+        or re.fullmatch(r"[0-9a-f]{64}", assertion) is None
+    ):
+        return None
+    return {**identity, "email": email, "sitesAssertion": assertion}
 
 
 def current():

@@ -348,21 +348,26 @@ The Brain CLI now reads native v2 requester leases as well as retained v1 leases
 A present invalid v2 lease rejects the request without consulting v1, including
 on repeated reads after expiry. The regression failed on the old reader; the
 full CLI suite passes (232 tests, two ignored), and Clippy passes. This change
-still needs qualification in a rebuilt runtime. Native requester issuance also
-currently depends on Sites availability; remove that dependency for Brain-only
-turns before claiming product parity.
+still needs qualification in a rebuilt runtime. Native requester identity now
+comes from the exact hosted human/Project binding even when Sites is unavailable
+or unconfigured; optional Sites claims remain an all-or-nothing pair. Brain-only
+turns write v2 leases without mailbox/assertion fields and never leave a v1
+fallback. Server outage/binding tests, client parsing, seven sealed-helper tests,
+86 adapter tests, and the Rust lease regressions pass. Live Brain approval through
+the actual dashboard remains unqualified.
 
 The native Sites handoff reuses the existing registry-issued assertion binding
 verified mailbox, human principal and exact agent. The dashboard obtains fresh
 context for each prompt through its owner-authorized Hermes access route. Hermes
 carries it outside prompt text/history, scopes it to the executing turn, and uses
 the existing adapter's terminal-tool lease writer. Native turns write v2 leases
-only, bounded by the assertion expiry; they never create an unsigned v1 fallback.
+only, bounded by the requester expiry (and the assertion expiry when Sites claims
+are present); they never create an unsigned v1 fallback.
 Different requesters cannot steer the active turn or merge their queued envelopes.
 Sites remains the authority when `fsite` submits Project Init.
 
-Current evidence: the sealed Linux Python package builds; six packaged-runtime
-regressions cover validation, concurrent isolation, queue separation, steering,
+Current evidence: the sealed Linux Python package builds; seven packaged-runtime
+regressions cover optional Sites claims, validation, concurrent isolation, queue separation, steering,
 compute-frame/history separation, and gateway-first import order. All 86 adapter tests pass, including native
 lease cleanup and sender mismatch. The dashboard browser fixture checks fresh
 context on each prompt and successful chat without Sites context. The real Sites

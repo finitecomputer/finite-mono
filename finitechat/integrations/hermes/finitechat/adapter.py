@@ -214,7 +214,7 @@ def _load_local_env_defaults(path: Path | None = None) -> None:
 _load_local_env_defaults()
 
 
-def _native_sites_requester():
+def _native_requester():
     try:
         from hermes_cli.finite_requester_context import current
     except ImportError:
@@ -317,14 +317,14 @@ class _RequesterContextBroker:
 
     def _write(self, *, session_key: str, user_id: str, expires_at_unix: int) -> None:
         try:
-            native = _native_sites_requester()
+            native = _native_requester()
             if native is not None:
-                # Native claims require the Sites-issued assertion. Never leave a
-                # v1 fallback that could outlive or discard that assertion.
+                # Native turns always use v2, including Brain-only identity.
+                # Never leave a v1 fallback that discards a Sites assertion.
                 (self.root / _requester_context_filename(session_key)).unlink(missing_ok=True)
                 self._write_v2(
                     session_key=session_key, user_id=user_id,
-                    email=native["email"], sites_assertion=native["sitesAssertion"],
+                    email=native.get("email"), sites_assertion=native.get("sitesAssertion"),
                     expires_at_unix=min(expires_at_unix, native["expiresAt"]),
                 )
                 return
@@ -363,8 +363,8 @@ class _RequesterContextBroker:
         *,
         session_key: str,
         user_id: str,
-        email: str,
-        sites_assertion: str,
+        email: str | None,
+        sites_assertion: str | None,
         expires_at_unix: int,
     ) -> None:
         self.root_v2.mkdir(mode=0o700, parents=True, exist_ok=True)
@@ -376,10 +376,10 @@ class _RequesterContextBroker:
             "session_key": session_key,
             "platform": FINITE_PLATFORM_NAME,
             "requesting_user_id": user_id,
-            "owner_email": email,
-            "hosted_requester_assertion": sites_assertion,
             "expires_at_unix": expires_at_unix,
         }
+        if email is not None and sites_assertion is not None:
+            payload.update(owner_email=email, hosted_requester_assertion=sites_assertion)
         with temp_path.open("w", encoding="utf-8") as handle:
             os.chmod(temp_path, 0o600)
             json.dump(payload, handle, separators=(",", ":"), sort_keys=True)
@@ -421,10 +421,10 @@ def _active_finite_session() -> tuple[str | None, str | None]:
     session_key = str(get_session_env("HERMES_SESSION_KEY", "") or "").strip()
     user_id = str(get_session_env("HERMES_SESSION_USER_ID", "") or "").strip()
     authenticated_turn_user = _AUTHENTICATED_FINITE_TURN_USER.get()
-    native = _native_sites_requester()
+    native = _native_requester()
     if authenticated_turn_user is None and native is not None:
-        # This supplies Sites context only; the registry validates the assertion
-        # against the exact human, mailbox, agent and expiry at Project Init.
+        # Requester provenance is turn-scoped. Sites separately validates its
+        # optional assertion against human, mailbox, agent and expiry.
         authenticated_turn_user = native["userId"]
     if (
         # Pinned Hermes maps plugin platforms that are not enum members to

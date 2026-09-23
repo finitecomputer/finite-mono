@@ -120,14 +120,15 @@ fn resolve_at(
     let valid_shape = match version {
         1 => context.owner_email.is_none() && context.hosted_requester_assertion.is_none(),
         2 => {
-            context
-                .owner_email
-                .as_ref()
-                .is_some_and(|value| !value.trim().is_empty())
-                && context
-                    .hosted_requester_assertion
+            (context.owner_email.is_none() && context.hosted_requester_assertion.is_none())
+                || context
+                    .owner_email
                     .as_ref()
                     .is_some_and(|value| !value.trim().is_empty())
+                    && context
+                        .hosted_requester_assertion
+                        .as_ref()
+                        .is_some_and(|value| !value.trim().is_empty())
         }
         _ => false,
     };
@@ -237,6 +238,17 @@ mod tests {
         valid["hosted_requester_assertion"] = "b2".repeat(32).into();
         std::fs::remove_file(legacy).unwrap();
         std::fs::write(&native, valid.to_string()).unwrap();
+        assert!(matches!(
+            resolve_at(&environment, root.path(), 100).unwrap(),
+            BrainCreationAuthority::AuthenticatedRequester(_)
+        ));
+        let mut identity_only = valid.clone();
+        identity_only.as_object_mut().unwrap().remove("owner_email");
+        identity_only
+            .as_object_mut()
+            .unwrap()
+            .remove("hosted_requester_assertion");
+        std::fs::write(&native, identity_only.to_string()).unwrap();
         assert!(matches!(
             resolve_at(&environment, root.path(), 100).unwrap(),
             BrainCreationAuthority::AuthenticatedRequester(_)

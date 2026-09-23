@@ -360,7 +360,7 @@ class FinitePlatformAdapterTests(unittest.TestCase):
             broker.root.mkdir(parents=True, exist_ok=True)
             (broker.root / filename).write_text("stale legacy lease")
             hook = {"tool_name": "terminal", "tool_call_id": "native-call"}
-            with patch.object(self.module, "_native_sites_requester", return_value=requester):
+            with patch.object(self.module, "_native_requester", return_value=requester):
                 broker.before_tool_call(**hook)
                 self.assertFalse((broker.root / filename).exists())
                 payload = json.loads((broker.root_v2 / filename).read_text())
@@ -373,7 +373,17 @@ class FinitePlatformAdapterTests(unittest.TestCase):
                 broker.before_tool_call(**hook)
                 self.assertFalse((broker.root_v2 / filename).exists())
             session_context.values["HERMES_SESSION_USER_ID"] = "a1" * 32
-            with patch.object(self.module, "_native_sites_requester", return_value=None):
+            identity_only = {"userId": requester["userId"], "expiresAt": requester["expiresAt"]}
+            with patch.object(self.module, "_native_requester", return_value=identity_only):
+                broker.before_tool_call(**hook)
+                payload = json.loads((broker.root_v2 / filename).read_text())
+                self.assertEqual(payload["requesting_user_id"], requester["userId"])
+                self.assertNotIn("owner_email", payload)
+                self.assertNotIn("hosted_requester_assertion", payload)
+                self.assertFalse((broker.root / filename).exists())
+                broker.after_tool_call(**hook)
+                self.assertFalse((broker.root_v2 / filename).exists())
+            with patch.object(self.module, "_native_requester", return_value=None):
                 broker.before_tool_call(**hook)
                 self.assertFalse((broker.root / filename).exists())
                 self.assertFalse((broker.root_v2 / filename).exists())

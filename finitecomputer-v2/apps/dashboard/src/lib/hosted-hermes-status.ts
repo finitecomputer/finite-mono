@@ -9,7 +9,8 @@ export type HostedHermesAccess = {
 };
 
 export type HostedHermesSession = { baseUrl: string; accessToken: string; expiresAt: number };
-export type NativeRequesterContext = { userId: string; email: string; sitesAssertion: string; expiresAt: number };
+export type NativeRequesterContext = { userId: string; expiresAt: number } &
+  ({ email: string; sitesAssertion: string } | { email?: never; sitesAssertion?: never });
 
 export async function readNativeRequesterContext(runtimeId: string, signal: AbortSignal): Promise<NativeRequesterContext | undefined> {
   return bounded(signal, async requestSignal => {
@@ -20,10 +21,12 @@ export async function readNativeRequesterContext(runtimeId: string, signal: Abor
     requestSignal.throwIfAborted();
     const value = record(result.requester);
     if (typeof value.userId !== "string" || !/^[0-9a-f]{64}$/.test(value.userId) ||
-      typeof value.email !== "string" || !value.email.includes("@") || value.email.length > 254 ||
-      typeof value.sitesAssertion !== "string" || !/^[0-9a-f]{64}$/.test(value.sitesAssertion) ||
       !Number.isSafeInteger(value.expiresAt) || Number(value.expiresAt) <= 0) return undefined;
-    return { userId: value.userId, email: value.email, sitesAssertion: value.sitesAssertion, expiresAt: Number(value.expiresAt) };
+    const identity = { userId: value.userId, expiresAt: Number(value.expiresAt) };
+    if (value.email === undefined && value.sitesAssertion === undefined) return identity;
+    if (typeof value.email !== "string" || !value.email.includes("@") || value.email.length > 254 ||
+      typeof value.sitesAssertion !== "string" || !/^[0-9a-f]{64}$/.test(value.sitesAssertion)) return undefined;
+    return { ...identity, email: value.email, sitesAssertion: value.sitesAssertion };
   });
 }
 

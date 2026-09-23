@@ -1,10 +1,13 @@
 import assert from "node:assert/strict";
-import { readFile } from "node:fs/promises";
+import { readFile, mkdtemp, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import test from "node:test";
 
 import {
   HostedWebChatError,
   createHostedRequesterContext,
+  createNativeRequesterContext,
   hostedWebChatErrorMessage,
   hostedWebChatErrorResponse,
   isAgentBindingAuthorizationRequired,
@@ -185,6 +188,54 @@ test("missing or failing Sites requester exchange keeps Chat context optional", 
     assert.equal(await createHostedRequesterContext(input), undefined);
     assert.equal(requests.length, 2);
   }
+});
+
+test("native requester survives Sites outage but requires the exact human and Project", async (t) => {
+  const saved = { ...process.env };
+  t.after(() => { process.env = saved; });
+  const root = await mkdtemp(join(tmpdir(), "native-requester-"));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  process.env = { ...process.env, NODE_ENV: "development", PATH: "", FC_FINITED_BIN: "",
+    FC_REPO_ROOT: root, FC_WORKSPACE_ROOT: root, FC_CONTROL_PLANE_ROOT: root,
+    FC_WORKOS_AUTH_ENABLED: "0", FC_DASHBOARD_ALLOW_DEV_ACCOUNT_AUTH: "1",
+    FC_DASHBOARD_DEV_EMAIL: "owner@example.test", FC_DASHBOARD_DEV_WORKOS_USER_ID: "native-owner",
+    FC_DASHBOARD_DEV_WORKOS_ACCESS_TOKEN: "local-fixture", FC_CORE_BASE_URL: "https://core.test",
+    FC_HOSTED_WEB_DEVICE_URL: "https://device.test", FINITECHAT_HOSTED_API_TOKEN: "local-device-fixture",
+    FC_SITES_UPSTREAM_URL: "https://sites.test", FINITE_SITES_VIEWER_SESSION_TOKEN: "local-sites-fixture",
+  };
+  const user = "a1".repeat(32);
+  let bindingHuman = user, bindingProject = "project-1", sitesCalls = 0;
+  t.mock.method(globalThis, "fetch", async (input: string | URL) => {
+    const url = String(input);
+    if (url === "https://core.test/api/core/v1/me") return Response.json({
+      workos_user_id: "native-owner", email: "owner@example.test", projects: [{
+        project: { id: "project-1", display_name: "Native" }, runtime: { id: "runtime-1" },
+      }],
+    });
+    if (url === "https://device.test/v1/app/agent-bindings/open") {
+      const state = targetState(); state.identity.account_id = user;
+      state.hosted_agent_binding!.human_account_id = bindingHuman;
+      state.hosted_agent_binding!.project_id = bindingProject;
+      return Response.json(state);
+    }
+    if (url === "https://sites.test/internal/v1/hosted-requester-assertions") {
+      sitesCalls += 1; return Response.json({ error: "unavailable" }, { status: 503 });
+    }
+    throw new Error(`Unexpected request: ${url}`);
+  });
+  const before = Math.floor(Date.now() / 1000);
+  const identity = await createNativeRequesterContext("runtime-1");
+  assert.equal(identity?.userId, user);
+  assert.ok(identity && identity.expiresAt >= before + 600 && identity.expiresAt <= Math.floor(Date.now() / 1000) + 600);
+  assert.deepEqual(Object.keys(identity!).sort(), ["expiresAt", "userId"]);
+  assert.equal(sitesCalls, 1);
+  delete process.env.FC_SITES_UPSTREAM_URL;
+  assert.equal((await createNativeRequesterContext("runtime-1"))?.userId, user);
+  assert.equal(sitesCalls, 1);
+  bindingHuman = "c3".repeat(32);
+  assert.equal(await createNativeRequesterContext("runtime-1"), undefined);
+  bindingHuman = user; bindingProject = "other-project";
+  assert.equal(await createNativeRequesterContext("runtime-1"), undefined);
 });
 
 function targetState(): HostedChatState {

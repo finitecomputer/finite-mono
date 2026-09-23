@@ -54,6 +54,18 @@ class NativeRequesterTests(unittest.TestCase):
                 self.assertIsNone(requester.normalize({**valid, field: value}))
         self.assertIsNone(requester.normalize(None))
 
+    def test_identity_without_sites_claims_remains_turn_scoped(self):
+        identity = {"userId": "a1" * 32, "expiresAt": int(time.time()) + 60}
+        tokens = requester.bind(identity)
+        try:
+            self.assertEqual(requester.current(), identity)
+            self.assertEqual(get_session_env("HERMES_SESSION_USER_ID"), identity["userId"])
+        finally:
+            requester.reset(tokens)
+        self.assertIsNone(requester.current())
+        for partial in ({"email": "owner@example.com"}, {"sitesAssertion": "b2" * 32}):
+            self.assertIsNone(requester.normalize({**identity, **partial}))
+
     def test_concurrent_turns_do_not_share_identity_and_cleanup_restores_context(self):
         barrier = threading.Barrier(2)
 

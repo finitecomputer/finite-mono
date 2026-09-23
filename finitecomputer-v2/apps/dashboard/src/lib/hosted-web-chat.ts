@@ -258,13 +258,17 @@ function isTextSendAction(action: HostedChatAction) {
 }
 
 export async function createNativeRequesterContext(machineId: string) {
-  if (!sitesUpstreamOrigin() || !process.env.FINITE_SITES_VIEWER_SESSION_TOKEN?.trim()) return undefined;
   try {
     const context = await hostedWebChatContext(machineId, "fresh");
-    await bootstrapHostedWebChatWithContext(context);
-    return await createHostedRequesterContext(context);
+    const state = await bootstrapHostedWebChatWithContext(context);
+    const binding = state.hosted_agent_binding;
+    if (binding?.project_id !== context.projectId || binding.human_account_id !== state.identity.account_id ||
+      !/^[0-9a-f]{64}$/.test(state.identity.account_id)) return undefined;
+    return await createHostedRequesterContext(context) ?? {
+      userId: state.identity.account_id, expiresAt: Math.floor(Date.now() / 1000) + 600,
+    };
   } catch {
-    // Sites availability must not block native chat. No unsigned fallback.
+    // Identity setup failure must not block chat. Sites claims remain optional.
     return undefined;
   }
 }

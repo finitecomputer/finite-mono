@@ -161,7 +161,10 @@ test("requester handoff projects only scoped fields and preserves denial and can
   });
   const signal = new AbortController().signal;
   assert.deepEqual(await readNativeRequesterContext("agent-a", signal), requester);
-  for (response of [{}, { requester: { ...requester, userId: "other" } }, { requester: { ...requester, sitesAssertion: "unsigned" } }]) {
+  const identity = { userId: requester.userId, expiresAt: requester.expiresAt };
+  response = { requester: identity };
+  assert.deepEqual(await readNativeRequesterContext("agent-a", signal), identity);
+  for (response of [{ requester: { ...identity, email: requester.email } }, { requester: { ...identity, sitesAssertion: requester.sitesAssertion } }, {}, { requester: { ...requester, userId: "other" } }, { requester: { ...requester, sitesAssertion: "unsigned" } }]) {
     assert.equal(await readNativeRequesterContext("agent-a", signal), undefined);
   }
   status = 401;
