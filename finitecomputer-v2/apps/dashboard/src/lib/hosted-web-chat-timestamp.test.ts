@@ -29,13 +29,22 @@ function message(overrides: Partial<HostedChatMessage> = {}): HostedChatMessage 
 }
 
 function renderedTime(value: HostedChatMessage) {
-  const html = renderToStaticMarkup(createElement(TooltipProvider, null, createElement(MessageRow, {
+  const row = createElement(MessageRow, {
     attachmentUrl: () => "",
     message: value,
     ownAccountId: "user",
     shareTitle: "Chat",
-  })));
+  });
+  const html = renderToStaticMarkup(createElement(TooltipProvider, null, row));
   return html.match(/<time\b[^>]*>(.*?)<\/time>/u)?.[1];
+}
+
+// Expected wall-clock hours are explicit; their label follows the test runner's locale.
+function clockTime(hour: number, minute: number) {
+  return new Date(2026, 0, 1, hour, minute).toLocaleTimeString(undefined, {
+    hour: "numeric",
+    minute: "2-digit",
+  });
 }
 
 test("webchat renders agent and user timestamps in the viewer's timezone", (t) => {
@@ -46,19 +55,19 @@ test("webchat renders agent and user timestamps in the viewer's timezone", (t) =
     else process.env.TZ = originalTimezone;
   });
 
-  assert.equal(renderedTime(message()), "11:51 AM");
-  assert.equal(renderedTime(message({ final_delivery: false })), "11:51 AM");
-  assert.equal(renderedTime(message({ sender_account_id: "user", is_mine: true })), "11:51 AM");
+  assert.equal(renderedTime(message()), clockTime(11, 51));
+  assert.equal(renderedTime(message({ final_delivery: false })), clockTime(11, 51));
+  assert.equal(renderedTime(message({ sender_account_id: "user", is_mine: true })), clockTime(11, 51));
 
   // Winter uses EST rather than the summer EDT offset from the screenshot.
   assert.equal(renderedTime(message({
     timestamp_unix_seconds: Date.parse("2026-01-22T15:51:00Z") / 1000,
-  })), "10:51 AM");
+  })), clockTime(10, 51));
 
   process.env.TZ = "Asia/Tokyo";
-  assert.equal(renderedTime(message()), "12:51 AM");
+  assert.equal(renderedTime(message()), clockTime(0, 51));
   process.env.TZ = "UTC";
-  assert.equal(renderedTime(message()), "3:51 PM");
+  assert.equal(renderedTime(message()), clockTime(15, 51));
 });
 
 test("webchat preserves delivery labels in place of the user timestamp", () => {
