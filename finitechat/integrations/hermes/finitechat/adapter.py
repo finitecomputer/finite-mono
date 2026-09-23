@@ -417,9 +417,7 @@ def _requester_context_lease_id(kwargs: dict[str, Any]) -> str:
     )
 
 
-def _active_finite_session(
-    *, diagnostic_stage: str = ""
-) -> tuple[str | None, str | None]:
+def _active_finite_session(*, diagnostic_stage: str = "") -> tuple[str | None, str | None]:
     try:
         from gateway.session_context import get_session_env
     except ImportError:
@@ -432,11 +430,16 @@ def _active_finite_session(
     authenticated_turn_user = _AUTHENTICATED_FINITE_TURN_USER.get()
     if diagnostic_stage:
         gate = (
-            "foreign_platform" if platform not in {FINITE_PLATFORM_NAME, Platform.LOCAL.value}
-            else "missing_session" if not session_key
-            else "invalid_user" if FINITE_ACCOUNT_ID_PATTERN.fullmatch(user_id) is None
-            else "missing_turn" if authenticated_turn_user is None
-            else "sender_mismatch" if authenticated_turn_user != user_id
+            "foreign_platform"
+            if platform not in {FINITE_PLATFORM_NAME, Platform.LOCAL.value}
+            else "missing_session"
+            if not session_key
+            else "invalid_user"
+            if FINITE_ACCOUNT_ID_PATTERN.fullmatch(user_id) is None
+            else "missing_turn"
+            if authenticated_turn_user is None
+            else "sender_mismatch"
+            if authenticated_turn_user != user_id
             else "accepted"
         )
         _requester_diagnostic(diagnostic_stage, gate)
