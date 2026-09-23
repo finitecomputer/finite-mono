@@ -32,6 +32,10 @@ test("chat history stays scoped to each tab across freeze, reconnect, and old-se
     }
     browser = await chromium.launch({ headless: true, ...chromiumLaunchOptions() });
     const context = await browser.newContext({ viewport: { width: 1440, height: 1000 } });
+    let nativeRequests = 0;
+    context.on("request", request => {
+      if (request.url().includes("/hermes-access")) nativeRequests++;
+    });
     const a = await context.newPage();
     const errors: string[] = [];
     context.on("page", page => page.on("pageerror", error => errors.push(error.message)));
@@ -197,6 +201,7 @@ test("chat history stays scoped to each tab across freeze, reconnect, and old-se
     await a.locator(".finite-chat__messages").getByText("History in the other tab", { exact: true }).waitFor();
     await a.getByRole("button", { name: "Design review", exact: true }).click();
     await a.locator(".finite-chat__messages").getByText("Later arrival 40", { exact: true }).waitFor();
+    assert.equal(nativeRequests, 0, "Core responses without the native capability must retain Finite Chat");
     assert.deepEqual(errors, []);
   } finally {
     await browser?.close();

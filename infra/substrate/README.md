@@ -33,6 +33,14 @@ The existing Core store replay regression also runs for Substrate: full startup
 schema replay preserves its pending placement, repairs a mismatched legacy runner
 field from that placement, and leases the request to the matching adapter.
 
+The current dashboard also passes the retained-chat browser proof against a Core
+response that omits `native_hermes_chat`: history, multi-tab isolation, reconnect
+and predecessor-service snapshots remain usable, with zero Hermes-access requests.
+The explicit native opt-in browser proof passes separately. Evidence:
+`legacy-transport-browser.log` (3 tests) and `native-transport-browser.log` (1 test).
+These exercise predecessor wire shapes through the actual dashboard; they do not
+establish a mixed-binary production fleet or authorize rollback after new rows exist.
+
 ## Runtime configuration and processes
 
 Public flags come from Core's existing `FC_CORE_RUNTIME_ENV_JSON`, through
