@@ -41,6 +41,14 @@ The explicit native opt-in browser proof passes separately. Evidence:
 These exercise predecessor wire shapes through the actual dashboard; they do not
 establish a mixed-binary production fleet or authorize rollback after new rows exist.
 
+The real-Postgres runtime-control lifecycle test now gives wrong-host and
+wrong-provider callers valid restart capabilities. It rejects Phala/Substrate
+callers for a retained Kata runtime, then proves its matching Kata runner can
+still lease and complete the request (`mixed-provider-lease-qualified.log`).
+Previously those negative cases omitted capabilities and could return early
+without exercising host/placement selection. Structure and strict Core Clippy
+pass. This proves candidate-Core lease isolation, not predecessor-binary parsing.
+
 ## Local node-restart limitation
 
 Restarting OrbStack during qualification changed worker pod IPs without changing

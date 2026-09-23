@@ -211,31 +211,39 @@ async fn postgres_runtime_control_lifecycle_row_scoped() {
                     lease_token: format!("ctl-other-{run}"),
                     lease_seconds: Some(60),
                     source_host_id: Some("someotherhost".to_string()),
-                    runner_capacity: None,
-                    now: None,
-                })
-                .await
-                .unwrap();
-            assert!(other_host_lease.is_none(), "partitioned by source host");
-
-            let wrong_class_lease = store
-                .lease_runtime_control_request(LeaseRuntimeControlRequestInput {
-                    runner_id: format!("phala-runner-{run}"),
-                    lease_token: format!("ctl-phala-{run}"),
-                    lease_seconds: Some(60),
-                    source_host_id: Some(host.to_string()),
                     runner_capacity: Some(crate::RunnerLeaseCapacity {
-                        runner_classes: vec![crate::RunnerClass::Phala],
+                        runner_classes: vec![crate::RunnerClass::Kata],
+                        runtime_capabilities: Some(kata_runtime_capabilities()),
                         ..crate::RunnerLeaseCapacity::default()
                     }),
                     now: None,
                 })
                 .await
                 .unwrap();
-            assert!(
-                wrong_class_lease.is_none(),
-                "Phala worker must not claim Kata control work"
-            );
+            assert!(other_host_lease.is_none(), "partitioned by source host");
+
+            // Valid restart capabilities isolate placement filtering from
+            // capability rejection: neither provider may claim retained Kata work.
+            for runner_class in [crate::RunnerClass::Phala, crate::RunnerClass::Substrate] {
+                let wrong_class_lease = store
+                    .lease_runtime_control_request(LeaseRuntimeControlRequestInput {
+                        runner_id: format!("{}-runner-{run}", runner_class.as_str()),
+                        lease_token: format!("ctl-{}-{run}", runner_class.as_str()),
+                        lease_seconds: Some(60),
+                        source_host_id: Some(host.to_string()),
+                        runner_capacity: Some(crate::RunnerLeaseCapacity {
+                            runner_classes: vec![runner_class],
+                            runtime_capabilities: Some(crate::RuntimeCapabilitiesEnvelope::V1(
+                                crate::RuntimeCapabilitiesV1 { restart: true, ..Default::default() },
+                            )),
+                            ..crate::RunnerLeaseCapacity::default()
+                        }),
+                        now: None,
+                    })
+                    .await
+                    .unwrap();
+                assert!(wrong_class_lease.is_none(), "wrong provider claimed Kata control work");
+            }
 
             let unspecified_class_lease = store
                 .lease_runtime_control_request(LeaseRuntimeControlRequestInput {
