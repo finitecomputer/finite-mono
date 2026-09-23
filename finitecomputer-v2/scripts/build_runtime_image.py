@@ -21,6 +21,7 @@ MONOREPO_ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(MONOREPO_ROOT))
 
 from scripts.hermes_nix_runtime import (  # noqa: E402  (needs the sys.path shim above)
+    HERMES_NIX_CONTEXT_DIR,
     image_build_args,
     nix_system_for_platform,
     stage_runtime_closure,
@@ -31,6 +32,7 @@ DEFAULT_IMAGE_ENGINE = "docker"
 IMAGE_ENGINES = ("docker", "depot", "apple-container")
 
 BUILD_EXCLUDES = [
+    HERMES_NIX_CONTEXT_DIR,  # stage_runtime_closure owns replacement of this tree.
     ".DS_Store",
     # The build context is fully curated by this rsync exclude list; copying
     # the repo's .dockerignore into the context ROOT would additionally
