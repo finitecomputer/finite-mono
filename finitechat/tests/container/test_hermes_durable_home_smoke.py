@@ -223,6 +223,63 @@ class HermesDurableHomeSmokeTest(unittest.TestCase):
             )
         self.assertIn("AGENT-LOG-TAIL", str(raised.exception))
 
+    def test_reply_poll_retries_sse_disconnect_without_resending(self) -> None:
+        responses = [
+            {"messages": []},
+            smoke.SmokeFailure("delivery error: SSE hint stream read failed: body error"),
+            {"messages": [{"is_mine": False, "text": "hello", "message_id": "reply"}]},
+        ]
+        with (
+            mock.patch.object(smoke, "docker_user_app", side_effect=responses) as app,
+            mock.patch.object(smoke, "ensure_container_running") as alive,
+            mock.patch.object(smoke.time, "sleep"),
+        ):
+            result = smoke.run_model_smoke(
+                image="test",
+                user_volume="user",
+                server_url="https://chat.example",
+                room_id="room",
+                expected="hello",
+                env={},
+                agent_container="agent",
+            )
+        self.assertEqual(result["status"], "passed")
+        self.assertEqual(result["state_read_retries"], 1)
+        self.assertEqual(
+            [c.kwargs["args"][0] for c in app.call_args_list], ["send", "state", "state"]
+        )
+        alive.assert_called_once_with("agent")
+
+    def test_reply_poll_still_fails_when_sse_never_recovers(self) -> None:
+        clock = iter([0.0, 0.0, 1.0, 200.0])
+        with (
+            mock.patch.object(
+                smoke,
+                "docker_user_app",
+                side_effect=[
+                    {},
+                    smoke.SmokeFailure("SSE hint stream read failed: body error"),
+                ],
+            ) as app,
+            mock.patch.object(smoke, "ensure_container_running"),
+            mock.patch.object(smoke, "agent_log_tail", return_value="AGENT-LOG-TAIL"),
+            mock.patch.object(smoke.time, "sleep"),
+            mock.patch.object(smoke.time, "monotonic", side_effect=lambda: next(clock)),
+            self.assertRaises(smoke.SmokeFailure) as raised,
+        ):
+            smoke.run_model_smoke(
+                image="test",
+                user_volume="user",
+                server_url="https://chat.example",
+                room_id="room",
+                expected="hello",
+                env={},
+                agent_container="agent",
+            )
+        self.assertEqual([c.kwargs["args"][0] for c in app.call_args_list], ["send", "state"])
+        self.assertIn("AGENT-LOG-TAIL", str(raised.exception))
+        self.assertIn("SSE hint stream read failed", str(raised.exception))
+
 
 if __name__ == "__main__":
     unittest.main()
