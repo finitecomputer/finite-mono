@@ -12,6 +12,7 @@ const eslintConfig = defineConfig([
     // Browser integration tests use an isolated Next build directory so they
     // can run alongside the live local dashboard.
     ".next-browser-test/**",
+    ".next-substrate-proof/**",
     // Devfinity's long-lived dashboard is isolated from production and test
     // manifests for the same reason.
     ".next-devfinity/**",
