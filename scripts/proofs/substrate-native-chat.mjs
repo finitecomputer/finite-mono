@@ -8,7 +8,7 @@ import { join } from 'node:path';
 
 let input = '';
 for await (const chunk of process.stdin) input += chunk;
-const { baseUrl, grantEndpoint, ownerToken, previous, proveInterrupt, proveDesktop, upgradeMarker, proveBrowser, prepareCrash, environmentValue } = JSON.parse(input);
+const { baseUrl, grantEndpoint, ownerToken, previous, proveInterrupt, proveDesktop, upgradeMarker, proveBrowser, prepareCrash, environmentValue, sitesProof } = JSON.parse(input);
 async function accessToken() {
   const response = await fetch(grantEndpoint, {
     method: 'POST', headers: { authorization: `Bearer ${ownerToken}` },
@@ -179,6 +179,29 @@ try {
     assert.ok(environmentRead, 'Agent must read its actual boot environment');
     onToolStart = () => {};
     await verifyFile({ path: environmentPath, content: `${environmentValue}\n` });
+  }
+  if (sitesProof) {
+    assert.match(sitesProof.requester.userId, /^[0-9a-f]{64}$/);
+    assert.match(sitesProof.requester.sitesAssertion, /^[0-9a-f]{64}$/);
+    assert.ok(Number.isSafeInteger(sitesProof.requester.expiresAt) && sitesProof.requester.expiresAt > Date.now() / 1000, 'Sites assertion must be valid at submission');
+    const config = `[project]\nslug = "${sitesProof.slug}"\n`;
+    const attached = await rpc('file.attach', { session_id: activeSession, name: 'finite.toml', data_url: `data:text/plain;base64,${Buffer.from(config).toString('base64')}` });
+    const resultPath = `/data/agent/${marker}-sites.json`;
+    const command = `FINITE_SITES_API=${sitesProof.api} fsite project init --config ${attached.path} --output json > ${resultPath}`;
+    let invoked = false;
+    onToolStart = tool => { if (tool.name === 'terminal' && tool.args?.command?.trim() === command) invoked = true; };
+    complete = new Promise((resolve, reject) => { answer = { resolve, reject }; });
+    complete.catch(() => {});
+    await rpc('prompt.submit', { session_id: activeSession, finite_requester: sitesProof.requester,
+      text: `Use the terminal tool to run exactly: ${command}. Do not change the config or add identity arguments. Then say done.` });
+    await complete;
+    assert.ok(invoked, 'Native turn must invoke fsite through the terminal');
+    const resultBytes = await verifyFile({ path: resultPath });
+    assert.ok(resultBytes.length, 'Native Sites command produced no JSON; inspect the terminal tool failure');
+    const result = JSON.parse(resultBytes.toString());
+    assert.equal(result.owner_email, sitesProof.requester.email, 'Sites lost the verified native requester');
+    onToolStart = () => {};
+    console.error('native model turn -> fsite -> Sites verified owner attribution passed');
   }
   if (upgradeMarker) {
     let imageReadObserved = false;

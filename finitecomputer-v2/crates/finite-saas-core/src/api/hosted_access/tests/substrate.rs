@@ -3,6 +3,7 @@
 use super::*;
 mod capacity;
 mod recovery;
+mod sites;
 use crate::auth::test_support::{core_auth_with_runner_credentials, runner_credential_config};
 use crate::launch_codes::IssueLaunchCodeBatchInput;
 use crate::{
@@ -267,6 +268,7 @@ async fn crash_local_worker(runtime: &str) {
 #[ignore = "requires disposable Substrate, local TLS ingress, canonical image and a test inference key"]
 async fn substrate_two_owner_launch_and_native_access() {
     with_isolated_postgres(|db| async move {
+        let sites = sites::Sites::start().await;
         let image = required("FC_TEST_SUBSTRATE_IMAGE_DIGEST");
         let public_origin = required("FC_TEST_SUBSTRATE_PUBLIC_ORIGIN");
         let runtime_core_origin = required("FC_TEST_SUBSTRATE_CORE_ORIGIN");
@@ -885,6 +887,9 @@ async fn substrate_two_owner_launch_and_native_access() {
                 native_grant["proveBrowser"] = Value::Bool(index == 0 && pass == 0 && std::env::var_os("FC_TEST_SUBSTRATE_BROWSER").is_some());
                 if pass >= 2 {
                     native_grant["upgradeMarker"] = json!(required("FC_TEST_SUBSTRATE_UPGRADE_MARKER"));
+                }
+                if pass == 0 && let Some(sites) = &sites {
+                    native_grant["sitesProof"] = sites.grant(&bindings[index], index).await;
                 }
                 let native_grant = native_grant.to_string();
                 let chat = tokio::task::spawn_blocking(move || {

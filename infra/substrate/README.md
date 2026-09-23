@@ -353,9 +353,9 @@ only, bounded by the assertion expiry; they never create an unsigned v1 fallback
 Different requesters cannot steer the active turn or merge their queued envelopes.
 Sites remains the authority when `fsite` submits Project Init.
 
-Current evidence: the sealed Linux Python package builds; five packaged-runtime
+Current evidence: the sealed Linux Python package builds; six packaged-runtime
 regressions cover validation, concurrent isolation, queue separation, steering,
-and compute-frame/history separation. All 86 adapter tests pass, including native
+compute-frame/history separation, and gateway-first import order. All 86 adapter tests pass, including native
 lease cleanup and sender mismatch. The dashboard browser fixture checks fresh
 context on each prompt and successful chat without Sites context. The real Sites
 service accepts the exact assertion and rejects another agent. These are separate
@@ -367,8 +367,22 @@ disposable Sites service: wrong-agent assertion use is denied before the intende
 agent successfully creates its Project with verified owner attribution; both
 leases are cleaned up. It uses the pinned host minimal Python package and the
 real terminal dispatcher, with the native session/context setup called directly.
-It does not yet prove a model-driven `hermes serve` turn on the rebuilt Substrate
-image or a deployed dashboard/Sites configuration.
+The canonical Substrate image now also passes the live two-owner proof with
+`FC_TEST_SUBSTRATE_SITES_BINARY` pointing to the disposable local `finitesitesd`:
+`gateway-live-provider.log` passes in 152.04s on
+`sha256:28066d523005e13aa7e1a174ce386ff454fd58f98f892ffe8bace0fe292b1c1b`
+(canonical image plus only the local fixture CA). Each model turn invokes the
+real terminal and `fsite`, and the downloaded Project Init result must carry its
+own verified mailbox. Native chat/history, desktop, environment refresh,
+interruption/clarification/approval, and bidirectional owner isolation also pass
+across restart. This supplies the assertion through native RPC; deployed dashboard
+assertion acquisition and real WorkOS authentication remain separate gates.
+
+The first live run exposed a packaging bug: gateway startup prepended the
+unpatched upstream package root to Python's import path. The sealed package now
+materializes the gateway directory so startup retains the patched handler. A
+fresh-interpreter regression fails on the previous package and passes on both
+host and Linux packages. Direct dispatcher tests alone did not cover this edge.
 
 Reproduce the combined local boundary proof after building `fsite`:
 
@@ -563,8 +577,8 @@ Do not enable production admission until the remaining gates are satisfied:
 - Qualify real WorkOS login and the deployed dashboard origin. Local actual-Next
   onboarding, native chat and correction/queue history pass on the canonical image
   with synthetic account authentication; this does not establish deployed auth
-  or Brain/Sites service parity. Close native Sites requester attribution (above)
-  and prove real human signing/approval with a fresh native-only user.
+  or deployed Brain/Sites integration. Native Sites requester attribution passes
+  locally (above); prove real human signing/approval with a fresh native-only user.
 - Qualify stuck-start/capacity-exhaustion handling without overriding Core
   stop/control intent. Local worker-loss recovery and an interrupted foreground tool are qualified;
   node loss and failures during model-request persistence remain separate gates.
