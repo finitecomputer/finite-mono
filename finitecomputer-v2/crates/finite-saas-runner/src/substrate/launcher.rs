@@ -116,6 +116,36 @@ impl SubstrateLauncher {
         )))
     }
 
+    // Both creation and lifecycle recovery require a current Core lease.
+    // Revert discards execution only after verifying CSI data and cold boot.
+    fn revert_to_durable_data(
+        &self,
+        actor: api::ObjectRef,
+        template: api::ObjectRef,
+    ) -> Result<(), RunnerError> {
+        let template = self
+            .executor
+            .block_on(self.client.template(template))
+            .map_err(failed)?
+            .ok_or_else(|| failed("actor template missing"))?;
+        validate_base(&template)?;
+        let snapshots = template
+            .snapshots_config
+            .as_ref()
+            .ok_or_else(|| failed("snapshot policy missing"))?;
+        if snapshots.on_pause != api::SnapshotContentScope::Data as i32
+            || snapshots.on_commit != api::SnapshotContentScope::Data as i32
+            || snapshots.on_resume.as_ref().map(|resume| resume.from_data)
+                != Some(api::ResumeSource::ColdBoot as i32)
+        {
+            return Err(failed("execution recovery requires CSI data and cold boot"));
+        }
+        self.executor
+            .block_on(self.client.revert(actor))
+            .map_err(failed)?;
+        Ok(())
+    }
+
     fn suspend_for_restart(
         &self,
         lease: &RuntimeControlLease,
@@ -131,34 +161,12 @@ impl SubstrateLauncher {
                     | api::ActorState::Suspending
             )
         ) {
-            // Revert discards execution, not CSI data. Only this leased Core
-            // control operation may recover it; no independent auto-resume loop exists.
-            let template = self
-                .executor
-                .block_on(
-                    self.client.template(
-                        current
-                            .actor_template
-                            .ok_or_else(|| failed("actor template missing"))?,
-                    ),
-                )
-                .map_err(failed)?
-                .ok_or_else(|| failed("actor template missing"))?;
-            validate_base(&template)?;
-            let snapshots = template
-                .snapshots_config
-                .as_ref()
-                .ok_or_else(|| failed("snapshot policy missing"))?;
-            if snapshots.on_pause != api::SnapshotContentScope::Data as i32
-                || snapshots.on_commit != api::SnapshotContentScope::Data as i32
-                || snapshots.on_resume.as_ref().map(|resume| resume.from_data)
-                    != Some(api::ResumeSource::ColdBoot as i32)
-            {
-                return Err(failed("execution recovery requires CSI data and cold boot"));
-            }
-            self.executor
-                .block_on(self.client.revert(actor.clone()))
-                .map_err(failed)?;
+            self.revert_to_durable_data(
+                actor.clone(),
+                current
+                    .actor_template
+                    .ok_or_else(|| failed("actor template missing"))?,
+            )?;
         } else {
             self.executor
                 .block_on(self.client.stop(actor.clone()))
@@ -551,7 +559,7 @@ impl RuntimeLauncher for SubstrateLauncher {
             );
         }
         let actor = actor.ok_or_else(|| failed(SubstrateError::Conflict))?;
-        if actor.actor_template != Some(template_reference) {
+        if actor.actor_template.as_ref() != Some(&template_reference) {
             return Err(failed("actor template changed"));
         }
         let uid = actor
@@ -590,6 +598,14 @@ impl RuntimeLauncher for SubstrateLauncher {
                 self.config.egress_cidrs.clone(),
             ))
             .map_err(failed)?;
+        if matches!(
+            actor.status.as_ref().map(|status| status.state()),
+            Some(api::ActorState::Crashed | api::ActorState::Reverting)
+        ) {
+            // A worker may die after provider creation but before Core completion.
+            // Reconcile the same journaled actor; Resume alone rejects CRASHED.
+            self.revert_to_durable_data(reference.clone(), template_reference)?;
+        }
         self.executor
             .block_on(self.client.resume(reference))
             .map_err(|error| match error {

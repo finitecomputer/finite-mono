@@ -5,6 +5,15 @@ identities and stores, Chat SQLite, Core Postgres, Brain SQLite and Identity
 SQLite. Agent Runtime recovery is separate; Sites has its own
 [backup procedure](deploy-sites.md#backups-and-restore).
 
+For native `hermes serve` chat, message history and uploaded files live in the
+Agent Runtime's `/data`, not the Hosted Device or Finite Chat databases. Restoring
+this snapshot restores Core ownership and credentials, but does not restore that
+history. A Substrate recovery also requires independently retained runtime data,
+provider metadata/volume bindings, and the exact installed template and image;
+see the [Substrate recovery boundary](../substrate/README.md#lifecycle-and-recovery).
+Do not activate a restored Core binding against a newly initialized agent volume
+or claim native-chat recovery from this hosted snapshot alone.
+
 The verifier accepts complete historical v3 archives, including Sites. Restore
 those on isolated scratch targets and retain their Sites material without
 starting an old writer. v1/v2 archives are rejected.

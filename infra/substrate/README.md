@@ -179,6 +179,11 @@ per-agent controller exists. New-admission drain does not stop this maintenance.
 A delayed observation of an already-running actor does not interrupt it. Explicit
 stops and failed/uncertain controls remain fenced; an exhausted recovery attempt
 requires operator intervention. Anonymous ingress cannot undo a Core stop.
+An actor can also crash after provider creation but before Core records launch
+completion. A later creation lease reuses the same journaled actor and applies
+the same CSI/cold-boot-validated Revert-then-Resume sequence for CRASHED or
+REVERTING state. It leaves RUNNING/RESUMING actors on the normal idempotent resume
+path. This does not shorten leases after ambiguous failures.
 Resume retries ResourceExhausted once per second up to 30 times; other errors,
 including ambiguous transport failures, are not blindly retried.
 A creation that exhausts these retries remains `launching` in Core. Runner asks
@@ -340,6 +345,16 @@ Optional gates:
   continuity. Do not use an old Finite agent whose bootstrap credential belongs
   to a deleted test database: that initial fixture attempt stalled at readiness
   and was canceled; it did not qualify capacity recovery.
+- `FC_TEST_SUBSTRATE_CREATION_CRASH=1`, together with the capacity-holder option:
+  after capacity exhaustion, claim a real 20-second fixture lease and provision
+  its normal Core bootstrap credential. Resume the journaled actor, kill its
+  assigned worker before Core completion, and wait for natural lease expiry.
+  The next Runner attempt must finish creation with unchanged Core identity,
+  credential, actor UID and CSI volume mapping. This reproduced a pre-fix
+  `ResumeActor` precondition failure. With the fix, the full two-owner proof
+  passed on 2026-09-23 in 163.92 seconds, including native chat/history after
+  restart. The test lease is deliberately shorter than the production default
+  and does not establish production retry latency.
 - `FC_TEST_SUBSTRATE_IMAGES=1`: require a real four-quadrant image response
   through an uploaded file reference and an observed native vision-tool call.
   Require the image bytes and persisted reference to survive restart.

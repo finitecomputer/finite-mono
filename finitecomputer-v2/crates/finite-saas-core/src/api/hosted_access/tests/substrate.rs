@@ -512,6 +512,7 @@ async fn substrate_two_owner_launch_and_native_access() {
                     crate::AgentCreationRequestStatus::Running
                         | crate::AgentCreationRequestStatus::Failed
                 ) || attempts == 30
+                  || (capacity_wait.is_some() && std::env::var_os("FC_TEST_SUBSTRATE_CREATION_CRASH").is_some())
                 {
                     break (output, creation);
                 }
