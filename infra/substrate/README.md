@@ -470,7 +470,17 @@ completion and failed dispatch. The latter two pass in both rebuilt macOS and Li
 immediate completion reproduces stale
 requester state before the fix. The assignment now precedes dispatch, leaving
 completion responsible for cleanup and preserving the next queued requester.
-The runtime image/browser proof must be refreshed for this change.
+The rebuilt canonical image plus only the local proof CA
+(`sha256:10ba77158eb9d75b325c26a41ece330483025ce386c19b56c63bb44915ba954a`)
+passes the combined two-owner browser proof in 204.18 seconds:
+`requester-dispatch-browser-retry.log`. This covers actual onboarding, native
+chat and reload, browser-to-terminal Brain creation/human access, Sites requester
+handoff, approval/clarification/interruption/reconnect, desktop, next-boot config
+refresh and retained history/files across restart, with cross-owner denials
+before and afterward. Both actors are suspended with data retained; deployment
+and worker UID/IP checks pass in `requester-dispatch-status-after.json`. This
+run follows manual worker replacement for the documented node-restart IP drift;
+it does not qualify automatic whole-node recovery.
 All 86 adapter tests pass, including native
 lease cleanup and sender mismatch. The dashboard browser fixture checks fresh
 context on each prompt and successful chat without Sites context. The real Sites
