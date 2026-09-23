@@ -281,6 +281,8 @@ async fn substrate_two_owner_launch_and_native_access() {
             required("FC_TEST_SUBSTRATE_ATE_CLI");
             required("FC_TEST_SUBSTRATE_CRASH_KUBECONFIG");
         }
+        assert!(std::env::var_os("FC_TEST_SUBSTRATE_INFLIGHT_CRASH").is_none()
+            || std::env::var_os("FC_TEST_SUBSTRATE_AUTO_RECOVERY").is_some(), "in-flight fault requires automatic recovery");
         let mut artifacts = Vec::new();
         if let Some(image) = &upgrade_image { artifacts.push(("substrate-upgrade-proof", image.clone())); }
         if let Some(image) = &failed_image { artifacts.push(("substrate-failed-proof", image.clone())); }
@@ -684,7 +686,9 @@ async fn substrate_two_owner_launch_and_native_access() {
                             assert_eq!(unchanged["metadata"]["version"], after["metadata"]["version"], "a delayed observation must not restart healthy compute");
                         }
                     }
-                    let actions: &[&str] = if index == 1 || automatic {
+                    let actions: &[&str] = if index == 0 && automatic && std::env::var_os("FC_TEST_SUBSTRATE_INFLIGHT_CRASH").is_some() {
+                        &[] // Prove native readiness after automatic recovery alone.
+                    } else if index == 1 || automatic {
                         &["stop", "restart"]
                     } else {
                         // Recovery must remain stoppable after a lost worker.
@@ -887,6 +891,7 @@ async fn substrate_two_owner_launch_and_native_access() {
                 native_grant["previous"] = histories[index].clone();
                 native_grant["proveInterrupt"] = Value::Bool(index == 0 && pass == 0);
                 native_grant["proveDesktop"] = Value::Bool(index == 1 && pass == 0);
+                native_grant["prepareCrash"] = Value::Bool(index == 0 && pass == 0 && std::env::var_os("FC_TEST_SUBSTRATE_INFLIGHT_CRASH").is_some());
                 native_grant["proveBrowser"] = Value::Bool(index == 0 && pass == 0 && std::env::var_os("FC_TEST_SUBSTRATE_BROWSER").is_some());
                 if pass >= 2 {
                     native_grant["upgradeMarker"] = json!(required("FC_TEST_SUBSTRATE_UPGRADE_MARKER"));

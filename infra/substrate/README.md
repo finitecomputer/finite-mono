@@ -311,6 +311,12 @@ Optional gates:
   drain without an owner request. Check Core system attribution, host/control
   fences, duplicate admission, delayed-observation idempotency, and stopped actors
   remaining suspended through later cycles.
+- `FC_TEST_SUBSTRATE_INFLIGHT_CRASH=1` with automatic recovery: after the first
+  owner's normal protocol checks, start a foreground terminal command that writes
+  one marker and waits. Verify its side effect before killing the worker. Require
+  automatic recovery alone (no owner restart), exactly one retained user prompt,
+  an idle resumed session, a successful subsequent turn, and unchanged marker
+  bytes before and after that turn. The second owner still exercises stop/restart.
 - `FC_TEST_SUBSTRATE_IMAGES=1`: require a real four-quadrant image response
   through an uploaded file reference and an observed native vision-tool call.
   Require the image bytes and persisted reference to survive restart.
@@ -361,6 +367,7 @@ Current local evidence (2026-09-22):
 | Combined browser + SimpleX + image recovery | `native-home-simplex-upgrade-proof.log`: both owners passed in 627.42s. Native and SimpleX replies/addresses, actor UID/CSI records, Core artifact/contact/host, history/files and screenshot survived worker loss, restart, healthy upgrades and failed-image recovery. Live browser creation/reload also passed. |
 | Image upload | `native-browser-image-proof.log` passed in 152.98s: real UI upload, native vision reply, image rendering and reload. `native-image-reference-probe.log` observes the native vision call; partial mixed-upload failure, retry, TypeScript and lint also pass. `image-reference-upgrade-qualified.log` passed in 163.37s: exact image bytes and the persisted user reference survived restart and a healthy runtime upgrade. |
 | Automatic worker recovery | `automatic-recovery-qualified.log` passed in 178.01s with two owners, native chat, image persistence and SimpleX. Recovery during admission drain preserves actor/CSI identity; wrong-host requests, duplicate admission and pending/completed stops are fenced. A delayed crash observation against a running actor leaves its version unchanged. This does not establish node-loss or in-flight-turn recovery. |
+| In-flight worker loss | `inflight-worker-recovery-qualified.log` passed in 116.46s on the canonical image. The worker dies after a foreground tool's observed file write, before tool completion. Normal recovery under admission drain preserves actor/CSI identity, retains the accepted prompt exactly once, clears the busy session, and accepts a subsequent model turn without repeating the side effect. No owner stop/restart intervenes for this actor. This covers that tool-execution boundary, not arbitrary external effects, model-request persistence windows, node loss or exactly-once execution in general. |
 | Lost completion | The actual Runner was killed after provider success, before Core completion; natural lease expiry and a new Runner recovered the same upgrade request. Both owners retained native chat/history/files and actor/storage identity. This does not prove automatic worker crash recovery. |
 | Clarification controls | Browser contract tests pass for single/multi-select, custom answers, reload, and ordered stale/current expiry events. `clarification-native-batch-qualified.log` passed in 115.86s: a real batch retains its accepted multi-select answer across reconnect, delivers two intact selections to the tool, completes the free-text answer, and rejects a late duplicate. Native timeout timing was not exercised. |
 | Mid-turn corrections and queue | Real provider baselines reproduce lost ordinary steering and stopped model corrections; offline SQLite regressions fail before/pass after. The sealed package and canonical image pass all correction and stream-writer regressions. `dashboard-onboarding-canonical-qualified.log` passes ordinary, queued, stopped-tool and stopped-model input through actor restart in 123.23s. Earlier exact-reply failures preserved input but replied `done`; a diagnostic trace carries the correction as the final outbound user row. The test now explicitly revokes the earlier `done` instruction and retains exact-reply and persistence assertions. |
@@ -375,7 +382,7 @@ batch clarification. The real native proof observes an active tool before socket
 reconnect, verifies native interruption and a later turn, reconnects to an exact
 clarification request and rejects a late duplicate, and verifies separate deny
 and allow-once file operations with duplicate approvals resolving zero requests.
-These do not establish worker-loss recovery of an in-flight turn.
+The separate in-flight worker-loss proof above covers a foreground tool boundary.
 
 Do not enable production admission until the remaining gates are satisfied:
 
@@ -384,8 +391,8 @@ Do not enable production admission until the remaining gates are satisfied:
   with synthetic account authentication; this does not establish deployed auth
   or Brain/Sites service parity.
 - Qualify stuck-start/capacity-exhaustion handling without overriding Core
-  stop/control intent. Local worker-loss recovery is implemented; node-loss and
-  interrupted in-flight model turns remain separate qualifications.
+  stop/control intent. Local worker-loss recovery and an interrupted foreground tool are qualified;
+  node loss and failures during model-request persistence remain separate gates.
   Keep upgrades opt-in; retirement and backup recovery remain unadvertised.
 - Preserve the Recovery Authority and restore the same Recovery Set onto an
   empty target. A provider volume/snapshot is not a backup. Local worker-pod loss

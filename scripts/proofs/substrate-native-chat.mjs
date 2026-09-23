@@ -8,7 +8,7 @@ import { join } from 'node:path';
 
 let input = '';
 for await (const chunk of process.stdin) input += chunk;
-const { baseUrl, grantEndpoint, ownerToken, previous, proveInterrupt, proveDesktop, upgradeMarker, proveBrowser } = JSON.parse(input);
+const { baseUrl, grantEndpoint, ownerToken, previous, proveInterrupt, proveDesktop, upgradeMarker, proveBrowser, prepareCrash } = JSON.parse(input);
 async function accessToken() {
   const response = await fetch(grantEndpoint, {
     method: 'POST', headers: { authorization: `Bearer ${ownerToken}` },
@@ -116,6 +116,13 @@ try {
   if (previous?.file) await verifyFile(previous.file);
   let desktop = previous?.desktop;
   if (desktop) await verifyFile(desktop);
+  let crashProof = previous?.crashProof;
+  if (crashProof) {
+    assert.equal(Boolean(created.running), false, 'Lost worker left native chat permanently busy');
+    assert.equal(created.messages?.filter(message => message.role === 'user' && message.text === crashProof.prompt).length, 1,
+      'The accepted pre-crash turn was lost or duplicated');
+    await verifyFile(crashProof.file);
+  }
   let correctionProof = previous?.correctionProof;
   let ordinaryCorrectionProof = previous?.ordinaryCorrectionProof;
   let queuedProof = previous?.queuedProof;
@@ -423,7 +430,34 @@ const {setTimeout: delay} = require('node:timers/promises');
     const row = (await inventory.json()).sessions.find((session) => session.id === storedSessionId);
     assert.equal(row?.archived, archived, 'Native archive state did not persist');
   }
-  console.log(JSON.stringify({ nativeModelTurn: true, imageVerified, browserVerified: Boolean(proveBrowser), interruptionVerified: Boolean(proveInterrupt), clarificationVerified: Boolean(proveInterrupt), approvalVerified: Boolean(proveInterrupt), reconnectVerified: Boolean(proveInterrupt), storedSessionId, marker, file, image, desktop, correctionProof, ordinaryCorrectionProof, queuedProof, modelStopProof, recoveredAfterRestart: Boolean(previous) }));
+  if (crashProof) await verifyFile(crashProof.file);
+  if (prepareCrash) {
+    const path = `/data/agent/${marker}-crash-once.txt`;
+    const command = `echo ${marker} >> ${path}; sleep 300`;
+    const prompt = `Run this exact terminal command in the foreground with timeout 600. Do not background it, retry it, or use another tool. After it returns reply exactly completed-${marker}.\n${command}`;
+    let started;
+    const toolStarted = new Promise(resolve => { started = resolve; });
+    onToolStart = tool => {
+      if (tool.name === 'terminal' && tool.args?.command === command && !tool.args?.background) started();
+    };
+    terminalPayload = undefined;
+    complete = new Promise((resolve, reject) => { answer = { resolve, reject }; });
+    complete.catch(() => {});
+    await rpc('prompt.submit', { session_id: activeSession, text: prompt });
+    await Promise.race([toolStarted, complete.then(() => { throw new Error('Crash turn finished before its foreground tool started'); })]);
+    const file = { path, content: `${marker}\n` };
+    let written = false;
+    for (let attempt = 0; attempt < 20; attempt++) {
+      try { await verifyFile(file); written = true; break; }
+      catch { await new Promise(resolve => setTimeout(resolve, 250)); }
+    }
+    assert(written, 'Foreground tool never produced its pre-crash side effect');
+    assert.equal(terminalPayload, undefined, 'Crash fixture is no longer in flight');
+    crashProof = { prompt, file };
+    // Closing the socket deliberately leaves this test-owned turn running;
+    // the Rust harness next kills its worker and exercises normal recovery.
+  }
+  console.log(JSON.stringify({ nativeModelTurn: true, imageVerified, browserVerified: Boolean(proveBrowser), interruptionVerified: Boolean(proveInterrupt), clarificationVerified: Boolean(proveInterrupt), approvalVerified: Boolean(proveInterrupt), reconnectVerified: Boolean(proveInterrupt), storedSessionId, marker, file, image, desktop, correctionProof, ordinaryCorrectionProof, queuedProof, modelStopProof, crashProof, recoveredAfterRestart: Boolean(previous) }));
 } catch (error) {
   // Closing a native socket leaves model work running. Stop a failed proof's
   // own turn before disconnecting, using the normal native control method.
