@@ -634,6 +634,15 @@ router and egress in `ate-system`; it does not claim chat, capacity or recovery.
 Worker inventory must include all assignments (including `ate-golden`): an
 atespace-filtered actor inventory is not the fleet's available capacity.
 
+The local API credential rotation check passes in
+`token-rotation-qualified.log`: one Rust client reads a retained actor, rejects
+an atomically replaced invalid token, then accepts an independently issued token
+and reads the same actor UID. This proves credentials are reloaded between calls;
+it does not qualify Kubernetes projected-volume rotation on GKE. Runner library
+tests pass (201 passed, four opt-in integration tests ignored); the real rotation
+test passes separately. The full workspace gates remain pending.
+
+
 ## Evidence and remaining gates
 
 Current local evidence (2026-09-22):

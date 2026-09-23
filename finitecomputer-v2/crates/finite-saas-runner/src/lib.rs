@@ -5309,8 +5309,16 @@ mod tests {
             outcome,
             Err(RunnerError::RuntimeBootstrapUnavailable)
         ));
-        assert_eq!(paths.len(), 3, "must not post a terminal creation failure");
-        assert!(paths[2].ends_with("/runtime-credential"));
+        assert_eq!(
+            paths,
+            [
+                "/api/core/v1/runtime-control-requests/lease",
+                "/api/core/v1/runtimes/runtime_123/recover",
+                "/api/core/v1/agent-creation-requests/lease",
+                "/api/core/v1/agent-creation-requests/agent_request_123/runtime-credential",
+            ],
+            "missing bootstrap support must not post a terminal creation failure"
+        );
         assert!(runner.launcher.launch_options.is_empty());
     }
 

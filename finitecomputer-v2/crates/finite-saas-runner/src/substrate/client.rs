@@ -418,6 +418,49 @@ mod integration {
         assert!(actor.status.is_some());
     }
     #[tokio::test]
+    #[ignore = "requires two distinct projected tokens for a disposable Substrate API"]
+    async fn real_substrate_token_rotation_reuses_client_and_rejects_invalid_token() {
+        let initial = std::fs::read(required("FC_TEST_SUBSTRATE_TOKEN_FILE")).unwrap();
+        let replacement = std::fs::read(required("FC_TEST_SUBSTRATE_ROTATED_TOKEN_FILE")).unwrap();
+        assert!(
+            initial != replacement,
+            "provide independently issued fixture tokens"
+        );
+        let directory = tempfile::tempdir().unwrap();
+        let token_file = directory.path().join("token");
+        let rotate = |value: &[u8]| {
+            let next = directory.path().join("next");
+            std::fs::write(&next, value).unwrap();
+            std::fs::rename(next, &token_file).unwrap();
+        };
+        rotate(&initial);
+        let client = SubstrateClient::new(SubstrateConnection {
+            token_file: token_file.clone(),
+            ..test_client().connection
+        })
+        .unwrap();
+        let reference = api::ObjectRef {
+            atespace: required("FC_TEST_SUBSTRATE_ATESPACE"),
+            name: required("FC_TEST_SUBSTRATE_ACTOR"),
+        };
+        let before = client.actor(reference.clone()).await.unwrap().unwrap();
+        rotate(b"invalid-disposable-token");
+        assert!(
+            matches!(
+                client.actor(reference.clone()).await,
+                Err(SubstrateError::Rpc {
+                    code: Code::Unauthenticated | Code::PermissionDenied,
+                    ..
+                })
+            ),
+            "a cached valid token must not mask an invalid replacement"
+        );
+        rotate(&replacement);
+        let after = client.actor(reference).await.unwrap().unwrap();
+        assert_eq!(before.metadata.unwrap().uid, after.metadata.unwrap().uid);
+    }
+
+    #[tokio::test]
     #[ignore = "repoints an explicitly named suspended disposable actor, then restores its template"]
     async fn real_substrate_template_update_preserves_identity_and_rejects_stale_version() {
         let client = test_client();

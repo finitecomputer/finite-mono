@@ -6353,7 +6353,8 @@ esac
         use std::os::unix::fs::symlink;
         use std::os::unix::net::UnixListener;
 
-        let root = tempfile::tempdir().unwrap();
+        // macOS TMPDIR can exceed the Unix socket path limit for this layout.
+        let root = tempfile::tempdir_in("/tmp").unwrap();
         let state = root.path().join("agent/hermes-home/state");
         std::fs::create_dir_all(&state).unwrap();
         std::fs::write(state.join("gateway.heartbeat"), b"retain heartbeat").unwrap();
