@@ -272,79 +272,58 @@ rebinding contract. The independent Recovery Authority must be able to obtain th
 backup and necessary decryption/bootstrap secrets after losing the source cluster.
 Templates contain credentials and belong in protected recovery storage, never logs.
 
-Substrate already persists actor UIDs, full actor protobufs (including volume
-bindings), templates and authorization state in its Postgres database. Prefer a
-coordinated provider-database/storage restore over introducing a Core copy of
-these bindings or a new per-agent rebinding API. On 2026-09-23, a private custom
-`pg_dump` of the local provider restored transactionally onto empty Postgres 18
-storage in a network-isolated container. Both named suspended proof actors
-retained byte-identical serialized state, UID and version. The database restored
-236 actors and 241 templates; there were zero authorization tuples in this local
-fixture, so it does not qualify recovery of populated authorization policy.
-Truncating the archive caused restore failure and left zero public tables.
-Evidence is in `provider-restore/` under the private local proof directory. This
-is only a metadata restore proof: no restored controller or runtime was started.
-Database role grants were excluded on the isolated target and remain a separate
-deployment-identity requirement.
+Substrate persists actor UIDs, full actor protobufs (including volume bindings),
+templates and authorization state in Postgres. Restore that authority with its
+storage; do not introduce a Core copy of provider bindings or a per-agent rebinding
+API. The provider outbox uses PostgreSQL transaction IDs, so the qualified drill
+uses a physical backup with WAL, verified by `pg_verifybackup`. A logical restore
+alone does not prove watch continuity.
 
-The existing two-owner test drops its isolated Core database on completion. A
-complete recovery drill must capture the coordinated Recovery Set inside that
-test lifetime, after fencing all selected writers; retained actor volumes from
-a completed run cannot establish recovery of the deleted Core authority.
+The two-owner empty-cluster recovery proof passed on 2026-09-23 in 591.69s
+(`finite-substrate-restore/drill-5/proof.log`, private local evidence). It used the
+pinned provider and canonical runtime plus fixture CA. Before teardown, both
+owners passed native chat, image/file handling, desktop capture, SimpleX inference
+and repeated cross-owner denials. After suspending the actors, the drill retained:
 
-An isolated `kind-finite-hermes-restore` fixture is now installed from the pinned
-upstream installer and tested control-plane binaries. It has its own kubeconfig,
-API/CONNECT forwards, shared Rust ingress and local TLS port, two empty workers,
-and the same DATA/cold-boot base template. Initial inventory is zero actors; both
-its control plane and the original cluster report healthy. It contains no source
-cluster actors or user data. Setup evidence lives in the private
-`finite-substrate-restore` scratch directory.
+- A verified physical provider Postgres backup and an independent Core backup.
+- The complete CSI data/state directory, including both agents' `/data` trees.
+- The fenced local snapshot-store volume; both referenced manifest paths were
+  checked in its archive before teardown.
+- Exact actor metadata, image/template references and archive SHA-256 checksums.
 
-`FC_TEST_SUBSTRATE_RECOVERY_DIRECTORY` optionally pauses the two-owner proof
-after initial native history verification and before restart. A fresh private
-directory receives mode-0600 `ready.json` with the Core database URL, runtime IDs
-and a per-run resume nonce. Writing that nonce to `resume` releases the barrier;
-a stale marker or a 15-minute timeout fails the test. This is test coordination,
-not a product restore interface. Core remains outside the simulated cluster failure.
+It deleted and recreated only `kind-finite-hermes-restore`, installed the backups
+into fresh target directories with their writers stopped, then verified both
+original UIDs, templates, volume bindings and snapshot references. Normal Core
+owner controls restarted both agents. Both recovered native history, exact file,
+image and screenshot bytes, and accepted new native model turns. Their existing
+SimpleX addresses and approved contacts survived, with real inference replies for
+both. Both agents read the updated central Core environment value after cold boot.
+Alternating native grants still returned 401 against the other agent in both
+directions after both were running. Canonical fleet status was healthy before
+and after; completed fixture agents were suspended with their data retained.
 
-The first live drill restored a verified physical Postgres backup and the complete
-CSI directory after deleting/recreating that isolated cluster. Both acceptance
-actors retained their exact UID, template reference and volume bindings, and the
-control plane was healthy. The first owner restart nevertheless failed: Substrate
-reported `DataLoss` fetching the external snapshot manifest from the object store,
-which the backup had omitted. No post-restore chat success is claimed. This is
-evidence that DATA/cold-boot does not eliminate the snapshot-store dependency;
-`RevertActor` also preserves that reference and cannot repair missing objects.
-Private evidence is in `finite-substrate-restore/drill-3/`. The next drill must
-include the quiesced snapshot store and verify its referenced objects before
-teardown. A physical provider backup preserves the transaction IDs used by the
-provider outbox; a logical restore alone does not prove watch continuity.
+**Snapshot objects are required even for DATA/cold-boot actors.** Omitting the
+object store in the negative drill caused `DataLoss` before Hermes started.
+`RevertActor` preserves the external snapshot reference and cannot repair missing
+objects. **Run upstream CSI setup before restoring data:** its setup command
+clears the driver data directory. Fence the target API/controller, CSI driver and
+snapshot-store writer while installing their coordinated backups. Do not use the
+destructive local setup command on an existing source cluster.
 
-The corrected `drill-4` included the fenced local snapshot-store volume, checked
-both referenced manifest paths in its archive, and verified all archive hashes
-before teardown. After restore, both UIDs, templates, CSI bindings and snapshot
-references matched. The first actor passed owner-controlled restart, retained its
-SimpleX identity and answered a real SimpleX inference request. The proof then
-failed its cross-agent HTTP assertion because it checked the second actor before
-restarting it (503 while suspended, rather than the expected 401 from Hermes).
-The isolation loop now runs after both owner restarts and still requires 401 in
-both directions. Neither a completed two-owner recovery proof nor restored native
-history verification is claimed by this partial result.
+`FC_TEST_SUBSTRATE_RECOVERY_DIRECTORY` pauses the existing two-owner proof after
+initial native history verification. A fresh private directory receives mode-0600
+`ready.json` containing the Core database URL, runtime IDs and a per-run nonce.
+Writing that nonce to `resume` releases the barrier; a stale marker or 15-minute
+timeout fails the test. Cross-agent isolation runs after both owner restarts and
+requires 401, never a permissive acceptance of 503. This is test coordination,
+not a product restore API. The test drops its isolated Core database on completion,
+so capture recovery evidence inside that lifetime.
 
-For that drill, fence both agents, retain the Core backup/bindings independently,
-and capture provider Postgres, snapshot object storage and the complete CSI data/state directory before
-recreating only this disposable cluster. **Run upstream CSI setup before restoring
-data:** its setup command clears the driver data directory. Fence the target API,
-controller and CSI writer while installing the verified backup, then restore
-service and resume the test to check native history/files and owner isolation.
-Do not run the destructive setup command against the existing source cluster.
-
-The next restore proof must fence the source writer, restore onto genuinely empty
-storage without reading the source, start exactly one writer, and exercise native
-history/files, SimpleX identity and owner isolation with the retained Core binding.
-Copying `/data` while Core/provider bindings remain unrecoverable is only a data-copy
-proof. GKE storage backup and provider rebinding remain unimplemented qualification
-gates; do not add direct actor-status edits as an operator repair procedure.
+Limits: Core survived outside the simulated failure domain; its backup was retained
+but not restored in this live drill. This does not qualify a full Core/identity
+outage, populated provider authorization policy, automatic node-loss failover,
+GKE storage recovery or a production backup service. Keep the independent Recovery
+Authority and qualify those deployment-specific recovery boundaries before rollout.
 
 ## Pinned provider dependencies
 
@@ -506,6 +485,7 @@ Current local evidence (2026-09-22):
 | Native protocol + SimpleX restart | Two-owner real-relay run passed, including worker loss, explicit stop/restart, native approval/clarification/reconnect/interruption, history/files, desktop screenshot and repeated isolation checks. This did not prove SimpleX across image upgrades. |
 | Combined browser + SimpleX + image recovery | `native-home-simplex-upgrade-proof.log`: both owners passed in 627.42s. Native and SimpleX replies/addresses, actor UID/CSI records, Core artifact/contact/host, history/files and screenshot survived worker loss, restart, healthy upgrades and failed-image recovery. Live browser creation/reload also passed. |
 | Image upload | `native-browser-image-proof.log` passed in 152.98s: real UI upload, native vision reply, image rendering and reload. `native-image-reference-probe.log` observes the native vision call; partial mixed-upload failure, retry, TypeScript and lint also pass. `image-reference-upgrade-qualified.log` passed in 163.37s: exact image bytes and the persisted user reference survived restart and a healthy runtime upgrade. |
+| Empty-cluster recovery | `finite-substrate-restore/drill-5/proof.log`: two owners passed in 591.69s after physical provider Postgres, CSI and snapshot-store restore onto a recreated cluster. Native history/files/images, SimpleX identity/replies, central environment refresh and bidirectional isolation passed. Core stayed alive outside the failure domain; GKE and full Core recovery remain unqualified. |
 | Automatic worker recovery | `automatic-recovery-qualified.log` passed in 178.01s with two owners, native chat, image persistence and SimpleX. Recovery during admission drain preserves actor/CSI identity; wrong-host requests, duplicate admission and pending/completed stops are fenced. A delayed crash observation against a running actor leaves its version unchanged. This does not establish node-loss or in-flight-turn recovery. |
 | In-flight worker loss | `inflight-worker-recovery-qualified.log` passed in 116.46s on the canonical image. The worker dies after a foreground tool's observed file write, before tool completion. Normal recovery under admission drain preserves actor/CSI identity, retains the accepted prompt exactly once, clears the busy session, and accepts a subsequent model turn without repeating the side effect. No owner stop/restart intervenes for this actor. This covers that tool-execution boundary, not arbitrary external effects, model-request persistence windows, node loss or exactly-once execution in general. |
 | Lost completion | The actual Runner was killed after provider success, before Core completion; natural lease expiry and a new Runner recovered the same upgrade request. Both owners retained native chat/history/files and actor/storage identity. This does not prove automatic worker crash recovery. |
@@ -534,9 +514,10 @@ Do not enable production admission until the remaining gates are satisfied:
   stop/control intent. Local worker-loss recovery and an interrupted foreground tool are qualified;
   node loss and failures during model-request persistence remain separate gates.
   Keep upgrades opt-in; retirement and backup recovery remain unadvertised.
-- Preserve the Recovery Authority and restore the same Recovery Set onto an
-  empty target. A provider volume/snapshot is not a backup. Local worker-pod loss
-  does not establish node-loss or GKE CSI recovery.
+- Preserve the Recovery Authority and qualify the deployment Recovery Set. The
+  local empty-cluster drill passes with Core retained; full Core/identity outage,
+  populated provider authorization and GKE storage recovery remain unqualified.
+  A provider volume/snapshot alone is not a backup.
 - Qualify intended upstream release, production egress/DNS/internet tools, storage,
   isolation, TLS, projected identity rotation, capacity and fleet probes on GKE.
   Google's [installation documentation](https://docs.cloud.google.com/kubernetes-engine/ai-ml/install-overview-substrate)
