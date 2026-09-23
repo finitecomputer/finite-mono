@@ -2884,6 +2884,33 @@ def runtime_port_rules(raw: str, port: int) -> list[str]:
     ]
 
 
+def runtime_saved_port_bindings(
+    raw: str, selected_ports: set[int]
+) -> list[dict[str, Any]]:
+    """Read durable nerdctl port output, including stopped-container bindings."""
+    if len(raw) > 65536:
+        raise ValueError("saved port output exceeds bound")
+    bindings = []
+    for line in raw.splitlines():
+        match = re.fullmatch(r"([0-9]+)/(tcp|udp|sctp) -> (.+):([0-9]+)", line)
+        if match is None:
+            raise ValueError("saved port output is malformed")
+        container_port, protocol, host, port = match.groups()
+        address = str(ipaddress.ip_address(host.strip("[]")))
+        if not 0 < int(port) < 65536 or not 0 < int(container_port) < 65536:
+            raise ValueError("saved port is outside the valid range")
+        if protocol == "tcp" and int(port) in selected_ports:
+            bindings.append(
+                {
+                    "HostIp": address,
+                    "HostPort": port,
+                    "ContainerPort": int(container_port),
+                    "Protocol": protocol,
+                }
+            )
+    return bindings
+
+
 def collect_runtime_route(machine: str, expected: str | None) -> dict[str, Any]:
     """Compare one owned Kata guest's direct and published contact routes.
 
@@ -3013,14 +3040,23 @@ def collect_runtime_route(machine: str, expected: str | None) -> dict[str, Any]:
             )
             if owners_result.returncode == 0:
                 owners = []
+                inspected_names = set()
                 for line in owners_result.stdout.splitlines():
                     owner = json.loads(line)
-                    bindings = [
-                        binding
-                        for bindings in (owner.get("ports") or {}).values()
-                        for binding in (bindings or [])
-                        if int(binding["HostPort"]) in host_ports
-                    ]
+                    name = owner["name"].removeprefix("/")
+                    if name not in names or name in inspected_names:
+                        raise ValueError(
+                            "container inventory changed during inspection"
+                        )
+                    inspected_names.add(name)
+                    saved = run_read_only(
+                        ["nerdctl", "--namespace", "finite", "port", name]
+                    )
+                    if saved.returncode:
+                        raise ValueError(
+                            "saved container port mappings are unavailable"
+                        )
+                    bindings = runtime_saved_port_bindings(saved.stdout, host_ports)
                     if bindings:
                         owners.append(
                             {
@@ -3039,7 +3075,14 @@ def collect_runtime_route(machine: str, expected: str | None) -> dict[str, Any]:
                                 ],
                             }
                         )
-                port_owners = {"status": "observed", "containers": owners}
+                if inspected_names != set(names):
+                    raise ValueError("container inventory is incomplete")
+                port_owners = {
+                    "status": "observed",
+                    "namespace": "finite",
+                    "binding_source": "nerdctl port",
+                    "containers": owners,
+                }
     except (CollectionError, KeyError, TypeError, ValueError):
         pass
     hashes = [route["agent_principal_sha256"] for route in (published, direct)]

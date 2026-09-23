@@ -67,7 +67,10 @@ Establish the expected Principal independently from Core, never from the
 published endpoint under investigation. The probe compares `/contact` through
 the published address and the inspected guest IP, retains only Principal
 hashes, and reports the matching NAT chains and container port claims. It
-does not inspect credentials or change networking. A green result proves only
+reads saved claims with `nerdctl port`, including stopped containers whose
+ordinary inspect output has no port bindings. The owner inventory is scoped
+to the `finite` namespace and is diagnostic, not an allocation authority.
+It does not inspect credentials or change networking. A green result proves only
 agreement of these identity routes at observation time, not Chat readiness.
 
 If the direct route matches Core but the published route differs, preserve

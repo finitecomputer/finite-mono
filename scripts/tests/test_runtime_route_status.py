@@ -8,7 +8,9 @@ from scripts import finite_status
 
 
 class RuntimeRouteStatusTests(unittest.TestCase):
-    def report(self, published, direct, expected=None, *, ports=None):
+    def report(
+        self, published, direct, expected=None, *, ports=None, stopped_owner=False
+    ):
         inspected = {
             "labels": {
                 "computer.finite.v2.runtime": "true",
@@ -23,7 +25,24 @@ class RuntimeRouteStatusTests(unittest.TestCase):
             subprocess.CompletedProcess([], 0, json.dumps(v), "") for v in values
         ]
         results.append(subprocess.CompletedProcess([], 0, "", ""))
-        results.append(subprocess.CompletedProcess([], 0, "", ""))
+        if stopped_owner:
+            owner = {
+                **inspected,
+                "name": "stopped-agent",
+                "state": "exited",
+                "ports": {},
+            }
+            results.extend(
+                [
+                    subprocess.CompletedProcess([], 0, "stopped-agent\n", ""),
+                    subprocess.CompletedProcess([], 0, json.dumps(owner), ""),
+                    subprocess.CompletedProcess(
+                        [], 0, "8080/tcp -> 10.254.3.5:49153\n", ""
+                    ),
+                ]
+            )
+        else:
+            results.append(subprocess.CompletedProcess([], 0, "", ""))
         with (
             patch.object(finite_status, "run_read_only", side_effect=results) as run,
             patch.object(
@@ -48,6 +67,30 @@ class RuntimeRouteStatusTests(unittest.TestCase):
         )
         self.assertEqual(report["overall_status"], "green")
         self.assertNotIn(principal, json.dumps(report))
+
+    def test_stopped_container_reservation_is_visible_when_inspect_ports_are_empty(
+        self,
+    ):
+        principal = "npub1" + "a" * 58
+        report = self.report(principal, principal, stopped_owner=True)
+        owners = report["sections"]["runtime_route"]["port_owners"]
+        self.assertEqual(owners["binding_source"], "nerdctl port")
+        self.assertEqual(owners["containers"][0]["state"], "exited")
+        self.assertEqual(owners["containers"][0]["bindings"][0]["HostPort"], "49153")
+
+    def test_saved_binding_parser_rejects_partial_or_malformed_evidence(self):
+        with self.assertRaises(ValueError):
+            finite_status.runtime_saved_port_bindings(
+                "8080/tcp -> 10.4.0.8:49153\ntruncated", {49153}
+            )
+
+    def test_saved_binding_parser_distinguishes_protocol_and_ipv6(self):
+        bindings = finite_status.runtime_saved_port_bindings(
+            "8080/tcp -> [::1]:49153\n8080/udp -> 127.0.0.1:49153\n8080/tcp -> 127.0.0.1:49154\n",
+            {49153},
+        )
+        self.assertEqual(len(bindings), 1)
+        self.assertEqual(bindings[0]["HostIp"], "::1")
 
     def test_published_port_serving_another_principal_is_red(self):
         report = self.report("npub1" + "a" * 58, "npub1" + "q" * 58)
