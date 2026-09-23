@@ -41,6 +41,25 @@ The explicit native opt-in browser proof passes separately. Evidence:
 These exercise predecessor wire shapes through the actual dashboard; they do not
 establish a mixed-binary production fleet or authorize rollback after new rows exist.
 
+## Local node-restart limitation
+
+Restarting OrbStack during qualification changed worker pod IPs without changing
+pod UIDs. At provider pin `bb0effe`, `workersync.createOrUpdateWorker` detects the
+mismatch but only logs it: registered worker IPs are immutable. A new actor was
+reported RUNNING at worker IP `10.244.0.33` while its Kubernetes pod was at
+`10.244.0.16`; the agentd ingress returned 503 with a connection timeout. The
+second idle worker also retained its pre-restart address. Deployment convergence
+alone therefore does not prove usable worker routing.
+
+`requester-dispatch-browser-proof.log` is an interrupted run, not a pass. Its
+actor `runtime-e578240cfdfe5e1a3627` was suspended with data retained before the
+stale worker pods were replaced. New pod UIDs registered current addresses; the
+combined browser retry uses those workers. This is manual local infrastructure
+recovery, not automatic whole-node recovery. Add the worker/pod UID and address
+comparison to the canonical status command and qualify provider-supported
+reconciliation before accepting node restart as a supported recovery boundary.
+Do not repair this with a second worker registry in Core or Runner.
+
 ## GKE staging boundary
 
 Rechecked against [Google's installation guide](https://docs.cloud.google.com/kubernetes-engine/ai-ml/install-overview-substrate)
