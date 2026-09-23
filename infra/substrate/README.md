@@ -345,8 +345,8 @@ TypeScript and targeted lint pass. A live proof now starts a disposable real Bra
 service and exercises the actual Next dashboard approval routes for each fresh
 user: initial signer 428, automatic setup, pending request, wrong-nonce rejection,
 human-signed approval, persisted membership and resolver identity, and replay
-rejection. The fixture creates the request; model-generated requests and chat-card
-rendering/clicks remain a separate gate.
+rejection. The fixture creates the request; this does not prove a live terminal
+`fbrain` operation or historical approval-card rendering/clicks.
 
 The Brain CLI now reads native v2 requester leases as well as retained v1 leases.
 A present invalid v2 lease rejects the request without consulting v1, including
@@ -363,14 +363,22 @@ Sites attribution, restart and fresh-user dashboard Brain approval proof in
 199.99 seconds. Run with `FC_TEST_SUBSTRATE_DASHBOARD=1` and
 `FC_TEST_SUBSTRATE_BRAIN_BINARY` pointing to the built `finite-brain` server.
 This proves the approval service/signing path, not a live native terminal lease
-consumed by `fbrain`; model-to-card approval remains unqualified.
+consumed by `fbrain`; live Organization Brain creation and requester attribution
+remain unqualified. The current CLI no longer files approval requests or emits
+the chat-card trailer: upstream auth-kernel commit `9d5fe9ba` deleted that producer
+and its callers. Do not reintroduce the removed workflow for runner parity. Keep
+the native trailer reader for persisted histories; the retained server approval
+route and dashboard signing path are qualified separately above.
 
-A follow-up run with `FC_TEST_SUBSTRATE_BROWSER=1` also passed actual-Next
-browser chat, image upload, generated-file bytes and reload history on that image.
-The combined run then failed the command-approval fixture: retained Hermes history
-shows the model simplified the requested `rm -rf` to `rm -f`, which completed
-without an approval event. The fixture now explicitly requires preserving those
-flags; the combined browser run must pass before counting its remaining gates.
+The combined run with `FC_TEST_SUBSTRATE_BROWSER=1`, actual Next and the real
+Brain service passes in 136.44 seconds on the same canonical image. It covers
+browser chat, image upload, generated-file bytes, reload history, interruption,
+clarification, command approval, both owners' restart checks and bidirectional
+isolation before/after restart. Both disposable actors were suspended with data
+retained and canonical fleet status was captured. An earlier run exposed a model
+rewriting the approval fixture's `rm -rf` to `rm -f`; the prompt now explicitly
+preserves the flags required to exercise approval. No acceptance assertion was
+removed.
 
 The native Sites handoff reuses the existing registry-issued assertion binding
 verified mailbox, human principal and exact agent. The dashboard obtains fresh
@@ -608,7 +616,9 @@ Do not enable production admission until the remaining gates are satisfied:
   with synthetic account authentication; this does not establish deployed auth
   or deployed Brain/Sites integration. Native Sites requester attribution passes
   locally (above), as does fresh-user human signing/approval through dashboard
-  routes; prove model-generated Brain requests and approval-card clicks in chat.
+  routes; prove native terminal Organization Brain creation/access with the current
+  CLI and historical approval-card compatibility. The removed CLI request producer
+  is not a new runner feature.
 - Qualify stuck-start/capacity-exhaustion handling without overriding Core
   stop/control intent. Local worker-loss recovery and an interrupted foreground tool are qualified;
   node loss and failures during model-request persistence remain separate gates.
