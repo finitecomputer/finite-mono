@@ -444,8 +444,9 @@ Sites remains the authority when `fsite` submits Project Init.
 Current evidence: the sealed Linux Python package builds; nine packaged-runtime
 regressions cover optional Sites claims, validation, concurrent isolation, queue separation, steering,
 compute-frame/history separation, gateway-first import order, immediate compute
-completion and failed dispatch. The latter two pass in the rebuilt macOS sealed
-package (`requester-dispatch-after.log`); immediate completion reproduces stale
+completion and failed dispatch. The latter two pass in both rebuilt macOS and Linux sealed packages
+(`requester-dispatch-after.log`, `requester-dispatch-linux-tests.log`);
+immediate completion reproduces stale
 requester state before the fix. The assignment now precedes dispatch, leaving
 completion responsible for cleanup and preserving the next queued requester.
 The runtime image/browser proof must be refreshed for this change.
@@ -646,7 +647,11 @@ an atomically replaced invalid token, then accepts an independently issued token
 and reads the same actor UID. This proves credentials are reloaded between calls;
 it does not qualify Kubernetes projected-volume rotation on GKE. Runner library
 tests pass (201 passed, four opt-in integration tests ignored); the real rotation
-test passes separately. The full workspace gates remain pending.
+test passes separately. The full workspace Rust tests pass in
+`final-rust-low-storage-2.log`. Its subsequent structure gate identified an
+oversized proof file; moving dashboard onboarding into its own module preserves
+behavior. Formatting, structure checks and strict workspace/all-target Clippy
+then pass in `final-structure-clippy.log`.
 
 
 ## Evidence and remaining gates

@@ -2,6 +2,7 @@
 //! with the shipped Runner binary, canonical image, and native authentication.
 use super::*;
 mod capacity;
+mod dashboard;
 mod recovery;
 mod sites;
 mod stalled_boot;
@@ -10,6 +11,7 @@ use crate::launch_codes::IssueLaunchCodeBatchInput;
 use crate::{
     RuntimeArtifactKind, RuntimePlacement, RuntimeResourceClass, UpsertRuntimeArtifactInput,
 };
+use dashboard::dashboard_creation;
 use std::time::Duration;
 
 fn required(name: &str) -> String {
@@ -19,44 +21,6 @@ fn required(name: &str) -> String {
 fn owner_session(index: usize) -> String {
     let user = format!("substrate-proof-{index}");
     access_token_with_subject(&user, &format!("{user}@finite.test"), true, None)
-}
-
-async fn dashboard_creation(owner: &str, user: &str, code: &str) -> String {
-    let input = json!({"ownerToken": owner, "displayName": user, "launchCode": code}).to_string();
-    tokio::task::spawn_blocking(move || {
-        use std::io::Write;
-        let mut child = std::process::Command::new("node")
-            .arg(concat!(
-                env!("CARGO_MANIFEST_DIR"),
-                "/../../apps/dashboard/scripts/substrate-dashboard-proof.mjs"
-            ))
-            .arg("create")
-            .stdin(std::process::Stdio::piped())
-            .stdout(std::process::Stdio::piped())
-            .stderr(std::process::Stdio::piped())
-            .spawn()
-            .unwrap();
-        child
-            .stdin
-            .take()
-            .unwrap()
-            .write_all(input.as_bytes())
-            .unwrap();
-        let output = child.wait_with_output().unwrap();
-        assert!(
-            output.status.success(),
-            "actual dashboard creation failed: {}",
-            String::from_utf8_lossy(&output.stderr)
-        );
-        let result: Value = serde_json::from_slice(&output.stdout).unwrap();
-        if std::env::var_os("FC_TEST_SUBSTRATE_BRAIN_BINARY").is_some() {
-            assert_eq!(result["brainApprovalVerified"], true);
-            eprintln!("fresh-user dashboard Brain approval and replay guards passed");
-        }
-        result["requestId"].as_str().unwrap().to_owned()
-    })
-    .await
-    .unwrap()
 }
 
 async fn native_grant(app: &axum::Router, path: &str, owner: &str) -> Value {
