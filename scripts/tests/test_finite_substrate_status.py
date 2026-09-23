@@ -43,6 +43,50 @@ class SubstrateStatusTests(unittest.TestCase):
         deployment["spec"]["replicas"] = 0
         self.assertEqual(status.deployment_evidence(deployment)["status"], "degraded")
 
+    def test_node_restart_ip_drift_and_pod_replacement_are_not_healthy(self):
+        worker = {
+            "metadata": {"name": "worker-1"},
+            "workerNamespace": "agents",
+            "workerPod": "worker-pod",
+            "workerPodUid": "pod-uid",
+            "ip": "10.244.0.33",
+        }
+        pod = {
+            "metadata": {"namespace": "agents", "name": "worker-pod", "uid": "pod-uid"},
+            "status": {"podIP": "10.244.0.33"},
+        }
+        self.assertEqual(
+            status.worker_evidence([worker], [pod])["worker-1"]["status"], "ok"
+        )
+        pod["status"]["podIP"] = "10.244.0.16"
+        self.assertEqual(
+            status.worker_evidence([worker], [pod])["worker-1"]["status"], "degraded"
+        )
+        pod["status"]["podIP"] = worker["ip"]
+        pod["metadata"]["uid"] = "replacement-pod"
+        self.assertEqual(
+            status.worker_evidence([worker], [pod])["worker-1"]["status"], "degraded"
+        )
+        self.assertEqual(
+            status.worker_evidence([worker], [])["worker-1"]["status"], "degraded"
+        )
+
+    def test_healthy_deployments_do_not_mask_missing_workers(self):
+        deployments = []
+        for name in status.DEPLOYMENTS:
+            deployment = self.deployment()
+            deployment["metadata"]["name"] = name
+            deployments.append(deployment)
+        results = [
+            subprocess.CompletedProcess([], 0, json.dumps(value), "")
+            for value in ({"items": deployments}, {"workers": []}, {"items": []})
+        ]
+        with patch.object(status, "run_read_only", side_effect=results):
+            report = status.collect("test-context")
+        self.assertEqual(report["sections"]["substrate_control_plane"]["status"], "ok")
+        self.assertEqual(report["overall_status"], "degraded")
+        self.assertEqual(report["exit_code"], 1)
+
     def test_missing_control_plane_is_not_healthy(self):
         result = subprocess.CompletedProcess(
             [], 0, json.dumps({"items": [self.deployment()]}), ""

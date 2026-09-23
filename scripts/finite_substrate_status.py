@@ -29,6 +29,61 @@ def deployment_evidence(deployment):
     }
 
 
+def worker_evidence(workers, pods):
+    by_name = {
+        (pod["metadata"]["namespace"], pod["metadata"]["name"]): pod for pod in pods
+    }
+    checks = {}
+    for worker in workers:
+        pod = by_name.get((worker["workerNamespace"], worker["workerPod"]), {})
+        metadata = pod.get("metadata", {})
+        current_ip = pod.get("status", {}).get("podIP")
+        ready = bool(current_ip) and (
+            worker["workerPodUid"] == metadata.get("uid") and worker["ip"] == current_ip
+        )
+        checks[worker["metadata"]["name"]] = {
+            "status": "ok" if ready else "degraded",
+            "namespace": worker["workerNamespace"],
+            "pod": worker["workerPod"],
+            "registered_ip": worker["ip"],
+            "pod_ip": current_ip,
+            "pod_uid_matches": worker["workerPodUid"] == metadata.get("uid"),
+        }
+    return checks
+
+
+def worker_checks(context):
+    workers = run_read_only(
+        ["kubectl", "ate", "--context", context, "get", "workers", "-o", "json"]
+    )
+    pods = run_read_only(
+        [
+            "kubectl",
+            "--context",
+            context,
+            "--request-timeout=10s",
+            "get",
+            "pods",
+            "-A",
+            "-l",
+            "ate.dev/worker-pool",
+            "-o",
+            "json",
+        ]
+    )
+    if workers.returncode or pods.returncode:
+        raise CollectionError(
+            "Substrate worker query failed; check kubectl ate and Kubernetes access"
+        )
+    try:
+        return worker_evidence(
+            json.loads(workers.stdout).get("workers", []),
+            json.loads(pods.stdout)["items"],
+        )
+    except (AttributeError, KeyError, TypeError, ValueError) as error:
+        raise CollectionError("Invalid Substrate worker evidence") from error
+
+
 def collect(context):
     result = run_read_only(
         [
@@ -58,7 +113,12 @@ def collect(context):
             raise ValueError("missing deployment")
     except (KeyError, TypeError, ValueError) as error:
         raise CollectionError("Invalid Substrate deployment evidence") from error
-    ready = all(check["status"] == "ok" for check in checks.values())
+    workers = worker_checks(context)
+    workers_ready = bool(workers) and all(
+        check["status"] == "ok" for check in workers.values()
+    )
+    deployments_ready = all(check["status"] == "ok" for check in checks.values())
+    ready = deployments_ready and workers_ready
     status = "ok" if ready else "degraded"
     return {
         "schema_version": "finite.status.v1",
@@ -67,10 +127,16 @@ def collect(context):
         "exit_code": 0 if ready else 1,
         "sections": {
             "substrate_control_plane": {
-                "status": status,
+                "status": "ok" if deployments_ready else "degraded",
                 "context": context,
                 "checks": checks,
                 "scope": "Deployment convergence only; agent chat, capacity, and recovery are unproven",
-            }
+            },
+            "substrate_worker_routing": {
+                "status": "ok" if workers_ready else "degraded",
+                "context": context,
+                "checks": workers,
+                "scope": "Registered worker/pod UID and IP agreement only; live actor routing is unproven",
+            },
         },
     }

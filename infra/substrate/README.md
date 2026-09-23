@@ -55,8 +55,10 @@ alone therefore does not prove usable worker routing.
 actor `runtime-e578240cfdfe5e1a3627` was suspended with data retained before the
 stale worker pods were replaced. New pod UIDs registered current addresses; the
 combined browser retry uses those workers. This is manual local infrastructure
-recovery, not automatic whole-node recovery. Add the worker/pod UID and address
-comparison to the canonical status command and qualify provider-supported
+recovery, not automatic whole-node recovery. The canonical status command now compares registered worker/pod UIDs and IPs
+using `kubectl ate get workers` and the Kubernetes worker pods; a mismatch,
+missing pod or empty worker inventory cannot report healthy. The `kubectl ate`
+plugin is required for this read-only probe. Qualify provider-supported
 reconciliation before accepting node restart as a supported recovery boundary.
 Do not repair this with a second worker registry in Core or Runner.
 
