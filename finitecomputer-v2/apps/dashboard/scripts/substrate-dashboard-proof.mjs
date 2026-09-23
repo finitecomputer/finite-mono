@@ -7,8 +7,9 @@ import { copyFile, mkdtemp, open, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { chromium } from 'playwright';
+import { proveFreshBrainApproval } from './substrate-brain-proof.mjs';
 
-export async function withDashboard({ ownerToken }, work) {
+export async function withDashboard({ ownerToken, brainProof = false }, work) {
   const response = await fetch('http://127.0.0.1:18420/api/core/v1/me', { headers: { authorization: `Bearer ${ownerToken}` }, signal: AbortSignal.timeout(10000) });
   assert.equal(response.status, 200, 'Core account lookup failed');
   const account = await response.json();
@@ -18,9 +19,16 @@ export async function withDashboard({ ownerToken }, work) {
   const base = `http://127.0.0.1:${port}`;
   const directory = await mkdtemp(join(tmpdir(), 'finite-substrate-dashboard-'));
   const log = await open(join(directory, 'next.log'), 'w', 0o600);
+  const brainOrigin = 'http://127.0.0.1:18430';
+  const brain = brainProof ? spawn(process.env.FC_TEST_SUBSTRATE_BRAIN_BINARY, [], {
+    env: { ...process.env, FINITE_BRAIN_ADDR: '127.0.0.1:18430',
+      FINITE_BRAIN_PUBLIC_BASE_URL: brainOrigin, FINITE_BRAIN_DB: join(directory, 'brain.sqlite3') },
+    stdio: ['ignore', log.fd, log.fd],
+  }) : null;
   const server = spawn(process.execPath, ['node_modules/next/dist/bin/next', 'dev', '--hostname', '127.0.0.1', '--port', String(port)], {
     cwd: new URL('..', import.meta.url),
     env: { ...process.env,
+      ...(brain ? { FC_BRAIN_UPSTREAM_URL: brainOrigin, FC_BRAIN_PUBLIC_ORIGIN: brainOrigin } : {}),
       FC_CORE_BASE_URL: 'http://127.0.0.1:18420',
       FC_HOSTED_WEB_DEVICE_URL: 'http://127.0.0.1:18428',
       FINITECHAT_HOSTED_API_TOKEN: 'disposable-control-proof',
@@ -47,17 +55,23 @@ export async function withDashboard({ ownerToken }, work) {
       await new Promise(resolve => setTimeout(resolve, 100));
     }
     assert.ok(ready, 'Actual dashboard did not become ready');
+    if (brain) {
+      assert.equal(brain.exitCode, null, 'Disposable Brain service exited');
+      await proveFreshBrainApproval(base, brainOrigin, account.workos_user_id);
+    }
     return await work(base, directory);
   } catch (error) {
     console.error(`Private actual-dashboard diagnostics: ${directory}`);
     throw error;
   } finally {
-    if (server.exitCode === null) {
-      const exited = once(server, 'exit');
-      server.kill('SIGTERM');
-      const timer = setTimeout(() => server.kill('SIGKILL'), 5000);
-      await exited;
-      clearTimeout(timer);
+    for (const child of [server, brain]) {
+      if (child && child.exitCode === null && child.signalCode === null) {
+        const exited = once(child, 'exit');
+        child.kill('SIGTERM');
+        const timer = setTimeout(() => child.kill('SIGKILL'), 5000);
+        await exited;
+        clearTimeout(timer);
+      }
     }
     await log.close();
     await rm(tsconfig, { force: true });
@@ -68,7 +82,7 @@ if (process.argv[2] === 'create') {
   let input = '';
   for await (const chunk of process.stdin) input += chunk;
   const options = JSON.parse(input);
-  const result = await withDashboard(options, async (base, directory) => {
+  const result = await withDashboard({ ...options, brainProof: Boolean(process.env.FC_TEST_SUBSTRATE_BRAIN_BINARY) }, async (base, directory) => {
     const browser = await chromium.launch({ headless: true,
       ...(process.env.PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH
         ? { executablePath: process.env.PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH }
@@ -99,5 +113,5 @@ if (process.argv[2] === 'create') {
       await browser.close();
     }
   });
-  console.log(JSON.stringify(result));
+  console.log(JSON.stringify({ ...result, brainApprovalVerified: Boolean(process.env.FC_TEST_SUBSTRATE_BRAIN_BINARY) }));
 }

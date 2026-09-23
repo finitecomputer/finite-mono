@@ -341,20 +341,29 @@ required (428), the dashboard initializes it through the existing state endpoint
 and retries once. Other failures, including incomplete durable state, do not cause
 setup or retry. The native-user regression fails before/passes after this change;
 21 signing/request client tests, the real Rust hosted signer boundary test,
-TypeScript and targeted lint pass. This is not yet a live Brain-service approval
-proof.
+TypeScript and targeted lint pass. A live proof now starts a disposable real Brain
+service and exercises the actual Next dashboard approval routes for each fresh
+user: initial signer 428, automatic setup, pending request, wrong-nonce rejection,
+human-signed approval, persisted membership and resolver identity, and replay
+rejection. The fixture creates the request; model-generated requests and chat-card
+rendering/clicks remain a separate gate.
 
 The Brain CLI now reads native v2 requester leases as well as retained v1 leases.
 A present invalid v2 lease rejects the request without consulting v1, including
 on repeated reads after expiry. The regression failed on the old reader; the
-full CLI suite passes (232 tests, two ignored), and Clippy passes. This change
-still needs qualification in a rebuilt runtime. Native requester identity now
+full CLI suite passes (232 tests, two ignored), and Clippy passes. Native requester identity now
 comes from the exact hosted human/Project binding even when Sites is unavailable
 or unconfigured; optional Sites claims remain an all-or-nothing pair. Brain-only
 turns write v2 leases without mailbox/assertion fields and never leave a v1
 fallback. Server outage/binding tests, client parsing, seven sealed-helper tests,
-86 adapter tests, and the Rust lease regressions pass. Live Brain approval through
-the actual dashboard remains unqualified.
+86 adapter tests, and the Rust lease regressions pass. The rebuilt canonical runtime
+(`sha256:a5b1ab5e2698b7bf87cf257b0b595c2f0fb45396becf8e50bafdac21a0ef9d3b`,
+with the local test CA) passes the combined two-owner onboarding, native chat,
+Sites attribution, restart and fresh-user dashboard Brain approval proof in
+199.99 seconds. Run with `FC_TEST_SUBSTRATE_DASHBOARD=1` and
+`FC_TEST_SUBSTRATE_BRAIN_BINARY` pointing to the built `finite-brain` server.
+This proves the approval service/signing path, not a live native terminal lease
+consumed by `fbrain`; model-to-card approval remains unqualified.
 
 The native Sites handoff reuses the existing registry-issued assertion binding
 verified mailbox, human principal and exact agent. The dashboard obtains fresh
@@ -591,7 +600,8 @@ Do not enable production admission until the remaining gates are satisfied:
   onboarding, native chat and correction/queue history pass on the canonical image
   with synthetic account authentication; this does not establish deployed auth
   or deployed Brain/Sites integration. Native Sites requester attribution passes
-  locally (above); prove real human signing/approval with a fresh native-only user.
+  locally (above), as does fresh-user human signing/approval through dashboard
+  routes; prove model-generated Brain requests and approval-card clicks in chat.
 - Qualify stuck-start/capacity-exhaustion handling without overriding Core
   stop/control intent. Local worker-loss recovery and an interrupted foreground tool are qualified;
   node loss and failures during model-request persistence remain separate gates.

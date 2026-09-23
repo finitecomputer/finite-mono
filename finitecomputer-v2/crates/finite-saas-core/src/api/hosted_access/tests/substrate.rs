@@ -47,10 +47,12 @@ async fn dashboard_creation(owner: &str, user: &str, code: &str) -> String {
             "actual dashboard creation failed: {}",
             String::from_utf8_lossy(&output.stderr)
         );
-        serde_json::from_slice::<Value>(&output.stdout).unwrap()["requestId"]
-            .as_str()
-            .unwrap()
-            .to_owned()
+        let result: Value = serde_json::from_slice(&output.stdout).unwrap();
+        if std::env::var_os("FC_TEST_SUBSTRATE_BRAIN_BINARY").is_some() {
+            assert_eq!(result["brainApprovalVerified"], true);
+            eprintln!("fresh-user dashboard Brain approval and replay guards passed");
+        }
+        result["requestId"].as_str().unwrap().to_owned()
     })
     .await
     .unwrap()
