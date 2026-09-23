@@ -320,6 +320,17 @@ include the quiesced snapshot store and verify its referenced objects before
 teardown. A physical provider backup preserves the transaction IDs used by the
 provider outbox; a logical restore alone does not prove watch continuity.
 
+The corrected `drill-4` included the fenced local snapshot-store volume, checked
+both referenced manifest paths in its archive, and verified all archive hashes
+before teardown. After restore, both UIDs, templates, CSI bindings and snapshot
+references matched. The first actor passed owner-controlled restart, retained its
+SimpleX identity and answered a real SimpleX inference request. The proof then
+failed its cross-agent HTTP assertion because it checked the second actor before
+restarting it (503 while suspended, rather than the expected 401 from Hermes).
+The isolation loop now runs after both owner restarts and still requires 401 in
+both directions. Neither a completed two-owner recovery proof nor restored native
+history verification is claimed by this partial result.
+
 For that drill, fence both agents, retain the Core backup/bindings independently,
 and capture provider Postgres, snapshot object storage and the complete CSI data/state directory before
 recreating only this disposable cluster. **Run upstream CSI setup before restoring

@@ -851,7 +851,6 @@ async fn substrate_two_owner_launch_and_native_access() {
                 }
                 let grant = native_grant(&app, &path, &owners[index]).await;
                 let base = grant["baseUrl"].as_str().unwrap();
-                let token = grant["accessToken"].as_str().unwrap();
                 assert_eq!(
                     http.get(format!("{base}api/auth/me"))
                         .send()
@@ -860,38 +859,6 @@ async fn substrate_two_owner_launch_and_native_access() {
                         .status(),
                     StatusCode::UNAUTHORIZED
                 );
-                // Alternate identities repeatedly: a single successful pair missed
-                // pooled CONNECT filter-state leakage in upstream Envoy.
-                for _ in 0..12 {
-                    let authenticated = http
-                        .get(format!("{base}api/auth/me"))
-                        .bearer_auth(token)
-                        .send()
-                        .await
-                        .unwrap();
-                    let authenticated_status = authenticated.status();
-                    if authenticated_status != StatusCode::OK {
-                        let reason = authenticated.json::<Value>().await.ok().and_then(|body| {
-                            body.get("reason")
-                                .and_then(Value::as_str)
-                                .map(str::to_owned)
-                        });
-                        panic!("native grant rejected: {authenticated_status}, reason: {reason:?}");
-                    }
-                    let other = format!(
-                        "{public_origin}/runtimes/{}/api/auth/me",
-                        runtimes[1 - index]
-                    );
-                    assert_eq!(
-                        http.get(&other)
-                            .bearer_auth(token)
-                            .send()
-                            .await
-                            .unwrap()
-                            .status(),
-                        StatusCode::UNAUTHORIZED
-                    );
-                }
                 let denied = app
                     .clone()
                     .oneshot(
@@ -973,6 +940,48 @@ async fn substrate_two_owner_launch_and_native_access() {
                     "native model turn passed for synthetic owner {index}, restart pass {pass}"
                 );
             }
+            // A recovery drill restores both actors suspended. Check cross-agent
+            // authentication only after both have passed their owner restart.
+            for (index, runtime) in runtimes.iter().enumerate() {
+                let owner = owner_session(index);
+                let path = format!("/api/core/v1/me/runtimes/{runtime}/hosted-hermes-session");
+                let grant = native_grant(&app, &path, &owner).await;
+                let base = grant["baseUrl"].as_str().unwrap();
+                let token = grant["accessToken"].as_str().unwrap();
+                // Alternate identities repeatedly: a single successful pair missed
+                // pooled CONNECT filter-state leakage in upstream Envoy.
+                for _ in 0..12 {
+                    let authenticated = http
+                        .get(format!("{base}api/auth/me"))
+                        .bearer_auth(token)
+                        .send()
+                        .await
+                        .unwrap();
+                    let authenticated_status = authenticated.status();
+                    if authenticated_status != StatusCode::OK {
+                        let reason = authenticated.json::<Value>().await.ok().and_then(|body| {
+                            body.get("reason")
+                                .and_then(Value::as_str)
+                                .map(str::to_owned)
+                        });
+                        panic!("native grant rejected: {authenticated_status}, reason: {reason:?}");
+                    }
+                    let other = format!(
+                        "{public_origin}/runtimes/{}/api/auth/me",
+                        runtimes[1 - index]
+                    );
+                    assert_eq!(
+                        http.get(&other)
+                            .bearer_auth(token)
+                            .send()
+                            .await
+                            .unwrap()
+                            .status(),
+                        StatusCode::UNAUTHORIZED
+                    );
+                }
+            }
+            eprintln!("bidirectional native owner isolation passed, restart pass {pass}");
         }
         if let Some(server) = device_server { server.abort(); }
         identity_server.abort();
