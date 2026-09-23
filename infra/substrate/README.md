@@ -135,7 +135,11 @@ approvals, clarification and in-flight turn state:
 - Files stage with `file.attach` and the returned path is submitted with the
   caption. Failed staging preserves the draft. Downloads obtain fresh Core
   authorization, keep tokens out of URLs and sandbox documents on the dashboard
-  origin. Persisted `@image:`/`@file:` references render as attachment cards.
+  origin. Persisted `@image:`/`@file:` references and native generated `MEDIA:`
+  directives render as attachment cards. Inline/standalone generated references
+  and quoted filenames use the same authenticated file route; fenced/inline
+  code, remote URLs and invalid paths remain literal text. Browser fixtures
+  cover generated documents in restored history and live replies.
   Images use the same staging call and a turn-scoped `@image:` reference;
   Hermes invokes its vision tool. The client never fills the native session-wide
   pending-image queue or implements model-routing policy. Live browser upload,

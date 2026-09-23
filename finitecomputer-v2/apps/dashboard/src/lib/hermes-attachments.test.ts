@@ -19,3 +19,27 @@ test("prose, fenced examples and external URLs are never converted into native f
   }
   assert.equal(hermesMessageAttachments("@file:/tmp/bad\0name").media.length, 0);
 });
+
+
+test("native generated media uses existing cards for documents, images and audio", () => {
+  const parsed = hermesMessageAttachments('Here are the results\nMEDIA:/data/agent/report.pdf\nMEDIA:"/data/agent/my photo.PNG"\nMEDIA:/data/agent/voice.mp3\nMEDIA:/data/agent/report.pdf');
+  assert.equal(parsed.text, "Here are the results");
+  assert.deepEqual(parsed.media.map(item => [item.filename, item.kind, item.mime_type]), [
+    ["report.pdf", "File", "application/octet-stream"],
+    ["my photo.PNG", "Image", "image/png"],
+    ["voice.mp3", "File", "audio/mpeg"],
+  ]);
+});
+
+test("generated-media examples and unsafe paths remain literal text", () => {
+  for (const text of ['```text\nMEDIA:/tmp/report.pdf\n```', '~~~\nMEDIA:/tmp/photo.png\n~~~', 'Use `MEDIA:/tmp/report.pdf` as an example', 'Use ``MEDIA:/tmp/report.pdf`` as an example', 'MEDIA:https://other.test/tracker.png', 'MEDIA:relative.pdf', 'MEDIA:/tmp/bad\0name', 'MEDIA:/' + 'x'.repeat(4096)]) {
+    assert.deepEqual(hermesMessageAttachments(text), { text, media: [] });
+  }
+});
+
+
+test("inline native media preserves the caption and quoted filenames", () => {
+  const parsed = hermesMessageAttachments('Listen: MEDIA:/data/agent/voice.mp3\nDownload: MEDIA:`/data/agent/my report.csv`');
+  assert.equal(parsed.text, "Listen: \nDownload:");
+  assert.deepEqual(parsed.media.map(item => item.filename), ["voice.mp3", "my report.csv"]);
+});

@@ -188,12 +188,12 @@ test("native chat pages older history, archives, reconnects, and restores", { ti
           }
           if (holdTurn) {
             socket.send(JSON.stringify({ method: "event", params: { session_id: "handle-one", type: "message.delta", payload: { text: "Working 🚀 partial reply" } } }));
-          } else socket.send(JSON.stringify({ method: "event", params: { session_id: "handle-one", type: "message.complete", payload: failTurn ? { text: "Partial model reply", status: "error", error: "Model service unavailable", partial: true } : { text: "Recovered model reply" } } }));
+          } else socket.send(JSON.stringify({ method: "event", params: { session_id: "handle-one", type: "message.complete", payload: failTurn ? { text: "Partial model reply", status: "error", error: "Model service unavailable", partial: true } : { text: "Recovered model reply MEDIA:/data/agent/generated/live.csv" } } }));
         }
         const result = request.method === "projects.tree"
           ? { projects: [], scoped_session_ids: [] }
           : request.method === "session.resume"
-            ? { session_id: "handle-one", pending_approval: pendingApproval, pending_clarify: pendingClarify, ...(holdTurn ? { running: true, inflight: { user: "Start a long turn", assistant: heldAnswer, streaming: true, corrections, correction_offsets: corrections.map(() => Array.from(heldAnswer).length) } } : {}), ...(retainedFailure ? { inflight: { status: "error", error: "Model service unavailable", assistant: "Partial model reply", corrections: ["Correction before failure"], correction_offsets: [8] } } : {}), messages: [{ role: "tool", name: "terminal", text: "finite-brain-approval-filed brain=brain-1 request=approval-1" }, { role: "assistant", text: "Durable reply" }, { role: "user", text: "An uploaded file\n@file:/data/agent/attachments/report.txt" }, ...(persistHeldUser ? [{ role: "user", text: "Start a long turn" }] : [])] }
+            ? { session_id: "handle-one", pending_approval: pendingApproval, pending_clarify: pendingClarify, ...(holdTurn ? { running: true, inflight: { user: "Start a long turn", assistant: heldAnswer, streaming: true, corrections, correction_offsets: corrections.map(() => Array.from(heldAnswer).length) } } : {}), ...(retainedFailure ? { inflight: { status: "error", error: "Model service unavailable", assistant: "Partial model reply", corrections: ["Correction before failure"], correction_offsets: [8] } } : {}), messages: [{ role: "tool", name: "terminal", text: "finite-brain-approval-filed brain=brain-1 request=approval-1" }, { role: "assistant", text: "Durable reply\nMEDIA:/data/agent/generated/report.pdf" }, { role: "user", text: "An uploaded file\n@file:/data/agent/attachments/report.txt" }, ...(persistHeldUser ? [{ role: "user", text: "Start a long turn" }] : [])] }
             : {};
         socket.send(JSON.stringify({ jsonrpc: "2.0", id: request.id, result }));
       });
@@ -227,6 +227,9 @@ test("native chat pages older history, archives, reconnects, and restores", { ti
     await download.waitFor();
     assert.equal(await download.getAttribute("href"), "/api/agents/runtime_web_design/hermes-file?path=%2Fdata%2Fagent%2Fattachments%2Freport.txt");
     assert.equal(await page.locator(".finite-chat__messages").getByText("/data/agent/attachments/report.txt", { exact: true }).count(), 0);
+    const generated = page.getByRole("link", { name: "report.pdf", exact: true });
+    await generated.waitFor();
+    assert.equal(await generated.getAttribute("href"), "/api/agents/runtime_web_design/hermes-file?path=%2Fdata%2Fagent%2Fgenerated%2Freport.pdf");
     const composer = page.locator(".finite-chat__composer textarea");
     await composer.fill("Read these notes");
     await page.locator('input[type="file"]').setInputFiles([{ name: "notes.txt", mimeType: "text/plain", buffer: Buffer.from("Upload content") }, { name: "photo.png", mimeType: "image/png", buffer: Buffer.from("Upload content") }]);
