@@ -116,7 +116,7 @@ class NativeRequesterTests(unittest.TestCase):
                 def complete(frame, *, on_complete):
                     on_complete({"type": "turn.done", "session_info_emitted": True})
 
-                def drain(*args):
+                def drain(*args, session=session, next_user=next_user):
                     if next_user:
                         session["_finite_requester_user"] = next_user
 
