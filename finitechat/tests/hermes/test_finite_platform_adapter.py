@@ -343,6 +343,41 @@ class FinitePlatformAdapterTests(unittest.TestCase):
                 broker.after_tool_call(**hook)
                 self.module._AUTHENTICATED_FINITE_TURN_USER.reset(token)
 
+    def test_native_terminal_lease_requires_matching_sender_and_has_no_v1_fallback(self):
+        with tempfile.TemporaryDirectory() as finite_home:
+            broker = self.module._RequesterContextBroker(Path(finite_home) / "requester-context-v1")
+            session_context = cast(Any, sys.modules["gateway.session_context"])
+            session_context.values = {
+                "HERMES_SESSION_PLATFORM": "local",
+                "HERMES_SESSION_KEY": "native:session-a",
+                "HERMES_SESSION_USER_ID": "a1" * 32,
+            }
+            requester = {
+                "userId": "a1" * 32, "email": "owner@example.com",
+                "sitesAssertion": "b2" * 32, "expiresAt": int(time.time()) + 5,
+            }
+            filename = self.module._requester_context_filename("native:session-a")
+            broker.root.mkdir(parents=True, exist_ok=True)
+            (broker.root / filename).write_text("stale legacy lease")
+            hook = {"tool_name": "terminal", "tool_call_id": "native-call"}
+            with patch.object(self.module, "_native_sites_requester", return_value=requester):
+                broker.before_tool_call(**hook)
+                self.assertFalse((broker.root / filename).exists())
+                payload = json.loads((broker.root_v2 / filename).read_text())
+                self.assertEqual(payload["requesting_user_id"], requester["userId"])
+                self.assertEqual(payload["hosted_requester_assertion"], requester["sitesAssertion"])
+                self.assertEqual(payload["expires_at_unix"], requester["expiresAt"])
+                broker.after_tool_call(**hook)
+                self.assertFalse((broker.root_v2 / filename).exists())
+                session_context.values["HERMES_SESSION_USER_ID"] = "c3" * 32
+                broker.before_tool_call(**hook)
+                self.assertFalse((broker.root_v2 / filename).exists())
+            session_context.values["HERMES_SESSION_USER_ID"] = "a1" * 32
+            with patch.object(self.module, "_native_sites_requester", return_value=None):
+                broker.before_tool_call(**hook)
+                self.assertFalse((broker.root / filename).exists())
+                self.assertFalse((broker.root_v2 / filename).exists())
+
     def test_terminal_hook_writes_additive_v2_verified_mailbox_lease(self):
         with tempfile.TemporaryDirectory() as finite_home:
             broker = self.module._RequesterContextBroker(Path(finite_home) / "requester-context-v1")

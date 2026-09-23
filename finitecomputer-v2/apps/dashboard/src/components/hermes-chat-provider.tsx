@@ -4,7 +4,7 @@
  * Adapted from the existing Hermes gateway spike (PR #845). Core authorizes
  * each connection; Hermes owns sessions, history, and streamed turns. */
 import { attemptHostedChatSignIn, currentHostedChatReturnPath, isHostedChatSessionAuthFailure, redirectToHostedChatSignIn, shouldAutoRedirectForSessionAuthFailure } from "@/lib/hosted-chat-session";
-import { createHostedHermesWebSocket, readHostedHermesJson, setHostedHermesSessionArchived } from "@/lib/hosted-hermes-status";
+import { createHostedHermesWebSocket, readNativeRequesterContext, readHostedHermesJson, setHostedHermesSessionArchived } from "@/lib/hosted-hermes-status";
 import { HOME_TOPIC_ID } from "@/lib/hosted-web-chat-topics";
 import { hermesAttachmentUrl, hermesMessageAttachments } from "@/lib/hermes-attachments";
 import { hermesBrainApprovals } from "@/lib/hermes-brain-approvals";
@@ -771,7 +771,11 @@ export function HermesChatProvider({ children, machineId }: { children: ReactNod
       try {
         const streaming = entry.streaming;
         const offset = Array.from(streaming?.answer ?? "").length;
-        const result = await call("prompt.submit", { session_id: handle, text }) as { status?: string };
+        const signal = requestAbortRef.current?.signal;
+        if (!signal) throw new Error("Agent connection changed. Reopen the conversation before sending.");
+        const requester = await readNativeRequesterContext(machineId, signal);
+        assertConnected();
+        const result = await call("prompt.submit", { session_id: handle, text, ...(requester ? { finite_requester: requester } : {}) }) as { status?: string };
         if (streaming && streaming === entry.streaming && (result?.status === "redirected" || result?.status === "steered")) {
           const index = messages.findIndex(row => row.message_id === optimistic.message_id);
           if (index >= 0) messages.splice(index, 1);
@@ -798,7 +802,7 @@ export function HermesChatProvider({ children, machineId }: { children: ReactNod
     } finally {
       sendingRef.current = false;
     }
-  }, [createDraft, currentState, publish, upsertStreamingMessages]);
+  }, [machineId, createDraft, currentState, publish, upsertStreamingMessages]);
 
   const dispatch = useCallback(
     async (action: HostedChatAction): Promise<HostedChatState> => {

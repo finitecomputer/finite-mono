@@ -421,10 +421,11 @@ jobs:
           HERMES_AGENT_PYTHON: ${{ steps.hermes_agent_runtime.outputs.python }}
           HERMES_BUNDLED_PLUGINS: ${{ steps.hermes_agent_runtime.outputs.path }}/share/hermes-agent/plugins
         run: |
-          nix develop "$GITHUB_WORKSPACE#hermes-bridge-ci" --command ruff format --check infra/images/test_hermes_product_inventory.py finite-brain/integrations/hermes finite-sites/integrations/hermes
-          nix develop "$GITHUB_WORKSPACE#hermes-bridge-ci" --command ruff check infra/images/test_hermes_product_inventory.py finite-brain/integrations/hermes finite-sites/integrations/hermes
+          nix develop "$GITHUB_WORKSPACE#hermes-bridge-ci" --command ruff format --check infra/images/test_hermes_product_inventory.py infra/images/test_hermes_native_requester.py finite-agentd/integrations/hermes/finite_requester_context.py finite-brain/integrations/hermes finite-sites/integrations/hermes
+          nix develop "$GITHUB_WORKSPACE#hermes-bridge-ci" --command ruff check infra/images/test_hermes_product_inventory.py infra/images/test_hermes_native_requester.py finite-agentd/integrations/hermes/finite_requester_context.py finite-brain/integrations/hermes finite-sites/integrations/hermes
           nix develop "$GITHUB_WORKSPACE#rust-ci" --command cargo build --locked -p finite-brain-cli -p fsite-cli --bins
           "$HERMES_AGENT_PYTHON" -m unittest discover -s infra/images -p 'test_hermes_product_inventory.py'
+          "$HERMES_AGENT_PYTHON" -m unittest discover -s infra/images -p 'test_hermes_native_requester.py'
 
       - name: Chat reliability fast gate (Hermes adapter)
         env:

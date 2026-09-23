@@ -9,6 +9,24 @@ export type HostedHermesAccess = {
 };
 
 export type HostedHermesSession = { baseUrl: string; accessToken: string; expiresAt: number };
+export type NativeRequesterContext = { userId: string; email: string; sitesAssertion: string; expiresAt: number };
+
+export async function readNativeRequesterContext(runtimeId: string, signal: AbortSignal): Promise<NativeRequesterContext | undefined> {
+  return bounded(signal, async requestSignal => {
+    const result = record(await controlRequest(runtimeId, {
+      method: "POST", signal: requestSignal,
+      headers: { "content-type": "application/json" }, body: JSON.stringify({ requester: true }),
+    }));
+    requestSignal.throwIfAborted();
+    const value = record(result.requester);
+    if (typeof value.userId !== "string" || !/^[0-9a-f]{64}$/.test(value.userId) ||
+      typeof value.email !== "string" || !value.email.includes("@") || value.email.length > 254 ||
+      typeof value.sitesAssertion !== "string" || !/^[0-9a-f]{64}$/.test(value.sitesAssertion) ||
+      !Number.isSafeInteger(value.expiresAt) || Number(value.expiresAt) <= 0) return undefined;
+    return { userId: value.userId, email: value.email, sitesAssertion: value.sitesAssertion, expiresAt: Number(value.expiresAt) };
+  });
+}
+
 export type HostedHermesStatus = { version: string; gatewayRunning: boolean };
 export class HostedHermesStatusError extends Error {
   constructor(message: string, readonly kind: "request" | "access" | "unsupported" = "request", readonly status?: number) {

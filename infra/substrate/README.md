@@ -344,15 +344,26 @@ setup or retry. The native-user regression fails before/passes after this change
 TypeScript and targeted lint pass. This is not yet a live Brain-service approval
 proof.
 
-Sites automatic requester attribution remains incomplete on native chat. The
-Finite Chat send path mints an assertion through the existing Sites registry,
-binding the verified mailbox, human principal and exact agent. Its Hermes adapter
-writes that context only around the matching terminal tool call, and `fsite`
-consumes it under the matching task-local session. Native `prompt.submit` currently
-bypasses that adapter and carries no equivalent context. Reuse that assertion
-contract with turn isolation; do not substitute a permanent owner environment
-variable or an unsigned prompt claim. This gap must be closed and proved against
-the Sites service before claiming native product parity.
+The native Sites handoff reuses the existing registry-issued assertion binding
+verified mailbox, human principal and exact agent. The dashboard obtains fresh
+context for each prompt through its owner-authorized Hermes access route. Hermes
+carries it outside prompt text/history, scopes it to the executing turn, and uses
+the existing adapter's terminal-tool lease writer. Native turns write v2 leases
+only, bounded by the assertion expiry; they never create an unsigned v1 fallback.
+Different requesters cannot steer the active turn or merge their queued envelopes.
+Sites remains the authority when `fsite` submits Project Init.
+
+Current evidence: the sealed Linux Python package builds; five packaged-runtime
+regressions cover validation, concurrent isolation, queue separation, steering,
+and compute-frame/history separation. All 86 adapter tests pass, including native
+lease cleanup and sender mismatch. The dashboard browser fixture checks fresh
+context on each prompt and successful chat without Sites context. The real Sites
+service accepts the exact assertion and rejects another agent. These are separate
+boundary proofs. A real pinned Hermes terminal subprocess also observes the native
+session identity and assertion lease, with no v1 fallback and cleanup after the
+tool completes. The full Hermes integration suite passes (116 tests, two opt-in
+live tests skipped). A single live native turn through `fsite` into Sites is still
+required before claiming full native product parity.
 
 ## Pinned provider dependencies
 

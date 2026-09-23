@@ -1,0 +1,230 @@
+--- a/tui_gateway/methods_prompt.py
++++ b/tui_gateway/methods_prompt.py
+@@ -288,6 +288,9 @@
+ def _(rid, params: dict) -> dict:
+     from hermes_cli.input_sanitize import sanitize_user_prompt_text
+ 
++    from hermes_cli.finite_requester_context import normalize
++
++    finite_requester = normalize(params.get("finite_requester"))
+     sid = params.get("session_id", "")
+     raw_text = params.get("text", "")
+     text = sanitize_user_prompt_text(raw_text) if isinstance(raw_text, str) else raw_text
+@@ -471,7 +474,7 @@
+                 break
+         busy_response = _handle_busy_submit(
+             rid, sid, session, text, busy_transport,
+-            queued=bool(params.get("queued")),
++            queued=bool(params.get("queued")), finite_requester=finite_requester,
+         )
+         if busy_response is not None:
+             return busy_response
+@@ -914,7 +917,7 @@
+ 
+     if turn_isolation:
+         isolated_response = _submit_prompt_to_compute_host(
+-            rid, sid, session, text, display_kind=display_kind
++            rid, sid, session, text, display_kind=display_kind, finite_requester=finite_requester
+         )
+         if not isolated_response.get("error"):
+             if survivor_user_row_ids is not None and requested_rebind_ids is None:
+@@ -1023,6 +1026,7 @@
+             text,
+             display_kind=display_kind,
+             terminal_callback=hosted_terminal_callback,
++            finite_requester=finite_requester,
+         )
+ 
+     run_thread = threading.Thread(target=run_after_agent_ready, daemon=True)
+--- a/tui_gateway/server.py
++++ b/tui_gateway/server.py
+@@ -2623,6 +2623,7 @@
+     image_paths: list[str] | None = None,
+     queued_prompt_generation: int | None = None,
+     display_kind: str | None = None,
++    finite_requester: dict | None = None,
+ ) -> dict:
+     with session["history_lock"]:
+         history = list(session.get("history", []))
+@@ -2634,6 +2635,7 @@
+         )
+     return {
+         "type": "turn.start",
++        "finite_requester": finite_requester,
+         "sid": sid,
+         "request_id": rid,
+         "session_key": session.get("session_key") or sid,
+@@ -2786,6 +2788,7 @@
+                 )
+             except Exception:
+                 pass
++        session.pop("_finite_requester_user", None)
+         session["running"] = False
+         session["last_active"] = time.time()
+         _clear_inflight_turn(session)
+@@ -2811,6 +2814,7 @@
+     image_paths: list[str] | None = None,
+     queued_prompt_generation: int | None = None,
+     display_kind: str | None = None,
++    finite_requester: dict | None = None,
+ ) -> dict:
+     cfg = _load_dashboard_process_isolation_config()
+     frame = _compute_host_turn_frame(
+@@ -2821,6 +2825,7 @@
+         image_paths=image_paths,
+         queued_prompt_generation=queued_prompt_generation,
+         display_kind=display_kind,
++        finite_requester=finite_requester,
+     )
+ 
+     def _complete(done: dict) -> None:
+@@ -2838,6 +2843,7 @@
+         return _err(rid, 5019, f"compute-host dispatch failed: {exc}")
+     with session["history_lock"]:
+         session["_compute_host_active"] = True
++        session["_finite_requester_user"] = (finite_requester or {}).get("userId")
+         if image_paths is None:
+             session["attached_images"] = []
+     return _ok(rid, {"status": "streaming", "turn_isolation": True})
+@@ -10030,6 +10036,7 @@
+     text: Any,
+     transport: Any,
+     image_paths: list[str] | None = None,
++    finite_requester: dict | None = None,
+ ) -> None:
+     """Stash a message to run as the very next turn once the live one ends.
+ 
+@@ -10056,11 +10063,14 @@
+         if original and text.strip() == original:
+             return
+     queued = {"text": text, "transport": transport}
++    if finite_requester is not None:
++        queued["finite_requester"] = finite_requester
+     if image_paths:
+         queued["image_paths"] = image_paths
+     existing = session.get("queued_prompt")
+     if (
+         existing
++        and existing.get("finite_requester") == finite_requester
+         and isinstance(existing.get("text"), str)
+         and isinstance(text, str)
+         and not existing.get("image_paths")
+@@ -10188,7 +10198,8 @@
+ 
+ 
+ def _handle_busy_submit(
+-    rid, sid: str, session: dict, text: Any, transport: Any, queued: bool = False
++    rid, sid: str, session: dict, text: Any, transport: Any, queued: bool = False,
++    finite_requester: dict | None = None,
+ ) -> dict | None:
+     """Apply the ``display.busy_input_mode`` policy to a prompt that lands while
+     a turn is in flight, instead of rejecting it with ``session busy``.
+@@ -10210,6 +10221,8 @@
+     semantics betrayed by a millisecond race the user can't see.
+     """
+     mode = "queue" if queued else _load_busy_input_mode()
++    if session.get("_finite_requester_user") != (finite_requester or {}).get("userId"):
++        mode = "queue"  # A different requester cannot inherit the active turn's authority.
+     agent = session.get("agent")
+     with session["history_lock"]:
+         if not session.get("running"):
+@@ -10266,7 +10279,7 @@
+             if image_paths:
+                 session["attached_images"] = image_paths + list(session.get("attached_images", []))
+             return None
+-        _enqueue_prompt(session, text, transport, image_paths=image_paths)
++        _enqueue_prompt(session, text, transport, image_paths=image_paths, finite_requester=finite_requester)
+         session["last_active"] = time.time()
+ 
+     # Attachments need a separate model invocation. Queue them without
+@@ -10337,10 +10350,11 @@
+                     queued["text"],
+                     image_paths=queued["image_paths"],
+                     queued_prompt_generation=queue_generation,
++                    finite_requester=queued.get("finite_requester"),
+                 )
+             else:
+                 resp = _submit_prompt_to_compute_host(
+-                    rid, sid, session, queued["text"], queued_prompt_generation=queue_generation
++                    rid, sid, session, queued["text"], queued_prompt_generation=queue_generation, finite_requester=queued.get("finite_requester")
+                 )
+             if resp.get("error"):
+                 message = str(((resp.get("error") or {}).get("message")) or "queued prompt failed")
+@@ -10358,6 +10372,7 @@
+                     queued["text"],
+                     image_paths=queued["image_paths"],
+                     queued_prompt_generation=queue_generation,
++                    finite_requester=queued.get("finite_requester"),
+                 )
+             else:
+                 _run_prompt_submit(
+@@ -10366,6 +10381,7 @@
+                     session,
+                     queued["text"],
+                     queued_prompt_generation=queue_generation,
++                    finite_requester=queued.get("finite_requester"),
+                 )
+     except Exception as exc:
+         print(
+@@ -12739,7 +12755,11 @@
+     image_paths: list[str] | None = None,
+     queued_prompt_generation: int | None = None,
+     terminal_callback: Callable[[dict[str, Any]], None] | None = None,
++    finite_requester: dict | None = None,
+ ) -> bool:
++    from hermes_cli import finite_requester_context
++
++    finite_requester = finite_requester_context.normalize(finite_requester)
+     with session["history_lock"]:
+         if session.get("_closing"):
+             session["running"] = False
+@@ -12750,6 +12770,7 @@
+         ):
+             session["running"] = False
+             return False
++        session["_finite_requester_user"] = (finite_requester or {}).get("userId")
+         if image_paths is None:
+             images = list(session.get("attached_images", []))
+             session["attached_images"] = []
+@@ -12802,6 +12823,7 @@
+         agent = session["agent"]
+         approval_token = None
+         session_tokens = []
++        requester_tokens = []
+         home_token = None  # per-turn HERMES_HOME override for a resumed remote profile
+         secret_token = None
+         goal_followup = None  # set by the post-turn goal hook below
+@@ -12835,6 +12857,7 @@
+                 session["session_key"],
+                 ui_session_id=sid,
+             )
++            requester_tokens = finite_requester_context.bind(finite_requester)
+             _profile_home_str = session.get("profile_home")
+             if _profile_home_str:
+                 home_token = set_hermes_home_override(_profile_home_str)
+@@ -13603,6 +13626,7 @@
+                 reset_hermes_home_override(home_token)
+             if secret_token is not None:
+                 reset_secret_scope(secret_token)
++            finite_requester_context.reset(requester_tokens)
+             _clear_session_context(session_tokens)
+             _current_runtime_session_record.reset(runtime_session_token)
+             reset_transport(transport_token)
+@@ -13610,6 +13634,7 @@
+             # this turn can't fire during a later turn on the same agent.
+             agent.interim_assistant_callback = None
+             with session["history_lock"]:
++                session.pop("_finite_requester_user", None)
+                 session["running"] = False
+                 session["last_active"] = time.time()
+                 if not turn_error_retained:
+--- a/tui_gateway/compute_host.py
++++ b/tui_gateway/compute_host.py
+@@ -536,6 +536,7 @@
+                 session,
+                 text,
+                 display_kind=frame.get("display_kind") or None,
++                finite_requester=frame.get("finite_requester"),
+             )
+             run_thread = session.get("_run_thread")
+             if run_thread is not None and hasattr(run_thread, "join"):

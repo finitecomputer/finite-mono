@@ -214,6 +214,14 @@ def _load_local_env_defaults(path: Path | None = None) -> None:
 _load_local_env_defaults()
 
 
+def _native_sites_requester():
+    try:
+        from hermes_cli.finite_requester_context import current
+    except ImportError:
+        return None  # Existing standalone Hermes installations keep their contract.
+    return current()
+
+
 class _RequesterContextBroker:
     """Lease authenticated Finite sender context to turn-local subprocesses.
 
@@ -309,6 +317,17 @@ class _RequesterContextBroker:
 
     def _write(self, *, session_key: str, user_id: str, expires_at_unix: int) -> None:
         try:
+            native = _native_sites_requester()
+            if native is not None:
+                # Native claims require the Sites-issued assertion. Never leave a
+                # v1 fallback that could outlive or discard that assertion.
+                (self.root / _requester_context_filename(session_key)).unlink(missing_ok=True)
+                self._write_v2(
+                    session_key=session_key, user_id=user_id,
+                    email=native["email"], sites_assertion=native["sitesAssertion"],
+                    expires_at_unix=min(expires_at_unix, native["expiresAt"]),
+                )
+                return
             self.root.mkdir(mode=0o700, parents=True, exist_ok=True)
             final_path = self.root / _requester_context_filename(session_key)
             temp_path = self.root / f".{final_path.name}.{os.getpid()}.tmp"
@@ -402,6 +421,11 @@ def _active_finite_session() -> tuple[str | None, str | None]:
     session_key = str(get_session_env("HERMES_SESSION_KEY", "") or "").strip()
     user_id = str(get_session_env("HERMES_SESSION_USER_ID", "") or "").strip()
     authenticated_turn_user = _AUTHENTICATED_FINITE_TURN_USER.get()
+    native = _native_sites_requester()
+    if authenticated_turn_user is None and native is not None:
+        # This supplies Sites context only; the registry validates the assertion
+        # against the exact human, mailbox, agent and expiry at Project Init.
+        authenticated_turn_user = native["userId"]
     if (
         # Pinned Hermes maps plugin platforms that are not enum members to
         # LOCAL. The adapter-owned ContextVar below is the Finite marker;

@@ -26,6 +26,14 @@ upstream.override {
             ${pkgs.patch}/bin/patch --fuzz=0 -d "$site" -p1 < ${./patches/hermes-skills-inventory.patch}
             rm -f "$site/hermes_cli/web_routers/__pycache__/skills."*.pyc
             cp ${../../finite-agentd/integrations/hermes/finite_dashboard_reads.py} "$site/hermes_cli/finite_dashboard_reads.py"
+            cp ${../../finite-agentd/integrations/hermes/finite_requester_context.py} "$site/hermes_cli/finite_requester_context.py"
+            test -L "$site/tui_gateway"
+            cp -RL "$site/tui_gateway" "$site/tui_gateway-patched"
+            rm "$site/tui_gateway"
+            mv "$site/tui_gateway-patched" "$site/tui_gateway"
+            chmod -R u+w "$site/tui_gateway"
+            ${pkgs.patch}/bin/patch --fuzz=0 -d "$site" -p1 < ${../../finite-agentd/patches/hermes-native-requester.patch}
+            rm -f "$site/tui_gateway/__pycache__/"*.pyc
             test -L "$site/agent"
             cp -RL "$site/agent" "$site/agent-patched"
             rm "$site/agent"

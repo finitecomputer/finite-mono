@@ -48,6 +48,65 @@ PINNED_ADAPTER_MODULE = load_adapter_module()
 
 
 class PinnedHermesSenderContextTests(unittest.TestCase):
+    def test_native_terminal_subprocess_receives_only_its_live_assertion_lease(self):
+        import json
+        import time
+
+        from hermes_cli import finite_requester_context
+        from tui_gateway import server
+
+        with tempfile.TemporaryDirectory() as finite_home:
+            session_key = "native-sites-tool-proof"
+            filename = hashlib.sha256(session_key.encode()).hexdigest() + ".json"
+            root = Path(finite_home)
+            lease = root / "requester-context-v2" / filename
+            observed = root / "observed.json"
+            context = {
+                "userId": "a1" * 32,
+                "email": "owner@example.com",
+                "sitesAssertion": "b2" * 32,
+                "expiresAt": int(time.time()) + 60,
+            }
+            manager = plugins.PluginManager()
+            with (
+                patch.object(plugins, "_plugin_manager", manager),
+                patch.dict(os.environ, {"FINITE_HOME": finite_home}),
+            ):
+                adapter = load_adapter_module()
+                adapter.register(HookOnlyPluginContext(manager))
+                session_tokens = server._set_session_context(session_key)
+                requester_tokens = finite_requester_context.bind(context)
+                try:
+                    script = (
+                        "import json, os, pathlib; "
+                        f"p=json.loads(pathlib.Path({str(lease)!r}).read_text()); "
+                        "assert p['session_key']==os.environ['HERMES_SESSION_KEY']; "
+                        "assert p['requesting_user_id']==os.environ['HERMES_SESSION_USER_ID']; "
+                        "assert os.environ['HERMES_SESSION_PLATFORM']=='local'; "
+                        f"pathlib.Path({str(observed)!r}).write_text(json.dumps(p))"
+                    )
+                    probe = root / "probe.py"
+                    probe.write_text(script)
+                    result = handle_function_call(
+                        "terminal",
+                        {"command": f"{shlex.quote(sys.executable)} {shlex.quote(str(probe))}"},
+                        task_id="native-tool",
+                        session_id=session_key,
+                        tool_call_id="native-call",
+                    )
+                    self.assertTrue(observed.exists(), result)
+                    payload = json.loads(observed.read_text())
+                    self.assertEqual(
+                        payload["hosted_requester_assertion"], context["sitesAssertion"]
+                    )
+                    self.assertEqual(payload["owner_email"], context["email"])
+                    self.assertLessEqual(payload["expires_at_unix"], context["expiresAt"])
+                    self.assertFalse(lease.exists())
+                    self.assertFalse((root / "requester-context-v1" / filename).exists())
+                finally:
+                    finite_requester_context.reset(requester_tokens)
+                    server._clear_session_context(session_tokens)
+
     def test_cached_second_turn_uses_session_key_around_each_terminal_process(self):
         session_key = "finitechat:room-agent-1:home-chat"
         cached_session_id = "cached-agent-session"

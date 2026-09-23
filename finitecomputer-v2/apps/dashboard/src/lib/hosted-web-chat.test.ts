@@ -79,6 +79,8 @@ test("verified hosted requester assertion binds mailbox, human, and agent", asyn
   assert.deepEqual(requester, {
     email: "after@example.test",
     sitesAssertion: "assertion-1",
+    userId: "human-1",
+    expiresAt: 123,
   });
   assert.equal(requests[1].url, "https://device.internal/v1/app/agent-bindings/open");
   assert.deepEqual(requests[2], {

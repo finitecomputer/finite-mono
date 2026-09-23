@@ -38,6 +38,10 @@ test("native chat pages older history, archives, reconnects, and restores", { ti
     const offsets: number[] = [];
     const mutations: boolean[] = [];
     const prompts: string[] = [];
+    let requesterAvailable = true;
+    let requesterRequests = 0;
+    const requesters: unknown[] = [];
+    let issuedRequester: Record<string, unknown> | undefined;
     let rejectUpload = true;
     let rejectOlderPage = false;
     let retainedFailure = false;
@@ -76,9 +80,20 @@ test("native chat pages older history, archives, reconnects, and restores", { ti
       requestedByNpub: "fixture", createdAt: "2026-09-22T00:00:00Z", payload: null,
     }, ...(liveBrainRequest ? [{ id: "approval-live", brainId: "brain-1", brainName: "Native Brain", action: "invite-commit", expiresAt: Math.floor(Date.now() / 1000) + 900, payload: null }] : [])] } }));
     await page.route("**/api/chat/**", route => { legacyCalls++; return route.fulfill({ status: 503, json: {} }); });
-    await page.route("**/api/agents/*/hermes-access", route => route.fulfill({ json: {
-      baseUrl: "https://native.fixture.test/runtimes/agent/", accessToken: "synthetic", expiresAt: 100,
-    } }));
+    await page.route("**/api/agents/*/hermes-access", route => {
+      if (route.request().postDataJSON()?.requester === true) {
+        requesterRequests++;
+        issuedRequester = requesterAvailable ? {
+          userId: "a1".repeat(32), email: "owner@example.com",
+          sitesAssertion: requesterRequests.toString(16).padStart(64, "0"),
+          expiresAt: Math.floor(Date.now() / 1000) + 600,
+        } : undefined;
+      }
+      return route.fulfill({ json: {
+        baseUrl: "https://native.fixture.test/runtimes/agent/", accessToken: "synthetic", expiresAt: 100,
+        requester: issuedRequester,
+      } });
+    });
     await page.route("https://native.fixture.test/**", async route => {
       const request = route.request();
       const url = new URL(request.url());
@@ -169,6 +184,9 @@ test("native chat pages older history, archives, reconnects, and restores", { ti
           return;
         }
         if (request.method === "prompt.submit") {
+          assert.deepEqual(request.params.finite_requester, issuedRequester);
+          requesters.push(request.params.finite_requester);
+          assert.equal(requesterRequests, requesters.length, "each prompt must fetch fresh attribution");
           prompts.push(request.params.text);
           if (holdTurn && request.params.text === "Use the revised requirement") {
             corrections.push(request.params.text);
@@ -409,10 +427,13 @@ test("native chat pages older history, archives, reconnects, and restores", { ti
     await page.getByRole("button", { name: "Native history", exact: true }).waitFor();
     holdTurn = false;
     await page.getByRole("button", { name: "Native history", exact: true }).click();
+    requesterAvailable = false; // Sites outage must not prevent the next native turn.
     const brainCard = page.getByRole("region", { name: "Brain actions" });
     await brainCard.getByRole("button", { name: "Approve", exact: true }).click();
     await page.locator(".finite-chat__messages").getByText("Approved: invitation approval for Native Brain", { exact: true }).waitFor();
     assert(brainApproved);
+    assert.equal(requesters.at(-1), undefined);
+    assert.ok(requesters[0]);
     assert.equal(prompts.at(-1), "Approved: invitation approval for Native Brain");
     await page.reload();
     await page.getByRole("button", { name: "Native history", exact: true }).click();

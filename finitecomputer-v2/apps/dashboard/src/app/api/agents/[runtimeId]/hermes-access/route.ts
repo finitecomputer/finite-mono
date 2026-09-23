@@ -1,3 +1,4 @@
+import { createNativeRequesterContext } from "@/lib/hosted-web-chat";
 import {
   CoreFetchError, createCoreHostedHermesSession, loadCoreHostedHermesAccess, setCoreHostedHermesAccess,
 } from "@/lib/core-client";
@@ -31,6 +32,10 @@ async function handle(request: Request, context: RouteContext) {
       }, request.signal);
     } else if (request.method === "POST") {
       result = await createCoreHostedHermesSession(runtimeId, request.signal);
+      const payload = await request.json().catch(() => null);
+      if (payload?.requester === true) {
+        result = { ...result as object, requester: await createNativeRequesterContext(runtimeId) };
+      }
     } else {
       result = { ...await loadCoreHostedHermesAccess(runtimeId, request.signal),
         nativeHermesChat: access.coreProject.runtime?.native_hermes_chat === true };

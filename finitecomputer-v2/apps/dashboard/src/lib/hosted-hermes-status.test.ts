@@ -144,3 +144,30 @@ test("archive uses a fresh account grant and never retries a refused mutation", 
   assert.equal(calls[1].init.redirect, "error");
   assert.deepEqual(JSON.parse(String(calls[1].init.body)), { archived: true });
 });
+
+test("requester handoff projects only scoped fields and preserves denial and cancellation", async (t) => {
+  const { readNativeRequesterContext } = await import("./hosted-hermes-status");
+  const requester = { userId: "a1".repeat(32), email: "owner@example.com", sitesAssertion: "b2".repeat(32), expiresAt: 123 };
+  let response: unknown = { requester: { ...requester, privateField: "never-forward" } };
+  let status = 200;
+  const cancel = new AbortController();
+  let shouldCancel = false;
+  t.mock.method(globalThis, "fetch", async (url: string | URL, init: RequestInit) => {
+    assert.equal(String(url), "/api/agents/agent-a/hermes-access");
+    assert.equal(init.method, "POST");
+    assert.deepEqual(JSON.parse(String(init.body)), { requester: true });
+    if (shouldCancel) cancel.abort();
+    return Response.json(response, { status });
+  });
+  const signal = new AbortController().signal;
+  assert.deepEqual(await readNativeRequesterContext("agent-a", signal), requester);
+  for (response of [{}, { requester: { ...requester, userId: "other" } }, { requester: { ...requester, sitesAssertion: "unsigned" } }]) {
+    assert.equal(await readNativeRequesterContext("agent-a", signal), undefined);
+  }
+  status = 401;
+  await assert.rejects(readNativeRequesterContext("agent-a", signal), e => e instanceof HostedHermesStatusError && e.status === 401);
+  status = 200;
+  response = { requester };
+  shouldCancel = true;
+  await assert.rejects(readNativeRequesterContext("agent-a", cancel.signal));
+});

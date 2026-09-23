@@ -257,12 +257,24 @@ function isTextSendAction(action: HostedChatAction) {
   );
 }
 
+export async function createNativeRequesterContext(machineId: string) {
+  if (!sitesUpstreamOrigin() || !process.env.FINITE_SITES_VIEWER_SESSION_TOKEN?.trim()) return undefined;
+  try {
+    const context = await hostedWebChatContext(machineId, "fresh");
+    await bootstrapHostedWebChatWithContext(context);
+    return await createHostedRequesterContext(context);
+  } catch {
+    // Sites availability must not block native chat. No unsigned fallback.
+    return undefined;
+  }
+}
+
 export async function createHostedRequesterContext(
   context: Pick<
     Awaited<ReturnType<typeof hostedWebChatContext>>,
     "config" | "account" | "projectId"
   >
-): Promise<HostedRequesterContext | undefined> {
+): Promise<(HostedRequesterContext & { userId: string; expiresAt: number }) | undefined> {
   // Requester assertions and publishing grants belong to the same Sites registry.
   const upstream = sitesUpstreamOrigin();
   const serviceToken = process.env.FINITE_SITES_VIEWER_SESSION_TOKEN?.trim();
@@ -306,15 +318,16 @@ export async function createHostedRequesterContext(
     const payload = (await response.json()) as {
       email?: unknown;
       assertion?: unknown;
+      expires_at?: unknown;
     };
     if (
       payload.email !== email ||
       typeof payload.assertion !== "string" ||
-      !payload.assertion
+      !payload.assertion || !Number.isSafeInteger(payload.expires_at) || Number(payload.expires_at) <= 0
     ) {
       return undefined;
     }
-    return { email, sitesAssertion: payload.assertion };
+    return { email, sitesAssertion: payload.assertion, userId: state.identity.account_id, expiresAt: Number(payload.expires_at) };
   } catch {
     // Chat stays available if Sites is down. Project Init will return the
     // structured requester_email_required response and the skill can ask.
