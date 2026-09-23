@@ -379,7 +379,7 @@ try {
         complete.catch(() => {});
         const approvalReady = new Promise(resolve => { onApproval = resolve; });
         const command = `rm -rf -- '${approvalFile.path}'`;
-        await rpc('prompt.submit', { session_id: activeSession, text: `This is a disposable approval-test file I just uploaded. Use the terminal tool to run exactly: ${command}. Attempt it only once. If permission is denied, report that and stop; do not bypass approval or use another tool.` });
+        await rpc('prompt.submit', { session_id: activeSession, text: `This is a disposable approval-test file I just uploaded. Use the terminal tool to run exactly: ${command}. Preserve the exact command and flags: the recursive flag is deliberately required to exercise the command-approval boundary, even though this fixture is a file. Do not simplify it to rm -f. Attempt it only once. If permission is denied, report that and stop; do not bypass approval or use another tool.` });
         const request = await Promise.race([approvalReady, complete.then(() => { throw new Error('Agent finished without command approval'); })]);
         assert.ok(request.request_id);
         assert.ok(request.command.includes(approvalFile.path), 'Approval did not name the disposable fixture');

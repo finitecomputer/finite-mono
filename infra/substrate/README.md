@@ -365,6 +365,13 @@ Sites attribution, restart and fresh-user dashboard Brain approval proof in
 This proves the approval service/signing path, not a live native terminal lease
 consumed by `fbrain`; model-to-card approval remains unqualified.
 
+A follow-up run with `FC_TEST_SUBSTRATE_BROWSER=1` also passed actual-Next
+browser chat, image upload, generated-file bytes and reload history on that image.
+The combined run then failed the command-approval fixture: retained Hermes history
+shows the model simplified the requested `rm -rf` to `rm -f`, which completed
+without an approval event. The fixture now explicitly requires preserving those
+flags; the combined browser run must pass before counting its remaining gates.
+
 The native Sites handoff reuses the existing registry-issued assertion binding
 verified mailbox, human principal and exact agent. The dashboard obtains fresh
 context for each prompt through its owner-authorized Hermes access route. Hermes
