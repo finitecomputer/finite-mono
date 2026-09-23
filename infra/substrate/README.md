@@ -84,7 +84,9 @@ using `kubectl ate get workers` and the Kubernetes worker pods; a mismatch,
 missing pod or empty worker inventory cannot report healthy. The `kubectl ate`
 plugin is required for this read-only probe. Qualify provider-supported
 reconciliation before accepting node restart as a supported recovery boundary.
-Do not repair this with a second worker registry in Core or Runner.
+Do not repair this with a second worker registry in Core or Runner. The provider
+patch and later sandbox/IP-drift qualification are recorded below; simultaneous
+whole-node loss remains unqualified.
 
 ## GKE staging boundary
 
@@ -568,7 +570,7 @@ scripts/with-dev-env cargo test --locked -p finitesitesd --test e2e \
   native_hermes_terminal_initializes_sites_with_scoped_requester -- --ignored --exact
 ```
 
-## Worker IP drift candidate
+## Worker IP drift recovery
 
 `0007-replace-workers-after-ip-change.patch` addresses the reproduced restart
 failure at its provider owner. Current upstream `d277088b` still only logs IP
@@ -584,8 +586,24 @@ errors remain retryable. The existing Deleted-event path owns actor release.
 Negative cases retain the worker on deletion rejection and forbid deletion when
 drain fails. These are controller tests, not proof that a Kubernetes deletion
 always fences a partitioned node. Do not force-delete workers as part of this
-recovery. The patch is not installed in the local cluster yet; real graceful
-replacement, restored chat and durable-data continuity remain qualification gates.
+recovery.
+
+The patched controller is installed only in the disposable kind cluster as
+`localhost:5017/restore/atecontroller@sha256:d31836bcca8be9892d2c0c0cb6116c1341e8e51c4d16a776c0d3413b5f24004c`.
+`worker-ip-live-proof.log` passes the two-owner proof in 160.19 seconds. The
+fixture stops the exact worker's CRI sandbox, leaving Kubernetes to recreate its
+network. A separate pod watch records the same UID moving from `10.244.0.23` to
+`10.244.0.26`, followed by controller deletion and a replacement pod at
+`10.244.0.27`. An ordinary Runner cycle under admission drain recovers the actor
+with unchanged UID and durable volumes and a single Core-attributed recovery
+operation. Both owners pass native chat, files/history, desktop, configuration
+refresh and isolation across recovery/restart. No manual pod deletion or actor
+replacement is part of the fault path. Both test actors were suspended afterward
+with data retained; canonical platform status is healthy.
+
+This qualifies real sandbox/network recreation with IP drift on a reachable
+node. It does not establish simultaneous whole-node/control-plane loss, a
+partitioned node, GKE CSI fencing, or production recovery latency.
 
 ## Pinned provider dependencies
 
@@ -601,7 +619,7 @@ and custom egress fixture; repeat qualification against the intended release.
 | `0004-local-hostpath-set.patch` | Local CSI v1.17.1 fixture only: treat publish paths as a set and remove persisted duplicates on unpublish. Regression fails before/passes after; clean stop works after worker loss. Build with `-X main.version=v1.17.1-finite-local-set-fix`; an empty version is rejected by sidecars. |
 | `0005-revert-interrupted-lifecycle.patch` | Permit Revert from RESUMING/SUSPENDING under the existing actor lease. State regressions and full control API suite pass; real bad-image recovery passes. |
 | `0006-skip-unused-golden-snapshots.patch` | Cold-boot templates never consume golden state. Skip unused warmup, which otherwise strands capacity on a bad image. Regression fails upstream/passes patched; full control API suite passes. Existing golden fixtures require explicit cleanup. |
-| `0007-replace-workers-after-ip-change.patch` | Candidate, not deployed: drain a worker after pod IP drift, request graceful pod deletion with UID/resource-version preconditions, and retain its actor assignment until the existing pod-deletion reconcile runs. Requires controller pod-delete permission. Regression fails on the pinned upstream code and passes patched; controller suites, worker race tests and generated RBAC pass. Live node-restart and data-fencing qualification remain required. |
+| `0007-replace-workers-after-ip-change.patch` | Locally qualified: drain a worker after pod IP drift, request graceful pod deletion with UID/resource-version preconditions, and retain its actor assignment until the existing pod-deletion reconcile runs. Requires controller pod-delete permission. Regression fails on the pinned upstream code and passes patched; controller suites, worker race tests and generated RBAC pass. Real CRI sandbox recreation, IP drift and two-owner recovery pass; whole-node/partition and GKE fencing remain unqualified. |
 
 Hermes's pinned stream-writer guard still allowed a cancelled late opener to
 supersede its replacement. `scripts/proofs/hermes-stream-writer.py` forces that
@@ -677,6 +695,12 @@ Optional gates:
   drain without an owner request. Check Core system attribution, host/control
   fences, duplicate admission, delayed-observation idempotency, and stopped actors
   remaining suspended through later cycles.
+- `FC_TEST_SUBSTRATE_RESTART_SANDBOX=1` with automatic recovery and the local
+  fault CLI/kubeconfig: restart only the selected synthetic worker's CRI sandbox
+  in `kind-finite-hermes-restore`, rather than deleting its pod. Requires the
+  patched controller and its pod-delete permission. Capture a pod UID/IP watch
+  to verify actual IP drift; require unchanged actor/volume identities and the
+  ordinary two-owner chat/restart gates after automatic recovery.
 - `FC_TEST_SUBSTRATE_INFLIGHT_CRASH=1` with automatic recovery: after the first
   owner's normal protocol checks, start a foreground terminal command that writes
   one marker and waits. Verify its side effect before killing the worker. Require

@@ -7,6 +7,7 @@ mod predecessor;
 mod recovery;
 mod sites;
 mod stalled_boot;
+mod worker_loss;
 use crate::auth::test_support::{core_auth_with_runner_credentials, runner_credential_config};
 use crate::launch_codes::IssueLaunchCodeBatchInput;
 use crate::{
@@ -14,6 +15,7 @@ use crate::{
 };
 use dashboard::dashboard_creation;
 use std::time::Duration;
+use worker_loss::crash_local_worker;
 
 fn required(name: &str) -> String {
     std::env::var(name).unwrap_or_else(|_| panic!("{name} is required"))
@@ -201,49 +203,6 @@ fn local_substrate_resource(kind: &str, name: &str) -> Value {
 }
 
 // Explicit opt-in fault injection for the disposable kind cluster only.
-async fn crash_local_worker(runtime: &str) {
-    let Ok(kubeconfig) = std::env::var("FC_TEST_SUBSTRATE_CRASH_KUBECONFIG") else {
-        return;
-    };
-    let actor = runtime.replacen("runtime_", "runtime-", 1);
-    let read_actor = || local_substrate_resource("actor", &actor);
-    let initial = read_actor();
-    assert_eq!(initial["metadata"]["name"], actor);
-    assert_eq!(initial["status"]["state"], "ACTOR_STATE_RUNNING");
-    let worker = &initial["status"]["workerAssignment"];
-    assert_eq!(worker["workerNamespace"], "finite-hermes-spike");
-    let pod = worker["workerPod"].as_str().unwrap();
-    assert!(pod.starts_with("hermes-"));
-    let output = std::process::Command::new("kubectl")
-        .args([
-            "--kubeconfig",
-            &kubeconfig,
-            "--context",
-            &local_substrate_context(),
-            "--request-timeout=10s",
-            "-n",
-            "finite-hermes-spike",
-            "delete",
-            "pod",
-            pod,
-            "--wait=false",
-        ])
-        .output()
-        .unwrap();
-    assert!(
-        output.status.success(),
-        "delete only the synthetic actor's worker pod"
-    );
-    for _ in 0..60 {
-        let current = read_actor();
-        assert_eq!(current["metadata"]["uid"], initial["metadata"]["uid"]);
-        if current["status"]["state"] == "ACTOR_STATE_CRASHED" {
-            return;
-        }
-        tokio::time::sleep(Duration::from_secs(1)).await;
-    }
-    panic!("worker loss did not reach CRASHED");
-}
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[ignore = "requires disposable Substrate, local TLS ingress, canonical image and a test inference key"]
