@@ -12,7 +12,7 @@ fn actor_action(name: &str, action: &str) -> bool {
             "--kubeconfig",
             &required("FC_TEST_SUBSTRATE_CRASH_KUBECONFIG"),
             "--context",
-            "kind-finite-hermes-spike",
+            &local_substrate_context(),
             action,
             "actor",
             name,

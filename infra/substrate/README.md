@@ -242,7 +242,13 @@ worker occupied, verifies the expired Core lease, then frees one worker. On
 2026-09-23 the same creation launched in 3.93 seconds with unchanged runtime ID,
 Core credential, provider correlation, runtime spec and actor UID. Native chat
 and history after restart passed for both owners (full proof: 139.87 seconds).
-This is one local observation, not a GKE latency guarantee.
+This is one local observation, not a GKE latency guarantee. The current canonical
+runtime also passes the explicit worker-loss/restart/stop/restart proof in
+160.71 seconds on the recreated kind cluster (`current-worker-loss.log`). Both
+owners retain native history/files and bidirectional isolation after the first
+owner's worker is deleted. Stopped ingress remains unavailable until Core
+restart. This qualifies a worker-pod loss; it does not prove whole-node failure
+or a launch stranded in RESUMING.
 
 Upgrades remain behind `FC_CORE_ENABLE_RUNTIME_UPGRADES`. A template name derives
 from runtime and immutable Core artifact ID. Clone the actor's installed template,
@@ -513,7 +519,9 @@ Optional gates:
 
 - `FC_TEST_SUBSTRATE_CRASH_KUBECONFIG` and `FC_TEST_SUBSTRATE_ATE_CLI` explicitly
   permit deletion of the first synthetic actor's worker, restricted to
-  `kind-finite-hermes-spike` / `finite-hermes-spike`. Require CRASHED, then Core
+  `kind-finite-hermes-spike` / `finite-hermes-spike`. Set
+  `FC_TEST_SUBSTRATE_CONTEXT=kind-finite-hermes-restore` for the recreated local
+  cluster; other context names are rejected. Require CRASHED, then Core
   restart, stop and restart again; check history/bytes/identity and stopped 503s.
 - `FC_TEST_SUBSTRATE_SIMPLEX=1` and `FC_TEST_SUBSTRATE_SIMPLEX_BIN`: disposable
   human peers pair through exact owner-approved Device controls. Check real relay
@@ -636,8 +644,9 @@ Do not enable production admission until the remaining gates are satisfied:
   routes and native terminal Organization Brain creation/access with the current
   CLI. Historical card rendering has separate fixture coverage. The removed CLI
   request producer is not a new runner feature.
-- Qualify stuck-start/capacity-exhaustion handling without overriding Core
-  stop/control intent. Local worker-loss recovery and an interrupted foreground tool are qualified;
+- Qualify stuck-start handling without overriding Core stop/control intent.
+  Local full capacity exhaustion/retry, worker-loss recovery and an interrupted
+  foreground tool are qualified;
   node loss and failures during model-request persistence remain separate gates.
   Keep upgrades opt-in; retirement and backup recovery remain unadvertised.
 - Preserve the Recovery Authority and qualify the deployment Recovery Set. The

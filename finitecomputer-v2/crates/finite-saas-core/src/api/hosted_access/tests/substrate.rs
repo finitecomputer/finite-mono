@@ -200,13 +200,26 @@ async fn simplex_peer(input: Value) -> Value {
     serde_json::from_slice(&result.stdout).unwrap()
 }
 
+fn local_substrate_context() -> String {
+    let context = std::env::var("FC_TEST_SUBSTRATE_CONTEXT")
+        .unwrap_or_else(|_| "kind-finite-hermes-spike".into());
+    assert!(
+        matches!(
+            context.as_str(),
+            "kind-finite-hermes-spike" | "kind-finite-hermes-restore"
+        ),
+        "fault injection requires an explicitly supported disposable kind cluster"
+    );
+    context
+}
+
 fn local_substrate_resource(kind: &str, name: &str) -> Value {
     let output = std::process::Command::new(required("FC_TEST_SUBSTRATE_ATE_CLI"))
         .args([
             "--kubeconfig",
             &required("FC_TEST_SUBSTRATE_CRASH_KUBECONFIG"),
             "--context",
-            "kind-finite-hermes-spike",
+            &local_substrate_context(),
             "get",
             kind,
             name,
@@ -240,7 +253,7 @@ async fn crash_local_worker(runtime: &str) {
             "--kubeconfig",
             &kubeconfig,
             "--context",
-            "kind-finite-hermes-spike",
+            &local_substrate_context(),
             "--request-timeout=10s",
             "-n",
             "finite-hermes-spike",
