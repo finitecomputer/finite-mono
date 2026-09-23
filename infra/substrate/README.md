@@ -49,6 +49,22 @@ Previously those negative cases omitted capabilities and could return early
 without exercising host/placement selection. Structure and strict Core Clippy
 pass. This proves candidate-Core lease isolation, not predecessor-binary parsing.
 
+A real predecessor Runner built from archived revision
+`c1b66ba309e9bfd8b26d08a085c23451f69a87c9` also passes alongside current Core
+and the Substrate Runner (`predecessor-runner-retry.log`, 150.68 seconds).
+The local macOS binary SHA-256 is
+`1cdb13b0a8843095692c973643c14dd7cd3d368bc303aeb28e1dd524a816b40a`.
+Set `FC_TEST_SUBSTRATE_PREDECESSOR_RUNNER` to that binary and enable
+`FC_TEST_SUBSTRATE_AUTO_RECOVERY` with the documented local worker-loss flags.
+The old Docker adapter uses its own class-scoped credential on the same host,
+reads the current artifact and polling routes, and returns idle while each
+Substrate creation is pending and while a null-requester recovery is queued.
+The current Runner then completes the work. The full two-owner native chat,
+worker-loss recovery, stop/restart, history/files/desktop and isolation checks
+pass; both actors are suspended with data retained and final fleet status is
+healthy. This is real old-Runner/new-Core queue coexistence, not old-Core rollback,
+a deployed Kata/Phala qualification, or a legacy agent launch/chat proof.
+
 ## Local node-restart limitation
 
 Restarting OrbStack during qualification changed worker pod IPs without changing

@@ -3,6 +3,7 @@
 use super::*;
 mod capacity;
 mod dashboard;
+mod predecessor;
 mod recovery;
 mod sites;
 mod stalled_boot;
@@ -256,6 +257,7 @@ async fn substrate_two_owner_launch_and_native_access() {
         let inference_key =
             std::fs::read_to_string(required("FC_TEST_SUBSTRATE_INFERENCE_KEY_FILE")).unwrap();
         let runner_token = crate::store::runtime_credentials::new_secret().unwrap();
+        let predecessor_token = crate::store::runtime_credentials::new_secret().unwrap();
         let source_host = "substrate-proof";
         let runner_id = "substrate-proof";
         let upgrade_image = std::env::var("FC_TEST_SUBSTRATE_UPGRADE_IMAGE_DIGEST").ok();
@@ -307,7 +309,8 @@ async fn substrate_two_owner_launch_and_native_access() {
                 &[crate::RunnerClass::Substrate],
                 source_host,
                 false,
-            )],
+            ), runner_credential_config("predecessor", &predecessor_token, "predecessor",
+                &[crate::RunnerClass::LocalDocker], source_host, false)],
             "proof-usage",
         );
         let app = router_with_runtime_upgrades_and_agent_creation_placement(
@@ -478,6 +481,7 @@ async fn substrate_two_owner_launch_and_native_access() {
                     .unwrap();
             created["request"]["id"].as_str().unwrap().to_owned()
             };
+            predecessor::idle(runner_command(), &predecessor_token).await;
             let stalled_identity = if index == 0 {
                 stalled_boot.interrupt(&db, &request, runner_command()).await
             } else { None };
@@ -688,6 +692,7 @@ async fn substrate_two_owner_launch_and_native_access() {
                             // Simulate a delayed crash observation after recovery.
                             let duplicate = db.request_substrate_recovery(source_host, runtime).await.unwrap().unwrap();
                             assert!(duplicate.requested_by_user_id.is_none());
+                            predecessor::idle(runner_command(), &predecessor_token).await;
                             assert!(db.request_substrate_recovery(source_host, runtime).await.unwrap().is_none());
                             let mut command = runner_command();
                             let output = tokio::task::spawn_blocking(move || command.output().unwrap()).await.unwrap();
