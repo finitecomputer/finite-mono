@@ -9,7 +9,7 @@ import { join } from 'node:path';
 import { chromium } from 'playwright';
 import { proveFreshBrainApproval } from './substrate-brain-proof.mjs';
 
-export async function withDashboard({ ownerToken, brainProof = false }, work) {
+export async function withDashboard({ ownerToken, brainProof = false, brainChat = false }, work) {
   const response = await fetch('http://127.0.0.1:18420/api/core/v1/me', { headers: { authorization: `Bearer ${ownerToken}` }, signal: AbortSignal.timeout(10000) });
   assert.equal(response.status, 200, 'Core account lookup failed');
   const account = await response.json();
@@ -20,15 +20,15 @@ export async function withDashboard({ ownerToken, brainProof = false }, work) {
   const directory = await mkdtemp(join(tmpdir(), 'finite-substrate-dashboard-'));
   const log = await open(join(directory, 'next.log'), 'w', 0o600);
   const brainOrigin = 'http://127.0.0.1:18430';
-  const brain = brainProof ? spawn(process.env.FC_TEST_SUBSTRATE_BRAIN_BINARY, [], {
-    env: { ...process.env, FINITE_BRAIN_ADDR: '127.0.0.1:18430',
+  const brain = (brainProof || brainChat) ? spawn(process.env.FC_TEST_SUBSTRATE_BRAIN_BINARY, [], {
+    env: { ...process.env, FINITE_BRAIN_ADDR: brainChat ? '0.0.0.0:18430' : '127.0.0.1:18430',
       FINITE_BRAIN_PUBLIC_BASE_URL: brainOrigin, FINITE_BRAIN_DB: join(directory, 'brain.sqlite3') },
     stdio: ['ignore', log.fd, log.fd],
   }) : null;
   const server = spawn(process.execPath, ['node_modules/next/dist/bin/next', 'dev', '--hostname', '127.0.0.1', '--port', String(port)], {
     cwd: new URL('..', import.meta.url),
     env: { ...process.env,
-      ...(brain ? { FC_BRAIN_UPSTREAM_URL: brainOrigin, FC_BRAIN_PUBLIC_ORIGIN: brainOrigin } : {}),
+      ...(brain ? { FC_BRAIN_UPSTREAM_URL: 'http://127.0.0.1:18430', FC_BRAIN_PUBLIC_ORIGIN: brainOrigin } : {}),
       FC_CORE_BASE_URL: 'http://127.0.0.1:18420',
       FC_HOSTED_WEB_DEVICE_URL: 'http://127.0.0.1:18428',
       FINITECHAT_HOSTED_API_TOKEN: 'disposable-control-proof',
@@ -57,9 +57,9 @@ export async function withDashboard({ ownerToken, brainProof = false }, work) {
     assert.ok(ready, 'Actual dashboard did not become ready');
     if (brain) {
       assert.equal(brain.exitCode, null, 'Disposable Brain service exited');
-      await proveFreshBrainApproval(base, brainOrigin, account.workos_user_id);
+      if (brainProof) await proveFreshBrainApproval(base, brainOrigin, account.workos_user_id);
     }
-    return await work(base, directory);
+    return await work(base, directory, brainChat ? { origin: brainOrigin, user: account.workos_user_id, projects: account.projects } : undefined);
   } catch (error) {
     console.error(`Private actual-dashboard diagnostics: ${directory}`);
     throw error;

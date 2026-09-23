@@ -3,7 +3,7 @@
 import assert from 'node:assert/strict';
 import { createHash, randomBytes } from 'node:crypto';
 
-export async function proveFreshBrainApproval(dashboard, brain, user) {
+export function brainProofClient(brain, user) {
   const deviceHeaders = who => ({ authorization: 'Bearer disposable-control-proof',
     'x-finite-workos-user-id': who, 'x-finite-brain-public-origin': brain,
     'content-type': 'application/json' });
@@ -30,6 +30,11 @@ export async function proveFreshBrainApproval(dashboard, brain, user) {
       'content-type': 'application/json',
     }, body: bodyText || undefined, signal: AbortSignal.timeout(10000) }), 'Brain request');
   }
+  return { provider, json, signed };
+}
+
+export async function proveFreshBrainApproval(dashboard, brain, user) {
+  const { provider, json, signed } = brainProofClient(brain, user);
   const absent = await provider('identifyMember');
   assert.equal(absent.status, 428, 'fresh native user must not have a preinitialized signer');
   await absent.body?.cancel();
@@ -38,7 +43,7 @@ export async function proveFreshBrainApproval(dashboard, brain, user) {
   const human = await json(await provider('identifyMember'), 'initialized signer');
   const targetUser = `brain-target-${user}`;
   await json(await fetch('http://127.0.0.1:18428/v1/app/state', {
-    headers: deviceHeaders(targetUser), signal: AbortSignal.timeout(10000),
+    headers: { authorization: 'Bearer disposable-control-proof', 'x-finite-workos-user-id': targetUser, 'x-finite-brain-public-origin': brain }, signal: AbortSignal.timeout(10000),
   }), 'disposable recipient');
   const target = await json(await provider('identifyMember', {}, targetUser), 'recipient identity');
   const brainId = 'native-approval-proof';

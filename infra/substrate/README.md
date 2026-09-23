@@ -363,8 +363,8 @@ Sites attribution, restart and fresh-user dashboard Brain approval proof in
 199.99 seconds. Run with `FC_TEST_SUBSTRATE_DASHBOARD=1` and
 `FC_TEST_SUBSTRATE_BRAIN_BINARY` pointing to the built `finite-brain` server.
 This proves the approval service/signing path, not a live native terminal lease
-consumed by `fbrain`; live Organization Brain creation and requester attribution
-remain unqualified. The current CLI no longer files approval requests or emits
+consumed by `fbrain`; that boundary is covered by the extended browser proof below.
+The current CLI no longer files approval requests or emits
 the chat-card trailer: upstream auth-kernel commit `9d5fe9ba` deleted that producer
 and its callers. Do not reintroduce the removed workflow for runner parity. Keep
 the native trailer reader for persisted histories; the retained server approval
@@ -379,6 +379,23 @@ retained and canonical fleet status was captured. An earlier run exposed a model
 rewriting the approval fixture's `rm -rf` to `rm -f`; the prompt now explicitly
 preserves the flags required to exercise approval. No acceptance assertion was
 removed.
+
+The extended browser run passes in 168.08 seconds on the same image. A real
+browser prompt runs `fbrain brain create` through Hermes' terminal tool without
+identity/session overrides. The human then independently signs a Brain metadata
+read; its admins must exactly match that human and the canonical hosted binding
+for the selected runtime's Project. Human inventory must also contain the Brain.
+This exercises the native v2 requester lease without Sites claims. The browser
+also explicitly renames its conversation and proves the name/history after reload;
+it no longer depends on the timing of automatic title generation.
+
+The disposable Brain server listens on 18430. For this local-only proof, a
+short-lived Node relay inside the agent forwards loopback HTTP to the Docker host
+and closes after `fbrain` exits. `fbrain` accepts loopback HTTP but uses bundled
+public CA roots, so the image's fixture CA cannot qualify its HTTPS path. No
+production TLS policy is weakened: public-CA HTTPS remains a GKE gate. Enable
+this check with `FC_TEST_SUBSTRATE_BRAIN_BINARY`, `FC_TEST_SUBSTRATE_BROWSER=1`
+and `FC_TEST_SUBSTRATE_DASHBOARD=1`. No relay is added to the runtime image.
 
 The native Sites handoff reuses the existing registry-issued assertion binding
 verified mailbox, human principal and exact agent. The dashboard obtains fresh
@@ -596,7 +613,7 @@ Current local evidence (2026-09-22):
 | Lost completion | The actual Runner was killed after provider success, before Core completion; natural lease expiry and a new Runner recovered the same upgrade request. Both owners retained native chat/history/files and actor/storage identity. This does not prove automatic worker crash recovery. |
 | Clarification controls | Browser contract tests pass for single/multi-select, custom answers, reload, and ordered stale/current expiry events. `clarification-native-batch-qualified.log` passed in 115.86s: a real batch retains its accepted multi-select answer across reconnect, delivers two intact selections to the tool, completes the free-text answer, and rejects a late duplicate. Native timeout timing was not exercised. |
 | Mid-turn corrections and queue | The consumed-redirect/Stop race is reproduced offline and fixed through the existing writer; `consumed-redirect-dashboard-qualified.log` passes the full two-owner sequence and restart in 171.37s. Real provider baselines reproduce lost ordinary steering and stopped model corrections; offline SQLite regressions fail before/pass after. The sealed package and canonical image pass all correction and stream-writer regressions. `dashboard-onboarding-canonical-qualified.log` passes ordinary, queued, stopped-tool and stopped-model input through actor restart in 123.23s. Earlier exact-reply failures preserved input but replied `done`; a diagnostic trace carries the correction as the final outbound user row. The test now explicitly revokes the earlier `done` instruction and retains exact-reply and persistence assertions. |
-| Native Brain approval cards | Native tool-history projection consumes the existing `fbrain` reference trailer and reuses the shared server-backed approval cards. Two projection tests, TypeScript, targeted lint and browser proofs (`native-brain-cards-action.log`, `native-live-tools.log`) pass: cards appear from live native tool events and survive reload, repeated tool completions update the same row, approval posts the exact reference to the existing route, sends a native human-readable receipt, and the resolved server request stays closed after reload. Brain endpoints are fixtures here; live signing/service parity remains unqualified. Approval choice metadata is not added to Hermes storage; request authority and resolution remain on the Brain server. |
+| Native Brain approval cards | Native tool-history projection consumes the existing `fbrain` reference trailer and reuses the shared server-backed approval cards. Two projection tests, TypeScript, targeted lint and browser proofs (`native-brain-cards-action.log`, `native-live-tools.log`) pass: cards appear from live native tool events and survive reload, repeated tool completions update the same row, approval posts the exact reference to the existing route, sends a native human-readable receipt, and the resolved server request stays closed after reload. Brain endpoints are fixtures in those card-rendering tests; fresh-user signing/service parity is separately qualified above. Approval choice metadata is not added to Hermes storage; request authority and resolution remain on the Brain server. |
 | Actual dashboard routes | `dashboard-onboarding-canonical-qualified.log` passes in 123.23s on canonical runtime code plus only the fixture CA (`sha256:6f94a71db3000af2e1847b20e067d95e65b966a07635e2fbf2d7c12969d18929`). Both fresh owners complete the actual launch-code wizard and launch agents; real Next chat, image upload, authenticated download and reload pass without grant/file interception, followed by native protocol/restart checks for both owners. Account auth uses existing dev mode, not WorkOS login. Brain/Sites service behavior is not qualified by this chat proof. |
 | Browser boundary | Real browser exposed native preflight 401. Shared ingress CORS tests, real HTTPS preflight and strict Runner clippy pass; the Home/Recents projection regression also passes. `native-home-browser-proof.log` confirms a live UI-created model reply and history reopening after reload. The combined run above passed; the deployed account/origin path remains unqualified. |
 
@@ -616,9 +633,9 @@ Do not enable production admission until the remaining gates are satisfied:
   with synthetic account authentication; this does not establish deployed auth
   or deployed Brain/Sites integration. Native Sites requester attribution passes
   locally (above), as does fresh-user human signing/approval through dashboard
-  routes; prove native terminal Organization Brain creation/access with the current
-  CLI and historical approval-card compatibility. The removed CLI request producer
-  is not a new runner feature.
+  routes and native terminal Organization Brain creation/access with the current
+  CLI. Historical card rendering has separate fixture coverage. The removed CLI
+  request producer is not a new runner feature.
 - Qualify stuck-start/capacity-exhaustion handling without overriding Core
   stop/control intent. Local worker-loss recovery and an interrupted foreground tool are qualified;
   node loss and failures during model-request persistence remain separate gates.
