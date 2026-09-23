@@ -8,7 +8,7 @@ import { join } from 'node:path';
 
 let input = '';
 for await (const chunk of process.stdin) input += chunk;
-const { baseUrl, grantEndpoint, ownerToken, previous, proveInterrupt, proveDesktop, upgradeMarker, proveBrowser, prepareCrash } = JSON.parse(input);
+const { baseUrl, grantEndpoint, ownerToken, previous, proveInterrupt, proveDesktop, upgradeMarker, proveBrowser, prepareCrash, environmentValue } = JSON.parse(input);
 async function accessToken() {
   const response = await fetch(grantEndpoint, {
     method: 'POST', headers: { authorization: `Bearer ${ownerToken}` },
@@ -167,6 +167,19 @@ try {
   assert.ok(created.session_id);
   await rpc('prompt.submit', { session_id: created.session_id, text: `Reply with exactly ${marker}. Do not use any tools.\n@file:${file.path}` });
   assert.ok((await complete).includes(marker), 'Model response did not contain the unique prompt marker');
+  if (environmentValue) {
+    const environmentPath = `/data/agent/${marker}-environment.txt`;
+    const command = `printenv FINITE_SUBSTRATE_ENV_PROOF > ${environmentPath}`;
+    let environmentRead = false;
+    onToolStart = tool => { if (tool.name === 'terminal' && tool.args?.command?.trim() === command) environmentRead = true; };
+    complete = new Promise((resolve, reject) => { answer = { resolve, reject }; });
+    complete.catch(() => {});
+    await rpc('prompt.submit', { session_id: activeSession, text: `Use the terminal tool to run exactly: ${command}. Do not set or override the environment variable. Then say done.` });
+    await complete;
+    assert.ok(environmentRead, 'Agent must read its actual boot environment');
+    onToolStart = () => {};
+    await verifyFile({ path: environmentPath, content: `${environmentValue}\n` });
+  }
   if (upgradeMarker) {
     let imageReadObserved = false;
     onToolStart = tool => { if (tool.name === 'terminal' && tool.args?.command?.trim() === 'cat /runtime/upgrade-proof') imageReadObserved = true; };

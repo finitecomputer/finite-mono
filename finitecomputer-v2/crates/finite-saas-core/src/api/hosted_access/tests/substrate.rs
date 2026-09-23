@@ -304,11 +304,14 @@ async fn substrate_two_owner_launch_and_native_access() {
             now: None,
         });
         register_artifact("substrate-proof", image).await.unwrap();
-        let mut environment = BTreeMap::from([("FINITE_DESKTOP_ENABLED".into(), "1".into())]);
+        let mut environment = BTreeMap::from([
+            ("FINITE_DESKTOP_ENABLED".into(), "1".into()),
+            ("FINITE_SUBSTRATE_ENV_PROOF".into(), "initial".into()),
+        ]);
         if std::env::var_os("FC_TEST_SUBSTRATE_REQUEST_TRACE").is_some() {
             environment.insert("HERMES_DUMP_REQUESTS".into(), "1".into());
         }
-        let store = db.store.clone().with_runtime_environment(environment).unwrap();
+        let store = db.store.clone().with_runtime_environment(environment.clone()).unwrap();
         let origins =
             HostedHermesOrigins::from_json(&json!({source_host: public_origin}).to_string())
                 .unwrap();
@@ -406,8 +409,8 @@ async fn substrate_two_owner_launch_and_native_access() {
             }
         }));
         let account_server = tokio::spawn(axum::serve(account_listener, account_app).into_future());
-        let runtime_server = tokio::spawn(
-            axum::serve(runtime_listener, runtime_router(store, origins)).into_future(),
+        let mut runtime_server = tokio::spawn(
+            axum::serve(runtime_listener, runtime_router(store, origins.clone())).into_future(),
         );
         let codes = db
             .issue_launch_code_batch(IssueLaunchCodeBatchInput {
@@ -588,6 +591,18 @@ async fn substrate_two_owner_launch_and_native_access() {
             }
         }
         for pass in 0..(2 + usize::from(upgrade_image.is_some()) + usize::from(failed_image.is_some())) {
+            if pass == 1 {
+                // Replace Core's boot configuration authority, leaving the
+                // installed provider templates and creation specs untouched.
+                runtime_server.abort();
+                let _ = (&mut runtime_server).await;
+                environment.insert("FINITE_SUBSTRATE_ENV_PROOF".into(), "updated".into());
+                let refreshed = db.store.clone().with_runtime_environment(environment.clone()).unwrap();
+                let listener = tokio::net::TcpListener::bind("127.0.0.1:18422").await.unwrap();
+                runtime_server = tokio::spawn(
+                    axum::serve(listener, runtime_router(refreshed, origins.clone())).into_future(),
+                );
+            }
             for (index, runtime) in runtimes.iter().enumerate() {
                 if pass >= 2 {
                     let actor_name = runtime.replacen("runtime_", "runtime-", 1);
@@ -892,6 +907,7 @@ async fn substrate_two_owner_launch_and_native_access() {
                 native_grant["grantEndpoint"] = json!(format!("http://127.0.0.1:18420{path}"));
                 native_grant["ownerToken"] = json!(owners[index]);
                 native_grant["previous"] = histories[index].clone();
+                native_grant["environmentValue"] = json!(if pass == 0 { "initial" } else { "updated" });
                 native_grant["proveInterrupt"] = Value::Bool(index == 0 && pass == 0);
                 native_grant["proveDesktop"] = Value::Bool(index == 1 && pass == 0);
                 native_grant["prepareCrash"] = Value::Bool(index == 0 && pass == 0 && std::env::var_os("FC_TEST_SUBSTRATE_INFLIGHT_CRASH").is_some());

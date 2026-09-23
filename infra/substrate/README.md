@@ -43,6 +43,15 @@ before invoking the canonical runtime entrypoint. Updates apply on the next
 cold boot; a failed fetch never falls back to cached flags. Existing runners
 continue consuming their persisted RuntimeSpec environment.
 
+The real two-owner proof changes Core's boot configuration between launch and
+restart, leaving installed templates and creation specs untouched. Each agent
+uses its terminal tool to write one actual environment value to a file; the
+verifier downloads and compares the bytes before and after restart.
+`environment-refresh-qualified.log` passes both values, native chat and retained
+history for both owners in 169.62 seconds on the qualified runtime image recorded below.
+This proves next-boot refresh of an updated value, not hot reload or removal of
+an operator flag. Rust clippy/format, JavaScript syntax and structure checks pass.
+
 The initial fetch authenticates the creation credential and live lease; later
 boots require the current assignment. A stopped assignment may fetch boot flags
 only during its exact live, leased restart/upgrade operation. This does not
