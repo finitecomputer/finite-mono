@@ -118,8 +118,15 @@ uses its terminal tool to write one actual environment value to a file; the
 verifier downloads and compares the bytes before and after restart.
 `environment-refresh-qualified.log` passes both values, native chat and retained
 history for both owners in 169.62 seconds on the qualified runtime image recorded below.
-This proves next-boot refresh of an updated value, not hot reload or removal of
-an operator flag. Rust clippy/format, JavaScript syntax and structure checks pass.
+The extended `environment-removal-proof.log` passes in 115.11 seconds on image
+`sha256:10ba77158eb9d75b325c26a41ece330483025ce386c19b56c63bb44915ba954a`.
+Both agents read the initial values through an observed terminal command; after
+Core changes one flag and removes another, restart yields the updated value and
+an actually unset removed flag, verified through authenticated file downloads.
+Templates remain unchanged. Native chat, history/files, desktop and isolation
+also pass. Both actors are suspended with data retained and final fleet status
+is healthy. This proves next-boot refresh and removal, not hot reload.
+Rust clippy/format, JavaScript syntax and structure checks pass.
 
 The initial fetch authenticates the creation credential and live lease; later
 boots require the current assignment. A stopped assignment may fetch boot flags

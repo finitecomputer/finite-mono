@@ -292,6 +292,7 @@ async fn substrate_two_owner_launch_and_native_access() {
         let mut environment = BTreeMap::from([
             ("FINITE_DESKTOP_ENABLED".into(), "1".into()),
             ("FINITE_SUBSTRATE_ENV_PROOF".into(), "initial".into()),
+            ("FINITE_SUBSTRATE_ENV_REMOVAL".into(), "present".into()),
         ]);
         if std::env::var_os("FC_TEST_SUBSTRATE_REQUEST_TRACE").is_some() {
             environment.insert("HERMES_DUMP_REQUESTS".into(), "1".into());
@@ -593,6 +594,7 @@ async fn substrate_two_owner_launch_and_native_access() {
                 runtime_server.abort();
                 let _ = (&mut runtime_server).await;
                 environment.insert("FINITE_SUBSTRATE_ENV_PROOF".into(), "updated".into());
+                environment.remove("FINITE_SUBSTRATE_ENV_REMOVAL");
                 let refreshed = db.store.clone().with_runtime_environment(environment.clone()).unwrap();
                 let listener = tokio::net::TcpListener::bind("127.0.0.1:18422").await.unwrap();
                 runtime_server = tokio::spawn(

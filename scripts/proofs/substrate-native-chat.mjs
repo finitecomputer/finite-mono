@@ -169,7 +169,7 @@ try {
   assert.ok((await complete).includes(marker), 'Model response did not contain the unique prompt marker');
   if (environmentValue) {
     const environmentPath = `/data/agent/${marker}-environment.txt`;
-    const command = `printenv FINITE_SUBSTRATE_ENV_PROOF > ${environmentPath}`;
+    const command = `printf '%s\\n' "$FINITE_SUBSTRATE_ENV_PROOF" "\${FINITE_SUBSTRATE_ENV_REMOVAL-unset}" > ${environmentPath}`;
     let environmentRead = false;
     onToolStart = tool => { if (tool.name === 'terminal' && tool.args?.command?.trim() === command) environmentRead = true; };
     complete = new Promise((resolve, reject) => { answer = { resolve, reject }; });
@@ -178,7 +178,7 @@ try {
     await complete;
     assert.ok(environmentRead, 'Agent must read its actual boot environment');
     onToolStart = () => {};
-    await verifyFile({ path: environmentPath, content: `${environmentValue}\n` });
+    await verifyFile({ path: environmentPath, content: `${environmentValue}\n${environmentValue === 'initial' ? 'present' : 'unset'}\n` });
   }
   if (sitesProof) {
     assert.match(sitesProof.requester.userId, /^[0-9a-f]{64}$/);
