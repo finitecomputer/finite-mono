@@ -345,3 +345,131 @@ async fn postgres_agent_creation_lease_partition_by_source_host() {
     })
     .await;
 }
+
+#[tokio::test]
+async fn postgres_capacity_release_preserves_operation_and_fences_old_lease() {
+    for runner_class in [RunnerClass::Kata, RunnerClass::Substrate] {
+        with_isolated_postgres(|store| async move {
+            let placement = RuntimePlacement {
+                runner_class,
+                runtime_resource_class: crate::RuntimeResourceClass::Vcpu4Memory8Gib,
+            };
+            let created = store
+                .request_agent_creation_configured(
+                    RequestAgentCreationInput {
+                        verified_email: "capacity@finite.test".into(),
+                        workos_user_id: "capacity-owner".into(),
+                        display_name: "Capacity".into(),
+                        launch_code: issue_test_launch_code(&store, "unused").await,
+                        idempotency_key: "capacity".into(),
+                        now: None,
+                    },
+                    AgentCreationConfiguration {
+                        placement: Some(placement),
+                        ..Default::default()
+                    },
+                )
+                .await
+                .unwrap();
+            let input = |token: &str| LeaseAgentCreationRequestInput {
+                runner_id: "capacity-runner".into(),
+                lease_token: token.into(),
+                lease_seconds: Some(600),
+                runner_capacity: Some(RunnerLeaseCapacity {
+                    runner_classes: vec![runner_class],
+                    ..Default::default()
+                }),
+                source_host_id: Some("capacity-host".into()),
+                now: None,
+            };
+            let first = store
+                .lease_agent_creation_request(input("first"))
+                .await
+                .unwrap()
+                .unwrap();
+            let journal = store
+                .record_provider_operation_transition(RecordProviderOperationTransitionInput {
+                    request_id: created.request.id.clone(),
+                    runner_id: "capacity-runner".into(),
+                    lease_token: "first".into(),
+                    correlation_id: "capacity-actor".into(),
+                    placement,
+                    transition: ProviderOperationTransition::CorrelationReserved,
+                })
+                .await
+                .unwrap();
+            assert!(
+                store
+                    .lease_agent_creation_request(input("premature"))
+                    .await
+                    .unwrap()
+                    .is_none()
+            );
+            for (runner, token) in [("another-runner", "first"), ("capacity-runner", "wrong")] {
+                assert!(
+                    store
+                        .release_agent_creation_lease(&created.request.id, runner, token)
+                        .await
+                        .is_err()
+                );
+            }
+            if runner_class == RunnerClass::Kata {
+                assert!(matches!(
+                    store
+                        .release_agent_creation_lease(
+                            &created.request.id,
+                            "capacity-runner",
+                            "first"
+                        )
+                        .await,
+                    Err(CoreError::RuntimeSpecMismatch)
+                ));
+                assert!(
+                    store
+                        .lease_agent_creation_request(input("second"))
+                        .await
+                        .unwrap()
+                        .is_none()
+                );
+                return;
+            }
+            store
+                .release_agent_creation_lease(&created.request.id, "capacity-runner", "first")
+                .await
+                .unwrap();
+            assert!(
+                store
+                    .release_agent_creation_lease(&created.request.id, "capacity-runner", "first")
+                    .await
+                    .is_err()
+            );
+            let second = store
+                .lease_agent_creation_request(input("second"))
+                .await
+                .unwrap()
+                .unwrap();
+            assert_eq!(second.request.id, first.request.id);
+            assert_eq!(
+                second.request.agent_runtime_id,
+                first.request.agent_runtime_id
+            );
+            assert_eq!(second.request.runtime_spec, first.request.runtime_spec);
+            assert_eq!(second.request.status, AgentCreationRequestStatus::Launching);
+            assert_eq!(second.provider_operation, Some(journal));
+            assert!(
+                store
+                    .release_agent_creation_lease(&created.request.id, "capacity-runner", "first")
+                    .await
+                    .is_err()
+            );
+            assert!(
+                store
+                    .lease_agent_creation_request(input("third"))
+                    .await
+                    .unwrap()
+                    .is_none()
+            );
+        })
+        .await;
+    }
+}

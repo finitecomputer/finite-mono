@@ -317,7 +317,7 @@ async fn runner_keyring_enforces_worker_class_source_and_revocation_bindings() {
 }
 
 #[tokio::test]
-async fn core_api_automatic_recovery_requires_substrate_runner_authority() {
+async fn core_api_recovery_and_capacity_release_require_substrate_runner_authority() {
     with_isolated_postgres(|db| async move {
         let auth = core_auth_with_runner_credentials(
             "service",
@@ -342,6 +342,23 @@ async fn core_api_automatic_recovery_requires_substrate_runner_authority() {
             "usage",
         );
         let app = router(db.store.clone(), auth);
+        for (token, runner, expected) in [
+            ("service", "substrate", StatusCode::UNAUTHORIZED),
+            ("invalid", "substrate", StatusCode::UNAUTHORIZED),
+            ("kata-token", "kata", StatusCode::FORBIDDEN),
+            ("substrate-token", "another-runner", StatusCode::FORBIDDEN),
+            ("substrate-token", "substrate", StatusCode::NOT_FOUND),
+        ] {
+            let (status, _) = send_json(
+                &app,
+                "POST",
+                "/api/core/v1/agent-creation-requests/missing/release",
+                &[("authorization".into(), format!("Bearer {token}"))],
+                Some(serde_json::json!({ "runnerId": runner, "leaseToken": "first" })),
+            )
+            .await;
+            assert_eq!(status, expected);
+        }
         for (token, expected) in [
             ("service", StatusCode::UNAUTHORIZED),
             ("kata-token", StatusCode::FORBIDDEN),

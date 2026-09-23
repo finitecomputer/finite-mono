@@ -418,6 +418,10 @@ fn router_from_state(state: CoreApiState) -> Router {
             post(retry_runtime_control_request),
         )
         .route(
+            "/api/core/v1/agent-creation-requests/{request_id}/release",
+            post(release_agent_creation_lease),
+        )
+        .route(
             "/api/core/v1/agent-creation-requests/{request_id}/complete",
             post(complete_agent_creation_request),
         )

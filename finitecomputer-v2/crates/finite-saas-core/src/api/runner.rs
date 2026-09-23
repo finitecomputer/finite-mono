@@ -383,3 +383,24 @@ pub(super) async fn request_runtime_recovery(
             .await?,
     ))
 }
+
+pub(super) async fn release_agent_creation_lease(
+    State(state): State<CoreApiState>,
+    headers: HeaderMap,
+    Path(request_id): Path<String>,
+    Json(input): Json<ReleaseAgentCreationLeaseRequest>,
+) -> Result<Json<bool>, ApiError> {
+    let credential = require_runner_auth(&state, &headers)?;
+    authorize_runner_id(&credential, &input.runner_id)?;
+    if !credential
+        .runner_classes
+        .contains(&crate::RunnerClass::Substrate)
+    {
+        return Err(runner_binding_error());
+    }
+    state
+        .store
+        .release_agent_creation_lease(&request_id, &input.runner_id, &input.lease_token)
+        .await?;
+    Ok(Json(true))
+}

@@ -592,7 +592,13 @@ impl RuntimeLauncher for SubstrateLauncher {
             .map_err(failed)?;
         self.executor
             .block_on(self.client.resume(reference))
-            .map_err(failed)?;
+            .map_err(|error| match error {
+                SubstrateError::Rpc {
+                    code: tonic::Code::ResourceExhausted,
+                    ..
+                } => RunnerError::RuntimeCapacityUnavailable,
+                error => failed(error),
+            })?;
         let base = format!(
             "{}/runtimes/{}",
             self.config.runtime_origin.trim_end_matches('/'),

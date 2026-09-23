@@ -264,6 +264,8 @@ pub enum RunnerError {
     CoreJson(String),
     #[error("runtime launch failed: {0}")]
     RuntimeLaunch(String),
+    #[error("provider has no available worker capacity")]
+    RuntimeCapacityUnavailable,
     #[error("runtime launch remains pending: {0}")]
     RuntimeLaunchPending(String),
     /// A Kata plan was requested for a runtime whose lease carries no
@@ -782,6 +784,21 @@ where
                     }
                 }
             }
+            Err(RunnerError::RuntimeCapacityUnavailable) => {
+                // Older Core can reject this additive endpoint. Retain its lease
+                // in that case; never fail or clean up a capacity-waiting actor.
+                if let Err(error) = self.queue.release_agent_creation_lease(
+                    &request_id,
+                    &self.runner_id,
+                    &lease_token,
+                ) {
+                    eprintln!("creation lease release failed: {error}");
+                }
+                Ok(RunOnceOutcome::CapacityUnavailable {
+                    reason: "provider has no available worker capacity".into(),
+                    runner_capacity,
+                })
+            }
             Err(error @ RunnerError::RuntimeLaunchPending(_)) => Err(error),
             Err(error) => {
                 let failure_message = error.to_string();
@@ -1222,6 +1239,17 @@ where
 }
 
 pub trait AgentCreationQueue {
+    fn release_agent_creation_lease(
+        &mut self,
+        _request_id: &str,
+        _runner_id: &str,
+        _lease_token: &str,
+    ) -> Result<(), RunnerError> {
+        Err(RunnerError::CoreRequest(
+            "creation lease release unsupported".into(),
+        ))
+    }
+
     fn lease_runtime_control(
         &mut self,
         runner_id: &str,
@@ -2345,6 +2373,22 @@ impl CoreHttpAgentCreationQueue {
 }
 
 impl AgentCreationQueue for CoreHttpAgentCreationQueue {
+    fn release_agent_creation_lease(
+        &mut self,
+        request_id: &str,
+        runner_id: &str,
+        lease_token: &str,
+    ) -> Result<(), RunnerError> {
+        let _: bool = self.post_json(
+            &format!("/api/core/v1/agent-creation-requests/{request_id}/release"),
+            &finite_saas_core::api::ReleaseAgentCreationLeaseRequest {
+                runner_id: runner_id.into(),
+                lease_token: lease_token.into(),
+            },
+        )?;
+        Ok(())
+    }
+
     fn provision_runtime_core_credential(
         &mut self,
         request_id: &str,
@@ -5648,7 +5692,7 @@ mod tests {
 
     #[test]
     fn interrupted_launch_keeps_creation_and_installed_key_for_reconciliation() {
-        struct InterruptedLauncher;
+        struct InterruptedLauncher(bool);
         impl RuntimeLauncher for InterruptedLauncher {
             fn validate_ready(&self) -> Result<(), RunnerError> {
                 Ok(())
@@ -5684,33 +5728,48 @@ mod tests {
                     options.finite_private.as_ref().unwrap().raw_api_key,
                     "synthetic-installed-key"
                 );
-                Err(RunnerError::RuntimeLaunchPending(
-                    "lost provider response".into(),
-                ))
+                if self.0 {
+                    Err(RunnerError::RuntimeCapacityUnavailable)
+                } else {
+                    Err(RunnerError::RuntimeLaunchPending(
+                        "lost provider response".into(),
+                    ))
+                }
             }
         }
-        let mut runner = AgentCreationRunner::new(
-            FakeQueue::with_lease(sample_lease("agent_request_123")),
-            InterruptedLauncher,
-            FixedLeaseTokens::new(["lease-1"]),
-            "runner-1",
-            300,
-        )
-        .unwrap()
-        .with_default_finite_private_inference(finite_private_defaults());
-        assert!(matches!(
-            runner.run_once(),
-            Err(RunnerError::RuntimeLaunchPending(_))
-        ));
-        assert!(
-            runner.queue.provisioned.is_empty(),
-            "must not mint an unused replacement key"
-        );
-        assert!(
-            runner.queue.failed.is_empty(),
-            "must not terminally fail or revoke an adopted actor's credentials"
-        );
-        assert!(runner.queue.registered.is_empty());
+        for (capacity, old_core) in [(false, false), (true, false), (true, true)] {
+            let mut queue = FakeQueue::with_lease(sample_lease("agent_request_123"));
+            queue.release_error = old_core;
+            let mut runner = AgentCreationRunner::new(
+                queue,
+                InterruptedLauncher(capacity),
+                FixedLeaseTokens::new(["lease-1"]),
+                "runner-1",
+                300,
+            )
+            .unwrap()
+            .with_default_finite_private_inference(finite_private_defaults());
+            let outcome = runner.run_once();
+            if capacity {
+                assert!(matches!(
+                    outcome,
+                    Ok(RunOnceOutcome::CapacityUnavailable { .. })
+                ));
+                assert_eq!(runner.queue.released_creation_leases, ["agent_request_123"]);
+            } else {
+                assert!(matches!(outcome, Err(RunnerError::RuntimeLaunchPending(_))));
+                assert!(runner.queue.released_creation_leases.is_empty());
+            }
+            assert!(
+                runner.queue.provisioned.is_empty(),
+                "must not mint an unused replacement key"
+            );
+            assert!(
+                runner.queue.failed.is_empty(),
+                "must not terminally fail or revoke an adopted actor's credentials"
+            );
+            assert!(runner.queue.registered.is_empty());
+        }
     }
 
     #[test]
@@ -6522,6 +6581,8 @@ mod tests {
 
     #[derive(Debug)]
     struct FakeQueue {
+        released_creation_leases: Vec<String>,
+        release_error: bool,
         next_lease: Option<AgentCreationLease>,
         next_runtime_control_lease: Option<RuntimeControlLease>,
         observed_recovery: Option<RuntimeControlLease>,
@@ -6548,6 +6609,8 @@ mod tests {
                 next_lease: None,
                 next_runtime_control_lease: None,
                 observed_recovery: None,
+                released_creation_leases: Vec::new(),
+                release_error: false,
                 provision_error: None,
                 leases: Vec::new(),
                 lease_capacities: Vec::new(),
@@ -6571,6 +6634,8 @@ mod tests {
                 next_lease: Some(lease),
                 next_runtime_control_lease: None,
                 observed_recovery: None,
+                released_creation_leases: Vec::new(),
+                release_error: false,
                 provision_error: None,
                 leases: Vec::new(),
                 lease_capacities: Vec::new(),
@@ -6594,6 +6659,8 @@ mod tests {
                 next_lease: None,
                 next_runtime_control_lease: Some(lease),
                 observed_recovery: None,
+                released_creation_leases: Vec::new(),
+                release_error: false,
                 provision_error: None,
                 leases: Vec::new(),
                 lease_capacities: Vec::new(),
@@ -6619,6 +6686,22 @@ mod tests {
     }
 
     impl AgentCreationQueue for FakeQueue {
+        fn release_agent_creation_lease(
+            &mut self,
+            request_id: &str,
+            _runner_id: &str,
+            _lease_token: &str,
+        ) -> Result<(), RunnerError> {
+            self.released_creation_leases.push(request_id.into());
+            if self.release_error {
+                Err(RunnerError::CoreStatus {
+                    status: 404,
+                    body: "old Core".into(),
+                })
+            } else {
+                Ok(())
+            }
+        }
         fn request_runtime_recovery(&mut self, _runtime_id: &str) -> Result<bool, RunnerError> {
             let Some(recovery) = self.observed_recovery.take() else {
                 return Ok(false);

@@ -1,6 +1,24 @@
 use super::*;
 
 impl CoreStore {
+    /// Yield a Substrate capacity wait without discarding its durable operation.
+    pub async fn release_agent_creation_lease(
+        &self,
+        request_id: &str,
+        runner_id: &str,
+        lease_token: &str,
+    ) -> CoreResult<()> {
+        let mut client = self.connection().await?;
+        let tx = client.transaction().await.map_err(store_error)?;
+        let request = locked_agent_creation_request(&*tx, request_id).await?;
+        verify_agent_creation_lease_active(&*tx, &request, runner_id, lease_token).await?;
+        if request.runner_class != crate::RunnerClass::Substrate {
+            return Err(CoreError::RuntimeSpecMismatch);
+        }
+        tx.execute("UPDATE agent_creation_requests SET lease_expires_at=CURRENT_TIMESTAMP, updated_at=CURRENT_TIMESTAMP WHERE id=$1", &[&request_id]).await.map_err(store_error)?;
+        self.finish(tx).await
+    }
+
     pub async fn lease_agent_creation_request(
         &self,
         input: LeaseAgentCreationRequestInput,

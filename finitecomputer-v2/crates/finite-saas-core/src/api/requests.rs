@@ -350,3 +350,10 @@ pub struct SettleFinitePrivateReservationRequest {
     pub upstream_error_class: Option<String>,
     pub now: Option<String>,
 }
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ReleaseAgentCreationLeaseRequest {
+    pub runner_id: String,
+    pub lease_token: String,
+}

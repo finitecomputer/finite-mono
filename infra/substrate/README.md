@@ -181,12 +181,17 @@ stops and failed/uncertain controls remain fenced; an exhausted recovery attempt
 requires operator intervention. Anonymous ingress cannot undo a Core stop.
 Resume retries ResourceExhausted once per second up to 30 times; other errors,
 including ambiguous transport failures, are not blindly retried.
-A creation that exhausts these retries remains `launching` in Core; its lease
-is not released early. Another creation attempt waits for lease expiry (Runner's
-current default is 600 seconds). Existing lifecycle controls are checked first on
-subsequent cycles, but a capacity-exhausted onboarding can therefore wait minutes
-after capacity returns. This latency remains an admission qualification gap; the
-short provider-capacity retry proof does not cover prolonged exhaustion.
+A creation that exhausts these retries remains `launching` in Core. Runner asks
+Core to expire only its current creation lease, preserving the runtime identity,
+installed credentials and provider journal, so the next polling cycle can retry.
+The release requires Substrate Runner authority and the active lease token;
+expired tokens cannot release a successor lease, and legacy placements cannot use
+this path. Ambiguous transport failures retain their original lease. An older
+Core that rejects the additive release endpoint also retains the lease (Runner's
+default is 600 seconds), without failing creation or deleting credentials.
+Real-Postgres and Runner tests cover release, fencing and old-Core rejection;
+prolonged provider exhaustion followed by successful onboarding still needs the
+full integration proof. The short provider-capacity retry proof does not cover it.
 
 Upgrades remain behind `FC_CORE_ENABLE_RUNTIME_UPGRADES`. A template name derives
 from runtime and immutable Core artifact ID. Clone the actor's installed template,
