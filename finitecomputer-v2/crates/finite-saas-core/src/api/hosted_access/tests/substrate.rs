@@ -755,7 +755,9 @@ async fn substrate_two_owner_launch_and_native_access() {
                                 crate::RuntimeControlRequestStatus::Stopped
                             } else {
                                 crate::RuntimeControlRequestStatus::Succeeded
-                            }
+                            },
+                            "{action} failed: {:?}",
+                            request.failure_message
                         );
                         if *action == "stop" {
                             if automatic {

@@ -264,7 +264,8 @@ and [volume interface](https://github.com/agent-substrate/substrate/blob/bb0effe
 
 For empty-target qualification, the Runtime Recovery Set must include the entire
 quiesced `/data` tree (identity, Hermes history/files, SimpleX state and other agent
-state), the exact image and installed template, and the Core ownership/credential
+state), Substrate snapshot objects (including the referenced manifest even for
+DATA/cold-boot actors), the exact image and installed template, and the Core ownership/credential
 and provider-operation bindings. Provider metadata must retain the actor UID and
 volume mapping or be replaced through an explicitly authorized, identity-checked
 rebinding contract. The independent Recovery Authority must be able to obtain the
@@ -304,11 +305,23 @@ after initial native history verification and before restart. A fresh private
 directory receives mode-0600 `ready.json` with the Core database URL, runtime IDs
 and a per-run resume nonce. Writing that nonce to `resume` releases the barrier;
 a stale marker or a 15-minute timeout fails the test. This is test coordination,
-not a product restore interface, and has compiled but has not yet completed a
-live restore drill. Core remains outside the simulated cluster failure.
+not a product restore interface. Core remains outside the simulated cluster failure.
+
+The first live drill restored a verified physical Postgres backup and the complete
+CSI directory after deleting/recreating that isolated cluster. Both acceptance
+actors retained their exact UID, template reference and volume bindings, and the
+control plane was healthy. The first owner restart nevertheless failed: Substrate
+reported `DataLoss` fetching the external snapshot manifest from the object store,
+which the backup had omitted. No post-restore chat success is claimed. This is
+evidence that DATA/cold-boot does not eliminate the snapshot-store dependency;
+`RevertActor` also preserves that reference and cannot repair missing objects.
+Private evidence is in `finite-substrate-restore/drill-3/`. The next drill must
+include the quiesced snapshot store and verify its referenced objects before
+teardown. A physical provider backup preserves the transaction IDs used by the
+provider outbox; a logical restore alone does not prove watch continuity.
 
 For that drill, fence both agents, retain the Core backup/bindings independently,
-and capture provider Postgres plus the complete CSI data/state directory before
+and capture provider Postgres, snapshot object storage and the complete CSI data/state directory before
 recreating only this disposable cluster. **Run upstream CSI setup before restoring
 data:** its setup command clears the driver data directory. Fence the target API,
 controller and CSI writer while installing the verified backup, then restore
