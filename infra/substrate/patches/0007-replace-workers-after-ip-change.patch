@@ -1,0 +1,298 @@
+diff --git a/cmd/atecontroller/internal/controllers/gen.go b/cmd/atecontroller/internal/controllers/gen.go
+index 218a18c2..c2dd52b8 100644
+--- a/cmd/atecontroller/internal/controllers/gen.go
++++ b/cmd/atecontroller/internal/controllers/gen.go
+@@ -16,10 +16,10 @@ package controllers
+ 
+ // RBAC needed by atecontroller components outside this package, which
+ // controller-gen (paths="./...") does not scan:
+-//   - internal/workersync's pod informer lists and watches worker pods.
++//   - internal/workersync's pod informer watches workers and replaces pods with stale IPs.
+ //   - internal/k8sresolver watches ateapi's EndpointSlices to dial it.
+ //
+-//+kubebuilder:rbac:groups=core,resources=pods,verbs=get;list;watch
++//+kubebuilder:rbac:groups=core,resources=pods,verbs=get;list;watch;delete
+ //+kubebuilder:rbac:groups=discovery.k8s.io,resources=endpointslices,verbs=get;list;watch,namespace=ate-system
+ 
+ //go:generate bash ../../../../hack/run-tool.sh controller-gen rbac:headerFile=../../../../hack/boilerplate/sh.txt,roleName=ate-controller paths="./..." output:rbac:artifacts:config=../../../../manifests/ate-install/generated/
+diff --git a/cmd/atecontroller/internal/workersync/syncer.go b/cmd/atecontroller/internal/workersync/syncer.go
+index c4a05447..cea3e427 100644
+--- a/cmd/atecontroller/internal/workersync/syncer.go
++++ b/cmd/atecontroller/internal/workersync/syncer.go
+@@ -28,7 +28,10 @@ import (
+ 	"google.golang.org/grpc/codes"
+ 	"google.golang.org/grpc/status"
+ 	corev1 "k8s.io/api/core/v1"
++	apierrors "k8s.io/apimachinery/pkg/api/errors"
++	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+ 	"k8s.io/apimachinery/pkg/util/wait"
++	"k8s.io/client-go/kubernetes"
+ 	"k8s.io/client-go/tools/cache"
+ 	"k8s.io/client-go/util/workqueue"
+ )
+@@ -95,6 +98,7 @@ func (k workerKey) logAttrs() []any {
+ // backoff on transient failures such as a lost version precondition.
+ type WorkerPoolSyncer struct {
+ 	client             ateapipb.ControlClient
++	kube               kubernetes.Interface
+ 	workerInformer     cache.SharedIndexInformer
+ 	workerPoolInformer cache.SharedIndexInformer
+ 	queue              workqueue.TypedRateLimitingInterface[workerKey]
+@@ -107,9 +111,10 @@ type WorkerPoolSyncer struct {
+ }
+ 
+ // NewWorkerPoolSyncer creates a new WorkerPoolSyncer.
+-func NewWorkerPoolSyncer(client ateapipb.ControlClient, workerInformer, workerPoolInformer cache.SharedIndexInformer) *WorkerPoolSyncer {
++func NewWorkerPoolSyncer(client ateapipb.ControlClient, kube kubernetes.Interface, workerInformer, workerPoolInformer cache.SharedIndexInformer) *WorkerPoolSyncer {
+ 	return &WorkerPoolSyncer{
+ 		client:             client,
++		kube:               kube,
+ 		workerInformer:     workerInformer,
+ 		workerPoolInformer: workerPoolInformer,
+ 		queue:              workqueue.NewTypedRateLimitingQueue(workqueue.DefaultTypedControllerRateLimiter[workerKey]()),
+@@ -345,12 +350,20 @@ func (s *WorkerPoolSyncer) createOrUpdateWorker(ctx context.Context, key workerK
+ 			append(key.logAttrs(), slog.String("registered", w.GetSandboxClass()), slog.String("pool", string(pool.Spec.SandboxClass)))...)
+ 	}
+ 	if w.GetIp() != pod.Status.PodIP {
+-		// TODO: I don't think this is possible, but handling this case so we can
+-		// log it just in case we can reproduce it. It is logged rather than
+-		// repaired because ip is immutable on a registered Worker: writing the
+-		// pod's value back would be rejected rather than applied.
+-		slog.WarnContext(ctx, "Syncer: registered worker IP disagrees with its pod",
+-			append(key.logAttrs(), slog.String("registered", w.GetIp()), slog.String("pod_ip", pod.Status.PodIP))...)
++		// Node restarts can change a pod's IP without changing its UID. Drain
++		// before gracefully deleting that incarnation; only the later Pod
++		// Deleted event may release its actors. Never rewrite a live worker's
++		// address or release its actor while the old process could still run.
++		if err := s.markWorkerDraining(ctx, key); err != nil {
++			return err
++		}
++		err := s.kube.CoreV1().Pods(pod.Namespace).Delete(ctx, pod.Name, metav1.DeleteOptions{
++			Preconditions: &metav1.Preconditions{UID: &pod.UID, ResourceVersion: &pod.ResourceVersion},
++		})
++		if apierrors.IsNotFound(err) {
++			return nil
++		}
++		return err
+ 	}
+ 	if !changed {
+ 		return nil
+diff --git a/cmd/atecontroller/internal/workersync/syncer_test.go b/cmd/atecontroller/internal/workersync/syncer_test.go
+index fa6c853a..8e45354e 100644
+--- a/cmd/atecontroller/internal/workersync/syncer_test.go
++++ b/cmd/atecontroller/internal/workersync/syncer_test.go
+@@ -126,7 +126,7 @@ func setupSyncerTest(t *testing.T, ctx context.Context, api *fakeControl, initPo
+ 
+ 	// Start before the factory: the informer's initial list is what seeds the
+ 	// queue with the pods that already exist.
+-	NewWorkerPoolSyncer(api, workerInformer, workerPoolInformer).Start(ctx)
++	NewWorkerPoolSyncer(api, fakeK8s, workerInformer, workerPoolInformer).Start(ctx)
+ 	workerFactory.Start(ctx.Done())
+ 	workerFactory.WaitForCacheSync(ctx.Done())
+ 
+@@ -140,10 +140,11 @@ func setupReconcileTest(t *testing.T, api *fakeControl, initPools ...*atev1alpha
+ 	t.Helper()
+ 
+ 	//nolint:staticcheck // NewSimpleClientset is what the informer machinery takes.
+-	_, workerInformer := WorkerPodInformer(fake.NewSimpleClientset())
++	fakeK8s := fake.NewSimpleClientset()
++	_, workerInformer := WorkerPodInformer(fakeK8s)
+ 	workerPoolInformer, poolIndexer := newWorkerPoolInformer(t, initPools...)
+ 
+-	return NewWorkerPoolSyncer(api, workerInformer, workerPoolInformer), workerInformer.GetIndexer(), poolIndexer
++	return NewWorkerPoolSyncer(api, fakeK8s, workerInformer, workerPoolInformer), workerInformer.GetIndexer(), poolIndexer
+ }
+ 
+ // seedPod puts a pod in the syncer's cache as though the informer had delivered
+diff --git a/cmd/atecontroller/main.go b/cmd/atecontroller/main.go
+index 83b75892..ec98ce82 100644
+--- a/cmd/atecontroller/main.go
++++ b/cmd/atecontroller/main.go
+@@ -233,7 +233,7 @@ func main() {
+ 	// Start registers the informer event handlers, so it has to run before the
+ 	// factory does: the initial list then synthesizes an Add for every pod that
+ 	// already exists, and no explicit startup re-list is needed.
+-	workersync.NewWorkerPoolSyncer(ateapiClient, workerPodInformer, workerPoolInformer.Informer()).Start(runCtx)
++	workersync.NewWorkerPoolSyncer(ateapiClient, k8sClient, workerPodInformer, workerPoolInformer.Informer()).Start(runCtx)
+ 
+ 	workerPodInformerFactory.Start(runCtx.Done())
+ 	ateFactory.Start(runCtx.Done())
+diff --git a/manifests/ate-install/generated/role.yaml b/manifests/ate-install/generated/role.yaml
+index 1fc8066f..ed3ad1a6 100644
+--- a/manifests/ate-install/generated/role.yaml
++++ b/manifests/ate-install/generated/role.yaml
+@@ -22,6 +22,14 @@ rules:
+   - ""
+   resources:
+   - pods
++  verbs:
++  - delete
++  - get
++  - list
++  - watch
++- apiGroups:
++  - ""
++  resources:
+   - secrets
+   verbs:
+   - get
+diff --git a/cmd/atecontroller/internal/workersync/ip_change_test.go b/cmd/atecontroller/internal/workersync/ip_change_test.go
+new file mode 100644
+index 00000000..166c55a2
+--- /dev/null
++++ b/cmd/atecontroller/internal/workersync/ip_change_test.go
+@@ -0,0 +1,154 @@
++// Copyright 2026 Google LLC
++//
++// Licensed under the Apache License, Version 2.0 (the "License");
++// you may not use this file except in compliance with the License.
++// You may obtain a copy of the License at
++//
++//     http://www.apache.org/licenses/LICENSE-2.0
++//
++// Unless required by applicable law or agreed to in writing, software
++// distributed under the License is distributed on an "AS IS" BASIS,
++// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++// See the License for the specific language governing permissions and
++// limitations under the License.
++
++package workersync
++
++import (
++	"context"
++	"errors"
++	"testing"
++	"time"
++
++	"github.com/agent-substrate/substrate/pkg/proto/ateapipb"
++	"google.golang.org/grpc"
++	"google.golang.org/grpc/codes"
++	"google.golang.org/grpc/status"
++	apierrors "k8s.io/apimachinery/pkg/api/errors"
++	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
++	"k8s.io/apimachinery/pkg/runtime"
++	"k8s.io/client-go/kubernetes/fake"
++	ktesting "k8s.io/client-go/testing"
++)
++
++func TestSyncer_IPChangeReplacesPod(t *testing.T) {
++	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
++	defer cancel()
++	api := newFakeControl()
++	kube := setupSyncerTest(t, ctx, api, workerPool("ns", "pool", "gvisor", nil))
++	pod := workerPod("ns", "worker", "pool", testPodUID, "10.0.0.1")
++	if _, err := kube.CoreV1().Pods("ns").Create(ctx, pod, metav1.CreateOptions{}); err != nil {
++		t.Fatal(err)
++	}
++	waitForWorker(t, ctx, api, testPodUID, func(w *ateapipb.Worker) bool { return w != nil })
++	pod.Status.PodIP = "10.0.0.2"
++	if _, err := kube.CoreV1().Pods("ns").UpdateStatus(ctx, pod, metav1.UpdateOptions{}); err != nil {
++		t.Fatal(err)
++	}
++	waitForWorker(t, ctx, api, testPodUID, func(w *ateapipb.Worker) bool { return w == nil })
++	if _, err := kube.CoreV1().Pods("ns").Get(ctx, "worker", metav1.GetOptions{}); !apierrors.IsNotFound(err) {
++		t.Fatalf("stale pod still present: %v", err)
++	}
++	replacement := workerPod("ns", "worker", "pool", otherPodUID, "10.0.0.3")
++	if _, err := kube.CoreV1().Pods("ns").Create(ctx, replacement, metav1.CreateOptions{}); err != nil {
++		t.Fatal(err)
++	}
++	got := waitForWorker(t, ctx, api, otherPodUID, func(w *ateapipb.Worker) bool { return w != nil })
++	if got.GetIp() != "10.0.0.3" {
++		t.Fatalf("replacement IP: %s", got.GetIp())
++	}
++}
++
++// A successful delete request is not proof that the old writer has exited.
++// Keep its registry and actor assignment until the informer observes removal.
++func TestSyncer_IPChangeWaitsForPodDeletion(t *testing.T) {
++	for _, failDelete := range []bool{false, true} {
++		t.Run(map[bool]string{false: "terminating", true: "delete-rejected"}[failDelete], func(t *testing.T) {
++			ctx := context.Background()
++			api := newFakeControl()
++			s, pods, _ := setupReconcileTest(t, api, workerPool("ns", "pool", "gvisor", nil))
++			pod := workerPod("ns", "worker", "pool", testPodUID, "10.0.0.1")
++			pod.ResourceVersion = "7"
++			key := seedPod(t, pods, pod)
++			mustReconcile(t, ctx, s, key)
++			pod = pod.DeepCopy()
++			pod.Status.PodIP = "10.0.0.2"
++			if err := pods.Update(pod); err != nil {
++				t.Fatal(err)
++			}
++			rejected := errors.New("deletion rejected")
++			calls := 0
++			s.kube.(*fake.Clientset).PrependReactor("delete", "pods", func(action ktesting.Action) (bool, runtime.Object, error) {
++				calls++
++				w := api.get(testPodUID)
++				if w == nil || w.GetStatus().GetState() != ateapipb.WorkerState_WORKER_STATE_DRAINING {
++					t.Fatal("worker must be drained before pod deletion")
++				}
++				deletion := action.(ktesting.DeleteAction)
++				opts := deletion.GetDeleteOptions()
++				if deletion.GetName() != pod.Name || action.GetNamespace() != pod.Namespace || opts.Preconditions == nil || opts.Preconditions.UID == nil || string(*opts.Preconditions.UID) != testPodUID || opts.Preconditions.ResourceVersion == nil || *opts.Preconditions.ResourceVersion != "7" {
++					t.Fatalf("delete lacks observed pod identity: %+v", opts)
++				}
++				if opts.GracePeriodSeconds != nil {
++					t.Fatal("must retain graceful termination")
++				}
++				if failDelete {
++					return true, nil, rejected
++				}
++				return true, nil, nil
++			})
++			err := s.reconcile(ctx, key)
++			if failDelete && !errors.Is(err, rejected) {
++				t.Fatalf("delete error lost: %v", err)
++			}
++			if !failDelete && err != nil {
++				t.Fatal(err)
++			}
++			if calls != 1 {
++				t.Fatalf("delete calls: %d", calls)
++			}
++			if w := api.get(testPodUID); w == nil || w.GetIp() != "10.0.0.1" {
++				t.Fatal("live worker was released or retargeted")
++			}
++			if !failDelete {
++				if err := pods.Delete(pod); err != nil {
++					t.Fatal(err)
++				}
++				mustReconcile(t, ctx, s, key)
++				if api.get(testPodUID) != nil {
++					t.Fatal("deleted pod retained registry")
++				}
++			}
++		})
++	}
++}
++
++type unavailableDrain struct{ ateapipb.ControlClient }
++
++func (unavailableDrain) DrainWorker(context.Context, *ateapipb.DrainWorkerRequest, ...grpc.CallOption) (*ateapipb.Worker, error) {
++	return nil, status.Error(codes.Unavailable, "control unavailable")
++}
++
++func TestSyncer_IPChangeDoesNotDeleteBeforeDrain(t *testing.T) {
++	ctx := context.Background()
++	api := newFakeControl()
++	s, pods, _ := setupReconcileTest(t, api, workerPool("ns", "pool", "gvisor", nil))
++	pod := workerPod("ns", "worker", "pool", testPodUID, "10.0.0.1")
++	key := seedPod(t, pods, pod)
++	mustReconcile(t, ctx, s, key)
++	pod = pod.DeepCopy()
++	pod.Status.PodIP = "10.0.0.2"
++	if err := pods.Update(pod); err != nil {
++		t.Fatal(err)
++	}
++	s.client = unavailableDrain{api}
++	if err := s.reconcile(ctx, key); status.Code(err) != codes.Unavailable {
++		t.Fatalf("drain error: %v", err)
++	}
++	if len(s.kube.(*fake.Clientset).Actions()) != 0 {
++		t.Fatal("pod mutated before drain succeeded")
++	}
++	if w := api.get(testPodUID); w == nil || w.GetStatus().GetState() != ateapipb.WorkerState_WORKER_STATE_ACTIVE {
++		t.Fatal("failed drain changed worker")
++	}
++}

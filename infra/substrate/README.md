@@ -568,6 +568,25 @@ scripts/with-dev-env cargo test --locked -p finitesitesd --test e2e \
   native_hermes_terminal_initializes_sites_with_scoped_requester -- --ignored --exact
 ```
 
+## Worker IP drift candidate
+
+`0007-replace-workers-after-ip-change.patch` addresses the reproduced restart
+failure at its provider owner. Current upstream `d277088b` still only logs IP
+drift. The patch drains the registered worker, then gracefully deletes the
+observed pod incarnation. It does not change the immutable registered IP or
+release actor assignments while the pod is present. Kubernetes UID and resource
+version preconditions protect a replaced pod or a stale observation; deletion
+errors remain retryable. The existing Deleted-event path owns actor release.
+
+`worker-ip-before.log` reproduces the stuck active worker on the pinned source.
+`worker-ip-controller-tests.log` passes every controller package, and
+`worker-ip-final-checks.log` covers generated RBAC, worker race tests and vet.
+Negative cases retain the worker on deletion rejection and forbid deletion when
+drain fails. These are controller tests, not proof that a Kubernetes deletion
+always fences a partitioned node. Do not force-delete workers as part of this
+recovery. The patch is not installed in the local cluster yet; real graceful
+replacement, restored chat and durable-data continuity remain qualification gates.
+
 ## Pinned provider dependencies
 
 These are local qualification dependencies, not guarantees from an upstream
@@ -582,6 +601,7 @@ and custom egress fixture; repeat qualification against the intended release.
 | `0004-local-hostpath-set.patch` | Local CSI v1.17.1 fixture only: treat publish paths as a set and remove persisted duplicates on unpublish. Regression fails before/passes after; clean stop works after worker loss. Build with `-X main.version=v1.17.1-finite-local-set-fix`; an empty version is rejected by sidecars. |
 | `0005-revert-interrupted-lifecycle.patch` | Permit Revert from RESUMING/SUSPENDING under the existing actor lease. State regressions and full control API suite pass; real bad-image recovery passes. |
 | `0006-skip-unused-golden-snapshots.patch` | Cold-boot templates never consume golden state. Skip unused warmup, which otherwise strands capacity on a bad image. Regression fails upstream/passes patched; full control API suite passes. Existing golden fixtures require explicit cleanup. |
+| `0007-replace-workers-after-ip-change.patch` | Candidate, not deployed: drain a worker after pod IP drift, request graceful pod deletion with UID/resource-version preconditions, and retain its actor assignment until the existing pod-deletion reconcile runs. Requires controller pod-delete permission. Regression fails on the pinned upstream code and passes patched; controller suites, worker race tests and generated RBAC pass. Live node-restart and data-fencing qualification remain required. |
 
 Hermes's pinned stream-writer guard still allowed a cancelled late opener to
 supersede its replacement. `scripts/proofs/hermes-stream-writer.py` forces that
