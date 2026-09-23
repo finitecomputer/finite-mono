@@ -32,7 +32,7 @@ impl Drop for Holder {
     }
 }
 
-async fn identity(db: &TestDb, request: &str) -> Value {
+pub(super) async fn identity(db: &TestDb, request: &str) -> Value {
     db.query_json(
         "SELECT jsonb_build_object('runtime',q.agent_runtime_id,'spec',q.runtime_spec,
          'correlation',p.correlation_id,'credential',c.token_sha256)

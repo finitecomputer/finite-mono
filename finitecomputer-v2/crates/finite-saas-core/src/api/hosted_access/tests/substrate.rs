@@ -4,6 +4,7 @@ use super::*;
 mod capacity;
 mod recovery;
 mod sites;
+mod stalled_boot;
 use crate::auth::test_support::{core_auth_with_runner_credentials, runner_credential_config};
 use crate::launch_codes::IssueLaunchCodeBatchInput;
 use crate::{
@@ -427,8 +428,9 @@ async fn substrate_two_owner_launch_and_native_access() {
             }
         }));
         let account_server = tokio::spawn(axum::serve(account_listener, account_app).into_future());
+        let stalled_boot = stalled_boot::Fault::new();
         let mut runtime_server = tokio::spawn(
-            axum::serve(runtime_listener, runtime_router(store, origins.clone())).into_future(),
+            axum::serve(runtime_listener, stalled_boot.layer(runtime_router(store, origins.clone()))).into_future(),
         );
         let codes = db
             .issue_launch_code_batch(IssueLaunchCodeBatchInput {
@@ -512,6 +514,9 @@ async fn substrate_two_owner_launch_and_native_access() {
                     .unwrap();
             created["request"]["id"].as_str().unwrap().to_owned()
             };
+            let stalled_identity = if index == 0 {
+                stalled_boot.interrupt(&db, &request, runner_command()).await
+            } else { None };
             let capacity_wait = if index == 1 {
                 capacity::exhaust(&db, &request, runner_command()).await
             } else { None };
@@ -554,6 +559,10 @@ async fn substrate_two_owner_launch_and_native_access() {
             assert_eq!(serde_json::to_value(creation.status).unwrap(), "running");
             assert_eq!(creation.desired_runtime_artifact_id.as_deref(), Some("substrate-proof"), "proof must start on the original image");
             if let Some(wait) = capacity_wait { wait.verify(&db, &request).await; }
+            if let Some(before) = stalled_identity {
+                assert_eq!(before, capacity::identity(&db, &request).await, "stalled launch changed durable identity");
+                eprintln!("stalled bootstrap recovered under the same creation identity");
+            }
             let runtime = creation.agent_runtime_id.unwrap();
             eprintln!("qualified launch for synthetic owner {index}: {runtime}");
             device_request(&device, &user, "/v1/app/actions", Some(json!({"StartRuntime": null}))).await;

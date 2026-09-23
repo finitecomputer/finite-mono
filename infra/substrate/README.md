@@ -248,7 +248,19 @@ runtime also passes the explicit worker-loss/restart/stop/restart proof in
 owners retain native history/files and bidirectional isolation after the first
 owner's worker is deleted. Stopped ingress remains unavailable until Core
 restart. This qualifies a worker-pod loss; it does not prove whole-node failure
-or a launch stranded in RESUMING.
+or a permanently invalid boot configuration.
+
+A transient bootstrap failure with an interrupted Runner is also qualified on
+that image (`stalled-boot-before.log`, 176.45 seconds). The fixture returns 503
+for all three environment-fetch attempts, kills the Runner, observes RESUMING,
+then restores the endpoint and waits for its real 60-second Core lease to expire.
+The next ordinary creation attempt succeeds with unchanged runtime ID, runtime
+spec, credential hash and provider correlation. Both owners then pass chat,
+worker-loss recovery, stop/restart, retained files/history and isolation checks.
+Substrate's existing Resume re-entry performs recovery; no Finite reset loop was
+added. Production retains its configured lease (default 600 seconds), so the
+fixture does not establish production recovery latency. Permanently invalid
+configuration still requires correction rather than indefinite-success claims.
 
 Upgrades remain behind `FC_CORE_ENABLE_RUNTIME_UPGRADES`. A template name derives
 from runtime and immutable Core artifact ID. Clone the actor's installed template,
@@ -548,6 +560,10 @@ Optional gates:
   automatic recovery alone (no owner restart), exactly one retained user prompt,
   an idle resumed session, a successful subsequent turn, and unchanged marker
   bytes before and after that turn. The second owner still exercises stop/restart.
+- `FC_TEST_SUBSTRATE_STALLED_BOOT=1`, with the local fault CLI/kubeconfig:
+  fail bootstrap environment fetches, kill the Runner while the actor is
+  RESUMING, restore the endpoint, and retry after natural Core lease expiry.
+  Assert durable creation identity and run the ordinary two-owner parity gates.
 - `FC_TEST_SUBSTRATE_CAPACITY_HOLDER`: a suspended disposable actor in the local
   two-worker pool, using a readiness-capable template independent of Core. Supply
   the same CLI/kubeconfig variables used for worker fault injection. The proof
@@ -644,9 +660,9 @@ Do not enable production admission until the remaining gates are satisfied:
   routes and native terminal Organization Brain creation/access with the current
   CLI. Historical card rendering has separate fixture coverage. The removed CLI
   request producer is not a new runner feature.
-- Qualify stuck-start handling without overriding Core stop/control intent.
-  Local full capacity exhaustion/retry, worker-loss recovery and an interrupted
-  foreground tool are qualified;
+- Qualify permanent boot failure handling and operator recovery. Local transient
+  bootstrap failure/RESUMING re-entry, full capacity exhaustion/retry, worker-loss
+  recovery and an interrupted foreground tool are qualified;
   node loss and failures during model-request persistence remain separate gates.
   Keep upgrades opt-in; retirement and backup recovery remain unadvertised.
 - Preserve the Recovery Authority and qualify the deployment Recovery Set. The
