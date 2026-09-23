@@ -4153,3 +4153,44 @@ async fn aggregate_metrics_disabled_by_default() {
     .await
     .unwrap();
 }
+
+/// Requires the pinned Hermes Python and a built fsite binary; no external service.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "set HERMES_AGENT_PYTHON and FSITE_TEST_BINARY for native terminal integration"]
+async fn native_hermes_terminal_initializes_sites_with_scoped_requester() {
+    use std::io::Write as _;
+    let owner = finitesites_proto::event::pubkey_for_secret(&user_secret()).unwrap();
+    let agent = finitesites_proto::event::pubkey_for_secret(&stranger_secret()).unwrap();
+    let wrong = finitesites_proto::event::pubkey_for_secret(&viewer_secret()).unwrap();
+    let server = TestServer::start(&owner).await;
+    tokio::task::spawn_blocking(move || {
+        let mut store = Store::open(&server.data_dir().join("registry.db")).unwrap();
+        for key in [&agent, &wrong] {
+            store.allow_pubkey(key, "synthetic native proof", now_unix()).unwrap();
+        }
+        drop(store);
+        let assertion: HostedRequesterAssertionResponse = json_body(server.hosted_requester_assertion(
+            Some(VIEWER_SESSION_SERVICE_TOKEN),
+            &HostedRequesterAssertionRequest {
+                email: "owner@example.com".into(), requester_npub: owner.clone(), agent_npub: agent,
+            },
+        ).unwrap());
+        let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../..");
+        let fixture = serde_json::json!({
+            "api": server.api_url,
+            "fsite": std::env::var("FSITE_TEST_BINARY").expect("FSITE_TEST_BINARY"),
+            "requester": {"userId": owner, "email": assertion.email, "sitesAssertion": assertion.assertion, "expiresAt": assertion.expires_at},
+            "agents": [
+                ["wrong", finitesites_proto::hex::encode(&viewer_secret()), 1],
+                ["correct", finitesites_proto::hex::encode(&stranger_secret()), 0]
+            ]
+        });
+        let mut child = Command::new(std::env::var("HERMES_AGENT_PYTHON").expect("HERMES_AGENT_PYTHON"))
+            .arg("-B").arg(root.join("infra/images/prove_native_sites_requester.py"))
+            .stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped()).spawn().unwrap();
+        child.stdin.take().unwrap().write_all(&serde_json::to_vec(&fixture).unwrap()).unwrap();
+        let output = child.wait_with_output().unwrap();
+        assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+        assert!(String::from_utf8_lossy(&output.stdout).contains("exact-agent success"));
+    }).await.unwrap();
+}

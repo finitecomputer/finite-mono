@@ -362,8 +362,22 @@ service accepts the exact assertion and rejects another agent. These are separat
 boundary proofs. A real pinned Hermes terminal subprocess also observes the native
 session identity and assertion lease, with no v1 fallback and cleanup after the
 tool completes. The full Hermes integration suite passes (116 tests, two opt-in
-live tests skipped). A single live native turn through `fsite` into Sites is still
-required before claiming full native product parity.
+live tests skipped). The combined native terminal proof now runs the real `fsite` CLI against a
+disposable Sites service: wrong-agent assertion use is denied before the intended
+agent successfully creates its Project with verified owner attribution; both
+leases are cleaned up. It uses the pinned host minimal Python package and the
+real terminal dispatcher, with the native session/context setup called directly.
+It does not yet prove a model-driven `hermes serve` turn on the rebuilt Substrate
+image or a deployed dashboard/Sites configuration.
+
+Reproduce the combined local boundary proof after building `fsite`:
+
+```sh
+HERMES_AGENT_PYTHON=<pinned-python>/bin/python3 \
+FSITE_TEST_BINARY="$PWD/target/debug/fsite" \
+scripts/with-dev-env cargo test --locked -p finitesitesd --test e2e \
+  native_hermes_terminal_initializes_sites_with_scoped_requester -- --ignored --exact
+```
 
 ## Pinned provider dependencies
 
