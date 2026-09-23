@@ -2,12 +2,13 @@ import assert from "node:assert/strict";
 import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
 import http, { type IncomingMessage, type ServerResponse } from "node:http";
 import { once } from "node:events";
-import { rm } from "node:fs/promises";
+import { mkdir, rm } from "node:fs/promises";
 import { test } from "node:test";
 
 import { chromium, type Browser, type Page } from "playwright";
 
 import { chromiumLaunchOptions } from "../scripts/playwright-browser";
+import { sealAgentOnboardingDraft } from "../src/lib/agent-onboarding";
 
 const CORE_TOKEN = "browser-core-token";
 const HOSTED_DEVICE_TOKEN = "browser-hosted-device-token";
@@ -63,6 +64,7 @@ type CoreState = {
   creationPosts: unknown[];
   creationResults: Map<string, { projectId: string; requestId: string }>;
   meGets: number;
+  meError: boolean;
   runtimeRouteGets: number;
   runtimeRouteProjectIdOverride: string | null;
   cancelPosts: string[];
@@ -72,6 +74,8 @@ type CoreState = {
   createDelayMs: number;
   canCreateAgent: boolean;
   requiresBilling: boolean;
+  billingClass: "sponsored" | "standard";
+  billingError: boolean;
   creationError: string | null;
 };
 
@@ -281,48 +285,95 @@ test("dashboard agent creation browser states", { timeout: 300_000 }, async () =
     });
     await withSignedInPage(browser, paidDashboardPort, async (page) => {
       await page.goto(`http://127.0.0.1:${paidDashboardPort}/dashboard?new=1`);
-      await fillAgentNameUntilContinueEnabled(page, "Customer Access Proof");
-      assert.equal(
-        await page.getByRole("button", { name: "Create agent" }).count(),
-        0,
-        "fresh customer onboarding must never bypass Access from Profile"
-      );
-      await clickAgentCreationContinue(page);
-      await page
-        .getByRole("button", { name: "Continue to secure payment" })
-        .waitFor({ state: "visible" });
-      await expectVisibleText(page, "Pay securely or use a Launch Code.");
-      await expectVisibleText(page, "Finite Computer Hosted Agent");
-      await expectVisibleText(page, "$200 USD / month");
-      await page
-        .getByText("Renews monthly until you cancel in the billing portal.")
-        .waitFor({ state: "visible", timeout: 15_000 });
-      await page
-        .getByText("refunds are handled per our")
-        .waitFor({ state: "visible", timeout: 15_000 });
-      assert.equal(
-        core.state.creationPosts.length,
-        0,
-        "Profile must not submit agent creation before the customer chooses Access"
-      );
-      await page.getByRole("button", { name: "Back" }).click();
-      await page.getByRole("radio", { name: /Confidential/u }).waitFor({
-        state: "visible",
-      });
+      await page.getByRole("heading", { name: "Do you have a launch code?" }).waitFor();
+      await onboardingScreenshots(page, "code");
+      assert.equal(await page.getByRole("button", { name: "Use account access" }).count(), 0,
+        "customer mode must still require explicit access despite stale capacity");
+      await page.getByRole("button", { name: "Continue without a code" }).click();
+      await page.getByRole("heading", { name: "Your own Finite Agent." }).waitFor();
+      await expectVisibleText(page, "Hosted Agent");
+      await expectVisibleText(page, "$200 USD");
+      await onboardingScreenshots(page, "plan");
+      await page.getByText("Renews monthly until you cancel in the billing portal.").waitFor();
+      await page.getByText("refunds are handled per our").waitFor();
+      assert.equal(core.state.creationPosts.length, 0, "reviewing the plan must not create an agent");
+      await page.getByRole("button", { name: "Continue", exact: true }).click();
+      await page.getByLabel("Agent name").fill("Customer Access Proof");
+      await onboardingScreenshots(page, "name");
+      await page.getByRole("button", { name: "Continue to secure payment" }).waitFor();
+      assert.equal(core.state.creationPosts.length, 0, "naming must not create an unpaid agent");
+      await page.getByRole("button", { name: "Back", exact: true }).click();
+      await page.getByRole("button", { name: "Back", exact: true }).click();
       await page.getByRole("radio", { name: /Confidential/u }).check();
-      await clickAgentCreationContinue(page);
-      await expectVisibleText(
-        page,
-        "Enter a Confidential Launch Code. Standard subscriptions do not unlock this option yet."
-      );
-      assert.equal(
-        await page.getByRole("button", { name: "Continue to secure payment" }).count(),
-        0,
-        "Confidential early access must not send a Standard customer to checkout"
-      );
-      await page
-        .getByRole("textbox", { name: "Confidential Launch Code" })
-        .waitFor({ state: "visible" });
+      await expectVisibleText(page, "Enter a Confidential Launch Code. Standard subscriptions do not unlock this option yet.");
+      assert.equal(await page.getByRole("button", { name: "Continue without a code" }).count(), 0);
+      await page.getByRole("textbox", { name: "Confidential Launch Code" }).waitFor();
+
+    });
+
+    // A new dashboard must resume a signed draft written by the previous
+    // dashboard release. Core's billing state remains the payment authority.
+    core.reset({ billingClass: "standard", requiresBilling: true });
+    await withSignedInPage(browser, paidDashboardPort, async (page) => {
+      await page.goto(`http://127.0.0.1:${paidDashboardPort}/dashboard?billing=success`);
+      await expectVisibleText(page, "Confirming your payment");
+      assert.equal(await page.getByRole("button", { name: "Continue without a code" }).count(), 0);
+      assert.equal(core.state.creationPosts.length, 0);
+      await page.goto(`http://127.0.0.1:${paidDashboardPort}/dashboard?billing=success&billingSyncStartedAt=${Date.now() - 120_000}`);
+      await expectVisibleText(page, "Payment received, still syncing");
+      assert.equal(core.state.creationPosts.length, 0);
+      await page.goto(`http://127.0.0.1:${paidDashboardPort}/dashboard?billing=cancelled`);
+      await expectVisibleText(page, "Checkout cancelled");
+      await page.getByLabel("Launch Code", { exact: true }).waitFor();
+    });
+    core.reset({ billingClass: "standard", requiresBilling: false, canCreateAgent: true });
+    await withSignedInPage(browser, paidDashboardPort, async (page) => {
+      const sealed = await sealAgentOnboardingDraft({
+        version: 1,
+        workosUserId: "user_browser",
+        displayName: "Paid Return Bot",
+        profilePictureUrl: null,
+        hostingTier: "standard",
+        idempotencyKey: "browser-previous-dashboard-paid-draft",
+        issuedAtMs: Date.now() - 10_000,
+        stripeCheckoutStartedAtMs: Date.now() - 5_000,
+      }, { WORKOS_COOKIE_PASSWORD: "browser-test-cookie-password-32-characters-minimum" });
+      await page.context().addCookies([{
+        name: "finite-agent-draft", value: sealed, domain: "127.0.0.1", path: "/dashboard", httpOnly: true, sameSite: "Lax",
+      }]);
+      core.state.billingError = true;
+      await page.goto(`http://127.0.0.1:${paidDashboardPort}/dashboard?billing=success`);
+      await page.getByRole("link", { name: "Retry agent setup", exact: true }).waitFor();
+      assert.equal(await page.getByRole("button", { name: "Continue without a code" }).count(), 0);
+      assert.equal(core.state.creationPosts.length, 0);
+      core.state.billingError = false;
+      hostedDevice.failNextBindingAuthorization();
+      await page.getByRole("link", { name: "Retry agent setup", exact: true }).click();
+      await page.getByRole("alert").filter({ hasText: "binding authorization is temporarily unavailable" }).waitFor();
+      assert.equal(core.state.creationPosts.length, 1);
+      assert.equal(core.state.creationResults.size, 1);
+      assert.equal(await page.getByRole("button", { name: "Continue without a code" }).count(), 0);
+      assert.equal(await page.getByRole("button", { name: "Continue to secure payment" }).count(), 0);
+      core.state.canCreateAgent = false; // The first attempt used the last allowance.
+      core.state.billingError = true;
+      await page.getByRole("link", { name: "Retry agent setup", exact: true }).click();
+      await page.getByRole("alert").filter({ hasText: "Billing is temporarily unavailable for browser proof." }).waitFor();
+      assert.equal(core.state.creationPosts.length, 1);
+      assert.equal(await page.getByRole("button", { name: "Continue without a code" }).count(), 0);
+      core.state.billingError = false;
+      await page.getByRole("link", { name: "Retry agent setup", exact: true }).click();
+      await page.waitForURL(/creation=agent_request_1/u);
+      assert.equal(core.state.creationPosts.length, 2);
+      assert.equal(core.state.creationResults.size, 1, "paid retry must reuse the original Project");
+      assert.equal((core.state.creationPosts[1] as Record<string, unknown>).idempotencyKey,
+        (core.state.creationPosts[0] as Record<string, unknown>).idempotencyKey);
+      const post = core.state.creationPosts[0] as Record<string, unknown>;
+      assert.equal(post.displayName, "Paid Return Bot");
+      assert.equal(post.launchCode, "");
+      assert.equal(post.idempotencyKey, "browser-previous-dashboard-paid-draft");
+      assert.equal((await page.context().cookies()).some((cookie) => cookie.name === "finite-agent-draft"), false);
+      await page.reload();
+      assert.equal(core.state.creationPosts.length, 2, "reloading a paid return must not duplicate creation");
     });
 
     core.reset({
@@ -417,10 +468,51 @@ test("dashboard agent creation browser states", { timeout: 300_000 }, async () =
       assert.equal(await page.getByRole("button", { name: "Retire agent" }).count(), 0);
     });
 
+    core.reset({ meError: true });
+    await withSignedInPage(browser, dashboardPort, async (page) => {
+      await page.goto(`http://127.0.0.1:${dashboardPort}/dashboard`);
+      await page.getByRole("heading", { name: "Could not load your account" }).waitFor();
+      assert.equal(await page.getByLabel("Launch Code", { exact: true }).count(), 0);
+      assert.equal(core.state.creationPosts.length, 0);
+    });
+    const runtimeLessProject = visibleProject("project_retained", "Retained Agent", hostedDevice.runtimeStatusUrl);
+    runtimeLessProject.runtime = null;
+    core.reset({
+      projects: [runtimeLessProject],
+      requests: [agentCreationRequest({
+        id: "retired_request", projectId: "project_retained", status: "running",
+        agentRuntimeId: "runtime_retired",
+      })],
+    });
+    await withSignedInPage(browser, dashboardPort, async (page) => {
+      await page.goto(`http://127.0.0.1:${dashboardPort}/dashboard`);
+      await page.getByRole("heading", { name: "Retained Agent", exact: true }).waitFor();
+      assert.equal(await page.getByLabel("Launch Code", { exact: true }).count(), 0);
+      assert.equal(core.state.creationPosts.length, 0);
+      await page.goto(`http://127.0.0.1:${dashboardPort}/dashboard?new=1`);
+      await page.getByLabel("Launch Code", { exact: true }).waitFor({ timeout: 10_000 });
+      assert.equal(await page.getByText("Preparing your workspace", { exact: true }).count(), 0);
+      assert.equal(core.state.creationPosts.length, 0, "New agent must not replay the completed launch");
+      await page.goto(`http://127.0.0.1:${dashboardPort}/dashboard?creation=retired_request`);
+      await expectVisibleText(page, "Preparing your workspace");
+      assert.equal(await page.getByLabel("Launch Code", { exact: true }).count(), 0);
+    });
+    core.reset({ requests: [
+      agentCreationRequest({ id: "ambiguous_1", projectId: "project_1", status: "running" }),
+      agentCreationRequest({ id: "ambiguous_2", projectId: "project_2", status: "running" }),
+    ] });
+    await withSignedInPage(browser, dashboardPort, async (page) => {
+      await page.goto(`http://127.0.0.1:${dashboardPort}/dashboard`);
+      await expectVisibleText(page, "Preparing your workspace");
+      assert.equal(new URL(page.url()).searchParams.has("creation"), false);
+      assert.equal(await page.getByLabel("Launch Code", { exact: true }).count(), 0);
+      assert.equal(core.state.creationPosts.length, 0);
+    });
+
     core.reset();
     await withSignedInPage(browser, dashboardPort, async (page) => {
       await page.goto(`http://127.0.0.1:${dashboardPort}/dashboard`);
-      await fillAgentNameUntilContinueEnabled(page, "Oslo Bot");
+      await prepareAgentLaunch(page, "Oslo Bot");
       await page.getByRole("button", { name: "Account menu" }).waitFor({ state: "visible" });
       assert.equal(
         await page.getByRole("radio", { name: /Confidential/u }).count(),
@@ -433,16 +525,12 @@ test("dashboard agent creation browser states", { timeout: 300_000 }, async () =
         buffer: PNG_BYTES,
       });
       await page.getByRole("img", { name: "Agent profile preview" }).waitFor({ state: "visible" });
-      await clickAgentCreationContinue(page);
       assert.equal(
         await page.getByRole("button", { name: "Continue to secure payment" }).count(),
         0,
         "payment must stay hidden when the webhook/return path is not fully configured"
       );
-      await page
-        .getByRole("textbox", { name: "Launch Code", exact: true })
-        .fill("fixture-launch-code");
-      await page.getByRole("button", { name: "Apply" }).click();
+      await page.getByRole("button", { name: "Launch agent", exact: true }).click();
       await waitFor(
         () => core.state.creationPosts.length === 1,
         5_000,
@@ -469,11 +557,8 @@ test("dashboard agent creation browser states", { timeout: 300_000 }, async () =
     core.reset({ createDelayMs: 500 });
     await withSignedInPage(browser, dashboardPort, async (page) => {
       await page.goto(`http://127.0.0.1:${dashboardPort}/dashboard`);
-      await fillAgentNameAndContinue(page, "Double Submit Bot");
-      await page
-        .getByRole("textbox", { name: "Launch Code", exact: true })
-        .fill("fixture-launch-code");
-      await page.getByRole("button", { name: "Apply" }).dblclick();
+      await prepareAgentLaunch(page, "Double Submit Bot");
+      await page.getByRole("button", { name: "Launch agent", exact: true }).dblclick();
       await waitFor(() => core.state.creationPosts.length === 1);
       await new Promise((resolve) => setTimeout(resolve, 700));
       assert.equal(core.state.creationPosts.length, 1);
@@ -483,11 +568,8 @@ test("dashboard agent creation browser states", { timeout: 300_000 }, async () =
     hostedDevice.failNextBindingAuthorization();
     await withSignedInPage(browser, dashboardPort, async (page) => {
       await page.goto(`http://127.0.0.1:${dashboardPort}/dashboard`);
-      await fillAgentNameAndContinue(page, "Authorization Retry Bot");
-      await page
-        .getByRole("textbox", { name: "Launch Code", exact: true })
-        .fill("fixture-launch-code");
-      await page.getByRole("button", { name: "Apply" }).click();
+      await prepareAgentLaunch(page, "Authorization Retry Bot");
+      await page.getByRole("button", { name: "Launch agent", exact: true }).click();
       await page.waitForURL((url) => url.searchParams.has("agentCreationError"));
       assert.equal(
         new URL(page.url()).searchParams.get("agentCreationError"),
@@ -499,18 +581,15 @@ test("dashboard agent creation browser states", { timeout: 300_000 }, async () =
         ),
         "binding authorization failure did not preserve the signed draft cookie"
       );
-      const retryName = page.getByLabel("Agent name");
-      await retryName.waitFor({ state: "visible" }).catch(async (error) => {
+      const retryCode = page.getByLabel("Launch Code", { exact: true });
+      await retryCode.waitFor({ state: "visible" }).catch(async (error) => {
         throw new Error(
           `binding authorization retry form did not render: ${String(error)}\n${await pageText(page)}`
         );
       });
       await expectVisibleText(page, "binding authorization is temporarily unavailable");
-      await fillAgentNameAndContinue(page, "Authorization Retry Bot");
-      await page
-        .getByRole("textbox", { name: "Launch Code", exact: true })
-        .fill("fixture-launch-code");
-      await page.getByRole("button", { name: "Apply" }).click();
+      await prepareAgentLaunch(page, "Authorization Retry Bot");
+      await page.getByRole("button", { name: "Launch agent", exact: true }).click();
       await page.waitForURL(/\/dashboard\?new=1&creation=agent_request_1$/u);
 
       assert.equal(core.state.creationPosts.length, 2);
@@ -537,11 +616,8 @@ test("dashboard agent creation browser states", { timeout: 300_000 }, async () =
     });
     await withSignedInPage(browser, dashboardPort, async (page) => {
       await page.goto(`http://127.0.0.1:${dashboardPort}/dashboard?new=1`);
-      await fillAgentNameAndContinue(page, "Fresh Code Bot");
-      await page
-        .getByRole("textbox", { name: "Launch Code", exact: true })
-        .fill("fresh-top-up-code");
-      await page.getByRole("button", { name: "Apply" }).click();
+      await prepareAgentLaunch(page, "Fresh Code Bot", "fresh-top-up-code");
+      await page.getByRole("button", { name: "Launch agent", exact: true }).click();
       await expectVisibleText(page, "Choose payment or enter a Launch Code to continue.");
       await new Promise((resolve) => setTimeout(resolve, 750));
       assert.equal(
@@ -573,6 +649,20 @@ test("dashboard agent creation browser states", { timeout: 300_000 }, async () =
         page,
         "All runner hosts are busy. Your agent is still queued and will start automatically when capacity opens."
       );
+    });
+
+    core.reset({ requests: [agentCreationRequest({
+      id: "request_no_runtime", projectId: "project_no_runtime", status: "running",
+    })] });
+    await withSignedInPage(browser, dashboardPort, async (page) => {
+      await page.goto(`http://127.0.0.1:${dashboardPort}/dashboard`);
+      await page.waitForURL(/creation=request_no_runtime/u);
+      await expectVisibleText(page, "Preparing your workspace");
+      assert.equal(await page.getByRole("link", { name: "Continue to chat" }).count(), 0);
+      await onboardingScreenshots(page, "launch");
+      core.state.projects = [visibleProject("project_no_runtime", "Oslo Bot", hostedDevice.runtimeStatusUrl, "untracked-bot")];
+      await page.getByRole("heading", { name: "Oslo Bot is alive!", exact: true }).waitFor();
+      assert.equal(core.state.creationPosts.length, 0, "resuming progress must not create an agent");
     });
 
     core.reset({
@@ -620,11 +710,11 @@ test("dashboard agent creation browser states", { timeout: 300_000 }, async () =
       await waitFor(() =>
         core.state.cancelPosts.includes("agent_request_immersive_failed")
       );
-      await page.getByLabel("Agent name").waitFor({ state: "visible" });
-      await expectVisibleText(page, "Give your agent a name.");
+      await page.getByLabel("Launch Code", { exact: true }).waitFor({ state: "visible" });
+      await expectVisibleText(page, "Do you have a launch code?");
       await waitFor(async () =>
         (await page.locator('[aria-current="step"]').innerText()).trim() ===
-        "Profile: current"
+        "Launch code: current"
       );
     });
 
@@ -736,13 +826,12 @@ test("dashboard agent creation browser states", { timeout: 300_000 }, async () =
         async () => `agent navigation did not hydrate from Core\nURL: ${page.url()}\n${await pageText(page)}\n${dashboardOutput()}`
       );
       await productNav.getByRole("link", { name: "Connections", exact: true }).waitFor({ state: "visible" });
-      const brainItem = productNav
-        .getByText("Brain", { exact: true })
-        .locator("xpath=..");
-      await brainItem.waitFor({ state: "visible" });
-      assert.equal(await brainItem.getAttribute("aria-disabled"), "true");
-      assert.equal(await brainItem.getAttribute("href"), null);
-      assert.equal(await brainItem.getAttribute("title"), "Coming soon");
+      const brainLink = productNav.getByRole("link", { name: "Brain", exact: true });
+      await brainLink.waitFor({ state: "visible" });
+      assert.equal(
+        await brainLink.getAttribute("href"),
+        "/dashboard/machines/runtime_completed-oslo-bot/brain"
+      );
       const skillsLink = productNav.getByRole("link", { name: "Skills", exact: true });
       await skillsLink.waitFor({ state: "visible" });
       assert.equal(
@@ -795,7 +884,7 @@ test("dashboard agent creation browser states", { timeout: 300_000 }, async () =
       await page.waitForURL(
         /\/dashboard\?new=1&machine=runtime_second-oslo-bot$/u
       );
-      await page.getByLabel("Agent name").waitFor({ state: "visible" });
+      await page.getByLabel("Launch Code", { exact: true }).waitFor({ state: "visible" });
       const returnToExistingChat = page.getByRole("link", {
         name: "Return to Second Oslo Bot chat",
         exact: true,
@@ -826,12 +915,10 @@ test("dashboard agent creation browser states", { timeout: 300_000 }, async () =
       await page.waitForURL(
         /\/dashboard\?new=1&machine=runtime_second-oslo-bot$/u
       );
-      await page.getByLabel("Agent name").waitFor({ state: "visible" });
-      await fillAgentNameAndContinue(page, "Second Oslo Bot");
-      await page
-        .getByRole("textbox", { name: "Launch Code", exact: true })
-        .waitFor({ state: "visible" });
-      await page.getByRole("button", { name: "Apply", exact: true }).click();
+      await page.getByLabel("Launch Code", { exact: true }).waitFor({ state: "visible" });
+      core.state.creationError = "Launch Code is invalid or expired.";
+      await prepareAgentLaunch(page, "Second Oslo Bot", "invalid-code");
+      await page.getByRole("button", { name: "Launch agent", exact: true }).click();
       await page.waitForURL((url) => {
         const params = url.searchParams;
         return (
@@ -842,8 +929,8 @@ test("dashboard agent creation browser states", { timeout: 300_000 }, async () =
         );
       });
       await page
-        .getByRole("paragraph")
-        .filter({ hasText: /^Enter your Launch Code\.$/u })
+        .getByRole("alert")
+        .filter({ hasText: /^Launch Code is invalid or expired\.$/u })
         .waitFor({ state: "visible" });
       assert.equal(
         await page
@@ -857,18 +944,19 @@ test("dashboard agent creation browser states", { timeout: 300_000 }, async () =
       );
 
       await page.goto(
-        `http://127.0.0.1:${dashboardPort}/dashboard?new=1&creation=agent_request_second`
+        `http://127.0.0.1:${dashboardPort}/dashboard?creation=agent_request_second`
       );
       await page
-        .getByRole("heading", { name: "Second Oslo Bot is online." })
+        .getByRole("heading", { name: "Second Oslo Bot is alive!" })
         .waitFor({ state: "visible" });
       assert.match(
         page.url(),
-        /\/dashboard\?new=1&creation=agent_request_second$/u,
+        /\/dashboard\?creation=agent_request_second$/u,
         "a ready agent should pause on the Ready interstitial"
       );
       await page.locator(".status-prism-scene--happy").waitFor({ state: "visible" });
-      const meetAgent = page.getByRole("link", { name: "Meet Second Oslo Bot" });
+      await onboardingScreenshots(page, "ready");
+      const meetAgent = page.getByRole("link", { name: "Continue to chat" });
       assert.equal(
         await meetAgent.getAttribute("href"),
         "/dashboard/machines/runtime_second-oslo-bot/chat"
@@ -897,6 +985,7 @@ test("dashboard agent creation browser states", { timeout: 300_000 }, async () =
       const openWebChat = main.getByRole("link", { name: "Open chat" });
       await openWebChat.waitFor({ state: "visible" });
 
+      const creationPostCountBeforeChat = core.state.creationPosts.length;
       const bindingAuthorizationCount =
         hostedDevice.state.bindingAuthorizations.length;
       core.state.runtimeRouteProjectIdOverride = "project_second";
@@ -911,7 +1000,7 @@ test("dashboard agent creation browser states", { timeout: 300_000 }, async () =
         bindingAuthorizationCount,
         "ordinary chat load granted binding bootstrap authority"
       );
-      assert.equal(core.state.creationPosts.length, 0, "chat recovery created another Project");
+      assert.equal(core.state.creationPosts.length, creationPostCountBeforeChat, "chat recovery created another Project");
       const recoveryMeGets = core.state.meGets;
       const recoveryRuntimeRouteGets = core.state.runtimeRouteGets;
       await page
@@ -1035,13 +1124,14 @@ test("dashboard agent creation browser states", { timeout: 300_000 }, async () =
       const completedProductNav = page.getByRole("navigation", {
         name: "Agent navigation",
       });
-      const completedBrainItem = completedProductNav
-        .getByText("Brain", { exact: true })
-        .locator("xpath=..");
-      await completedBrainItem.waitFor({ state: "visible" });
-      assert.equal(await completedBrainItem.getAttribute("aria-disabled"), "true");
-      assert.equal(await completedBrainItem.getAttribute("href"), null);
-      assert.equal(await completedBrainItem.getAttribute("title"), "Coming soon");
+      const completedBrainLink = completedProductNav.getByRole("link", {
+        name: "Brain", exact: true,
+      });
+      await completedBrainLink.waitFor({ state: "visible" });
+      assert.equal(
+        await completedBrainLink.getAttribute("href"),
+        "/dashboard/machines/runtime_completed-oslo-bot/brain"
+      );
       await page.goto(
         `http://127.0.0.1:${dashboardPort}/dashboard/machines/completed-oslo-bot/chat`
       );
@@ -1111,6 +1201,7 @@ test("dashboard agent creation browser states", { timeout: 300_000 }, async () =
       const renameDialog = page.getByRole("dialog", { name: "Rename chat" });
       await renameDialog.getByRole("textbox", { name: "Name" }).fill("Browser QA");
       await renameDialog.getByRole("button", { name: "Save" }).click();
+      await renameDialog.waitFor({ state: "hidden" });
       await waitFor(() =>
         hostedDevice.state.actions.some(
           (action) => actionName(action) === "RenameChat"
@@ -1617,6 +1708,16 @@ test("dashboard agent creation browser states", { timeout: 300_000 }, async () =
       // share the ordered navigation lane with a subsequent chat click.
       const topicTitle = "Launch planning";
       const topicActionsBefore = hostedDevice.state.actions.length;
+      const topicNavigationActions = () => hostedDevice.state.actions
+        .slice(topicActionsBefore)
+        .filter((action) => ["CreateTopic", "OpenChat"].includes(actionName(action)));
+      // Typing is independent of the ordered navigation lane. Include it
+      // explicitly so this proof cannot rely on incidental request order.
+      const typing = await page.request.post(
+        new URL("/api/chat/machines/completed-oslo-bot/hosted-device/actions", page.url()).href,
+        { data: { SetTyping: { room_id: "room_browser_agent", is_typing: false } } }
+      );
+      assert(typing.ok());
       const completedTopicMutations = hostedDevice.state.completedSelectionMutations;
       hostedDevice.holdNextNavigationAction();
       await page.getByRole("button", { name: "New topic", exact: true }).click();
@@ -1628,12 +1729,12 @@ test("dashboard agent creation browser states", { timeout: 300_000 }, async () =
         5_000,
         () => "CreateTopic did not enter the ordered navigation lane"
       );
-      assert.deepEqual(hostedDevice.state.actions[topicActionsBefore], {
+      assert.deepEqual(topicNavigationActions(), [{
         CreateTopic: {
           room_id: "room_browser_agent",
           title: topicTitle,
         },
-      });
+      }]);
 
       // The modal intentionally blocks a second human click. Trigger the
       // underlying existing-chat handler directly to prove the provider still
@@ -1645,12 +1746,12 @@ test("dashboard agent creation browser states", { timeout: 300_000 }, async () =
         .first()
         .evaluate((element) => (element as HTMLButtonElement).click());
       await waitFor(
-        () => hostedDevice.state.actions.length > topicActionsBefore + 1,
+        () => topicNavigationActions().length > 1,
         750
       ).catch(() => undefined);
       assert.equal(
-        hostedDevice.state.actions.length,
-        topicActionsBefore + 1,
+        topicNavigationActions().length,
+        1,
         "a later OpenChat reached the daemon before CreateTopic completed"
       );
       hostedDevice.releaseNavigationAction();
@@ -1703,11 +1804,11 @@ test("dashboard agent creation browser states", { timeout: 300_000 }, async () =
       // Hold a selection-only OpenChat while a newer stream revision lands.
       // Starting outside chat also proves route navigation does not wait for
       // the high-latency mutation response. The clicked selection is pinned
-      // client-side immediately, so the pane switches at once, the stale
-      // stream snapshot applies its content without yanking the selection
-      // back, and the equal-revision response still triggers reconciliation.
+      // client-side immediately, so the pane switches at once. The scoped
+      // stream and HTTP read must return that transcript even before the
+      // shared Device cursor catches up.
       const stateFetchesBeforeSelectionRace = hostedDevice.state.authRequests.filter(
-        (request) => request.path === "/v1/app/agent-bindings/open"
+        (request) => request.path === "/v1/app/state"
       ).length;
       await page
         .getByRole("navigation", { name: "Agent navigation" })
@@ -1737,9 +1838,8 @@ test("dashboard agent creation browser states", { timeout: 300_000 }, async () =
         chat_id: "chat_browser_agent",
       });
       hostedDevice.emit();
-      // The stream snapshot still carries the previous selection while the
-      // OpenChat is held; its message is only visible if the browser-owned Browser QA
-      // pane stayed put instead of fighting back to Remembered work.
+      // While OpenChat is held, the stream must already serve Browser QA's
+      // transcript instead of the shared cursor's Remembered work transcript.
       await expectVisibleText(page, "Concurrent stream update.");
       hostedDevice.releaseNavigationAction();
       await waitFor(
@@ -1752,10 +1852,10 @@ test("dashboard agent creation browser states", { timeout: 300_000 }, async () =
       await waitFor(
         () =>
           hostedDevice.state.authRequests.filter(
-            (request) => request.path === "/v1/app/agent-bindings/open"
+            (request) => request.path === "/v1/app/state"
           ).length > stateFetchesBeforeSelectionRace,
         5_000,
-        () => "a rejected selection response did not trigger state reconciliation"
+        () => "navigation did not refresh its scoped transcript"
       );
       await page
         .locator(".finite-chat__topbar")
@@ -1770,12 +1870,8 @@ test("dashboard agent creation browser states", { timeout: 300_000 }, async () =
       hostedDevice.emit();
       await expectVisibleText(page, "Selection settled checkpoint.");
 
-      // Cross-device tripwire: with no click in flight, a snapshot whose
-      // daemon selection diverges from this browser's (for example, a scoped
-      // send in a concurrently active Chat on another device) may update
-      // background state but must NOT move the visible pane. Selection is
-      // device-scoped; only an explicit local click, a vanished local
-      // selection, or first load may move the foreground.
+      // Another tab's selection must not move this tab or erase its history.
+      // Check actual foreground content as well as the selected heading.
       hostedDevice.state.app.selected_chat_id = "chat_browser_remembered";
       hostedDevice.state.app.topics[0]!.active_chat_id = "chat_browser_remembered";
       hostedDevice.state.app.messages.push({
@@ -1797,6 +1893,7 @@ test("dashboard agent creation browser states", { timeout: 300_000 }, async () =
         false,
         "a divergent daemon selection moved the visible Chat without a local click"
       );
+      await expectVisibleText(page, "Selection settled checkpoint.");
 
       const completedBeforeBackgroundChatNavigation =
         hostedDevice.state.completedSelectionMutations;
@@ -2165,7 +2262,7 @@ async function startFakeHostedDevice() {
       },
     },
   };
-  const streams = new Set<ServerResponse>();
+  const streams = new Map<ServerResponse, URLSearchParams>();
   const server = http.createServer(async (request, response) => {
     try {
       await handleHostedDeviceRequest(request, response, state, streams);
@@ -2215,14 +2312,14 @@ async function startFakeHostedDevice() {
     setAvailable(available: boolean) {
       state.unavailable = !available;
       if (!available) {
-        for (const stream of streams) stream.end();
+        for (const stream of streams.keys()) stream.end();
         streams.clear();
       }
     },
     setUpdatesAvailable(available: boolean) {
       state.updatesUnavailable = !available;
       if (!available) {
-        for (const stream of streams) stream.end();
+        for (const stream of streams.keys()) stream.end();
         streams.clear();
       }
     },
@@ -2234,7 +2331,7 @@ async function startFakeHostedDevice() {
       state.bindingAuthorizationFailuresRemaining += 1;
     },
     close() {
-      for (const stream of streams) {
+      for (const stream of streams.keys()) {
         stream.end();
       }
       server.close();
@@ -2246,9 +2343,11 @@ async function handleHostedDeviceRequest(
   request: IncomingMessage,
   response: ServerResponse,
   state: HostedDeviceState,
-  streams: Set<ServerResponse>
+  streams: Map<ServerResponse, URLSearchParams>
 ) {
-  const path = request.url ?? "/";
+  const url = new URL(request.url ?? "/", "http://fixture");
+  const path = url.pathname;
+  const view = url.searchParams;
   if (request.method === "GET" && path === "/generated-image.png") {
     state.directImageGets += 1;
     response.writeHead(200, {
@@ -2329,7 +2428,7 @@ async function handleHostedDeviceRequest(
       return;
     }
     state.app.hosted_agent_binding = binding;
-    writeJson(response, 200, state.app);
+    writeJson(response, 200, hostedView(state.app, view));
     return;
   }
 
@@ -2386,7 +2485,7 @@ async function handleHostedDeviceRequest(
       state.agentBindings.set(projectId, binding);
     }
     state.app.hosted_agent_binding = binding;
-    writeJson(response, 200, state.app);
+    writeJson(response, 200, hostedView(state.app, view));
     return;
   }
 
@@ -2397,7 +2496,7 @@ async function handleHostedDeviceRequest(
     );
     state.app.rev += 1;
     emitHostedState(streams, state.app);
-    writeJson(response, 200, state.app);
+    writeJson(response, 200, hostedView(state.app, view));
     return;
   }
 
@@ -2422,12 +2521,12 @@ async function handleHostedDeviceRequest(
     });
     state.completedSelectionMutations += 1;
     emitHostedState(streams, state.app);
-    writeJson(response, 200, state.app);
+    writeJson(response, 200, hostedView(state.app, view));
     return;
   }
 
   if (request.method === "GET" && path === "/v1/app/state") {
-    writeJson(response, 200, state.app);
+    writeJson(response, 200, hostedView(state.app, view));
     return;
   }
 
@@ -2447,7 +2546,7 @@ async function handleHostedDeviceRequest(
     if (!["OpenChat", "OpenTopic"].includes(actionName(action))) {
       emitHostedState(streams, state.app);
     }
-    writeJson(response, 200, state.app);
+    writeJson(response, 200, hostedView(state.app, view));
     return;
   }
 
@@ -2461,9 +2560,9 @@ async function handleHostedDeviceRequest(
       connection: "keep-alive",
       "content-type": "text/event-stream",
     });
-    streams.add(response);
+    streams.set(response, view);
     response.on("close", () => streams.delete(response));
-    writeHostedState(response, state.app);
+    writeHostedState(response, state.app, view);
     return;
   }
 
@@ -2839,16 +2938,29 @@ function hostedPlayableMessage(
 }
 
 function emitHostedState(
-  streams: Set<ServerResponse>,
+  streams: Map<ServerResponse, URLSearchParams>,
   state: FakeHostedChatState
 ) {
-  for (const stream of streams) {
-    writeHostedState(stream, state);
+  for (const [stream, view] of streams) {
+    writeHostedState(stream, state, view);
   }
 }
 
-function writeHostedState(response: ServerResponse, state: FakeHostedChatState) {
-  response.write(`id: ${state.rev}\nevent: state\ndata: ${JSON.stringify(state)}\n\n`);
+function hostedView(state: FakeHostedChatState, view: URLSearchParams) {
+  const room = view.get("room_id") ?? state.selected_room_id;
+  const topicId = view.get("topic_id") ?? state.selected_topic_id;
+  const topic = state.topics.find(topic => topic.room_id === room && topic.topic_id === topicId);
+  const chat = view.get("chat_id") ?? (view.has("room_id") ? topic?.active_chat_id ?? null : state.selected_chat_id);
+  const messages = state.messages.filter(message => message.room_id === room && message.conversation_id === topicId && message.chat_id === chat);
+  const anchorIndex = messages.findIndex(message => message.message_id === view.get("oldest_message_id"));
+  const limit = Math.max(Number(view.get("limit") ?? 50), anchorIndex < 0 ? 0 : messages.length - anchorIndex);
+  return { ...state, selected_room_id: room, selected_topic_id: topicId, selected_chat_id: chat,
+    messages: messages.slice(-limit),
+  };
+}
+
+function writeHostedState(response: ServerResponse, state: FakeHostedChatState, view: URLSearchParams) {
+  response.write(`id: ${state.rev}\nevent: state\ndata: ${JSON.stringify(hostedView(state, view))}\n\n`);
 }
 
 function actionName(action: Record<string, unknown>) {
@@ -2904,6 +3016,10 @@ async function handleCoreRequest(
 
   if (request.method === "GET" && request.url === "/api/core/v1/me") {
     state.meGets += 1;
+    if (state.meError) {
+      writeJson(response, 503, { error: "Core account is unavailable for browser proof." });
+      return;
+    }
     writeJson(response, 200, {
       email: "browser@finite.vip",
       workos_user_id: "user_browser",
@@ -2942,12 +3058,16 @@ async function handleCoreRequest(
   }
 
   if (request.method === "GET" && request.url === "/api/core/v1/me/billing") {
+    if (state.billingError) {
+      writeJson(response, 503, { error: "Billing is temporarily unavailable for browser proof." });
+      return;
+    }
     writeJson(response, 200, {
       customer_org: {
         id: "org_browser",
         owner_user_id: "user_browser",
         name: "Browser Test",
-        billing_class: "sponsored",
+        billing_class: state.billingClass,
         created_at: "2026-05-28T12:00:00Z",
         updated_at: "2026-05-28T12:01:00Z",
       },
@@ -3118,6 +3238,7 @@ function emptyCoreState(): CoreState {
     creationPosts: [],
     creationResults: new Map(),
     meGets: 0,
+    meError: false,
     runtimeRouteGets: 0,
     runtimeRouteProjectIdOverride: null,
     cancelPosts: [],
@@ -3127,6 +3248,8 @@ function emptyCoreState(): CoreState {
     createDelayMs: 0,
     canCreateAgent: false,
     requiresBilling: true,
+    billingClass: "sponsored",
+    billingError: false,
     creationError: null,
   };
 }
@@ -3237,49 +3360,32 @@ async function expectVisibleText(page: Page, text: string) {
     .waitFor({ state: "visible", timeout: 15_000 });
 }
 
-async function fillAgentNameAndContinue(page: Page, displayName: string) {
-  await fillAgentNameUntilContinueEnabled(page, displayName);
-  await clickAgentCreationContinue(page);
+async function onboardingScreenshots(page: Page, stage: string) {
+  const directory = process.env.ONBOARDING_SCREENSHOT_DIR;
+  if (!directory) return;
+  await mkdir(directory, { recursive: true });
+  const original = page.viewportSize();
+  for (const width of [1280, 390]) {
+    await page.setViewportSize({ width, height: 900 });
+    await page.screenshot({ path: `${directory}/${stage}-${width}.png`, fullPage: true });
+    assert(await page.evaluate(() => {
+      const main = document.querySelector("main");
+      const heading = main?.querySelector("h1")?.getBoundingClientRect();
+      return Boolean(main && main.scrollWidth <= main.clientWidth && heading &&
+        heading.left >= 0 && heading.right <= window.innerWidth);
+    }), `${stage} is clipped or overflows horizontally at ${width}px`);
+  }
+  if (original) await page.setViewportSize(original);
 }
 
-async function fillAgentNameUntilContinueEnabled(page: Page, displayName: string) {
-  const agentName = page.getByLabel("Agent name");
-  const continueButton = agentCreationContinueButton(page);
-  await agentName.waitFor({ state: "visible", timeout: 15_000 }).catch(async (error) => {
-    throw new Error(
-      `Agent creation form did not render: ${String(error)}\n${await pageText(page)}`
-    );
-  });
-  await waitFor(
-    async () => {
-      await agentName.fill(displayName);
-      await page.waitForTimeout(100);
-      return (
-        (await agentName.inputValue().catch(() => "")) === displayName
-        && await continueButton.isEnabled().catch(() => false)
-      );
-    },
-    15_000,
-    async () => {
-      const value = await agentName.inputValue().catch((error) => `unavailable: ${String(error)}`);
-      const disabled = await continueButton.getAttribute("disabled").catch(() => null);
-      return `Agent name did not enable Continue.\nvalue: ${JSON.stringify(value)}\ndisabled: ${String(disabled)}\n${await pageText(page)}`;
-    }
-  );
-}
-
-async function clickAgentCreationContinue(page: Page) {
-  const continueButton = agentCreationContinueButton(page);
-  await waitFor(
-    async () => continueButton.isEnabled().catch(() => false),
-    5_000,
-    async () => `Continue never became clickable.\n${await pageText(page)}`
-  );
-  await continueButton.click();
-}
-
-function agentCreationContinueButton(page: Page) {
-  return page.getByRole("button", { name: "Continue", exact: true });
+async function prepareAgentLaunch(page: Page, displayName: string, code = "fixture-launch-code") {
+  const codeInput = page.getByLabel("Launch Code", { exact: true });
+  await codeInput.waitFor({ state: "visible", timeout: 15_000 });
+  await codeInput.fill(code);
+  await page.getByRole("button", { name: "Continue with code", exact: true }).click();
+  await page.getByRole("button", { name: "Continue", exact: true }).click();
+  await page.getByLabel("Agent name").fill(displayName);
+  await waitFor(async () => page.getByRole("button", { name: "Launch agent", exact: true }).isEnabled());
 }
 
 async function waitFor(

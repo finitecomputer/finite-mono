@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { parseHostedHermesStatus } from "./hosted-hermes-status";
+import { HostedHermesStatusError, parseHostedHermesStatus } from "./hosted-hermes-status";
 
 test("native status selects version and gateway state without treating a stopped gateway as unreachable", () => {
   assert.deepEqual(parseHostedHermesStatus({
@@ -73,4 +73,16 @@ test("read rejects arbitrary URLs and oversized native responses", async (t)=>{
   for(const path of ["https://other.test/api/auth/me","//other.test/","api/../auth/me","api/auth/me?x=1","api/skills?inventory=true&profile=other","api/skills?inventory=false"]) await assert.rejects(readHostedHermesJson("a",path,new AbortController().signal),/Invalid agent API path/);
   assert.equal(calls,0);
   await assert.rejects(readHostedHermesJson("a","api/auth/me",new AbortController().signal),/too large/);
+});
+
+
+test("malformed, empty and oversized native bodies invalidate prior inventory", async (t) => {
+  let body: string | null = null;
+  t.mock.method(globalThis, "fetch", async (input: string | URL) => String(input).startsWith("/api/agents/")
+    ? Response.json({ baseUrl: "https://agents.test/a/", accessToken: "synthetic", expiresAt: 100 })
+    : new Response(body));
+  for (body of [null, "", "not JSON", "x".repeat(1024 * 1024 + 1)]) {
+    await assert.rejects(readHostedHermesJson("a", "api/plugins/finite-brain/overview", new AbortController().signal),
+      error => error instanceof HostedHermesStatusError && error.kind === "unsupported");
+  }
 });

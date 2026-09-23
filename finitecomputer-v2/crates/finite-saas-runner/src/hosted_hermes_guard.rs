@@ -24,6 +24,22 @@ pub(crate) struct HostedHermesGuard {
 }
 
 impl HostedHermesGuard {
+    /// Synthetic process state for unit tests. Real systemd acquisition and
+    /// process lifetime remain covered by the disposable Linux proof.
+    #[cfg(test)]
+    pub(crate) fn for_failed_mutation_test(root: &Path) -> Self {
+        let cgroup = root.join("cgroup");
+        std::fs::create_dir_all(&cgroup).unwrap();
+        std::fs::write(cgroup.join("cgroup.procs"), std::process::id().to_string()).unwrap();
+        Self {
+            _lock: File::create(root.join("host.lock")).unwrap(),
+            root: root.into(),
+            cgroup,
+            invocation: "test-invocation".into(),
+            proxy_unit: "unused-test-proxy.service".into(),
+        }
+    }
+
     pub(crate) fn acquire(root: &Path, runner_unit: &str, proxy_unit: &str) -> Result<Self> {
         if !cfg!(target_os = "linux") || !root.is_absolute() {
             return Err(refused(

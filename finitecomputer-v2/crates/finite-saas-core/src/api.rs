@@ -24,10 +24,11 @@ use crate::{
     LinkStripeCustomerRequest, LinkVerifiedUserInput, Project, ProviderOperationEnvelope,
     ProviderOperationTransition, ProviderRuntimeHandleEnvelope,
     ProvisionFinitePrivateRuntimeKeyInput, ProvisionFinitePrivateRuntimeKeyResult,
-    RecordProviderOperationTransitionInput, RecordRuntimeHealthReportInput,
-    RegisterAgentCreationRuntimeInput, RenewRuntimeControlRequestInput, RequestAgentCreationInput,
-    RequestAgentCreationResult, RequestRuntimeRecoverKnownGoodChatInput,
-    RequestRuntimeRestartInput, ReserveFinitePrivateUsageInput, ResetFinitePrivateUsageWindowInput,
+    RecordFinitePrivateRequestDiagnosticInput, RecordProviderOperationTransitionInput,
+    RecordRuntimeHealthReportInput, RegisterAgentCreationRuntimeInput,
+    RenewRuntimeControlRequestInput, RequestAgentCreationInput, RequestAgentCreationResult,
+    RequestRuntimeRecoverKnownGoodChatInput, RequestRuntimeRestartInput,
+    ReserveFinitePrivateUsageInput, ResetFinitePrivateUsageWindowInput,
     RetryRuntimeControlRequestInput, RevokeFinitePrivateApiKeyInput, RevokeFinitePrivateGrantInput,
     RotateFinitePrivateApiKeyInput, RunnerLeaseCapacity, RuntimeArtifact, RuntimeArtifactKind,
     RuntimeCapabilitiesEnvelope, RuntimeCapabilitiesV1, RuntimeHealthProjection,
@@ -291,6 +292,10 @@ fn router_from_state(state: CoreApiState) -> Router {
         .route(
             "/internal/finite-private/v1/reservations/{reservation_id}/settle",
             post(settle_finite_private_reservation),
+        )
+        .route(
+            "/internal/finite-private/v1/request-diagnostics",
+            post(record_finite_private_request_diagnostic),
         )
         .route("/api/core/v1/admin/runtimes", get(admin_runtimes))
         .route(

@@ -52,6 +52,30 @@ impl std::fmt::Debug for HostedHermesLifecycle {
 }
 
 impl HostedHermesLifecycle {
+    /// Exercises failed mutations and their fence without a systemd host.
+    /// Successful publication is covered by the disposable Linux proof.
+    #[cfg(test)]
+    pub(crate) fn for_failed_mutation_test(
+        nerdctl: PathBuf,
+        namespace: String,
+        root: &Path,
+    ) -> Self {
+        Self {
+            config: HostedHermesConfig {
+                public_origin: "https://unused.invalid".into(),
+                listen: "127.0.0.1:0".parse().unwrap(),
+                allowed_origins: vec![],
+            },
+            guard: Mutex::new(HostedHermesGuard::for_failed_mutation_test(root)),
+            nerdctl,
+            namespace,
+            source_host: "finite-lat-1".into(),
+            work_root: root.into(),
+            core: CoreHttpAgentCreationQueue::new("http://127.0.0.1:0", "unused-test-token")
+                .unwrap(),
+        }
+    }
+
     pub fn new(
         config: HostedHermesConfig,
         nerdctl: PathBuf,

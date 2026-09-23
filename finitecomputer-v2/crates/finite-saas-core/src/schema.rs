@@ -61,7 +61,9 @@ pub const CORE_SCHEMA_SQL: &str = concat!(
     "\n",
     include_str!("../migrations/0030_runtime_hosted_hermes.sql"),
     "\n",
-    include_str!("../migrations/0031_runtime_artifact_canary.sql")
+    include_str!("../migrations/0031_runtime_artifact_canary.sql"),
+    "\n",
+    include_str!("../migrations/0032_finite_private_request_diagnostics.sql")
 );
 
 pub const RUNTIME_UPGRADE_ROLLBACK_RESCUE_SQL: &str =

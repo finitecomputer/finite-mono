@@ -266,6 +266,24 @@ pub(crate) fn signed_json_request(
     signed_json_request_to_server(env, &server_url, method, path, body)
 }
 
+/// Fixed read path for dashboard inventories; no first-use identity minting.
+pub(crate) fn signed_json_read_existing_identity(
+    env: &CliEnvironment,
+    args: &[String],
+    path: &str,
+) -> Result<serde_json::Value, CliError> {
+    let server_url = server_url_for_command(env, args)?;
+    signed_json_request_with_signer(
+        env,
+        &server_url,
+        "GET",
+        path,
+        None,
+        DEFAULT_JSON_RESPONSE_LIMIT_BYTES,
+        crate::signer::load_existing_signer,
+    )
+}
+
 pub(crate) fn signed_json_request_with_response_limit(
     env: &CliEnvironment,
     args: &[String],
@@ -310,11 +328,31 @@ pub(crate) fn signed_json_request_to_server_with_response_limit(
     body: Option<serde_json::Value>,
     response_limit_bytes: usize,
 ) -> Result<serde_json::Value, CliError> {
+    signed_json_request_with_signer(
+        env,
+        server_url,
+        method,
+        path,
+        body,
+        response_limit_bytes,
+        load_signer,
+    )
+}
+
+fn signed_json_request_with_signer(
+    env: &CliEnvironment,
+    server_url: &str,
+    method: &str,
+    path: &str,
+    body: Option<serde_json::Value>,
+    response_limit_bytes: usize,
+    signer_loader: fn(&CliEnvironment) -> Result<crate::signer::LocalSigner, CliError>,
+) -> Result<serde_json::Value, CliError> {
     let body = body.map(|body| serde_json::to_vec(&body)).transpose()?;
     let transport_url = absolute_server_url(server_url, path);
     let authorization_url = authorization_url_for_request(env, server_url, path);
     validate_http_url(&authorization_url)?;
-    let signer = load_signer(env)?;
+    let signer = signer_loader(env)?;
     let authorization =
         signed_http_auth_header(&signer.keys, method, &authorization_url, body.as_deref())?;
     let response = http_request_with_response_limit(

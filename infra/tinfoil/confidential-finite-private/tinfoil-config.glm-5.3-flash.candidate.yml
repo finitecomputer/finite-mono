@@ -71,7 +71,7 @@ containers:
       start_period: 45m
 
   - name: "finite-private-limiter"
-    image: "ghcr.io/finitecomputer/private-limiter:2026-08-28.6@sha256:4746398277eeb7eb96994c40affff34cd070721dd7753596bf7571604c823461"
+    image: "ghcr.io/finitecomputer/private-limiter@sha256:a0138304201310299b948827ac21ce1d5ada124330624e405f897e98a60f5f5e"
     restart: always
     env:
       - LISTEN_ADDR: "0.0.0.0:8002"
@@ -93,6 +93,7 @@ containers:
       - UPSTREAM_BODY_TIMEOUT_SECS: "600"
       - UPSTREAM_STREAM_IDLE_TIMEOUT_SECS: "600"
     secrets:
+      - FINITE_PRIVATE_METRICS_TOKEN
       - FINITE_USAGE_API_SERVICE_KEY
       - VLLM_INTERNAL_API_KEY
     networks: [model-net, core-api]

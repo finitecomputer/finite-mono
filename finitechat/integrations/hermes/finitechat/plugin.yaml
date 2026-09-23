@@ -6,7 +6,8 @@ description: >
   Chat rooms through the resident finitechat service. A user Device starts a
   chat with the Agent Principal using KeyPackage/Add/Welcome admission; the
   agent does not create an invite session or choose a room at startup. All
-  message senders are MLS-authenticated.
+  message senders are MLS-authenticated. Managed SimpleX connections also
+  support agent-created owner-only topic groups through the pinned adapter.
 author: finitecomputer
 provides_hooks:
   - pre_tool_call

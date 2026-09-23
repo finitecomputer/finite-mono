@@ -159,6 +159,20 @@ pub struct FinitePrivateReservation {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct RecordFinitePrivateRequestDiagnosticInput {
+    pub reservation_id: String,
+    pub request_id: String,
+    pub prompt_tokens: Option<i64>,
+    pub completion_tokens: Option<i64>,
+    pub first_output_ms: Option<i64>,
+    pub first_answer_ms: Option<i64>,
+    pub duration_ms: Option<i64>,
+    pub termination_reason: String,
+    pub measurement_quality: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct FinitePrivateUsageDecision {
     pub decision: String,
     pub reservation_id: Option<String>,

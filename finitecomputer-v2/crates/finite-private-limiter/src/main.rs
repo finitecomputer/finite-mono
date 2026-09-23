@@ -52,6 +52,7 @@ fn config_from_env() -> Result<LimiterConfig> {
         ),
     };
     config.admission_allowlist = comma_list_env("FINITE_ADMISSION_ALLOWLIST")?;
+    config.metrics_auth_token = optional_nonempty_env("FINITE_PRIVATE_METRICS_TOKEN")?;
     config.default_reasoning_effort = optional_reasoning_effort_env()?;
     config.default_enable_thinking = optional_bool_env("FINITE_PRIVATE_DEFAULT_ENABLE_THINKING")?;
     config.readiness_timeout = duration_env("READINESS_TIMEOUT_SECS", config.readiness_timeout)?;

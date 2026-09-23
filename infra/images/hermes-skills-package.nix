@@ -25,6 +25,7 @@ upstream.override {
             chmod -R u+w "$site/hermes_cli"
             ${pkgs.patch}/bin/patch --fuzz=0 -d "$site" -p1 < ${./patches/hermes-skills-inventory.patch}
             rm -f "$site/hermes_cli/web_routers/__pycache__/skills."*.pyc
+            cp ${../../finite-agentd/integrations/hermes/finite_dashboard_reads.py} "$site/hermes_cli/finite_dashboard_reads.py"
           '';
         });
       }

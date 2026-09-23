@@ -949,6 +949,10 @@ project_id="$2"
 runtime_id="$3"
 machine_id="$4"
 set -a
+# Match the runner service's defaults-then-operator EnvironmentFile order.
+if [[ -r /etc/finite/runner-shared.env ]]; then
+  . /etc/finite/runner-shared.env
+fi
 . /etc/finite/runner.env
 set +a
 # The runner package is not in systemPackages on every host; resolve the
