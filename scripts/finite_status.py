@@ -9,6 +9,7 @@ import csv
 import glob
 import hashlib
 import io
+import ipaddress
 import json
 import math
 import os
@@ -2853,6 +2854,226 @@ def collect_live() -> tuple[dict[str, Any], datetime]:
     return raw, now
 
 
+def runtime_port_rules(raw: str, port: int) -> list[str]:
+    """Retain ordered hostport rules and their reachable DNAT chains only."""
+    rules = []
+    for line in raw.splitlines():
+        if line.startswith("-A "):
+            tokens = shlex.split(line)
+            rules.append((line, tokens))
+    roots = [
+        (line, tokens)
+        for line, tokens in rules
+        if any(
+            flag in tokens and str(port) in tokens[tokens.index(flag) + 1].split(",")
+            for flag in ("--dport", "--dports")
+        )
+    ]
+    chains = {tokens[tokens.index("-j") + 1] for _, tokens in roots if "-j" in tokens}
+    for _ in range(8):
+        expanded = chains | {
+            tokens[tokens.index("-j") + 1]
+            for _, tokens in rules
+            if tokens[1] in chains and "-j" in tokens
+        }
+        if expanded == chains:
+            break
+        chains = expanded
+    return [
+        line for line, tokens in rules if (line, tokens) in roots or tokens[1] in chains
+    ]
+
+
+def collect_runtime_route(machine: str, expected: str | None) -> dict[str, Any]:
+    """Compare one owned Kata guest's direct and published contact routes.
+
+    No credentials, identity files, or full inspect environment enter the report.
+    A responding published port alone does not establish its Runtime identity.
+    """
+    template = (
+        '{"name":{{json .Name}},"labels":{{json .Config.Labels}},"state":{{json .State.Status}},'
+        '"ports":{{json .NetworkSettings.Ports}},'
+        '"networks":{{json .NetworkSettings.Networks}}}'
+    )
+    result = run_read_only(
+        ["nerdctl", "--namespace", "finite", "inspect", "--format", template, machine]
+    )
+    if result.returncode:
+        raise CollectionError("cannot inspect the exact runtime route target")
+    try:
+        inspected = json.loads(result.stdout)
+        labels = inspected["labels"]
+        if (
+            labels.get("computer.finite.v2.runtime") != "true"
+            or labels.get("computer.finite.v2.source_machine_id") != machine
+            or inspected["state"] != "running"
+        ):
+            raise ValueError("target is not the owned running canonical Runtime")
+        ports = inspected["ports"]["8080/tcp"]
+        host_ports = {int(entry["HostPort"]) for entry in ports}
+        if len(host_ports) != 1 or not all(0 < port < 65536 for port in host_ports):
+            raise ValueError("ambiguous runtime service port")
+        guest_ips = {
+            str(ipaddress.ip_address(entry["IPAddress"]))
+            for entry in inspected["networks"].values()
+            if entry.get("IPAddress")
+        }
+        if len(guest_ips) != 1:
+            raise ValueError("ambiguous guest network address")
+    except (KeyError, TypeError, ValueError) as error:
+        raise CollectionError(f"runtime route inspection rejected: {error}") from error
+    bind_host = "127.0.0.1"
+    for path in ("/etc/finite/runner-shared.env", "/etc/finite/runner.env"):
+        values = read_environment_values(Path(path), {"FC_RUNNER_KATA_HOST_ADDRESS"})
+        bind_host = values.get("FC_RUNNER_KATA_HOST_ADDRESS") or bind_host
+    try:
+        bind_host = str(ipaddress.ip_address(bind_host))
+    except ValueError as error:
+        raise CollectionError("runner bind address is not an IP address") from error
+
+    def contact(address: str, port: int) -> dict[str, Any]:
+        host = f"[{address}]" if ":" in address else address
+        url = f"http://{host}:{port}/contact"
+        result = run_read_only(
+            [
+                "curl",
+                "--noproxy",
+                "*",
+                "--max-time",
+                "5",
+                "--max-filesize",
+                "65536",
+                "--fail",
+                "--silent",
+                url,
+            ],
+            timeout=10,
+        )
+        try:
+            value = json.loads(result.stdout) if result.returncode == 0 else {}
+            principal = value.get("agent_npub", "")
+            if not isinstance(principal, str) or not re.fullmatch(
+                r"npub1[023456789acdefghjklmnpqrstuvwxyz]{58}", principal
+            ):
+                raise ValueError("missing valid Agent Principal")
+            return {
+                "url": url,
+                "status": "observed",
+                "agent_principal_sha256": hashlib.sha256(
+                    principal.encode()
+                ).hexdigest(),
+            }
+        except (ValueError, AttributeError):
+            return {"url": url, "status": "unavailable", "agent_principal_sha256": None}
+
+    published = contact(bind_host, next(iter(host_ports)))
+    direct = contact(next(iter(guest_ips)), 8080)
+    nat_rules: dict[str, Any] = {"status": "unavailable", "rules": []}
+    try:
+        nat = run_read_only(["iptables-save", "-t", "nat"])
+        if nat.returncode == 0:
+            nat_rules = {
+                "status": "observed",
+                "rules": runtime_port_rules(nat.stdout, next(iter(host_ports))),
+            }
+    except CollectionError:
+        pass
+    port_owners: dict[str, Any] = {"status": "unavailable", "containers": []}
+    try:
+        names_result = run_read_only(
+            [
+                "nerdctl",
+                "--namespace",
+                "finite",
+                "ps",
+                "--all",
+                "--format",
+                "{{.Names}}",
+            ]
+        )
+        names = names_result.stdout.splitlines()
+        if (
+            names_result.returncode == 0
+            and 0 < len(names) <= 128
+            and all(
+                re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,254}", name)
+                for name in names
+            )
+        ):
+            owners_result = run_read_only(
+                [
+                    "nerdctl",
+                    "--namespace",
+                    "finite",
+                    "inspect",
+                    "--format",
+                    template,
+                    *names,
+                ]
+            )
+            if owners_result.returncode == 0:
+                owners = []
+                for line in owners_result.stdout.splitlines():
+                    owner = json.loads(line)
+                    bindings = [
+                        binding
+                        for bindings in (owner.get("ports") or {}).values()
+                        for binding in (bindings or [])
+                        if int(binding["HostPort"]) in host_ports
+                    ]
+                    if bindings:
+                        owners.append(
+                            {
+                                "container": owner["name"],
+                                "state": owner["state"],
+                                "project_id": owner["labels"].get(
+                                    "computer.finite.v2.project_id"
+                                ),
+                                "source_machine_id": owner["labels"].get(
+                                    "computer.finite.v2.source_machine_id"
+                                ),
+                                "bindings": bindings,
+                                "guest_ips": [
+                                    entry.get("IPAddress")
+                                    for entry in (owner.get("networks") or {}).values()
+                                ],
+                            }
+                        )
+                port_owners = {"status": "observed", "containers": owners}
+    except (CollectionError, KeyError, TypeError, ValueError):
+        pass
+    hashes = [route["agent_principal_sha256"] for route in (published, direct)]
+    status = (
+        "unknown"
+        if None in hashes
+        else "red"
+        if len(set(hashes)) != 1 or (expected is not None and hashes[0] != expected)
+        else "green"
+    )
+    return {
+        "schema_version": "finite.status.v1",
+        "generated_at": isoformat(utc_now()),
+        "overall_status": status,
+        "exit_code": {"green": 0, "red": 1, "unknown": 2}[status],
+        "sections": {
+            "runtime_route": {
+                "status": status,
+                "source_machine_id": machine,
+                "project_id": labels.get("computer.finite.v2.project_id"),
+                "source_host_id": labels.get("computer.finite.v2.source_host_id"),
+                "runtime_artifact_id": labels.get(
+                    "computer.finite.v2.runtime_artifact_id"
+                ),
+                "expected_agent_principal_sha256": expected,
+                "published": published,
+                "direct": direct,
+                "nat": nat_rules,
+                "port_owners": port_owners,
+            }
+        },
+    }
+
+
 def parse_args(arguments: list[str]) -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description="Canonical read-only Finite platform and fleet status"
@@ -2861,6 +3082,10 @@ def parse_args(arguments: list[str]) -> argparse.Namespace:
         "--json", action="store_true", help="emit finite.status.v1 JSON"
     )
     mode = parser.add_mutually_exclusive_group()
+    mode.add_argument("--runtime-route", metavar="SOURCE_MACHINE_ID",
+                      help="compare one owned Kata Runtime's direct and published identity routes")
+    parser.add_argument("--expected-agent-principal-sha256",
+                        help="compare both routes against an independently established Principal hash")
     mode.add_argument(
         "--tinfoil",
         action="store_true",
@@ -2883,6 +3108,11 @@ def parse_args(arguments: list[str]) -> argparse.Namespace:
         help="maximum Sites snapshot and upload age in seconds (default: 129600 / 36h)",
     )
     options = parser.parse_args(arguments)
+    if options.runtime_route and not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,254}", options.runtime_route):
+        parser.error("--runtime-route requires a simple source machine identifier")
+    if options.expected_agent_principal_sha256 and (
+            not options.runtime_route or not re.fullmatch(r"[a-f0-9]{64}", options.expected_agent_principal_sha256)):
+        parser.error("--expected-agent-principal-sha256 requires --runtime-route and 64 lowercase hex digits")
     if options.sites_backup_max_age is not None:
         if options.sites_backup_max_age < 0:
             parser.error("--sites-backup-max-age must be nonnegative")
@@ -2896,7 +3126,9 @@ def parse_args(arguments: list[str]) -> argparse.Namespace:
 def main(arguments: list[str] | None = None) -> None:
     options = parse_args(sys.argv[1:] if arguments is None else arguments)
     try:
-        if options.tinfoil:
+        if options.runtime_route:
+            report = collect_runtime_route(options.runtime_route, options.expected_agent_principal_sha256)
+        elif options.tinfoil:
             from finite_tinfoil_status import collect
 
             report = collect()
@@ -2927,7 +3159,7 @@ def main(arguments: list[str] | None = None) -> None:
                 "chat_plane": {"status": "unknown", "error": str(error)},
             },
         }
-    if options.json or options.tinfoil:
+    if options.json or options.tinfoil or options.runtime_route:
         print(json.dumps(report, indent=2, sort_keys=True))
     else:
         print(render_human(report))
