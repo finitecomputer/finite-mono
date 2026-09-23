@@ -465,6 +465,29 @@ export function HermesChatProvider({ children, machineId }: { children: ReactNod
         if (request?.request_id && typeof request.command === "string" && Array.isArray(request.choices)) {
           setApprovals(current => ({ ...current, [chatId]: request }));
         }
+      } else if (type === "tool.start" || type === "tool.complete") {
+        const payload = event.payload;
+        if (typeof payload?.tool_id !== "string" || !payload.tool_id) return;
+        const messages = transcriptRef.current.get(chatId) ?? [];
+        const result = payload.result_text ?? payload.result;
+        const text = type === "tool.complete" && result !== undefined
+          ? typeof result === "string" ? result : JSON.stringify(result)
+          : [payload.name, payload.context].filter(Boolean).join(": ");
+        const message = {
+          ...gatewayMessage("assistant", text, chatId, chat.topicId, false, type === "tool.start" ? "running" : "complete"),
+          message_id: `${chatId}:tool:${payload.tool_id}`,
+          kind: "tool",
+        };
+        const index = messages.findIndex(row => row.message_id === message.message_id);
+        if (index >= 0) messages.splice(index, 1, message);
+        else {
+          // The native reply accumulates in one row. Keep tool output before
+          // that row, so final-delivery cards also see references from late tools.
+          const reply = messages.findIndex(row => row.status === "running" && row.kind === "message" && !row.is_mine);
+          messages.splice(reply < 0 ? messages.length : reply, 0, message);
+        }
+        transcriptRef.current.set(chatId, messages);
+        publish();
       } else if (type === "message.start") {
         if (selectedRef.current.chatId === chatId) setTransportError(null);
         chat.streaming = { turnKey: ++turnKeyRef.current, reasoning: "", answer: "" };

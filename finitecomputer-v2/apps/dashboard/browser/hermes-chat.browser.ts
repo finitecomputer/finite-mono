@@ -64,6 +64,7 @@ test("native chat pages older history, archives, reconnects, and restores", { ti
     let rejectClarify = true;
     const clarificationAnswers: string[] = [];
     let brainApproved = false;
+    let liveBrainRequest = false;
     await page.route("**/api/brain/approvals/approve", route => {
       assert.deepEqual(route.request().postDataJSON(), { brainId: "brain-1", requestId: "approval-1", payload: null });
       brainApproved = true;
@@ -73,7 +74,7 @@ test("native chat pages older history, archives, reconnects, and restores", { ti
       id: "approval-1", brainId: "brain-1", brainName: "Native Brain",
       action: "invite-commit", expiresAt: Math.floor(Date.now() / 1000) + 900,
       requestedByNpub: "fixture", createdAt: "2026-09-22T00:00:00Z", payload: null,
-    }] } }));
+    }, ...(liveBrainRequest ? [{ id: "approval-live", brainId: "brain-1", brainName: "Native Brain", action: "invite-commit", expiresAt: Math.floor(Date.now() / 1000) + 900, payload: null }] : [])] } }));
     await page.route("**/api/chat/**", route => { legacyCalls++; return route.fulfill({ status: 503, json: {} }); });
     await page.route("**/api/agents/*/hermes-access", route => route.fulfill({ json: {
       baseUrl: "https://native.fixture.test/runtimes/agent/", accessToken: "synthetic", expiresAt: 100,
@@ -176,6 +177,15 @@ test("native chat pages older history, archives, reconnects, and restores", { ti
           }
           retainedFailure = failTurn;
           socket.send(JSON.stringify({ method: "event", params: { session_id: "handle-one", type: "message.start" } }));
+          if (request.params.text === "Try another turn") {
+            liveBrainRequest = true;
+            const emit = (type: string, payload: unknown) => socket.send(JSON.stringify({ method: "event", params: { session_id: "handle-one", type, payload } }));
+            emit("message.delta", { text: "Preparing the request" });
+            emit("tool.start", { tool_id: "brain-tool", name: "terminal", context: "fbrain" });
+            const result = { tool_id: "brain-tool", name: "terminal", result: { output: "finite-brain-approval-filed brain=brain-1 request=approval-live" } };
+            emit("tool.complete", result);
+            emit("tool.complete", result);
+          }
           if (holdTurn) {
             socket.send(JSON.stringify({ method: "event", params: { session_id: "handle-one", type: "message.delta", payload: { text: "Working 🚀 partial reply" } } }));
           } else socket.send(JSON.stringify({ method: "event", params: { session_id: "handle-one", type: "message.complete", payload: failTurn ? { text: "Partial model reply", status: "error", error: "Model service unavailable", partial: true } : { text: "Recovered model reply" } } }));
@@ -244,6 +254,8 @@ test("native chat pages older history, archives, reconnects, and restores", { ti
     await composer.fill("Try another turn");
     await page.getByRole("button", { name: "Send message", exact: true }).click();
     await page.locator(".finite-chat__messages").getByText("Recovered model reply", { exact: true }).waitFor();
+    await page.getByRole("region", { name: "Brain actions" }).nth(1).getByRole("button", { name: "Approve", exact: true }).waitFor();
+    assert.equal(await page.getByRole("region", { name: "Brain actions" }).count(), 2);
     assert.equal(await page.getByText("Agent turn failed: Model service unavailable", { exact: true }).count(), 0);
     holdTurn = true;
     await composer.fill("Start a long turn");
@@ -398,7 +410,7 @@ test("native chat pages older history, archives, reconnects, and restores", { ti
     await brainCard.getByRole("button", { name: "Approve", exact: true }).click();
     await page.locator(".finite-chat__messages").getByText("Approved: invitation approval for Native Brain", { exact: true }).waitFor();
     assert(brainApproved);
-    assert(prompts.includes("Approved: invitation approval for Native Brain"));
+    assert.equal(prompts.at(-1), "Approved: invitation approval for Native Brain");
     await page.reload();
     await page.getByRole("button", { name: "Native history", exact: true }).click();
     await brainCard.waitFor();
