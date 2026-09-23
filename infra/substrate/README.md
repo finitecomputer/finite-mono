@@ -12,6 +12,18 @@ workers and snapshots. The Rust adapter uses native gRPC, not kubectl; protocol
 provenance is in `finite-saas-runner/proto/README.md`. There is no second routing
 registry or operation journal.
 
+The integration uses the existing Runner process, one shared ingress, a stateless
+gRPC client and a boot-time environment fetch. There is no per-agent transport
+pod, Finite worker registry, parallel lifecycle queue or credential-refresh daemon.
+The source-of-truth audit does not justify deleting the Core lease/journal fences:
+Substrate observations cannot authorize an owner stop reversal or change ownership.
+
+The operational cost is not limited to this Rust adapter. Six checked-in provider
+patches affect production behavior; the seventh is local CSI-only. The qualified
+cluster also retains spike-specific provider/egress changes. Stock managed egress
+does not yet satisfy SimpleX parity. Qualify a reproducible supported provider
+build and raw-TCP path before describing this as a low-operations replacement.
+
 Use the existing `FC_CORE_AGENT_CREATION_PLACEMENT_JSON` setting for staging
 admission and `FC_RUNNER_DRAIN` for capacity/drain. Existing placements stay on
 their existing runner and chat transport. Expand **every Core reader** to support
@@ -113,21 +125,10 @@ before invoking the canonical runtime entrypoint. Updates apply on the next
 cold boot; a failed fetch never falls back to cached flags. Existing runners
 continue consuming their persisted RuntimeSpec environment.
 
-The real two-owner proof changes Core's boot configuration between launch and
-restart, leaving installed templates and creation specs untouched. Each agent
-uses its terminal tool to write one actual environment value to a file; the
-verifier downloads and compares the bytes before and after restart.
-`environment-refresh-qualified.log` passes both values, native chat and retained
-history for both owners in 169.62 seconds on the qualified runtime image recorded below.
-The extended `environment-removal-proof.log` passes in 115.11 seconds on image
-`sha256:10ba77158eb9d75b325c26a41ece330483025ce386c19b56c63bb44915ba954a`.
-Both agents read the initial values through an observed terminal command; after
-Core changes one flag and removes another, restart yields the updated value and
-an actually unset removed flag, verified through authenticated file downloads.
-Templates remain unchanged. Native chat, history/files, desktop and isolation
-also pass. Both actors are suspended with data retained and final fleet status
-is healthy. This proves next-boot refresh and removal, not hot reload.
-Rust clippy/format, JavaScript syntax and structure checks pass.
+`environment-removal-proof.log` qualifies next-boot updates and removals on the
+current image: both agents write the real environment through terminal tools,
+and authenticated downloads verify the changed value and unset removed flag.
+Installed templates remain unchanged. This is not hot reload.
 
 The initial fetch authenticates the creation credential and live lease; later
 boots require the current assignment. A stopped assignment may fetch boot flags
@@ -242,37 +243,13 @@ cancellation marker so a subsequent request cannot merge with it. It closes tool
 alternation and never requeues canceled work. No Finite history store, additional
 database writer, or new queue is introduced.
 
-`scripts/proofs/hermes-steer-history.py` uses real scratch SQLite for ordinary
-steering, stopped tool steering, and a stopped model redirect with no tool history.
-It checks exactly-once storage, unchanged earlier rows, drained buffers and
-unchanged Stop state. The native proof requires ordinary and queued replies, then
-checks ordinary, queued, stopped-tool and stopped-model input after settlement
-and actor restart. The earlier combined candidate passed both owners. Its sealed Linux package
-builds and passes all three SQLite cases, the stream-writer regression and Nix
-integrity verification (`model-stop-canonical-proof.log`,
-`model-stop-canonical-stream.log`, `model-stop-canonical-integrity.log`).
-The canonical image plus only the local fixture CA passes real dashboard onboarding,
-native chat and restart in `dashboard-onboarding-canonical-qualified.log` (123.23s).
-Its test digest is `sha256:6f94a71db3000af2e1847b20e067d95e65b966a07635e2fbf2d7c12969d18929`.
-
-A later generated-file browser proof passed authenticated file bytes and reload
-twice, but exposed the consumed-redirect/Stop race during the subsequent native
-clarification turn (`generated-file-dashboard-qualified.log` and
-`generated-file-dashboard-traced.log`). Native request dumps showed the canceled
-correction merged with the next user request. The fourth offline SQLite case
-reproduces that failure on the previous image and passes on the rebuilt sealed
-package (`consumed-redirect-before.log`, `consumed-redirect-after.log`). The
-canonical image also passes all four SQLite cases; the sealed package passes
-the stream-writer regression and integrity verification. The combined actual
-dashboard/provider proof passes in 171.37 seconds
-(`consumed-redirect-dashboard-qualified.log`): both owners launch, native browser
-chat/image upload/generated-file bytes and reload pass, the Stop/clarification
-sequence completes, and both owners retain native chat/history after restart.
-The qualified test image is
-`sha256:2e6886a545af36aefdf1b41396776aa7a6487e8d5c96bb747aac0308324d7ad5`
-(canonical runtime plus only the local fixture CA). Request dumping is disabled.
-Both disposable actors are suspended with data retained; fleet status is healthy
-before and after. This remains local synthetic account auth, not WorkOS qualification.
+`scripts/proofs/hermes-steer-history.py` covers ordinary steering, stopped tool
+steering, stopped model redirects and the consumed-redirect/Stop race in scratch
+SQLite. The assertions require exactly-once storage, unchanged earlier rows,
+drained buffers and unchanged Stop state. The sealed package passes all four
+cases; the actual dashboard/provider proof also passes correction, clarification,
+file/image, reload and restart checks. Current combined-image evidence is listed
+under Product identity parity; older intermediate image digests are in git history.
 
 ## Lifecycle and recovery
 
@@ -306,30 +283,13 @@ this path. Ambiguous transport failures retain their original lease. An older
 Core that rejects the additive release endpoint also retains the lease (Runner's
 default is 600 seconds), without failing creation or deleting credentials.
 Real-Postgres and Runner tests cover release, fencing and old-Core rejection.
-The real two-owner proof also exhausts the full provider retry window with every
-worker occupied, verifies the expired Core lease, then frees one worker. On
-2026-09-23 the same creation launched in 3.93 seconds with unchanged runtime ID,
-Core credential, provider correlation, runtime spec and actor UID. Native chat
-and history after restart passed for both owners (full proof: 139.87 seconds).
-This is one local observation, not a GKE latency guarantee. The current canonical
-runtime also passes the explicit worker-loss/restart/stop/restart proof in
-160.71 seconds on the recreated kind cluster (`current-worker-loss.log`). Both
-owners retain native history/files and bidirectional isolation after the first
-owner's worker is deleted. Stopped ingress remains unavailable until Core
-restart. This qualifies a worker-pod loss; it does not prove whole-node failure
-or a permanently invalid boot configuration.
-
-A transient bootstrap failure with an interrupted Runner is also qualified on
-that image (`stalled-boot-before.log`, 176.45 seconds). The fixture returns 503
-for all three environment-fetch attempts, kills the Runner, observes RESUMING,
-then restores the endpoint and waits for its real 60-second Core lease to expire.
-The next ordinary creation attempt succeeds with unchanged runtime ID, runtime
-spec, credential hash and provider correlation. Both owners then pass chat,
-worker-loss recovery, stop/restart, retained files/history and isolation checks.
-Substrate's existing Resume re-entry performs recovery; no Finite reset loop was
-added. Production retains its configured lease (default 600 seconds), so the
-fixture does not establish production recovery latency. Permanently invalid
-configuration still requires correction rather than indefinite-success claims.
+Local capacity exhaustion qualifies retry without changing creation identity,
+credential, provider correlation, spec or actor UID. The observed launch after
+freeing capacity was 3.93 seconds; this is not a GKE latency guarantee.
+`stalled-boot-before.log` qualifies transient bootstrap HTTP failure followed by
+Runner loss and natural lease expiry. The same creation resumes after the endpoint
+recovers; production retains its configured lease (600 seconds by default).
+Worker loss and whole-node restart evidence are recorded below.
 
 Invalid central boot configuration is also qualified on the requester-dispatch
 image (`invalid-boot-proof.log`, 329.55 seconds). The real authenticated Core
@@ -361,7 +321,9 @@ On target failure, restore the previous template on the same actor/CSI data and
 check readiness before reporting failure. Core's current/target artifacts remain
 the authority for retries. Ordinary restart rejects an uncommitted template;
 stop stays allowed. Repointing an image **does not undo writes** the failed image
-made to the shared volume. Interrupted Runner completion still needs proof.
+made to the shared volume. `interrupted-completion-provider-proof.log` qualifies
+Runner loss after provider success and before Core completion, followed by natural
+lease expiry and completion of the same request.
 Retirement and known-good backup recovery remain unadvertised.
 
 The pinned provider does **not** supply an external-volume backup/restore path.
@@ -440,127 +402,48 @@ Authority and qualify those deployment-specific recovery boundaries before rollo
 
 ## Product identity parity
 
-Native chat does not open Finite Chat's hosted Device UI. Brain signing still uses
-that Device's existing durable human key authority. If the signer reports setup
-required (428), the dashboard initializes it through the existing state endpoint
-and retries once. Other failures, including incomplete durable state, do not cause
-setup or retry. The native-user regression fails before/passes after this change;
-21 signing/request client tests, the real Rust hosted signer boundary test,
-TypeScript and targeted lint pass. A live proof now starts a disposable real Brain
-service and exercises the actual Next dashboard approval routes for each fresh
-user: initial signer 428, automatic setup, pending request, wrong-nonce rejection,
-human-signed approval, persisted membership and resolver identity, and replay
-rejection. The fixture creates the request; this does not prove a live terminal
-`fbrain` operation or historical approval-card rendering/clicks.
+Native chat does not mount the legacy Device UI, but Brain signing still uses
+that Device's durable human key authority. A signer setup-required response (428)
+initializes the existing state endpoint and retries once. Other errors, including
+incomplete durable state, do not initialize or retry. Real Next approval routes
+qualify fresh-user signing, wrong-nonce rejection, persisted membership/resolver
+identity and replay denial. The current `fbrain` CLI no longer produces approval
+requests or chat-card trailers; do not restore that removed workflow. Keep the
+trailer reader for persisted history. Card rendering has separate browser fixtures.
 
-The Brain CLI now reads native v2 requester leases as well as retained v1 leases.
-A present invalid v2 lease rejects the request without consulting v1, including
-on repeated reads after expiry. The regression failed on the old reader; the
-full CLI suite passes (232 tests, two ignored), and Clippy passes. Native requester identity now
-comes from the exact hosted human/Project binding even when Sites is unavailable
-or unconfigured; optional Sites claims remain an all-or-nothing pair. Brain-only
-turns write v2 leases without mailbox/assertion fields and never leave a v1
-fallback. Server outage/binding tests, client parsing, seven sealed-helper tests,
-86 adapter tests, and the Rust lease regressions pass. The rebuilt canonical runtime
-(`sha256:a5b1ab5e2698b7bf87cf257b0b595c2f0fb45396becf8e50bafdac21a0ef9d3b`,
-with the local test CA) passes the combined two-owner onboarding, native chat,
-Sites attribution, restart and fresh-user dashboard Brain approval proof in
-199.99 seconds. Run with `FC_TEST_SUBSTRATE_DASHBOARD=1` and
-`FC_TEST_SUBSTRATE_BRAIN_BINARY` pointing to the built `finite-brain` server.
-This proves the approval service/signing path, not a live native terminal lease
-consumed by `fbrain`; that boundary is covered by the extended browser proof below.
-The current CLI no longer files approval requests or emits
-the chat-card trailer: upstream auth-kernel commit `9d5fe9ba` deleted that producer
-and its callers. Do not reintroduce the removed workflow for runner parity. Keep
-the native trailer reader for persisted histories; the retained server approval
-route and dashboard signing path are qualified separately above.
+The Brain CLI accepts native v2 requester leases and retained v1 leases. A present
+invalid or expired v2 lease rejects without falling back to v1. Native identity
+comes from the exact hosted human/Project binding even when Sites is unavailable;
+optional Sites claims are an all-or-nothing pair. Native turns only write v2 leases,
+bounded by requester/assertion expiry, through the existing terminal-tool writer.
+Different requesters cannot steer a running turn or merge queued envelopes.
 
-The combined run with `FC_TEST_SUBSTRATE_BROWSER=1`, actual Next and the real
-Brain service passes in 136.44 seconds on the same canonical image. It covers
-browser chat, image upload, generated-file bytes, reload history, interruption,
-clarification, command approval, both owners' restart checks and bidirectional
-isolation before/after restart. Both disposable actors were suspended with data
-retained and canonical fleet status was captured. An earlier run exposed a model
-rewriting the approval fixture's `rm -rf` to `rm -f`; the prompt now explicitly
-preserves the flags required to exercise approval. No acceptance assertion was
-removed.
+The Sites handoff reuses the registry-issued assertion binding verified mailbox,
+human principal and exact agent. The dashboard obtains fresh context per prompt;
+Hermes carries it outside prompt text/history and scopes it to the executing turn.
+Sites remains authoritative when `fsite` submits Project Init. A wrong agent cannot
+consume the assertion. Completion and dispatch failure clean up the lease. Requester
+assignment precedes dispatch so immediate completion cannot leave stale authority
+or overwrite a queued successor. Nine sealed-runtime regressions cover these
+boundaries on macOS and Linux, including gateway-first imports. The sealed package
+materializes the gateway directory to prevent upstream import-path shadowing.
 
-The extended browser run passes in 168.08 seconds on the same image. A real
-browser prompt runs `fbrain brain create` through Hermes' terminal tool without
-identity/session overrides. The human then independently signs a Brain metadata
-read; its admins must exactly match that human and the canonical hosted binding
-for the selected runtime's Project. Human inventory must also contain the Brain.
-This exercises the native v2 requester lease without Sites claims. The browser
-also explicitly renames its conversation and proves the name/history after reload;
-it no longer depends on the timing of automatic title generation.
+Current combined evidence is `requester-dispatch-browser-retry.log` (204.18s), on
+canonical image plus only the local CA:
+`sha256:10ba77158eb9d75b325c26a41ece330483025ce386c19b56c63bb44915ba954a`.
+Both owners pass actual Next onboarding, native chat/reload, browser-to-terminal
+Brain creation and independent human access, Sites attribution, approvals,
+clarifications, interruption, reconnect, desktop, configuration refresh,
+retained history/files and cross-owner denial before/after restart.
 
-The disposable Brain server listens on 18430. For this local-only proof, a
-short-lived Node relay inside the agent forwards loopback HTTP to the Docker host
-and closes after `fbrain` exits. `fbrain` accepts loopback HTTP but uses bundled
-public CA roots, so the image's fixture CA cannot qualify its HTTPS path. No
-production TLS policy is weakened: public-CA HTTPS remains a GKE gate. Enable
-this check with `FC_TEST_SUBSTRATE_BRAIN_BINARY`, `FC_TEST_SUBSTRATE_BROWSER=1`
-and `FC_TEST_SUBSTRATE_DASHBOARD=1`. No relay is added to the runtime image.
+Enable the actual browser/Brain proof with `FC_TEST_SUBSTRATE_BROWSER=1`,
+`FC_TEST_SUBSTRATE_DASHBOARD=1` and `FC_TEST_SUBSTRATE_BRAIN_BINARY`; the disposable
+Brain service listens on 18430. Its local-only Node relay inside the agent forwards
+loopback HTTP to the host and closes after `fbrain` exits. The CLI uses bundled
+public CA roots, so this does not qualify public-CA HTTPS. No relay or weakened
+TLS policy is added to the runtime image. WorkOS/deployed-origin parity remains open.
 
-The native Sites handoff reuses the existing registry-issued assertion binding
-verified mailbox, human principal and exact agent. The dashboard obtains fresh
-context for each prompt through its owner-authorized Hermes access route. Hermes
-carries it outside prompt text/history, scopes it to the executing turn, and uses
-the existing adapter's terminal-tool lease writer. Native turns write v2 leases
-only, bounded by the requester expiry (and the assertion expiry when Sites claims
-are present); they never create an unsigned v1 fallback.
-Different requesters cannot steer the active turn or merge their queued envelopes.
-Sites remains the authority when `fsite` submits Project Init.
-
-Current evidence: the sealed Linux Python package builds; nine packaged-runtime
-regressions cover optional Sites claims, validation, concurrent isolation, queue separation, steering,
-compute-frame/history separation, gateway-first import order, immediate compute
-completion and failed dispatch. The latter two pass in both rebuilt macOS and Linux sealed packages
-(`requester-dispatch-after.log`, `requester-dispatch-linux-tests.log`);
-immediate completion reproduces stale
-requester state before the fix. The assignment now precedes dispatch, leaving
-completion responsible for cleanup and preserving the next queued requester.
-The rebuilt canonical image plus only the local proof CA
-(`sha256:10ba77158eb9d75b325c26a41ece330483025ce386c19b56c63bb44915ba954a`)
-passes the combined two-owner browser proof in 204.18 seconds:
-`requester-dispatch-browser-retry.log`. This covers actual onboarding, native
-chat and reload, browser-to-terminal Brain creation/human access, Sites requester
-handoff, approval/clarification/interruption/reconnect, desktop, next-boot config
-refresh and retained history/files across restart, with cross-owner denials
-before and afterward. Both actors are suspended with data retained; deployment
-and worker UID/IP checks pass in `requester-dispatch-status-after.json`. This
-run follows manual worker replacement for the documented node-restart IP drift;
-it does not qualify automatic whole-node recovery.
-All 86 adapter tests pass, including native
-lease cleanup and sender mismatch. The dashboard browser fixture checks fresh
-context on each prompt and successful chat without Sites context. The real Sites
-service accepts the exact assertion and rejects another agent. These are separate
-boundary proofs. A real pinned Hermes terminal subprocess also observes the native
-session identity and assertion lease, with no v1 fallback and cleanup after the
-tool completes. The full Hermes integration suite passes (116 tests, two opt-in
-live tests skipped). The combined native terminal proof now runs the real `fsite` CLI against a
-disposable Sites service: wrong-agent assertion use is denied before the intended
-agent successfully creates its Project with verified owner attribution; both
-leases are cleaned up. It uses the pinned host minimal Python package and the
-real terminal dispatcher, with the native session/context setup called directly.
-The canonical Substrate image now also passes the live two-owner proof with
-`FC_TEST_SUBSTRATE_SITES_BINARY` pointing to the disposable local `finitesitesd`:
-`gateway-live-provider.log` passes in 152.04s on
-`sha256:28066d523005e13aa7e1a174ce386ff454fd58f98f892ffe8bace0fe292b1c1b`
-(canonical image plus only the local fixture CA). Each model turn invokes the
-real terminal and `fsite`, and the downloaded Project Init result must carry its
-own verified mailbox. Native chat/history, desktop, environment refresh,
-interruption/clarification/approval, and bidirectional owner isolation also pass
-across restart. This supplies the assertion through native RPC; deployed dashboard
-assertion acquisition and real WorkOS authentication remain separate gates.
-
-The first live run exposed a packaging bug: gateway startup prepended the
-unpatched upstream package root to Python's import path. The sealed package now
-materializes the gateway directory so startup retains the patched handler. A
-fresh-interpreter regression fails on the previous package and passes on both
-host and Linux packages. Direct dispatcher tests alone did not cover this edge.
-
-Reproduce the combined local boundary proof after building `fsite`:
+For the focused native terminal/Sites boundary, build `fsite`, then run:
 
 ```sh
 HERMES_AGENT_PYTHON=<pinned-python>/bin/python3 \
@@ -808,14 +691,19 @@ then pass in `final-structure-clippy.log`.
 
 ## Evidence and remaining gates
 
+The evidence below covers different boundaries and revisions; it is not one
+all-features production certification. Full Rust workspace tests pass in
+`final-rust-low-storage-2.log`; formatting, structure and strict workspace/all-target
+Clippy pass in `final-structure-clippy.log`. Subsequent recovery fixtures have their
+own live proofs and strict Core Clippy checks. Historical failed runs and superseded
+image digests remain in git history instead of defining the current gate status.
+
 Current local evidence (2026-09-22):
 
 | Scope | Result and limit |
 | --- | --- |
-| Complete workspace | 2,053 passed, 15 ignored in `workspace-bounded-concurrency.log` with `TMPDIR=/tmp` and `--test-threads=4`. Includes the latest browser/migration work; predates the control-priority fix, separately covered by 28 Runner-cycle tests and strict all-target Runner clippy. |
-| Current candidate regression run | `workspace-final-candidate.log` stopped at six parallel Kata lifecycle failures (four fake-command 2s timeouts, one cleanup assertion and one synchronization deadline). All six pass unchanged in `runner-serial-qualification.log`: 200 passed, 3 ignored in 85.93s. This does not establish a green default-parallel workspace run. The full-schema placement replay extension separately passes for Apple Container and Substrate. |
 | Dev stack | `DEVFINITY_PORT_OFFSET=4000 just dev smoke` and source-structure check passed. |
-| Dashboard | Current `dashboard-current-full.log`: 327 tests and production build pass after native Brain-card/tool-event changes. Typecheck, targeted lint and the native protocol browser fixture also pass. Build reports 15 Turbopack file-tracing warnings through `workspace-paths.ts`; no warning suppression was added. |
+| Dashboard | `final-dashboard-checks-2.log`: lint, 336 tests and production build pass. Native browser and deployed-auth boundaries remain separate. |
 | Native protocol + SimpleX restart | Two-owner real-relay run passed, including worker loss, explicit stop/restart, native approval/clarification/reconnect/interruption, history/files, desktop screenshot and repeated isolation checks. This did not prove SimpleX across image upgrades. |
 | Combined browser + SimpleX + image recovery | `native-home-simplex-upgrade-proof.log`: both owners passed in 627.42s. Native and SimpleX replies/addresses, actor UID/CSI records, Core artifact/contact/host, history/files and screenshot survived worker loss, restart, healthy upgrades and failed-image recovery. Live browser creation/reload also passed. |
 | Image upload | `native-browser-image-proof.log` passed in 152.98s: real UI upload, native vision reply, image rendering and reload. `native-image-reference-probe.log` observes the native vision call; partial mixed-upload failure, retry, TypeScript and lint also pass. `image-reference-upgrade-qualified.log` passed in 163.37s: exact image bytes and the persisted user reference survived restart and a healthy runtime upgrade. |
