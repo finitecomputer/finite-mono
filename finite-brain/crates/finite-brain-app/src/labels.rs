@@ -1,7 +1,7 @@
 //! Local, read-only identity projection for Brain display metadata.
 //! No secrets, messages, encrypted state, invite tokens, or grants are queried.
 use std::{
-    collections::BTreeSet,
+    collections::{BTreeMap, BTreeSet},
     fs,
     io::Write,
     path::{Path, PathBuf},
@@ -10,10 +10,11 @@ use std::{
 
 use finite_brain_server::principal_labels::{
     LabelBinding, LabelProjection, LabelSource, MAX_LABELS, MAX_PROJECTION_BYTES, PrincipalKind,
-    PrincipalLabel, valid_label_name,
+    PrincipalLabel,
 };
 use finite_nostr::NostrPublicKey;
 use rusqlite::{Connection, OpenFlags};
+#[cfg(test)]
 use sha2::{Digest, Sha256};
 use tokio_postgres::NoTls;
 
@@ -60,10 +61,9 @@ fn brain_principals(path: &Path) -> Result<BTreeSet<String>, RefreshError> {
     Ok(principals)
 }
 
-fn hosted_public_key(root: &Path, subject: &str) -> Result<Option<String>, RefreshError> {
+fn hosted_public_key(root: &Path, storage_id: &str) -> Result<Option<String>, RefreshError> {
     // The hosted device owns this WorkOS-subject namespace (user_storage_id).
     // A bare creation-request owner key is caller input and is never a source.
-    let storage_id = format!("{:x}", Sha256::digest(subject.as_bytes()));
     let database = root
         .join("users")
         .join(storage_id)
@@ -90,6 +90,44 @@ fn hosted_public_key(root: &Path, subject: &str) -> Result<Option<String>, Refre
         .and_then(|key| key.to_npub().ok()))
 }
 
+fn hosted_candidates(
+    root: &Path,
+    principals: &BTreeSet<String>,
+    started: Instant,
+) -> Result<BTreeMap<String, String>, RefreshError> {
+    let users = match fs::read_dir(root.join("users")) {
+        Ok(users) => users,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(BTreeMap::new()),
+        Err(_) => return Err(RefreshError::SourceUnavailable),
+    };
+    let mut candidates = BTreeMap::new();
+    // Stream existing hosted namespaces, not every enrolled Core account.
+    // Time bounds this scan; the output limit counts only matching principals.
+    for user in users {
+        if started.elapsed() > Duration::from_secs(25) {
+            return Err(RefreshError::Limit);
+        }
+        let user = user.map_err(|_| RefreshError::SourceUnavailable)?;
+        let storage_id = user.file_name().to_string_lossy().into_owned();
+        if storage_id.len() != 64
+            || !storage_id
+                .bytes()
+                .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase())
+        {
+            continue;
+        }
+        if let Some(npub) = hosted_public_key(root, &storage_id)? {
+            if principals.contains(&npub) {
+                candidates.insert(storage_id, npub);
+            }
+        }
+        if candidates.len() > MAX_LABELS {
+            return Err(RefreshError::Limit);
+        }
+    }
+    Ok(candidates)
+}
+
 fn binding(
     npub: String,
     source_id: String,
@@ -97,9 +135,8 @@ fn binding(
     kind: PrincipalKind,
     now: u64,
 ) -> Option<LabelBinding> {
-    if !valid_label_name(&name) || !valid_label_name(&source_id) {
-        return None;
-    }
+    // Preserve even unusable names until conflict resolution: dropping one
+    // owner here could make a different owner of the same key look unique.
     let canonical = NostrPublicKey::parse(&npub).ok()?.to_npub().ok()?;
     if canonical != npub {
         return None;
@@ -127,6 +164,7 @@ async fn collect(
 ) -> Result<LabelProjection, RefreshError> {
     let started = Instant::now();
     let principals = brain_principals(brain_db)?;
+    let candidates = hosted_candidates(hosted_root, &principals, started)?;
     let (mut client, connection) = database
         .connect(NoTls)
         .await
@@ -155,11 +193,14 @@ async fn collect(
         )
         .await
         .map_err(|_| RefreshError::SourceUnavailable)?;
+    let subject_hashes: Vec<_> = candidates.keys().cloned().collect();
     let users = transaction
         .query(
-            "SELECT workos_user_id, normalized_email FROM users
-        WHERE link_status='linked' AND workos_user_id IS NOT NULL LIMIT $1",
-            &[&limit],
+            "SELECT workos_user_id, normalized_email,
+            encode(sha256(convert_to(workos_user_id, 'UTF8')), 'hex') AS subject_hash
+        FROM users WHERE link_status='linked' AND workos_user_id IS NOT NULL
+            AND encode(sha256(convert_to(workos_user_id, 'UTF8')), 'hex') = ANY($1) LIMIT $2",
+            &[&subject_hashes, &limit],
         )
         .await
         .map_err(|_| RefreshError::SourceUnavailable)?;
@@ -189,11 +230,12 @@ async fn collect(
             return Err(RefreshError::Limit);
         }
         let subject: String = row.get(0);
-        if let Some(npub) = hosted_public_key(hosted_root, &subject)? {
-            if principals.contains(&npub) {
-                if let Some(label) = binding(npub, subject, row.get(1), PrincipalKind::Human, now) {
-                    bindings.push(label);
-                }
+        let subject_hash: String = row.get(2);
+        if let Some(npub) = candidates.get(&subject_hash) {
+            if let Some(label) =
+                binding(npub.clone(), subject, row.get(1), PrincipalKind::Human, now)
+            {
+                bindings.push(label);
             }
         }
     }
@@ -237,7 +279,7 @@ fn publish(path: &Path, projection: &LabelProjection) -> Result<(), RefreshError
 
 async fn refresh() -> Result<(), RefreshError> {
     let required = |name| std::env::var(name).map_err(|_| RefreshError::Configuration);
-    let url = required("FC_CORE_DATABASE_URL")?;
+    let url = required("FINITE_BRAIN_LABEL_DATABASE_URL")?;
     let brain_db = PathBuf::from(required("FINITE_BRAIN_DB")?);
     let hosted_root = PathBuf::from(required("FINITECHAT_HOSTED_DATA_ROOT")?);
     let output = PathBuf::from(required("FINITE_BRAIN_PRINCIPAL_LABELS")?);
@@ -279,6 +321,10 @@ async fn main() -> std::process::ExitCode {
 mod tests {
     use super::*;
 
+    fn subject_hash(subject: &str) -> String {
+        format!("{:x}", Sha256::digest(subject.as_bytes()))
+    }
+
     fn principal(byte: u8) -> (String, String) {
         let hex = format!("{byte:02x}").repeat(32);
         let npub = NostrPublicKey::parse(&hex).unwrap().to_npub().unwrap();
@@ -305,13 +351,17 @@ mod tests {
     #[test]
     fn hosted_identity_reads_fail_closed_without_creating_or_modifying_stores() {
         let dir = tempfile::tempdir().unwrap();
-        assert!(hosted_public_key(dir.path(), "absent").unwrap().is_none());
+        assert!(
+            hosted_public_key(dir.path(), &subject_hash("absent"))
+                .unwrap()
+                .is_none()
+        );
         assert!(!dir.path().join("users").exists());
         let (hex, npub) = principal(1);
         let path = hosted_fixture(dir.path(), "verified-subject", &hex);
         let before = fs::read(&path).unwrap();
         assert_eq!(
-            hosted_public_key(dir.path(), "verified-subject").unwrap(),
+            hosted_public_key(dir.path(), &subject_hash("verified-subject")).unwrap(),
             Some(npub)
         );
         assert_eq!(fs::read(&path).unwrap(), before);
@@ -329,7 +379,7 @@ mod tests {
         )
         .unwrap();
         assert!(
-            hosted_public_key(dir.path(), "verified-subject")
+            hosted_public_key(dir.path(), &subject_hash("verified-subject"))
                 .unwrap()
                 .is_none()
         );
@@ -392,6 +442,7 @@ mod tests {
         hosted_fixture(&hosted, "verified-human", &human_hex);
         hosted_fixture(&hosted, "future-human", &future_hex);
         hosted_fixture(&hosted, "unverified", &human_hex);
+        admin.batch_execute("INSERT INTO users SELECT 'unrelated-' || id, 'unrelated@example.com', 'linked' FROM generate_series(1, 5000) id").await.unwrap();
         let before = fs::read(&brain).unwrap();
         let mut config: tokio_postgres::Config = url.parse().unwrap();
         config.options(&format!("-c search_path={schema}"));
@@ -433,6 +484,11 @@ mod tests {
         hosted_fixture(&hosted, "other-human", &human_hex);
         let ambiguous = collect(&config, &brain, &hosted, 220).await.unwrap();
         assert!(!ambiguous.labels(220).unwrap().contains_key(&human));
+        admin.execute("UPDATE users SET normalized_email=E'bad\\nname' WHERE workos_user_id='other-human'", &[]).await.unwrap();
+        let invalid_owner = collect(&config, &brain, &hosted, 240).await.unwrap();
+        let labels = invalid_owner.labels(240).unwrap();
+        assert!(!labels.contains_key(&human));
+        assert!(labels.contains_key(&agent));
         assert_eq!(
             admin
                 .query_one("SELECT count(*) FROM agent_runtimes", &[])

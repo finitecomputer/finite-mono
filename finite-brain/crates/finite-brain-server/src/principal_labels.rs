@@ -85,8 +85,6 @@ impl LabelProjection {
         for binding in &self.bindings {
             let canonical = NostrPublicKey::parse(&binding.npub).ok()?.to_npub().ok()?;
             if canonical != binding.npub
-                || !valid_label_name(&binding.label.name)
-                || !valid_label_name(&binding.source_id)
                 || binding.label.observed_at != self.generated_at
                 || !matches!(
                     (binding.label.kind, binding.label.source),
@@ -95,6 +93,12 @@ impl LabelProjection {
                 )
             {
                 return None;
+            }
+            if !valid_label_name(&binding.label.name) || !valid_label_name(&binding.source_id) {
+                // An unusable source still claims this key. Reject this key,
+                // including any other candidate, without hiding unrelated labels.
+                candidates.insert(binding.npub.clone(), None);
+                continue;
             }
             candidates
                 .entry(binding.npub.clone())
@@ -190,7 +194,13 @@ mod tests {
         assert!(invalid.labels(100).is_none());
         invalid = valid.clone();
         invalid.bindings[0].label.name = "Alex\nadmin".to_owned();
-        assert!(invalid.labels(100).is_none());
+        invalid.bindings.push(valid.bindings[0].clone());
+        invalid
+            .bindings
+            .push(binding(2, "Other", PrincipalKind::Agent));
+        let labels = invalid.labels(100).unwrap();
+        assert!(!labels.contains_key(&valid.bindings[0].npub));
+        assert_eq!(labels.len(), 1);
         invalid = valid.clone();
         invalid.bindings[0].npub = "npub-invalid".to_owned();
         assert!(invalid.labels(100).is_none());

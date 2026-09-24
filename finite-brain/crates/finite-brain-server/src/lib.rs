@@ -1028,10 +1028,16 @@ fn selected_folder_ids(values: &[String]) -> Result<Vec<FolderId>, ApiError> {
         .map_err(ApiError::from)
 }
 
+enum LabelAudience<'a> {
+    BrainAdmin,
+    Principal(&'a str),
+}
+
 fn enrich_metadata_identities(
     state: &ServerState,
     store: &BrainStore,
     response: &mut BrainMetadataResponse,
+    audience: LabelAudience<'_>,
 ) -> Result<(), ApiError> {
     let mut npubs = Vec::new();
     if let Some(owner) = &response.owner_user_id {
@@ -1054,11 +1060,14 @@ fn enrich_metadata_identities(
         .into_iter()
         .map(|identity| (identity.npub.clone(), identity))
         .collect();
-    let labels = state
+    let mut labels = state
         .principal_labels_path
         .as_deref()
         .and_then(|path| principal_labels::read_labels(path, state.auth_now_unix_seconds()))
         .unwrap_or_default();
+    if let LabelAudience::Principal(actor) = audience {
+        labels.retain(|npub, _| npub == actor);
+    }
     for npub in npubs {
         if !identities.contains_key(&npub) {
             if let Ok(public_key) = NostrPublicKey::parse(&npub) {
@@ -1217,7 +1226,7 @@ where
         mutation(&mut store, &brain_id)?;
         let stored = store.load_brain(&brain_id)?;
         let mut response = metadata_response(stored);
-        enrich_metadata_identities(&state, &store, &mut response)?;
+        enrich_metadata_identities(&state, &store, &mut response, LabelAudience::BrainAdmin)?;
         attach_pending_approvals(&store, &mut response, &brain_id)?;
         attach_pending_wraps(&store, &mut response, &brain_id)?;
         response
@@ -3645,6 +3654,27 @@ mod tests {
         );
         assert_eq!(admitted.admins, original.admins);
         assert_eq!(admitted.grant_count, original.grant_count);
+        let member_view: BrainMetadataResponse =
+            read_json(get_metadata(router.clone(), &newcomer, "acme", TEST_NOW + 1).await).await;
+        assert!(
+            member_view
+                .identities
+                .iter()
+                .find(|id| id.npub == npub(&admin))
+                .unwrap()
+                .label
+                .is_none(),
+            "membership alone must not expose another person's private account label"
+        );
+        assert!(
+            member_view
+                .identities
+                .iter()
+                .find(|id| id.npub == npub(&newcomer))
+                .unwrap()
+                .label
+                .is_some()
+        );
         projection.generated_at = TEST_NOW - MAX_LABEL_AGE_SECONDS - 1;
         std::fs::write(&path, serde_json::to_vec(&projection).unwrap()).unwrap();
         let expired: BrainMetadataResponse =
@@ -3916,7 +3946,17 @@ mod tests {
         let owner_npub = npub(&owner_keys);
         let agent_npub = npub(&agent_keys);
         let member_npub = npub(&member_keys);
-        let router = personal_test_router(&owner_keys, &agent_keys);
+        let label_dir = tempfile::tempdir().unwrap();
+        let label_path = label_dir.path().join("labels.json");
+        std::fs::write(&label_path, serde_json::to_vec(&serde_json::json!({
+            "version": 1, "generatedAt": TEST_NOW,
+            "bindings": ([&owner_npub, &member_npub].map(|npub| serde_json::json!({
+                "npub": npub, "sourceId": npub, "label": {"name": "private@example.com", "kind": "human", "source": "hosted_account", "observedAt": TEST_NOW}
+            })))
+        })).unwrap()).unwrap();
+        let router = router_with_state(
+            personal_test_state(&owner_keys, &agent_keys).with_principal_labels_path(label_path),
+        );
 
         let all_members_folder_body = serde_json::json!({
             "folderId": "implicit-personal-share",
@@ -4023,6 +4063,26 @@ mod tests {
             vec![member_npub.clone()]
         );
         assert_eq!(metadata.grant_count, 1);
+        assert!(
+            metadata
+                .identities
+                .iter()
+                .find(|id| id.npub == owner_npub)
+                .unwrap()
+                .label
+                .is_none(),
+            "a guest cannot see the owner's private account label"
+        );
+        assert!(
+            metadata
+                .identities
+                .iter()
+                .find(|id| id.npub == member_npub)
+                .unwrap()
+                .label
+                .is_some(),
+            "a guest can see their own label"
+        );
 
         let export = authed_request(
             router.clone(),

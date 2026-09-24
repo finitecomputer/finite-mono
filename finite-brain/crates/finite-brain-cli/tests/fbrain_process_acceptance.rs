@@ -163,6 +163,7 @@ fn spawn_real_brain_server(
 fn spawn_file_backed_brain_server(
     owner_npub: &str,
     database_path: std::path::PathBuf,
+    labels_path: Option<PathBuf>,
 ) -> (
     String,
     tokio::sync::oneshot::Sender<()>,
@@ -189,7 +190,10 @@ fn spawn_file_backed_brain_server(
             if !brain_exists {
                 store.create_brain_bootstrap(&organization, &[]).unwrap();
             }
-            let state = finite_brain_server::ServerState::new(store, url.clone());
+            let mut state = finite_brain_server::ServerState::new(store, url.clone());
+            if let Some(path) = labels_path {
+                state = state.with_principal_labels_path(path);
+            }
             url_tx.send(url).unwrap();
             let router = finite_brain_server::router_with_state(state);
             axum::serve(
@@ -1057,7 +1061,7 @@ fn built_fbrain_process_brain_restore_drill() {
     let database_path = scratch.path().join("state").join("brain-a.sqlite3");
     fs::create_dir_all(database_path.parent().unwrap()).unwrap();
     let (server_a_url, shutdown_a, server_a) =
-        spawn_file_backed_brain_server(&alice_npub, database_path.clone());
+        spawn_file_backed_brain_server(&alice_npub, database_path.clone(), None);
     let run_against = |home: &Path, server_url: &str, args: &[&str]| {
         let now = OffsetDateTime::now_utc().format(&Rfc3339).unwrap();
         command(home, home)
@@ -1223,7 +1227,7 @@ fn built_fbrain_process_brain_restore_drill() {
     fs::create_dir_all(restored_path.parent().unwrap()).unwrap();
     fs::copy(&backup_path, &restored_path).unwrap();
     let (server_b_url, shutdown_b, server_b) =
-        spawn_file_backed_brain_server(&alice_npub, restored_path);
+        spawn_file_backed_brain_server(&alice_npub, restored_path, None);
 
     // Memberships and provenance survived; the revoked member did not.
     let metadata = json_of(
@@ -4397,4 +4401,71 @@ fn built_fbrain_pending_wraps_complete_on_admin_sync_unlock_invited_member() {
 
     shutdown.send(()).unwrap();
     server_thread.join().unwrap();
+}
+
+#[test]
+fn built_fbrain_access_list_preserves_private_principal_labels() {
+    let scratch = TempDir::new().unwrap();
+    let home = scratch.path().join("home");
+    fs::create_dir_all(&home).unwrap();
+    let secret = scratch.path().join("synthetic-key");
+    let keys = Keys::generate();
+    fs::write(&secret, keys.secret_key().to_secret_hex()).unwrap();
+    assert!(
+        run(
+            &home,
+            &home,
+            &[
+                "auth",
+                "import",
+                "--file",
+                secret.to_str().unwrap(),
+                "--json"
+            ]
+        )
+        .status
+        .success()
+    );
+    let npub = NostrPublicKey::from_protocol(keys.public_key())
+        .to_npub()
+        .unwrap();
+    let now = OffsetDateTime::now_utc();
+    let labels = scratch.path().join("labels.json");
+    write_json(
+        &labels,
+        &json!({"version": 1, "generatedAt": now.unix_timestamp(), "bindings": [{
+            "npub": npub, "sourceId": "synthetic-account", "label": {
+                "name": "alex@example.com", "kind": "human", "source": "hosted_account", "observedAt": now.unix_timestamp()
+            }
+        }]}),
+    );
+    let (url, stop, server) =
+        spawn_file_backed_brain_server(&npub, scratch.path().join("brain.sqlite3"), Some(labels));
+    let output = command(&home, &home)
+        .env("FBRAIN_NOW", now.format(&Rfc3339).unwrap())
+        .args([
+            "access",
+            "list",
+            "--brain",
+            "roundtrip-org",
+            "--server",
+            &url,
+            "--json",
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let report: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(
+        report["identities"][0]["display"],
+        "alex@example.com (human)"
+    );
+    assert_eq!(report["identities"][0]["label"]["source"], "hosted_account");
+    assert_eq!(report["admins"], json!([npub]));
+    let _ = stop.send(());
+    server.join().unwrap();
 }

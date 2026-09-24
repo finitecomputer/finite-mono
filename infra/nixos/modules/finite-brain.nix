@@ -2,30 +2,89 @@
 # origin and behind the finite.computer dashboard's embedded client proxy. It
 # binds loopback only. WorkOS protects the embedded Product Client; Brain owns
 # route-level auth through signed Nostr request proofs.
-{ config, finitePackages, ... }:
+{
+  config,
+  finitePackages,
+  pkgs,
+  ...
+}:
 let
   mailEnvironmentFile = "/etc/finite-saas/sites.env";
   labelsPath = "/run/finite-brain-labels/principals.json";
 in
 {
   users.groups.finite-brain-labels = { };
-  # Disposable display cache only. This worker reads existing public identity
-  # columns under an operator boundary; Brain never receives Core credentials
-  # or opens the hosted Chat store. It cannot write any source database.
+  users.users.finite_brain_labels = {
+    isSystemUser = true;
+    group = "finite-brain-labels";
+  };
+  systemd.tmpfiles.rules = [ "d /run/finite-brain-labels-root 0755 root root - -" ];
+  # Existing local peer authentication covers this dedicated Unix user. Keep
+  # role setup in its own unit so adding labels does not restart PostgreSQL.
+  systemd.services.finite-brain-label-grants = {
+    description = "Grant read-only public identity columns to Brain label observer";
+    after = [
+      "postgresql.service"
+      "finite-saas-core.service"
+    ];
+    # Observe an already-running database; never undo an operator's DB stop.
+    unitConfig.Requisite = "postgresql.service";
+    partOf = [ "postgresql.service" ];
+    serviceConfig = {
+      Type = "oneshot";
+      RemainAfterExit = true;
+      User = "postgres";
+      TimeoutStartSec = 15;
+      ExecStart = pkgs.writeShellScript "grant-brain-label-reader" ''
+        set -euo pipefail
+        ${config.services.postgresql.package}/bin/psql --no-psqlrc --quiet --set=ON_ERROR_STOP=1 --dbname=finite_core <<'SQL'
+        SET statement_timeout = '5s';
+        SET lock_timeout = '1s';
+        DO $role$
+        BEGIN
+          IF NOT EXISTS (SELECT FROM pg_roles WHERE rolname = 'finite_brain_labels') THEN
+            CREATE ROLE finite_brain_labels LOGIN;
+          END IF;
+        END
+        $role$;
+        GRANT CONNECT ON DATABASE finite_core TO finite_brain_labels;
+        GRANT USAGE ON SCHEMA public TO finite_brain_labels;
+        GRANT SELECT (workos_user_id, normalized_email, link_status) ON users TO finite_brain_labels;
+        GRANT SELECT (id, display_name) ON projects TO finite_brain_labels;
+        GRANT SELECT (project_id, health_reporting_npub) ON agent_runtimes TO finite_brain_labels;
+        SQL
+      '';
+    };
+  };
+  # Disposable display cache. Dedicated peer-authenticated Postgres role with
+  # column SELECT grants; no credentials or Core API tokens. The worker's root
+  # filesystem exposes only the read-only sources, Nix closure, socket, and output.
   systemd.services.finite-brain-labels = {
     description = "Refresh private Brain principal labels";
-    after = [ "network-online.target" ];
+    after = [ "finite-brain-label-grants.service" ];
+    requires = [ "finite-brain-label-grants.service" ];
     environment = {
-      FINITE_BRAIN_DB = "/var/lib/private/finitebrain/finite-brain.sqlite3";
-      FINITECHAT_HOSTED_DATA_ROOT = "/var/lib/private/finitechat-hosted-device";
-      FINITE_BRAIN_PRINCIPAL_LABELS = labelsPath;
+      FINITE_BRAIN_LABEL_DATABASE_URL = "host=/run/postgresql user=finite_brain_labels dbname=finite_core";
+      FINITE_BRAIN_DB = "/sources/brain/finite-brain.sqlite3";
+      FINITECHAT_HOSTED_DATA_ROOT = "/sources/hosted";
+      FINITE_BRAIN_PRINCIPAL_LABELS = "/output/principals.json";
     };
     serviceConfig = {
       Type = "oneshot";
       ExecStart = "${finitePackages.finite-brain}/bin/finite-brain-labels";
-      EnvironmentFile = "/etc/finite/core.env";
-      User = "root";
+      User = "finite_brain_labels";
+      # Read DynamicUser-owned SQLite sources, confined to these explicit binds.
       CapabilityBoundingSet = [ "CAP_DAC_READ_SEARCH" ];
+      AmbientCapabilities = [ "CAP_DAC_READ_SEARCH" ];
+      RootDirectory = "/run/finite-brain-labels-root";
+      BindReadOnlyPaths = [
+        "/nix/store"
+        "/run/postgresql"
+        "/var/lib/private/finitebrain:/sources/brain"
+        "/var/lib/private/finitechat-hosted-device/users:/sources/hosted/users"
+      ];
+      BindPaths = [ "/run/finite-brain-labels:/output" ];
+      RestrictAddressFamilies = [ "AF_UNIX" ];
       Group = "finite-brain-labels";
       RuntimeDirectory = "finite-brain-labels";
       RuntimeDirectoryMode = "0750";
@@ -36,7 +95,7 @@ in
       PrivateTmp = true;
       ProtectSystem = "strict";
       ProtectHome = true;
-      ReadWritePaths = [ "/run/finite-brain-labels" ];
+      ReadWritePaths = [ "+/output" ];
     };
   };
   systemd.timers.finite-brain-labels = {

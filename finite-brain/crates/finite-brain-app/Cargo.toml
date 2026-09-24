@@ -1,5 +1,6 @@
 [package]
 name = "finite-brain-app"
+default-run = "finite-brain"
 version = "0.5.0"
 edition.workspace = true
 license.workspace = true
@@ -20,10 +21,14 @@ finite-brain-server = { path = "../finite-brain-server" }
 finite-nostr.workspace = true
 rusqlite.workspace = true
 serde_json.workspace = true
-sha2.workspace = true
 tempfile.workspace = true
 tokio-postgres = "0.7"
 tokio = { version = "1.52.3", features = ["macros", "net", "rt-multi-thread"] }
+
+[dev-dependencies]
+finite-brain-core = { path = "../finite-brain-core" }
+finite-brain-store = { path = "../finite-brain-store" }
+sha2.workspace = true
 
 [lints]
 workspace = true
