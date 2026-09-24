@@ -116,10 +116,10 @@ fn hosted_candidates(
         {
             continue;
         }
-        if let Some(npub) = hosted_public_key(root, &storage_id)? {
-            if principals.contains(&npub) {
-                candidates.insert(storage_id, npub);
-            }
+        if let Some(npub) = hosted_public_key(root, &storage_id)?
+            && principals.contains(&npub)
+        {
+            candidates.insert(storage_id, npub);
         }
         if candidates.len() > MAX_LABELS {
             return Err(RefreshError::Limit);
@@ -231,12 +231,11 @@ async fn collect(
         }
         let subject: String = row.get(0);
         let subject_hash: String = row.get(2);
-        if let Some(npub) = candidates.get(&subject_hash) {
-            if let Some(label) =
+        if let Some(npub) = candidates.get(&subject_hash)
+            && let Some(label) =
                 binding(npub.clone(), subject, row.get(1), PrincipalKind::Human, now)
-            {
-                bindings.push(label);
-            }
+        {
+            bindings.push(label);
         }
     }
     let projection = LabelProjection {

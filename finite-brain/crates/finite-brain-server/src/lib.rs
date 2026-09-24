@@ -1069,23 +1069,23 @@ fn enrich_metadata_identities(
         labels.retain(|npub, _| npub == actor);
     }
     for npub in npubs {
-        if !identities.contains_key(&npub) {
-            if let Ok(public_key) = NostrPublicKey::parse(&npub) {
-                let mut identity = identity_response_from_resolved(
-                    resolved_identity(public_key, None, Vec::new())?,
-                    None,
-                );
-                identity.display = format!("Unidentified ({npub})");
-                identities.insert(npub.clone(), identity);
-            }
+        if !identities.contains_key(&npub)
+            && let Ok(public_key) = NostrPublicKey::parse(&npub)
+        {
+            let mut identity = identity_response_from_resolved(
+                resolved_identity(public_key, None, Vec::new())?,
+                None,
+            );
+            identity.display = format!("Unidentified ({npub})");
+            identities.insert(npub.clone(), identity);
         }
         if let (Some(identity), Some(label)) = (identities.get_mut(&npub), labels.get(&npub)) {
             identity.display = label.display();
             identity.label = Some(label.clone());
-        } else if let Some(identity) = identities.get_mut(&npub) {
-            if identity.nip05.is_none() {
-                identity.display = format!("Unidentified ({npub})");
-            }
+        } else if let Some(identity) = identities.get_mut(&npub)
+            && identity.nip05.is_none()
+        {
+            identity.display = format!("Unidentified ({npub})");
         }
     }
     response.identities = identities.into_values().collect();
