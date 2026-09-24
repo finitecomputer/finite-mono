@@ -515,10 +515,10 @@ pub struct SubmitRecordOutcome {
     pub duplicate: bool,
 }
 
-/// Result of granting one identity the current Folder Key.
+/// Result of ensuring one identity has Folder access and its current key grant.
 #[derive(Debug, Clone, Copy, Eq, PartialEq)]
 pub enum GrantFolderAccessOutcome {
-    /// Access and its current-version key grant were added.
+    /// Access was granted, preserving an existing current-version key grant or adding one.
     Granted,
     /// The identity already had effective access and the current-version grant.
     AlreadyHasAccess,
@@ -7950,18 +7950,24 @@ mod tests {
             "npub-admin",
         );
         store.submit_sync_record(&brain_id, &access_record).unwrap();
+        let mut conflicting_body = access_record.clone();
+        let SyncRecordInput::Control(record) = &mut conflicting_body else {
+            panic!("access fixture must be a control record");
+        };
+        record.payload_json = "{\"different\":true}".to_owned();
         let before = store.load_brain(&brain_id).unwrap();
         let before_sequence = store.latest_sequence(&brain_id).unwrap();
-        for _ in 0..2 {
-            store
+        for rejected in [access_record.clone(), access_record, conflicting_body] {
+            let error = store
                 .grant_folder_access_with_control_records(
                     &brain_id,
                     &folder_id,
                     &member,
                     &repair,
-                    &[key_record.clone(), access_record.clone()],
+                    &[key_record.clone(), rejected],
                 )
                 .unwrap_err();
+            assert!(matches!(error, StoreError::Database { .. }), "{error:?}");
             let after = store.load_brain(&brain_id).unwrap();
             assert_eq!(after.folder_access, before.folder_access);
             assert_eq!(after.grants, before.grants);
@@ -7978,12 +7984,31 @@ mod tests {
                 .unwrap()
             );
         }
-        // A fresh signed change can succeed after the failed transaction.
+        // A fresh access change can succeed after rejection, even if the
+        // discarded replacement key record reuses the retained wrap's event ID.
+        let retained_key_record = folder_key_grant_control_record(&retained, "retained-key-record");
+        let fresh_access_record = folder_access_control_record(
+            "repair-access-record",
+            SyncRecordType::BrainAdminAccessChange,
+            "strategy",
+            "npub-admin",
+        );
         assert_eq!(
             store
-                .grant_folder_access(&brain_id, &folder_id, &member, &repair)
+                .grant_folder_access_with_control_records(
+                    &brain_id,
+                    &folder_id,
+                    &member,
+                    &repair,
+                    &[retained_key_record, fresh_access_record],
+                )
                 .unwrap(),
             GrantFolderAccessOutcome::Granted
+        );
+        assert_eq!(store.load_brain(&brain_id).unwrap().grants, before.grants);
+        assert_eq!(
+            store.latest_sequence(&brain_id).unwrap(),
+            before_sequence + 1
         );
     }
 
