@@ -444,7 +444,7 @@ mod tests {
         admin.batch_execute("INSERT INTO users SELECT 'unrelated-' || id, 'unrelated@example.com', 'linked' FROM generate_series(1, 5000) id").await.unwrap();
         let before = fs::read(&brain).unwrap();
         let mut config: tokio_postgres::Config = url.parse().unwrap();
-        config.options(&format!("-c search_path={schema}"));
+        config.options(format!("-c search_path={schema}"));
         let projection = collect(&config, &brain, &hosted, 100).await.unwrap();
         let labels = projection.labels(100).unwrap();
         assert_eq!(labels.len(), 2);
