@@ -51,6 +51,9 @@ async fn main() -> Result<(), Box<dyn Error>> {
 
     let mut state =
         finite_brain_server::server_state_with_sqlite_path(database_path, public_base_url)?;
+    if let Ok(path) = std::env::var("FINITE_BRAIN_PRINCIPAL_LABELS") {
+        state = state.with_principal_labels_path(path);
+    }
     if let Some((max_requests, window_seconds)) =
         protected_rate_limit_override(std::env::var("FINITE_BRAIN_PROTECTED_RATE_LIMIT").ok())
             .map_err(|error| {

@@ -115,6 +115,9 @@ pub struct IdentityResponse {
     pub nip05: Option<String>,
     pub relays: Vec<String>,
     pub verified_at: Option<String>,
+    /// Private account/agent label; does not change the public NIP-05 binding.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub label: Option<crate::principal_labels::PrincipalLabel>,
 }
 
 /// Resolve a public identity input to canonical npub metadata.

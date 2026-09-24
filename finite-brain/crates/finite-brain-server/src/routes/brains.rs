@@ -108,7 +108,7 @@ pub(crate) async fn create_brain_handler(
     let mut response = metadata_response(stored);
     {
         let store = state.store.lock().map_err(lock_error)?;
-        enrich_metadata_identities(&store, &mut response)?;
+        enrich_metadata_identities(&state, &store, &mut response)?;
     }
     Ok(Json(response))
 }
@@ -152,7 +152,7 @@ pub(crate) async fn brain_metadata_handler(
     let mut response = metadata_response_for_actor(stored, mounted_folders, &actor_npub);
     {
         let store = state.store.lock().map_err(lock_error)?;
-        enrich_metadata_identities(&store, &mut response)?;
+        enrich_metadata_identities(&state, &store, &mut response)?;
         if actor_is_admin {
             attach_pending_approvals(&store, &mut response, &brain_id)?;
             attach_pending_wraps(&store, &mut response, &brain_id)?;

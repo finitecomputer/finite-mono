@@ -2528,6 +2528,7 @@ fn access_summary_report(metadata: BrainMetadataView) -> Result<AccessSummaryRep
         })
         .collect::<Result<Vec<_>, CliError>>()?;
     Ok(AccessSummaryReport {
+        identities: metadata.identities,
         brain_id: metadata.brain_id,
         members: metadata.members,
         guests: metadata.guests,
@@ -2552,6 +2553,22 @@ fn write_access_summary_rows<W: Write>(
         report.guests.len(),
         report.grant_count
     )?;
+    for identity in &report.identities {
+        let source = identity
+            .label
+            .as_ref()
+            .map(|label| label.source.as_str())
+            .unwrap_or(if identity.nip05.is_some() {
+                "public_nip05"
+            } else {
+                "unverified"
+            });
+        writeln!(
+            output,
+            "identity {} label={} source={}",
+            identity.npub, identity.display, source
+        )?;
+    }
     for person in &report.collaborator_readiness {
         writeln!(
             output,
@@ -8373,6 +8390,36 @@ mod tests {
     }
 
     #[test]
+    fn access_summary_preserves_private_labels_and_old_server_metadata() {
+        let mut wire = serde_json::json!({
+            "brainId": "acme", "kind": "organization", "name": "Acme",
+            "ownerUserId": null, "members": ["human", "agent", "unknown"],
+            "admins": ["human"], "folders": []
+        });
+        let old: BrainMetadataView = serde_json::from_value(wire.clone()).unwrap();
+        assert!(access_summary_report(old).unwrap().identities.is_empty());
+        wire["identities"] = serde_json::json!([
+            {"npub": "human", "display": "Alex (human)", "nip05": null,
+             "label": {"name": "Alex", "kind": "human", "source": "hosted_account", "observedAt": 100}},
+            {"npub": "agent", "display": "Alex (agent)", "nip05": "alex@example.com",
+             "label": {"name": "Alex", "kind": "agent", "source": "managed_agent", "observedAt": 100}},
+            {"npub": "unknown", "display": "Unidentified (unknown)", "nip05": null}
+        ]);
+        let report = access_summary_report(serde_json::from_value(wire).unwrap()).unwrap();
+        let json = serde_json::to_value(&report).unwrap();
+        assert_eq!(json["identities"][0]["label"]["kind"], "human");
+        assert_eq!(json["identities"][1]["label"]["kind"], "agent");
+        assert_eq!(json["identities"][1]["nip05"], "alex@example.com");
+        assert_eq!(report.admins, ["human"]);
+        let mut output = Vec::new();
+        write_access_summary_rows(&mut output, &report).unwrap();
+        let text = String::from_utf8(output).unwrap();
+        assert!(text.contains("identity human label=Alex (human) source=hosted_account"));
+        assert!(text.contains("identity agent label=Alex (agent) source=managed_agent"));
+        assert!(text.contains("identity unknown label=Unidentified (unknown) source=unverified"));
+    }
+
+    #[test]
     fn folder_mount_and_access_list_commands_use_typed_metadata() {
         let tmp = TempDir::new().unwrap();
         import_identity_secret(
@@ -13522,6 +13569,7 @@ mod tests {
     #[test]
     fn folder_required_recipients_follow_access_mode() {
         let metadata = BrainMetadataView {
+            identities: Vec::new(),
             brain_id: "org".to_owned(),
             kind: "organization".to_owned(),
             name: "Org".to_owned(),
@@ -13547,6 +13595,7 @@ mod tests {
         );
 
         let personal_metadata = BrainMetadataView {
+            identities: Vec::new(),
             brain_id: "personal".to_owned(),
             kind: "personal".to_owned(),
             name: "Personal".to_owned(),
@@ -13571,6 +13620,7 @@ mod tests {
     #[test]
     fn member_removal_rotations_use_the_post_removal_roster() {
         let metadata = BrainMetadataView {
+            identities: Vec::new(),
             brain_id: "org".to_owned(),
             kind: "organization".to_owned(),
             name: "Org".to_owned(),

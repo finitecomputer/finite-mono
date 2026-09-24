@@ -323,7 +323,7 @@ pub(crate) async fn grant_folder_access_handler(
         )?;
         let stored = store.load_brain(&brain_id)?;
         let mut metadata = metadata_response(stored);
-        enrich_metadata_identities(&store, &mut metadata)?;
+        enrich_metadata_identities(&state, &store, &mut metadata)?;
         (metadata, outcome)
     };
     let outcome = match outcome {

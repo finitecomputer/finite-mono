@@ -962,7 +962,13 @@ version = "0.5.0"
 dependencies = [
  "axum",
  "finite-brain-server",
+ "finite-nostr",
+ "rusqlite",
+ "serde_json",
+ "sha2 0.10.9",
+ "tempfile",
  "tokio",
+ "tokio-postgres",
 ]
 
 [[package]]

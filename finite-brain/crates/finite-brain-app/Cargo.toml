@@ -10,9 +10,19 @@ description = "Binary entrypoint for the FiniteBrain application server."
 name = "finite-brain"
 path = "src/main.rs"
 
+[[bin]]
+name = "finite-brain-labels"
+path = "src/labels.rs"
+
 [dependencies]
 axum = { version = "0.8.7", features = ["tokio", "http1"] }
 finite-brain-server = { path = "../finite-brain-server" }
+finite-nostr.workspace = true
+rusqlite.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
+tempfile.workspace = true
+tokio-postgres = "0.7"
 tokio = { version = "1.52.3", features = ["macros", "net", "rt-multi-thread"] }
 
 [lints]

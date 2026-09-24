@@ -49,6 +49,7 @@ use time::format_description::well_known::Rfc3339;
 
 mod contracts;
 mod object_records;
+pub mod principal_labels;
 mod protected_routes;
 mod responses;
 
@@ -113,6 +114,7 @@ pub struct ServerState {
     rate_limit: RateLimitConfig,
     cors_allowed_origins: Arc<BTreeSet<String>>,
     nip05_fetcher: Nip05Fetcher,
+    principal_labels_path: Option<std::path::PathBuf>,
     invite_mailer: Option<BrainInviteMailer>,
     brain_updates: tokio::sync::broadcast::Sender<BrainUpdateNotification>,
 }
@@ -155,6 +157,7 @@ impl ServerState {
             },
             cors_allowed_origins: Arc::new(cors_allowed_origins),
             nip05_fetcher: default_nip05_fetcher(),
+            principal_labels_path: None,
             invite_mailer: None,
             brain_updates,
         }
@@ -211,6 +214,13 @@ impl ServerState {
             .load_brain(&brain_id)
             .ok()
             .is_some_and(|stored| ensure_metadata_visible(&stored, actor).is_ok())
+    }
+
+    /// Read private display labels from an operator-owned, disposable projection.
+    /// No authorization or invitation decision consults this file.
+    pub fn with_principal_labels_path(mut self, path: impl Into<std::path::PathBuf>) -> Self {
+        self.principal_labels_path = Some(path.into());
+        self
     }
 
     /// Override the auth validation clock for deterministic tests.
@@ -807,6 +817,7 @@ fn identity_response_from_resolved(
         nip05: resolved.nip05,
         relays: resolved.relays,
         verified_at,
+        label: None,
     }
 }
 
@@ -821,6 +832,7 @@ fn identity_response_from_alias(alias: IdentityAlias) -> IdentityResponse {
         nip05: alias.preferred_nip05,
         relays: alias.nip05_relays,
         verified_at: alias.nip05_verified_at,
+        label: None,
     }
 }
 
@@ -1017,6 +1029,7 @@ fn selected_folder_ids(values: &[String]) -> Result<Vec<FolderId>, ApiError> {
 }
 
 fn enrich_metadata_identities(
+    state: &ServerState,
     store: &BrainStore,
     response: &mut BrainMetadataResponse,
 ) -> Result<(), ApiError> {
@@ -1033,7 +1046,40 @@ fn enrich_metadata_identities(
     for folder in &response.folders {
         npubs.extend(folder.access_user_ids.iter().cloned());
     }
-    response.identities = known_identity_responses(store, npubs)?;
+    // Only identities already disclosed by this authorized metadata response
+    // may receive private labels. Public resolve/invitation endpoints never do.
+    let npubs: BTreeSet<_> = npubs.into_iter().collect();
+    let aliases = known_identity_responses(store, npubs.iter().cloned())?;
+    let mut identities: BTreeMap<_, _> = aliases
+        .into_iter()
+        .map(|identity| (identity.npub.clone(), identity))
+        .collect();
+    let labels = state
+        .principal_labels_path
+        .as_deref()
+        .and_then(|path| principal_labels::read_labels(path, state.auth_now_unix_seconds()))
+        .unwrap_or_default();
+    for npub in npubs {
+        if !identities.contains_key(&npub) {
+            if let Ok(public_key) = NostrPublicKey::parse(&npub) {
+                let mut identity = identity_response_from_resolved(
+                    resolved_identity(public_key, None, Vec::new())?,
+                    None,
+                );
+                identity.display = format!("Unidentified ({npub})");
+                identities.insert(npub.clone(), identity);
+            }
+        }
+        if let (Some(identity), Some(label)) = (identities.get_mut(&npub), labels.get(&npub)) {
+            identity.display = label.display();
+            identity.label = Some(label.clone());
+        } else if let Some(identity) = identities.get_mut(&npub) {
+            if identity.nip05.is_none() {
+                identity.display = format!("Unidentified ({npub})");
+            }
+        }
+    }
+    response.identities = identities.into_values().collect();
     Ok(())
 }
 
@@ -1171,7 +1217,7 @@ where
         mutation(&mut store, &brain_id)?;
         let stored = store.load_brain(&brain_id)?;
         let mut response = metadata_response(stored);
-        enrich_metadata_identities(&store, &mut response)?;
+        enrich_metadata_identities(&state, &store, &mut response)?;
         attach_pending_approvals(&store, &mut response, &brain_id)?;
         attach_pending_wraps(&store, &mut response, &brain_id)?;
         response
@@ -3474,6 +3520,138 @@ mod tests {
             expired_row.status, "pending",
             "expired is computed at read; the stored status is never mutated"
         );
+    }
+
+    #[tokio::test]
+    async fn private_labels_refresh_existing_and_new_members_without_changing_authority() {
+        use crate::principal_labels::*;
+        let admin = Keys::generate();
+        let newcomer = Keys::generate();
+        let outsider = Keys::generate();
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("labels.json");
+        let state = test_state().with_principal_labels_path(&path);
+        let router = router_with_state(state.clone());
+        assert_eq!(
+            post_brain(
+                router.clone(),
+                &admin,
+                &create_brain_body("acme", "organization"),
+                TEST_NOW,
+                None,
+                None,
+                None
+            )
+            .await
+            .status(),
+            StatusCode::OK
+        );
+        let original: BrainMetadataResponse =
+            read_json(get_metadata(router.clone(), &admin, "acme", TEST_NOW).await).await;
+        assert!(original.identities[0].label.is_none());
+        let binding = |keys: &Keys, kind| LabelBinding {
+            npub: npub(keys),
+            source_id: npub(keys),
+            label: PrincipalLabel {
+                name: "Alex".to_owned(),
+                kind,
+                observed_at: TEST_NOW,
+                source: if kind == PrincipalKind::Human {
+                    LabelSource::HostedAccount
+                } else {
+                    LabelSource::ManagedAgent
+                },
+            },
+        };
+        let mut projection = LabelProjection {
+            version: 1,
+            generated_at: TEST_NOW,
+            bindings: vec![
+                binding(&admin, PrincipalKind::Human),
+                binding(&newcomer, PrincipalKind::Agent),
+                binding(&outsider, PrincipalKind::Human),
+            ],
+        };
+        std::fs::write(&path, serde_json::to_vec(&projection).unwrap()).unwrap();
+        let labelled: BrainMetadataResponse =
+            read_json(get_metadata(router.clone(), &admin, "acme", TEST_NOW + 1).await).await;
+        assert_eq!(
+            labelled.identities.len(),
+            1,
+            "no private directory entries for nonmembers"
+        );
+        assert_eq!(labelled.identities[0].display, "Alex (human)");
+        assert_eq!(labelled.members, original.members);
+        assert_eq!(labelled.admins, original.admins);
+        assert_eq!(labelled.folders, original.folders);
+        assert_eq!(labelled.grant_count, original.grant_count);
+        let raw: IdentityResponse = read_json(
+            authed_request(
+                router.clone(),
+                &outsider,
+                "POST",
+                "/v1/identities/resolve",
+                Some(serde_json::json!({"input": npub(&admin)}).to_string()),
+                TEST_NOW,
+            )
+            .await,
+        )
+        .await;
+        assert_eq!(
+            raw.display,
+            npub(&admin),
+            "private label never enters global resolve"
+        );
+        assert!(raw.label.is_none());
+        assert_eq!(
+            get_metadata(router.clone(), &outsider, "acme", TEST_NOW)
+                .await
+                .status(),
+            StatusCode::FORBIDDEN
+        );
+        // Ordinary member admission remains authoritative; no label grants it.
+        let created: CreateBrainInviteTokenResponse = read_json(
+            authed_request(
+                router.clone(),
+                &admin,
+                "POST",
+                "/v1/brains/acme/invite-tokens",
+                Some(serde_json::json!({"role": "member"}).to_string()),
+                TEST_NOW,
+            )
+            .await,
+        )
+        .await;
+        let accepted = authed_request(
+            router.clone(),
+            &newcomer,
+            "POST",
+            "/v1/invite-tokens/redeem",
+            Some(serde_json::json!({"token": created.token}).to_string()),
+            TEST_NOW,
+        )
+        .await;
+        assert_eq!(accepted.status(), StatusCode::OK);
+        let admitted: BrainMetadataResponse =
+            read_json(get_metadata(router.clone(), &admin, "acme", TEST_NOW + 2).await).await;
+        assert_eq!(
+            admitted
+                .identities
+                .iter()
+                .find(|id| id.npub == npub(&newcomer))
+                .unwrap()
+                .display,
+            "Alex (agent)"
+        );
+        assert_eq!(admitted.admins, original.admins);
+        assert_eq!(admitted.grant_count, original.grant_count);
+        projection.generated_at = TEST_NOW - MAX_LABEL_AGE_SECONDS - 1;
+        std::fs::write(&path, serde_json::to_vec(&projection).unwrap()).unwrap();
+        let expired: BrainMetadataResponse =
+            read_json(get_metadata(router, &admin, "acme", TEST_NOW + 3).await).await;
+        assert!(expired.identities.iter().all(|id| id.label.is_none()));
+        assert_eq!(expired.members, admitted.members);
+        assert_eq!(expired.admins, admitted.admins);
     }
 
     #[tokio::test]

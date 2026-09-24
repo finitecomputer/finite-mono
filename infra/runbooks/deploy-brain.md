@@ -94,6 +94,51 @@ row or rolling back the server binary. Do not restore an old database over
 subsequent accepted writes. Coordinate the explicit repair with any concurrent
 runtime recovery and run `scripts/finite-status` before and after rollout.
 
+## Private principal labels
+
+The same closure installs `finite-brain-labels.service` and its one-minute
+refresh timer. It derives labels for existing Brain principals from Core's
+linked WorkOS accounts plus the hosted device's `hosted-web` public account key,
+and from Core's runner-pinned Agent Principal plus Project display name. An
+invitation's delivery email and an agent-creation request's caller-supplied
+owner key are never identity evidence. Conflicting bindings remain unidentified.
+Newly admitted members appear after the next successful refresh (normally
+within 65 seconds); existing members use the same path without a database backfill.
+
+The exporter runs locally under the operator boundary. It loads the existing
+Core database credential by name from `/etc/finite/core.env`, starts a read-only
+Postgres transaction, and opens Brain and hosted Chat SQLite files read-only.
+It queries public identity columns only; it never reads identity secret files,
+messages, ciphertext, invite tokens, or encrypted grants. The retained source
+contract is `users(workos_user_id, normalized_email, link_status)`,
+`projects(id, display_name)`, `agent_runtimes(project_id, health_reporting_npub)`,
+and the hosted `client_device_states(account_id, device_id)` row inside the
+SHA-256 WorkOS-subject namespace. Source schema changes must preserve or update
+this reader. Missing or ambiguous hosted state is never repaired by this worker.
+
+`/run/finite-brain-labels/principals.json` is an atomic, disposable private
+projection, owned by root and readable only by the label group (directory
+0750, file 0640). Brain receives its path through
+`FINITE_BRAIN_PRINCIPAL_LABELS`; it receives no Core credential. Only authorized
+Brain metadata responses use labels, for the principals already in that
+response. Global identity resolution and public NIP-05 aliases are unchanged.
+Human/agent type, source, and observation time accompany the display label.
+
+A missing, malformed, oversized, future-dated, or more-than-five-minute-old
+projection supplies no private labels. The refresh is bounded to 4,096 source
+accounts/principals and 35 seconds; failure leaves the previous projection to
+expire. Brain access and sync do not depend on the worker. On an authorized
+rollout, verify existing and newly admitted identities with `fbrain brain
+metadata --brain "$BRAIN_ID" --json` and an updated `fbrain access list --brain
+"$BRAIN_ID" --json`; unknown keys remain unverified. Old clients ignore the
+additive label metadata, and the new CLI accepts older servers without it.
+
+No Brain or Chat schema migration is required. Labels can be regenerated from
+retained source bindings after an empty-target service restore; the projection
+is not part of the Recovery Set. Rolling back the closure removes the label
+consumer/timer without undoing or rewriting source state or accepted access
+repairs. Do not manually edit the projection to assert an unverified name.
+
 ## Rollback
 
 1. Switch lat2 to the previous NixOS generation and record the resulting

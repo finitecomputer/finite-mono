@@ -487,6 +487,7 @@ pub(crate) struct AccessExplanation {
 #[derive(Debug, Clone, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct AccessSummaryReport {
+    pub(crate) identities: Vec<IdentityDisplayView>,
     pub(crate) brain_id: String,
     pub(crate) members: Vec<String>,
     pub(crate) guests: Vec<String>,
@@ -523,6 +524,8 @@ pub(crate) struct HttpResponse {
 #[derive(Debug, Clone, Eq, PartialEq, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct BrainMetadataView {
+    #[serde(default)]
+    pub(crate) identities: Vec<IdentityDisplayView>,
     pub(crate) brain_id: String,
     pub(crate) kind: String,
     pub(crate) name: String,
@@ -544,6 +547,25 @@ pub(crate) struct BrainMetadataView {
     /// markers from the stacked pending-wraps work can extend this view later.
     #[serde(default)]
     pub(crate) collaborator_readiness: Vec<CollaboratorReadinessView>,
+}
+
+#[derive(Debug, Clone, Eq, PartialEq, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct IdentityDisplayView {
+    pub(crate) npub: String,
+    pub(crate) display: String,
+    pub(crate) nip05: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) label: Option<PrincipalLabelView>,
+}
+
+#[derive(Debug, Clone, Eq, PartialEq, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct PrincipalLabelView {
+    pub(crate) name: String,
+    pub(crate) kind: String,
+    pub(crate) source: String,
+    pub(crate) observed_at: u64,
 }
 
 #[derive(Debug, Clone, Eq, PartialEq, Deserialize, Serialize)]
