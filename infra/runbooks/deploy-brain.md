@@ -79,10 +79,14 @@ fbrain admin folder-access grant --brain "$BRAIN_ID" --folder "$FOLDER_ID" --tar
 ```
 
 This preserves an existing current-version key grant, or supplies one when
-missing. It does not restore admin standing. Verify metadata and run a fresh
-`fbrain sync now --summary` plus `fbrain conflicts --json` as the recipient;
-prove they can read the intended content and that unrelated Folders remain
-inaccessible. Stored grant presence alone is not a decryption proof.
+missing. It does not restore admin standing. Verify the recipient's explicit
+Folder permission and unchanged admin set in authoritative metadata. In the
+recipient's Working Tree for this Brain, run `fbrain sync now --summary` and
+`fbrain conflicts --json`. Prove restored decryption using a new remote revision
+written after demotion, or by bootstrapping a fresh Working Tree. Previously
+downloaded plaintext can survive access loss; neither those cached bytes nor
+stored grant presence proves restored access. Confirm unrelated Folders remain
+inaccessible.
 
 A mistaken grant requires the supported Folder-access revoke operation, which
 rotates keys and re-encrypts content; it is not undone by deleting an access
