@@ -1075,9 +1075,12 @@ fn enrich_metadata_identities(
     if admin {
         for npub in labels.keys().filter(|npub| npubs.contains(*npub)) {
             let target = UserId::new(npub.clone())?;
-            if store.member_provenance(&brain_id, &target)?.is_some_and(|origin| {
-                origin.origin_kind == finite_brain_store::ProvenanceOriginKind::Invitation
-            }) {
+            if store
+                .member_provenance(&brain_id, &target)?
+                .is_some_and(|origin| {
+                    origin.origin_kind == finite_brain_store::ProvenanceOriginKind::Invitation
+                })
+            {
                 visible_labels.insert(npub.clone());
             }
         }
