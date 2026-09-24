@@ -18,12 +18,24 @@
 //! sanctioned monotonic cursor path). No entries are rewritten or deleted
 //! and no other table is touched.
 //!
+//! `finitechat repair heal-behind-server` clears durable currency-gate
+//! rewind evidence whose room has already healed: a Commit moved the group
+//! epoch above the epoch the evidence was recorded at. It never clears on
+//! operator say-so — the heal predicate is read from the room's own MLS
+//! epoch — and refuses, changing nothing, while any flagged room is not
+//! healed yet. This is the one-shot for a store rekeyed by an image that
+//! left the evidence flag in place (the running image refuses sends on the
+//! flag's mere presence), so a stopped agent can be healed without a
+//! fleet roll.
+//!
 //! Every run appends to `--audit-log` (JSONL, created mode 0600): one line
 //! per skipped entry as it is applied, then a final summary line with
 //! phase "apply" or "refused". Stdout carries the same privacy contract as
 //! the classifier: seqs, kinds, SHA-256 bindings, error classes, cursor
 //! numbers, and counts only — never identifiers, plaintext, ciphertext, or
-//! secrets.
+//! secrets. Room ids follow the `hermes rekey` audit precedent: they are
+//! operator-visible routing identifiers and appear in the heal audit lines
+//! and record, never account ids, device ids, or secrets.
 
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -37,6 +49,7 @@ use serde::Serialize;
 
 use crate::cli::RepairArgs;
 use crate::cli::RepairCommand;
+use crate::cli::RepairHealBehindServerArgs;
 use crate::cli::RepairSkipEntryArgs;
 use crate::diagnose::split_capture;
 use crate::{CliError, parse_account_secret, write_pretty_json};
@@ -44,12 +57,16 @@ use crate::{CliError, parse_account_secret, write_pretty_json};
 /// Schema version of the stdout record and the audit-log lines. Bump on
 /// any field change.
 const REPAIR_SKIP_ENTRY_SCHEMA_VERSION: u32 = 1;
+/// Schema version of the `heal-behind-server` stdout record and audit
+/// lines. Bump on any field change.
+const REPAIR_HEAL_BEHIND_SERVER_SCHEMA_VERSION: u32 = 1;
 /// Hard cap on `--max-skips`; values above this are a usage error.
 const HARD_MAX_SKIPS: u32 = 64;
 
 pub(crate) fn run<W: Write>(args: RepairArgs, output: &mut W) -> Result<(), CliError> {
     match args.command {
         RepairCommand::SkipEntry(args) => cmd_skip_entry(args, output),
+        RepairCommand::HealBehindServer(args) => cmd_heal_behind_server(args, output),
     }
 }
 
@@ -173,6 +190,246 @@ impl AuditLog {
         writeln!(self.file).map_err(CliError::Output)?;
         self.file.sync_data().map_err(CliError::Output)
     }
+}
+
+/// One flagged room's durable rewind evidence, as the heal command found
+/// it. Shared by the stdout record and the audit lines.
+#[derive(Debug, Clone, Serialize)]
+struct FlaggedRoomEvidence {
+    room_id: String,
+    evidence_epoch: u64,
+    group_epoch: u64,
+    local_mark: u64,
+    observed_seq: u64,
+}
+
+/// The stdout record of `repair heal-behind-server`: what was healed, and
+/// which flagged rooms remain (the currency gate refuses sends from the
+/// whole store while any room stays flagged).
+#[derive(Serialize)]
+struct HealBehindServerRepairRecord {
+    schema_version: u32,
+    repair_disposition: &'static str,
+    healed: Vec<FlaggedRoomEvidence>,
+    remaining_flagged_rooms: Vec<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    refusal_reason: Option<&'static str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    refused: Option<FlaggedRoomEvidence>,
+}
+
+/// Audit trail: one line per room the heal cleared (phase "healed") or the
+/// room that refused the run (phase "refused"), then one summary line.
+#[derive(Serialize)]
+struct HealAuditRoomLine<'a> {
+    schema_version: u32,
+    record: &'static str,
+    phase: &'static str,
+    room_id: &'a str,
+    evidence_epoch: u64,
+    group_epoch: u64,
+    local_mark: u64,
+    observed_seq: u64,
+    recorded_at_unix_seconds: u64,
+}
+
+#[derive(Serialize)]
+struct HealAuditSummaryLine {
+    schema_version: u32,
+    record: &'static str,
+    phase: &'static str,
+    flagged: usize,
+    healed: usize,
+}
+
+/// `finitechat repair heal-behind-server`: open the REAL store, snapshot
+/// every room carrying durable behind-server evidence, and clear exactly
+/// the evidence whose room has healed (the MLS group epoch now sits above
+/// the epoch the evidence was recorded at). The predicate is never an
+/// operator input. Any selected room that has NOT healed refuses the whole
+/// run before the single save, leaving the store byte-identical: the
+/// operator rekeys that room first (`finitechat hermes rekey`), which
+/// clears its evidence as part of the rekey on this image.
+fn cmd_heal_behind_server<W: Write>(
+    RepairHealBehindServerArgs {
+        store,
+        device_id,
+        account_secret_hex,
+        room,
+        audit_log,
+    }: RepairHealBehindServerArgs,
+    output: &mut W,
+) -> Result<(), CliError> {
+    let store_path = PathBuf::from(store);
+    let audit_path = PathBuf::from(audit_log);
+    if audit_path == store_path {
+        return Err(CliError::Usage(
+            "--audit-log must not be the client store".to_owned(),
+        ));
+    }
+
+    let now_unix_seconds = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|duration| duration.as_secs())
+        .unwrap_or(0);
+    let config = FiniteChatDeviceConfig {
+        account_secret_key: parse_account_secret(&account_secret_hex)?,
+        device_id,
+        now_unix_seconds,
+        credential_not_before_unix_seconds: now_unix_seconds.saturating_sub(60),
+        credential_not_after_unix_seconds: now_unix_seconds.saturating_add(60),
+    };
+
+    let mut real_store = SqliteClientStore::open(
+        &store_path,
+        SqliteClientStoreOptions::from_nostr_secret(&config.account_secret_key, &config.device_id)
+            .map_err(|error| {
+                CliError::Runtime(format!("failed to prepare the client store: {error}"))
+            })?,
+    )
+    .map_err(|error| CliError::Runtime(format!("failed to open the real store: {error}")))?;
+    let mut device = real_store
+        .load_device(config.clone())
+        .map_err(|error| CliError::Runtime(format!("failed to load the device state: {error}")))?;
+
+    let cursors = device.room_sync_cursors();
+    if let Some(room) = &room
+        && !cursors.iter().any(|cursor| &cursor.room_id == room)
+    {
+        return Err(CliError::Usage(format!(
+            "room '{room}' is not on this store"
+        )));
+    }
+    let mut flagged: Vec<FlaggedRoomEvidence> = Vec::new();
+    for cursor in cursors {
+        let Some(evidence) = cursor.behind_server else {
+            continue;
+        };
+        let group_epoch = device.group_epoch(&cursor.room_id).map_err(|error| {
+            CliError::Runtime(format!(
+                "failed to read the room epoch for the flagged room: {error}"
+            ))
+        })?;
+        flagged.push(FlaggedRoomEvidence {
+            room_id: cursor.room_id,
+            evidence_epoch: evidence.evidence_epoch,
+            group_epoch,
+            local_mark: evidence.local_mark,
+            observed_seq: evidence.observed_seq,
+        });
+    }
+    let selected: Vec<FlaggedRoomEvidence> = match &room {
+        Some(room) => flagged
+            .iter()
+            .filter(|candidate| &candidate.room_id == room)
+            .cloned()
+            .collect(),
+        None => flagged.clone(),
+    };
+
+    let mut audit = AuditLog::open(&audit_path)?;
+
+    // Fail closed: the first selected room whose epoch has not moved past
+    // its evidence epoch refuses the run. The device may have cleared
+    // earlier rooms in memory, but nothing is saved, so the durable store
+    // is untouched.
+    let mut healed: Vec<FlaggedRoomEvidence> = Vec::new();
+    for candidate in &selected {
+        let cleared = device
+            .clear_behind_server_if_healed(&candidate.room_id)
+            .map_err(|error| {
+                CliError::Runtime(format!(
+                    "failed to evaluate the heal for room {}: {error}",
+                    candidate.room_id
+                ))
+            })?;
+        if !cleared {
+            audit.append(&HealAuditRoomLine {
+                schema_version: REPAIR_HEAL_BEHIND_SERVER_SCHEMA_VERSION,
+                record: "heal-behind-server",
+                phase: "refused",
+                room_id: &candidate.room_id,
+                evidence_epoch: candidate.evidence_epoch,
+                group_epoch: candidate.group_epoch,
+                local_mark: candidate.local_mark,
+                observed_seq: candidate.observed_seq,
+                recorded_at_unix_seconds: now_unix_seconds,
+            })?;
+            audit.append(&HealAuditSummaryLine {
+                schema_version: REPAIR_HEAL_BEHIND_SERVER_SCHEMA_VERSION,
+                record: "heal-behind-server",
+                phase: "refused",
+                flagged: flagged.len(),
+                healed: 0,
+            })?;
+            return write_pretty_json(
+                output,
+                &HealBehindServerRepairRecord {
+                    schema_version: REPAIR_HEAL_BEHIND_SERVER_SCHEMA_VERSION,
+                    repair_disposition: "refused",
+                    healed: Vec::new(),
+                    remaining_flagged_rooms: flagged
+                        .iter()
+                        .map(|candidate| candidate.room_id.clone())
+                        .collect(),
+                    refusal_reason: Some(
+                        "room_not_healed: the group epoch has not advanced past the evidence epoch; rekey the room first (finitechat hermes rekey)",
+                    ),
+                    refused: Some(candidate.clone()),
+                },
+            );
+        }
+        healed.push(candidate.clone());
+    }
+
+    // Every selected room healed (or nothing was flagged): one save, then
+    // the audit trail.
+    if !healed.is_empty() {
+        real_store.save_device_state(&device).map_err(|error| {
+            CliError::Runtime(format!("failed to save the healed device state: {error}"))
+        })?;
+    }
+    for candidate in &healed {
+        audit.append(&HealAuditRoomLine {
+            schema_version: REPAIR_HEAL_BEHIND_SERVER_SCHEMA_VERSION,
+            record: "heal-behind-server",
+            phase: "healed",
+            room_id: &candidate.room_id,
+            evidence_epoch: candidate.evidence_epoch,
+            group_epoch: candidate.group_epoch,
+            local_mark: candidate.local_mark,
+            observed_seq: candidate.observed_seq,
+            recorded_at_unix_seconds: now_unix_seconds,
+        })?;
+    }
+    audit.append(&HealAuditSummaryLine {
+        schema_version: REPAIR_HEAL_BEHIND_SERVER_SCHEMA_VERSION,
+        record: "heal-behind-server",
+        phase: "apply",
+        flagged: flagged.len(),
+        healed: healed.len(),
+    })?;
+
+    let remaining_flagged_rooms: Vec<String> = flagged
+        .iter()
+        .filter(|candidate| {
+            !healed
+                .iter()
+                .any(|healed| healed.room_id == candidate.room_id)
+        })
+        .map(|candidate| candidate.room_id.clone())
+        .collect();
+    write_pretty_json(
+        output,
+        &HealBehindServerRepairRecord {
+            schema_version: REPAIR_HEAL_BEHIND_SERVER_SCHEMA_VERSION,
+            repair_disposition: "applied",
+            healed,
+            remaining_flagged_rooms,
+            refusal_reason: None,
+            refused: None,
+        },
+    )
 }
 
 /// Result of phase 1: the rehearsal loop over byte copies of the store.

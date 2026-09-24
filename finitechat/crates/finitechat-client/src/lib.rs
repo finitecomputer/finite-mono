@@ -1906,7 +1906,8 @@ impl FiniteChatDevice {
         self.apply_commit_entry_inner(room_id, entry)?;
         // A Commit that moved the epoch past the evidence epoch re-derived
         // every member's secret tree: fresh generations, rewind healed.
-        self.clear_behind_server_if_healed(room_id)
+        self.clear_behind_server_if_healed(room_id)?;
+        Ok(())
     }
 
     /// True when `entry` is this device's own Commit whose effects are
@@ -2139,9 +2140,24 @@ impl FiniteChatDevice {
     }
 
     /// The outbound gate. Refuses while any room carries rewind evidence
-    /// (the whole store is suspect, not one room) and while `room_id` has
-    /// not completed a sync tick since the store was opened.
-    pub fn ensure_current_for_send(&self, room_id: &str) -> Result<(), ClientError> {
+    /// that is still current (the whole store is suspect, not one room)
+    /// and while `room_id` has not completed a sync tick since the store
+    /// was opened. Evidence whose room has since advanced past its
+    /// evidence epoch is healed — the epoch bump re-derived the secret
+    /// trees — and is cleared here rather than refused on: a rekey
+    /// one-shot whose merge path never pages its own Commit would
+    /// otherwise leave the healed evidence muting the device forever
+    /// (the 2026-09-19→24 lat4 wedge).
+    pub fn ensure_current_for_send(&mut self, room_id: &str) -> Result<(), ClientError> {
+        let flagged_room_ids: Vec<String> = self
+            .rooms
+            .iter()
+            .filter(|(_, entry)| entry.behind_server.is_some())
+            .map(|(room_id, _)| room_id.clone())
+            .collect();
+        for flagged_room_id in flagged_room_ids {
+            self.clear_behind_server_if_healed(&flagged_room_id)?;
+        }
         if let Some((flagged_room_id, evidence)) = self
             .rooms
             .iter()
@@ -2225,7 +2241,16 @@ impl FiniteChatDevice {
         Ok(true)
     }
 
-    fn clear_behind_server_if_healed(&mut self, room_id: &str) -> Result<(), ClientError> {
+    /// Clear the room's durable behind-server evidence once a Commit has
+    /// moved the group epoch above the epoch the evidence was recorded at
+    /// (the epoch bump re-derived every member's secret tree, so the
+    /// rewound generations are no longer reachable). Returns whether
+    /// evidence was cleared. Public because every path that can observe a
+    /// healed room must reach the same clear: `apply_commit_entry` (the
+    /// paged foreign Commit), the rekey worker (its merge path never pages
+    /// its own Commit), the sync tick (a store healed by another image),
+    /// the send gate, and `repair heal-behind-server`.
+    pub fn clear_behind_server_if_healed(&mut self, room_id: &str) -> Result<bool, ClientError> {
         let room = self.room_entry_mut(room_id)?;
         let epoch = room.group.epoch().as_u64();
         if room
@@ -2234,8 +2259,9 @@ impl FiniteChatDevice {
             .is_some_and(|evidence| epoch > evidence.evidence_epoch)
         {
             room.behind_server = None;
+            return Ok(true);
         }
-        Ok(())
+        Ok(false)
     }
 
     fn remember_unacknowledged_own_message_id(&mut self, room_id: &str, message_id: MessageId) {
@@ -6290,6 +6316,13 @@ pub struct RuntimeRekeyRoomReport {
     /// error class; nothing else is ever skipped.
     #[serde(default)]
     pub skipped: Vec<RuntimeRekeySkippedEntry>,
+    /// Whether the rekey cleared this room's durable behind-server
+    /// evidence. The epoch bump is itself the heal the evidence waits
+    /// for, and the rekey's merge path never pages its own Commit, so
+    /// the clear must happen here — otherwise no path reaches it and the
+    /// room stays send-refused forever (the 2026-09-19→24 lat4 wedge).
+    #[serde(default)]
+    pub healed_behind_server: bool,
 }
 
 /// One backlog entry the rekey's pre-commit replay skipped on evidence.
@@ -6489,7 +6522,11 @@ fn server_room_epoch<D: RuntimeDelivery>(
 /// Only after the backlog is fully replayed-or-skipped is the Commit
 /// prepared; the local epoch must then equal the server's current epoch
 /// (read from the account room directory), and the cursor lands on
-/// `commit_seq` through the normal merge.
+/// `commit_seq` through the normal merge. A successful rekey also clears
+/// (and saves) the room's durable behind-server evidence: the epoch bump
+/// is the heal that evidence waits for, and this merge path never pages
+/// its own Commit through `apply_commit_entry`, so without this clear no
+/// path would ever reach it.
 ///
 /// Durability order mirrors the add-member flow: the pending Commit is
 /// saved before submit (so a crash after acceptance is merged by the next
@@ -6577,6 +6614,11 @@ pub fn run_runtime_rekey_room<D: RuntimeDelivery>(
         device.set_last_applied_seq(room_id, accepted.seq)?;
     }
     let cursor_after = device.last_applied_seq(room_id)?;
+    // The rekey Commit is itself the heal behind-server evidence waits
+    // for (the epoch bump re-derived the secret trees), and this merge
+    // path never pages its own Commit through `apply_commit_entry`, so
+    // the durable evidence is cleared and saved with the rekey itself.
+    let healed_behind_server = device.clear_behind_server_if_healed(room_id)?;
     store.save_device_state(device)?;
 
     Ok(RuntimeRekeyRoomReport {
@@ -6589,6 +6631,7 @@ pub fn run_runtime_rekey_room<D: RuntimeDelivery>(
         cursor_after,
         applied: replay.applied,
         skipped: replay.skipped,
+        healed_behind_server,
     })
 }
 
@@ -7022,6 +7065,13 @@ fn sync_room_pages<D: RuntimeDelivery>(
     // room graduates from initialization to enforcement, and the room is
     // verified current for this process.
     if device.complete_currency_initialization(&room_id)? {
+        dirty = true;
+    }
+    // A completed tick with the epoch above the evidence epoch means the
+    // healing Commit was merged by a path that never pages it (a rekey
+    // one-shot on an older image); the evidence flag would otherwise
+    // outlive its heal, since the cursor never returns to that Commit.
+    if device.clear_behind_server_if_healed(&room_id)? {
         dirty = true;
     }
     if dirty {
