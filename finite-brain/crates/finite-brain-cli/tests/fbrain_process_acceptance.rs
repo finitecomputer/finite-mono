@@ -1441,7 +1441,7 @@ fn built_fbrain_process_restores_demoted_admin_folder_access_with_retained_key()
     ];
     let restored = run_json(&owner_home, &owner_tree, &repair);
     assert_eq!(restored["outcome"], "granted");
-    assert_eq!(restored["metadata"]["admins"], json!([owner]));
+    assert_eq!(restored["admins"], json!([owner]));
     let retry = run_json(&owner_home, &owner_tree, &repair);
     assert_eq!(retry["outcome"], "alreadyHasAccess");
     let after = run_json(&owner_home, &owner_tree, &["brain", "export"]);
