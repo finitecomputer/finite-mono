@@ -886,6 +886,11 @@ pub struct AppRekeyRoomReport {
     pub applied: u64,
     #[serde(default)]
     pub skipped: Vec<AppRekeySkippedEntry>,
+    /// Whether the rekey cleared the room's durable behind-server
+    /// evidence (the epoch bump is the heal; the rekey's merge path never
+    /// pages its own Commit, so the clear belongs to the rekey itself).
+    #[serde(default)]
+    pub healed_behind_server: bool,
 }
 
 /// One backlog entry the rekey's pre-commit replay skipped on evidence.
@@ -8655,6 +8660,7 @@ impl CoreState {
                     cursor_before: report.cursor_before,
                     cursor_after: report.cursor_after,
                     applied: report.applied,
+                    healed_behind_server: report.healed_behind_server,
                     skipped: report
                         .skipped
                         .into_iter()

@@ -4953,3 +4953,255 @@ fn currency_gate_clears_when_counterpart_commit_advances_the_epoch() {
             if plaintext == br#"{"type":"finitecomputer.command.v1","body":{"text":"t5 healed"}}"#
     ));
 }
+
+/// Reproduce the pre-heal-fix rekey one-shot: mint, merge, and save the
+/// device's own rekey Commit with the cursor landing on it — everything
+/// `run_runtime_rekey_room` does EXCEPT clearing behind-server evidence.
+/// This is the store shape every 2026-09-19→24 lat4 agent was left in:
+/// crypto healed (epoch above the evidence epoch) while the durable
+/// evidence flag survived, because the merge path never pages its own
+/// Commit through `apply_commit_entry` and the cursor never returns to it.
+fn rekey_like_the_pre_fix_image(
+    store: &mut SqliteClientStore,
+    device: &mut FiniteChatDevice,
+    delivery: &mut TestHttpRuntimeDelivery,
+    idempotency_key: &str,
+) -> u64 {
+    let prepared = device
+        .prepare_self_update_commit(ROOM_ID, idempotency_key)
+        .unwrap();
+    store.save_device_state(device).unwrap();
+    let accepted = delivery.submit_commit(prepared.request).unwrap();
+    let page = delivery
+        .sync_events(ROOM_ID, device.device_ref(), accepted.seq - 1)
+        .unwrap();
+    device
+        .merge_pending_commit_from_log(ROOM_ID, &page.entries, &prepared.message_id)
+        .unwrap();
+    store
+        .advance_room_cursor_and_save(device, ROOM_ID, accepted.seq)
+        .unwrap();
+    accepted.seq
+}
+
+/// The wedged-agent setup shared by the lat4 heal tests: bob's store is
+/// restored from a WAL-less copy while the server already accepted his
+/// later send, so his first sync tick records durable behind-server
+/// evidence (mark = the checkpointed send, observed = the later send,
+/// evidence epoch 1) and his sends are refused. Returns the rewound
+/// store and device.
+fn wedge_sender_behind_server(
+    f: &mut CurrencyFixture,
+    tag: &str,
+) -> (SqliteClientStore, FiniteChatDevice) {
+    let first = send_recorded(
+        &mut f.delivery,
+        &mut f.bob,
+        Some(&mut f.bob_store),
+        &format!("{tag} first"),
+        &format!("{tag}_first"),
+    );
+    checkpoint_wal(&f.bob_db);
+    let later = send_recorded(
+        &mut f.delivery,
+        &mut f.bob,
+        Some(&mut f.bob_store),
+        &format!("{tag} later"),
+        &format!("{tag}_later"),
+    );
+    run_runtime_sync_tick(
+        &mut f.alice_store,
+        &mut f.alice,
+        &mut f.delivery,
+        &f.options,
+    )
+    .unwrap();
+
+    let raw_db = f.dir.path().join(format!("{tag}_bob_raw.sqlite3"));
+    raw_copy_without_wal(&f.bob_db, &raw_db);
+    let mut raw_store = sqlite_client_store(&raw_db, &f.bob_config);
+    let mut raw_bob = raw_store.load_device(f.bob_config.clone()).unwrap();
+    let tripped = run_runtime_sync_tick(&mut raw_store, &mut raw_bob, &mut f.delivery, &f.options)
+        .unwrap_err();
+    assert_eq!(
+        behind_server_evidence_in(&tripped),
+        Some((first.seq, later.seq)),
+        "unexpected tick error: {tripped:?}"
+    );
+    let raw_bob = raw_store.load_device(f.bob_config.clone()).unwrap();
+    assert_eq!(
+        room_cursor(&raw_bob)
+            .behind_server
+            .as_ref()
+            .map(|e| e.evidence_epoch),
+        Some(1),
+        "the rewind evidence is durable"
+    );
+    (raw_store, raw_bob)
+}
+
+/// T6 — the lat4 heal, operator path: a rekey run on the wedged agent's
+/// own store (the one-shot container) heals the currency gate in the same
+/// run. The rekey's merge path never pages its own Commit, so without the
+/// rekey clearing the evidence itself the flag would outlive the heal and
+/// the agent would stay mute forever.
+#[test]
+fn rekey_worker_heals_behind_server_evidence_in_the_same_run() {
+    let mut f = currency_fixture("t6");
+    let (mut raw_store, mut raw_bob) = wedge_sender_behind_server(&mut f, "t6");
+    assert_send_refused_behind_server(&mut raw_bob, "t6_refused");
+
+    let report = run_runtime_rekey_room(
+        &mut raw_store,
+        &mut raw_bob,
+        &mut f.delivery,
+        ROOM_ID,
+        "t6_rekey",
+    )
+    .unwrap();
+    assert_eq!(report.previous_epoch, 1);
+    assert_eq!(report.new_epoch, 2);
+    assert!(
+        report.healed_behind_server,
+        "the rekey must clear the evidence it healed: {report:?}"
+    );
+
+    // The clear is immediate (no sync tick needed) and durable.
+    assert!(room_cursor(&raw_bob).behind_server.is_none());
+    assert!(
+        room_cursor(&raw_store.load_device(f.bob_config.clone()).unwrap())
+            .behind_server
+            .is_none()
+    );
+
+    // The healed agent sends again; the owner decrypts.
+    run_runtime_sync_tick(&mut raw_store, &mut raw_bob, &mut f.delivery, &f.options).unwrap();
+    let healed = send_recorded(
+        &mut f.delivery,
+        &mut raw_bob,
+        Some(&mut raw_store),
+        "t6 healed",
+        "t6_healed",
+    );
+    let owner_report = run_runtime_sync_tick(
+        &mut f.alice_store,
+        &mut f.alice,
+        &mut f.delivery,
+        &f.options,
+    )
+    .unwrap();
+    assert!(owner_report.applied_entries.iter().any(|entry| entry.seq == healed.seq
+        && matches!(
+            &entry.entry,
+            AppliedLogEntry::Application { plaintext, .. }
+                if plaintext == br#"{"type":"finitecomputer.command.v1","body":{"text":"t6 healed"}}"#
+        )));
+}
+
+/// T7 — the mixed-version heal: a store rekeyed by the pre-fix image (the
+/// nine lat4 agents) carries healed crypto and a stale evidence flag, with
+/// the cursor already past the rekey Commit so no page ever re-reaches
+/// `apply_commit_entry`. The fixed image's own sync tick — even one that
+/// pages nothing new — clears the stale flag durably.
+#[test]
+fn sync_tick_clears_stale_behind_server_evidence_left_by_a_pre_fix_rekey() {
+    let mut f = currency_fixture("t7");
+    let (mut raw_store, mut raw_bob) = wedge_sender_behind_server(&mut f, "t7");
+
+    let commit_seq = rekey_like_the_pre_fix_image(
+        &mut raw_store,
+        &mut raw_bob,
+        &mut f.delivery,
+        "t7_pre_fix_rekey",
+    );
+    assert_eq!(raw_bob.group_epoch(ROOM_ID).unwrap(), 2);
+    assert_eq!(raw_bob.last_applied_seq(ROOM_ID).unwrap(), commit_seq);
+    assert!(
+        room_cursor(&raw_bob).behind_server.is_some(),
+        "the pre-fix rekey left the evidence in place (the wedge)"
+    );
+    assert!(
+        room_cursor(&raw_store.load_device(f.bob_config.clone()).unwrap())
+            .behind_server
+            .is_some(),
+        "the wedge is durable"
+    );
+
+    // The fixed image's next sync tick has nothing new to page and still
+    // completes: the end-of-tick heal clears the stale evidence.
+    run_runtime_sync_tick(&mut raw_store, &mut raw_bob, &mut f.delivery, &f.options).unwrap();
+    assert!(room_cursor(&raw_bob).behind_server.is_none());
+    assert!(
+        room_cursor(&raw_store.load_device(f.bob_config.clone()).unwrap())
+            .behind_server
+            .is_none(),
+        "the heal is durable"
+    );
+
+    let healed = send_recorded(
+        &mut f.delivery,
+        &mut raw_bob,
+        Some(&mut raw_store),
+        "t7 healed",
+        "t7_healed",
+    );
+    let owner_report = run_runtime_sync_tick(
+        &mut f.alice_store,
+        &mut f.alice,
+        &mut f.delivery,
+        &f.options,
+    )
+    .unwrap();
+    assert!(owner_report.applied_entries.iter().any(|entry| entry.seq == healed.seq
+        && matches!(
+            &entry.entry,
+            AppliedLogEntry::Application { plaintext, .. }
+                if plaintext == br#"{"type":"finitecomputer.command.v1","body":{"text":"t7 healed"}}"#
+        )));
+}
+
+/// T8 — the send gate compares epochs, not flag presence: evidence whose
+/// room has advanced past its evidence epoch no longer refuses the send
+/// (the gate clears it in memory), while evidence at the current epoch
+/// still fails closed.
+#[test]
+fn send_gate_clears_stale_but_refuses_current_behind_server_evidence() {
+    let mut f = currency_fixture("t8");
+    let (mut raw_store, mut raw_bob) = wedge_sender_behind_server(&mut f, "t8");
+
+    // A completed second tick leaves the room verified with the flag
+    // still current (epoch 1 == evidence epoch 1): the gate must keep
+    // refusing — epoch-awareness never clears unhealed evidence.
+    run_runtime_sync_tick(&mut raw_store, &mut raw_bob, &mut f.delivery, &f.options).unwrap();
+    assert!(room_cursor(&raw_bob).behind_server.is_some());
+    assert!(room_cursor(&raw_bob).currency_verified);
+    assert_send_refused_behind_server(&mut raw_bob, "t8_current_still_refuses");
+
+    // The stale shape: the epoch moves above the evidence epoch without
+    // the flag being cleared (a pre-fix rekey, in this same process so the
+    // room stays currency-verified).
+    rekey_like_the_pre_fix_image(
+        &mut raw_store,
+        &mut raw_bob,
+        &mut f.delivery,
+        "t8_pre_fix_rekey",
+    );
+    assert!(room_cursor(&raw_bob).behind_server.is_some());
+
+    // The gate clears the stale evidence instead of refusing on it; the
+    // accepted send's save persists the clear.
+    let healed = send_recorded(
+        &mut f.delivery,
+        &mut raw_bob,
+        Some(&mut raw_store),
+        "t8 healed",
+        "t8_healed",
+    );
+    assert!(room_cursor(&raw_bob).behind_server.is_none());
+    assert!(
+        room_cursor(&raw_store.load_device(f.bob_config.clone()).unwrap())
+            .behind_server
+            .is_none()
+    );
+    assert!(healed.seq > 0);
+}
