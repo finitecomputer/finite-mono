@@ -1302,6 +1302,154 @@ fn built_fbrain_process_brain_restore_drill() {
 }
 
 #[test]
+fn built_fbrain_process_restores_demoted_admin_folder_access_with_retained_key() {
+    let scratch = TempDir::new().unwrap();
+    let owner_home = scratch.path().join("owner");
+    let member_home = scratch.path().join("member");
+    let mut npubs = Vec::new();
+    for home in [&owner_home, &member_home] {
+        fs::create_dir_all(home).unwrap();
+        let keys = Keys::generate();
+        let secret = home.join("import-key");
+        fs::write(&secret, keys.secret_key().to_secret_hex()).unwrap();
+        let imported = run(
+            home,
+            home,
+            &[
+                "auth",
+                "import",
+                "--file",
+                secret.to_str().unwrap(),
+                "--json",
+            ],
+        );
+        assert!(
+            imported.status.success(),
+            "{}",
+            String::from_utf8_lossy(&imported.stderr)
+        );
+        fs::remove_file(secret).unwrap();
+        npubs.push(
+            NostrPublicKey::from_protocol(keys.public_key())
+                .to_npub()
+                .unwrap(),
+        );
+    }
+    let owner = &npubs[0];
+    let member = &npubs[1];
+    let (server_url, shutdown, server_thread) =
+        spawn_real_brain_server(member, member, owner, owner);
+    let run_json = |home: &Path, cwd: &Path, args: &[&str]| -> Value {
+        let output = command(home, cwd)
+            .env(
+                "FBRAIN_NOW",
+                OffsetDateTime::now_utc().format(&Rfc3339).unwrap(),
+            )
+            .env("FINITE_BRAIN_SERVER_URL", &server_url)
+            .env("FINITE_BRAIN_PUBLIC_BASE_URL", &server_url)
+            .args(args)
+            .arg("--json")
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{args:?}: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        serde_json::from_slice(&output.stdout).unwrap()
+    };
+    run_json(
+        &owner_home,
+        &owner_home,
+        &["brain", "create", "organization", "Repair"],
+    );
+    let owner_tree = owner_home.join("tree");
+    run_json(
+        &owner_home,
+        &owner_home,
+        &["open", "repair", owner_tree.to_str().unwrap()],
+    );
+    run_json(
+        &owner_home,
+        &owner_tree,
+        &["admin", "member", "add", "--target", member],
+    );
+    run_json(
+        &owner_home,
+        &owner_tree,
+        &["admin", "role", "grant", "admin", "--target", member],
+    );
+    // Creating the folders while the recipient is an admin gives them a key
+    // through native access, without a direct folder permission.
+    for name in ["Shared", "Unrelated"] {
+        run_json(&owner_home, &owner_tree, &["folder", "create", name]);
+    }
+    run_json(&owner_home, &owner_tree, &["sync", "now"]);
+    fs::write(owner_tree.join("Shared/note.md"), "# Retained key proof\n").unwrap();
+    fs::write(owner_tree.join("Unrelated/private.md"), "# Unrelated\n").unwrap();
+    run_json(&owner_home, &owner_tree, &["sync", "now"]);
+    let member_tree = member_home.join("tree");
+    run_json(
+        &member_home,
+        &member_home,
+        &["open", "repair", member_tree.to_str().unwrap()],
+    );
+    run_json(&member_home, &member_tree, &["sync", "now"]);
+    assert_eq!(
+        fs::read_to_string(member_tree.join("Shared/note.md")).unwrap(),
+        "# Retained key proof\n"
+    );
+
+    run_json(
+        &owner_home,
+        &owner_tree,
+        &["admin", "role", "revoke", "admin", "--target", member],
+    );
+    run_json(&member_home, &member_tree, &["sync", "now"]);
+    assert!(!member_tree.join("Shared/note.md").exists());
+    assert!(!member_tree.join("Unrelated/private.md").exists());
+    let before = run_json(&owner_home, &owner_tree, &["brain", "export"]);
+    let repair = [
+        "admin",
+        "folder-access",
+        "grant",
+        "--folder",
+        "shared",
+        "--target",
+        member,
+    ];
+    let restored = run_json(&owner_home, &owner_tree, &repair);
+    assert_eq!(restored["outcome"], "granted");
+    assert_eq!(restored["metadata"]["admins"], json!([owner]));
+    let retry = run_json(&owner_home, &owner_tree, &repair);
+    assert_eq!(retry["outcome"], "alreadyHasAccess");
+    let after = run_json(&owner_home, &owner_tree, &["brain", "export"]);
+    assert_eq!(after["keyGrants"], before["keyGrants"]);
+    run_json(&member_home, &member_tree, &["sync", "now"]);
+    assert_eq!(
+        fs::read_to_string(member_tree.join("Shared/note.md")).unwrap(),
+        "# Retained key proof\n"
+    );
+    assert!(!member_tree.join("Unrelated/private.md").exists());
+
+    // A fresh local tree must also bootstrap and decrypt the retained grant.
+    let fresh_tree = member_home.join("fresh-tree");
+    run_json(
+        &member_home,
+        &member_home,
+        &["open", "repair", fresh_tree.to_str().unwrap()],
+    );
+    run_json(&member_home, &fresh_tree, &["sync", "now"]);
+    assert_eq!(
+        fs::read_to_string(fresh_tree.join("Shared/note.md")).unwrap(),
+        "# Retained key proof\n"
+    );
+    assert!(!fresh_tree.join("Unrelated/private.md").exists());
+    shutdown.send(()).unwrap();
+    server_thread.join().unwrap();
+}
+
+#[test]
 fn built_fbrain_process_two_independent_homes_open_restricted_collaboration() {
     let mut smoke = CollaborationSmokeReport::from_environment();
     let scratch = TempDir::new().unwrap();
