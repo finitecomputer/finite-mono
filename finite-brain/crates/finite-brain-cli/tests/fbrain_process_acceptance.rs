@@ -1406,8 +1406,29 @@ fn built_fbrain_process_restores_demoted_admin_folder_access_with_retained_key()
         &["admin", "role", "revoke", "admin", "--target", member],
     );
     run_json(&member_home, &member_tree, &["sync", "now"]);
-    assert!(!member_tree.join("Shared/note.md").exists());
-    assert!(!member_tree.join("Unrelated/private.md").exists());
+    // The client preserves old downloaded bytes after access loss. Check the
+    // server's authority, then require a new revision to prove restored reads.
+    let denied = run_json(&member_home, &member_tree, &["brain", "export"]);
+    for folder_id in ["shared", "unrelated"] {
+        let folder = denied["folders"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|folder| folder["id"] == folder_id)
+            .unwrap();
+        assert_eq!(folder["accessible"], false);
+    }
+    fs::write(
+        owner_tree.join("Shared/note.md"),
+        "# Written after demotion\n",
+    )
+    .unwrap();
+    fs::write(
+        owner_tree.join("Unrelated/private.md"),
+        "# Still private after demotion\n",
+    )
+    .unwrap();
+    run_json(&owner_home, &owner_tree, &["sync", "now"]);
     let before = run_json(&owner_home, &owner_tree, &["brain", "export"]);
     let repair = [
         "admin",
@@ -1428,9 +1449,12 @@ fn built_fbrain_process_restores_demoted_admin_folder_access_with_retained_key()
     run_json(&member_home, &member_tree, &["sync", "now"]);
     assert_eq!(
         fs::read_to_string(member_tree.join("Shared/note.md")).unwrap(),
-        "# Retained key proof\n"
+        "# Written after demotion\n"
     );
-    assert!(!member_tree.join("Unrelated/private.md").exists());
+    assert_eq!(
+        fs::read_to_string(member_tree.join("Unrelated/private.md")).unwrap(),
+        "# Unrelated\n"
+    );
 
     // A fresh local tree must also bootstrap and decrypt the retained grant.
     let fresh_tree = member_home.join("fresh-tree");
@@ -1442,7 +1466,7 @@ fn built_fbrain_process_restores_demoted_admin_folder_access_with_retained_key()
     run_json(&member_home, &fresh_tree, &["sync", "now"]);
     assert_eq!(
         fs::read_to_string(fresh_tree.join("Shared/note.md")).unwrap(),
-        "# Retained key proof\n"
+        "# Written after demotion\n"
     );
     assert!(!fresh_tree.join("Unrelated/private.md").exists());
     shutdown.send(()).unwrap();
