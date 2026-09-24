@@ -4,16 +4,18 @@ export function FinitePrivateUsageProgress({
   usedUnits,
   limitUnits,
   className,
+  stacked = false,
 }: {
   usedUnits: number;
   limitUnits: number;
   className?: string;
+  stacked?: boolean;
 }) {
   const usedPercent = finitePrivateUsedPercent(usedUnits, limitUnits);
 
   return (
     <div className={cn("grid gap-2", className)}>
-      <div className="flex flex-wrap items-baseline justify-between gap-x-3 gap-y-1 text-xs">
+      <div className={cn("gap-y-1 text-xs", stacked ? "grid" : "flex flex-wrap items-baseline justify-between gap-x-3")}>
         <span className="font-semibold tabular-nums text-foreground">{usedPercent}% used</span>
         <span className="tabular-nums text-muted-foreground">
           {formatWeightedTokens(usedUnits)} of {formatWeightedTokens(limitUnits)} weighted tokens

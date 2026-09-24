@@ -1,9 +1,7 @@
+import formStyles from "@/styles/admin-forms.module.css";
 import { notFound } from "next/navigation";
 import {
   BanIcon,
-  KeyRoundIcon,
-  ShieldCheckIcon,
-  WrenchIcon,
 } from "lucide-react";
 
 import { adminOpsRevokeLaunchCodeBatchAction } from "@/app/actions";
@@ -12,10 +10,11 @@ import {
   AdminLaunchCodeBatchIssueForm,
   ConfirmSubmitButton,
 } from "@/components/admin-ops-forms";
-import { AdminEmailChangeForm } from "@/components/admin-email-change-form";
 import { AdminUsersPanel } from "@/components/admin-users-panel";
+import styles from "@/styles/admin-ops.module.css";
 import { formatWeightedTokens } from "@/components/finite-private-usage-progress";
-import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
+import { TabsContent } from "@/components/ui/tabs";
+import { AdminOpsTabs } from "@/components/admin-ops-tabs";
 import {
   canAccessAdminOps,
   finitePrivateAssignableProfiles,
@@ -44,31 +43,12 @@ export default async function AdminOpsPage() {
   ]);
 
   return (
-    <div className="ocean-page-stack">
-      <section className="ocean-page-hero">
-        <div className="ocean-page-hero__main">
-          <span className="ocean-page-hero__icon" aria-hidden>
-            <WrenchIcon className="size-5" />
-          </span>
-          <div>
-            <h1 className="ocean-page-hero__title">Admin Ops</h1>
-            <p className="ocean-page-hero__description">
-              Provisioned boxes and Finite Private management. Core authorizes
-              every action against its own admin allowlist.
-            </p>
-          </div>
-        </div>
-      </section>
+    <div className={`ocean-page-stack ${styles.page}`}>
+      <header><h1 className={styles.title}>Ministry of Operations</h1></header>
 
-      <Tabs defaultValue="users" className="gap-4">
-        <TabsList aria-label="Admin sections">
-          <TabsTrigger value="users">Users</TabsTrigger>
-          <TabsTrigger value="invites">Invites</TabsTrigger>
-          <TabsTrigger value="finite-private">Finite Private</TabsTrigger>
-        </TabsList>
+      <AdminOpsTabs>
         <TabsContent value="users">
           <AdminUsersPanel result={runtimes} finitePrivate={finitePrivate} />
-          <AdminEmailChangeForm />
         </TabsContent>
         <TabsContent value="invites">
           <LaunchCodeBatchesPanel result={launchCodeBatches} />
@@ -76,18 +56,15 @@ export default async function AdminOpsPage() {
         <TabsContent value="finite-private">
           <FinitePrivateOpsPanel result={finitePrivate} />
         </TabsContent>
-      </Tabs>
+      </AdminOpsTabs>
     </div>
   );
 }
 
 function LaunchCodeBatchesPanel({ result }: { result: CoreLaunchCodeBatchesResult }) {
   return (
-    <section className="ocean-utility-card">
+    <section className={`ocean-utility-card w-full ${formStyles.surface}`} style={{ maxWidth: 560 }}>
       <div className="ocean-utility-card__header">
-        <span className="ocean-utility-card__icon" aria-hidden>
-          <KeyRoundIcon className="size-5" />
-        </span>
         <div>
           <h2 className="ocean-utility-card__title">Launch Codes</h2>
           <p className="text-sm text-muted-foreground">
@@ -193,16 +170,13 @@ function FinitePrivateOpsPanel({
   const profiles = finitePrivateAssignableProfiles(state?.profiles);
 
   return (
-    <section className="ocean-utility-card">
+    <section className={`ocean-utility-card w-full ${formStyles.surface}`} style={{ maxWidth: 560 }}>
       <div className="ocean-utility-card__header">
-        <span className="ocean-utility-card__icon" aria-hidden>
-          <ShieldCheckIcon className="size-5" />
-        </span>
         <div>
           <h2 className="ocean-utility-card__title">Finite Private</h2>
           <p className="text-sm text-muted-foreground">
             Mint standalone friends-and-family keys for testing. Account grant,
-            usage, profile, and key controls live on each card in Users.
+            usage, profile, and key controls are available by selecting an agent in Users.
           </p>
         </div>
       </div>
@@ -215,7 +189,7 @@ function FinitePrivateOpsPanel({
         <div className="ocean-empty-state">{result.error}</div>
       ) : state ? (
         <div className="grid gap-4">
-          <div className="ocean-metric-grid">
+          <div className={`ocean-metric-grid ${styles.metrics}`}>
             <div className="ocean-metric">
               <span>{activeGrantCount}</span>
               <small>Active grants</small>
