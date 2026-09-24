@@ -131,10 +131,13 @@ projection, owned by the dedicated worker and readable only by the label group
 (directory 0750, file 0640). Brain receives its path through
 `FINITE_BRAIN_PRINCIPAL_LABELS`; it receives no Core credential. Only authorized
 Brain metadata responses use labels, for the principals already in that
-response. Brain admins can see all verified private labels; other members and
-Folder guests can see only their own private label. Visibility of a public key
-alone does not expose its account email. Global identity resolution and public
-NIP-05 aliases are unchanged.
+response. Each principal can see their own private label. Brain admins may
+also see labels for members who accepted a Brain invitation; direct additions,
+Folder grants, admin promotion, and declared bootstrap requester identities do
+not establish that sharing boundary. Other members and Folder guests cannot
+see another principal's private label. Visibility of a public key alone does
+not expose its account email. Global identity resolution and public NIP-05
+aliases are unchanged.
 Human/agent type, source, and observation time accompany the display label.
 
 A missing, malformed, oversized, future-dated, or more-than-five-minute-old

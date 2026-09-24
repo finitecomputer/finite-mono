@@ -108,7 +108,12 @@ pub(crate) async fn create_brain_handler(
     let mut response = metadata_response(stored);
     {
         let store = state.store.lock().map_err(lock_error)?;
-        enrich_metadata_identities(&state, &store, &mut response, LabelAudience::BrainAdmin)?;
+        enrich_metadata_identities(
+            &state,
+            &store,
+            &mut response,
+            LabelAudience::BrainAdmin(&actor_npub),
+        )?;
     }
     Ok(Json(response))
 }
@@ -153,7 +158,7 @@ pub(crate) async fn brain_metadata_handler(
     {
         let store = state.store.lock().map_err(lock_error)?;
         let audience = if actor_is_admin {
-            LabelAudience::BrainAdmin
+            LabelAudience::BrainAdmin(&actor_npub)
         } else {
             LabelAudience::Principal(&actor_npub)
         };

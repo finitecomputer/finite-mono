@@ -1029,7 +1029,7 @@ fn selected_folder_ids(values: &[String]) -> Result<Vec<FolderId>, ApiError> {
 }
 
 enum LabelAudience<'a> {
-    BrainAdmin,
+    BrainAdmin(&'a str),
     Principal(&'a str),
 }
 
@@ -1052,8 +1052,9 @@ fn enrich_metadata_identities(
     for folder in &response.folders {
         npubs.extend(folder.access_user_ids.iter().cloned());
     }
-    // Only identities already disclosed by this authorized metadata response
-    // may receive private labels. Public resolve/invitation endpoints never do.
+    // A public key in the roster is not consent to reveal its private label:
+    // admins can add arbitrary keys. Only self and target-accepted memberships
+    // may disclose private account metadata. Public resolve never does.
     let npubs: BTreeSet<_> = npubs.into_iter().collect();
     let aliases = known_identity_responses(store, npubs.iter().cloned())?;
     let mut identities: BTreeMap<_, _> = aliases
@@ -1065,9 +1066,23 @@ fn enrich_metadata_identities(
         .as_deref()
         .and_then(|path| principal_labels::read_labels(path, state.auth_now_unix_seconds()))
         .unwrap_or_default();
-    if let LabelAudience::Principal(actor) = audience {
-        labels.retain(|npub, _| npub == actor);
+    let brain_id = BrainId::new(response.brain_id.clone())?;
+    let (actor, admin) = match audience {
+        LabelAudience::BrainAdmin(actor) => (actor, true),
+        LabelAudience::Principal(actor) => (actor, false),
+    };
+    let mut visible_labels = BTreeSet::from([actor.to_owned()]);
+    if admin {
+        for npub in labels.keys().filter(|npub| npubs.contains(*npub)) {
+            let target = UserId::new(npub.clone())?;
+            if store.member_provenance(&brain_id, &target)?.is_some_and(|origin| {
+                origin.origin_kind == finite_brain_store::ProvenanceOriginKind::Invitation
+            }) {
+                visible_labels.insert(npub.clone());
+            }
+        }
     }
+    labels.retain(|npub, _| visible_labels.contains(npub));
     for npub in npubs {
         if !identities.contains_key(&npub)
             && let Ok(public_key) = NostrPublicKey::parse(&npub)
@@ -1226,7 +1241,12 @@ where
         mutation(&mut store, &brain_id)?;
         let stored = store.load_brain(&brain_id)?;
         let mut response = metadata_response(stored);
-        enrich_metadata_identities(&state, &store, &mut response, LabelAudience::BrainAdmin)?;
+        enrich_metadata_identities(
+            &state,
+            &store,
+            &mut response,
+            LabelAudience::BrainAdmin(&actor_npub),
+        )?;
         attach_pending_approvals(&store, &mut response, &brain_id)?;
         attach_pending_wraps(&store, &mut response, &brain_id)?;
         response
@@ -3618,6 +3638,60 @@ mod tests {
                 .status(),
             StatusCode::FORBIDDEN
         );
+        // An admin cannot turn a directly added public key into a lookup of
+        // that account's private identity. Only the target can establish this
+        // sharing boundary by accepting an invitation.
+        let target = npub(&outsider);
+        let added = authed_request(
+            router.clone(),
+            &admin,
+            "PUT",
+            &format!("/v1/admin/brains/acme/members/{target}"),
+            Some(
+                serde_json::json!({"accessChangeEvent": admin_event(
+                    &admin, "acme", "label-oracle-add", AdminAccessAction::AddMember,
+                    None, Some(&target), None
+                )})
+                .to_string(),
+            ),
+            TEST_NOW,
+        )
+        .await;
+        assert_eq!(added.status(), StatusCode::OK);
+        let added: BrainMetadataResponse = read_json(added).await;
+        assert!(
+            added
+                .identities
+                .iter()
+                .find(|id| id.npub == target)
+                .unwrap()
+                .label
+                .is_none()
+        );
+        let mut bootstrap: serde_json::Value =
+            serde_json::from_str(&create_brain_body("label-oracle", "organization")).unwrap();
+        bootstrap["requestingUserNpub"] = serde_json::json!(target);
+        let declared = post_brain(
+            router.clone(),
+            &admin,
+            &bootstrap.to_string(),
+            TEST_NOW,
+            None,
+            None,
+            None,
+        )
+        .await;
+        assert_eq!(declared.status(), StatusCode::OK);
+        let declared: BrainMetadataResponse = read_json(declared).await;
+        assert!(
+            declared
+                .identities
+                .iter()
+                .find(|id| id.npub == target)
+                .unwrap()
+                .label
+                .is_none()
+        );
         // Ordinary member admission remains authoritative; no label grants it.
         let created: CreateBrainInviteTokenResponse = read_json(
             authed_request(
@@ -4048,6 +4122,20 @@ mod tests {
         assert_eq!(list.brains.len(), 1);
         assert_eq!(list.brains[0].brain_id, "personal");
         assert_eq!(list.brains[0].role, "guest");
+
+        let owner_view: BrainMetadataResponse =
+            read_json(get_metadata(router.clone(), &owner_keys, "personal", TEST_NOW + 2).await)
+                .await;
+        assert!(
+            owner_view
+                .identities
+                .iter()
+                .find(|id| id.npub == member_npub)
+                .unwrap()
+                .label
+                .is_none(),
+            "direct folder access cannot disclose the guest's private identity"
+        );
 
         let metadata = get_metadata(router.clone(), &member_keys, "personal", TEST_NOW + 2).await;
         assert_eq!(metadata.status(), StatusCode::OK);
