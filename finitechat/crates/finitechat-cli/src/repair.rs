@@ -262,11 +262,7 @@ fn cmd_heal_behind_server<W: Write>(
 ) -> Result<(), CliError> {
     let store_path = PathBuf::from(store);
     let audit_path = PathBuf::from(audit_log);
-    if audit_path == store_path {
-        return Err(CliError::Usage(
-            "--audit-log must not be the client store".to_owned(),
-        ));
-    }
+    check_audit_store_separation(&store_path, &audit_path)?;
 
     let now_unix_seconds = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -776,28 +772,81 @@ fn check_audit_log_location(
     let work_canonical = std::fs::canonicalize(work_dir).map_err(|error| {
         CliError::Runtime(format!("failed to resolve the work directory: {error}"))
     })?;
-    let store_canonical = std::fs::canonicalize(store_path)
-        .map_err(|error| CliError::Runtime(format!("failed to resolve the store path: {error}")))?;
-    let audit_parent = audit_path.parent().unwrap_or_else(|| Path::new("."));
-    std::fs::create_dir_all(audit_parent).map_err(|error| {
-        CliError::Runtime(format!("failed to create the audit log directory: {error}"))
-    })?;
-    let audit_canonical = if audit_path.exists() {
-        std::fs::canonicalize(audit_path)
-    } else {
-        std::fs::canonicalize(audit_parent)
-            .map(|parent| parent.join(audit_path.file_name().unwrap_or_default()))
-    }
-    .map_err(|error| CliError::Runtime(format!("failed to resolve the audit log path: {error}")))?;
+    let audit_canonical = check_audit_store_separation(store_path, audit_path)?;
     if audit_canonical.starts_with(&work_canonical) {
         return Err(CliError::Usage(
             "--audit-log must not be inside --work-dir".to_owned(),
         ));
     }
-    if audit_canonical == store_canonical {
-        return Err(CliError::Usage(
-            "--audit-log must not be the client store".to_owned(),
-        ));
-    }
     Ok(())
+}
+
+/// Validate before opening the real store: even a refused repair writes an
+/// audit record. Reserve SQLite's companion paths before they exist, and
+/// compare existing file identities so hard links cannot bypass the check.
+fn check_audit_store_separation(store_path: &Path, audit_path: &Path) -> Result<PathBuf, CliError> {
+    let path_error = |error| {
+        CliError::Runtime(format!(
+            "failed to resolve repair store/audit paths: {error}"
+        ))
+    };
+    let store_canonical = std::fs::canonicalize(store_path).map_err(path_error)?;
+    let audit_parent = audit_path.parent().unwrap_or_else(|| Path::new("."));
+    let audit_parent = if audit_parent.as_os_str().is_empty() {
+        Path::new(".")
+    } else {
+        audit_parent
+    };
+    std::fs::create_dir_all(audit_parent).map_err(|error| {
+        CliError::Runtime(format!("failed to create the audit log directory: {error}"))
+    })?;
+    let audit_location = std::fs::canonicalize(audit_parent)
+        .map_err(path_error)?
+        .join(audit_path.file_name().unwrap_or_default());
+    let audit_exists = match std::fs::symlink_metadata(audit_path) {
+        Ok(_) => true,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => false,
+        Err(error) => return Err(path_error(error)),
+    };
+    // A dangling symlink fails closed instead of creating its target later.
+    let audit_canonical = if audit_exists {
+        std::fs::canonicalize(audit_path).map_err(path_error)?
+    } else {
+        audit_location.clone()
+    };
+    let store_parent = store_path
+        .parent()
+        .filter(|path| !path.as_os_str().is_empty())
+        .unwrap_or_else(|| Path::new("."));
+    let store_location = std::fs::canonicalize(store_parent)
+        .map_err(path_error)?
+        .join(store_path.file_name().unwrap_or_default());
+    // Check both the supplied filename and its resolved target: the store
+    // itself may be a symlink, and SQLite/lease files must stay separate.
+    for store in [store_location, store_canonical] {
+        for suffix in ["", "-wal", "-shm", "-journal", ".writer-lease"] {
+            let mut protected = store.as_os_str().to_os_string();
+            protected.push(suffix);
+            let protected = PathBuf::from(protected);
+            let protected_exists = match std::fs::symlink_metadata(&protected) {
+                Ok(_) => true,
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => false,
+                Err(error) => return Err(path_error(error)),
+            };
+            // Do not let audit creation supply the target of a dangling
+            // SQLite sidecar symlink either.
+            if protected_exists {
+                std::fs::canonicalize(&protected).map_err(path_error)?;
+            }
+            let same_file = audit_exists
+                && protected_exists
+                && same_file::is_same_file(audit_path, &protected).map_err(path_error)?;
+            if audit_location == protected || audit_canonical == protected || same_file {
+                return Err(CliError::Usage(
+                    "--audit-log must not be the client store or its SQLite/lease files".to_owned(),
+                ));
+            }
+        }
+    }
+    Ok(audit_canonical)
 }

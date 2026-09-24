@@ -1210,6 +1210,7 @@ dependencies = [
  "futures-util",
  "qrcode",
  "reqwest",
+ "same-file",
  "serde",
  "serde_json",
  "sha2 0.10.9",

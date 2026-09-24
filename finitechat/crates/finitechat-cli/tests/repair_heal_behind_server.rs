@@ -572,3 +572,121 @@ fn healthy_store_reports_nothing_to_heal() {
     assert_eq!(audit[0]["flagged"], 0);
     assert_eq!(audit[0]["healed"], 0);
 }
+
+fn assert_audit_path_rejected(fixture: &HealFixture, audit_path: &std::path::Path) {
+    let before = std::fs::read(&fixture.hosted_store_path).unwrap();
+    let error = run_heal(fixture, audit_path, &[]).expect_err("unsafe audit path must refuse");
+    assert!(
+        error.contains("--audit-log must not be the client store"),
+        "{error}"
+    );
+    assert_eq!(std::fs::read(&fixture.hosted_store_path).unwrap(), before);
+}
+
+#[test]
+fn rejects_audit_store_paths_and_hardlinks_without_writing() {
+    let dir = tempfile::tempdir().unwrap();
+    let fixture = build_heal_fixture(dir.path(), HealShape::Healthy);
+    assert_audit_path_rejected(&fixture, &fixture.hosted_store_path);
+    let subdir = dir.path().join("subdir");
+    std::fs::create_dir(&subdir).unwrap();
+    assert_audit_path_rejected(&fixture, &subdir.join("../hosted-store.sqlite3"));
+    let hardlink = dir.path().join("audit.jsonl");
+    std::fs::hard_link(&fixture.hosted_store_path, &hardlink).unwrap();
+    assert_audit_path_rejected(&fixture, &hardlink);
+}
+
+#[cfg(unix)]
+#[test]
+fn rejects_audit_symlink_to_store_even_when_heal_would_refuse() {
+    let dir = tempfile::tempdir().unwrap();
+    let fixture = build_heal_fixture(dir.path(), HealShape::CurrentEvidence);
+    let audit_path = dir.path().join("audit.jsonl");
+    std::os::unix::fs::symlink(&fixture.hosted_store_path, &audit_path).unwrap();
+    assert_audit_path_rejected(&fixture, &audit_path);
+}
+
+#[test]
+fn rejects_sqlite_companion_paths_and_existing_hardlink_aliases() {
+    let dir = tempfile::tempdir().unwrap();
+    let fixture = build_heal_fixture(dir.path(), HealShape::RekeyedStaleEvidence);
+    for suffix in ["-wal", "-shm", "-journal", ".writer-lease"] {
+        let companion =
+            std::path::PathBuf::from(format!("{}{suffix}", fixture.hosted_store_path.display()));
+        let existed = companion.exists();
+        assert_audit_path_rejected(&fixture, &companion);
+        assert_eq!(
+            companion.exists(),
+            existed,
+            "rejection must not create a sidecar"
+        );
+
+        // Invalid SQLite contents prove rejection happens before store open.
+        std::fs::write(&companion, b"preserve this companion file").unwrap();
+        let audit_path = dir.path().join(format!("audit{suffix}"));
+        std::fs::hard_link(&companion, &audit_path).unwrap();
+        assert_audit_path_rejected(&fixture, &audit_path);
+        assert_eq!(
+            std::fs::read(&companion).unwrap(),
+            b"preserve this companion file"
+        );
+        std::fs::remove_file(audit_path).unwrap();
+        std::fs::remove_file(companion).unwrap();
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn rejects_companions_of_both_store_symlink_and_resolved_store() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut fixture = build_heal_fixture(dir.path(), HealShape::Healthy);
+    let actual_store = fixture.hosted_store_path.clone();
+    let alias = dir.path().join("store-alias.sqlite3");
+    std::os::unix::fs::symlink(&actual_store, &alias).unwrap();
+    fixture.hosted_store_path = alias;
+    for store in [&actual_store, &fixture.hosted_store_path] {
+        let wal_path = std::path::PathBuf::from(format!("{}-wal", store.display()));
+        assert_audit_path_rejected(&fixture, &wal_path);
+        assert!(!wal_path.exists());
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn rejects_dangling_audit_symlink_without_creating_its_target() {
+    let dir = tempfile::tempdir().unwrap();
+    let fixture = build_heal_fixture(dir.path(), HealShape::Healthy);
+    let wal_path = std::path::PathBuf::from(format!("{}-wal", fixture.hosted_store_path.display()));
+    let audit_path = dir.path().join("audit.jsonl");
+    std::os::unix::fs::symlink(&wal_path, &audit_path).unwrap();
+    let before = std::fs::read(&fixture.hosted_store_path).unwrap();
+    assert!(run_heal(&fixture, &audit_path, &[]).is_err());
+    assert!(!wal_path.exists());
+    assert_eq!(std::fs::read(&fixture.hosted_store_path).unwrap(), before);
+}
+
+#[test]
+fn appends_to_a_distinct_existing_audit_log() {
+    let dir = tempfile::tempdir().unwrap();
+    let fixture = build_heal_fixture(dir.path(), HealShape::Healthy);
+    let audit_path = dir.path().join("audit.jsonl");
+    run_heal(&fixture, &audit_path, &[]).unwrap();
+    let before = std::fs::read(&audit_path).unwrap();
+    run_heal(&fixture, &audit_path, &[]).unwrap();
+    assert!(std::fs::read(&audit_path).unwrap().starts_with(&before));
+    assert_eq!(read_audit_lines(&audit_path).len(), 2);
+}
+
+#[cfg(unix)]
+#[test]
+fn refuses_to_create_a_dangling_sqlite_companion_symlinks_target() {
+    let dir = tempfile::tempdir().unwrap();
+    let fixture = build_heal_fixture(dir.path(), HealShape::Healthy);
+    let wal_path = std::path::PathBuf::from(format!("{}-wal", fixture.hosted_store_path.display()));
+    let audit_path = dir.path().join("audit.jsonl");
+    std::os::unix::fs::symlink(&audit_path, &wal_path).unwrap();
+    let before = std::fs::read(&fixture.hosted_store_path).unwrap();
+    assert!(run_heal(&fixture, &audit_path, &[]).is_err());
+    assert!(!audit_path.exists());
+    assert_eq!(std::fs::read(&fixture.hosted_store_path).unwrap(), before);
+}
