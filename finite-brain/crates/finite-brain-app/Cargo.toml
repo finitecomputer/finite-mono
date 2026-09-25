@@ -26,6 +26,7 @@ tokio-postgres = "0.7"
 tokio = { version = "1.52.3", features = ["macros", "net", "rt-multi-thread"] }
 
 [dev-dependencies]
+tower = { version = "0.5.2", features = ["util"] }
 finite-brain-core = { path = "../finite-brain-core" }
 finite-brain-store = { path = "../finite-brain-store" }
 sha2.workspace = true

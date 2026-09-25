@@ -198,6 +198,9 @@ pub(crate) async fn brain_metadata_handler(
         store.load_brain(&brain_id)?
     };
     ensure_metadata_visible(&stored, &actor_npub)?;
+    if let Some(path) = &state.principal_labels_socket {
+        principal_labels::request_refresh(path);
+    }
     let actor_is_admin = ensure_brain_admin(&stored, &actor_npub).is_ok();
     let mounted_folders = {
         let store = state.store.lock().map_err(lock_error)?;

@@ -115,6 +115,7 @@ pub struct ServerState {
     cors_allowed_origins: Arc<BTreeSet<String>>,
     nip05_fetcher: Nip05Fetcher,
     principal_labels_path: Option<std::path::PathBuf>,
+    principal_labels_socket: Option<std::path::PathBuf>,
     invite_mailer: Option<BrainInviteMailer>,
     brain_updates: tokio::sync::broadcast::Sender<BrainUpdateNotification>,
 }
@@ -158,6 +159,7 @@ impl ServerState {
             cors_allowed_origins: Arc::new(cors_allowed_origins),
             nip05_fetcher: default_nip05_fetcher(),
             principal_labels_path: None,
+            principal_labels_socket: None,
             invite_mailer: None,
             brain_updates,
         }
@@ -220,6 +222,13 @@ impl ServerState {
     /// No authorization or invitation decision consults this file.
     pub fn with_principal_labels_path(mut self, path: impl Into<std::path::PathBuf>) -> Self {
         self.principal_labels_path = Some(path.into());
+        self
+    }
+
+    /// Optional local wakeup for demand-driven label refresh. Never awaited by
+    /// metadata, sync, or authorization; the worker enforces global work limits.
+    pub fn with_principal_labels_socket(mut self, path: impl Into<std::path::PathBuf>) -> Self {
+        self.principal_labels_socket = Some(path.into());
         self
     }
 
@@ -3554,6 +3563,49 @@ mod tests {
         assert_eq!(
             expired_row.status, "pending",
             "expired is computed at read; the stored status is never mutated"
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn metadata_wakes_label_worker_only_after_authorization_without_waiting() {
+        use std::os::unix::net::UnixDatagram;
+        let directory = tempfile::tempdir().unwrap();
+        let socket_path = directory.path().join("refresh.sock");
+        let socket = UnixDatagram::bind(&socket_path).unwrap();
+        socket.set_nonblocking(true).unwrap();
+        let admin = Keys::generate();
+        let outsider = Keys::generate();
+        let state = approval_test_state(&admin).with_principal_labels_socket(&socket_path);
+        let router = router_with_state(state);
+        let mut bytes = [0; 16];
+        let denied = get_metadata(router.clone(), &outsider, "acme", TEST_NOW).await;
+        assert_eq!(denied.status(), StatusCode::FORBIDDEN);
+        assert_eq!(
+            socket.recv(&mut bytes).unwrap_err().kind(),
+            std::io::ErrorKind::WouldBlock
+        );
+        let allowed = get_metadata(router.clone(), &admin, "acme", TEST_NOW).await;
+        assert_eq!(allowed.status(), StatusCode::OK);
+        let len = socket.recv(&mut bytes).unwrap();
+        assert_eq!(&bytes[..len], b"refresh");
+        // Fill the datagram queue. A stalled worker must not block a request.
+        for _ in 0..1024 {
+            principal_labels::request_refresh(&socket_path);
+        }
+        assert_eq!(
+            get_metadata(router.clone(), &admin, "acme", TEST_NOW + 1)
+                .await
+                .status(),
+            StatusCode::OK
+        );
+        drop(socket);
+        std::fs::remove_file(&socket_path).unwrap();
+        assert_eq!(
+            get_metadata(router, &admin, "acme", TEST_NOW + 2)
+                .await
+                .status(),
+            StatusCode::OK
         );
     }
 

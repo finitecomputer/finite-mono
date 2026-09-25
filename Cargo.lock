@@ -971,6 +971,7 @@ dependencies = [
  "tempfile",
  "tokio",
  "tokio-postgres",
+ "tower",
 ]
 
 [[package]]

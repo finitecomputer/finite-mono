@@ -54,6 +54,9 @@ async fn main() -> Result<(), Box<dyn Error>> {
     if let Ok(path) = std::env::var("FINITE_BRAIN_PRINCIPAL_LABELS") {
         state = state.with_principal_labels_path(path);
     }
+    if let Ok(path) = std::env::var("FINITE_BRAIN_LABEL_SOCKET") {
+        state = state.with_principal_labels_socket(path);
+    }
     if let Some((max_requests, window_seconds)) =
         protected_rate_limit_override(std::env::var("FINITE_BRAIN_PROTECTED_RATE_LIMIT").ok())
             .map_err(|error| {

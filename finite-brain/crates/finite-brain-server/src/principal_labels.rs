@@ -9,7 +9,28 @@ use serde::{Deserialize, Serialize};
 
 pub const MAX_LABELS: usize = 4096;
 pub const MAX_PROJECTION_BYTES: u64 = 2 * 1024 * 1024;
-pub const MAX_LABEL_AGE_SECONDS: u64 = 300;
+// Revalidation is demand-driven every five minutes. During a source outage,
+// display evidence expires after one hour; sharing is checked on every read.
+pub const MAX_LABEL_AGE_SECONDS: u64 = 3600;
+pub const LABEL_REFRESH_INTERVAL_SECONDS: u64 = 300;
+
+/// Best-effort wakeup only. No identity, Brain ID or credentials cross this
+/// socket; the confined worker discovers its targets from authoritative state.
+/// Call only after authorizing the metadata request, outside the store lock.
+#[cfg(unix)]
+pub(crate) fn request_refresh(path: &Path) {
+    use std::os::unix::net::UnixDatagram;
+    let Ok(socket) = UnixDatagram::unbound() else {
+        return;
+    };
+    if socket.set_nonblocking(true).is_ok() {
+        // A missing worker or a full socket queue must never delay Brain reads.
+        let _ = socket.send_to(b"refresh", path);
+    }
+}
+
+#[cfg(not(unix))]
+pub(crate) fn request_refresh(_path: &Path) {}
 
 #[derive(Debug, Clone, Copy, Eq, PartialEq, Deserialize, Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -187,8 +208,8 @@ mod tests {
             bindings: vec![binding(1, "Alex", PrincipalKind::Human)],
         };
         assert!(valid.labels(99).is_none());
-        assert!(valid.labels(401).is_none());
-        assert!(valid.labels(400).is_some());
+        assert!(valid.labels(100 + MAX_LABEL_AGE_SECONDS + 1).is_none());
+        assert!(valid.labels(100 + MAX_LABEL_AGE_SECONDS).is_some());
         let mut invalid = valid.clone();
         invalid.bindings[0].label.kind = PrincipalKind::Agent;
         assert!(invalid.labels(100).is_none());

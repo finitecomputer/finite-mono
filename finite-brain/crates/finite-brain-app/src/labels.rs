@@ -12,6 +12,9 @@ use finite_brain_server::principal_labels::{
     LabelBinding, LabelProjection, LabelSource, MAX_LABELS, MAX_PROJECTION_BYTES, PrincipalKind,
     PrincipalLabel,
 };
+#[path = "labels/demand.rs"]
+mod demand;
+
 use finite_nostr::NostrPublicKey;
 use rusqlite::{Connection, OpenFlags};
 #[cfg(test)]
@@ -156,22 +159,31 @@ fn binding(
     })
 }
 
+// A daemon must release the connection task on every error and timeout, not
+// just after a successful query. It never survives the refresh that owns it.
+struct DatabaseConnectionTask(tokio::task::JoinHandle<()>);
+impl Drop for DatabaseConnectionTask {
+    fn drop(&mut self) {
+        self.0.abort();
+    }
+}
+
 async fn collect(
     database: &tokio_postgres::Config,
     brain_db: &Path,
     hosted_root: &Path,
     now: u64,
+    locations: &mut demand::HostedLocations,
 ) -> Result<LabelProjection, RefreshError> {
-    let started = Instant::now();
     let principals = brain_principals(brain_db)?;
-    let candidates = hosted_candidates(hosted_root, &principals, started)?;
+    let candidates = locations.candidates(hosted_root, &principals, Instant::now())?;
     let (mut client, connection) = database
         .connect(NoTls)
         .await
         .map_err(|_| RefreshError::SourceUnavailable)?;
-    let connection_task = tokio::spawn(async move {
+    let _connection_task = DatabaseConnectionTask(tokio::spawn(async move {
         let _ = connection.await;
-    });
+    }));
     let transaction = client
         .build_transaction()
         .read_only(true)
@@ -209,7 +221,7 @@ async fn collect(
         .await
         .map_err(|_| RefreshError::SourceUnavailable)?;
     drop(client);
-    connection_task.abort();
+
     if agents.len() > MAX_LABELS || users.len() > MAX_LABELS {
         return Err(RefreshError::Limit);
     }
@@ -276,7 +288,7 @@ fn publish(path: &Path, projection: &LabelProjection) -> Result<(), RefreshError
     Ok(())
 }
 
-async fn refresh() -> Result<(), RefreshError> {
+async fn refresh(locations: &mut demand::HostedLocations) -> Result<(), RefreshError> {
     let required = |name| std::env::var(name).map_err(|_| RefreshError::Configuration);
     let url = required("FINITE_BRAIN_LABEL_DATABASE_URL")?;
     let brain_db = PathBuf::from(required("FINITE_BRAIN_DB")?);
@@ -289,7 +301,7 @@ async fn refresh() -> Result<(), RefreshError> {
     let database = url
         .parse::<tokio_postgres::Config>()
         .map_err(|_| RefreshError::Configuration)?;
-    let projection = collect(&database, &brain_db, &hosted_root, now).await?;
+    let projection = collect(&database, &brain_db, &hosted_root, now, locations).await?;
     publish(&output, &projection)?;
     println!(
         "Brain label projection refreshed: {} unambiguous identities",
@@ -303,7 +315,23 @@ async fn refresh() -> Result<(), RefreshError> {
 
 #[tokio::main]
 async fn main() -> std::process::ExitCode {
-    match tokio::time::timeout(Duration::from_secs(30), refresh()).await {
+    if let Ok(path) = std::env::var("FINITE_BRAIN_LABEL_SOCKET") {
+        return match demand::serve(Path::new(&path)).await {
+            Ok(()) => std::process::ExitCode::SUCCESS,
+            Err(error) => {
+                eprintln!("Brain label worker stopped: {error:?}");
+                std::process::ExitCode::FAILURE
+            }
+        };
+    }
+    // One-shot mode is retained for synthetic process tests and explicit
+    // operator diagnostics. Production always configures the demand socket.
+    match tokio::time::timeout(
+        Duration::from_secs(30),
+        refresh(&mut demand::HostedLocations::default()),
+    )
+    .await
+    {
         Ok(Ok(())) => std::process::ExitCode::SUCCESS,
         result => {
             // Keep connection URLs, account names, subjects and keys out of logs.
@@ -320,17 +348,17 @@ async fn main() -> std::process::ExitCode {
 mod tests {
     use super::*;
 
-    fn subject_hash(subject: &str) -> String {
+    pub(super) fn subject_hash(subject: &str) -> String {
         format!("{:x}", Sha256::digest(subject.as_bytes()))
     }
 
-    fn principal(byte: u8) -> (String, String) {
+    pub(super) fn principal(byte: u8) -> (String, String) {
         let hex = format!("{byte:02x}").repeat(32);
         let npub = NostrPublicKey::parse(&hex).unwrap().to_npub().unwrap();
         (hex, npub)
     }
 
-    fn hosted_fixture(root: &Path, subject: &str, hex: &str) -> PathBuf {
+    pub(super) fn hosted_fixture(root: &Path, subject: &str, hex: &str) -> PathBuf {
         let path = root
             .join("users")
             .join(format!("{:x}", Sha256::digest(subject.as_bytes())))
@@ -445,7 +473,15 @@ mod tests {
         let before = fs::read(&brain).unwrap();
         let mut config: tokio_postgres::Config = url.parse().unwrap();
         config.options(format!("-c search_path={schema}"));
-        let projection = collect(&config, &brain, &hosted, 100).await.unwrap();
+        let projection = collect(
+            &config,
+            &brain,
+            &hosted,
+            100,
+            &mut demand::HostedLocations::default(),
+        )
+        .await
+        .unwrap();
         let labels = projection.labels(100).unwrap();
         assert_eq!(labels.len(), 2);
         assert_eq!(labels[&human].display(), "alex@example.com (human)");
@@ -456,7 +492,15 @@ mod tests {
         let first = fs::read(&output).unwrap();
         conn.execute("INSERT INTO brain_members VALUES (?1)", [&future])
             .unwrap();
-        let refreshed = collect(&config, &brain, &hosted, 160).await.unwrap();
+        let refreshed = collect(
+            &config,
+            &brain,
+            &hosted,
+            160,
+            &mut demand::HostedLocations::default(),
+        )
+        .await
+        .unwrap();
         assert_eq!(
             refreshed.labels(160).unwrap()[&future].name,
             "future@example.com"
@@ -481,10 +525,26 @@ mod tests {
             .await
             .unwrap();
         hosted_fixture(&hosted, "other-human", &human_hex);
-        let ambiguous = collect(&config, &brain, &hosted, 220).await.unwrap();
+        let ambiguous = collect(
+            &config,
+            &brain,
+            &hosted,
+            220,
+            &mut demand::HostedLocations::default(),
+        )
+        .await
+        .unwrap();
         assert!(!ambiguous.labels(220).unwrap().contains_key(&human));
         admin.execute("UPDATE users SET normalized_email=E'bad\\nname' WHERE workos_user_id='other-human'", &[]).await.unwrap();
-        let invalid_owner = collect(&config, &brain, &hosted, 240).await.unwrap();
+        let invalid_owner = collect(
+            &config,
+            &brain,
+            &hosted,
+            240,
+            &mut demand::HostedLocations::default(),
+        )
+        .await
+        .unwrap();
         let labels = invalid_owner.labels(240).unwrap();
         assert!(!labels.contains_key(&human));
         assert!(labels.contains_key(&agent));

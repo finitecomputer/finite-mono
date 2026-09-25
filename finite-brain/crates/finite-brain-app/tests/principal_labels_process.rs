@@ -1,7 +1,15 @@
 //! Real exporter entrypoint against retained source columns and private output.
-use finite_brain_server::principal_labels::LabelProjection;
+#![cfg(unix)]
+use axum::{
+    body::{Body, to_bytes},
+    http::Request,
+};
+use finite_brain_server::{ServerState, principal_labels::LabelProjection, router_with_state};
 use finite_brain_store::BrainStore;
 use finite_nostr::NostrPublicKey;
+use finite_nostr::{
+    HttpAuthEventRequest, decode_http_auth_header, sign_http_auth_header_with_secret,
+};
 use rusqlite::Connection;
 use sha2::{Digest, Sha256};
 use std::{
@@ -10,6 +18,7 @@ use std::{
     time::{SystemTime, UNIX_EPOCH},
 };
 use tokio_postgres::NoTls;
+use tower::ServiceExt;
 
 #[tokio::test]
 async fn built_label_exporter_uses_narrow_sources_and_preserves_output_on_failure() {
@@ -45,7 +54,13 @@ async fn built_label_exporter_uses_narrow_sources_and_preserves_output_on_failur
     admin.batch_execute("RESET ROLE").await.unwrap();
     let dir = tempfile::tempdir().unwrap();
     let brain_db = dir.path().join("brain.sqlite3");
-    let hex = "01".repeat(32);
+    let secret = [1_u8; 32];
+    let proof = sign_http_auth_header_with_secret(
+        &secret,
+        &HttpAuthEventRequest::new("GET", "http://brain.test", 100),
+    )
+    .unwrap();
+    let hex = decode_http_auth_header(&proof).unwrap().pubkey.to_hex();
     let npub = NostrPublicKey::parse(&hex).unwrap().to_npub().unwrap();
     let mut store = BrainStore::open(&brain_db).unwrap();
     store
@@ -102,6 +117,102 @@ async fn built_label_exporter_uses_narrow_sources_and_preserves_output_on_failur
     assert_eq!(fs::read(&brain_db).unwrap(), before_brain);
     assert_eq!(fs::read(&chat).unwrap(), before_chat);
     assert!(!String::from_utf8_lossy(&success.stdout).contains("alex@example.com"));
+    // Run the real daemon and authorized metadata entrypoint. No discovery on
+    // startup; a cold response returns before work, then a later read has names.
+    let daemon_output = dir.path().join("demand.json");
+    let socket_path = dir.path().join("refresh.sock");
+    struct Worker(std::process::Child);
+    impl Drop for Worker {
+        fn drop(&mut self) {
+            let _ = self.0.kill();
+            let _ = self.0.wait();
+        }
+    }
+    let mut worker = Worker(
+        Command::new(env!("CARGO_BIN_EXE_finite-brain-labels"))
+            .env_clear()
+            .env("FINITE_BRAIN_LABEL_DATABASE_URL", &scoped_url)
+            .env("FINITE_BRAIN_DB", &brain_db)
+            .env("FINITECHAT_HOSTED_DATA_ROOT", &hosted)
+            .env("FINITE_BRAIN_PRINCIPAL_LABELS", &daemon_output)
+            .env("FINITE_BRAIN_LABEL_SOCKET", &socket_path)
+            .stdout(std::process::Stdio::null())
+            .spawn()
+            .unwrap(),
+    );
+    let started = std::time::Instant::now();
+    while !socket_path.exists() {
+        assert!(worker.0.try_wait().unwrap().is_none());
+        assert!(started.elapsed() < std::time::Duration::from_secs(30));
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
+    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    assert!(
+        !daemon_output.exists(),
+        "idle service does not scan or publish"
+    );
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_secs();
+    let router = router_with_state(
+        ServerState::new(BrainStore::open(&brain_db).unwrap(), "http://brain.test")
+            .with_auth_clock(now, 60)
+            .with_principal_labels_path(&daemon_output)
+            .with_principal_labels_socket(&socket_path),
+    );
+    let read = |nonce: &str| {
+        let auth = sign_http_auth_header_with_secret(
+            &secret,
+            &HttpAuthEventRequest::new("GET", "http://brain.test/v1/brains/org/metadata", now)
+                .with_nonce(nonce),
+        )
+        .unwrap();
+        router.clone().oneshot(
+            Request::builder()
+                .uri("/v1/brains/org/metadata")
+                .header("Authorization", auth)
+                .body(Body::empty())
+                .unwrap(),
+        )
+    };
+    assert!(read("cold").await.unwrap().status().is_success());
+    while !daemon_output.exists() {
+        assert!(worker.0.try_wait().unwrap().is_none());
+        assert!(started.elapsed() < std::time::Duration::from_secs(30));
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
+    let response = read("warm").await.unwrap();
+    assert!(response.status().is_success());
+    let metadata: serde_json::Value =
+        serde_json::from_slice(&to_bytes(response.into_body(), 1024 * 1024).await.unwrap())
+            .unwrap();
+    assert_eq!(
+        metadata["identities"][0]["display"],
+        "alex@example.com (human)"
+    );
+    let published = fs::read(&daemon_output).unwrap();
+    // New requests reuse the projection instead of querying even changed names.
+    admin
+        .execute(
+            "UPDATE users SET normalized_email='changed@example.com'",
+            &[],
+        )
+        .await
+        .unwrap();
+    for nonce in 0..20 {
+        assert!(
+            read(&format!("burst-{nonce}"))
+                .await
+                .unwrap()
+                .status()
+                .is_success()
+        );
+    }
+    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    assert_eq!(fs::read(&daemon_output).unwrap(), published);
+    drop(worker);
+    assert_eq!(fs::read(&chat).unwrap(), before_chat);
     // Wrong-schema or corrupt existing hosted sources must not overwrite a
     // previously verified projection or leak identity/connection data to logs.
     let conn = Connection::open(&chat).unwrap();

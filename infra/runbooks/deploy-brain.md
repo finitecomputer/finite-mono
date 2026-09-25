@@ -96,15 +96,38 @@ runtime recovery and run `scripts/finite-status` before and after rollout.
 
 ## Private principal labels
 
-The same closure installs `finite-brain-labels.service` and its one-minute
-refresh timer. It derives labels for existing Brain principals from Core's
-linked WorkOS accounts plus the hosted device's `hosted-web` public account key,
-and from Core's runner-pinned Agent Principal plus Project display name. An
-invitation's delivery email and an agent-creation request's caller-supplied
-owner key are never identity evidence. Conflicting bindings remain unidentified.
-Newly admitted members appear after the next successful refresh (once per
-minute, plus lookup time); existing members use the same path without a database
-backfill.
+The same closure installs `finite-brain-labels.service`, an idle local worker
+woken by authorized Brain metadata reads. Sync and the current dashboard both
+use that route; `fbrain access list` does too. There is no refresh timer or
+startup scan. The server sends a constant, nonblocking Unix datagram after
+permission checks, outside the Brain store lock. It never sends a caller-chosen
+key or waits for discovery. A missing worker or full queue cannot fail sync.
+
+The worker coalesces demand across all Brains. Successful refreshes have a
+five-minute cooldown; failures back off from 30 seconds to five minutes.
+Requests during cooldown reuse the projection; they do not schedule future
+work. Known hosted key locations are revalidated on eligible refreshes. Full
+hosted-directory discovery, including negative results and failed scans, has a
+separate fifteen-minute cooldown. Unknown/new human keys can therefore take
+up to fifteen minutes plus the next eligible metadata request to be discovered.
+There is no periodic reconciliation while idle. Restart discards the location
+cache; the next request performs a bounded discovery. Source discovery still
+scales with hosted account count, but repeated reads no longer repeat the scan.
+
+Labels derive from Core's linked WorkOS accounts plus the hosted device's
+`hosted-web` public account key, and from Core's runner-pinned Agent Principal
+plus Project display name. An invitation's delivery email and an agent-creation
+request's caller-supplied owner key are never identity evidence. Conflicting
+bindings remain unidentified; newly introduced conflicting hosted bindings are
+detected on the next complete discovery. Existing members use the same lookup
+path as new members without a database backfill.
+
+A cold metadata request may return unidentified keys before the worker finishes.
+A subsequent `fbrain access list --brain "$BRAIN_ID"` shows available labels;
+one-shot CLI commands do not wait or poll. The current dashboard lists Brains
+and folders, not a member roster: opening it wakes the same worker, but this
+change does not add a new roster UI. Any future label-rendering view must refetch
+metadata with fresh auth evidence and a bounded retry policy.
 
 The exporter runs as the dedicated `finite_brain_labels` Unix user. Its local
 Postgres peer-authenticated role has column-level SELECT grants only; no Core
@@ -130,7 +153,10 @@ hosted state is never repaired by this worker.
 `/run/finite-brain-labels/principals.json` is an atomic, disposable private
 projection, owned by the dedicated worker and readable only by the label group
 (directory 0750, file 0640). Brain receives its path through
-`FINITE_BRAIN_PRINCIPAL_LABELS`; it receives no Core credential. Only authorized
+`FINITE_BRAIN_PRINCIPAL_LABELS` and the signal socket through
+`FINITE_BRAIN_LABEL_SOCKET`; it receives no Core credential. The socket is
+worker-owned, mode 0660 inside the 0750 directory. Brain can signal but cannot
+replace the socket or write the projection. Only authorized
 Brain metadata responses use labels, for the principals already in that
 response. Each principal can see their own private label. Brain admins may
 also see labels for members who accepted a Brain invitation or explicitly
@@ -152,10 +178,13 @@ These choices affect only admin visibility, never membership, permissions,
 keys, public NIP-05 aliases, or the principal's own label. A choice made before
 a verified label exists applies when a later refresh resolves it.
 
-A missing, malformed, oversized, future-dated, or more-than-five-minute-old
-projection supplies no private labels. The refresh is bounded to 4,096 relevant
-principals/bindings and 35 seconds; failure leaves the previous projection to
-expire. Brain access and sync do not depend on the worker. On an authorized
+A missing, malformed, oversized, future-dated, or more-than-one-hour-old
+projection supplies no private labels. One hour is the hard display lifetime,
+separate from the five-minute refresh cooldown. Failure preserves the last
+projection until it expires; a successful refresh replaces it atomically.
+Each refresh is bounded to 4,096 relevant principals/bindings and 30 seconds
+(with synchronous SQLite discovery bounded to 25 seconds). Private-label
+sharing is rechecked on every response: hiding does not wait for cache expiry. Brain access and sync do not depend on the worker. On an authorized
 rollout, verify existing and newly admitted identities with `fbrain brain
 metadata --brain "$BRAIN_ID" --json` and an updated `fbrain access list --brain
 "$BRAIN_ID" --json`; unknown keys remain unverified. Old clients ignore the
@@ -177,7 +206,7 @@ and a stopped-writer whole-database backup restored onto an empty target,
 including hidden labels staying absent from admin metadata. The old server
 ignores the additive table and optional metadata; the new sharing command
 requires the new server. Rolling back to the pre-label closure removes the
-label consumer/timer while retaining preferences, triggers, and accepted access
+label consumer/worker while retaining preferences, triggers, and accepted access
 repairs. No source identity or encrypted state is rewritten. The observer's
 read-only Postgres role/grants may remain after binary
 rollback; remove that observer role deliberately if retiring the label service.

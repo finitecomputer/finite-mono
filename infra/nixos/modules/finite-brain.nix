@@ -11,6 +11,7 @@
 let
   mailEnvironmentFile = "/etc/finite-saas/sites.env";
   labelsPath = "/run/finite-brain-labels/principals.json";
+  labelsSocket = "/run/finite-brain-labels/refresh.sock";
 in
 {
   users.groups.finite-brain-labels = { };
@@ -60,7 +61,8 @@ in
   # column SELECT grants; no credentials or Core API tokens. The worker's root
   # filesystem exposes only the read-only sources, Nix closure, socket, and output.
   systemd.services.finite-brain-labels = {
-    description = "Refresh private Brain principal labels";
+    description = "Refresh private Brain principal labels on demand";
+    wantedBy = [ "multi-user.target" ];
     after = [ "finite-brain-label-grants.service" ];
     requires = [ "finite-brain-label-grants.service" ];
     environment = {
@@ -68,9 +70,12 @@ in
       FINITE_BRAIN_DB = "/sources/brain/finite-brain.sqlite3";
       FINITECHAT_HOSTED_DATA_ROOT = "/sources/hosted";
       FINITE_BRAIN_PRINCIPAL_LABELS = "/output/principals.json";
+      FINITE_BRAIN_LABEL_SOCKET = "/output/refresh.sock";
     };
     serviceConfig = {
-      Type = "oneshot";
+      Type = "simple";
+      Restart = "on-failure";
+      RestartSec = 30;
       ExecStart = "${finitePackages.finite-brain}/bin/finite-brain-labels";
       User = "finite_brain_labels";
       # Read DynamicUser-owned SQLite sources, confined to these explicit binds.
@@ -98,14 +103,6 @@ in
       ReadWritePaths = [ "+/output" ];
     };
   };
-  systemd.timers.finite-brain-labels = {
-    wantedBy = [ "timers.target" ];
-    timerConfig = {
-      OnBootSec = "30s";
-      OnUnitActiveSec = "60s";
-      AccuracySec = "5s";
-    };
-  };
   systemd.services.finite-brain-app = {
     description = "FiniteBrain Rust application server";
     wants = [ "network-online.target" ];
@@ -125,6 +122,7 @@ in
       FINITE_BRAIN_INVITE_MAILER = "resend";
       FINITE_BRAIN_INVITE_MAIL_FROM = "Finite Brain <brain@finite.chat>";
       FINITE_BRAIN_PRINCIPAL_LABELS = labelsPath;
+      FINITE_BRAIN_LABEL_SOCKET = labelsSocket;
     };
 
     serviceConfig = {
