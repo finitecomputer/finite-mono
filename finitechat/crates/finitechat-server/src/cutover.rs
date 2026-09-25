@@ -3,7 +3,7 @@
 //!
 //! This module is TRANSITIONAL. It exists only to move a pre-cutover
 //! database onto the normalized engine, and PR 2 (`cleanup/chat-store-
-//! delete-old`) deletes it wholesale before 2026-09-25. Two things live
+//! delete-old`) deletes it wholesale before 2026-10-02. Two things live
 //! here:
 //!
 //! * The READER: exactly the legacy boot path production ran until the

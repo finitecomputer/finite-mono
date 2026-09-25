@@ -66,7 +66,7 @@ mod auth;
 /// One-time op-log fold of a pre-cutover database onto the normalized
 /// engine, plus the minimal legacy READER that feeds it. Transitional:
 /// PR 2 (`cleanup/chat-store-delete-old`) deletes this module wholesale
-/// before 2026-09-25.
+/// before 2026-10-02.
 mod cutover;
 mod projections;
 mod routes;
@@ -104,7 +104,7 @@ pub fn print_engine_rollout_banner() {
          --sqlite PATH` passes; otherwise roll forward (the restore is\n\
          refused once any post-fold write exists). The legacy reader and\n\
          fold code are deleted by cleanup/chat-store-delete-old before\n\
-         2026-09-25."
+         2026-10-02."
     );
 }
 
@@ -646,7 +646,9 @@ mod engine_cutover_tripwires {
     /// After it, this test fails CI until the transitional reader/fold
     /// module (`src/cutover.rs`) is deleted. Postponing the deletion means
     /// consciously editing this constant in review — that is the point.
-    const LEGACY_READER_DELETION_DEADLINE: (i64, u32, u32) = (2026, 9, 25);
+    // Retain the reader for one more week while removal and recovery evidence
+    // are reviewed; its deletion must not be bundled into an unrelated repair.
+    const LEGACY_READER_DELETION_DEADLINE: (i64, u32, u32) = (2026, 10, 2);
 
     fn deadline_unix_seconds() -> i64 {
         let (year, month, day) = LEGACY_READER_DELETION_DEADLINE;
