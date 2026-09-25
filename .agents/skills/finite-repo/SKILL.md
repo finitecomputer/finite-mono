@@ -53,9 +53,9 @@ Repository docs describe current behavior, supported operations and retained
 contracts. Product plans and transition narratives belong in Linear; at most,
 leave a TODO linked to its issue. Do not add repo-local PRDs or work logs.
 
-`docs/agents/issue-tracker.md` defines product authority and issue conventions;
-`docs/agents/triage-labels.md` defines triage labels. Use
-`docs/agents/domain.md` for retained contracts and `CONTEXT-MAP.md` for owners.
+The root `AGENTS.md` defines the GitHub–Linear boundary and issue conventions.
+Locate owners in the code and component `AGENTS.md` files; consult retained
+contracts when changing compatibility, security or recovery boundaries.
 Prune stale legacy documents and scripts after checking current callers,
 production boundaries, migration gates, and test contracts; history is the
 archive.
