@@ -96,144 +96,112 @@ runtime recovery and run `scripts/finite-status` before and after rollout.
 
 ## Private principal labels
 
-The same closure installs `finite-brain-labels.service`, an idle local worker
-woken by authorized Brain metadata reads. Sync and the current dashboard both
-use that route; `fbrain access list` does too. There is no refresh timer or
-startup scan. The server sends a constant, nonblocking Unix datagram after
-permission checks, outside the Brain store lock. It never sends a caller-chosen
-key or waits for discovery. A missing worker or full queue cannot fail sync.
+`finite-brain-labels.service` is a demand worker, with no timer, startup scan,
+or one-shot mode. After authorizing a metadata request, Brain sends the validated
+Brain ID through a nonblocking Unix datagram. Sync, dashboard inventory, and
+`fbrain access list` use this route. The worker reads that Brain's roster itself;
+the request cannot supply a public key or label. Missing workers and full queues
+do not fail the read.
 
-The worker coalesces demand across all Brains. Successful refreshes have a
-five-minute cooldown; failures back off from 30 seconds to five minutes.
-Requests during cooldown reuse the projection; they do not schedule future
-work. Known hosted key locations are revalidated on eligible refreshes. Full
-hosted-directory discovery, including negative results and failed scans, has a
-separate fifteen-minute cooldown. Unknown/new human keys can therefore take
-up to fifteen minutes plus the next eligible metadata request to be discovered.
-There is no periodic reconciliation while idle. Restart discards the location
-cache; the next request performs a bounded discovery. Source discovery still
-scales with hosted account count, but repeated reads no longer repeat the scan.
+The worker publishes one atomic `<brain-id>.json` file per Brain under
+`/run/finite-brain-labels`. Roster and output limits derive from the supported
+per-Brain Member and Folder Access envelope; other Brains do not consume that
+budget. Files contain resolved labels, human/agent type, source type, and
+observation time. Internal source identifiers and conflicting candidate records
+stay in the worker. Brain reads and validates the requested file outside the
+BrainStore lock, then checks current sharing choices with one bounded query.
+Labels never confer membership, Folder Access, keys, or admin standing.
 
-Labels derive from Core's linked WorkOS accounts plus the hosted device's
-`hosted-web` public account key, and from Core's runner-pinned Agent Principal
-plus Project display name. An invitation's delivery email and an agent-creation
-request's caller-supplied owner key are never identity evidence. Conflicting
-bindings remain unidentified; newly introduced conflicting hosted bindings are
-detected on the next complete discovery. Existing members use the same lookup
-path as new members without a database backfill.
+Successful files have a five-minute refresh cooldown. One worker processes
+requests sequentially, with no cross-Brain success delay and global
+failure backoff from 30 seconds to five minutes. Requests during cooldown do not
+schedule later work. Cached labels expire after one hour; sharing choices are
+checked on every response, so hide does not wait for cache expiry.
 
-A cold metadata request may return unidentified keys before the worker finishes.
-A subsequent `fbrain access list --brain "$BRAIN_ID"` shows available labels;
-one-shot CLI commands do not wait or poll. The current dashboard lists Brains
-and folders, not a member roster: opening it wakes the same worker, but this
-change does not add a new roster UI. Any future label-rendering view must refetch
-metadata with fresh auth evidence and a bounded retry policy.
+Hosted identity discovery has a separate global fifteen-minute cooldown,
+including negative results and failed scans. It streams public keys and hashed
+storage namespaces into a temporary, worker-private SQLite index with a fixed
+page-cache budget. The index has no account names, emails, or identity secrets;
+only a complete successful discovery replaces it. It serves subsequent requests
+for different Brains without a new scan. Requested keys are revalidated at their
+indexed locations before use. Corrupt sources fail discovery rather than hiding
+a potentially conflicting owner. New/conflicting bindings are found on the next
+complete discovery, independent of Brain additions or caller activity.
 
-The exporter runs as the dedicated `finite_brain_labels` Unix user. Its local
-Postgres peer-authenticated role has column-level SELECT grants only; no Core
-credentials or API tokens are loaded. NixOS provisions those grants once per
-database service lifetime, separately from Brain startup, and never starts an
-intentionally stopped database to refresh labels. The grant unit is wanted by
-PostgreSQL and follows its explicit stop/restart lifecycle. The worker is also wanted by and follows PostgreSQL's explicit stop/restart,
-ordered after grants. This recreates its confined mount of `/run/postgresql`
-after PostgreSQL recreates that directory. Its Requisite check rejects manual
-worker activation while PostgreSQL is stopped without starting the database.
-Other source failures leave the worker alive with demand-driven backoff;
-metadata reads stay available when the worker is stopped. The worker uses a confined
-root filesystem exposing the Nix closure, Postgres socket, read-only source
-directories, and writable output.
-Its sole capability permits reading the DynamicUser-owned source files inside
-that filesystem. It starts a read-only Postgres transaction and opens Brain
-and hosted Chat SQLite files read-only. It queries public identity columns only;
-it never queries identity secret files, messages, ciphertext, invite tokens,
-or encrypted grants. The retained source contract is
-`users(workos_user_id, normalized_email, link_status)`,
-`projects(id, display_name)`, `agent_runtimes(project_id, health_reporting_npub)`,
-and the hosted `client_device_states(account_id, device_id)` row inside the
-SHA-256 WorkOS-subject namespace. It first finds hosted public keys matching
-current Brain principals, then queries Core for those exact hashed subject
-namespaces; unrelated enrolled Core accounts do not consume the label limit.
-Source schema changes must preserve or update this reader. Missing or ambiguous
-hosted state is never repaired by this worker.
+The index is disposable and lost on restart. No index schema is added to Brain,
+Chat, or Core. Discovery still scans hosted accounts and has a 25-second time
+budget; a corpus that cannot complete within that budget requires a discovery
+redesign before expansion, not an increased Principal limit. Each refresh has a
+30-second deadline. Source failures preserve the old file until expiry. A bad
+Brain roster cannot invalidate another Brain's output.
 
-`/run/finite-brain-labels/principals.json` is an atomic, disposable private
-projection, owned by the dedicated worker and readable only by the label group
-(directory 0750, file 0640). Brain receives its path through
-`FINITE_BRAIN_PRINCIPAL_LABELS` and the signal socket through
-`FINITE_BRAIN_LABEL_SOCKET`; it receives no Core credential. The socket is
-worker-owned, mode 0660 inside the 0750 directory. Brain can signal but cannot
-replace the socket or write the projection. Only authorized
-Brain metadata responses use labels, for the principals already in that
-response. Each principal can see their own private label. Brain admins may
-also see labels for members who accepted a Brain invitation or explicitly
-shared their label. The invitation default applies to retained accepted
-memberships too. An explicit hide always overrides it. Direct additions, Folder
-grants, admin promotion, and declared bootstrap requester identities do not
-establish that sharing boundary. Other members and Folder guests cannot
-see another principal's private label. Visibility of a public key alone does
-not expose its account email. Global identity resolution and public NIP-05
-aliases are unchanged.
-Human/agent type, source, and observation time accompany the display label.
+A cold read can precede discovery. Repeat `fbrain access list --brain
+"$BRAIN_ID"` after the worker completes. Newly created hosted bindings can wait
+fifteen minutes plus the next eligible request. CLI reads do not poll. The
+current dashboard lists Brains and Folders, not member identities; this change
+adds no roster UI.
 
-Existing directly added members and Folder guests can inspect and share their
-own label with `fbrain brain label status --brain "$BRAIN_ID"` and
-`fbrain brain label share --brain "$BRAIN_ID"`. Each human/agent key acts for
-itself; there is no admin target selector or manual name override. Use
-`fbrain brain label hide --brain "$BRAIN_ID"` to withdraw private-label sharing.
-These choices affect only admin visibility, never membership, permissions,
-keys, public NIP-05 aliases, or the principal's own label. A choice made before
-a verified label exists applies when a later refresh resolves it.
+Identity evidence comes from linked Core WorkOS accounts joined to the hosted
+`hosted-web` public account key, or runner-pinned Agent keys joined to Project
+names. Invitation delivery emails and caller-supplied owner keys are not identity
+evidence. The retained source contract is:
 
-A missing, malformed, oversized, future-dated, or more-than-one-hour-old
-projection supplies no private labels. One hour is the hard display lifetime,
-separate from the five-minute refresh cooldown. Failure preserves the last
-projection until it expires; a successful refresh replaces it atomically.
-Each refresh is bounded to 4,096 relevant principals/bindings and 30 seconds
-(with synchronous SQLite discovery bounded to 25 seconds). Private-label
-sharing is rechecked on every response: hiding does not wait for cache expiry. Brain access and sync do not depend on the worker. On an authorized
-rollout, verify existing and newly admitted identities with `fbrain brain
-metadata --brain "$BRAIN_ID" --json` and an updated `fbrain access list --brain
-"$BRAIN_ID" --json`; unknown keys remain unverified. Old clients ignore the
-additive label metadata, and the new CLI accepts older servers without it.
+- Core `users(workos_user_id, normalized_email, link_status)`;
+- Core `projects(id, display_name)` and
+  `agent_runtimes(project_id, health_reporting_npub)`;
+- hosted `client_device_states(account_id, device_id)` in the SHA-256
+  WorkOS-subject storage namespace.
 
-Brain schema V30 adds `brain_identity_label_preferences` and two cleanup
-triggers; it leaves existing customer rows and Chat schemas unchanged. The
-signed self-only endpoint is the preference writer; metadata and preference
-status are its readers. The access check and preference write are one immediate
-transaction. Membership deletion or the last guest-access deletion clears the
-choice, including when an older binary issues those retained SQL statements.
-An unrelated future direct re-add cannot inherit the former sharing choice.
+Source schema changes must preserve or update this reader. It never repairs
+source state or reads secrets, messages, ciphertext, invitations, or grants.
+The dedicated Unix user and peer-authenticated Postgres role have only the
+required column-level SELECT grants. The confined filesystem exposes read-only
+sources, the Nix closure, the Postgres socket, and writable output. Its sole
+capability allows reading DynamicUser-owned source files inside that filesystem.
+The temporary index remains private to the worker; label files are group-readable
+0640 inside a 0750 directory. Brain can signal the 0660 socket and read files,
+but cannot replace them. Configure `FINITE_BRAIN_PRINCIPAL_LABELS_DIR` and
+`FINITE_BRAIN_LABEL_SOCKET`; Brain receives no Core credential.
 
-Preferences are durable privacy state in the whole Brain SQLite Recovery Set:
-restore explicit `hide` rows with the rest of that database. The disposable
-projection can be regenerated from verified source bindings and is not part of
-the Recovery Set. Tests cover V29 upgrade, retained deletion forms, restart,
-and a stopped-writer whole-database backup restored onto an empty target,
-including hidden labels staying absent from admin metadata. The old server
-ignores the additive table and optional metadata; the new sharing command
-requires the new server. Rolling back to the pre-label closure removes the
-label consumer/worker while retaining preferences, triggers, and accepted access
-repairs. No source identity or encrypted state is rewritten. The observer's
-read-only Postgres role/grants may remain after binary
-rollback; remove that observer role deliberately if retiring the label service.
-Do not manually edit the projection to assert an unverified name.
+Postgres wants the grant unit and worker. Both follow its stop/restart lifecycle;
+the worker starts after grants so its confined Postgres socket mount is recreated.
+Requisite prevents either unit from starting an intentionally stopped database.
+Other source errors leave the worker alive with bounded backoff. Label failure
+does not change Brain access or prevent sync.
 
-Before rollout, exercise the evaluated Linux service on synthetic sources:
-verify socket/output ownership, idle startup without discovery, authorized
-metadata wakeup, burst coalescing, source failure, and restart recovery. Nix
-evaluation and process tests do not substitute for this confined-systemd
-canary. Use `scripts/finite-status` before and after the authorized rollout.
+A Principal always sees its own label. Admin visibility requires accepted
+invitation provenance or explicit per-Brain sharing; explicit hide overrides the
+invitation default, including retained accepted memberships. Adding an arbitrary
+key, granting Folder Access, or promoting an admin cannot reveal private identity.
+Other Members and Guests do not see another Principal's private label. Public
+NIP-05 aliases and global identity resolution are unchanged.
 
-## Rollback
+Directly added Members and Guests use `fbrain brain label status|share|hide
+--brain "$BRAIN_ID"`. Each human or Agent acts with its own key; there is no admin
+target selector or manual name override. Existing-member rollout still requires
+that sharing step and verification of the intended identities. Unknown or
+conflicting keys remain unidentified.
 
-1. Switch lat2 to the previous NixOS generation and record the resulting
-   `/run/current-system`; for a deliberate rollback, build/download/deploy the
-   previous known-good rev's exact lat2 closure artifact and verify that path.
-2. Preserve the current database and all accepted writes. A binary rollback is
-   safe only if the old binary can read the current schema. Otherwise restore
-   and diagnose on an isolated target; never start a second writable service.
+Schema V30 stores sharing preferences in the whole Brain SQLite Recovery Set.
+The signed self-only route checks access and writes the preference in one
+immediate transaction. Membership or last-guest-access deletion clears the old
+choice, including retained SQL from older binaries. Restore explicit hide rows
+with the complete database. Tests cover V29 upgrade, old-writer deletion,
+restart, and empty-target recovery. Label files and the temporary index are
+regenerated and are not part of the Recovery Set. Per-Brain files remain in the
+runtime directory until reboot; expiry controls use, not file deletion.
 
-A NixOS rollback is not a data rollback. Continuous Litestream replication is
-the between-deploy restore lane (see
-`litestream-chat-replication.md`); empty-target restore still requires an
-explicit drill before claiming it.
+Old clients ignore additive label metadata; new clients accept older servers
+without it. The share/hide command requires the new server. The worker format and
+configuration are an unreleased hard cut: deploy worker and server from the same
+closure. Rollback to the pre-label closure removes their consumers but retains
+privacy preferences and accepted repairs. Read-only observer grants can remain
+or be removed deliberately when retiring the feature. Do not edit label files
+to assert a name, or restore an old database over later accepted writes.
+
+Before rollout, exercise the confined Linux service on synthetic sources:
+verify permissions, idle startup, authorized Brain-scoped wakeups, multiple
+Brains, burst handling, source failure, and Postgres stop/start recovery. Nix
+evaluation and process tests do not replace this systemd canary. Use
+`scripts/finite-status` before and after the authorized rollout; verify labels
+with Brain metadata and access-list reads from the intended identities.

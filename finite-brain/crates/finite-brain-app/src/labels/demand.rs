@@ -1,17 +1,17 @@
-//! One process coalesces demand across every Brain. No timer performs discovery.
+//! One process serves Brain-scoped demand; expensive discovery has one global gate.
 use super::*;
 use finite_brain_server::principal_labels::LABEL_REFRESH_INTERVAL_SECONDS;
 
 const DISCOVERY_INTERVAL: Duration = Duration::from_secs(15 * 60);
 const REFRESH_INTERVAL: Duration = Duration::from_secs(LABEL_REFRESH_INTERVAL_SECONDS);
 
-/// Only locations matched by a complete discovery are retained. Unknown keys
+/// One complete, temporary public-key index serves every Brain. Unknown keys
 /// share the discovery cooldown: adding arbitrary npubs cannot force new scans.
 #[derive(Default)]
 pub(super) struct HostedLocations {
     discovered_at: Option<Instant>,
     discovery_failed: bool,
-    candidates: BTreeMap<String, String>,
+    index: Option<HostedIndex>,
 }
 
 impl HostedLocations {
@@ -24,6 +24,7 @@ impl HostedLocations {
         if principals.is_empty() {
             return Ok(BTreeMap::new());
         }
+        let started = Instant::now();
         if self
             .discovered_at
             .is_none_or(|last| now.duration_since(last) >= DISCOVERY_INTERVAL)
@@ -32,24 +33,40 @@ impl HostedLocations {
             // to expire; never republish it as newly verified after a scan error.
             self.discovered_at = Some(now);
             self.discovery_failed = true;
-            self.candidates = hosted_candidates(root, principals, Instant::now())?;
+            self.index = Some(discover_hosted(root, started)?);
             self.discovery_failed = false;
-            return Ok(self.candidates.clone());
         }
         if self.discovery_failed {
             return Err(RefreshError::SourceUnavailable);
         }
 
         let mut current = BTreeMap::new();
-        let started = Instant::now();
-        for (storage_id, prior_npub) in &self.candidates {
-            if started.elapsed() > Duration::from_secs(25) {
-                return Err(RefreshError::Limit);
-            }
-            if principals.contains(prior_npub)
-                && hosted_public_key(root, storage_id)?.as_ref() == Some(prior_npub)
-            {
-                current.insert(storage_id.clone(), prior_npub.clone());
+        let mut examined = 0;
+        let index = self.index.as_ref().ok_or(RefreshError::SourceUnavailable)?;
+        let mut statement = index
+            .connection
+            .prepare("SELECT storage_id FROM locations WHERE npub=?1 LIMIT ?2")
+            .map_err(|_| RefreshError::InvalidSource)?;
+        for npub in principals {
+            let rows = statement
+                .query_map(rusqlite::params![npub, MAX_LABELS as u64 * 2 + 1], |row| {
+                    row.get::<_, String>(0)
+                })
+                .map_err(|_| RefreshError::InvalidSource)?;
+            for row in rows {
+                examined += 1;
+                // Count every indexed claim, including changed keys. Truncating
+                // before revalidation could hide a conflicting owner.
+                if examined > MAX_LABELS * 2 {
+                    return Err(RefreshError::Limit);
+                }
+                if started.elapsed() > Duration::from_secs(25) {
+                    return Err(RefreshError::Limit);
+                }
+                let storage_id = row.map_err(|_| RefreshError::InvalidSource)?;
+                if hosted_public_key(root, &storage_id)?.as_ref() == Some(npub) {
+                    current.insert(storage_id, npub.clone());
+                }
             }
         }
         Ok(current)
@@ -70,7 +87,7 @@ impl RefreshGate {
     fn finished(&mut self, now: Instant, success: bool) {
         let delay = if success {
             self.failures = 0;
-            REFRESH_INTERVAL
+            Duration::ZERO
         } else {
             self.failures = (self.failures + 1).min(5);
             Duration::from_secs((30_u64 << (self.failures - 1)).min(300))
@@ -94,16 +111,34 @@ pub(super) async fn serve(path: &Path) -> Result<(), RefreshError> {
         .map_err(|_| RefreshError::Configuration)?;
     let mut locations = HostedLocations::default();
     let mut gate = RefreshGate::default();
-    let mut bytes = [0_u8; 16];
+    let directory = PathBuf::from(
+        std::env::var("FINITE_BRAIN_PRINCIPAL_LABELS_DIR")
+            .map_err(|_| RefreshError::Configuration)?,
+    );
+    let mut bytes = [0_u8; 129];
     loop {
         let len = socket
             .recv(&mut bytes)
             .await
             .map_err(|_| RefreshError::Configuration)?;
-        if &bytes[..len] != b"refresh" || !gate.ready(Instant::now()) {
+        let Ok(value) = std::str::from_utf8(&bytes[..len]) else {
+            continue;
+        };
+        let Ok(brain_id) = BrainId::new(value) else {
+            continue;
+        };
+        // Per-Brain success cooldown lives in its disposable file; no growing
+        // in-memory roster/gate map and no one Brain's success starving another.
+        let fresh = fs::metadata(projection_path(&directory, &brain_id))
+            .ok()
+            .and_then(|metadata| metadata.modified().ok())
+            .and_then(|modified| modified.elapsed().ok())
+            .is_some_and(|age| age < REFRESH_INTERVAL);
+        if fresh || !gate.ready(Instant::now()) {
             continue;
         }
-        let result = tokio::time::timeout(Duration::from_secs(30), refresh(&mut locations)).await;
+        let result =
+            tokio::time::timeout(Duration::from_secs(30), refresh(&brain_id, &mut locations)).await;
         let success = matches!(result, Ok(Ok(())));
         gate.finished(Instant::now(), success);
         if !success {
@@ -131,10 +166,8 @@ mod tests {
         let mut gate = RefreshGate::default();
         assert!(gate.ready(now));
         gate.finished(now, true);
-        for seconds in 0..LABEL_REFRESH_INTERVAL_SECONDS {
-            assert!(!gate.ready(now + Duration::from_secs(seconds)));
-        }
-        let retry = now + REFRESH_INTERVAL;
+        assert!(gate.ready(now), "another Brain can run after success");
+        let retry = now;
         assert!(gate.ready(retry));
         gate.finished(retry, false);
         assert!(!gate.ready(retry + Duration::from_secs(29)));
@@ -231,6 +264,40 @@ mod tests {
                 )
                 .unwrap()
                 .is_empty()
+        );
+    }
+
+    #[test]
+    fn one_discovery_serves_different_brains_without_a_global_roster() {
+        let dir = tempfile::tempdir().unwrap();
+        let (first_hex, first) = tests_fixture_principal(1);
+        let (second_hex, second) = tests_fixture_principal(2);
+        super::super::tests::hosted_fixture(dir.path(), "first", &first_hex);
+        super::super::tests::hosted_fixture(dir.path(), "second", &second_hex);
+        let mut locations = HostedLocations::default();
+        let now = Instant::now();
+        let a = locations
+            .candidates(dir.path(), &BTreeSet::from([first.clone()]), now)
+            .unwrap();
+        assert_eq!(a.values().collect::<Vec<_>>(), vec![&first]);
+        let broken = super::super::tests::hosted_fixture(
+            dir.path(),
+            "unrelated",
+            &tests_fixture_principal(3).0,
+        );
+        fs::write(broken, b"broken").unwrap();
+        let b = locations
+            .candidates(
+                dir.path(),
+                &BTreeSet::from([second.clone()]),
+                now + Duration::from_secs(1),
+            )
+            .unwrap();
+        assert_eq!(b.values().collect::<Vec<_>>(), vec![&second]);
+        assert_eq!(
+            locations.discovered_at,
+            Some(now),
+            "a second Brain must reuse complete discovery"
         );
     }
 

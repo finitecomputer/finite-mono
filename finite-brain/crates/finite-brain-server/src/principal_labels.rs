@@ -7,30 +7,38 @@ use std::{collections::BTreeMap, fs::File, io::Read, path::Path};
 use finite_nostr::NostrPublicKey;
 use serde::{Deserialize, Serialize};
 
-pub const MAX_LABELS: usize = 4096;
-pub const MAX_PROJECTION_BYTES: u64 = 2 * 1024 * 1024;
-// Revalidation is demand-driven every five minutes. During a source outage,
-// display evidence expires after one hour; sharing is checked on every read.
+// One snapshot covers one Brain's supported membership and guest envelope.
+// Admins are members; owner and Personal Agent can be separate Principals.
+pub const MAX_LABELS: usize = finite_brain_core::BRAIN_CAPACITY_ENVELOPE.members
+    + finite_brain_core::BRAIN_CAPACITY_ENVELOPE.folder_access_entries
+    + 2;
+pub const MAX_PROJECTION_BYTES: u64 = MAX_LABELS as u64 * 1024 + 1024;
 pub const MAX_LABEL_AGE_SECONDS: u64 = 3600;
 pub const LABEL_REFRESH_INTERVAL_SECONDS: u64 = 300;
 
-/// Best-effort wakeup only. No identity, Brain ID or credentials cross this
-/// socket; the confined worker discovers its targets from authoritative state.
-/// Call only after authorizing the metadata request, outside the store lock.
+/// Authorized callers request one Brain, never arbitrary identity lookups.
+/// The worker independently reads that Brain's roster from authoritative state.
 #[cfg(unix)]
-pub(crate) fn request_refresh(path: &Path) {
+pub(crate) fn request_refresh(path: &Path, brain_id: &finite_brain_core::BrainId) {
     use std::os::unix::net::UnixDatagram;
     let Ok(socket) = UnixDatagram::unbound() else {
         return;
     };
     if socket.set_nonblocking(true).is_ok() {
-        // A missing worker or a full socket queue must never delay Brain reads.
-        let _ = socket.send_to(b"refresh", path);
+        let _ = socket.send_to(brain_id.as_str().as_bytes(), path);
     }
 }
 
 #[cfg(not(unix))]
-pub(crate) fn request_refresh(_path: &Path) {}
+pub(crate) fn request_refresh(_path: &Path, _brain_id: &finite_brain_core::BrainId) {}
+
+pub fn projection_path(
+    directory: &Path,
+    brain_id: &finite_brain_core::BrainId,
+) -> std::path::PathBuf {
+    // BrainId permits only ASCII alphanumeric, '-' and '_', at most 128 bytes.
+    directory.join(format!("{}.json", brain_id.as_str()))
+}
 
 #[derive(Debug, Clone, Copy, Eq, PartialEq, Deserialize, Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -66,22 +74,14 @@ impl PrincipalLabel {
     }
 }
 
-#[derive(Debug, Clone, Eq, PartialEq, Deserialize, Serialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
-pub struct LabelBinding {
-    pub npub: String,
-    /// Stable source record identity. Used to reject conflicting owners, never
-    /// returned in Brain metadata (in particular, never expose WorkOS subjects).
-    pub source_id: String,
-    pub label: PrincipalLabel,
-}
-
+/// Fully resolved display data; source record identifiers stay in the worker.
 #[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct LabelProjection {
     pub version: u32,
+    pub brain_id: String,
     pub generated_at: u64,
-    pub bindings: Vec<LabelBinding>,
+    pub labels: BTreeMap<String, PrincipalLabel>,
 }
 
 pub fn valid_label_name(value: &str) -> bool {
@@ -94,53 +94,38 @@ pub fn valid_label_name(value: &str) -> bool {
 }
 
 impl LabelProjection {
-    pub fn labels(&self, now: u64) -> Option<BTreeMap<String, PrincipalLabel>> {
+    pub fn valid(&self, brain_id: &finite_brain_core::BrainId, now: u64) -> bool {
         if self.version != 1
-            || self.bindings.len() > MAX_LABELS
+            || self.brain_id != brain_id.as_str()
+            || self.labels.len() > MAX_LABELS
             || self.generated_at > now
             || now - self.generated_at > MAX_LABEL_AGE_SECONDS
         {
-            return None;
+            return false;
         }
-        let mut candidates: BTreeMap<String, Option<&LabelBinding>> = BTreeMap::new();
-        for binding in &self.bindings {
-            let canonical = NostrPublicKey::parse(&binding.npub).ok()?.to_npub().ok()?;
-            if canonical != binding.npub
-                || binding.label.observed_at != self.generated_at
-                || !matches!(
-                    (binding.label.kind, binding.label.source),
+        self.labels.iter().all(|(npub, label)| {
+            NostrPublicKey::parse(npub)
+                .ok()
+                .and_then(|key| key.to_npub().ok())
+                .as_ref()
+                == Some(npub)
+                && valid_label_name(&label.name)
+                && label.observed_at == self.generated_at
+                && matches!(
+                    (label.kind, label.source),
                     (PrincipalKind::Human, LabelSource::HostedAccount)
                         | (PrincipalKind::Agent, LabelSource::ManagedAgent)
                 )
-            {
-                return None;
-            }
-            if !valid_label_name(&binding.label.name) || !valid_label_name(&binding.source_id) {
-                // An unusable source still claims this key. Reject this key,
-                // including any other candidate, without hiding unrelated labels.
-                candidates.insert(binding.npub.clone(), None);
-                continue;
-            }
-            candidates
-                .entry(binding.npub.clone())
-                .and_modify(|prior| {
-                    if *prior != Some(binding) {
-                        *prior = None;
-                    }
-                })
-                .or_insert(Some(binding));
-        }
-        Some(
-            candidates
-                .into_iter()
-                .filter_map(|(npub, binding)| binding.map(|binding| (npub, binding.label.clone())))
-                .collect(),
-        )
+        })
     }
 }
 
-pub(crate) fn read_labels(path: &Path, now: u64) -> Option<BTreeMap<String, PrincipalLabel>> {
-    let file = File::open(path).ok()?;
+pub(crate) fn read_labels(
+    directory: &Path,
+    brain_id: &finite_brain_core::BrainId,
+    now: u64,
+) -> Option<BTreeMap<String, PrincipalLabel>> {
+    let file = File::open(projection_path(directory, brain_id)).ok()?;
     if !file.metadata().ok()?.is_file() {
         return None;
     }
@@ -151,94 +136,63 @@ pub(crate) fn read_labels(path: &Path, now: u64) -> Option<BTreeMap<String, Prin
     if bytes.len() as u64 > MAX_PROJECTION_BYTES {
         return None;
     }
-    serde_json::from_slice::<LabelProjection>(&bytes)
-        .ok()?
-        .labels(now)
+    let projection: LabelProjection = serde_json::from_slice(&bytes).ok()?;
+    if !projection.valid(brain_id, now) {
+        return None;
+    }
+    Some(projection.labels)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use finite_brain_core::BrainId;
 
-    fn binding(key: u8, name: &str, kind: PrincipalKind) -> LabelBinding {
-        let npub = NostrPublicKey::parse(&format!("{key:02x}").repeat(32))
+    #[test]
+    fn snapshots_are_brain_scoped_bounded_and_expire() {
+        let brain = BrainId::new("acme").unwrap();
+        let other = BrainId::new("other").unwrap();
+        let npub = NostrPublicKey::parse(&"01".repeat(32))
             .unwrap()
             .to_npub()
             .unwrap();
-        LabelBinding {
-            npub,
-            source_id: format!("source-{key}"),
-            label: PrincipalLabel {
-                name: name.to_owned(),
-                kind,
-                observed_at: 100,
-                source: match kind {
-                    PrincipalKind::Human => LabelSource::HostedAccount,
-                    PrincipalKind::Agent => LabelSource::ManagedAgent,
-                },
-            },
-        }
-    }
-
-    #[test]
-    fn labels_distinguish_same_name_and_reject_conflicting_owners() {
-        let human = binding(1, "Alex", PrincipalKind::Human);
-        let agent = binding(2, "Alex", PrincipalKind::Agent);
-        let mut projection = LabelProjection {
-            version: 1,
-            generated_at: 100,
-            bindings: vec![human.clone(), agent.clone(), human.clone()],
-        };
-        let labels = projection.labels(101).unwrap();
-        assert_eq!(labels[&human.npub].display(), "Alex (human)");
-        assert_eq!(labels[&agent.npub].display(), "Alex (agent)");
-        let mut conflict = human.clone();
-        conflict.source_id = "different-owner".to_owned();
-        projection.bindings.extend([conflict, human]);
-        let labels = projection.labels(101).unwrap();
-        assert_eq!(labels.len(), 1);
-        assert!(labels.contains_key(&agent.npub));
-    }
-
-    #[test]
-    fn projection_fails_closed_on_staleness_bad_types_and_oversized_input() {
         let valid = LabelProjection {
             version: 1,
+            brain_id: brain.to_string(),
             generated_at: 100,
-            bindings: vec![binding(1, "Alex", PrincipalKind::Human)],
+            labels: BTreeMap::from([(
+                npub.clone(),
+                PrincipalLabel {
+                    name: "Alex".into(),
+                    kind: PrincipalKind::Human,
+                    source: LabelSource::HostedAccount,
+                    observed_at: 100,
+                },
+            )]),
         };
-        assert!(valid.labels(99).is_none());
-        assert!(valid.labels(100 + MAX_LABEL_AGE_SECONDS + 1).is_none());
-        assert!(valid.labels(100 + MAX_LABEL_AGE_SECONDS).is_some());
+        assert!(valid.valid(&brain, 100));
+        assert!(!valid.valid(&other, 100));
+        assert!(!valid.valid(&brain, 99));
+        assert!(valid.valid(&brain, 100 + MAX_LABEL_AGE_SECONDS));
+        assert!(!valid.valid(&brain, 101 + MAX_LABEL_AGE_SECONDS));
         let mut invalid = valid.clone();
-        invalid.bindings[0].label.kind = PrincipalKind::Agent;
-        assert!(invalid.labels(100).is_none());
+        invalid.labels.get_mut(&npub).unwrap().kind = PrincipalKind::Agent;
+        assert!(!invalid.valid(&brain, 100));
         invalid = valid.clone();
-        invalid.bindings[0].label.name = "Alex\nadmin".to_owned();
-        invalid.bindings.push(valid.bindings[0].clone());
-        invalid
-            .bindings
-            .push(binding(2, "Other", PrincipalKind::Agent));
-        let labels = invalid.labels(100).unwrap();
-        assert!(!labels.contains_key(&valid.bindings[0].npub));
-        assert_eq!(labels.len(), 1);
+        invalid.labels.get_mut(&npub).unwrap().name = "Alex\nadmin".into();
+        assert!(!invalid.valid(&brain, 100));
         invalid = valid.clone();
-        invalid.bindings[0].npub = "npub-invalid".to_owned();
-        assert!(invalid.labels(100).is_none());
-        invalid = valid.clone();
-        invalid.bindings[0].label.observed_at = 99;
-        assert!(invalid.labels(100).is_none());
-        invalid = valid.clone();
-        invalid.bindings = vec![valid.bindings[0].clone(); MAX_LABELS + 1];
-        assert!(invalid.labels(100).is_none());
+        invalid.labels.get_mut(&npub).unwrap().observed_at = 99;
+        assert!(!invalid.valid(&brain, 100));
         let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("labels.json");
-        assert!(read_labels(&path, 100).is_none());
+        let path = projection_path(dir.path(), &brain);
+        assert!(read_labels(dir.path(), &brain, 100).is_none());
         std::fs::write(&path, b"{broken}").unwrap();
-        assert!(read_labels(&path, 100).is_none());
+        assert!(read_labels(dir.path(), &brain, 100).is_none());
         std::fs::write(&path, vec![b' '; MAX_PROJECTION_BYTES as usize + 1]).unwrap();
-        assert!(read_labels(&path, 100).is_none());
+        assert!(read_labels(dir.path(), &brain, 100).is_none());
         std::fs::write(&path, serde_json::to_vec(&valid).unwrap()).unwrap();
-        assert_eq!(read_labels(&path, 100).unwrap().len(), 1);
+        assert_eq!(read_labels(dir.path(), &brain, 100).unwrap().len(), 1);
+        assert!(read_labels(dir.path(), &other, 100).is_none());
     }
 }

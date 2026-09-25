@@ -21,6 +21,21 @@ impl BrainStore {
             .is_some_and(|origin| origin.origin_kind == ProvenanceOriginKind::Invitation))
     }
 
+    /// One bounded read for the Brain roster; explicit hide overrides invitations.
+    pub fn shared_identity_label_principals(
+        &self,
+        brain_id: &BrainId,
+    ) -> Result<BTreeSet<String>, StoreError> {
+        let mut statement = self.conn.prepare(
+            "SELECT user_id FROM brain_identity_label_preferences WHERE brain_id=?1 AND shared_with_admins=1
+             UNION SELECT m.user_id FROM brain_members m
+             LEFT JOIN brain_identity_label_preferences p ON p.brain_id=m.brain_id AND p.user_id=m.user_id
+             WHERE m.brain_id=?1 AND m.origin_kind='invitation' AND p.user_id IS NULL")?;
+        // Rows are constrained by this Brain's membership/Folder Access envelope.
+        let rows = statement.query_map([brain_id.as_str()], |row| row.get(0))?;
+        Ok(rows.collect::<Result<_, _>>()?)
+    }
+
     /// The HTTP boundary supplies the authenticated principal, never a target
     /// selected by an admin. Retain no names or cross-product identity data.
     pub fn set_identity_label_sharing(
@@ -132,6 +147,10 @@ mod tests {
             !store
                 .identity_label_shared_with_admins(&brain, &invited)
                 .unwrap()
+        );
+        assert_eq!(
+            store.shared_identity_label_principals(&brain).unwrap(),
+            BTreeSet::from([direct.to_string()])
         );
         assert_eq!(store.load_brain(&brain).unwrap().brain, before.brain);
         drop(store);

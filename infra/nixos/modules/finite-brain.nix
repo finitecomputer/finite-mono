@@ -10,7 +10,7 @@
 }:
 let
   mailEnvironmentFile = "/etc/finite-saas/sites.env";
-  labelsPath = "/run/finite-brain-labels/principals.json";
+  labelsDirectory = "/run/finite-brain-labels";
   labelsSocket = "/run/finite-brain-labels/refresh.sock";
 in
 {
@@ -77,7 +77,7 @@ in
       FINITE_BRAIN_LABEL_DATABASE_URL = "host=/run/postgresql user=finite_brain_labels dbname=finite_core";
       FINITE_BRAIN_DB = "/sources/brain/finite-brain.sqlite3";
       FINITECHAT_HOSTED_DATA_ROOT = "/sources/hosted";
-      FINITE_BRAIN_PRINCIPAL_LABELS = "/output/principals.json";
+      FINITE_BRAIN_PRINCIPAL_LABELS_DIR = "/output";
       FINITE_BRAIN_LABEL_SOCKET = "/output/refresh.sock";
     };
     serviceConfig = {
@@ -129,7 +129,7 @@ in
       FINITE_BRAIN_SERVER_URL = "https://brain.finite.computer";
       FINITE_BRAIN_INVITE_MAILER = "resend";
       FINITE_BRAIN_INVITE_MAIL_FROM = "Finite Brain <brain@finite.chat>";
-      FINITE_BRAIN_PRINCIPAL_LABELS = labelsPath;
+      FINITE_BRAIN_PRINCIPAL_LABELS_DIR = labelsDirectory;
       FINITE_BRAIN_LABEL_SOCKET = labelsSocket;
     };
 

@@ -9,12 +9,13 @@ use std::{
 };
 
 use finite_brain_server::principal_labels::{
-    LabelBinding, LabelProjection, LabelSource, MAX_LABELS, MAX_PROJECTION_BYTES, PrincipalKind,
-    PrincipalLabel,
+    LabelProjection, LabelSource, MAX_LABELS, MAX_PROJECTION_BYTES, PrincipalKind, PrincipalLabel,
+    projection_path, valid_label_name,
 };
 #[path = "labels/demand.rs"]
 mod demand;
 
+use finite_brain_core::BrainId;
 use finite_nostr::NostrPublicKey;
 use rusqlite::{Connection, OpenFlags};
 #[cfg(test)]
@@ -40,20 +41,30 @@ fn readonly_sqlite(path: &Path) -> Result<Connection, RefreshError> {
     Ok(conn)
 }
 
-fn brain_principals(path: &Path) -> Result<BTreeSet<String>, RefreshError> {
+fn brain_principals(path: &Path, brain_id: &BrainId) -> Result<BTreeSet<String>, RefreshError> {
     let conn = readonly_sqlite(path)?;
-    // These are existing Brain principals, not an account-wide directory dump.
-    let mut statement = conn
-        .prepare(
-            "SELECT user_id FROM brain_members
-        UNION SELECT user_id FROM brain_admins
-        UNION SELECT user_id FROM folder_access
-        UNION SELECT owner_user_id FROM brains WHERE owner_user_id IS NOT NULL
-        UNION SELECT agent_npub FROM personal_agents LIMIT ?1",
+    let exists: bool = conn
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM brains WHERE id=?1)",
+            [brain_id.as_str()],
+            |row| row.get(0),
         )
         .map_err(|_| RefreshError::InvalidSource)?;
+    if !exists {
+        return Err(RefreshError::InvalidSource);
+    }
+    let mut statement = conn.prepare(
+        "SELECT user_id FROM brain_members WHERE brain_id=?1
+         UNION SELECT user_id FROM brain_admins WHERE brain_id=?1
+         UNION SELECT user_id FROM folder_access WHERE brain_id=?1
+         UNION SELECT owner_user_id FROM brains WHERE id=?1 AND owner_user_id IS NOT NULL
+         UNION SELECT agent_npub FROM personal_agents WHERE brain_id=?1 AND status='active' LIMIT ?2")
+        .map_err(|_| RefreshError::InvalidSource)?;
     let rows = statement
-        .query_map([MAX_LABELS as u64 + 1], |row| row.get::<_, String>(0))
+        .query_map(
+            rusqlite::params![brain_id.as_str(), MAX_LABELS as u64 + 1],
+            |row| row.get::<_, String>(0),
+        )
         .map_err(|_| RefreshError::InvalidSource)?;
     let principals = rows
         .collect::<Result<BTreeSet<_>, _>>()
@@ -93,42 +104,80 @@ fn hosted_public_key(root: &Path, storage_id: &str) -> Result<Option<String>, Re
         .and_then(|key| key.to_npub().ok()))
 }
 
-fn hosted_candidates(
-    root: &Path,
-    principals: &BTreeSet<String>,
-    started: Instant,
-) -> Result<BTreeMap<String, String>, RefreshError> {
+// Temporary, private disk-backed index. Streaming discovery has fixed SQLite
+// cache memory, independent of how many Brains or hosted namespaces exist.
+struct HostedIndex {
+    connection: Connection,
+    _file: tempfile::NamedTempFile,
+}
+
+fn discover_hosted(root: &Path, started: Instant) -> Result<HostedIndex, RefreshError> {
+    let file = tempfile::NamedTempFile::new().map_err(|_| RefreshError::Output)?;
+    let mut connection = Connection::open(file.path()).map_err(|_| RefreshError::Output)?;
+    connection.execute_batch("PRAGMA cache_size=-1024; CREATE TABLE locations (npub TEXT NOT NULL, storage_id TEXT NOT NULL); CREATE INDEX locations_npub ON locations(npub);")
+        .map_err(|_| RefreshError::Output)?;
+    let transaction = connection.transaction().map_err(|_| RefreshError::Output)?;
     let users = match fs::read_dir(root.join("users")) {
-        Ok(users) => users,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(BTreeMap::new()),
+        Ok(users) => Some(users),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
         Err(_) => return Err(RefreshError::SourceUnavailable),
     };
-    let mut candidates = BTreeMap::new();
-    // Stream existing hosted namespaces, not every enrolled Core account.
-    // Time bounds this scan; the output limit counts only matching principals.
-    for user in users {
-        if started.elapsed() > Duration::from_secs(25) {
-            return Err(RefreshError::Limit);
-        }
-        let user = user.map_err(|_| RefreshError::SourceUnavailable)?;
-        let storage_id = user.file_name().to_string_lossy().into_owned();
-        if storage_id.len() != 64
-            || !storage_id
-                .bytes()
-                .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase())
-        {
-            continue;
-        }
-        if let Some(npub) = hosted_public_key(root, &storage_id)?
-            && principals.contains(&npub)
-        {
-            candidates.insert(storage_id, npub);
-        }
-        if candidates.len() > MAX_LABELS {
-            return Err(RefreshError::Limit);
+    if let Some(users) = users {
+        for user in users {
+            if started.elapsed() > Duration::from_secs(25) {
+                return Err(RefreshError::Limit);
+            }
+            let user = user.map_err(|_| RefreshError::SourceUnavailable)?;
+            let storage_id = user.file_name().to_string_lossy().into_owned();
+            if storage_id.len() != 64
+                || !storage_id
+                    .bytes()
+                    .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase())
+            {
+                continue;
+            }
+            if let Some(npub) = hosted_public_key(root, &storage_id)? {
+                transaction
+                    .execute("INSERT INTO locations VALUES (?1,?2)", [&npub, &storage_id])
+                    .map_err(|_| RefreshError::Output)?;
+            }
         }
     }
-    Ok(candidates)
+    transaction.commit().map_err(|_| RefreshError::Output)?;
+    Ok(HostedIndex {
+        connection,
+        _file: file,
+    })
+}
+
+#[derive(Debug, Clone, Eq, PartialEq)]
+struct LabelBinding {
+    npub: String,
+    source_id: String,
+    label: PrincipalLabel,
+}
+
+fn resolved_labels(bindings: &[LabelBinding]) -> BTreeMap<String, PrincipalLabel> {
+    let mut candidates: BTreeMap<String, Option<&LabelBinding>> = BTreeMap::new();
+    for binding in bindings {
+        // Invalid names still claim the key: never accidentally select another owner.
+        if !valid_label_name(&binding.label.name) || !valid_label_name(&binding.source_id) {
+            candidates.insert(binding.npub.clone(), None);
+            continue;
+        }
+        candidates
+            .entry(binding.npub.clone())
+            .and_modify(|prior| {
+                if *prior != Some(binding) {
+                    *prior = None;
+                }
+            })
+            .or_insert(Some(binding));
+    }
+    candidates
+        .into_iter()
+        .filter_map(|(npub, binding)| binding.map(|binding| (npub, binding.label.clone())))
+        .collect()
 }
 
 fn binding(
@@ -171,12 +220,13 @@ impl Drop for DatabaseConnectionTask {
 async fn collect(
     database: &tokio_postgres::Config,
     brain_db: &Path,
+    brain_id: &BrainId,
     hosted_root: &Path,
     now: u64,
     locations: &mut demand::HostedLocations,
 ) -> Result<LabelProjection, RefreshError> {
     let started = Instant::now();
-    let principals = brain_principals(brain_db)?;
+    let principals = brain_principals(brain_db, brain_id)?;
     let candidates = locations.candidates(hosted_root, &principals, Instant::now())?;
     let (mut client, connection) = database
         .connect(NoTls)
@@ -196,7 +246,7 @@ async fn collect(
         .await
         .map_err(|_| RefreshError::SourceUnavailable)?;
     let targets: Vec<_> = principals.iter().cloned().collect();
-    let limit = MAX_LABELS as i64 + 1;
+    let limit = (MAX_LABELS * 2) as i64 + 1;
     let agents = transaction
         .query(
             "SELECT DISTINCT ar.health_reporting_npub, p.id, p.display_name
@@ -223,7 +273,7 @@ async fn collect(
         .map_err(|_| RefreshError::SourceUnavailable)?;
     drop(client);
 
-    if agents.len() > MAX_LABELS || users.len() > MAX_LABELS {
+    if agents.len() > MAX_LABELS * 2 || users.len() > MAX_LABELS * 2 {
         return Err(RefreshError::Limit);
     }
     let mut bindings = Vec::new();
@@ -253,10 +303,11 @@ async fn collect(
     }
     let projection = LabelProjection {
         version: 1,
+        brain_id: brain_id.to_string(),
         generated_at: now,
-        bindings,
+        labels: resolved_labels(&bindings),
     };
-    if projection.labels(now).is_none() {
+    if !projection.valid(brain_id, now) {
         return Err(RefreshError::InvalidSource);
     }
     Ok(projection)
@@ -289,12 +340,16 @@ fn publish(path: &Path, projection: &LabelProjection) -> Result<(), RefreshError
     Ok(())
 }
 
-async fn refresh(locations: &mut demand::HostedLocations) -> Result<(), RefreshError> {
+async fn refresh(
+    brain_id: &BrainId,
+    locations: &mut demand::HostedLocations,
+) -> Result<(), RefreshError> {
     let required = |name| std::env::var(name).map_err(|_| RefreshError::Configuration);
     let url = required("FINITE_BRAIN_LABEL_DATABASE_URL")?;
     let brain_db = PathBuf::from(required("FINITE_BRAIN_DB")?);
     let hosted_root = PathBuf::from(required("FINITECHAT_HOSTED_DATA_ROOT")?);
-    let output = PathBuf::from(required("FINITE_BRAIN_PRINCIPAL_LABELS")?);
+    let directory = PathBuf::from(required("FINITE_BRAIN_PRINCIPAL_LABELS_DIR")?);
+    let output = projection_path(&directory, brain_id);
     let now = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map_err(|_| RefreshError::Configuration)?
@@ -302,44 +357,25 @@ async fn refresh(locations: &mut demand::HostedLocations) -> Result<(), RefreshE
     let database = url
         .parse::<tokio_postgres::Config>()
         .map_err(|_| RefreshError::Configuration)?;
-    let projection = collect(&database, &brain_db, &hosted_root, now, locations).await?;
+    let projection = collect(&database, &brain_db, brain_id, &hosted_root, now, locations).await?;
     publish(&output, &projection)?;
     println!(
         "Brain label projection refreshed: {} unambiguous identities",
-        projection
-            .labels(now)
-            .ok_or(RefreshError::InvalidSource)?
-            .len()
+        projection.labels.len()
     );
     Ok(())
 }
 
 #[tokio::main]
 async fn main() -> std::process::ExitCode {
-    if let Ok(path) = std::env::var("FINITE_BRAIN_LABEL_SOCKET") {
-        return match demand::serve(Path::new(&path)).await {
-            Ok(()) => std::process::ExitCode::SUCCESS,
-            Err(error) => {
-                eprintln!("Brain label worker stopped: {error:?}");
-                std::process::ExitCode::FAILURE
-            }
-        };
-    }
-    // One-shot mode is retained for synthetic process tests and explicit
-    // operator diagnostics. Production always configures the demand socket.
-    match tokio::time::timeout(
-        Duration::from_secs(30),
-        refresh(&mut demand::HostedLocations::default()),
-    )
-    .await
-    {
-        Ok(Ok(())) => std::process::ExitCode::SUCCESS,
-        result => {
-            // Keep connection URLs, account names, subjects and keys out of logs.
-            eprintln!(
-                "Brain label refresh failed: {:?}",
-                result.map(|result| result.err())
-            );
+    let Ok(path) = std::env::var("FINITE_BRAIN_LABEL_SOCKET") else {
+        eprintln!("Brain label worker requires FINITE_BRAIN_LABEL_SOCKET");
+        return std::process::ExitCode::FAILURE;
+    };
+    match demand::serve(Path::new(&path)).await {
+        Ok(()) => std::process::ExitCode::SUCCESS,
+        Err(error) => {
+            eprintln!("Brain label worker stopped: {error:?}");
             std::process::ExitCode::FAILURE
         }
     }
@@ -413,6 +449,69 @@ mod tests {
         );
     }
 
+    #[test]
+    fn collection_respects_each_brains_supported_capacity() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("brain.sqlite3");
+        let mut store = finite_brain_store::BrainStore::open(&path).unwrap();
+        for id in ["one", "two", "three", "four", "five", "large"] {
+            store
+                .create_brain_bootstrap(
+                    &finite_brain_core::bootstrap_organization_brain(id, id, format!("owner-{id}"))
+                        .unwrap(),
+                    &[],
+                )
+                .unwrap();
+        }
+        drop(store);
+        let mut conn = Connection::open(&path).unwrap();
+        let tx = conn.transaction().unwrap();
+        for id in ["one", "two", "three", "four", "five"] {
+            for member in 0..900 {
+                tx.execute(
+                    "INSERT INTO brain_members (brain_id,user_id) VALUES (?1,?2)",
+                    rusqlite::params![id, format!("member-{id}-{member}")],
+                )
+                .unwrap();
+            }
+        }
+        for guest in 0..5000 {
+            tx.execute("INSERT INTO folder_access (brain_id,folder_id,user_id) SELECT 'large',id,?1 FROM folders WHERE brain_id='large' LIMIT 1", [format!("guest-{guest}")]).unwrap();
+        }
+        tx.commit().unwrap();
+        for id in ["one", "two", "three", "four", "five"] {
+            let roster = brain_principals(&path, &BrainId::new(id).unwrap()).unwrap();
+            assert_eq!(roster.len(), 901);
+            assert!(roster.iter().all(|key| key.contains(id)));
+        }
+        assert_eq!(
+            brain_principals(&path, &BrainId::new("large").unwrap())
+                .unwrap()
+                .len(),
+            5001
+        );
+        assert!(brain_principals(&path, &BrainId::new("absent").unwrap()).is_err());
+    }
+
+    #[test]
+    fn conflict_resolution_publishes_only_final_labels() {
+        let (_, key) = principal(1);
+        let human = binding(
+            key.clone(),
+            "account-a".into(),
+            "Alex".into(),
+            PrincipalKind::Human,
+            100,
+        )
+        .unwrap();
+        let mut conflict = human.clone();
+        conflict.source_id = "account-b".into();
+        assert_eq!(resolved_labels(&[human.clone(), human.clone()]).len(), 1);
+        assert!(resolved_labels(&[human.clone(), conflict.clone(), human.clone()]).is_empty());
+        conflict.label.name = "invalid\nname".into();
+        assert!(resolved_labels(&[conflict, human]).is_empty());
+    }
+
     #[tokio::test]
     async fn projection_joins_verified_sources_and_refreshes_new_members_without_source_writes() {
         let url = std::env::var("FC_CORE_POSTGRES_TEST_URL")
@@ -457,13 +556,14 @@ mod tests {
         let brain = dir.path().join("brain.sqlite3");
         let conn = Connection::open(&brain).unwrap();
         conn.execute_batch(
-            "CREATE TABLE brain_members (user_id TEXT); CREATE TABLE brain_admins (user_id TEXT);
-            CREATE TABLE folder_access (user_id TEXT); CREATE TABLE brains (owner_user_id TEXT);
-            CREATE TABLE personal_agents (agent_npub TEXT);",
+            "CREATE TABLE brain_members (brain_id TEXT DEFAULT 'org', user_id TEXT); CREATE TABLE brain_admins (brain_id TEXT, user_id TEXT);
+            CREATE TABLE folder_access (brain_id TEXT, user_id TEXT); CREATE TABLE brains (id TEXT, owner_user_id TEXT);
+            CREATE TABLE personal_agents (brain_id TEXT, agent_npub TEXT, status TEXT);
+            INSERT INTO brains VALUES ('org', NULL);",
         )
         .unwrap();
         for npub in [&human, &agent] {
-            conn.execute("INSERT INTO brain_members VALUES (?1)", [npub])
+            conn.execute("INSERT INTO brain_members (user_id) VALUES (?1)", [npub])
                 .unwrap();
         }
         let hosted = dir.path().join("hosted");
@@ -477,13 +577,14 @@ mod tests {
         let projection = collect(
             &config,
             &brain,
+            &BrainId::new("org").unwrap(),
             &hosted,
             100,
             &mut demand::HostedLocations::default(),
         )
         .await
         .unwrap();
-        let labels = projection.labels(100).unwrap();
+        let labels = &projection.labels;
         assert_eq!(labels.len(), 2);
         assert_eq!(labels[&human].display(), "alex@example.com (human)");
         assert_eq!(labels[&agent].display(), "alex@example.com (agent)");
@@ -491,21 +592,19 @@ mod tests {
         let output = dir.path().join("labels.json");
         publish(&output, &projection).unwrap();
         let first = fs::read(&output).unwrap();
-        conn.execute("INSERT INTO brain_members VALUES (?1)", [&future])
+        conn.execute("INSERT INTO brain_members (user_id) VALUES (?1)", [&future])
             .unwrap();
         let refreshed = collect(
             &config,
             &brain,
+            &BrainId::new("org").unwrap(),
             &hosted,
             160,
             &mut demand::HostedLocations::default(),
         )
         .await
         .unwrap();
-        assert_eq!(
-            refreshed.labels(160).unwrap()[&future].name,
-            "future@example.com"
-        );
+        assert_eq!(refreshed.labels[&future].name, "future@example.com");
         publish(&output, &refreshed).unwrap();
         assert_ne!(fs::read(&output).unwrap(), first);
         #[cfg(unix)]
@@ -529,24 +628,26 @@ mod tests {
         let ambiguous = collect(
             &config,
             &brain,
+            &BrainId::new("org").unwrap(),
             &hosted,
             220,
             &mut demand::HostedLocations::default(),
         )
         .await
         .unwrap();
-        assert!(!ambiguous.labels(220).unwrap().contains_key(&human));
+        assert!(!ambiguous.labels.contains_key(&human));
         admin.execute("UPDATE users SET normalized_email=E'bad\\nname' WHERE workos_user_id='other-human'", &[]).await.unwrap();
         let invalid_owner = collect(
             &config,
             &brain,
+            &BrainId::new("org").unwrap(),
             &hosted,
             240,
             &mut demand::HostedLocations::default(),
         )
         .await
         .unwrap();
-        let labels = invalid_owner.labels(240).unwrap();
+        let labels = &invalid_owner.labels;
         assert!(!labels.contains_key(&human));
         assert!(labels.contains_key(&agent));
         assert_eq!(

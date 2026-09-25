@@ -69,6 +69,12 @@ async fn built_label_exporter_uses_narrow_sources_and_preserves_output_on_failur
             &[],
         )
         .unwrap();
+    store
+        .create_brain_bootstrap(
+            &finite_brain_core::bootstrap_organization_brain("other", "Other", &npub).unwrap(),
+            &[],
+        )
+        .unwrap();
     drop(store);
     let hosted = dir.path().join("hosted");
     let chat = hosted
@@ -85,41 +91,24 @@ async fn built_label_exporter_uses_narrow_sources_and_preserves_output_on_failur
     )
     .unwrap();
     drop(conn);
-    let output = dir.path().join("labels.json");
     let scoped_url = format!(
         "{url}{}options=-csearch_path%3D{schema}%20-crole%3D{role}",
         if url.contains('?') { '&' } else { '?' }
     );
-    let run = || {
-        Command::new(env!("CARGO_BIN_EXE_finite-brain-labels"))
-            .env_clear()
-            .env("FINITE_BRAIN_LABEL_DATABASE_URL", &scoped_url)
-            .env("FINITE_BRAIN_DB", &brain_db)
-            .env("FINITECHAT_HOSTED_DATA_ROOT", &hosted)
-            .env("FINITE_BRAIN_PRINCIPAL_LABELS", &output)
-            .output()
-            .unwrap()
-    };
     let before_brain = fs::read(&brain_db).unwrap();
     let before_chat = fs::read(&chat).unwrap();
-    let success = run();
+    // Configuration errors must not select an alternate execution mode.
     assert!(
-        success.status.success(),
-        "{}",
-        String::from_utf8_lossy(&success.stderr)
+        !Command::new(env!("CARGO_BIN_EXE_finite-brain-labels"))
+            .env_clear()
+            .output()
+            .unwrap()
+            .status
+            .success()
     );
-    let bytes = fs::read(&output).unwrap();
-    let projection: LabelProjection = serde_json::from_slice(&bytes).unwrap();
-    assert_eq!(
-        projection.labels(projection.generated_at).unwrap()[&npub].display(),
-        "alex@example.com (human)"
-    );
-    assert_eq!(fs::read(&brain_db).unwrap(), before_brain);
-    assert_eq!(fs::read(&chat).unwrap(), before_chat);
-    assert!(!String::from_utf8_lossy(&success.stdout).contains("alex@example.com"));
     // Run the real daemon and authorized metadata entrypoint. No discovery on
     // startup; a cold response returns before work, then a later read has names.
-    let daemon_output = dir.path().join("demand.json");
+    let daemon_output = dir.path().join("org.json");
     let socket_path = dir.path().join("refresh.sock");
     struct Worker(std::process::Child);
     impl Drop for Worker {
@@ -134,7 +123,7 @@ async fn built_label_exporter_uses_narrow_sources_and_preserves_output_on_failur
             .env("FINITE_BRAIN_LABEL_DATABASE_URL", &scoped_url)
             .env("FINITE_BRAIN_DB", &brain_db)
             .env("FINITECHAT_HOSTED_DATA_ROOT", &hosted)
-            .env("FINITE_BRAIN_PRINCIPAL_LABELS", &daemon_output)
+            .env("FINITE_BRAIN_PRINCIPAL_LABELS_DIR", dir.path())
             .env("FINITE_BRAIN_LABEL_SOCKET", &socket_path)
             .stdout(std::process::Stdio::null())
             .spawn()
@@ -153,35 +142,45 @@ async fn built_label_exporter_uses_narrow_sources_and_preserves_output_on_failur
     );
     let router = router_with_state(
         ServerState::new(BrainStore::open(&brain_db).unwrap(), "http://brain.test")
-            .with_principal_labels_path(&daemon_output)
+            .with_principal_labels_dir(dir.path())
             .with_principal_labels_socket(&socket_path),
     );
-    let read = |nonce: &str| {
+    let read = |brain: &str, nonce: &str| {
         let now = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap()
             .as_secs();
         let auth = sign_http_auth_header_with_secret(
             &secret,
-            &HttpAuthEventRequest::new("GET", "http://brain.test/v1/brains/org/metadata", now)
-                .with_nonce(nonce),
+            &HttpAuthEventRequest::new(
+                "GET",
+                format!("http://brain.test/v1/brains/{brain}/metadata"),
+                now,
+            )
+            .with_nonce(nonce),
         )
         .unwrap();
         router.clone().oneshot(
             Request::builder()
-                .uri("/v1/brains/org/metadata")
+                .uri(format!("/v1/brains/{brain}/metadata"))
                 .header("Authorization", auth)
                 .body(Body::empty())
                 .unwrap(),
         )
     };
-    assert!(read("cold").await.unwrap().status().is_success());
-    while !daemon_output.exists() {
+    let (first, second) = tokio::join!(read("org", "cold"), read("other", "cold-other"));
+    assert!(first.unwrap().status().is_success());
+    assert!(second.unwrap().status().is_success());
+    while !daemon_output.exists() || !dir.path().join("other.json").exists() {
         assert!(worker.0.try_wait().unwrap().is_none());
         assert!(started.elapsed() < std::time::Duration::from_secs(30));
         tokio::time::sleep(std::time::Duration::from_millis(10)).await;
     }
-    let response = read("warm").await.unwrap();
+    let second: LabelProjection =
+        serde_json::from_slice(&fs::read(dir.path().join("other.json")).unwrap()).unwrap();
+    assert_eq!(second.brain_id, "other");
+    assert!(second.labels.contains_key(&npub));
+    let response = read("org", "warm").await.unwrap();
     assert!(response.status().is_success());
     let metadata: serde_json::Value =
         serde_json::from_slice(&to_bytes(response.into_body(), 1024 * 1024).await.unwrap())
@@ -191,6 +190,12 @@ async fn built_label_exporter_uses_narrow_sources_and_preserves_output_on_failur
         "alex@example.com (human)"
     );
     let published = fs::read(&daemon_output).unwrap();
+    assert_eq!(fs::read(&brain_db).unwrap(), before_brain);
+    assert_eq!(fs::read(&chat).unwrap(), before_chat);
+    let projection: LabelProjection = serde_json::from_slice(&published).unwrap();
+    assert_eq!(projection.brain_id, "org");
+    assert!(!String::from_utf8_lossy(&published).contains("sourceId"));
+    assert!(!String::from_utf8_lossy(&published).contains("verified"));
     // New requests reuse the projection instead of querying even changed names.
     admin
         .execute(
@@ -201,7 +206,7 @@ async fn built_label_exporter_uses_narrow_sources_and_preserves_output_on_failur
         .unwrap();
     for nonce in 0..20 {
         assert!(
-            read(&format!("burst-{nonce}"))
+            read("org", &format!("burst-{nonce}"))
                 .await
                 .unwrap()
                 .status()
@@ -211,7 +216,7 @@ async fn built_label_exporter_uses_narrow_sources_and_preserves_output_on_failur
     tokio::time::sleep(std::time::Duration::from_millis(100)).await;
     assert_eq!(fs::read(&daemon_output).unwrap(), published);
     drop(worker);
-    let unavailable = read("worker-down").await.unwrap();
+    let unavailable = read("org", "worker-down").await.unwrap();
     assert!(unavailable.status().is_success());
     let metadata: serde_json::Value = serde_json::from_slice(
         &to_bytes(unavailable.into_body(), 1024 * 1024)
@@ -235,13 +240,22 @@ async fn built_label_exporter_uses_narrow_sources_and_preserves_output_on_failur
     let application = format!("brain_labels_daemon_{unique}");
     let daemon_url = format!("{scoped_url}&application_name={application}");
     let errors = dir.path().join("worker-errors.log");
+    fs::File::options()
+        .write(true)
+        .open(&daemon_output)
+        .unwrap()
+        .set_times(
+            fs::FileTimes::new()
+                .set_modified(SystemTime::now() - std::time::Duration::from_secs(301)),
+        )
+        .unwrap();
     let mut recovering = Worker(
         Command::new(env!("CARGO_BIN_EXE_finite-brain-labels"))
             .env_clear()
             .env("FINITE_BRAIN_LABEL_DATABASE_URL", &daemon_url)
             .env("FINITE_BRAIN_DB", &brain_db)
             .env("FINITECHAT_HOSTED_DATA_ROOT", &hosted)
-            .env("FINITE_BRAIN_PRINCIPAL_LABELS", &daemon_output)
+            .env("FINITE_BRAIN_PRINCIPAL_LABELS_DIR", dir.path())
             .env("FINITE_BRAIN_LABEL_SOCKET", &socket_path)
             .stdout(std::process::Stdio::null())
             .stderr(fs::File::create(&errors).unwrap())
@@ -254,7 +268,7 @@ async fn built_label_exporter_uses_narrow_sources_and_preserves_output_on_failur
     loop {
         assert!(recovering.0.try_wait().unwrap().is_none());
         assert!(failure_started.elapsed() < std::time::Duration::from_secs(15));
-        let _ = signal.send_to(b"refresh", &socket_path);
+        let _ = signal.send_to(b"org", &socket_path);
         if fs::read_to_string(&errors)
             .unwrap()
             .contains("Brain label refresh failed")
@@ -264,7 +278,13 @@ async fn built_label_exporter_uses_narrow_sources_and_preserves_output_on_failur
         tokio::time::sleep(std::time::Duration::from_millis(20)).await;
     }
     assert_eq!(fs::read(&daemon_output).unwrap(), published);
-    assert!(read("source-failed").await.unwrap().status().is_success());
+    assert!(
+        read("org", "source-failed")
+            .await
+            .unwrap()
+            .status()
+            .is_success()
+    );
     let cleanup_started = std::time::Instant::now();
     loop {
         let active: i64 = admin
@@ -296,19 +316,19 @@ async fn built_label_exporter_uses_narrow_sources_and_preserves_output_on_failur
     loop {
         assert!(recovering.0.try_wait().unwrap().is_none());
         assert!(recovery_started.elapsed() < std::time::Duration::from_secs(15));
-        let _ = signal.send_to(b"refresh", &socket_path);
+        let _ = signal.send_to(b"org", &socket_path);
         let current: LabelProjection =
             serde_json::from_slice(&fs::read(&daemon_output).unwrap()).unwrap();
         if current
-            .bindings
-            .iter()
-            .any(|binding| binding.label.name == "changed@example.com")
+            .labels
+            .values()
+            .any(|label| label.name == "changed@example.com")
         {
             break;
         }
         tokio::time::sleep(std::time::Duration::from_millis(20)).await;
     }
-    let response = read("recovered").await.unwrap();
+    let response = read("org", "recovered").await.unwrap();
     assert!(response.status().is_success());
     let metadata: serde_json::Value =
         serde_json::from_slice(&to_bytes(response.into_body(), 1024 * 1024).await.unwrap())
@@ -319,17 +339,6 @@ async fn built_label_exporter_uses_narrow_sources_and_preserves_output_on_failur
     );
     assert!(!fs::read_to_string(&errors).unwrap().contains("example.com"));
     drop(recovering);
-    // Wrong-schema or corrupt existing hosted sources must not overwrite a
-    // previously verified projection or leak identity/connection data to logs.
-    let conn = Connection::open(&chat).unwrap();
-    conn.execute_batch("DROP TABLE client_device_states")
-        .unwrap();
-    drop(conn);
-    assert!(!run().status.success());
-    assert_eq!(fs::read(&output).unwrap(), bytes);
-    fs::write(&chat, b"not a database").unwrap();
-    assert!(!run().status.success());
-    assert_eq!(fs::read(&output).unwrap(), bytes);
     admin
         .batch_execute(&format!("DROP SCHEMA {schema} CASCADE; DROP ROLE {role};"))
         .await

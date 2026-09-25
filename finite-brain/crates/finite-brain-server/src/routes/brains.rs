@@ -105,11 +105,12 @@ pub(crate) async fn create_brain_handler(
         store.load_brain(&brain_id)?
     };
 
+    let labels = state.read_principal_labels(&brain_id);
     let mut response = metadata_response(stored);
     {
         let store = state.store.lock().map_err(lock_error)?;
         enrich_metadata_identities(
-            &state,
+            labels,
             &store,
             &mut response,
             LabelAudience::BrainAdmin(&actor_npub),
@@ -170,11 +171,7 @@ pub(crate) async fn identity_label_handler(
         }
         store.identity_label_shared_with_admins(&brain_id, &actor_id)?
     };
-    let label = state
-        .principal_labels_path
-        .as_deref()
-        .and_then(|path| principal_labels::read_labels(path, state.auth_now_unix_seconds()))
-        .and_then(|mut labels| labels.remove(&actor));
+    let label = state.read_principal_labels(&brain_id).remove(&actor);
     Ok(Json(IdentityLabelSharingResponse {
         brain_id: brain_id.to_string(),
         npub: actor,
@@ -199,7 +196,7 @@ pub(crate) async fn brain_metadata_handler(
     };
     ensure_metadata_visible(&stored, &actor_npub)?;
     if let Some(path) = &state.principal_labels_socket {
-        principal_labels::request_refresh(path);
+        principal_labels::request_refresh(path, &brain_id);
     }
     let actor_is_admin = ensure_brain_admin(&stored, &actor_npub).is_ok();
     let mounted_folders = {
@@ -207,6 +204,7 @@ pub(crate) async fn brain_metadata_handler(
         store.mounted_folder_projection(&brain_id, &UserId::new(actor_npub.clone())?)?
     };
 
+    let labels = state.read_principal_labels(&brain_id);
     let mut response = metadata_response_for_actor(stored, mounted_folders, &actor_npub);
     {
         let store = state.store.lock().map_err(lock_error)?;
@@ -215,7 +213,7 @@ pub(crate) async fn brain_metadata_handler(
         } else {
             LabelAudience::Principal(&actor_npub)
         };
-        enrich_metadata_identities(&state, &store, &mut response, audience)?;
+        enrich_metadata_identities(labels, &store, &mut response, audience)?;
         if actor_is_admin {
             attach_pending_approvals(&store, &mut response, &brain_id)?;
             attach_pending_wraps(&store, &mut response, &brain_id)?;

@@ -16,6 +16,7 @@ name = "finite-brain-labels"
 path = "src/labels.rs"
 
 [dependencies]
+finite-brain-core = { path = "../finite-brain-core" }
 axum = { version = "0.8.7", features = ["tokio", "http1"] }
 finite-brain-server = { path = "../finite-brain-server" }
 finite-nostr.workspace = true
@@ -27,7 +28,6 @@ tokio = { version = "1.52.3", features = ["macros", "net", "rt-multi-thread"] }
 
 [dev-dependencies]
 tower = { version = "0.5.2", features = ["util"] }
-finite-brain-core = { path = "../finite-brain-core" }
 finite-brain-store = { path = "../finite-brain-store" }
 sha2.workspace = true
 

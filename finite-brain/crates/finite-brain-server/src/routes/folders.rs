@@ -310,6 +310,7 @@ pub(crate) async fn grant_folder_access_handler(
         admin_access_change_sync_record(&actor, &event, &payload)?,
     ];
 
+    let labels = state.read_principal_labels(&brain_id);
     let (metadata, outcome) = {
         let mut store = state.store.lock().map_err(lock_error)?;
         let stored = store.load_brain(&brain_id)?;
@@ -324,7 +325,7 @@ pub(crate) async fn grant_folder_access_handler(
         let stored = store.load_brain(&brain_id)?;
         let mut metadata = metadata_response(stored);
         enrich_metadata_identities(
-            &state,
+            labels,
             &store,
             &mut metadata,
             LabelAudience::BrainAdmin(&actor),

@@ -114,7 +114,7 @@ pub struct ServerState {
     rate_limit: RateLimitConfig,
     cors_allowed_origins: Arc<BTreeSet<String>>,
     nip05_fetcher: Nip05Fetcher,
-    principal_labels_path: Option<std::path::PathBuf>,
+    principal_labels_dir: Option<std::path::PathBuf>,
     principal_labels_socket: Option<std::path::PathBuf>,
     invite_mailer: Option<BrainInviteMailer>,
     brain_updates: tokio::sync::broadcast::Sender<BrainUpdateNotification>,
@@ -158,7 +158,7 @@ impl ServerState {
             },
             cors_allowed_origins: Arc::new(cors_allowed_origins),
             nip05_fetcher: default_nip05_fetcher(),
-            principal_labels_path: None,
+            principal_labels_dir: None,
             principal_labels_socket: None,
             invite_mailer: None,
             brain_updates,
@@ -220,8 +220,8 @@ impl ServerState {
 
     /// Read private display labels from an operator-owned, disposable projection.
     /// No authorization or invitation decision consults this file.
-    pub fn with_principal_labels_path(mut self, path: impl Into<std::path::PathBuf>) -> Self {
-        self.principal_labels_path = Some(path.into());
+    pub fn with_principal_labels_dir(mut self, path: impl Into<std::path::PathBuf>) -> Self {
+        self.principal_labels_dir = Some(path.into());
         self
     }
 
@@ -230,6 +230,19 @@ impl ServerState {
     pub fn with_principal_labels_socket(mut self, path: impl Into<std::path::PathBuf>) -> Self {
         self.principal_labels_socket = Some(path.into());
         self
+    }
+
+    // Always call outside the BrainStore mutex. Display I/O is not store work.
+    fn read_principal_labels(
+        &self,
+        brain_id: &BrainId,
+    ) -> BTreeMap<String, principal_labels::PrincipalLabel> {
+        self.principal_labels_dir
+            .as_deref()
+            .and_then(|directory| {
+                principal_labels::read_labels(directory, brain_id, self.auth_now_unix_seconds())
+            })
+            .unwrap_or_default()
     }
 
     /// Override the auth validation clock for deterministic tests.
@@ -1050,7 +1063,7 @@ enum LabelAudience<'a> {
 }
 
 fn enrich_metadata_identities(
-    state: &ServerState,
+    mut labels: BTreeMap<String, principal_labels::PrincipalLabel>,
     store: &BrainStore,
     response: &mut BrainMetadataResponse,
     audience: LabelAudience<'_>,
@@ -1078,11 +1091,6 @@ fn enrich_metadata_identities(
         .into_iter()
         .map(|identity| (identity.npub.clone(), identity))
         .collect();
-    let mut labels = state
-        .principal_labels_path
-        .as_deref()
-        .and_then(|path| principal_labels::read_labels(path, state.auth_now_unix_seconds()))
-        .unwrap_or_default();
     let brain_id = BrainId::new(response.brain_id.clone())?;
     let (actor, admin) = match audience {
         LabelAudience::BrainAdmin(actor) => (actor, true),
@@ -1090,12 +1098,7 @@ fn enrich_metadata_identities(
     };
     let mut visible_labels = BTreeSet::from([actor.to_owned()]);
     if admin {
-        for npub in labels.keys().filter(|npub| npubs.contains(*npub)) {
-            let target = UserId::new(npub.clone())?;
-            if store.identity_label_shared_with_admins(&brain_id, &target)? {
-                visible_labels.insert(npub.clone());
-            }
-        }
+        visible_labels.extend(store.shared_identity_label_principals(&brain_id)?);
     }
     labels.retain(|npub, _| visible_labels.contains(npub));
     for npub in npubs {
@@ -1249,6 +1252,7 @@ fn run_as_admin<F>(
 where
     F: FnOnce(&mut BrainStore, &BrainId) -> Result<(), StoreError>,
 {
+    let labels = state.read_principal_labels(&brain_id);
     let response = {
         let mut store = state.store.lock().map_err(lock_error)?;
         let stored = store.load_brain(&brain_id)?;
@@ -1257,7 +1261,7 @@ where
         let stored = store.load_brain(&brain_id)?;
         let mut response = metadata_response(stored);
         enrich_metadata_identities(
-            &state,
+            labels,
             &store,
             &mut response,
             LabelAudience::BrainAdmin(&actor_npub),
@@ -3588,10 +3592,10 @@ mod tests {
         let allowed = get_metadata(router.clone(), &admin, "acme", TEST_NOW).await;
         assert_eq!(allowed.status(), StatusCode::OK);
         let len = socket.recv(&mut bytes).unwrap();
-        assert_eq!(&bytes[..len], b"refresh");
+        assert_eq!(&bytes[..len], b"acme");
         // Fill the datagram queue. A stalled worker must not block a request.
         for _ in 0..1024 {
-            principal_labels::request_refresh(&socket_path);
+            principal_labels::request_refresh(&socket_path, &BrainId::new("acme").unwrap());
         }
         assert_eq!(
             get_metadata(router.clone(), &admin, "acme", TEST_NOW + 1)
@@ -3616,11 +3620,11 @@ mod tests {
         let newcomer = Keys::generate();
         let outsider = Keys::generate();
         let directory = tempfile::tempdir().unwrap();
-        let path = directory.path().join("labels.json");
+        let path = directory.path().join("acme.json");
         let database = directory.path().join("brain.sqlite3");
         let state = ServerState::new(BrainStore::open(&database).unwrap(), TEST_BASE_URL)
             .with_auth_clock(TEST_NOW, 60)
-            .with_principal_labels_path(&path);
+            .with_principal_labels_dir(directory.path());
         let router = router_with_state(state.clone());
         assert_eq!(
             post_brain(
@@ -3639,28 +3643,30 @@ mod tests {
         let original: BrainMetadataResponse =
             read_json(get_metadata(router.clone(), &admin, "acme", TEST_NOW).await).await;
         assert!(original.identities[0].label.is_none());
-        let binding = |keys: &Keys, kind| LabelBinding {
-            npub: npub(keys),
-            source_id: npub(keys),
-            label: PrincipalLabel {
-                name: "Alex".to_owned(),
-                kind,
-                observed_at: TEST_NOW,
-                source: if kind == PrincipalKind::Human {
-                    LabelSource::HostedAccount
-                } else {
-                    LabelSource::ManagedAgent
+        let binding = |keys: &Keys, kind| {
+            (
+                npub(keys),
+                PrincipalLabel {
+                    name: "Alex".to_owned(),
+                    kind,
+                    observed_at: TEST_NOW,
+                    source: if kind == PrincipalKind::Human {
+                        LabelSource::HostedAccount
+                    } else {
+                        LabelSource::ManagedAgent
+                    },
                 },
-            },
+            )
         };
         let mut projection = LabelProjection {
             version: 1,
+            brain_id: "acme".to_owned(),
             generated_at: TEST_NOW,
-            bindings: vec![
+            labels: BTreeMap::from([
                 binding(&admin, PrincipalKind::Human),
                 binding(&newcomer, PrincipalKind::Agent),
                 binding(&outsider, PrincipalKind::Human),
-            ],
+            ]),
         };
         std::fs::write(&path, serde_json::to_vec(&projection).unwrap()).unwrap();
         let labelled: BrainMetadataResponse =
@@ -3955,7 +3961,7 @@ mod tests {
         let restored = router_with_state(
             ServerState::new(BrainStore::open(restored_database).unwrap(), TEST_BASE_URL)
                 .with_auth_clock(TEST_NOW, 60)
-                .with_principal_labels_path(&path),
+                .with_principal_labels_dir(directory.path()),
         );
         let preference: IdentityLabelSharingResponse = read_json(
             authed_request(
@@ -4258,15 +4264,14 @@ mod tests {
         let agent_npub = npub(&agent_keys);
         let member_npub = npub(&member_keys);
         let label_dir = tempfile::tempdir().unwrap();
-        let label_path = label_dir.path().join("labels.json");
+        let label_path = label_dir.path().join("personal.json");
         std::fs::write(&label_path, serde_json::to_vec(&serde_json::json!({
-            "version": 1, "generatedAt": TEST_NOW,
-            "bindings": ([&owner_npub, &member_npub].map(|npub| serde_json::json!({
-                "npub": npub, "sourceId": npub, "label": {"name": "private@example.com", "kind": "human", "source": "hosted_account", "observedAt": TEST_NOW}
-            })))
+            "version": 1, "brainId": "personal", "generatedAt": TEST_NOW,
+            "labels": ([&owner_npub, &member_npub].map(|npub| (npub.clone(), serde_json::json!({"name": "private@example.com", "kind": "human", "source": "hosted_account", "observedAt": TEST_NOW}))).into_iter().collect::<BTreeMap<_,_>>())
         })).unwrap()).unwrap();
         let router = router_with_state(
-            personal_test_state(&owner_keys, &agent_keys).with_principal_labels_path(label_path),
+            personal_test_state(&owner_keys, &agent_keys)
+                .with_principal_labels_dir(label_dir.path()),
         );
 
         let all_members_folder_body = serde_json::json!({

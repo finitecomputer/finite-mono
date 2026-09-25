@@ -192,7 +192,7 @@ fn spawn_file_backed_brain_server(
             }
             let mut state = finite_brain_server::ServerState::new(store, url.clone());
             if let Some(path) = labels_path {
-                state = state.with_principal_labels_path(path);
+                state = state.with_principal_labels_dir(path);
             }
             url_tx.send(url).unwrap();
             let router = finite_brain_server::router_with_state(state);
@@ -4430,18 +4430,17 @@ fn built_fbrain_access_list_preserves_private_principal_labels() {
         .to_npub()
         .unwrap();
     let now = OffsetDateTime::now_utc();
-    let labels = scratch.path().join("labels.json");
+    let labels = scratch.path().join("roundtrip-org.json");
     write_json(
         &labels,
-        &json!({"version": 1, "generatedAt": now.unix_timestamp(), "bindings": [{
-            "npub": npub, "sourceId": "synthetic-account", "label": {
+        &json!({"version": 1, "brainId": "roundtrip-org", "generatedAt": now.unix_timestamp(), "labels": { npub.clone(): {
                 "name": "alex@example.com", "kind": "human", "source": "hosted_account", "observedAt": now.unix_timestamp()
             }
-        }]}),
+        }}),
     );
     let database = scratch.path().join("brain.sqlite3");
     let (url, stop, server) =
-        spawn_file_backed_brain_server(&npub, database.clone(), Some(labels.clone()));
+        spawn_file_backed_brain_server(&npub, database.clone(), Some(scratch.path().to_owned()));
     let output = command(&home, &home)
         .env("FBRAIN_NOW", now.format(&Rfc3339).unwrap())
         .args([
