@@ -84,12 +84,20 @@ async def run():
         os.environ["FINITECHAT_HOME"] = td + "/agent"
         home = Path(os.environ["HERMES_HOME"])
         home.mkdir(exist_ok=True)
-        (home / "config.yaml").write_text("plugins:\n  enabled: [finitechat]\n")
+        (home / "config.yaml").write_text(
+            "plugins:\n  enabled: [finitechat]\n"
+            "gateway:\n  platforms:\n    simplex:\n      enabled: true\n"
+            "      extra:\n        finite_managed: true\n"
+        )
         shutil.copytree(
             Path(__file__).resolve().parents[1] / "finitechat/integrations/hermes/finitechat",
             home / "plugins/finitechat",
         )
         get_plugin_manager().discover_and_load()
+        from tools.registry import registry
+
+        tool = registry.get_entry("simplex_create_topic")
+        assert tool is not None, "Managed SimpleX owner-topic registration failed"
         runner = GatewayRunner(config=GatewayConfig())
 
         ports = [port(), port(), port()]
@@ -163,9 +171,7 @@ async def run():
             assert pairing.approve_code("simplex", code)
             from gateway.session_context import clear_session_vars, set_session_vars
             from model_tools import handle_function_call
-            from tools.registry import registry
 
-            tool = registry.get_entry("simplex_create_topic")
             assert "error" in json.loads(
                 await asyncio.to_thread(tool.handler, {"topic": "gardening"})
             )
