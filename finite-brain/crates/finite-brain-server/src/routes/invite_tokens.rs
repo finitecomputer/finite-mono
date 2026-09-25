@@ -242,6 +242,9 @@ fn deliver_invite_token_email(
              Open this link with your agent, or use the CLI command below.\n\n\
              {url}\n\n\
              Agent instruction: fbrain invite-accept {url}\n\n\
+             Accepting shares your verified account email or agent name with Brain \
+             admins. After joining, use fbrain brain label hide from that Brain's \
+             Working Tree to hide your private label.\n\n\
              The link is a single-use capability: the first key to redeem it joins the \
              brain. If you were not expecting this invitation, ignore this email; the \
              inviter can revoke the link at any time.",

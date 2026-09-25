@@ -108,6 +108,13 @@ impl BrainStore {
                 params![29, MIGRATION_TIMESTAMP],
             )?;
         }
+        if !migration_applied(&tx, 30)? {
+            tx.execute_batch(SCHEMA_V30)?;
+            tx.execute(
+                "INSERT INTO schema_migrations (version, applied_at) VALUES (?1, ?2)",
+                params![30, MIGRATION_TIMESTAMP],
+            )?;
+        }
         tx.commit()?;
         Ok(())
     }
@@ -355,6 +362,33 @@ ALTER TABLE brain_invitation_plans ADD COLUMN folder_id TEXT;
 
 const SCHEMA_V27: &str = r#"
 ALTER TABLE brain_approval_requests ADD COLUMN result_invitations_json TEXT;
+"#;
+
+// Additive display preference only. Triggers also reset preferences when an
+// older binary removes membership/access, so a later direct re-add cannot
+// inherit an earlier sharing decision.
+const SCHEMA_V30: &str = r#"
+CREATE TABLE brain_identity_label_preferences (
+    brain_id TEXT NOT NULL REFERENCES brains(id) ON DELETE CASCADE,
+    user_id TEXT NOT NULL,
+    shared_with_admins INTEGER NOT NULL CHECK (shared_with_admins IN (0, 1)),
+    updated_at TEXT NOT NULL,
+    PRIMARY KEY (brain_id, user_id)
+);
+CREATE TRIGGER clear_member_identity_label_preference
+AFTER DELETE ON brain_members
+BEGIN
+    DELETE FROM brain_identity_label_preferences
+    WHERE brain_id = OLD.brain_id AND user_id = OLD.user_id;
+END;
+CREATE TRIGGER clear_departed_guest_identity_label_preference
+AFTER DELETE ON folder_access
+WHEN NOT EXISTS (SELECT 1 FROM brain_members WHERE brain_id = OLD.brain_id AND user_id = OLD.user_id)
+ AND NOT EXISTS (SELECT 1 FROM folder_access WHERE brain_id = OLD.brain_id AND user_id = OLD.user_id)
+BEGIN
+    DELETE FROM brain_identity_label_preferences
+    WHERE brain_id = OLD.brain_id AND user_id = OLD.user_id;
+END;
 "#;
 
 const SCHEMA_V29: &str = r#"
@@ -2787,7 +2821,7 @@ mod tests {
                 row.get(0)
             })
             .unwrap();
-        assert_eq!(latest_version, 29);
+        assert_eq!(latest_version, 30);
         assert_eq!(capacity_count(&store, "legacy-organization", "folders"), 1);
         assert_eq!(capacity_count(&store, "legacy-organization", "members"), 1);
         assert_eq!(

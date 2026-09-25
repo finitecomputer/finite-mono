@@ -4439,8 +4439,9 @@ fn built_fbrain_access_list_preserves_private_principal_labels() {
             }
         }]}),
     );
+    let database = scratch.path().join("brain.sqlite3");
     let (url, stop, server) =
-        spawn_file_backed_brain_server(&npub, scratch.path().join("brain.sqlite3"), Some(labels));
+        spawn_file_backed_brain_server(&npub, database.clone(), Some(labels.clone()));
     let output = command(&home, &home)
         .env("FBRAIN_NOW", now.format(&Rfc3339).unwrap())
         .args([
@@ -4466,6 +4467,58 @@ fn built_fbrain_access_list_preserves_private_principal_labels() {
     );
     assert_eq!(report["identities"][0]["label"]["source"], "hosted_account");
     assert_eq!(report["admins"], json!([npub]));
+    let label_command = |url: &str, action: &str| {
+        let output = command(&home, &home)
+            .env(
+                "FBRAIN_NOW",
+                OffsetDateTime::now_utc().format(&Rfc3339).unwrap(),
+            )
+            .args([
+                "brain",
+                "label",
+                action,
+                "--brain",
+                "roundtrip-org",
+                "--server",
+                url,
+                "--json",
+            ])
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        serde_json::from_slice::<Value>(&output.stdout).unwrap()
+    };
+    assert_eq!(label_command(&url, "status")["sharedWithAdmins"], false);
+    for (action, shared) in [("share", true), ("hide", false), ("share", true)] {
+        let report = label_command(&url, action);
+        assert_eq!(report["sharedWithAdmins"], shared);
+        assert_eq!(report["npub"], npub);
+        assert_eq!(report["label"]["name"], "alex@example.com");
+        assert_eq!(label_command(&url, "status")["sharedWithAdmins"], shared);
+    }
+    let rejected = command(&home, &home)
+        .args([
+            "brain",
+            "label",
+            "share",
+            "--brain",
+            "roundtrip-org",
+            "--target",
+            "someone-else",
+            "--server",
+            &url,
+        ])
+        .output()
+        .unwrap();
+    assert!(!rejected.status.success());
+    let _ = stop.send(());
+    server.join().unwrap();
+    let (url, stop, server) = spawn_file_backed_brain_server(&npub, database, Some(labels));
+    assert_eq!(label_command(&url, "status")["sharedWithAdmins"], true);
     let _ = stop.send(());
     server.join().unwrap();
 }

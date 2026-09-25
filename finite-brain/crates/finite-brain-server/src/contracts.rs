@@ -1,6 +1,16 @@
 use finite_brain_core::{BrainKind, FolderAccessMode, FolderRole};
 use serde::{Deserialize, Serialize};
 
+/// The authenticated principal's private label and per-Brain sharing choice.
+#[derive(Debug, Clone, Eq, PartialEq, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct IdentityLabelSharingResponse {
+    pub brain_id: String,
+    pub npub: String,
+    pub shared_with_admins: bool,
+    pub label: Option<crate::principal_labels::PrincipalLabel>,
+}
+
 /// Create Brain request.
 #[derive(Debug, Clone, Eq, PartialEq, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]

@@ -458,6 +458,10 @@ fn normal_signed_api_router() -> Router<ServerState> {
         .route("/identities/resolve", post(resolve_identity_handler))
         .route("/my-invitations", get(list_my_invitations_handler))
         .route("/brains/{brain_id}/metadata", get(brain_metadata_handler))
+        .route(
+            "/brains/{brain_id}/identity-label",
+            get(identity_label_handler).put(identity_label_handler),
+        )
         .route("/brains/{brain_id}/access", get(brain_metadata_handler))
         .route(
             "/brains/{brain_id}/folders/{folder_id}/access",
@@ -1000,6 +1004,9 @@ fn npub_invite_instructions_text(
          plaintext, and encrypted invite structure.\n\n\
          Target npub: {target}\n\
          Invitation id: {id}\n\n\
+         Accepting Brain membership shares your verified account email or agent \
+         name with Brain admins. After joining, use fbrain brain label hide \
+         from that Brain's Working Tree to hide your private label.\n\n\
          Workflow:\n\
          1. Act with the Nostr key that matches the target npub above; no other key \
          can accept this invitation.\n\
@@ -1075,12 +1082,7 @@ fn enrich_metadata_identities(
     if admin {
         for npub in labels.keys().filter(|npub| npubs.contains(*npub)) {
             let target = UserId::new(npub.clone())?;
-            if store
-                .member_provenance(&brain_id, &target)?
-                .is_some_and(|origin| {
-                    origin.origin_kind == finite_brain_store::ProvenanceOriginKind::Invitation
-                })
-            {
+            if store.identity_label_shared_with_admins(&brain_id, &target)? {
                 visible_labels.insert(npub.clone());
             }
         }
@@ -3562,7 +3564,10 @@ mod tests {
         let outsider = Keys::generate();
         let directory = tempfile::tempdir().unwrap();
         let path = directory.path().join("labels.json");
-        let state = test_state().with_principal_labels_path(&path);
+        let database = directory.path().join("brain.sqlite3");
+        let state = ServerState::new(BrainStore::open(&database).unwrap(), TEST_BASE_URL)
+            .with_auth_clock(TEST_NOW, 60)
+            .with_principal_labels_path(&path);
         let router = router_with_state(state.clone());
         assert_eq!(
             post_brain(
@@ -3641,6 +3646,19 @@ mod tests {
                 .status(),
             StatusCode::FORBIDDEN
         );
+        assert_eq!(
+            authed_request(
+                router.clone(),
+                &outsider,
+                "PUT",
+                "/v1/brains/acme/identity-label",
+                Some(serde_json::json!({"sharedWithAdmins": true}).to_string()),
+                TEST_NOW
+            )
+            .await
+            .status(),
+            StatusCode::FORBIDDEN
+        );
         // An admin cannot turn a directly added public key into a lookup of
         // that account's private identity. Only the target can establish this
         // sharing boundary by accepting an invitation.
@@ -3694,6 +3712,77 @@ mod tests {
                 .unwrap()
                 .label
                 .is_none()
+        );
+        let forged = authed_request(
+            router.clone(),
+            &admin,
+            "PUT",
+            "/v1/brains/acme/identity-label",
+            Some(serde_json::json!({"sharedWithAdmins": true, "targetNpub": target}).to_string()),
+            TEST_NOW,
+        )
+        .await;
+        assert_eq!(forged.status(), StatusCode::BAD_REQUEST);
+        let preference: IdentityLabelSharingResponse = read_json(
+            authed_request(
+                router.clone(),
+                &outsider,
+                "GET",
+                "/v1/brains/acme/identity-label",
+                None,
+                TEST_NOW,
+            )
+            .await,
+        )
+        .await;
+        assert!(!preference.shared_with_admins);
+        assert!(preference.label.is_some());
+        for shared in [true, false, true] {
+            let preference: IdentityLabelSharingResponse = read_json(
+                authed_request(
+                    router.clone(),
+                    &outsider,
+                    "PUT",
+                    "/v1/brains/acme/identity-label",
+                    Some(serde_json::json!({"sharedWithAdmins": shared}).to_string()),
+                    TEST_NOW,
+                )
+                .await,
+            )
+            .await;
+            assert_eq!(preference.npub, target);
+            assert_eq!(preference.shared_with_admins, shared);
+            assert!(
+                preference.label.is_some(),
+                "self remains visible when hidden from admins"
+            );
+            let admin_view: BrainMetadataResponse =
+                read_json(get_metadata(router.clone(), &admin, "acme", TEST_NOW).await).await;
+            assert_eq!(
+                admin_view
+                    .identities
+                    .iter()
+                    .find(|id| id.npub == target)
+                    .unwrap()
+                    .label
+                    .is_some(),
+                shared
+            );
+            assert_eq!(admin_view.members, added.members);
+            assert_eq!(admin_view.admins, original.admins);
+            assert_eq!(admin_view.grant_count, original.grant_count);
+        }
+        let other_brain: BrainMetadataResponse =
+            read_json(get_metadata(router.clone(), &admin, "label-oracle", TEST_NOW).await).await;
+        assert!(
+            other_brain
+                .identities
+                .iter()
+                .find(|id| id.npub == target)
+                .unwrap()
+                .label
+                .is_none(),
+            "sharing is scoped to one Brain"
         );
         // Ordinary member admission remains authoritative; no label grants it.
         let created: CreateBrainInviteTokenResponse = read_json(
@@ -3752,13 +3841,102 @@ mod tests {
                 .label
                 .is_some()
         );
+        assert!(
+            member_view
+                .identities
+                .iter()
+                .find(|id| id.npub == target)
+                .unwrap()
+                .label
+                .is_none(),
+            "sharing with admins does not share with all members"
+        );
+        let hidden = authed_request(
+            router.clone(),
+            &newcomer,
+            "PUT",
+            "/v1/brains/acme/identity-label",
+            Some(serde_json::json!({"sharedWithAdmins": false}).to_string()),
+            TEST_NOW,
+        )
+        .await;
+        assert_eq!(hidden.status(), StatusCode::OK);
+        let hidden_view: BrainMetadataResponse =
+            read_json(get_metadata(router.clone(), &admin, "acme", TEST_NOW).await).await;
+        assert!(
+            hidden_view
+                .identities
+                .iter()
+                .find(|id| id.npub == npub(&newcomer))
+                .unwrap()
+                .label
+                .is_none(),
+            "explicit hide overrides invitation default"
+        );
         projection.generated_at = TEST_NOW - MAX_LABEL_AGE_SECONDS - 1;
         std::fs::write(&path, serde_json::to_vec(&projection).unwrap()).unwrap();
         let expired: BrainMetadataResponse =
-            read_json(get_metadata(router, &admin, "acme", TEST_NOW + 3).await).await;
+            read_json(get_metadata(router.clone(), &admin, "acme", TEST_NOW + 3).await).await;
         assert!(expired.identities.iter().all(|id| id.label.is_none()));
         assert_eq!(expired.members, admitted.members);
         assert_eq!(expired.admins, admitted.admins);
+
+        // Stop the writer, back up the whole SQLite DB, lose the source, and
+        // restore onto an empty target. Privacy preferences are recovery state;
+        // an invited member's explicit hide must not fall back to shared.
+        drop(router);
+        drop(state);
+        let backup = directory.path().join("backup.sqlite3");
+        std::fs::copy(&database, &backup).unwrap();
+        std::fs::remove_file(&database).unwrap();
+        let empty_target = directory.path().join("empty-target");
+        std::fs::create_dir(&empty_target).unwrap();
+        let restored_database = empty_target.join("brain.sqlite3");
+        std::fs::copy(&backup, &restored_database).unwrap();
+        // The disposable label projection is regenerated separately.
+        projection.generated_at = TEST_NOW;
+        std::fs::write(&path, serde_json::to_vec(&projection).unwrap()).unwrap();
+        let restored = router_with_state(
+            ServerState::new(BrainStore::open(restored_database).unwrap(), TEST_BASE_URL)
+                .with_auth_clock(TEST_NOW, 60)
+                .with_principal_labels_path(&path),
+        );
+        let preference: IdentityLabelSharingResponse = read_json(
+            authed_request(
+                restored.clone(),
+                &newcomer,
+                "GET",
+                "/v1/brains/acme/identity-label",
+                None,
+                TEST_NOW,
+            )
+            .await,
+        )
+        .await;
+        assert!(!preference.shared_with_admins);
+        let metadata: BrainMetadataResponse =
+            read_json(get_metadata(restored, &admin, "acme", TEST_NOW).await).await;
+        assert!(
+            metadata
+                .identities
+                .iter()
+                .find(|id| id.npub == npub(&newcomer))
+                .unwrap()
+                .label
+                .is_none()
+        );
+        assert!(
+            metadata
+                .identities
+                .iter()
+                .find(|id| id.npub == target)
+                .unwrap()
+                .label
+                .is_some()
+        );
+        assert_eq!(metadata.admins, admitted.admins);
+        assert_eq!(metadata.members, admitted.members);
+        assert_eq!(metadata.grant_count, admitted.grant_count);
     }
 
     #[tokio::test]

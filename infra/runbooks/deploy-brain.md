@@ -110,14 +110,15 @@ The exporter runs as the dedicated `finite_brain_labels` Unix user. Its local
 Postgres peer-authenticated role has column-level SELECT grants only; no Core
 credentials or API tokens are loaded. NixOS provisions those grants once per
 database service lifetime, separately from Brain startup, and never starts an
-intentionally stopped database to refresh labels. The worker uses a confined root filesystem exposing the
-Nix closure, Postgres socket, read-only source directories, and writable output.
+intentionally stopped database to refresh labels. The worker uses a confined
+root filesystem exposing the Nix closure, Postgres socket, read-only source
+directories, and writable output.
 Its sole capability permits reading the DynamicUser-owned source files inside
 that filesystem. It starts a read-only Postgres transaction and opens Brain
 and hosted Chat SQLite files read-only. It queries public identity columns only;
 it never queries identity secret files, messages, ciphertext, invite tokens,
-or encrypted grants. The retained source
-contract is `users(workos_user_id, normalized_email, link_status)`,
+or encrypted grants. The retained source contract is
+`users(workos_user_id, normalized_email, link_status)`,
 `projects(id, display_name)`, `agent_runtimes(project_id, health_reporting_npub)`,
 and the hosted `client_device_states(account_id, device_id)` row inside the
 SHA-256 WorkOS-subject namespace. It first finds hosted public keys matching
@@ -132,13 +133,24 @@ projection, owned by the dedicated worker and readable only by the label group
 `FINITE_BRAIN_PRINCIPAL_LABELS`; it receives no Core credential. Only authorized
 Brain metadata responses use labels, for the principals already in that
 response. Each principal can see their own private label. Brain admins may
-also see labels for members who accepted a Brain invitation; direct additions,
-Folder grants, admin promotion, and declared bootstrap requester identities do
-not establish that sharing boundary. Other members and Folder guests cannot
+also see labels for members who accepted a Brain invitation or explicitly
+shared their label. The invitation default applies to retained accepted
+memberships too. An explicit hide always overrides it. Direct additions, Folder
+grants, admin promotion, and declared bootstrap requester identities do not
+establish that sharing boundary. Other members and Folder guests cannot
 see another principal's private label. Visibility of a public key alone does
 not expose its account email. Global identity resolution and public NIP-05
 aliases are unchanged.
 Human/agent type, source, and observation time accompany the display label.
+
+Existing directly added members and Folder guests can inspect and share their
+own label with `fbrain brain label status --brain "$BRAIN_ID"` and
+`fbrain brain label share --brain "$BRAIN_ID"`. Each human/agent key acts for
+itself; there is no admin target selector or manual name override. Use
+`fbrain brain label hide --brain "$BRAIN_ID"` to withdraw private-label sharing.
+These choices affect only admin visibility, never membership, permissions,
+keys, public NIP-05 aliases, or the principal's own label. A choice made before
+a verified label exists applies when a later refresh resolves it.
 
 A missing, malformed, oversized, future-dated, or more-than-five-minute-old
 projection supplies no private labels. The refresh is bounded to 4,096 relevant
@@ -149,11 +161,25 @@ metadata --brain "$BRAIN_ID" --json` and an updated `fbrain access list --brain
 "$BRAIN_ID" --json`; unknown keys remain unverified. Old clients ignore the
 additive label metadata, and the new CLI accepts older servers without it.
 
-No Brain or Chat schema migration is required. Labels can be regenerated from
-retained source bindings after an empty-target service restore; the projection
-is not part of the Recovery Set. Rolling back the closure removes the label
-consumer/timer without undoing or rewriting source state or accepted access
-repairs. The observer's read-only Postgres role/grants may remain after binary
+Brain schema V30 adds `brain_identity_label_preferences` and two cleanup
+triggers; it leaves existing customer rows and Chat schemas unchanged. The
+signed self-only endpoint is the preference writer; metadata and preference
+status are its readers. The access check and preference write are one immediate
+transaction. Membership deletion or the last guest-access deletion clears the
+choice, including when an older binary issues those retained SQL statements.
+An unrelated future direct re-add cannot inherit the former sharing choice.
+
+Preferences are durable privacy state in the whole Brain SQLite Recovery Set:
+restore explicit `hide` rows with the rest of that database. The disposable
+projection can be regenerated from verified source bindings and is not part of
+the Recovery Set. Tests cover V29 upgrade, retained deletion forms, restart,
+and a stopped-writer whole-database backup restored onto an empty target,
+including hidden labels staying absent from admin metadata. The old server
+ignores the additive table and optional metadata; the new sharing command
+requires the new server. Rolling back to the pre-label closure removes the
+label consumer/timer while retaining preferences, triggers, and accepted access
+repairs. No source identity or encrypted state is rewritten. The observer's
+read-only Postgres role/grants may remain after binary
 rollback; remove that observer role deliberately if retiring the label service.
 Do not manually edit the projection to assert an unverified name.
 

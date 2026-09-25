@@ -132,6 +132,16 @@ Every invitation carries a public instructions document at
 open it when an invite code, expiry, or claim step confuses you. An
 invitation marked `expired` cannot be accepted; ask the admin to re-invite.
 
+## Identity labels
+
+`fbrain brain label status|share|hide --brain <brain-id>` controls your current
+key's verified private label (account email or agent name). Accepted Brain
+invitations share with admins by default; an explicit hide overrides this.
+Directly added members and Folder guests can share once. Each key acts for
+itself. Labels never change access or public NIP-05 aliases; unresolved keys
+remain unidentified. Membership removal or loss of the last guest access resets
+the choice.
+
 ## Folder access
 
 Folders have access modes: `owner`, `admin_only`, `all_members`,

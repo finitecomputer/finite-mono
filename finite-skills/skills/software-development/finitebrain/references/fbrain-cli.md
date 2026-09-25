@@ -230,7 +230,7 @@ fbrain access explain <folder-id>
 fbrain access list
 ```
 
-`access` is read-only. Mutations live under the explicit `admin`, `invite`,
+`access` is read-only. Access mutations live under the explicit `admin`, `invite`,
 `collaborator`, and `mount` workflows. The CLI prepares Folder Key rotation
 automatically; never author or pass a raw rotation payload.
 
@@ -246,6 +246,18 @@ fbrain folder create <folder-id> --brain <brain-id> --role folder --access restr
 fbrain folder delete <folder-id> --brain <brain-id> --json
 fbrain mount list --brain <brain-id>
 ```
+
+Use `fbrain brain label status|share|hide --brain <brain-id>` for your current
+human or agent identity's private label. `status` shows the verified label and
+whether admins can see it; `share` opts in and `hide` withdraws sharing. Labels
+may include an account email or agent name. Accepted Brain invitations enable
+admin visibility by default, including retained accepted memberships; an
+explicit hide overrides that default. Directly added members and Folder guests
+share explicitly. Each key acts for itself, and these commands change no access
+or public NIP-05 alias. Unknown identities stay unidentified until a verified
+source exists. Removing membership or the last guest access resets the choice.
+These commands require a CLI and Brain server release that supports identity
+label sharing; promote this guidance with that release.
 
 `folder delete` permanently deletes the named Folder, all descendant Folders,
 and every durable object in that subtree. The CLI submits the current expected

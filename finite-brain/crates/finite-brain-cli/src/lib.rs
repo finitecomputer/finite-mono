@@ -156,7 +156,7 @@ where
 fn help<W: Write>(output: &mut W) -> Result<(), CliError> {
     writeln!(
         output,
-        "fbrain [--config-dir <path>] doctor\nrepair\nauth status|import [--file <path>]|login <email>|redeem <email> <token>\nsigner status|public-key|sign|encrypt|decrypt\ndaemon status|start|stop|logs|tick|watch|supervise [--working-tree-root <path>]\nsync status|now [--summary]\nopen personal [path]\nopen <brain-id> [path]\nstatus [--json]\nconflicts\nresolve <id>\nsearch <query> [--folder <folder>...] [--limit <1-50>] [--lexical-only] [--json]\nsearch-index status [--folder <folder>...]|enable --folder <folder>|disable --folder <folder> [--json]\nactivity\nwiki check\naccess explain|list\nbrain list|create <personal|organization> <display-name>|bootstrap-personal|metadata|export\nfolder create <display-name>|list|delete\nmount offer create|list|inspect|revoke\nmount accept|list|inspect|revoke\nmount participant add|remove\nadmin member add|remove\nadmin role grant|revoke admin\nadmin folder-access grant|revoke --target <email|NIP-05|npub|hex>\nadmin ensure-access --brain <brain-id> --target <NIP-05|npub|email>\ncollaborator ensure-admin --brain <brain-id> --target <email|NIP-05|npub|hex>\ninvite brain create|list|inspect|accept|revoke\ninvite folder create|list|inspect|accept|claim|revoke\ninvite-token create|list|revoke\ninvite-accept <url-or-token>\napprovals list [--brain <brain-id>] [--all]|approve --id <request-id> [--brain <brain-id>]|deny --id <request-id> [--brain <brain-id>]\n--skill print the self-contained agent guide"
+        "fbrain [--config-dir <path>] doctor\nrepair\nauth status|import [--file <path>]|login <email>|redeem <email> <token>\nsigner status|public-key|sign|encrypt|decrypt\ndaemon status|start|stop|logs|tick|watch|supervise [--working-tree-root <path>]\nsync status|now [--summary]\nopen personal [path]\nopen <brain-id> [path]\nstatus [--json]\nconflicts\nresolve <id>\nsearch <query> [--folder <folder>...] [--limit <1-50>] [--lexical-only] [--json]\nsearch-index status [--folder <folder>...]|enable --folder <folder>|disable --folder <folder> [--json]\nactivity\nwiki check\naccess explain|list\nbrain list|create <personal|organization> <display-name>|bootstrap-personal|metadata|export\nbrain label status|share|hide [--brain <brain-id>]\nfolder create <display-name>|list|delete\nmount offer create|list|inspect|revoke\nmount accept|list|inspect|revoke\nmount participant add|remove\nadmin member add|remove\nadmin role grant|revoke admin\nadmin folder-access grant|revoke --target <email|NIP-05|npub|hex>\nadmin ensure-access --brain <brain-id> --target <NIP-05|npub|email>\ncollaborator ensure-admin --brain <brain-id> --target <email|NIP-05|npub|hex>\ninvite brain create|list|inspect|accept|revoke\ninvite folder create|list|inspect|accept|claim|revoke\ninvite-token create|list|revoke\ninvite-accept <url-or-token>\napprovals list [--brain <brain-id>] [--all]|approve --id <request-id> [--brain <brain-id>]|deny --id <request-id> [--brain <brain-id>]\n--skill print the self-contained agent guide"
     )?;
     Ok(())
 }
@@ -2624,6 +2624,37 @@ fn brain<W: Write>(
     output: &mut W,
 ) -> Result<(), CliError> {
     match args.first().map(String::as_str).unwrap_or("metadata") {
+        "label" => {
+            let action = args.get(1).map(String::as_str).unwrap_or("status");
+            let shared = match action {
+                "status" => None,
+                "share" => Some(true),
+                "hide" => Some(false),
+                _ => return Err(CliError::InvalidCommand(format!("brain label {action}"))),
+            };
+            if args
+                .iter()
+                .any(|arg| arg == "--target" || arg.starts_with("--target="))
+            {
+                return Err(CliError::InvalidInput(
+                    "brain label only changes your own identity's label".to_owned(),
+                ));
+            }
+            let brain_id = match option_value(args, "--brain") {
+                Some(id) => id,
+                None => current_brain_id(env)?
+                    .ok_or(CliError::MissingArgument("brain-id or --brain"))?,
+            };
+            let path = format!("/v1/brains/{brain_id}/identity-label");
+            let response = signed_json_request(
+                env,
+                args,
+                if shared.is_some() { "PUT" } else { "GET" },
+                &path,
+                shared.map(|value| serde_json::json!({"sharedWithAdmins": value})),
+            )?;
+            write_command_response(output, json, &response)
+        }
         "list" | "ls" => {
             let response = brain_inventory_read(env, args, "/v1/brains")?;
             write_command_response(output, json, &response)

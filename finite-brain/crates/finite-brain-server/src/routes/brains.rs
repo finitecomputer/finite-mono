@@ -133,6 +133,56 @@ fn canonical_requesting_user_npub(value: &str) -> Result<String, ApiError> {
     })
 }
 
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct IdentityLabelSharingRequest {
+    shared_with_admins: bool,
+}
+
+/// GET/PUT always concern the authenticated identity, including Folder guests.
+/// There is intentionally no admin target selector or caller-supplied name.
+pub(crate) async fn identity_label_handler(
+    State(state): State<ServerState>,
+    headers: HeaderMap,
+    method: Method,
+    OriginalUri(uri): OriginalUri,
+    AxumPath(brain_id): AxumPath<String>,
+    body: Bytes,
+) -> Result<Json<IdentityLabelSharingResponse>, ApiError> {
+    let writing = method == Method::PUT;
+    let actor = validate_request_auth(&state, &headers, &method, &uri, writing.then_some(&body))?;
+    let actor_id = UserId::new(actor.clone())?;
+    let brain_id = BrainId::new(brain_id)?;
+    let shared = {
+        let mut store = state.store.lock().map_err(lock_error)?;
+        ensure_metadata_visible(&store.load_brain(&brain_id)?, &actor)?;
+        if writing {
+            let request: IdentityLabelSharingRequest =
+                serde_json::from_slice(&body).map_err(|_| {
+                    ApiError::new(StatusCode::BAD_REQUEST, "expected sharedWithAdmins boolean")
+                })?;
+            store.set_identity_label_sharing(
+                &brain_id,
+                &actor_id,
+                request.shared_with_admins,
+                &server_timestamp(&state),
+            )?;
+        }
+        store.identity_label_shared_with_admins(&brain_id, &actor_id)?
+    };
+    let label = state
+        .principal_labels_path
+        .as_deref()
+        .and_then(|path| principal_labels::read_labels(path, state.auth_now_unix_seconds()))
+        .and_then(|mut labels| labels.remove(&actor));
+    Ok(Json(IdentityLabelSharingResponse {
+        brain_id: brain_id.to_string(),
+        npub: actor,
+        shared_with_admins: shared,
+        label,
+    }))
+}
+
 pub(crate) async fn brain_metadata_handler(
     State(state): State<ServerState>,
     headers: HeaderMap,

@@ -21,6 +21,7 @@ mod approvals;
 mod brains;
 mod folder_access;
 mod folder_deletion;
+mod identity_labels;
 mod invite_tokens;
 mod links;
 mod loading;
