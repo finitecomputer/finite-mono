@@ -63,10 +63,15 @@ in
   # filesystem exposes only the read-only sources, Nix closure, socket, and output.
   systemd.services.finite-brain-labels = {
     description = "Refresh private Brain principal labels on demand";
-    wantedBy = [ "multi-user.target" ];
+    wantedBy = [
+      "multi-user.target"
+      "postgresql.service"
+    ];
     after = [ "finite-brain-label-grants.service" ];
-    # Keep the socket alive through database stops. Future demand retries after
-    # the explicitly restarted database has reestablished the reader grants.
+    # PostgreSQL recreates /run/postgresql. Rebuild our confined mount on its
+    # restart; never start an intentionally stopped database to obtain labels.
+    partOf = [ "postgresql.service" ];
+    unitConfig.Requisite = "postgresql.service";
     wants = [ "finite-brain-label-grants.service" ];
     environment = {
       FINITE_BRAIN_LABEL_DATABASE_URL = "host=/run/postgresql user=finite_brain_labels dbname=finite_core";
