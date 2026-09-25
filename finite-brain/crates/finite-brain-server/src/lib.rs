@@ -1060,8 +1060,9 @@ fn enrich_metadata_identities(
         npubs.extend(folder.access_user_ids.iter().cloned());
     }
     // A public key in the roster is not consent to reveal its private label:
-    // admins can add arbitrary keys. Only self and target-accepted memberships
-    // may disclose private account metadata. Public resolve never does.
+    // admins can add arbitrary keys. Admin visibility requires a target-accepted
+    // invitation or explicit sharing; self is always visible. Public resolve
+    // never discloses private account metadata.
     let npubs: BTreeSet<_> = npubs.into_iter().collect();
     let aliases = known_identity_responses(store, npubs.iter().cloned())?;
     let mut identities: BTreeMap<_, _> = aliases
@@ -3661,7 +3662,7 @@ mod tests {
         );
         // An admin cannot turn a directly added public key into a lookup of
         // that account's private identity. Only the target can establish this
-        // sharing boundary by accepting an invitation.
+        // sharing boundary by accepting an invitation or explicitly sharing.
         let target = npub(&outsider);
         let added = authed_request(
             router.clone(),
@@ -3737,7 +3738,10 @@ mod tests {
         .await;
         assert!(!preference.shared_with_admins);
         assert!(preference.label.is_some());
-        for shared in [true, false, true] {
+        for (offset, shared) in [true, false, true].into_iter().enumerate() {
+            // Each operation needs fresh auth evidence, including a retry of
+            // the same preference after the earlier pre-membership denial.
+            let request_time = TEST_NOW + 10 + offset as u64;
             let preference: IdentityLabelSharingResponse = read_json(
                 authed_request(
                     router.clone(),
@@ -3745,7 +3749,7 @@ mod tests {
                     "PUT",
                     "/v1/brains/acme/identity-label",
                     Some(serde_json::json!({"sharedWithAdmins": shared}).to_string()),
-                    TEST_NOW,
+                    request_time,
                 )
                 .await,
             )
@@ -3757,7 +3761,7 @@ mod tests {
                 "self remains visible when hidden from admins"
             );
             let admin_view: BrainMetadataResponse =
-                read_json(get_metadata(router.clone(), &admin, "acme", TEST_NOW).await).await;
+                read_json(get_metadata(router.clone(), &admin, "acme", request_time).await).await;
             assert_eq!(
                 admin_view
                     .identities
@@ -3862,7 +3866,7 @@ mod tests {
         .await;
         assert_eq!(hidden.status(), StatusCode::OK);
         let hidden_view: BrainMetadataResponse =
-            read_json(get_metadata(router.clone(), &admin, "acme", TEST_NOW).await).await;
+            read_json(get_metadata(router.clone(), &admin, "acme", TEST_NOW + 20).await).await;
         assert!(
             hidden_view
                 .identities
