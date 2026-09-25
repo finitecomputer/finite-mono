@@ -475,8 +475,25 @@ mod tests {
                 .unwrap();
             }
         }
+        tx.execute_batch(
+            "INSERT INTO folders (
+                brain_id, id, name, role, access, parent_folder_id,
+                parent_folder_key, path, current_key_version,
+                shared_folder_source, setup_incomplete, created_at
+             ) VALUES ('large', 'shared', 'Shared', 'folder', 'restricted',
+                       NULL, '', 'Shared', 1, 0, 0, '2026-09-25T00:00:00Z');",
+        )
+        .unwrap();
         for guest in 0..5000 {
-            tx.execute("INSERT INTO folder_access (brain_id,folder_id,user_id) SELECT 'large',id,?1 FROM folders WHERE brain_id='large' LIMIT 1", [format!("guest-{guest}")]).unwrap();
+            assert_eq!(
+                tx.execute(
+                    "INSERT INTO folder_access (brain_id,folder_id,user_id)
+                     VALUES ('large','shared',?1)",
+                    [format!("guest-{guest}")],
+                )
+                .unwrap(),
+                1
+            );
         }
         tx.commit().unwrap();
         for id in ["one", "two", "three", "four", "five"] {
