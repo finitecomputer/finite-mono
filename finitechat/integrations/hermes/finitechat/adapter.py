@@ -214,6 +214,23 @@ def _load_local_env_defaults(path: Path | None = None) -> None:
 _load_local_env_defaults()
 
 
+def _requester_diagnostic(stage: str, gate: str = "") -> None:
+    """Opt-in incident probe: fixed reason codes, never requester data.
+
+    The process-local marker identity distinguishes a reloaded hook from the
+    context variable still used by an existing adapter. It is not a user,
+    session, tool-call, or credential identifier.
+    """
+    if os.getenv("FINITECHAT_REQUESTER_DIAGNOSTICS") == "1":
+        logger.info(
+            "[DEBUG-fbrain-requester] stage=%s gate=%s pid=%s marker=%x",
+            stage,
+            gate,
+            os.getpid(),
+            id(_AUTHENTICATED_FINITE_TURN_USER),
+        )
+
+
 class _RequesterContextBroker:
     """Lease authenticated Finite sender context to turn-local subprocesses.
 
@@ -229,11 +246,12 @@ class _RequesterContextBroker:
         self._lock = threading.Lock()
         self._leases: dict[str, dict[str, tuple[int, int]]] = {}
         self._clear_on_start()
+        _requester_diagnostic("broker_created")
 
     def before_tool_call(self, **kwargs: Any) -> None:
         if str(kwargs.get("tool_name") or "") != "terminal":
             return
-        session_key, user_id = _active_finite_session()
+        session_key, user_id = _active_finite_session(diagnostic_stage="pre_tool")
         if session_key is None or user_id is None:
             return
         lease_id = _requester_context_lease_id(kwargs)
@@ -255,7 +273,7 @@ class _RequesterContextBroker:
     def after_tool_call(self, **kwargs: Any) -> None:
         if str(kwargs.get("tool_name") or "") != "terminal":
             return
-        session_key, _ = _active_finite_session()
+        session_key, _ = _active_finite_session(diagnostic_stage="post_tool")
         if session_key is None:
             return
         lease_id = _requester_context_lease_id(kwargs)
@@ -326,6 +344,7 @@ class _RequesterContextBroker:
                 handle.flush()
                 os.fsync(handle.fileno())
             temp_path.replace(final_path)
+            _requester_diagnostic("written")
             requester_context = _AUTHENTICATED_FINITE_REQUESTER_CONTEXT.get()
             if requester_context is not None:
                 email, sites_assertion = requester_context
@@ -337,6 +356,7 @@ class _RequesterContextBroker:
                     expires_at_unix=expires_at_unix,
                 )
         except OSError as exc:
+            _requester_diagnostic("write_failed")
             logger.warning("[finitechat] could not write requester context lease: %s", exc)
 
     def _write_v2(
@@ -370,9 +390,13 @@ class _RequesterContextBroker:
         temp_path.replace(final_path)
 
     def _remove(self, session_key: str) -> None:
+        removed = True
         for root in (self.root, self.root_v2):
-            with contextlib.suppress(OSError):
+            try:
                 (root / _requester_context_filename(session_key)).unlink(missing_ok=True)
+            except OSError:
+                removed = False
+        _requester_diagnostic("removed" if removed else "remove_failed")
 
 
 def _requester_context_root() -> Path:
@@ -393,15 +417,32 @@ def _requester_context_lease_id(kwargs: dict[str, Any]) -> str:
     )
 
 
-def _active_finite_session() -> tuple[str | None, str | None]:
+def _active_finite_session(*, diagnostic_stage: str = "") -> tuple[str | None, str | None]:
     try:
         from gateway.session_context import get_session_env
     except ImportError:
+        if diagnostic_stage:
+            _requester_diagnostic(diagnostic_stage, "session_api_unavailable")
         return None, None
     platform = str(get_session_env("HERMES_SESSION_PLATFORM", "") or "").strip()
     session_key = str(get_session_env("HERMES_SESSION_KEY", "") or "").strip()
     user_id = str(get_session_env("HERMES_SESSION_USER_ID", "") or "").strip()
     authenticated_turn_user = _AUTHENTICATED_FINITE_TURN_USER.get()
+    if diagnostic_stage:
+        gate = (
+            "foreign_platform"
+            if platform not in {FINITE_PLATFORM_NAME, Platform.LOCAL.value}
+            else "missing_session"
+            if not session_key
+            else "invalid_user"
+            if FINITE_ACCOUNT_ID_PATTERN.fullmatch(user_id) is None
+            else "missing_turn"
+            if authenticated_turn_user is None
+            else "sender_mismatch"
+            if authenticated_turn_user != user_id
+            else "accepted"
+        )
+        _requester_diagnostic(diagnostic_stage, gate)
     if (
         # Pinned Hermes maps plugin platforms that are not enum members to
         # LOCAL. The adapter-owned ContextVar below is the Finite marker;
@@ -562,6 +603,7 @@ class FiniteChatAdapter(BasePlatformAdapter):
         token = _AUTHENTICATED_FINITE_TURN_USER.set(requester)
         requester_context = _authenticated_requester_context_for_event(event)
         context_token = _AUTHENTICATED_FINITE_REQUESTER_CONTEXT.set(requester_context)
+        _requester_diagnostic("turn", "authenticated" if requester else "unauthenticated")
         try:
             await super()._process_message_background(event, session_key)
         finally:
@@ -2324,6 +2366,7 @@ def register(ctx) -> None:
         register_hook("pre_tool_call", requester_context.before_tool_call)
         register_hook("post_tool_call", requester_context.after_tool_call)
         register_hook("post_tool_call", _BRAIN_APPROVAL_FILINGS.after_tool_call)
+        _requester_diagnostic("hooks_registered")
     ctx.register_platform(
         name=FINITE_PLATFORM_NAME,
         label="Finite Chat",
