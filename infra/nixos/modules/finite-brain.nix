@@ -24,6 +24,7 @@ in
   # role setup in its own unit so adding labels does not restart PostgreSQL.
   systemd.services.finite-brain-label-grants = {
     description = "Grant read-only public identity columns to Brain label observer";
+    wantedBy = [ "postgresql.service" ];
     after = [
       "postgresql.service"
       "finite-saas-core.service"
@@ -64,7 +65,9 @@ in
     description = "Refresh private Brain principal labels on demand";
     wantedBy = [ "multi-user.target" ];
     after = [ "finite-brain-label-grants.service" ];
-    requires = [ "finite-brain-label-grants.service" ];
+    # Keep the socket alive through database stops. Future demand retries after
+    # the explicitly restarted database has reestablished the reader grants.
+    wants = [ "finite-brain-label-grants.service" ];
     environment = {
       FINITE_BRAIN_LABEL_DATABASE_URL = "host=/run/postgresql user=finite_brain_labels dbname=finite_core";
       FINITE_BRAIN_DB = "/sources/brain/finite-brain.sqlite3";

@@ -151,17 +151,16 @@ async fn built_label_exporter_uses_narrow_sources_and_preserves_output_on_failur
         !daemon_output.exists(),
         "idle service does not scan or publish"
     );
-    let now = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap()
-        .as_secs();
     let router = router_with_state(
         ServerState::new(BrainStore::open(&brain_db).unwrap(), "http://brain.test")
-            .with_auth_clock(now, 60)
             .with_principal_labels_path(&daemon_output)
             .with_principal_labels_socket(&socket_path),
     );
     let read = |nonce: &str| {
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
         let auth = sign_http_auth_header_with_secret(
             &secret,
             &HttpAuthEventRequest::new("GET", "http://brain.test/v1/brains/org/metadata", now)
@@ -212,7 +211,114 @@ async fn built_label_exporter_uses_narrow_sources_and_preserves_output_on_failur
     tokio::time::sleep(std::time::Duration::from_millis(100)).await;
     assert_eq!(fs::read(&daemon_output).unwrap(), published);
     drop(worker);
+    let unavailable = read("worker-down").await.unwrap();
+    assert!(unavailable.status().is_success());
+    let metadata: serde_json::Value = serde_json::from_slice(
+        &to_bytes(unavailable.into_body(), 1024 * 1024)
+            .await
+            .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(
+        metadata["identities"][0]["display"],
+        "alex@example.com (human)"
+    );
     assert_eq!(fs::read(&chat).unwrap(), before_chat);
+    // The long-lived worker must survive source errors and release its DB
+    // driver, preserve old evidence, and recover on later demand after backoff.
+    admin
+        .batch_execute(&format!(
+            "REVOKE SELECT (workos_user_id, normalized_email, link_status) ON users FROM {role}"
+        ))
+        .await
+        .unwrap();
+    let application = format!("brain_labels_daemon_{unique}");
+    let daemon_url = format!("{scoped_url}&application_name={application}");
+    let errors = dir.path().join("worker-errors.log");
+    let mut recovering = Worker(
+        Command::new(env!("CARGO_BIN_EXE_finite-brain-labels"))
+            .env_clear()
+            .env("FINITE_BRAIN_LABEL_DATABASE_URL", &daemon_url)
+            .env("FINITE_BRAIN_DB", &brain_db)
+            .env("FINITECHAT_HOSTED_DATA_ROOT", &hosted)
+            .env("FINITE_BRAIN_PRINCIPAL_LABELS", &daemon_output)
+            .env("FINITE_BRAIN_LABEL_SOCKET", &socket_path)
+            .stdout(std::process::Stdio::null())
+            .stderr(fs::File::create(&errors).unwrap())
+            .spawn()
+            .unwrap(),
+    );
+    let signal = std::os::unix::net::UnixDatagram::unbound().unwrap();
+    signal.set_nonblocking(true).unwrap();
+    let failure_started = std::time::Instant::now();
+    loop {
+        assert!(recovering.0.try_wait().unwrap().is_none());
+        assert!(failure_started.elapsed() < std::time::Duration::from_secs(15));
+        let _ = signal.send_to(b"refresh", &socket_path);
+        if fs::read_to_string(&errors)
+            .unwrap()
+            .contains("Brain label refresh failed")
+        {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    }
+    assert_eq!(fs::read(&daemon_output).unwrap(), published);
+    assert!(read("source-failed").await.unwrap().status().is_success());
+    let cleanup_started = std::time::Instant::now();
+    loop {
+        let active: i64 = admin
+            .query_one(
+                "SELECT count(*) FROM pg_stat_activity WHERE application_name=$1",
+                &[&application],
+            )
+            .await
+            .unwrap()
+            .get(0);
+        if active == 0 {
+            break;
+        }
+        assert!(
+            cleanup_started.elapsed() < std::time::Duration::from_secs(5),
+            "failed refresh leaked a connection"
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    }
+    admin
+        .batch_execute(&format!(
+            "GRANT SELECT (workos_user_id, normalized_email, link_status) ON users TO {role}"
+        ))
+        .await
+        .unwrap();
+    // Use the actual production first-failure backoff, not a test-only setting.
+    tokio::time::sleep(std::time::Duration::from_secs(31)).await;
+    let recovery_started = std::time::Instant::now();
+    loop {
+        assert!(recovering.0.try_wait().unwrap().is_none());
+        assert!(recovery_started.elapsed() < std::time::Duration::from_secs(15));
+        let _ = signal.send_to(b"refresh", &socket_path);
+        let current: LabelProjection =
+            serde_json::from_slice(&fs::read(&daemon_output).unwrap()).unwrap();
+        if current
+            .bindings
+            .iter()
+            .any(|binding| binding.label.name == "changed@example.com")
+        {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    }
+    let response = read("recovered").await.unwrap();
+    assert!(response.status().is_success());
+    let metadata: serde_json::Value =
+        serde_json::from_slice(&to_bytes(response.into_body(), 1024 * 1024).await.unwrap())
+            .unwrap();
+    assert_eq!(
+        metadata["identities"][0]["display"],
+        "changed@example.com (human)"
+    );
+    assert!(!fs::read_to_string(&errors).unwrap().contains("example.com"));
+    drop(recovering);
     // Wrong-schema or corrupt existing hosted sources must not overwrite a
     // previously verified projection or leak identity/connection data to logs.
     let conn = Connection::open(&chat).unwrap();

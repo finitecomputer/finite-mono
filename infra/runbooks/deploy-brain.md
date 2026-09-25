@@ -133,7 +133,10 @@ The exporter runs as the dedicated `finite_brain_labels` Unix user. Its local
 Postgres peer-authenticated role has column-level SELECT grants only; no Core
 credentials or API tokens are loaded. NixOS provisions those grants once per
 database service lifetime, separately from Brain startup, and never starts an
-intentionally stopped database to refresh labels. The worker uses a confined
+intentionally stopped database to refresh labels. The grant unit is wanted by
+PostgreSQL and follows its explicit stop/restart lifecycle. The worker wants
+but does not require that unit: it keeps its socket through database outages,
+backs off on demand, and reconnects after PostgreSQL and the grants return. The worker uses a confined
 root filesystem exposing the Nix closure, Postgres socket, read-only source
 directories, and writable output.
 Its sole capability permits reading the DynamicUser-owned source files inside
