@@ -34,7 +34,7 @@ ROOT = Path(__file__).resolve().parents[1]
 # status run shows the rollback window. PR 2 (cleanup/chat-store-delete-old)
 # deletes this constant and its line.
 CHAT_ENGINE_ROLLOUT_WINDOW_SINCE = "2026-08-31"
-CHAT_ENGINE_ROLLOUT_DELETION_DEADLINE = "2026-10-02"
+CHAT_ENGINE_ROLLOUT_DELETION_DEADLINE = "2026-09-27"
 
 # Every operational name lives here. The contract test keeps entries that are
 # owned by Nix aligned with their declaring modules.
