@@ -175,6 +175,7 @@ async fn collect(
     now: u64,
     locations: &mut demand::HostedLocations,
 ) -> Result<LabelProjection, RefreshError> {
+    let started = Instant::now();
     let principals = brain_principals(brain_db)?;
     let candidates = locations.candidates(hosted_root, &principals, Instant::now())?;
     let (mut client, connection) = database

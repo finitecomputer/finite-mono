@@ -212,6 +212,12 @@ read-only Postgres role/grants may remain after binary
 rollback; remove that observer role deliberately if retiring the label service.
 Do not manually edit the projection to assert an unverified name.
 
+Before rollout, exercise the evaluated Linux service on synthetic sources:
+verify socket/output ownership, idle startup without discovery, authorized
+metadata wakeup, burst coalescing, source failure, and restart recovery. Nix
+evaluation and process tests do not substitute for this confined-systemd
+canary. Use `scripts/finite-status` before and after the authorized rollout.
+
 ## Rollback
 
 1. Switch lat2 to the previous NixOS generation and record the resulting
