@@ -63,7 +63,10 @@ generic `custom` provider. With its default `agent.image_input_mode: auto`,
 the pinned Hermes sends attached images directly to the main model and uses
 the native image-loading path of `vision_analyze` when no explicit auxiliary
 vision backend is configured. An explicit `auxiliary.vision` backend still
-takes precedence in this Hermes version. The runtime reconciler
+takes precedence in this Hermes version. Startup removes only the backend the
+deleted AEON specialization writer installed, keeping the replaced config as
+`config.yaml.pre-aeon-vision-retirement`; see the runtime-image runbook.
+The runtime reconciler
 backfills only a missing declaration on the known Finite-owned model/route/key
 shape; explicit capability and image-routing settings remain user-owned.
 Absence means the managed product default: deleting the declaration causes

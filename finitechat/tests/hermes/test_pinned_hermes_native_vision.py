@@ -1,6 +1,7 @@
 """Exercise Finite's generated config through the pinned Hermes vision paths."""
 
 import base64
+import copy
 import os
 import tempfile
 import unittest
@@ -27,8 +28,13 @@ class PinnedHermesNativeVisionTests(unittest.IsolatedAsyncioTestCase):
         old_config = fixture._reconcile_config(None, settings)
         old_config["model"].pop("supports_vision", None)
         old_config["auxiliary"]["vision"] = {"provider": "auto"}
-        for existing in (None, old_config):
-            with self.subTest(existing=existing is not None):
+        retired_aeon_configs = []
+        for block in fixture._retired_aeon_vision_blocks():
+            aeon_config = copy.deepcopy(old_config)
+            aeon_config["auxiliary"]["vision"] = block
+            retired_aeon_configs.append(aeon_config)
+        for case, existing in enumerate((None, old_config, *retired_aeon_configs)):
+            with self.subTest(case=case):
                 config = fixture._reconcile_config(existing, settings)
                 model = config["model"]
                 runtime = {**model, "model": model["default"]}
@@ -67,6 +73,32 @@ class PinnedHermesNativeVisionTests(unittest.IsolatedAsyncioTestCase):
                 images = [part for part in multimodal["content"] if part["type"] == "image_url"]
                 self.assertEqual(len(images), 1)
                 self.assertTrue(images[0]["image_url"]["url"].startswith("data:image/png;base64,"))
+
+    def test_retired_aeon_backend_no_longer_outranks_native_images(self):
+        fixture = launcher_tests.AgentRuntimeLauncherConfigTest
+        settings = fixture._reconciler_settings()
+        runner = object.__new__(GatewayRunner)
+
+        def decision(config: dict[str, Any]) -> str:
+            return runner._decide_image_input_mode(
+                user_config=config, provider="custom", model="glm-5-3-flash"
+            )
+
+        for block in fixture._retired_aeon_vision_blocks():
+            with self.subTest(model=block["model"], extra_body="extra_body" in block):
+                existing = fixture._reconcile_config(None, settings)
+                existing["model"].pop("supports_vision")
+                existing["auxiliary"]["vision"] = block
+                # The capability flag alone cannot win over this stored backend.
+                flagged_only = copy.deepcopy(existing)
+                flagged_only["model"]["supports_vision"] = True
+                self.assertEqual(decision(flagged_only), "text")
+
+                config = fixture._reconcile_config(existing, settings)
+
+                self.assertNotIn("vision", config["auxiliary"])
+                self.assertIs(config["model"]["supports_vision"], True)
+                self.assertEqual(decision(config), "native")
 
     def test_explicit_text_routing_remains_authoritative(self):
         fixture = launcher_tests.AgentRuntimeLauncherConfigTest

@@ -25,6 +25,7 @@ from reconcile_hermes_config import (
     _atomic_write,
     _dump,
     _load,
+    _preserve_pre_aeon_retirement_config,
     reconcile_config,
 )
 
@@ -824,6 +825,7 @@ def recover_known_good_boot(config_path: Path) -> int:
             reconciled = reconcile_config(existing_config, settings, recover_known_good=True)
             config_changed = reconciled != existing_config
             if config_changed:
+                _preserve_pre_aeon_retirement_config(config_path, existing_config)
                 _atomic_write(config_path, _dump(reconciled))
             report["actions"].append(
                 {
