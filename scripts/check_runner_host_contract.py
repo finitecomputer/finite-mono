@@ -1,15 +1,14 @@
 #!/usr/bin/env python3
 """Verify all Kata Runner hosts share one runner-role declaration.
 
-finite-lat-1, finite-lat-3, and finite-lat-4 import
+finite-lat-1 (retired), finite-lat-3, finite-lat-4, and finite-lat-5 import
 infra/nixos/modules/kata-runner-host.nix,
 which renders the shared non-secret environment to
 /etc/finite/runner-shared.env and owns the finite-saas-runner unit shape. Host
-configs pass only the declared per-host inputs. This guard evaluates both
-nixosConfigurations and fails on any runner-role drift outside that declared
-per-host set, so a future hand-edit to one host breaks CI instead of
-production. (finite-lat-2 is the app-plane replacement host and deliberately
-runs no runner; the runner lane moves to finite-lat-4.)
+configs pass only the declared per-host inputs. This guard evaluates every
+Runner configuration and fails on runner-role drift outside that declared
+per-host set. (finite-lat-2 is the app-plane replacement host and deliberately
+runs no Runner.)
 """
 
 from __future__ import annotations
@@ -24,8 +23,8 @@ HOSTS = ["finite-lat-1", "finite-lat-3", "finite-lat-4", "finite-lat-5"]
 EXPECTED_MAX_SANDBOXES = {
     "finite-lat-1": "12",
     "finite-lat-3": "42",
-    # finite-lat-4 mirrors lat3's owner-authorized ceiling; it is admitted
-    # drained (FC_RUNNER_DRAIN is operator env, not shared env).
+    # finite-lat-4 uses the same declared estimate as lat3; its admission
+    # state is operator env, not shared env.
     "finite-lat-4": "42",
     "finite-lat-5": "42",
 }
@@ -68,7 +67,7 @@ NIX_OWNED_FINITE_PRIVATE_KEYS = {
 
 # systemd.services.finite-saas-runner.environment key that is legitimately
 # per-host (loopback Authority on the Core host, overlay proxy on a remote
-# Runner). It must exist on both hosts but may differ.
+# Runner). It must exist on every Runner host but may differ.
 PER_HOST_UNIT_ENV_KEYS = {"FINITE_IDENTITY_AUTHORITY"}
 
 

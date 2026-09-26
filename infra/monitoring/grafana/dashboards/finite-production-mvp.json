@@ -1056,7 +1056,7 @@
       "targets": [
         {
           "editorMode": "code",
-          "expr": "up{job=\"finite-internal-health\",instance=~\"finite-lat-[1-4]\"} or on(instance) (label_replace(vector(0), \"instance\", \"finite-lat-1\", \"__name__\", \".*\") or label_replace(vector(0), \"instance\", \"finite-lat-2\", \"__name__\", \".*\") or label_replace(vector(0), \"instance\", \"finite-lat-3\", \"__name__\", \".*\") or label_replace(vector(0), \"instance\", \"finite-lat-4\", \"__name__\", \".*\"))",
+          "expr": "up{job=\"finite-internal-health\",instance=~\"finite-lat-[1-5]\"} or on(instance) (label_replace(vector(0), \"instance\", \"finite-lat-1\", \"__name__\", \".*\") or label_replace(vector(0), \"instance\", \"finite-lat-2\", \"__name__\", \".*\") or label_replace(vector(0), \"instance\", \"finite-lat-3\", \"__name__\", \".*\") or label_replace(vector(0), \"instance\", \"finite-lat-4\", \"__name__\", \".*\") or label_replace(vector(0), \"instance\", \"finite-lat-5\", \"__name__\", \".*\"))",
           "instant": true,
           "legendFormat": "{{instance}}",
           "range": false,
@@ -1153,7 +1153,7 @@
       "targets": [
         {
           "editorMode": "code",
-          "expr": "100 * (1 - avg by (instance) (rate(node_cpu_seconds_total{instance=~\"finite-lat-[1-4]\",mode=\"idle\"}[5m])))",
+          "expr": "100 * (1 - avg by (instance) (rate(node_cpu_seconds_total{instance=~\"finite-lat-[1-5]\",mode=\"idle\"}[5m])))",
           "instant": false,
           "legendFormat": "{{instance}}",
           "range": true,
@@ -1248,7 +1248,7 @@
       "targets": [
         {
           "editorMode": "code",
-          "expr": "node_load1{instance=~\"finite-lat-[1-4]\"}",
+          "expr": "node_load1{instance=~\"finite-lat-[1-5]\"}",
           "instant": false,
           "legendFormat": "{{instance}} load1",
           "range": true,
@@ -1256,7 +1256,7 @@
         },
         {
           "editorMode": "code",
-          "expr": "node_load5{instance=~\"finite-lat-[1-4]\"}",
+          "expr": "node_load5{instance=~\"finite-lat-[1-5]\"}",
           "instant": false,
           "legendFormat": "{{instance}} load5",
           "range": true,
@@ -1264,7 +1264,7 @@
         },
         {
           "editorMode": "code",
-          "expr": "node_load15{instance=~\"finite-lat-[1-4]\"}",
+          "expr": "node_load15{instance=~\"finite-lat-[1-5]\"}",
           "instant": false,
           "legendFormat": "{{instance}} load15",
           "range": true,
@@ -1361,7 +1361,7 @@
       "targets": [
         {
           "editorMode": "code",
-          "expr": "100 * (1 - (node_memory_MemAvailable_bytes{instance=~\"finite-lat-[1-4]\"} / node_memory_MemTotal_bytes{instance=~\"finite-lat-[1-4]\"}))",
+          "expr": "100 * (1 - (node_memory_MemAvailable_bytes{instance=~\"finite-lat-[1-5]\"} / node_memory_MemTotal_bytes{instance=~\"finite-lat-[1-5]\"}))",
           "instant": false,
           "legendFormat": "{{instance}}",
           "range": true,
@@ -1458,7 +1458,7 @@
       "targets": [
         {
           "editorMode": "code",
-          "expr": "(100 * (1 - (node_memory_SwapFree_bytes{instance=~\"finite-lat-[1-4]\"} / node_memory_SwapTotal_bytes{instance=~\"finite-lat-[1-4]\"}))) and on(instance) node_memory_SwapTotal_bytes{instance=~\"finite-lat-[1-4]\"} > 0",
+          "expr": "(100 * (1 - (node_memory_SwapFree_bytes{instance=~\"finite-lat-[1-5]\"} / node_memory_SwapTotal_bytes{instance=~\"finite-lat-[1-5]\"}))) and on(instance) node_memory_SwapTotal_bytes{instance=~\"finite-lat-[1-5]\"} > 0",
           "instant": false,
           "legendFormat": "{{instance}}",
           "range": true,
@@ -1555,7 +1555,7 @@
       "targets": [
         {
           "editorMode": "code",
-          "expr": "100 * (1 - (node_filesystem_avail_bytes{instance=~\"finite-lat-[1-4]\",mountpoint=~\"/|/data\",fstype!~\"tmpfs|devtmpfs|overlay|squashfs\"} / node_filesystem_size_bytes{instance=~\"finite-lat-[1-4]\",mountpoint=~\"/|/data\",fstype!~\"tmpfs|devtmpfs|overlay|squashfs\"}))",
+          "expr": "100 * (1 - (node_filesystem_avail_bytes{instance=~\"finite-lat-[1-5]\",mountpoint=~\"/|/data\",fstype!~\"tmpfs|devtmpfs|overlay|squashfs\"} / node_filesystem_size_bytes{instance=~\"finite-lat-[1-5]\",mountpoint=~\"/|/data\",fstype!~\"tmpfs|devtmpfs|overlay|squashfs\"}))",
           "instant": false,
           "legendFormat": "{{instance}} {{mountpoint}}",
           "range": true,
@@ -1650,7 +1650,7 @@
       "targets": [
         {
           "editorMode": "code",
-          "expr": "rate(node_disk_read_bytes_total{instance=~\"finite-lat-[1-4]\",device=~\"nvme.*|md.*|sd.*|vd.*|xvd.*\"}[5m])",
+          "expr": "rate(node_disk_read_bytes_total{instance=~\"finite-lat-[1-5]\",device=~\"nvme.*|md.*|sd.*|vd.*|xvd.*\"}[5m])",
           "instant": false,
           "legendFormat": "{{instance}} {{device}} read",
           "range": true,
@@ -1658,7 +1658,7 @@
         },
         {
           "editorMode": "code",
-          "expr": "rate(node_disk_written_bytes_total{instance=~\"finite-lat-[1-4]\",device=~\"nvme.*|md.*|sd.*|vd.*|xvd.*\"}[5m])",
+          "expr": "rate(node_disk_written_bytes_total{instance=~\"finite-lat-[1-5]\",device=~\"nvme.*|md.*|sd.*|vd.*|xvd.*\"}[5m])",
           "instant": false,
           "legendFormat": "{{instance}} {{device}} write",
           "range": true,
@@ -1754,7 +1754,7 @@
       "targets": [
         {
           "editorMode": "code",
-          "expr": "100 * rate(node_disk_io_time_seconds_total{instance=~\"finite-lat-[1-4]\",device=~\"nvme.*|md.*|sd.*|vd.*|xvd.*\"}[5m])",
+          "expr": "100 * rate(node_disk_io_time_seconds_total{instance=~\"finite-lat-[1-5]\",device=~\"nvme.*|md.*|sd.*|vd.*|xvd.*\"}[5m])",
           "instant": false,
           "legendFormat": "{{instance}} {{device}}",
           "range": true,
@@ -1849,7 +1849,7 @@
       "targets": [
         {
           "editorMode": "code",
-          "expr": "8 * rate(node_network_receive_bytes_total{instance=~\"finite-lat-[1-4]\",device=~\"en.*|eth.*|wg-finite\"}[5m])",
+          "expr": "8 * rate(node_network_receive_bytes_total{instance=~\"finite-lat-[1-5]\",device=~\"en.*|eth.*|wg-finite\"}[5m])",
           "instant": false,
           "legendFormat": "{{instance}} {{device}} rx",
           "range": true,
@@ -1857,7 +1857,7 @@
         },
         {
           "editorMode": "code",
-          "expr": "8 * rate(node_network_transmit_bytes_total{instance=~\"finite-lat-[1-4]\",device=~\"en.*|eth.*|wg-finite\"}[5m])",
+          "expr": "8 * rate(node_network_transmit_bytes_total{instance=~\"finite-lat-[1-5]\",device=~\"en.*|eth.*|wg-finite\"}[5m])",
           "instant": false,
           "legendFormat": "{{instance}} {{device}} tx",
           "range": true,
@@ -1953,7 +1953,7 @@
       "targets": [
         {
           "editorMode": "code",
-          "expr": "rate(node_network_receive_errs_total{instance=~\"finite-lat-[1-4]\",device=~\"en.*|eth.*|wg-finite\"}[5m])",
+          "expr": "rate(node_network_receive_errs_total{instance=~\"finite-lat-[1-5]\",device=~\"en.*|eth.*|wg-finite\"}[5m])",
           "instant": false,
           "legendFormat": "{{instance}} {{device}} rx errors",
           "range": true,
@@ -1961,7 +1961,7 @@
         },
         {
           "editorMode": "code",
-          "expr": "rate(node_network_transmit_errs_total{instance=~\"finite-lat-[1-4]\",device=~\"en.*|eth.*|wg-finite\"}[5m])",
+          "expr": "rate(node_network_transmit_errs_total{instance=~\"finite-lat-[1-5]\",device=~\"en.*|eth.*|wg-finite\"}[5m])",
           "instant": false,
           "legendFormat": "{{instance}} {{device}} tx errors",
           "range": true,
@@ -2070,7 +2070,7 @@
       "targets": [
         {
           "editorMode": "code",
-          "expr": "node_hwmon_temp_celsius{instance=~\"finite-lat-[1-4]\"} * on (instance, chip, sensor) group_left(label) node_hwmon_sensor_label{instance=~\"finite-lat-[1-4]\",label=~\"Tctl|Tccd[0-9]+\"}",
+          "expr": "node_hwmon_temp_celsius{instance=~\"finite-lat-[1-5]\"} * on (instance, chip, sensor) group_left(label) node_hwmon_sensor_label{instance=~\"finite-lat-[1-5]\",label=~\"Tctl|Tccd[0-9]+\"}",
           "instant": false,
           "legendFormat": "{{instance}} {{label}}",
           "range": true,
@@ -2165,7 +2165,7 @@
       "targets": [
         {
           "editorMode": "code",
-          "expr": "avg by (instance) (node_cpu_scaling_frequency_hertz{instance=~\"finite-lat-[1-4]\"})",
+          "expr": "avg by (instance) (node_cpu_scaling_frequency_hertz{instance=~\"finite-lat-[1-5]\"})",
           "instant": false,
           "legendFormat": "{{instance}} current",
           "range": true,
@@ -2173,7 +2173,7 @@
         },
         {
           "editorMode": "code",
-          "expr": "avg by (instance) (node_cpu_scaling_frequency_max_hertz{instance=~\"finite-lat-[1-4]\"})",
+          "expr": "avg by (instance) (node_cpu_scaling_frequency_max_hertz{instance=~\"finite-lat-[1-5]\"})",
           "instant": false,
           "legendFormat": "{{instance}} maximum",
           "range": true,
@@ -2255,7 +2255,7 @@
       "targets": [
         {
           "editorMode": "code",
-          "expr": "(max by (instance) (node_hwmon_temp_celsius{instance=~\"finite-lat-[1-4]\"} * on (instance, chip, sensor) group_left(label) node_hwmon_sensor_label{instance=~\"finite-lat-[1-4]\",label=~\"Tctl|Tccd[0-9]+\"}) >= bool 95) * on (instance) (100 * (1 - avg by (instance) (rate(node_cpu_seconds_total{instance=~\"finite-lat-[1-4]\",mode=\"idle\"}[1m]))) >= bool 70) * on (instance) ((avg by (instance) (node_cpu_scaling_frequency_hertz{instance=~\"finite-lat-[1-4]\"}) / avg by (instance) (node_cpu_scaling_frequency_max_hertz{instance=~\"finite-lat-[1-4]\"})) <= bool 0.70)",
+          "expr": "(max by (instance) (node_hwmon_temp_celsius{instance=~\"finite-lat-[1-5]\"} * on (instance, chip, sensor) group_left(label) node_hwmon_sensor_label{instance=~\"finite-lat-[1-5]\",label=~\"Tctl|Tccd[0-9]+\"}) >= bool 95) * on (instance) (100 * (1 - avg by (instance) (rate(node_cpu_seconds_total{instance=~\"finite-lat-[1-5]\",mode=\"idle\"}[1m]))) >= bool 70) * on (instance) ((avg by (instance) (node_cpu_scaling_frequency_hertz{instance=~\"finite-lat-[1-5]\"}) / avg by (instance) (node_cpu_scaling_frequency_max_hertz{instance=~\"finite-lat-[1-5]\"})) <= bool 0.70)",
           "instant": true,
           "legendFormat": "{{instance}}",
           "range": false,
@@ -2336,7 +2336,7 @@
       "targets": [
         {
           "editorMode": "code",
-          "expr": "max by (instance, mountpoint) (node_filesystem_readonly{instance=~\"finite-lat-[1-4]\",mountpoint=~\"/|/data\",fstype!~\"tmpfs|devtmpfs|overlay|squashfs\"})",
+          "expr": "max by (instance, mountpoint) (node_filesystem_readonly{instance=~\"finite-lat-[1-5]\",mountpoint=~\"/|/data\",fstype!~\"tmpfs|devtmpfs|overlay|squashfs\"})",
           "instant": true,
           "legendFormat": "{{instance}} {{mountpoint}}",
           "range": false,
@@ -2371,7 +2371,7 @@
       "targets": [
         {
           "editorMode": "code",
-          "expr": "{host=~\"finite-lat-[1-4]\", priority=~\"warning|error|crit|alert|emerg\"}",
+          "expr": "{host=~\"finite-lat-[1-5]\", priority=~\"warning|error|crit|alert|emerg\"}",
           "queryType": "range",
           "refId": "A"
         }
@@ -2404,7 +2404,7 @@
       "targets": [
         {
           "editorMode": "code",
-          "expr": "{host=~\"finite-lat-[1-4]\", source=~\"kernel|systemd|nixos-activation|auth\", priority=~\"warning|error|crit|alert|emerg\"}",
+          "expr": "{host=~\"finite-lat-[1-5]\", source=~\"kernel|systemd|nixos-activation|auth\", priority=~\"warning|error|crit|alert|emerg\"}",
           "queryType": "range",
           "refId": "A"
         }
@@ -2437,7 +2437,7 @@
       "targets": [
         {
           "editorMode": "code",
-          "expr": "{host=~\"finite-lat-[1-4]\", source=\"kernel\", priority=~\"warning|error|crit|alert|emerg\"}",
+          "expr": "{host=~\"finite-lat-[1-5]\", source=\"kernel\", priority=~\"warning|error|crit|alert|emerg\"}",
           "queryType": "range",
           "refId": "A"
         }
@@ -2470,7 +2470,7 @@
       "targets": [
         {
           "editorMode": "code",
-          "expr": "{host=~\"finite-lat-[1-4]\", source=~\"systemd|nixos-activation\", priority=~\"warning|error|crit|alert|emerg\"}",
+          "expr": "{host=~\"finite-lat-[1-5]\", source=~\"systemd|nixos-activation\", priority=~\"warning|error|crit|alert|emerg\"}",
           "queryType": "range",
           "refId": "A"
         }
@@ -2503,7 +2503,7 @@
       "targets": [
         {
           "editorMode": "code",
-          "expr": "{host=~\"finite-lat-[1-4]\", source=\"auth\", priority=~\"warning|error|crit|alert|emerg\"}",
+          "expr": "{host=~\"finite-lat-[1-5]\", source=\"auth\", priority=~\"warning|error|crit|alert|emerg\"}",
           "queryType": "range",
           "refId": "A"
         }

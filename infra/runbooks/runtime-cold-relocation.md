@@ -12,8 +12,8 @@ name is not authority to select a Runtime.
 
 ## PRECONDITIONS
 
-- The Core and both Runner hosts run the reviewed generation that contains the
-  `runtime_relocation.v1` contract.
+- The Core, source Runner, and target Runner run the reviewed generation that
+  contains the `runtime_relocation.v1` contract.
 - A full lat1 Borg archive completed successfully after quiescing the hosted
   services, and its archive is visible from the independently held recovery
   credentials.
@@ -34,9 +34,9 @@ name is not authority to select a Runtime.
 - There are no pending/running controls or retirement snapshot for the Runtime.
 - The normal typed `stop` request has succeeded. Do not substitute
   `nerdctl stop`; Core must also record the Runtime offline.
-- Both Runner timers are drained while staging and reviewing the request, and
-  no untargeted ordinary creation request is claimable before the target
-  Runner is allowed one lease attempt.
+- The source and target Runner timers are drained while staging and reviewing
+  the request, and no untargeted ordinary creation request is claimable before
+  the target Runner is allowed one lease attempt.
 
 Abort on any mismatch. Do not delete, rename, or modify source state as part of
 this procedure.

@@ -23,7 +23,7 @@
       },
       "options": {
         "mode": "markdown",
-        "content": "**Unused slots are estimates, not admission capacity.** 42 minus Core-recorded active Runtimes. Runtimes with incomplete artifact identity are excluded. Runner drain, reservations and host readiness are not measured; check `scripts/finite-status` before capacity decisions.\n\nCore exports every 5 minutes. Missing, future-dated or at least 10-minute-old exports hide counts. **Unknown / No data** can also mean no counted Runtimes; it never means 42 available slots. The 42-slot ceiling is pinned configuration, not a live metric."
+        "content": "**Unused slots are estimates, not admission capacity.** 42 minus Core-recorded active Runtimes. Runtimes with incomplete artifact identity are excluded. Runner drain, reservations and host readiness are not measured; check `scripts/finite-status` before capacity decisions.\n\nCore exports every 5 minutes. Missing, future-dated or at least 10-minute-old exports hide counts. **Unknown / No data** can also mean no counted Runtimes; it never means 42 available slots. The 42-slot estimate uses the Nix default, not the effective Runner ceiling. An operator override can lower that ceiling; check `scripts/finite-status` on the Runner host."
       },
       "pluginVersion": "13.0.2"
     },
@@ -231,7 +231,7 @@
           "refId": "A"
         }
       ],
-      "title": "lat3 Unused Slots (estimate)",
+      "title": "lat3 Unused Slots (Nix-default estimate)",
       "type": "stat"
     },
     {
@@ -364,7 +364,7 @@
           "refId": "A"
         }
       ],
-      "title": "lat4 Unused Slots (estimate)",
+      "title": "lat4 Unused Slots (Nix-default estimate)",
       "type": "stat"
     },
     {
@@ -497,7 +497,7 @@
           "refId": "A"
         }
       ],
-      "title": "lat5 Unused Slots (estimate)",
+      "title": "lat5 Unused Slots (Nix-default estimate)",
       "type": "stat"
     },
     {
@@ -616,7 +616,7 @@
           "refId": "A"
         }
       ],
-      "title": "Unused Slots (estimate)",
+      "title": "Unused Slots (Nix-default estimate)",
       "type": "timeseries"
     }
   ],

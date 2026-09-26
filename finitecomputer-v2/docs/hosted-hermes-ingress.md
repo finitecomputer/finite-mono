@@ -3,8 +3,8 @@
 This implementation supplies the shared Core → agent → browser authenticated
 connection on the PR #914 Caddy foundation. Account eligibility is current
 Project ownership, not operator/admin status. It does not build feature pages,
-cut over chat or roll the fleet. The production configuration selects Lat5 for
-a bounded canary; configuration, deployment and applied readiness are separate.
+cut over chat or roll the fleet. Host configuration, deployment and applied
+readiness are separate.
 The execution plan and release gates live in
 [FIN-39](https://linear.app/finitecomputer/issue/FIN-39/provide-hermes-web-authentication-and-desktop-connection-details)
 and the Agent rollout manifest in
@@ -33,7 +33,7 @@ Core owns account authorization and hosted-access intent; necessary
 credential state is not duplicated in Caddy or the dashboard.
 
 No dependency on Finite Chat control, Iroh, a new Python service, or the
-WireGuard network is added by this draft. Existing chat and SimpleX startup are
+WireGuard network is added by this implementation. Existing chat and SimpleX startup are
 preserved; native serving is an optional separately supervised child.
 
 ## Location discovery implemented here
@@ -107,14 +107,14 @@ proxied verbatim from `https://runtime-api.finite.computer` to `127.0.0.1:4201`.
 This does not expose Core's private/account router. Each origin needs DNS pointing
 to its Runner host and a valid TLS certificate before owner access is qualified.
 
-The selected canary is Lat5 Canary Retry. New enrollment on configured hosts
+New enrollment on configured hosts
 prepares native serving automatically; browser access still requires current-owner
 authorization and applied readiness. Existing serving intent is preserved. Host configuration
 does not change the Runtime Artifact default or upgrade any agent. FIN-57 records
-the deployed state, exact selected Runtime, immutable artifacts, recovery boundary
-and activation gates. In particular, reconcile unrelated changes between the live
+the rollout evidence, exact Runtime selections, immutable artifacts, recovery
+boundary and activation gates. In particular, reconcile unrelated changes between the live
 host and the proposed closure before activation; source configuration alone is
-not evidence that the canary is deployed or qualified.
+not evidence that an Agent Runtime is deployed or qualified.
 
 ## Address lifetime is a release gate
 

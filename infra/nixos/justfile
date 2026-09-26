@@ -139,9 +139,9 @@ lat4-runner-rollout-contract:
 lat1-healthcheck-contract:
     cd ../.. && python3 scripts/check_lat1_healthcheck_contract.py
 
-# Anti-drift contract: both Kata Runner hosts render one shared runner-role
-# module; evaluated env and unit fragments may differ only in the declared
-# per-host set.
+# Anti-drift contract: all Kata Runner configurations render one shared
+# runner-role module. This includes retired lat1 and active lat3/lat4/lat5;
+# evaluated env and unit fragments may differ only in the declared per-host set.
 runner-host-contract:
     cd ../.. && python3 scripts/check_runner_host_contract.py
 
