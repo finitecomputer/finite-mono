@@ -45,7 +45,12 @@ activate or probe `auxiliary.vision`, and the retired
 `agent.specialization.aeon.reconcile` command falls through to the generic
 unsupported-command error. Status still includes a `specialization` object so
 mixed-version readers keep working; it is always `desired=false` /
-`effective=false`. Persisted Hermes `auxiliary.vision` rows are left alone.
+`effective=false`. Agentd leaves persisted Hermes `auxiliary.vision` rows
+alone. The Agent Runtime startup reconciler
+(`finitechat/containers/agent/reconcile_hermes_config.py`) removes only the
+exact AEON worker block at gateway start. It keeps the replaced config as
+`hermes-home/config.yaml.pre-aeon-vision-retirement`. Any agentd rollback of
+an old AEON proposal would then fail its config hash check, as intended.
 
 `FINITE_AGENTD_AUTHORIZED_ACCOUNT_IDS` seeds that ledger when configured. For
 the trusted internal-canary path only, the first `agent.owner.claim` may fill

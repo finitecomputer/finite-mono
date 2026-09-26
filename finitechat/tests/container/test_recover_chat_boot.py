@@ -441,6 +441,35 @@ class RecoverChatBootTest(unittest.TestCase):
         self.assertTrue(report["preservation"]["client_store_reused_in_place"])
         self.assertEqual(json.loads(fixture.operation_marker().read_text()), report)
 
+    def test_recovery_keeps_rollback_copy_when_retiring_aeon_vision(self) -> None:
+        fixture = self.make_fixture()
+        config = load_hermes_config(fixture.config_path)
+        config["auxiliary"] = {
+            "title_generation": {"timeout": 2},
+            "vision": {
+                "provider": "custom",
+                "base_url": "https://specialization.finite.vip/v1",
+                "api_mode": "chat_completions",
+                "model": "nemotron-3-nano-omni-30b-a3b-reasoning-nvfp4-fast",
+                "api_key": "fake-retired-aeon-worker-key",
+                "timeout": 120,
+                "download_timeout": 30,
+            },
+        }
+        original = (json.dumps(config, indent=2, sort_keys=True) + "\n").encode()
+        fixture.config_path.write_bytes(original)
+        backup = fixture.hermes_home / "config.yaml.pre-aeon-vision-retirement"
+
+        result = fixture.run()
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("FINITE_RECOVER_CHAT_COMPLETE", result.stdout)
+        recovered = load_hermes_config(fixture.config_path)
+        self.assertEqual(recovered["auxiliary"], {"title_generation": {"timeout": 2}})
+        self.assertEqual(recovered["model"], config["model"])
+        self.assertEqual(backup.read_bytes(), original)
+        self.assertEqual(backup.stat().st_mode & 0o777, 0o600)
+
     def test_store_with_retired_outbox_table_is_still_accepted(self) -> None:
         fixture = self.make_fixture()
         connection = sqlite3.connect(fixture.client_store)

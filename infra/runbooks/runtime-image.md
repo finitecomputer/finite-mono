@@ -173,26 +173,62 @@ on the existing Finite-owned model/route/key shape. Agentd writes the same
 declaration when the owner selects Finite Private; selecting OpenRouter
 replaces the model block and removes the declaration. Hermes reads the flag
 for both incoming attachments and its built-in `vision_analyze` image loader.
-The Hermes version, auxiliary vision settings, chat stores, and protocols do
-not change. Explicit model capability, image-input-mode, and auxiliary vision
-backend overrides remain authoritative. In the current Hermes pin, an explicit
-auxiliary backend takes priority over native vision in `auto`. This capability
-fix does not retire such profiles; identify them during preflight rather than
-claiming that every existing Agent will route natively.
+The Hermes version, chat stores, and protocols do not change. Explicit model
+capability, image-input-mode, and user auxiliary vision backend overrides
+remain authoritative. In the current Hermes pin, an explicit auxiliary backend
+takes priority over native vision in `auto`, so the flag alone does not prove
+native routing.
 The capability is a managed default while absent, not a one-shot migration:
 deleting it causes startup to restore it; an explicit override is preserved.
+
+The one retired backend is the AEON specialization worker, which has been
+deleted. Its writer left `auxiliary.vision` with `provider: custom`, an
+`https://specialization.finite.vip/...` base URL, model
+`nemotron-3-nano-omni-30b-a3b-reasoning-nvfp4-fast` or
+`aeon-gemma-4-12b-k4-nvfp4-unified-fast`, a literal worker key, timeouts, and
+optionally `extra_body.finite_specialization`. The 2026-09-26 census found it
+on 45 of 75 Core-active Runtimes. On the first gateway start on this image
+(or a recover-known-good boot), the startup reconciler removes exactly that
+block, including the dead worker key, and then applies the declaration above.
+Upgrading a Runtime to this image therefore rewrites its config at the next
+start. Before that rewrite, the reconciler keeps the replaced file as
+`hermes-home/config.yaml.pre-aeon-vision-retirement` (mode 0600). It is
+written once and never overwritten. A block with any other key or value, and
+every other backend (the census found OpenRouter, xAI, and one timeouts-only
+block), is left alone; those Agents keep their auxiliary routing.
 
 Qualify this change on the exact published candidate digest before promotion:
 
 1. Run `scripts/finite-status`. Record the previous artifact and the canary's
-   exact Runtime identity. Retain its normal Recovery Set and a private,
-   mode-0600 copy of its pre-upgrade `hermes-home/config.yaml`; the config copy
-   is the rollback boundary for this change, not a chat-history backup.
+   exact Runtime identity. Include a canary that carries the AEON block.
+   Retain its normal Recovery Set and a private, mode-0600 copy of its
+   pre-upgrade `hermes-home/config.yaml`; the config copy is the rollback
+   boundary for this change, not a chat-history backup.
 2. Prove a fresh launch and an explicit upgrade of an existing canary whose
    config lacks the flag. Confirm text replies, retained history, and a new
    synthetic image attachment in an existing Chat. The model must identify
    image content; tool catalog presence alone is insufficient. Resume the
-   Chat after a restart and confirm continued text/image replies.
+   Chat after a restart and confirm continued text/image replies. On the AEON
+   canary, confirm that `auxiliary.vision` is gone and that
+   `config.yaml.pre-aeon-vision-retirement` is mode 0600 and byte-identical to
+   the copy from step 1. Check the routing decision, not the flag. Inside the
+   Runtime, this check must print `native` (it prints `text` while any
+   explicit auxiliary backend remains). Importing Hermes creates home
+   directories, so the check points `HERMES_HOME` at a scratch directory after
+   reading the config:
+
+   ```sh
+   python - <<'PY'
+   import os, tempfile, yaml
+   with open(os.path.join(os.environ["HERMES_HOME"], "config.yaml")) as f:
+       config = yaml.safe_load(f)
+   os.environ["HERMES_HOME"] = tempfile.mkdtemp()
+   from gateway.run import GatewayRunner
+   model = config["model"]
+   print(object.__new__(GatewayRunner)._decide_image_input_mode(
+       user_config=config, provider=model["provider"], model=model["default"]))
+   PY
+   ```
 3. On the test canary, exercise Finite Private → OpenRouter → Finite Private.
    The GLM declaration must disappear on OpenRouter and return on Finite
    Private. Also retain an explicit `supports_vision: false` or
@@ -212,6 +248,15 @@ The candidate would add the missing flag again on startup, so restore the
 old config with the previous artifact. Verify text, retained history, and
 `scripts/finite-status` after rollback. Agentd's profile-apply path separately
 retains its exact-config rollback journal.
+
+For a retired AEON block, the saved config is the Runtime's own
+`hermes-home/config.yaml.pre-aeon-vision-retirement`. Apply the same rule:
+restore it over `config.yaml` with the previous artifact, and only if no owner
+edits since the retirement would be lost. The restored block points at the
+deleted worker, so this brings back the old failing routing rather than a
+working vision backend. The current image would retire the block again on its
+next start. Any agentd rollback of an old AEON proposal would fail closed on
+its config hash check; that refusal is expected.
 
 ### 4a. Upgrade an existing Kata Runtime explicitly
 

@@ -78,6 +78,13 @@ rewriting other model settings. Its rollback boundary is the previous runtime
 artifact plus a saved pre-change config, as specified in the runtime-image
 runbook. Explicit profile selection continues to use agentd's offer journal.
 
+The same reconciler also retires one Finite-installed auxiliary backend that
+has been deleted: the exact `auxiliary.vision` block written by the removed
+AEON specialization writer. It matches the AEON host, model names, and known
+keys; any other key or value leaves the block user-owned. Before its first
+rewrite, it keeps the replaced config beside it once as the rollback copy. No
+other auxiliary backend is rewritten.
+
 ## Boundary with lifecycle infrastructure
 
 `finite-agentd` may restart Hermes and other processes inside an Agent Runtime.
