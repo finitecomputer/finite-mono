@@ -123,6 +123,7 @@ REMAINING_NIX_CHECK_PATHS = {
     "scripts/tests/test_finite_private_ops.py",
     "scripts/tests/test_check_lat1_secret_bootstrap.py",
     "scripts/tests/test_snapshot_sqlite.py",
+    "scripts/tests/test_hosted_snapshot_fence.py",
     "scripts/tests/test_deploy_lat1_rollout.py",
     "scripts/tests/test_lat1_closure_artifact.py",
     "scripts/tests/test_lat3_closure_artifact.py",

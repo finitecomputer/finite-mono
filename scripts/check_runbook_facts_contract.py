@@ -198,7 +198,7 @@ def authority_units() -> set[str]:
         text = path.read_text(encoding="utf-8")
         strings = dict(re.findall(r"^ *(\w+) = \"([^\"]+)\";", text, re.MULTILINE))
         services = re.finditer(
-            r"systemd\.(?:services|timers)\.(?:\"([^\"]+)\"|([a-zA-Z0-9@_-]+)|\$\{(\w+)\}) =",
+            r"systemd\.(?:services|timers|sockets)\.(?:\"([^\"]+)\"|([a-zA-Z0-9@_-]+)|\$\{(\w+)\}) =",
             text,
         )
         for match in services:
@@ -208,7 +208,7 @@ def authority_units() -> set[str]:
                 units.add(name)
         # Units may also be declared as nested attrsets:
         #   systemd.services = { finite-storage-health = { ... }; };
-        for attr in ("services", "timers"):
+        for attr in ("services", "timers", "sockets"):
             units.update(first_level_keys(text, f"systemd.{attr}"))
         jobs = re.finditer(
             r"services\.borgbackup\.jobs\.(?:\"([^\"]+)\"|([a-zA-Z0-9_-]+)) =", text
@@ -290,7 +290,11 @@ def check_units() -> list[str]:
                 lineno += 1
             referenced = journalctl_units(line) + systemctl_units(line)
             for name in referenced:
-                base = name.removesuffix(".service").removesuffix(".timer")
+                base = (
+                    name.removesuffix(".service")
+                    .removesuffix(".timer")
+                    .removesuffix(".socket")
+                )
                 if base not in units:
                     failures.append(
                         f"{path.relative_to(ROOT)}:{lineno}: unit `{name}` matches no"
