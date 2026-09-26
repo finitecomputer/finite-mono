@@ -201,7 +201,7 @@ async fn postgres_admin_ops_runtime_overview_and_finite_private_lifecycle() {
             .await
             .unwrap()
             .unwrap();
-        assert_eq!(usage.burst_limit_units, 100_000_000);
+        assert_eq!(usage.burst_limit_units, 200_000_000);
         assert!(usage.free_daily_reset_available);
         let daily_reset = store
             .claim_finite_private_daily_reset_for_api_key(

@@ -46,8 +46,8 @@ async fn finite_private_reserve_and_settle_keeps_core_as_usage_authority() {
             .unwrap();
 
         assert_eq!(reserved.decision, "allow");
-        assert_eq!(reserved.burst_limit_units, Some(100_000_000));
-        assert_eq!(reserved.burst_remaining_units, Some(99_750_000));
+        assert_eq!(reserved.burst_limit_units, Some(200_000_000));
+        assert_eq!(reserved.burst_remaining_units, Some(199_750_000));
         assert_eq!(reserved.weekly_limit_units, None);
         assert_eq!(reserved.weekly_remaining_units, None);
         let reservation_id = reserved.reservation_id.clone().unwrap();
@@ -457,8 +457,8 @@ async fn finite_private_threshold_notices_are_strongest_once_per_epoch() {
         .unwrap();
 
         for (request_id, units, at) in [
-            ("req-notice-25", 76_000_000, "2026-05-26T13:00:00Z"),
-            ("req-notice-10", 16_000_000, "2026-05-26T13:10:00Z"),
+            ("req-notice-25", 152_000_000, "2026-05-26T13:00:00Z"),
+            ("req-notice-10", 32_000_000, "2026-05-26T13:10:00Z"),
         ] {
             let reserved = db
                 .reserve_finite_private_usage(ReserveFinitePrivateUsageInput {
@@ -503,7 +503,7 @@ async fn finite_private_threshold_notices_are_strongest_once_per_epoch() {
                     .notice
                     .as_ref()
                     .map(|notice| notice.threshold_remaining_percent),
-                Some(if units == 76_000_000 { 25 } else { 10 })
+                Some(if units == 152_000_000 { 25 } else { 10 })
             );
             assert!(
                 status

@@ -376,7 +376,7 @@ fn schema_is_postgres_first_and_contains_first_bridge_tables() {
     assert!(CORE_SCHEMA_SQL.contains("JSONB"));
     assert!(CORE_SCHEMA_SQL.contains("TIMESTAMPTZ"));
     assert!(CORE_SCHEMA_SQL.contains("finite-private-generous-v2"));
-    assert!(CORE_SCHEMA_SQL.contains("100000000"));
+    assert!(CORE_SCHEMA_SQL.contains("200000000"));
     assert!(CORE_SCHEMA_SQL.contains(FINITE_PRIVATE_5X_LIMIT_PROFILE));
     assert!(CORE_SCHEMA_SQL.contains("500000000"));
     assert!(CORE_SCHEMA_SQL.contains("weekly_limit_units = NULL"));
