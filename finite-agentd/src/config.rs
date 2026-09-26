@@ -294,7 +294,14 @@ fn validate_model_value(value: &Value) -> Result<(), AgentdError> {
     let object = value
         .as_object()
         .ok_or_else(|| AgentdError::Config("model must be an object".to_owned()))?;
-    let allowed = ["default", "provider", "base_url", "api_key", "api_mode"];
+    let allowed = [
+        "default",
+        "provider",
+        "base_url",
+        "api_key",
+        "api_mode",
+        "supports_vision",
+    ];
     for key in object.keys() {
         if !allowed.contains(&key.as_str()) {
             return Err(AgentdError::Config(format!(
@@ -310,6 +317,13 @@ fn validate_model_value(value: &Value) -> Result<(), AgentdError> {
         if !valid {
             return Err(AgentdError::Config(format!("model.{key} is required")));
         }
+    }
+    if let Some(value) = object.get("supports_vision")
+        && !value.is_boolean()
+    {
+        return Err(AgentdError::Config(
+            "model.supports_vision must be a boolean".to_owned(),
+        ));
     }
     for key in ["base_url", "api_key", "api_mode"] {
         if let Some(value) = object.get(key)
@@ -580,6 +594,20 @@ mod tests {
                 "model": "gpt-5-mini",
                 "api_key": "never-display-this"
             }),
+        }
+    }
+
+    #[test]
+    fn model_vision_capability_requires_a_boolean() {
+        let mut value = json!({"default": "glm-5-3-flash", "provider": "custom"});
+        assert!(validate_model_value(&value).is_ok());
+        for capability in [json!(true), json!(false)] {
+            value["supports_vision"] = capability;
+            assert!(validate_model_value(&value).is_ok());
+        }
+        for capability in [json!("false"), json!(1), Value::Null, json!({})] {
+            value["supports_vision"] = capability;
+            assert!(validate_model_value(&value).is_err());
         }
     }
 

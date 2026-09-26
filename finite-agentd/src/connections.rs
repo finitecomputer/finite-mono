@@ -263,13 +263,10 @@ impl ConnectionManager {
     ) -> Result<InferenceApplyPlan, AgentdError> {
         let (value, openrouter_api_key_to_persist) = match request.profile.as_str() {
             "finite_private" => (
-                json!({
-                    "default": required_env("FINITE_PRIVATE_MODEL")?,
-                    "provider": "custom",
-                    "base_url": required_env("FINITE_PRIVATE_BASE_URL")?,
-                    "api_key": "${FINITE_PRIVATE_API_KEY}",
-                    "api_mode": "chat_completions",
-                }),
+                finite_private_model_config(
+                    &required_env("FINITE_PRIVATE_MODEL")?,
+                    &required_env("FINITE_PRIVATE_BASE_URL")?,
+                ),
                 None,
             ),
             "openrouter" => {
@@ -726,6 +723,28 @@ fn google_authorized_user_token(request: &GoogleApplyRequest, scopes: &BTreeSet<
     })
 }
 
+fn finite_private_model_config(model: &str, base_url: &str) -> Value {
+    let mut value = json!({
+        "default": model,
+        "provider": "custom",
+        "base_url": base_url,
+        "api_key": "${FINITE_PRIVATE_API_KEY}",
+        "api_mode": "chat_completions",
+    });
+    // Keep this declaration scoped like the runtime's config reconciler.
+    // Unknown models/endpoints continue using Hermes capability discovery.
+    if model == "glm-5-3-flash"
+        && matches!(
+            base_url,
+            "https://finite-private.finite.containers.tinfoil.dev/v1"
+                | "https://kimi-k2-6.finite.containers.tinfoil.dev/v1"
+        )
+    {
+        value["supports_vision"] = json!(true);
+    }
+    value
+}
+
 fn approved_offer(request_id: &str, path: &str, value: Value) -> HermesConfigOfferV1 {
     HermesConfigOfferV1 {
         proposal_id: request_id.to_owned(),
@@ -971,6 +990,82 @@ mod tests {
             ConfigManager::new(hermes_home.join("config.yaml"), ledger),
         );
         (temp, manager)
+    }
+
+    #[test]
+    fn finite_private_vision_is_scoped_to_the_known_model_and_route() {
+        for base_url in [
+            "https://finite-private.finite.containers.tinfoil.dev/v1",
+            "https://kimi-k2-6.finite.containers.tinfoil.dev/v1",
+        ] {
+            let known = finite_private_model_config("glm-5-3-flash", base_url);
+            assert_eq!(known["supports_vision"], true);
+            let unknown = finite_private_model_config("future-model", base_url);
+            assert!(unknown.get("supports_vision").is_none());
+        }
+        let custom = finite_private_model_config("glm-5-3-flash", "https://example.invalid/v1");
+        assert!(custom.get("supports_vision").is_none());
+    }
+
+    #[test]
+    fn vision_profile_switch_and_rollback_preserve_other_config() {
+        let (_temp, manager) = manager();
+        let original = b"model:\n  default: glm-5-3-flash\n  provider: custom\nauxiliary:\n  vision:\n    provider: custom\n    model: user-vision-model\n";
+        fs::write(manager.config.path(), original).unwrap();
+        let private = finite_private_model_config(
+            "glm-5-3-flash",
+            "https://finite-private.finite.containers.tinfoil.dev/v1",
+        );
+        manager
+            .config
+            .apply(
+                &approved_offer("private-vision", MODEL_CONFIG_PATH, private.clone()),
+                || Ok(()),
+            )
+            .unwrap();
+        let after_private = fs::read(manager.config.path()).unwrap();
+        let openrouter = manager
+            .inference_plan(
+                "switch-away",
+                InferenceApplyRequest {
+                    profile: "openrouter".to_owned(),
+                    api_key: Some("synthetic-test-key".to_owned()),
+                    model: Some("user/model".to_owned()),
+                },
+            )
+            .unwrap();
+        manager.config.apply(&openrouter.offer, || Ok(())).unwrap();
+        let model = manager.config.current_value(MODEL_CONFIG_PATH).unwrap();
+        assert_eq!(model["provider"], "openrouter");
+        assert!(model.get("supports_vision").is_none());
+        assert_eq!(
+            manager.config.current_value("auxiliary.vision").unwrap()["model"],
+            "user-vision-model"
+        );
+        manager
+            .config
+            .rollback(
+                &crate::config::HermesConfigRollbackV1 {
+                    proposal_id: "switch-away".to_owned(),
+                },
+                || Ok(()),
+            )
+            .unwrap();
+        assert_eq!(fs::read(manager.config.path()).unwrap(), after_private);
+        assert_eq!(
+            manager.config.current_value(MODEL_CONFIG_PATH).unwrap(),
+            private
+        );
+        manager
+            .config
+            .rollback(
+                &crate::config::HermesConfigRollbackV1 {
+                    proposal_id: "private-vision".to_owned(),
+                },
+                || Ok(()),
+            )
+            .unwrap();
+        assert_eq!(fs::read(manager.config.path()).unwrap(), original);
     }
 
     #[test]

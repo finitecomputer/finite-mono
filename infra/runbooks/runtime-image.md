@@ -164,6 +164,55 @@ seed that baseline once. Existing agents do not auto-update; users and agents
 choose when to run `finite skills sync` against the image's tested bundle.
 Core, RMP, and Runner have no desired-skills state.
 
+### Finite Private native vision qualification
+
+The known Finite Private `glm-5-3-flash` profile now declares
+`model.supports_vision: true` for Hermes's default automatic image routing.
+The startup reconciler seeds new configs and backfills a missing declaration
+on the existing Finite-owned model/route/key shape. Agentd writes the same
+declaration when the owner selects Finite Private; selecting OpenRouter
+replaces the model block and removes the declaration. Hermes reads the flag
+for both incoming attachments and its built-in `vision_analyze` image loader.
+The Hermes version, auxiliary vision settings, chat stores, and protocols do
+not change. Explicit model capability, image-input-mode, and auxiliary vision
+backend overrides remain authoritative. In the current Hermes pin, an explicit
+auxiliary backend takes priority over native vision in `auto`. This capability
+fix does not retire such profiles; identify them during preflight rather than
+claiming that every existing Agent will route natively.
+The capability is a managed default while absent, not a one-shot migration:
+deleting it causes startup to restore it; an explicit override is preserved.
+
+Qualify this change on the exact published candidate digest before promotion:
+
+1. Run `scripts/finite-status`. Record the previous artifact and the canary's
+   exact Runtime identity. Retain its normal Recovery Set and a private,
+   mode-0600 copy of its pre-upgrade `hermes-home/config.yaml`; the config copy
+   is the rollback boundary for this change, not a chat-history backup.
+2. Prove a fresh launch and an explicit upgrade of an existing canary whose
+   config lacks the flag. Confirm text replies, retained history, and a new
+   synthetic image attachment in an existing Chat. The model must identify
+   image content; tool catalog presence alone is insufficient. Resume the
+   Chat after a restart and confirm continued text/image replies.
+3. On the test canary, exercise Finite Private → OpenRouter → Finite Private.
+   The GLM declaration must disappear on OpenRouter and return on Finite
+   Private. Also retain an explicit `supports_vision: false` or
+   `agent.image_input_mode: text` fixture unchanged. A user override is not a
+   failed automatic migration.
+4. Run `scripts/finite-status` again. Stop promotion if attachment handling,
+   history reopening, ordinary replies, or profile switching fails. Use the
+   existing prepared-cohort upgrade flow below only after canary acceptance.
+
+An image downgrade alone does **not** undo the persisted capability field:
+the preceding reconciler preserves unknown model fields. If rollback requires
+the old routing behavior, stop the canary's writers through the supported
+runtime lifecycle, select its previous artifact, and restore the saved config
+only if no subsequent owner edits would be lost. Ambiguous config drift must
+be resolved explicitly; never restore chat databases to roll back this flag.
+The candidate would add the missing flag again on startup, so restore the
+old config with the previous artifact. Verify text, retained history, and
+`scripts/finite-status` after rollback. Agentd's profile-apply path separately
+retains its exact-config rollback journal.
+
 ### 4a. Upgrade an existing Kata Runtime explicitly
 
 Promotion changes only the artifact used by future launches. A normal
