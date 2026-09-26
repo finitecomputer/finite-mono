@@ -487,6 +487,7 @@ pub(crate) struct AccessExplanation {
 #[derive(Debug, Clone, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct AccessSummaryReport {
+    pub(crate) identities: Vec<IdentityDisplayView>,
     pub(crate) brain_id: String,
     pub(crate) members: Vec<String>,
     pub(crate) guests: Vec<String>,
@@ -523,6 +524,10 @@ pub(crate) struct HttpResponse {
 #[derive(Debug, Clone, Eq, PartialEq, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct BrainMetadataView {
+    #[serde(default)]
+    pub(crate) principal_labels_available: bool,
+    #[serde(default)]
+    pub(crate) identities: Vec<IdentityDisplayView>,
     pub(crate) brain_id: String,
     pub(crate) kind: String,
     pub(crate) name: String,
@@ -591,4 +596,31 @@ pub(crate) struct MountedFolderMetadataView {
 
 fn default_folder_role() -> String {
     "folder".to_owned()
+}
+
+#[derive(Debug, Clone, Eq, PartialEq, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct IdentityDisplayView {
+    pub(crate) npub: String,
+    pub(crate) display: String,
+    pub(crate) nip05: Option<String>,
+    pub(crate) verified_at: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) label: Option<PrincipalLabelView>,
+}
+
+#[derive(Debug, Clone, Eq, PartialEq, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct PrincipalLabelView {
+    pub(crate) text: String,
+    pub(crate) source: String,
+    pub(crate) recorded_by: String,
+    pub(crate) updated_at: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct PrincipalLabelsPageView {
+    pub(crate) labels: std::collections::BTreeMap<String, PrincipalLabelView>,
+    pub(crate) next_after: Option<String>,
 }

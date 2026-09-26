@@ -25,6 +25,8 @@ mod invite_tokens;
 mod links;
 mod loading;
 mod pending_wraps;
+mod principal_labels;
+pub use principal_labels::{PRINCIPAL_LABEL_PAGE_SIZE, PrincipalLabel, PrincipalLabelSource};
 mod schema;
 mod shared_folders;
 mod sync_records;
@@ -4444,6 +4446,7 @@ mod tests {
                 &admin,
                 expires,
                 now,
+                None,
             )
             .unwrap();
         assert_eq!(token.role, BrainInviteTokenRole::Member);
@@ -4520,6 +4523,7 @@ mod tests {
                 &admin,
                 expires,
                 now,
+                None,
             )
             .unwrap();
         store
@@ -4556,6 +4560,7 @@ mod tests {
                 &admin,
                 expires,
                 now,
+                None,
             )
             .unwrap();
         store
@@ -4588,6 +4593,7 @@ mod tests {
                 &admin,
                 expires,
                 now,
+                None,
             )
             .unwrap();
         assert_eq!(
@@ -4608,6 +4614,7 @@ mod tests {
                 &admin,
                 expires,
                 now,
+                None,
             )
             .unwrap();
         let revoked = store
@@ -4650,6 +4657,7 @@ mod tests {
                     &outsider,
                     expires,
                     now,
+                    None,
                 )
                 .is_err()
         );
@@ -4663,6 +4671,7 @@ mod tests {
                     &admin,
                     "2026-09-30T00:00:00.000Z",
                     now,
+                    None,
                 )
                 .is_err()
         );
@@ -4675,6 +4684,7 @@ mod tests {
                     &admin,
                     expires,
                     now,
+                    None,
                 )
                 .is_err()
         );
@@ -4697,6 +4707,7 @@ mod tests {
                 &admin,
                 expires,
                 now,
+                None,
             )
             .unwrap();
         assert!(
@@ -9393,6 +9404,7 @@ mod tests {
                 &admin,
                 "2026-09-20T00:00:00.000Z",
                 now,
+                None,
             )
             .unwrap();
         let redeemed = store

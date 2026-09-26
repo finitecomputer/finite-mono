@@ -55,6 +55,7 @@ fbrain mount offer create|list|inspect|revoke
 fbrain mount accept|list|inspect|revoke
 fbrain mount participant add|remove
 fbrain admin member add|remove
+fbrain admin label set|clear --brain <id> --target <npub|hex> [--text <note>]
 fbrain admin role grant|revoke admin
 fbrain admin folder-access grant|revoke
 ```
@@ -279,16 +280,32 @@ fbrain collaborator ensure-admin \
   --json
 ```
 
-`--target` resolution is unified with `invite brain create`: an email bound
-to a Finite account resolves to that account's Member Identity npub through
-the server's account authorities, a NIP-05 name resolves through its domain,
-and a bare npub (or hex public key) is used directly. An email with neither
-a Finite account nor a serving NIP-05 domain fails with the resolver's error
-rather than falling back to a guess.
+`--target` resolution uses public NIP-05 for email-shaped names and accepts
+bare npubs or hex keys directly. Brain does not consult account authorities.
+An address without a matching public NIP-05 record fails resolution; use an
+email Invite Token for delivery instead.
 
-`collaborator ensure-admin` is the normal email-first Organization Brain
-sharing operation. Do not precede it with an ad hoc public NIP-05 probe. The
-command resolves the Managed Agent Email natively and returns one typed receipt:
+`fbrain access list --brain <id>` includes verified NIP-05 names and Brain-local
+notes with their sources. To label a current member or guest, an admin uses:
+
+```sh
+fbrain admin label set --brain <id> --target <npub|hex> --text "CK (human)"
+fbrain admin label clear --brain <id> --target <npub|hex>
+```
+
+Notes require an exact public key and contain 1–320 UTF-8 bytes without control
+characters.
+`admin_note` is an admin assertion, not a verified identity. `invitation_email`
+records the requested email destination, not successful delivery or mailbox
+ownership: someone else can redeem a forwarded link. Redemption never overwrites an existing note. NIP-05
+adds/invitations retain the existing verified alias automatically; bare keys
+stay unidentified until explicitly labelled. Admins see their Brain's notes;
+other principals see only their own. Member removal or loss of final guest
+access clears notes. Labels never alter permissions, keys, roles, or resolution.
+
+`collaborator ensure-admin` shares an Organization Brain with a known Agent
+public key or NIP-05 name. The CLI verifies NIP-05 itself and returns one typed
+receipt:
 
 - `complete` proves Admin Brain Role plus current Folder readiness across the
   authoritative Folder snapshot.
@@ -312,24 +329,17 @@ normal sharing workflow.
 
 ## Invitations And Sharing
 
-`invite brain create --target <email>` and
-`invite folder create --target <email>` are the blessed invite paths. For a
-Finite account email the CLI resolves the account's human and managed agents
-into one plan (Brain membership, or Guest access to exactly one Folder); a
-signer with Brain admin standing commits it directly, everyone else files an
-approval request that a Brain admin signs (`fbrain approvals approve` or the
-chat approval card; Folder plans additionally need the key-holding
-committer). Emails without a Finite account fall back to the one-time email
-invitation.
+`invite brain create` and `invite folder create` accept npubs, hex keys, or
+public NIP-05 names. They invite the resolved key only. To deliver a Brain
+invitation to an email address without a public identity binding, use
+`invite-token create --brain <id> --email <email>`. The token grants access to
+whichever key redeems it first; email is a requested destination, not identity.
+These commands require Brain operational authority.
 
-Every invitation receipt carries a self-describing `deliveryStatus`:
-`sent` (a courtesy email with the public instructions URL reached the human
-account mailbox), `in_app` (the npub-bound invitee — managed agents, or
-humans when no mailer is configured — receives it in their authenticated
-client, not by email), `not_configured` (server has no invite mailer), and
-`failed` (the courtesy email errored after the invitations were already
-committed; they remain valid and visible in-app). `in_app` is the normal
-outcome for account-backed invitations, not a delivery failure.
+For an email Invite Token, `deliveryStatus` is `sent`, `not_configured`, or
+`failed`; the token remains valid when delivery fails and can be shared manually.
+A token created without email reports `manual`. A key-addressed invitation
+reports `in_app`. Read the receipt before reporting delivery to the user.
 
 `invite brain list` answers two different questions depending on the flag:
 with no `--brain` it lists invitations RECEIVED by the acting identity
@@ -340,12 +350,6 @@ anything?", run the no-flag form; `brain list --json` rows with
 `invite brain inspect` and `accept` want the invitation id
 (`invitation-...`); an invite code (`invite-...`) is resolved to its id by
 the code's public `llms.txt` instructions URL.
-
-When your invite files an approval request, tell the user: an approval card
-appears in their chat (they can also run `fbrain approvals list`). When the
-user asks whether anything is waiting for them, check both sides: your own
-`fbrain invite brain list` for invitations addressed to your principal, and
-their pending approval and invitation cards in chat.
 
 ```sh
 fbrain invite brain create --target <email|npub>
@@ -379,7 +383,7 @@ Invitations and Mount Offers default to seven days and accept `--expires-in`
 from `1h` through `30d`. Brain Invitations create Members. Folder Invitations
 create bounded Guest access. Mounts are source-backed and work between either
 Brain kind; the CLI opens and wraps required Folder grants in memory.
-Folder Invitations work for registered identities and unregistered email
-addresses. Unregistered recipients claim the bounded invitation after exact
-email verification using the delivered Invite Secret file. A Folder's native
-access mode remains unchanged; explicit Guest access is orthogonal to it.
+Folder Invitations target an exact public key, supplied directly or resolved
+through public NIP-05. They do not bootstrap an unregistered email recipient.
+A Folder's native access mode remains unchanged; explicit Guest access is
+orthogonal to it.

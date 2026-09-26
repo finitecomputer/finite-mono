@@ -814,3 +814,71 @@ pub(crate) async fn accept_brain_invitation_link_handler(
     }
     Ok(Json(response))
 }
+
+/// Administrative display metadata. NIP-98 authenticates the exact target and
+/// body; the note is never fed into the identity resolver or access protocol.
+pub(crate) async fn set_principal_label_handler(
+    State(state): State<ServerState>,
+    headers: HeaderMap,
+    method: Method,
+    OriginalUri(uri): OriginalUri,
+    AxumPath((brain_id, target_npub)): AxumPath<(String, String)>,
+    body: Bytes,
+) -> Result<Json<PrincipalLabelReceipt>, ApiError> {
+    let actor = validate_request_auth(&state, &headers, &method, &uri, Some(&body))?;
+    let request: SetPrincipalLabelRequest = serde_json::from_slice(&body)
+        .map_err(|_| ApiError::new(StatusCode::BAD_REQUEST, "invalid JSON request body"))?;
+    let brain_id = BrainId::new(brain_id)?;
+    let key = NostrPublicKey::parse(&target_npub).map_err(nostr_identity_error)?;
+    let target = UserId::new(key.to_npub().map_err(nostr_identity_error)?)?;
+    let actor_id = UserId::new(actor.clone())?;
+    let now = server_timestamp(&state);
+    let mut store = state.store.lock().map_err(lock_error)?;
+    ensure_brain_admin(&store.load_brain(&brain_id)?, &actor)?;
+    store.set_principal_label(&brain_id, &actor_id, &target, request.text.as_deref(), &now)?;
+    let label = store
+        .principal_labels_page(&brain_id, Some(&target), "")?
+        .remove(target.as_str());
+    Ok(Json(PrincipalLabelReceipt {
+        brain_id: brain_id.to_string(),
+        npub: target.to_string(),
+        label,
+    }))
+}
+
+pub(crate) async fn list_principal_labels_handler(
+    State(state): State<ServerState>,
+    headers: HeaderMap,
+    method: Method,
+    OriginalUri(uri): OriginalUri,
+    AxumPath(brain_id): AxumPath<String>,
+    Query(query): Query<PrincipalLabelsQuery>,
+) -> Result<Json<PrincipalLabelsResponse>, ApiError> {
+    let actor = validate_request_auth(&state, &headers, &method, &uri, None)?;
+    let brain_id = BrainId::new(brain_id)?;
+    let after = query
+        .after
+        .map(|cursor| {
+            NostrPublicKey::parse(&cursor)
+                .and_then(|key| key.to_npub())
+                .map_err(nostr_identity_error)
+        })
+        .transpose()?
+        .unwrap_or_default();
+    let store = state.store.lock().map_err(lock_error)?;
+    let stored = store.load_brain(&brain_id)?;
+    ensure_metadata_visible(&stored, &actor)?;
+    let viewer = if ensure_brain_admin(&stored, &actor).is_ok() {
+        None
+    } else {
+        Some(UserId::new(actor)?)
+    };
+    let mut labels = store.principal_labels_page(&brain_id, viewer.as_ref(), &after)?;
+    let next_after = if labels.len() > finite_brain_store::PRINCIPAL_LABEL_PAGE_SIZE {
+        labels.pop_last();
+        labels.keys().next_back().cloned()
+    } else {
+        None
+    };
+    Ok(Json(PrincipalLabelsResponse { labels, next_after }))
+}

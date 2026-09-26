@@ -132,6 +132,17 @@ Every invitation carries a public instructions document at
 open it when an invite code, expiry, or claim step confuses you. An
 invitation marked `expired` cannot be accepted; ask the admin to re-invite.
 
+## Principal labels
+
+Use `fbrain access list --brain <id>` to read names with their sources. Public
+NIP-05 names are verified key bindings. An admin can record an unverified note:
+`fbrain admin label set --brain <id> --target <npub|hex> --text "CK (human)"`.
+Use `admin label clear` with the same Brain and target to remove it. Notes are
+visible to admins and the named principal; they never grant access or resolve
+identities. Email Invite Tokens record the requested email destination as `invitation_email`
+on redemption, which does not prove the redeemer owns that mailbox. Preserve
+these source distinctions when reporting a roster. Unknown keys stay unidentified.
+
 ## Folder access
 
 Folders have access modes: `owner`, `admin_only`, `all_members`,

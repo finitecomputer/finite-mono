@@ -42,6 +42,8 @@ pub struct CreateBrainFolderKeyGrantRequest {
 #[derive(Debug, Clone, Eq, PartialEq, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct BrainMetadataResponse {
+    #[serde(default)]
+    pub principal_labels_available: bool,
     pub brain_id: String,
     pub kind: BrainKind,
     pub name: String,
@@ -1093,4 +1095,30 @@ pub struct RevokeMountRequest {
     pub new_key_version: u32,
     pub grants: Vec<FolderKeyGrantRequest>,
     pub reencrypted_records: Vec<RotationObjectRequest>,
+}
+
+/// A Brain-local admin note; null clears it. Never resolves an identity.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SetPrincipalLabelRequest {
+    #[serde(deserialize_with = "Option::deserialize")]
+    pub text: Option<String>,
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PrincipalLabelReceipt {
+    pub brain_id: String,
+    pub npub: String,
+    pub label: Option<finite_brain_store::PrincipalLabel>,
+}
+#[derive(Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PrincipalLabelsResponse {
+    pub labels: std::collections::BTreeMap<String, finite_brain_store::PrincipalLabel>,
+    pub next_after: Option<String>,
+}
+#[derive(Debug, Default, Deserialize)]
+pub struct PrincipalLabelsQuery {
+    pub after: Option<String>,
 }

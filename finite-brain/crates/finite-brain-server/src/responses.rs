@@ -88,6 +88,7 @@ pub(crate) fn metadata_response_with_mounts(
     let folder_access = stored.folder_access;
     let setup_incomplete = stored.setup_incomplete_folder_ids;
     BrainMetadataResponse {
+        principal_labels_available: true,
         brain_id: stored.brain.id.to_string(),
         kind: stored.brain.kind,
         name: stored.brain.name.to_string(),

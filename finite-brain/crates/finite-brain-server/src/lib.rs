@@ -440,6 +440,10 @@ async fn api_route_not_found_handler() -> ApiError {
 
 fn normal_signed_api_router() -> Router<ServerState> {
     Router::new()
+        .route(
+            "/brains/{brain_id}/labels",
+            get(list_principal_labels_handler),
+        )
         .route("/brain-updates", get(brain_updates_handler))
         .route(
             "/brains",
@@ -581,6 +585,10 @@ fn normal_signed_api_router() -> Router<ServerState> {
 
 fn low_level_signed_api_router() -> Router<ServerState> {
     Router::new()
+        .route(
+            "/brains/{brain_id}/labels/{target_npub}",
+            axum::routing::put(set_principal_label_handler),
+        )
         .route(
             "/brains/{brain_id}/members/{target_npub}",
             axum::routing::put(add_member_handler).delete(remove_member_handler),
@@ -3474,6 +3482,160 @@ mod tests {
             expired_row.status, "pending",
             "expired is computed at read; the stored status is never mutated"
         );
+    }
+
+    #[tokio::test]
+    async fn principal_notes_are_brain_scoped_authorized_and_separate_from_identity() {
+        let admin = Keys::generate();
+        let member = Keys::generate();
+        let other = Keys::generate();
+        let target = npub(&member);
+        let state = test_state();
+        let router = router_with_state(state.clone());
+        for brain in ["acme", "other"] {
+            let created = post_brain(
+                router.clone(),
+                &admin,
+                &create_brain_body(brain, "organization"),
+                TEST_NOW,
+                None,
+                None,
+                None,
+            )
+            .await;
+            assert_eq!(created.status(), StatusCode::OK);
+            let mut store = state.store.lock().unwrap();
+            store
+                .add_member(
+                    &BrainId::new(brain).unwrap(),
+                    &UserId::new(target.clone()).unwrap(),
+                )
+                .unwrap();
+            store
+                .add_member(
+                    &BrainId::new(brain).unwrap(),
+                    &UserId::new(npub(&other)).unwrap(),
+                )
+                .unwrap();
+        }
+        let path = format!("/v1/admin/brains/acme/labels/{target}");
+        let before = state
+            .store
+            .lock()
+            .unwrap()
+            .load_brain(&BrainId::new("acme").unwrap())
+            .unwrap();
+        let sequence = state
+            .store
+            .lock()
+            .unwrap()
+            .latest_sequence(&BrainId::new("acme").unwrap())
+            .unwrap();
+        let set = authed_request(
+            router.clone(),
+            &admin,
+            "PUT",
+            &path,
+            Some(serde_json::json!({"text":"Gaius (agent)"}).to_string()),
+            TEST_NOW,
+        )
+        .await;
+        assert_eq!(set.status(), StatusCode::OK);
+        let receipt: PrincipalLabelReceipt = read_json(set).await;
+        assert_eq!(receipt.npub, target);
+        assert_eq!(receipt.label.as_ref().unwrap().text, "Gaius (agent)");
+        assert_eq!(
+            receipt.label.as_ref().unwrap().source,
+            finite_brain_store::PrincipalLabelSource::AdminNote
+        );
+        for (actor, brain, visible) in [
+            (&admin, "acme", true),
+            (&member, "acme", true),
+            (&other, "acme", false),
+            (&admin, "other", false),
+        ] {
+            let page: PrincipalLabelsResponse = read_json(
+                authed_request(
+                    router.clone(),
+                    actor,
+                    "GET",
+                    &format!("/v1/brains/{brain}/labels"),
+                    None,
+                    TEST_NOW,
+                )
+                .await,
+            )
+            .await;
+            assert_eq!(page.labels.contains_key(&target), visible);
+        }
+        let denied = authed_request(
+            router.clone(),
+            &member,
+            "PUT",
+            &path,
+            Some(serde_json::json!({"text":"spoof"}).to_string()),
+            TEST_NOW,
+        )
+        .await;
+        assert_eq!(denied.status(), StatusCode::FORBIDDEN);
+        for body in [
+            serde_json::json!({}),
+            serde_json::json!({"text":"ok", "source":"verified_nip05"}),
+            serde_json::json!({"text":"bad\nline"}),
+            serde_json::json!({"text":" "}),
+        ] {
+            let rejected = authed_request(
+                router.clone(),
+                &admin,
+                "PUT",
+                &path,
+                Some(body.to_string()),
+                TEST_NOW,
+            )
+            .await;
+            assert_eq!(rejected.status(), StatusCode::BAD_REQUEST);
+        }
+        let unknown = authed_request(
+            router.clone(),
+            &admin,
+            "PUT",
+            &format!("/v1/admin/brains/acme/labels/{}", npub(&Keys::generate())),
+            Some(serde_json::json!({"text":"unknown"}).to_string()),
+            TEST_NOW,
+        )
+        .await;
+        assert!(!unknown.status().is_success());
+        {
+            let store = state.store.lock().unwrap();
+            assert_eq!(
+                store.load_brain(&BrainId::new("acme").unwrap()).unwrap(),
+                before
+            );
+            assert_eq!(
+                store
+                    .latest_sequence(&BrainId::new("acme").unwrap())
+                    .unwrap(),
+                sequence
+            );
+            assert!(
+                store
+                    .load_identity_aliases(&[UserId::new(target.clone()).unwrap()])
+                    .unwrap()
+                    .is_empty()
+            );
+        }
+        let clear = authed_request(
+            router.clone(),
+            &admin,
+            "PUT",
+            &path,
+            Some(serde_json::json!({"text":null}).to_string()),
+            TEST_NOW,
+        )
+        .await;
+        assert_eq!(clear.status(), StatusCode::OK);
+        let receipt: PrincipalLabelReceipt = read_json(clear).await;
+        assert!(receipt.label.is_none());
     }
 
     #[tokio::test]
@@ -6634,6 +6796,7 @@ mod tests {
                 &UserId::new("npub-admin").unwrap(),
                 "2026-05-08T00:00:00Z",
                 "2026-05-01T00:00:00Z",
+                None,
             )
             .unwrap();
         let router =
@@ -6694,6 +6857,83 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn invitation_note_records_requested_destination_even_when_delivery_fails() {
+        for failed in [false, true] {
+            let admin = Keys::generate();
+            let recipient = Keys::generate();
+            let state = if failed {
+                test_state().with_invite_mailer(|_| Err("unavailable".to_owned()))
+            } else {
+                test_state()
+            };
+            let router = router_with_state(state);
+            assert_eq!(
+                post_brain(
+                    router.clone(),
+                    &admin,
+                    &create_brain_body("acme", "organization"),
+                    TEST_NOW,
+                    None,
+                    None,
+                    None
+                )
+                .await
+                .status(),
+                StatusCode::OK
+            );
+            let created: CreateBrainInviteTokenResponse = read_json(
+                authed_request(
+                    router.clone(),
+                    &admin,
+                    "POST",
+                    "/v1/brains/acme/invite-tokens",
+                    Some(
+                        serde_json::json!({"role":"member", "email":"intended@example.com"})
+                            .to_string(),
+                    ),
+                    TEST_NOW,
+                )
+                .await,
+            )
+            .await;
+            assert_eq!(
+                created.delivery_status,
+                if failed { "failed" } else { "not_configured" }
+            );
+            assert_eq!(
+                authed_request(
+                    router.clone(),
+                    &recipient,
+                    "POST",
+                    "/v1/invite-tokens/redeem",
+                    Some(serde_json::json!({"token":created.token}).to_string()),
+                    TEST_NOW
+                )
+                .await
+                .status(),
+                StatusCode::OK
+            );
+            let page: PrincipalLabelsResponse = read_json(
+                authed_request(
+                    router,
+                    &admin,
+                    "GET",
+                    "/v1/brains/acme/labels",
+                    None,
+                    TEST_NOW,
+                )
+                .await,
+            )
+            .await;
+            assert_eq!(page.labels[&npub(&recipient)].text, "intended@example.com");
+            assert_eq!(
+                page.labels[&npub(&recipient)].source,
+                finite_brain_store::PrincipalLabelSource::InvitationEmail
+            );
+        }
+    }
+
+    #[tokio::test]
     async fn invite_token_email_serves_human_and_agent_readers() {
         let admin_keys = Keys::generate();
         let sent = Arc::new(Mutex::new(Vec::new()));
@@ -6730,6 +6970,35 @@ mod tests {
         let created: CreateBrainInviteTokenResponse = read_json(create).await;
         assert_eq!(created.delivery_status, "sent");
 
+        let recipient = Keys::generate();
+        let redeemed = authed_request(
+            router.clone(),
+            &recipient,
+            "POST",
+            "/v1/invite-tokens/redeem",
+            Some(serde_json::json!({"token":created.token}).to_string()),
+            TEST_NOW,
+        )
+        .await;
+        assert_eq!(redeemed.status(), StatusCode::OK);
+        let labels: PrincipalLabelsResponse = read_json(
+            authed_request(
+                router,
+                &admin_keys,
+                "GET",
+                "/v1/brains/acme/labels",
+                None,
+                TEST_NOW,
+            )
+            .await,
+        )
+        .await;
+        let label = &labels.labels[&npub(&recipient)];
+        assert_eq!(label.text, "friend@example.com");
+        assert_eq!(
+            label.source,
+            finite_brain_store::PrincipalLabelSource::InvitationEmail
+        );
         let sent = sent.lock().unwrap();
         assert_eq!(sent.len(), 1);
         let email = &sent[0];
