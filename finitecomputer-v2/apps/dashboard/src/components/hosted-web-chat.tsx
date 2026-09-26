@@ -71,6 +71,7 @@ import type {
   HostedChatSummary,
   HostedChatTopic,
 } from "@/lib/hosted-web-device";
+import { formatLocalMessageTime } from "@/lib/date-time";
 import { chatPreviewUrls } from "@/lib/chat-preview-urls";
 import { directHostedImageUrl } from "@/lib/hosted-chat-attachment-url";
 import { restoreHostedChatComposerDraft } from "@/lib/hosted-chat-session";
@@ -1393,7 +1394,7 @@ function ToolRollup({
   );
 }
 
-function MessageRow({
+export function MessageRow({
   attachmentUrl,
   message,
   ownAccountId,
@@ -1405,13 +1406,15 @@ function MessageRow({
   shareTitle: string;
 }) {
   const content = messageContent(message);
+  // The Hosted Web Device's display_timestamp uses the server's timezone.
+  const timestamp = formatLocalMessageTime(message.timestamp_unix_seconds);
   if (message.sender_account_id === ownAccountId || (!ownAccountId && message.is_mine)) {
     return (
       <article className="finite-chat__message finite-chat__message--user">
         <div>
           <MessageAttachments attachmentUrl={attachmentUrl} message={message} compact />
           {content ? <p>{content}</p> : null}
-          <time className="finite-chat__message-time">{deliveryText(message) || message.display_timestamp}</time>
+          <time className="finite-chat__message-time">{deliveryText(message) || timestamp}</time>
         </div>
       </article>
     );
@@ -1423,11 +1426,11 @@ function MessageRow({
       {content && message.final_delivery ? (
         <ChatResponseActions
           text={content}
-          timestamp={message.display_timestamp}
+          timestamp={timestamp}
           title={shareTitle}
         />
       ) : (
-        <time className="finite-chat__message-time">{message.display_timestamp}</time>
+        <time className="finite-chat__message-time">{timestamp}</time>
       )}
     </article>
   );
