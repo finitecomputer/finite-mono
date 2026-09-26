@@ -63,7 +63,7 @@ test("admins issue Standard or Confidential Launch Codes", { timeout: 120_000 },
       }).getAttribute("aria-valuenow"),
       "75"
     );
-    await page.getByText("75,000,000 of 100,000,000 weighted tokens").waitFor({
+    await page.getByText("150,000,000 of 200,000,000 weighted tokens").waitFor({
       state: "visible",
     });
     await page.getByText(/Jul 21, 2026, 8:00 PM UTC/u).waitFor({ state: "visible" });
@@ -95,7 +95,7 @@ test("admins issue Standard or Confidential Launch Codes", { timeout: 120_000 },
     await page.getByRole("progressbar", {
       name: "Finite Private weighted token usage",
     }).waitFor({ state: "visible" });
-    await page.getByText("84 of 100,000,000 weighted tokens").waitFor({ state: "visible" });
+    await page.getByText("84 of 200,000,000 weighted tokens").waitFor({ state: "visible" });
     await page.getByRole("button", { name: "Reset usage" }).waitFor({ state: "visible" });
     await page.getByText("fp_key_1", { exact: true }).waitFor({ state: "visible" });
     await page.getByRole("tab", { name: "Finite Private" }).click();
@@ -328,9 +328,9 @@ async function handleCoreRequest(
 
 function finitePrivateUsage(resetUsed: boolean) {
   return {
-    burstLimitUnits: 100_000_000,
-    burstUsedUnits: resetUsed ? 0 : 75_000_000,
-    burstRemainingUnits: resetUsed ? 100_000_000 : 25_000_000,
+    burstLimitUnits: 200_000_000,
+    burstUsedUnits: resetUsed ? 0 : 150_000_000,
+    burstRemainingUnits: resetUsed ? 200_000_000 : 50_000_000,
     burstResetAt: resetUsed ? "2026-07-21T23:00:00Z" : "2026-07-21T20:00:00Z",
     freeDailyResetAvailable: !resetUsed,
     freeDailyResetAvailableAgainAt: "2026-07-22T00:00:00Z",
@@ -468,7 +468,7 @@ function finitePrivateAdminState() {
       {
         id: "finite-private-generous-v2",
         burst_window_seconds: 18_000,
-        burst_limit_units: 100_000_000,
+        burst_limit_units: 200_000_000,
         weekly_limit_units: null,
         created_at: "2026-05-28T12:00:00Z",
         updated_at: "2026-05-28T12:01:00Z",

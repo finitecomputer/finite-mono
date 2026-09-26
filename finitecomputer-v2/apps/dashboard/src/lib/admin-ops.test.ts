@@ -37,11 +37,11 @@ test("heartbeatAgeLabel formats ages and degrades safely", () => {
   assert.equal(heartbeatAgeLabel("2026-06-28T12:00:00Z", now), "4d ago");
 });
 
-test("Finite Private helpers keep the curated 1x/5x order and exact project correlation", () => {
+test("Finite Private helpers keep the curated 200M/500M order and exact project correlation", () => {
   const profiles = finitePrivateAssignableProfiles([
     { id: "finite-private-generous-5x-v1", burst_limit_units: 500_000_000 },
     { id: "legacy-custom", burst_limit_units: 7 },
-    { id: "finite-private-generous-v2", burst_limit_units: 100_000_000 },
+    { id: "finite-private-generous-v2", burst_limit_units: 200_000_000 },
   ]);
   assert.deepEqual(
     profiles.map((profile) => profile.id),
@@ -49,11 +49,11 @@ test("Finite Private helpers keep the curated 1x/5x order and exact project corr
   );
   assert.equal(
     finitePrivateProfileLabel(profiles[0].id),
-    "1× · 100M weighted tokens / 5h"
+    "200M weighted tokens / 5h"
   );
   assert.equal(
     finitePrivateProfileLabel(profiles[1].id),
-    "5× · 500M weighted tokens / 5h"
+    "500M weighted tokens / 5h"
   );
 
   const accounts = [

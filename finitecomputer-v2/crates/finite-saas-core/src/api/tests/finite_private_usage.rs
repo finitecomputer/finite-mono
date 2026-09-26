@@ -41,7 +41,7 @@ async fn finite_private_user_controls_share_one_daily_claim_across_key_and_dashb
             .await
             .unwrap();
         let status: crate::FinitePrivateUsageStatus = serde_json::from_slice(&body).unwrap();
-        assert_eq!(status.burst_limit_units, 100_000_000);
+        assert_eq!(status.burst_limit_units, 200_000_000);
         assert!(status.free_daily_reset_available);
 
         let response = app
