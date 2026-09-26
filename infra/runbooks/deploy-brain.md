@@ -63,6 +63,20 @@ authorized write/read proof against `https://brain.finite.computer`. Signed
 `/_admin/*` requests use Brain's own authorization and do not require a
 WorkOS browser session.
 
+## Rollback
+
+1. Switch lat2 to the previous NixOS generation and record the resulting
+   `/run/current-system`; for a deliberate rollback, build/download/deploy the
+   previous known-good rev's exact lat2 closure artifact and verify that path.
+2. Preserve the current database and all accepted writes. A binary rollback is
+   safe only if the old binary can read the current schema. Otherwise restore
+   and diagnose on an isolated target; never start a second writable service.
+
+A NixOS rollback is not a data rollback. Continuous Litestream replication is
+the between-deploy restore lane (see
+`litestream-chat-replication.md`); empty-target restore still requires an
+explicit drill before claiming it.
+
 ## Principal labels and backfill
 
 Labels are display metadata in the Brain database. Public NIP-05 names use the
@@ -106,17 +120,3 @@ including source and unchanged admin/Folder access. Correct a mistake with the
 same exact-key command or `admin label clear`; labels do not require key rotation.
 Run `scripts/finite-status` before and after rollout. Deployment and any live
 backfill require their own explicit authorization and recorded target set.
-
-## Rollback
-
-1. Switch lat2 to the previous NixOS generation and record the resulting
-   `/run/current-system`; for a deliberate rollback, build/download/deploy the
-   previous known-good rev's exact lat2 closure artifact and verify that path.
-2. Preserve the current database and all accepted writes. A binary rollback is
-   safe only if the old binary can read the current schema. Otherwise restore
-   and diagnose on an isolated target; never start a second writable service.
-
-A NixOS rollback is not a data rollback. Continuous Litestream replication is
-the between-deploy restore lane (see
-`litestream-chat-replication.md`); empty-target restore still requires an
-explicit drill before claiming it.
