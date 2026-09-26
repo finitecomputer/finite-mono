@@ -582,6 +582,10 @@ fn normal_signed_api_router() -> Router<ServerState> {
 fn low_level_signed_api_router() -> Router<ServerState> {
     Router::new()
         .route(
+            "/brains/{brain_id}/labels/{target_npub}",
+            axum::routing::put(set_principal_label_handler),
+        )
+        .route(
             "/brains/{brain_id}/members/{target_npub}",
             axum::routing::put(add_member_handler).delete(remove_member_handler),
         )
@@ -798,6 +802,7 @@ fn identity_response_from_resolved(
     verified_at: Option<String>,
 ) -> IdentityResponse {
     IdentityResponse {
+        label: None,
         display: resolved
             .nip05
             .clone()
@@ -812,6 +817,7 @@ fn identity_response_from_resolved(
 
 fn identity_response_from_alias(alias: IdentityAlias) -> IdentityResponse {
     IdentityResponse {
+        label: None,
         display: alias
             .preferred_nip05
             .clone()
@@ -1019,6 +1025,7 @@ fn selected_folder_ids(values: &[String]) -> Result<Vec<FolderId>, ApiError> {
 fn enrich_metadata_identities(
     store: &BrainStore,
     response: &mut BrainMetadataResponse,
+    actor: &str,
 ) -> Result<(), ApiError> {
     let mut npubs = Vec::new();
     if let Some(owner) = &response.owner_user_id {
@@ -1033,7 +1040,33 @@ fn enrich_metadata_identities(
     for folder in &response.folders {
         npubs.extend(folder.access_user_ids.iter().cloned());
     }
-    response.identities = known_identity_responses(store, npubs)?;
+    let mut identities = known_identity_responses(store, npubs.clone())?
+        .into_iter()
+        .map(|identity| (identity.npub.clone(), identity))
+        .collect::<BTreeMap<_, _>>();
+    let brain_id = BrainId::new(response.brain_id.clone())?;
+    let stored = store.load_brain(&brain_id)?;
+    let admin = ensure_brain_admin(&stored, actor).is_ok();
+    let mut labels = store.principal_labels(&brain_id)?;
+    for npub in npubs.into_iter().collect::<BTreeSet<_>>() {
+        let identity = identities
+            .entry(npub.clone())
+            .or_insert_with(|| IdentityResponse {
+                npub: npub.clone(),
+                hex: NostrPublicKey::parse(&npub)
+                    .map(|key| key.to_hex())
+                    .unwrap_or_default(),
+                display: npub.clone(),
+                nip05: None,
+                relays: Vec::new(),
+                verified_at: None,
+                label: None,
+            });
+        if admin || npub == actor {
+            identity.label = labels.remove(&npub);
+        }
+    }
+    response.identities = identities.into_values().collect();
     Ok(())
 }
 
@@ -1171,7 +1204,7 @@ where
         mutation(&mut store, &brain_id)?;
         let stored = store.load_brain(&brain_id)?;
         let mut response = metadata_response(stored);
-        enrich_metadata_identities(&store, &mut response)?;
+        enrich_metadata_identities(&store, &mut response, &actor_npub)?;
         attach_pending_approvals(&store, &mut response, &brain_id)?;
         attach_pending_wraps(&store, &mut response, &brain_id)?;
         response
@@ -3474,6 +3507,173 @@ mod tests {
             expired_row.status, "pending",
             "expired is computed at read; the stored status is never mutated"
         );
+    }
+
+    #[tokio::test]
+    async fn principal_notes_are_brain_scoped_authorized_and_separate_from_verified_identity() {
+        let admin = Keys::generate();
+        let member = Keys::generate();
+        let other = Keys::generate();
+        let target = npub(&member);
+        let identifier = Nip05Identifier::parse("agent@example.com").unwrap();
+        let document =
+            serde_json::json!({"names": {"agent": member.public_key().to_hex()}}).to_string();
+        let state = test_state().with_nip05_fixture(identifier.well_known_request().url, document);
+        let router = router_with_state(state.clone());
+        for brain in ["acme", "other"] {
+            let created = post_brain(
+                router.clone(),
+                &admin,
+                &create_brain_body(brain, "organization"),
+                TEST_NOW,
+                None,
+                None,
+                None,
+            )
+            .await;
+            assert_eq!(created.status(), StatusCode::OK);
+            let mut store = state.store.lock().unwrap();
+            store
+                .add_member(
+                    &BrainId::new(brain).unwrap(),
+                    &UserId::new(target.clone()).unwrap(),
+                )
+                .unwrap();
+            store
+                .add_member(
+                    &BrainId::new(brain).unwrap(),
+                    &UserId::new(npub(&other)).unwrap(),
+                )
+                .unwrap();
+        }
+        let resolve = authed_request(
+            router.clone(),
+            &admin,
+            "POST",
+            "/v1/identities/resolve",
+            Some(serde_json::json!({"input":"agent@example.com"}).to_string()),
+            TEST_NOW,
+        )
+        .await;
+        assert_eq!(resolve.status(), StatusCode::OK);
+        let path = format!("/v1/admin/brains/acme/labels/{target}");
+        let before = state
+            .store
+            .lock()
+            .unwrap()
+            .load_brain(&BrainId::new("acme").unwrap())
+            .unwrap();
+        let sequence = state
+            .store
+            .lock()
+            .unwrap()
+            .latest_sequence(&BrainId::new("acme").unwrap())
+            .unwrap();
+        let set = authed_request(
+            router.clone(),
+            &admin,
+            "PUT",
+            &path,
+            Some(serde_json::json!({"text":"Gaius (agent)"}).to_string()),
+            TEST_NOW,
+        )
+        .await;
+        assert_eq!(set.status(), StatusCode::OK);
+        let metadata: BrainMetadataResponse = read_json(set).await;
+        let identity = metadata
+            .identities
+            .iter()
+            .find(|i| i.npub == target)
+            .unwrap();
+        assert_eq!(identity.display, "agent@example.com");
+        assert_eq!(identity.nip05.as_deref(), Some("agent@example.com"));
+        assert!(identity.verified_at.is_some());
+        assert_eq!(identity.label.as_ref().unwrap().text, "Gaius (agent)");
+        assert_eq!(
+            identity.label.as_ref().unwrap().source,
+            finite_brain_store::PrincipalLabelSource::AdminNote
+        );
+        for (actor, brain, visible, timestamp) in [
+            (&member, "acme", true, TEST_NOW),
+            (&other, "acme", false, TEST_NOW),
+            (&admin, "other", false, TEST_NOW),
+        ] {
+            let response: BrainMetadataResponse =
+                read_json(get_metadata(router.clone(), actor, brain, timestamp).await).await;
+            let identity = response
+                .identities
+                .iter()
+                .find(|i| i.npub == target)
+                .unwrap();
+            assert_eq!(identity.label.is_some(), visible);
+        }
+        let denied = authed_request(
+            router.clone(),
+            &member,
+            "PUT",
+            &path,
+            Some(serde_json::json!({"text":"spoof"}).to_string()),
+            TEST_NOW,
+        )
+        .await;
+        assert_eq!(denied.status(), StatusCode::FORBIDDEN);
+        for body in [
+            serde_json::json!({}),
+            serde_json::json!({"text":"ok", "source":"verified_nip05"}),
+            serde_json::json!({"text":"bad\nline"}),
+            serde_json::json!({"text":" "}),
+        ] {
+            let rejected = authed_request(
+                router.clone(),
+                &admin,
+                "PUT",
+                &path,
+                Some(body.to_string()),
+                TEST_NOW,
+            )
+            .await;
+            assert_eq!(rejected.status(), StatusCode::BAD_REQUEST);
+        }
+        let unknown = authed_request(
+            router.clone(),
+            &admin,
+            "PUT",
+            &format!("/v1/admin/brains/acme/labels/{}", npub(&Keys::generate())),
+            Some(serde_json::json!({"text":"unknown"}).to_string()),
+            TEST_NOW,
+        )
+        .await;
+        assert!(!unknown.status().is_success());
+        let store = state.store.lock().unwrap();
+        assert_eq!(
+            store.load_brain(&BrainId::new("acme").unwrap()).unwrap(),
+            before
+        );
+        assert_eq!(
+            store
+                .latest_sequence(&BrainId::new("acme").unwrap())
+                .unwrap(),
+            sequence
+        );
+        drop(store);
+        let clear = authed_request(
+            router.clone(),
+            &admin,
+            "PUT",
+            &path,
+            Some(serde_json::json!({"text":null}).to_string()),
+            TEST_NOW,
+        )
+        .await;
+        assert_eq!(clear.status(), StatusCode::OK);
+        let response: BrainMetadataResponse = read_json(clear).await;
+        let identity = response
+            .identities
+            .iter()
+            .find(|i| i.npub == target)
+            .unwrap();
+        assert!(identity.label.is_none());
+        assert_eq!(identity.nip05.as_deref(), Some("agent@example.com"));
     }
 
     #[tokio::test]
@@ -6634,6 +6834,7 @@ mod tests {
                 &UserId::new("npub-admin").unwrap(),
                 "2026-05-08T00:00:00Z",
                 "2026-05-01T00:00:00Z",
+                None,
             )
             .unwrap();
         let router =
@@ -6730,6 +6931,30 @@ mod tests {
         let created: CreateBrainInviteTokenResponse = read_json(create).await;
         assert_eq!(created.delivery_status, "sent");
 
+        let recipient = Keys::generate();
+        let redeemed = authed_request(
+            router.clone(),
+            &recipient,
+            "POST",
+            "/v1/invite-tokens/redeem",
+            Some(serde_json::json!({"token":created.token}).to_string()),
+            TEST_NOW,
+        )
+        .await;
+        assert_eq!(redeemed.status(), StatusCode::OK);
+        let metadata: BrainMetadataResponse =
+            read_json(get_metadata(router, &admin_keys, "acme", TEST_NOW).await).await;
+        let identity = metadata
+            .identities
+            .iter()
+            .find(|i| i.npub == npub(&recipient))
+            .unwrap();
+        assert_eq!(identity.label.as_ref().unwrap().text, "friend@example.com");
+        assert_eq!(
+            identity.label.as_ref().unwrap().source,
+            finite_brain_store::PrincipalLabelSource::InvitationEmail
+        );
+        assert!(identity.nip05.is_none());
         let sent = sent.lock().unwrap();
         assert_eq!(sent.len(), 1);
         let email = &sent[0];

@@ -108,6 +108,13 @@ impl BrainStore {
                 params![29, MIGRATION_TIMESTAMP],
             )?;
         }
+        if !migration_applied(&tx, 30)? {
+            tx.execute_batch(SCHEMA_V30)?;
+            tx.execute(
+                "INSERT INTO schema_migrations (version, applied_at) VALUES (?1, ?2)",
+                params![30, MIGRATION_TIMESTAMP],
+            )?;
+        }
         tx.commit()?;
         Ok(())
     }
@@ -355,6 +362,49 @@ ALTER TABLE brain_invitation_plans ADD COLUMN folder_id TEXT;
 
 const SCHEMA_V27: &str = r#"
 ALTER TABLE brain_approval_requests ADD COLUMN result_invitations_json TEXT;
+"#;
+
+const SCHEMA_V30: &str = r#"
+CREATE TABLE brain_principal_labels (
+    brain_id TEXT NOT NULL REFERENCES brains(id) ON DELETE CASCADE,
+    user_id TEXT NOT NULL,
+    text TEXT NOT NULL CHECK (length(text) BETWEEN 1 AND 320),
+    source TEXT NOT NULL CHECK (source IN ('admin_note', 'invitation_email')),
+    recorded_by TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    PRIMARY KEY (brain_id, user_id)
+);
+
+-- This is delivery provenance, never an identity binding. Old token creators
+-- omit it and continue working. Old redeemers also execute the trigger below.
+ALTER TABLE brain_invite_tokens ADD COLUMN delivery_email TEXT;
+
+CREATE TRIGGER label_invite_token_redeemer
+AFTER UPDATE OF redeemed_by_npub ON brain_invite_tokens
+WHEN OLD.redeemed_by_npub IS NULL AND NEW.redeemed_by_npub IS NOT NULL
+    AND NEW.delivery_email IS NOT NULL
+    AND EXISTS(SELECT 1 FROM brain_members
+        WHERE brain_id=NEW.brain_id AND user_id=NEW.redeemed_by_npub)
+BEGIN
+    INSERT INTO brain_principal_labels (brain_id, user_id, text, source, recorded_by, updated_at)
+    VALUES (NEW.brain_id, NEW.redeemed_by_npub, NEW.delivery_email, 'invitation_email',
+        NEW.inviter_npub, NEW.redeemed_at)
+    ON CONFLICT(brain_id, user_id) DO NOTHING;
+END;
+
+-- Cleanup applies to retained older writers as well as the new server.
+CREATE TRIGGER clear_member_principal_label AFTER DELETE ON brain_members
+BEGIN
+    DELETE FROM brain_principal_labels WHERE brain_id=OLD.brain_id AND user_id=OLD.user_id;
+END;
+CREATE TRIGGER clear_departed_guest_principal_label AFTER DELETE ON folder_access
+WHEN NOT EXISTS(SELECT 1 FROM brain_members WHERE brain_id=OLD.brain_id AND user_id=OLD.user_id)
+    AND NOT EXISTS(SELECT 1 FROM folder_access WHERE brain_id=OLD.brain_id AND user_id=OLD.user_id)
+    AND NOT EXISTS(SELECT 1 FROM brains WHERE id=OLD.brain_id AND owner_user_id=OLD.user_id)
+    AND NOT EXISTS(SELECT 1 FROM personal_agents WHERE brain_id=OLD.brain_id AND agent_npub=OLD.user_id AND status='active')
+BEGIN
+    DELETE FROM brain_principal_labels WHERE brain_id=OLD.brain_id AND user_id=OLD.user_id;
+END;
 "#;
 
 const SCHEMA_V29: &str = r#"
@@ -2787,7 +2837,7 @@ mod tests {
                 row.get(0)
             })
             .unwrap();
-        assert_eq!(latest_version, 29);
+        assert_eq!(latest_version, 30);
         assert_eq!(capacity_count(&store, "legacy-organization", "folders"), 1);
         assert_eq!(capacity_count(&store, "legacy-organization", "members"), 1);
         assert_eq!(

@@ -52,6 +52,7 @@ pub(crate) async fn create_brain_invite_token_handler(
             &actor_user_id,
             &expires_at,
             &created_at,
+            email.as_deref(),
         )?;
         (stored, created)
     };

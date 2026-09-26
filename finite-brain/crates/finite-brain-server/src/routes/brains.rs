@@ -108,7 +108,7 @@ pub(crate) async fn create_brain_handler(
     let mut response = metadata_response(stored);
     {
         let store = state.store.lock().map_err(lock_error)?;
-        enrich_metadata_identities(&store, &mut response)?;
+        enrich_metadata_identities(&store, &mut response, &actor_npub)?;
     }
     Ok(Json(response))
 }
@@ -152,7 +152,7 @@ pub(crate) async fn brain_metadata_handler(
     let mut response = metadata_response_for_actor(stored, mounted_folders, &actor_npub);
     {
         let store = state.store.lock().map_err(lock_error)?;
-        enrich_metadata_identities(&store, &mut response)?;
+        enrich_metadata_identities(&store, &mut response, &actor_npub)?;
         if actor_is_admin {
             attach_pending_approvals(&store, &mut response, &brain_id)?;
             attach_pending_wraps(&store, &mut response, &brain_id)?;
@@ -813,4 +813,32 @@ pub(crate) async fn accept_brain_invitation_link_handler(
         enrich_brain_invitation_identities(&store, &mut response)?;
     }
     Ok(Json(response))
+}
+
+/// Administrative display metadata. NIP-98 authenticates the exact target and
+/// body; the note is never fed into the identity resolver or access protocol.
+pub(crate) async fn set_principal_label_handler(
+    State(state): State<ServerState>,
+    headers: HeaderMap,
+    method: Method,
+    OriginalUri(uri): OriginalUri,
+    AxumPath((brain_id, target_npub)): AxumPath<(String, String)>,
+    body: Bytes,
+) -> Result<Json<BrainMetadataResponse>, ApiError> {
+    let actor = validate_request_auth(&state, &headers, &method, &uri, Some(&body))?;
+    let request: SetPrincipalLabelRequest = serde_json::from_slice(&body)
+        .map_err(|_| ApiError::new(StatusCode::BAD_REQUEST, "invalid JSON request body"))?;
+    let brain_id = BrainId::new(brain_id)?;
+    let key = NostrPublicKey::parse(&target_npub).map_err(nostr_identity_error)?;
+    let target = UserId::new(key.to_npub().map_err(nostr_identity_error)?)?;
+    let actor_id = UserId::new(actor.clone())?;
+    let now = server_timestamp(&state);
+    Ok(Json(run_as_admin(
+        state,
+        brain_id,
+        actor,
+        |store, brain_id| {
+            store.set_principal_label(brain_id, &actor_id, &target, request.text.as_deref(), &now)
+        },
+    )?))
 }

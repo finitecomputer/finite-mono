@@ -109,6 +109,8 @@ pub struct PersonalAgentResponse {
 #[derive(Debug, Clone, Eq, PartialEq, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct IdentityResponse {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub label: Option<finite_brain_store::PrincipalLabel>,
     pub npub: String,
     pub hex: String,
     pub display: String,
@@ -1093,4 +1095,12 @@ pub struct RevokeMountRequest {
     pub new_key_version: u32,
     pub grants: Vec<FolderKeyGrantRequest>,
     pub reencrypted_records: Vec<RotationObjectRequest>,
+}
+
+/// A Brain-local admin note; null clears it. Never resolves an identity.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SetPrincipalLabelRequest {
+    #[serde(deserialize_with = "Option::deserialize")]
+    pub text: Option<String>,
 }

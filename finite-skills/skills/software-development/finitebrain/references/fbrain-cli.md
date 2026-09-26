@@ -55,6 +55,7 @@ fbrain mount offer create|list|inspect|revoke
 fbrain mount accept|list|inspect|revoke
 fbrain mount participant add|remove
 fbrain admin member add|remove
+fbrain admin label set|clear --brain <id> --target <npub|hex> [--text <note>]
 fbrain admin role grant|revoke admin
 fbrain admin folder-access grant|revoke
 ```
@@ -279,12 +280,27 @@ fbrain collaborator ensure-admin \
   --json
 ```
 
-`--target` resolution is unified with `invite brain create`: an email bound
-to a Finite account resolves to that account's Member Identity npub through
-the server's account authorities, a NIP-05 name resolves through its domain,
-and a bare npub (or hex public key) is used directly. An email with neither
-a Finite account nor a serving NIP-05 domain fails with the resolver's error
-rather than falling back to a guess.
+`--target` resolution uses public NIP-05 for email-shaped names and accepts
+bare npubs or hex keys directly. Brain does not consult account authorities.
+An address without a matching public NIP-05 record fails resolution; use an
+email Invite Token for delivery instead.
+
+`fbrain access list --brain <id>` includes verified NIP-05 names and Brain-local
+notes with their sources. To label a current member or guest, an admin uses:
+
+```sh
+fbrain admin label set --brain <id> --target <npub|hex> --text "CK (human)"
+fbrain admin label clear --brain <id> --target <npub|hex>
+```
+
+Notes require an exact public key and contain 1–320 printable characters.
+`admin_note` is an admin assertion, not a verified identity. `invitation_email`
+records where an Invite Token was sent, not mailbox ownership: someone else can
+redeem a forwarded link. Redemption never overwrites an existing note. NIP-05
+adds/invitations retain the existing verified alias automatically; bare keys
+stay unidentified until explicitly labelled. Admins see their Brain's notes;
+other principals see only their own. Member removal or loss of final guest
+access clears notes. Labels never alter permissions, keys, roles, or resolution.
 
 `collaborator ensure-admin` is the normal email-first Organization Brain
 sharing operation. Do not precede it with an ad hoc public NIP-05 probe. The

@@ -4226,3 +4226,97 @@ fn built_fbrain_pending_wraps_complete_on_admin_sync_unlock_invited_member() {
     shutdown.send(()).unwrap();
     server_thread.join().unwrap();
 }
+
+#[test]
+fn built_fbrain_process_sets_displays_and_clears_admin_notes() {
+    let scratch = TempDir::new().unwrap();
+    let home = scratch.path();
+    let keys = Keys::generate();
+    let target = NostrPublicKey::from_protocol(keys.public_key())
+        .to_npub()
+        .unwrap();
+    let secret = home.join("import-key");
+    fs::write(&secret, keys.secret_key().to_secret_hex()).unwrap();
+    let imported = run(
+        home,
+        home,
+        &[
+            "auth",
+            "import",
+            "--file",
+            secret.to_str().unwrap(),
+            "--json",
+        ],
+    );
+    assert!(imported.status.success());
+    fs::remove_file(secret).unwrap();
+    let (server_url, shutdown, server_thread) =
+        spawn_real_brain_server(&target, &target, &target, &target);
+    let invoke = |args: &[&str]| {
+        command(home, home)
+            .env(
+                "FBRAIN_NOW",
+                OffsetDateTime::now_utc().format(&Rfc3339).unwrap(),
+            )
+            .env("FINITE_BRAIN_SERVER_URL", &server_url)
+            .env("FINITE_BRAIN_PUBLIC_BASE_URL", &server_url)
+            .args(args)
+            .output()
+            .unwrap()
+    };
+    let checked = |args: &[&str]| {
+        let output = invoke(args);
+        assert!(
+            output.status.success(),
+            "{args:?}: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        output
+    };
+    checked(&["brain", "create", "organization", "Labels", "--json"]);
+    checked(&[
+        "admin",
+        "label",
+        "set",
+        "--brain",
+        "labels",
+        "--target",
+        &target,
+        "--text",
+        "CK (human)",
+        "--json",
+    ]);
+    let listed = checked(&["access", "list", "--brain", "labels"]);
+    let text = String::from_utf8(listed.stdout).unwrap();
+    assert!(text.contains(&format!(
+        "identity {target} note=CK (human) source=admin_note (unverified)"
+    )));
+    let listed = checked(&["access", "list", "--brain", "labels", "--json"]);
+    let report: Value = serde_json::from_slice(&listed.stdout).unwrap();
+    assert_eq!(report["identities"][0]["label"]["text"], "CK (human)");
+    assert_eq!(report["identities"][0]["label"]["recordedBy"], target);
+    // Exact key selection is mandatory for durable notes.
+    let rejected = invoke(&[
+        "admin",
+        "label",
+        "set",
+        "--brain",
+        "labels",
+        "--target",
+        "someone@example.com",
+        "--text",
+        "No implicit lookup",
+    ]);
+    assert!(!rejected.status.success());
+    checked(&[
+        "admin", "label", "clear", "--brain", "labels", "--target", &target, "--json",
+    ]);
+    let cleared = checked(&["access", "list", "--brain", "labels"]);
+    assert!(
+        String::from_utf8(cleared.stdout)
+            .unwrap()
+            .contains(&format!("identity {target} source=unidentified"))
+    );
+    drop(shutdown);
+    server_thread.join().unwrap();
+}

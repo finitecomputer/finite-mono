@@ -156,7 +156,7 @@ where
 fn help<W: Write>(output: &mut W) -> Result<(), CliError> {
     writeln!(
         output,
-        "fbrain [--config-dir <path>] doctor\nrepair\nauth status|import [--file <path>]|login <email>|redeem <email> <token>\nsigner status|public-key|sign|encrypt|decrypt\ndaemon status|start|stop|logs|tick|watch|supervise [--working-tree-root <path>]\nsync status|now [--summary]\nopen personal [path]\nopen <brain-id> [path]\nstatus [--json]\nconflicts\nresolve <id>\nsearch <query> [--folder <folder>...] [--limit <1-50>] [--lexical-only] [--json]\nsearch-index status [--folder <folder>...]|enable --folder <folder>|disable --folder <folder> [--json]\nactivity\nwiki check\naccess explain|list\nbrain list|create <personal|organization> <display-name>|bootstrap-personal|metadata|export\nfolder create <display-name>|list|delete\nmount offer create|list|inspect|revoke\nmount accept|list|inspect|revoke\nmount participant add|remove\nadmin member add|remove\nadmin role grant|revoke admin\nadmin folder-access grant|revoke --target <email|NIP-05|npub|hex>\nadmin ensure-access --brain <brain-id> --target <NIP-05|npub|email>\ncollaborator ensure-admin --brain <brain-id> --target <email|NIP-05|npub|hex>\ninvite brain create|list|inspect|accept|revoke\ninvite folder create|list|inspect|accept|claim|revoke\ninvite-token create|list|revoke\ninvite-accept <url-or-token>\napprovals list [--brain <brain-id>] [--all]|approve --id <request-id> [--brain <brain-id>]|deny --id <request-id> [--brain <brain-id>]\n--skill print the self-contained agent guide"
+        "fbrain [--config-dir <path>] doctor\nrepair\nauth status|import [--file <path>]|login <email>|redeem <email> <token>\nsigner status|public-key|sign|encrypt|decrypt\ndaemon status|start|stop|logs|tick|watch|supervise [--working-tree-root <path>]\nsync status|now [--summary]\nopen personal [path]\nopen <brain-id> [path]\nstatus [--json]\nconflicts\nresolve <id>\nsearch <query> [--folder <folder>...] [--limit <1-50>] [--lexical-only] [--json]\nsearch-index status [--folder <folder>...]|enable --folder <folder>|disable --folder <folder> [--json]\nactivity\nwiki check\naccess explain|list\nbrain list|create <personal|organization> <display-name>|bootstrap-personal|metadata|export\nfolder create <display-name>|list|delete\nmount offer create|list|inspect|revoke\nmount accept|list|inspect|revoke\nmount participant add|remove\nadmin member add|remove\nadmin label set|clear --brain <brain-id> --target <npub|hex> [--text <note>]\nadmin role grant|revoke admin\nadmin folder-access grant|revoke --target <email|NIP-05|npub|hex>\nadmin ensure-access --brain <brain-id> --target <NIP-05|npub|email>\ncollaborator ensure-admin --brain <brain-id> --target <email|NIP-05|npub|hex>\ninvite brain create|list|inspect|accept|revoke\ninvite folder create|list|inspect|accept|claim|revoke\ninvite-token create|list|revoke\ninvite-accept <url-or-token>\napprovals list [--brain <brain-id>] [--all]|approve --id <request-id> [--brain <brain-id>]|deny --id <request-id> [--brain <brain-id>]\n--skill print the self-contained agent guide"
     )?;
     Ok(())
 }
@@ -2528,6 +2528,7 @@ fn access_summary_report(metadata: BrainMetadataView) -> Result<AccessSummaryRep
         })
         .collect::<Result<Vec<_>, CliError>>()?;
     Ok(AccessSummaryReport {
+        identities: metadata.identities,
         brain_id: metadata.brain_id,
         members: metadata.members,
         guests: metadata.guests,
@@ -2552,6 +2553,28 @@ fn write_access_summary_rows<W: Write>(
         report.guests.len(),
         report.grant_count
     )?;
+    for identity in &report.identities {
+        if let Some(nip05) = identity
+            .nip05
+            .as_ref()
+            .filter(|_| identity.verified_at.is_some())
+        {
+            writeln!(
+                output,
+                "identity {} name={} source=verified_nip05",
+                identity.npub, nip05
+            )?;
+        } else if identity.label.is_none() {
+            writeln!(output, "identity {} source=unidentified", identity.npub)?;
+        }
+        if let Some(label) = &identity.label {
+            writeln!(
+                output,
+                "identity {} note={} source={} (unverified)",
+                identity.npub, label.text, label.source
+            )?;
+        }
+    }
     for person in &report.collaborator_readiness {
         writeln!(
             output,
@@ -3278,6 +3301,35 @@ fn admin_operation<W: Write>(
     output: &mut W,
 ) -> Result<(), CliError> {
     match (namespace, action) {
+        ("label", "set" | "clear") => {
+            let brain_id = command_brain_id(args, env)?;
+            let raw_target =
+                option_value(args, "--target").ok_or(CliError::MissingArgument("--target"))?;
+            // An admin note names an exact public key; it must never resolve a
+            // mutable NIP-05 name to choose whose durable note to overwrite.
+            let target = NostrPublicKey::parse(&raw_target)
+                .and_then(|key| key.to_npub())
+                .map_err(|error| {
+                    CliError::InvalidInput(format!(
+                        "label target must be an npub or hex key: {error}"
+                    ))
+                })?;
+            let text = if action == "set" {
+                Some(option_value(args, "--text").ok_or(CliError::MissingArgument("--text"))?)
+            } else {
+                None
+            };
+            let route = format!("/v1/admin/brains/{brain_id}/labels/{target}");
+            let response = signed_json_request(
+                env,
+                args,
+                "PUT",
+                &route,
+                Some(serde_json::json!({"text": text})),
+            )?;
+            write_command_response(output, json, &response)
+        }
+
         ("member", "add") => {
             let brain_id = command_brain_id(args, env)?;
             let raw_target = required_option_or_positional(args, "--target", 1, "target-identity")?;
@@ -3563,7 +3615,9 @@ fn admin<W: Write>(
         .map(String::as_str)
         .ok_or(CliError::MissingArgument("admin action"))?;
     let operation_args = match (namespace, action) {
-        ("member", "add" | "remove") | ("folder-access", "grant") => &args[1..],
+        ("member", "add" | "remove") | ("folder-access", "grant") | ("label", "set" | "clear") => {
+            &args[1..]
+        }
         ("folder-access", "revoke") => {
             return access_revoke(&args[1..], env, json, output);
         }
@@ -8370,6 +8424,28 @@ mod tests {
         assert_eq!(response["brains"][0]["kind"], "personal");
         assert_eq!(response["brains"][0]["role"], "member");
         assert_eq!(server.join().unwrap(), "GET /v1/brains HTTP/1.1");
+    }
+
+    #[test]
+    fn access_summary_accepts_old_metadata_and_keeps_label_sources_distinct() {
+        let mut wire = serde_json::json!({"brainId":"acme", "kind":"organization", "name":"Acme",
+            "ownerUserId":null, "members":["agent"], "admins":[], "folders":[]});
+        let old: BrainMetadataView = serde_json::from_value(wire.clone()).unwrap();
+        assert!(access_summary_report(old).unwrap().identities.is_empty());
+        wire["identities"] = serde_json::json!([{"npub":"agent", "display":"agent@example.com",
+            "nip05":"agent@example.com", "verifiedAt":"now", "label":{"text":"Gaius (agent)",
+                "source":"admin_note", "recordedBy":"admin", "updatedAt":"now"}},
+            {"npub":"human", "display":"human", "nip05":null, "label":{"text":"invitee@example.com",
+                "source":"invitation_email", "recordedBy":"admin", "updatedAt":"now"}},
+            {"npub":"unknown", "display":"unknown", "nip05":null}]);
+        let report = access_summary_report(serde_json::from_value(wire).unwrap()).unwrap();
+        let mut output = Vec::new();
+        write_access_summary_rows(&mut output, &report).unwrap();
+        let text = String::from_utf8(output).unwrap();
+        assert!(text.contains("name=agent@example.com source=verified_nip05"));
+        assert!(text.contains("note=Gaius (agent) source=admin_note (unverified)"));
+        assert!(text.contains("note=invitee@example.com source=invitation_email (unverified)"));
+        assert!(text.contains("identity unknown source=unidentified"));
     }
 
     #[test]
@@ -13522,6 +13598,7 @@ mod tests {
     #[test]
     fn folder_required_recipients_follow_access_mode() {
         let metadata = BrainMetadataView {
+            identities: Vec::new(),
             brain_id: "org".to_owned(),
             kind: "organization".to_owned(),
             name: "Org".to_owned(),
@@ -13547,6 +13624,7 @@ mod tests {
         );
 
         let personal_metadata = BrainMetadataView {
+            identities: Vec::new(),
             brain_id: "personal".to_owned(),
             kind: "personal".to_owned(),
             name: "Personal".to_owned(),
@@ -13571,6 +13649,7 @@ mod tests {
     #[test]
     fn member_removal_rotations_use_the_post_removal_roster() {
         let metadata = BrainMetadataView {
+            identities: Vec::new(),
             brain_id: "org".to_owned(),
             kind: "organization".to_owned(),
             name: "Org".to_owned(),

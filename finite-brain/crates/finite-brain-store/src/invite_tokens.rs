@@ -18,6 +18,7 @@ impl BrainStore {
         inviter_npub: &UserId,
         expires_at: &str,
         created_at: &str,
+        delivery_email: Option<&str>,
     ) -> Result<StoredBrainInviteToken, StoreError> {
         let stored = self.load_brain(brain_id)?;
         if !has_brain_operational_authority(&stored, inviter_npub) {
@@ -30,6 +31,9 @@ impl BrainStore {
                 reason: "admin invite tokens require an organization brain".to_owned(),
             });
         }
+        if let Some(email) = delivery_email {
+            principal_labels::validate_principal_label(email)?;
+        }
         validate_invite_token_hash(token_hash)?;
         validate_bounded_offer_expiry(expires_at, created_at)?;
 
@@ -37,9 +41,9 @@ impl BrainStore {
             .execute(
                 r#"
                 INSERT INTO brain_invite_tokens (
-                    token_hash, brain_id, role, inviter_npub, created_at, expires_at
+                    token_hash, brain_id, role, inviter_npub, created_at, expires_at, delivery_email
                 )
-                VALUES (?1, ?2, ?3, ?4, ?5, ?6)
+                VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
                 "#,
                 params![
                     token_hash,
@@ -47,7 +51,8 @@ impl BrainStore {
                     role.as_str(),
                     inviter_npub.as_str(),
                     created_at,
-                    expires_at
+                    expires_at,
+                    delivery_email
                 ],
             )
             .map_err(map_insert_error("brain_invite_token_hash", token_hash))?;
