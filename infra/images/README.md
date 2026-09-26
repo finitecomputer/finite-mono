@@ -32,14 +32,26 @@ frozen packages while any deployed digest references them.
 
 Notes:
 
-- `hermes-skills-package.nix` applies the Skills inventory patch inside the
+- `hermes-package.nix` applies bounded patches inside the
   upstream sealed Python environment. Both full and minimal Hermes packages,
   their launchers and exported Python environments use this same override.
-  It preserves the upstream source/dependency pin and default `/api/skills`
-  response. Opt-in `?inventory=true` returns versioned display metadata and
+  The Skills inventory patch preserves the upstream source/dependency pin and
+  default `/api/skills` response. Opt-in `?inventory=true` returns versioned display metadata and
   uses native idempotent plugin discovery, without forced reload. Remove the
   patch when an upstream release supplies this contract, retaining the
   packaged regression suite `test_hermes_skills_inventory.py`.
+
+- The gateway stop-generation patch prevents a cancelled turn from draining
+  queued work or launching a follow-up after `/stop` invalidates its run.
+  The gateway owns the in-memory generation and queue; Hermes retains its
+  existing SQLite session/lease writer and reader. No schema, lease format,
+  transcript, or chat protocol changes are introduced. Existing sessions and
+  mixed-version processes keep the same durable serialization contract.
+  `test_hermes_stop_generation.py` exercises the packaged gateway, including
+  stop during completion, stale queue ownership, and normal follow-ups.
+  Remove the patch when the pinned upstream gateway passes these tests.
+  Runtime release and rollback use the usual digest-pinned image procedure;
+  there is no data migration or manual lock cleanup for this fix.
 
 - The sealed Hermes environment also includes the bounded product inventory
   reader; full/minimal packages bundle Brain- and Sites-owned dashboard plugins.

@@ -272,9 +272,9 @@
             craneLib = crane.mkLib hermesPkgs;
             sourceRoot = ./.;
           };
-          withSkillsInventory =
+          withFinitePatches =
             upstream:
-            (import ./infra/images/hermes-skills-package.nix {
+            (import ./infra/images/hermes-package.nix {
               pkgs = hermesPkgs;
               inherit upstream;
               source = hermes-agent.outPath;
@@ -291,16 +291,16 @@
               '';
             });
           hermesAgentPackage =
-            (withSkillsInventory hermes-agent.packages.${system}.default).overrideAttrs
+            (withFinitePatches hermes-agent.packages.${system}.default).overrideAttrs
               (old: {
                 postInstall = (old.postInstall or "") + ''
                   # Keep the Python environment unchanged; patch only the bundled adapter.
                   plugins="$out/share/hermes-agent/plugins"
-                  # withSkillsInventory already materialized a writable copy.
+                  # withFinitePatches already materialized a writable copy.
                   ${hermesPkgs.patch}/bin/patch -d "$plugins" -p1 < ${./finite-agentd/patches/simplex-media-path.patch}
                 '';
               });
-          hermesAgentMinimal = withSkillsInventory hermes-agent.packages.${system}.minimal;
+          hermesAgentMinimal = withFinitePatches hermes-agent.packages.${system}.minimal;
         in
         {
           simplex-chat =
