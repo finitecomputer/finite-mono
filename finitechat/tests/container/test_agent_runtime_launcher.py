@@ -153,8 +153,78 @@ class AgentRuntimeLauncherConfigTest(unittest.TestCase):
                 "context_length": 393216,
                 "api_mode": "chat_completions",
                 "api_key": "${FINITE_PRIVATE_API_KEY}",
+                "supports_vision": True,
             },
         )
+
+    def test_reconciler_restores_missing_managed_vision_default_without_replacing_preferences(
+        self,
+    ) -> None:
+        existing = self._reconcile_config(None, self._reconciler_settings())
+        # Absence means the product default, including deletion after adoption.
+        existing["model"].pop("supports_vision", None)
+        existing["model"]["temperature"] = 0.4
+        existing["auxiliary"]["vision"] = {
+            "provider": "custom",
+            "base_url": "https://old-vision.example/v1",
+            "model": "old-vision-model",
+        }
+        before = json.loads(json.dumps(existing))
+
+        reconciled = self._reconcile_config(existing, self._reconciler_settings())
+
+        expected = json.loads(json.dumps(before))
+        expected["model"]["supports_vision"] = True
+        self.assertEqual(reconciled, expected)
+        self.assertEqual(existing, before)
+        self.assertEqual(
+            self._reconcile_config(reconciled, self._reconciler_settings()), reconciled
+        )
+
+    def test_reconciler_preserves_explicit_vision_and_routing_overrides(self) -> None:
+        for capability in (False, True, "false", None):
+            with self.subTest(capability=capability):
+                existing = self._reconcile_config(None, self._reconciler_settings())
+                existing["model"]["supports_vision"] = capability
+                existing["agent"] = {"image_input_mode": "text"}
+                self.assertEqual(
+                    self._reconcile_config(existing, self._reconciler_settings()), existing
+                )
+
+    def test_reconciler_does_not_assume_vision_for_other_models_or_providers(self) -> None:
+        for key, value in (
+            ("default", "future-model"),
+            ("provider", "openrouter"),
+            ("base_url", "https://inference.example/v1"),
+            ("api_key", "${USER_INFERENCE_KEY}"),
+            ("api_mode", "anthropic_messages"),
+        ):
+            with self.subTest(key=key):
+                existing = self._reconcile_config(None, self._reconciler_settings())
+                existing["model"].pop("supports_vision", None)
+                existing["model"][key] = value
+                reconciled = self._reconcile_config(existing, self._reconciler_settings())
+                self.assertEqual(reconciled, existing)
+
+    def test_reconciler_preserves_provider_capability_overrides(self) -> None:
+        for field in ("supports_vision", "vision"):
+            for legacy in (False, True):
+                with self.subTest(field=field, legacy=legacy):
+                    existing = self._reconcile_config(None, self._reconciler_settings())
+                    existing["model"].pop("supports_vision")
+                    provider = {"models": {"glm-5-3-flash": {field: False}}}
+                    if legacy:
+                        existing["custom_providers"] = [{"name": "custom", **provider}]
+                    else:
+                        existing["providers"] = {"custom": provider}
+                    self.assertEqual(
+                        self._reconcile_config(existing, self._reconciler_settings()), existing
+                    )
+
+    def test_reconciler_does_not_seed_vision_for_another_model(self) -> None:
+        settings = self._reconciler_settings()
+        settings["FINITE_CONFIG_MODEL"] = "future-model"
+        self.assertNotIn("supports_vision", self._reconcile_config(None, settings)["model"])
 
     def test_reconciler_migrates_only_the_legacy_finite_private_default(self) -> None:
         existing = {
@@ -177,6 +247,7 @@ class AgentRuntimeLauncherConfigTest(unittest.TestCase):
         )
         self.assertEqual(reconciled["model"]["context_length"], 393216)
         self.assertEqual(reconciled["model"]["temperature"], 0.4)
+        self.assertIs(reconciled["model"]["supports_vision"], True)
 
     def test_reconciler_migrates_deepseek_image_owned_default(self) -> None:
         existing = {

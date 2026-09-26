@@ -107,6 +107,25 @@ def _migrate_legacy_finite_private_model(config: dict[str, Any], settings: dict[
     )
 
 
+def _has_provider_vision_override(config: dict[str, Any], model: dict[str, Any]) -> bool:
+    """Do not shadow Hermes's supported per-provider capability declarations."""
+    providers = config.get("providers")
+    entries = [providers.get("custom")] if isinstance(providers, dict) else []
+    custom_providers = config.get("custom_providers")
+    if isinstance(custom_providers, list):
+        entries.extend(
+            entry
+            for entry in custom_providers
+            if isinstance(entry, dict) and str(entry.get("name", "")).strip().lower() == "custom"
+        )
+    for entry in entries:
+        models = entry.get("models") if isinstance(entry, dict) else None
+        capability = models.get(model["default"]) if isinstance(models, dict) else None
+        if isinstance(capability, dict) and {"supports_vision", "vision"}.intersection(capability):
+            return True
+    return False
+
+
 def reconcile_config(
     existing: dict[str, Any] | None,
     settings: dict[str, str],
@@ -117,8 +136,10 @@ def reconcile_config(
 
     Model/provider configuration and non-Finite platforms are seeded only when
     no config exists. Once Hermes owns the file, this function deliberately
-    leaves those sections semantically unchanged except for narrowly matched,
-    versioned migrations of an image-owned default.
+    leaves those sections semantically unchanged except for narrowly matched
+    migrations and the missing capability default of the known Finite Private
+    profile. Deleting that declaration restores the product default on boot;
+    an explicit capability or routing override remains user-owned.
     """
 
     first_seed = existing is None
@@ -168,7 +189,19 @@ def reconcile_config(
         _migrate_historical_finite_private_route(config)
         _migrate_legacy_finite_private_model(config, settings)
 
-    # Outside the explicit migration above, these are the only settings Finite
+    # Hermes cannot discover capabilities for our generic custom provider.
+    # Declare only the known Finite Private GLM model, including existing
+    # configs after the migrations above. Explicit user overrides still win.
+    current_model = config.get("model")
+    if (
+        isinstance(current_model, dict)
+        and _is_image_owned_finite_private_shape(current_model)
+        and current_model.get("default") == "glm-5-3-flash"
+        and not _has_provider_vision_override(config, current_model)
+    ):
+        current_model.setdefault("supports_vision", True)
+
+    # Outside the migrations and capability default above, these are the only settings Finite
     # repairs after first boot. They keep the encrypted transport and managed
     # skill catalog reachable without turning the runtime launcher into a
     # second Hermes configuration store.
