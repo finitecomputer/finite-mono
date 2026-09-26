@@ -392,8 +392,16 @@ impl BrainStore {
                 &grant.created_at,
             )?;
         }
-        insert_grant(&tx, brain_id, grant)?;
+        if !current_grant_exists {
+            insert_grant(&tx, brain_id, grant)?;
+        }
         for input in control_records {
+            // Demotion can remove inherited access without deleting its key
+            // grant. Preserve that wrap and publish only the new permission;
+            // publishing the discarded replacement would diverge from export.
+            if current_grant_exists && input.record_type() == SyncRecordType::FolderKeyGrant {
+                continue;
+            }
             sync_records::validate_sync_conflict(&tx, brain_id, input)?;
             let sequence = sync_records::next_sequence(&tx, brain_id)?;
             sync_records::insert_sync_record(&tx, brain_id, sequence, input)?;

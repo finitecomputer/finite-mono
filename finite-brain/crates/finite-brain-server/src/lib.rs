@@ -5036,6 +5036,125 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn demoted_member_cannot_regrant_retained_folder_access() {
+        let admin = Keys::generate();
+        let member = Keys::generate();
+        let target = npub(&member);
+        let router = router_with_test_org_folders(&admin).await;
+        for (action, route, id) in [
+            (
+                AdminAccessAction::AddMember,
+                format!("/v1/admin/brains/acme/members/{target}"),
+                "add-member",
+            ),
+            (
+                AdminAccessAction::AddAdmin,
+                format!("/v1/admin/brains/acme/roles/admin/{target}"),
+                "promote",
+            ),
+        ] {
+            let response = authed_request(
+                router.clone(),
+                &admin,
+                "PUT",
+                &route,
+                Some(
+                    serde_json::json!({"accessChangeEvent": admin_event(&admin, "acme", id,
+                    action, None, Some(&target), None)})
+                    .to_string(),
+                ),
+                TEST_NOW,
+            )
+            .await;
+            assert_eq!(response.status(), StatusCode::OK);
+        }
+        let path = format!("/v1/admin/brains/acme/folders/restricted/access/{target}");
+        let body = |signer: &Keys, id: &str| {
+            serde_json::json!({
+            "grant": folder_key_grant_value(id, 1, &target),
+            "accessChangeEvent": admin_event(signer, "acme", id,
+                AdminAccessAction::GrantFolderAccess, Some("restricted"), Some(&target), Some(1))
+        }).to_string()
+        };
+        let grant = authed_request(
+            router.clone(),
+            &admin,
+            "PUT",
+            &path,
+            Some(body(&admin, "initial-grant")),
+            TEST_NOW,
+        )
+        .await;
+        assert_eq!(grant.status(), StatusCode::OK);
+        let demote = authed_request(
+            router.clone(),
+            &admin,
+            "DELETE",
+            &format!("/v1/admin/brains/acme/roles/admin/{target}"),
+            Some(
+                serde_json::json!({"accessChangeEvent": admin_event(&admin, "acme", "demote",
+                AdminAccessAction::RemoveAdmin, None, Some(&target), None)})
+                .to_string(),
+            ),
+            TEST_NOW,
+        )
+        .await;
+        assert_eq!(demote.status(), StatusCode::OK);
+        let before: serde_json::Value = read_json(
+            authed_request(
+                router.clone(),
+                &admin,
+                "GET",
+                "/v1/brains/acme/export",
+                None,
+                TEST_NOW,
+            )
+            .await,
+        )
+        .await;
+        let sequence = latest_sync_sequence(&router, &admin, "acme").await;
+        let denied = authed_request(
+            router.clone(),
+            &member,
+            "PUT",
+            &path,
+            Some(body(&member, "unauthorized-repair")),
+            TEST_NOW,
+        )
+        .await;
+        assert_eq!(denied.status(), StatusCode::FORBIDDEN);
+        let after: serde_json::Value = read_json(
+            authed_request(
+                router.clone(),
+                &admin,
+                "GET",
+                "/v1/brains/acme/export",
+                None,
+                TEST_NOW + 1,
+            )
+            .await,
+        )
+        .await;
+        assert_eq!(after, before);
+        assert_eq!(
+            latest_sync_sequence_at(&router, &admin, "acme", TEST_NOW + 1).await,
+            sequence
+        );
+        let repair = authed_request(
+            router.clone(),
+            &admin,
+            "PUT",
+            &path,
+            Some(body(&admin, "authorized-repair")),
+            TEST_NOW,
+        )
+        .await;
+        assert_eq!(repair.status(), StatusCode::OK);
+        let receipt: serde_json::Value = read_json(repair).await;
+        assert_eq!(receipt["outcome"], "granted");
+    }
+
+    #[tokio::test]
     async fn concurrent_current_folder_grants_have_one_winner_and_one_truthful_no_op() {
         let admin_keys = Keys::generate();
         let member_keys = Keys::generate();
