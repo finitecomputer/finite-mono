@@ -1,0 +1,9 @@
+[project]
+slug = "finite-code-map"
+
+[outputs.map]
+kind = "site"
+site_name = "finite-code-map"
+branch = "main"
+path = "site"
+spa = false
