@@ -4,10 +4,10 @@
 { ... }:
 {
   virtualisation.oci-containers.containers.finite-saas-dashboard = {
-    # Production onboarding and agent-scoped Brain/Sites inventories.
-    # Source 150da47329f46428d1368913099d489e3be0358b.
-    # https://github.com/finitecomputer/finite-mono/actions/runs/35419244270
-    image = "ghcr.io/finitecomputer/finite-saas-dashboard@sha256:a092a49d181b026a5984501fe36f44d85db08e359c27354c1ba8961650dff6d1";
+    # Viewer-timezone chat timestamps and the 200M Finite Private admin label.
+    # Source 72f708f20f0414d7bbf6388d697da6970514958c.
+    # https://github.com/finitecomputer/finite-mono/actions/runs/36277845091
+    image = "ghcr.io/finitecomputer/finite-saas-dashboard@sha256:68bcaa10c3688237a2fff3c845ecf6b1a4c14a07eedb7f2a8585a4a1fde569ef";
 
     # Host networking: the dashboard must reach core on the HOST loopback
     # (127.0.0.1:4200) and itself bind 127.0.0.1:3000 (HOSTNAME below). With
