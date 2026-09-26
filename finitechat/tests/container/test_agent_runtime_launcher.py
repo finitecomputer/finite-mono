@@ -157,8 +157,11 @@ class AgentRuntimeLauncherConfigTest(unittest.TestCase):
             },
         )
 
-    def test_reconciler_backfills_vision_without_replacing_existing_preferences(self) -> None:
+    def test_reconciler_restores_missing_managed_vision_default_without_replacing_preferences(
+        self,
+    ) -> None:
         existing = self._reconcile_config(None, self._reconciler_settings())
+        # Absence means the product default, including deletion after adoption.
         existing["model"].pop("supports_vision", None)
         existing["model"]["temperature"] = 0.4
         existing["auxiliary"]["vision"] = {

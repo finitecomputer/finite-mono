@@ -179,6 +179,8 @@ backend overrides remain authoritative. In the current Hermes pin, an explicit
 auxiliary backend takes priority over native vision in `auto`. This capability
 fix does not retire such profiles; identify them during preflight rather than
 claiming that every existing Agent will route natively.
+The capability is a managed default while absent, not a one-shot migration:
+deleting it causes startup to restore it; an explicit override is preserved.
 
 Qualify this change on the exact published candidate digest before promotion:
 

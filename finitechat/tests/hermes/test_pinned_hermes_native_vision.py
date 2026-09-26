@@ -5,6 +5,7 @@ import os
 import tempfile
 import unittest
 from pathlib import Path
+from typing import Any, cast
 from unittest.mock import AsyncMock, patch
 
 from agent.auxiliary_client import scoped_runtime_main
@@ -59,9 +60,11 @@ class PinnedHermesNativeVisionTests(unittest.IsolatedAsyncioTestCase):
                     )
                 auxiliary.assert_not_awaited()
                 self.assertIsInstance(result, dict)
-                self.assertTrue(result["_multimodal"])
-                self.assertTrue(result["meta"]["native_vision"])
-                images = [part for part in result["content"] if part["type"] == "image_url"]
+                # Upstream annotates this handler as str even for its native image result.
+                multimodal = cast(dict[str, Any], result)
+                self.assertTrue(multimodal["_multimodal"])
+                self.assertTrue(multimodal["meta"]["native_vision"])
+                images = [part for part in multimodal["content"] if part["type"] == "image_url"]
                 self.assertEqual(len(images), 1)
                 self.assertTrue(images[0]["image_url"]["url"].startswith("data:image/png;base64,"))
 

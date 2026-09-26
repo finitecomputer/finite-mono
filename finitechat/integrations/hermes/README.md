@@ -66,6 +66,9 @@ vision backend is configured. An explicit `auxiliary.vision` backend still
 takes precedence in this Hermes version. The runtime reconciler
 backfills only a missing declaration on the known Finite-owned model/route/key
 shape; explicit capability and image-routing settings remain user-owned.
+Absence means the managed product default: deleting the declaration causes
+startup to restore it. Set an explicit capability or routing override to
+change that behavior.
 Selecting another inference profile replaces the model block, so the
 declaration does not carry over to an unrelated model.
 

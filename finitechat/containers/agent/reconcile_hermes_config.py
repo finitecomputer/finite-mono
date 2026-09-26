@@ -136,8 +136,10 @@ def reconcile_config(
 
     Model/provider configuration and non-Finite platforms are seeded only when
     no config exists. Once Hermes owns the file, this function deliberately
-    leaves those sections semantically unchanged except for narrowly matched,
-    versioned migrations of an image-owned default.
+    leaves those sections semantically unchanged except for narrowly matched
+    migrations and the missing capability default of the known Finite Private
+    profile. Deleting that declaration restores the product default on boot;
+    an explicit capability or routing override remains user-owned.
     """
 
     first_seed = existing is None
@@ -190,16 +192,16 @@ def reconcile_config(
     # Hermes cannot discover capabilities for our generic custom provider.
     # Declare only the known Finite Private GLM model, including existing
     # configs after the migrations above. Explicit user overrides still win.
-    model = config.get("model")
+    current_model = config.get("model")
     if (
-        isinstance(model, dict)
-        and _is_image_owned_finite_private_shape(model)
-        and model.get("default") == "glm-5-3-flash"
-        and not _has_provider_vision_override(config, model)
+        isinstance(current_model, dict)
+        and _is_image_owned_finite_private_shape(current_model)
+        and current_model.get("default") == "glm-5-3-flash"
+        and not _has_provider_vision_override(config, current_model)
     ):
-        model.setdefault("supports_vision", True)
+        current_model.setdefault("supports_vision", True)
 
-    # Outside the explicit migration above, these are the only settings Finite
+    # Outside the migrations and capability default above, these are the only settings Finite
     # repairs after first boot. They keep the encrypted transport and managed
     # skill catalog reachable without turning the runtime launcher into a
     # second Hermes configuration store.
