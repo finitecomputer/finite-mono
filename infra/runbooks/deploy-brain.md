@@ -70,6 +70,14 @@ the recipient's encrypted key grant stored. Deploying the server fix does not
 restore anyone's permission automatically. Treat each human and agent npub as
 a separate principal; resolve the intended recipient before authorizing repair.
 
+Before approving an exact target set, collect read-only authoritative metadata:
+the Brain and Folder IDs, recipient npub, current key version, retained grant,
+explicit permission, and admin standing. Reproduce the demotion/regrant failure
+on synthetic state matching those facts and prove the candidate repair preserves
+the grant, adds only the requested permission, and permits fresh recipient
+decryption. Stop if the observed state differs or the retained wrap is unusable;
+corrupted-wrap recovery is a separate key-rotation operation.
+
 After an exact target set is approved, capture the consistent database backup
 and deployed revision described above. From an authorized admin's configured
 `fbrain` identity holding the Folder key, grant only the reviewed Folder:
