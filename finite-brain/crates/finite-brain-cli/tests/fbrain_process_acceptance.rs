@@ -4400,7 +4400,7 @@ fn built_fbrain_process_reads_capacity_roster_labels_in_bounded_pages() {
     assert!(serde_json::to_vec(&page).unwrap().len() < 256 * 1024);
     drop(store);
     let (url_tx, url_rx) = mpsc::channel();
-    let (shutdown, shutdown_rx) = tokio::sync::oneshot::channel();
+    let (shutdown, shutdown_rx) = tokio::sync::oneshot::channel::<()>();
     let server_thread = thread::spawn(move || {
         tokio::runtime::Runtime::new().unwrap().block_on(async move {
             let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();

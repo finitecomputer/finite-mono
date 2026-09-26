@@ -383,7 +383,7 @@ Invitations and Mount Offers default to seven days and accept `--expires-in`
 from `1h` through `30d`. Brain Invitations create Members. Folder Invitations
 create bounded Guest access. Mounts are source-backed and work between either
 Brain kind; the CLI opens and wraps required Folder grants in memory.
-Folder Invitations work for registered identities and unregistered email
-addresses. Unregistered recipients claim the bounded invitation after exact
-email verification using the delivered Invite Secret file. A Folder's native
-access mode remains unchanged; explicit Guest access is orthogonal to it.
+Folder Invitations target an exact public key, supplied directly or resolved
+through public NIP-05. They do not bootstrap an unregistered email recipient.
+A Folder's native access mode remains unchanged; explicit Guest access is
+orthogonal to it.
