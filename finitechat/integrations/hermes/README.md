@@ -57,6 +57,18 @@ Hosted Web Device starts the room independently.
 
 ## Native Hermes capability profiles
 
+The managed Finite Private `glm-5-3-flash` profile declares
+`model.supports_vision: true`. Hermes cannot discover capabilities for the
+generic `custom` provider. With its default `agent.image_input_mode: auto`,
+the pinned Hermes sends attached images directly to the main model and uses
+the native image-loading path of `vision_analyze` when no explicit auxiliary
+vision backend is configured. An explicit `auxiliary.vision` backend still
+takes precedence in this Hermes version. The runtime reconciler
+backfills only a missing declaration on the known Finite-owned model/route/key
+shape; explicit capability and image-routing settings remain user-owned.
+Selecting another inference profile replaces the model block, so the
+declaration does not carry over to an unrelated model.
+
 Finite Chat conveys authenticated attachments to Hermes without choosing a
 model, rewriting the channel prompt, or registering Finite-specific agent
 tools. Auxiliary capabilities are runtime configuration behind Hermes's

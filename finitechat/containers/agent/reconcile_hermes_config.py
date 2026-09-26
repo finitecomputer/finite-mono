@@ -107,6 +107,25 @@ def _migrate_legacy_finite_private_model(config: dict[str, Any], settings: dict[
     )
 
 
+def _has_provider_vision_override(config: dict[str, Any], model: dict[str, Any]) -> bool:
+    """Do not shadow Hermes's supported per-provider capability declarations."""
+    providers = config.get("providers")
+    entries = [providers.get("custom")] if isinstance(providers, dict) else []
+    custom_providers = config.get("custom_providers")
+    if isinstance(custom_providers, list):
+        entries.extend(
+            entry
+            for entry in custom_providers
+            if isinstance(entry, dict) and str(entry.get("name", "")).strip().lower() == "custom"
+        )
+    for entry in entries:
+        models = entry.get("models") if isinstance(entry, dict) else None
+        capability = models.get(model["default"]) if isinstance(models, dict) else None
+        if isinstance(capability, dict) and {"supports_vision", "vision"}.intersection(capability):
+            return True
+    return False
+
+
 def reconcile_config(
     existing: dict[str, Any] | None,
     settings: dict[str, str],
@@ -167,6 +186,18 @@ def reconcile_config(
     if not first_seed:
         _migrate_historical_finite_private_route(config)
         _migrate_legacy_finite_private_model(config, settings)
+
+    # Hermes cannot discover capabilities for our generic custom provider.
+    # Declare only the known Finite Private GLM model, including existing
+    # configs after the migrations above. Explicit user overrides still win.
+    model = config.get("model")
+    if (
+        isinstance(model, dict)
+        and _is_image_owned_finite_private_shape(model)
+        and model.get("default") == "glm-5-3-flash"
+        and not _has_provider_vision_override(config, model)
+    ):
+        model.setdefault("supports_vision", True)
 
     # Outside the explicit migration above, these are the only settings Finite
     # repairs after first boot. They keep the encrypted transport and managed
