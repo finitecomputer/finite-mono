@@ -2427,9 +2427,13 @@ fn access<W: Write>(
         Some("list") | Some("ls") => {
             let brain_id = command_brain_id(args, env)?;
             let route = format!("/v1/brains/{brain_id}/access");
-            let metadata =
+            let metadata: BrainMetadataView =
                 serde_json::from_value(signed_json_request(env, args, "GET", &route, None)?)?;
-            let report = access_summary_report(metadata)?;
+            let labels_available = metadata.principal_labels_available;
+            let mut report = access_summary_report(metadata)?;
+            if labels_available {
+                attach_principal_labels(env, args, &mut report)?;
+            }
             if json {
                 write_json(output, &report)
             } else {
@@ -2527,8 +2531,38 @@ fn access_summary_report(metadata: BrainMetadataView) -> Result<AccessSummaryRep
             })
         })
         .collect::<Result<Vec<_>, CliError>>()?;
+    let mut identities = metadata
+        .identities
+        .into_iter()
+        .map(|identity| (identity.npub.clone(), identity))
+        .collect::<BTreeMap<_, _>>();
+    let mut principals = metadata
+        .members
+        .iter()
+        .chain(&metadata.guests)
+        .chain(&metadata.admins)
+        .cloned()
+        .collect::<BTreeSet<_>>();
+    principals.extend(metadata.owner_user_id.iter().cloned());
+    if let Some(agent) = &metadata.personal_agent {
+        principals.insert(agent.agent_npub.clone());
+    }
+    for folder in &metadata.folders {
+        principals.extend(folder.access_user_ids.iter().cloned());
+    }
+    for npub in principals {
+        identities
+            .entry(npub.clone())
+            .or_insert(IdentityDisplayView {
+                display: npub.clone(),
+                npub,
+                nip05: None,
+                verified_at: None,
+                label: None,
+            });
+    }
     Ok(AccessSummaryReport {
-        identities: metadata.identities,
+        identities: identities.into_values().collect(),
         brain_id: metadata.brain_id,
         members: metadata.members,
         guests: metadata.guests,
@@ -2538,6 +2572,51 @@ fn access_summary_report(metadata: BrainMetadataView) -> Result<AccessSummaryRep
         grant_count: metadata.grant_count,
         collaborator_readiness: metadata.collaborator_readiness,
     })
+}
+
+fn attach_principal_labels(
+    env: &CliEnvironment,
+    args: &[String],
+    report: &mut AccessSummaryReport,
+) -> Result<(), CliError> {
+    let mut after = String::new();
+    // The accepted Brain envelope has at most 11,002 principals; the server
+    // returns 256 notes per page. Bound retries even if the roster is changing.
+    for _ in 0..64 {
+        let route = format!(
+            "/v1/brains/{}/labels{}",
+            report.brain_id,
+            if after.is_empty() {
+                String::new()
+            } else {
+                format!("?after={after}")
+            }
+        );
+        let value = match signed_json_request(env, args, "GET", &route, None) {
+            Ok(value) => value,
+            // A retained server during rollback has no label route.
+            Err(CliError::HttpStatus { status: 404, .. }) if after.is_empty() => return Ok(()),
+            Err(error) => return Err(error),
+        };
+        let page: PrincipalLabelsPageView = serde_json::from_value(value)?;
+        for identity in &mut report.identities {
+            if let Some(label) = page.labels.get(&identity.npub) {
+                identity.label = Some(label.clone());
+            }
+        }
+        let Some(next) = page.next_after else {
+            return Ok(());
+        };
+        if next <= after || NostrPublicKey::parse(&next).is_err() {
+            return Err(CliError::InvalidInput(
+                "invalid principal label cursor".to_owned(),
+            ));
+        }
+        after = next;
+    }
+    Err(CliError::InvalidInput(
+        "principal label page limit exceeded; retry the roster read".to_owned(),
+    ))
 }
 
 fn write_access_summary_rows<W: Write>(
@@ -8431,7 +8510,13 @@ mod tests {
         let mut wire = serde_json::json!({"brainId":"acme", "kind":"organization", "name":"Acme",
             "ownerUserId":null, "members":["agent"], "admins":[], "folders":[]});
         let old: BrainMetadataView = serde_json::from_value(wire.clone()).unwrap();
-        assert!(access_summary_report(old).unwrap().identities.is_empty());
+        assert!(
+            access_summary_report(old)
+                .unwrap()
+                .identities
+                .iter()
+                .all(|identity| identity.label.is_none())
+        );
         wire["identities"] = serde_json::json!([{"npub":"agent", "display":"agent@example.com",
             "nip05":"agent@example.com", "verifiedAt":"now", "label":{"text":"Gaius (agent)",
                 "source":"admin_note", "recordedBy":"admin", "updatedAt":"now"}},
@@ -13598,6 +13683,7 @@ mod tests {
     #[test]
     fn folder_required_recipients_follow_access_mode() {
         let metadata = BrainMetadataView {
+            principal_labels_available: false,
             identities: Vec::new(),
             brain_id: "org".to_owned(),
             kind: "organization".to_owned(),
@@ -13624,6 +13710,7 @@ mod tests {
         );
 
         let personal_metadata = BrainMetadataView {
+            principal_labels_available: false,
             identities: Vec::new(),
             brain_id: "personal".to_owned(),
             kind: "personal".to_owned(),
@@ -13649,6 +13736,7 @@ mod tests {
     #[test]
     fn member_removal_rotations_use_the_post_removal_roster() {
         let metadata = BrainMetadataView {
+            principal_labels_available: false,
             identities: Vec::new(),
             brain_id: "org".to_owned(),
             kind: "organization".to_owned(),

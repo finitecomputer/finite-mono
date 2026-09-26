@@ -525,6 +525,8 @@ pub(crate) struct HttpResponse {
 #[serde(rename_all = "camelCase")]
 pub(crate) struct BrainMetadataView {
     #[serde(default)]
+    pub(crate) principal_labels_available: bool,
+    #[serde(default)]
     pub(crate) identities: Vec<IdentityDisplayView>,
     pub(crate) brain_id: String,
     pub(crate) kind: String,
@@ -614,4 +616,11 @@ pub(crate) struct PrincipalLabelView {
     pub(crate) source: String,
     pub(crate) recorded_by: String,
     pub(crate) updated_at: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct PrincipalLabelsPageView {
+    pub(crate) labels: std::collections::BTreeMap<String, PrincipalLabelView>,
+    pub(crate) next_after: Option<String>,
 }

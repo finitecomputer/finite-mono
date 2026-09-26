@@ -67,20 +67,23 @@ WorkOS browser session.
 
 Labels are display metadata in the Brain database. Public NIP-05 names use the
 existing verified alias store. Schema V30 adds `brain_principal_labels` and an
-optional Invite Token delivery email. The admin label endpoint writes notes;
-first token redemption records `invitation_email` in the same transaction as
-membership. Metadata and `fbrain access list` read notes for admins and the
-named principal. No Chat store, Core database, worker, socket, or mount is needed.
-The delivery address is unverified provenance; possession of a forwarded token
-does not prove ownership of its mailbox. Admin notes never resolve keys.
+optional Invite Token requested email destination. The admin label endpoint
+writes notes; first token redemption records `invitation_email` in the same
+transaction as membership. A paginated label endpoint and `fbrain access list`
+read notes for admins and the named principal. Pages contain at most 256 notes;
+edits return one receipt. Notes are bounded to 320 UTF-8 bytes. The requested
+email destination is unverified provenance, even if delivery fails; possession
+of a forwarded token does not prove mailbox ownership. Admin notes never
+resolve keys. No Chat store, Core database, worker, socket, or mount is needed.
 
-Deploy the server before the CLI. Old clients ignore the additive label field;
-new clients accept old metadata with no labels, while label edits against old
+Deploy the server before the CLI. Old clients ignore the additive
+`principalLabelsAvailable` metadata flag; notes stay out of ordinary metadata
+responses. New clients skip label reads on old metadata; edits against old
 servers return an unsupported route. Old servers ignore the added table/column;
 SQLite triggers still clear notes on membership/final guest-access removal and
-record email provenance if an older server redeems a newly issued token. Old
-token creators leave delivery email null. The earlier worker-based draft was
-never deployed and is not a supported V30 database input.
+record requested-email provenance if an older server redeems a newly issued
+token. Old token creators leave requested email null. The earlier worker-based
+draft was never deployed and is not a supported V30 database input.
 
 The whole consistent Brain SQLite database is the Recovery Set, including label
 notes and pending token provenance. Restore it onto an empty target and verify

@@ -17,6 +17,8 @@ pub enum PrincipalLabelSource {
     InvitationEmail,
 }
 
+pub const PRINCIPAL_LABEL_PAGE_SIZE: usize = 256;
+
 impl BrainStore {
     /// Only an operational Brain admin can set a note, and only for a current
     /// principal. None clears the note. The canonical target is supplied by the
@@ -71,45 +73,56 @@ impl BrainStore {
         Ok(())
     }
 
-    /// Bounded by the Brain's principal capacity; callers apply audience rules.
-    pub fn principal_labels(
+    /// Read at most one page plus lookahead, optionally restricted to one viewer.
+    pub fn principal_labels_page(
         &self,
         brain_id: &BrainId,
+        visible_user: Option<&UserId>,
+        after: &str,
     ) -> Result<BTreeMap<String, PrincipalLabel>, StoreError> {
         let mut query = self.conn.prepare(
             "SELECT user_id, text, source, recorded_by, updated_at
-             FROM brain_principal_labels WHERE brain_id=?1",
+             FROM brain_principal_labels WHERE brain_id=?1 AND user_id>?2
+             AND (?3 IS NULL OR user_id=?3) ORDER BY user_id LIMIT ?4",
         )?;
-        let rows = query.query_map([brain_id.as_str()], |row| {
-            let source: String = row.get(2)?;
-            let source = match source.as_str() {
-                "admin_note" => PrincipalLabelSource::AdminNote,
-                "invitation_email" => PrincipalLabelSource::InvitationEmail,
-                _ => return Err(rusqlite::Error::InvalidQuery),
-            };
-            Ok((
-                row.get(0)?,
-                PrincipalLabel {
-                    text: row.get(1)?,
-                    source,
-                    recorded_by: row.get(3)?,
-                    updated_at: row.get(4)?,
-                },
-            ))
-        })?;
+        let rows = query.query_map(
+            params![
+                brain_id.as_str(),
+                after,
+                visible_user.map(UserId::as_str),
+                (PRINCIPAL_LABEL_PAGE_SIZE + 1) as i64
+            ],
+            |row| {
+                let source: String = row.get(2)?;
+                let source = match source.as_str() {
+                    "admin_note" => PrincipalLabelSource::AdminNote,
+                    "invitation_email" => PrincipalLabelSource::InvitationEmail,
+                    _ => return Err(rusqlite::Error::InvalidQuery),
+                };
+                Ok((
+                    row.get(0)?,
+                    PrincipalLabel {
+                        text: row.get(1)?,
+                        source,
+                        recorded_by: row.get(3)?,
+                        updated_at: row.get(4)?,
+                    },
+                ))
+            },
+        )?;
         Ok(rows.collect::<Result<_, _>>()?)
     }
 }
 
 pub(crate) fn validate_principal_label(text: &str) -> Result<(), StoreError> {
     if text.is_empty()
-        || text.chars().count() > 320
+        || text.len() > 320
         || text.chars().any(|ch| {
             ch.is_control() || matches!(ch, '\u{2028}'..='\u{202e}' | '\u{2066}'..='\u{2069}')
         })
     {
         return Err(StoreError::InvalidRecord {
-            reason: "principal label must contain 1-320 characters without control characters"
+            reason: "principal label must contain 1-320 UTF-8 bytes without control characters"
                 .to_owned(),
         });
     }
@@ -144,7 +157,7 @@ mod tests {
             DROP TRIGGER clear_member_principal_label;
             DROP TRIGGER clear_departed_guest_principal_label;
             DROP TABLE brain_principal_labels;
-            ALTER TABLE brain_invite_tokens DROP COLUMN delivery_email;
+            ALTER TABLE brain_invite_tokens DROP COLUMN requested_email;
             DELETE FROM schema_migrations WHERE version=30;",
             )
             .unwrap();
@@ -152,7 +165,12 @@ mod tests {
         drop(store);
         let mut store = BrainStore::open(&path).unwrap();
         assert_eq!(store.load_brain(&brain).unwrap(), before);
-        assert!(store.principal_labels(&brain).unwrap().is_empty());
+        assert!(
+            store
+                .principal_labels_page(&brain, None, "")
+                .unwrap()
+                .is_empty()
+        );
         assert!(
             store
                 .set_principal_label(&brain, &member, &member, Some("spoof"), "now")
@@ -174,6 +192,7 @@ mod tests {
             "  ",
             "name\nforged output",
             "name\u{202e}spoof",
+            &"😀".repeat(81),
             &"x".repeat(321),
         ] {
             assert!(
@@ -185,7 +204,7 @@ mod tests {
         store
             .set_principal_label(&brain, &admin, &member, Some("CK (human)"), "now")
             .unwrap();
-        let labels = store.principal_labels(&brain).unwrap();
+        let labels = store.principal_labels_page(&brain, None, "").unwrap();
         assert_eq!(labels["member"].source, PrincipalLabelSource::AdminNote);
         assert_eq!(labels["member"].recorded_by, "admin");
         assert_eq!(store.load_brain(&brain).unwrap(), before);
@@ -203,12 +222,20 @@ mod tests {
             .unwrap();
         drop(store);
         let mut restored = BrainStore::open(&recovery).unwrap();
-        assert_eq!(restored.principal_labels(&brain).unwrap(), labels);
+        assert_eq!(
+            restored.principal_labels_page(&brain, None, "").unwrap(),
+            labels
+        );
         assert_eq!(restored.load_brain(&brain).unwrap(), before);
         restored
             .set_principal_label(&brain, &admin, &member, None, "later")
             .unwrap();
-        assert!(restored.principal_labels(&brain).unwrap().is_empty());
+        assert!(
+            restored
+                .principal_labels_page(&brain, None, "")
+                .unwrap()
+                .is_empty()
+        );
 
         // Exact older membership SQL, with no new label API, must clear notes.
         let legacy = Connection::open(&path).unwrap();
@@ -221,7 +248,12 @@ mod tests {
             .unwrap();
         drop(legacy);
         let mut store = BrainStore::open(&path).unwrap();
-        assert!(store.principal_labels(&brain).unwrap().is_empty());
+        assert!(
+            store
+                .principal_labels_page(&brain, None, "")
+                .unwrap()
+                .is_empty()
+        );
         store.conn.execute_batch("INSERT INTO folders (brain_id,id,name,role,access,parent_folder_key,path,current_key_version,shared_folder_source,setup_incomplete,created_at)
             VALUES ('labels','one','One','folder','restricted','','One',1,0,0,'now'),
                    ('labels','two','Two','folder','restricted','','Two',1,0,0,'now');
@@ -239,7 +271,7 @@ mod tests {
             .unwrap();
         assert!(
             store
-                .principal_labels(&brain)
+                .principal_labels_page(&brain, None, "")
                 .unwrap()
                 .contains_key("guest")
         );
@@ -250,7 +282,12 @@ mod tests {
                 [],
             )
             .unwrap();
-        assert!(store.principal_labels(&brain).unwrap().is_empty());
+        assert!(
+            store
+                .principal_labels_page(&brain, None, "")
+                .unwrap()
+                .is_empty()
+        );
     }
 
     #[test]
@@ -280,11 +317,16 @@ mod tests {
                 Some("invitee@example.com"),
             )
             .unwrap();
-        assert!(store.principal_labels(&brain).unwrap().is_empty());
+        assert!(
+            store
+                .principal_labels_page(&brain, None, "")
+                .unwrap()
+                .is_empty()
+        );
         store
             .redeem_brain_invite_token(&first, &redeemer, now)
             .unwrap();
-        let labels = store.principal_labels(&brain).unwrap();
+        let labels = store.principal_labels_page(&brain, None, "").unwrap();
         assert_eq!(
             labels[redeemer.as_str()].source,
             PrincipalLabelSource::InvitationEmail
@@ -324,7 +366,7 @@ mod tests {
             .unwrap();
         store.conn.execute("UPDATE brain_invite_tokens SET redeemed_by_npub=?2, redeemed_at=?3 WHERE token_hash=?1 AND redeemed_by_npub IS NULL AND revoked_at IS NULL", params![second, redeemer.as_str(), now]).unwrap();
         assert_eq!(
-            store.principal_labels(&brain).unwrap()[redeemer.as_str()].text,
+            store.principal_labels_page(&brain, None, "").unwrap()[redeemer.as_str()].text,
             "Actual recipient (agent)"
         );
         store
@@ -334,7 +376,10 @@ mod tests {
             .redeem_brain_invite_token(&first, &redeemer, now)
             .unwrap();
         assert!(
-            store.principal_labels(&brain).unwrap().is_empty(),
+            store
+                .principal_labels_page(&brain, None, "")
+                .unwrap()
+                .is_empty(),
             "retries must not resurrect a cleared note"
         );
     }

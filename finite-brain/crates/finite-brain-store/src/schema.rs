@@ -368,26 +368,26 @@ const SCHEMA_V30: &str = r#"
 CREATE TABLE brain_principal_labels (
     brain_id TEXT NOT NULL REFERENCES brains(id) ON DELETE CASCADE,
     user_id TEXT NOT NULL,
-    text TEXT NOT NULL CHECK (length(text) BETWEEN 1 AND 320),
+    text TEXT NOT NULL CHECK (length(CAST(text AS BLOB)) BETWEEN 1 AND 320),
     source TEXT NOT NULL CHECK (source IN ('admin_note', 'invitation_email')),
     recorded_by TEXT NOT NULL,
     updated_at TEXT NOT NULL,
     PRIMARY KEY (brain_id, user_id)
 );
 
--- This is delivery provenance, never an identity binding. Old token creators
+-- This is the requested email destination, never an identity binding. Old token creators
 -- omit it and continue working. Old redeemers also execute the trigger below.
-ALTER TABLE brain_invite_tokens ADD COLUMN delivery_email TEXT;
+ALTER TABLE brain_invite_tokens ADD COLUMN requested_email TEXT;
 
 CREATE TRIGGER label_invite_token_redeemer
 AFTER UPDATE OF redeemed_by_npub ON brain_invite_tokens
 WHEN OLD.redeemed_by_npub IS NULL AND NEW.redeemed_by_npub IS NOT NULL
-    AND NEW.delivery_email IS NOT NULL
+    AND NEW.requested_email IS NOT NULL
     AND EXISTS(SELECT 1 FROM brain_members
         WHERE brain_id=NEW.brain_id AND user_id=NEW.redeemed_by_npub)
 BEGIN
     INSERT INTO brain_principal_labels (brain_id, user_id, text, source, recorded_by, updated_at)
-    VALUES (NEW.brain_id, NEW.redeemed_by_npub, NEW.delivery_email, 'invitation_email',
+    VALUES (NEW.brain_id, NEW.redeemed_by_npub, NEW.requested_email, 'invitation_email',
         NEW.inviter_npub, NEW.redeemed_at)
     ON CONFLICT(brain_id, user_id) DO NOTHING;
 END;

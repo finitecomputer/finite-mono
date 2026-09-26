@@ -10,6 +10,7 @@ const BRAIN_INVITE_TOKEN_SELECT: &str = r#"
 impl BrainStore {
     /// Create one capability Invite Token. The store only ever sees the
     /// SHA-256 hash of the raw token; the raw token is a server-side concern.
+    #[allow(clippy::too_many_arguments)]
     pub fn create_brain_invite_token(
         &mut self,
         brain_id: &BrainId,
@@ -18,7 +19,7 @@ impl BrainStore {
         inviter_npub: &UserId,
         expires_at: &str,
         created_at: &str,
-        delivery_email: Option<&str>,
+        requested_email: Option<&str>,
     ) -> Result<StoredBrainInviteToken, StoreError> {
         let stored = self.load_brain(brain_id)?;
         if !has_brain_operational_authority(&stored, inviter_npub) {
@@ -31,7 +32,7 @@ impl BrainStore {
                 reason: "admin invite tokens require an organization brain".to_owned(),
             });
         }
-        if let Some(email) = delivery_email {
+        if let Some(email) = requested_email {
             principal_labels::validate_principal_label(email)?;
         }
         validate_invite_token_hash(token_hash)?;
@@ -41,7 +42,7 @@ impl BrainStore {
             .execute(
                 r#"
                 INSERT INTO brain_invite_tokens (
-                    token_hash, brain_id, role, inviter_npub, created_at, expires_at, delivery_email
+                    token_hash, brain_id, role, inviter_npub, created_at, expires_at, requested_email
                 )
                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
                 "#,
@@ -52,7 +53,7 @@ impl BrainStore {
                     inviter_npub.as_str(),
                     created_at,
                     expires_at,
-                    delivery_email
+                    requested_email
                 ],
             )
             .map_err(map_insert_error("brain_invite_token_hash", token_hash))?;

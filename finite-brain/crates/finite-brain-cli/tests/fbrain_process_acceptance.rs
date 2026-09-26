@@ -4250,8 +4250,11 @@ fn built_fbrain_process_sets_displays_and_clears_admin_notes() {
     );
     assert!(imported.status.success());
     fs::remove_file(secret).unwrap();
+    let agent = NostrPublicKey::from_protocol(Keys::generate().public_key())
+        .to_npub()
+        .unwrap();
     let (server_url, shutdown, server_thread) =
-        spawn_real_brain_server(&target, &target, &target, &target);
+        spawn_real_brain_server(&target, &agent, &target, &target);
     let invoke = |args: &[&str]| {
         command(home, home)
             .env(
@@ -4316,6 +4319,139 @@ fn built_fbrain_process_sets_displays_and_clears_admin_notes() {
         String::from_utf8(cleared.stdout)
             .unwrap()
             .contains(&format!("identity {target} source=unidentified"))
+    );
+    drop(shutdown);
+    server_thread.join().unwrap();
+}
+
+#[test]
+fn built_fbrain_process_reads_capacity_roster_labels_in_bounded_pages() {
+    let scratch = TempDir::new().unwrap();
+    let home = scratch.path();
+    let keys = Keys::generate();
+    let admin = NostrPublicKey::from_protocol(keys.public_key())
+        .to_npub()
+        .unwrap();
+    let secret = home.join("import-key");
+    fs::write(&secret, keys.secret_key().to_secret_hex()).unwrap();
+    assert!(
+        run(
+            home,
+            home,
+            &[
+                "auth",
+                "import",
+                "--file",
+                secret.to_str().unwrap(),
+                "--json"
+            ]
+        )
+        .status
+        .success()
+    );
+    fs::remove_file(secret).unwrap();
+    let path = home.join("brain.sqlite3");
+    let mut store = finite_brain_store::BrainStore::open(&path).unwrap();
+    store
+        .create_brain_bootstrap(
+            &finite_brain_core::bootstrap_organization_brain("capacity", "Capacity", &admin)
+                .unwrap(),
+            &[],
+        )
+        .unwrap();
+    drop(store);
+    let mut db = rusqlite::Connection::open(&path).unwrap();
+    db.execute_batch("PRAGMA foreign_keys=ON;
+        INSERT INTO folders (brain_id,id,name,role,access,parent_folder_key,path,current_key_version,shared_folder_source,setup_incomplete,created_at)
+        VALUES ('capacity','one','One','folder','restricted','','One',1,0,1,'now');").unwrap();
+    let envelope = finite_brain_core::BRAIN_CAPACITY_ENVELOPE;
+    let note = "\\".repeat(320); // Worst JSON escaping at the byte limit.
+    let tx = db.transaction().unwrap();
+    for index in 0..envelope.members + envelope.folder_access_entries {
+        let principal = if index == 0 {
+            admin.clone()
+        } else {
+            NostrPublicKey::from_protocol(Keys::generate().public_key())
+                .to_npub()
+                .unwrap()
+        };
+        if index > 0 && index < envelope.members {
+            tx.execute(
+                "INSERT INTO brain_members (brain_id,user_id) VALUES ('capacity',?1)",
+                [&principal],
+            )
+            .unwrap();
+        } else if index >= envelope.members {
+            tx.execute("INSERT INTO folder_access (brain_id,folder_id,user_id) VALUES ('capacity','one',?1)", [&principal]).unwrap();
+        }
+        tx.execute("INSERT INTO brain_principal_labels (brain_id,user_id,text,source,recorded_by,updated_at)
+            VALUES ('capacity',?1,?2,'admin_note',?3,'now')", rusqlite::params![principal,note,admin]).unwrap();
+    }
+    tx.commit().unwrap();
+    drop(db);
+    let store = finite_brain_store::BrainStore::open(&path).unwrap();
+    let page = store
+        .principal_labels_page(&BrainId::new("capacity").unwrap(), None, "")
+        .unwrap();
+    assert_eq!(
+        page.len(),
+        finite_brain_store::PRINCIPAL_LABEL_PAGE_SIZE + 1
+    );
+    assert!(serde_json::to_vec(&page).unwrap().len() < 256 * 1024);
+    drop(store);
+    let (url_tx, url_rx) = mpsc::channel();
+    let (shutdown, shutdown_rx) = tokio::sync::oneshot::channel();
+    let server_thread = thread::spawn(move || {
+        tokio::runtime::Runtime::new().unwrap().block_on(async move {
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let url = format!("http://{}", listener.local_addr().unwrap());
+            let state = finite_brain_server::ServerState::new(finite_brain_store::BrainStore::open(path).unwrap(), url.clone())
+                .with_auth_clock(OffsetDateTime::now_utc().unix_timestamp() as u64, 300);
+            url_tx.send(url).unwrap();
+            tokio::select! {
+                result = axum::serve(listener, finite_brain_server::router_with_state(state)) => result.unwrap(),
+                _ = shutdown_rx => {}
+            }
+        });
+    });
+    let url = url_rx.recv().unwrap();
+    let invoke = |args: &[&str]| {
+        let output = command(home, home)
+            .env(
+                "FBRAIN_NOW",
+                OffsetDateTime::now_utc().format(&Rfc3339).unwrap(),
+            )
+            .env("FINITE_BRAIN_SERVER_URL", &url)
+            .env("FINITE_BRAIN_PUBLIC_BASE_URL", &url)
+            .args(args)
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        output
+    };
+    let edited = invoke(&[
+        "admin", "label", "set", "--brain", "capacity", "--target", &admin, "--text", &note,
+        "--json",
+    ]);
+    assert!(
+        edited.stdout.len() < 2048,
+        "edits must return a single bounded receipt"
+    );
+    let listed = invoke(&["access", "list", "--brain", "capacity", "--json"]);
+    let report: Value = serde_json::from_slice(&listed.stdout).unwrap();
+    let identities = report["identities"].as_array().unwrap();
+    assert_eq!(
+        identities.len(),
+        envelope.members + envelope.folder_access_entries
+    );
+    assert!(
+        identities
+            .iter()
+            .all(|identity| identity["label"]["text"] == note)
     );
     drop(shutdown);
     server_thread.join().unwrap();
