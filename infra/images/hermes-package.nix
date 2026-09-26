@@ -1,4 +1,4 @@
-# Apply the native read-contract patch to the sealed Python environment, so the
+# Apply bounded Finite patches to the sealed Python environment, so the
 # Hermes CLI wrapper and exported runtime Python use the same implementation.
 # No dependency/version change, PYTHONPATH overlay, or mutable production patch.
 {
@@ -26,6 +26,14 @@ upstream.override {
             ${pkgs.patch}/bin/patch --fuzz=0 -d "$site" -p1 < ${./patches/hermes-skills-inventory.patch}
             rm -f "$site/hermes_cli/web_routers/__pycache__/skills."*.pyc
             cp ${../../finite-agentd/integrations/hermes/finite_dashboard_reads.py} "$site/hermes_cli/finite_dashboard_reads.py"
+
+            test -L "$site/gateway"
+            cp -RL "$site/gateway" "$site/gateway-patched"
+            rm "$site/gateway"
+            mv "$site/gateway-patched" "$site/gateway"
+            chmod -R u+w "$site/gateway"
+            ${pkgs.patch}/bin/patch --fuzz=0 -d "$site" -p1 < ${./patches/hermes-stop-generation.patch}
+            rm -f "$site/gateway/__pycache__/run."*.pyc
           '';
         });
       }

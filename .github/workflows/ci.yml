@@ -413,6 +413,14 @@ jobs:
           nix develop "$GITHUB_WORKSPACE#hermes-bridge-ci" --command ruff check "$GITHUB_WORKSPACE/infra/images/test_hermes_skills_inventory.py"
           "$HERMES_AGENT_PYTHON" -m unittest discover -s "$GITHUB_WORKSPACE/infra/images" -p 'test_hermes_skills_inventory.py'
 
+      - name: Packaged Hermes stop and queued-turn contract
+        env:
+          HERMES_AGENT_PYTHON: ${{ steps.hermes_agent_runtime.outputs.python }}
+        run: |
+          nix develop "$GITHUB_WORKSPACE#hermes-bridge-ci" --command ruff format --check "$GITHUB_WORKSPACE/infra/images/test_hermes_stop_generation.py"
+          nix develop "$GITHUB_WORKSPACE#hermes-bridge-ci" --command ruff check "$GITHUB_WORKSPACE/infra/images/test_hermes_stop_generation.py"
+          "$HERMES_AGENT_PYTHON" -m unittest discover -s "$GITHUB_WORKSPACE/infra/images" -p 'test_hermes_stop_generation.py'
+
       - name: Packaged Brain and Sites inventory contracts
         working-directory: ${{ github.workspace }}
         env:
