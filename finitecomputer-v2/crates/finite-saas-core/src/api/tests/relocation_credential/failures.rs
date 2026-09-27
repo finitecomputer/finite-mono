@@ -55,7 +55,7 @@ async fn relocation_failure_and_cancel_revoke_only_pending_credentials() {
             (true, false, None)
         );
 
-        let second_fixture = enqueue_retry(&db, &fixture).await;
+        let second_fixture = enqueue_relocation(&db, &fixture).await;
         let second_lease = "api-relocation-failure-register-lease";
         lease_relocation(&db, &second_fixture, second_lease).await;
         let (status, second) =
@@ -98,7 +98,7 @@ async fn relocation_failure_and_cancel_revoke_only_pending_credentials() {
             (true, false, None)
         );
 
-        let third_fixture = enqueue_retry(&db, &fixture).await;
+        let third_fixture = enqueue_relocation(&db, &fixture).await;
         let third_lease = "api-relocation-failure-cancel-lease";
         lease_relocation(&db, &third_fixture, third_lease).await;
         let (status, third) =
@@ -136,7 +136,7 @@ async fn relocation_failure_and_cancel_revoke_only_pending_credentials() {
             (true, false, None)
         );
 
-        let fourth_fixture = enqueue_retry(&db, &fixture).await;
+        let fourth_fixture = enqueue_relocation(&db, &fixture).await;
         let fourth_lease = "api-relocation-failure-complete-lease";
         lease_relocation(&db, &fourth_fixture, fourth_lease).await;
         let (status, fourth) =
@@ -192,6 +192,18 @@ async fn relocation_credential_provisioning_rejects_invalid_predecessor_state() 
             "api-relocation-revoked-predecessor-relocation-lease",
         )
         .await;
+        assert_eq!(status, StatusCode::CONFLICT);
+
+        let missing = prepare_relocation(&db, "missing-predecessor", true).await;
+        execute_test_sql(&db,
+            "UPDATE runtime_core_credentials SET agent_runtime_id=NULL, revoked=TRUE WHERE creation_request_id=$1",
+            &[&missing.origin_request_id],
+        ).await;
+        expire_creation_lease(&db, &missing.request_id).await;
+        assert_legacy_cannot_lease(&db, &missing).await;
+        lease_relocation(&db, &missing, "api-relocation-missing-predecessor-relocation-lease").await;
+        let (status, _) = provision_relocation_over_http(&app, &missing.request_id,
+            "api-relocation-missing-predecessor-relocation-lease").await;
         assert_eq!(status, StatusCode::CONFLICT);
 
         let inactive_link = prepare_relocation(&db, "inactive-link", true).await;
@@ -299,33 +311,7 @@ async fn relocation_completion_rolls_back_when_successor_is_missing_or_revoked()
         let missing_lease = "api-relocation-missing-successor-relocation-lease";
         register_relocation(&db, &missing, missing_lease).await;
         let result = db
-            .complete_agent_creation_request(CompleteAgentCreationRequestInput {
-                request_id: missing.request_id.clone(),
-                runner_id: "runner-oslo-1".to_string(),
-                lease_token: missing_lease.to_string(),
-                source_host_id: missing.source_host.clone(),
-                source_machine_id: missing.source_machine.clone(),
-                runtime_artifact_id: Some(missing.artifact_id.clone()),
-                state_schema_version: Some("state-v1".to_string()),
-                provider_runtime_handle: None,
-                contact_endpoint: Some("http://127.0.0.1:4200/contact".to_string()),
-                runtime_capabilities: Some(RuntimeCapabilitiesEnvelope::V1(
-                    RuntimeCapabilitiesV1 {
-                        runtime_upgrade: true,
-                        stop: true,
-                        ..Default::default()
-                    },
-                )),
-                display_name: None,
-                hostname: None,
-                runtime_host: Some(missing.source_host.clone()),
-                runtime_status: Some(RuntimeSummaryStatus::Online),
-                active_inference_profile: None,
-                hermes_available: Some(true),
-                published_app_urls: vec![],
-                agent_npub: None,
-                now: None,
-            })
+            .complete_agent_creation_request(relocation_completion(&missing, missing_lease))
             .await;
         assert!(result.is_err());
         assert_eq!(
@@ -350,33 +336,7 @@ async fn relocation_completion_rolls_back_when_successor_is_missing_or_revoked()
         .await;
         register_relocation(&db, &revoked, revoked_lease).await;
         let result = db
-            .complete_agent_creation_request(CompleteAgentCreationRequestInput {
-                request_id: revoked.request_id.clone(),
-                runner_id: "runner-oslo-1".to_string(),
-                lease_token: revoked_lease.to_string(),
-                source_host_id: revoked.source_host.clone(),
-                source_machine_id: revoked.source_machine.clone(),
-                runtime_artifact_id: Some(revoked.artifact_id.clone()),
-                state_schema_version: Some("state-v1".to_string()),
-                provider_runtime_handle: None,
-                contact_endpoint: Some("http://127.0.0.1:4200/contact".to_string()),
-                runtime_capabilities: Some(RuntimeCapabilitiesEnvelope::V1(
-                    RuntimeCapabilitiesV1 {
-                        runtime_upgrade: true,
-                        stop: true,
-                        ..Default::default()
-                    },
-                )),
-                display_name: None,
-                hostname: None,
-                runtime_host: Some(revoked.source_host.clone()),
-                runtime_status: Some(RuntimeSummaryStatus::Online),
-                active_inference_profile: None,
-                hermes_available: Some(true),
-                published_app_urls: vec![],
-                agent_npub: None,
-                now: None,
-            })
+            .complete_agent_creation_request(relocation_completion(&revoked, revoked_lease))
             .await;
         assert!(result.is_err());
         assert_eq!(

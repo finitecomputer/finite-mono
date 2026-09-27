@@ -1,4 +1,5 @@
 mod failures;
+mod lifecycle;
 
 use super::*;
 use crate::store::runtime_credentials::ProvisionRuntimeCredential;
@@ -17,6 +18,7 @@ struct PreparedRelocation {
     project_id: String,
     runtime_id: String,
     source_host: String,
+    target_host: String,
     source_machine: String,
     artifact_id: String,
     run: String,
@@ -36,21 +38,20 @@ fn relocation_capacity() -> RunnerLeaseCapacity {
     }
 }
 
-async fn prepare_relocation(db: &TestDb, run: &str, enroll_initial: bool) -> PreparedRelocation {
-    let artifact_id = format!("api-relocation-{run}-v1");
+async fn artifact(db: &TestDb, id: &str, digest: char) {
     db.upsert_runtime_artifact(crate::UpsertRuntimeArtifactInput {
-        id: artifact_id.clone(),
+        id: id.into(),
         kind: crate::RuntimeArtifactKind::OciImage,
         reference: format!(
-            "ghcr.io/finitecomputer/agent-runtime:{run}@sha256:{}",
-            "a".repeat(64)
+            "ghcr.io/finitecomputer/agent-runtime:{id}@sha256:{}",
+            digest.to_string().repeat(64)
         ),
-        version_label: format!("api-relocation-{run}"),
+        version_label: id.into(),
         source_git_sha: None,
         finitec_version: None,
         hermes_source_ref: None,
         finite_platform_plugin_ref: None,
-        state_schema_version: "state-v1".to_string(),
+        state_schema_version: "state-v1".into(),
         base_image: None,
         canary_runtime_id: None,
         recover_known_good_chat: false,
@@ -59,6 +60,11 @@ async fn prepare_relocation(db: &TestDb, run: &str, enroll_initial: bool) -> Pre
     })
     .await
     .unwrap();
+}
+
+async fn create_runtime(db: &TestDb, run: &str, enroll_initial: bool) -> PreparedRelocation {
+    let artifact_id = format!("api-relocation-{run}-v1");
+    artifact(db, &artifact_id, 'a').await;
 
     let owner_email = format!("{run}@finite.vip");
     let owner_workos = format!("api-relocation-{run}-owner");
@@ -108,7 +114,7 @@ async fn prepare_relocation(db: &TestDb, run: &str, enroll_initial: bool) -> Pre
                 runner_id: runner.clone(),
                 lease_token: creation_lease_token.clone(),
                 source_host_id: source_host.clone(),
-                prepare_hosted_access: false,
+                prepare_hosted_access: true,
             })
             .await
             .unwrap()
@@ -129,11 +135,7 @@ async fn prepare_relocation(db: &TestDb, run: &str, enroll_initial: bool) -> Pre
         state_schema_version: Some("state-v1".to_string()),
         provider_runtime_handle: None,
         contact_endpoint: Some("http://127.0.0.1:4200/contact".to_string()),
-        runtime_capabilities: Some(RuntimeCapabilitiesEnvelope::V1(RuntimeCapabilitiesV1 {
-            runtime_upgrade: true,
-            stop: true,
-            ..Default::default()
-        })),
+        runtime_capabilities: relocation_capacity().runtime_capabilities,
         display_name: None,
         hostname: None,
         runtime_host: Some(source_host.clone()),
@@ -156,11 +158,7 @@ async fn prepare_relocation(db: &TestDb, run: &str, enroll_initial: bool) -> Pre
             state_schema_version: Some("state-v1".to_string()),
             provider_runtime_handle: None,
             contact_endpoint: Some("http://127.0.0.1:4200/contact".to_string()),
-            runtime_capabilities: Some(RuntimeCapabilitiesEnvelope::V1(RuntimeCapabilitiesV1 {
-                runtime_upgrade: true,
-                stop: true,
-                ..Default::default()
-            })),
+            runtime_capabilities: relocation_capacity().runtime_capabilities,
             display_name: None,
             hostname: None,
             runtime_host: Some(source_host.clone()),
@@ -176,39 +174,12 @@ async fn prepare_relocation(db: &TestDb, run: &str, enroll_initial: bool) -> Pre
 
     let runtime_id = completed.request.agent_runtime_id.unwrap();
     let project_id = completed.project.id;
-    let relocation = db
-        .admin_request_runtime_relocate_exact(AdminRuntimeRelocateExactInput {
-            admin_verified_email: format!("{run}-admin@finite.vip"),
-            admin_workos_user_id: format!("api-relocation-{run}-admin"),
-            project_id: project_id.clone(),
-            expected_agent_runtime_id: runtime_id.clone(),
-            expected_source_host_id: source_host.clone(),
-            expected_source_machine_id: source_machine.clone(),
-            target_source_host_id: source_host.clone(),
-            expected_agent_npub: agent_npub,
-            durable_state_manifest_sha256: "b".repeat(64),
-            operator_observed_compute_absent: true,
-            now: None,
-        })
-        .await
-        .unwrap();
-
-    db.lease_agent_creation_request(LeaseAgentCreationRequestInput {
-        runner_id: runner,
-        source_host_id: Some("oslo-host-1".to_string()),
-        lease_token: format!("api-relocation-{run}-relocation-lease"),
-        lease_seconds: Some(300),
-        runner_capacity: Some(relocation_capacity()),
-        now: None,
-    })
-    .await
-    .unwrap()
-    .expect("relocation request should lease");
     PreparedRelocation {
-        origin_request_id: created.request.id,
-        request_id: relocation.id,
+        origin_request_id: created.request.id.clone(),
+        request_id: created.request.id,
         project_id,
         runtime_id,
+        target_host: source_host.clone(),
         source_host,
         source_machine: source_machine_for_fixture,
         artifact_id: artifact_id_for_fixture,
@@ -217,11 +188,23 @@ async fn prepare_relocation(db: &TestDb, run: &str, enroll_initial: bool) -> Pre
     }
 }
 
+async fn prepare_relocation(db: &TestDb, run: &str, enroll_initial: bool) -> PreparedRelocation {
+    let runtime = create_runtime(db, run, enroll_initial).await;
+    let fixture = enqueue_relocation(db, &runtime).await;
+    lease_relocation(
+        db,
+        &fixture,
+        &format!("api-relocation-{run}-relocation-lease"),
+    )
+    .await;
+    fixture
+}
+
 async fn lease_relocation(db: &TestDb, fixture: &PreparedRelocation, token: &str) {
     let lease = db
         .lease_agent_creation_request(LeaseAgentCreationRequestInput {
             runner_id: "runner-oslo-1".to_string(),
-            source_host_id: Some(fixture.source_host.clone()),
+            source_host_id: Some(fixture.target_host.clone()),
             lease_token: token.to_string(),
             lease_seconds: Some(300),
             runner_capacity: Some(relocation_capacity()),
@@ -233,7 +216,7 @@ async fn lease_relocation(db: &TestDb, fixture: &PreparedRelocation, token: &str
     assert_eq!(lease.request.id, fixture.request_id);
 }
 
-async fn enqueue_retry(db: &TestDb, fixture: &PreparedRelocation) -> PreparedRelocation {
+async fn enqueue_relocation(db: &TestDb, fixture: &PreparedRelocation) -> PreparedRelocation {
     let relocation = db
         .admin_request_runtime_relocate_exact(AdminRuntimeRelocateExactInput {
             admin_verified_email: format!("{}-retry-admin@finite.vip", fixture.run),
@@ -242,10 +225,10 @@ async fn enqueue_retry(db: &TestDb, fixture: &PreparedRelocation) -> PreparedRel
             expected_agent_runtime_id: fixture.runtime_id.clone(),
             expected_source_host_id: fixture.source_host.clone(),
             expected_source_machine_id: fixture.source_machine.clone(),
-            target_source_host_id: fixture.source_host.clone(),
+            target_source_host_id: fixture.target_host.clone(),
             expected_agent_npub: format!("npub1{}", "a".repeat(58)),
             durable_state_manifest_sha256: "c".repeat(64),
-            operator_observed_compute_absent: true,
+            operator_observed_compute_absent: fixture.source_host == fixture.target_host,
             now: None,
         })
         .await
@@ -256,6 +239,7 @@ async fn enqueue_retry(db: &TestDb, fixture: &PreparedRelocation) -> PreparedRel
         project_id: fixture.project_id.clone(),
         runtime_id: fixture.runtime_id.clone(),
         source_host: fixture.source_host.clone(),
+        target_host: fixture.target_host.clone(),
         source_machine: fixture.source_machine.clone(),
         artifact_id: fixture.artifact_id.clone(),
         run: fixture.run.clone(),
@@ -282,23 +266,10 @@ async fn provision_relocation_over_http(
 }
 
 async fn expire_creation_lease(db: &TestDb, request_id: &str) {
-    let (client, connection) = tokio_postgres::connect(&db.url, tokio_postgres::NoTls)
-        .await
-        .unwrap();
-    let connection = tokio::spawn(async move {
-        let _ = connection.await;
-    });
-    client
-        .execute(
-            "UPDATE agent_creation_requests
-             SET lease_expires_at = CURRENT_TIMESTAMP - INTERVAL '1 second'
-             WHERE id = $1",
-            &[&request_id],
-        )
-        .await
-        .unwrap();
-    drop(client);
-    connection.abort();
+    execute_test_sql(db,
+        "UPDATE agent_creation_requests SET lease_expires_at = CURRENT_TIMESTAMP - INTERVAL '1 second' WHERE id = $1",
+        &[&request_id],
+    ).await;
 }
 
 async fn execute_test_sql(
@@ -369,20 +340,16 @@ async fn register_relocation(db: &TestDb, fixture: &PreparedRelocation, lease_to
         request_id: fixture.request_id.clone(),
         runner_id: "runner-oslo-1".to_string(),
         lease_token: lease_token.to_string(),
-        source_host_id: fixture.source_host.clone(),
+        source_host_id: fixture.target_host.clone(),
         source_machine_id: fixture.source_machine.clone(),
         runtime_artifact_id: Some(fixture.artifact_id.clone()),
         state_schema_version: Some("state-v1".to_string()),
         provider_runtime_handle: None,
         contact_endpoint: Some("http://127.0.0.1:4200/contact".to_string()),
-        runtime_capabilities: Some(RuntimeCapabilitiesEnvelope::V1(RuntimeCapabilitiesV1 {
-            runtime_upgrade: true,
-            stop: true,
-            ..Default::default()
-        })),
+        runtime_capabilities: relocation_capacity().runtime_capabilities,
         display_name: None,
         hostname: None,
-        runtime_host: Some(fixture.source_host.clone()),
+        runtime_host: Some(fixture.target_host.clone()),
         runtime_status: Some(RuntimeSummaryStatus::Online),
         active_inference_profile: None,
         hermes_available: Some(true),
@@ -393,34 +360,37 @@ async fn register_relocation(db: &TestDb, fixture: &PreparedRelocation, lease_to
     .unwrap();
 }
 
-async fn complete_relocation(db: &TestDb, fixture: &PreparedRelocation, lease_token: &str) {
-    db.complete_agent_creation_request(CompleteAgentCreationRequestInput {
+fn relocation_completion(
+    fixture: &PreparedRelocation,
+    lease_token: &str,
+) -> CompleteAgentCreationRequestInput {
+    CompleteAgentCreationRequestInput {
         request_id: fixture.request_id.clone(),
         runner_id: "runner-oslo-1".to_string(),
         lease_token: lease_token.to_string(),
-        source_host_id: fixture.source_host.clone(),
+        source_host_id: fixture.target_host.clone(),
         source_machine_id: fixture.source_machine.clone(),
         runtime_artifact_id: Some(fixture.artifact_id.clone()),
         state_schema_version: Some("state-v1".to_string()),
         provider_runtime_handle: None,
         contact_endpoint: Some("http://127.0.0.1:4200/contact".to_string()),
-        runtime_capabilities: Some(RuntimeCapabilitiesEnvelope::V1(RuntimeCapabilitiesV1 {
-            runtime_upgrade: true,
-            stop: true,
-            ..Default::default()
-        })),
+        runtime_capabilities: relocation_capacity().runtime_capabilities,
         display_name: None,
         hostname: None,
-        runtime_host: Some(fixture.source_host.clone()),
+        runtime_host: Some(fixture.target_host.clone()),
         runtime_status: Some(RuntimeSummaryStatus::Online),
         active_inference_profile: None,
         hermes_available: Some(true),
         published_app_urls: vec![],
         agent_npub: None,
         now: None,
-    })
-    .await
-    .unwrap();
+    }
+}
+
+async fn complete_relocation(db: &TestDb, fixture: &PreparedRelocation, lease_token: &str) {
+    db.complete_agent_creation_request(relocation_completion(fixture, lease_token))
+        .await
+        .unwrap();
 }
 
 #[tokio::test]
@@ -561,4 +531,25 @@ async fn relocation_credential_retries_are_idempotent_and_recover_expired_leases
         assert_eq!(status, StatusCode::CONFLICT);
     })
     .await;
+}
+
+async fn assert_legacy_cannot_lease(db: &TestDb, fixture: &PreparedRelocation) {
+    let legacy_capacity: RunnerLeaseCapacity = serde_json::from_value(serde_json::json!({
+        "runnerClasses": ["kata"], "runtimeCapabilities": relocation_capacity().runtime_capabilities.unwrap()
+    })).unwrap();
+    assert!(!legacy_capacity.supports_relocation_credentials);
+    for runner_capacity in [None, Some(legacy_capacity)] {
+        let lease = db
+            .lease_agent_creation_request(LeaseAgentCreationRequestInput {
+                runner_id: "legacy-runner".into(),
+                source_host_id: Some(fixture.target_host.clone()),
+                lease_token: "legacy-relocation-lease".into(),
+                lease_seconds: Some(300),
+                runner_capacity,
+                now: None,
+            })
+            .await
+            .unwrap();
+        assert!(lease.is_none());
+    }
 }

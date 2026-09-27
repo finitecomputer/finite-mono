@@ -5456,50 +5456,6 @@ mod tests {
     }
 
     #[test]
-    fn runtime_core_opt_in_delivers_relocation_credential_to_launch() {
-        let mut lease = sample_lease("agent_request_relocation");
-        lease.request.relocation = Some(finite_saas_core::RuntimeRelocationEnvelope::V1(
-            finite_saas_core::RuntimeRelocationV1 {
-                source_host_id: "old-host".into(),
-                source_machine_id: "old-machine".into(),
-                target_source_host_id: "new-host".into(),
-                expected_agent_npub: "npub-relocation-fixture".into(),
-                durable_state_manifest_sha256: "a".repeat(64),
-                source_compute_absent: true,
-            },
-        ));
-        let secret = "b".repeat(64);
-        let mut runner = AgentCreationRunner::new(
-            FakeQueue::with_lease(lease).with_relocation_core_credential(
-                finite_saas_core::store::runtime_credentials::RuntimeBootstrapCredential {
-                    secret: secret.clone(),
-                },
-            ),
-            FakeLauncher::ready(RuntimeLaunchFacts::sample()).for_kata(),
-            FixedLeaseTokens::new(["lease-relocation"]),
-            "runner-1",
-            300,
-        )
-        .unwrap()
-        .with_runtime_core_bootstrap("https://core.example.test".into())
-        .unwrap();
-
-        assert!(matches!(
-            runner.run_once().unwrap(),
-            RunOnceOutcome::Launched { .. }
-        ));
-        let options = &runner.launcher.launch_options[0];
-        assert_eq!(
-            options.environment.get("FINITE_CORE_URL"),
-            Some(&"https://core.example.test".to_string())
-        );
-        assert_eq!(
-            options.secret_environment.get("FINITE_CORE_CREDENTIAL"),
-            Some(&secret)
-        );
-    }
-
-    #[test]
     fn relocation_credential_http_object_and_null_contract() {
         for expected_secret in [Some("c".repeat(64)), None] {
             let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
@@ -5562,10 +5518,18 @@ mod tests {
             assert!(paths[2].ends_with("/relocation-credential"));
             let options = &runner.launcher.launch_options[0];
             match expected_secret {
-                Some(secret) => assert_eq!(
-                    options.secret_environment.get("FINITE_CORE_CREDENTIAL"),
-                    Some(&secret)
-                ),
+                Some(secret) => {
+                    assert_eq!(
+                        options
+                            .environment
+                            .get("FINITE_CORE_URL")
+                            .map(String::as_str),
+                        Some("https://core.example.test")
+                    );
+                    assert!(
+                        options.secret_environment.get("FINITE_CORE_CREDENTIAL") == Some(&secret)
+                    );
+                }
                 None => assert!(
                     !options
                         .secret_environment
@@ -6612,7 +6576,6 @@ mod tests {
         completed: Vec<CompleteAgentCreationRequestInput>,
         failed: Vec<FailAgentCreationRequestInput>,
         health_reports: Vec<RuntimeHealthReportRequest>,
-        relocation_core_secret: Option<String>,
     }
 
     impl FakeQueue {
@@ -6635,7 +6598,6 @@ mod tests {
                 completed: Vec::new(),
                 failed: Vec::new(),
                 health_reports: Vec::new(),
-                relocation_core_secret: None,
             }
         }
 
@@ -6658,7 +6620,6 @@ mod tests {
                 completed: Vec::new(),
                 failed: Vec::new(),
                 health_reports: Vec::new(),
-                relocation_core_secret: None,
             }
         }
 
@@ -6681,20 +6642,11 @@ mod tests {
                 completed: Vec::new(),
                 failed: Vec::new(),
                 health_reports: Vec::new(),
-                relocation_core_secret: None,
             }
         }
 
         fn with_provision_error(mut self, message: &str) -> Self {
             self.provision_error = Some(message.to_string());
-            self
-        }
-
-        fn with_relocation_core_credential(
-            mut self,
-            credential: finite_saas_core::store::runtime_credentials::RuntimeBootstrapCredential,
-        ) -> Self {
-            self.relocation_core_secret = Some(credential.secret);
             self
         }
     }
@@ -6823,11 +6775,7 @@ mod tests {
             Option<finite_saas_core::store::runtime_credentials::RuntimeBootstrapCredential>,
             RunnerError,
         > {
-            Ok(self.relocation_core_secret.as_ref().map(|secret| {
-                finite_saas_core::store::runtime_credentials::RuntimeBootstrapCredential {
-                    secret: secret.clone(),
-                }
-            }))
+            Ok(None)
         }
 
         fn fail_agent_creation(
