@@ -55,8 +55,10 @@ let
     # Raised from the stock 30s: stopping a busy Kata sandbox regularly
     # exceeds 30s, and the short timeout caused false upgrade failures.
     FC_RUNNER_KATA_STOP_TIMEOUT_SECS = "180";
-    # Runtime Retirement stays disabled until its dedicated, restricted Borg
-    # namespace passes the gates in finitecomputer-v2/docs/runtime-control-contract.md.
+    # Runtime Retirement is off by default. A host enables it in its operator
+    # runner.env once the dedicated, restricted Borg recovery set is installed
+    # (see the host runner.env.example); gates are in
+    # finitecomputer-v2/docs/runtime-control-contract.md.
     FC_RUNNER_KATA_RETIREMENT_ENABLED = "false";
 
     FC_RUNNER_FINITE_PRIVATE_BASE_URL = "https://finite-private.finite.containers.tinfoil.dev/v1";
