@@ -831,6 +831,29 @@ class PendingDisconnectTests(HelperCase):
             self.assertTrue(reason.isascii() and len(reason) <= 64)
 
 
+class PackagedModuleTests(HelperCase):
+    """The packaged env carries this helper as ``hermes_cli.finite_inference_helper``."""
+
+    def test_runs_as_packaged_module(self):
+        spec = importlib.util.find_spec("hermes_cli.finite_inference_helper")
+        self.assertIsNotNone(spec, "the Hermes env does not package the helper")
+        self.assertEqual(
+            Path(spec.origin).read_bytes(), HELPER.read_bytes(), "stale packaged helper"
+        )
+        self.write_config({"model": fp_model_block()})
+        completed = subprocess.run(
+            [sys.executable, "-m", "hermes_cli.finite_inference_helper", "inference-facts"],
+            env={"PATH": os.environ.get("PATH", ""), **self.env},
+            cwd=self.root,
+            capture_output=True,
+            text=True,
+            timeout=300,
+        )
+        self.assertEqual(completed.returncode, 0, completed.stderr)
+        facts = json.loads(completed.stdout)
+        self.assertEqual((facts["v"], facts["saved_route"]), (1, "finite_private"))
+
+
 class SecretTests(HelperCase):
     """T-P5: no key or token reaches stdout or stderr."""
 

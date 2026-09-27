@@ -1,0 +1,197 @@
+--- a/gateway/run.py
++++ b/gateway/run.py
+@@ -3187,6 +3187,13 @@
+     except Exception as exc:
+         raise RuntimeError(format_runtime_provider_error(exc)) from exc
+ 
++    if _openrouter_credential_missing(runtime):
++        logger.warning("Primary provider openrouter has no API key configured — trying fallback")
++        fb_config = _try_resolve_fallback_provider()
++        if fb_config is not None:
++            return fb_config
++        raise RuntimeError(OPENROUTER_KEY_MISSING_MESSAGE)
++
+     model_cfg = _get_model_config()
+     max_tokens = None
+     _env_mt = os.environ.get("HERMES_MAX_TOKENS")
+@@ -3378,6 +3385,83 @@
+         "capabilities": dict(runtime.get("capabilities") or {}),
+         "max_tokens": runtime.get("max_output_tokens"),
+     }
++
++
++OPENROUTER_KEY_MISSING_MESSAGE = (
++    "No OpenRouter API key is configured for this agent, and no fallback model is available."
++)
++
++
++def _openrouter_credential_missing(runtime: dict) -> bool:
++    """True when a resolved OpenRouter runtime carries no usable API key."""
++    if str(runtime.get("provider") or "").strip().lower() != "openrouter":
++        return False
++    key = str(runtime.get("api_key") or "").strip()
++    return not key or key.startswith("${")
++
++
++def _endpoint_identity(url: Optional[str]) -> Optional[tuple]:
++    """Comparable endpoint identity: scheme and host case-insensitive, the rest exact.
++
++    Only a trailing slash on the path is normalized. Returns None for an empty
++    URL and ("uncertain",) for a URL that cannot be bound to an endpoint.
++    """
++    raw = str(url or "").strip()
++    if not raw:
++        return None
++    from urllib.parse import urlsplit
++
++    try:
++        parts = urlsplit(raw)
++        port = parts.port
++    except ValueError:
++        return ("uncertain",)
++    if not parts.scheme or not parts.hostname:
++        return ("uncertain",)
++    return (
++        parts.scheme.lower(),
++        parts.hostname.lower(),
++        port,
++        parts.username,
++        parts.password,
++        parts.path.rstrip("/"),
++        parts.query,
++        parts.fragment,
++    )
++
++
++def _resolve_session_override_credentials(
++    provider: str, persisted_base_url: Optional[str]
++) -> dict:
++    """Resolve credentials for a session override's own route.
++
++    Raises when the provider cannot be resolved, when an OpenRouter route has
++    no key, or when the credentials cannot be proven to belong to the endpoint
++    the override names, so a caller can never pair one route's endpoint with
++    another route's key.
++    """
++    runtime = _resolve_runtime_agent_kwargs_for_provider(provider)
++    if _openrouter_credential_missing(runtime):
++        raise RuntimeError(f"credentials for provider {provider!r} are not configured")
++    wanted = _endpoint_identity(persisted_base_url)
++    if wanted is None:
++        return runtime
++    resolved = _endpoint_identity(runtime.get("base_url"))
++    if wanted == ("uncertain",) or resolved == ("uncertain",):
++        raise RuntimeError(
++            f"credentials for provider {provider!r} have an uncertain endpoint binding"
++        )
++    if resolved is None:
++        if runtime.get("api_key"):
++            raise RuntimeError(
++                f"credentials for provider {provider!r} have no verified endpoint binding"
++            )
++        return runtime
++    if wanted != resolved:
++        raise RuntimeError(
++            f"credentials for provider {provider!r} are bound to a different endpoint"
++        )
++    return runtime
+ 
+ 
+ def _deep_merge_request_overrides(base: Optional[dict], override: Optional[dict]) -> dict:
+@@ -8703,8 +8787,15 @@
+                     override_runtime.get("provider"),
+                 )
+                 return override_model, override_runtime
+-            # Override exists but has no api_key — fall through to env-based
+-            # resolution and apply model/provider from the override on top.
++            if override.get("provider") or override.get("base_url"):
++                # Never overlay a session route onto another route's
++                # credentials: resolve the override's own provider, else the
++                # configured fallback chain, else fail the turn.
++                return self._resolve_credentialless_session_override(
++                    resolved_session_key, override, override_model
++                )
++            # Model-only override (no provider) — fall through to env-based
++            # resolution and apply the model from the override on top.
+             logger.debug(
+                 "Session model override (no api_key, fallback): session=%s config_model=%s override_model=%s",
+                 resolved_session_key or "", model, override_model,
+@@ -28329,7 +28420,9 @@
+             # credential-less override — _resolve_session_agent_runtime falls
+             # back to env-based resolution and applies model/provider on top.
+             try:
+-                runtime = _resolve_runtime_agent_kwargs_for_provider(provider)
++                runtime = _resolve_session_override_credentials(
++                    provider, persisted.get("base_url")
++                )
+                 override["api_key"] = runtime.get("api_key")
+                 override["api_mode"] = runtime.get("api_mode")
+                 override["credential_pool"] = runtime.get("credential_pool")
+@@ -28352,6 +28445,57 @@
+             "Rehydrated persisted /model override for session=%s: model=%s provider=%s",
+             session_key, override.get("model"), provider or "",
+         )
++
++    def _resolve_credentialless_session_override(
++        self, session_key: Optional[str], override: dict, override_model: str
++    ) -> tuple:
++        """Resolve a session /model route whose credentials are not cached.
++
++        The override stays the conversation's primary identity. Its own
++        provider is re-resolved every turn; when that fails, the configured
++        fallback chain is used exactly as for a failing default primary, and
++        with no usable fallback the turn fails with the resolution error.
++        """
++        provider = str(override.get("provider") or "").strip()
++        try:
++            if not provider:
++                raise RuntimeError(
++                    "session model override names an endpoint but no provider"
++                )
++            runtime = _resolve_session_override_credentials(
++                provider, override.get("base_url")
++            )
++        except Exception as exc:
++            logger.warning(
++                "Session model override provider=%s has no usable credentials "
++                "(%s) — trying fallback",
++                provider, exc,
++            )
++            fb_config = _try_resolve_fallback_provider()
++            if fb_config is not None:
++                fb_model = fb_config.pop("model", None) or override_model
++                return fb_model, fb_config
++            raise
++        override["api_key"] = runtime.get("api_key")
++        override["api_mode"] = runtime.get("api_mode")
++        override["credential_pool"] = runtime.get("credential_pool")
++        override["request_overrides"] = dict(runtime.get("request_overrides") or {})
++        override["requested_provider"] = runtime.get("requested_provider")
++        override["capabilities"] = dict(runtime.get("capabilities") or {})
++        override["max_tokens"] = runtime.get("max_tokens")
++        if not override.get("base_url"):
++            override["base_url"] = runtime.get("base_url")
++        return override_model, {
++            "provider": override.get("provider"),
++            "requested_provider": override.get("requested_provider"),
++            "api_key": override.get("api_key"),
++            "base_url": override.get("base_url"),
++            "api_mode": override.get("api_mode"),
++            "max_tokens": override.get("max_tokens"),
++            "credential_pool": override.get("credential_pool"),
++            "request_overrides": override.get("request_overrides"),
++            "capabilities": dict(override.get("capabilities") or {}),
++        }
+ 
+     def _apply_session_model_override(
+         self, session_key: str, model: str, runtime_kwargs: dict
+--- a/hermes_cli/runtime_provider.py
++++ b/hermes_cli/runtime_provider.py
+@@ -1468,7 +1468,6 @@
+         api_key_candidates = [
+             explicit_api_key,
+             _getenv("OPENROUTER_API_KEY"),
+-            _getenv("OPENAI_API_KEY"),
+         ]
+     else:
+         # Custom endpoint: use api_key from config when using config base_url (#1760).
