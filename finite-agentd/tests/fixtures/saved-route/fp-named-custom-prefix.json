@@ -1,0 +1,9 @@
+{
+  "description": "Named custom provider reference",
+  "fp_base_url": null,
+  "model": {
+    "default": "glm-5-3-flash",
+    "provider": "custom:finite-private"
+  },
+  "expected": "finite_private"
+}

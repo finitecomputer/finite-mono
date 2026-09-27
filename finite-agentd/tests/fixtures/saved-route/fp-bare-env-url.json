@@ -1,0 +1,12 @@
+{
+  "description": "Bare block on the configured Finite Private URL",
+  "fp_base_url": "https://fp.example.invalid/v1",
+  "model": {
+    "default": "glm-5-3-flash",
+    "provider": "custom",
+    "base_url": "https://fp.example.invalid/v1",
+    "api_key": "${FINITE_PRIVATE_API_KEY}",
+    "api_mode": "chat_completions"
+  },
+  "expected": "finite_private"
+}
