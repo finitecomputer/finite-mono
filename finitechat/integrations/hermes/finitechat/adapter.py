@@ -698,6 +698,7 @@ class FiniteChatAdapter(BasePlatformAdapter):
         """
         outcome_name = str(getattr(outcome, "value", getattr(outcome, "name", outcome))).lower()
         await self._settle_event_ack(event, outcome_name)
+        await self._send_inference_route_notice(event, outcome_name)
         if outcome_name != "success":
             return
         status = await asyncio.to_thread(_finite_private_control_request, "usage", "GET")
@@ -723,6 +724,68 @@ class FiniteChatAdapter(BasePlatformAdapter):
             logger.warning(
                 "[finitechat] could not deliver Finite Private usage notice: %s", result.error
             )
+
+    async def _send_inference_route_notice(self, event: MessageEvent, outcome_name: str) -> None:
+        """Consume the turn's observed routes and send at most one notice.
+
+        The record is taken for every outcome so a cancelled or failed turn
+        never leaks into the next one. Nothing here may disturb the turn: any
+        failure is logged by type only and the notice is dropped.
+        """
+        try:
+            source = getattr(event, "source", None)
+            notice = _INFERENCE_ROUTE_OBSERVER.take_notice(
+                getattr(source, "chat_id", None),
+                getattr(source, "thread_id", None),
+                outcome_name,
+            )
+            # Hermes's self-injected turns (internal events) get no notice.
+            if notice is None or bool(getattr(event, "internal", False)):
+                return
+            text, finite_notice = notice
+            raw_message = event.raw_message if isinstance(event.raw_message, dict) else {}
+            metadata: dict[str, Any] = {
+                **(
+                    self._route_metadata(
+                        _string_or_none(raw_message.get("conversation_id")),
+                        _string_or_none(raw_message.get("segment_id")),
+                    )
+                    or {}
+                ),
+                "_finitechat_kind": "message",
+                "_finitechat_status": "complete",
+                "finite_notice": finite_notice,
+            }
+            result = await self.send(
+                chat_id=str(getattr(source, "chat_id", "") or raw_message.get("room_id") or ""),
+                content=text,
+                metadata=metadata,
+            )
+            if not result.success:
+                logger.warning(
+                    "[finitechat] could not deliver inference route notice: %s", result.error
+                )
+        except Exception as exc:
+            logger.warning("[finitechat] inference route notice skipped: %s", type(exc).__name__)
+
+    async def send_or_update_status(
+        self,
+        chat_id: str,
+        status_key: str,
+        content: str,
+        metadata: dict[str, Any] | None = None,
+    ) -> SendResult:
+        """Deliver a Hermes status line, minus the upstream route-switch lines.
+
+        Pinned Hermes routes its lifecycle statuses here when the adapter has
+        this method, and to `send` otherwise. The model fallback and primary
+        restore lines repeat on every failing turn; the turn's Finite notice
+        (see `_InferenceRouteObserver`) replaces them. Everything else is sent
+        exactly as the gateway would have sent it.
+        """
+        if status_key == "lifecycle" and _is_upstream_route_status(content):
+            return SendResult(success=True)
+        return await self.send(chat_id, content, metadata=metadata)
 
     async def send(
         self,
@@ -1566,7 +1629,8 @@ class FiniteChatAdapter(BasePlatformAdapter):
         if not filings:
             return []
         meta = payload.setdefault("metadata", {})
-        if not isinstance(meta, dict) or "approve" in meta:
+        # A route notice renders as a notice line, which shows no card.
+        if not isinstance(meta, dict) or "approve" in meta or "finite_notice" in meta:
             return []
         meta["approve"] = _brain_approval_metadata(filings)
         return filings
@@ -2336,6 +2400,252 @@ def _brain_approval_metadata(requests: list[dict[str, Any]]) -> dict[str, Any]:
     }
 
 
+# Pinned Hermes's route-switch status lines (agent/chat_completion_helpers.py
+# and agent/agent_runtime_helpers.py). The turn's Finite notice replaces them;
+# test_inference_route_notice renders both from the pinned source so a pin bump
+# that rewords either fails there instead of leaking beside the notice.
+FALLBACK_RE = re.compile(
+    r"^⚠️ Model fallback: (?P<old_model>.+?) via (?P<old_provider>\S+) unavailable "
+    r"\((?P<reason>[^)]*)\); using (?P<fb_model>.+?) via (?P<fb_provider>\S+)\.$"
+)
+RESTORE_RE = re.compile(
+    r"^✅ Primary model restored: (?P<model>.+?) via (?P<provider>\S+); "
+    r"fallback (?P<prev_model>.+?) via (?P<prev_provider>\S+) is no longer active\.$"
+)
+FINITE_PRIVATE_ROUTE_PROVIDERS = frozenset({"custom", "finite-private", "custom:finite-private"})
+INFERENCE_ROUTE_LABELS = {"openrouter": "OpenRouter", "openai-codex": "ChatGPT"}
+INFERENCE_ROUTE_ATTEMPTED = {"openrouter": "openrouter", "openai-codex": "openai_codex"}
+# Keys are pinned Hermes FailoverReason values (agent/error_classifier.py).
+INFERENCE_ROUTE_REASON_PHRASES = {
+    "rate_limit": "is rate-limited",
+    "upstream_rate_limit": "is rate-limited",
+    "billing": "is out of credits or quota",
+    "auth": "rejected its sign-in",
+    "auth_permanent": "rejected its sign-in",
+    "overloaded": "is having problems",
+    "server_error": "is having problems",
+    "timeout": "is having problems",
+    "model_not_found": "doesn't have that model",
+    "content_policy_blocked": "declined this request",
+    "provider_policy_blocked": "declined this request",
+    "format_error": "rejected the request",
+}
+
+
+def _is_upstream_route_status(content: Any) -> bool:
+    try:
+        text = str(content).strip()
+        return bool(FALLBACK_RE.fullmatch(text) or RESTORE_RE.fullmatch(text))
+    except Exception:  # never let the filter drop a status
+        return False
+
+
+class _RouteTurnRecord:
+    def __init__(self, turn_id: str) -> None:
+        self.turn_id = turn_id
+        # Insertion-ordered identity sets; an identity is (provider, endpoint).
+        self.attempted: dict[tuple[str, Any], None] = {}
+        self.errored: dict[tuple[str, Any], str | None] = {}
+        self.served: tuple[str, Any] | None = None
+
+
+class _InferenceRouteObserver:
+    """Record which inference routes a Finite turn tried and which answered.
+
+    Hermes fires the API request hooks on the agent thread with the turn's
+    session ContextVars bound, so a record is keyed by the Finite
+    conversation (chat id, thread id) and replaced when a new turn id arrives
+    there. `on_processing_complete` consumes it and states only what was
+    observed: a route errored and another answered. A fallback Hermes chooses
+    while resolving credentials makes no request and so produces no notice.
+
+    Hooks run on the agent's request path: they only update memory and never
+    raise.
+    """
+
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        self._records: dict[tuple[str, str], _RouteTurnRecord] = {}
+
+    def pre_api_request(self, **kwargs: Any) -> None:
+        self._observe("attempt", kwargs)
+
+    def api_request_error(self, **kwargs: Any) -> None:
+        self._observe("error", kwargs)
+
+    def post_api_request(self, **kwargs: Any) -> None:
+        self._observe("served", kwargs)
+
+    def _observe(self, hook: str, kwargs: dict[str, Any]) -> None:
+        try:
+            key = _inference_turn_key(kwargs)
+            if key is None:
+                return
+            turn_id = str(kwargs.get("turn_id") or "")
+            identity = (
+                str(kwargs.get("provider") or "").strip().lower(),
+                _endpoint_identity(kwargs.get("base_url")),
+            )
+            with self._lock:
+                record = self._records.get(key)
+                if record is None or record.turn_id != turn_id:
+                    record = _RouteTurnRecord(turn_id)
+                    self._records[key] = record
+                record.attempted.setdefault(identity, None)
+                if hook == "error":
+                    reason = kwargs.get("reason")
+                    record.errored[identity] = reason if isinstance(reason, str) else None
+                elif hook == "served":
+                    record.served = identity
+        except Exception:  # observer hook must never raise
+            logger.debug("inference route observation failed", exc_info=True)
+
+    def take_notice(
+        self, chat_id: Any, thread_id: Any, outcome_name: str
+    ) -> tuple[str, dict[str, Any]] | None:
+        """Remove the conversation's record and return (text, finite_notice)."""
+        key = (str(chat_id or "").strip(), str(thread_id or "").strip())
+        with self._lock:
+            record = self._records.pop(key, None)
+        if record is None or not record.errored:
+            return None
+        return _inference_route_notice(record, outcome_name, _configured_finite_private_endpoint())
+
+
+def _inference_turn_key(kwargs: dict[str, Any]) -> tuple[str, str] | None:
+    """The Finite conversation of a main-agent request, else None.
+
+    The gateway runs a turn with task_id equal to the agent's session id.
+    Delegated children run under Hermes's delegated-child context, and the
+    background review fork shares the parent's session id with a fresh
+    task id, so neither is counted.
+    """
+    try:
+        from gateway.session_context import get_session_env
+    except ImportError:
+        return None
+    platform = str(get_session_env("HERMES_SESSION_PLATFORM", "") or "").strip()
+    chat_id = str(get_session_env("HERMES_SESSION_CHAT_ID", "") or "").strip()
+    session_id = str(kwargs.get("session_id") or "")
+    if (
+        platform not in {FINITE_PLATFORM_NAME, Platform.LOCAL.value}
+        or not chat_id
+        or not session_id
+        or str(kwargs.get("task_id") or "") != session_id
+        or _in_delegated_child()
+    ):
+        return None
+    return chat_id, str(get_session_env("HERMES_SESSION_THREAD_ID", "") or "").strip()
+
+
+def _in_delegated_child() -> bool:
+    try:
+        from agent.delegation_context import is_delegated_child_context
+    except ImportError:
+        return False
+    return bool(is_delegated_child_context())
+
+
+def _endpoint_identity(url: Any) -> tuple[Any, ...] | None:
+    """Scheme and host case-insensitive, the rest exact; only a trailing slash
+    on the path is normalized. None when the URL names no endpoint."""
+    raw = str(url or "").strip()
+    if not raw:
+        return None
+    try:
+        parts = urllib.parse.urlsplit(raw)
+        port = parts.port
+    except ValueError:
+        return None
+    if not parts.scheme or not parts.hostname:
+        return None
+    return (
+        parts.scheme.lower(),
+        parts.hostname.lower(),
+        port,
+        parts.username,
+        parts.password,
+        parts.path.rstrip("/"),
+        parts.query,
+        parts.fragment,
+    )
+
+
+def _configured_finite_private_endpoint() -> tuple[Any, ...] | None:
+    """`providers.finite-private.base_url`, which the reconciler writes."""
+    try:
+        from hermes_cli.config import read_raw_config_readonly
+
+        providers = read_raw_config_readonly().get("providers")
+    except Exception:
+        return None
+    entry = providers.get("finite-private") if isinstance(providers, dict) else None
+    return _endpoint_identity(entry.get("base_url")) if isinstance(entry, dict) else None
+
+
+def _inference_route_notice(
+    record: _RouteTurnRecord,
+    outcome_name: str,
+    finite_private_endpoint: tuple[Any, ...] | None,
+) -> tuple[str, dict[str, Any]] | None:
+    def is_finite_private(identity: tuple[str, Any]) -> bool:
+        provider, endpoint = identity
+        return (
+            provider in FINITE_PRIVATE_ROUTE_PROVIDERS
+            and finite_private_endpoint is not None
+            and endpoint == finite_private_endpoint
+        )
+
+    non_fp_errors = [
+        (identity, reason)
+        for identity, reason in record.errored.items()
+        if not is_finite_private(identity)
+    ]
+    served = record.served
+    if outcome_name == "success" and served is not None and is_finite_private(served):
+        if not non_fp_errors:
+            return None
+        notice_type, served_by, subject = "inference_fallback", "finite_private", "Finite Private"
+        (provider, _), reason = non_fp_errors[0]
+    elif outcome_name == "success" and served is not None:
+        others = [
+            (identity, reason) for identity, reason in record.errored.items() if identity != served
+        ]
+        if not others:
+            return None
+        notice_type, served_by, subject = "inference_backup", "backup", "Your backup model"
+        (provider, _), reason = others[0]
+    elif outcome_name == "failure":
+        if not non_fp_errors or not any(is_finite_private(i) for i in record.attempted):
+            return None
+        (provider, _), reason = non_fp_errors[0]
+        label = INFERENCE_ROUTE_LABELS.get(provider, "your selected model")
+        text = f"{label[:1].upper()}{label[1:]} and Finite Private couldn't answer this message."
+        return text, _finite_notice_metadata("inference_fallback_failed", provider, None, reason)
+    else:
+        return None
+
+    label = INFERENCE_ROUTE_LABELS.get(provider, "your selected model")
+    phrase = INFERENCE_ROUTE_REASON_PHRASES.get(reason or "")
+    if phrase:
+        text = f"{subject} answered this response because {label} {phrase}."
+    else:
+        text = f"{subject} answered this response after {label} returned an error."
+    return text, _finite_notice_metadata(notice_type, provider, served_by, reason)
+
+
+def _finite_notice_metadata(
+    notice_type: str, provider: str, served_by: str | None, reason: str | None
+) -> dict[str, Any]:
+    return {
+        "v": 1,
+        "type": notice_type,
+        "attempted": INFERENCE_ROUTE_ATTEMPTED.get(provider, "other"),
+        "served_by": served_by,
+        "reason": reason,
+    }
+
+
 def _local_attachment(path: str, kind: str) -> dict[str, Any]:
     local_path = Path(path)
     return {
@@ -2464,6 +2774,7 @@ def _finite_platform() -> Platform:
 
 
 _BRAIN_APPROVAL_FILINGS = _BrainApprovalFilings()
+_INFERENCE_ROUTE_OBSERVER = _InferenceRouteObserver()
 
 
 def register(ctx) -> None:
@@ -2473,6 +2784,9 @@ def register(ctx) -> None:
         register_hook("pre_tool_call", requester_context.before_tool_call)
         register_hook("post_tool_call", requester_context.after_tool_call)
         register_hook("post_tool_call", _BRAIN_APPROVAL_FILINGS.after_tool_call)
+        register_hook("pre_api_request", _INFERENCE_ROUTE_OBSERVER.pre_api_request)
+        register_hook("api_request_error", _INFERENCE_ROUTE_OBSERVER.api_request_error)
+        register_hook("post_api_request", _INFERENCE_ROUTE_OBSERVER.post_api_request)
     ctx.register_platform(
         name=FINITE_PLATFORM_NAME,
         label="Finite Chat",
