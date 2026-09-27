@@ -535,7 +535,7 @@ class FiniteChatAdapter(BasePlatformAdapter):
         # adapter keeps no route table, dedup set, or SQLite state of its own.
         #
         # The Rust inbox is the durable queue. While a Hermes session is busy
-        # the adapter keeps at most its first blocked ordinary text event per
+        # the adapter keeps at most its first blocked ordinary event per
         # session in memory as an admission head; later events are released back
         # to the durable inbox and redelivered after the head is admitted.
         self._deferred_admissions: dict[str, tuple[MessageEvent, str, Any, str, str]] = {}
@@ -1267,7 +1267,11 @@ class FiniteChatAdapter(BasePlatformAdapter):
         self._home_channel_hydrated = True
 
     def _should_defer_admission(self, event: MessageEvent, session_key: str) -> bool:
-        if event.message_type != MessageType.TEXT or event.internal:
+        # Media needs the same durable admission as text. Hermes can merge
+        # busy-session media into one pending event and run it recursively
+        # inside the current turn, without a completion hook for each lease.
+        # Admit each event as its own turn so its hook alone settles it.
+        if event.internal:
             return False
         if (event.text or "").lstrip().startswith("/"):
             return False
