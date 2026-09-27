@@ -1167,11 +1167,9 @@ class FinitePlatformAdapterTests(unittest.TestCase):
                 await adapter._handle_finitechat_event(second)
 
             self.assertEqual(adapter.handled_messages, [])
-            # The head is held in adapter memory; every redelivered head and
-            # every later event is released back to the durable inbox for
-            # redelivery after the head is admitted (no second dispatch, no ack).
-            self.assertTrue(calls)
-            self.assertTrue(all(call[0] == "release" for call in calls))
+            # Retain each delivered lease once, without a release/redelivery
+            # loop. A renewed lease cannot create a second queued turn.
+            self.assertEqual(calls, [])
             self.assertEqual(len(adapter._deferred_admissions), 1)
             self.assertEqual(len(adapter._admission_tasks), 1)
             admission_task = adapter._admission_tasks[session_key]
@@ -1181,22 +1179,13 @@ class FinitePlatformAdapterTests(unittest.TestCase):
             await owner
             await admission_task
 
-            self.assertEqual([event.text for event in adapter.handled_messages], ["queued first"])
-            self.assertEqual([call[0] for call in calls], ["activity", "ack"])
-            self.assertEqual(calls[-1][1]["message_id"], "msg-21")
-
-            # The second event stayed only in the durable Rust inbox. Its next
-            # redelivery becomes the following turn after the head is ACKed.
-            calls.clear()
-            await adapter._handle_finitechat_event(second)
-
         asyncio.run(exercise())
 
         self.assertEqual(
             [event.text for event in adapter.handled_messages],
             ["queued first", "queued second"],
         )
-        self.assertEqual([call[0] for call in calls], ["activity", "ack"])
+        self.assertEqual([call[0] for call in calls], ["activity", "ack", "activity", "ack"])
         self.assertEqual(calls[-1][1]["message_id"], "msg-22")
 
     def test_deferred_text_survives_adapter_restart_until_admission(self):
@@ -1225,7 +1214,7 @@ class FinitePlatformAdapterTests(unittest.TestCase):
         asyncio.run(restarted._handle_finitechat_event(queued))
 
         self.assertEqual(first_adapter.handled_messages, [])
-        self.assertEqual(first_calls, [])
+        self.assertEqual([call[0] for call in first_calls], ["release"])
         self.assertEqual([event.text for event in restarted.handled_messages], ["survive restart"])
         self.assertEqual([call[0] for call in restarted_calls], ["activity", "ack"])
 

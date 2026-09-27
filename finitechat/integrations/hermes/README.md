@@ -142,7 +142,7 @@ its own.
   success or failure, and a turn cancelled by shutdown or recovery calls
   `release`, which returns the entry to `Pending` for redelivery. A user
   `/stop`, `/new` or `/reset` instead `ack`s the cancelled turn and its held
-  admission head; earlier released entries are acked when redelivered in that
+  queued admissions; earlier undelivered entries are acked when delivered in that
   process. A lease older than the TTL (config, generous default) is swept back
   to `Pending`, so a crashed turn cannot strand
   an entry. The sidecar keeps a bounded recently-acked ring, so a post-restart
@@ -150,18 +150,22 @@ its own.
   idempotency the adapter no longer has to provide. Existing `hermes-inbox.json`
   entries load as `Pending` (`#[serde(default)]`), so the on-disk format is
   unchanged.
-- **Busy-session admission.** While a Hermes session is busy the adapter keeps
-  at most the first blocked ordinary event per session in memory as an
-  admission head; every redelivered head and every later event is `release`d
-  back to the durable inbox, so ordering is preserved without buffering in
-  adapter memory. Slash commands, pending approval responses, and pending
+- **Busy-session admission.** While a Hermes session is busy the adapter holds
+  delivered ordinary events in arrival order per session, retaining their
+  leases in the Rust inbox. It admits them one at a time. Releasing later
+  events while holding only the head would let a partly consumed stream batch
+  overtake those released events when the session becomes idle. Renewed leases
+  for a queued or running event are coalesced without changing its position.
+  These in-memory holders grow with the delivered backlog; the Rust inbox
+  remains the only durable queue. Slash commands, pending approval responses, and pending
   clarification replies still reach the active turn immediately, and one busy
   session does not pause another. Text, photos, audio, video, and files each
   enter their own background turn and retain their lease until its completion
   hook settles it. Separate media messages are not merged into Hermes's pending
-  slot; multiple attachments on one message still travel together. A restart
-  drops only the admission head, leaving its existing lease recoverable by the
-  sidecar's normal expiry/redelivery path. Events consumed inline by a busy
+  slot; multiple attachments on one message still travel together. Graceful
+  shutdown releases every queued lease for immediate redelivery; a crash
+  leaves those leases recoverable through the sidecar's normal expiry path.
+  A failed handoff retries the head before admitting later events. Events consumed inline by a busy
   session never pass through a background turn, so the adapter acks them
   directly (exactly once; the sidecar's ack is idempotent).
 - **Reply/edit routing (O2).** Every inbound event already carries its

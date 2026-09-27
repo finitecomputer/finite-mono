@@ -27,6 +27,7 @@ class MediaHarness(StopHarness):
         self.tasks = {}
         self.failures = set()
         self.runner._prepare_profile_scoped_inbound_message_text = self._prepare_media
+        self.adapter.set_busy_session_handler(self.runner._handle_active_session_busy_message)
 
     async def _prepare_media(self, *, event, **_kwargs):
         self.received[event.message_id] = event
@@ -170,6 +171,37 @@ class PinnedHermesMediaAdmissionTests(unittest.TestCase):
 
         self.run_scenario(scenario)
 
+    def test_stream_batch_cannot_overtake_an_earlier_released_photo(self):
+        async def scenario(h):
+            await h.deliver(raw_event(1, "long running work"))
+            await h.wait_running("msg-1")
+            for seq in (2, 3, 4):
+                await h.deliver(raw_photo(seq))
+
+            # The real sidecar leases a batch before streaming its records.
+            # Pause delivery between two records while the running turn and
+            # held head finish. A released record must not lose its place to
+            # the later record already travelling in the same stream batch.
+            batch = [raw for raw, state in h.inbox.values() if state == "pending"]
+            for raw in batch:
+                h.inbox[raw["message_id"]] = (raw, "leased")
+            if batch:
+                await h.adapter._handle_finitechat_event(batch[0])
+            h.gates["msg-1"].set()
+            await h.wait_settled("msg-1")
+            await h.wait_settled("msg-2")
+            await asyncio.wait_for(asyncio.shield(h.tasks["msg-2"]), 5)
+            for raw in batch[1:]:
+                await h.adapter._handle_finitechat_event(raw)
+                await h.settle_loop()
+            await h.tick()
+            for seq in (3, 4):
+                await h.wait_running(f"msg-{seq}")
+                await h.wait_settled(f"msg-{seq}")
+            self.assertEqual(h.runs, ["msg-1", "msg-2", "msg-3", "msg-4"])
+
+        self.run_scenario(scenario)
+
     def test_shutdown_before_media_admission_keeps_it_for_restart(self):
         async def scenario(h):
             await h.deliver(raw_event(1, "long running work"))
@@ -179,12 +211,12 @@ class PinnedHermesMediaAdmissionTests(unittest.TestCase):
             await h.adapter._cancel_admission_tasks()
             await h.adapter.cancel_background_tasks()
             self.assertEqual(h.state("msg-1"), "pending")
-            self.assertEqual(h.state("msg-2"), "leased")
+            self.assertEqual(h.state("msg-2"), "pending")
             self.assertNotIn(("ack", "msg-2"), h.settled)
             self.assertEqual(h.runs, ["msg-1"])
 
-            # A fresh adapter has no admission head. The sidecar can redeliver
-            # the existing photo lease after expiry without a data migration.
+            # A fresh adapter accepts the released photo using the unchanged
+            # sidecar contract, without waiting for lease expiry or migration.
             with tempfile.TemporaryDirectory(prefix="finite-media-restarted-") as home:
                 restarted = MediaHarness(home)
                 try:
@@ -197,6 +229,67 @@ class PinnedHermesMediaAdmissionTests(unittest.TestCase):
                     self.assertEqual(restarted.runs, ["msg-2"])
                 finally:
                     await restarted.close()
+
+        self.run_scenario(scenario)
+
+    def test_queued_and_running_lease_redelivery_does_not_duplicate_turns(self):
+        async def scenario(h):
+            await h.deliver(raw_event(1, "long running work"))
+            await h.wait_running("msg-1")
+            for seq in (2, 3, 4):
+                await h.deliver(raw_photo(seq))
+            # Simulate the unchanged sidecar renewing leases after its TTL,
+            # including an event already running and several still queued.
+            await h.deliver(raw_event(1, "long running work"))
+            for seq in (4, 3, 2):
+                await h.deliver(raw_photo(seq))
+            self.assertEqual(h.settled, [], "a busy queue must not spin release/redelivery")
+            h.gates["msg-1"].set()
+            for seq in (1, 2, 3, 4):
+                await h.wait_settled(f"msg-{seq}")
+            self.assertEqual(h.runs, ["msg-1", "msg-2", "msg-3", "msg-4"])
+            self.assertEqual(h.settled, [("ack", f"msg-{seq}") for seq in (1, 2, 3, 4)])
+
+        self.run_scenario(scenario)
+
+    def test_graceful_shutdown_releases_the_entire_queue_in_order(self):
+        async def scenario(h):
+            await h.deliver(raw_event(1, "long running work"))
+            await h.wait_running("msg-1")
+            for seq in (2, 3, 4):
+                await h.deliver(raw_photo(seq))
+            await h.adapter._cancel_admission_tasks()
+            await h.adapter.cancel_background_tasks()
+            self.assertEqual(h.runs, ["msg-1"])
+            for seq in (1, 2, 3, 4):
+                self.assertEqual(h.state(f"msg-{seq}"), "pending")
+            self.assertFalse(any(action == "ack" for action, _ in h.settled))
+            self.assertEqual(h.adapter._deferred_admissions, {})
+
+        self.run_scenario(scenario)
+
+    def test_failed_head_handoff_retries_before_later_photos(self):
+        async def scenario(h):
+            await h.deliver(raw_event(1, "long running work"))
+            await h.wait_running("msg-1")
+            for seq in (2, 3, 4):
+                await h.deliver(raw_photo(seq))
+            original = h.adapter.handle_message
+            attempts = []
+
+            async def transient_failure(event):
+                attempts.append(event.message_id)
+                if len(attempts) == 1:
+                    raise RuntimeError("synthetic handoff failure")
+                return await original(event)
+
+            h.adapter.handle_message = transient_failure
+            h.gates["msg-1"].set()
+            for seq in (1, 2, 3, 4):
+                await h.wait_settled(f"msg-{seq}")
+                await h.wait_running(f"msg-{seq}")
+            self.assertEqual(h.runs, ["msg-1", "msg-2", "msg-3", "msg-4"])
+            self.assertEqual(attempts, ["msg-2", "msg-2", "msg-3", "msg-4"])
 
         self.run_scenario(scenario)
 

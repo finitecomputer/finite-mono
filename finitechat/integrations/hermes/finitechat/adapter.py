@@ -535,10 +535,14 @@ class FiniteChatAdapter(BasePlatformAdapter):
         # adapter keeps no route table, dedup set, or SQLite state of its own.
         #
         # The Rust inbox is the durable queue. While a Hermes session is busy
-        # the adapter keeps at most its first blocked ordinary event per
-        # session in memory as an admission head; later events are released back
-        # to the durable inbox and redelivered after the head is admitted.
-        self._deferred_admissions: dict[str, tuple[MessageEvent, str, Any, str, str]] = {}
+        # the adapter retains delivered leases in arrival order per session.
+        # Releasing later entries lets an in-transit stream batch overtake them
+        # when the session becomes idle. These ordered maps are ephemeral lease
+        # holders, not another durable queue; shutdown releases them and a crash
+        # leaves recovery to the sidecar's existing lease expiry.
+        self._deferred_admissions: dict[
+            str, dict[str, tuple[MessageEvent, str, Any, str, str]]
+        ] = {}
         self._admission_tasks: dict[str, asyncio.Task] = {}
         # Per-turn marker (not a dedup store): the key of an event currently
         # being admitted. The turn's completion hook clears it when it settles
@@ -1101,9 +1105,16 @@ class FiniteChatAdapter(BasePlatformAdapter):
             logger.warning("[finitechat] ignored event without message_id")
             return
         event_key = _adapter_event_key(room_id, seq, message_id)
-        # The sidecar leases an entry on delivery and keeps a recently-acked
-        # ring, so an in-flight or already-acked entry is never redelivered to
-        # the adapter — no adapter-side dedup or in-flight tracking is needed.
+        if event_key in self._inflight_admissions or any(
+            event_key in admissions for admissions in self._deferred_admissions.values()
+        ):
+            # A lease can expire while its turn is still queued or running.
+            # Keep the existing holder and order; its completion settles the
+            # renewed lease too (the protocol settles by event identity).
+            return
+        # The sidecar's recently-acked ring owns durable deduplication. The
+        # checks above only coalesce renewed leases while this process still
+        # holds the same event; they retain no completed-event history.
 
         raw_source = raw_event.get("source")
         source_data: dict[str, Any] = raw_source if isinstance(raw_source, dict) else {}
@@ -1159,21 +1170,14 @@ class FiniteChatAdapter(BasePlatformAdapter):
             await self._ack_finitechat_event(room_id, seq, message_id)
             return
         if self._should_defer_admission(event, session_key):
-            if session_key in self._deferred_admissions:
-                # A head event is already held for this session. This later
-                # event stays exclusively in the durable inbox: release its
-                # lease so the sidecar redelivers it after the head is admitted,
-                # preserving inbox order without buffering it in adapter memory.
-                await self._release_finitechat_event(room_id, seq, message_id)
-            else:
-                self._defer_admission(
-                    session_key,
-                    event,
-                    room_id,
-                    seq,
-                    message_id,
-                    event_key or "",
-                )
+            self._defer_admission(
+                session_key,
+                event,
+                room_id,
+                seq,
+                message_id,
+                event_key or "",
+            )
             return
 
         await self._admit_finitechat_event(
@@ -1319,52 +1323,48 @@ class FiniteChatAdapter(BasePlatformAdapter):
         message_id: str,
         event_key: str,
     ) -> None:
-        if session_key in self._deferred_admissions:
-            return
-        self._deferred_admissions[session_key] = (
+        admissions = self._deferred_admissions.setdefault(session_key, {})
+        admissions[event_key] = (
             event,
             room_id,
             seq,
             message_id,
             event_key,
         )
+        if session_key in self._admission_tasks:
+            return
         task = asyncio.create_task(self._admit_when_session_idle(session_key))
         self._admission_tasks[session_key] = task
 
     async def _admit_when_session_idle(self, session_key: str) -> None:
         try:
-            while self._session_is_active(session_key):
-                admission = self._deferred_admissions.get(session_key)
-                if admission is None:
-                    return
-                owner = self._session_tasks.get(session_key)
-                if owner is not None and not owner.done():
-                    await asyncio.wait({owner}, timeout=ADMISSION_RECHECK_SECS)
-                else:
+            while admissions := self._deferred_admissions.get(session_key):
+                if self._session_is_active(session_key):
+                    owner = self._session_tasks.get(session_key)
+                    if owner is not None and not owner.done():
+                        await asyncio.wait({owner}, timeout=ADMISSION_RECHECK_SECS)
+                    else:
+                        await asyncio.sleep(ADMISSION_RECHECK_SECS)
+                    continue
+                event, room_id, seq, message_id, event_key = next(iter(admissions.values()))
+                try:
+                    await self._admit_finitechat_event(
+                        event,
+                        room_id,
+                        seq,
+                        message_id,
+                        event_key,
+                    )
+                except Exception:
+                    # Handoff failure may release the lease. Retain its place
+                    # until retry succeeds; a redelivery coalesces with this
+                    # holder instead of letting later entries overtake it.
+                    logger.exception("[finitechat] deferred handoff failed for %s", session_key)
                     await asyncio.sleep(ADMISSION_RECHECK_SECS)
-
-            admission = self._deferred_admissions.get(session_key)
-            if admission is None:
-                return
-            event, room_id, seq, message_id, event_key = admission
-            await self._admit_finitechat_event(
-                event,
-                room_id,
-                seq,
-                message_id,
-                event_key,
-            )
+                    continue
+                admissions.pop(event_key, None)
         except asyncio.CancelledError:
             raise
-        except Exception as exc:
-            # The inbox still owns the unacknowledged event. Dropping only the
-            # ephemeral gate lets the next stream delivery retry it.
-            logger.error(
-                "[finitechat] deferred admission failed for session %s: %s",
-                session_key,
-                exc,
-                exc_info=True,
-            )
         finally:
             current = asyncio.current_task()
             if self._admission_tasks.get(session_key) is current:
@@ -1397,16 +1397,15 @@ class FiniteChatAdapter(BasePlatformAdapter):
 
     async def _discard_deferred_admission(self, session_key: str) -> None:
         task = self._admission_tasks.pop(session_key, None)
-        admission = self._deferred_admissions.pop(session_key, None)
+        admissions = self._deferred_admissions.pop(session_key, {})
         if task is not None and not task.done():
             task.cancel()
             await asyncio.gather(task, return_exceptions=True)
-        if admission is None:
-            return
-        _event, room_id, seq, message_id, _event_key = admission
-        await self._ack_finitechat_event(room_id, seq, message_id)
+        for _event, room_id, seq, message_id, _event_key in admissions.values():
+            await self._ack_finitechat_event(room_id, seq, message_id)
 
     async def _cancel_admission_tasks(self) -> None:
+        admissions = list(self._deferred_admissions.values())
         tasks = list(self._admission_tasks.values())
         for task in tasks:
             task.cancel()
@@ -1414,6 +1413,9 @@ class FiniteChatAdapter(BasePlatformAdapter):
             await asyncio.gather(*tasks, return_exceptions=True)
         self._admission_tasks.clear()
         self._deferred_admissions.clear()
+        for queue in admissions:
+            for _event, room_id, seq, message_id, _event_key in queue.values():
+                await self._release_finitechat_event(room_id, seq, message_id)
 
     async def _set_processing_activity(
         self,
