@@ -4365,7 +4365,8 @@ fn built_fbrain_process_reads_capacity_roster_labels_in_bounded_pages() {
         INSERT INTO folders (brain_id,id,name,role,access,parent_folder_key,path,current_key_version,shared_folder_source,setup_incomplete,created_at)
         VALUES ('capacity','one','One','folder','restricted','','One',1,0,1,'now');").unwrap();
     let envelope = finite_brain_core::BRAIN_CAPACITY_ENVELOPE;
-    let note = "\\".repeat(320); // Worst JSON escaping at the byte limit.
+    // Worst JSON escaping at the byte limit.
+    let note = "\\".repeat(finite_brain_store::PRINCIPAL_LABEL_MAX_BYTES);
     let tx = db.transaction().unwrap();
     for index in 0..envelope.members + envelope.folder_access_entries {
         let principal = if index == 0 {
@@ -4391,12 +4392,21 @@ fn built_fbrain_process_reads_capacity_roster_labels_in_bounded_pages() {
     drop(db);
     let store = finite_brain_store::BrainStore::open(&path).unwrap();
     let page = store
-        .principal_labels_page(&BrainId::new("capacity").unwrap(), None, "")
+        .principal_labels_page(&BrainId::new("capacity").unwrap(), None, None)
         .unwrap();
     assert_eq!(
-        page.len(),
-        finite_brain_store::PRINCIPAL_LABEL_PAGE_SIZE + 1
+        page.labels.len(),
+        finite_brain_store::PRINCIPAL_LABEL_PAGE_SIZE
     );
+    let page = finite_brain_server::PrincipalLabelsResponse {
+        labels: page
+            .labels
+            .into_iter()
+            .map(|(npub, label)| (npub, label.into()))
+            .collect(),
+        next_after: page.next_after,
+    };
+    assert!(page.next_after.is_some());
     assert!(serde_json::to_vec(&page).unwrap().len() < 256 * 1024);
     drop(store);
     let (url_tx, url_rx) = mpsc::channel();

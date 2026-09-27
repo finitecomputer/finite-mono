@@ -829,20 +829,17 @@ pub(crate) async fn set_principal_label_handler(
     let request: SetPrincipalLabelRequest = serde_json::from_slice(&body)
         .map_err(|_| ApiError::new(StatusCode::BAD_REQUEST, "invalid JSON request body"))?;
     let brain_id = BrainId::new(brain_id)?;
-    let key = NostrPublicKey::parse(&target_npub).map_err(nostr_identity_error)?;
-    let target = UserId::new(key.to_npub().map_err(nostr_identity_error)?)?;
+    let target = principal_user_id(&target_npub)?;
     let actor_id = UserId::new(actor.clone())?;
     let now = server_timestamp(&state);
     let mut store = state.store.lock().map_err(lock_error)?;
     ensure_brain_admin(&store.load_brain(&brain_id)?, &actor)?;
     store.set_principal_label(&brain_id, &actor_id, &target, request.text.as_deref(), &now)?;
-    let label = store
-        .principal_labels_page(&brain_id, Some(&target), "")?
-        .remove(target.as_str());
+    let label = store.principal_label(&brain_id, &target)?;
     Ok(Json(PrincipalLabelReceipt {
         brain_id: brain_id.to_string(),
         npub: target.to_string(),
-        label,
+        label: label.map(PrincipalLabelResponse::from),
     }))
 }
 
@@ -856,29 +853,28 @@ pub(crate) async fn list_principal_labels_handler(
 ) -> Result<Json<PrincipalLabelsResponse>, ApiError> {
     let actor = validate_request_auth(&state, &headers, &method, &uri, None)?;
     let brain_id = BrainId::new(brain_id)?;
-    let after = query
-        .after
-        .map(|cursor| {
-            NostrPublicKey::parse(&cursor)
-                .and_then(|key| key.to_npub())
-                .map_err(nostr_identity_error)
-        })
-        .transpose()?
-        .unwrap_or_default();
+    let after = query.after.as_deref().map(principal_user_id).transpose()?;
     let store = state.store.lock().map_err(lock_error)?;
     let stored = store.load_brain(&brain_id)?;
     ensure_metadata_visible(&stored, &actor)?;
-    let viewer = if ensure_brain_admin(&stored, &actor).is_ok() {
+    let only_user = if ensure_brain_admin(&stored, &actor).is_ok() {
         None
     } else {
         Some(UserId::new(actor)?)
     };
-    let mut labels = store.principal_labels_page(&brain_id, viewer.as_ref(), &after)?;
-    let next_after = if labels.len() > finite_brain_store::PRINCIPAL_LABEL_PAGE_SIZE {
-        labels.pop_last();
-        labels.keys().next_back().cloned()
-    } else {
-        None
-    };
-    Ok(Json(PrincipalLabelsResponse { labels, next_after }))
+    let page = store.principal_labels_page(&brain_id, only_user.as_ref(), after.as_ref())?;
+    Ok(Json(PrincipalLabelsResponse {
+        labels: page
+            .labels
+            .into_iter()
+            .map(|(npub, label)| (npub, label.into()))
+            .collect(),
+        next_after: page.next_after,
+    }))
+}
+
+/// Principal labels are keyed by canonical npub; hex input is accepted.
+fn principal_user_id(input: &str) -> Result<UserId, ApiError> {
+    let key = NostrPublicKey::parse(input).map_err(nostr_identity_error)?;
+    Ok(UserId::new(key.to_npub().map_err(nostr_identity_error)?)?)
 }

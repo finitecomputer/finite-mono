@@ -42,6 +42,7 @@ pub struct CreateBrainFolderKeyGrantRequest {
 #[derive(Debug, Clone, Eq, PartialEq, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct BrainMetadataResponse {
+    /// True when this server serves principal labels. Older clients ignore it.
     #[serde(default)]
     pub principal_labels_available: bool,
     pub brain_id: String,
@@ -1105,17 +1106,28 @@ pub struct SetPrincipalLabelRequest {
     pub text: Option<String>,
 }
 
+/// Brain-local display label. Neither source is a verified identity.
+#[derive(Debug, Clone, Eq, PartialEq, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PrincipalLabelResponse {
+    pub text: String,
+    /// "admin_note" or "invitation_email".
+    pub source: String,
+    pub recorded_by: String,
+    pub updated_at: String,
+}
+
 #[derive(Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct PrincipalLabelReceipt {
     pub brain_id: String,
     pub npub: String,
-    pub label: Option<finite_brain_store::PrincipalLabel>,
+    pub label: Option<PrincipalLabelResponse>,
 }
 #[derive(Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct PrincipalLabelsResponse {
-    pub labels: std::collections::BTreeMap<String, finite_brain_store::PrincipalLabel>,
+    pub labels: std::collections::BTreeMap<String, PrincipalLabelResponse>,
     pub next_after: Option<String>,
 }
 #[derive(Debug, Default, Deserialize)]

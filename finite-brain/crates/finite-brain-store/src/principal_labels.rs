@@ -1,8 +1,14 @@
-//! Brain-local display notes. These never participate in identity or access resolution.
+//! Brain-local display labels. These never participate in identity or access resolution.
 use crate::*;
 
-#[derive(Debug, Clone, Eq, PartialEq, serde::Deserialize, serde::Serialize)]
-#[serde(rename_all = "camelCase")]
+/// Principal label bound in UTF-8 bytes; schema V30 enforces the same limit.
+pub const PRINCIPAL_LABEL_MAX_BYTES: usize = 320;
+pub const PRINCIPAL_LABEL_PAGE_SIZE: usize = 256;
+
+const PRINCIPAL_LABEL_SELECT: &str =
+    "SELECT user_id, text, source, recorded_by, updated_at FROM brain_principal_labels";
+
+#[derive(Debug, Clone, Eq, PartialEq)]
 pub struct PrincipalLabel {
     pub text: String,
     pub source: PrincipalLabelSource,
@@ -10,19 +16,51 @@ pub struct PrincipalLabel {
     pub updated_at: String,
 }
 
-#[derive(Debug, Clone, Copy, Eq, PartialEq, serde::Deserialize, serde::Serialize)]
-#[serde(rename_all = "snake_case")]
+#[derive(Debug, Clone, Copy, Eq, PartialEq)]
 pub enum PrincipalLabelSource {
+    /// An admin's unverified note.
     AdminNote,
+    /// The requested destination of a redeemed email Invite Token.
     InvitationEmail,
 }
 
-pub const PRINCIPAL_LABEL_PAGE_SIZE: usize = 256;
+impl PrincipalLabelSource {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::AdminNote => "admin_note",
+            Self::InvitationEmail => "invitation_email",
+        }
+    }
+}
+
+impl TryFrom<&str> for PrincipalLabelSource {
+    type Error = StoreError;
+
+    fn try_from(value: &str) -> Result<Self, Self::Error> {
+        match value {
+            "admin_note" => Ok(Self::AdminNote),
+            "invitation_email" => Ok(Self::InvitationEmail),
+            _ => Err(StoreError::BrokenInvariant {
+                reason: format!("unknown principal label source {value}"),
+            }),
+        }
+    }
+}
+
+/// One keyset page of labels ordered by principal.
+#[derive(Debug, Clone, Eq, PartialEq)]
+pub struct PrincipalLabelPage {
+    /// At most `PRINCIPAL_LABEL_PAGE_SIZE` labels keyed by principal.
+    pub labels: BTreeMap<String, PrincipalLabel>,
+    /// Cursor for the next page; present only when more labels remain.
+    pub next_after: Option<String>,
+}
 
 impl BrainStore {
-    /// Only an operational Brain admin can set a note, and only for a current
-    /// principal. None clears the note. The canonical target is supplied by the
-    /// signed HTTP request, never inferred from a roster position or a note.
+    /// Only an operational Brain admin can record an admin note, and only for
+    /// a current principal. None clears the label. The canonical target is
+    /// supplied by the signed HTTP request, never inferred from a roster
+    /// position or a label.
     pub fn set_principal_label(
         &mut self,
         brain_id: &BrainId,
@@ -57,10 +95,17 @@ impl BrainStore {
             Some(text) => {
                 self.conn.execute(
                     "INSERT INTO brain_principal_labels (brain_id, user_id, text, source, recorded_by, updated_at)
-                     VALUES (?1, ?2, ?3, 'admin_note', ?4, ?5)
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6)
                      ON CONFLICT(brain_id, user_id) DO UPDATE SET text=excluded.text,
                      source=excluded.source, recorded_by=excluded.recorded_by, updated_at=excluded.updated_at",
-                    params![brain_id.as_str(), target.as_str(), text, actor.as_str(), now],
+                    params![
+                        brain_id.as_str(),
+                        target.as_str(),
+                        text,
+                        PrincipalLabelSource::AdminNote.as_str(),
+                        actor.as_str(),
+                        now
+                    ],
                 )?;
             }
             None => {
@@ -73,57 +118,83 @@ impl BrainStore {
         Ok(())
     }
 
-    /// Read at most one page plus lookahead, optionally restricted to one viewer.
+    /// Read one page of labels after the `after` principal. `only_user`
+    /// restricts the page to that principal's own label.
     pub fn principal_labels_page(
         &self,
         brain_id: &BrainId,
-        visible_user: Option<&UserId>,
-        after: &str,
-    ) -> Result<BTreeMap<String, PrincipalLabel>, StoreError> {
-        let mut query = self.conn.prepare(
-            "SELECT user_id, text, source, recorded_by, updated_at
-             FROM brain_principal_labels WHERE brain_id=?1 AND user_id>?2
-             AND (?3 IS NULL OR user_id=?3) ORDER BY user_id LIMIT ?4",
-        )?;
+        only_user: Option<&UserId>,
+        after: Option<&UserId>,
+    ) -> Result<PrincipalLabelPage, StoreError> {
+        let mut query = self.conn.prepare(&format!(
+            "{PRINCIPAL_LABEL_SELECT} WHERE brain_id=?1 AND user_id>?2
+             AND (?3 IS NULL OR user_id=?3) ORDER BY user_id LIMIT ?4"
+        ))?;
+        // One lookahead row decides whether another page exists.
         let rows = query.query_map(
             params![
                 brain_id.as_str(),
-                after,
-                visible_user.map(UserId::as_str),
+                after.map_or("", UserId::as_str),
+                only_user.map(UserId::as_str),
                 (PRINCIPAL_LABEL_PAGE_SIZE + 1) as i64
             ],
-            |row| {
-                let source: String = row.get(2)?;
-                let source = match source.as_str() {
-                    "admin_note" => PrincipalLabelSource::AdminNote,
-                    "invitation_email" => PrincipalLabelSource::InvitationEmail,
-                    _ => return Err(rusqlite::Error::InvalidQuery),
-                };
-                Ok((
-                    row.get(0)?,
-                    PrincipalLabel {
-                        text: row.get(1)?,
-                        source,
-                        recorded_by: row.get(3)?,
-                        updated_at: row.get(4)?,
-                    },
-                ))
-            },
+            principal_label_from_row,
         )?;
-        Ok(rows.collect::<Result<_, _>>()?)
+        let mut labels = rows.collect::<Result<BTreeMap<_, _>, _>>()?;
+        let next_after = if labels.len() > PRINCIPAL_LABEL_PAGE_SIZE {
+            labels.pop_last();
+            labels.keys().next_back().cloned()
+        } else {
+            None
+        };
+        Ok(PrincipalLabelPage { labels, next_after })
     }
+
+    /// Read one principal's label.
+    pub fn principal_label(
+        &self,
+        brain_id: &BrainId,
+        user: &UserId,
+    ) -> Result<Option<PrincipalLabel>, StoreError> {
+        Ok(self
+            .conn
+            .query_row(
+                &format!("{PRINCIPAL_LABEL_SELECT} WHERE brain_id=?1 AND user_id=?2"),
+                params![brain_id.as_str(), user.as_str()],
+                principal_label_from_row,
+            )
+            .optional()?
+            .map(|(_, label)| label))
+    }
+}
+
+fn principal_label_from_row(
+    row: &rusqlite::Row<'_>,
+) -> Result<(String, PrincipalLabel), rusqlite::Error> {
+    let source: String = row.get(2)?;
+    Ok((
+        row.get(0)?,
+        PrincipalLabel {
+            text: row.get(1)?,
+            source: PrincipalLabelSource::try_from(source.as_str())
+                .map_err(to_store_from_sql_error(2, rusqlite::types::Type::Text))?,
+            recorded_by: row.get(3)?,
+            updated_at: row.get(4)?,
+        },
+    ))
 }
 
 pub(crate) fn validate_principal_label(text: &str) -> Result<(), StoreError> {
     if text.is_empty()
-        || text.len() > 320
+        || text.len() > PRINCIPAL_LABEL_MAX_BYTES
         || text.chars().any(|ch| {
             ch.is_control() || matches!(ch, '\u{2028}'..='\u{202e}' | '\u{2066}'..='\u{2069}')
         })
     {
         return Err(StoreError::InvalidRecord {
-            reason: "principal label must contain 1-320 UTF-8 bytes without control characters"
-                .to_owned(),
+            reason: format!(
+                "principal label must contain 1-{PRINCIPAL_LABEL_MAX_BYTES} UTF-8 bytes without control characters"
+            ),
         });
     }
     Ok(())
@@ -167,8 +238,9 @@ mod tests {
         assert_eq!(store.load_brain(&brain).unwrap(), before);
         assert!(
             store
-                .principal_labels_page(&brain, None, "")
+                .principal_labels_page(&brain, None, None)
                 .unwrap()
+                .labels
                 .is_empty()
         );
         assert!(
@@ -204,7 +276,10 @@ mod tests {
         store
             .set_principal_label(&brain, &admin, &member, Some("CK (human)"), "now")
             .unwrap();
-        let labels = store.principal_labels_page(&brain, None, "").unwrap();
+        let labels = store
+            .principal_labels_page(&brain, None, None)
+            .unwrap()
+            .labels;
         assert_eq!(labels["member"].source, PrincipalLabelSource::AdminNote);
         assert_eq!(labels["member"].recorded_by, "admin");
         assert_eq!(store.load_brain(&brain).unwrap(), before);
@@ -223,7 +298,10 @@ mod tests {
         drop(store);
         let mut restored = BrainStore::open(&recovery).unwrap();
         assert_eq!(
-            restored.principal_labels_page(&brain, None, "").unwrap(),
+            restored
+                .principal_labels_page(&brain, None, None)
+                .unwrap()
+                .labels,
             labels
         );
         assert_eq!(restored.load_brain(&brain).unwrap(), before);
@@ -232,12 +310,13 @@ mod tests {
             .unwrap();
         assert!(
             restored
-                .principal_labels_page(&brain, None, "")
+                .principal_labels_page(&brain, None, None)
                 .unwrap()
+                .labels
                 .is_empty()
         );
 
-        // Exact older membership SQL, with no new label API, must clear notes.
+        // Exact older membership SQL, with no new label API, must clear labels.
         let legacy = Connection::open(&path).unwrap();
         legacy
             .execute_batch(
@@ -250,8 +329,9 @@ mod tests {
         let mut store = BrainStore::open(&path).unwrap();
         assert!(
             store
-                .principal_labels_page(&brain, None, "")
+                .principal_labels_page(&brain, None, None)
                 .unwrap()
+                .labels
                 .is_empty()
         );
         store.conn.execute_batch("INSERT INTO folders (brain_id,id,name,role,access,parent_folder_key,path,current_key_version,shared_folder_source,setup_incomplete,created_at)
@@ -271,8 +351,9 @@ mod tests {
             .unwrap();
         assert!(
             store
-                .principal_labels_page(&brain, None, "")
+                .principal_labels_page(&brain, None, None)
                 .unwrap()
+                .labels
                 .contains_key("guest")
         );
         store
@@ -284,9 +365,64 @@ mod tests {
             .unwrap();
         assert!(
             store
-                .principal_labels_page(&brain, None, "")
+                .principal_labels_page(&brain, None, None)
                 .unwrap()
+                .labels
                 .is_empty()
+        );
+    }
+
+    #[test]
+    fn label_pages_are_bounded_keyset_pages_and_receipts_read_one_row() {
+        let mut store = BrainStore::open_in_memory().unwrap();
+        let brain = BrainId::new("labels").unwrap();
+        store
+            .create_brain_bootstrap(
+                &finite_brain_core::bootstrap_organization_brain("labels", "Labels", "admin")
+                    .unwrap(),
+                &[],
+            )
+            .unwrap();
+        for index in 0..=PRINCIPAL_LABEL_PAGE_SIZE {
+            store
+                .conn
+                .execute(
+                    "INSERT INTO brain_principal_labels (brain_id,user_id,text,source,recorded_by,updated_at)
+                     VALUES ('labels',?1,'label','admin_note','admin','now')",
+                    [format!("user-{index:04}")],
+                )
+                .unwrap();
+        }
+        let first = store.principal_labels_page(&brain, None, None).unwrap();
+        assert_eq!(first.labels.len(), PRINCIPAL_LABEL_PAGE_SIZE);
+        let cursor = UserId::new(first.next_after.clone().unwrap()).unwrap();
+        assert_eq!(first.labels.keys().next_back(), Some(&cursor.to_string()));
+        let last = store
+            .principal_labels_page(&brain, None, Some(&cursor))
+            .unwrap();
+        assert_eq!(last.labels.len(), 1);
+        assert_eq!(last.next_after, None);
+        assert!(
+            !first
+                .labels
+                .contains_key(last.labels.keys().next().unwrap())
+        );
+
+        let viewer = UserId::new("user-0003").unwrap();
+        let own = store
+            .principal_labels_page(&brain, Some(&viewer), None)
+            .unwrap();
+        assert_eq!(own.labels.keys().collect::<Vec<_>>(), ["user-0003"]);
+        assert_eq!(own.next_after, None);
+        assert_eq!(
+            store.principal_label(&brain, &viewer).unwrap().as_ref(),
+            own.labels.get("user-0003")
+        );
+        assert_eq!(
+            store
+                .principal_label(&brain, &UserId::new("absent").unwrap())
+                .unwrap(),
+            None
         );
     }
 
@@ -319,14 +455,18 @@ mod tests {
             .unwrap();
         assert!(
             store
-                .principal_labels_page(&brain, None, "")
+                .principal_labels_page(&brain, None, None)
                 .unwrap()
+                .labels
                 .is_empty()
         );
         store
             .redeem_brain_invite_token(&first, &redeemer, now)
             .unwrap();
-        let labels = store.principal_labels_page(&brain, None, "").unwrap();
+        let labels = store
+            .principal_labels_page(&brain, None, None)
+            .unwrap()
+            .labels;
         assert_eq!(
             labels[redeemer.as_str()].source,
             PrincipalLabelSource::InvitationEmail
@@ -366,7 +506,11 @@ mod tests {
             .unwrap();
         store.conn.execute("UPDATE brain_invite_tokens SET redeemed_by_npub=?2, redeemed_at=?3 WHERE token_hash=?1 AND redeemed_by_npub IS NULL AND revoked_at IS NULL", params![second, redeemer.as_str(), now]).unwrap();
         assert_eq!(
-            store.principal_labels_page(&brain, None, "").unwrap()[redeemer.as_str()].text,
+            store
+                .principal_labels_page(&brain, None, None)
+                .unwrap()
+                .labels[redeemer.as_str()]
+            .text,
             "Actual recipient (agent)"
         );
         store
@@ -377,8 +521,9 @@ mod tests {
             .unwrap();
         assert!(
             store
-                .principal_labels_page(&brain, None, "")
+                .principal_labels_page(&brain, None, None)
                 .unwrap()
+                .labels
                 .is_empty(),
             "retries must not resurrect a cleared note"
         );

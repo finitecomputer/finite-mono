@@ -32,10 +32,11 @@ use finite_brain_store::{
     BrainInvitationTargetKind, BrainInviteTokenRole, BrainStore, ControlSyncRecord,
     EncryptedBrainExport, FolderKeyGrantMetadata, FolderObjectRevisionSyncRecord,
     FolderObjectTombstoneSyncRecord, GrantFolderAccessOutcome, IdentityAlias, LinkStatus,
-    MountedFolderProjection, MountedFolderState, PendingGrantWrap, SharedFolderConnectionStatus,
-    SharedFolderDirection, StoreError, StoredBrain, StoredBrainInvitation, StoredBrainInviteToken,
-    StoredShareLink, StoredSharedFolderConnection, StoredSharedFolderInvitation, StoredSyncRecord,
-    SyncRecordInput, SyncRecordType, VisibleBrain, VisibleBrainRole, timestamp_expired,
+    MountedFolderProjection, MountedFolderState, PendingGrantWrap, PrincipalLabel,
+    SharedFolderConnectionStatus, SharedFolderDirection, StoreError, StoredBrain,
+    StoredBrainInvitation, StoredBrainInviteToken, StoredShareLink, StoredSharedFolderConnection,
+    StoredSharedFolderInvitation, StoredSyncRecord, SyncRecordInput, SyncRecordType, VisibleBrain,
+    VisibleBrainRole, timestamp_expired,
 };
 use finite_nostr::{
     MAX_NIP05_DOCUMENT_BYTES, Nip05Identifier, Nip05WellKnownDocument, Nip05WellKnownRequest,
@@ -3484,6 +3485,20 @@ mod tests {
         );
     }
 
+    #[test]
+    fn principal_label_wire_shape_is_stable() {
+        let label = PrincipalLabelResponse::from(PrincipalLabel {
+            text: "CK (human)".to_owned(),
+            source: finite_brain_store::PrincipalLabelSource::InvitationEmail,
+            recorded_by: "npub-admin".to_owned(),
+            updated_at: "now".to_owned(),
+        });
+        assert_eq!(
+            serde_json::to_string(&label).unwrap(),
+            r#"{"text":"CK (human)","source":"invitation_email","recordedBy":"npub-admin","updatedAt":"now"}"#
+        );
+    }
+
     #[tokio::test]
     async fn principal_notes_are_brain_scoped_authorized_and_separate_from_identity() {
         let admin = Keys::generate();
@@ -3544,10 +3559,7 @@ mod tests {
         let receipt: PrincipalLabelReceipt = read_json(set).await;
         assert_eq!(receipt.npub, target);
         assert_eq!(receipt.label.as_ref().unwrap().text, "Gaius (agent)");
-        assert_eq!(
-            receipt.label.as_ref().unwrap().source,
-            finite_brain_store::PrincipalLabelSource::AdminNote
-        );
+        assert_eq!(receipt.label.as_ref().unwrap().source, "admin_note");
         for (actor, brain, visible) in [
             (&admin, "acme", true),
             (&member, "acme", true),
@@ -3604,7 +3616,7 @@ mod tests {
             TEST_NOW,
         )
         .await;
-        assert!(!unknown.status().is_success());
+        assert_eq!(unknown.status(), StatusCode::BAD_REQUEST);
         {
             let store = state.store.lock().unwrap();
             assert_eq!(
@@ -6926,10 +6938,7 @@ mod tests {
             )
             .await;
             assert_eq!(page.labels[&npub(&recipient)].text, "intended@example.com");
-            assert_eq!(
-                page.labels[&npub(&recipient)].source,
-                finite_brain_store::PrincipalLabelSource::InvitationEmail
-            );
+            assert_eq!(page.labels[&npub(&recipient)].source, "invitation_email");
         }
     }
 
@@ -6995,10 +7004,7 @@ mod tests {
         .await;
         let label = &labels.labels[&npub(&recipient)];
         assert_eq!(label.text, "friend@example.com");
-        assert_eq!(
-            label.source,
-            finite_brain_store::PrincipalLabelSource::InvitationEmail
-        );
+        assert_eq!(label.source, "invitation_email");
         let sent = sent.lock().unwrap();
         assert_eq!(sent.len(), 1);
         let email = &sent[0];

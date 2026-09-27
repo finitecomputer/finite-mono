@@ -501,6 +501,17 @@ pub(crate) fn pending_grant_wrap_response(wrap: PendingGrantWrap) -> PendingGran
     }
 }
 
+impl From<PrincipalLabel> for PrincipalLabelResponse {
+    fn from(label: PrincipalLabel) -> Self {
+        Self {
+            text: label.text,
+            source: label.source.as_str().to_owned(),
+            recorded_by: label.recorded_by,
+            updated_at: label.updated_at,
+        }
+    }
+}
+
 fn link_status_str(status: LinkStatus) -> &'static str {
     match status {
         LinkStatus::Pending => "pending",
