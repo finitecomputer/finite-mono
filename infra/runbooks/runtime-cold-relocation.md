@@ -15,8 +15,8 @@ name is not authority to select a Runtime.
 - The Core and both Runner hosts run the reviewed generation that contains the
   `runtime_relocation.v1` contract.
 - For an Agent enrolled in Core authentication, the target Runner must also
-  advertise `supports_relocation_credentials` with `FC_RUNNER_RUNTIME_CORE_URL`
-  configured. Core will not lease that relocation to an older Runner. A new
+  advertise `supportsRelocationCredentials` in its lease capacity, which it
+  does when `FC_RUNNER_RUNTIME_CORE_URL` is configured. Core will not lease that relocation to an older Runner. A new
   Runner talking to an older Core stops before provider work and retries.
   Quiesce already-leased relocations before deploying this Core change: the
   capability gate cannot recall work an old Runner has already claimed.
