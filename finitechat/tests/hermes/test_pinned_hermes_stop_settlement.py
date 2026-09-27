@@ -69,6 +69,12 @@ def raw_event(seq: int, text: str) -> dict[str, Any]:
     }
 
 
+def raw_photo(seq: int) -> dict[str, Any]:
+    raw = raw_event(seq, "what is in this picture?")
+    raw["attachments"] = [{"path": f"/synthetic/photo-{seq}.png", "mime_type": "image/png"}]
+    return raw
+
+
 class StopHarness:
     """Real pinned gateway + adapter; simulated model, transport, and sidecar."""
 
@@ -208,6 +214,40 @@ class PinnedHermesStopSettlementTests(unittest.TestCase):
             for message_id in ("msg-1", "msg-2", "msg-3", "msg-4", "msg-5"):
                 self.assertEqual(h.state(message_id), "acked", message_id)
             self.assertEqual(h.adapter._deferred_admissions, {})
+
+        self.run_scenario(scenario)
+
+    def test_stop_acks_a_photo_queued_in_hermes_behind_the_running_turn(self):
+        async def scenario(h: StopHarness):
+            await h.deliver(raw_event(1, "long running work"))
+            await asyncio.wait_for(h.started.wait(), 2)
+            # Non-text bypasses the Finite admission head and waits in the
+            # Hermes pending slot, which the gateway stop handler discards.
+            await h.deliver(raw_photo(2))
+            self.assertEqual(h.state("msg-2"), "leased")
+
+            await h.deliver(raw_event(3, "/stop"))
+
+            # Settled durably by the stop itself, not by the in-memory
+            # boundary on a later redelivery, so a gateway restart inside the
+            # lease window cannot resurrect it.
+            self.assertEqual(h.state("msg-2"), "acked")
+            self.assertNotIn(("release", "msg-2"), h.settled)
+            await h.tick()
+            self.assertEqual(h.runs, ["msg-1"])
+
+        self.run_scenario(scenario)
+
+    def test_photo_sent_after_stop_runs_normally(self):
+        async def scenario(h: StopHarness):
+            await h.deliver(raw_event(1, "long running work"))
+            await asyncio.wait_for(h.started.wait(), 2)
+            await h.deliver(raw_event(2, "/stop"))
+            await h.deliver(raw_photo(3))
+            await h.wait_settled("msg-3")
+
+            self.assertEqual(h.runs, ["msg-1", "msg-3"])
+            self.assertEqual(h.state("msg-3"), "acked")
 
         self.run_scenario(scenario)
 

@@ -551,8 +551,13 @@ class FiniteChatAdapter(BasePlatformAdapter):
         # same CANCELLED outcome as shutdown, so the adapter marks the turn
         # tasks the command cancels (settled as consumed, never redelivered)
         # and keeps the command's room sequence per session so pre-command
-        # events still cycling through the durable inbox are acked unrun.
-        self._user_interrupting_sessions: set[str] = set()
+        # events still cycling through the durable inbox are acked unrun. The
+        # boundaries live for the process: clearing one on idle would let an
+        # entry whose lease expires later replay work the user stopped.
+        # While a command runs, its session maps to the events the gateway
+        # took from the Hermes pending slot (non-text queued behind the turn),
+        # which the stop handler discards without settling their leases.
+        self._user_interrupting_sessions: dict[str, list[MessageEvent]] = {}
         self._user_cancelled_tasks: weakref.WeakSet[asyncio.Task] = weakref.WeakSet()
         self._user_interrupt_boundaries: dict[str, tuple[str, int]] = {}
 
@@ -591,6 +596,9 @@ class FiniteChatAdapter(BasePlatformAdapter):
         that queue, and the cancelled turn's lease would otherwise be released
         for redelivery as a brand-new run. Everything this session sent before
         the command is settled as consumed; later messages run normally.
+        Settling is durable ack, not the in-memory boundary alone, so a
+        gateway restart inside the lease window cannot resurrect a stopped
+        message.
         """
         raw_message = event.raw_message if isinstance(event.raw_message, dict) else {}
         seq = raw_message.get("seq")
@@ -598,11 +606,21 @@ class FiniteChatAdapter(BasePlatformAdapter):
             room_id = str(raw_message.get("room_id") or self.room_id)
             self._user_interrupt_boundaries[session_key] = (room_id, seq)
         await self._discard_deferred_admission(session_key)
-        self._user_interrupting_sessions.add(session_key)
+        dequeued: list[MessageEvent] = []
+        self._user_interrupting_sessions[session_key] = dequeued
         try:
             await super()._dispatch_active_session_command(event, session_key, cmd)
         finally:
-            self._user_interrupting_sessions.discard(session_key)
+            self._user_interrupting_sessions.pop(session_key, None)
+            for pending in dequeued:
+                await self._settle_user_interrupted_pending(session_key, pending)
+
+    def get_pending_message(self, session_key: str) -> MessageEvent | None:
+        pending = super().get_pending_message(session_key)
+        dequeued = self._user_interrupting_sessions.get(session_key)
+        if pending is not None and dequeued is not None:
+            dequeued.append(pending)
+        return pending
 
     async def cancel_session_processing(
         self,
@@ -1355,6 +1373,23 @@ class FiniteChatAdapter(BasePlatformAdapter):
             return False
         boundary_room_id, boundary_seq = boundary
         return room_id == boundary_room_id and seq < boundary_seq
+
+    async def _settle_user_interrupted_pending(self, session_key: str, event: MessageEvent) -> None:
+        raw_message = event.raw_message if isinstance(event.raw_message, dict) else {}
+        room_id = str(raw_message.get("room_id") or self.room_id)
+        seq = raw_message.get("seq")
+        message_id = str(raw_message.get("message_id") or "")
+        if not message_id:
+            return
+        event_key = _adapter_event_key(room_id, seq, message_id)
+        if event_key:
+            self._inflight_admissions.discard(event_key)
+        if self._precedes_user_interrupt(session_key, room_id, seq):
+            await self._ack_finitechat_event(room_id, seq, message_id)
+        else:
+            # Inbound dispatch is serial, so nothing sent after the command
+            # can reach the slot while it runs; never drop one if it does.
+            await self._release_finitechat_event(room_id, seq, message_id)
 
     async def _discard_deferred_admission(self, session_key: str) -> None:
         task = self._admission_tasks.pop(session_key, None)
