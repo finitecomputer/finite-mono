@@ -1029,13 +1029,13 @@
       "targets": [
         {
           "refId": "A",
-          "expr": "sum by (project) (max_over_time({service=\"finite-private-request-diagnostics\"} | json reservation=\"reservationId\", observed=\"observedAtUnixSeconds\", model=\"model\", endpoint=\"endpoint\", project=\"projectId\", runtime=\"agentRuntimeId\", key=\"apiKeyId\", value=\"promptTokens\" | label_format diagnostic_age=\"{{sub (unixEpoch now) .observed}}\" | diagnostic_age >= 0 | diagnostic_age <= 604800 | drop diagnostic_age | model=~\"$model\" | endpoint=~\"$endpoint\" | project=~\"${project:raw}\" | runtime=~\"${runtime:raw}\" | key=~\"${key:raw}\" | value!=\"\" | unwrap value | __error__=\"\" [$__range]))",
+          "expr": "sum by (project) (last_over_time({service=\"finite-private-request-diagnostics\"} | json reservation=\"reservationId\", observed=\"observedAtUnixSeconds\", model=\"model\", endpoint=\"endpoint\", project=\"projectId\", runtime=\"agentRuntimeId\", key=\"apiKeyId\", value=\"promptTokens\" | label_format diagnostic_age=\"{{sub (unixEpoch now) .observed}}\" | diagnostic_age >= 0 | diagnostic_age <= 604800 | drop diagnostic_age | model=~\"$model\" | endpoint=~\"$endpoint\" | project=~\"${project:raw}\" | runtime=~\"${runtime:raw}\" | key=~\"${key:raw}\" | value!=\"\" | unwrap value | __error__=\"\" [$__range]))",
           "legendFormat": "Input {{project}}",
           "queryType": "instant"
         },
         {
           "refId": "B",
-          "expr": "sum by (project) (max_over_time({service=\"finite-private-request-diagnostics\"} | json reservation=\"reservationId\", observed=\"observedAtUnixSeconds\", model=\"model\", endpoint=\"endpoint\", project=\"projectId\", runtime=\"agentRuntimeId\", key=\"apiKeyId\", value=\"completionTokens\" | label_format diagnostic_age=\"{{sub (unixEpoch now) .observed}}\" | diagnostic_age >= 0 | diagnostic_age <= 604800 | drop diagnostic_age | model=~\"$model\" | endpoint=~\"$endpoint\" | project=~\"${project:raw}\" | runtime=~\"${runtime:raw}\" | key=~\"${key:raw}\" | value!=\"\" | unwrap value | __error__=\"\" [$__range]))",
+          "expr": "sum by (project) (last_over_time({service=\"finite-private-request-diagnostics\"} | json reservation=\"reservationId\", observed=\"observedAtUnixSeconds\", model=\"model\", endpoint=\"endpoint\", project=\"projectId\", runtime=\"agentRuntimeId\", key=\"apiKeyId\", value=\"completionTokens\" | label_format diagnostic_age=\"{{sub (unixEpoch now) .observed}}\" | diagnostic_age >= 0 | diagnostic_age <= 604800 | drop diagnostic_age | model=~\"$model\" | endpoint=~\"$endpoint\" | project=~\"${project:raw}\" | runtime=~\"${runtime:raw}\" | key=~\"${key:raw}\" | value!=\"\" | unwrap value | __error__=\"\" [$__range]))",
           "legendFormat": "Output {{project}}",
           "queryType": "instant"
         }
@@ -1123,13 +1123,13 @@
       "targets": [
         {
           "refId": "A",
-          "expr": "sum by (key) (max_over_time({service=\"finite-private-request-diagnostics\"} | json reservation=\"reservationId\", observed=\"observedAtUnixSeconds\", model=\"model\", endpoint=\"endpoint\", project=\"projectId\", runtime=\"agentRuntimeId\", key=\"apiKeyId\", value=\"promptTokens\" | label_format diagnostic_age=\"{{sub (unixEpoch now) .observed}}\" | diagnostic_age >= 0 | diagnostic_age <= 604800 | drop diagnostic_age | model=~\"$model\" | endpoint=~\"$endpoint\" | project=~\"${project:raw}\" | runtime=~\"${runtime:raw}\" | key=~\"${key:raw}\" | value!=\"\" | unwrap value | __error__=\"\" [$__range]))",
+          "expr": "sum by (key) (last_over_time({service=\"finite-private-request-diagnostics\"} | json reservation=\"reservationId\", observed=\"observedAtUnixSeconds\", model=\"model\", endpoint=\"endpoint\", project=\"projectId\", runtime=\"agentRuntimeId\", key=\"apiKeyId\", value=\"promptTokens\" | label_format diagnostic_age=\"{{sub (unixEpoch now) .observed}}\" | diagnostic_age >= 0 | diagnostic_age <= 604800 | drop diagnostic_age | model=~\"$model\" | endpoint=~\"$endpoint\" | project=~\"${project:raw}\" | runtime=~\"${runtime:raw}\" | key=~\"${key:raw}\" | value!=\"\" | unwrap value | __error__=\"\" [$__range]))",
           "legendFormat": "{{key}} input",
           "queryType": "instant"
         },
         {
           "refId": "B",
-          "expr": "sum by (key) (max_over_time({service=\"finite-private-request-diagnostics\"} | json reservation=\"reservationId\", observed=\"observedAtUnixSeconds\", model=\"model\", endpoint=\"endpoint\", project=\"projectId\", runtime=\"agentRuntimeId\", key=\"apiKeyId\", value=\"completionTokens\" | label_format diagnostic_age=\"{{sub (unixEpoch now) .observed}}\" | diagnostic_age >= 0 | diagnostic_age <= 604800 | drop diagnostic_age | model=~\"$model\" | endpoint=~\"$endpoint\" | project=~\"${project:raw}\" | runtime=~\"${runtime:raw}\" | key=~\"${key:raw}\" | value!=\"\" | unwrap value | __error__=\"\" [$__range]))",
+          "expr": "sum by (key) (last_over_time({service=\"finite-private-request-diagnostics\"} | json reservation=\"reservationId\", observed=\"observedAtUnixSeconds\", model=\"model\", endpoint=\"endpoint\", project=\"projectId\", runtime=\"agentRuntimeId\", key=\"apiKeyId\", value=\"completionTokens\" | label_format diagnostic_age=\"{{sub (unixEpoch now) .observed}}\" | diagnostic_age >= 0 | diagnostic_age <= 604800 | drop diagnostic_age | model=~\"$model\" | endpoint=~\"$endpoint\" | project=~\"${project:raw}\" | runtime=~\"${runtime:raw}\" | key=~\"${key:raw}\" | value!=\"\" | unwrap value | __error__=\"\" [$__range]))",
           "legendFormat": "{{key}} output",
           "queryType": "instant"
         }
@@ -1192,7 +1192,7 @@
       "targets": [
         {
           "refId": "A",
-          "expr": "sum by(quality)(max_over_time({service=\"finite-private-request-diagnostics\"} | json reservation=\"reservationId\", observed=\"observedAtUnixSeconds\", model=\"model\", endpoint=\"endpoint\", project=\"projectId\", runtime=\"agentRuntimeId\", key=\"apiKeyId\", quality=\"measurementQuality\" | label_format diagnostic_age=\"{{sub (unixEpoch now) .observed}}\" | diagnostic_age >= 0 | diagnostic_age <= 604800 | drop diagnostic_age | model=~\"$model\" | endpoint=~\"$endpoint\" | project=~\"${project:raw}\" | runtime=~\"${runtime:raw}\" | key=~\"${key:raw}\" | label_format record=\"1\" | unwrap record | __error__=\"\" [$__range]))",
+          "expr": "sum by(quality)(last_over_time({service=\"finite-private-request-diagnostics\"} | json reservation=\"reservationId\", observed=\"observedAtUnixSeconds\", model=\"model\", endpoint=\"endpoint\", project=\"projectId\", runtime=\"agentRuntimeId\", key=\"apiKeyId\", quality=\"measurementQuality\" | label_format diagnostic_age=\"{{sub (unixEpoch now) .observed}}\" | diagnostic_age >= 0 | diagnostic_age <= 604800 | drop diagnostic_age | model=~\"$model\" | endpoint=~\"$endpoint\" | project=~\"${project:raw}\" | runtime=~\"${runtime:raw}\" | key=~\"${key:raw}\" | label_format record=\"1\" | unwrap record | __error__=\"\" [$__range]))",
           "legendFormat": "{{quality}}",
           "queryType": "instant"
         }
@@ -1255,7 +1255,7 @@
       "targets": [
         {
           "refId": "A",
-          "expr": "sum by(reason)(max_over_time({service=\"finite-private-request-diagnostics\"} | json reservation=\"reservationId\", observed=\"observedAtUnixSeconds\", model=\"model\", endpoint=\"endpoint\", project=\"projectId\", runtime=\"agentRuntimeId\", key=\"apiKeyId\", reason=\"terminationReason\" | label_format diagnostic_age=\"{{sub (unixEpoch now) .observed}}\" | diagnostic_age >= 0 | diagnostic_age <= 604800 | drop diagnostic_age | model=~\"$model\" | endpoint=~\"$endpoint\" | project=~\"${project:raw}\" | runtime=~\"${runtime:raw}\" | key=~\"${key:raw}\" | label_format record=\"1\" | unwrap record | __error__=\"\" [$__range]))",
+          "expr": "sum by(reason)(last_over_time({service=\"finite-private-request-diagnostics\"} | json reservation=\"reservationId\", observed=\"observedAtUnixSeconds\", model=\"model\", endpoint=\"endpoint\", project=\"projectId\", runtime=\"agentRuntimeId\", key=\"apiKeyId\", reason=\"terminationReason\" | label_format diagnostic_age=\"{{sub (unixEpoch now) .observed}}\" | diagnostic_age >= 0 | diagnostic_age <= 604800 | drop diagnostic_age | model=~\"$model\" | endpoint=~\"$endpoint\" | project=~\"${project:raw}\" | runtime=~\"${runtime:raw}\" | key=~\"${key:raw}\" | label_format record=\"1\" | unwrap record | __error__=\"\" [$__range]))",
           "legendFormat": "{{reason}}",
           "queryType": "instant"
         }
