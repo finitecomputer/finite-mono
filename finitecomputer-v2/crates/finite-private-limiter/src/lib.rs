@@ -719,6 +719,16 @@ async fn proxy_openai(
         reservation_id
     };
 
+    // From here every exit settles this reservation once. A client that
+    // disconnects while the upstream is still queueing or prefilling drops the
+    // handler, and the guard then settles what the client received.
+    let mut settlement_guard = SettlementGuard::new(
+        state.clone(),
+        reservation_id,
+        request_id,
+        estimate,
+        request_timer,
+    );
     let rewrite_model = state
         .config
         .upstream_model
@@ -733,112 +743,20 @@ async fn proxy_openai(
         &state.config,
     );
     if is_streaming {
-        let upstream = match call_upstream_response(&state, &uri, upstream_body).await {
-            Ok(response) => response,
-            Err(error) => {
-                request_timer.finish(if error.contains("timed out") {
-                    TerminalOutcome::UpstreamTimeout
-                } else {
-                    TerminalOutcome::UpstreamError
-                });
-                eprintln!("finite-private-limiter upstream failed: {error}");
-                let diagnostic_request_id = request_id.clone();
-                let _settlement_result = settle_usage_with_retries(
-                    &state,
-                    &reservation_id,
-                    SettleRequest {
-                        request_id,
-                        settlement: "estimate".to_string(),
-                        prompt_tokens: None,
-                        completion_tokens: None,
-                        // The client received no output from a failed upstream.
-                        usage_units: Some(0),
-                        usage_formula_version: USAGE_FORMULA_VERSION.to_string(),
-                        upstream_status: Some(502),
-                        upstream_error_class: Some("upstream_unavailable".to_string()),
-                    },
-                )
-                .await;
-
-                record_diagnostic_best_effort(
-                    &state,
-                    &reservation_id,
-                    DiagnosticRequest::new(
-                        diagnostic_request_id,
-                        &request_timer,
-                        None,
-                        "upstream_error".to_string(),
-                    ),
-                );
-                return openai_error(
-                    StatusCode::BAD_GATEWAY,
-                    "Finite Private upstream is unavailable.",
-                    "upstream_unavailable",
-                    "upstream_unavailable",
-                );
-            }
+        return match call_upstream_response(&state, &uri, upstream_body).await {
+            Ok(upstream) => streaming_response(settlement_guard, upstream, degraded_admission),
+            Err(error) => upstream_unavailable(settlement_guard, &error).await,
         };
-        return streaming_response(
-            state,
-            upstream,
-            reservation_id,
-            request_id,
-            estimate,
-            degraded_admission,
-            request_timer,
-        );
     }
 
     let upstream = match call_upstream(&state, &uri, upstream_body).await {
         Ok(response) => response,
-        Err(error) => {
-            request_timer.finish(if error.contains("timed out") {
-                TerminalOutcome::UpstreamTimeout
-            } else {
-                TerminalOutcome::UpstreamError
-            });
-            eprintln!("finite-private-limiter upstream failed: {error}");
-            let diagnostic_request_id = request_id.clone();
-            let _settlement_result = settle_usage_with_retries(
-                &state,
-                &reservation_id,
-                SettleRequest {
-                    request_id,
-                    settlement: "estimate".to_string(),
-                    prompt_tokens: None,
-                    completion_tokens: None,
-                    // The client received no output from a failed upstream.
-                    usage_units: Some(0),
-                    usage_formula_version: USAGE_FORMULA_VERSION.to_string(),
-                    upstream_status: Some(502),
-                    upstream_error_class: Some("upstream_unavailable".to_string()),
-                },
-            )
-            .await;
-
-            record_diagnostic_best_effort(
-                &state,
-                &reservation_id,
-                DiagnosticRequest::new(
-                    diagnostic_request_id,
-                    &request_timer,
-                    None,
-                    "upstream_error".to_string(),
-                ),
-            );
-            return openai_error(
-                StatusCode::BAD_GATEWAY,
-                "Finite Private upstream is unavailable.",
-                "upstream_unavailable",
-                "upstream_unavailable",
-            );
-        }
+        Err(error) => return upstream_unavailable(settlement_guard, &error).await,
     };
 
     let actual = actual_usage(&upstream.body, &state.config.default_model);
-    let diagnostic_request_id = request_id.clone();
     let settle = SettleRequest {
-        request_id,
+        request_id: settlement_guard.request_id().to_string(),
         settlement: if actual.is_some() {
             "actual"
         } else {
@@ -864,34 +782,39 @@ async fn proxy_openai(
     };
     // Freeze limiter-observed generation latency before Core settlement
     // retries; accounting service delay must not inflate model timing.
-    request_timer.finish(if upstream.status.is_success() {
-        TerminalOutcome::Success
-    } else {
-        TerminalOutcome::UpstreamError
-    });
-    request_timer.tokens(
+    settlement_guard
+        .timer()
+        .finish(if upstream.status.is_success() {
+            TerminalOutcome::Success
+        } else {
+            TerminalOutcome::UpstreamError
+        });
+    settlement_guard.timer().tokens(
         actual.as_ref().map(|usage| usage.prompt_tokens),
         actual.as_ref().map(|usage| usage.completion_tokens),
     );
-    if let Err(error) = settle_usage_with_retries(&state, &reservation_id, settle).await {
+    let diagnostic = DiagnosticRequest::new(
+        settlement_guard.request_id().to_string(),
+        settlement_guard.timer(),
+        actual.as_ref(),
+        if upstream.status.is_success() {
+            "complete"
+        } else {
+            "upstream_error"
+        }
+        .to_string(),
+    );
+    // Preserve known final usage if the client drops while Core retries.
+    settlement_guard.pending_diagnostic = Some(diagnostic.clone());
+    if let Err(error) = settlement_guard.settle(settle).await {
         eprintln!("finite-private-limiter settle failed: {error}");
     }
-
     record_diagnostic_best_effort(
-        &state,
-        &reservation_id,
-        DiagnosticRequest::new(
-            diagnostic_request_id,
-            &request_timer,
-            actual.as_ref(),
-            if upstream.status.is_success() {
-                "complete"
-            } else {
-                "upstream_error"
-            }
-            .to_string(),
-        ),
+        settlement_guard.state(),
+        settlement_guard.reservation_id(),
+        diagnostic,
     );
+    settlement_guard.mark_diagnostic_recorded();
 
     let mut response = Response::builder().status(upstream.status);
     if let Some(content_type) = upstream.content_type {
@@ -903,6 +826,48 @@ async fn proxy_openai(
     response
         .body(axum::body::Body::from(upstream.body))
         .unwrap()
+}
+
+/// Settles an upstream that never answered. The client received nothing.
+async fn upstream_unavailable(mut settlement_guard: SettlementGuard, error: &str) -> Response {
+    settlement_guard
+        .timer()
+        .finish(if error.contains("timed out") {
+            TerminalOutcome::UpstreamTimeout
+        } else {
+            TerminalOutcome::UpstreamError
+        });
+    eprintln!("finite-private-limiter upstream failed: {error}");
+    settlement_guard.preserve_terminal_diagnostic("upstream_error");
+    let _ = settlement_guard
+        .settle(SettleRequest {
+            request_id: settlement_guard.request_id().to_string(),
+            settlement: "estimate".to_string(),
+            prompt_tokens: None,
+            completion_tokens: None,
+            usage_units: Some(0),
+            usage_formula_version: USAGE_FORMULA_VERSION.to_string(),
+            upstream_status: Some(502),
+            upstream_error_class: Some("upstream_unavailable".to_string()),
+        })
+        .await;
+    record_diagnostic_best_effort(
+        settlement_guard.state(),
+        settlement_guard.reservation_id(),
+        DiagnosticRequest::new(
+            settlement_guard.request_id().to_string(),
+            settlement_guard.timer(),
+            None,
+            "upstream_error".to_string(),
+        ),
+    );
+    settlement_guard.mark_diagnostic_recorded();
+    openai_error(
+        StatusCode::BAD_GATEWAY,
+        "Finite Private upstream is unavailable.",
+        "upstream_unavailable",
+        "upstream_unavailable",
+    )
 }
 
 async fn reserve_usage(
@@ -1145,13 +1110,9 @@ async fn call_upstream_response(
 }
 
 fn streaming_response(
-    state: AppState,
+    mut settlement_guard: SettlementGuard,
     upstream: reqwest::Response,
-    reservation_id: String,
-    request_id: String,
-    estimate: EstimatedUsage,
     degraded_admission: bool,
-    request_timer: RequestTimer,
 ) -> Response {
     let status =
         StatusCode::from_u16(upstream.status().as_u16()).unwrap_or(StatusCode::BAD_GATEWAY);
@@ -1168,13 +1129,11 @@ fn streaming_response(
         response = response.header("x-finite-admission", "degraded-allowlist");
     }
     let mut stream = upstream.bytes_stream();
-    let settlement = Settlement::new(state, reservation_id, request_id);
-    let idle_timeout = settlement.state.config.upstream_stream_idle_timeout;
-    let usage = StreamingUsageAccumulator::new(settlement.state.config.default_model.clone());
-    // Construct the guard before polling begins so a client that disconnects
-    // immediately after headers still receives fallback accounting and a
+    let idle_timeout = settlement_guard.state().config.upstream_stream_idle_timeout;
+    settlement_guard.upstream_status = Some(status);
+    // The guard moves into the body before polling begins, so a client that
+    // disconnects immediately after headers still settles and records a
     // cancellation diagnostic.
-    let settlement_guard = SettlementGuard::new(settlement, estimate, status, usage, request_timer);
     let body_stream = async_stream::stream! {
         let mut settlement_guard = settlement_guard;
         loop {
@@ -1332,7 +1291,8 @@ impl Settlement {
 struct SettlementGuard {
     settlement: Settlement,
     estimate: EstimatedUsage,
-    upstream_status: StatusCode,
+    /// Set once upstream response headers arrive.
+    upstream_status: Option<StatusCode>,
     usage: StreamingUsageAccumulator,
     request_timer: RequestTimer,
     diagnostic_recorded: bool,
@@ -1341,16 +1301,17 @@ struct SettlementGuard {
 
 impl SettlementGuard {
     fn new(
-        settlement: Settlement,
+        state: AppState,
+        reservation_id: String,
+        request_id: String,
         estimate: EstimatedUsage,
-        upstream_status: StatusCode,
-        usage: StreamingUsageAccumulator,
         request_timer: RequestTimer,
     ) -> Self {
+        let usage = StreamingUsageAccumulator::new(state.config.default_model.clone());
         Self {
-            settlement,
+            settlement: Settlement::new(state, reservation_id, request_id),
             estimate,
-            upstream_status,
+            upstream_status: None,
             usage,
             request_timer,
             diagnostic_recorded: false,
@@ -1388,7 +1349,7 @@ impl SettlementGuard {
             completion_tokens: actual.map(|usage| usage.completion_tokens),
             usage_units: Some(usage_units),
             usage_formula_version: USAGE_FORMULA_VERSION.to_string(),
-            upstream_status: Some(self.upstream_status.as_u16() as i32),
+            upstream_status: self.upstream_status.map(|status| status.as_u16() as i32),
             upstream_error_class: upstream_error_class.map(str::to_string),
         }
     }
@@ -1443,7 +1404,8 @@ impl Drop for SettlementGuard {
             });
             let settlement = self.settlement.clone();
             let fallback = self.observed_settlement(
-                !self.upstream_status.is_success(),
+                self.upstream_status
+                    .is_some_and(|status| !status.is_success()),
                 Some("client_disconnected_or_stream_cancelled"),
             );
             tokio::spawn(async move {
@@ -3042,6 +3004,53 @@ mod tests {
             settlements[0]["upstreamErrorClass"],
             "client_disconnected_or_stream_cancelled"
         );
+    }
+
+    #[tokio::test]
+    async fn client_disconnect_before_upstream_responds_still_settles() {
+        let core = FakeCoreState::new("fpk_live_secret", 1_000_000);
+        let core_url = spawn(fake_core_router(core.clone())).await;
+        let upstream = FakeUpstreamState::new();
+        upstream.delay_first_byte_ms.store(1_000, Ordering::SeqCst);
+        let upstream_url = spawn(fake_upstream_router(upstream.clone())).await;
+        let mut config = test_config(core_url, upstream_url);
+        config.upstream_first_byte_timeout = Duration::from_secs(10);
+        config.usage_api_timeout = Duration::from_secs(2);
+        let limiter_url = spawn(app(config).unwrap()).await;
+
+        // The client gives up while the upstream is still queueing or
+        // prefilling, before any response header reaches the limiter.
+        let client = reqwest::Client::builder()
+            .timeout(Duration::from_millis(200))
+            .build()
+            .unwrap();
+        for stream in [false, true] {
+            let result = client
+                .post(format!("{limiter_url}/v1/chat/completions"))
+                .bearer_auth("fpk_live_secret")
+                .json(&json!({
+                    "model": "glm-5-2",
+                    "stream": stream,
+                    "messages": [{ "role": "user", "content": "hello" }],
+                    "max_tokens": 64
+                }))
+                .send()
+                .await;
+            assert!(result.is_err());
+        }
+        sleep(Duration::from_millis(1_500)).await;
+        assert_eq!(core.reserve_calls.load(Ordering::SeqCst), 2);
+        let settlements = core.settlements.lock().unwrap().clone();
+        assert_eq!(settlements.len(), 2, "every reservation must settle");
+        for settlement in settlements {
+            assert_eq!(settlement["settlement"], "estimate");
+            assert_eq!(settlement["usageUnits"], usage_units(1, 0, DEFAULT_MODEL));
+            assert_eq!(
+                settlement["upstreamErrorClass"],
+                "client_disconnected_or_stream_cancelled"
+            );
+        }
+        assert_eq!(core.diagnostics.lock().unwrap().len(), 2);
     }
 
     #[tokio::test]
