@@ -82,45 +82,53 @@ explicit drill before claiming it.
 Labels are display metadata in the Brain database. Public NIP-05 names use the
 existing verified alias store. Schema V30 adds `brain_principal_labels` and an
 optional Invite Token requested email destination. The admin label endpoint
-writes notes; first token redemption records `invitation_email` in the same
-transaction as membership. A paginated label endpoint and `fbrain access list`
-read notes for admins and the named principal. Pages contain at most 256 notes;
-edits return one receipt. Notes are bounded to 320 UTF-8 bytes. The requested
-email destination is unverified provenance, even if delivery fails; possession
-of a forwarded token does not prove mailbox ownership. Admin notes never
-resolve keys. No Chat store, Core database, worker, socket, or mount is needed.
+writes `admin_note` labels; first token redemption records `invitation_email`
+in the same transaction as membership. A paginated label endpoint and
+`fbrain access list` read labels for admins and the named principal. Pages
+contain at most 256 labels, and each edit returns only the edited label.
+Labels are bounded to 320 UTF-8 bytes. The requested email destination is
+unverified provenance, even if delivery fails; possession of a forwarded token
+does not prove mailbox ownership. Labels never resolve keys. No Chat store,
+Core database, worker, socket, or mount is needed.
 
 Follow the coordinated [platform rollout](platform-rollout.md) order. Runtime
 promotion can expose the new CLI before the Brain server switches; ordinary
-Brain operations remain supported, but label edits are unavailable until the
-new server is active. Verify labels only after both components are current.
-Old clients ignore the additive
-`principalLabelsAvailable` metadata flag; notes stay out of ordinary metadata
-responses. New clients skip label reads on old metadata; edits against old
-servers return an unsupported route. Old servers ignore the added table/column;
-SQLite triggers still clear notes on membership/final guest-access removal and
-record requested-email provenance if an older server redeems a newly issued
-token. Old token creators leave requested email null. The earlier worker-based
-draft was never deployed and is not a supported V30 database input.
+Brain operations remain supported, but label edits fail with "does not support
+principal labels yet" until the new server is active. Verify labels only after
+both components are current. Old clients ignore the additive
+`principalLabelsAvailable` metadata flag; labels stay out of ordinary metadata
+responses. New clients skip label reads on old metadata. Old servers ignore the
+added table and column; SQLite triggers still clear labels on membership or
+final guest-access removal and record requested-email provenance if an older
+server redeems a newly issued token. Old token creators leave requested email
+null.
 
-The whole consistent Brain SQLite database is the Recovery Set, including label
-notes and pending token provenance. Restore it onto an empty target and verify
-notes plus unchanged access metadata before rollout. Encrypted Brain export is
-not a backup of these server-side notes. Binary rollback retains the additive
-schema and notes; it does not require deleting tables or restoring stale data.
+The whole consistent Brain SQLite database is the Recovery Set, including
+labels and pending token provenance. Restore it onto an empty target and verify
+labels plus unchanged access metadata before rollout. Encrypted Brain export is
+not a backup of these server-side labels. Binary rollback retains the additive
+schema and labels; it does not require deleting tables or restoring stale data.
 
 For an approved roster backfill, capture a consistent backup and a private
-mapping of **Brain ID, exact npub, proposed note, and supporting evidence**.
-Re-read current membership/access and check each public NIP-05 name resolves to
-that exact key before recording it through the existing identity resolver.
-Use `fbrain admin label set --brain "$BRAIN_ID" --target "$TARGET_NPUB" --text "$LABEL"`
-for verified-by-the-operator mappings that need a human/agent note. The source
-remains `admin_note`; it must not be reported as a verified account binding.
-Review mappings per key, leave unknown/conflicting keys unidentified, and never
-select a target by roster position. Do not commit private roster mappings.
+mapping of **Brain ID, exact npub, proposed label, and supporting evidence**.
+Re-read current membership and access, then record each reviewed mapping with:
 
-Verify `fbrain access list --brain "$BRAIN_ID" --json` against the approved mapping,
-including source and unchanged admin/Folder access. Correct a mistake with the
-same exact-key command or `admin label clear`; labels do not require key rotation.
-Run `scripts/finite-status` before and after rollout. Deployment and any live
-backfill require their own explicit authorization and recorded target set.
+```sh
+fbrain admin label set --brain "$BRAIN_ID" --target "$TARGET_NPUB" --text "$LABEL"
+```
+
+Backfill uses only this command. Never use `admin member add`,
+`admin ensure-access`, `admin folder-access grant`, or any other membership or
+access command to backfill labels; those commands change access. Verified
+NIP-05 names already in the alias store display automatically. Backfilled
+labels have source `admin_note`; never report one as a verified account
+binding. Review mappings per key, leave unknown or conflicting keys
+unidentified, and never select a target by roster position. Do not commit
+private roster mappings.
+
+Verify `fbrain access list --brain "$BRAIN_ID" --json` against the approved
+mapping, including source and unchanged admin/Folder access. Correct a mistake
+with the same exact-key command or `admin label clear`; labels do not require
+key rotation. Run `scripts/finite-status` before and after rollout. Deployment
+and any live backfill require their own explicit authorization and recorded
+target set.

@@ -135,13 +135,16 @@ invitation marked `expired` cannot be accepted; ask the admin to re-invite.
 ## Principal labels
 
 Use `fbrain access list --brain <id>` to read names with their sources. Public
-NIP-05 names are verified key bindings. An admin can record an unverified note:
+NIP-05 names are verified key bindings. An admin can record an unverified
+label, stored with source `admin_note`:
 `fbrain admin label set --brain <id> --target <npub|hex> --text "CK (human)"`.
-Use `admin label clear` with the same Brain and target to remove it. Notes are
+Use `admin label clear` with the same Brain and target to remove it. Labels are
 visible to admins and the named principal; they never grant access or resolve
-identities. Email Invite Tokens record the requested email destination as `invitation_email`
-on redemption, which does not prove the redeemer owns that mailbox. Preserve
-these source distinctions when reporting a roster. Unknown keys stay unidentified.
+identities. Email Invite Tokens record the requested email destination as
+`invitation_email` on redemption, which does not prove the redeemer owns that
+mailbox. Plain-text rows print `source=` before the quoted `label="..."`.
+Preserve these source distinctions when reporting a roster. Unknown keys stay
+unidentified.
 
 ## Folder access
 
@@ -161,6 +164,8 @@ inferring from local files.
 ## Error glossary
 
 - `unsupported: ... retired Brain protocol` / 404 on a route: upgrade fbrain.
+- `does not support principal labels yet` on `admin label`: the Brain server
+  predates labels; retry after the server is upgraded.
 - `email auth ...` or identity resolution failures: check connectivity to the
   identity authority; override with `FINITE_IDENTITY_AUTHORITY` only for
   development.

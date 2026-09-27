@@ -286,22 +286,24 @@ An address without a matching public NIP-05 record fails resolution; use an
 email Invite Token for delivery instead.
 
 `fbrain access list --brain <id>` includes verified NIP-05 names and Brain-local
-notes with their sources. To label a current member or guest, an admin uses:
+labels with their sources. To label a current member or guest, an admin uses:
 
 ```sh
 fbrain admin label set --brain <id> --target <npub|hex> --text "CK (human)"
 fbrain admin label clear --brain <id> --target <npub|hex>
 ```
 
-Notes require an exact public key and contain 1–320 UTF-8 bytes without control
-characters.
+`admin label` takes an exact public key. Label text is 1–320 UTF-8 bytes
+without control characters. Plain-text rows print the source before the quoted
+label: `identity <npub> source=admin_note label="CK (human)" (unverified)`.
 `admin_note` is an admin assertion, not a verified identity. `invitation_email`
 records the requested email destination, not successful delivery or mailbox
-ownership: someone else can redeem a forwarded link. Redemption never overwrites an existing note. NIP-05
-adds/invitations retain the existing verified alias automatically; bare keys
-stay unidentified until explicitly labelled. Admins see their Brain's notes;
-other principals see only their own. Member removal or loss of final guest
-access clears notes. Labels never alter permissions, keys, roles, or resolution.
+ownership: someone else can redeem a forwarded link. Redemption never
+overwrites an existing label. NIP-05 adds/invitations retain the existing
+verified alias automatically; bare keys stay unidentified until explicitly
+labelled. Admins see their Brain's labels; other principals see only their
+own. Member removal or loss of final guest access clears labels. Labels never
+alter permissions, keys, roles, or resolution.
 
 `collaborator ensure-admin` shares an Organization Brain with a known Agent
 public key or NIP-05 name. The CLI verifies NIP-05 itself and returns one typed
