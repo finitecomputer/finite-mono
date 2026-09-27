@@ -35,7 +35,7 @@ ADAPTER_PATH = REPO_ROOT / "integrations" / "hermes" / "finitechat" / "adapter.p
 ROOM_ID = "room-agent-1"
 
 
-def load_adapter_module():
+def load_adapter_module() -> Any:
     module_name = "finitechat_pinned_stop_adapter_under_test"
     sys.modules.pop(module_name, None)
     spec = importlib.util.spec_from_file_location(module_name, ADAPTER_PATH)
