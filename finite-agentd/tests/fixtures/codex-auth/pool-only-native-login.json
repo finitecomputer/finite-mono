@@ -1,0 +1,35 @@
+{
+  "description": "Pool-only login from hermes auth add",
+  "auth": {
+    "version": 1,
+    "providers": {},
+    "credential_pool": {
+      "openai-codex": [
+        {
+          "id": "fxnati",
+          "label": "fixture-native",
+          "auth_type": "oauth",
+          "priority": 0,
+          "source": "manual:device_code",
+          "access_token": "eyJhbGciOiJub25lIiwidHlwIjoiSldUIn0.eyJleHAiOjQxMDI0NDQ4MDAsInN1YiI6Im5hdGl2ZS1wb29sIn0.fixture-signature",
+          "refresh_token": "fixture-refresh-native-pool",
+          "last_status": "ok",
+          "last_status_at": null,
+          "last_error_code": null,
+          "last_error_reason": null,
+          "last_error_message": null,
+          "last_error_reset_at": null,
+          "base_url": "https://chatgpt.com/backend-api/codex",
+          "last_refresh": "2026-09-27T00:00:00Z",
+          "request_count": 0
+        }
+      ]
+    }
+  },
+  "expected": {
+    "state": "signed_in",
+    "quota_reset_at": null,
+    "reported_quota_reset_at": null,
+    "resolver": "resolved"
+  }
+}

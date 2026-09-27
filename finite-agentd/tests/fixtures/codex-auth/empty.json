@@ -1,0 +1,13 @@
+{
+  "description": "No Codex state at all",
+  "auth": {
+    "version": 1,
+    "providers": {}
+  },
+  "expected": {
+    "state": "not_signed_in",
+    "quota_reset_at": null,
+    "reported_quota_reset_at": null,
+    "resolver": "codex_auth_missing"
+  }
+}
