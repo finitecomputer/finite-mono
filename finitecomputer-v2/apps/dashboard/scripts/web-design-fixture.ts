@@ -1,8 +1,10 @@
 import { spawn } from "node:child_process";
+import { createHash, randomBytes } from "node:crypto";
 import { once } from "node:events";
 import fs from "node:fs";
 import http, { type IncomingMessage, type ServerResponse } from "node:http";
 import path from "node:path";
+import { fileURLToPath } from "node:url";
 
 const MACHINE_ID = "web-design-fixture";
 const RUNTIME_ID = "runtime_web_design";
@@ -42,6 +44,8 @@ const statePath = path.join(stateDir, "chat.json");
 const attachmentsDir = path.join(stateDir, "attachments");
 const scenarioPath = path.join(stateDir, "scenario");
 const resetPath = path.join(stateDir, "reset-generation");
+const inferenceAgentPath = path.join(stateDir, "inference-agent");
+const failNextOperationPath = path.join(stateDir, "inference-fail-next");
 
 function localChildEnvironment(): NodeJS.ProcessEnv {
   const environment: NodeJS.ProcessEnv = { NODE_ENV: "development" };
@@ -82,37 +86,69 @@ function writeScenario(scenario: Scenario) {
   fs.writeFileSync(scenarioPath, `${scenario}\n`, { mode: 0o600 });
 }
 
-const command = process.argv[2];
-if (command === "set-scenario") {
-  const scenario = parseScenario(process.argv[3]);
-  fs.mkdirSync(stateDir, { recursive: true });
-  writeScenario(scenario);
-  console.log(`Web design fixture scenario: ${scenario}`);
-  process.exit(0);
-}
-if (command === "reset") {
-  fs.mkdirSync(stateDir, { recursive: true });
-  fs.rmSync(statePath, { force: true });
-  fs.rmSync(`${statePath}.tmp`, { force: true });
-  fs.rmSync(attachmentsDir, { force: true, recursive: true });
-  writeScenario("healthy");
-  fs.writeFileSync(resetPath, `${process.hrtime.bigint()}\n`, { mode: 0o600 });
-  console.log("Reset only the local web design fixture state.");
-  process.exit(0);
-}
-if (command && command !== "serve") {
-  throw new Error("usage: web-design-fixture.ts [serve | set-scenario healthy|unavailable|recovering | reset]");
+function usage() {
+  return "usage: web-design-fixture.ts [serve | set-scenario healthy|unavailable|recovering | reset"
+    + ` | set-agent ${FAKE_AGENTS.join("|")} [${FAKE_ROUTES.join("|")}]`
+    + ` | fail-next-operation [${OPERATION_ERROR_CODES.join("|")}]]`;
 }
 
-void serve();
+function runFixtureCommand(command: string | undefined, argument?: string, secondArgument?: string) {
+  if (command === "set-scenario") {
+    const scenario = parseScenario(argument);
+    fs.mkdirSync(stateDir, { recursive: true });
+    writeScenario(scenario);
+    console.log(`Web design fixture scenario: ${scenario}`);
+    process.exit(0);
+  }
+  if (command === "reset") {
+    fs.mkdirSync(stateDir, { recursive: true });
+    fs.rmSync(statePath, { force: true });
+    fs.rmSync(`${statePath}.tmp`, { force: true });
+    fs.rmSync(attachmentsDir, { force: true, recursive: true });
+    writeScenario("healthy");
+    fs.writeFileSync(resetPath, `${process.hrtime.bigint()}\n`, { mode: 0o600 });
+    console.log("Reset only the local web design fixture state.");
+    process.exit(0);
+  }
+  if (command === "set-agent") {
+    const choice = parseInferenceChoice(`${argument ?? ""} ${secondArgument ?? ""}`);
+    if (!choice) throw new Error(usage());
+    fs.mkdirSync(stateDir, { recursive: true });
+    fs.writeFileSync(inferenceAgentPath, `${choice.agent} ${choice.saved}\n`, { mode: 0o600 });
+    console.log(`Web design fixture agent: ${choice.agent}, saved route ${choice.saved}. A running fixture restarts its Connections state.`);
+    process.exit(0);
+  }
+  if (command === "fail-next-operation") {
+    const code = argument ?? "verify_failed";
+    if (!isOperationErrorCode(code)) throw new Error(usage());
+    fs.mkdirSync(stateDir, { recursive: true });
+    fs.writeFileSync(failNextOperationPath, `${code}\n`, { mode: 0o600 });
+    console.log(`The next Connections operation in the running fixture fails with ${code}.`);
+    process.exit(0);
+  }
+  if (command && command !== "serve") {
+    throw new Error(usage());
+  }
+  let runtimeCommandsUrl: string | null;
+  try {
+    runtimeCommandsUrl = runtimeCommandsForwardUrl(process.env.FC_DESIGN_RUNTIME_COMMANDS_URL);
+  } catch (error) {
+    console.error(error instanceof Error ? error.message : String(error));
+    process.exit(1);
+  }
+  void serve(runtimeCommandsUrl);
+}
 
-async function serve() {
+async function serve(runtimeCommandsUrl: string | null) {
   fs.mkdirSync(stateDir, { recursive: true });
   if (!fs.existsSync(scenarioPath)) {
     writeScenario("healthy");
   }
+  // A failure armed for an earlier run must not surprise this one.
+  fs.rmSync(failNextOperationPath, { force: true });
 
   let state = loadState();
+  let inference = createInferenceFake(readInferenceChoice());
   let recoveringFailuresRemaining = 2;
   const streams = new Map<ServerResponse, URLSearchParams>();
   const attachments = loadAttachments(state);
@@ -127,8 +163,18 @@ async function serve() {
   });
   fs.watchFile(resetPath, { interval: 100 }, () => {
     state = initialState();
+    inference = createInferenceFake(readInferenceChoice());
     recoveringFailuresRemaining = 2;
     closeStreams();
+  });
+  fs.watchFile(inferenceAgentPath, { interval: 100 }, () => {
+    inference = createInferenceFake(readInferenceChoice());
+  });
+  fs.watchFile(failNextOperationPath, { interval: 100 }, () => {
+    const code = readFailNextOperation();
+    if (!code) return;
+    inference.failNextOperation(code);
+    fs.rmSync(failNextOperationPath, { force: true });
   });
   const hostedServer = http.createServer(async (request, response) => {
     try {
@@ -262,7 +308,13 @@ async function serve() {
   );
   console.log("State survives stopping and restarting this command.");
   console.log(
-    "Switch states in another terminal with: just dev web-design-state healthy|unavailable|recovering\n"
+    "Switch states in another terminal with: just dev web-design-state healthy|unavailable|recovering"
+  );
+  console.log(
+    runtimeCommandsUrl
+      ? `Connections runtime commands are forwarded to ${runtimeCommandsUrl}\n`
+      : "Connections agent: node --import tsx scripts/web-design-fixture.ts set-agent pr1|legacy|full [route]"
+        + " (fail the next operation with fail-next-operation)\n"
   );
 
   let shuttingDown = false;
@@ -271,8 +323,7 @@ async function serve() {
   }
   dashboard.on("exit", (code) => {
     if (!shuttingDown) {
-      fs.unwatchFile(scenarioPath);
-      fs.unwatchFile(resetPath);
+      unwatchControlFiles();
       hostedServer.close();
       coreServer.close();
       process.exit(code ?? 1);
@@ -418,12 +469,11 @@ async function handleHostedRequest(request: IncomingMessage, response: ServerRes
     return;
   }
   if (request.method === "POST" && requestPath === "/v1/app/runtime-commands") {
-    writeJson(response, 200, {
-      request_id: "web-design-command",
-      status: "succeeded",
-      body: {},
-      error: null,
-    });
+    if (runtimeCommandsUrl) {
+      await forwardRuntimeCommand(runtimeCommandsUrl, request, response);
+      return;
+    }
+    writeJson(response, 200, inference.runtimeCommand(await readJson(request)));
     return;
   }
   writeJson(response, 404, { error: "not found" });
@@ -676,6 +726,12 @@ function writeEvent(response: ServerResponse, view: URLSearchParams) {
   response.write(`id: ${state.rev}\nevent: state\ndata: ${JSON.stringify(appState(view))}\n\n`);
 }
 
+function unwatchControlFiles() {
+  for (const controlPath of [scenarioPath, resetPath, inferenceAgentPath, failNextOperationPath]) {
+    fs.unwatchFile(controlPath);
+  }
+}
+
 function readScenario(): Scenario {
   try {
     return parseScenario(fs.readFileSync(scenarioPath, "utf8").trim());
@@ -713,12 +769,715 @@ function listeningPort(server: http.Server) {
 function shutdown(signal: NodeJS.Signals) {
   if (shuttingDown) return;
   shuttingDown = true;
-  fs.unwatchFile(scenarioPath);
-  fs.unwatchFile(resetPath);
+  unwatchControlFiles();
   closeStreams();
   hostedServer.close();
   coreServer.close();
   dashboard.kill(signal);
   setTimeout(() => process.exit(0), 2_000).unref();
 }
+}
+
+// Connections runtime-command fakes (DESIGN §3, §4, §10.7). Replies go through the dashboard's real
+// parser, so a reply that parser rejects or degrades is a bug here. Keys and codes are fake, only a
+// key's SHA-256 is kept, and nothing here logs.
+
+const FAKE_AGENTS = ["pr1", "legacy", "full"] as const;
+const FAKE_ROUTES = ["finite_private", "openrouter", "openai_codex"] as const;
+const OPERATION_ERROR_CODES = [
+  "config_invalid", "config_conflict", "supervisor_unavailable", "helper_unavailable", "verify_failed",
+] as const;
+
+export type FakeAgentKind = (typeof FAKE_AGENTS)[number];
+export type FakeInferenceRoute = (typeof FAKE_ROUTES)[number];
+export type OperationErrorCode = (typeof OPERATION_ERROR_CODES)[number];
+export type FakeRuntimeReply = {
+  request_id: string;
+  status: "succeeded" | "failed";
+  body: unknown;
+  error: { code: string; message: string } | null;
+};
+export type InferenceFakeOptions = {
+  /** `pr1` advertises the PR1 capabilities, `legacy` is today's agentd, `full` adds PR2 and PR3's. */
+  agent?: FakeAgentKind;
+  saved?: FakeInferenceRoute;
+  /** How long an operation, or a Codex sign-in, stays in each phase. */
+  phaseMs?: number;
+  now?: () => number;
+};
+export type InferenceFake = {
+  runtimeCommand(request: unknown): FakeRuntimeReply;
+  /** The next operation to run, including a resumed one, ends `failed` with this code. */
+  failNextOperation(code?: OperationErrorCode): void;
+};
+
+const PR1_CAPABILITIES = ["inference.status.v2", "inference.select.v1", "inference.disconnect.v1"];
+const FULL_CAPABILITIES = [
+  ...PR1_CAPABILITIES,
+  "openrouter.connect.v1", "openrouter.usage.v1", "codex.login.v1", "codex.models.v1",
+];
+const EMPTY_REQUEST_SCHEMA = "finite.agent.empty.request.v1";
+// The commands of §3.12, with their schema and the capability that gates them. A command the agent
+// doesn't advertise gets agentd's answer to an unknown command; any other command gets `{}`, as before.
+const INFERENCE_COMMANDS = new Map<string, { schema: string; capability: string | null }>([
+  ["agent.connections.status", { schema: EMPTY_REQUEST_SCHEMA, capability: null }],
+  ["agent.inference.apply", { schema: "finite.agent.inference.apply.v1", capability: null }],
+  ["agent.inference.select", { schema: "finite.agent.inference.select.v1", capability: "inference.select.v1" }],
+  ["agent.inference.disconnect", { schema: "finite.agent.inference.disconnect.v1", capability: "inference.disconnect.v1" }],
+  ["agent.openrouter.usage", { schema: EMPTY_REQUEST_SCHEMA, capability: "openrouter.usage.v1" }],
+  ["agent.openrouter.connect", { schema: "finite.agent.openrouter.connect.v1", capability: "openrouter.connect.v1" }],
+  ["agent.codex.login.start", { schema: "finite.agent.codex.login.start.v1", capability: "codex.login.v1" }],
+  ["agent.codex.login.cancel", { schema: "finite.agent.codex.login.cancel.v1", capability: "codex.login.v1" }],
+  ["agent.codex.models", { schema: EMPTY_REQUEST_SCHEMA, capability: "codex.models.v1" }],
+]);
+const OPERATION_PHASES = {
+  select: ["accepted", "config_written", "restarting", "verifying"],
+  activate: ["accepted", "config_written", "restarting", "verifying"],
+  disconnect: ["accepted", "login_cancelled", "route_switched", "credential_removed", "cleanup", "verifying"],
+} as const;
+const FAKE_FINITE_PRIVATE_MODEL = "glm-5-3-flash";
+const FAKE_OPENROUTER_MODEL = "anthropic/claude-sonnet-4.6";
+const FAKE_CODEX_MODELS = ["gpt-5.5", "gpt-5.3-codex"];
+const FAKE_SEEDED_OPENROUTER_KEY = "sk-or-v1-web-design-fixture-fake-key";
+const FAKE_CODEX_USER_CODE = "FAKE-0000";
+const CODEX_VERIFICATION_URI = "https://auth.openai.com/codex/device";
+const CODEX_LOGIN_TTL_MS = 15 * 60_000;
+const LAST_RESULT_MS = 10 * 60_000;
+const FAILED_ATTEMPTS = 3;
+
+type SavedModel = { route: FakeInferenceRoute; model: string };
+// A fake key containing one of these words fails the `/key` check the way agentd reports it (§3.9).
+type KeyVerdict = "ok" | "management" | "rejected" | "exhausted" | "unreachable";
+type StoredKey = { hash: string; verdict: KeyVerdict };
+type OperationKind = keyof typeof OPERATION_PHASES;
+type FakeOperation = {
+  id: string;
+  kind: OperationKind;
+  route: FakeInferenceRoute;
+  model: string | null;
+  phaseIndex: number;
+  state: "running" | "succeeded" | "failed";
+  errorCode: OperationErrorCode | null;
+  attempts: number;
+  startedAtMs: number;
+  updatedAtMs: number;
+  failWith: OperationErrorCode | null;
+  savedBefore: SavedModel;
+};
+type FakeCodexLogin = {
+  attemptId: string;
+  state: "pending" | "committing" | "approved" | "canceled" | "expired" | "interrupted";
+  startedAtMs: number;
+};
+type Admission = "proceed" | "replace_failed" | "resume_failed";
+
+class FakeCommandError extends Error {
+  constructor(readonly code: string, message: string) {
+    super(message);
+  }
+}
+
+export function createInferenceFake(options: InferenceFakeOptions = {}): InferenceFake {
+  const agent = options.agent ?? "pr1";
+  const phaseMs = Math.max(0, options.phaseMs ?? 2_000);
+  const now = options.now ?? Date.now;
+  const capabilities = agent === "full" ? FULL_CAPABILITIES : agent === "pr1" ? PR1_CAPABILITIES : [];
+  const seeded = options.saved ?? "finite_private";
+  let saved: SavedModel = {
+    route: seeded,
+    model: seeded === "openrouter" ? FAKE_OPENROUTER_MODEL : seeded === "openai_codex" ? FAKE_CODEX_MODELS[0] : FAKE_FINITE_PRIVATE_MODEL,
+  };
+  let openrouterKey = seeded === "openrouter" ? storedKey(FAKE_SEEDED_OPENROUTER_KEY) : null;
+  let codexSignedIn = seeded === "openai_codex";
+  let codexLogin: FakeCodexLogin | null = null;
+  // The intent record while running or failed (§3.11), then the last result.
+  let operation: FakeOperation | null = null;
+  let failNext: OperationErrorCode | null = null;
+  let replies = 0;
+  // OAuth attempts already exchanged: the reply to repeat, or null when the attempt failed.
+  const oauthAttempts = new Map<string, unknown>();
+
+  function runtimeCommand(request: unknown): FakeRuntimeReply {
+    const record = isRecord(request) ? request : {};
+    const command = typeof record.command === "string" ? record.command : "";
+    const known = INFERENCE_COMMANDS.get(command);
+    replies += 1;
+    advance();
+    try {
+      if (!known) return reply("succeeded", {}, null);
+      if (known.capability && !capabilities.includes(known.capability)) {
+        throw new FakeCommandError("unsupported_command", `Command ${JSON.stringify(command)} is not supported.`);
+      }
+      if (record.schema !== known.schema) throw invalidPayload(`${command} expects schema ${known.schema}.`);
+      return reply("succeeded", handle(command, record.body), null);
+    } catch (error) {
+      if (!(error instanceof FakeCommandError)) throw error;
+      return reply("failed", null, { code: error.code, message: error.message });
+    }
+  }
+
+  function reply(status: FakeRuntimeReply["status"], body: unknown, error: FakeRuntimeReply["error"]): FakeRuntimeReply {
+    return { request_id: `web-design-command-${replies}`, status, body, error };
+  }
+
+  function handle(command: string, body: unknown): unknown {
+    switch (command) {
+      case "agent.connections.status":
+        return status();
+      case "agent.inference.apply":
+        return applyV1(body);
+      case "agent.inference.select":
+        return select(body);
+      case "agent.inference.disconnect":
+        return disconnect(body);
+      case "agent.openrouter.usage":
+        return usage();
+      case "agent.openrouter.connect":
+        return connect(body);
+      case "agent.codex.login.start":
+        bodyRecord(body, []);
+        admit("codex_login_start");
+        codexLogin = { attemptId: `cxl_${randomBytes(16).toString("hex")}`, state: "pending", startedAtMs: now() };
+        return codexLoginStatus();
+      case "agent.codex.login.cancel":
+        return cancelCodexLogin(body);
+      case "agent.codex.models":
+        return codexSignedIn
+          ? { state: "live", models: FAKE_CODEX_MODELS, reason: null }
+          : { state: "unavailable", models: [], reason: "not_signed_in" };
+      default:
+        throw new Error(`unhandled fake command ${command}`);
+    }
+  }
+
+  // Operations and sign-ins move on with time, so every reply sees the state a real agent would.
+  function advance() {
+    const at = now();
+    if (codexLogin && (codexLogin.state === "pending" || codexLogin.state === "committing")) {
+      const elapsed = at - codexLogin.startedAtMs;
+      if (elapsed >= CODEX_LOGIN_TTL_MS) {
+        codexLogin.state = "expired";
+      } else if (elapsed >= 4 * phaseMs) {
+        codexLogin.state = "approved";
+        codexSignedIn = true;
+      } else if (elapsed >= 3 * phaseMs) {
+        codexLogin.state = "committing";
+      }
+    }
+    const current = operation;
+    if (!current) return;
+    const phases = OPERATION_PHASES[current.kind];
+    while (current.state === "running") {
+      const due = current.startedAtMs + (current.phaseIndex + 1) * phaseMs;
+      if (due > at) return;
+      current.updatedAtMs = due;
+      if (current.phaseIndex + 1 < phases.length) {
+        current.phaseIndex += 1;
+        enterPhase(current, phases[current.phaseIndex]);
+      } else {
+        finish(current);
+      }
+    }
+  }
+
+  function enterPhase(current: FakeOperation, phase: string) {
+    switch (phase) {
+      case "config_written":
+        saved = { route: current.route, model: current.model ?? FAKE_FINITE_PRIVATE_MODEL };
+        break;
+      case "login_cancelled":
+        if (current.route === "openai_codex" && codexLogin?.state === "pending") codexLogin.state = "canceled";
+        if (current.route === "openai_codex" && codexLogin?.state === "committing") codexLogin.state = "interrupted";
+        break;
+      case "route_switched":
+        if (saved.route === current.route) saved = { route: "finite_private", model: FAKE_FINITE_PRIVATE_MODEL };
+        break;
+      case "credential_removed":
+        if (current.route === "openrouter") openrouterKey = null;
+        break;
+      case "cleanup":
+        if (current.route === "openai_codex") {
+          codexSignedIn = false;
+          codexLogin = null;
+        }
+        break;
+    }
+  }
+
+  function finish(current: FakeOperation) {
+    if (!current.failWith) {
+      current.state = "succeeded";
+      return;
+    }
+    current.state = "failed";
+    current.errorCode = current.failWith;
+    current.attempts = FAILED_ATTEMPTS;
+    current.failWith = null;
+    // A spawn failure after a select or activate restores the previous config (§3.10).
+    if (current.errorCode === "supervisor_unavailable" && current.kind !== "disconnect") saved = current.savedBefore;
+  }
+
+  // The §3.11 admission table.
+  function admit(command: "mutation" | "codex_login_start" | { disconnect: FakeInferenceRoute }): Admission {
+    const record = operation && operation.state !== "succeeded" ? operation : null;
+    if (!record) return "proceed";
+    if (command === "codex_login_start") {
+      if (record.kind === "disconnect" && record.route === "openai_codex") {
+        throw new FakeCommandError(
+          "disconnect_in_progress",
+          "ChatGPT is being removed from this agent. Wait for that to finish, or try the removal again."
+        );
+      }
+      if (record.state === "failed" && record.kind === "disconnect") throw operationInProgress();
+      return "proceed";
+    }
+    if (record.state === "running") throw operationInProgress();
+    if (record.kind === "disconnect") {
+      if (typeof command === "object" && command.disconnect === record.route) return "resume_failed";
+      throw operationInProgress();
+    }
+    return "replace_failed";
+  }
+
+  // A command that succeeds without recording an operation drops a failed select or activate.
+  function settle(admission: Admission) {
+    if (admission === "replace_failed") operation = null;
+  }
+
+  function startOperation(kind: OperationKind, route: FakeInferenceRoute, model: string | null) {
+    const at = now();
+    operation = {
+      id: `op_${randomBytes(16).toString("hex")}`,
+      kind,
+      route,
+      model,
+      phaseIndex: 0,
+      state: "running",
+      errorCode: null,
+      attempts: 0,
+      startedAtMs: at,
+      updatedAtMs: at,
+      failWith: takeFailNext(),
+      savedBefore: saved,
+    };
+    return { accepted: true, operation_id: operation.id };
+  }
+
+  function takeFailNext() {
+    const code = failNext;
+    failNext = null;
+    return code;
+  }
+
+  function status() {
+    const legacy = {
+      profile: saved.route === "openrouter" ? "openrouter" : "finite_private",
+      provider: savedProvider(saved.route),
+      model: saved.model,
+    };
+    const others = {
+      telegram: { connected: false, home_channel: null, pending: [], approved: [] },
+      google: { connected: false, email: null },
+    };
+    if (agent === "legacy") return { inference: legacy, ...others };
+    return {
+      inference: {
+        ...legacy,
+        saved: { route: saved.route, provider: savedProvider(saved.route), model: saved.model },
+        routes: {
+          finite_private: { state: "configured", reason: null },
+          openrouter: openrouterKey
+            ? { state: "key_saved", key_source: "agent", key_hash: openrouterKey.hash, hermes_key: "saved_key", other_pool_keys: "none" }
+            : { state: "no_key", key_source: null, key_hash: null, hermes_key: "none", other_pool_keys: "none" },
+          ...(capabilities.includes("codex.login.v1")
+            ? {
+                openai_codex: {
+                  state: codexSignedIn ? "signed_in" : "not_signed_in",
+                  quota_reset_at_ms: null,
+                  reported_quota_reset_at_ms: null,
+                  login: codexLoginStatus(),
+                },
+              }
+            : {}),
+        },
+        fallback: { state: "configured", reason: null, model: FAKE_FINITE_PRIVATE_MODEL, extra_entries: 0 },
+        operation: operationStatus(),
+      },
+      ...others,
+      capabilities,
+    };
+  }
+
+  function operationStatus() {
+    if (!operation || (operation.state === "succeeded" && now() - operation.updatedAtMs >= LAST_RESULT_MS)) {
+      return null;
+    }
+    return {
+      id: operation.id,
+      kind: operation.kind,
+      route: operation.route,
+      model: operation.model,
+      state: operation.state,
+      phase: OPERATION_PHASES[operation.kind][operation.phaseIndex],
+      error_code: operation.errorCode,
+      attempts: operation.attempts,
+      updated_at_ms: operation.updatedAtMs,
+    };
+  }
+
+  function codexLoginStatus() {
+    if (!codexLogin) return null;
+    const waiting = codexLogin.state === "pending" || codexLogin.state === "committing";
+    return {
+      attempt_id: codexLogin.attemptId,
+      state: codexLogin.state,
+      user_code: waiting ? FAKE_CODEX_USER_CODE : null,
+      verification_uri: waiting ? CODEX_VERIFICATION_URI : null,
+      expires_at_ms: codexLogin.startedAtMs + CODEX_LOGIN_TTL_MS,
+      poll_interval_s: 5,
+      error_code: null,
+      retry_after_s: null,
+    };
+  }
+
+  // v1 stays synchronous and stores a key it has not validated, as today (§3.5).
+  function applyV1(body: unknown) {
+    const request = bodyRecord(body, ["profile", "api_key", "model"]);
+    const apiKey = optionalText(request.api_key, "api_key");
+    const model = optionalText(request.model, "model");
+    const admission = admit("mutation");
+    let planned: SavedModel;
+    let key = openrouterKey;
+    if (request.profile === "finite_private") {
+      planned = { route: "finite_private", model: FAKE_FINITE_PRIVATE_MODEL };
+    } else if (request.profile === "openrouter") {
+      if (apiKey?.trim()) key = storedKey(apiKey);
+      if (!key) throw invalidPayload("OpenRouter key is required");
+      planned = { route: "openrouter", model: modelName(model ?? FAKE_OPENROUTER_MODEL) };
+    } else {
+      throw invalidPayload("Inference must be Finite Private or OpenRouter");
+    }
+    const unchanged = sameModel(planned, saved) && key?.hash === openrouterKey?.hash;
+    if (!unchanged) {
+      openrouterKey = key;
+      saved = planned;
+    }
+    settle(admission);
+    return {
+      proposal_id: `web-design-proposal-${replies}`,
+      path: "model",
+      applied: !unchanged,
+      already_applied: unchanged,
+      restart_required: !unchanged,
+    };
+  }
+
+  function select(body: unknown) {
+    const request = bodyRecord(body, ["route", "model"]);
+    const route = FAKE_ROUTES.find((value) => value === request.route);
+    if (!route) throw invalidPayload("Unknown route.");
+    if (route === "openai_codex" && !capabilities.includes("codex.login.v1")) {
+      throw invalidPayload("ChatGPT isn't available on this agent.");
+    }
+    if (route === "finite_private" && request.model !== undefined && request.model !== null) {
+      throw invalidPayload("Finite Private takes no model.");
+    }
+    const planned: SavedModel =
+      route === "finite_private"
+        ? { route, model: FAKE_FINITE_PRIVATE_MODEL }
+        : { route, model: route === "openrouter" ? modelName(request.model) : codexModelName(request.model) };
+    const admission = admit("mutation");
+    if (route === "openrouter") {
+      if (!openrouterKey) throw new FakeCommandError("not_connected", "Connect OpenRouter first.");
+      checkKey(openrouterKey.verdict);
+    }
+    if (route === "openai_codex") {
+      if (!codexSignedIn) throw new FakeCommandError("not_connected", "Connect ChatGPT first.");
+      if (!FAKE_CODEX_MODELS.includes(planned.model)) {
+        throw new FakeCommandError("model_unavailable", "That model isn't available for this ChatGPT account.");
+      }
+    }
+    if (sameModel(planned, saved)) {
+      settle(admission);
+      return { changed: false };
+    }
+    return startOperation("select", route, route === "finite_private" ? null : planned.model);
+  }
+
+  function disconnect(body: unknown) {
+    const request = bodyRecord(body, ["route"]);
+    const route = request.route === "openrouter" || request.route === "openai_codex" ? request.route : null;
+    if (!route) throw invalidPayload("Unknown route.");
+    if (route === "openai_codex" && !capabilities.includes("codex.login.v1")) {
+      throw invalidPayload("ChatGPT isn't available on this agent.");
+    }
+    const admission = admit({ disconnect: route });
+    // The F1 precondition always holds: this fake's Finite Private is configured.
+    if (admission === "resume_failed" && operation) {
+      const at = now();
+      Object.assign(operation, {
+        state: "running",
+        errorCode: null,
+        attempts: 0,
+        startedAtMs: at - operation.phaseIndex * phaseMs,
+        updatedAtMs: at,
+        failWith: takeFailNext(),
+      });
+      return { accepted: true, operation_id: operation.id };
+    }
+    const stored = route === "openrouter" ? openrouterKey !== null : codexSignedIn;
+    if (!stored && saved.route !== route) {
+      settle(admission);
+      return { changed: false };
+    }
+    return startOperation("disconnect", route, null);
+  }
+
+  function usage() {
+    const base = {
+      fetched_at_ms: now(),
+      retry_after_s: null,
+      other_pool_keys: "none",
+      hermes_key: openrouterKey ? "saved_key" : "none",
+      key: null,
+    };
+    if (!openrouterKey) return { state: "no_key", ...base };
+    if (openrouterKey.verdict === "rejected" || openrouterKey.verdict === "management") {
+      return { state: "key_rejected", ...base };
+    }
+    if (openrouterKey.verdict === "unreachable") return { state: "unavailable", ...base };
+    return {
+      state: "ok",
+      ...base,
+      key: {
+        key_hash: openrouterKey.hash,
+        limit_usd: 25,
+        limit_remaining_usd: openrouterKey.verdict === "exhausted" ? 0 : 24.5,
+        limit_reset: "monthly",
+        include_byok_in_limit: false,
+        usage_usd: { total: 0.5, daily: 0.05, weekly: 0.2, monthly: 0.5 },
+        byok_usage_usd: { total: 0, daily: 0, weekly: 0, monthly: 0 },
+        is_free_tier: false,
+        expires_at: null,
+      },
+    };
+  }
+
+  function connect(body: unknown) {
+    const request = bodyRecord(body, ["credential", "activate"]);
+    const credential = isRecord(request.credential) ? request.credential : {};
+    const activate =
+      request.activate === undefined || request.activate === null
+        ? null
+        : modelName(bodyRecord(request.activate, ["model"]).model);
+    const admission = admit("mutation");
+    if (credential.kind === "api_key") {
+      const apiKey = bodyRecord(credential, ["kind", "api_key"]).api_key;
+      if (typeof apiKey !== "string" || apiKey.length < 8 || apiKey.length > 16 * 1024) {
+        throw invalidPayload("api_key is invalid.");
+      }
+      return connectCandidate(storedKey(apiKey), activate, admission);
+    }
+    if (credential.kind !== "oauth_code") throw invalidPayload("credential is invalid.");
+    const oauth = bodyRecord(credential, ["kind", "code", "code_verifier", "attempt_id"]);
+    if (
+      typeof oauth.code !== "string" || !/^[A-Za-z0-9._~-]{1,512}$/u.test(oauth.code)
+      || typeof oauth.code_verifier !== "string" || !/^[A-Za-z0-9._~-]{43,128}$/u.test(oauth.code_verifier)
+      || typeof oauth.attempt_id !== "string" || !/^ora_[0-9a-f]{32}$/u.test(oauth.attempt_id)
+    ) {
+      throw invalidPayload("credential is invalid.");
+    }
+    if (oauthAttempts.has(oauth.attempt_id)) {
+      const prior = oauthAttempts.get(oauth.attempt_id);
+      if (prior === null) throw new FakeCommandError("attempt_not_found", "That sign-in is no longer active. Start again.");
+      return prior;
+    }
+    try {
+      const result = connectCandidate(storedKey(`sk-or-v1-web-design-fixture-oauth-${oauth.code}`), activate, admission);
+      oauthAttempts.set(oauth.attempt_id, result);
+      return result;
+    } catch (error) {
+      oauthAttempts.set(oauth.attempt_id, null);
+      throw error;
+    }
+  }
+
+  function connectCandidate(candidate: StoredKey, activate: string | null, admission: Admission) {
+    checkKey(candidate.verdict);
+    const planned: SavedModel | null = activate ? { route: "openrouter", model: activate } : null;
+    if (candidate.hash === openrouterKey?.hash && (!planned || sameModel(planned, saved))) {
+      settle(admission);
+      return { changed: false };
+    }
+    const replaced = openrouterKey !== null && openrouterKey.hash !== candidate.hash;
+    openrouterKey = candidate;
+    if (planned) return startOperation("activate", "openrouter", planned.model);
+    if (replaced && saved.route === "openrouter") return startOperation("activate", "openrouter", saved.model);
+    settle(admission);
+    return { changed: true, activated: false };
+  }
+
+  function cancelCodexLogin(body: unknown) {
+    const attemptId = bodyRecord(body, ["attempt_id"]).attempt_id;
+    if (!codexLogin || codexLogin.attemptId !== attemptId) {
+      throw new FakeCommandError("attempt_not_found", "That sign-in is no longer active. Start again.");
+    }
+    if (codexLogin.state === "pending") codexLogin.state = "canceled";
+    return codexLoginStatus();
+  }
+
+  return {
+    runtimeCommand,
+    failNextOperation(code = "verify_failed") {
+      failNext = code;
+    },
+  };
+}
+
+function storedKey(key: string): StoredKey {
+  const verdict = (["management", "rejected", "exhausted", "unreachable"] as const).find((word) => key.includes(word));
+  return { hash: createHash("sha256").update(key).digest("hex"), verdict: verdict ?? "ok" };
+}
+
+function checkKey(verdict: KeyVerdict) {
+  switch (verdict) {
+    case "management":
+      throw new FakeCommandError("credential_rejected", "That's an OpenRouter management key. Use an ordinary API key.");
+    case "rejected":
+      throw new FakeCommandError("credential_rejected", "OpenRouter didn't accept this key.");
+    case "exhausted":
+      throw new FakeCommandError(
+        "key_allowance_exhausted",
+        "This key has no remaining allowance. Raise its limit at openrouter.ai/keys, or use another key."
+      );
+    case "unreachable":
+      throw new FakeCommandError("provider_unavailable", "Couldn't reach OpenRouter to check this key.");
+  }
+}
+
+function savedProvider(route: FakeInferenceRoute) {
+  return route === "openrouter" ? "openrouter" : route === "openai_codex" ? "openai-codex" : "custom";
+}
+
+function sameModel(left: SavedModel, right: SavedModel) {
+  return left.route === right.route && left.model === right.model;
+}
+
+function modelName(value: unknown) {
+  if (typeof value !== "string" || value.length < 1 || value.length > 256 || /[\s\p{Cc}]/u.test(value)) {
+    throw invalidPayload("model is invalid.");
+  }
+  return value;
+}
+
+function codexModelName(value: unknown) {
+  if (typeof value !== "string" || !/^[A-Za-z0-9._:-]{1,128}$/u.test(value)) throw invalidPayload("model is invalid.");
+  return value;
+}
+
+function optionalText(value: unknown, field: string) {
+  if (value === undefined || value === null) return undefined;
+  if (typeof value !== "string") throw invalidPayload(`${field} is invalid.`);
+  return value;
+}
+
+function bodyRecord(value: unknown, allowed: readonly string[]) {
+  if (!isRecord(value)) throw invalidPayload("The command body must be an object.");
+  const unknown = Object.keys(value).find((key) => !allowed.includes(key));
+  if (unknown) throw invalidPayload(`Unknown field ${JSON.stringify(unknown)}.`);
+  return value;
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function invalidPayload(message: string) {
+  return new FakeCommandError("invalid_payload", message);
+}
+
+function operationInProgress() {
+  return new FakeCommandError("operation_in_progress", "Another connection change is still finishing. Try again in a moment.");
+}
+
+function isOperationErrorCode(value: string): value is OperationErrorCode {
+  return (OPERATION_ERROR_CODES as readonly string[]).includes(value);
+}
+
+function parseInferenceChoice(text: string): { agent: FakeAgentKind; saved: FakeInferenceRoute } | null {
+  const [agentName, route = "finite_private"] = text.trim().split(/\s+/u);
+  const agent = FAKE_AGENTS.find((value) => value === agentName);
+  const saved = FAKE_ROUTES.find((value) => value === route);
+  return agent && saved ? { agent, saved } : null;
+}
+
+function readInferenceChoice() {
+  try {
+    return parseInferenceChoice(fs.readFileSync(inferenceAgentPath, "utf8")) ?? {};
+  } catch {
+    return {};
+  }
+}
+
+function readFailNextOperation() {
+  try {
+    const code = fs.readFileSync(failNextOperationPath, "utf8").trim();
+    return isOperationErrorCode(code) ? code : null;
+  } catch {
+    return null;
+  }
+}
+
+const LOCAL_RUNTIME_COMMANDS_URL = /^http:\/\/(127\.0\.0\.1|localhost):([0-9]{1,5})\/?$/u;
+
+/**
+ * `FC_DESIGN_RUNTIME_COMMANDS_URL` names a local harness (DESIGN §13.3 E-0) that answers
+ * `/v1/app/runtime-commands` in place of the fakes. Only a loopback origin is accepted, so the
+ * fixture can never be pointed at a real service by accident.
+ */
+export function runtimeCommandsForwardUrl(value: string | undefined): string | null {
+  if (value === undefined || value === "") return null;
+  const match = LOCAL_RUNTIME_COMMANDS_URL.exec(value);
+  const port = Number(match?.[2]);
+  if (!match || port < 1 || port > 65_535) {
+    throw new Error(
+      "FC_DESIGN_RUNTIME_COMMANDS_URL must be http://127.0.0.1:<port> or http://localhost:<port>. "
+        + "The design fixture forwards runtime commands only to a local harness."
+    );
+  }
+  return `http://${match[1]}:${port}/v1/app/runtime-commands`;
+}
+
+export async function forwardRuntimeCommand(target: string, request: IncomingMessage, response: ServerResponse) {
+  const chunks: Buffer[] = [];
+  for await (const chunk of request) chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk));
+  const headers: Record<string, string> = { "content-type": "application/json" };
+  for (const name of ["authorization", "x-finite-workos-user-id"]) {
+    const value = request.headers[name];
+    if (typeof value === "string") headers[name] = value;
+  }
+  const upstream = await fetch(target, {
+    method: "POST",
+    headers,
+    body: new Uint8Array(Buffer.concat(chunks)),
+    signal: AbortSignal.timeout(65_000),
+  });
+  response.writeHead(upstream.status, {
+    "content-type": upstream.headers.get("content-type") ?? "application/json",
+  });
+  response.end(Buffer.from(await upstream.arrayBuffer()));
+}
+
+function invokedDirectly() {
+  try {
+    return Boolean(process.argv[1])
+      && fs.realpathSync(process.argv[1]) === fs.realpathSync(fileURLToPath(import.meta.url));
+  } catch {
+    return false;
+  }
+}
+
+// Last, so every constant above is initialized. Tests import this file for its fakes without starting it.
+if (invokedDirectly()) {
+  runFixtureCommand(process.argv[2], process.argv[3], process.argv[4]);
 }
