@@ -4292,7 +4292,7 @@ fn built_fbrain_process_sets_displays_and_clears_admin_notes() {
     let listed = checked(&["access", "list", "--brain", "labels"]);
     let text = String::from_utf8(listed.stdout).unwrap();
     assert!(text.contains(&format!(
-        "identity {target} note=CK (human) source=admin_note (unverified)"
+        "identity {target} source=admin_note label=\"CK (human)\" (unverified)"
     )));
     let listed = checked(&["access", "list", "--brain", "labels", "--json"]);
     let report: Value = serde_json::from_slice(&listed.stdout).unwrap();

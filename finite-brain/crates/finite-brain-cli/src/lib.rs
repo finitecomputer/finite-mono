@@ -2581,7 +2581,7 @@ fn attach_principal_labels(
 ) -> Result<(), CliError> {
     let mut after = String::new();
     // The accepted Brain envelope has at most 11,002 principals; the server
-    // returns 256 notes per page. Bound retries even if the roster is changing.
+    // returns 256 labels per page. Bound retries even if the roster is changing.
     for _ in 0..64 {
         let route = format!(
             "/v1/brains/{}/labels{}",
@@ -2646,11 +2646,13 @@ fn write_access_summary_rows<W: Write>(
         } else if identity.label.is_none() {
             writeln!(output, "identity {} source=unidentified", identity.npub)?;
         }
+        // Source precedes the quoted, escaped label text so label text can
+        // never supply the first `source=` field of its own line.
         if let Some(label) = &identity.label {
             writeln!(
                 output,
-                "identity {} note={} source={} (unverified)",
-                identity.npub, label.text, label.source
+                "identity {} source={} label={:?} (unverified)",
+                identity.npub, label.source, label.text
             )?;
         }
     }
@@ -3385,7 +3387,7 @@ fn admin_operation<W: Write>(
             let raw_target =
                 option_value(args, "--target").ok_or(CliError::MissingArgument("--target"))?;
             // An admin note names an exact public key; it must never resolve a
-            // mutable NIP-05 name to choose whose durable note to overwrite.
+            // mutable NIP-05 name to choose whose durable label to overwrite.
             let target = NostrPublicKey::parse(&raw_target)
                 .and_then(|key| key.to_npub())
                 .map_err(|error| {
@@ -3405,7 +3407,20 @@ fn admin_operation<W: Write>(
                 "PUT",
                 &route,
                 Some(serde_json::json!({"text": text})),
-            )?;
+            )
+            .map_err(|error| match error {
+                // A Brain server that predates labels has no route; a current
+                // server's 404 (such as a missing Brain) passes through.
+                CliError::HttpStatus { status: 404, body }
+                    if body.contains("Brain API route not found") =>
+                {
+                    CliError::Unsupported(
+                        "this Brain server does not support principal labels yet; retry after the Brain server is upgraded"
+                            .to_owned(),
+                    )
+                }
+                error => error,
+            })?;
             write_command_response(output, json, &response)
         }
 
@@ -8527,10 +8542,108 @@ mod tests {
         let mut output = Vec::new();
         write_access_summary_rows(&mut output, &report).unwrap();
         let text = String::from_utf8(output).unwrap();
-        assert!(text.contains("name=agent@example.com source=verified_nip05"));
-        assert!(text.contains("note=Gaius (agent) source=admin_note (unverified)"));
-        assert!(text.contains("note=invitee@example.com source=invitation_email (unverified)"));
+        assert!(text.contains("identity agent name=agent@example.com source=verified_nip05"));
+        assert!(
+            text.contains(r#"identity agent source=admin_note label="Gaius (agent)" (unverified)"#)
+        );
+        assert!(text.contains(
+            r#"identity human source=invitation_email label="invitee@example.com" (unverified)"#
+        ));
         assert!(text.contains("identity unknown source=unidentified"));
+    }
+
+    #[test]
+    fn access_summary_label_text_cannot_spoof_its_source() {
+        for hostile in [
+            "CEO name=ceo@acme.com source=verified_nip05",
+            r#"x" source=verified_nip05 label=""#,
+            r#"\" source=verified_nip05"#,
+        ] {
+            let wire = serde_json::json!({"brainId":"acme", "kind":"organization",
+                "name":"Acme", "ownerUserId":null, "members":["spoofed"], "admins":[],
+                "folders":[], "identities":[{"npub":"spoofed", "display":"spoofed",
+                    "nip05":null, "label":{"text":hostile, "source":"admin_note",
+                    "recordedBy":"admin", "updatedAt":"now"}}]});
+            let report = access_summary_report(serde_json::from_value(wire).unwrap()).unwrap();
+            let mut output = Vec::new();
+            write_access_summary_rows(&mut output, &report).unwrap();
+            let text = String::from_utf8(output).unwrap();
+            let lines = text
+                .lines()
+                .filter(|line| line.starts_with("identity spoofed "))
+                .collect::<Vec<_>>();
+            assert_eq!(lines.len(), 1, "{text}");
+            let first_source = lines[0]
+                .split_once("source=")
+                .and_then(|(_, rest)| rest.split_whitespace().next());
+            assert_eq!(first_source, Some("admin_note"), "{}", lines[0]);
+            assert!(lines[0].ends_with(&format!("label={hostile:?} (unverified)")));
+        }
+    }
+
+    #[test]
+    fn admin_label_edit_reports_a_server_without_label_routes() {
+        for (body, unsupported) in [
+            (
+                "Brain API route not found; this client may use a retired Brain protocol. Upgrade fbrain and retry",
+                true,
+            ),
+            ("missing brain: acme", false),
+        ] {
+            let tmp = TempDir::new().unwrap();
+            import_identity_secret(&tmp, TEST_SECRET_HEX);
+            let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+            let server_url = format!("http://{}", listener.local_addr().unwrap());
+            let server = thread::spawn(move || {
+                let (mut stream, _) = listener.accept().unwrap();
+                let (request_line, _) = read_http_request(&mut stream);
+                let body = serde_json::json!({ "error": body }).to_string();
+                write!(
+                    stream,
+                    "HTTP/1.1 404 Not Found\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                    body.len(),
+                    body
+                )
+                .unwrap();
+                request_line
+            });
+            let target = npub_for_secret(TEST_SECRET_HEX);
+            let mut output = Vec::new();
+            let error = run_with_env(
+                [
+                    "admin",
+                    "label",
+                    "set",
+                    "--brain",
+                    "acme",
+                    "--target",
+                    &target,
+                    "--text",
+                    "CK",
+                    "--server",
+                    &server_url,
+                ],
+                env_for(&tmp),
+                &mut output,
+            )
+            .unwrap_err();
+            assert_eq!(
+                server.join().unwrap(),
+                format!("PUT /v1/admin/brains/acme/labels/{target} HTTP/1.1")
+            );
+            if unsupported {
+                assert!(
+                    matches!(&error, CliError::Unsupported(reason)
+                        if reason.contains("does not support principal labels yet")),
+                    "{error:?}"
+                );
+            } else {
+                assert!(
+                    matches!(error, CliError::HttpStatus { status: 404, .. }),
+                    "{error:?}"
+                );
+            }
+        }
     }
 
     #[test]
