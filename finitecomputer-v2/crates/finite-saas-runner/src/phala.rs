@@ -564,6 +564,7 @@ impl RuntimeLauncher for PhalaLauncher {
             active_sandbox_count: Some(snapshot.billable_resource_count),
             available_memory_bytes: self.config.available_memory_bytes,
             runtime_capabilities: Some(self.runtime_capabilities()),
+            supports_relocation_credentials: false,
         }
     }
 

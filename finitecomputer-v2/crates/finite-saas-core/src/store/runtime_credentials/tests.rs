@@ -1,5 +1,6 @@
 use super::*;
 mod automatic_access;
+mod relocation;
 use crate::test_support::{TestDb, with_isolated_postgres};
 use crate::{
     RunnerClass, RunnerLeaseCapacity, RuntimeArtifactKind, RuntimeCapabilitiesEnvelope,

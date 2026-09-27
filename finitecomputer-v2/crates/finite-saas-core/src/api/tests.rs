@@ -19,6 +19,7 @@ mod finite_private_usage;
 mod hosted_access;
 mod identity_authorization;
 mod public_contracts;
+mod relocation_credential;
 mod runner_authorization;
 mod runner_leases;
 mod runtime_control;

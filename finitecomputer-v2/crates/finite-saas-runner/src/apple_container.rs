@@ -527,6 +527,7 @@ impl RuntimeLauncher for AppleContainerLauncher {
             active_sandbox_count: active_owned_container_count(&self.config),
             available_memory_bytes: self.config.available_memory_bytes,
             runtime_capabilities: Some(self.runtime_capabilities()),
+            supports_relocation_credentials: false,
         }
     }
 

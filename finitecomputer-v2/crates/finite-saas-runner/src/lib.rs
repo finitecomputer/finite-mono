@@ -590,6 +590,10 @@ where
         let runtime_capabilities = self.launcher.runtime_capabilities();
         let mut runner_capacity = self.launcher.runner_capacity();
         runner_capacity.runtime_capabilities = Some(runtime_capabilities.clone());
+        // Relocation credential delivery is opt-in with the Runner's Core
+        // bootstrap configuration. Older/unconfigured workers continue to
+        // advertise the bounded legacy capability set.
+        runner_capacity.supports_relocation_credentials = self.runtime_core_url.is_some();
         if runner_capacity.runner_classes.is_empty() {
             return Ok(RunOnceOutcome::CapacityUnavailable {
                 reason: "runner advertises no classes".to_string(),
@@ -1110,20 +1114,28 @@ where
             secret_environment,
             ..RuntimeLaunchOptions::default()
         };
-        if let Some(core_url) = self.runtime_core_url.as_ref()
-            && lease.request.relocation.is_none()
-        {
-            let bootstrap = self.queue.provision_runtime_core_credential(
-                &lease.request.id,
-                &self.runner_id,
-                lease_token,
-            )?;
-            options
-                .environment
-                .insert("FINITE_CORE_URL".into(), core_url.clone());
-            options
-                .secret_environment
-                .insert("FINITE_CORE_CREDENTIAL".into(), bootstrap.secret);
+        if let Some(core_url) = self.runtime_core_url.as_ref() {
+            let bootstrap = if lease.request.relocation.is_some() {
+                self.queue.provision_relocation_core_credential(
+                    &lease.request.id,
+                    &self.runner_id,
+                    lease_token,
+                )?
+            } else {
+                Some(self.queue.provision_runtime_core_credential(
+                    &lease.request.id,
+                    &self.runner_id,
+                    lease_token,
+                )?)
+            };
+            if let Some(bootstrap) = bootstrap {
+                options
+                    .environment
+                    .insert("FINITE_CORE_URL".into(), core_url.clone());
+                options
+                    .secret_environment
+                    .insert("FINITE_CORE_CREDENTIAL".into(), bootstrap.secret);
+            }
         }
         let requires_finite_private = runtime_spec.is_some_and(|spec| {
             spec.secret_references
@@ -1261,6 +1273,22 @@ pub trait AgentCreationQueue {
         Err(RunnerError::CoreRequest(
             "runtime Core bootstrap is not supported by this queue".into(),
         ))
+    }
+
+    fn provision_relocation_core_credential(
+        &mut self,
+        _request_id: &str,
+        _runner_id: &str,
+        _lease_token: &str,
+    ) -> Result<
+        Option<finite_saas_core::store::runtime_credentials::RuntimeBootstrapCredential>,
+        RunnerError,
+    > {
+        // A queue that predates relocation credential delivery cannot prove
+        // whether this relocation is enrolled. Fail closed; only a queue
+        // implementation that understands the new endpoint may return the
+        // explicit null for a genuinely unenrolled relocation.
+        Err(RunnerError::RuntimeBootstrapUnavailable)
     }
 
     fn provision_upgrade_core_credential(
@@ -2239,6 +2267,19 @@ impl CoreHttpAgentCreationQueue {
         lease_token: &str,
     ) -> Result<finite_saas_core::store::runtime_credentials::RuntimeBootstrapCredential, RunnerError>
     {
+        self.provision_optional_core_credential(url, runner_id, lease_token)?
+            .ok_or(RunnerError::RuntimeBootstrapUnavailable)
+    }
+
+    fn provision_optional_core_credential(
+        &self,
+        url: &str,
+        runner_id: &str,
+        lease_token: &str,
+    ) -> Result<
+        Option<finite_saas_core::store::runtime_credentials::RuntimeBootstrapCredential>,
+        RunnerError,
+    > {
         let agent = ureq::AgentBuilder::new()
             .timeout(Duration::from_secs(15))
             .redirects(0)
@@ -2292,6 +2333,22 @@ impl AgentCreationQueue for CoreHttpAgentCreationQueue {
             self.base_url
         );
         self.provision_core_credential(&url, runner_id, lease_token)
+    }
+
+    fn provision_relocation_core_credential(
+        &mut self,
+        request_id: &str,
+        runner_id: &str,
+        lease_token: &str,
+    ) -> Result<
+        Option<finite_saas_core::store::runtime_credentials::RuntimeBootstrapCredential>,
+        RunnerError,
+    > {
+        let url = format!(
+            "{}/api/core/v1/agent-creation-requests/{request_id}/relocation-credential",
+            self.base_url
+        );
+        self.provision_optional_core_credential(&url, runner_id, lease_token)
     }
 
     fn lease_runtime_control(
@@ -2737,6 +2794,7 @@ impl RuntimeLauncher for DockerLauncher {
             active_sandbox_count: active_docker_container_count(&self.config),
             available_memory_bytes: self.config.available_memory_bytes,
             runtime_capabilities: Some(self.runtime_capabilities()),
+            supports_relocation_credentials: false,
         }
     }
 
@@ -3693,6 +3751,7 @@ impl RuntimeLauncher for EnclaviaLauncher {
             active_sandbox_count: active_enclavia_enclave_count(&self.config),
             available_memory_bytes: self.config.available_memory_bytes,
             runtime_capabilities: Some(self.runtime_capabilities()),
+            supports_relocation_credentials: false,
         }
     }
 
@@ -4165,6 +4224,7 @@ mod tests {
             active_sandbox_count: Some(2),
             available_memory_bytes: Some(8 * 1024 * 1024 * 1024),
             runtime_capabilities: Some(state_preserving_runtime_capabilities(false)),
+            supports_relocation_credentials: false,
         };
         let mut runner = AgentCreationRunner::new(
             FakeQueue::idle(),
@@ -4202,6 +4262,7 @@ mod tests {
             active_sandbox_count: Some(2),
             available_memory_bytes: Some(1024 * 1024 * 1024),
             runtime_capabilities: Some(state_preserving_runtime_capabilities(false)),
+            supports_relocation_credentials: false,
         };
         let mut runner = AgentCreationRunner::new(
             FakeQueue::with_lease(sample_lease("agent_request_123")),
@@ -5157,6 +5218,73 @@ mod tests {
     }
 
     #[test]
+    fn old_core_missing_relocation_credential_endpoint_keeps_creation_retryable() {
+        use std::sync::{
+            Arc,
+            atomic::{AtomicBool, Ordering},
+        };
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let mut lease = sample_lease("agent_request_relocation");
+        lease.request.relocation = Some(finite_saas_core::RuntimeRelocationEnvelope::V1(
+            finite_saas_core::RuntimeRelocationV1 {
+                source_host_id: "old-host".into(),
+                source_machine_id: "old-machine".into(),
+                target_source_host_id: "new-host".into(),
+                expected_agent_npub: "npub-relocation-fixture".into(),
+                durable_state_manifest_sha256: "a".repeat(64),
+                source_compute_absent: true,
+            },
+        ));
+        let done = Arc::new(AtomicBool::new(false));
+        let stopped = done.clone();
+        let server = std::thread::spawn(move || {
+            let mut paths = Vec::new();
+            while let Ok((mut stream, _)) = listener.accept() {
+                if stopped.load(Ordering::Relaxed) {
+                    break;
+                }
+                let request = read_http_request(&mut stream);
+                let path = request.split_whitespace().nth(1).unwrap().to_owned();
+                let (status, body) = match path.as_str() {
+                    "/api/core/v1/runtime-control-requests/lease" => (200, "null".into()),
+                    "/api/core/v1/agent-creation-requests/lease" => {
+                        (200, serde_json::to_string(&lease).unwrap())
+                    }
+                    _ => (404, "{}".into()),
+                };
+                paths.push(path);
+                write_http_json(&mut stream, status, &body);
+            }
+            paths
+        });
+        let mut runner = AgentCreationRunner::new(
+            CoreHttpAgentCreationQueue::new(format!("http://{address}"), "test-runner").unwrap(),
+            FakeLauncher::ready(RuntimeLaunchFacts::sample()).for_kata(),
+            FixedLeaseTokens::new(["lease-relocation"]),
+            "runner-1",
+            300,
+        )
+        .unwrap()
+        .with_runtime_core_bootstrap("https://core.example.test".into())
+        .unwrap();
+        let outcome = runner.run_once();
+        done.store(true, Ordering::Relaxed);
+        let _ = std::net::TcpStream::connect(address);
+        let paths = server.join().unwrap();
+        assert!(matches!(
+            outcome,
+            Err(RunnerError::RuntimeBootstrapUnavailable)
+        ));
+        assert_eq!(paths.len(), 3, "must not launch or post a terminal failure");
+        assert_eq!(
+            paths[2],
+            "/api/core/v1/agent-creation-requests/agent_request_relocation/relocation-credential"
+        );
+        assert!(runner.launcher.launch_options.is_empty());
+    }
+
+    #[test]
     fn upgrade_enrollment_http_and_old_core_retry() {
         for status in [200, 404, 503] {
             let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
@@ -5306,12 +5434,18 @@ mod tests {
         .unwrap()
         .with_runtime_core_bootstrap("https://core.finite.test".into())
         .unwrap();
-        // FakeQueue does not support bootstrap: accidental issuance makes
-        // this orchestration fail before it reaches the existing launcher.
+        // An unenrolled relocation receives an explicit null from Core. It
+        // must retain the existing unenrolled launch behavior.
         assert!(matches!(
             runner.run_once().unwrap(),
             RunOnceOutcome::Launched { .. }
         ));
+        assert!(
+            runner.queue.lease_capacities[0]
+                .as_ref()
+                .unwrap()
+                .supports_relocation_credentials
+        );
         let options = &runner.launcher.launch_options[0];
         assert!(!options.environment.contains_key("FINITE_CORE_URL"));
         assert!(
@@ -5319,6 +5453,126 @@ mod tests {
                 .secret_environment
                 .contains_key("FINITE_CORE_CREDENTIAL")
         );
+    }
+
+    #[test]
+    fn runtime_core_opt_in_delivers_relocation_credential_to_launch() {
+        let mut lease = sample_lease("agent_request_relocation");
+        lease.request.relocation = Some(finite_saas_core::RuntimeRelocationEnvelope::V1(
+            finite_saas_core::RuntimeRelocationV1 {
+                source_host_id: "old-host".into(),
+                source_machine_id: "old-machine".into(),
+                target_source_host_id: "new-host".into(),
+                expected_agent_npub: "npub-relocation-fixture".into(),
+                durable_state_manifest_sha256: "a".repeat(64),
+                source_compute_absent: true,
+            },
+        ));
+        let secret = "b".repeat(64);
+        let mut runner = AgentCreationRunner::new(
+            FakeQueue::with_lease(lease).with_relocation_core_credential(
+                finite_saas_core::store::runtime_credentials::RuntimeBootstrapCredential {
+                    secret: secret.clone(),
+                },
+            ),
+            FakeLauncher::ready(RuntimeLaunchFacts::sample()).for_kata(),
+            FixedLeaseTokens::new(["lease-relocation"]),
+            "runner-1",
+            300,
+        )
+        .unwrap()
+        .with_runtime_core_bootstrap("https://core.example.test".into())
+        .unwrap();
+
+        assert!(matches!(
+            runner.run_once().unwrap(),
+            RunOnceOutcome::Launched { .. }
+        ));
+        let options = &runner.launcher.launch_options[0];
+        assert_eq!(
+            options.environment.get("FINITE_CORE_URL"),
+            Some(&"https://core.example.test".to_string())
+        );
+        assert_eq!(
+            options.secret_environment.get("FINITE_CORE_CREDENTIAL"),
+            Some(&secret)
+        );
+    }
+
+    #[test]
+    fn relocation_credential_http_object_and_null_contract() {
+        for expected_secret in [Some("c".repeat(64)), None] {
+            let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+            let address = listener.local_addr().unwrap();
+            let mut lease = sample_lease("agent_request_http_relocation");
+            lease.request.relocation = Some(finite_saas_core::RuntimeRelocationEnvelope::V1(
+                finite_saas_core::RuntimeRelocationV1 {
+                    source_host_id: "old-host".into(),
+                    source_machine_id: "old-machine".into(),
+                    target_source_host_id: "new-host".into(),
+                    expected_agent_npub: "npub-relocation-http-fixture".into(),
+                    durable_state_manifest_sha256: "a".repeat(64),
+                    source_compute_absent: true,
+                },
+            ));
+            let credential_for_server = expected_secret.clone();
+            let server = std::thread::spawn(move || {
+                let mut paths = Vec::new();
+                for _ in 0..5 {
+                    let (mut stream, _) = listener.accept().unwrap();
+                    let request = read_http_request(&mut stream);
+                    let path = request.split_whitespace().nth(1).unwrap().to_owned();
+                    let body = match path.as_str() {
+                        "/api/core/v1/runtime-control-requests/lease" => "null".to_string(),
+                        "/api/core/v1/agent-creation-requests/lease" => {
+                            serde_json::to_string(&lease).unwrap()
+                        }
+                        path if path.ends_with("/relocation-credential") => {
+                            serde_json::to_string(&credential_for_server.as_ref().map(|secret| {
+                                finite_saas_core::store::runtime_credentials::RuntimeBootstrapCredential {
+                                    secret: secret.clone(),
+                                }
+                            }))
+                            .unwrap()
+                        }
+                        path if path.ends_with("/runtime") || path.ends_with("/complete") => {
+                            serde_json::to_string(&lease).unwrap()
+                        }
+                        _ => panic!("unexpected Core path in relocation contract test"),
+                    };
+                    paths.push(path);
+                    write_http_json(&mut stream, 200, &body);
+                }
+                paths
+            });
+            let mut runner = AgentCreationRunner::new(
+                CoreHttpAgentCreationQueue::new(format!("http://{address}"), "test-runner")
+                    .unwrap(),
+                FakeLauncher::ready(RuntimeLaunchFacts::sample()).for_kata(),
+                FixedLeaseTokens::new(["lease-http-relocation"]),
+                "runner-1",
+                300,
+            )
+            .unwrap()
+            .with_runtime_core_bootstrap("https://core.example.test".into())
+            .unwrap();
+            let outcome = runner.run_once().unwrap();
+            let paths = server.join().unwrap();
+            assert!(matches!(outcome, RunOnceOutcome::Launched { .. }));
+            assert!(paths[2].ends_with("/relocation-credential"));
+            let options = &runner.launcher.launch_options[0];
+            match expected_secret {
+                Some(secret) => assert_eq!(
+                    options.secret_environment.get("FINITE_CORE_CREDENTIAL"),
+                    Some(&secret)
+                ),
+                None => assert!(
+                    !options
+                        .secret_environment
+                        .contains_key("FINITE_CORE_CREDENTIAL")
+                ),
+            }
+        }
     }
 
     #[test]
@@ -6358,6 +6612,7 @@ mod tests {
         completed: Vec<CompleteAgentCreationRequestInput>,
         failed: Vec<FailAgentCreationRequestInput>,
         health_reports: Vec<RuntimeHealthReportRequest>,
+        relocation_core_secret: Option<String>,
     }
 
     impl FakeQueue {
@@ -6380,6 +6635,7 @@ mod tests {
                 completed: Vec::new(),
                 failed: Vec::new(),
                 health_reports: Vec::new(),
+                relocation_core_secret: None,
             }
         }
 
@@ -6402,6 +6658,7 @@ mod tests {
                 completed: Vec::new(),
                 failed: Vec::new(),
                 health_reports: Vec::new(),
+                relocation_core_secret: None,
             }
         }
 
@@ -6424,11 +6681,20 @@ mod tests {
                 completed: Vec::new(),
                 failed: Vec::new(),
                 health_reports: Vec::new(),
+                relocation_core_secret: None,
             }
         }
 
         fn with_provision_error(mut self, message: &str) -> Self {
             self.provision_error = Some(message.to_string());
+            self
+        }
+
+        fn with_relocation_core_credential(
+            mut self,
+            credential: finite_saas_core::store::runtime_credentials::RuntimeBootstrapCredential,
+        ) -> Self {
+            self.relocation_core_secret = Some(credential.secret);
             self
         }
     }
@@ -6546,6 +6812,22 @@ mod tests {
             }
             self.provisioned.push(input);
             Ok(sample_finite_private_key())
+        }
+
+        fn provision_relocation_core_credential(
+            &mut self,
+            _request_id: &str,
+            _runner_id: &str,
+            _lease_token: &str,
+        ) -> Result<
+            Option<finite_saas_core::store::runtime_credentials::RuntimeBootstrapCredential>,
+            RunnerError,
+        > {
+            Ok(self.relocation_core_secret.as_ref().map(|secret| {
+                finite_saas_core::store::runtime_credentials::RuntimeBootstrapCredential {
+                    secret: secret.clone(),
+                }
+            }))
         }
 
         fn fail_agent_creation(

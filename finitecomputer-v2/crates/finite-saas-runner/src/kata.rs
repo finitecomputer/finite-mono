@@ -2072,6 +2072,7 @@ impl RuntimeLauncher for KataLauncher {
             active_sandbox_count: active_kata_container_count(&self.config),
             available_memory_bytes: self.config.available_memory_bytes,
             runtime_capabilities: Some(self.runtime_capabilities()),
+            supports_relocation_credentials: false,
         }
     }
 

@@ -14,6 +14,12 @@ name is not authority to select a Runtime.
 
 - The Core and both Runner hosts run the reviewed generation that contains the
   `runtime_relocation.v1` contract.
+- For an Agent enrolled in Core authentication, the target Runner must also
+  advertise `supports_relocation_credentials` with `FC_RUNNER_RUNTIME_CORE_URL`
+  configured. Core will not lease that relocation to an older Runner. A new
+  Runner talking to an older Core stops before provider work and retries.
+  Quiesce already-leased relocations before deploying this Core change: the
+  capability gate cannot recall work an old Runner has already claimed.
 - A full lat1 Borg archive completed successfully after quiescing the hosted
   services, and its archive is visible from the independently held recovery
   credentials.
@@ -203,12 +209,26 @@ Only after those checks does Core replace the source binding. The Runner
 resolves fresh target-host secrets through the normal launch path; durable
 state is never used as the secret transport.
 
+For an enrolled Agent, the authenticated relocation-credential endpoint prepares
+one inactive successor credential for the exact live lease. Retries reuse it.
+The predecessor remains bound until completion, when Core atomically revokes
+it and activates the successor on the target. Hosted access preferences and
+native credentials carry forward from their latest committed state; routing
+waits for the new process to acknowledge the current configuration generation.
+An Agent that was never enrolled stays unenrolled. A revoked or inconsistent
+credential fails closed; this operation cannot repair historical credentials.
+
 ## VERIFY
 
 - The relocation creation request is `running`.
 - Core still has the same Project, Runtime ID, artifact, state schema, and
   Agent Principal, now bound to the target host and same machine name.
 - The target container is running and healthy.
+- For an enrolled Agent, Core configuration polling succeeds with the target
+  credential, the predecessor no longer authenticates, and hosted access is
+  ready after the target acknowledges its configuration. A subsequent canary
+  upgrade must obtain the current credential successfully. Record outcomes,
+  never credential values.
 - Finite Chat receives a round trip from the existing Agent Principal.
 - Sites, Brain, workspace files, Hermes memory, and installed skills expected
   for the canary are present.
@@ -232,6 +252,17 @@ target may have changed the staged manifest even when Core rejected the final
 registration. Preserve that tree under a request-specific, non-canonical name,
 then restage the absent canonical path from the stopped source only after
 diagnosing the failure.
+
+Failure or cancellation revokes only the pending successor credential. It does
+not re-activate stopped source compute or alter the predecessor's existing
+activation state. A fresh relocation request receives a fresh successor.
+
+After the first successful credential handoff, keep Core on a version that
+understands relocation-owned credentials. Older Core versions cannot provision
+a later upgrade from that credential lineage. If Core must be rolled back,
+hold relocations and upgrades until a compatible version is restored; do not
+unrevoke or rebind credential rows manually. Existing runtime authentication
+uses the same schema and token contract, and no database migration is required.
 
 After Core switches the binding, do not manually start source compute: that
 would create two writers. Stop the target through Core first. A reverse
