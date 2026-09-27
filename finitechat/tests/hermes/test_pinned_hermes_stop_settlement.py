@@ -71,7 +71,14 @@ def raw_event(seq: int, text: str) -> dict[str, Any]:
 
 def raw_photo(seq: int) -> dict[str, Any]:
     raw = raw_event(seq, "what is in this picture?")
-    raw["attachments"] = [{"path": f"/synthetic/photo-{seq}.png", "mime_type": "image/png"}]
+    raw["attachments"] = [
+        {
+            "kind": "image",
+            "name": f"photo-{seq}.png",
+            "path": f"/synthetic/photo-{seq}.png",
+            "mime_type": "image/png",
+        }
+    ]
     return raw
 
 
@@ -217,12 +224,11 @@ class PinnedHermesStopSettlementTests(unittest.TestCase):
 
         self.run_scenario(scenario)
 
-    def test_stop_acks_a_photo_queued_in_hermes_behind_the_running_turn(self):
+    def test_stop_acks_a_photo_waiting_behind_the_running_turn(self):
         async def scenario(h: StopHarness):
             await h.deliver(raw_event(1, "long running work"))
             await asyncio.wait_for(h.started.wait(), 2)
-            # Non-text bypasses the Finite admission head and waits in the
-            # Hermes pending slot, which the gateway stop handler discards.
+            # Media waits at the same durable admission boundary as text.
             await h.deliver(raw_photo(2))
             self.assertEqual(h.state("msg-2"), "leased")
 
