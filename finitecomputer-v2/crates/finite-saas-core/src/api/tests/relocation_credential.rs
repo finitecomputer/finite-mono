@@ -114,7 +114,7 @@ async fn create_runtime(db: &TestDb, run: &str, enroll_initial: bool) -> Prepare
                 runner_id: runner.clone(),
                 lease_token: creation_lease_token.clone(),
                 source_host_id: source_host.clone(),
-                prepare_hosted_access: true,
+                prepare_hosted_access: false,
             })
             .await
             .unwrap()

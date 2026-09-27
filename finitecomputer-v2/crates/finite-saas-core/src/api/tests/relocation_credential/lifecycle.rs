@@ -23,6 +23,11 @@ async fn run_relocation_credential_handoff(same_host: bool) {
         let runtime_id = runtime.runtime_id.clone();
         let old_secret = runtime.predecessor_secret.as_ref().unwrap().clone();
         let initial_hosted = db.hosted_access(&runtime_id, &owner_workos).await.unwrap();
+        // Keep API fixtures enrolled but without hosted access; only this
+        // lifecycle enables it so both initial states stay covered.
+        let initial_hosted = db.set_hosted_access(&runtime_id, &owner_workos, SetHostedAccess {
+            enabled: true, expected_generation: initial_hosted.generation,
+        }).await.unwrap();
         assert!(initial_hosted.enrolled && initial_hosted.enabled);
         db.report_hosted(&old_secret, HostedReport {
             generation: initial_hosted.generation,
