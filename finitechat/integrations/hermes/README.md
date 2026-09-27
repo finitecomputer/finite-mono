@@ -164,8 +164,12 @@ its own.
   hook settles it. Separate media messages are not merged into Hermes's pending
   slot; multiple attachments on one message still travel together. Graceful
   shutdown releases every queued lease for immediate redelivery; a crash
-  leaves those leases recoverable through the sidecar's normal expiry path.
-  A failed handoff retries the head before admitting later events. Events consumed inline by a busy
+  leaves the entire held backlog recoverable through the sidecar's normal
+  expiry path (45 minutes by default). Settlement uses one RPC per entry, so
+  an interrupted shutdown can leave remaining leases waiting for that expiry.
+  A failed handoff retries the head with exponential backoff (1–30 seconds)
+  before admitting later events. User interruption also clears held work in
+  the idle gap between turns. Events consumed inline by a busy
   session never pass through a background turn, so the adapter acks them
   directly (exactly once; the sidecar's ack is idempotent).
 - **Reply/edit routing (O2).** Every inbound event already carries its

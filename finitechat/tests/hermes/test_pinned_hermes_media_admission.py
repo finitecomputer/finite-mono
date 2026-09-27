@@ -293,6 +293,111 @@ class PinnedHermesMediaAdmissionTests(unittest.TestCase):
 
         self.run_scenario(scenario)
 
+    def test_stop_between_turns_discards_queued_handoff(self):
+        async def scenario(h):
+            await h.deliver(raw_event(1, "long running work"))
+            await h.wait_running("msg-1")
+            for seq in (2, 3, 4):
+                await h.deliver(raw_photo(seq))
+            entered = asyncio.Event()
+            release = asyncio.Event()
+            original = h.adapter._set_processing_activity
+
+            async def delayed_activity(*args):
+                if not entered.is_set():
+                    entered.set()
+                    await release.wait()
+                return await original(*args)
+
+            h.adapter._set_processing_activity = delayed_activity
+            h.gates["msg-1"].set()
+            await asyncio.wait_for(entered.wait(), 5)
+            await h.deliver(raw_event(5, "/stop"))
+            await h.wait_settled("msg-5")
+            release.set()
+            await h.settle_loop()
+            for seq in (2, 3, 4):
+                self.assertEqual(h.state(f"msg-{seq}"), "acked")
+            self.assertEqual(h.runs, ["msg-1"])
+            await h.deliver(raw_event(6, "after stop"))
+            await h.wait_settled("msg-6")
+            self.assertEqual(h.runs, ["msg-1", "msg-6"])
+
+        self.run_scenario(scenario)
+
+    def test_persistent_handoff_failure_does_not_spin_and_stop_still_works(self):
+        async def scenario(h):
+            await h.deliver(raw_event(1, "long running work"))
+            await h.wait_running("msg-1")
+            await h.deliver(raw_photo(2))
+            original = h.adapter.handle_message
+            attempted = asyncio.Event()
+            attempts = []
+
+            async def failure(event):
+                if event.message_id == "msg-2":
+                    attempts.append(event.message_id)
+                    attempted.set()
+                    raise RuntimeError("persistent synthetic handoff failure")
+                return await original(event)
+
+            h.adapter.handle_message = failure
+            h.gates["msg-1"].set()
+            await asyncio.wait_for(attempted.wait(), 5)
+            await asyncio.sleep(0.2)
+            self.assertEqual(attempts, ["msg-2"])
+            await h.deliver(raw_event(3, "/stop"))
+            self.assertNotIn("msg-2", h.runs)
+            self.assertEqual(h.adapter._deferred_admissions, {})
+
+        self.run_scenario(scenario)
+
+    def test_cancelled_handoff_clears_activity_and_inflight_marker(self):
+        async def scenario(h):
+            await h.deliver(raw_event(1, "long running work"))
+            await h.wait_running("msg-1")
+            await h.deliver(raw_photo(2))
+            entered = asyncio.Event()
+            original = h.adapter.handle_message
+            cleared = []
+
+            async def stalled_handoff(event):
+                if event.message_id == "msg-2":
+                    entered.set()
+                    await asyncio.Event().wait()
+                return await original(event)
+
+            async def clear_activity(*args):
+                cleared.append(args)
+
+            h.adapter.handle_message = stalled_handoff
+            h.adapter._clear_processing_activity = clear_activity
+            h.gates["msg-1"].set()
+            await asyncio.wait_for(entered.wait(), 5)
+            await h.deliver(raw_event(3, "/stop"))
+            await h.wait_settled("msg-3")
+            self.assertEqual(h.state("msg-2"), "acked")
+            self.assertEqual(h.adapter._inflight_admissions, set())
+            self.assertTrue(cleared)
+            self.assertEqual(h.runs, ["msg-1"])
+
+        self.run_scenario(scenario)
+
+    def test_stale_inflight_marker_does_not_suppress_recovery(self):
+        async def scenario(h):
+            event = raw_photo(2)
+            key = h.module._adapter_event_key(event["room_id"], 2, "msg-2")
+            # Model an old pending event whose completion hook was lost. Once
+            # the session has no owner, its expired lease must be admissible.
+            h.adapter._inflight_admissions.add(key)
+            await h.deliver(event)
+            await h.wait_settled("msg-2")
+            self.assertEqual(h.runs, ["msg-2"])
+            self.assertEqual(h.state("msg-2"), "acked")
+            self.assertEqual(h.adapter._inflight_admissions, set())
+
+        self.run_scenario(scenario)
+
     def test_busy_media_does_not_block_or_settle_another_session(self):
         async def scenario(h):
             await h.deliver(raw_event(1, "long running work"))

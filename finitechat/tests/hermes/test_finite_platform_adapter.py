@@ -79,6 +79,13 @@ class MessageEvent:
     channel_prompt: str | None = None
     internal: bool = False
 
+    def get_command(self):
+        text = self.text.lstrip()
+        if not text.startswith("/"):
+            return None
+        command = text.split(maxsplit=1)[0][1:].lower().split("@", 1)[0]
+        return command if "/" not in command else None
+
 
 @dataclass
 class SendResult:
