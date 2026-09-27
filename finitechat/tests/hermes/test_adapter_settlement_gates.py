@@ -6,8 +6,11 @@ state and deleted the adapter's shadow delivery state along with its
 regression layers. The adapter's entire remaining settle contract is these
 mappings, pinned here against ``adapter.py`` as-is:
 
-- a cancelled turn RELEASES the sidecar lease so the entry is redelivered
-  whole (was ``cancelled turn leaves event for redelivery``, both the
+- a turn cancelled by shutdown or recovery RELEASES the sidecar lease so the
+  entry is redelivered whole (a user /stop instead acks it; that path needs
+  the real gateway dispatch and is pinned in
+  ``test_pinned_hermes_stop_settlement.py``) (was ``cancelled turn leaves
+  event for redelivery``, both the
   pre-swap durability scenario in
   ``scripts/hermes-adapter-regression-report.py`` and the live test
   ``test_cancelled_turn_stays_unacked_and_redelivery_reprocesses``);
