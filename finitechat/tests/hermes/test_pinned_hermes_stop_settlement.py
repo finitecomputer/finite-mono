@@ -206,11 +206,10 @@ class PinnedHermesStopSettlementTests(unittest.TestCase):
         async def scenario(h: StopHarness):
             await h.deliver(raw_event(1, "long running work"))
             await asyncio.wait_for(h.started.wait(), 2)
-            # msg-2 becomes the held admission head; msg-3 is released back to
-            # the durable inbox behind it.
+            # Both queued leases stay held until their turn or the stop.
             await h.deliver(raw_event(2, "queued follow-up"))
             await h.deliver(raw_event(3, "second follow-up"))
-            self.assertEqual(h.state("msg-3"), "pending")
+            self.assertEqual(h.state("msg-3"), "leased")
 
             await h.deliver(raw_event(4, "/stop"))
             await h.tick()
