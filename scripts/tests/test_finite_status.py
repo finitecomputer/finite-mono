@@ -36,23 +36,28 @@ SET LOCAL search_path=pg_temp;
 CREATE TEMP TABLE projects(id text,owner_user_id text);
 CREATE TEMP TABLE agent_runtimes(id text,project_id text,source_host_id text,source_machine_id text,runtime_artifact_id text);
 CREATE TEMP TABLE project_runtime_links(project_id text,agent_runtime_id text,active boolean);
-CREATE TEMP TABLE agent_creation_requests(id text,agent_runtime_id text,project_id text,status text,owner_user_id text,runner_class text,relocation_spec jsonb);
+CREATE TEMP TABLE agent_creation_requests(id text,agent_runtime_id text,project_id text,status text,owner_user_id text,runner_class text,relocation_spec jsonb,target_source_host_id text);
 INSERT INTO projects VALUES ('project','owner');
 INSERT INTO agent_runtimes VALUES ('runtime','project','host','machine','artifact');
 INSERT INTO project_runtime_links VALUES ('project','runtime',TRUE);
-INSERT INTO agent_creation_requests VALUES ('primary','runtime','project','running','owner','kata',NULL),('relocation','runtime','project','running','owner','kata','{}'),('old-owner','runtime','project','running','previous-owner','kata','{}');
+INSERT INTO agent_creation_requests VALUES ('primary','runtime','project','running','owner','kata',NULL,NULL),('relocation','runtime','project','running','owner','kata','{}','host'),('old-owner','runtime','project','running','previous-owner','kata','{}','host');
 """
         schema = "CREATE TEMP TABLE runtime_core_credentials(creation_request_id text,agent_runtime_id text,source_host_id text,source_machine_id text,owner_user_id text,revoked boolean,activated boolean);\n"
         for setup, expected in [
             ("", "schema_absent"),
             (schema, "missing"),
             (schema + "INSERT INTO runtime_core_credentials VALUES ('primary',NULL,'host','machine','owner',FALSE,TRUE);", "assignment_conflict"),
-            (schema + "INSERT INTO runtime_core_credentials VALUES ('relocation','runtime','host','machine','owner',FALSE,TRUE);", "assignment_conflict"),
+            (schema + "INSERT INTO runtime_core_credentials VALUES ('relocation','runtime','host','machine','owner',FALSE,TRUE);", "bound"),
+            (schema + "INSERT INTO runtime_core_credentials VALUES ('primary',NULL,'source-host','machine','owner',TRUE,FALSE),('relocation','runtime','host','machine','owner',FALSE,TRUE);", "bound"),
+            (schema + "UPDATE agent_creation_requests SET target_source_host_id='elsewhere' WHERE id='relocation'; INSERT INTO runtime_core_credentials VALUES ('relocation','runtime','host','machine','owner',FALSE,TRUE);", "assignment_conflict"),
+            (schema + "INSERT INTO runtime_core_credentials VALUES ('old-owner','runtime','host','machine','owner',FALSE,TRUE);", "assignment_conflict"),
+            (schema + "INSERT INTO runtime_core_credentials VALUES ('primary','runtime','host','machine','owner',TRUE,TRUE);", "revoked"),
             (schema + "INSERT INTO runtime_core_credentials VALUES ('primary','runtime','host','machine','owner',FALSE,TRUE);", "bound"),
             (schema + "UPDATE agent_creation_requests SET owner_user_id='previous-owner' WHERE id='primary';", "primary_conflict"),
         ]:
             with self.subTest(expected=expected, setup=setup):
                 result = subprocess.run(["psql", "--no-psqlrc", "--csv", "--tuples-only", "--quiet", "--set", "ON_ERROR_STOP=1", "--dbname", os.environ["FC_CORE_POSTGRES_TEST_URL"]], input=fixture + setup + query + "ROLLBACK;", text=True, capture_output=True, check=True)
+                self.assertEqual(len(result.stdout.strip().splitlines()), 1)
                 values = result.stdout.strip().split(",")
                 self.assertEqual(values[-1], expected)
                 if expected != "primary_conflict":
