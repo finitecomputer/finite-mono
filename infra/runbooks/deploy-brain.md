@@ -90,7 +90,11 @@ email destination is unverified provenance, even if delivery fails; possession
 of a forwarded token does not prove mailbox ownership. Admin notes never
 resolve keys. No Chat store, Core database, worker, socket, or mount is needed.
 
-Deploy the server before the CLI. Old clients ignore the additive
+Follow the coordinated [platform rollout](platform-rollout.md) order. Runtime
+promotion can expose the new CLI before the Brain server switches; ordinary
+Brain operations remain supported, but label edits are unavailable until the
+new server is active. Verify labels only after both components are current.
+Old clients ignore the additive
 `principalLabelsAvailable` metadata flag; notes stay out of ordinary metadata
 responses. New clients skip label reads on old metadata; edits against old
 servers return an unsupported route. Old servers ignore the added table/column;
