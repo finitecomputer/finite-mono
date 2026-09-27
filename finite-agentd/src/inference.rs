@@ -151,7 +151,6 @@ impl FinitePrivateEnv {
     }
 
     /// `FINITE_CONFIG_FP_*` for the helper; an unset value is an empty string (§8.2).
-    #[cfg_attr(not(test), expect(dead_code, reason = "wired in A1b"))]
     pub(crate) fn helper_env(&self) -> [(&'static str, String); 3] {
         [
             (
@@ -172,7 +171,6 @@ impl FinitePrivateEnv {
     }
 }
 
-#[expect(dead_code, reason = "wired in A1c")]
 pub(crate) fn finite_private_env() -> FinitePrivateEnv {
     finite_private_env_from(|name| std::env::var(name).ok())
 }
@@ -208,7 +206,6 @@ fn finite_private_env_from(lookup: impl Fn(&str) -> Option<String>) -> FinitePri
 /// The whole `model` value agentd writes for a route (§3.6). `model` is
 /// ignored for Finite Private, whose model comes from agentd's environment.
 /// Callers validate model names.
-#[cfg_attr(not(test), expect(dead_code, reason = "wired in A1c"))]
 pub(crate) fn plan_model_block(
     route: IntentRoute,
     model: Option<&str>,
@@ -396,13 +393,11 @@ pub(crate) struct OperationStatus {
 #[serde(rename_all = "snake_case")]
 pub(crate) enum OperationState {
     Running,
-    #[expect(dead_code, reason = "wired in A1b")]
     Succeeded,
     Failed,
 }
 
 impl OperationStatus {
-    #[cfg_attr(not(test), expect(dead_code, reason = "wired in A1b"))]
     pub(crate) fn from_record(record: &IntentRecord) -> Self {
         Self {
             id: record.id.clone(),

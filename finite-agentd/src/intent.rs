@@ -163,7 +163,6 @@ pub(crate) fn intent_path(agent_home: &Path) -> PathBuf {
 /// Reads the record. A missing file is `Ok(None)`. A file that does not parse
 /// as a version-1 record is renamed to `<name>.corrupt-<unix ms>`, logged, and
 /// treated as absent.
-#[cfg_attr(not(test), expect(dead_code, reason = "wired in A1b"))]
 pub(crate) fn load(path: &Path) -> Result<Option<IntentRecord>, AgentdError> {
     let mut bytes = Vec::new();
     match File::open(path) {
@@ -195,7 +194,6 @@ pub(crate) fn load(path: &Path) -> Result<Option<IntentRecord>, AgentdError> {
 }
 
 /// Writes the record atomically: temp file, fsync, rename, fsync the directory. Mode 0600.
-#[cfg_attr(not(test), expect(dead_code, reason = "wired in A1b"))]
 pub(crate) fn store(path: &Path, record: &IntentRecord) -> Result<(), AgentdError> {
     record.check().map_err(|problem| {
         AgentdError::Config(format!("refusing to write an invalid intent: {problem}"))
@@ -216,7 +214,6 @@ pub(crate) fn store(path: &Path, record: &IntentRecord) -> Result<(), AgentdErro
 }
 
 /// Deletes the record. A missing file is not an error.
-#[cfg_attr(not(test), expect(dead_code, reason = "wired in A1b"))]
 pub(crate) fn clear(path: &Path) -> Result<(), AgentdError> {
     match fs::remove_file(path) {
         Ok(()) => {}

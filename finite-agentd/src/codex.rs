@@ -113,7 +113,7 @@ pub(crate) async fn cancel(
 /// cancel leaves the attempt `interrupted`. Without a login manager there is
 /// no attempt to cancel, so a disconnect recorded by a newer image still
 /// completes here (§4.3 cell 6b).
-#[expect(dead_code, reason = "wired in A1b")]
+#[expect(dead_code, reason = "wired in A1c")]
 pub(crate) async fn cancel_for_disconnect(_state: &CodexState) -> Result<(), AgentdError> {
     Ok(())
 }

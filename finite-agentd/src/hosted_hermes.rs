@@ -7,10 +7,11 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
-use tokio::sync::{Mutex, mpsc, watch};
+use tokio::sync::{Mutex, mpsc, oneshot, watch};
 use tokio::task::JoinHandle;
 
 use crate::AgentdError;
+use crate::intent::{self, IntentKind};
 use crate::supervisor::{
     ProcessSpec, ProcessState, ProcessStatus, now_ms, signal_group, spawn_process, terminate_child,
 };
@@ -21,6 +22,54 @@ const PUBLIC_URL: &str = "HERMES_DASHBOARD_PUBLIC_URL";
 const USERNAME: &str = "HERMES_DASHBOARD_BASIC_AUTH_USERNAME";
 const PASSWORD: &str = "HERMES_DASHBOARD_BASIC_AUTH_PASSWORD";
 const SECRET: &str = "HERMES_DASHBOARD_BASIC_AUTH_SECRET";
+const GATE_POLL: Duration = Duration::from_millis(500);
+
+/// §5.6: every Finite launch point of Hermes code points `CODEX_HOME` here so
+/// no desktop Codex store is ever imported.
+pub(crate) const CODEX_HOME_DISABLED: &str = "/dev/null/finite-codex-home-disabled";
+
+/// §5.6: `OPENAI_API_KEY` is unset at a Finite launch point only when it is
+/// the Runner's alias of a non-empty `FINITE_PRIVATE_API_KEY`. A key the user
+/// set keeps working for Hermes's other OpenAI features.
+pub(crate) fn openai_key_is_finite_private_alias(
+    value: impl Fn(&str) -> Option<std::ffi::OsString>,
+) -> bool {
+    match (value("FINITE_PRIVATE_API_KEY"), value("OPENAI_API_KEY")) {
+        (Some(finite_private), Some(openai)) => {
+            !finite_private.is_empty() && finite_private == openai
+        }
+        _ => false,
+    }
+}
+
+/// Decides whether `hermes serve` may start: never while a disconnect intent
+/// exists (§3.7), so it always starts after the launcher's pending-disconnect
+/// clears and never holds a store from before them.
+#[derive(Debug, Clone, Default)]
+pub(crate) struct ServeGate {
+    intent_path: Option<PathBuf>,
+}
+
+impl ServeGate {
+    #[cfg_attr(not(test), expect(dead_code, reason = "wired in A1c"))]
+    pub(crate) fn new(intent_path: PathBuf) -> Self {
+        Self {
+            intent_path: Some(intent_path),
+        }
+    }
+
+    /// An unreadable intent file also blocks: the native dashboard is
+    /// optional, and chat never waits on it.
+    pub(crate) fn blocked(&self) -> bool {
+        let Some(path) = &self.intent_path else {
+            return false;
+        };
+        match intent::load(path) {
+            Ok(record) => record.is_some_and(|record| record.kind == IntentKind::Disconnect),
+            Err(_) => true,
+        }
+    }
+}
 
 /// This handle owns only the optional native backend. Existing gateway,
 /// health, Finite Chat and SimpleX lifecycle behavior is unchanged.
@@ -29,19 +78,47 @@ pub(crate) struct HostedHermesHandle {
     pub(super) stop: mpsc::Sender<()>,
     pub(super) status: watch::Receiver<ProcessStatus>,
     pub(super) task: Arc<Mutex<Option<JoinHandle<()>>>>,
+    /// Restart requests; each is acknowledged once the running child is gone.
+    pub(super) restart: Option<mpsc::Sender<oneshot::Sender<()>>>,
 }
 
 impl HostedHermesHandle {
     pub(crate) fn start(home: &Path) -> Result<Option<Self>, AgentdError> {
+        Self::start_gated(home, ServeGate::default())
+    }
+
+    pub(crate) fn start_gated(home: &Path, gate: ServeGate) -> Result<Option<Self>, AgentdError> {
         if std::env::var_os("FINITE_CORE_URL").is_some()
             || std::env::var_os("FINITE_CORE_CREDENTIAL").is_some()
         {
-            return Ok(Some(crate::hosted_hermes_pull::start(home.to_path_buf())));
+            return Ok(Some(crate::hosted_hermes_pull::start(
+                home.to_path_buf(),
+                gate,
+            )));
         }
         Ok(None)
     }
 
+    /// Stops the running child and returns once it has exited. A new child
+    /// starts as soon as the gate allows: at once for a credential change, or
+    /// only after the disconnect record is deleted.
+    #[expect(dead_code, reason = "wired in A1c")]
+    pub(crate) async fn restart(&self) {
+        let Some(restart) = &self.restart else {
+            return;
+        };
+        let (done, stopped) = oneshot::channel();
+        if restart.send(done).await.is_ok() {
+            let _ = stopped.await;
+        }
+    }
+
+    #[cfg(test)]
     pub(super) fn start_spec(spec: ProcessSpec) -> Self {
+        Self::start_spec_gated(spec, ServeGate::default())
+    }
+
+    pub(super) fn start_spec_gated(spec: ProcessSpec, gate: ServeGate) -> Self {
         let (stop, mut stop_rx) = mpsc::channel(1);
         let (status_tx, status) = watch::channel(ProcessStatus::default());
         let task = tokio::spawn(async move {
@@ -55,6 +132,13 @@ impl HostedHermesHandle {
                 });
             };
             loop {
+                if gate.blocked() {
+                    update(ProcessState::Stopped, restart_count);
+                    tokio::select! {
+                        _ = tokio::time::sleep(GATE_POLL) => continue,
+                        _ = stop_rx.recv() => break,
+                    }
+                }
                 update(
                     if restart_count == 0 {
                         ProcessState::Starting
@@ -100,6 +184,7 @@ impl HostedHermesHandle {
             stop,
             status,
             task: Arc::new(Mutex::new(Some(task))),
+            restart: None,
         }
     }
 
@@ -206,7 +291,16 @@ fn invalid(key: &str) -> AgentdError {
 /// only this optional child; existing gateway and SimpleX supervision continues.
 pub fn run_hosted_hermes() -> Result<(), AgentdError> {
     let config = HostedHermesConfig::read(|key| std::env::var(key).ok())?;
-    let error = std::process::Command::new("hermes")
+    let error = hermes_serve_command(&config, |key| std::env::var_os(key)).exec();
+    Err(error.into())
+}
+
+fn hermes_serve_command(
+    config: &HostedHermesConfig,
+    value: impl Fn(&str) -> Option<std::ffi::OsString>,
+) -> std::process::Command {
+    let mut command = std::process::Command::new("hermes");
+    command
         .args([
             "serve",
             "--isolated",
@@ -221,8 +315,11 @@ pub fn run_hosted_hermes() -> Result<(), AgentdError> {
         // Accepted work survives a client disconnect. Process termination is
         // a separate interruption boundary, not a promise of work survival.
         .env("HERMES_TUI_WS_ORPHAN_REAP_GRACE_S", "0")
-        .exec();
-    Err(error.into())
+        .env("CODEX_HOME", CODEX_HOME_DISABLED);
+    if openai_key_is_finite_private_alias(value) {
+        command.env_remove("OPENAI_API_KEY");
+    }
+    command
 }
 
 #[cfg(test)]
@@ -382,6 +479,112 @@ mod tests {
             );
         }
         existing.shutdown().await;
+    }
+
+    fn serve_env(command: &std::process::Command) -> BTreeMap<String, Option<String>> {
+        command
+            .get_envs()
+            .map(|(name, value)| {
+                (
+                    name.to_string_lossy().into_owned(),
+                    value.map(|value| value.to_string_lossy().into_owned()),
+                )
+            })
+            .collect()
+    }
+
+    #[test]
+    fn t_a12_hermes_serve_drops_only_the_finite_private_alias() {
+        let values = settings();
+        let config = HostedHermesConfig::read(|key| values.get(key).cloned()).unwrap();
+        let launch = |openai: Option<&str>, finite_private: Option<&str>| {
+            let environment = BTreeMap::from([
+                ("OPENAI_API_KEY", openai),
+                ("FINITE_PRIVATE_API_KEY", finite_private),
+            ]);
+            serve_env(&hermes_serve_command(&config, |key| {
+                environment.get(key).copied().flatten().map(Into::into)
+            }))
+        };
+
+        let alias = launch(Some("synthetic-fp-key"), Some("synthetic-fp-key"));
+        assert_eq!(alias["OPENAI_API_KEY"], None, "the alias is removed");
+        assert_eq!(
+            alias["CODEX_HOME"].as_deref(),
+            Some("/dev/null/finite-codex-home-disabled")
+        );
+
+        for (openai, finite_private) in [
+            (Some("sk-user-own-key"), Some("synthetic-fp-key")),
+            (Some(""), Some("")),
+            (Some("sk-user-own-key"), None),
+            (None, Some("synthetic-fp-key")),
+        ] {
+            let kept = launch(openai, finite_private);
+            // Not mentioned at all: the inherited value passes through untouched.
+            assert!(!kept.contains_key("OPENAI_API_KEY"), "{openai:?}");
+            assert_eq!(
+                kept["CODEX_HOME"].as_deref(),
+                Some("/dev/null/finite-codex-home-disabled")
+            );
+        }
+    }
+
+    fn disconnect_record(dir: &Path) -> PathBuf {
+        let path = crate::intent::intent_path(dir);
+        let record = crate::intent::IntentRecord::new(
+            IntentKind::Disconnect,
+            crate::intent::IntentRoute::Openrouter,
+            None,
+        )
+        .unwrap();
+        crate::intent::store(&path, &record).unwrap();
+        path
+    }
+
+    #[tokio::test]
+    async fn t_a43_hermes_serve_never_starts_while_a_disconnect_record_exists() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = disconnect_record(temp.path());
+        let gate = ServeGate::new(path.clone());
+        assert!(gate.blocked());
+        let handle = HostedHermesHandle::start_spec_gated(sleeper("hermes-serve"), gate);
+        tokio::time::sleep(Duration::from_millis(1200)).await;
+        assert_eq!(handle.status().pid(), None);
+        assert!(matches!(handle.status().state, ProcessState::Stopped));
+
+        // A failed disconnect keeps it stopped too.
+        let mut record = crate::intent::load(&path).unwrap().unwrap();
+        record.state = crate::intent::IntentState::Failed;
+        crate::intent::store(&path, &record).unwrap();
+        tokio::time::sleep(Duration::from_millis(700)).await;
+        assert_eq!(handle.status().pid(), None);
+
+        // Verified and deleted: it starts.
+        crate::intent::clear(&path).unwrap();
+        running(&handle, None).await;
+        handle.shutdown().await;
+    }
+
+    #[test]
+    fn only_a_disconnect_record_closes_the_gate() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = crate::intent::intent_path(temp.path());
+        let gate = ServeGate::new(path.clone());
+        assert!(!gate.blocked(), "no record");
+        assert!(!ServeGate::default().blocked());
+        for kind in [IntentKind::Select, IntentKind::Activate] {
+            let record = crate::intent::IntentRecord::new(
+                kind,
+                crate::intent::IntentRoute::Openrouter,
+                Some("a/b".to_owned()),
+            )
+            .unwrap();
+            crate::intent::store(&path, &record).unwrap();
+            assert!(!gate.blocked(), "{kind:?}");
+        }
+        disconnect_record(temp.path());
+        assert!(gate.blocked());
     }
 
     #[tokio::test]

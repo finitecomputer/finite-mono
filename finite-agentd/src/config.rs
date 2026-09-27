@@ -59,6 +59,22 @@ pub struct ConfigApplyResultV1 {
     pub restart_required: bool,
 }
 
+/// The result of writing the whole `model` block (§3.6, §3.10).
+#[derive(Debug)]
+pub(crate) enum ModelWrite {
+    /// The block already held exactly this value; nothing was written.
+    Unchanged,
+    Written(WrittenConfig),
+}
+
+/// The file bytes before and after one agentd write. `restore_if_unchanged`
+/// uses them as the byte guard for spawn-failure rollback.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct WrittenConfig {
+    pub before: Vec<u8>,
+    pub written: Vec<u8>,
+}
+
 #[derive(Debug, Clone)]
 pub struct ConfigManager {
     path: PathBuf,
@@ -192,6 +208,44 @@ impl ConfigManager {
         })
     }
 
+    /// Replaces the whole `model` block, then runs `validate` (`hermes config
+    /// check`) and restores the prior bytes if it fails. An equal value is a
+    /// no-op. Unlike `apply`, this records no ledger history: the caller keeps
+    /// the returned bytes for `restore_if_unchanged`.
+    pub(crate) fn write_model(
+        &self,
+        value: &Value,
+        validate: impl FnOnce() -> Result<(), AgentdError>,
+    ) -> Result<ModelWrite, AgentdError> {
+        validate_model_value(value)?;
+        let (before, mut document) = self.load_document()?;
+        if value_at_path(&document, MODEL_CONFIG_PATH) == Some(value) {
+            return Ok(ModelWrite::Unchanged);
+        }
+        set_value_at_path(&mut document, MODEL_CONFIG_PATH, value.clone())?;
+        let written = serde_yaml::to_string(&document)?.into_bytes();
+        self.atomic_write(&written)?;
+        if let Err(error) = validate() {
+            self.atomic_write(&before)?;
+            return Err(error);
+        }
+        Ok(ModelWrite::Written(WrittenConfig { before, written }))
+    }
+
+    /// Spawn-failure rollback (§3.10): restores the prior bytes only while the
+    /// file still holds exactly the bytes agentd wrote. Anything else means
+    /// another writer changed it; the file is left alone and the caller
+    /// reports `config_conflict`.
+    pub(crate) fn restore_if_unchanged(&self, write: &WrittenConfig) -> Result<(), AgentdError> {
+        if fs::read(&self.path)? != write.written {
+            return Err(AgentdError::ConfigConflict(
+                "Hermes configuration changed after the agent wrote it, so it was not restored"
+                    .to_owned(),
+            ));
+        }
+        self.atomic_write(&write.before)
+    }
+
     pub fn rollback(
         &self,
         request: &HermesConfigRollbackV1,
@@ -300,6 +354,7 @@ fn validate_model_value(value: &Value) -> Result<(), AgentdError> {
         "base_url",
         "api_key",
         "api_mode",
+        "context_length",
         "supports_vision",
     ];
     for key in object.keys() {
@@ -317,6 +372,13 @@ fn validate_model_value(value: &Value) -> Result<(), AgentdError> {
         if !valid {
             return Err(AgentdError::Config(format!("model.{key} is required")));
         }
+    }
+    if let Some(value) = object.get("context_length")
+        && value.as_u64().is_none_or(|length| length == 0)
+    {
+        return Err(AgentdError::Config(
+            "model.context_length must be a positive integer".to_owned(),
+        ));
     }
     if let Some(value) = object.get("supports_vision")
         && !value.is_boolean()
@@ -679,6 +741,111 @@ mod tests {
             Err(AgentdError::ConfigConflict(_))
         ));
         assert_eq!(fs::read(manager.path()).unwrap(), original.as_bytes());
+    }
+
+    fn finite_private_block() -> Value {
+        json!({
+            "default": "glm-5-3-flash",
+            "provider": "custom",
+            "base_url": "https://finite-private.finite.containers.tinfoil.dev/v1",
+            "api_key": "${FINITE_PRIVATE_API_KEY}",
+            "api_mode": "chat_completions",
+            "context_length": 393216,
+            "supports_vision": true,
+        })
+    }
+
+    #[test]
+    fn t_a6_model_block_with_context_length_is_written_once() {
+        let (_directory, manager) = manager();
+        let ModelWrite::Written(write) = manager
+            .write_model(&finite_private_block(), || Ok(()))
+            .unwrap()
+        else {
+            panic!("a changed block must be written");
+        };
+        assert_eq!(write.before, ORIGINAL.as_bytes());
+        assert_eq!(fs::read(manager.path()).unwrap(), write.written);
+        assert_eq!(
+            manager.current_value(MODEL_CONFIG_PATH).unwrap(),
+            finite_private_block()
+        );
+        assert_eq!(
+            manager.current_value("auxiliary.vision.provider").unwrap(),
+            "auto"
+        );
+        // An equal value is a no-op: nothing written, so nothing to restart.
+        let mtime = fs::metadata(manager.path()).unwrap().modified().unwrap();
+        assert!(matches!(
+            manager
+                .write_model(&finite_private_block(), || panic!("no check for a no-op"))
+                .unwrap(),
+            ModelWrite::Unchanged
+        ));
+        assert_eq!(
+            fs::metadata(manager.path()).unwrap().modified().unwrap(),
+            mtime
+        );
+        for bad in [json!(0), json!(-1), json!("393216"), json!(1.5)] {
+            let mut block = finite_private_block();
+            block["context_length"] = bad;
+            assert!(matches!(
+                manager.write_model(&block, || Ok(())),
+                Err(AgentdError::Config(_))
+            ));
+        }
+    }
+
+    #[test]
+    fn write_model_restores_exact_bytes_when_the_check_fails() {
+        let (_directory, manager) = manager();
+        let error = manager
+            .write_model(&finite_private_block(), || {
+                Err(AgentdError::Config("Hermes rejected it".to_owned()))
+            })
+            .unwrap_err();
+        assert!(matches!(error, AgentdError::Config(_)));
+        assert_eq!(fs::read(manager.path()).unwrap(), ORIGINAL.as_bytes());
+    }
+
+    #[test]
+    fn write_model_fails_for_real_on_a_read_only_directory() {
+        let (directory, manager) = manager();
+        fs::set_permissions(directory.path(), fs::Permissions::from_mode(0o500)).unwrap();
+        let result = manager.write_model(&finite_private_block(), || Ok(()));
+        fs::set_permissions(directory.path(), fs::Permissions::from_mode(0o700)).unwrap();
+        assert!(matches!(result, Err(AgentdError::Io(_))));
+        assert_eq!(fs::read(manager.path()).unwrap(), ORIGINAL.as_bytes());
+    }
+
+    #[test]
+    fn t_a8_restore_happens_only_while_the_written_bytes_are_intact() {
+        let (_directory, manager) = manager();
+        let ModelWrite::Written(write) = manager
+            .write_model(&finite_private_block(), || Ok(()))
+            .unwrap()
+        else {
+            panic!("a changed block must be written");
+        };
+        manager.restore_if_unchanged(&write).unwrap();
+        assert_eq!(fs::read(manager.path()).unwrap(), ORIGINAL.as_bytes());
+
+        let ModelWrite::Written(write) = manager
+            .write_model(&finite_private_block(), || Ok(()))
+            .unwrap()
+        else {
+            panic!("a changed block must be written");
+        };
+        // Any other writer, even one that leaves the model values alone, voids
+        // the guard.
+        let mut touched = write.written.clone();
+        touched.extend_from_slice(b"agent: {}\n");
+        fs::write(manager.path(), &touched).unwrap();
+        assert!(matches!(
+            manager.restore_if_unchanged(&write),
+            Err(AgentdError::ConfigConflict(_))
+        ));
+        assert_eq!(fs::read(manager.path()).unwrap(), touched);
     }
 
     #[test]

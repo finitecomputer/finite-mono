@@ -10,10 +10,10 @@ use std::time::Duration;
 
 use reqwest::{Client, StatusCode, Url};
 use serde::Deserialize;
-use tokio::sync::{Mutex, mpsc, watch};
+use tokio::sync::{Mutex, mpsc, oneshot, watch};
 
 use crate::AgentdError;
-use crate::hosted_hermes::{HostedHermesHandle, configured_spec};
+use crate::hosted_hermes::{HostedHermesHandle, ServeGate, configured_spec};
 use crate::supervisor::{ProcessState, ProcessStatus, now_ms};
 
 const POLL_INTERVAL: Duration = Duration::from_secs(2);
@@ -211,6 +211,8 @@ fn valid_native_identity(identity: &serde_json::Value, username: Option<&str>, n
 
 #[derive(Default)]
 struct Applied {
+    /// Closed while a disconnect intent exists (§3.7).
+    gate: ServeGate,
     runtime_id: Option<String>,
     generation: Option<u64>,
     child: Option<HostedHermesHandle>,
@@ -226,6 +228,13 @@ impl Applied {
         self.child = None;
         self.verified_pid = None;
         self.reported = None;
+    }
+
+    /// Stops the child and forgets the applied generation, so the next
+    /// reconcile starts a fresh child once the gate allows it.
+    async fn restart(&mut self) {
+        self.stop().await;
+        self.generation = None;
     }
 
     async fn reconcile(
@@ -262,10 +271,25 @@ impl Applied {
         }
         if self.generation != Some(desired.generation) {
             self.stop().await;
+            if desired.enabled && self.gate.blocked() {
+                // Not applied yet: the next reconcile after the disconnect
+                // record is deleted starts the child.
+                status.send_replace(ProcessStatus {
+                    state: ProcessState::Stopped,
+                    restart_count: 0,
+                    updated_at_ms: now_ms(),
+                });
+                return;
+            }
             self.generation = Some(desired.generation);
             if desired.enabled {
                 match desired.spec(home) {
-                    Ok(spec) => self.child = Some(HostedHermesHandle::start_spec(spec)),
+                    Ok(spec) => {
+                        self.child = Some(HostedHermesHandle::start_spec_gated(
+                            spec,
+                            self.gate.clone(),
+                        ))
+                    }
                     Err(_) => {
                         status.send_replace(unavailable("Core native configuration was invalid"));
                     }
@@ -326,8 +350,9 @@ fn unavailable(error: &str) -> ProcessStatus {
     }
 }
 
-pub(super) fn start(home: PathBuf) -> HostedHermesHandle {
+pub(super) fn start(home: PathBuf, gate: ServeGate) -> HostedHermesHandle {
     let (stop, mut stop_rx) = mpsc::channel(1);
+    let (restart, mut restart_rx) = mpsc::channel::<oneshot::Sender<()>>(1);
     let (status_tx, status) = watch::channel(ProcessStatus::default());
     let task = tokio::spawn(async move {
         let core = match CoreConnection::from_env() {
@@ -338,7 +363,10 @@ pub(super) fn start(home: PathBuf) -> HostedHermesHandle {
                 return;
             }
         };
-        let mut applied = Applied::default();
+        let mut applied = Applied {
+            gate,
+            ..Applied::default()
+        };
         loop {
             tokio::select! {
                 _ = applied.reconcile(&core, &home, &status_tx) => {},
@@ -349,6 +377,10 @@ pub(super) fn start(home: PathBuf) -> HostedHermesHandle {
             }
             tokio::select! {
                 _ = tokio::time::sleep(POLL_INTERVAL) => {},
+                Some(done) = restart_rx.recv() => {
+                    applied.restart().await;
+                    let _ = done.send(());
+                }
                 _ = stop_rx.recv() => break,
             }
         }
@@ -363,6 +395,7 @@ pub(super) fn start(home: PathBuf) -> HostedHermesHandle {
         stop,
         status,
         task: Arc::new(Mutex::new(Some(task))),
+        restart: Some(restart),
     }
 }
 
@@ -640,6 +673,66 @@ mod tests {
         assert_eq!(applied.reported, Some(true));
         assert!(matches!(status.borrow().state, ProcessState::Stopped));
         requests.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn t_a43_core_pull_does_not_start_hermes_serve_during_a_disconnect() {
+        let temp = tempfile::tempdir().unwrap();
+        let intent_path = crate::intent::intent_path(temp.path());
+        let record = crate::intent::IntentRecord::new(
+            crate::intent::IntentKind::Disconnect,
+            crate::intent::IntentRoute::OpenaiCodex,
+            None,
+        )
+        .unwrap();
+        crate::intent::store(&intent_path, &record).unwrap();
+        let enabled = serde_json::json!({"runtimeId":"runtime_test","generation":2,"enabled":true,
+            "publicUrl":"https://agents.example.test/runtimes/runtime_test/","username":"test-user",
+            "password":"test-password","signingSecret":"test-signing-secret","accessTtlSeconds":60})
+        .to_string();
+        let (origin, requests) = server(3, move |index, request| match index {
+            0 | 1 => (200, enabled.clone(), String::new()),
+            _ => {
+                assert!(request.head.starts_with("POST "));
+                (204, String::new(), String::new())
+            }
+        })
+        .await;
+        let core = CoreConnection::new(origin, "a".repeat(64)).unwrap();
+        let (status, _) = watch::channel(ProcessStatus::default());
+        let mut applied = Applied {
+            gate: ServeGate::new(intent_path.clone()),
+            ..Applied::default()
+        };
+        applied.reconcile(&core, temp.path(), &status).await;
+        assert!(applied.child.is_none(), "started during a disconnect");
+        assert_eq!(applied.generation, None, "not applied yet");
+        assert!(matches!(status.borrow().state, ProcessState::Stopped));
+
+        crate::intent::clear(&intent_path).unwrap();
+        applied.reconcile(&core, temp.path(), &status).await;
+        assert!(applied.child.is_some(), "starts once the record is gone");
+        assert_eq!(applied.generation, Some(2));
+        applied.stop().await;
+        assert_eq!(requests.await.unwrap().len(), 3);
+    }
+
+    #[tokio::test]
+    async fn restart_stops_the_child_and_forgets_the_generation() {
+        let (child, pid) = child().await;
+        let mut applied = Applied {
+            runtime_id: Some("runtime_test".into()),
+            generation: Some(1),
+            child: Some(child),
+            ..Applied::default()
+        };
+        applied.restart().await;
+        assert!(applied.child.is_none());
+        assert_eq!(applied.generation, None);
+        assert!(
+            rustix::process::test_kill_process(rustix::process::Pid::from_raw(pid as i32).unwrap())
+                .is_err()
+        );
     }
 
     #[test]
