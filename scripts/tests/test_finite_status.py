@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import contextlib
 import hashlib
+import io
 import json
 import os
 from datetime import timedelta
@@ -1890,3 +1892,95 @@ class HostedHermesStatusTests(unittest.TestCase):
         del raw["host_health"]["hosted_hermes"]
         report = finite_status.build_report(raw, now)
         self.assertEqual(report["sections"]["host_health"]["hosted_hermes"]["state"], "not-observed")
+
+
+class FinitePrivateUsageStatusTests(unittest.TestCase):
+    def test_probe_is_one_read_only_transaction_and_prints_json(self):
+        usage = {"profiles": [{"id": "finite-private-generous-v2", "burst_limit_units": 200000000}]}
+        completed = subprocess.CompletedProcess([], 0, json.dumps(usage) + "\n", "")
+        stdout = io.StringIO()
+        with mock.patch.object(finite_status, "postgres_environment", return_value={}), \
+                mock.patch.object(finite_status, "run_read_only", return_value=completed) as run, \
+                contextlib.redirect_stdout(stdout), \
+                self.assertRaises(SystemExit) as exit:
+            finite_status.main(["--finite-private-usage"])
+        sql = run.call_args.kwargs["input_text"]
+        self.assertTrue(sql.startswith("BEGIN TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY;\n"))
+        self.assertTrue(sql.endswith("ROLLBACK;\n"))
+        self.assertEqual(exit.exception.code, 0)
+        report = json.loads(stdout.getvalue())
+        self.assertEqual(report["schema_version"], "finite.private-usage-status.v1")
+        self.assertEqual(report["usage"], usage)
+
+    def test_query_failure_or_invalid_json_is_a_collection_error(self):
+        for completed in (
+            subprocess.CompletedProcess([], 1, "", "ERROR: relation does not exist\n"),
+            subprocess.CompletedProcess([], 0, "not json", ""),
+        ):
+            with self.subTest(returncode=completed.returncode), \
+                    mock.patch.object(finite_status, "postgres_environment", return_value={}), \
+                    mock.patch.object(finite_status, "run_read_only", return_value=completed), \
+                    self.assertRaises(finite_status.CollectionError):
+                finite_status.collect_finite_private_usage()
+
+    @unittest.skipUnless(os.environ.get("FC_CORE_POSTGRES_TEST_URL"), "requires disposable Core Postgres")
+    def test_query_is_profile_relative_and_sees_the_200m_floor(self):
+        migration = (
+            ROOT / "finitecomputer-v2/crates/finite-saas-core/migrations/0033_finite_private_200m_default.sql"
+        ).read_text()
+        # Temp tables shadow any real Core tables; the rollback discards the
+        # migration's function and trigger too.
+        fixture = """
+BEGIN;
+CREATE TEMP TABLE finite_private_limit_profiles(id text PRIMARY KEY,burst_window_seconds bigint,burst_limit_units bigint,weekly_limit_units bigint,created_at timestamptz,updated_at timestamptz);
+CREATE TEMP TABLE finite_private_grants(id text,limit_profile_id text,status text,burst_window_epoch bigint,current_window_started_at timestamptz,current_window_used_units bigint);
+CREATE TEMP TABLE finite_private_reservations(grant_id text,burst_window_epoch bigint,model text,usage_formula_version text,status text,settlement_kind text,upstream_status integer,upstream_error_class text,reserved_usage_units bigint,settled_usage_units bigint,created_at timestamptz);
+INSERT INTO finite_private_limit_profiles VALUES
+  ('finite-private-generous-v2',18000,100000000,NULL,now(),now()),
+  ('finite-private-generous-5x-v1',18000,500000000,NULL,now(),now());
+"""
+        seed = """
+INSERT INTO finite_private_grants VALUES
+  ('near','finite-private-generous-v2','active',3,now()-interval '1 hour',190000000),
+  ('drift','finite-private-generous-v2','active',1,now()-interval '10 minutes',5000000),
+  ('extended','finite-private-generous-5x-v1','active',2,now()-interval '1 hour',190000000),
+  ('expired','finite-private-generous-v2','active',1,now()-interval '6 hours',199000000),
+  ('revoked','finite-private-generous-v2','revoked',1,now()-interval '1 hour',0);
+INSERT INTO finite_private_reservations VALUES
+  ('near',3,'glm','v1','settled','actual',200,NULL,160000000,150000000,now()-interval '50 minutes'),
+  ('near',3,'glm','v1','reserved',NULL,NULL,NULL,40000000,NULL,now()-interval '20 minutes'),
+  ('near',3,'glm','v1','denied',NULL,NULL,NULL,999,NULL,now()-interval '5 minutes'),
+  ('drift',1,'glm','v1','settled','actual',200,NULL,4000000,4000000,now()-interval '5 minutes'),
+  ('extended',2,'glm','v1','settled','estimate',502,'upstream_http',190000000,190000000,now()-interval '30 minutes'),
+  ('expired',1,'glm','v1','settled','actual',200,NULL,199000000,199000000,now()-interval '6 hours');
+"""
+        result = subprocess.run(
+            ["psql", "--no-psqlrc", "--tuples-only", "--no-align", "--quiet", "--set", "ON_ERROR_STOP=1",
+             "--dbname", os.environ["FC_CORE_POSTGRES_TEST_URL"]],
+            input=fixture + migration + seed + finite_status.FINITE_PRIVATE_USAGE_QUERY + "ROLLBACK;\n",
+            text=True, capture_output=True, check=True,
+        )
+        usage = json.loads(result.stdout)
+        self.assertEqual(
+            [(p["id"], p["burst_limit_units"], p["active_grants"]) for p in usage["profiles"]],
+            [("finite-private-generous-5x-v1", 500000000, 1), ("finite-private-generous-v2", 200000000, 3)],
+        )
+        self.assertEqual(usage["limit_profile_triggers"], ["preserve_finite_private_200m_default"])
+        self.assertEqual(
+            usage["current_windows"], {"active_windows": 3, "at_least_90_percent": 1, "at_or_over_limit": 0}
+        )
+        self.assertEqual(usage["current_counter_mismatches"], 1)
+        self.assertEqual(
+            usage["reserved_over_15_minutes_in_current_windows"], {"requests": 1, "held_units": 40000000}
+        )
+        outcomes = {
+            (row["status"], row["upstream_status"]): row["charged_or_held_units"]
+            for row in usage["last_7_days_by_outcome"]
+        }
+        self.assertEqual(outcomes[("settled", 502)], 190000000)
+        self.assertEqual(outcomes[("reserved", None)], 40000000)
+        self.assertEqual(
+            {row["limit_profile_id"]: (row["observed_epochs"], row["at_least_90_percent"], row["at_least_98_percent"])
+             for row in usage["last_7_days_epochs_by_current_profile"]},
+            {"finite-private-generous-5x-v1": (1, 0, 0), "finite-private-generous-v2": (3, 2, 1)},
+        )
