@@ -181,8 +181,8 @@ impl CoreStore {
                 .query_one(
                     "SELECT EXISTS(SELECT 1 FROM runtime_core_credentials c
                  JOIN agent_creation_requests q ON q.id=c.creation_request_id
-                 WHERE q.agent_runtime_id=$1 OR q.id=$2)",
-                    &[&request.agent_runtime_id, &creation],
+                 WHERE q.agent_runtime_id=$1)",
+                    &[&request.agent_runtime_id],
                 )
                 .await
                 .map_err(store_error)?

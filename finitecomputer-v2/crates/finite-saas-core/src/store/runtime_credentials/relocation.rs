@@ -39,31 +39,12 @@ impl CoreStore {
             &relocation.target_source_host_id,
             &relocation.source_machine_id,
         )?;
-        let current = tx
-            .query_opt(
-                "SELECT * FROM runtime_core_credentials WHERE agent_runtime_id=$1 FOR UPDATE",
-                &[&runtime],
-            )
-            .await
-            .map_err(store_error)?;
-        let pending = tx
-            .query_opt(
-                "SELECT * FROM runtime_core_credentials WHERE creation_request_id=$1 FOR UPDATE",
-                &[&request.id],
-            )
-            .await
-            .map_err(store_error)?;
+        let handoff = lock_handoff(&*tx, &runtime, &request).await?;
         ensure_live_now(&*tx, &request.id).await?;
-        let Some(current) = current else {
-            if pending.is_some() {
-                return Err(CoreError::ProviderOperationTransitionConflict);
-            }
-            require_unenrolled(&*tx, &runtime).await?;
+        let Some((_, pending)) = handoff else {
             self.finish(tx).await?;
             return Ok(None);
         };
-        validate_predecessor(&*tx, &current, &request).await?;
-        ensure_live_now(&*tx, &request.id).await?;
         let lease_hash = digest(
             request
                 .lease_token
@@ -107,6 +88,7 @@ impl CoreStore {
 
 /// Called only after the completion transaction has validated and replaced the
 /// runtime placement. Registration alone deliberately keeps the source binding.
+#[tracing::instrument(skip_all, fields(creation_request_id = request.id))]
 pub(super) async fn complete<C: GenericClient + Sync>(
     client: &C,
     request: &AgentCreationRequest,
@@ -123,29 +105,11 @@ pub(super) async fn complete<C: GenericClient + Sync>(
         &relocation.source_machine_id,
     )
     .await?;
-    let current = client
-        .query_opt(
-            "SELECT * FROM runtime_core_credentials WHERE agent_runtime_id=$1 FOR UPDATE",
-            &[&runtime],
-        )
-        .await
-        .map_err(store_error)?;
-    let pending = client
-        .query_opt(
-            "SELECT * FROM runtime_core_credentials WHERE creation_request_id=$1 FOR UPDATE",
-            &[&request.id],
-        )
-        .await
-        .map_err(store_error)?;
-    let Some(current) = current else {
-        if pending.is_some() {
-            return Err(CoreError::ProviderOperationTransitionConflict);
-        }
-        return require_unenrolled(client, &runtime).await;
+    let Some((current, pending)) = lock_handoff(client, &runtime, request).await? else {
+        return Ok(());
     };
-    validate_predecessor(client, &current, request).await?;
     ensure_live_now(client, &request.id).await?;
-    let pending = pending.ok_or(CoreError::ProviderOperationTransitionConflict)?;
+    let pending = pending.ok_or_else(|| conflict("successor credential missing at completion"))?;
     validate_successor(&pending, request)?;
     if request.lease_token.as_deref().map(digest).as_deref()
         != Some(pending.get::<_, String>("lease_sha256").as_str())
@@ -186,6 +150,46 @@ pub(super) async fn complete<C: GenericClient + Sync>(
     Ok(())
 }
 
+/// Locks the Runtime's current credential and this attempt's successor, then
+/// validates the predecessor. `None` means the Runtime was never enrolled.
+async fn lock_handoff<C: GenericClient + Sync>(
+    client: &C,
+    runtime: &str,
+    request: &AgentCreationRequest,
+) -> CoreResult<Option<(Row, Option<Row>)>> {
+    let current = client
+        .query_opt(
+            "SELECT * FROM runtime_core_credentials WHERE agent_runtime_id=$1 FOR UPDATE",
+            &[&runtime],
+        )
+        .await
+        .map_err(store_error)?;
+    let pending = client
+        .query_opt(
+            "SELECT * FROM runtime_core_credentials WHERE creation_request_id=$1 FOR UPDATE",
+            &[&request.id],
+        )
+        .await
+        .map_err(store_error)?;
+    let Some(current) = current else {
+        if pending.is_some() {
+            return Err(conflict(
+                "successor credential without a current predecessor",
+            ));
+        }
+        require_unenrolled(client, runtime).await?;
+        return Ok(None);
+    };
+    validate_predecessor(client, &current, request).await?;
+    Ok(Some((current, pending)))
+}
+
+/// Every rejection names its check; credential values never reach the log.
+fn conflict(check: &'static str) -> CoreError {
+    tracing::warn!(check, "relocation credential handoff rejected");
+    CoreError::ProviderOperationTransitionConflict
+}
+
 async fn require_unenrolled<C: GenericClient + Sync>(client: &C, runtime: &str) -> CoreResult<()> {
     let enrolled: bool = client
         .query_one(
@@ -198,7 +202,7 @@ async fn require_unenrolled<C: GenericClient + Sync>(client: &C, runtime: &str) 
         .map_err(store_error)?
         .get(0);
     if enrolled {
-        return Err(CoreError::ProviderOperationTransitionConflict);
+        return Err(conflict("credential history without a current credential"));
     }
     Ok(())
 }
@@ -249,14 +253,18 @@ async fn validate_predecessor<C: GenericClient + Sync>(
         .as_ref()
         .ok_or(CoreError::RuntimeSpecMismatch)?
         .v1();
-    if row.get::<_, bool>("revoked")
-        || row.get::<_, String>("creation_request_id") == request.id
+    if row.get::<_, bool>("revoked") {
+        return Err(conflict("current credential is revoked"));
+    }
+    if row.get::<_, String>("creation_request_id") == request.id
         || row.get::<_, String>("owner_user_id") != request.owner_user_id
         || row.get::<_, String>("source_host_id") != relocation.source_host_id
         || row.get::<_, Option<String>>("source_machine_id").as_deref()
             != Some(relocation.source_machine_id.as_str())
     {
-        return Err(CoreError::ProviderOperationTransitionConflict);
+        return Err(conflict(
+            "current credential does not match the relocation source",
+        ));
     }
     // A typed stop suspends activation, so activated=false is legitimate here.
     // Its completed creation lineage must still authorize this exact Runtime.
@@ -273,7 +281,9 @@ async fn validate_predecessor<C: GenericClient + Sync>(
                     != Some(relocation.source_host_id.as_str())
         })
     {
-        return Err(CoreError::ProviderOperationTransitionConflict);
+        return Err(conflict(
+            "current credential lineage does not authorize this Runtime",
+        ));
     }
     Ok(())
 }
@@ -292,7 +302,9 @@ fn validate_successor(row: &Row, request: &AgentCreationRequest) -> CoreResult<(
         || row.get::<_, Option<String>>("source_machine_id").as_deref()
             != Some(relocation.source_machine_id.as_str())
     {
-        return Err(CoreError::ProviderOperationTransitionConflict);
+        return Err(conflict(
+            "successor credential does not match this relocation",
+        ));
     }
     Ok(())
 }

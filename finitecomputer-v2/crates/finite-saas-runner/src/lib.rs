@@ -5225,17 +5225,7 @@ mod tests {
         };
         let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
         let address = listener.local_addr().unwrap();
-        let mut lease = sample_lease("agent_request_relocation");
-        lease.request.relocation = Some(finite_saas_core::RuntimeRelocationEnvelope::V1(
-            finite_saas_core::RuntimeRelocationV1 {
-                source_host_id: "old-host".into(),
-                source_machine_id: "old-machine".into(),
-                target_source_host_id: "new-host".into(),
-                expected_agent_npub: "npub-relocation-fixture".into(),
-                durable_state_manifest_sha256: "a".repeat(64),
-                source_compute_absent: true,
-            },
-        ));
+        let lease = sample_relocation_lease("agent_request_relocation");
         let done = Arc::new(AtomicBool::new(false));
         let stopped = done.clone();
         let server = std::thread::spawn(move || {
@@ -5413,17 +5403,7 @@ mod tests {
 
     #[test]
     fn runtime_core_opt_in_preserves_unenrolled_relocation() {
-        let mut lease = sample_lease("agent_request_123");
-        lease.request.relocation = Some(finite_saas_core::RuntimeRelocationEnvelope::V1(
-            finite_saas_core::RuntimeRelocationV1 {
-                source_host_id: "old-host".into(),
-                source_machine_id: "old-machine".into(),
-                target_source_host_id: "new-host".into(),
-                expected_agent_npub: "npub-relocation-fixture".into(),
-                durable_state_manifest_sha256: "a".repeat(64),
-                source_compute_absent: true,
-            },
-        ));
+        let lease = sample_relocation_lease("agent_request_123");
         let mut runner = AgentCreationRunner::new(
             FakeQueue::with_lease(lease),
             FakeLauncher::ready(RuntimeLaunchFacts::sample()),
@@ -5460,17 +5440,7 @@ mod tests {
         for expected_secret in [Some("c".repeat(64)), None] {
             let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
             let address = listener.local_addr().unwrap();
-            let mut lease = sample_lease("agent_request_http_relocation");
-            lease.request.relocation = Some(finite_saas_core::RuntimeRelocationEnvelope::V1(
-                finite_saas_core::RuntimeRelocationV1 {
-                    source_host_id: "old-host".into(),
-                    source_machine_id: "old-machine".into(),
-                    target_source_host_id: "new-host".into(),
-                    expected_agent_npub: "npub-relocation-http-fixture".into(),
-                    durable_state_manifest_sha256: "a".repeat(64),
-                    source_compute_absent: true,
-                },
-            ));
+            let lease = sample_relocation_lease("agent_request_http_relocation");
             let credential_for_server = expected_secret.clone();
             let server = std::thread::spawn(move || {
                 let mut paths = Vec::new();
@@ -7090,6 +7060,21 @@ mod tests {
                 published_app_urls: Vec::new(),
             }
         }
+    }
+
+    fn sample_relocation_lease(request_id: &str) -> AgentCreationLease {
+        let mut lease = sample_lease(request_id);
+        lease.request.relocation = Some(finite_saas_core::RuntimeRelocationEnvelope::V1(
+            finite_saas_core::RuntimeRelocationV1 {
+                source_host_id: "old-host".into(),
+                source_machine_id: "old-machine".into(),
+                target_source_host_id: "new-host".into(),
+                expected_agent_npub: "npub-relocation-fixture".into(),
+                durable_state_manifest_sha256: "a".repeat(64),
+                source_compute_absent: true,
+            },
+        ));
+        lease
     }
 
     fn sample_lease(request_id: &str) -> AgentCreationLease {
