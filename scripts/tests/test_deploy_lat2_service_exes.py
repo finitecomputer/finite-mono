@@ -1,6 +1,7 @@
 """Exercise the actual lat2 activation gate with a stale running process."""
 from pathlib import Path
 import os
+import re
 import subprocess
 import tempfile
 import unittest
@@ -58,7 +59,13 @@ class ActivationEntryPointTests(unittest.TestCase):
     def test_matching_process_reports_deployed(self):
         self.run_activation(stale=False)
 
-    def run_activation(self, *, stale):
+    def test_dashboard_digest_other_than_the_pin_refuses_success(self):
+        self.run_activation(stale=False, dashboard_digest='sha256:' + '0' * 64)
+
+    def test_failed_dashboard_inspect_refuses_success(self):
+        self.run_activation(stale=False, inspect_fails=True)
+
+    def run_activation(self, *, stale, dashboard_digest=None, inspect_fails=False):
         import sys
         from scripts.tests.test_lat2_closure_artifact import (
             VALID_MANIFEST, write_valid_artifact, write_shim,
@@ -78,12 +85,20 @@ class ActivationEntryPointTests(unittest.TestCase):
             (units / 'finite-saas-core.service').write_text(
                 '[Service]\nExecStart=' + store_root + 'candidate-core/bin/finite-saas-core\n')
             (units / 'finite-healthcheck.timer').touch()
+            (units / 'podman-finite-saas-dashboard.service').touch()
+            dashboard_nix = ROOT / 'infra/nixos/modules/dashboard.nix'
+            pin = re.search(r'finite-saas-dashboard@(sha256:[0-9a-f]{64})', dashboard_nix.read_text())[1]
             marker = root / 'switched'
             log = root / 'calls'
             write_shim(system / 'bin', 'switch-to-configuration',
                        'echo "switch $*" >> "$CALL_LOG"\ntouch "$SWITCH_MARKER"\n')
-            for tool in ['git', 'nix', 'nix-store', 'nix-env']:
+            for tool in ['nix', 'nix-store', 'nix-env']:
                 write_shim(shims, tool, f'echo "{tool} $*" >> "$CALL_LOG"\n')
+            write_shim(shims, 'git', 'echo "git $*" >> "$CALL_LOG"\n'
+                       '[[ "$1" != show ]] || cat "$TEST_DASHBOARD_NIX"\n')
+            write_shim(shims, 'podman', 'echo "podman $*" >> "$CALL_LOG"\n'
+                       '[[ -z "$TEST_INSPECT_FAILS" ]] || exit 125\n'
+                       'printf "%s\\n" "$TEST_DASHBOARD_DIGEST"\n')
             write_shim(shims, 'systemctl', '''
 echo "systemctl $*" >> "$CALL_LOG"
 case "$1" in
@@ -123,6 +138,9 @@ sys.exit(subprocess.run(['bash','-s','--',*remote_args],input=body,text=True).re
                        CALL_LOG=str(log), SWITCH_MARKER=str(marker),
                        TEST_SYSTEM=str(system), TEST_OLD_SYSTEM=str(root/'previous'),
                        TEST_UNITS=str(units), TEST_STORE_ROOT=store_root,
+                       TEST_DASHBOARD_NIX=str(dashboard_nix),
+                       TEST_DASHBOARD_DIGEST=dashboard_digest or pin,
+                       TEST_INSPECT_FAILS='1' if inspect_fails else '',
                        TEST_EXE=store_root+('old-core' if stale else 'candidate-core')+'/bin/finite-saas-core')
             result = subprocess.run([str(ROOT/'scripts/deploy-lat2-closure-cache'), '--activate', str(artifact)],
                                     cwd=ROOT, env=env, text=True, capture_output=True)
@@ -138,9 +156,22 @@ sys.exit(subprocess.run(['bash','-s','--',*remote_args],input=body,text=True).re
                 self.assertIn('executable mismatch', result.stderr)
                 self.assertIn('ACTIVATION FAILED', result.stderr)
                 self.assertIn('NO automatic revert', result.stderr)
+            elif inspect_fails:
+                self.assertNotEqual(result.returncode, 0)
+                self.assertNotIn('==> DEPLOYED', result.stdout)
+                self.assertIn('podman could not inspect the finite-saas-dashboard container', result.stderr)
+                self.assertIn('ACTIVATION FAILED', result.stderr)
+            elif dashboard_digest:
+                self.assertNotEqual(result.returncode, 0)
+                self.assertNotIn('==> DEPLOYED', result.stdout)
+                self.assertIn(f'finite-saas-dashboard runs image {dashboard_digest}', result.stderr)
+                self.assertIn(f'the pin at this rev is {pin}', result.stderr)
+                self.assertIn('ACTIVATION FAILED', result.stderr)
             else:
                 self.assertEqual(result.returncode, 0, result.stderr)
                 self.assertIn('==> DEPLOYED', result.stdout)
+                self.assertIn(f'verified finite-saas-dashboard image digest={pin}', result.stdout)
+                self.assertIn(f'git show {"a" * 40}:infra/nixos/modules/dashboard.nix', calls)
 
 
 if __name__ == '__main__':

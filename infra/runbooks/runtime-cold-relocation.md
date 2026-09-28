@@ -36,7 +36,11 @@ name is not authority to select a Runtime.
   `nerdctl stop`; Core must also record the Runtime offline.
 - The source and target Runner timers are drained while staging and reviewing
   the request, and no untargeted ordinary creation request is claimable before
-  the target Runner is allowed one lease attempt.
+  the target Runner is allowed one lease attempt. A closure deploy to either
+  host during this window uses `--activate --keep-runner-paused`, which keeps
+  the timer stopped across the switch; an ordinary switch starts it again.
+  After an interrupted deploy, check for leftover pause files before
+  re-enabling a timer (paths and release steps in `infra/nixos/README.md`).
 
 Abort on any mismatch. Do not delete, rename, or modify source state as part of
 this procedure.

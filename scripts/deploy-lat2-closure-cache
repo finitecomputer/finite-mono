@@ -114,7 +114,8 @@ fi
 
 manifest_values_file="$(mktemp "${TMPDIR:-/tmp}/lat2-closure-manifest.XXXXXX")"
 dry_output_file="$(mktemp "${TMPDIR:-/tmp}/lat2-dry-activate.XXXXXX")"
-trap 'rm -f "$manifest_values_file" "$dry_output_file"' EXIT
+config_output_file="$(mktemp "${TMPDIR:-/tmp}/lat2-config-compare.XXXXXX")"
+trap 'rm -f "$manifest_values_file" "$dry_output_file" "$config_output_file"' EXIT
 python3 - "$manifest" > "$manifest_values_file" <<'PY'
 import json
 import re
@@ -173,11 +174,23 @@ git merge-base --is-ancestor "$REV" origin/main || {
   exit 65
 }
 
+# The dashboard image the closure pins at this rev. Activation compares the
+# running container's digest with it.
+dashboard_pin="$(
+  git show "$REV:infra/nixos/modules/dashboard.nix" \
+    | sed -nE 's#^[[:space:]]*image = "ghcr\.io/finitecomputer/finite-saas-dashboard@(sha256:[0-9a-f]{64})";.*#\1#p'
+)"
+if [[ ! "$dashboard_pin" =~ ^sha256:[0-9a-f]{64}$ ]]; then
+  echo "refusing: no single dashboard image pin in infra/nixos/modules/dashboard.nix at $REV" >&2
+  exit 65
+fi
+
 echo "==> validated finite-lat-2 closure artifact"
 echo "    rev=$REV"
 echo "    system=$SYSTEM"
 echo "    disko=$DISKO"
 echo "    kexec=$KEXEC"
+echo "    dashboard-pin=$dashboard_pin"
 if [[ "$expect_startup" == 1 ]]; then
   echo "    mode=go-live (import-mode -> product startup expected)"
 fi
@@ -204,12 +217,47 @@ ssh -o BatchMode=yes "$LAT2" \
   >"$dry_output_file" 2>&1
 cat "$dry_output_file"
 
+echo "==> comparing the tmpfiles and D-Bus configuration with the running system"
+config_status=0
+ssh -o BatchMode=yes "$LAT2" python3 - "$SYSTEM" \
+  < infra/nixos/scripts/compare-activation-config \
+  >"$config_output_file" 2>&1 || config_status=$?
+cat "$config_output_file"
+if [[ "$config_status" != 0 ]]; then
+  echo "configuration comparison exited $config_status; neither unit is admitted without --allow-unit" >&2
+fi
+
+# A package change makes dry activation reload dbus-broker and restart
+# systemd-tmpfiles-resetup. Admit either only when the comparison completed,
+# found store reference changes alone, and the broker is reloaded, never
+# restarted. An incomplete comparison needs --allow-unit.
+reference_only_unit() {
+  local unit="$1" verbs="$2" line
+  [[ "$config_status" == 0 ]] || return 1
+  grep -qxF "reference-only $unit" "$config_output_file" || return 1
+  ! grep -qxF "content-change $unit" "$config_output_file" || return 1
+  ! grep -qxF "incomplete $unit" "$config_output_file" || return 1
+  while IFS= read -r line; do
+    [[ "$line" =~ ^would\ ($verbs)\ the\ following\ units: ]] || return 1
+  done < <(grep -F -- "$unit" "$dry_output_file" || true)
+}
+
 # App-plane fence: a rollout may only touch the declared app-plane unit set
 # (units starting for the first time at go-live, or ordinary restarts in
 # steady state). Anything else needs an explicit --allow-unit for this
 # attempt; the default remains fail closed.
 unexpected_units=""
 while IFS= read -r unit; do
+  case "$unit" in
+    dbus-broker.service|systemd-tmpfiles-resetup.service)
+      verbs='stop|start|restart'
+      [[ "$unit" == systemd-tmpfiles-resetup.service ]] || verbs='reload'
+      if reference_only_unit "$unit" "$verbs"; then
+        echo "    admitted-reference-only-unit=$unit"
+        continue
+      fi
+      ;;
+  esac
   approved=0
   for expected_unit in "${expected_app_plane_units[@]}"; do
     if [[ "$unit" == "$expected_unit" ]]; then
@@ -246,11 +294,12 @@ fi
 
 echo "==> activating the fenced app-plane closure"
 # shellcheck disable=SC2034
-ssh -o BatchMode=yes "$LAT2" bash -s -- "$SYSTEM" "$expect_startup" "${approved_extra_units[@]+"${approved_extra_units[@]}"}" <<'LAT2'
+ssh -o BatchMode=yes "$LAT2" bash -s -- "$SYSTEM" "$expect_startup" "$dashboard_pin" "${approved_extra_units[@]+"${approved_extra_units[@]}"}" <<'LAT2'
 set -euo pipefail
 system="$1"
 expect_startup="$2"
-shift 2
+dashboard_pin="$3"
+shift 3
 approved_units=("${@-}")
 [[ "$system" =~ ^/nix/store/[0-9a-z]{32}-nixos-system-finite-lat-2-[^/[:space:]]+$ ]] || exit 64
 test -x "$system/bin/switch-to-configuration"
@@ -527,6 +576,16 @@ for unit in finite-saas-core.service finitechat-server.service finitechat-hosted
     || activation_failed 1 "$unit does not run the candidate executable; inspect before an explicitly scoped restart"
 done
 # END RUNNING_EXECUTABLE_VERIFICATION
+
+# The dashboard runs from a digest-pinned image, so the executable check above
+# cannot see it. Compare the running container's digest with the pin.
+if [[ -e "$system/etc/systemd/system/podman-finite-saas-dashboard.service" ]]; then
+  running_digest="$(podman inspect finite-saas-dashboard --format '{{.ImageDigest}}')" \
+    || activation_failed 1 "podman could not inspect the finite-saas-dashboard container"
+  [[ "$running_digest" == "$dashboard_pin" ]] \
+    || activation_failed 1 "finite-saas-dashboard runs image $running_digest; the pin at this rev is $dashboard_pin"
+  echo "==> verified finite-saas-dashboard image digest=$running_digest"
+fi
 
 runner_check="$(systemctl cat finite-saas-runner.service >/dev/null 2>&1 && echo present || echo absent)"
 [[ "$runner_check" == "absent" ]] \
