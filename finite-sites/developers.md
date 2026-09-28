@@ -4,9 +4,7 @@ This document is for humans and agents working on the Finite Sites codebase.
 The root `README.md` is intentionally agent-first and focuses on installing
 and using `fsite`.
 
-Read `CONTEXT.md` before changing code. It defines the product vocabulary used
-by code, docs, tests, and prompts. Follow `docs/engineering-style.md`; it is
-the style contract for this repo.
+Follow `docs/engineering-style.md`; it is the style contract for this repo.
 
 ## Product Shape
 
@@ -183,13 +181,11 @@ cargo build --locked --release --workspace
 
 ## Documentation Map
 
-- `CONTEXT.md`: glossary; use these words in code and prompts.
 - `AGENTS.md`: prompting contract and repo commands.
 - `docs/engineering-style.md`: engineering rules and test shape.
 - `docs/adr/`: decisions and alternatives.
 - `docs/bare-repos-and-skills-hosting.md`: source-only Project Repository
   requirements and public-read policy for finitecomputer-managed skills.
-- `docs/technical-debt-ledger.md`: links to outstanding work in Linear.
 - `../finite-skills/skills/software-development/finite-sites-publishing-finite/SKILL.md`:
   canonical managed agent skill for publishing. Finite Sites owns the API and
   CLI contract; `finite-skills` is the only editable deployed skill source.

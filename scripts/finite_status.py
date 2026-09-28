@@ -9,6 +9,7 @@ import csv
 import glob
 import hashlib
 import io
+import ipaddress
 import json
 import math
 import os
@@ -590,6 +591,121 @@ def psql_query_sets(environment: dict[str, str]) -> dict[str, list[dict[str, Any
 def collect_core() -> dict[str, Any]:
     environment = postgres_environment()
     return psql_query_sets(environment)
+
+
+# Aggregates only: no emails, keys, prompts, or per-grant rows leave the host.
+# Usage is compared with each grant's own profile so this probe never encodes
+# Core's current allowance.
+FINITE_PRIVATE_USAGE_QUERY = """
+WITH recent AS (
+  SELECT * FROM finite_private_reservations
+  WHERE created_at >= NOW() - INTERVAL '7 days' AND created_at <= NOW()
+), live AS (
+  SELECT g.id, g.burst_window_epoch, g.current_window_used_units, p.burst_limit_units
+  FROM finite_private_grants g
+  JOIN finite_private_limit_profiles p ON p.id = g.limit_profile_id
+  WHERE g.status = 'active'
+    AND g.current_window_started_at + p.burst_window_seconds * INTERVAL '1 second' > NOW()
+), epoch_totals AS (
+  SELECT grant_id, burst_window_epoch,
+    SUM(COALESCE(settled_usage_units, reserved_usage_units)) AS units
+  FROM recent WHERE status <> 'denied'
+  GROUP BY grant_id, burst_window_epoch
+)
+SELECT json_build_object(
+  'profiles', (SELECT COALESCE(json_agg(row_to_json(x)), '[]'::json) FROM (
+    SELECT p.id, p.burst_window_seconds, p.burst_limit_units, p.weekly_limit_units,
+      (SELECT COUNT(*) FROM finite_private_grants g
+       WHERE g.limit_profile_id = p.id AND g.status = 'active') AS active_grants
+    FROM finite_private_limit_profiles p ORDER BY p.id
+  ) x),
+  'limit_profile_triggers', (SELECT COALESCE(json_agg(tgname ORDER BY tgname), '[]'::json)
+    FROM pg_trigger
+    WHERE tgrelid = 'finite_private_limit_profiles'::regclass AND NOT tgisinternal),
+  'current_windows', (SELECT row_to_json(x) FROM (
+    SELECT COUNT(*) AS active_windows,
+      COUNT(*) FILTER (WHERE current_window_used_units >= burst_limit_units * 0.9) AS at_least_90_percent,
+      COUNT(*) FILTER (WHERE current_window_used_units >= burst_limit_units) AS at_or_over_limit
+    FROM live
+  ) x),
+  'current_counter_mismatches', (SELECT COUNT(*) FROM live l WHERE
+    l.current_window_used_units <> COALESCE((
+      SELECT SUM(COALESCE(r.settled_usage_units, r.reserved_usage_units))
+      FROM finite_private_reservations r
+      WHERE r.grant_id = l.id AND r.burst_window_epoch = l.burst_window_epoch
+        AND r.status <> 'denied'
+    ), 0)),
+  'reserved_over_15_minutes_in_current_windows', (SELECT row_to_json(x) FROM (
+    SELECT COUNT(*) AS requests, COALESCE(SUM(r.reserved_usage_units), 0) AS held_units
+    FROM finite_private_reservations r JOIN live l
+      ON r.grant_id = l.id AND r.burst_window_epoch = l.burst_window_epoch
+    WHERE r.status = 'reserved' AND r.created_at < NOW() - INTERVAL '15 minutes'
+  ) x),
+  'last_7_days_by_outcome', (SELECT COALESCE(json_agg(row_to_json(x)), '[]'::json) FROM (
+    SELECT model, usage_formula_version, status, settlement_kind,
+      upstream_status, upstream_error_class, COUNT(*) AS requests,
+      SUM(reserved_usage_units) AS reserved_units,
+      SUM(COALESCE(settled_usage_units, reserved_usage_units)) AS charged_or_held_units
+    FROM recent
+    GROUP BY model, usage_formula_version, status, settlement_kind,
+      upstream_status, upstream_error_class
+    ORDER BY charged_or_held_units DESC NULLS LAST
+  ) x),
+  'last_7_days_epochs_by_current_profile', (SELECT COALESCE(json_agg(row_to_json(x)), '[]'::json) FROM (
+    SELECT g.limit_profile_id, COUNT(*) AS observed_epochs,
+      COUNT(DISTINCT e.grant_id) AS grants,
+      COUNT(*) FILTER (WHERE e.units >= p.burst_limit_units * 0.9) AS at_least_90_percent,
+      COUNT(*) FILTER (WHERE e.units >= p.burst_limit_units * 0.98) AS at_least_98_percent,
+      COUNT(DISTINCT e.grant_id) FILTER (WHERE e.units >= p.burst_limit_units * 0.9)
+        AS grants_reaching_90_percent
+    FROM epoch_totals e JOIN finite_private_grants g ON g.id = e.grant_id
+    JOIN finite_private_limit_profiles p ON p.id = g.limit_profile_id
+    GROUP BY g.limit_profile_id ORDER BY g.limit_profile_id
+  ) x)
+);
+"""
+
+
+def collect_finite_private_usage() -> dict[str, Any]:
+    result = run_read_only(
+        [
+            "psql",
+            "--no-psqlrc",
+            "--tuples-only",
+            "--no-align",
+            "--quiet",
+            "--set",
+            "ON_ERROR_STOP=1",
+            "--dbname",
+            CONTRACT["database"]["name"],
+        ],
+        environment=postgres_environment(),
+        input_text=(
+            "BEGIN TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY;\n"
+            "SET LOCAL statement_timeout = '15s';\n"
+            f"{FINITE_PRIVATE_USAGE_QUERY}ROLLBACK;\n"
+        ),
+    )
+    if result.returncode != 0:
+        message = result.stderr.strip().splitlines()
+        detail = message[-1] if message else f"exit {result.returncode}"
+        raise CollectionError(f"read-only Finite Private usage query failed: {detail}")
+    try:
+        usage = json.loads(result.stdout)
+    except ValueError as error:
+        raise CollectionError("Finite Private usage query returned invalid JSON") from error
+    return {
+        "schema_version": "finite.private-usage-status.v1",
+        "generated_at": isoformat(utc_now()),
+        "exit_code": 0,
+        "limitations": [
+            "Units are weighted; raw input, output, and cached token counts are not persisted.",
+            "Denied admissions are not persisted, so near-limit epochs do not count denials.",
+            "Seven-day epochs can be partial, end early after a reset, or predate a profile change.",
+            "A reservation older than 15 minutes needs investigation; age alone does not prove abandonment.",
+        ],
+        "usage": usage,
+    }
 
 
 def systemd_properties(unit: str) -> dict[str, str]:
@@ -2853,6 +2969,273 @@ def collect_live() -> tuple[dict[str, Any], datetime]:
     return raw, now
 
 
+def runtime_port_rules(raw: str, port: int) -> list[str]:
+    """Retain ordered hostport rules and their reachable DNAT chains only."""
+    rules = []
+    for line in raw.splitlines():
+        if line.startswith("-A "):
+            tokens = shlex.split(line)
+            rules.append((line, tokens))
+    roots = [
+        (line, tokens)
+        for line, tokens in rules
+        if any(
+            flag in tokens and str(port) in tokens[tokens.index(flag) + 1].split(",")
+            for flag in ("--dport", "--dports")
+        )
+    ]
+    chains = {tokens[tokens.index("-j") + 1] for _, tokens in roots if "-j" in tokens}
+    for _ in range(8):
+        expanded = chains | {
+            tokens[tokens.index("-j") + 1]
+            for _, tokens in rules
+            if tokens[1] in chains and "-j" in tokens
+        }
+        if expanded == chains:
+            break
+        chains = expanded
+    return [
+        line for line, tokens in rules if (line, tokens) in roots or tokens[1] in chains
+    ]
+
+
+def runtime_saved_port_bindings(
+    raw: str, selected_ports: set[int]
+) -> list[dict[str, Any]]:
+    """Read durable nerdctl port output, including stopped-container bindings."""
+    if len(raw) > 65536:
+        raise ValueError("saved port output exceeds bound")
+    bindings = []
+    for line in raw.splitlines():
+        match = re.fullmatch(r"([0-9]+)/(tcp|udp|sctp) -> (.+):([0-9]+)", line)
+        if match is None:
+            raise ValueError("saved port output is malformed")
+        container_port, protocol, host, port = match.groups()
+        address = str(ipaddress.ip_address(host.strip("[]")))
+        if not 0 < int(port) < 65536 or not 0 < int(container_port) < 65536:
+            raise ValueError("saved port is outside the valid range")
+        if protocol == "tcp" and int(port) in selected_ports:
+            bindings.append(
+                {
+                    "HostIp": address,
+                    "HostPort": port,
+                    "ContainerPort": int(container_port),
+                    "Protocol": protocol,
+                }
+            )
+    return bindings
+
+
+def collect_runtime_route(machine: str, expected: str | None) -> dict[str, Any]:
+    """Compare one owned Kata guest's direct and published contact routes.
+
+    No credentials, identity files, or full inspect environment enter the report.
+    A responding published port alone does not establish its Runtime identity.
+    """
+    template = (
+        '{"name":{{json .Name}},"labels":{{json .Config.Labels}},"state":{{json .State.Status}},'
+        '"ports":{{json .NetworkSettings.Ports}},'
+        '"networks":{{json .NetworkSettings.Networks}}}'
+    )
+    result = run_read_only(
+        ["nerdctl", "--namespace", "finite", "inspect", "--format", template, machine]
+    )
+    if result.returncode:
+        raise CollectionError("cannot inspect the exact runtime route target")
+    try:
+        inspected = json.loads(result.stdout)
+        labels = inspected["labels"]
+        if (
+            not isinstance(labels, dict)
+            or labels.get("computer.finite.v2.runtime") != "true"
+            or labels.get("computer.finite.v2.source_machine_id") != machine
+            or inspected["state"] != "running"
+        ):
+            raise ValueError("target is not the owned running canonical Runtime")
+        ports = inspected["ports"]["8080/tcp"]
+        host_ports = {int(entry["HostPort"]) for entry in ports}
+        if len(host_ports) != 1 or not all(0 < port < 65536 for port in host_ports):
+            raise ValueError("ambiguous runtime service port")
+        guest_ips = {
+            str(ipaddress.ip_address(entry["IPAddress"]))
+            for entry in inspected["networks"].values()
+            if entry.get("IPAddress")
+        }
+        if len(guest_ips) != 1:
+            raise ValueError("ambiguous guest network address")
+    except (KeyError, TypeError, ValueError) as error:
+        raise CollectionError(f"runtime route inspection rejected: {error}") from error
+    bind_host = "127.0.0.1"
+    for path in ("/etc/finite/runner-shared.env", "/etc/finite/runner.env"):
+        values = read_environment_values(Path(path), {"FC_RUNNER_KATA_HOST_ADDRESS"})
+        bind_host = values.get("FC_RUNNER_KATA_HOST_ADDRESS") or bind_host
+    try:
+        bind_host = str(ipaddress.ip_address(bind_host))
+    except ValueError as error:
+        raise CollectionError("runner bind address is not an IP address") from error
+
+    def contact(address: str, port: int) -> dict[str, Any]:
+        host = f"[{address}]" if ":" in address else address
+        url = f"http://{host}:{port}/contact"
+        result = run_read_only(
+            [
+                "curl",
+                "--noproxy",
+                "*",
+                "--max-time",
+                "5",
+                "--max-filesize",
+                "65536",
+                "--fail",
+                "--silent",
+                url,
+            ],
+            timeout=10,
+        )
+        try:
+            value = json.loads(result.stdout) if result.returncode == 0 else {}
+            principal = value.get("agent_npub", "")
+            if not isinstance(principal, str) or not re.fullmatch(
+                r"npub1[023456789acdefghjklmnpqrstuvwxyz]{58}", principal
+            ):
+                raise ValueError("missing valid Agent Principal")
+            return {
+                "url": url,
+                "status": "observed",
+                "agent_principal_sha256": hashlib.sha256(
+                    principal.encode()
+                ).hexdigest(),
+            }
+        except (ValueError, AttributeError):
+            return {"url": url, "status": "unavailable", "agent_principal_sha256": None}
+
+    published = contact(bind_host, next(iter(host_ports)))
+    direct = contact(next(iter(guest_ips)), 8080)
+    nat_rules: dict[str, Any] = {"status": "unavailable", "rules": []}
+    try:
+        nat = run_read_only(["iptables-save", "-t", "nat"])
+        if nat.returncode == 0:
+            nat_rules = {
+                "status": "observed",
+                "rules": runtime_port_rules(nat.stdout, next(iter(host_ports))),
+            }
+    except CollectionError:
+        pass
+    port_owners: dict[str, Any] = {"status": "unavailable", "containers": []}
+    try:
+        names_result = run_read_only(
+            [
+                "nerdctl",
+                "--namespace",
+                "finite",
+                "ps",
+                "--all",
+                "--format",
+                "{{.Names}}",
+            ]
+        )
+        names = names_result.stdout.splitlines()
+        if (
+            names_result.returncode == 0
+            and 0 < len(names) <= 128
+            and all(
+                re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,254}", name)
+                for name in names
+            )
+        ):
+            owners_result = run_read_only(
+                [
+                    "nerdctl",
+                    "--namespace",
+                    "finite",
+                    "inspect",
+                    "--format",
+                    template,
+                    *names,
+                ]
+            )
+            if owners_result.returncode == 0:
+                owners = []
+                inspected_names = set()
+                for line in owners_result.stdout.splitlines():
+                    owner = json.loads(line)
+                    name = owner["name"].removeprefix("/")
+                    if name not in names or name in inspected_names:
+                        raise ValueError(
+                            "container inventory changed during inspection"
+                        )
+                    inspected_names.add(name)
+                    saved = run_read_only(
+                        ["nerdctl", "--namespace", "finite", "port", name]
+                    )
+                    if saved.returncode:
+                        raise ValueError(
+                            "saved container port mappings are unavailable"
+                        )
+                    bindings = runtime_saved_port_bindings(saved.stdout, host_ports)
+                    if bindings:
+                        owner_labels = owner.get("labels") or {}
+                        if not isinstance(owner_labels, dict):
+                            raise ValueError("container labels are malformed")
+                        owners.append(
+                            {
+                                "container": owner["name"],
+                                "state": owner["state"],
+                                "project_id": owner_labels.get(
+                                    "computer.finite.v2.project_id"
+                                ),
+                                "source_machine_id": owner_labels.get(
+                                    "computer.finite.v2.source_machine_id"
+                                ),
+                                "bindings": bindings,
+                                "guest_ips": [
+                                    entry.get("IPAddress")
+                                    for entry in (owner.get("networks") or {}).values()
+                                ],
+                            }
+                        )
+                if inspected_names != set(names):
+                    raise ValueError("container inventory is incomplete")
+                port_owners = {
+                    "status": "observed",
+                    "namespace": "finite",
+                    "binding_source": "nerdctl port",
+                    "containers": owners,
+                }
+    except (CollectionError, KeyError, TypeError, ValueError):
+        pass
+    hashes = [route["agent_principal_sha256"] for route in (published, direct)]
+    status = (
+        "unknown"
+        if None in hashes
+        else "red"
+        if len(set(hashes)) != 1 or (expected is not None and hashes[0] != expected)
+        else "green"
+    )
+    return {
+        "schema_version": "finite.status.v1",
+        "generated_at": isoformat(utc_now()),
+        "overall_status": status,
+        "exit_code": {"green": 0, "red": 1, "unknown": 2}[status],
+        "sections": {
+            "runtime_route": {
+                "status": status,
+                "source_machine_id": machine,
+                "project_id": labels.get("computer.finite.v2.project_id"),
+                "source_host_id": labels.get("computer.finite.v2.source_host_id"),
+                "runtime_artifact_id": labels.get(
+                    "computer.finite.v2.runtime_artifact_id"
+                ),
+                "expected_agent_principal_sha256": expected,
+                "published": published,
+                "direct": direct,
+                "nat": nat_rules,
+                "port_owners": port_owners,
+            }
+        },
+    }
+
+
 def parse_args(arguments: list[str]) -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description="Canonical read-only Finite platform and fleet status"
@@ -2861,6 +3244,10 @@ def parse_args(arguments: list[str]) -> argparse.Namespace:
         "--json", action="store_true", help="emit finite.status.v1 JSON"
     )
     mode = parser.add_mutually_exclusive_group()
+    mode.add_argument("--runtime-route", metavar="SOURCE_MACHINE_ID",
+                      help="compare one owned Kata Runtime's direct and published identity routes")
+    parser.add_argument("--expected-agent-principal-sha256",
+                        help="compare both routes against an independently established Principal hash")
     mode.add_argument(
         "--tinfoil",
         action="store_true",
@@ -2870,6 +3257,11 @@ def parse_args(arguments: list[str]) -> argparse.Namespace:
         "--sites-backup-state",
         type=Path,
         help="read only a local Sites Borg backup receipt instead of fleet evidence",
+    )
+    mode.add_argument(
+        "--finite-private-usage",
+        action="store_true",
+        help="read only aggregate Finite Private limits and accounting; emits JSON",
     )
     mode.add_argument(
         "--fixture",
@@ -2883,6 +3275,11 @@ def parse_args(arguments: list[str]) -> argparse.Namespace:
         help="maximum Sites snapshot and upload age in seconds (default: 129600 / 36h)",
     )
     options = parser.parse_args(arguments)
+    if options.runtime_route and not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,254}", options.runtime_route):
+        parser.error("--runtime-route requires a simple source machine identifier")
+    if options.expected_agent_principal_sha256 and (
+            not options.runtime_route or not re.fullmatch(r"[a-f0-9]{64}", options.expected_agent_principal_sha256)):
+        parser.error("--expected-agent-principal-sha256 requires --runtime-route and 64 lowercase hex digits")
     if options.sites_backup_max_age is not None:
         if options.sites_backup_max_age < 0:
             parser.error("--sites-backup-max-age must be nonnegative")
@@ -2896,10 +3293,14 @@ def parse_args(arguments: list[str]) -> argparse.Namespace:
 def main(arguments: list[str] | None = None) -> None:
     options = parse_args(sys.argv[1:] if arguments is None else arguments)
     try:
-        if options.tinfoil:
+        if options.runtime_route:
+            report = collect_runtime_route(options.runtime_route, options.expected_agent_principal_sha256)
+        elif options.tinfoil:
             from finite_tinfoil_status import collect
 
             report = collect()
+        elif options.finite_private_usage:
+            report = collect_finite_private_usage()
         elif options.sites_backup_state:
             report = build_sites_backup_report(
                 options.sites_backup_state, utc_now(), options.sites_backup_max_age
@@ -2927,7 +3328,12 @@ def main(arguments: list[str] | None = None) -> None:
                 "chat_plane": {"status": "unknown", "error": str(error)},
             },
         }
-    if options.json or options.tinfoil:
+    if (
+        options.json
+        or options.tinfoil
+        or options.finite_private_usage
+        or options.runtime_route
+    ):
         print(json.dumps(report, indent=2, sort_keys=True))
     else:
         print(render_human(report))

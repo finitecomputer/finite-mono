@@ -1,4 +1,4 @@
-# Opt-in native Hermes ingress. Lat5 provides the bounded FIN-39 canary.
+# Opt-in native Hermes ingress for configured Runner hosts.
 {
   config,
   lib,

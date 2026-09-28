@@ -65,9 +65,9 @@ the 2026-08-18 wave proved unexercised lanes fail serially on deploy night.
     downloadable (14-day retention — re-plan the wave if it ages out mid-day);
   - the previous runtime-artifact digest and dashboard `@sha256:` from the
     pins their authorities name (changelog map above).
-- **Runner generation staged first (both Kata hosts):** new runner binaries
+- **Runner generation staged first (all active Kata hosts):** new runner binaries
   applied and `FC_RUNNER_RUNTIME_ARTIFACT_ID` present EXPLICITLY in
-  `/etc/finite/runner.env` on lat3 **and** lat4. There is no implicit default
+  `/etc/finite/runner.env` on lat3, lat4, and lat5. There is no implicit default
   anymore; `scripts/finite-status` renders a missing pin as RED/absent — treat
   that as a halt condition. Never hand-edit `runtime_artifact_id` records or
   bypass the promotion path in [`runtime-image.md`](runtime-image.md).
@@ -106,12 +106,12 @@ wave. Save `scripts/finite-status --json` (BEFORE artifact) with timestamp and
 rev. Open the private rollout evidence record now so the record is filled in as-you-go,
 not reconstructed later.
 
-### STEP 1 — Stage and apply runners (both hosts) — BEFORE Core
+### STEP 1 — Stage and apply runners (all active Kata hosts) — BEFORE Core
 
-Apply the staged runner generation on lat3 and lat4 (runner.env pin included).
+Apply the staged runner generation on lat3, lat4, and lat5 (runner.env pin included).
 Runners-under-old-Core is the tolerated direction; the reverse wedges
-stop/restart/upgrade operations fleet-wide. Confirm via finite-status: both
-hosts show pin matched/green, service active, and the standing-readiness
+stop/restart/upgrade operations fleet-wide. Confirm via finite-status: all three
+hosts show pin matched/green, Runner timer active and successful cycles, and the standing-readiness
 section reading plausibly (absent reports project as `unknown` until each
 runtime sees its next control operation — acceptable inside the window).
 
@@ -181,7 +181,8 @@ product probe. A layer is green only when both agree.
 3. **Dashboard byte-equality:** host-running digest equals the pinned
    `@sha256:` in `modules/dashboard.nix`. An exit-0 command proves nothing;
    compare digests.
-4. **Pins:** finite-status shows the artifact pin matched/green on BOTH hosts;
+4. **Pins:** finite-status shows the artifact pin matched/green on every active
+   Kata host;
    treated as RED/absent → halt per PRECONDITIONS.
 5. **Control-plane census:** rerun `scripts/rollout_preflight.py` — legacy
    vocabulary preserved unless deliberately exercising the new one; no

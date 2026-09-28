@@ -315,14 +315,13 @@ identity details.
 
 ## Brain Invitations
 
-`invite brain create --target <email|npub>` is the blessed invite path.
-Delivery is named in every receipt's `deliveryStatus`: `sent` means a
-courtesy email reached the human account mailbox; `in_app` means the
-invitee (managed agents, or humans when no mailer is configured) receives
-the invitation in their authenticated client — the designed outcome for
-account-backed invitations, not a delivery failure; `not_configured` and
-`failed` name mailer states, and `failed` never invalidates the committed
-invitation.
+`invite brain create --target <npub|NIP-05>` is the blessed invite path. It
+invites exactly the resolved key, and its receipt reports
+`deliveryStatus: in_app`: the invitee sees the invitation in their
+authenticated client, which is the designed outcome, not a delivery failure.
+To reach an email address with no public NIP-05, use
+`invite-token create --brain <id> --email <email>`; its receipt reports
+`sent`, `not_configured`, `failed` (the token stays valid), or `manual`.
 
 To answer "have I been invited to anything?", run `fbrain invite brain list`
 with no `--brain`: that form is the acting identity's incoming-invitation

@@ -32,6 +32,7 @@ import {
   launchCodeDownloadFilename,
   launchCodeDownloadText,
   launchCodeHostingTierLabel,
+  FINITE_PRIVATE_1X_PROFILE_ID,
   finitePrivateProfileLabel,
   oneTimeKeyDisplay,
   oneTimeKeyError,
@@ -157,7 +158,9 @@ export function AdminFriendKeyIssueForm({
             </SelectContent>
           </Select>
         ) : (
-          <p className="text-sm text-muted-foreground">Default 1× profile</p>
+          <p className="text-sm text-muted-foreground">
+            Default · {finitePrivateProfileLabel(FINITE_PRIVATE_1X_PROFILE_ID)}
+          </p>
         )}
       </div>
       <FormActionButton className="w-fit" pendingLabel="Issuing...">
