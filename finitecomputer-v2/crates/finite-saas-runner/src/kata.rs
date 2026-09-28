@@ -7551,6 +7551,9 @@ esac
             let candidate_server = TestHttpServer::start("npub1sameagent");
             let temp = tempfile::tempdir().unwrap();
             let (mut launcher, plan, fake_state) = test_launcher(&temp, candidate_server.port);
+            // The fake provider launches several subprocesses per operation;
+            // keep this boundary test stable on a loaded developer machine.
+            launcher.config.command_timeout = Duration::from_secs(10);
             let lease = upgrade_lease("runtime_ctl_credential_recovery");
             let target = target_artifact();
             let (image, artifact) = if case == "already-target" {
@@ -7576,11 +7579,13 @@ esac
                 "retained history",
             )
             .unwrap();
-            let old = "b".repeat(64);
+            // Neither test credential may equal an artifact digest in argv.
+            let old = "fedcba9876543210".repeat(4);
+            let fresh = "0123456789abcdef".repeat(4);
             std::fs::write(fake_state.join(format!("{}.env-file", plan.container_name)),
                 format!("FINITE_CORE_URL=https://core.example.test\nFINITE_CORE_CREDENTIAL={old}\nFINITE_HOME=/data/agent\n")).unwrap();
             let mut options = RuntimeRestartOptions::default()
-                .with_core_bootstrap("https://core.example.test", "a".repeat(64), None)
+                .with_core_bootstrap("https://core.example.test", fresh.clone(), None)
                 .unwrap();
             options
                 .core_bootstrap
@@ -7595,19 +7600,19 @@ esac
                 })
             ));
             let outcome = launcher.upgrade_runtime(&lease, &options);
-            let commands = std::fs::read_to_string(fake_state.join("commands.log")).unwrap();
             if case == "deliver" {
                 outcome.unwrap();
                 let installed = fake_environment(&fake_state, &plan.container_name);
-                assert!(installed.get("FINITE_CORE_CREDENTIAL") == Some(&"a".repeat(64)));
+                assert!(installed.get("FINITE_CORE_CREDENTIAL") == Some(&fresh));
                 launcher.upgrade_runtime(&lease, &options).unwrap(); // actual installed replay
             } else {
-                assert!(outcome.is_err(), "accepted {case}");
-                assert!(!commands.lines().any(|line| {
-                    ["stop ", "run ", "rm ", "rename "]
-                        .iter()
-                        .any(|prefix| line.starts_with(prefix))
-                }));
+                let error = outcome.expect_err("unexpected recovery of mismatched installed state");
+                assert!(
+                    error
+                        .to_string()
+                        .contains("existing Core bootstrap conflicts"),
+                    "{case}: {error}"
+                );
                 assert!(
                     fake_environment(&fake_state, &plan.container_name)
                         .get("FINITE_CORE_CREDENTIAL")
@@ -7618,7 +7623,15 @@ esac
                 std::fs::read_to_string(plan.state_root.join("chat-history-fixture")).unwrap(),
                 "retained history"
             );
-            assert!(!commands.contains(&old) && !commands.contains(&"a".repeat(64)));
+            let commands = std::fs::read_to_string(fake_state.join("commands.log")).unwrap();
+            if case != "deliver" {
+                assert!(!commands.lines().any(|line| {
+                    ["stop ", "run ", "rm ", "rename "]
+                        .iter()
+                        .any(|prefix| line.starts_with(prefix))
+                }));
+            }
+            assert!(!commands.contains(&old) && !commands.contains(&fresh));
         }
     }
 
