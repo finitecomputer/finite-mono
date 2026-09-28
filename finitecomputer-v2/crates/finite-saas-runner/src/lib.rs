@@ -5455,6 +5455,48 @@ mod tests {
     }
 
     #[test]
+    fn legacy_relocation_recovery_rejects_missing_or_ambiguous_local_bootstrap() {
+        use sha2::{Digest, Sha256};
+        let url = "https://core.example.test";
+        let old = "b".repeat(64);
+        let options = RuntimeRestartOptions::default()
+            .with_core_bootstrap(
+                url,
+                "a".repeat(64),
+                Some(format!("{:x}", Sha256::digest(old.as_bytes()))),
+            )
+            .unwrap();
+        let core_url = ("FINITE_CORE_URL".to_string(), url.to_string());
+        let credential = ("FINITE_CORE_CREDENTIAL".to_string(), old);
+        for mut entries in [
+            vec![],
+            vec![core_url.clone()],
+            vec![credential.clone()],
+            vec![core_url.clone(), credential.clone(), credential.clone()],
+            vec![
+                (
+                    "FINITE_CORE_URL".into(),
+                    "https://other.example.test".into(),
+                ),
+                credential.clone(),
+            ],
+        ] {
+            let before = entries.clone();
+            assert!(options.enroll_environment(&mut entries, true).is_err());
+            assert!(entries == before);
+        }
+        let mut installed = vec![core_url, credential];
+        let before = installed.clone();
+        assert!(options.enroll_environment(&mut installed, false).is_err());
+        assert!(installed == before);
+        assert!(
+            RuntimeRestartOptions::default()
+                .with_core_bootstrap(url, "a".repeat(64), Some("malformed".into()))
+                .is_err()
+        );
+    }
+
+    #[test]
     fn runtime_core_opt_in_preserves_unenrolled_relocation() {
         let lease = sample_relocation_lease("agent_request_123");
         let mut runner = AgentCreationRunner::new(
