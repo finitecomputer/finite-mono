@@ -497,6 +497,7 @@ mod tests {
     }
 
     type RestartHook = Box<dyn FnMut(usize, &Path) -> Result<(), AgentdError> + Send>;
+    type ReadHook = Box<dyn FnOnce(&Path) + Send>;
 
     /// Hermes-side state the launcher's pending-disconnect step clears.
     #[derive(Debug, Clone, Copy)]
@@ -515,6 +516,9 @@ mod tests {
         events: Mutex<Vec<Event>>,
         restarts: Mutex<usize>,
         on_restart: Mutex<RestartHook>,
+        /// Runs once, at the first `.env` key read during `verifying`: between
+        /// the first check's model read and the second check.
+        on_verify_key_read: Mutex<Option<ReadHook>>,
         facts_fail: Mutex<bool>,
         hermes: Mutex<HermesSide>,
     }
@@ -563,6 +567,12 @@ mod tests {
         }
 
         fn dotenv_openrouter_key(&self) -> Result<Option<String>, AgentdError> {
+            if self.phase() == Some(IntentPhase::Verifying) {
+                let hook = self.on_verify_key_read.lock().unwrap().take();
+                if let Some(hook) = hook {
+                    hook(&self.config_path());
+                }
+            }
             Ok(self
                 .env_lines()
                 .iter()
@@ -703,6 +713,7 @@ mod tests {
             events: Mutex::new(Vec::new()),
             restarts: Mutex::new(0),
             on_restart: Mutex::new(Box::new(|_, _| Ok(()))),
+            on_verify_key_read: Mutex::new(None),
             facts_fail: Mutex::new(false),
             hermes: Mutex::new(HermesSide {
                 pool: PoolEntries::Present,
@@ -1163,29 +1174,24 @@ mod tests {
 
     #[tokio::test]
     async fn t_a14_a_stale_writer_is_reapplied_then_reported_as_found() {
-        // Clobbered once, after the first check: the 5 s re-read catches it.
-        let mut setup = new_setup(
-            &openrouter_block(),
-            "OPENROUTER_API_KEY=sk-or-v1-synthetic\n",
+        // Clobbered once, after the first check passed: the second read
+        // (5 s later in production) catches it. Deterministic: the clobber
+        // runs inside the first check, after its model read.
+        let setup = new_setup(&fp_block(), "OPENROUTER_API_KEY=sk-or-v1-synthetic\n");
+        *setup.fake.on_verify_key_read.lock().unwrap() = Some(Box::new(|path| {
+            let text = fs::read_to_string(path).unwrap();
+            fs::write(path, text.replace(OPENROUTER_MODEL, "stale-model")).unwrap();
+        }));
+        arm(
+            &setup,
+            IntentKind::Select,
+            IntentRoute::Openrouter,
+            Some(OPENROUTER_MODEL),
         );
-        // Long enough that the clobber always lands between the two reads.
-        setup.executor.verify_delay = Duration::from_secs(1);
-        *setup.fake.on_restart.lock().unwrap() = Box::new(|count, path| {
-            if count == 1 {
-                let path = path.to_owned();
-                std::thread::spawn(move || {
-                    std::thread::sleep(Duration::from_millis(20));
-                    let text = fs::read_to_string(&path).unwrap();
-                    fs::write(&path, text.replace("glm-5-3-flash", "stale-model")).unwrap();
-                });
-            }
-            Ok(())
-        });
-        arm(&setup, IntentKind::Select, IntentRoute::FinitePrivate, None);
         setup.executor.run().await;
         assert!(record_now(&setup).is_none());
         assert_eq!(*setup.fake.restarts.lock().unwrap(), 2);
-        assert_eq!(setup.fake.model(), fp_block());
+        assert_eq!(setup.fake.model(), openrouter_block());
 
         // Clobbered after every restart: two re-applies, then the state as found.
         let setup = new_setup(
@@ -1313,7 +1319,7 @@ mod tests {
             sleeper("hermes", &program),
             None,
         );
-        tokio::time::timeout(Duration::from_secs(5), async {
+        tokio::time::timeout(Duration::from_secs(10), async {
             while supervisor
                 .status()
                 .await

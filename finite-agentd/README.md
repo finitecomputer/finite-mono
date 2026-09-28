@@ -87,7 +87,10 @@ the design is FIN-129/FIN-130.
   on the stats of `config.yaml`, `.env`, and `auth.json` for at most 30 s. If
   the helper fails, those fields are `unknown`.
 - v1 `agent.inference.apply` is synchronous and wire-compatible. It keeps its
-  `.env` snapshot restore and verifies after the restart.
+  `.env` snapshot restore on a failed write or spawn. After the restart it
+  reads the saved `model` and key once, with no delay: a mismatch replies
+  `config_conflict` with the state as found, and nothing is re-applied or
+  restored (ruling R8).
 - `agent.inference.select` and `agent.inference.disconnect` validate
   synchronously, record an intent, and reply `{"accepted": true,
   "operation_id": …}` or `{"changed": false}`. A background executor writes,

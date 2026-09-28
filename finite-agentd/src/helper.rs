@@ -415,22 +415,40 @@ mod tests {
             &format!("sleep 60 &\necho $! > '{}'\nwait", pid_file.display()),
         );
         let started = Instant::now();
-        let result = run_helper(
-            &command,
-            BTreeMap::from([("PATH".into(), "/usr/bin:/bin".into())]),
-            &["inference-facts"],
-            // Long enough for a loaded machine to start the script.
-            Duration::from_secs(2),
-        )
-        .await;
-        assert!(result.is_err());
-        assert!(started.elapsed() < Duration::from_secs(10));
-        let grandchild = fs::read_to_string(&pid_file)
-            .unwrap()
-            .trim()
-            .parse::<i32>()
+        let helper = tokio::spawn(async move {
+            run_helper(
+                &command,
+                BTreeMap::from([("PATH".into(), "/usr/bin:/bin".into())]),
+                &["inference-facts"],
+                Duration::from_secs(10),
+            )
+            .await
+        });
+        // The positive signal: the helper's grandchild exists before the
+        // deadline fires.
+        let grandchild = tokio::time::timeout(Duration::from_secs(10), async {
+            loop {
+                if let Some(pid) = fs::read_to_string(&pid_file)
+                    .ok()
+                    .and_then(|text| text.trim().parse::<i32>().ok())
+                {
+                    return pid;
+                }
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        })
+        .await
+        .expect("the helper script starts its grandchild");
+        let result = tokio::time::timeout(Duration::from_secs(30), helper)
+            .await
+            .expect("the deadline ends the helper")
             .unwrap();
-        tokio::time::timeout(Duration::from_secs(5), async {
+        assert!(result.is_err());
+        assert!(
+            started.elapsed() >= Duration::from_secs(10),
+            "not before its deadline"
+        );
+        tokio::time::timeout(Duration::from_secs(10), async {
             while rustix::process::test_kill_process(
                 rustix::process::Pid::from_raw(grandchild).unwrap(),
             )

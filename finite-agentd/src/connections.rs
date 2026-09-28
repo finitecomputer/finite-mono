@@ -272,23 +272,6 @@ impl ConnectionManager {
         })
     }
 
-    /// Writes the plan's key again without a snapshot: a re-apply after a
-    /// stale writer removed it (§3.10).
-    pub(crate) fn restage_inference_credential(
-        &self,
-        plan: &InferenceApplyPlan,
-    ) -> Result<(), AgentdError> {
-        let Some(api_key) = plan.credential_to_persist() else {
-            return Ok(());
-        };
-        let path = self.openrouter_env_path();
-        let existing = snapshot(&path)?.unwrap_or_default();
-        atomic_private_bytes(
-            &path,
-            &upsert_dotenv_value(&existing, OPENROUTER_API_KEY_ENV, api_key)?,
-        )
-    }
-
     fn simplex_status(&self) -> Result<Option<crate::simplex::SimplexStatus>, AgentdError> {
         if !crate::simplex::script_path().is_file() {
             return Ok(None);

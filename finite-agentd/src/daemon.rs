@@ -68,10 +68,6 @@ const INFERENCE_COMMANDS: [&str; 9] = [
     "agent.codex.login.cancel",
     "agent.codex.models",
 ];
-/// §3.10: verification reads again this long after `Running`.
-const VERIFY_DELAY: Duration = Duration::from_secs(5);
-/// §3.10: a verify mismatch is re-applied at most this many times.
-const MAX_REAPPLIES: usize = 2;
 const INTENT_WRITE_FAILED: &str = "The agent couldn't record this change.";
 const TELEGRAM_CONNECT_SCHEMA: &str = "finite.agent.telegram.connect.v1";
 const TELEGRAM_APPROVE_SCHEMA: &str = "finite.agent.telegram.approve.v1";
@@ -276,8 +272,11 @@ pub async fn run_daemon(config: DaemonConfig) -> Result<(), AgentdError> {
         finite_private_env(),
         codex,
     ));
-    // Only after Hermes has started; a bad intent never delays chat.
-    resume_intent_after_hermes_starts(Arc::clone(&inference.executor), supervisor.clone());
+    // Only after Hermes has started; a bad intent never delays chat. Detached.
+    drop(resume_intent_after_hermes_starts(
+        Arc::clone(&inference.executor),
+        supervisor.clone(),
+    ));
     spawn_status_writer(
         config.status_path(),
         identity.clone(),
@@ -752,11 +751,12 @@ impl ExecutorHost for AgentdHost {
 }
 
 /// Resumes a recorded intent only once Hermes has been started, so a pending,
-/// failing, or unreadable intent never delays chat (§3.11 Startup).
+/// failing, or unreadable intent never delays chat (§3.11 Startup). The
+/// daemon detaches the task; tests await it.
 fn resume_intent_after_hermes_starts<H: ExecutorHost + Clone>(
     executor: Arc<Executor<H>>,
     supervisor: SupervisorHandle,
-) {
+) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
         loop {
             let started = supervisor
@@ -771,7 +771,7 @@ fn resume_intent_after_hermes_starts<H: ExecutorHost + Clone>(
             tokio::time::sleep(Duration::from_millis(250)).await;
         }
         executor.resume_at_startup().await;
-    });
+    })
 }
 
 /// The inference contract's commands (§3): status, v1 apply, select,
@@ -788,7 +788,6 @@ struct Inference<H> {
     codex: Arc<CodexState>,
     openrouter: OpenRouterState,
     openrouter_api_base: String,
-    verify_delay: Duration,
 }
 
 impl<H: ExecutorHost + Clone> Inference<H> {
@@ -818,7 +817,6 @@ impl<H: ExecutorHost + Clone> Inference<H> {
             codex,
             openrouter: OpenRouterState::default(),
             openrouter_api_base: crate::openrouter::api_base(),
-            verify_delay: VERIFY_DELAY,
         }
     }
 
@@ -1070,51 +1068,27 @@ impl<H: ExecutorHost + Clone> Inference<H> {
             // A replaced key: flush any copy the native `hermes serve` holds.
             self.host.restart_serve().await;
         }
-        self.verify_v1(plan).await?;
+        self.verify_v1(plan)?;
         Ok(serde_json::to_value(result)?)
     }
 
-    /// §3.10 for v1: parsed values, never bytes. A mismatch is re-applied and
-    /// restarted at most twice, then reported as `config_conflict` with the
-    /// state as found.
-    async fn verify_v1(&self, plan: &InferenceApplyPlan) -> Result<(), AgentdError> {
-        let mut reapplies = 0;
-        while !self.v1_verified(plan).await? {
-            if reapplies == MAX_REAPPLIES {
-                return Err(AgentdError::ConfigConflict(
-                    "Something else changed the agent's model setting after it was saved. Status shows it as found.".to_owned(),
-                ));
-            }
-            reapplies += 1;
-            let config = self.config.clone();
-            let host = self.host.clone();
-            let value = plan.offer.value.clone();
-            tokio::task::spawn_blocking(move || {
-                config.write_model(&value, || host.validate_config())
-            })
-            .await
-            .map_err(|error| AgentdError::Config(error.to_string()))??;
-            self.connections.restage_inference_credential(plan)?;
-            self.host.restart_gateway().await?;
+    /// §3.10 for v1 as ruled in R8: one immediate read of the parsed values
+    /// agentd owns, never bytes, so the reply is no later than before. A
+    /// mismatch is `config_conflict` with the state as found: no re-apply, no
+    /// second restart, and no restore, since the apply itself succeeded.
+    fn verify_v1(&self, plan: &InferenceApplyPlan) -> Result<(), AgentdError> {
+        let model_matches = self.config.current_value(MODEL_CONFIG_PATH)? == plan.offer.value;
+        let key_matches = match plan.credential_to_persist() {
+            Some(key) => self.connections.openrouter_dotenv_key()?.as_deref() == Some(key),
+            None => true,
+        };
+        if model_matches && key_matches {
+            Ok(())
+        } else {
+            Err(AgentdError::ConfigConflict(
+                "Something else changed the agent's model setting after it was saved. Status shows it as found.".to_owned(),
+            ))
         }
-        Ok(())
-    }
-
-    async fn v1_verified(&self, plan: &InferenceApplyPlan) -> Result<bool, AgentdError> {
-        for check in 0..2 {
-            if check > 0 {
-                tokio::time::sleep(self.verify_delay).await;
-            }
-            let model_matches = self.config.current_value(MODEL_CONFIG_PATH)? == plan.offer.value;
-            let key_matches = match plan.credential_to_persist() {
-                Some(key) => self.connections.openrouter_dotenv_key()?.as_deref() == Some(key),
-                None => true,
-            };
-            if !(model_matches && key_matches) {
-                return Ok(false);
-            }
-        }
-        Ok(true)
     }
 
     /// §3.6: validate synchronously with no file touched, then record the
@@ -1888,8 +1862,8 @@ mod inference_tests {
             let marker = self.started_marker.lock().unwrap().clone();
             if let Some(marker) = marker {
                 // The supervisor spawned Hermes before the resume began; give
-                // its first line a moment to run on a loaded machine.
-                let deadline = std::time::Instant::now() + Duration::from_secs(5);
+                // its first line time to run on a loaded machine.
+                let deadline = std::time::Instant::now() + Duration::from_secs(10);
                 while !marker.exists() && std::time::Instant::now() < deadline {
                     std::thread::sleep(Duration::from_millis(20));
                 }
@@ -1958,6 +1932,7 @@ mod inference_tests {
         }
 
         fn migrate_legacy_openrouter_key(&self) -> Result<(), AgentdError> {
+            self.event("migrate");
             self.connections.migrate_legacy_openrouter_key()
         }
 
@@ -2087,7 +2062,6 @@ mod inference_tests {
             fp(),
             Arc::new(CodexState::default()),
         );
-        inference.verify_delay = Duration::from_millis(10);
         // Unreachable unless a test starts a fake OpenRouter.
         inference.openrouter_api_base = "http://127.0.0.1:9/api/v1".to_owned();
         Setup {
@@ -2666,23 +2640,9 @@ mod inference_tests {
     }
 
     #[tokio::test]
-    async fn v1_verify_reapplies_then_reports_config_conflict_as_found() {
+    async fn r8_v1_verify_is_one_read_and_a_mismatch_is_reported_as_found() {
         let body = json!({"profile": "openrouter", "api_key": OR_KEY, "model": OR_MODEL});
-        // One stale write after the restart: re-applied once.
-        let setup = new_setup(&fp_block(), "");
-        let path = setup.host.config_path.clone();
-        *setup.host.on_restart.lock().unwrap() = Box::new(move |count| {
-            if count == 1 {
-                let text = fs::read_to_string(&path).unwrap();
-                fs::write(&path, text.replace(OR_MODEL, "stale/model")).unwrap();
-            }
-            Ok(())
-        });
-        setup.v1(body.clone()).await.unwrap();
-        assert_eq!(setup.host.model(), openrouter_block());
-        assert_eq!(*setup.host.restarts.lock().unwrap(), 2);
-
-        // Every restart clobbered: two re-applies, then the state as found.
+        // A stale writer changes the model right after the restart.
         let setup = new_setup(&fp_block(), "");
         let path = setup.host.config_path.clone();
         *setup.host.on_restart.lock().unwrap() = Box::new(move |_| {
@@ -2690,9 +2650,63 @@ mod inference_tests {
             fs::write(&path, text.replace(OR_MODEL, "stale/model")).unwrap();
             Ok(())
         });
-        assert_eq!(code(setup.v1(body).await), "config_conflict");
-        assert_eq!(*setup.host.restarts.lock().unwrap(), 1 + MAX_REAPPLIES);
+        let found = {
+            let error = setup.v1(body.clone()).await.unwrap_err();
+            assert_eq!(error.public_code(), "config_conflict");
+            setup.config_bytes()
+        };
+        // No re-apply and no second restart: one gateway restart, and the
+        // key's `hermes serve` restart, then the reply.
+        assert_eq!(*setup.host.restarts.lock().unwrap(), 1);
+        assert_eq!(setup.host.events(), ["gateway", "serve"]);
+        // Nothing restored: the file and the key are as found.
         assert_eq!(setup.host.model()["default"], "stale/model");
+        assert_eq!(setup.config_bytes(), found);
+        assert_eq!(
+            setup
+                .inference
+                .connections
+                .openrouter_dotenv_key()
+                .unwrap()
+                .as_deref(),
+            Some(OR_KEY)
+        );
+
+        // A stale writer that removes the key the request carried.
+        let setup = new_setup(&fp_block(), "");
+        let env_path = setup.hermes_home.join(".env");
+        *setup.host.on_restart.lock().unwrap() = Box::new(move |_| {
+            fs::write(&env_path, "").unwrap();
+            Ok(())
+        });
+        assert_eq!(code(setup.v1(body).await), "config_conflict");
+        assert_eq!(*setup.host.restarts.lock().unwrap(), 1);
+        assert_eq!(setup.env(), "", "not written again");
+    }
+
+    #[tokio::test]
+    async fn r8_v1_success_makes_one_restart_and_replies_without_waiting() {
+        // The reply is no later than before verification existed: exactly one
+        // restart call and one immediate read. `Inference` has no verify delay
+        // for v1 at all; the only waits are the restarts the host records.
+        let setup = new_setup(
+            &openrouter_block(),
+            &format!("OPENROUTER_API_KEY={OR_KEY}\n"),
+        );
+        setup
+            .v1(json!({"profile": "finite_private"}))
+            .await
+            .unwrap();
+        assert_eq!(setup.host.events(), ["gateway"]);
+        assert_eq!(*setup.host.restarts.lock().unwrap(), 1);
+
+        let setup = new_setup(&fp_block(), "");
+        setup
+            .v1(json!({"profile": "openrouter", "api_key": OR_KEY, "model": OR_MODEL}))
+            .await
+            .unwrap();
+        assert_eq!(setup.host.events(), ["gateway", "serve"]);
+        assert_eq!(*setup.host.restarts.lock().unwrap(), 1);
     }
 
     #[test]
@@ -3087,29 +3101,25 @@ mod inference_tests {
 
         // select with the config directory read-only: accepted, then the
         // background write really fails and the config is untouched.
-        let setup = new_setup(
-            &openrouter_block(),
-            &format!("OPENROUTER_API_KEY={OR_KEY}\n"),
-        );
+        let mut setup = new_setup(&fp_block(), &format!("OPENROUTER_API_KEY={OR_KEY}\n"));
+        let fake = FakeOpenRouter::start(200, &key_data(json!({"limit": null}))).await;
+        setup.inference.openrouter_api_base = fake.base.clone();
+        let before = (setup.config_bytes(), setup.env());
         fs::set_permissions(&setup.hermes_home, fs::Permissions::from_mode(0o500)).unwrap();
         let reply = setup
-            .select(json!({"route": "finite_private"}))
+            .select(json!({"route": "openrouter", "model": OR_MODEL}))
             .await
             .unwrap();
         assert_eq!(reply["accepted"], true);
-        tokio::time::timeout(Duration::from_secs(10), async {
-            while setup
-                .record()
-                .is_some_and(|record| record.phase != intent::IntentPhase::ConfigWritten)
-            {
-                tokio::time::sleep(Duration::from_millis(20)).await;
-            }
+        // The positive signal that the write was attempted: the executor calls
+        // `migrate` and then `write_model` in one poll, with no await between,
+        // on this single-threaded test runtime. Once `migrate` is recorded, the
+        // write has already failed and the next attempt is 15 s away.
+        let host = setup.host.clone();
+        eventually("the background write attempt", || {
+            host.events().contains(&"migrate".to_owned())
         })
-        .await
-        .unwrap();
-        // The next attempt is 15 s away; the directory stays read-only until
-        // the assertions are done.
-        tokio::time::sleep(Duration::from_millis(500)).await;
+        .await;
         let unchanged = (setup.config_bytes(), setup.env()) == before;
         let record = setup.record().unwrap();
         let events = setup.host.events();
@@ -3121,7 +3131,7 @@ mod inference_tests {
             IntentState::Running,
             "retried after its backoff"
         );
-        assert!(events.is_empty(), "no restart after a failed write");
+        assert_eq!(events, ["migrate"], "no restart after a failed write");
     }
 
     /// A host that restarts a real supervisor; the gateway program is deleted
@@ -3244,6 +3254,29 @@ mod inference_tests {
     struct Started {
         supervisor: SupervisorHandle,
         marker: PathBuf,
+        resume: tokio::task::JoinHandle<()>,
+    }
+
+    /// Polls `condition` for up to 10 s; fails the test if it never holds.
+    async fn eventually(what: &str, mut condition: impl FnMut() -> bool) {
+        tokio::time::timeout(Duration::from_secs(10), async {
+            while !condition() {
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        })
+        .await
+        .unwrap_or_else(|_| panic!("timed out waiting for {what}"));
+    }
+
+    impl Started {
+        /// The positive signal that startup is done: the resume task, which
+        /// runs only after the supervisor reported Hermes started, finished.
+        async fn resumed(&mut self) {
+            tokio::time::timeout(Duration::from_secs(30), &mut self.resume)
+                .await
+                .expect("the resume finishes")
+                .unwrap();
+        }
     }
 
     /// Starts a real supervisor whose Hermes touches `marker`, then the
@@ -3261,11 +3294,15 @@ mod inference_tests {
             sleeper_spec("hermes", &program),
             None,
         );
-        resume_intent_after_hermes_starts(
+        let resume = resume_intent_after_hermes_starts(
             Arc::clone(&setup.inference.executor),
             supervisor.clone(),
         );
-        Started { supervisor, marker }
+        Started {
+            supervisor,
+            marker,
+            resume,
+        }
     }
 
     #[tokio::test]
@@ -3274,12 +3311,22 @@ mod inference_tests {
         let setup = new_setup(&fp_block(), "");
         fs::create_dir_all(setup.agent_home.join("agentd")).unwrap();
         fs::write(&setup.inference.intent_path, b"not json").unwrap();
-        let started = start_like_run_daemon(&setup);
-        wait_for_hermes(&started.supervisor).await;
-        tokio::time::sleep(Duration::from_millis(500)).await;
-        assert!(started.marker.exists());
+        let mut started = start_like_run_daemon(&setup);
+        started.resumed().await;
+        let marker = started.marker.clone();
+        eventually("Hermes to start", || marker.exists()).await;
+        let quarantined = fs::read_dir(setup.agent_home.join("agentd"))
+            .unwrap()
+            .filter_map(|entry| entry.ok())
+            .any(|entry| {
+                entry
+                    .file_name()
+                    .to_string_lossy()
+                    .starts_with("inference-intent.json.corrupt-")
+            });
+        assert!(quarantined, "the resume read the record");
         assert!(setup.record().is_none());
-        assert!(setup.host.events().is_empty());
+        assert!(setup.host.events().is_empty(), "no step ran");
         started.supervisor.shutdown().await;
 
         // Unreadable: logged, nothing runs, Hermes keeps running.
@@ -3294,10 +3341,11 @@ mod inference_tests {
             fs::Permissions::from_mode(0o000),
         )
         .unwrap();
-        let started = start_like_run_daemon(&setup);
-        wait_for_hermes(&started.supervisor).await;
-        tokio::time::sleep(Duration::from_millis(500)).await;
-        assert!(setup.host.events().is_empty());
+        let mut started = start_like_run_daemon(&setup);
+        started.resumed().await;
+        let marker = started.marker.clone();
+        eventually("Hermes to start", || marker.exists()).await;
+        assert!(setup.host.events().is_empty(), "no step ran");
         assert!(
             started.supervisor.status().await.processes["hermes"]
                 .pid()
@@ -3322,9 +3370,13 @@ mod inference_tests {
         );
         *setup.host.on_restart.lock().unwrap() =
             Box::new(|_| Err(AgentdError::Supervisor("spawn failed".to_owned())));
-        let started = start_like_run_daemon(&setup);
-        let failed = setup.settled().await.unwrap();
+        let mut started = start_like_run_daemon(&setup);
+        started.resumed().await;
+        let failed = setup.record().unwrap();
+        assert_eq!(failed.state, IntentState::Failed);
         assert_eq!(failed.error_code.as_deref(), Some("supervisor_unavailable"));
+        // The first step's event() already required the marker.
+        assert!(started.marker.exists());
         assert!(
             started.supervisor.status().await.processes["hermes"]
                 .pid()

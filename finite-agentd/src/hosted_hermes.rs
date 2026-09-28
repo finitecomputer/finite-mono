@@ -543,21 +543,44 @@ mod tests {
         let gate = ServeGate::new(path.clone());
         assert!(gate.blocked());
         let handle = HostedHermesHandle::start_spec_gated(sleeper("hermes-serve"), gate);
-        tokio::time::sleep(Duration::from_millis(1200)).await;
-        assert_eq!(handle.status().pid(), None);
-        assert!(matches!(handle.status().state, ProcessState::Stopped));
+        // Two gate evaluations, each observed: the loop ran and chose not to
+        // start.
+        stays_stopped(&handle, 2).await;
 
-        // A failed disconnect keeps it stopped too.
+        // A failed disconnect keeps it stopped too. The second evaluation
+        // after the write certainly read the failed record.
         let mut record = crate::intent::load(&path).unwrap().unwrap();
         record.state = crate::intent::IntentState::Failed;
         crate::intent::store(&path, &record).unwrap();
-        tokio::time::sleep(Duration::from_millis(700)).await;
-        assert_eq!(handle.status().pid(), None);
+        stays_stopped(&handle, 2).await;
 
         // Verified and deleted: it starts.
         crate::intent::clear(&path).unwrap();
-        running(&handle, None).await;
+        tokio::time::timeout(Duration::from_secs(10), async {
+            while handle.status().pid().is_none() {
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        })
+        .await
+        .expect("hermes serve starts once the record is gone");
         handle.shutdown().await;
+    }
+
+    /// Waits for the gated loop to evaluate its gate `times` more times, and
+    /// asserts after each that it stayed stopped: the positive signal that the
+    /// loop was running and did not start the child.
+    async fn stays_stopped(handle: &HostedHermesHandle, times: usize) {
+        let mut status = handle.status.clone();
+        status.mark_unchanged();
+        for _ in 0..times {
+            tokio::time::timeout(Duration::from_secs(10), status.changed())
+                .await
+                .expect("the gate is evaluated")
+                .unwrap();
+            let current = status.borrow_and_update().clone();
+            assert_eq!(current.pid(), None);
+            assert!(matches!(current.state, ProcessState::Stopped));
+        }
     }
 
     #[test]

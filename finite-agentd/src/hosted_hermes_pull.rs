@@ -688,8 +688,10 @@ mod tests {
         crate::intent::store(&intent_path, &record).unwrap();
         let enabled = serde_json::json!({"runtimeId":"runtime_test","generation":2,"enabled":true,
             "publicUrl":"https://agents.example.test/runtimes/runtime_test/","username":"test-user",
-            "password":"test-password","signingSecret":"test-signing-secret","accessTtlSeconds":60})
+            "password":"test-password","signingSecret":"test-signing-secret","accessTtlSeconds":30})
         .to_string();
+        // accessTtlSeconds 30 makes `spec()` refuse right after the gate, so the
+        // start path runs without spawning a child or probing the native port.
         let (origin, requests) = server(3, move |index, request| match index {
             0 | 1 => (200, enabled.clone(), String::new()),
             _ => {
@@ -711,9 +713,18 @@ mod tests {
 
         crate::intent::clear(&intent_path).unwrap();
         applied.reconcile(&core, temp.path(), &status).await;
-        assert!(applied.child.is_some(), "starts once the record is gone");
-        assert_eq!(applied.generation, Some(2));
-        applied.stop().await;
+        // The gate passed: the generation was applied and the child's spec was
+        // built (and refused), which happens only on the start path.
+        assert_eq!(
+            applied.generation,
+            Some(2),
+            "starts once the record is gone"
+        );
+        assert!(matches!(
+            &status.borrow().state,
+            ProcessState::Unavailable { error } if error == "Core native configuration was invalid"
+        ));
+        assert!(applied.child.is_none());
         assert_eq!(requests.await.unwrap().len(), 3);
     }
 
