@@ -444,8 +444,7 @@ async fn relocation_completion_rolls_back_when_lease_expires_before_activation()
             "completion must fail as a whole when the successor cannot activate: {error:?}"
         );
         // A Runner sees the same 409 that an expired lease already returns at
-        // the first clock read, so a Runner built from PR #1000 takes its
-        // existing failure path.
+        // the first clock read, so it takes its existing failure path.
         assert_eq!(
             complete_relocation_over_http(&app, &fixture, lease).await,
             StatusCode::CONFLICT

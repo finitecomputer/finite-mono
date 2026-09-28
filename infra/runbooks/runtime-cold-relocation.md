@@ -220,13 +220,15 @@ state is never used as the secret transport.
 
 For an enrolled Agent, the authenticated relocation-credential endpoint prepares
 one inactive successor credential for the exact live lease. Retries reuse it.
-The predecessor remains bound until completion, when Core atomically revokes
-it and activates the successor on the target. If the lease expires before the
-successor activates, the whole completion rolls back: the predecessor stays
-current and the request stays launching until its lease is retried or the
-Runner records the failure. Hosted access preferences and
-native credentials carry forward from their latest committed state; routing
-waits for the new process to acknowledge the current configuration generation.
+The predecessor remains bound until completion, which revokes it and activates
+the successor on the target in one transaction. If the lease expires before the
+successor activates, the whole completion rolls back with a lease conflict: the
+predecessor stays bound and unrevoked with the activation state it had before,
+the successor stays pending, and the request stays launching until its lease is
+retried, the Runner records the failure, or an operator cancels it.
+Hosted access preferences and native credentials carry forward from their latest
+committed state; routing waits for the new process to acknowledge the current
+configuration generation.
 An Agent that was never enrolled stays unenrolled. A revoked or inconsistent
 credential fails closed; this operation cannot repair historical credentials.
 

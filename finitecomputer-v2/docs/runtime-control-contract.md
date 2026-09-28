@@ -170,10 +170,11 @@ Core leases the relocation only to a Runner advertising
 for the exact lease before launch, and completion revokes the predecessor in
 the same transaction that switches the binding. If the successor cannot also be
 activated in that transaction, the whole completion rolls back. A revoked
-current credential fails closed. While a relocation is requested or launching,
-or cancelled while its target Runner still holds the lease, Core refuses every
-new control request for that Runtime. Such a control would target the source
-binding while target compute may run.
+current credential fails closed.
+While a relocation is requested or launching, or cancelled while its target
+Runner still holds the lease, Core refuses every new control request for that
+Runtime. Such a control would target the source binding while target compute
+may run.
 
 Before a relocation reaches a terminal state that reopens source controls, the
 target Runner stops or removes target compute and proves shutdown from the
