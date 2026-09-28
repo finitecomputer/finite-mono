@@ -1,9 +1,11 @@
 # Nix builds of the workspace server binaries + CLIs, shared by flake.nix.
 # Each package receives a generated workspace manifest plus only its transitive
-# local crate closure. Related binaries share product-family dependency artifacts;
+# local crate closure, narrowed to the files a release build reads (see
+# crateSources). Related binaries share product-family dependency artifacts;
 # every real application build retains its own narrower source closure.
-# Keep these path lists aligned with Cargo path dependencies; the Nix package-build
-# CI lane catches omissions.
+# Keep these crate lists aligned with Cargo path dependencies; the Nix package-build
+# CI lane catches omissions, and scripts/tests/test_nix_package_sources.py keeps
+# docs and test files out of the source sets.
 # A missing path dependency usually surfaces there as Cargo's "failed to load
 # manifest" or "no targets specified" error; update that package's sourcePaths.
 # doCheck = false: tests run in CI via cargo; nix builds stay fast/reliable.
@@ -18,10 +20,40 @@ let
   workspaceManifest = builtins.fromTOML (builtins.readFile (sourceRoot + "/Cargo.toml"));
   workspaceMembers = workspaceManifest.workspace.members;
 
-  scopedSources =
-    paths:
+  # Files outside a crate's manifest, build script and src/ tree that non-test
+  # code embeds with include_str! or include_bytes!. They join the source set
+  # wherever the crate does.
+  crateCompileInputs = {
+    "finitecomputer-v2/crates/finite-saas-core" = [
+      "finitecomputer-v2/crates/finite-saas-core/migrations"
+    ];
+    "finitechat/crates/finitechat-cli" = [
+      "finitechat/integrations/hermes/finitechat/__init__.py"
+      "finitechat/integrations/hermes/finitechat/adapter.py"
+      "finitechat/integrations/hermes/finitechat/plugin.yaml"
+      "finitechat/integrations/hermes/finitechat/simplex_topics.py"
+    ];
+  };
+
+  # A release build reads only these files of a crate. Docs, tests and
+  # scripts beside them stay out, so editing them keeps the store path.
+  crateSources =
+    crate:
     let
-      members = builtins.filter (member: builtins.elem member paths) workspaceMembers;
+      root = sourceRoot + "/${crate}";
+      buildScript = root + "/build.rs";
+    in
+    [
+      (root + "/Cargo.toml")
+      (root + "/src")
+    ]
+    ++ lib.optional (builtins.pathExists buildScript) buildScript
+    ++ map (path: sourceRoot + "/${path}") (crateCompileInputs.${crate} or [ ]);
+
+  scopedSources =
+    crates:
+    let
+      members = builtins.filter (member: builtins.elem member crates) workspaceMembers;
       manifest = (pkgs.formats.toml { }).generate "Cargo.toml" (
         workspaceManifest
         // {
@@ -30,16 +62,20 @@ let
           };
         }
       );
+      fileset = lib.fileset.unions (
+        [
+          (sourceRoot + "/Cargo.lock")
+          (sourceRoot + "/Cargo.toml")
+        ]
+        ++ lib.concatMap crateSources crates
+      );
       files = lib.fileset.toSource {
         root = sourceRoot;
-        fileset = lib.fileset.unions (
-          [
-            (sourceRoot + "/Cargo.lock")
-            (sourceRoot + "/Cargo.toml")
-          ]
-          ++ map (path: sourceRoot + "/${path}") paths
-        );
+        inherit fileset;
       };
+      # Repository-relative file list, evaluated without building, for the
+      # package source contract in scripts/tests/test_nix_package_sources.py.
+      fileList = map (file: lib.path.removePrefix sourceRoot file) (lib.fileset.toList fileset);
       app = pkgs.runCommand "source" { } ''
         cp -R ${files} "$out"
         chmod u+w "$out" "$out/Cargo.toml"
@@ -47,7 +83,12 @@ let
       '';
     in
     {
-      inherit app files manifest;
+      inherit
+        app
+        fileList
+        files
+        manifest
+        ;
     };
 
   crateVersion =
@@ -178,6 +219,7 @@ let
           // fingerprintPassthru
           // {
             inherit cargoArtifactGroup cargoArtifacts;
+            sourceFiles = sources.fileList;
           };
       }
     );
@@ -251,10 +293,6 @@ let
     "finitechat/crates/finitechat-proto"
     "finitechat/crates/finitechat-server"
     "finitechat/crates/finitechat-transport"
-    "finitechat/integrations/hermes/finitechat/__init__.py"
-    "finitechat/integrations/hermes/finitechat/adapter.py"
-    "finitechat/integrations/hermes/finitechat/plugin.yaml"
-    "finitechat/integrations/hermes/finitechat/simplex_topics.py"
   ];
   finitechatCargoArtifacts = mkCargoArtifacts {
     pname = "finitechat-group";
@@ -356,6 +394,7 @@ rec {
         inherit runtimeInputs;
         cargoArtifactGroup = devfinity-unwrapped.cargoArtifactGroup;
         cargoArtifacts = devfinity-unwrapped.cargoArtifacts;
+        sourceFiles = devfinity-unwrapped.sourceFiles;
         unwrapped = devfinity-unwrapped;
       };
     };
@@ -448,7 +487,6 @@ rec {
       "finite-nostr"
       "finite-sites/crates/finitesites-proto"
       "finite-sites/crates/fsite-cli"
-      "finite-sites/examples"
     ];
   };
   fbrain = mkWorkspaceCrate {
