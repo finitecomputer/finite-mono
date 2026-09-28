@@ -77,7 +77,7 @@ declaration does not carry over to an unrelated model.
 
 ## Inference routes, backup, and notices
 
-The dashboard's inference commands, the intent record, and what disconnect
+The dashboard's inference commands, the Inference Intent, and what disconnect
 guarantees are specified in the
 [runtime control contract](../../../finitecomputer-v2/docs/runtime-control-contract.md#inference-connections).
 This section covers the Hermes side.
@@ -146,11 +146,11 @@ route could use another route's credential:
    Hermes sent the Finite Private key (the Runner's alias), or a user's own
    OpenAI key, to OpenRouter. The patch removes `OPENAI_API_KEY` from
    OpenRouter's key candidates (`hermes_cli/runtime_provider.py`). An
-   OpenRouter runtime with an empty or `${…}` key, as the saved default or a
+   OpenRouter runtime with an empty or `${…}` key, as the Saved Default or a
    session override, is a credential failure: Hermes uses the fallback chain
    before any request, or fails the turn.
 2. **A session override ran on another route's key.** A `/model` override
-   whose credential was not cached was laid over the saved default's runtime,
+   whose credential was not cached was laid over the Saved Default's runtime,
    so, for example, a ChatGPT override with no sign-in sent the Finite Private
    key to the ChatGPT endpoint. The patch resolves the override's own provider
    instead (`gateway/run.py`). If that fails, or the resolved endpoint is not
@@ -158,14 +158,14 @@ route could use another route's credential:
    fails, and the next turn tries again. The override is never cleared and
    stays the conversation's choice. Endpoints compare scheme and host
    case-insensitively and everything else exactly, ignoring only a trailing
-   `/`. An override with only a model still inherits the saved default's
+   `/`. An override with only a model still inherits the Saved Default's
    runtime.
 
 With no key and no usable fallback, the user sees the gateway's generic error:
 "⚠️ Provider authentication failed. Check the configured credentials; raw
 provider details are in the gateway logs." The specific reason ("No OpenRouter
 API key is configured for this agent, and no fallback model is available." for
-the saved default, or "credentials for provider 'openrouter' are not
+the Saved Default, or "credentials for provider 'openrouter' are not
 configured" for an override) reaches the gateway log only.
 
 **Re-port the patch on every Hermes pin bump.** The build applies it with
@@ -217,7 +217,7 @@ the plugin can see:
 
 - a ChatGPT route that is signed out, or whose only credentials are in a
   usage-limit cooldown;
-- an OpenRouter route with no key, as the saved default or an override;
+- an OpenRouter route with no key, as the Saved Default or an override;
 - a session override whose endpoint binding the patch refuses;
 - the provider cooldown on an agent Hermes keeps cached. After a billing or
   rate-limit error Hermes stops trying the primary for 60 seconds (doubling on

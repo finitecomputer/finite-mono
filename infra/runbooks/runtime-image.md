@@ -512,20 +512,20 @@ in `infra/tinfoil/README.md`.
    Runtime that adopted the bad image, explicitly request an upgrade to the
    previous promoted, same-schema artifact. Never use destroy as the first leg.
    The target must pass the
-   [inference compatibility floor](#inference-compatibility-floor) gate.
+   [Inference Compatibility Floor](#inference-compatibility-floor) gate.
 3. Leave the bad tag in GHCR (immutability > tidiness) but note it in
    `infra/deployment-changelog.md` so nobody promotes it again.
 
-### Inference compatibility floor
+### Inference Compatibility Floor
 
-The floor is the first promoted artifact whose `finite-agentd` keeps the
-inference intent record (`/data/agent/agentd/inference-intent.json`) and whose
-Hermes carries `hermes-session-route-safety.patch` and
-`hermes_cli/finite_inference_helper.py`. When that artifact is promoted,
-record its artifact id in `infra/deployment-changelog.md` as the inference
-compatibility floor. Core does not enforce it; this gate is procedural. The
-contract is in
-[the runtime control contract](../../finitecomputer-v2/docs/runtime-control-contract.md#compatibility-floor).
+The Inference Compatibility Floor ([glossary](../CONTEXT.md)) is the first
+promoted artifact whose `finite-agentd` keeps the Inference Intent
+(`agentd/inference-intent.json` under the Agent Home) and whose Hermes carries
+`hermes-session-route-safety.patch` and `hermes_cli/finite_inference_helper.py`.
+When that artifact is promoted, record its artifact id in
+`infra/deployment-changelog.md` as the Inference Compatibility Floor. Core does
+not enforce it; this gate is procedural. The contract is in
+[the runtime control contract](../../finitecomputer-v2/docs/runtime-control-contract.md#inference-compatibility-floor).
 
 Before a Runtime Upgrade to an older artifact, for any Runtime that has run the
 floor or a later image:
@@ -534,14 +534,25 @@ floor or a later image:
    unsupported: it has no session-route patch and no launch-point rule, so an
    OpenRouter route without its own key again borrows the Finite Private key
    the Runner passes as `OPENAI_API_KEY`, and a conversation override can
-   again run on another route's key. It also cannot finish a recorded intent.
-2. Check for a recorded intent on the Runner host, read-only:
-   `/var/lib/finite-saas-runner/kata/<durable-state-id>/agent/agentd/inference-intent.json`.
-   It holds no secret. `state: running` means an operation is still finishing;
-   wait for it to succeed or fail. A `running` or `failed` record is completed
-   after the upgrade by any image at or above the floor: agentd starts Hermes,
-   then resumes the record with a fresh retry budget. Do not edit or delete
-   the file by hand.
+   again run on another route's key. It also cannot finish a recorded
+   Inference Intent.
+2. Check for a recorded Inference Intent, read-only. It holds no secret. Find
+   the Runtime's durable state bind (`nerdctl --namespace finite inspect
+   <source-machine-id>` shows the host directory mounted at `/data`); the file
+   is `agent/agentd/inference-intent.json` beneath it. That relative path
+   follows from `FINITECHAT_HOME=/data/agent` in the
+   [runtime control contract](../../finitecomputer-v2/docs/runtime-control-contract.md#state-roots);
+   the full host path is derived, so confirm it exists before relying on it.
+   - No file: nothing is pending.
+   - `state: running`: an operation is still finishing. A disconnect can take
+     several minutes. Wait for it to succeed or fail.
+   - `state: failed`, `kind: disconnect`: any image at or above the floor
+     resumes it after the upgrade, with a fresh retry budget, once Hermes has
+     started.
+   - `state: failed`, `kind: select` or `activate`: no image re-runs it. It
+     stays failed until the owner's next change replaces it.
+
+   Do not edit or delete the file by hand.
 3. After the upgrade, verify chat as for any upgrade, and read the owner's
    Connections panel or `agent.connections.status` `inference.operation`.
 
@@ -549,11 +560,11 @@ Durable additions survive any rollback: the reconciler-owned
 `providers.finite-private` entry, the Finite Private entry in
 `fallback_providers`, and the intent file. None needs repair.
 
-A candidate image that changes the intent record (its `v`, fields, `kind`,
-`route` or `phase` values) raises the floor. agentd renames aside a record it
-cannot parse (`inference-intent.json.corrupt-<unix ms>`), which drops that
-operation with only a log line, so an older floor image cannot complete it.
-Record the new floor with that promotion.
+A candidate image that changes the Inference Intent schema (its `v`, fields,
+`kind`, `route` or `phase` values) raises the floor. agentd renames aside a
+record it cannot parse (`inference-intent.json.corrupt-<unix ms>`), which drops
+that operation with only a log line, so an older floor image cannot complete
+it. Record the new floor with that promotion.
 
 ### Rolling Core back across Runtime Upgrade first use
 

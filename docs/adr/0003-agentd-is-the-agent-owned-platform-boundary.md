@@ -46,7 +46,7 @@ The first command family is deliberately narrow:
 - recover incomplete Finite Chat/Hermes turns;
 - preview, apply, and roll back an allowlisted Hermes configuration offer;
 - report the agent's inference routes as stored facts, select Finite Private
-  or OpenRouter as the saved default, and disconnect OpenRouter;
+  or OpenRouter as the Saved Default, and disconnect OpenRouter;
 - connect, approve pairing for, select a home chat for, and disconnect
   Telegram through Hermes' supported configuration and pairing flows; and
 - install or revoke the exact product-scoped Google Workspace grant used by
@@ -94,17 +94,19 @@ Finite Private backup entry in `fallback_providers`. It seeds the backup only
 when neither fallback key exists, and afterwards refreshes only its own
 entries in place.
 
-The inference select and disconnect commands do not use the offer journal.
-They replace the whole `model` value, which is user-owned after the first
-seed, only on an explicit owner action, and they move forward: validate
-everything the user controls, then write the credential, then `model`, then
-restart, then verify by re-reading. A single-slot, secret-free intent record
-(`agentd/inference-intent.json`) lets the daemon finish that work in the
-background and after its own restart, and refuses a second change while one
-is unfinished. Their only rollback is the spawn-failure restore, and only
-while the file still holds exactly the bytes the daemon wrote. Other writers,
-such as `/model --global` in chat, are not fenced: the operation verifies what
-it wrote and reports what it found. See the
+The inference select and disconnect commands do not use the offer journal. They
+replace the whole Saved Default, which is user-owned after the first seed, only
+on an explicit owner action, and they move forward: validate everything the
+user controls, then write the credential, then `model`, then restart, then
+verify by re-reading. The Inference Intent (`agentd/inference-intent.json`)
+lets the daemon finish that work in the background and after its own restart,
+and refuses a second change while one is unfinished. At startup the daemon
+resumes a record that was still running and a failed disconnect, never a failed
+select: re-running a stale switch would overwrite a choice the user made since.
+Their only rollback is the spawn-failure restore, and only while the file still
+holds exactly the bytes the daemon wrote. Other writers, such as
+`/model --global` in chat, are not fenced: the operation verifies what it
+wrote and reports what it found. See the
 [runtime control contract](../../finitecomputer-v2/docs/runtime-control-contract.md#inference-connections).
 
 ## Boundary with lifecycle infrastructure
