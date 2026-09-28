@@ -1,5 +1,8 @@
 import assert from "node:assert/strict";
+import { readdir, readFile } from "node:fs/promises";
+import path from "node:path";
 import { test } from "node:test";
+import { fileURLToPath } from "node:url";
 
 import {
   missingWorkosAuthEnv,
@@ -174,6 +177,23 @@ test("WorkOS callback base URL is derived from the public redirect URI", () => {
   );
   assert.equal(workosBaseUrl({ NEXT_PUBLIC_WORKOS_REDIRECT_URI: "not a url" }), undefined);
   assert.equal(workosBaseUrl({}), undefined);
+});
+
+test("route redirects never take their origin from the internal request URL", async () => {
+  // Behind Caddy, request.url carries the listener origin (localhost:3000).
+  const appDirectory = fileURLToPath(new URL("../app", import.meta.url));
+  const routes = (await readdir(appDirectory, { recursive: true })).filter((file) =>
+    file.endsWith("route.ts"),
+  );
+  assert.ok(routes.length > 0);
+  const offenders: string[] = [];
+  for (const route of routes) {
+    const source = await readFile(path.join(appDirectory, route), "utf8");
+    if (/new URL\((?:(?!new URL\()[^;])*?,\s*request\.url\s*\)/u.test(source)) {
+      offenders.push(route);
+    }
+  }
+  assert.deepEqual(offenders, []);
 });
 
 test("WorkOS logout return URL is absolute for deployed environments", () => {
