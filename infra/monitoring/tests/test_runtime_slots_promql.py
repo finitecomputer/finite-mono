@@ -57,10 +57,10 @@ def main():
     active = [
         runtime("finite-lat-3", "old", 12),
         runtime("finite-lat-3", "new", 5),
-        runtime("finite-lat-4", "new", 42),
+        runtime("finite-lat-4", "new", 32),
         runtime("finite-lat-5", "new", 1),
     ]
-    counts = {"finite-lat-3": 17, "finite-lat-4": 42, "finite-lat-5": 1}
+    counts = {"finite-lat-3": 17, "finite-lat-4": 32, "finite-lat-5": 1}
     cases = [
         ("fresh mixed artifacts", 900, active, counts),
         ("just before expiry", 601, active, counts),
@@ -68,13 +68,13 @@ def main():
         ("missing file age", None, active, {}),
         ("future file age", 1201, active, {}),
         ("empty host", 900, [], {}),
-        ("one host missing", 900, active[2:], {"finite-lat-4": 42, "finite-lat-5": 1}),
-        ("lat5 absent", 900, active[:3], {"finite-lat-3": 17, "finite-lat-4": 42}),
+        ("one host missing", 900, active[2:], {"finite-lat-4": 32, "finite-lat-5": 1}),
+        ("lat5 absent", 900, active[:3], {"finite-lat-3": 17, "finite-lat-4": 32}),
         (
             "over ceiling",
             900,
-            [runtime("finite-lat-3", "new", 43)],
-            {"finite-lat-3": 43},
+            [runtime("finite-lat-3", "new", 33)],
+            {"finite-lat-3": 33},
         ),
     ]
     tests = []

@@ -3,7 +3,7 @@
 Executable wire types and bounds live in `crates/finitechat-proto/` and
 `crates/finitechat-http/`; public routes live in `crates/finitechat-server/`.
 The application payload contract below complements those definitions.
-See [vocabulary](protocol-glossary.md) and [storage](storage.md).
+See [storage](storage.md) for persistence and recovery constraints.
 
 ## Identity and ordering
 

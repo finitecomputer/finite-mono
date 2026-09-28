@@ -14,7 +14,7 @@ and infrastructure definition in one tree.
 | `finite-skills/` | sole authored managed-skills baseline; immutable revisions hot-activate in compatible runtimes |
 | `devfinity/` | local integration harness (Fedimint devimint-style) |
 | `infra/` | **the single deploy root**: per-host config, images, runbooks |
-| `docs/` | doctrine, ADRs, run records, postmortems, audits |
+| `docs/` | retained development, contract and operational references |
 
 Read [docs/monorepo-doctrine.md](docs/monorepo-doctrine.md) for the rules
 (single-repo model, component-scoped release tags, what deliberately stays

@@ -1,6 +1,6 @@
 # Dedicated lat5 Runner, captured 2026-09-15. Delivered hardware has
 # 192 GB RAM, two 480 GB SATA boot SSDs and two 7.68 TB NVMe data drives.
-# Owner-selected estimated ceiling mirrors lat4's declared 42-slot policy.
+# Its 32-slot ceiling matches lat3 and lat4, which share this hardware.
 # Workload qualification and opening admission remain separate gates.
 {
   config,
@@ -39,8 +39,8 @@ in
 
   networking.hostName = "finite-lat-5";
 
-  # FIN-39's selected canary is Lat5 Canary Retry. This installs the host
-  # capability; Core still requires per-agent enabled intent and readiness.
+  # This installs the host capability; Core still requires per-agent
+  # enabled intent and readiness.
   finite.hostedHermes = {
     enable = true;
     publicOrigin = "https://agents-lat5.finite.computer";
@@ -57,7 +57,7 @@ in
     sourceHostId = "finite-lat-5";
     workRoot = "/data/finite-saas-runner";
     kataHostAddress = "10.254.3.5";
-    maxSandboxes = 42;
+    maxSandboxes = 32;
   };
 
   finite.metrics = {
@@ -335,9 +335,10 @@ in
   ];
 
   # The Runner stays dead until the operator installs /etc/finite/runner.env
-  # (credential, artifact pin, drain state). finite-lat-5 is admitted DRAINED
-  # (FC_RUNNER_DRAIN=true); undraining is the separate admission decision per
-  # ADR 0007's one-creator rule.
+  # (credential, artifact pin, drain state). The example operator file
+  # bootstraps with drain enabled. Live admission state comes from the
+  # installed environment, not this installation source; observe it through
+  # scripts/finite-status.
   systemd.services.finite-saas-runner.unitConfig.ConditionPathExists = "/etc/finite/runner.env";
 
   environment.systemPackages = with pkgs; [

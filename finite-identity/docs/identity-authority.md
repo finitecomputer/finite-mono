@@ -39,8 +39,7 @@ audit metadata only; it never stores or returns user secret key material.
   immutably registered to a hosted runtime's Native Principal by trusted
   provisioning.
 
-The full glossary lives in [CONTEXT.md](../CONTEXT.md). The decision log lives
-under [docs/adr](./adr).
+Retained decisions live under [docs/adr](./adr).
 
 ## Running the Service
 

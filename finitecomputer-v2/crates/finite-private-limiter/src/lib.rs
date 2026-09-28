@@ -719,6 +719,16 @@ async fn proxy_openai(
         reservation_id
     };
 
+    // From here every exit settles this reservation once. A client that
+    // disconnects while the upstream is still queueing or prefilling drops the
+    // handler, and the guard then settles what the client received.
+    let mut settlement_guard = SettlementGuard::new(
+        state.clone(),
+        reservation_id,
+        request_id,
+        estimate,
+        request_timer,
+    );
     let rewrite_model = state
         .config
         .upstream_model
@@ -733,109 +743,20 @@ async fn proxy_openai(
         &state.config,
     );
     if is_streaming {
-        let upstream = match call_upstream_response(&state, &uri, upstream_body).await {
-            Ok(response) => response,
-            Err(error) => {
-                request_timer.finish(if error.contains("timed out") {
-                    TerminalOutcome::UpstreamTimeout
-                } else {
-                    TerminalOutcome::UpstreamError
-                });
-                eprintln!("finite-private-limiter upstream failed: {error}");
-                let diagnostic_request_id = request_id.clone();
-                let _settlement_result = settle_usage_with_retries(
-                    &state,
-                    &reservation_id,
-                    SettleRequest {
-                        request_id,
-                        settlement: "estimate".to_string(),
-                        prompt_tokens: None,
-                        completion_tokens: None,
-                        usage_units: None,
-                        usage_formula_version: USAGE_FORMULA_VERSION.to_string(),
-                        upstream_status: Some(502),
-                        upstream_error_class: Some("upstream_unavailable".to_string()),
-                    },
-                )
-                .await;
-
-                record_diagnostic_best_effort(
-                    &state,
-                    &reservation_id,
-                    DiagnosticRequest::new(
-                        diagnostic_request_id,
-                        &request_timer,
-                        None,
-                        "upstream_error".to_string(),
-                    ),
-                );
-                return openai_error(
-                    StatusCode::BAD_GATEWAY,
-                    "Finite Private upstream is unavailable.",
-                    "upstream_unavailable",
-                    "upstream_unavailable",
-                );
-            }
+        return match call_upstream_response(&state, &uri, upstream_body).await {
+            Ok(upstream) => streaming_response(settlement_guard, upstream, degraded_admission),
+            Err(error) => upstream_unavailable(settlement_guard, &error).await,
         };
-        return streaming_response(
-            state,
-            upstream,
-            reservation_id,
-            request_id,
-            degraded_admission,
-            request_timer,
-        );
     }
 
     let upstream = match call_upstream(&state, &uri, upstream_body).await {
         Ok(response) => response,
-        Err(error) => {
-            request_timer.finish(if error.contains("timed out") {
-                TerminalOutcome::UpstreamTimeout
-            } else {
-                TerminalOutcome::UpstreamError
-            });
-            eprintln!("finite-private-limiter upstream failed: {error}");
-            let diagnostic_request_id = request_id.clone();
-            let _settlement_result = settle_usage_with_retries(
-                &state,
-                &reservation_id,
-                SettleRequest {
-                    request_id,
-                    settlement: "estimate".to_string(),
-                    prompt_tokens: None,
-                    completion_tokens: None,
-                    usage_units: None,
-                    usage_formula_version: USAGE_FORMULA_VERSION.to_string(),
-                    upstream_status: Some(502),
-                    upstream_error_class: Some("upstream_unavailable".to_string()),
-                },
-            )
-            .await;
-
-            record_diagnostic_best_effort(
-                &state,
-                &reservation_id,
-                DiagnosticRequest::new(
-                    diagnostic_request_id,
-                    &request_timer,
-                    None,
-                    "upstream_error".to_string(),
-                ),
-            );
-            return openai_error(
-                StatusCode::BAD_GATEWAY,
-                "Finite Private upstream is unavailable.",
-                "upstream_unavailable",
-                "upstream_unavailable",
-            );
-        }
+        Err(error) => return upstream_unavailable(settlement_guard, &error).await,
     };
 
     let actual = actual_usage(&upstream.body, &state.config.default_model);
-    let diagnostic_request_id = request_id.clone();
     let settle = SettleRequest {
-        request_id,
+        request_id: settlement_guard.request_id().to_string(),
         settlement: if actual.is_some() {
             "actual"
         } else {
@@ -844,7 +765,13 @@ async fn proxy_openai(
         .to_string(),
         prompt_tokens: actual.as_ref().map(|usage| usage.prompt_tokens),
         completion_tokens: actual.as_ref().map(|usage| usage.completion_tokens),
-        usage_units: actual.as_ref().map(|usage| usage.usage_units),
+        // An upstream error without reported usage is not charged; a success
+        // without reported usage keeps its reservation.
+        usage_units: match &actual {
+            Some(usage) => Some(usage.usage_units),
+            None if !upstream.status.is_success() => Some(0),
+            None => None,
+        },
         usage_formula_version: USAGE_FORMULA_VERSION.to_string(),
         upstream_status: Some(upstream.status.as_u16() as i32),
         upstream_error_class: if upstream.status.is_success() {
@@ -855,34 +782,39 @@ async fn proxy_openai(
     };
     // Freeze limiter-observed generation latency before Core settlement
     // retries; accounting service delay must not inflate model timing.
-    request_timer.finish(if upstream.status.is_success() {
-        TerminalOutcome::Success
-    } else {
-        TerminalOutcome::UpstreamError
-    });
-    request_timer.tokens(
+    settlement_guard
+        .timer()
+        .finish(if upstream.status.is_success() {
+            TerminalOutcome::Success
+        } else {
+            TerminalOutcome::UpstreamError
+        });
+    settlement_guard.timer().tokens(
         actual.as_ref().map(|usage| usage.prompt_tokens),
         actual.as_ref().map(|usage| usage.completion_tokens),
     );
-    if let Err(error) = settle_usage_with_retries(&state, &reservation_id, settle).await {
+    let diagnostic = DiagnosticRequest::new(
+        settlement_guard.request_id().to_string(),
+        settlement_guard.timer(),
+        actual.as_ref(),
+        if upstream.status.is_success() {
+            "complete"
+        } else {
+            "upstream_error"
+        }
+        .to_string(),
+    );
+    // Preserve known final usage if the client drops while Core retries.
+    settlement_guard.pending_diagnostic = Some(diagnostic.clone());
+    if let Err(error) = settlement_guard.settle(settle).await {
         eprintln!("finite-private-limiter settle failed: {error}");
     }
-
     record_diagnostic_best_effort(
-        &state,
-        &reservation_id,
-        DiagnosticRequest::new(
-            diagnostic_request_id,
-            &request_timer,
-            actual.as_ref(),
-            if upstream.status.is_success() {
-                "complete"
-            } else {
-                "upstream_error"
-            }
-            .to_string(),
-        ),
+        settlement_guard.state(),
+        settlement_guard.reservation_id(),
+        diagnostic,
     );
+    settlement_guard.mark_diagnostic_recorded();
 
     let mut response = Response::builder().status(upstream.status);
     if let Some(content_type) = upstream.content_type {
@@ -894,6 +826,48 @@ async fn proxy_openai(
     response
         .body(axum::body::Body::from(upstream.body))
         .unwrap()
+}
+
+/// Settles an upstream that never answered. The client received nothing.
+async fn upstream_unavailable(mut settlement_guard: SettlementGuard, error: &str) -> Response {
+    settlement_guard
+        .timer()
+        .finish(if error.contains("timed out") {
+            TerminalOutcome::UpstreamTimeout
+        } else {
+            TerminalOutcome::UpstreamError
+        });
+    eprintln!("finite-private-limiter upstream failed: {error}");
+    settlement_guard.preserve_terminal_diagnostic("upstream_error");
+    let _ = settlement_guard
+        .settle(SettleRequest {
+            request_id: settlement_guard.request_id().to_string(),
+            settlement: "estimate".to_string(),
+            prompt_tokens: None,
+            completion_tokens: None,
+            usage_units: Some(0),
+            usage_formula_version: USAGE_FORMULA_VERSION.to_string(),
+            upstream_status: Some(502),
+            upstream_error_class: Some("upstream_unavailable".to_string()),
+        })
+        .await;
+    record_diagnostic_best_effort(
+        settlement_guard.state(),
+        settlement_guard.reservation_id(),
+        DiagnosticRequest::new(
+            settlement_guard.request_id().to_string(),
+            settlement_guard.timer(),
+            None,
+            "upstream_error".to_string(),
+        ),
+    );
+    settlement_guard.mark_diagnostic_recorded();
+    openai_error(
+        StatusCode::BAD_GATEWAY,
+        "Finite Private upstream is unavailable.",
+        "upstream_unavailable",
+        "upstream_unavailable",
+    )
 }
 
 async fn reserve_usage(
@@ -1136,16 +1110,12 @@ async fn call_upstream_response(
 }
 
 fn streaming_response(
-    state: AppState,
+    mut settlement_guard: SettlementGuard,
     upstream: reqwest::Response,
-    reservation_id: String,
-    request_id: String,
     degraded_admission: bool,
-    request_timer: RequestTimer,
 ) -> Response {
     let status =
         StatusCode::from_u16(upstream.status().as_u16()).unwrap_or(StatusCode::BAD_GATEWAY);
-    let upstream_status = Some(status.as_u16() as i32);
     let content_type = upstream
         .headers()
         .get("content-type")
@@ -1159,26 +1129,13 @@ fn streaming_response(
         response = response.header("x-finite-admission", "degraded-allowlist");
     }
     let mut stream = upstream.bytes_stream();
-    let settlement = Settlement::new(state, reservation_id, request_id.clone());
-    let fallback_settle = SettleRequest {
-        request_id,
-        settlement: "estimate".to_string(),
-        prompt_tokens: None,
-        completion_tokens: None,
-        usage_units: None,
-        usage_formula_version: USAGE_FORMULA_VERSION.to_string(),
-        upstream_status,
-        upstream_error_class: Some("client_disconnected_or_stream_cancelled".to_string()),
-    };
-    let idle_timeout = settlement.state.config.upstream_stream_idle_timeout;
-    let default_model = settlement.state.config.default_model.clone();
-    // Construct the guard before polling begins so a client that disconnects
-    // immediately after headers still receives fallback accounting and a
+    let idle_timeout = settlement_guard.state().config.upstream_stream_idle_timeout;
+    settlement_guard.upstream_status = Some(status);
+    // The guard moves into the body before polling begins, so a client that
+    // disconnects immediately after headers still settles and records a
     // cancellation diagnostic.
-    let settlement_guard = SettlementGuard::new(settlement, fallback_settle, request_timer);
     let body_stream = async_stream::stream! {
         let mut settlement_guard = settlement_guard;
-        let mut accumulator = StreamingUsageAccumulator::new(default_model);
         loop {
             let item = match timeout(idle_timeout, stream.next()).await {
                 Ok(item) => item,
@@ -1189,17 +1146,9 @@ fn streaming_response(
                     );
                     settlement_guard.timer().finish(TerminalOutcome::UpstreamTimeout);
                     settlement_guard.preserve_terminal_diagnostic("upstream_stream_timeout");
-                    let _ = settlement_guard.settle(SettleRequest {
-                        request_id: settlement_guard.request_id().to_string(),
-                        settlement: "estimate".to_string(),
-                        prompt_tokens: None,
-                        completion_tokens: None,
-                        usage_units: None,
-                        usage_formula_version: USAGE_FORMULA_VERSION.to_string(),
-                        upstream_status,
-                        upstream_error_class: Some("upstream_stream_timeout".to_string()),
-                    })
-                    .await;
+                    let settle =
+                        settlement_guard.observed_settlement(true, Some("upstream_stream_timeout"));
+                    let _ = settlement_guard.settle(settle).await;
 
                     record_diagnostic_best_effort(
                         settlement_guard.state(),
@@ -1219,14 +1168,14 @@ fn streaming_response(
             };
             match item {
                 Ok(chunk) => {
-                    accumulator.push(&chunk);
-                    if accumulator.saw_meaningful_output() {
+                    settlement_guard.usage.push(&chunk);
+                    if settlement_guard.usage.saw_meaningful_output() {
                         settlement_guard.timer().observe_first_output();
                     }
-                    if accumulator.saw_answer_text() {
+                    if settlement_guard.usage.saw_answer_text() {
                         settlement_guard.timer().observe_first_answer();
                     }
-                    let saw_done = accumulator.saw_done();
+                    let saw_done = settlement_guard.usage.saw_done();
                     yield Ok::<Bytes, std::io::Error>(chunk);
                     if saw_done {
                         break;
@@ -1236,18 +1185,9 @@ fn streaming_response(
                     eprintln!("finite-private-limiter upstream stream failed: {error}");
                     settlement_guard.timer().finish(TerminalOutcome::UpstreamError);
                     settlement_guard.preserve_terminal_diagnostic("upstream_stream_error");
-                    let _ = settlement_guard
-                        .settle(SettleRequest {
-                            request_id: settlement_guard.request_id().to_string(),
-                            settlement: "estimate".to_string(),
-                            prompt_tokens: None,
-                            completion_tokens: None,
-                            usage_units: None,
-                            usage_formula_version: USAGE_FORMULA_VERSION.to_string(),
-                            upstream_status,
-                            upstream_error_class: Some("upstream_stream_error".to_string()),
-                        })
-                    .await;
+                    let settle =
+                        settlement_guard.observed_settlement(true, Some("upstream_stream_error"));
+                    let _ = settlement_guard.settle(settle).await;
 
                     record_diagnostic_best_effort(
                         settlement_guard.state(),
@@ -1260,21 +1200,10 @@ fn streaming_response(
                 }
             }
         }
-        let actual = accumulator.actual_usage();
-        let settle = SettleRequest {
-            request_id: settlement_guard.request_id().to_string(),
-            settlement: if actual.is_some() { "actual" } else { "estimate" }.to_string(),
-            prompt_tokens: actual.as_ref().map(|usage| usage.prompt_tokens),
-            completion_tokens: actual.as_ref().map(|usage| usage.completion_tokens),
-            usage_units: actual.as_ref().map(|usage| usage.usage_units),
-            usage_formula_version: USAGE_FORMULA_VERSION.to_string(),
-            upstream_status,
-            upstream_error_class: if status.is_success() {
-                None
-            } else {
-                Some("upstream_error".to_string())
-            },
-        };
+        let actual = settlement_guard.usage.actual_usage();
+        let upstream_failed = !status.is_success();
+        let settle = settlement_guard
+            .observed_settlement(upstream_failed, upstream_failed.then_some("upstream_error"));
         settlement_guard.timer().finish(if status.is_success() {
             TerminalOutcome::Success
         } else {
@@ -1361,20 +1290,67 @@ impl Settlement {
 
 struct SettlementGuard {
     settlement: Settlement,
-    fallback: SettleRequest,
+    estimate: EstimatedUsage,
+    /// Set once upstream response headers arrive.
+    upstream_status: Option<StatusCode>,
+    usage: StreamingUsageAccumulator,
     request_timer: RequestTimer,
     diagnostic_recorded: bool,
     pending_diagnostic: Option<DiagnosticRequest>,
 }
 
 impl SettlementGuard {
-    fn new(settlement: Settlement, fallback: SettleRequest, request_timer: RequestTimer) -> Self {
+    fn new(
+        state: AppState,
+        reservation_id: String,
+        request_id: String,
+        estimate: EstimatedUsage,
+        request_timer: RequestTimer,
+    ) -> Self {
+        let usage = StreamingUsageAccumulator::new(state.config.default_model.clone());
         Self {
-            settlement,
-            fallback,
+            settlement: Settlement::new(state, reservation_id, request_id),
+            estimate,
+            upstream_status: None,
+            usage,
             request_timer,
             diagnostic_recorded: false,
             pending_diagnostic: None,
+        }
+    }
+
+    /// Reported usage when the stream carried it; otherwise the estimated
+    /// input plus the output streamed so far.
+    fn observed_settlement(
+        &self,
+        upstream_failed: bool,
+        upstream_error_class: Option<&str>,
+    ) -> SettleRequest {
+        let actual = self.usage.actual_usage();
+        let usage_units = actual.map_or_else(
+            || {
+                unreported_usage_units(
+                    &self.estimate,
+                    self.usage.delivered_completion_tokens(),
+                    upstream_failed,
+                )
+            },
+            |usage| usage.usage_units,
+        );
+        SettleRequest {
+            request_id: self.request_id().to_string(),
+            settlement: if actual.is_some() {
+                "actual"
+            } else {
+                "estimate"
+            }
+            .to_string(),
+            prompt_tokens: actual.map(|usage| usage.prompt_tokens),
+            completion_tokens: actual.map(|usage| usage.completion_tokens),
+            usage_units: Some(usage_units),
+            usage_formula_version: USAGE_FORMULA_VERSION.to_string(),
+            upstream_status: self.upstream_status.map(|status| status.as_u16() as i32),
+            upstream_error_class: upstream_error_class.map(str::to_string),
         }
     }
 
@@ -1427,7 +1403,11 @@ impl Drop for SettlementGuard {
                 )
             });
             let settlement = self.settlement.clone();
-            let fallback = self.fallback.clone();
+            let fallback = self.observed_settlement(
+                self.upstream_status
+                    .is_some_and(|status| !status.is_success()),
+                Some("client_disconnected_or_stream_cancelled"),
+            );
             tokio::spawn(async move {
                 if let Err(error) = settlement.settle(fallback).await {
                     eprintln!("finite-private-limiter background settle failed: {error}");
@@ -1647,12 +1627,32 @@ fn usage_units(prompt_tokens: i64, completion_tokens: i64, model: &str) -> i64 {
     (base_units * context_multiplier * model_multiplier).ceil() as i64
 }
 
+/// Units for a request whose usage the upstream never reported: the estimated
+/// input plus the output actually streamed, never more output than was
+/// reserved. An upstream failure that streamed no output is not charged.
+fn unreported_usage_units(
+    estimate: &EstimatedUsage,
+    delivered_completion_tokens: i64,
+    upstream_failed: bool,
+) -> i64 {
+    if upstream_failed && delivered_completion_tokens == 0 {
+        return 0;
+    }
+    usage_units(
+        estimate.prompt_tokens,
+        delivered_completion_tokens.min(estimate.completion_tokens),
+        &estimate.model,
+    )
+}
+
 struct StreamingUsageAccumulator {
     pending_line: String,
     actual_usage: Option<ActualUsage>,
     saw_done: bool,
     meaningful_output: bool,
     answer_text: bool,
+    output_chunks: i64,
+    output_chars: i64,
     default_model: String,
 }
 
@@ -1664,6 +1664,8 @@ impl StreamingUsageAccumulator {
             saw_done: false,
             meaningful_output: false,
             answer_text: false,
+            output_chunks: 0,
+            output_chars: 0,
             default_model,
         }
     }
@@ -1701,13 +1703,27 @@ impl StreamingUsageAccumulator {
         let (meaningful_output, answer_text) = output_signals(&value);
         self.meaningful_output |= meaningful_output;
         self.answer_text |= answer_text;
+        let output_chars = delta_output_chars(&value);
+        if output_chars > 0 {
+            self.output_chunks += 1;
+            self.output_chars += output_chars;
+        }
         if let Some(usage) = actual_usage_from_value(&value, &self.default_model) {
             self.actual_usage = Some(usage);
         }
     }
 
-    fn actual_usage(self) -> Option<ActualUsage> {
+    fn actual_usage(&self) -> Option<ActualUsage> {
         self.actual_usage
+    }
+
+    /// Completion tokens streamed so far, for a stream that ends without
+    /// reported usage. vLLM usually sends one token per chunk, but speculative
+    /// decoding packs several; four characters per token (the prompt
+    /// estimate's ratio) covers that, and the chunk count covers scripts such
+    /// as CJK where one token is fewer than four characters.
+    fn delivered_completion_tokens(&self) -> i64 {
+        self.output_chunks.max((self.output_chars + 3) / 4)
     }
 
     fn saw_done(&self) -> bool {
@@ -1721,6 +1737,38 @@ impl StreamingUsageAccumulator {
     fn saw_answer_text(&self) -> bool {
         self.answer_text
     }
+}
+
+/// Characters of generated answer, reasoning, and tool-call arguments in one
+/// chat-completion stream chunk, reading the same fields as `output_signals`.
+fn delta_output_chars(value: &Value) -> i64 {
+    let deltas = value
+        .get("choices")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(|choice| choice.get("delta"));
+    let mut chars = 0;
+    for delta in deltas {
+        let reasoning = delta
+            .get("reasoning_content")
+            .or_else(|| delta.get("reasoning"));
+        let arguments = delta
+            .get("tool_calls")
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+            .filter_map(|call| call.pointer("/function/arguments"));
+        for text in [delta.get("content"), reasoning]
+            .into_iter()
+            .flatten()
+            .chain(arguments)
+            .filter_map(Value::as_str)
+        {
+            chars += text.chars().count() as i64;
+        }
+    }
+    chars
 }
 
 fn output_signals(value: &Value) -> (bool, bool) {
@@ -1835,7 +1883,7 @@ struct EstimatedUsage {
     usage_units: i64,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone, Copy)]
 struct ActualUsage {
     prompt_tokens: i64,
     completion_tokens: i64,
@@ -1984,6 +2032,61 @@ mod tests {
     use std::time::Duration;
     use tokio::net::TcpListener;
     use tower::ServiceExt;
+
+    #[test]
+    fn unreported_usage_charges_streamed_output_and_frees_empty_upstream_failures() {
+        let estimate = EstimatedUsage {
+            model: DEFAULT_MODEL.to_string(),
+            prompt_tokens: 150_000,
+            completion_tokens: 4096,
+            usage_units: usage_units(150_000, 4096, DEFAULT_MODEL),
+        };
+        // A client cancel before any output still pays for the input.
+        assert_eq!(
+            unreported_usage_units(&estimate, 0, false),
+            usage_units(150_000, 0, DEFAULT_MODEL)
+        );
+        assert_eq!(
+            unreported_usage_units(&estimate, 100, false),
+            usage_units(150_000, 100, DEFAULT_MODEL)
+        );
+        // Output beyond the reservation is never charged.
+        assert_eq!(
+            unreported_usage_units(&estimate, 10_000, false),
+            estimate.usage_units
+        );
+        assert_eq!(unreported_usage_units(&estimate, 0, true), 0);
+        assert_eq!(
+            unreported_usage_units(&estimate, 5, true),
+            usage_units(150_000, 5, DEFAULT_MODEL)
+        );
+    }
+
+    #[test]
+    fn delivered_completion_tokens_count_chunks_and_characters() {
+        let delivered = |chunks: &[Value]| {
+            let mut usage = StreamingUsageAccumulator::new(DEFAULT_MODEL.to_string());
+            for chunk in chunks {
+                usage.push(format!("data: {chunk}\n\n").as_bytes());
+            }
+            usage.delivered_completion_tokens()
+        };
+        let content = |text: &str| json!({"choices":[{"delta":{"content":text}}]});
+        assert_eq!(delivered(&[content("ok"), content("ok"), content("ok")]), 3);
+        // Speculative decoding: one chunk carrying several tokens of text.
+        assert_eq!(delivered(&[content(&"a".repeat(40))]), 10);
+        assert_eq!(
+            delivered(&[
+                json!({"choices":[{"delta":{"role":"assistant"}}]}),
+                json!({"choices":[{"delta":{"reasoning_content":"abcd","reasoning":"abcd"}}]}),
+                json!({"choices":[{"delta":{"tool_calls":[{"function":{"arguments":"{\"q\":1}"}}]}}]}),
+                json!({"choices":[],"usage":{"prompt_tokens":1,"completion_tokens":2}}),
+            ]),
+            // 11 characters in two chunks; `reasoning` duplicates
+            // `reasoning_content` and is not counted twice.
+            3
+        );
+    }
 
     #[test]
     fn stream_output_signals_require_payload() {
@@ -2636,7 +2739,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn upstream_first_byte_timeout_settles_estimate() {
+    async fn upstream_first_byte_timeout_settles_nothing() {
         let core = FakeCoreState::new("fpk_live_secret", 1_000_000);
         let core_url = spawn(fake_core_router(core.clone())).await;
         let upstream = FakeUpstreamState::new();
@@ -2664,7 +2767,43 @@ mod tests {
         assert_eq!(core.settle_calls.load(Ordering::SeqCst), 1);
         let settlements = core.settlements.lock().unwrap();
         assert_eq!(settlements[0]["settlement"], "estimate");
+        assert_eq!(settlements[0]["usageUnits"], 0);
         assert_eq!(settlements[0]["upstreamErrorClass"], "upstream_unavailable");
+    }
+
+    #[tokio::test]
+    async fn upstream_error_status_without_usage_settles_nothing() {
+        let core = FakeCoreState::new("fpk_live_secret", 1_000_000);
+        let core_url = spawn(fake_core_router(core.clone())).await;
+        let upstream = FakeUpstreamState::new();
+        upstream.error_status.store(500, Ordering::SeqCst);
+        let upstream_url = spawn(fake_upstream_router(upstream.clone())).await;
+        let limiter_url = spawn(app(test_config(core_url, upstream_url)).unwrap()).await;
+
+        let client = reqwest::Client::new();
+        for stream in [false, true] {
+            let response = client
+                .post(format!("{limiter_url}/v1/chat/completions"))
+                .bearer_auth("fpk_live_secret")
+                .json(&json!({
+                    "model": "glm-5-2",
+                    "stream": stream,
+                    "messages": [{ "role": "user", "content": "hello" }],
+                    "max_tokens": 64
+                }))
+                .send()
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
+            let _ = response.text().await.unwrap();
+        }
+        wait_for(|| core.settlements.lock().unwrap().len() == 2).await;
+        for settlement in core.settlements.lock().unwrap().iter() {
+            assert_eq!(settlement["settlement"], "estimate");
+            assert_eq!(settlement["usageUnits"], 0);
+            assert_eq!(settlement["upstreamStatus"], 500);
+            assert_eq!(settlement["upstreamErrorClass"], "upstream_error");
+        }
     }
 
     #[tokio::test]
@@ -2780,7 +2919,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn stream_idle_timeout_settles_estimate() {
+    async fn stream_idle_timeout_settles_streamed_output() {
         let core = FakeCoreState::new("fpk_live_secret", 1_000_000);
         let core_url = spawn(fake_core_router(core.clone())).await;
         let upstream = FakeUpstreamState::new();
@@ -2809,9 +2948,13 @@ mod tests {
         assert!(String::from_utf8_lossy(&first).contains("chatcmpl_stream"));
         let second = stream.next().await;
         assert!(second.is_some());
-        wait_for(|| core.settle_calls.load(Ordering::SeqCst) == 1).await;
+        wait_for(|| core.settlements.lock().unwrap().len() == 1).await;
         let settlements = core.settlements.lock().unwrap();
         assert_eq!(settlements[0]["settlement"], "estimate");
+        assert_eq!(
+            settlements[0]["usageUnits"],
+            usage_units(1, 1, DEFAULT_MODEL)
+        );
         assert_eq!(
             settlements[0]["upstreamErrorClass"],
             "upstream_stream_timeout"
@@ -2819,7 +2962,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn stream_client_disconnect_settles_estimate() {
+    async fn stream_client_disconnect_settles_streamed_output() {
         let core = FakeCoreState::new("fpk_live_secret", 1_000_000);
         let core_url = spawn(fake_core_router(core.clone())).await;
         let upstream = FakeUpstreamState::new();
@@ -2848,13 +2991,66 @@ mod tests {
         assert!(String::from_utf8_lossy(&first).contains("chatcmpl_stream"));
         drop(stream);
 
-        wait_for(|| core.settle_calls.load(Ordering::SeqCst) == 1).await;
+        wait_for(|| core.settlements.lock().unwrap().len() == 1).await;
         let settlements = core.settlements.lock().unwrap();
         assert_eq!(settlements[0]["settlement"], "estimate");
+        // Input "hello" plus one streamed token, far below the 64-token reservation.
+        assert_eq!(
+            settlements[0]["usageUnits"],
+            usage_units(1, 1, DEFAULT_MODEL)
+        );
+        assert!(usage_units(1, 1, DEFAULT_MODEL) < usage_units(1, 64, DEFAULT_MODEL));
         assert_eq!(
             settlements[0]["upstreamErrorClass"],
             "client_disconnected_or_stream_cancelled"
         );
+    }
+
+    #[tokio::test]
+    async fn client_disconnect_before_upstream_responds_still_settles() {
+        let core = FakeCoreState::new("fpk_live_secret", 1_000_000);
+        let core_url = spawn(fake_core_router(core.clone())).await;
+        let upstream = FakeUpstreamState::new();
+        upstream.delay_first_byte_ms.store(1_000, Ordering::SeqCst);
+        let upstream_url = spawn(fake_upstream_router(upstream.clone())).await;
+        let mut config = test_config(core_url, upstream_url);
+        config.upstream_first_byte_timeout = Duration::from_secs(10);
+        config.usage_api_timeout = Duration::from_secs(2);
+        let limiter_url = spawn(app(config).unwrap()).await;
+
+        // The client gives up while the upstream is still queueing or
+        // prefilling, before any response header reaches the limiter.
+        let client = reqwest::Client::builder()
+            .timeout(Duration::from_millis(200))
+            .build()
+            .unwrap();
+        for stream in [false, true] {
+            let result = client
+                .post(format!("{limiter_url}/v1/chat/completions"))
+                .bearer_auth("fpk_live_secret")
+                .json(&json!({
+                    "model": "glm-5-2",
+                    "stream": stream,
+                    "messages": [{ "role": "user", "content": "hello" }],
+                    "max_tokens": 64
+                }))
+                .send()
+                .await;
+            assert!(result.is_err());
+        }
+        sleep(Duration::from_millis(1_500)).await;
+        assert_eq!(core.reserve_calls.load(Ordering::SeqCst), 2);
+        let settlements = core.settlements.lock().unwrap().clone();
+        assert_eq!(settlements.len(), 2, "every reservation must settle");
+        for settlement in settlements {
+            assert_eq!(settlement["settlement"], "estimate");
+            assert_eq!(settlement["usageUnits"], usage_units(1, 0, DEFAULT_MODEL));
+            assert_eq!(
+                settlement["upstreamErrorClass"],
+                "client_disconnected_or_stream_cancelled"
+            );
+        }
+        assert_eq!(core.diagnostics.lock().unwrap().len(), 2);
     }
 
     #[tokio::test]
@@ -2964,6 +3160,10 @@ mod tests {
         );
         assert!(diagnostic["firstOutputMs"].is_null());
         assert!(diagnostic["completionTokens"].is_null());
+        assert_eq!(
+            core.settlements.lock().unwrap()[0]["usageUnits"],
+            usage_units(2, 0, DEFAULT_MODEL)
+        );
         let response = router
             .oneshot(
                 axum::http::Request::get("/metrics")
@@ -3326,6 +3526,7 @@ mod tests {
         delay_first_byte_ms: Arc<AtomicUsize>,
         stream_tail_delay_ms: Arc<AtomicUsize>,
         stream_hang_after_done: Arc<AtomicBool>,
+        error_status: Arc<AtomicUsize>,
     }
 
     impl FakeUpstreamState {
@@ -3337,6 +3538,7 @@ mod tests {
                 delay_first_byte_ms: Arc::new(AtomicUsize::new(0)),
                 stream_tail_delay_ms: Arc::new(AtomicUsize::new(0)),
                 stream_hang_after_done: Arc::new(AtomicBool::new(false)),
+                error_status: Arc::new(AtomicUsize::new(0)),
             }
         }
     }
@@ -3374,6 +3576,14 @@ mod tests {
         }
         state.calls.fetch_add(1, Ordering::SeqCst);
         state.bodies.lock().unwrap().push(body.clone());
+        let error_status = state.error_status.load(Ordering::SeqCst);
+        if error_status > 0 {
+            return (
+                StatusCode::from_u16(error_status as u16).unwrap(),
+                Json(json!({ "error": { "message": "synthetic upstream failure" } })),
+            )
+                .into_response();
+        }
         let request = serde_json::from_slice::<Value>(&body).unwrap_or(Value::Null);
         if request["stream"].as_bool().unwrap_or(false) {
             assert_eq!(request["stream_options"]["include_usage"], true);

@@ -3,6 +3,12 @@
 Read current deployment facts from these authorities. Git history retains past
 rollout narratives; outstanding work belongs in Linear.
 
+For production questions, check the checkout revision against current `main`
+and the deployed revision before using its documentation. Read `scripts/finite-status`
+on the app plane and relevant Runner hosts for current observations. An old
+worktree or an `UNKNOWN` result from an operator laptop does not establish
+production state.
+
 ## Where the facts live
 
 | Surface | Source of truth | How to read it |
