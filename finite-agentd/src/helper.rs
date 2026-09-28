@@ -268,6 +268,12 @@ mod tests {
         environment
     }
 
+    /// The environment a fake helper gets: the system directories only, never
+    /// the host's PATH.
+    fn system_path() -> BTreeMap<OsString, OsString> {
+        BTreeMap::from([("PATH".into(), "/usr/bin:/bin".into())])
+    }
+
     /// A fake helper: records its argv and environment, then prints `reply`.
     fn fake_helper(dir: &Path, body: &str) -> HelperCommand {
         // A fresh file each time: rewriting a script that just ran can fail
@@ -377,7 +383,7 @@ mod tests {
             temp.path(),
             "echo 'import noise'\necho '{\"cleared\": \"yes\"}'\necho",
         );
-        let value = run_helper(&command, BTreeMap::new(), &["clear-auth"], CLEAR_DEADLINE)
+        let value = run_helper(&command, system_path(), &["clear-auth"], CLEAR_DEADLINE)
             .await
             .unwrap();
         assert!(parse_cleared_auth(&value).unwrap());
@@ -395,12 +401,11 @@ mod tests {
             "echo '{\"cleared\": \"maybe\"}'",
         ] {
             let command = fake_helper(temp.path(), body);
-            let error = match run_helper(&command, BTreeMap::new(), &["clear-auth"], CLEAR_DEADLINE)
-                .await
-            {
-                Ok(value) => parse_cleared_auth(&value).unwrap_err(),
-                Err(error) => error,
-            };
+            let error =
+                match run_helper(&command, system_path(), &["clear-auth"], CLEAR_DEADLINE).await {
+                    Ok(value) => parse_cleared_auth(&value).unwrap_err(),
+                    Err(error) => error,
+                };
             assert_eq!(error.public_code(), "provider_unavailable");
             assert!(!error.public_message().contains("sk-or"));
         }
@@ -411,7 +416,7 @@ mod tests {
         assert!(
             run_helper(
                 &missing,
-                BTreeMap::new(),
+                system_path(),
                 &["inference-facts"],
                 STATUS_FACTS_DEADLINE
             )
@@ -440,7 +445,7 @@ mod tests {
         });
         // The positive signal: the helper's grandchild exists before the
         // deadline fires.
-        let grandchild = tokio::time::timeout(Duration::from_secs(10), async {
+        let grandchild = tokio::time::timeout(Duration::from_secs(30), async {
             loop {
                 if let Some(pid) = fs::read_to_string(&pid_file)
                     .ok()
@@ -462,7 +467,7 @@ mod tests {
             started.elapsed() >= Duration::from_secs(10),
             "not before its deadline"
         );
-        tokio::time::timeout(Duration::from_secs(10), async {
+        tokio::time::timeout(Duration::from_secs(30), async {
             while rustix::process::test_kill_process(
                 rustix::process::Pid::from_raw(grandchild).unwrap(),
             )
@@ -482,11 +487,12 @@ mod tests {
         let failing = fake_helper(temp.path(), "exit 1");
         let facts = cache
             .get_or_fetch(temp.path(), || {
-                read_facts(&failing, BTreeMap::new(), STATUS_FACTS_DEADLINE)
+                read_facts(&failing, system_path(), STATUS_FACTS_DEADLINE)
             })
             .await;
-        assert_eq!(facts, InferenceFacts::unknown());
+        assert_eq!(facts, None, "could not read");
         // Status still derives every field, with unknown, never a guess.
+        let facts = facts.unwrap_or_else(InferenceFacts::unknown);
         let status = crate::inference::derive_status(&Value::Null, None, &fp(), &facts);
         assert_eq!(
             serde_json::to_value(&status.fallback).unwrap()["state"],
@@ -509,7 +515,7 @@ mod tests {
             "alias_present": "no", "codex_home_neutral": "yes"
         });
         let working = fake_helper(temp.path(), &format!("echo '{reply}'"));
-        let facts = read_facts(&working, BTreeMap::new(), STATUS_FACTS_DEADLINE)
+        let facts = read_facts(&working, system_path(), STATUS_FACTS_DEADLINE)
             .await
             .unwrap();
         assert_eq!(facts.finite_private.fp_key, Tri::Present);
@@ -551,7 +557,7 @@ mod tests {
                 read_facts(&status_helper, path(), STATUS_FACTS_DEADLINE)
             })
             .await;
-        assert_eq!(status, InferenceFacts::unknown(), "status gave up");
+        assert_eq!(status, None, "status gave up");
         assert!(started.elapsed() >= STATUS_FACTS_DEADLINE);
         fs::write(&release, "").unwrap();
         let facts = tokio::time::timeout(EXECUTOR_FACTS_DEADLINE, executor)

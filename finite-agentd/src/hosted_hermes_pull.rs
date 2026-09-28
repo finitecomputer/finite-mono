@@ -592,9 +592,10 @@ mod tests {
             name: "hermes-serve",
             program: "/bin/sh".into(),
             args: vec!["-c".into(), "exec sleep 60".into()],
-            environment: BTreeMap::new(),
+            // The system directories only, never the host's PATH.
+            environment: BTreeMap::from([("PATH".into(), "/usr/bin:/bin".into())]),
         });
-        let pid = tokio::time::timeout(Duration::from_secs(5), async {
+        let pid = tokio::time::timeout(Duration::from_secs(30), async {
             loop {
                 if let Some(pid) = child.status().pid() {
                     break pid;

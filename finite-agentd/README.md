@@ -135,7 +135,8 @@ helper's environment.
 ## E-0 host harness
 
 `examples/inference_host_harness.rs` runs the real `finite-agentd serve` in a
-scratch home under `~/.finite-scratch/fin-129-130/e0/`. It sits behind a fake
+scratch home under the repository's git-ignored `.local-state/e0/`. It sits
+behind a fake
 Finite Chat bridge and serves an HWD-compatible `/v1/app/runtime-commands`
 endpoint on one loopback port.
 
@@ -149,9 +150,13 @@ endpoint on one loopback port.
   service.
 
 Run it from the repository root, inside the Nix dev shell (the launcher step
-needs coreutils `timeout`):
+needs coreutils `timeout`). It needs the patched Hermes environment in
+`.local-state/hermes-env`; build it there once (the out-link keeps it from
+garbage collection):
 
 ```sh
+nix build --out-link .local-state/hermes-env \
+  ".#packages.$(nix eval --impure --raw --expr builtins.currentSystem).hermes-agent-python"
 scripts/with-dev-env bash -c 'cargo build -p finite-agentd --bins --examples && \
   target/debug/examples/inference_host_harness smoke'
 ```
@@ -160,8 +165,7 @@ scripts/with-dev-env bash -c 'cargo build -p finite-agentd --bins --examples && 
 --port <port>` keeps the agent up for the dashboard:
 `FC_DESIGN_RUNTIME_COMMANDS_URL=http://127.0.0.1:<port> just dev web-design`.
 Ctrl-C stops agentd and everything it started. `--hermes-env` and `--agentd`
-override the patched env (`~/.finite-scratch/fin-129-130/hermes-env-patched`)
-and the agentd binary.
+override the patched env (`.local-state/hermes-env`) and the agentd binary.
 
 ## Optional hosted Hermes process
 

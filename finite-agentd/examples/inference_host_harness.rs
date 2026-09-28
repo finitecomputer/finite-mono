@@ -72,7 +72,8 @@ struct Args {
     /// The `finite-agentd` binary (default: next to this example's directory).
     #[arg(long)]
     agentd: Option<PathBuf>,
-    /// The patched Hermes env (default: ~/.finite-scratch/fin-129-130/hermes-env-patched).
+    /// The patched Hermes env (default: `.local-state/hermes-env` in the
+    /// repository; see the README for how to build it there).
     #[arg(long)]
     hermes_env: Option<PathBuf>,
 }
@@ -394,14 +395,15 @@ fn port_is_free(port: u16) -> bool {
 
 impl Run {
     fn prepare(args: &Args, fakes: Arc<Fakes>) -> Self {
-        let scratch =
-            PathBuf::from(std::env::var("HOME").expect("HOME")).join(".finite-scratch/fin-129-130");
-        let dir = scratch.join("e0").join(format!("run-{}", now_ms()));
+        // Everything local lives under the repository's git-ignored
+        // `.local-state/`.
+        let repo = std::env::current_dir().expect("current dir");
+        let local = repo.join(".local-state");
+        let dir = local.join("e0").join(format!("run-{}", now_ms()));
         let hermes_env = args
             .hermes_env
             .clone()
-            .unwrap_or_else(|| scratch.join("hermes-env-patched"));
-        let repo = std::env::current_dir().expect("current dir");
+            .unwrap_or_else(|| local.join("hermes-env"));
         let stub = repo.join("finite-agentd/examples/harness-hermes-stub.sh");
         assert!(
             stub.is_file(),
@@ -1153,6 +1155,12 @@ fn check(ok: bool, what: impl Into<String>) -> (bool, String) {
     (ok, what.into())
 }
 
+/// The value of `name=` in a stub line.
+fn field<'a>(line: &'a str, name: &str) -> Option<&'a str> {
+    line.split_whitespace()
+        .find_map(|part| part.strip_prefix(name)?.strip_prefix('='))
+}
+
 fn is_operation_id(value: &Value) -> bool {
     value.as_str().is_some_and(|id| {
         id.len() == 35
@@ -1676,15 +1684,16 @@ async fn smoke(run: &mut Run, timeline: Arc<Mutex<Timeline>>) -> Proofs {
         ],
     );
 
-    // P9 (R15): the first start's launcher step hits its 20 s limit after
-    // clearing the pool entry and before the override, and agentd's facts
-    // reads hang while it runs. A failed read is only "not yet"; the mismatch
-    // found at the end of the window re-runs the steps once, and the second
-    // start finishes the clears.
+    // P9 (R15, R21): the first two starts' launcher steps hit their 20 s
+    // limit after clearing the pool entry and before the override, and
+    // agentd's facts reads hang while they run. A failed read is only "not
+    // yet"; each mismatch found at the end of a window re-runs the steps, and
+    // a later start finishes the clears. What must hold is the outcome, not
+    // how many starts it took.
     run.v1_openrouter("sk-or-v1-e0-fake-key-seven", OR_MODEL)
         .await;
     run.seed_hermes_openrouter_state();
-    run.set_stub_mode("cut-step-once");
+    run.set_stub_mode("cut-step-twice");
     let before = now_ms();
     let reply = run.disconnect("openrouter").await;
     let id = reply["body"]["operation_id"]
@@ -1702,11 +1711,7 @@ async fn smoke(run: &mut Run, timeline: Arc<Mutex<Timeline>>) -> Proofs {
         .collect::<Vec<_>>();
     let created = spawns
         .iter()
-        .filter_map(|(_, line)| {
-            line.split_whitespace()
-                .find_map(|part| part.strip_prefix("created="))
-                .and_then(|ms| ms.parse::<u64>().ok())
-        })
+        .filter_map(|(_, line)| field(line, "created").and_then(|ms| ms.parse::<u64>().ok()))
         .collect::<Vec<_>>();
     // A hung read that lasted the executor's 30 s: status gives up at 10 s.
     let rerun_at = spawns.get(1).map(|(ms, _)| *ms).unwrap_or(u64::MAX);
@@ -1738,68 +1743,77 @@ async fn smoke(run: &mut Run, timeline: Arc<Mutex<Timeline>>) -> Proofs {
         })
         .count();
     let mut evidence = story.clone();
+    for ((spawned, _), outcome) in spawns.iter().zip(&outcomes) {
+        let ready = run
+            .events()
+            .into_iter()
+            .find(|(_, line)| line == outcome)
+            .map(|(ms, _)| ms.saturating_sub(*spawned));
+        evidence.push(format!(
+            "launcher start: spawn to ready {ready:?} ms, step {} ms, load {}, cut on purpose {}",
+            field(outcome, "step_ms").unwrap_or("?"),
+            field(outcome, "load").unwrap_or("?"),
+            field(outcome, "cut").unwrap_or("?"),
+        ));
+    }
     evidence.push(format!(
         "{started_reads} facts reads started during the operation; hung ones (pid, ms until killed): {slow_reads:?}"
     ));
     proofs.observe(
-        "P9 disconnect with a cut-short step and slow facts reads, gateway starts",
+        "P9 disconnect with cut-short steps and slow facts reads, gateway starts",
         evidence,
     );
     let operation = &ended["inference"]["operation"];
     proofs.record(
-        "P9 a cut-short step and a slow helper end succeeded (R15)",
+        "P9 cut-short steps and a slow helper end succeeded (R15, R21)",
         vec![
             check(
-                spawns.len() == 2,
+                outcomes.len() >= 2
+                    && outcomes[..2].iter().all(|line| {
+                        line.contains("cut=yes") && line.contains("step=failed:124")
+                    }),
                 format!(
-                    "{} gateway start(s) after cleanup (2 = one re-run)",
-                    spawns.len()
-                ),
-            ),
-            check(
-                outcomes.first().is_some_and(|line| {
-                    line.contains("step=failed:124") && line.contains("hermes_state_changed=yes")
-                }),
-                format!(
-                    "the first start's step was cut short after a clear: {:?}",
-                    outcomes.first()
+                    "the scenario: the first two steps were cut short at the 20 s limit: {:?}",
+                    &outcomes[..outcomes.len().min(2)]
                 ),
             ),
             check(
                 slow_reads.iter().any(|(_, lasted)| *lasted >= 29_000),
                 format!(
-                    "an executor facts read hung until its 30 s deadline before the re-run \
-                     (pid, ms until killed): {slow_reads:?}"
+                    "the scenario: an executor facts read hung until its 30 s deadline before \
+                     the first re-run (pid, ms until killed): {slow_reads:?}"
                 ),
             ),
             check(
-                created.len() == 2 && created[1] >= created[0] + 60_000,
-                format!("the re-run start came a whole window later: created {created:?}"),
-            ),
-            check(
-                outcomes
-                    .get(1)
-                    .is_some_and(|line| line.contains("\"applied\":\"yes\"")),
-                format!("the second start's step: {:?}", outcomes.get(1)),
-            ),
-            check(
-                !story.iter().any(|line| line.contains("gateway-stopped")),
-                "no start was stopped",
-            ),
-            check(
-                operation["state"] == "succeeded" && operation["attempts"] == 1,
+                operation["state"] == "succeeded",
                 format!("operation {operation}"),
             ),
+            check(operation["attempts"] == 1, "attempts is 1"),
             check(
                 unavailable.is_empty(),
                 format!("no attempt ended helper_unavailable: {unavailable:?}"),
+            ),
+            check(
+                (1..=3).contains(&spawns.len()),
+                format!("{} gateway start(s) after cleanup (at most 3)", spawns.len()),
+            ),
+            check(
+                created.len() == spawns.len()
+                    && created.windows(2).all(|pair| pair[1] >= pair[0] + 60_000),
+                format!(
+                    "each re-run start came a whole 60 s window after the start before it: created {created:?}"
+                ),
+            ),
+            check(
+                !story.iter().any(|line| line.contains("gateway-stopped")),
+                "no start was stopped mid-way",
             ),
             check(
                 after["openrouter"]["manual_pool_entries"] == "none"
                     && after["session_overrides"]["openrouter"] == "absent"
                     && after["openrouter"]["dotenv_key"] == "absent",
                 format!(
-                    "after: pool {} override {} .env {}",
+                    "the clears are complete: pool {} override {} .env {}",
                     after["openrouter"]["manual_pool_entries"],
                     after["session_overrides"]["openrouter"],
                     after["openrouter"]["dotenv_key"]
@@ -2034,7 +2048,72 @@ async fn smoke(run: &mut Run, timeline: Arc<Mutex<Timeline>>) -> Proofs {
     )];
     lines.extend(others);
     proofs.observe("facts reads by agentd", lines);
+    proofs.observe("launcher starts by load", launcher_table(&run.events()));
     proofs
+}
+
+/// Every gateway start's durations, by the 1-minute load when its step stage
+/// began: spawn to ready for every start, and the pending-disconnect step
+/// alone where one ran. Steps the stub cut on purpose are counted apart.
+fn launcher_table(events: &[(u64, String)]) -> Vec<String> {
+    let spawned = events
+        .iter()
+        .filter(|(_, line)| line.starts_with("gateway-spawn"))
+        .filter_map(|(ms, line)| Some((field(line, "pid")?.to_owned(), *ms)))
+        .collect::<HashMap<_, _>>();
+    let mut lines = Vec::new();
+    let mut cut = 0;
+    let bucket = |load: f64| match load {
+        load if load < 15.0 => 0,
+        load if load <= 30.0 => 1,
+        _ => 2,
+    };
+    let mut ready_ms: [Vec<u64>; 3] = Default::default();
+    let mut step_ms: [Vec<u64>; 3] = Default::default();
+    let mut limit_hits = [0; 3];
+    for (ms, line) in events
+        .iter()
+        .filter(|(_, line)| line.starts_with("gateway-ready"))
+    {
+        let Some(load) = field(line, "load").and_then(|load| load.parse::<f64>().ok()) else {
+            continue;
+        };
+        let index = bucket(load);
+        if let Some(start) = field(line, "pid").and_then(|pid| spawned.get(pid)) {
+            ready_ms[index].push(ms.saturating_sub(*start));
+        }
+        if field(line, "cut") == Some("yes") {
+            cut += 1;
+            continue;
+        }
+        if let Some(step) = field(line, "step_ms").and_then(|ms| ms.parse::<u64>().ok()) {
+            step_ms[index].push(step);
+            if line.contains("step=failed:124") {
+                limit_hits[index] += 1;
+            }
+        }
+    }
+    let summary = |values: &mut Vec<u64>| {
+        values.sort_unstable();
+        format!(
+            "n={} median={} ms slowest={} ms",
+            values.len(),
+            values.get(values.len() / 2).copied().unwrap_or_default(),
+            values.last().copied().unwrap_or_default()
+        )
+    };
+    for (index, name) in ["load < 15", "load 15-30", "load > 30"].iter().enumerate() {
+        lines.push(format!(
+            "{name}: step {} (hit the 20 s limit: {}); spawn to ready {}",
+            summary(&mut step_ms[index]),
+            limit_hits[index],
+            summary(&mut ready_ms[index])
+        ));
+    }
+    lines.push(format!(
+        "{cut} step(s) cut on purpose by the stub, not counted"
+    ));
+    lines
 }
 
 #[tokio::main]

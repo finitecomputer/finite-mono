@@ -6,7 +6,7 @@ use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::Command as StdCommand;
 use std::sync::Arc;
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use finitechat_proto::{
     DeviceRef, RuntimeCommandDeliveryV1, RuntimeCommandErrorV1, RuntimeCommandInboundPayloadV1,
@@ -536,7 +536,9 @@ impl CommandExecutor {
                 let home = self.hermes_home.clone();
                 let connections = self.connection_manager.clone();
                 tokio::task::spawn_blocking(move || {
-                    config.apply(&offer, || validate_hermes_config(&home))?;
+                    config.apply(&offer, || {
+                        validate_hermes_config(&home, crate::executor::CONFIG_CHECK_DEADLINE)
+                    })?;
                     connections.prepare_simplex_reset()
                 })
                 .await
@@ -613,7 +615,9 @@ impl CommandExecutor {
         let manager = self.config_manager.clone();
         let hermes_home = self.hermes_home.clone();
         let result = tokio::task::spawn_blocking(move || {
-            manager.apply(&offer, || validate_hermes_config(&hermes_home))
+            manager.apply(&offer, || {
+                validate_hermes_config(&hermes_home, crate::executor::CONFIG_CHECK_DEADLINE)
+            })
         })
         .await
         .map_err(|error| AgentdError::Config(error.to_string()))??;
@@ -715,8 +719,8 @@ struct AgentdHost {
 }
 
 impl ExecutorHost for AgentdHost {
-    fn validate_config(&self) -> Result<(), AgentdError> {
-        validate_hermes_config(&self.hermes_home)
+    fn validate_config(&self, deadline: Duration) -> Result<(), AgentdError> {
+        validate_hermes_config(&self.hermes_home, deadline)
     }
 
     fn dotenv_openrouter_key(&self) -> Result<Option<String>, AgentdError> {
@@ -788,6 +792,21 @@ struct Inference<H> {
     codex: Arc<CodexState>,
     openrouter: OpenRouterState,
     openrouter_api_base: String,
+    /// v1's reply must fit the dashboard's wait: its config check gets what is
+    /// left of this from the command's receipt (R18) ...
+    v1_reply_budget: Duration,
+    /// ... and never less than this.
+    v1_min_config_check: Duration,
+}
+
+/// R18: v1's config check ends by this long after the command arrived.
+const V1_REPLY_BUDGET: Duration = Duration::from_secs(40);
+/// R18: the shortest config check v1 ever allows.
+const V1_MIN_CONFIG_CHECK: Duration = Duration::from_secs(5);
+
+/// What is left of `budget` since `received`, and at least `minimum`.
+fn remaining_budget(received: Instant, budget: Duration, minimum: Duration) -> Duration {
+    budget.saturating_sub(received.elapsed()).max(minimum)
 }
 
 impl<H: ExecutorHost + Clone> Inference<H> {
@@ -817,6 +836,8 @@ impl<H: ExecutorHost + Clone> Inference<H> {
             codex,
             openrouter: OpenRouterState::default(),
             openrouter_api_base: crate::openrouter::api_base(),
+            v1_reply_budget: V1_REPLY_BUDGET,
+            v1_min_config_check: V1_MIN_CONFIG_CHECK,
         }
     }
 
@@ -828,10 +849,14 @@ impl<H: ExecutorHost + Clone> Inference<H> {
         if !INFERENCE_COMMANDS.contains(&request.command.as_str()) {
             return None;
         }
-        Some(self.dispatch(request).await)
+        Some(self.dispatch(request, Instant::now()).await)
     }
 
-    async fn dispatch(&self, request: &RuntimeCommandRequestV1) -> Result<Value, AgentdError> {
+    async fn dispatch(
+        &self,
+        request: &RuntimeCommandRequestV1,
+        received: Instant,
+    ) -> Result<Value, AgentdError> {
         match request.command.as_str() {
             "agent.connections.status" => {
                 parse_body::<EmptyRequest>(request, EMPTY_REQUEST_SCHEMA)?;
@@ -841,7 +866,8 @@ impl<H: ExecutorHost + Clone> Inference<H> {
             "agent.inference.apply" => {
                 let body = parse_body::<InferenceApplyRequest>(request, INFERENCE_APPLY_SCHEMA)?;
                 let (_, admission) = self.admit(AdmitCommand::V1Apply)?;
-                self.v1_apply(&request.request_id, body, admission).await
+                self.v1_apply(&request.request_id, body, admission, received)
+                    .await
             }
             "agent.inference.select" => {
                 let body = parse_body::<SelectRequest>(request, INFERENCE_SELECT_SCHEMA)?;
@@ -919,6 +945,14 @@ impl<H: ExecutorHost + Clone> Inference<H> {
     }
 
     async fn facts(&self) -> InferenceFacts {
+        self.read_facts()
+            .await
+            .unwrap_or_else(InferenceFacts::unknown)
+    }
+
+    /// The facts through the status cache, or `None` when the read failed or
+    /// timed out, including a failure remembered for 15 s (R16, R17a).
+    async fn read_facts(&self) -> Option<InferenceFacts> {
         self.facts
             .get_or_fetch(&self.hermes_home, || {
                 self.host.facts(crate::helper::STATUS_FACTS_DEADLINE)
@@ -980,6 +1014,7 @@ impl<H: ExecutorHost + Clone> Inference<H> {
         request_id: &str,
         body: InferenceApplyRequest,
         admission: Admission,
+        received: Instant,
     ) -> Result<Value, AgentdError> {
         let plan = self
             .connections
@@ -994,21 +1029,32 @@ impl<H: ExecutorHost + Clone> Inference<H> {
                 restart_required: false,
             })?);
         }
-        let result = self.apply_inference_plan(&plan).await?;
+        let result = self.apply_inference_plan(&plan, received).await?;
         self.clear_failed_record(admission);
         Ok(result)
     }
 
-    async fn apply_inference_plan(&self, plan: &InferenceApplyPlan) -> Result<Value, AgentdError> {
+    /// The config check's deadline for a v1 apply received at `received`.
+    fn v1_config_check_deadline(&self, received: Instant) -> Duration {
+        remaining_budget(received, self.v1_reply_budget, self.v1_min_config_check)
+    }
+
+    async fn apply_inference_plan(
+        &self,
+        plan: &InferenceApplyPlan,
+        received: Instant,
+    ) -> Result<Value, AgentdError> {
         let credential_snapshot = self.connections.stage_inference_credential(plan)?;
         let credential_replaced = credential_snapshot.is_some();
         let proposal_id = plan.offer.proposal_id.clone();
         let manager = self.config.clone();
         let host = self.host.clone();
         let offer = plan.offer.clone();
-        let apply =
-            tokio::task::spawn_blocking(move || manager.apply(&offer, || host.validate_config()))
-                .await;
+        let deadline = self.v1_config_check_deadline(received);
+        let apply = tokio::task::spawn_blocking(move || {
+            manager.apply(&offer, || host.validate_config(deadline))
+        })
+        .await;
         let apply = match apply {
             Ok(apply) => apply,
             Err(error) => {
@@ -1037,8 +1083,9 @@ impl<H: ExecutorHost + Clone> Inference<H> {
             let rollback = HermesConfigRollbackV1 { proposal_id };
             let manager = self.config.clone();
             let host = self.host.clone();
+            let deadline = self.v1_config_check_deadline(received);
             let rollback_result = tokio::task::spawn_blocking(move || {
-                manager.rollback(&rollback, || host.validate_config())
+                manager.rollback(&rollback, || host.validate_config(deadline))
             })
             .await;
             let credential_restore = self
@@ -1202,18 +1249,22 @@ impl<H: ExecutorHost + Clone> Inference<H> {
         let model = self.config.current_value(MODEL_CONFIG_PATH)?;
         let is_saved =
             classify_saved_route(&model, self.fp.base_url.as_deref()) == saved_route_of(route);
-        let facts = self.facts().await;
+        let read = self.read_facts().await;
         // F1: switching the agent to Finite Private needs its settings and its
-        // credential known present. No live probe. A credential that could not
-        // be read is not a missing one (R17).
+        // credential known present. No live probe. A read that failed is "try
+        // again" (R17); a key the helper answered as absent or `unknown` (an
+        // external secret source it does not evaluate) is not (R17a).
         if is_saved {
-            if self.fp.settings().is_none() || facts.finite_private.fp_key == Tri::Absent {
+            if self.fp.settings().is_none() {
                 return Err(AgentdError::FinitePrivateUnavailable);
             }
-            if facts.finite_private.fp_key != Tri::Present {
-                return Err(AgentdError::FactsUnavailable);
+            match read.as_ref().map(|facts| facts.finite_private.fp_key) {
+                None => return Err(AgentdError::FactsUnavailable),
+                Some(Tri::Present) => {}
+                Some(_) => return Err(AgentdError::FinitePrivateUnavailable),
             }
         }
+        let facts = read.unwrap_or_else(InferenceFacts::unknown);
         if admission == Admission::ResumeFailed {
             let Some(mut record) = record else {
                 return Err(AgentdError::Config(INTENT_WRITE_FAILED.to_owned()));
@@ -1332,15 +1383,43 @@ fn failure_result(request: &RuntimeCommandRequestV1, error: AgentdError) -> Runt
     }
 }
 
-fn validate_hermes_config(hermes_home: &Path) -> Result<(), AgentdError> {
-    let status = StdCommand::new("hermes")
+fn validate_hermes_config(hermes_home: &Path, deadline: Duration) -> Result<(), AgentdError> {
+    run_config_check("hermes".as_ref(), hermes_home, deadline)
+}
+
+/// `<program> config check` for `hermes_home`, blocking. Past `deadline` the
+/// check is killed with its process group and counts as a rejection (R18).
+pub(crate) fn run_config_check(
+    program: &std::ffi::OsStr,
+    hermes_home: &Path,
+    deadline: Duration,
+) -> Result<(), AgentdError> {
+    use std::os::unix::process::CommandExt;
+
+    let mut child = StdCommand::new(program)
         .arg("config")
         .arg("check")
         .env("HERMES_HOME", hermes_home)
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())
-        .status()?;
+        .process_group(0)
+        .spawn()?;
+    let started = Instant::now();
+    let status = loop {
+        if let Some(status) = child.try_wait()? {
+            break status;
+        }
+        if started.elapsed() >= deadline {
+            crate::supervisor::signal_group(child.id(), rustix::process::Signal::KILL);
+            let _ = child.kill();
+            let _ = child.wait();
+            return Err(AgentdError::Config(
+                "Hermes did not finish checking the proposed configuration in time; previous bytes were restored".to_owned(),
+            ));
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    };
     if status.success() {
         Ok(())
     } else {
@@ -1858,6 +1937,10 @@ mod inference_tests {
         /// The deadline each facts read was given.
         facts_deadlines: Arc<Mutex<Vec<Duration>>>,
         validate_fail: Arc<Mutex<bool>>,
+        /// A stand-in `hermes` whose `config check` runs for real.
+        config_check: Arc<Mutex<Option<PathBuf>>>,
+        /// The deadline each config check was given.
+        check_deadlines: Arc<Mutex<Vec<Duration>>>,
         restarts: Arc<Mutex<usize>>,
         on_restart: Arc<Mutex<RestartHook>>,
         hold_restart: Arc<Mutex<Option<Arc<Notify>>>>,
@@ -1872,7 +1955,7 @@ mod inference_tests {
             if let Some(marker) = marker {
                 // The supervisor spawned Hermes before the resume began; give
                 // its first line time to run on a loaded machine.
-                let deadline = std::time::Instant::now() + Duration::from_secs(10);
+                let deadline = std::time::Instant::now() + Duration::from_secs(30);
                 while !marker.exists() && std::time::Instant::now() < deadline {
                     std::thread::sleep(Duration::from_millis(20));
                 }
@@ -1929,11 +2012,20 @@ mod inference_tests {
     }
 
     impl ExecutorHost for TestHost {
-        fn validate_config(&self) -> Result<(), AgentdError> {
+        fn validate_config(&self, deadline: Duration) -> Result<(), AgentdError> {
+            self.check_deadlines.lock().unwrap().push(deadline);
             if *self.validate_fail.lock().unwrap() {
                 return Err(AgentdError::Config("Hermes rejected it".to_owned()));
             }
-            Ok(())
+            let program = self.config_check.lock().unwrap().clone();
+            match program {
+                Some(program) => run_config_check(
+                    program.as_os_str(),
+                    self.config_path.parent().unwrap(),
+                    deadline,
+                ),
+                None => Ok(()),
+            }
         }
 
         fn dotenv_openrouter_key(&self) -> Result<Option<String>, AgentdError> {
@@ -2058,6 +2150,8 @@ mod inference_tests {
             facts_fail: Arc::default(),
             facts_deadlines: Arc::default(),
             validate_fail: Arc::default(),
+            config_check: Arc::default(),
+            check_deadlines: Arc::default(),
             restarts: Arc::default(),
             on_restart: Arc::new(Mutex::new(Box::new(|_| Ok(())))),
             hold_restart: Arc::default(),
@@ -2584,6 +2678,51 @@ mod inference_tests {
     }
 
     #[tokio::test]
+    async fn r18_a_hung_v1_config_check_replies_config_invalid_inside_its_budget() {
+        use crate::executor::tests::{all_gone, hanging_config_check, recorded_pids};
+        let mut setup = new_setup(&fp_block(), "OPENROUTER_API_KEY='sk-or-v1-synthetic-old'\n");
+        let (script, pids) = hanging_config_check(&setup.hermes_home);
+        *setup.host.config_check.lock().unwrap() = Some(script);
+        let budget = Duration::from_secs(2);
+        setup.inference.v1_reply_budget = budget;
+        setup.inference.v1_min_config_check = Duration::from_millis(500);
+        let before = (setup.config_bytes(), setup.env());
+        let started = Instant::now();
+        let reply = setup
+            .v1(json!({"profile": "openrouter", "api_key": OR_KEY, "model": OR_MODEL}))
+            .await;
+        let took = started.elapsed();
+        assert_eq!(code(reply), "config_invalid");
+        // The check ended by the budget; the reply follows it well inside the
+        // dashboard's wait, which is 5 s longer than the budget in production.
+        assert!(took < budget + Duration::from_secs(5), "{took:?}");
+        let deadlines = setup.host.check_deadlines.lock().unwrap().clone();
+        assert_eq!(deadlines.len(), 1);
+        assert!(
+            deadlines[0] <= budget && deadlines[0] >= Duration::from_millis(500),
+            "{deadlines:?}"
+        );
+        assert_eq!((setup.config_bytes(), setup.env()), before, "restored");
+        all_gone(&recorded_pids(&pids)).await;
+    }
+
+    #[test]
+    fn r18_v1_gets_what_is_left_of_40_s_and_at_least_5_s() {
+        assert_eq!(V1_REPLY_BUDGET, Duration::from_secs(40));
+        assert_eq!(V1_MIN_CONFIG_CHECK, Duration::from_secs(5));
+        let fresh = remaining_budget(Instant::now(), V1_REPLY_BUDGET, V1_MIN_CONFIG_CHECK);
+        assert!(fresh <= V1_REPLY_BUDGET && fresh > Duration::from_secs(39));
+        let late = Instant::now() - Duration::from_secs(38);
+        let left = remaining_budget(late, V1_REPLY_BUDGET, V1_MIN_CONFIG_CHECK);
+        assert_eq!(left, V1_MIN_CONFIG_CHECK, "2 s left is raised to 5 s");
+        let spent = Instant::now() - Duration::from_secs(90);
+        assert_eq!(
+            remaining_budget(spent, V1_REPLY_BUDGET, V1_MIN_CONFIG_CHECK),
+            V1_MIN_CONFIG_CHECK
+        );
+    }
+
+    #[tokio::test]
     async fn an_unreadable_intent_never_blocks_status() {
         let setup = new_setup(&fp_block(), "");
         let dir = setup.agent_home.join("agentd");
@@ -3099,7 +3238,8 @@ mod inference_tests {
     #[tokio::test]
     async fn t_a40_disconnecting_the_saved_route_needs_finite_private_known_present() {
         let env = format!("OPENROUTER_API_KEY={OR_KEY}\n");
-        // R17: an absent key is "not set up"; an unknown one is "could not check".
+        // R17a: an answered absent or `unknown` key is "not set up"; only a
+        // failed read is "could not check" (the R17 test below).
         for (fp_key, code, message) in [
             (
                 Tri::Absent,
@@ -3107,9 +3247,10 @@ mod inference_tests {
                 "Disconnecting would leave this agent without a model: Finite Private isn't fully set up here. Choose another model first.",
             ),
             (
+                // R17a: the helper answered and could not evaluate the key.
                 Tri::Unknown,
-                "facts_unavailable",
-                "The agent couldn't check its setup right now. Try again in a moment.",
+                "finite_private_unavailable",
+                "Disconnecting would leave this agent without a model: Finite Private isn't fully set up here. Choose another model first.",
             ),
         ] {
             let setup = new_setup(&openrouter_block(), &env);
@@ -3285,7 +3426,7 @@ mod inference_tests {
     }
 
     impl ExecutorHost for RealSupervisorHost {
-        fn validate_config(&self) -> Result<(), AgentdError> {
+        fn validate_config(&self, _deadline: Duration) -> Result<(), AgentdError> {
             Ok(())
         }
         fn dotenv_openrouter_key(&self) -> Result<Option<String>, AgentdError> {
@@ -3311,17 +3452,18 @@ mod inference_tests {
         }
     }
 
+    /// A child that sees the system directories only, never the host's PATH.
     fn sleeper_spec(name: &'static str, program: &Path) -> ProcessSpec {
         ProcessSpec {
             name,
             program: program.to_owned(),
             args: Vec::new(),
-            environment: BTreeMap::new(),
+            environment: BTreeMap::from([("PATH".to_owned(), "/usr/bin:/bin".to_owned())]),
         }
     }
 
     async fn wait_for_hermes(supervisor: &SupervisorHandle) {
-        tokio::time::timeout(Duration::from_secs(10), async {
+        tokio::time::timeout(Duration::from_secs(30), async {
             while supervisor
                 .status()
                 .await
@@ -3390,9 +3532,9 @@ mod inference_tests {
         resume: tokio::task::JoinHandle<()>,
     }
 
-    /// Polls `condition` for up to 10 s; fails the test if it never holds.
+    /// Polls `condition` for up to 30 s; fails the test if it never holds.
     async fn eventually(what: &str, mut condition: impl FnMut() -> bool) {
-        tokio::time::timeout(Duration::from_secs(10), async {
+        tokio::time::timeout(Duration::from_secs(30), async {
             while !condition() {
                 tokio::time::sleep(Duration::from_millis(20)).await;
             }

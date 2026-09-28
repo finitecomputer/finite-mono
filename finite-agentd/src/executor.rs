@@ -41,14 +41,19 @@ const MAX_REAPPLIES: usize = 2;
 /// polls every `VERIFY_DELAY` within this window and restarts nothing; a read
 /// that fails in it is only "not yet" (R15b).
 const LAUNCHER_WAIT: Duration = Duration::from_secs(60);
+/// R18: how long `hermes config check` may take before it is killed and the
+/// attempt is `config_invalid`.
+pub(crate) const CONFIG_CHECK_DEADLINE: Duration = Duration::from_secs(60);
 /// How long status shows a succeeded operation after its record is deleted.
 const RESULT_TTL: Duration = Duration::from_secs(10 * 60);
 
 /// What the executor needs from the rest of agentd. `.env` handling belongs to
 /// `connections.rs`; restarts to the supervisor and `hosted_hermes.rs`.
-pub(crate) trait ExecutorHost: Send + Sync + 'static {
-    /// `hermes config check` after a config write.
-    fn validate_config(&self) -> Result<(), AgentdError>;
+pub(crate) trait ExecutorHost: Clone + Send + Sync + 'static {
+    /// `hermes config check` after a config write, killed with its process
+    /// group at `deadline` (R18). Blocking: callers run it off the async
+    /// workers.
+    fn validate_config(&self, deadline: Duration) -> Result<(), AgentdError>;
     /// The value of the last `OPENROUTER_API_KEY` line in `.env`, if any.
     fn dotenv_openrouter_key(&self) -> Result<Option<String>, AgentdError>;
     /// §3.6 background step 1: copy a legacy `model.api_key` into `.env` when
@@ -119,6 +124,7 @@ pub(crate) struct Executor<H> {
     backoff: [Duration; 3],
     verify_delay: Duration,
     launcher_wait: Duration,
+    config_check_deadline: Duration,
     last: std::sync::Mutex<Option<(OperationStatus, Instant)>>,
     running: tokio::sync::Mutex<()>,
 }
@@ -138,6 +144,7 @@ impl<H: ExecutorHost> Executor<H> {
             backoff: BACKOFF,
             verify_delay: VERIFY_DELAY,
             launcher_wait: LAUNCHER_WAIT,
+            config_check_deadline: CONFIG_CHECK_DEADLINE,
             last: std::sync::Mutex::new(None),
             running: tokio::sync::Mutex::new(()),
         }
@@ -263,7 +270,9 @@ impl<H: ExecutorHost> Executor<H> {
         for phase in self.remaining(record) {
             self.enter(record, phase)?;
             match phase {
-                IntentPhase::ConfigWritten => written = self.write_select(record, &planned)?,
+                IntentPhase::ConfigWritten => {
+                    written = self.write_select(record, &planned).await?;
+                }
                 IntentPhase::Restarting => {
                     if self.host.restart_gateway().await.is_err() {
                         return Err(self.restore_after_spawn_failure(written.as_ref()).await);
@@ -280,7 +289,7 @@ impl<H: ExecutorHost> Executor<H> {
                             return Err(Failure::CONFIG_CONFLICT);
                         }
                         reapplies += 1;
-                        self.write_select(record, &planned)?;
+                        self.write_select(record, &planned).await?;
                         self.host.restart_gateway().await?;
                     }
                 }
@@ -290,7 +299,7 @@ impl<H: ExecutorHost> Executor<H> {
         Ok(())
     }
 
-    fn write_select(
+    async fn write_select(
         &self,
         record: &IntentRecord,
         planned: &Value,
@@ -298,13 +307,26 @@ impl<H: ExecutorHost> Executor<H> {
         if record.route == IntentRoute::Openrouter {
             self.host.migrate_legacy_openrouter_key()?;
         }
-        match self
-            .config
-            .write_model(planned, || self.host.validate_config())?
-        {
+        match self.write_model(planned).await? {
             ModelWrite::Written(written) => Ok(Some(written)),
             ModelWrite::Unchanged => Ok(None),
         }
+    }
+
+    /// Writes the `model` block, validated by `hermes config check` on a
+    /// blocking thread and within `config_check_deadline` (R18). A check that
+    /// fails or times out restores the previous bytes and is `config_invalid`.
+    async fn write_model(&self, planned: &Value) -> Result<ModelWrite, Failure> {
+        let config = self.config.clone();
+        let host = self.host.clone();
+        let planned = planned.clone();
+        let deadline = self.config_check_deadline;
+        tokio::task::spawn_blocking(move || {
+            config.write_model(&planned, || host.validate_config(deadline))
+        })
+        .await
+        .map_err(|_| Failure::CONFIG_INVALID)?
+        .map_err(Failure::from)
     }
 
     /// §3.10: after a spawn failure, restore the bytes this run wrote (only if
@@ -354,7 +376,7 @@ impl<H: ExecutorHost> Executor<H> {
                         self.host.cancel_codex_login().await?;
                     }
                 }
-                IntentPhase::RouteSwitched => self.switch_route_away(route)?,
+                IntentPhase::RouteSwitched => self.switch_route_away(route).await?,
                 IntentPhase::CredentialRemoved => self.remove_credential(route)?,
                 IntentPhase::Cleanup => self.cleanup_restart().await?,
                 IntentPhase::Verifying => {
@@ -366,7 +388,7 @@ impl<H: ExecutorHost> Executor<H> {
                         reruns += 1;
                         // Steps 2–5 again; the phase stays `verifying`, so the
                         // launcher still applies its clears on this restart.
-                        self.switch_route_away(route)?;
+                        self.switch_route_away(route).await?;
                         self.remove_credential(route)?;
                         self.cleanup_restart().await?;
                     }
@@ -379,13 +401,12 @@ impl<H: ExecutorHost> Executor<H> {
 
     /// §3.7 step 2: if the saved default is the route being removed, write the
     /// Finite Private block and confirm the switch by re-reading.
-    fn switch_route_away(&self, route: IntentRoute) -> Result<(), Failure> {
+    async fn switch_route_away(&self, route: IntentRoute) -> Result<(), Failure> {
         if self.saved_route()? != saved_route_of(route) {
             return Ok(());
         }
         let planned = plan_model_block(IntentRoute::FinitePrivate, None, &self.fp)?;
-        self.config
-            .write_model(&planned, || self.host.validate_config())?;
+        self.write_model(&planned).await?;
         if self.saved_route()? == saved_route_of(route) {
             return Err(Failure::CONFIG_CONFLICT);
         }
@@ -516,7 +537,7 @@ fn now_ms() -> u64 {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use std::fs;
     use std::path::Path;
     use std::sync::{Arc, Mutex};
@@ -585,6 +606,10 @@ mod tests {
         /// pool entry and before clearing the override.
         cut_short_steps: Mutex<usize>,
         restart_times: Mutex<Vec<Instant>>,
+        /// A stand-in `hermes` whose `config check` the fake runs for real.
+        config_check: Mutex<Option<PathBuf>>,
+        /// The deadline each config check was given.
+        check_deadlines: Mutex<Vec<Duration>>,
     }
 
     impl Fake {
@@ -645,9 +670,16 @@ mod tests {
     }
 
     impl ExecutorHost for Arc<Fake> {
-        fn validate_config(&self) -> Result<(), AgentdError> {
+        fn validate_config(&self, deadline: Duration) -> Result<(), AgentdError> {
             self.record(Event::Validate(self.phase()));
-            Ok(())
+            self.check_deadlines.lock().unwrap().push(deadline);
+            let program = self.config_check.lock().unwrap().clone();
+            match program {
+                Some(program) => {
+                    crate::daemon::run_config_check(program.as_os_str(), &self.home, deadline)
+                }
+                None => Ok(()),
+            }
         }
 
         fn dotenv_openrouter_key(&self) -> Result<Option<String>, AgentdError> {
@@ -840,6 +872,8 @@ mod tests {
             unknown_polls: Mutex::new(0),
             cut_short_steps: Mutex::new(0),
             restart_times: Mutex::new(Vec::new()),
+            config_check: Mutex::new(None),
+            check_deadlines: Mutex::new(Vec::new()),
             failed_reads: Mutex::new(0),
             reads: Mutex::new(Vec::new()),
             hermes: Mutex::new(HermesSide {
@@ -1143,6 +1177,91 @@ mod tests {
             .map(|(failed, _)| failed)
             .collect::<Vec<_>>();
         assert_eq!(reads, [true, true, false, false], "cleared and confirmed");
+    }
+
+    /// A stand-in `hermes` whose `config check` hangs. It uses absolute paths
+    /// only, and appends "<its pid> <its sleeping child's pid>" to `pids`.
+    pub(crate) fn hanging_config_check(dir: &Path) -> (PathBuf, PathBuf) {
+        use std::os::unix::fs::PermissionsExt;
+        let script = dir.join("hanging-hermes");
+        let pids = dir.join("config-check.pids");
+        fs::write(
+            &script,
+            format!(
+                "#!/bin/sh\nPATH=/usr/bin:/bin\n/bin/sleep 600 &\necho \"$$ $!\" >> '{}'\nwait\n",
+                pids.display()
+            ),
+        )
+        .unwrap();
+        fs::set_permissions(&script, fs::Permissions::from_mode(0o755)).unwrap();
+        (script, pids)
+    }
+
+    /// Every pid the stand-in recorded, from complete lines only.
+    pub(crate) fn recorded_pids(pids: &Path) -> Vec<i32> {
+        let text = fs::read_to_string(pids).unwrap_or_default();
+        text.split_inclusive('\n')
+            .filter(|line| line.ends_with('\n'))
+            .flat_map(|line| line.split_whitespace())
+            .filter_map(|pid| pid.parse().ok())
+            .collect()
+    }
+
+    /// Polls (bounded, 30 s) until every pid is gone.
+    pub(crate) async fn all_gone(pids: &[i32]) {
+        tokio::time::timeout(Duration::from_secs(30), async {
+            while pids.iter().any(|pid| {
+                rustix::process::test_kill_process(rustix::process::Pid::from_raw(*pid).unwrap())
+                    .is_ok()
+            }) {
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        })
+        .await
+        .unwrap_or_else(|_| panic!("a hung config check outlived its deadline: {pids:?}"));
+    }
+
+    #[tokio::test]
+    async fn r18_a_hung_config_check_is_config_invalid_and_retried() {
+        let mut setup = new_setup(&fp_block(), "OPENROUTER_API_KEY=sk-or-v1-synthetic\n");
+        let (script, pids) = hanging_config_check(&setup.fake.home);
+        *setup.fake.config_check.lock().unwrap() = Some(script);
+        let deadline = Duration::from_secs(1);
+        setup.executor.config_check_deadline = deadline;
+        let before = fs::read(setup.fake.config_path()).unwrap();
+        arm(
+            &setup,
+            IntentKind::Select,
+            IntentRoute::Openrouter,
+            Some(OPENROUTER_MODEL),
+        );
+        let started = Instant::now();
+        setup.executor.run().await;
+        let failed = record_now(&setup).unwrap();
+        assert_eq!(failed.state, IntentState::Failed);
+        assert_eq!(failed.error_code.as_deref(), Some("config_invalid"));
+        assert_eq!(failed.attempts, 3, "the bounded retry ran");
+        assert_eq!(*setup.fake.check_deadlines.lock().unwrap(), [deadline; 3]);
+        assert!(
+            started.elapsed() >= deadline * 3,
+            "each check ran to its deadline"
+        );
+        assert_eq!(
+            fs::read(setup.fake.config_path()).unwrap(),
+            before,
+            "restored"
+        );
+        assert_eq!(gateway_restarts(&setup.fake.events()), 0);
+        // Each hung check and its sleeping child were killed with the group.
+        // A check killed before its script got to record is killed all the
+        // same; the ones that recorded prove it.
+        let recorded = recorded_pids(&pids);
+        assert!(
+            recorded.len() >= 2 && recorded.len().is_multiple_of(2),
+            "{recorded:?}"
+        );
+        all_gone(&recorded).await;
+        assert_eq!(CONFIG_CHECK_DEADLINE, Duration::from_secs(60));
     }
 
     fn failed_record(setup: &Setup, kind: IntentKind, phase: IntentPhase) -> Vec<u8> {
@@ -1719,14 +1838,15 @@ mod tests {
     async fn a_spawn_that_really_fails_goes_through_the_real_supervisor() {
         use crate::supervisor::{ProcessSpec, SupervisorHandle, start_supervisor};
 
+        #[derive(Clone)]
         struct Real {
             fake: Arc<Fake>,
             supervisor: SupervisorHandle,
             program: PathBuf,
         }
         impl ExecutorHost for Real {
-            fn validate_config(&self) -> Result<(), AgentdError> {
-                self.fake.validate_config()
+            fn validate_config(&self, deadline: Duration) -> Result<(), AgentdError> {
+                self.fake.validate_config(deadline)
             }
             fn dotenv_openrouter_key(&self) -> Result<Option<String>, AgentdError> {
                 self.fake.dotenv_openrouter_key()
@@ -1760,7 +1880,11 @@ mod tests {
             name,
             program: program.to_owned(),
             args: Vec::new(),
-            environment: std::collections::BTreeMap::new(),
+            // The system directories only, never the host's PATH.
+            environment: std::collections::BTreeMap::from([(
+                "PATH".to_owned(),
+                "/usr/bin:/bin".to_owned(),
+            )]),
         };
 
         let setup = new_setup(&fp_block(), "OPENROUTER_API_KEY=sk-or-v1-synthetic\n");
@@ -1772,7 +1896,7 @@ mod tests {
             sleeper("hermes", &program),
             None,
         );
-        tokio::time::timeout(Duration::from_secs(10), async {
+        tokio::time::timeout(Duration::from_secs(30), async {
             while supervisor
                 .status()
                 .await

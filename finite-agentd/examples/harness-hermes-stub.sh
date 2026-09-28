@@ -14,10 +14,13 @@
 # `gateway-stopped` with the stage it was in when a restart stopped it. The
 # optional "$E0_RUN_DIR/stub-mode" file selects a behavior: `readd-env-key` (a
 # stale writer), `slow-step` (the pending-disconnect step starts 15 s late, as
-# a slow start would), or `cut-step-once` (the first start that runs the step
-# hits the launcher's 20 s limit after clearing the pool entry and before the
-# conversation override, and agentd's facts reads hang while it runs, as on a
-# machine at load 30; later starts run the step as usual).
+# a slow start would), or `cut-step-twice` (the first two starts that run the
+# step hit the launcher's 20 s limit after clearing the pool entry and before
+# the conversation override, and agentd's facts reads hang while they run, as
+# on a machine at load 30; later starts run the step as usual). A
+# `gateway-ready` line also carries `load` (the 1-minute load average when the
+# step stage began), `step_ms` (the step alone, `none` without an intent) and
+# `cut` (whether this stub cut the step on purpose).
 set -euo pipefail
 
 : "${E0_REPO:?E0_REPO is required}"
@@ -152,6 +155,10 @@ stage="step"
 phase="none"
 step="none"
 state_changed="no"
+step_ms="none"
+cut="no"
+load="$(sysctl -n vm.loadavg 2>/dev/null | awk '{print $2}' || true)"
+load="${load:-$(cut -d' ' -f1 /proc/loadavg 2>/dev/null || echo none)}"
 intent_path="${FINITE_AGENTD_INTENT_PATH:-}"
 mode="$(cat "$E0_RUN_DIR/stub-mode" 2>/dev/null || echo none)"
 if [[ -n "$intent_path" && -f "$intent_path" ]]; then
@@ -161,8 +168,11 @@ if [[ -n "$intent_path" && -f "$intent_path" ]]; then
     phase="$(intent_state)"
     before="$(state_digest)"
     step_command=(-m hermes_cli.finite_inference_helper)
-    if [[ "$mode" == "cut-step-once" && ! -e "$E0_RUN_DIR/cut-step-used" ]]; then
-        touch "$E0_RUN_DIR/cut-step-used" "$E0_RUN_DIR/facts-slow"
+    cuts="$(cat "$E0_RUN_DIR/cut-steps" 2>/dev/null || echo 0)"
+    if [[ "$mode" == "cut-step-twice" && "$cuts" -lt 2 ]]; then
+        echo "$((cuts + 1))" > "$E0_RUN_DIR/cut-steps"
+        touch "$E0_RUN_DIR/facts-slow"
+        cut="yes"
         # The helper's own step, delayed between its two clears.
         step_command=(-c 'import sys, time
 from hermes_cli import finite_inference_helper as helper
@@ -170,10 +180,12 @@ clear = helper.clear_session_overrides
 helper.clear_session_overrides = lambda providers: (time.sleep(60), clear(providers))[1]
 sys.exit(helper.main(sys.argv[1:]))')
     fi
+    step_started="$(now_ms)"
     status=0
     step="$(run_with_config_environment \
         timeout -k 5 20 python "${step_command[@]}" \
         apply-pending-disconnect --intent "$intent_path" </dev/null 2>/dev/null)" || status=$?
+    step_ms="$(( $(now_ms) - step_started ))"
     rm -f "$E0_RUN_DIR/facts-slow"
     if [[ "$status" -ne 0 ]]; then
         step="failed:$status"
@@ -190,5 +202,5 @@ if [[ "$mode" == "readd-env-key" ]]; then
 fi
 
 trap - TERM
-echo "$(now_ms) gateway-ready pid=$$ intent=$phase step=$step hermes_state_changed=$state_changed mode=$mode" >> "$events"
+echo "$(now_ms) gateway-ready pid=$$ intent=$phase step=$step hermes_state_changed=$state_changed mode=$mode step_ms=$step_ms load=$load cut=$cut" >> "$events"
 exec sleep 1000000

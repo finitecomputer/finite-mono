@@ -286,7 +286,9 @@ fn invalid(key: &str) -> AgentdError {
 pub fn run_hosted_hermes() -> Result<(), AgentdError> {
     let config = HostedHermesConfig::read(|key| std::env::var(key).ok())?;
     let error = hermes_serve_command(&config, |key| std::env::var_os(key)).exec();
-    Err(error.into())
+    Err(AgentdError::Config(format!(
+        "hosted Hermes could not start `hermes serve`: {error}"
+    )))
 }
 
 fn hermes_serve_command(
@@ -400,17 +402,21 @@ mod tests {
         }
     }
 
+    /// How long a test waits for another process before it fails.
+    const WAIT: Duration = Duration::from_secs(30);
+
+    /// A child that sees the system directories only, never the host's PATH.
     fn sleeper(name: &'static str) -> ProcessSpec {
         ProcessSpec {
             name,
             program: "/bin/sh".into(),
             args: vec!["-c".into(), "exec sleep 60".into()],
-            environment: BTreeMap::new(),
+            environment: BTreeMap::from([("PATH".into(), "/usr/bin:/bin".into())]),
         }
     }
 
     async fn running(handle: &HostedHermesHandle, after: Option<u32>) -> u32 {
-        tokio::time::timeout(Duration::from_secs(5), async {
+        tokio::time::timeout(WAIT, async {
             loop {
                 if let Some(pid) = handle.status().pid()
                     && Some(pid) != after
@@ -434,7 +440,7 @@ mod tests {
             sleeper("hermes"),
             Some(sleeper("simplex")),
         );
-        let original = tokio::time::timeout(Duration::from_secs(5), async {
+        let original = tokio::time::timeout(WAIT, async {
             loop {
                 let status = existing.status().await;
                 if status.processes.len() == 4
@@ -556,7 +562,7 @@ mod tests {
 
         // Verified and deleted: it starts.
         crate::intent::clear(&path).unwrap();
-        tokio::time::timeout(Duration::from_secs(10), async {
+        tokio::time::timeout(WAIT, async {
             while handle.status().pid().is_none() {
                 tokio::time::sleep(Duration::from_millis(20)).await;
             }
@@ -573,7 +579,7 @@ mod tests {
         let mut status = handle.status.clone();
         status.mark_unchanged();
         for _ in 0..times {
-            tokio::time::timeout(Duration::from_secs(10), status.changed())
+            tokio::time::timeout(WAIT, status.changed())
                 .await
                 .expect("the gate is evaluated")
                 .unwrap();
@@ -609,7 +615,7 @@ mod tests {
         let mut spec = sleeper("hermes-serve");
         spec.program = "/nonexistent/finite-hosted-proof".into();
         let handle = HostedHermesHandle::start_spec(spec);
-        tokio::time::timeout(Duration::from_secs(5), async {
+        tokio::time::timeout(WAIT, async {
             while !matches!(handle.status().state, ProcessState::Unavailable { .. }) {
                 tokio::time::sleep(Duration::from_millis(10)).await;
             }

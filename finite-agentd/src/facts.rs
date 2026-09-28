@@ -185,9 +185,10 @@ struct CachedFacts {
 }
 
 /// Caches helper facts keyed on the stats of the files they come from, with a
-/// TTL. A failed fetch serves `unknown` facts, and so does every call for
-/// `FAILED_READ_MEMORY` after it, without starting a helper (R16). The
-/// executor never reads through this cache.
+/// TTL. A failed fetch answers `None`, and so does every call for
+/// `FAILED_READ_MEMORY` after it, without starting a helper (R16). `None` is
+/// "could not read", which R17a keeps apart from facts the helper answered as
+/// `unknown`. The executor never reads through this cache.
 #[derive(Default)]
 pub(crate) struct FactsCache {
     entry: Mutex<Option<CachedFacts>>,
@@ -195,7 +196,11 @@ pub(crate) struct FactsCache {
 }
 
 impl FactsCache {
-    pub(crate) async fn get_or_fetch<F, Fut>(&self, hermes_home: &Path, fetch: F) -> InferenceFacts
+    pub(crate) async fn get_or_fetch<F, Fut>(
+        &self,
+        hermes_home: &Path,
+        fetch: F,
+    ) -> Option<InferenceFacts>
     where
         F: FnOnce() -> Fut,
         Fut: Future<Output = Result<InferenceFacts, AgentdError>>,
@@ -212,7 +217,7 @@ impl FactsCache {
         hermes_home: &Path,
         clock: impl Fn() -> Instant,
         fetch: F,
-    ) -> InferenceFacts
+    ) -> Option<InferenceFacts>
     where
         F: FnOnce() -> Fut,
         Fut: Future<Output = Result<InferenceFacts, AgentdError>>,
@@ -221,11 +226,11 @@ impl FactsCache {
         if lock(&self.failed_at)
             .is_some_and(|failed_at| now.saturating_duration_since(failed_at) < FAILED_READ_MEMORY)
         {
-            return InferenceFacts::unknown();
+            return None;
         }
         let stamps = file_stamps(hermes_home);
         if let Some(facts) = self.lookup(&stamps, now) {
-            return facts;
+            return Some(facts);
         }
         let result = fetch().await;
         let mut entry = lock(&self.entry);
@@ -240,12 +245,12 @@ impl FactsCache {
                     facts: facts.clone(),
                 });
                 *failed_at = None;
-                facts
+                Some(facts)
             }
             Err(_) => {
                 *entry = None;
                 *failed_at = Some(clock());
-                InferenceFacts::unknown()
+                None
             }
         }
     }
@@ -365,8 +370,8 @@ mod tests {
         facts
     }
 
-    fn label(facts: &InferenceFacts) -> Option<&str> {
-        facts.openrouter.hermes_key_fingerprint.as_deref()
+    fn label(facts: &Option<InferenceFacts>) -> Option<&str> {
+        facts.as_ref()?.openrouter.hermes_key_fingerprint.as_deref()
     }
 
     #[tokio::test]
@@ -430,7 +435,7 @@ mod tests {
             async { Err(AgentdError::ProviderUnavailable("helper failed".to_owned())) }
         };
         let failed = cache.get_or_fetch_at(home, || clock.get(), hang).await;
-        assert_eq!(failed, InferenceFacts::unknown());
+        assert_eq!(failed, None, "could not read");
         assert_eq!(calls.get(), 1);
         let failed_at = start + Duration::from_secs(10);
 
@@ -444,7 +449,7 @@ mod tests {
         ] {
             clock.set(failed_at + after);
             let remembered = cache.get_or_fetch_at(home, || clock.get(), hang).await;
-            assert_eq!(remembered, InferenceFacts::unknown(), "{after:?}");
+            assert_eq!(remembered, None, "{after:?}");
         }
         assert_eq!(
             calls.get(),
@@ -503,5 +508,23 @@ mod tests {
             .await;
         assert_eq!(label(&expired), Some("later"));
         assert_eq!(calls.get(), 3);
+    }
+
+    #[tokio::test]
+    async fn r17a_an_answered_unknown_is_not_a_failed_read() {
+        let temp = tempfile::tempdir().unwrap();
+        let cache = FactsCache::default();
+        // The helper answered, and could not evaluate the key (for example
+        // because `.op.env` exists): the facts are there, holding `unknown`.
+        let answered = cache
+            .get_or_fetch(temp.path(), || async { Ok(InferenceFacts::unknown()) })
+            .await;
+        assert_eq!(answered, Some(InferenceFacts::unknown()));
+        let failed = FactsCache::default()
+            .get_or_fetch(temp.path(), || async {
+                Err(AgentdError::ProviderUnavailable("helper failed".to_owned()))
+            })
+            .await;
+        assert_eq!(failed, None);
     }
 }
