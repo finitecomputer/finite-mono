@@ -302,7 +302,7 @@ export function backupLine(view: InferenceView) {
     const base =
       view.saved.route === "finite_private"
         ? "Finite Private backup is configured for conversations that use another model."
-        : `Finite Private backup is configured. If ${routeLabel(view.saved.route)} returns an error, Finite Private answers and the chat says so.`;
+        : `Finite Private backup is configured. If ${routeLabel(view.saved.route)} returns an error, Finite Private answers.`;
     return fallback.extraEntries > 0 ? `${base} Your other backup models are tried after it.` : base;
   }
   const reason = fallback.reason ? BACKUP_REASON_COPY[fallback.reason] : undefined;

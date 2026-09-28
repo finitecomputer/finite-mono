@@ -133,10 +133,10 @@ function panel(status: ReturnType<typeof parseConnectionsStatus> | null) {
 
 test("T-W10: every backup line, and only a configured backup says Finite Private answers", () => {
   const cases: Array<[Inference, string]> = [
-    [{ saved: SAVED_OR }, "Finite Private backup is configured. If OpenRouter returns an error, Finite Private answers and the chat says so."],
-    [{ saved: SAVED_CODEX }, "Finite Private backup is configured. If ChatGPT returns an error, Finite Private answers and the chat says so."],
+    [{ saved: SAVED_OR }, "Finite Private backup is configured. If OpenRouter returns an error, Finite Private answers."],
+    [{ saved: SAVED_CODEX }, "Finite Private backup is configured. If ChatGPT returns an error, Finite Private answers."],
     [{}, "Finite Private backup is configured for conversations that use another model."],
-    [{ saved: SAVED_OR, fallback: fallback("configured", null, 2) }, "Finite Private backup is configured. If OpenRouter returns an error, Finite Private answers and the chat says so. Your other backup models are tried after it."],
+    [{ saved: SAVED_OR, fallback: fallback("configured", null, 2) }, "Finite Private backup is configured. If OpenRouter returns an error, Finite Private answers. Your other backup models are tried after it."],
     [{ fallback: fallback("configured", null, 1) }, "Finite Private backup is configured for conversations that use another model. Your other backup models are tried after it."],
     [{ fallback: fallback("unavailable", "settings_missing") }, "Finite Private can't step in right now: Finite Private isn't set up on this agent."],
     [{ fallback: fallback("unavailable", "credential_missing") }, "Finite Private can't step in right now: this agent has no Finite Private credential."],
@@ -710,5 +710,8 @@ test("F3/F6: no rendered string claims a saved key or backup works, is ready, va
   for (const entry of rendered) {
     const scrubbed = allowed.reduce((value, sentence) => value.replaceAll(sentence, ""), entry);
     assert.doesNotMatch(scrubbed, /\b(works|working|ready|valid|active)\b|isn't in use|is not in use|not in use/iu, entry);
+    // R13: under V18 and R4 the chat doesn't always send a notice. Slice V18-P removes this check when it
+    // restores "and the chat says so" to the backup line.
+    assert.doesNotMatch(entry, /the chat says so/iu, entry);
   }
 });

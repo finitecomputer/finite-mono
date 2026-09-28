@@ -2168,7 +2168,7 @@ test("Connections inference flows", { timeout: 300_000 }, async () => {
       await expectTestIdText(page, "inference-operation-line", "Done.");
       await expectTestIdText(page, "inference-summary", "New conversations use OpenRouter · openai/gpt-5-mini.");
       await expectTestIdText(page, "inference-backup-line",
-        "Finite Private backup is configured. If OpenRouter returns an error, Finite Private answers and the chat says so.");
+        "Finite Private backup is configured. If OpenRouter returns an error, Finite Private answers.");
       assert.equal(commandCount("agent.inference.select"), 2);
 
       // T-W23: disconnect through the dialog; it fails, and Try again resumes the same operation.
