@@ -177,10 +177,15 @@ Runtime. Such a control would target the source binding while target compute
 may run.
 
 Before a relocation reaches a terminal state that reopens source controls, the
-target Runner stops or removes target compute and proves shutdown from the
-durable tree: no running record binds it, nobody holds the chat store's writer
-lease, and the tree is unchanged over an observation window. A missing provider
-record is not proof. It records a failure only after that proof. The Runner
+target Runner removes the compute the request started, by the container and
+sandbox identity it recorded before provider work, and positively proves it
+gone: containerd has no container for that id, no process belongs to the
+sandbox by cgroup, containerd bundle or Kata runtime directory, and no process
+has the durable tree mounted or open. A missing record, an unreadable tree or
+procfs, a quiet tree, or any failed observation leaves the hold in place;
+durable-tree evidence can only refuse. It records a failure only after that
+proof. After an ambiguous completion it stops and keeps the target and records
+nothing, because a kept container is not proof. The Runner
 never starts a stopped target itself; a relocation whose completion committed is
 brought back by an ordinary typed restart through Core. Core cannot verify the
 Runner's proof, and a Runner from before this contract does not make it. A

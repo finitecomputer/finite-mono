@@ -206,6 +206,7 @@ async fn exact_relocation_cancel_checks_the_binding_and_releases_only_with_attes
             assert_eq!(view["runner_id"], "runner-oslo-1");
             assert_eq!(view["status"], "cancelled");
             assert_eq!(view["lease_held"], true, "{view}");
+            assert_eq!(view["released_on_attestation"], false, "{view}");
             assert!(view["lease_expires_at"].is_string(), "{view}");
             assert!(
                 !view.to_string().contains(lease),
@@ -263,6 +264,8 @@ async fn exact_relocation_cancel_checks_the_binding_and_releases_only_with_attes
         );
         assert_eq!(released["status"], "cancelled");
         assert_eq!(released["lease_held"], false, "{released}");
+        // Core did not verify the release; the output says so.
+        assert_eq!(released["released_on_attestation"], true, "{released}");
         let accepted = owner_stop(&db, &fixture).await;
         assert!(accepted.is_none(), "{accepted:?}");
     })

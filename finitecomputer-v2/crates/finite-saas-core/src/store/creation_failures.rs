@@ -32,9 +32,13 @@ impl CoreStore {
     ) -> CoreResult<RelocationCancelOutcome> {
         let mut client = self.connection().await?;
         let tx = client.transaction().await.map_err(store_error)?;
-        let result = postgres_cancel_relocation_exact(&*tx, input).await?;
+        let (request, released_on_attestation) =
+            postgres_cancel_relocation_exact(&*tx, input).await?;
         self.finish(tx).await?;
-        Ok(result.into())
+        Ok(RelocationCancelOutcome {
+            released_on_attestation,
+            ..request.into()
+        })
     }
 }
 
@@ -213,10 +217,11 @@ where
     agent_creation_request_from_row(&row)
 }
 
+/// Returns the request and whether a held lease was released on attestation.
 async fn postgres_cancel_relocation_exact<C: GenericClient + Sync>(
     client: &C,
     input: CancelRelocationExactInput,
-) -> CoreResult<AgentCreationRequest> {
+) -> CoreResult<(AgentCreationRequest, bool)> {
     let now = input.now.unwrap_or(current_time_iso()?);
     let request = locked_agent_creation_request(client, &input.relocation_request_id).await?;
     if request.relocation.is_none()
@@ -228,14 +233,15 @@ async fn postgres_cancel_relocation_exact<C: GenericClient + Sync>(
     }
     match request.status {
         AgentCreationRequestStatus::Requested | AgentCreationRequestStatus::Launching => {
-            postgres_cancel_agent_creation_request(
+            let cancelled = postgres_cancel_agent_creation_request(
                 client,
                 CancelAgentCreationRequestInput {
                     request_id: request.id,
                     now: Some(now),
                 },
             )
-            .await
+            .await?;
+            Ok((cancelled, false))
         }
         AgentCreationRequestStatus::Cancelled if request.lease_token.is_some() => {
             let expired: bool = client
@@ -256,7 +262,10 @@ async fn postgres_cancel_relocation_exact<C: GenericClient + Sync>(
                 );
                 return Err(CoreError::AgentCreationRequestNotCancellable);
             }
-            release_relocation_lease(client, &request.id, &now).await
+            Ok((
+                release_relocation_lease(client, &request.id, &now).await?,
+                true,
+            ))
         }
         _ => Err(CoreError::AgentCreationRequestNotCancellable),
     }

@@ -259,19 +259,26 @@ record no secret values.
 
 ## ROLLBACK
 
-Before Core switches the binding, the target Runner removes target compute (or
-stops it when removal fails) and then proves shutdown from the durable tree
-before it records a failure: no running container record binds the tree, nobody
-holds the chat store's writer lease, and the tree does not change during the
-observation window. A missing provider record alone is not proof. When shutdown
-is unproved the Runner records nothing and prints
-`relocation_target_shutdown_unproved`; the request keeps refusing source
-controls. For a `launching` request the Runner's next cycle after the lease
-expires tries again. A cancelled or running request is never leased again, so
-there the recovery is an operator step (see RECONCILE). A `failed` request is
-still not proof that compute is absent: removal can fail after the stop, and a
-stopped container remains. The proof also cannot see an orphan that neither
-holds the lease nor writes during the window. Core keeps the existing Runtime/link and both durable trees.
+Before Core switches the binding, the target Runner records failure only after
+it positively proves that every compute this relocation request started is
+gone. It keeps a relocation attempt record at
+`<work-root>/kata-metadata/<machine>/relocation-attempt-<request-id>.json`,
+written before any provider work: the lease, whether provider work started, and
+each started container's id with the host signals that saw it alive at launch.
+Never delete it while the relocation is unresolved. To end an attempt the
+Runner removes the recorded containers by id and requires all of this:
+containerd has no container for each id; no process on the host is in that
+sandbox's cgroup, works in its containerd bundle, or holds its Kata runtime or
+shared directories; and no process in any mount namespace has the durable tree
+mounted or open. A launch-time observation must have seen that sandbox alive,
+so a host whose signals cannot see sandboxes never proves anything. A running
+record binding the tree, a live writer lease, a changing tree, or a missing
+tree only add reasons to refuse. Any observation that fails is unknown and
+keeps the hold. When shutdown is unproved the Runner records nothing and prints
+`relocation_target_shutdown_unproved`, and the request keeps refusing source
+controls. A `launching` request is tried again after its lease expires; a
+cancelled or running one is never leased again and needs FENCE THE TARGET.
+Core keeps the existing Runtime/link and both durable trees.
 Verify compute on the target host rather than assuming cleanup succeeded. A booted
 target may have changed the staged manifest even when Core rejected the final
 registration. Preserve that tree under a request-specific, non-canonical name,
@@ -280,15 +287,13 @@ diagnosing the failure.
 
 If the Runner cannot tell whether Core committed completion (the response was
 lost, Core or its proxy returned a 5xx, or the body was unreadable), it stops
-the target first and then records the failure under its lease:
-
-- Core accepts the record: the relocation failed, and the Runner removes the
-  stopped target.
-- Core refuses it or does not answer: the Runner leaves the target stopped and
-  prints `completion_unconfirmed`. A refusal usually means completion committed.
-  The Runner never starts compute on its own; a committed relocation is brought
-  back with an ordinary typed restart, which goes through Core's current
-  binding and exclusion checks.
+the target, keeps it, records nothing, and prints `completion_unconfirmed`. A
+kept container is not proof that the target is down, so the hold stays. If
+completion committed, the Runner never starts compute on its own: bring it back
+with an ordinary typed restart, which goes through Core's current binding and
+exclusion checks. If it did not commit, the request is still `launching`: after
+its lease expires the target Runner leases it again, removes the earlier
+container by its recorded id, proves the target gone, and records the failure.
 
 For `completion_unconfirmed` or `relocation_target_shutdown_unproved`, follow
 RECONCILE ONE RELOCATION REQUEST before touching either side.
@@ -317,29 +322,63 @@ If the target modified durable state and cannot be stopped cleanly, fail closed.
 Preserve both sides and restore the named pre-move Borg archive to an empty
 recovery target rather than guessing which tree is canonical.
 
-## PROVE TARGET SHUTDOWN ON THE HOST
+## FENCE THE TARGET
 
-Core cannot check target compute. When a step below asks you to prove target
-shutdown, collect all of this on the target host and keep it with the incident
-record:
+Use this when the Runner reports `relocation_target_shutdown_unproved` and no
+Runner will retry, or before releasing a held cancelled relocation. Core cannot
+check target compute, so a release is only as good as the fence. There are two
+supported fences, and both end compute in a way you can check afterwards.
 
-```sh
-timeout 15 nerdctl --namespace finite inspect '<SOURCE_MACHINE_ID>'; echo "exit: $?"
-# required: "no such object", or a status that is not running
-timeout 15 ctr -n finite tasks list | grep -c '<SOURCE_MACHINE_ID>'
-# required: 0
-pgrep -af 'containerd-shim-kata|qemu|virtiofsd' | grep -F '<durable-state-id>'
-# required: no output
-test ! -e '<target-work-root>/kata/<durable-state-id>/agent/client.sqlite3.writer-lease' ||
-  sudo flock -n -E 75 '<target-work-root>/kata/<durable-state-id>/agent/client.sqlite3.writer-lease' true
-echo "exit: $?"
-# required: 0 (75 means a live process holds the writer lease)
-```
+**Stop late Runner cycles first.** On the target host,
+`systemctl stop finite-saas-runner` and confirm it is inactive, so no paused or
+delayed cycle can act while you work.
 
-A timeout or error proves nothing. An unreachable host is not a stopped host:
-if the target host cannot be reached, fence it outside Finite (power it off
-through the provider console or cut its network) so that neither compute nor a
-delayed Runner cycle can resume, and record how.
+**Fence 1: end the exact sandbox by identity.**
+
+1. Read the attempt record. Each `compute[].container_id` is also the Kata
+   sandbox id:
+
+   ```sh
+   sudo cat '<work-root>/kata-metadata/<SOURCE_MACHINE_ID>/relocation-attempt-<request-id>.json'
+   ```
+
+2. For each recorded id, remove the container and check the exit status of
+   every command (a timeout or error proves nothing):
+
+   ```sh
+   sudo nerdctl --namespace finite rm --force '<container-id>'; echo "exit: $?"
+   ```
+
+3. Run the Runner's own proof, with the Runner service environment loaded and
+   without printing it. Take `<runner-bin>` and `<runner-env-file>` from
+   `systemctl cat finite-saas-runner.service` (on lat3, lat4 and lat5 the file
+   is `/etc/finite/runner.env`):
+
+   ```sh
+   sudo sh -c '
+     set -a
+     . <runner-env-file>
+     set +a
+     exec <runner-bin> relocation-target-proof \
+       --record "<work-root>/kata-metadata/<SOURCE_MACHINE_ID>/relocation-attempt-<request-id>.json"
+   '; echo "exit: $?"
+   ```
+
+   It exits 0 and prints `"proved": true` only when every observation above
+   holds. Otherwise it prints the reason, such as a process still in the
+   sandbox cgroup or holding its runtime directory. End that exact process by
+   its pid from the proof's evidence, not by searching command lines, and run
+   the proof again. Repeat until it proves.
+
+**Fence 2: take the target host down.** Power it off through the provider
+console and confirm the console shows it off. Every guest on it ends. Before
+the host serves again, keep `finite-saas-runner` disabled, boot it, remove every
+recorded container by id as in fence 1 (a container left behind can be
+restarted by its restart policy), and run the proof command until it proves.
+
+**Not a fence:** cutting network access, stopping only the Runner service, or
+an empty search of process command lines. None of these ends a guest, and a
+guest reconnected later runs beside the restarted source.
 
 ## CANCEL A RELOCATION
 
@@ -384,13 +423,11 @@ audit record of its own: the incident record is the audit trail.
   it crashes first, nothing retries: a cancelled request is never leased again,
   and the lease stays held until the next case below.
 - **The lease is still held after it expired** (the target Runner is gone,
-  printed `relocation_target_shutdown_unproved`, or crashed). Stop the target
-  Runner service (`systemctl stop finite-saas-runner`) or fence the host so no
-  late cycle can act. Stop any running target compute, then PROVE TARGET
-  SHUTDOWN ON THE HOST. Only then run the exact command again with
+  printed `relocation_target_shutdown_unproved`, or crashed). Complete FENCE THE
+  TARGET. Only then run the exact command again with
   `--confirm-target-compute-stopped`, first with `--dry-run`. Core releases the
   lease only after it has expired and only with that attestation, which Core
-  cannot verify.
+  cannot verify; the output says so with `"released_on_attestation": true`.
 
 The service route `POST /api/core/v1/agent-creation-requests/<id>/cancel`
 (header `authorization: Bearer $FC_CORE_API_TOKEN`, body `{}`) applies the same
@@ -442,12 +479,12 @@ Check that `runner_id` is the target Runner that printed the outcome, and that
 |---|---|---|
 | `running`; `bound_host` is the target; the successor is bound, activated and not revoked, or there is no successor row for an unenrolled Agent | Core committed this relocation. The target is the Agent. | If the target is stopped, start it with an ordinary typed restart (owner restart or admin restart), which goes through Core's current binding and exclusion checks. If the Runner reported `relocation_target_shutdown_unproved`, the target may still be running as the Agent, which is correct: continue with VERIFY. |
 | `running` with a successor that is missing, unbound, revoked or inactive while the Agent is enrolled | Inconsistent state | Change nothing. Preserve both trees and escalate. |
-| `failed` | Core recorded the failure and admits source controls. | Recheck `bound_host` and `bound_machine` and any newer relocation for the Runtime: a historical failed row does not prove the current binding. If target compute is running, stop it before anything else, then PROVE TARGET SHUTDOWN ON THE HOST. Preserve its tree under a request-specific name, remove the compute, then continue with ROLLBACK. |
+| `failed` | Core recorded the failure and admits source controls. | Recheck `bound_host` and `bound_machine` and any newer relocation for the Runtime: a historical failed row does not prove the current binding. If target compute is running, stop it before anything else, then FENCE THE TARGET. Preserve its tree under a request-specific name, remove the compute, then continue with ROLLBACK. |
 | `cancelled`, `lease_held` true, `lease_live` true | The target Runner has not released it. It may not have learned of the cancel yet, or it learned, could not prove shutdown, and stopped. Source controls stay refused. | If the Runner is still working, wait and re-run the query. If its last output for this request was `relocation_target_shutdown_unproved`, wait for the lease to expire and follow the held-lease case in CANCEL A RELOCATION. |
 | `cancelled`, `lease_held` true, `lease_live` false | No Runner will release it: cancelled requests are never leased again. | Follow the held-lease case in CANCEL A RELOCATION. |
-| `cancelled`, `lease_held` false | Released. Core admits source controls. | Prove target shutdown as for `failed`. |
+| `cancelled`, `lease_held` false | Released. Core admits source controls. | Confirm with the proof command in FENCE THE TARGET as for `failed`. |
 | `launching`, `lease_live` true | The target Runner still owns the attempt. | Wait for its cycle and re-run the query. |
-| `launching`, `lease_live` false | The attempt stalled. Source controls stay refused. | The target Runner's next cycle re-leases it. For a cross-host move it proves target shutdown before recording failure and, if it cannot, keeps refusing and prints `relocation_target_shutdown_unproved`: find and stop the orphan, then PROVE TARGET SHUTDOWN ON THE HOST. A same-host attempt records failure without touching the Core-bound machine. If the target Runner is down, use CANCEL A RELOCATION. |
+| `launching`, `lease_live` false | The attempt stalled. Source controls stay refused. | The target Runner's next cycle re-leases it. For a cross-host move it proves target shutdown before recording failure and, if it cannot, keeps refusing and prints `relocation_target_shutdown_unproved`: find and stop the orphan, then FENCE THE TARGET. A same-host attempt records failure without touching the Core-bound machine. If the target Runner is down, use CANCEL A RELOCATION. |
 | No row, an error, or a timeout | Unknown | Do nothing to either side. Preserve both durable trees and escalate. |
 
 ## Recover an already-completed relocation with a revoked credential

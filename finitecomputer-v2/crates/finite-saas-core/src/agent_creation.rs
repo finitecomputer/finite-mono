@@ -248,6 +248,9 @@ pub struct RelocationCancelOutcome {
     pub runner_id: Option<String>,
     pub lease_held: bool,
     pub lease_expires_at: Option<String>,
+    /// True when this call released a held lease on the operator's
+    /// attestation that target compute is stopped. Core did not verify it.
+    pub released_on_attestation: bool,
 }
 
 impl From<AgentCreationRequest> for RelocationCancelOutcome {
@@ -260,6 +263,7 @@ impl From<AgentCreationRequest> for RelocationCancelOutcome {
             runner_id: request.runner_id,
             lease_held: request.lease_token.is_some(),
             lease_expires_at: request.lease_expires_at,
+            released_on_attestation: false,
         }
     }
 }

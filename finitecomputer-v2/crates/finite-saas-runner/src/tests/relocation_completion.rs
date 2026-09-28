@@ -29,7 +29,7 @@ struct World {
     lease: Option<String>,
     lease_live: bool,
     target: Target,
-    /// Compute the provider lost track of that still writes the target tree.
+    /// Compute the provider lost track of that is still alive, possibly idle.
     /// Removing or stopping the named container does not end it.
     orphan_running: bool,
     /// Another copy of the Agent runs: the restarted source, or the Agent
@@ -41,9 +41,9 @@ struct World {
     cancel_on_boot: bool,
     stop_failures: usize,
     remove_fails: bool,
-    /// Another worker acts while this one is paused after a refused
-    /// failure record.
-    on_refused_failure: Option<fn(&mut World)>,
+    /// Another worker acts while this one is paused before it ends the
+    /// target.
+    on_end: Option<fn(&mut World)>,
     calls: Vec<&'static str>,
 }
 
@@ -64,7 +64,7 @@ impl World {
             cancel_on_boot: false,
             stop_failures: 0,
             remove_fails: false,
-            on_refused_failure: None,
+            on_end: None,
             calls: Vec::new(),
         }))
     }
@@ -134,13 +134,6 @@ impl World {
             (self.position(first), self.position(second)),
             (Some(first), Some(second)) if first < second
         )
-    }
-
-    fn called_after(&self, earlier: &str, call: &str) -> bool {
-        let Some(start) = self.position(earlier) else {
-            return false;
-        };
-        self.calls[start..].contains(&call)
     }
 }
 
@@ -324,9 +317,6 @@ impl AgentCreationQueue for ModelQueue {
                 world.lease = None;
             }
             world.record("fail");
-            if !accepted && let Some(act) = world.on_refused_failure.take() {
-                act(&mut world);
-            }
             if world.drop_failure_response {
                 return Err(response_lost());
             }
@@ -420,15 +410,38 @@ impl RuntimeLauncher for ModelLauncher {
         if world.target == Target::Running {
             world.target = Target::Stopped;
         }
-        // The adapter proves shutdown from the durable tree; its Kata test
-        // shows a live orphan writer makes that proof fail.
+        world.record("stop");
+        Ok(())
+    }
+
+    fn record_relocation_lease(&mut self, _lease: &AgentCreationLease) -> Result<(), RunnerError> {
+        self.world.borrow_mut().record("lease recorded");
+        Ok(())
+    }
+
+    /// Removes the recorded compute and proves it gone. The Kata adapter
+    /// tests show that proof failing for an idle orphan, a kept container,
+    /// and missing or uninspectable state.
+    fn end_relocation_target(&mut self, _lease: &AgentCreationLease) -> Result<(), RunnerError> {
+        let mut world = self.world.borrow_mut();
+        if let Some(act) = world.on_end.take() {
+            act(&mut world);
+        }
+        if world.remove_fails {
+            world.record("remove failed");
+            return Err(RunnerError::RuntimeLaunch(
+                "relocation target shutdown is unproved: rm failed".to_string(),
+            ));
+        }
+        world.target = Target::Absent;
+        world.record("remove");
         if world.orphan_running {
             world.record("shutdown unproved");
             return Err(RunnerError::RuntimeLaunch(
                 "relocation target shutdown is unproved".to_string(),
             ));
         }
-        world.record("stop");
+        world.record("proved");
         Ok(())
     }
 }
@@ -454,131 +467,92 @@ fn run_cycle(world: &SharedWorld, lease_token: &str) -> serde_json::Value {
     }
 }
 
-fn later_typed_restart_then_stop(world: &mut World) {
-    world.target = Target::Running;
-    world.record("typed restart");
-    world.target = Target::Stopped;
-    world.record("typed stop");
-}
-
-fn newer_relocation_elsewhere(world: &mut World) {
-    world.source_running = true;
-    world.record("newer relocation");
+/// Another worker leases the request while this one is paused.
+fn another_worker_leases_the_request(world: &mut World) {
+    world.lease = Some("lease-2".to_string());
+    world.lease_live = true;
+    world.record("superseding lease");
 }
 
 #[test]
-fn lost_failure_record_leaves_the_target_stopped_before_the_source_restarts() {
-    let world = World::new(Completion::RollsBackResponseLost);
-    world.borrow_mut().drop_failure_response = true;
+fn clear_rejection_ends_the_target_before_the_failure_record() {
+    let world = World::new(Completion::Rejected);
     let outcome = run_cycle(&world, "lease-1");
-    assert_eq!(outcome["status"], "completion_unconfirmed", "{outcome}");
+    assert_eq!(outcome["status"], "launch_failed", "{outcome}");
     let mut world = world.borrow_mut();
-    // Core committed the failure record; only its response was lost.
-    assert_eq!(world.status, AgentCreationRequestStatus::Failed);
-    assert_eq!(world.target, Target::Stopped);
-    assert!(world.before("stop", "fail"));
-    assert!(world.owner_restart(), "Core admits the source restart");
-}
-
-#[test]
-fn target_is_stopped_or_removed_while_source_controls_stay_refused() {
-    // A clear rejection keeps the old order: remove, then record failure.
-    let world = World::new(Completion::Rejected);
-    let outcome = run_cycle(&world, "lease-1");
-    assert_eq!(outcome["status"], "launch_failed", "{outcome}");
-    let world = world.borrow();
-    assert!(world.before("remove", "fail"));
+    assert!(world.before("lease recorded", "launch"));
+    assert!(world.before("proved", "fail"));
     assert_eq!(
         (world.status, world.target),
         (AgentCreationRequestStatus::Failed, Target::Absent)
     );
-    drop(world);
-
-    // When removal fails, the target is stopped before failure is recorded.
-    let world = World::new(Completion::Rejected);
-    world.borrow_mut().remove_fails = true;
-    let outcome = run_cycle(&world, "lease-1");
-    assert_eq!(outcome["status"], "launch_failed", "{outcome}");
-    let world = world.borrow();
-    assert!(world.before("stop", "fail"));
-    assert_eq!(
-        (world.status, world.target),
-        (AgentCreationRequestStatus::Failed, Target::Stopped)
-    );
-    drop(world);
-
-    // An ambiguous result stops the target first and removes it only after
-    // Core accepted the failure record.
-    let world = World::new(Completion::RollsBackResponseLost);
-    let outcome = run_cycle(&world, "lease-1");
-    assert_eq!(outcome["status"], "launch_failed", "{outcome}");
-    let world = world.borrow();
-    assert!(world.before("stop", "fail"));
-    assert!(world.before("fail", "remove"));
-    assert_eq!(
-        (world.status, world.target),
-        (AgentCreationRequestStatus::Failed, Target::Absent)
-    );
+    assert!(world.owner_restart());
 }
 
 #[test]
-fn unproved_shutdown_sends_no_failure_record_and_the_source_stays_refused() {
-    // Removing or stopping the named container leaves an orphan writing the
-    // tree. No failure record may follow, whichever path led here.
-    for completion in [Completion::Rejected, Completion::RollsBackResponseLost] {
-        let world = World::new(completion);
-        world.borrow_mut().orphan_running = true;
+fn unproved_end_sends_no_failure_record_and_the_source_stays_refused() {
+    // An idle orphan survives removal of the named container, or removal
+    // itself fails. Either way nothing proves the target down.
+    for (orphan_running, remove_fails) in [(true, false), (false, true)] {
+        let world = World::new(Completion::Rejected);
+        world.borrow_mut().orphan_running = orphan_running;
+        world.borrow_mut().remove_fails = remove_fails;
         let outcome = run_cycle(&world, "lease-1");
         assert_eq!(
             outcome["status"], "relocation_target_shutdown_unproved",
-            "{completion:?}: {outcome}"
+            "{outcome}"
         );
         let mut world = world.borrow_mut();
-        assert_eq!(world.position("fail"), None, "{completion:?}");
+        assert_eq!(world.position("fail"), None);
         assert_eq!(world.status, AgentCreationRequestStatus::Launching);
-        assert!(
-            !world.owner_restart(),
-            "{completion:?}: the source stays refused"
-        );
+        assert!(!world.owner_restart(), "the source stays refused");
     }
 }
 
 #[test]
-fn failed_stop_of_a_launching_relocation_is_retried_by_the_next_run() {
-    let world = World::new(Completion::RollsBackResponseLost);
-    world.borrow_mut().stop_failures = 1;
+fn lost_failure_record_after_proof_leaves_nothing_running() {
+    let world = World::new(Completion::Rejected);
+    world.borrow_mut().drop_failure_response = true;
     let outcome = run_cycle(&world, "lease-1");
-    assert_eq!(
-        outcome["status"], "relocation_target_shutdown_unproved",
-        "{outcome}"
-    );
+    assert_eq!(outcome["status"], "cycle_error", "{outcome}");
+    let mut world = world.borrow_mut();
+    // Core committed the failure record; only its response was lost.
+    assert_eq!(world.status, AgentCreationRequestStatus::Failed);
+    assert_eq!(world.target, Target::Absent);
+    assert!(world.owner_restart());
+}
+
+#[test]
+fn ambiguous_completion_keeps_the_hold_until_a_later_run_proves_the_target_gone() {
+    let world = World::new(Completion::RollsBackResponseLost);
+    let outcome = run_cycle(&world, "lease-1");
+    assert_eq!(outcome["status"], "completion_unconfirmed", "{outcome}");
     {
         let mut world = world.borrow_mut();
+        assert_eq!(world.position("fail"), None, "a kept container is no proof");
         assert_eq!(
-            world.position("fail"),
-            None,
-            "no failure record without a stopped target"
+            (world.status, world.target),
+            (AgentCreationRequestStatus::Launching, Target::Stopped)
         );
-        assert_eq!(world.status, AgentCreationRequestStatus::Launching);
-        assert_eq!(world.target, Target::Running);
-        assert!(
-            !world.owner_restart(),
-            "a launching relocation refuses the source restart"
-        );
+        assert!(!world.owner_restart());
+        // The kept guest resumes on its own; the source is still refused.
+        world.target = Target::Running;
+        world.record("guest resumes");
+        assert!(!world.owner_restart());
         world.expire_lease();
         world.calls.clear();
     }
-
-    // Only a launching request is leased again. The next Runner process finds
-    // the earlier target and stops it before recording failure.
+    // Only a launching request is leased again, so completion never
+    // committed. The next Runner removes the earlier target by identity and
+    // proves it gone before recording failure.
     let outcome = run_cycle(&world, "lease-2");
     assert_eq!(outcome["status"], "launch_failed", "{outcome}");
     let mut world = world.borrow_mut();
-    assert!(world.before("launch refused", "stop"));
-    assert!(world.before("stop", "fail"));
+    assert!(world.before("launch refused", "proved"));
+    assert!(world.before("proved", "fail"));
     assert_eq!(
         (world.status, world.target),
-        (AgentCreationRequestStatus::Failed, Target::Stopped)
+        (AgentCreationRequestStatus::Failed, Target::Absent)
     );
     assert!(world.owner_restart());
 }
@@ -589,7 +563,7 @@ fn committed_completion_with_a_lost_response_leaves_the_target_stopped_for_a_typ
     let outcome = run_cycle(&world, "lease-1");
     assert_eq!(outcome["status"], "completion_unconfirmed", "{outcome}");
     let world = world.borrow();
-    assert!(world.before("stop", "fail"));
+    assert_eq!(world.position("fail"), None);
     assert_eq!(
         world.position("start"),
         None,
@@ -602,69 +576,78 @@ fn committed_completion_with_a_lost_response_leaves_the_target_stopped_for_a_typ
 }
 
 #[test]
-fn delayed_worker_starts_nothing_after_a_later_stop_or_a_newer_relocation() {
-    for (later, expected) in [
-        (
-            later_typed_restart_then_stop as fn(&mut World),
-            "typed stop",
-        ),
-        (newer_relocation_elsewhere, "newer relocation"),
-    ] {
-        let world = World::new(Completion::CommitsResponseLost);
-        world.borrow_mut().on_refused_failure = Some(later);
-        let outcome = run_cycle(&world, "lease-1");
-        assert_eq!(
-            outcome["status"], "completion_unconfirmed",
-            "{expected}: {outcome}"
-        );
-        let world = world.borrow();
-        assert!(world.position(expected).is_some());
-        assert!(
-            !world.called_after(expected, "start"),
-            "{expected}: {:?}",
-            world.calls
-        );
-        assert!(
-            !world.called_after(expected, "remove"),
-            "{expected}: {:?}",
-            world.calls
-        );
-        assert_eq!(world.target, Target::Stopped, "{expected}");
-    }
-}
-
-#[test]
-fn cancel_of_a_booted_relocation_releases_only_after_the_target_is_down() {
-    for remove_fails in [false, true] {
-        let world = World::new(Completion::Commits);
-        world.borrow_mut().cancel_on_boot = true;
-        world.borrow_mut().remove_fails = remove_fails;
-        let outcome = run_cycle(&world, "lease-1");
-        assert_eq!(outcome["status"], "launch_failed", "{outcome}");
+fn failed_stop_after_an_ambiguous_completion_waits_for_the_next_run() {
+    let world = World::new(Completion::RollsBackResponseLost);
+    world.borrow_mut().stop_failures = 1;
+    let outcome = run_cycle(&world, "lease-1");
+    assert_eq!(
+        outcome["status"], "relocation_target_shutdown_unproved",
+        "{outcome}"
+    );
+    {
         let mut world = world.borrow_mut();
-        // The Runner learned of the cancel when registration was refused.
-        assert!(world.before("register", "fail"));
-        assert_eq!(world.status, AgentCreationRequestStatus::Cancelled);
-        assert_eq!(world.lease, None, "the failure record released the lease");
-        let expected = if remove_fails {
-            Target::Stopped
-        } else {
-            Target::Absent
-        };
-        assert_eq!(world.target, expected);
-        assert!(world.owner_restart());
+        assert_eq!(world.position("fail"), None);
+        assert_eq!(
+            (world.status, world.target),
+            (AgentCreationRequestStatus::Launching, Target::Running)
+        );
+        assert!(!world.owner_restart());
+        world.expire_lease();
     }
+    let outcome = run_cycle(&world, "lease-2");
+    assert_eq!(outcome["status"], "launch_failed", "{outcome}");
+    let mut world = world.borrow_mut();
+    assert_eq!(world.target, Target::Absent);
+    assert!(world.owner_restart());
 }
 
 #[test]
-fn cancelled_relocation_without_a_release_waits_for_an_operator() {
-    // Shutdown unproved after a cancel, or the failure record never arrived.
-    for (orphan_running, failure_record_lost) in [(true, false), (false, true)] {
+fn delayed_worker_with_a_superseded_lease_releases_nothing() {
+    let world = World::new(Completion::Rejected);
+    world.borrow_mut().on_end = Some(another_worker_leases_the_request);
+    let outcome = run_cycle(&world, "lease-1");
+    assert_eq!(outcome["status"], "cycle_error", "{outcome}");
+    let mut world = world.borrow_mut();
+    assert!(world.position("superseding lease").is_some());
+    assert_eq!(world.status, AgentCreationRequestStatus::Launching);
+    assert_eq!(world.lease.as_deref(), Some("lease-2"));
+    assert!(
+        !world.owner_restart(),
+        "the later lease still holds the source"
+    );
+}
+
+#[test]
+fn cancel_of_a_booted_relocation_releases_only_after_proof() {
+    let world = World::new(Completion::Commits);
+    world.borrow_mut().cancel_on_boot = true;
+    let outcome = run_cycle(&world, "lease-1");
+    assert_eq!(outcome["status"], "launch_failed", "{outcome}");
+    let mut world = world.borrow_mut();
+    // The Runner learned of the cancel when registration was refused.
+    assert!(world.before("register", "proved"));
+    assert!(world.before("proved", "fail"));
+    assert_eq!(world.status, AgentCreationRequestStatus::Cancelled);
+    assert_eq!(world.lease, None, "the failure record released the lease");
+    assert_eq!(world.target, Target::Absent);
+    assert!(world.owner_restart());
+}
+
+#[test]
+fn cancelled_relocation_without_a_release_waits_for_an_operator_fence() {
+    // No proof after a cancel: an idle orphan, a removal that fails, or a
+    // failure record that never arrived.
+    for (orphan_running, remove_fails, failure_record_lost) in [
+        (true, false, false),
+        (false, true, false),
+        (false, false, true),
+    ] {
         let world = World::new(Completion::Commits);
         {
             let mut world = world.borrow_mut();
             world.cancel_on_boot = true;
             world.orphan_running = orphan_running;
+            world.remove_fails = remove_fails;
             world.failure_record_lost = failure_record_lost;
         }
         run_cycle(&world, "lease-1");
@@ -679,8 +662,9 @@ fn cancelled_relocation_without_a_release_waits_for_an_operator() {
         assert_eq!(outcome["status"], "idle", "{outcome}");
         let mut world = world.borrow_mut();
         assert!(!world.owner_restart());
-        // The operator stops every trace of target compute, then releases.
+        // The operator fences the exact target, then releases.
         world.orphan_running = false;
+        world.target = Target::Absent;
         world.operator_release();
         assert!(world.owner_restart());
     }

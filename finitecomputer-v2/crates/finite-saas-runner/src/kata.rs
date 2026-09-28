@@ -17,6 +17,8 @@ use time::OffsetDateTime;
 use time::format_description::well_known::Rfc3339;
 use walkdir::WalkDir;
 
+mod relocation_attempt;
+
 const KATA_PROVIDER_DIR: &str = "kata";
 const KATA_METADATA_DIR: &str = "kata-metadata";
 const DEFAULT_KATA_RUNTIME: &str = "io.containerd.kata.v2";
@@ -141,6 +143,9 @@ pub struct KataConfig {
     /// Window over which a durable tree must stay unchanged before the
     /// Runner treats it as having no live writer.
     pub durable_tree_quiescence_window: Duration,
+    /// Where this host exposes processes and Kata/containerd sandbox state,
+    /// for proving that an exact relocation target is gone.
+    pub host_view: KataHostView,
     pub retirement: Option<KataRetirementConfig>,
     pub hosted_hermes:
         Option<std::sync::Arc<crate::hosted_hermes_lifecycle::HostedHermesLifecycle>>,
@@ -179,8 +184,33 @@ impl Default for KataConfig {
             // produced the rollout's ttrpc:closed false failures.
             stop_timeout_secs: 180,
             durable_tree_quiescence_window: DEFAULT_DURABLE_TREE_QUIESCENCE_WINDOW,
+            host_view: KataHostView::default(),
             retirement: None,
             hosted_hermes: None,
+        }
+    }
+}
+
+/// Host paths the relocation shutdown proof reads. The defaults are the
+/// procfs root, Kata's virtcontainers runtime directories and containerd's
+/// runtime v2 task directory.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct KataHostView {
+    pub proc_root: PathBuf,
+    pub kata_vm_root: PathBuf,
+    pub kata_sandbox_state_root: PathBuf,
+    pub kata_shared_sandboxes_root: PathBuf,
+    pub containerd_task_root: PathBuf,
+}
+
+impl Default for KataHostView {
+    fn default() -> Self {
+        Self {
+            proc_root: PathBuf::from("/proc"),
+            kata_vm_root: PathBuf::from("/run/vc/vm"),
+            kata_sandbox_state_root: PathBuf::from("/run/vc/sbs"),
+            kata_shared_sandboxes_root: PathBuf::from("/run/kata-containers/shared/sandboxes"),
+            containerd_task_root: PathBuf::from("/run/containerd/io.containerd.runtime.v2.task"),
         }
     }
 }
@@ -1993,11 +2023,14 @@ impl KataLauncher {
         write_kata_env_file(&plan.env_file, &env)
     }
 
+    /// `on_created` receives `nerdctl run`'s output as soon as compute exists,
+    /// before the readiness wait, so a relocation records its identity first.
     fn run_fresh(
         &self,
         plan: &KataLaunchPlan,
         lease: &AgentCreationLease,
         options: &RuntimeLaunchOptions,
+        on_created: &mut dyn FnMut(&str) -> Result<(), RunnerError>,
     ) -> Result<u16, RunnerError> {
         self.prepare_plan(plan)?;
         self.remove_compute_if_present(plan, &lease.project.id)?;
@@ -2007,7 +2040,14 @@ impl KataLauncher {
             self.config.launch_timeout,
         );
         let remove_env_result = std::fs::remove_file(&plan.env_file);
-        if let Err(error) = launch_result {
+        let run_output = match launch_result {
+            Ok(output) => output,
+            Err(error) => {
+                let _ = self.remove_compute(&plan.container_name);
+                return Err(error);
+            }
+        };
+        if let Err(error) = on_created(&run_output) {
             let _ = self.remove_compute(&plan.container_name);
             return Err(error);
         }
@@ -3037,10 +3077,22 @@ impl RuntimeLauncher for KataLauncher {
         } else {
             None
         };
+        let record_path = relocation_attempt_record_path(&plan, &lease.request.id);
         if let Some(relocation) = lease.request.relocation.as_ref() {
             launcher.verify_relocation_state(&plan, lease, relocation.v1())?;
+            // From here on this lease may start compute.
+            relocation_attempt::record_lease(&record_path, &plan, lease, true)?;
         }
-        let host_port = launcher.run_fresh(&plan, lease, options)?;
+        let mut on_created = |run_output: &str| -> Result<(), RunnerError> {
+            if lease.request.relocation.is_none() {
+                return Ok(());
+            }
+            let container_id = relocation_attempt::container_id_from_run_output(run_output)?;
+            let signals =
+                relocation_attempt::calibrate(&launcher.config, &container_id, &plan.state_root);
+            relocation_attempt::record_compute(&record_path, lease, &container_id, signals)
+        };
+        let host_port = launcher.run_fresh(&plan, lease, options, &mut on_created)?;
         let observed_npub = launcher.wait_for_agent_npub(&plan, host_port)?;
         if let Some(relocation) = lease.request.relocation.as_ref()
             && observed_npub != relocation.v1().expected_agent_npub
@@ -3079,14 +3131,38 @@ impl RuntimeLauncher for KataLauncher {
         Ok(())
     }
 
-    fn stop_relocation_target(&mut self, lease: &AgentCreationLease) -> Result<(), RunnerError> {
-        self.stop_and_prove_relocation_target(lease)
-            .map_err(|error| {
+    fn record_relocation_lease(&mut self, lease: &AgentCreationLease) -> Result<(), RunnerError> {
+        let (_launcher, plan, _lock) = self.relocation_plan(lease)?;
+        let path = relocation_attempt_record_path(&plan, &lease.request.id);
+        relocation_attempt::record_lease(&path, &plan, lease, false)
+    }
+
+    fn end_relocation_target(&mut self, lease: &AgentCreationLease) -> Result<(), RunnerError> {
+        self.end_and_prove_relocation_target(lease)
+            .map_err(|reason| {
                 RunnerError::RuntimeLaunch(format!(
-                    "relocation target shutdown is unproved: {error}"
+                    "relocation target shutdown is unproved: {reason}"
                 ))
             })
     }
+
+    fn stop_relocation_target(&mut self, lease: &AgentCreationLease) -> Result<(), RunnerError> {
+        let (launcher, plan, _lock) = self.relocation_plan(lease)?;
+        if let Some(inspected) = launcher.inspect(&plan.container_name)? {
+            launcher.validate_owned(&plan, &lease.project.id, &inspected)?;
+            launcher.stop_compute(&plan.container_name)?;
+        }
+        Ok(())
+    }
+}
+
+/// Where the Kata adapter keeps one relocation request's attempt record,
+/// beside the Runtime's other host-only metadata.
+pub(crate) fn relocation_attempt_record_path(plan: &KataLaunchPlan, request_id: &str) -> PathBuf {
+    plan.metadata_root.join(format!(
+        "relocation-attempt-{}.json",
+        sanitize_sandbox_name(request_id)
+    ))
 }
 
 /// The container (source machine) name for a creation lease. It names the
@@ -3122,17 +3198,12 @@ pub(crate) fn kata_launch_plan(
 }
 
 impl KataLauncher {
-    /// Stops this Runner's relocation target if its record exists, then proves
-    /// from the durable tree that nothing runs against it: no running record
-    /// of any name binds the tree, nobody holds the chat store's writer lease,
-    /// and the tree is unchanged over the quiescence window. A missing record
-    /// is never proof on its own, because an orphaned VM keeps writing without
-    /// one. These signals cannot see a writer that holds no lease and stays
-    /// idle for the whole window.
-    fn stop_and_prove_relocation_target(
+    /// The launch plan for a relocation lease, with the Runtime operation lock
+    /// held so launch, stop and proof never interleave.
+    fn relocation_plan(
         &self,
         lease: &AgentCreationLease,
-    ) -> Result<(), RunnerError> {
+    ) -> Result<(KataLauncher, KataLaunchPlan, KataRuntimeOperationLock), RunnerError> {
         if lease.request.relocation.is_none() {
             return Err(RunnerError::RuntimeLaunch(
                 "relocation target control requires a relocation lease".to_string(),
@@ -3140,41 +3211,47 @@ impl KataLauncher {
         }
         let launcher = KataLauncher::new(self.config_for_creation(lease)?);
         let plan = launcher.plan_launch(lease)?;
-        let _lock = launcher.acquire_runtime_operation_lock(&plan)?;
-        if let Some(inspected) = launcher.inspect(&plan.container_name)? {
-            launcher.validate_owned(&plan, &lease.project.id, &inspected)?;
-            launcher.stop_compute(&plan.container_name)?;
-        }
-        for container_name in launcher.container_names()? {
-            let Some(inspected) = launcher.inspect(&container_name)? else {
-                continue;
-            };
-            let binds_tree = inspected.mounts.iter().any(|mount| {
-                mount.destination == Path::new("/data") && mount.source == plan.state_root
-            });
-            if binds_tree && inspected.state.status == "running" {
-                return Err(RunnerError::RuntimeLaunch(format!(
-                    "container {container_name} still runs against {}",
-                    plan.state_root.display()
-                )));
-            }
-        }
-        // A tree that was never staged has no writer to find.
-        if !plan.state_root.exists() {
-            return Ok(());
-        }
-        if let Some(evidence) = durable_tree_is_quiescent_within(
-            &plan.state_root,
-            launcher.config.durable_tree_quiescence_window,
-        )?
-        .evidence()
-        {
-            return Err(RunnerError::DurableStateRootLive {
-                state_root: plan.state_root.clone(),
-                evidence,
-            });
-        }
-        Ok(())
+        let lock = launcher.acquire_runtime_operation_lock(&plan)?;
+        Ok((launcher, plan, lock))
+    }
+
+    /// Removes, by the identity recorded at launch, the compute this lease and
+    /// earlier leases of the request started, then proves that all of the
+    /// request's target compute is gone. `Err` is the reason it is unproved.
+    fn end_and_prove_relocation_target(&self, lease: &AgentCreationLease) -> Result<(), String> {
+        let (launcher, plan, _lock) = self.relocation_plan(lease).map_err(|e| e.to_string())?;
+        let path = relocation_attempt_record_path(&plan, &lease.request.id);
+        let record = relocation_attempt::load(&path)?
+            .ok_or_else(|| format!("no relocation attempt record at {}", path.display()))?;
+        let through = relocation_attempt::lease_index(&record, lease)?;
+        relocation_attempt::remove_recorded_compute(
+            &launcher,
+            &plan,
+            &lease.project.id,
+            &record,
+            through,
+        )
+        .map_err(|error| error.to_string())?;
+        relocation_attempt::prove_request_compute_down(&launcher, &record)
+    }
+
+    /// The read-only proof an operator runs after fencing: every compute the
+    /// recorded request started is gone. Nothing is stopped or removed.
+    pub fn prove_relocation_record(&self, record_path: &Path) -> Result<(), RunnerError> {
+        let record = relocation_attempt::load(record_path)
+            .and_then(|record| {
+                record.ok_or_else(|| {
+                    format!("no relocation attempt record at {}", record_path.display())
+                })
+            })
+            .map_err(|reason| {
+                RunnerError::RuntimeLaunch(format!(
+                    "relocation target shutdown is unproved: {reason}"
+                ))
+            })?;
+        relocation_attempt::prove_request_compute_down(self, &record).map_err(|reason| {
+            RunnerError::RuntimeLaunch(format!("relocation target shutdown is unproved: {reason}"))
+        })
     }
 
     fn verify_relocation_state(
@@ -4870,6 +4947,9 @@ case "$cmd" in
     ;;
   inspect)
     name="$1"
+    # Containers are also addressed by the id `run` printed.
+    if [ ! -f "$root/$name.image" ] && [ -f "$root/${name%-id}.image" ]; then name="${name%-id}"; fi
+    if [ -f "$root/inspect-fails" ]; then echo "injected inspect failure" >&2; exit 3; fi
     if [ ! -f "$root/$name.image" ]; then echo "not found" >&2; exit 1; fi
     image="$(field "$name" image)"; status="$(field "$name" status)"
     artifact="$(field "$name" artifact)"; schema="$(field "$name" schema)"
@@ -4925,6 +5005,7 @@ case "$cmd" in
     ;;
   rm)
     for name in "$@"; do :; done
+    if [ ! -f "$root/$name.image" ] && [ -f "$root/${name%-id}.image" ]; then name="${name%-id}"; fi
     rm -f "$root/$name.image" "$root/$name.status" "$root/$name.artifact" "$root/$name.schema" "$root/$name.project" "$root/$name.source" "$root/$name.mount" "$root/$name.request" "$root/$name.recovery" "$root/$name.public" "$root/$name.secret" "$root/$name.env-file" "$root/$name.port"
     ;;
   rename)
@@ -4965,6 +5046,7 @@ case "$cmd" in
     write_field "$name" secret "$secret"; cp "$env_file" "$root/$name.env-file"
     cp "$env_file" "$root/last-run.env-file"
     write_field "$name" port "$(cat "$root/candidate-port")"
+    printf '%s-id\n' "$name"
     if [ -f "$root/also-create" ]; then
       # A second create that never started: the same image and /data bind,
       # labelled for the request named in also-create.request.
@@ -8440,103 +8522,354 @@ esac
         );
     }
 
-    fn cross_host_relocation_target(
-        temp: &tempfile::TempDir,
-        port: u16,
-    ) -> (KataLauncher, KataLaunchPlan, PathBuf, AgentCreationLease) {
-        let (mut launcher, plan, fake_state) = test_launcher(temp, port);
+    /// A procfs tree the shutdown proof reads, one directory per process.
+    struct FakeProc {
+        root: PathBuf,
+    }
+
+    impl FakeProc {
+        fn new(root: PathBuf) -> Self {
+            std::fs::create_dir_all(&root).unwrap();
+            Self { root }
+        }
+
+        fn process(&self, pid: u32, cgroup: &str, open: &[&Path], mountinfo: &str) {
+            let dir = self.root.join(pid.to_string());
+            std::fs::create_dir_all(dir.join("fd")).unwrap();
+            std::fs::write(dir.join("cgroup"), format!("{cgroup}\n")).unwrap();
+            std::fs::write(dir.join("mountinfo"), mountinfo).unwrap();
+            std::os::unix::fs::symlink("/", dir.join("cwd")).unwrap();
+            std::os::unix::fs::symlink("/", dir.join("root")).unwrap();
+            for (fd, path) in open.iter().enumerate() {
+                std::os::unix::fs::symlink(path, dir.join("fd").join(fd.to_string())).unwrap();
+            }
+        }
+
+        fn exit(&self, pid: u32) {
+            std::fs::remove_dir_all(self.root.join(pid.to_string())).unwrap();
+        }
+    }
+
+    struct ProofFixture {
+        launcher: KataLauncher,
+        plan: KataLaunchPlan,
+        fake_state: PathBuf,
+        lease: AgentCreationLease,
+        proc: FakeProc,
+        view: KataHostView,
+        _server: TestHttpServer,
+    }
+
+    const SANDBOX_ID: &str = "finite-kata-upgrade-agent-id";
+
+    /// A cross-host relocation target launched with a proof host view. While
+    /// it launches, the host shows the sandbox's hypervisor in the sandbox
+    /// cgroup holding its runtime directory, so launch calibrates the proof.
+    fn launched_relocation_for_proof(temp: &tempfile::TempDir) -> ProofFixture {
+        let server = TestHttpServer::start("npub1sameagent");
+        let (mut launcher, plan, fake_state) = test_launcher(temp, server.port);
+        assert_eq!(format!("{TEST_CONTAINER_NAME}-id"), SANDBOX_ID);
+        let run = temp.path().join("host");
+        let view = KataHostView {
+            proc_root: run.join("proc"),
+            kata_vm_root: run.join("run/vc/vm"),
+            kata_sandbox_state_root: run.join("run/vc/sbs"),
+            kata_shared_sandboxes_root: run.join("run/kata-containers/shared/sandboxes"),
+            containerd_task_root: run.join("run/containerd/io.containerd.runtime.v2.task"),
+        };
+        launcher.config.host_view = view.clone();
+        // The proof adds provider calls; each forks the fake nerdctl, which
+        // can take more than the shared 2-second budget on a loaded host.
+        launcher.config.command_timeout = Duration::from_secs(10);
+        launcher.config.launch_timeout = Duration::from_secs(10);
+        launcher.config.readiness_timeout = Duration::from_secs(10);
+        let proc = FakeProc::new(view.proc_root.clone());
+        // An unrelated process: procfs always shows at least the Runner.
+        proc.process(1, "0::/init.scope", &[], "");
+        proc.process(
+            200,
+            &format!("0::/finite/{SANDBOX_ID}"),
+            &[&view.kata_vm_root.join(SANDBOX_ID).join("qmp.sock")],
+            "",
+        );
         stage_relocation_tree(&plan.state_root);
         let manifest = durable_state_manifest_sha256(&plan.state_root).unwrap();
-        let lease = relocation_creation_lease(
+        let mut lease = relocation_creation_lease(
             "agent_request_cross_host_target",
             "finite-lat-0",
             "finite-lat-1",
             &manifest,
             false,
         );
+        lease.request.lease_token = Some("lease-a".to_string());
+        launcher.record_relocation_lease(&lease).unwrap();
         launcher
             .launch(&lease, &RuntimeLaunchOptions::default())
             .unwrap();
-        (launcher, plan, fake_state, lease)
+        ProofFixture {
+            launcher,
+            plan,
+            fake_state,
+            lease,
+            proc,
+            view,
+            _server: server,
+        }
+    }
+
+    fn edit_attempt_record(fixture: &ProofFixture, edit: impl FnOnce(&mut serde_json::Value)) {
+        let path = relocation_attempt_record_path(&fixture.plan, &fixture.lease.request.id);
+        let mut record: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&path).expect("the attempt record exists"))
+                .unwrap();
+        edit(&mut record);
+        std::fs::write(&path, serde_json::to_vec(&record).unwrap()).unwrap();
+    }
+
+    fn assert_unproved(result: Result<(), RunnerError>, case: &str) {
+        let error = result.expect_err(case);
+        eprintln!("{case}: {error}");
+        assert!(error.to_string().contains("unproved"), "{case}: {error}");
     }
 
     #[test]
     fn relocation_target_stop_acts_only_on_the_owned_target() {
-        let server = TestHttpServer::start("npub1sameagent");
         let temp = tempfile::tempdir().unwrap();
-        let (mut launcher, _plan, fake_state, lease) =
-            cross_host_relocation_target(&temp, server.port);
+        let mut fixture = launched_relocation_for_proof(&temp);
         let status = || {
-            std::fs::read_to_string(fake_state.join(format!("{TEST_CONTAINER_NAME}.status")))
-                .unwrap()
+            std::fs::read_to_string(
+                fixture
+                    .fake_state
+                    .join(format!("{TEST_CONTAINER_NAME}.status")),
+            )
+            .unwrap()
         };
         assert_eq!(status(), "running");
 
-        // A stop that cannot be proven reports failure and leaves the
-        // container running, so the Runner records no failure.
-        std::fs::write(fake_state.join("stuck-stop"), "").unwrap();
-        assert!(launcher.stop_relocation_target(&lease).is_err());
+        std::fs::write(fixture.fake_state.join("stuck-stop"), "").unwrap();
+        assert!(
+            fixture
+                .launcher
+                .stop_relocation_target(&fixture.lease)
+                .is_err()
+        );
         assert_eq!(status(), "running");
-        std::fs::remove_file(fake_state.join("stuck-stop")).unwrap();
+        std::fs::remove_file(fixture.fake_state.join("stuck-stop")).unwrap();
 
-        // A container under the target name that this Runner does not own is
-        // refused rather than stopped.
         std::fs::write(
-            fake_state.join(format!("{TEST_CONTAINER_NAME}.project")),
+            fixture
+                .fake_state
+                .join(format!("{TEST_CONTAINER_NAME}.project")),
             "project-other",
         )
         .unwrap();
-        assert!(launcher.stop_relocation_target(&lease).is_err());
+        assert!(
+            fixture
+                .launcher
+                .stop_relocation_target(&fixture.lease)
+                .is_err()
+        );
         assert_eq!(status(), "running");
         std::fs::write(
-            fake_state.join(format!("{TEST_CONTAINER_NAME}.project")),
+            fixture
+                .fake_state
+                .join(format!("{TEST_CONTAINER_NAME}.project")),
             "project-1",
         )
         .unwrap();
 
-        launcher.stop_relocation_target(&lease).unwrap();
+        fixture
+            .launcher
+            .stop_relocation_target(&fixture.lease)
+            .unwrap();
         assert_ne!(status(), "running");
     }
 
     #[test]
-    fn relocation_target_shutdown_needs_evidence_beyond_a_missing_record() {
-        let server = TestHttpServer::start("npub1sameagent");
+    fn relocation_end_needs_positive_evidence_that_the_exact_sandbox_is_gone() {
         let temp = tempfile::tempdir().unwrap();
-        let (mut launcher, plan, fake_state, lease) =
-            cross_host_relocation_target(&temp, server.port);
-
-        // The provider forgot the container, but an orphaned VM still holds
-        // the chat store's writer lease on the durable tree.
-        remove_fake_container(&fake_state, TEST_CONTAINER_NAME);
-        let holder = hold_writer_lease(&plan.state_root);
-        let error = launcher
-            .stop_relocation_target(&lease)
-            .expect_err("a missing record with a live writer is not a shutdown");
-        assert!(error.to_string().contains("unproved"), "{error}");
-        drop(holder);
-
-        // A writer that never takes the lease keeps changing the tree.
-        let writer = BackgroundWriter::start(plan.state_root.join("agent/client.sqlite3-wal"));
-        let error = launcher.stop_relocation_target(&lease).unwrap_err();
-        assert!(error.to_string().contains("unproved"), "{error}");
-        writer.stop();
-
-        // A running record under another name still binds the tree.
-        write_fake_container(
-            &fake_state,
-            "finite-kata-somebody-else",
-            RELOCATION_TEST_IMAGE,
-            "artifact-v1",
-            "",
-            server.port,
-            &plan.state_root,
+        let mut fixture = launched_relocation_for_proof(&temp);
+        // The provider forgot the container while the guest lives on, idle:
+        // no writer lease is held and the tree does not change.
+        remove_fake_container(&fixture.fake_state, TEST_CONTAINER_NAME);
+        assert_unproved(
+            fixture.launcher.end_relocation_target(&fixture.lease),
+            "an idle orphan sandbox is not a shutdown",
         );
-        let error = launcher.stop_relocation_target(&lease).unwrap_err();
-        assert!(error.to_string().contains("unproved"), "{error}");
-        remove_fake_container(&fake_state, "finite-kata-somebody-else");
+        let record = relocation_attempt_record_path(&fixture.plan, &fixture.lease.request.id);
+        assert_unproved(
+            fixture.launcher.prove_relocation_record(&record),
+            "the operator proof sees the same orphan",
+        );
+        // An operator ends the exact sandbox: every observation now holds.
+        fixture.proc.exit(200);
+        fixture.launcher.prove_relocation_record(&record).unwrap();
+        fixture
+            .launcher
+            .end_relocation_target(&fixture.lease)
+            .unwrap();
+    }
 
-        // With no record, no lease holder and a quiet tree, shutdown is proved.
-        launcher.stop_relocation_target(&lease).unwrap();
+    #[test]
+    fn relocation_end_refuses_on_missing_or_uninspectable_state() {
+        for case in [
+            "missing record",
+            "malformed record",
+            "no identity recorded",
+            "identity never seen alive",
+            "procfs unreadable",
+            "container inventory fails",
+            "tree missing",
+        ] {
+            let temp = tempfile::tempdir().unwrap();
+            let mut fixture = launched_relocation_for_proof(&temp);
+            fixture.proc.exit(200);
+            let record = relocation_attempt_record_path(&fixture.plan, &fixture.lease.request.id);
+            match case {
+                "missing record" => std::fs::remove_file(&record).unwrap(),
+                "malformed record" => std::fs::write(&record, "{").unwrap(),
+                "no identity recorded" => edit_attempt_record(&fixture, |record| {
+                    record["leases"][0]["compute"] = serde_json::json!([]);
+                }),
+                "identity never seen alive" => edit_attempt_record(&fixture, |record| {
+                    record["leases"][0]["compute"][0]["signals"] = serde_json::json!([]);
+                }),
+                "procfs unreadable" => std::fs::remove_dir_all(&fixture.view.proc_root).unwrap(),
+                "container inventory fails" => {
+                    std::fs::write(fixture.fake_state.join("inspect-fails"), "").unwrap()
+                }
+                "tree missing" => std::fs::remove_dir_all(&fixture.plan.state_root).unwrap(),
+                _ => unreachable!(),
+            }
+            assert_unproved(fixture.launcher.end_relocation_target(&fixture.lease), case);
+        }
+    }
+
+    #[test]
+    fn relocation_end_passes_only_when_provider_work_was_recorded_as_never_started() {
+        let temp = tempfile::tempdir().unwrap();
+        let server = TestHttpServer::start("npub1sameagent");
+        let (mut launcher, plan, _fake_state) = test_launcher(&temp, server.port);
+        let mut lease = relocation_creation_lease(
+            "agent_request_never_started",
+            "finite-lat-0",
+            "finite-lat-1",
+            &"a".repeat(64),
+            false,
+        );
+        lease.request.lease_token = Some("lease-a".to_string());
+        // No record at all: nothing says provider work never started.
+        assert_unproved(launcher.end_relocation_target(&lease), "no attempt record");
+        launcher.record_relocation_lease(&lease).unwrap();
+        // The staged tree need not exist when no compute was ever started.
+        assert!(!plan.state_root.join("agent").exists());
+        launcher.end_relocation_target(&lease).unwrap();
+    }
+
+    #[test]
+    fn delayed_worker_removes_only_its_own_and_earlier_compute() {
+        let temp = tempfile::tempdir().unwrap();
+        let mut fixture = launched_relocation_for_proof(&temp);
+        fixture.proc.exit(200);
+        // A later lease of the same request started its own compute, which
+        // is still alive.
+        let mut later = fixture.lease.clone();
+        later.request.lease_token = Some("lease-b".to_string());
+        fixture.launcher.record_relocation_lease(&later).unwrap();
+        edit_attempt_record(&fixture, |record| {
+            record["leases"][1]["provider_work_started"] = serde_json::json!(true);
+            record["leases"][1]["compute"] = serde_json::json!([
+                {"container_id": "finite-kata-later-id", "signals": ["cgroup"]}
+            ]);
+        });
+        fixture
+            .proc
+            .process(300, "0::/finite/finite-kata-later-id", &[], "");
+
+        assert_unproved(
+            fixture.launcher.end_relocation_target(&fixture.lease),
+            "a later lease's live compute",
+        );
+        let commands = std::fs::read_to_string(fixture.fake_state.join("commands.log")).unwrap();
+        assert!(
+            commands.contains(&format!("rm --force {SANDBOX_ID}")),
+            "{commands}"
+        );
+        // The later lease's compute is only inspected, never removed or stopped.
+        assert!(
+            !commands.contains("rm --force finite-kata-later-id"),
+            "{commands}"
+        );
+        assert!(
+            !commands
+                .lines()
+                .any(|line| line.starts_with("stop") && line.contains("later")),
+            "{commands}"
+        );
+
+        fixture.proc.exit(300);
+        fixture
+            .launcher
+            .end_relocation_target(&fixture.lease)
+            .unwrap();
+    }
+
+    #[test]
+    fn kept_stopped_target_counts_as_present_until_removed_by_id() {
+        let temp = tempfile::tempdir().unwrap();
+        let mut fixture = launched_relocation_for_proof(&temp);
+        fixture
+            .launcher
+            .stop_relocation_target(&fixture.lease)
+            .unwrap();
+        fixture.proc.exit(200);
+        // The kept container resumes on its own, as a restart policy could.
+        std::fs::write(
+            fixture
+                .fake_state
+                .join(format!("{TEST_CONTAINER_NAME}.status")),
+            "running",
+        )
+        .unwrap();
+        fixture
+            .launcher
+            .end_relocation_target(&fixture.lease)
+            .unwrap();
+        let commands = std::fs::read_to_string(fixture.fake_state.join("commands.log")).unwrap();
+        assert!(
+            commands.contains(&format!("rm --force {SANDBOX_ID}")),
+            "{commands}"
+        );
+        assert!(
+            !fixture
+                .fake_state
+                .join(format!("{TEST_CONTAINER_NAME}.image"))
+                .exists()
+        );
+    }
+
+    #[test]
+    fn relocation_end_refuses_while_the_tree_shows_a_writer() {
+        let temp = tempfile::tempdir().unwrap();
+        let mut fixture = launched_relocation_for_proof(&temp);
+        fixture.proc.exit(200);
+        let holder = hold_writer_lease(&fixture.plan.state_root);
+        assert_unproved(
+            fixture.launcher.end_relocation_target(&fixture.lease),
+            "writer lease held",
+        );
+        drop(holder);
+        let writer =
+            BackgroundWriter::start(fixture.plan.state_root.join("agent/client.sqlite3-wal"));
+        assert_unproved(
+            fixture.launcher.end_relocation_target(&fixture.lease),
+            "tree changing",
+        );
+        writer.stop();
+        fixture
+            .launcher
+            .end_relocation_target(&fixture.lease)
+            .unwrap();
     }
 
     #[test]

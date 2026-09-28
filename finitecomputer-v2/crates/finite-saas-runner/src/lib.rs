@@ -43,8 +43,8 @@ pub mod retirement;
 pub use apple_container::{AppleContainerConfig, AppleContainerLaunchPlan, AppleContainerLauncher};
 pub use health_reports::{HealthReportConfig, HealthReportState};
 pub use kata::{
-    DEFAULT_DURABLE_TREE_QUIESCENCE_WINDOW, DURABLE_TREE_WRITER_LEASE, KataConfig, KataLaunchPlan,
-    KataLauncher, KataRetirementConfig, Quiescence, durable_state_manifest_sha256,
+    DEFAULT_DURABLE_TREE_QUIESCENCE_WINDOW, DURABLE_TREE_WRITER_LEASE, KataConfig, KataHostView,
+    KataLaunchPlan, KataLauncher, KataRetirementConfig, Quiescence, durable_state_manifest_sha256,
     durable_tree_is_quiescent, durable_tree_is_quiescent_within,
 };
 pub use lifecycle_probe::{
@@ -376,19 +376,19 @@ pub enum RunOnceOutcome {
         request_id: String,
         failure_message: String,
     },
-    /// Core may have committed this relocation: it refused the failure record
-    /// or did not answer. The target was stopped and kept. An operator
-    /// reconciles from the exact request; a committed relocation comes back
-    /// through an ordinary typed restart, never through this Runner.
+    /// The completion result was ambiguous, so Core may have committed this
+    /// relocation. The target was stopped and kept, and no failure was
+    /// recorded, because a kept container is no proof the target is down. A
+    /// committed relocation comes back through an ordinary typed restart; an
+    /// uncommitted one is ended by a later run after its lease expires.
     CompletionUnconfirmed {
         request_id: String,
         completion_error: String,
-        failure_record_error: String,
     },
-    /// Target shutdown could not be proved, so no failure was recorded and the
-    /// relocation keeps refusing source controls. A launching request is
-    /// leased again after its lease expires; a cancelled or running one is
-    /// not, and needs an operator.
+    /// Target shutdown could not be positively proved, so no failure was
+    /// recorded and the relocation keeps refusing source controls. A launching
+    /// request is leased again after its lease expires; a cancelled or running
+    /// one is not, and needs an operator fence.
     RelocationTargetShutdownUnproved {
         request_id: String,
         failure_message: String,
@@ -644,12 +644,17 @@ where
         };
 
         let request_id = lease.request.id.clone();
+        if lease.request.relocation.is_some() {
+            // Before any provider work, so a later proof can tell a lease that
+            // never started compute from one whose compute is unknown.
+            self.launcher.record_relocation_lease(&lease)?;
+        }
         let launch_options = match self.runtime_launch_options(&lease, &lease_token) {
             Ok(options) => options,
             Err(error @ RunnerError::RuntimeBootstrapUnavailable) => return Err(error),
             Err(error) => {
                 let failure_message = error.to_string();
-                if let Some(outcome) = self.stop_earlier_relocation_target(&lease, &failure_message)
+                if let Some(outcome) = self.end_earlier_relocation_target(&lease, &failure_message)
                 {
                     return Ok(outcome);
                 }
@@ -765,7 +770,6 @@ where
                             &lease,
                             lease_token,
                             &launch_options,
-                            &facts,
                             error,
                             completion_attempted,
                         ),
@@ -797,7 +801,7 @@ where
             }
             Err(error) => {
                 let failure_message = error.to_string();
-                if let Some(outcome) = self.stop_earlier_relocation_target(&lease, &failure_message)
+                if let Some(outcome) = self.end_earlier_relocation_target(&lease, &failure_message)
                 {
                     return Ok(outcome);
                 }
@@ -823,37 +827,42 @@ where
     }
 
     /// Ends a relocation attempt whose target compute this run launched. Core
-    /// admits source controls once it records the failure, so the target is
-    /// first removed or stopped and its shutdown proved. An ambiguous
-    /// completion may have committed and made the target the Agent, so it is
-    /// only stopped. This Runner never starts it again: a committed relocation
-    /// comes back through an ordinary typed restart.
+    /// admits source controls once it records the failure, so a failure is
+    /// recorded only after the launcher positively proves every compute of the
+    /// request gone. An ambiguous completion may have committed and made the
+    /// target the Agent: it is stopped and kept, and nothing is recorded. This
+    /// Runner never starts it again.
     fn end_launched_relocation(
         &mut self,
         lease: &AgentCreationLease,
         lease_token: String,
         launch_options: &RuntimeLaunchOptions,
-        facts: &RuntimeLaunchFacts,
         error: RunnerError,
         completion_attempted: bool,
     ) -> Result<RunOnceOutcome, RunnerError> {
         let request_id = lease.request.id.clone();
         let failure_message = error.to_string();
-        let ambiguous = completion_attempted && completion_outcome_unknown(&error);
-        if !ambiguous && let Err(remove_error) = self.launcher.cleanup_failed_launch(facts) {
-            eprintln!(
-                "warning: failed to remove relocation target compute, stopping it: {remove_error}"
-            );
+        if completion_attempted && completion_outcome_unknown(&error) {
+            return Ok(match self.launcher.stop_relocation_target(lease) {
+                Ok(()) => RunOnceOutcome::CompletionUnconfirmed {
+                    request_id,
+                    completion_error: failure_message,
+                },
+                Err(stop_error) => RunOnceOutcome::RelocationTargetShutdownUnproved {
+                    request_id,
+                    failure_message,
+                    shutdown_error: stop_error.to_string(),
+                },
+            });
         }
-        if let Err(shutdown_error) = self.launcher.stop_relocation_target(lease) {
-            // No failure record: the request keeps refusing source controls.
+        if let Err(shutdown_error) = self.launcher.end_relocation_target(lease) {
             return Ok(RunOnceOutcome::RelocationTargetShutdownUnproved {
                 request_id,
                 failure_message,
                 shutdown_error: shutdown_error.to_string(),
             });
         }
-        let recorded = self.queue.fail_agent_creation(
+        self.queue.fail_agent_creation(
             &request_id,
             FailAgentCreationRequestInput {
                 request_id: request_id.clone(),
@@ -863,38 +872,19 @@ where
                 provisioned_finite_private_api_key_id: provisioned_key_to_revoke(launch_options),
                 now: None,
             },
-        );
-        match recorded {
-            Ok(_) => {
-                if ambiguous {
-                    self.remove_stopped_relocation_target(facts);
-                }
-                Ok(RunOnceOutcome::LaunchFailed {
-                    request_id,
-                    failure_message,
-                })
-            }
-            Err(failure_record_error) if !ambiguous => Err(failure_record_error),
-            Err(failure_record_error) => Ok(RunOnceOutcome::CompletionUnconfirmed {
-                request_id,
-                completion_error: failure_message,
-                failure_record_error: failure_record_error.to_string(),
-            }),
-        }
-    }
-
-    fn remove_stopped_relocation_target(&mut self, facts: &RuntimeLaunchFacts) {
-        if let Err(error) = self.launcher.cleanup_failed_launch(facts) {
-            eprintln!("warning: stopped relocation target compute was kept: {error}");
-        }
+        )?;
+        Ok(RunOnceOutcome::LaunchFailed {
+            request_id,
+            failure_message,
+        })
     }
 
     /// Before recording a relocation failure for a run that has no launched
-    /// facts, stop any target compute an earlier attempt of this request left
-    /// on this host and prove its shutdown. A same-host relocation has only
-    /// the Core-bound machine, which may be a live source, so it is left alone
-    /// and the failure is recorded as before.
-    fn stop_earlier_relocation_target(
+    /// facts, end any target compute earlier leases of this request started on
+    /// this host and prove it gone. A same-host relocation has only the
+    /// Core-bound machine, which may be a live source, so it is left alone and
+    /// the failure is recorded as before.
+    fn end_earlier_relocation_target(
         &mut self,
         lease: &AgentCreationLease,
         failure_message: &str,
@@ -903,7 +893,7 @@ where
         if relocation.source_host_id == relocation.target_source_host_id {
             return None;
         }
-        let shutdown_error = self.launcher.stop_relocation_target(lease).err()?;
+        let shutdown_error = self.launcher.end_relocation_target(lease).err()?;
         Some(RunOnceOutcome::RelocationTargetShutdownUnproved {
             request_id: lease.request.id.clone(),
             failure_message: failure_message.to_string(),
@@ -1585,6 +1575,20 @@ pub trait RuntimeLauncher {
                 .to_string(),
         ))
     }
+    /// Persist this relocation lease in the attempt record before any provider
+    /// work, so a later proof can tell "never started" from "unknown".
+    fn record_relocation_lease(&mut self, _lease: &AgentCreationLease) -> Result<(), RunnerError> {
+        Ok(())
+    }
+    /// Remove, by the identity recorded at launch, the target compute this
+    /// lease and earlier leases of the request started, then prove that all of
+    /// the request's target compute is down. Only success authorizes a
+    /// relocation failure record.
+    fn end_relocation_target(&mut self, _lease: &AgentCreationLease) -> Result<(), RunnerError> {
+        Err(RunnerError::RuntimeLaunch(
+            "relocation target shutdown is unproved: this launcher cannot prove it".to_string(),
+        ))
+    }
 }
 
 impl<L> RuntimeLauncher for Box<L>
@@ -1677,6 +1681,12 @@ where
     }
     fn stop_relocation_target(&mut self, lease: &AgentCreationLease) -> Result<(), RunnerError> {
         (**self).stop_relocation_target(lease)
+    }
+    fn record_relocation_lease(&mut self, lease: &AgentCreationLease) -> Result<(), RunnerError> {
+        (**self).record_relocation_lease(lease)
+    }
+    fn end_relocation_target(&mut self, lease: &AgentCreationLease) -> Result<(), RunnerError> {
+        (**self).end_relocation_target(lease)
     }
 }
 
@@ -5772,6 +5782,7 @@ mod tests {
         outcome: Result<serde_json::Value, RunnerError>,
         paths: Vec<String>,
         stopped: Vec<String>,
+        ended: Vec<String>,
         cleaned_up: Vec<String>,
     }
 
@@ -5838,13 +5849,13 @@ mod tests {
             outcome,
             paths: server.join().unwrap(),
             stopped: runner.launcher.stopped_targets.clone(),
+            ended: runner.launcher.ended_targets.clone(),
             cleaned_up: runner.launcher.cleaned_up.clone(),
         }
     }
 
     #[test]
-    fn ambiguous_relocation_completion_stops_the_target_before_the_failure_record() {
-        let not_launching = || core_reply(409, r#"{"error":"not launching"}"#);
+    fn ambiguous_relocation_completion_stops_the_target_and_records_nothing() {
         let failure_recorded = || {
             let mut request = sample_relocation_lease("agent_request_lost_completion").request;
             request.status = AgentCreationRequestStatus::Failed;
@@ -5852,11 +5863,10 @@ mod tests {
             core_reply(200, &serde_json::to_string(&request).unwrap())
         };
         // Transport loss, a 5xx and an undecodable 2xx are all ambiguous. The
-        // target is stopped before the failure record, and a refused record
-        // leaves it stopped: the Runner never starts compute on its own and
-        // never asks Core for a status to act on.
+        // target is stopped and kept, and no failure record is sent: a kept
+        // container is not proof that the target is down.
         for completion in [None, core_reply(502, "bad gateway"), core_reply(200, "{")] {
-            let run = run_relocation_with_replies(completion.clone(), not_launching());
+            let run = run_relocation_with_replies(completion.clone(), None);
             let outcome = run.outcome.unwrap_or_else(|error| {
                 panic!("completion reply {completion:?} must report an outcome: {error}")
             });
@@ -5865,32 +5875,26 @@ mod tests {
                 "{completion:?}: {outcome}"
             );
             assert_eq!(
-                (run.stopped.len(), run.cleaned_up.len()),
-                (1, 0),
+                (run.stopped.len(), run.ended.len(), run.cleaned_up.len()),
+                (1, 0, 0),
                 "{completion:?}"
             );
-            assert!(run.paths[4].ends_with("/complete") && run.paths[5].ends_with("/fail"));
-            assert_eq!(run.paths.len(), 6, "{completion:?}: {:?}", run.paths);
+            assert!(run.paths[4].ends_with("/complete"));
+            assert_eq!(run.paths.len(), 5, "{completion:?}: {:?}", run.paths);
         }
 
-        // No answer to the failure record: the target stays stopped.
-        let run = run_relocation_with_replies(None, None);
-        assert_eq!(run.outcome.unwrap()["status"], "completion_unconfirmed");
-        assert_eq!((run.stopped.len(), run.cleaned_up.len()), (1, 0));
-
-        // Core accepted the failure record: stop, then remove.
-        let run = run_relocation_with_replies(None, failure_recorded());
-        assert_eq!(run.outcome.unwrap()["status"], "launch_failed");
-        assert_eq!((run.stopped.len(), run.cleaned_up.len()), (1, 1));
-
-        // A clear rejection removes the target, then proves its shutdown
-        // before the failure record.
+        // A clear rejection ends the target by its recorded identity, with
+        // proof, before the failure record.
         let run = run_relocation_with_replies(
             core_reply(409, r#"{"error":"lease conflict"}"#),
             failure_recorded(),
         );
         assert_eq!(run.outcome.unwrap()["status"], "launch_failed");
-        assert_eq!((run.stopped.len(), run.cleaned_up.len()), (1, 1));
+        assert_eq!(
+            (run.stopped.len(), run.ended.len(), run.cleaned_up.len()),
+            (0, 1, 0)
+        );
+        assert!(run.paths[5].ends_with("/fail"));
     }
 
     #[test]
@@ -7169,6 +7173,7 @@ mod tests {
         destroyed: Vec<String>,
         cleaned_up: Vec<String>,
         stopped_targets: Vec<String>,
+        ended_targets: Vec<String>,
         retired: Vec<String>,
         retirement_result: Option<Result<RuntimeRetirementSnapshotReceipt, String>>,
         runner_capacity: RunnerLeaseCapacity,
@@ -7192,6 +7197,7 @@ mod tests {
                 destroyed: Vec::new(),
                 cleaned_up: Vec::new(),
                 stopped_targets: Vec::new(),
+                ended_targets: Vec::new(),
                 retired: Vec::new(),
                 retirement_result: None,
                 runner_capacity: RunnerLeaseCapacity {
@@ -7221,6 +7227,7 @@ mod tests {
                 destroyed: Vec::new(),
                 cleaned_up: Vec::new(),
                 stopped_targets: Vec::new(),
+                ended_targets: Vec::new(),
                 retired: Vec::new(),
                 retirement_result: None,
                 runner_capacity: RunnerLeaseCapacity {
@@ -7250,6 +7257,7 @@ mod tests {
                 destroyed: Vec::new(),
                 cleaned_up: Vec::new(),
                 stopped_targets: Vec::new(),
+                ended_targets: Vec::new(),
                 retired: Vec::new(),
                 retirement_result: None,
                 runner_capacity: RunnerLeaseCapacity {
@@ -7416,6 +7424,11 @@ mod tests {
             lease: &AgentCreationLease,
         ) -> Result<(), RunnerError> {
             self.stopped_targets.push(lease.request.id.clone());
+            Ok(())
+        }
+
+        fn end_relocation_target(&mut self, lease: &AgentCreationLease) -> Result<(), RunnerError> {
+            self.ended_targets.push(lease.request.id.clone());
             Ok(())
         }
     }
