@@ -944,7 +944,11 @@ where
                 &self.runner_id,
                 &lease_token,
             )?;
-            restart_options = restart_options.with_core_bootstrap(url, credential.secret)?;
+            restart_options = restart_options.with_core_bootstrap(
+                url,
+                credential.secret,
+                credential.expected_previous_credential_sha256,
+            )?;
         }
         let operation_result: Result<RuntimeControlCompletionFacts, RunnerError> = match kind {
             RuntimeControlKind::Restart => self
@@ -1849,6 +1853,7 @@ fn runtime_spec_image_is_immutable(reference: &str) -> bool {
 struct RuntimeCoreBootstrap {
     url: String,
     credential: String,
+    expected_previous_credential_sha256: Option<String>,
 }
 
 impl RuntimeRestartOptions {
@@ -1879,31 +1884,49 @@ impl RuntimeRestartOptions {
         &self.secret_environment
     }
 
-    fn with_core_bootstrap(mut self, url: &str, secret: String) -> Result<Self, RunnerError> {
+    fn with_core_bootstrap(
+        mut self,
+        url: &str,
+        secret: String,
+        expected_previous_credential_sha256: Option<String>,
+    ) -> Result<Self, RunnerError> {
         let url = finite_saas_core::store::runtime_credentials::validate_runtime_core_url(url)
             .map_err(|_| RunnerError::RuntimeBootstrapUnavailable)?;
-        if secret.len() != 64
-            || !secret
-                .bytes()
-                .all(|c| c.is_ascii_digit() || (b'a'..=b'f').contains(&c))
+        let valid_hex = |value: &str| {
+            value.len() == 64
+                && value
+                    .bytes()
+                    .all(|c| c.is_ascii_digit() || (b'a'..=b'f').contains(&c))
+        };
+        if !valid_hex(&secret)
+            || expected_previous_credential_sha256
+                .as_deref()
+                .is_some_and(|hash| !valid_hex(hash))
         {
             return Err(RunnerError::RuntimeBootstrapUnavailable);
         }
         self.core_bootstrap = Some(RuntimeCoreBootstrap {
             url,
             credential: secret,
+            expected_previous_credential_sha256,
         });
         Ok(self)
     }
 
-    /// Install only into an unenrolled environment, or accept an exact replay.
-    /// Partial, duplicate or different local values are conflicts, never repairs.
+    /// Candidate construction may install or explicitly recover a credential.
+    /// Verification of running compute (allow_install=false) accepts only the
+    /// already-installed value. Never report an in-memory change as delivery.
     fn enroll_environment(
         &self,
         entries: &mut Vec<(String, String)>,
-        allow_missing: bool,
+        allow_install: bool,
     ) -> Result<(), RunnerError> {
-        let Some(RuntimeCoreBootstrap { url, credential }) = self.core_bootstrap.as_ref() else {
+        let Some(RuntimeCoreBootstrap {
+            url,
+            credential,
+            expected_previous_credential_sha256,
+        }) = self.core_bootstrap.as_ref()
+        else {
             return Ok(());
         };
         let expected = [
@@ -1914,22 +1937,40 @@ impl RuntimeRestartOptions {
             .iter()
             .filter(|(k, _)| expected.iter().any(|(name, _)| k == name))
             .collect::<Vec<_>>();
-        if present.is_empty() && allow_missing {
+        if present.is_empty() && allow_install && expected_previous_credential_sha256.is_none() {
             entries.extend(expected.map(|(key, value)| (key.to_string(), value.clone())));
             return Ok(());
         }
-        if present.len() != 2
-            || expected.iter().any(|(key, value)| {
-                present
-                    .iter()
-                    .filter(|(k, v)| k == key && v == *value)
-                    .count()
-                    != 1
-            })
+        if present.len() == 2
+            && present
+                .iter()
+                .filter(|(key, value)| key == "FINITE_CORE_URL" && value == url)
+                .count()
+                == 1
+            && let Some((_, installed)) = present
+                .iter()
+                .find(|(key, _)| key == "FINITE_CORE_CREDENTIAL")
         {
-            return Err(RunnerError::RuntimeLaunch("existing Core bootstrap conflicts with the current assignment; local values preserved".into()));
+            if installed == credential {
+                return Ok(());
+            }
+            if allow_install && let Some(previous) = expected_previous_credential_sha256 {
+                use sha2::{Digest, Sha256};
+                if format!("{:x}", Sha256::digest(installed.as_bytes())) == *previous {
+                    // Both reserved keys are unique and the URL is unchanged.
+                    for (key, value) in entries {
+                        if key == "FINITE_CORE_CREDENTIAL" {
+                            *value = credential.clone();
+                        }
+                    }
+                    return Ok(());
+                }
+            }
         }
-        Ok(())
+        Err(RunnerError::RuntimeLaunch(
+            "existing Core bootstrap conflicts with the current assignment; local values preserved"
+                .into(),
+        ))
     }
 }
 
@@ -5276,7 +5317,7 @@ mod tests {
 
     #[test]
     fn upgrade_enrollment_http_and_old_core_retry() {
-        for status in [200, 404, 503] {
+        for (status, replacement) in [(200, false), (200, true), (404, false), (503, false)] {
             let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
             let address = listener.local_addr().unwrap();
             let server = std::thread::spawn(move || {
@@ -5298,7 +5339,11 @@ mod tests {
                         assert!(request.contains("lease-upgrade") && request.contains("runner-1"));
                         (
                             status,
-                            serde_json::json!({"secret":"a".repeat(64)}).to_string(),
+                            if replacement {
+                                serde_json::json!({"secret":"a".repeat(64), "expectedPreviousCredentialSha256":"b".repeat(64)}).to_string()
+                            } else {
+                                serde_json::json!({"secret":"a".repeat(64)}).to_string()
+                            },
                         )
                     } else {
                         assert!(path.ends_with("/complete"));
@@ -5345,6 +5390,14 @@ mod tests {
                         .url,
                     "https://core.example.test"
                 );
+                assert_eq!(
+                    runner.launcher.restart_options[0]
+                        .core_bootstrap
+                        .as_ref()
+                        .unwrap()
+                        .expected_previous_credential_sha256,
+                    replacement.then(|| "b".repeat(64))
+                );
                 assert!(
                     !format!("{:?}", runner.launcher.restart_options[0]).contains(&"a".repeat(64))
                 );
@@ -5361,7 +5414,7 @@ mod tests {
     #[test]
     fn enrollment_preserves_or_rejects_local_bootstrap_without_overwriting() {
         let options = RuntimeRestartOptions::default()
-            .with_core_bootstrap("https://core.example.test", "a".repeat(64))
+            .with_core_bootstrap("https://core.example.test", "a".repeat(64), None)
             .unwrap();
         for entries in [
             vec![("FINITE_CORE_URL".into(), "https://core.example.test".into())],
@@ -5457,6 +5510,7 @@ mod tests {
                             serde_json::to_string(&credential_for_server.as_ref().map(|secret| {
                                 finite_saas_core::store::runtime_credentials::RuntimeBootstrapCredential {
                                     secret: secret.clone(),
+                                    expected_previous_credential_sha256: None,
                                 }
                             }))
                             .unwrap()

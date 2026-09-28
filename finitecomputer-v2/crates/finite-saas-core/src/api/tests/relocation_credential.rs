@@ -1,5 +1,6 @@
 mod failures;
 mod lifecycle;
+mod recovery;
 
 use super::*;
 use crate::store::runtime_credentials::ProvisionRuntimeCredential;

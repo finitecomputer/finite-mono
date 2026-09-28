@@ -3,7 +3,9 @@
 use super::*;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
+mod recovery;
 mod relocation;
+pub use recovery::RecoverRelocatedCredential;
 
 // No Debug: launch credentials must not become diagnostic data.
 pub struct ProvisionRuntimeCredential {
@@ -31,6 +33,9 @@ pub struct ProvisionUpgradeCredential {
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct RuntimeBootstrapCredential {
     pub secret: String,
+    /// Exact installed predecessor authorized only for this recovery upgrade.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub expected_previous_credential_sha256: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -204,8 +209,13 @@ impl CoreStore {
             }
             secret
         };
+        let expected_previous_credential_sha256 =
+            recovery::replacement_authorization(&tx, &request, &owner).await?;
         self.finish(tx).await?;
-        Ok(RuntimeBootstrapCredential { secret })
+        Ok(RuntimeBootstrapCredential {
+            secret,
+            expected_previous_credential_sha256,
+        })
     }
 
     /// Core returns the same secret for retries of this creation, including a
@@ -273,7 +283,10 @@ impl CoreStore {
         // If provisioning is retried after runtime registration, bind it now.
         bind_bootstrap(&*tx, &request.id).await?;
         self.finish(tx).await?;
-        Ok(RuntimeBootstrapCredential { secret })
+        Ok(RuntimeBootstrapCredential {
+            secret,
+            expected_previous_credential_sha256: None,
+        })
     }
 
     /// Observational reader. Mutation consumers use the transactional method below.

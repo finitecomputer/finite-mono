@@ -6560,7 +6560,7 @@ esac
         let lease = upgrade_lease("runtime_ctl_upgrade_success");
 
         let options = RuntimeRestartOptions::default()
-            .with_core_bootstrap("https://core.example.test", "a".repeat(64))
+            .with_core_bootstrap("https://core.example.test", "a".repeat(64), None)
             .unwrap();
         let facts = launcher.upgrade_runtime(&lease, &options).unwrap();
         assert_eq!(facts.runtime_artifact_id, "artifact-v2");
@@ -7541,6 +7541,126 @@ esac
         );
         let (validated, _) = launcher.validate_control(&lease).unwrap();
         assert_eq!(validated.state_root, plan.state_root);
+    }
+
+    #[test]
+    fn legacy_relocation_recovery_delivers_through_kata_or_preserves_old_compute() {
+        use sha2::{Digest, Sha256};
+        for case in ["deliver", "wrong-predecessor", "already-target"] {
+            let old_server = TestHttpServer::start("npub1sameagent");
+            let candidate_server = TestHttpServer::start("npub1sameagent");
+            let temp = tempfile::tempdir().unwrap();
+            let (mut launcher, plan, fake_state) = test_launcher(&temp, candidate_server.port);
+            let lease = upgrade_lease("runtime_ctl_credential_recovery");
+            let target = target_artifact();
+            let (image, artifact) = if case == "already-target" {
+                (target.reference.as_str(), "artifact-v2")
+            } else {
+                (
+                    "ghcr.io/finitecomputer/agent-runtime:v1@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                    "artifact-v1",
+                )
+            };
+            write_fake_container(
+                &fake_state,
+                &plan.container_name,
+                image,
+                artifact,
+                "",
+                old_server.port,
+                &plan.state_root,
+            );
+            std::fs::create_dir_all(&plan.state_root).unwrap();
+            std::fs::write(
+                plan.state_root.join("chat-history-fixture"),
+                "retained history",
+            )
+            .unwrap();
+            let old = "b".repeat(64);
+            std::fs::write(fake_state.join(format!("{}.env-file", plan.container_name)),
+                format!("FINITE_CORE_URL=https://core.example.test\nFINITE_CORE_CREDENTIAL={old}\nFINITE_HOME=/data/agent\n")).unwrap();
+            let mut options = RuntimeRestartOptions::default()
+                .with_core_bootstrap("https://core.example.test", "a".repeat(64), None)
+                .unwrap();
+            options
+                .core_bootstrap
+                .as_mut()
+                .unwrap()
+                .expected_previous_credential_sha256 = Some(format!(
+                "{:x}",
+                Sha256::digest(if case == "wrong-predecessor" {
+                    b"wrong".as_slice()
+                } else {
+                    old.as_bytes()
+                })
+            ));
+            let outcome = launcher.upgrade_runtime(&lease, &options);
+            let commands = std::fs::read_to_string(fake_state.join("commands.log")).unwrap();
+            if case == "deliver" {
+                outcome.unwrap();
+                let installed = fake_environment(&fake_state, &plan.container_name);
+                assert!(installed.get("FINITE_CORE_CREDENTIAL") == Some(&"a".repeat(64)));
+                launcher.upgrade_runtime(&lease, &options).unwrap(); // actual installed replay
+            } else {
+                assert!(outcome.is_err(), "accepted {case}");
+                assert!(!commands.lines().any(|line| {
+                    ["stop ", "run ", "rm ", "rename "]
+                        .iter()
+                        .any(|prefix| line.starts_with(prefix))
+                }));
+                assert!(
+                    fake_environment(&fake_state, &plan.container_name)
+                        .get("FINITE_CORE_CREDENTIAL")
+                        == Some(&old)
+                );
+            }
+            assert_eq!(
+                std::fs::read_to_string(plan.state_root.join("chat-history-fixture")).unwrap(),
+                "retained history"
+            );
+            assert!(!commands.contains(&old) && !commands.contains(&"a".repeat(64)));
+        }
+    }
+
+    #[test]
+    fn legacy_relocation_recovery_replaces_only_authorized_installed_credential() {
+        use sha2::{Digest, Sha256};
+        let old = "b".repeat(64);
+        let mut options = RuntimeRestartOptions::default()
+            .with_core_bootstrap("https://core.example.test", "a".repeat(64), None)
+            .unwrap();
+        options
+            .core_bootstrap
+            .as_mut()
+            .unwrap()
+            .expected_previous_credential_sha256 =
+            Some(format!("{:x}", Sha256::digest(old.as_bytes())));
+        let inspected = KataInspectConfig {
+            labels: BTreeMap::new(),
+            image: "old-image".into(),
+            environment: vec![
+                "FINITE_CORE_URL=https://core.example.test".into(),
+                format!("FINITE_CORE_CREDENTIAL={old}"),
+                "FINITE_HOME=/data/agent".into(),
+            ],
+        };
+        let candidate = kata_upgrade_environment(&inspected, &options)
+            .expect("explicit recovery must deliver the new credential before replacing compute");
+        assert!(
+            candidate
+                .entries
+                .contains(&("FINITE_CORE_CREDENTIAL".into(), "a".repeat(64)))
+        );
+        assert!(
+            candidate
+                .entries
+                .contains(&("FINITE_HOME".into(), "/data/agent".into()))
+        );
+        assert!(
+            inspected
+                .environment
+                .contains(&format!("FINITE_CORE_CREDENTIAL={old}"))
+        );
     }
 
     #[test]

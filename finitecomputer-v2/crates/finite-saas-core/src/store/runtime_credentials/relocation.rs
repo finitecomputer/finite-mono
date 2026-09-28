@@ -82,7 +82,10 @@ impl CoreStore {
             secret
         };
         self.finish(tx).await?;
-        Ok(Some(RuntimeBootstrapCredential { secret }))
+        Ok(Some(RuntimeBootstrapCredential {
+            secret,
+            expected_previous_credential_sha256: None,
+        }))
     }
 }
 
