@@ -88,11 +88,13 @@ impl CoreStore {
 
 /// Called only after the completion transaction has validated and replaced the
 /// runtime placement. Registration alone deliberately keeps the source binding.
+/// Returns whether a successor was bound; the caller must activate it in the
+/// same transaction.
 #[tracing::instrument(skip_all, fields(creation_request_id = request.id))]
 pub(super) async fn complete<C: GenericClient + Sync>(
     client: &C,
     request: &AgentCreationRequest,
-) -> CoreResult<()> {
+) -> CoreResult<bool> {
     let relocation = request
         .relocation
         .as_ref()
@@ -106,7 +108,7 @@ pub(super) async fn complete<C: GenericClient + Sync>(
     )
     .await?;
     let Some((current, pending)) = lock_handoff(client, &runtime, request).await? else {
-        return Ok(());
+        return Ok(false);
     };
     ensure_live_now(client, &request.id).await?;
     let pending = pending.ok_or_else(|| conflict("successor credential missing at completion"))?;
@@ -147,7 +149,7 @@ pub(super) async fn complete<C: GenericClient + Sync>(
         )
         .await
         .map_err(store_error)?;
-    Ok(())
+    Ok(true)
 }
 
 /// Locks the Runtime's current credential and this attempt's successor, then

@@ -345,10 +345,11 @@ pub(super) async fn validate_bootstrap_source<C: GenericClient + Sync>(
 
 /// Called by the actual runtime-registration and completion transactions.
 /// Old launchers have no bootstrap row; those paths remain unchanged.
+/// Returns whether a relocation handed authority to its successor.
 pub(super) async fn bind_bootstrap<C: GenericClient + Sync>(
     client: &C,
     request_id: &str,
-) -> CoreResult<()> {
+) -> CoreResult<bool> {
     let request = locked_agent_creation_request(client, request_id).await?;
     if request.relocation.is_some() {
         return relocation::complete(client, &request).await;
@@ -363,7 +364,7 @@ pub(super) async fn bind_bootstrap<C: GenericClient + Sync>(
         .await
         .map_err(store_error)?;
     let Some(row) = row else {
-        return Ok(());
+        return Ok(false);
     };
     let runtime: String = row.get(0);
     client
@@ -375,7 +376,7 @@ pub(super) async fn bind_bootstrap<C: GenericClient + Sync>(
         .map_err(store_error)?;
     let origin = client.query_opt("SELECT source_host_id,lease_sha256,revoked,agent_runtime_id,source_machine_id FROM runtime_core_credentials WHERE creation_request_id=$1 FOR UPDATE", &[&request_id]).await.map_err(store_error)?;
     let Some(origin) = origin else {
-        return Ok(());
+        return Ok(false);
     };
     if origin
         .get::<_, Option<String>>(3)
@@ -396,7 +397,7 @@ pub(super) async fn bind_bootstrap<C: GenericClient + Sync>(
     check_initial_runtime(client, &row.get::<_, String>(1), &runtime).await?;
     ensure_live_now(client, request_id).await?;
     client.execute("UPDATE runtime_core_credentials SET agent_runtime_id=$2,source_machine_id=$3 WHERE creation_request_id=$1", &[&request_id,&runtime,&row.get::<_, String>(3)]).await.map_err(store_error)?;
-    Ok(())
+    Ok(false)
 }
 pub(super) async fn authenticated<C: GenericClient + Sync>(
     client: &C,
