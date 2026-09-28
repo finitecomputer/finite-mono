@@ -246,8 +246,9 @@ only if no subsequent owner edits would be lost. Ambiguous config drift must
 be resolved explicitly; never restore chat databases to roll back this flag.
 The candidate would add the missing flag again on startup, so restore the
 old config with the previous artifact. Verify text, retained history, and
-`scripts/finite-status` after rollback. Agentd's profile-apply path separately
-retains its exact-config rollback journal.
+`scripts/finite-status` after rollback. Agentd's v1 profile-apply path
+separately retains its exact-config rollback journal; `agent.inference.select`
+writes forward without one.
 
 For a retired AEON block, the saved config is the Runtime's own
 `hermes-home/config.yaml.pre-aeon-vision-retirement`. Apply the same rule:
@@ -483,8 +484,49 @@ in `infra/tinfoil/README.md`.
 2. Existing Runtimes are unaffected either way (launch-time pin). For a Kata
    Runtime that adopted the bad image, explicitly request an upgrade to the
    previous promoted, same-schema artifact. Never use destroy as the first leg.
+   The target must pass the
+   [inference compatibility floor](#inference-compatibility-floor) gate.
 3. Leave the bad tag in GHCR (immutability > tidiness) but note it in
    `infra/deployment-changelog.md` so nobody promotes it again.
+
+### Inference compatibility floor
+
+The floor is the first promoted artifact whose `finite-agentd` keeps the
+inference intent record (`/data/agent/agentd/inference-intent.json`) and whose
+Hermes carries `hermes-session-route-safety.patch` and
+`hermes_cli/finite_inference_helper.py`. When that artifact is promoted,
+record its artifact id in `infra/deployment-changelog.md` as the inference
+compatibility floor. Core does not enforce it; this gate is procedural. The
+contract is in
+[the runtime control contract](../../finitecomputer-v2/docs/runtime-control-contract.md#compatibility-floor).
+
+Before a Runtime Upgrade to an older artifact, for any Runtime that has run the
+floor or a later image:
+
+1. Confirm the target is at or above the floor. A target below it is
+   unsupported: it has no session-route patch and no launch-point rule, so an
+   OpenRouter route without its own key again borrows the Finite Private key
+   the Runner passes as `OPENAI_API_KEY`, and a conversation override can
+   again run on another route's key. It also cannot finish a recorded intent.
+2. Check for a recorded intent on the Runner host, read-only:
+   `/var/lib/finite-saas-runner/kata/<durable-state-id>/agent/agentd/inference-intent.json`.
+   It holds no secret. `state: running` means an operation is still finishing;
+   wait for it to succeed or fail. A `running` or `failed` record is completed
+   after the upgrade by any image at or above the floor: agentd starts Hermes,
+   then resumes the record with a fresh retry budget. Do not edit or delete
+   the file by hand.
+3. After the upgrade, verify chat as for any upgrade, and read the owner's
+   Connections panel or `agent.connections.status` `inference.operation`.
+
+Durable additions survive any rollback: the reconciler-owned
+`providers.finite-private` entry, the Finite Private entry in
+`fallback_providers`, and the intent file. None needs repair.
+
+A candidate image that changes the intent record (its `v`, fields, `kind`,
+`route` or `phase` values) raises the floor. agentd renames aside a record it
+cannot parse (`inference-intent.json.corrupt-<unix ms>`), which drops that
+operation with only a log line, so an older floor image cannot complete it.
+Record the new floor with that promotion.
 
 ### Rolling Core back across Runtime Upgrade first use
 
