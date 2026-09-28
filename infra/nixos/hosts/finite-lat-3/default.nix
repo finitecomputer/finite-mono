@@ -52,7 +52,7 @@ in
     sourceHostId = "finite-lat-3";
     workRoot = "/data/finite-saas-runner";
     kataHostAddress = "10.254.3.2";
-    maxSandboxes = 42;
+    maxSandboxes = 32;
   };
 
   finite.metrics = {
