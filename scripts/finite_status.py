@@ -592,6 +592,121 @@ def collect_core() -> dict[str, Any]:
     return psql_query_sets(environment)
 
 
+# Aggregates only: no emails, keys, prompts, or per-grant rows leave the host.
+# Usage is compared with each grant's own profile so this probe never encodes
+# Core's current allowance.
+FINITE_PRIVATE_USAGE_QUERY = """
+WITH recent AS (
+  SELECT * FROM finite_private_reservations
+  WHERE created_at >= NOW() - INTERVAL '7 days' AND created_at <= NOW()
+), live AS (
+  SELECT g.id, g.burst_window_epoch, g.current_window_used_units, p.burst_limit_units
+  FROM finite_private_grants g
+  JOIN finite_private_limit_profiles p ON p.id = g.limit_profile_id
+  WHERE g.status = 'active'
+    AND g.current_window_started_at + p.burst_window_seconds * INTERVAL '1 second' > NOW()
+), epoch_totals AS (
+  SELECT grant_id, burst_window_epoch,
+    SUM(COALESCE(settled_usage_units, reserved_usage_units)) AS units
+  FROM recent WHERE status <> 'denied'
+  GROUP BY grant_id, burst_window_epoch
+)
+SELECT json_build_object(
+  'profiles', (SELECT COALESCE(json_agg(row_to_json(x)), '[]'::json) FROM (
+    SELECT p.id, p.burst_window_seconds, p.burst_limit_units, p.weekly_limit_units,
+      (SELECT COUNT(*) FROM finite_private_grants g
+       WHERE g.limit_profile_id = p.id AND g.status = 'active') AS active_grants
+    FROM finite_private_limit_profiles p ORDER BY p.id
+  ) x),
+  'limit_profile_triggers', (SELECT COALESCE(json_agg(tgname ORDER BY tgname), '[]'::json)
+    FROM pg_trigger
+    WHERE tgrelid = 'finite_private_limit_profiles'::regclass AND NOT tgisinternal),
+  'current_windows', (SELECT row_to_json(x) FROM (
+    SELECT COUNT(*) AS active_windows,
+      COUNT(*) FILTER (WHERE current_window_used_units >= burst_limit_units * 0.9) AS at_least_90_percent,
+      COUNT(*) FILTER (WHERE current_window_used_units >= burst_limit_units) AS at_or_over_limit
+    FROM live
+  ) x),
+  'current_counter_mismatches', (SELECT COUNT(*) FROM live l WHERE
+    l.current_window_used_units <> COALESCE((
+      SELECT SUM(COALESCE(r.settled_usage_units, r.reserved_usage_units))
+      FROM finite_private_reservations r
+      WHERE r.grant_id = l.id AND r.burst_window_epoch = l.burst_window_epoch
+        AND r.status <> 'denied'
+    ), 0)),
+  'reserved_over_15_minutes_in_current_windows', (SELECT row_to_json(x) FROM (
+    SELECT COUNT(*) AS requests, COALESCE(SUM(r.reserved_usage_units), 0) AS held_units
+    FROM finite_private_reservations r JOIN live l
+      ON r.grant_id = l.id AND r.burst_window_epoch = l.burst_window_epoch
+    WHERE r.status = 'reserved' AND r.created_at < NOW() - INTERVAL '15 minutes'
+  ) x),
+  'last_7_days_by_outcome', (SELECT COALESCE(json_agg(row_to_json(x)), '[]'::json) FROM (
+    SELECT model, usage_formula_version, status, settlement_kind,
+      upstream_status, upstream_error_class, COUNT(*) AS requests,
+      SUM(reserved_usage_units) AS reserved_units,
+      SUM(COALESCE(settled_usage_units, reserved_usage_units)) AS charged_or_held_units
+    FROM recent
+    GROUP BY model, usage_formula_version, status, settlement_kind,
+      upstream_status, upstream_error_class
+    ORDER BY charged_or_held_units DESC NULLS LAST
+  ) x),
+  'last_7_days_epochs_by_current_profile', (SELECT COALESCE(json_agg(row_to_json(x)), '[]'::json) FROM (
+    SELECT g.limit_profile_id, COUNT(*) AS observed_epochs,
+      COUNT(DISTINCT e.grant_id) AS grants,
+      COUNT(*) FILTER (WHERE e.units >= p.burst_limit_units * 0.9) AS at_least_90_percent,
+      COUNT(*) FILTER (WHERE e.units >= p.burst_limit_units * 0.98) AS at_least_98_percent,
+      COUNT(DISTINCT e.grant_id) FILTER (WHERE e.units >= p.burst_limit_units * 0.9)
+        AS grants_reaching_90_percent
+    FROM epoch_totals e JOIN finite_private_grants g ON g.id = e.grant_id
+    JOIN finite_private_limit_profiles p ON p.id = g.limit_profile_id
+    GROUP BY g.limit_profile_id ORDER BY g.limit_profile_id
+  ) x)
+);
+"""
+
+
+def collect_finite_private_usage() -> dict[str, Any]:
+    result = run_read_only(
+        [
+            "psql",
+            "--no-psqlrc",
+            "--tuples-only",
+            "--no-align",
+            "--quiet",
+            "--set",
+            "ON_ERROR_STOP=1",
+            "--dbname",
+            CONTRACT["database"]["name"],
+        ],
+        environment=postgres_environment(),
+        input_text=(
+            "BEGIN TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY;\n"
+            "SET LOCAL statement_timeout = '15s';\n"
+            f"{FINITE_PRIVATE_USAGE_QUERY}ROLLBACK;\n"
+        ),
+    )
+    if result.returncode != 0:
+        message = result.stderr.strip().splitlines()
+        detail = message[-1] if message else f"exit {result.returncode}"
+        raise CollectionError(f"read-only Finite Private usage query failed: {detail}")
+    try:
+        usage = json.loads(result.stdout)
+    except ValueError as error:
+        raise CollectionError("Finite Private usage query returned invalid JSON") from error
+    return {
+        "schema_version": "finite.private-usage-status.v1",
+        "generated_at": isoformat(utc_now()),
+        "exit_code": 0,
+        "limitations": [
+            "Units are weighted; raw input, output, and cached token counts are not persisted.",
+            "Denied admissions are not persisted, so near-limit epochs do not count denials.",
+            "Seven-day epochs can be partial, end early after a reset, or predate a profile change.",
+            "A reservation older than 15 minutes needs investigation; age alone does not prove abandonment.",
+        ],
+        "usage": usage,
+    }
+
+
 def systemd_properties(unit: str) -> dict[str, str]:
     result = run_read_only(
         [
@@ -2872,6 +2987,11 @@ def parse_args(arguments: list[str]) -> argparse.Namespace:
         help="read only a local Sites Borg backup receipt instead of fleet evidence",
     )
     mode.add_argument(
+        "--finite-private-usage",
+        action="store_true",
+        help="read only aggregate Finite Private limits and accounting; emits JSON",
+    )
+    mode.add_argument(
         "--fixture",
         type=Path,
         help="read an offline recorded fixture instead of host/production evidence",
@@ -2900,6 +3020,8 @@ def main(arguments: list[str] | None = None) -> None:
             from finite_tinfoil_status import collect
 
             report = collect()
+        elif options.finite_private_usage:
+            report = collect_finite_private_usage()
         elif options.sites_backup_state:
             report = build_sites_backup_report(
                 options.sites_backup_state, utc_now(), options.sites_backup_max_age
@@ -2927,7 +3049,7 @@ def main(arguments: list[str] | None = None) -> None:
                 "chat_plane": {"status": "unknown", "error": str(error)},
             },
         }
-    if options.json or options.tinfoil:
+    if options.json or options.tinfoil or options.finite_private_usage:
         print(json.dumps(report, indent=2, sort_keys=True))
     else:
         print(render_human(report))
