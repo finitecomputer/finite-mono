@@ -1,6 +1,6 @@
 # Dedicated lat5 Runner, captured 2026-09-15. Delivered hardware has
 # 192 GB RAM, two 480 GB SATA boot SSDs and two 7.68 TB NVMe data drives.
-# The declared 42-slot value is an estimate; an operator override can lower it.
+# Its 32-slot ceiling matches lat3 and lat4, which share this hardware.
 # Workload qualification and opening admission remain separate gates.
 {
   config,
@@ -57,7 +57,7 @@ in
     sourceHostId = "finite-lat-5";
     workRoot = "/data/finite-saas-runner";
     kataHostAddress = "10.254.3.5";
-    maxSandboxes = 42;
+    maxSandboxes = 32;
   };
 
   finite.metrics = {

@@ -3,8 +3,8 @@
 # services, no edge, no database. It follows ADR 0007's runner-twin model as
 # one of the active runner hosts (lat2 is the app-plane replacement, not a
 # runner): the wg-finite /29 widening to 10.254.3.0/29 landed with #715
-# (lat2=.1 hub, lat3=.2), lat4 takes 10.254.3.4, and its 42 value is a
-# declared estimate. Public addresses were captured from
+# (lat2=.1 hub, lat3=.2), lat4 takes 10.254.3.4, and its 32-slot ceiling
+# matches lat3 and lat5. Public addresses were captured from
 # the interim OS; see infra/runbooks/install-host.md for evidence and gates.
 {
   config,
@@ -61,7 +61,7 @@ in
     sourceHostId = "finite-lat-4";
     workRoot = "/data/finite-saas-runner";
     kataHostAddress = "10.254.3.4";
-    maxSandboxes = 42;
+    maxSandboxes = 32;
   };
 
   finite.metrics = {

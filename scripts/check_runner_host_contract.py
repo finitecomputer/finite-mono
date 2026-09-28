@@ -22,11 +22,11 @@ HOSTS = ["finite-lat-1", "finite-lat-3", "finite-lat-4", "finite-lat-5"]
 
 EXPECTED_MAX_SANDBOXES = {
     "finite-lat-1": "12",
-    "finite-lat-3": "42",
-    # finite-lat-4 uses the same declared estimate as lat3; its admission
+    # finite-lat-3/4/5 share hardware and one owner-set ceiling; admission
     # state is operator env, not shared env.
-    "finite-lat-4": "42",
-    "finite-lat-5": "42",
+    "finite-lat-3": "32",
+    "finite-lat-4": "32",
+    "finite-lat-5": "32",
 }
 
 SHARED_ENV_PATH = "/etc/finite/runner-shared.env"

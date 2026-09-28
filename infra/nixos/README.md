@@ -30,8 +30,8 @@ Kata adapter settings and
 `FC_RUNNER_KATA_STOP_TIMEOUT_SECS=180`.
 
 The declared `maxSandboxes` is a default. An `FC_RUNNER_MAX_SANDBOXES`
-value in the operator file overrides it. For example, a shared value of 42
-and an operator value of 32 give an effective ceiling of 32. Read the merged
+value in the operator file overrides it. For example, a shared value of 32
+and an operator value of 24 give an effective ceiling of 24. Read the merged
 Runner limits and drain state through `scripts/finite-status` on each host.
 Installation templates and Grafana occupancy estimates do not establish
 current admission capacity.
