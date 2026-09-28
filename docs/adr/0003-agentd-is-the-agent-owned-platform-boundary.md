@@ -88,26 +88,19 @@ keys; any other key or value leaves the block user-owned. Before its first
 rewrite, it keeps the replaced config beside it once as the rollback copy. No
 other auxiliary backend is rewritten.
 
-The reconciler also owns two image-defined entries outside `model`: the named
-`providers.finite-private` route, replaced on every normal start, and the
-Finite Private backup entry in `fallback_providers`. It seeds the backup only
-when neither fallback key exists, and afterwards refreshes only its own
-entries in place.
+The reconciler also owns the named `providers.finite-private` route and the
+Finite Private backup entry in `fallback_providers`, seeding the backup only
+when no fallback is configured; see the [Hermes
+integration](../../finitechat/integrations/hermes/README.md#finite-private-route-and-backup).
 
 The inference select and disconnect commands do not use the offer journal. They
 replace the whole Saved Default, which is user-owned after the first seed, only
-on an explicit owner action, and they move forward: validate everything the
-user controls, then write the credential, then `model`, then restart, then
-verify by re-reading. The Inference Intent (`agentd/inference-intent.json`)
-lets the daemon finish that work in the background and after its own restart,
-and refuses a second change while one is unfinished. At startup the daemon
-resumes a record that was still running and a failed disconnect, never a failed
-select: re-running a stale switch would overwrite a choice the user made since.
-Their only rollback is the spawn-failure restore, and only while the file still
-holds exactly the bytes the daemon wrote. Other writers, such as
-`/model --global` in chat, are not fenced: the operation verifies what it
-wrote and reports what it found. See the
-[runtime control contract](../../finitecomputer-v2/docs/runtime-control-contract.md#inference-connections).
+on an explicit owner action, and they move forward: validate, write, restart,
+verify. A single-slot, secret-free Inference Intent lets the daemon finish that
+work in the background and after its own restart. Their only rollback is the
+spawn-failure restore, and only while the file still holds exactly the bytes
+the daemon wrote. See the [runtime control
+contract](../../finitecomputer-v2/docs/runtime-control-contract.md#select-and-disconnect).
 
 ## Boundary with lifecycle infrastructure
 
@@ -147,10 +140,8 @@ not widen RMP.
   heals an acknowledgement lost after the result was sent.
 - Configuration writes are atomic and validated before Hermes is restarted.
 - Failed validation restores the exact previous bytes.
-- A disconnect's Hermes-side clears (stored credentials and conversation
-  overrides) run in the launcher before Hermes starts, not in the daemon,
-  because a running gateway writes cleared entries back. Nothing fallible
-  there may stop Hermes from starting.
+- A disconnect's Hermes-side clears run in the launcher before Hermes
+  starts, not in the daemon, and can never stop Hermes from starting.
 - This daemon boundary does not itself provide a Recovery Snapshot.
 
 ## Rejected shapes

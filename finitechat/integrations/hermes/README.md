@@ -75,163 +75,6 @@ change that behavior.
 Selecting another inference profile replaces the model block, so the
 declaration does not carry over to an unrelated model.
 
-## Inference routes, backup, and notices
-
-The dashboard's inference commands, the Inference Intent, and what disconnect
-guarantees are specified in the
-[runtime control contract](../../../finitecomputer-v2/docs/runtime-control-contract.md#inference-connections).
-This section covers the Hermes side.
-
-### Finite Private route and backup
-
-On every normal start (not a recover-known-good boot) with the Runner's
-`FINITE_PRIVATE_MODEL` and `FINITE_PRIVATE_BASE_URL` set, the startup
-reconciler writes an image-owned named provider and, when no fallback is
-configured, a backup entry:
-
-```yaml
-providers:
-  finite-private:
-    name: Finite Private
-    base_url: <FINITE_PRIVATE_BASE_URL>
-    key_env: FINITE_PRIVATE_API_KEY
-    api_mode: chat_completions
-    models:
-      <FINITE_PRIVATE_MODEL>: {context_length: <FINITE_PRIVATE_CONTEXT_LENGTH>}
-fallback_providers:
-  - provider: finite-private
-    model: <FINITE_PRIVATE_MODEL>
-    base_url: <FINITE_PRIVATE_BASE_URL>
-    key_env: FINITE_PRIVATE_API_KEY
-    api_mode: chat_completions
-```
-
-- `providers.finite-private` is replaced on every normal start, so a hand edit
-  there does not survive. Other providers are untouched. Its model entry adds
-  `supports_vision: true` for `glm-5-3-flash` on the Finite Private product
-  URL, as agentd's block does.
-- `fallback_providers` is seeded only when neither it nor the legacy
-  `fallback_model` exists and the Finite Private key is present (`.env` first,
-  then the process environment). A user chain, an explicit `[]`, or a
-  `fallback_model` wins. Later starts refresh only entries whose provider is
-  `finite-private`, in place.
-- `key_env` makes the entry resolve its own key. It never reads
-  `OPENAI_API_KEY`. The literal `base_url` lets Hermes skip the entry when the
-  primary is already the bare Finite Private block.
-- `FINITE_PRIVATE_FALLBACK_MODE=remove` makes the next normal start delete the
-  Finite-owned entries. The Runner does not set it.
-- Finite Private serves no `/v1/models` list (404). The `models` map supplies
-  context length and vision support. It does not validate:
-  `/model <any-model> --provider finite-private` succeeds with Hermes's warning
-  that it could not validate the model.
-- `/model … --global` writes only `{default, provider}` and drops
-  `context_length`, `base_url`, `api_mode` and `api_key` from the saved
-  block. The reconciler does not put them back, because `model` is
-  user-owned. Choosing Finite Private in Connections writes the full block
-  again.
-
-The launcher also unsets `OPENAI_API_KEY` when it equals
-`FINITE_PRIVATE_API_KEY` (the Runner sets both to the same value), leaves a
-different value alone, and sets
-`CODEX_HOME=/dev/null/finite-codex-home-disabled` before it runs any Hermes
-code.
-
-### The session-route safety patch
-
-`infra/images/patches/hermes-session-route-safety.patch` is applied to pinned
-Hermes at image build, after the stop-generation patch. It closes two ways a
-route could use another route's credential:
-
-1. **OpenRouter borrowed `OPENAI_API_KEY`.** With no `OPENROUTER_API_KEY`,
-   Hermes sent the Finite Private key (the Runner's alias), or a user's own
-   OpenAI key, to OpenRouter. The patch removes `OPENAI_API_KEY` from
-   OpenRouter's key candidates (`hermes_cli/runtime_provider.py`). An
-   OpenRouter runtime with an empty or `${…}` key, as the Saved Default or a
-   session override, is a credential failure: Hermes uses the fallback chain
-   before any request, or fails the turn.
-2. **A session override ran on another route's key.** A `/model` override
-   whose credential was not cached was laid over the Saved Default's runtime,
-   so, for example, a ChatGPT override with no sign-in sent the Finite Private
-   key to the ChatGPT endpoint. The patch resolves the override's own provider
-   instead (`gateway/run.py`). If that fails, or the resolved endpoint is not
-   provably the one the override names, the turn uses the fallback chain or
-   fails, and the next turn tries again. The override is never cleared and
-   stays the conversation's choice. Endpoints compare scheme and host
-   case-insensitively and everything else exactly, ignoring only a trailing
-   `/`. An override with only a model still inherits the Saved Default's
-   runtime.
-
-With no key and no usable fallback, the user sees the gateway's generic error:
-"⚠️ Provider authentication failed. Check the configured credentials; raw
-provider details are in the gateway logs." The specific reason ("No OpenRouter
-API key is configured for this agent, and no fallback model is available." for
-the Saved Default, or "credentials for provider 'openrouter' are not
-configured" for an override) reaches the gateway log only.
-
-**Re-port the patch on every Hermes pin bump.** The build applies it with
-`--fuzz=0`, so a moved hunk fails the build. A re-port that drops a hunk fails
-`infra/images/test_hermes_session_route_safety.py` (CI step "Packaged Hermes
-session route safety contract"). `OpenRouterBorrowingTests`,
-`EndpointIdentityTests`, `SessionBoundaryTests` and the 120-case
-`MatrixTests` hold the cases that fail on unpatched Hermes;
-`NormalServingTests` guards ordinary routing. Two other tests pin upstream
-behavior this integration relies on:
-`infra/images/test_finite_inference_helper.py` (`PinnedUpstreamTests`, the helper's Hermes symbols) and
-`finitechat/tests/hermes/test_inference_route_notice.py`
-(`PinnedUpstreamWordingTests`, the fallback wording below).
-
-### Backup notices
-
-When the backup answers, the chat gets one note after the answer, for example
-"Finite Private answered this response because OpenRouter is out of credits or
-quota." The plugin's `_InferenceRouteObserver` records, per Finite
-conversation and turn, which routes the main agent requested
-(`pre_api_request`), which failed and why (`api_request_error`), and which
-answered (`post_api_request`). On completion it sends at most one notice, and
-only for what it observed:
-
-| Observed in the turn | Notice |
-| --- | --- |
-| a non-Finite Private request failed, then Finite Private answered | "Finite Private answered this response because {route} {reason}." |
-| a request failed, then another non-Finite Private route answered | "Your backup model answered this response because {route} {reason}." |
-| the turn failed after a non-Finite Private failure and a Finite Private attempt | "{Route} and Finite Private couldn't answer this message." |
-| anything else, including every turn only Finite Private served | none |
-
-The route is OpenRouter, ChatGPT, or "your selected model"; without a known
-reason the text says "after {route} returned an error". Finite Private is a
-request to provider `custom`, `finite-private` or `custom:finite-private` at
-`providers.finite-private.base_url`, so a user's own custom endpoint is never
-called Finite Private. A request counts as the main agent's when its
-`task_id` equals its `session_id`, it is not inside a delegated child, and the
-session platform is Finite Chat or local; delegated subagents and the
-background review fork are ignored. The notice is a `kind: message` with
-`metadata.finite_notice = {v: 1, type, attempted, served_by, reason}` and no
-`notify`, so old clients show it as an ordinary agent message. The adapter's
-`send_or_update_status` drops Hermes's own "⚠️ Model fallback: …" and
-"✅ Primary model restored: …" status lines, which would otherwise repeat on
-every failing turn.
-
-A notice is sent for each failure the plugin observes. **No notice is sent when
-Hermes chooses the fallback before any request**, because nothing failed that
-the plugin can see:
-
-- a ChatGPT route that is signed out, or whose only credentials are in a
-  usage-limit cooldown;
-- an OpenRouter route with no key, as the Saved Default or an override;
-- a session override whose endpoint binding the patch refuses;
-- the provider cooldown on an agent Hermes keeps cached. After a billing or
-  rate-limit error Hermes stops trying the primary for 60 seconds (doubling on
-  consecutive errors, up to 4 hours). Hermes keeps the agent cached only when
-  the backup's model ID equals the primary's; otherwise it evicts the agent,
-  the next turn tries the primary again, and that failure gets its notice.
-
-TODO: close these cases with an observed-facts notice
-([FIN-129](https://linear.app/finitecomputer/issue/FIN-129)).
-
-Recovery follows the same rule. An evicted agent tries the primary again on
-the next turn; a cached agent tries it again only after the cooldown ends. No
-notice is sent on recovery.
-
 Finite Chat conveys authenticated attachments to Hermes without choosing a
 model, rewriting the channel prompt, or registering Finite-specific agent
 tools. Auxiliary capabilities are runtime configuration behind Hermes's
@@ -285,6 +128,111 @@ In that strict mode, stream failures reconnect with bounded backoff and resume
 from the Rust service's durable cursor. They never fall into Python timer
 polling or CLI-per-message subprocess calls. One-shot polling and CLI fallback
 remain available only when inbound streaming is disabled.
+
+## Inference routes, backup, and notices
+
+The dashboard's inference commands, the Saved Default, and what a disconnect
+guarantees are specified in the
+[runtime control contract](../../../finitecomputer-v2/docs/runtime-control-contract.md#inference-connections).
+This section covers the Hermes side.
+
+### Finite Private route and backup
+
+On every normal start, the startup reconciler
+(`finitechat/containers/agent/reconcile_hermes_config.py`) owns two entries:
+
+- `providers.finite-private`, a named Finite Private route, replaced on every
+  normal start, so a hand edit there does not survive;
+- the Finite Private backup entry in `fallback_providers`, seeded only when no
+  fallback is configured and the Finite Private key is present. A user chain,
+  an explicit `[]` or a legacy `fallback_model` always wins, and later starts
+  refresh only Finite-owned entries in place.
+  `FINITE_PRIVATE_FALLBACK_MODE=remove` makes the next start delete them; the
+  Runner does not set it.
+
+The backup entry names its key with `key_env`, so it never borrows
+`OPENAI_API_KEY`, and carries a literal `base_url`, so Hermes skips it when the
+primary is already the bare Finite Private block. Finite Private serves no
+model list, so the named route declares its model in a `models` map. That map
+supplies context length and vision support; it does not validate:
+`/model <any-model> --provider finite-private` succeeds with a warning.
+`/model … --global` writes only `{default, provider}` and drops the rest of
+the block; the reconciler does not restore it, because the Saved Default is
+user-owned, and choosing Finite Private in Connections writes the full block
+again.
+
+The Runner passes the Finite Private key as both `FINITE_PRIVATE_API_KEY` and
+`OPENAI_API_KEY`. The launcher, agentd's `hermes serve` and the helper unset
+`OPENAI_API_KEY` only when it equals the Finite Private key, so no Hermes
+consumer borrows the alias while a user's own OpenAI key stays usable, and
+point `CODEX_HOME` at a path that does not exist, so no desktop Codex login is
+imported.
+
+### The session-route safety patch
+
+`infra/images/patches/hermes-session-route-safety.patch` closes two ways a
+route could use another route's credential:
+
+1. **OpenRouter borrowed `OPENAI_API_KEY`.** With no `OPENROUTER_API_KEY`,
+   Hermes sent the Finite Private key, or a user's own OpenAI key, to
+   OpenRouter. The patch removes that candidate. An OpenRouter route with no
+   key, as the Saved Default or a session override, is a credential failure:
+   Hermes uses the fallback chain before any request, or fails the turn.
+2. **A session override ran on another route's key.** A `/model` override
+   without a cached credential was laid over the Saved Default's runtime, so,
+   for example, a ChatGPT override with no sign-in sent the Finite Private key
+   to the ChatGPT endpoint. The patch resolves the override's own provider,
+   and uses the fallback chain or fails the turn when that fails or the
+   endpoint cannot be proven to match. The override is never cleared and stays
+   the conversation's choice.
+
+With no key and no usable fallback, the chat shows the gateway's generic
+"⚠️ Provider authentication failed. Check the configured credentials; raw
+provider details are in the gateway logs." The specific reason is in the
+gateway log only.
+
+**Re-port the patch on every Hermes pin bump.** The build applies it with
+`--fuzz=0`, so a moved hunk fails the build, and a dropped hunk fails
+`infra/images/test_hermes_session_route_safety.py`, whose cases reproduce each
+leak on unpatched Hermes. `infra/images/test_finite_inference_helper.py` and
+`finitechat/tests/hermes/test_inference_route_notice.py` likewise fail when a
+bump changes the Hermes symbols or status wording this integration relies on.
+
+### Backup notices
+
+The plugin's `_InferenceRouteObserver` records which routes the main agent
+requested, which failed and which answered in each turn, and sends at most one
+note after the answer, stating only what it observed: a route failed and
+Finite Private (or another backup) answered, or both failed. It calls a route
+Finite Private only for a request to the configured
+`providers.finite-private` endpoint, so a user's own custom endpoint is never
+named Finite Private. Delegated subagents and the background review fork are
+ignored. The gateway's session-id variable is empty on a turn served by a
+cached agent and names the child inside a delegated one, so the observer
+matches each request's task id to its session id instead. The note
+is an ordinary `kind: message` with `metadata.finite_notice` and no `notify`,
+so old clients show it as a plain agent message. Hermes's own "Model fallback"
+and "Primary model restored" status lines are dropped, because they would
+repeat on every failing turn.
+
+**No notice is sent when Hermes chooses the fallback before any request**,
+because nothing failed that the plugin can see:
+
+- a ChatGPT route that is signed out, or whose credentials are all in a
+  usage-limit cooldown;
+- an OpenRouter route with no key, as the Saved Default or an override;
+- a session override whose endpoint the patch refuses;
+- the provider cooldown on an agent Hermes keeps cached. After a billing or
+  rate-limit error Hermes stops trying the primary for a minute or more. It
+  keeps the agent cached only when the backup's model ID equals the
+  primary's; otherwise the next turn tries the primary again, and that
+  failure gets its notice.
+
+TODO: close these cases
+([FIN-129](https://linear.app/finitecomputer/issue/FIN-129)).
+
+Recovery follows the same rule: an evicted agent tries the primary on the next
+turn, a cached one only after the cooldown. No notice is sent on recovery.
 
 ## Inbox in-flight state and reply routing live in Rust
 

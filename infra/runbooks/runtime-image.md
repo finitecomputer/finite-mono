@@ -518,24 +518,22 @@ in `infra/tinfoil/README.md`.
 
 ### Inference Compatibility Floor
 
-The Inference Compatibility Floor ([glossary](../CONTEXT.md)) is the first
-promoted artifact whose `finite-agentd` keeps the Inference Intent
-(`agentd/inference-intent.json` under the Agent Home) and whose Hermes carries
-`hermes-session-route-safety.patch` and `hermes_cli/finite_inference_helper.py`.
-When that artifact is promoted, record its artifact id in
-`infra/deployment-changelog.md` as the Inference Compatibility Floor. Core does
-not enforce it; this gate is procedural. The contract is in
-[the runtime control contract](../../finitecomputer-v2/docs/runtime-control-contract.md#inference-compatibility-floor).
+The **Inference Compatibility Floor** is the oldest Agent Runtime artifact
+that can complete every recorded Inference Intent: the first promoted artifact
+whose `finite-agentd` keeps the intent (`agentd/inference-intent.json` under
+the Agent Home) and whose Hermes carries `hermes-session-route-safety.patch`
+and `hermes_cli/finite_inference_helper.py`. When that artifact is promoted,
+record its artifact id in `infra/deployment-changelog.md`. Core does not
+enforce the floor; this gate is procedural. Why the floor exists is in
+[the runtime control contract](../../finitecomputer-v2/docs/runtime-control-contract.md#rollback).
 
 Before a Runtime Upgrade to an older artifact, for any Runtime that has run the
 floor or a later image:
 
 1. Confirm the target is at or above the floor. A target below it is
-   unsupported: it has no session-route patch and no launch-point rule, so an
-   OpenRouter route without its own key again borrows the Finite Private key
-   the Runner passes as `OPENAI_API_KEY`, and a conversation override can
-   again run on another route's key. It also cannot finish a recorded
-   Inference Intent.
+   unsupported: an OpenRouter route without its own key again borrows the
+   Finite Private key, a conversation override can again run on another
+   route's key, and a recorded Inference Intent is never finished.
 2. Check for a recorded Inference Intent, read-only. It holds no secret. Find
    the Runtime's durable state bind (`nerdctl --namespace finite inspect
    <source-machine-id>` shows the host directory mounted at `/data`); the file
@@ -544,11 +542,10 @@ floor or a later image:
    [runtime control contract](../../finitecomputer-v2/docs/runtime-control-contract.md#state-roots);
    the full host path is derived, so confirm it exists before relying on it.
    - No file: nothing is pending.
-   - `state: running`: an operation is still finishing. A disconnect can take
+   - `state: running`: an operation is still finishing, which can take
      several minutes. Wait for it to succeed or fail.
-   - `state: failed`, `kind: disconnect`: any image at or above the floor
-     resumes it after the upgrade, with a fresh retry budget, once Hermes has
-     started.
+   - `state: failed`, `kind: disconnect`: any floor image resumes it after the
+     upgrade, once Hermes has started.
    - `state: failed`, `kind: select` or `activate`: no image re-runs it. It
      stays failed until the owner's next change replaces it.
 
@@ -560,11 +557,10 @@ Durable additions survive any rollback: the reconciler-owned
 `providers.finite-private` entry, the Finite Private entry in
 `fallback_providers`, and the intent file. None needs repair.
 
-A candidate image that changes the Inference Intent schema (its `v`, fields,
-`kind`, `route` or `phase` values) raises the floor. agentd renames aside a
-record it cannot parse (`inference-intent.json.corrupt-<unix ms>`), which drops
-that operation with only a log line, so an older floor image cannot complete
-it. Record the new floor with that promotion.
+A candidate image that changes the intent's schema (its version, fields,
+kinds, routes or phases) raises the floor: agentd renames aside a record it
+cannot parse (`inference-intent.json.corrupt-<unix ms>`), dropping that
+operation with only a log line. Record the new floor with that promotion.
 
 ### Rolling Core back across Runtime Upgrade first use
 
