@@ -52,6 +52,33 @@ substitute an old data tree after newer writes. Relocation/new-launch recovery
 of an unpromoted image is intentionally unavailable; use the previous qualified
 release and the verified Recovery Set if recovery is needed.
 
+### Diagnosing a Principal mismatch before retrying
+
+An identity mismatch can be a published-port routing error even when the
+guest's durable identity is intact. On the exact runner, use the read-only
+canonical probe:
+
+```sh
+scripts/finite-status --json --runtime-route SOURCE_MACHINE_ID \
+  --expected-agent-principal-sha256 SHA256_OF_CORE_AGENT_NPUB
+```
+
+Establish the expected Principal independently from Core, never from the
+published endpoint under investigation. The probe compares `/contact` through
+the published address and the inspected guest IP, retains only Principal
+hashes, and reports the matching NAT chains and container port claims. It
+reads saved claims with `nerdctl port`, including stopped containers whose
+ordinary inspect output has no port bindings. The owner inventory is scoped
+to the `finite` namespace and is diagnostic, not an allocation authority.
+It does not inspect credentials or change networking. A green result proves only
+agreement of these identity routes at observation time, not Chat readiness.
+
+If the direct route matches Core but the published route differs, preserve
+both container owners and stop the rollout. Two running containers can claim
+the same host address and port; selecting a NAT rule by order does not resolve
+ownership. Do not rewrite an Agent identity or disable the upgrade guard to
+make that topology pass.
+
 ## PRECONDITIONS
 
 - Depot-managed GitHub Actions runner access is available for the
