@@ -12,14 +12,15 @@ name is not authority to select a Runtime.
 
 ## PRECONDITIONS
 
-- The Core and both Runner hosts run the reviewed generation that contains the
-  `runtime_relocation.v1` contract.
+- The Core, source Runner, and target Runner run the reviewed generation that
+  contains the `runtime_relocation.v1` contract.
 - For an Agent enrolled in Core authentication, the target Runner must also
   advertise `supportsRelocationCredentials` in its lease capacity, which it
-  does when `FC_RUNNER_RUNTIME_CORE_URL` is configured. Core will not lease that relocation to an older Runner. A new
-  Runner talking to an older Core stops before provider work and retries.
-  Quiesce already-leased relocations before deploying this Core change: the
-  capability gate cannot recall work an old Runner has already claimed.
+  does when `FC_RUNNER_RUNTIME_CORE_URL` is configured. Core will not lease
+  that relocation to an older Runner. A new Runner talking to an older Core
+  stops before provider work and retries. Quiesce already-leased relocations
+  before deploying this Core change: the capability gate cannot recall work an
+  old Runner has already claimed.
 - A full lat1 Borg archive completed successfully after quiescing the hosted
   services, and its archive is visible from the independently held recovery
   credentials.
@@ -40,9 +41,9 @@ name is not authority to select a Runtime.
 - There are no pending/running controls or retirement snapshot for the Runtime.
 - The normal typed `stop` request has succeeded. Do not substitute
   `nerdctl stop`; Core must also record the Runtime offline.
-- Both Runner timers are drained while staging and reviewing the request, and
-  no untargeted ordinary creation request is claimable before the target
-  Runner is allowed one lease attempt.
+- The source and target Runner timers are drained while staging and reviewing
+  the request, and no untargeted ordinary creation request is claimable before
+  the target Runner is allowed one lease attempt.
 
 Abort on any mismatch. Do not delete, rename, or modify source state as part of
 this procedure.

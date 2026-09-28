@@ -57,8 +57,9 @@
         StateDirectory = "finite-saas-runner";
         WorkingDirectory = "/var/lib/finite-saas-runner";
 
-        # Operator-created root:root 0600. Names and examples live in
-        # infra/hosts/lat1/systemd/runner.env.example; values stay host-only.
+        # Operator-created root:root 0600. Names and examples live in the
+        # active host templates under infra/nixos/hosts/finite-lat-*/;
+        # values stay host-only.
         # kata-runner-host.nix prepends the Nix-rendered shared non-secret
         # defaults, so this file keeps credentials, the promoted Runtime
         # artifact pin (FC_RUNNER_RUNTIME_ARTIFACT_ID), and bounded incident
