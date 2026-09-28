@@ -1,0 +1,295 @@
+#!/usr/bin/env python3
+"""Compare what dbus-broker.service and systemd-tmpfiles-resetup.service apply
+in a candidate NixOS system with the running system. Read-only.
+
+A package change rewrites system-path and the tmpfiles configuration, so dry
+activation names both units for nearly every closure. When the files differ
+only in Nix store hashes, the reload or restart reapplies the same rules and
+policy. The deploy scripts admit a unit then and require --allow-unit
+otherwise.
+
+Every path is read into memory and checked before anything is compared. A
+read or discovery error, a dangling or looping link, a non-regular file, or a
+D-Bus form this helper does not resolve makes the verdict "incomplete". Only
+FileNotFoundError counts as absence, and only where D-Bus or systemd allows
+the path to be missing.
+
+Run on the host as `python3 - CANDIDATE_SYSTEM < compare-activation-config`.
+Output: one verdict line per unit, "reference-only UNIT", "content-change
+UNIT" or "incomplete UNIT", followed by the diff (store hashes replaced by
+<hash>) and every path that could not be inspected. Exit 0 when both verdicts
+were produced.
+"""
+
+from __future__ import annotations
+
+import argparse
+import difflib
+import os
+import re
+import stat
+import sys
+import xml.etree.ElementTree as ET
+
+MAX_INCLUDE_DEPTH = 32
+
+
+class Inspection:
+    """What one side of the comparison read, and what it could not read."""
+
+    def __init__(self, system: str, store_dir: str, selinuxfs: str) -> None:
+        self.system = system.rstrip("/")
+        self.store_dir = store_dir.rstrip("/")
+        self.selinuxfs = selinuxfs
+        self.hash_re = re.compile(re.escape(self.store_dir).encode() + rb"/[0-9a-z]{32}-")
+        self.entries: list[str] = []
+        self.errors: list[str] = []
+
+    def normalize(self, data: bytes) -> str:
+        return self.hash_re.sub(self.store_dir.encode() + b"/<hash>-", data).decode("latin-1")
+
+    def label(self, path: str) -> str:
+        if path == self.system or path.startswith(self.system + "/"):
+            path = "<system>" + path[len(self.system):]
+        return self.normalize(path.encode())
+
+    def fail(self, message: str) -> None:
+        self.errors.append(message)
+
+    def read_file(self, path: str) -> bytes | None:
+        try:
+            st = os.stat(path)
+            if not stat.S_ISREG(st.st_mode):
+                self.fail(f"{self.label(path)}: not a regular file")
+                return None
+            with open(path, "rb") as handle:
+                return handle.read()
+        except OSError as error:
+            self.fail(f"{self.label(path)}: {error.strerror or error}")
+            return None
+
+    def present(self, path: str) -> bool | None:
+        """True or False when lstat answers; None (recorded) on any other error.
+
+        Only FileNotFoundError means absent. A permission error, a link loop in
+        a parent or any other failure is an inspection failure.
+        """
+        try:
+            os.lstat(path)
+        except FileNotFoundError:
+            return False
+        except OSError as error:
+            self.fail(f"{self.label(path)}: {error.strerror or error}")
+            return None
+        return True
+
+    def add_tree(self, path: str, required: bool) -> None:
+        """Record every regular file under path (following links)."""
+        present = self.present(path)
+        if present is None:
+            return
+        if not present:
+            if required:
+                self.fail(f"{self.label(path)}: missing")
+            else:
+                self.entries.append(f"== {self.label(path)}\n(absent)\n")
+            return
+        self._walk(path, set())
+
+    def _walk(self, path: str, ancestors: set[str]) -> None:
+        # The entry exists (lstat or listdir found it), so a missing target is
+        # a dangling link.
+        try:
+            st = os.stat(path)
+        except FileNotFoundError:
+            self.fail(f"{self.label(path)}: dangling link")
+            return
+        except OSError as error:
+            self.fail(f"{self.label(path)}: {error.strerror or error}")
+            return
+        if stat.S_ISDIR(st.st_mode):
+            real = os.path.realpath(path)
+            if real in ancestors:
+                self.fail(f"{self.label(path)}: link loop")
+                return
+            try:
+                names = sorted(os.listdir(path))
+            except OSError as error:
+                self.fail(f"{self.label(path)}: {error.strerror or error}")
+                return
+            self.entries.append(f"== {self.label(path)}/\n")
+            for name in names:
+                self._walk(os.path.join(path, name), ancestors | {real})
+        elif stat.S_ISREG(st.st_mode):
+            data = self.read_file(path)
+            if data is not None:
+                self.entries.append(f"== {self.label(path)}\n{self.normalize(data)}")
+        else:
+            self.fail(f"{self.label(path)}: not a regular file or directory")
+
+    # D-Bus configuration graph
+
+    def bus_path(self, logical: str) -> str | None:
+        """Map a path as dbus-broker sees it to this side's file."""
+        if logical.startswith(self.store_dir + "/"):
+            return logical
+        if logical.startswith("/etc/"):
+            return self.system + logical
+        return None
+
+    def selinux_enabled(self) -> bool | None:
+        """Whether SELinux is on; None (recorded) when that cannot be read."""
+        try:
+            os.lstat(os.path.join(self.selinuxfs, "enforce"))
+        except FileNotFoundError:
+            return False
+        except OSError as error:
+            self.fail(f"SELinux state unreadable at {self.selinuxfs}: {error.strerror or error}")
+            return None
+        return True
+
+    def add_bus_config(self, logical: str, stack: tuple[str, ...] = ()) -> None:
+        path = self.bus_path(logical)
+        if path is None:
+            self.fail(f"{self.label(logical)}: outside the store and /etc, so the candidate's copy is unknown")
+            return
+        real = os.path.realpath(path)
+        if real in stack:
+            self.fail(f"{self.label(logical)}: include cycle")
+            return
+        if len(stack) >= MAX_INCLUDE_DEPTH:
+            self.fail(f"{self.label(logical)}: includes nest deeper than {MAX_INCLUDE_DEPTH}")
+            return
+        data = self.read_file(path)
+        if data is None:
+            return
+        self.entries.append(f"== config {self.label(logical)}\n{self.normalize(data)}")
+        try:
+            root = ET.fromstring(data)
+        except ET.ParseError as error:
+            self.fail(f"{self.label(logical)}: not well-formed XML ({error})")
+            return
+        base = os.path.dirname(logical)
+        for element in root.iter():
+            self.add_bus_element(element, base, stack + (real,))
+
+    def add_bus_element(self, element: ET.Element, base: str, stack: tuple[str, ...]) -> None:
+        tag = element.tag
+        if tag in ("standard_system_servicedirs", "standard_session_servicedirs"):
+            self.fail(f"<{tag}/> names host directories outside the system closure")
+            return
+        if tag not in ("include", "includedir", "servicedir"):
+            return
+        text = (element.text or "").strip()
+        attributes = dict(element.attrib)
+        if tag == "include" and attributes.pop("if_selinux_enabled", "no") == "yes":
+            enabled = self.selinux_enabled()
+            if enabled is None:
+                return
+            if not enabled:
+                return  # dbus-broker skips it while SELinux is off
+            self.fail(f"<include if_selinux_enabled> {text}: SELinux is on and this form is not resolved")
+            return
+        ignore_missing = attributes.pop("ignore_missing", "no") == "yes" and tag == "include"
+        if attributes:
+            self.fail(f"<{tag}> {text}: unsupported attributes {sorted(attributes)}")
+            return
+        if not text:
+            self.fail(f"<{tag}> without a path")
+            return
+        logical = os.path.normpath(os.path.join(base, text))
+        path = self.bus_path(logical)
+        if path is None:
+            self.fail(f"<{tag}> {self.label(logical)}: outside the store and /etc, so the candidate's copy is unknown")
+            return
+        if tag == "include":
+            if ignore_missing:
+                present = self.present(path)
+                if present is None:
+                    return
+                if not present:
+                    self.entries.append(f"== include {self.label(logical)}\n(absent)\n")
+                    return
+            self.add_bus_config(logical, stack)
+        elif tag == "includedir":
+            present = self.present(path)
+            if present is None:
+                return
+            if not present:
+                self.entries.append(f"== includedir {self.label(logical)}\n(absent)\n")
+                return
+            try:
+                names = sorted(os.listdir(path))
+            except OSError as error:
+                self.fail(f"{self.label(logical)}: {error.strerror or error}")
+                return
+            self.entries.append(f"== includedir {self.label(logical)}\n")
+            for name in names:
+                if name.endswith(".conf"):
+                    self.add_bus_config(os.path.join(logical, name), stack)
+        else:
+            self.add_tree(path, required=False)
+
+
+def inspect_tmpfiles(side: Inspection) -> None:
+    unit_dir = os.path.join(side.system, "etc/systemd/system")
+    side.add_tree(os.path.join(side.system, "etc/tmpfiles.d"), required=True)
+    side.add_tree(os.path.join(unit_dir, "systemd-tmpfiles-resetup.service"), required=False)
+    side.add_tree(os.path.join(unit_dir, "systemd-tmpfiles-resetup.service.d"), required=False)
+
+
+def inspect_dbus(side: Inspection) -> None:
+    unit_dir = os.path.join(side.system, "etc/systemd/system")
+    side.add_tree(os.path.join(side.system, "etc/dbus-1"), required=True)
+    side.add_tree(os.path.join(unit_dir, "dbus-broker.service"), required=False)
+    side.add_tree(os.path.join(unit_dir, "dbus-broker.service.d"), required=False)
+    side.add_bus_config("/etc/dbus-1/system.conf")
+
+
+def compare(running: Inspection, candidate: Inspection) -> tuple[str, list[str]]:
+    lines: list[str] = []
+    diff = list(
+        difflib.unified_diff(
+            "".join(running.entries).splitlines(keepends=True),
+            "".join(candidate.entries).splitlines(keepends=True),
+            fromfile="running",
+            tofile="candidate",
+        )
+    )
+    for side, inspection in (("running", running), ("candidate", candidate)):
+        for error in inspection.errors:
+            lines.append(f"could not inspect ({side}): {error}\n")
+    if lines:
+        verdict = "incomplete"
+    elif diff:
+        verdict = "content-change"
+    else:
+        verdict = "reference-only"
+    return verdict, lines + [line if line.endswith("\n") else line + "\n" for line in diff]
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
+    parser.add_argument("--current", default="/run/current-system")
+    parser.add_argument("--store-dir", default="/nix/store")
+    parser.add_argument("--selinuxfs", default="/sys/fs/selinux")
+    parser.add_argument("candidate")
+    args = parser.parse_args()
+
+    units = {
+        "systemd-tmpfiles-resetup.service": inspect_tmpfiles,
+        "dbus-broker.service": inspect_dbus,
+    }
+    for unit, inspect in units.items():
+        running = Inspection(args.current, args.store_dir, args.selinuxfs)
+        candidate = Inspection(args.candidate, args.store_dir, args.selinuxfs)
+        inspect(running)
+        inspect(candidate)
+        verdict, lines = compare(running, candidate)
+        sys.stdout.write(f"{verdict} {unit}\n")
+        sys.stdout.writelines(lines)
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

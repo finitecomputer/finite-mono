@@ -523,7 +523,15 @@ unavoidable:
 
 1. Set `FC_CORE_ENABLE_RUNTIME_UPGRADES=false` and stop the
    `finite-saas-runner.timer` and `finite-saas-runner.service` so no lease can
-   move while inspecting provider topology.
+   move while inspecting provider topology. If a Runner host closure must be
+   deployed while the Runner stays stopped, run its `deploy-latN-closure`
+   recipe with `--activate --keep-runner-paused`. Without the flag the script
+   refuses a stopped timer, and an ordinary switch starts the timer again.
+   The pause writes `/run/finite-deploy-runner-pause` and
+   `50-finite-deploy-runner-pause.conf` drop-ins under
+   `/run/systemd/system/finite-saas-runner.{timer,service}.d/`; after an
+   interrupted deploy, check for and release them as described in
+   `infra/nixos/README.md` before resuming the timer.
 2. Query `runtime_control_requests` for `kind = 'upgrade' AND status IN
    ('requested','launching','compute_up','ready')`. For every result, use the
    compatible runner

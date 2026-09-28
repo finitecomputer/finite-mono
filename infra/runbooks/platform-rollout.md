@@ -180,7 +180,9 @@ product probe. A layer is green only when both agree.
    hit one public route per service through the edge.
 3. **Dashboard byte-equality:** host-running digest equals the pinned
    `@sha256:` in `modules/dashboard.nix`. An exit-0 command proves nothing;
-   compare digests.
+   compare digests. `deploy-lat2-closure-cache --activate` compares the
+   running container's digest with the pin at the artifact rev and fails the
+   activation on a mismatch.
 4. **Pins:** finite-status shows the artifact pin matched/green on every active
    Kata host;
    treated as RED/absent → halt per PRECONDITIONS.

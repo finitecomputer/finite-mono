@@ -51,7 +51,11 @@ def write_shim(bin_dir: Path, name: str, body: str) -> Path:
 def write_operator_shims(bin_dir: Path, dry_activation_units: str) -> None:
     """Stand in for git/nix/ssh so the local half of the deploy script runs
     through the dry-activation fence without a network or a host."""
-    write_shim(bin_dir, "git", "exit 0\n")
+    write_shim(
+        bin_dir,
+        "git",
+        f'[[ "$1" != show ]] || cat {ROOT / "infra/nixos/modules/dashboard.nix"}\n',
+    )
     write_shim(bin_dir, "nix", "exit 0\n")
     write_shim(
         bin_dir,

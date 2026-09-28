@@ -177,21 +177,29 @@ class Lat4ClosureArtifactTests(unittest.TestCase):
         mutation = source.index('echo "==> mutation boundary:')
         self.assertLess(source.index("dry-activate"), mutation)
         self.assertLess(
-            source.index("systemctl stop finite-saas-runner.timer"),
+            source.index('systemctl stop "$timer"'),
             mutation,
         )
         self.assertIn("previous_system", source)
         self.assertIn('switch-to-configuration" switch', source)
         self.assertIn("rollback", source)
-        self.assertIn("systemctl start finite-saas-runner.timer", source)
+        self.assertIn('systemctl start "$timer"', source)
+        self.assertIn("timer=finite-saas-runner.timer\n", source)
 
-    def test_activation_preserves_an_intentionally_inactive_timer(self) -> None:
+    def test_activation_owns_the_timer_pause(self) -> None:
+        # The script refuses a timer it did not stop unless the operator keeps
+        # the Runner paused, and succeeds without the flag only after a
+        # candidate Runner cycle. Behavior: test_runner_host_deploy.
         source = DEPLOY.read_text(encoding="utf-8")
+        mutation = source.index('echo "==> mutation boundary:')
         success = source.index('echo "==> DEPLOYED system=')
-        self.assertIn(
-            "else\n  systemctl stop finite-saas-runner.timer",
-            source[:success],
-        )
+        self.assertLess(source.index("is already stopped"), mutation)
+        self.assertLess(source.index("install_runner_pause\n"), mutation)
+        self.assertIn("--keep-runner-paused", source)
+        # A candidate that disables the timer is refused before the switch
+        # unless the operator keeps the Runner paused.
+        self.assertLess(source.index('timers.target.wants/$timer'), mutation)
+        self.assertIn("wait_for_candidate_runner_cycle", source[mutation:success])
 
     def test_extra_units_require_explicit_cli_approval(self) -> None:
         source = DEPLOY.read_text(encoding="utf-8")

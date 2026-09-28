@@ -155,7 +155,8 @@ Fleet scope requires both `--roll-all` and an explicit
    Activation installs `SYSTEM` as the boot profile, switches in a transient
    systemd unit, asserts `/run/current-system` is exactly the artifact's
    `SYSTEM` path, refuses any Runner unit on the app-plane host, and verifies
-   the product services.
+   the product services and that the dashboard container runs the image
+   digest pinned in `infra/nixos/modules/dashboard.nix` at the artifact rev.
 
 4. **Dashboard image bump:** edit `image = "...@sha256:..."` in
    `infra/nixos/modules/dashboard.nix`, commit to `main` — the committed

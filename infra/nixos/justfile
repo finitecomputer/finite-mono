@@ -111,7 +111,7 @@ install-lat4-from-artifact artifact_dir target_host *args:
 # Static parsing, transport, ordering, and failure-propagation contract for the
 # optional existing-Runtime rollout appended to a lat1 deploy.
 lat1-rollout-contract:
-    cd ../.. && bash -n scripts/deploy-lat1-closure-cache scripts/build-lat1-nixos-closure-artifact scripts/publish-lat1-nixos-cachix-closure scripts/rollout-lat1-runtime-artifact
+    cd ../.. && for f in scripts/deploy-lat1-closure-cache scripts/build-lat1-nixos-closure-artifact scripts/publish-lat1-nixos-cachix-closure scripts/rollout-lat1-runtime-artifact; do bash -n "$f" || exit 1; done
     cd ../.. && python3 -m unittest discover -s scripts/tests -p 'test_deploy_lat1_rollout.py'
     cd ../.. && python3 -m unittest scripts.tests.test_lat1_closure_artifact
     cd ../.. && python3 -m unittest scripts.tests.test_deploy_lat1_service_exes
@@ -119,20 +119,23 @@ lat1-rollout-contract:
 # Static manifest, build-host, dry-activation, Runner-fencing, and rollback
 # contract for finite-lat-3 closure rollouts.
 lat3-runner-rollout-contract:
-    cd ../.. && bash -n scripts/build-lat3-nixos-closure-artifact scripts/deploy-lat3-closure-cache
-    cd ../.. && python3 -m unittest scripts.tests.test_lat3_closure_artifact
+    cd ../.. && for f in scripts/build-lat3-nixos-closure-artifact scripts/deploy-lat3-closure-cache; do bash -n "$f" || exit 1; done
+    cd ../.. && python3 -c 'import ast, sys; ast.parse(open(sys.argv[1]).read(), sys.argv[1])' infra/nixos/scripts/compare-activation-config
+    cd ../.. && python3 -m unittest scripts.tests.test_lat3_closure_artifact scripts.tests.test_runner_host_deploy.Lat3RunnerDeployTests
 
 # Static manifest, install-input, build-host, dry-activation, app-plane
 # fence, and rollback contract for finite-lat-2 closure rollouts.
 lat2-runner-rollout-contract:
-    cd ../.. && bash -n scripts/build-lat2-nixos-closure-artifact scripts/deploy-lat2-closure-cache scripts/install-lat2-from-artifact
-    cd ../.. && python3 -m unittest scripts.tests.test_lat2_closure_artifact
+    cd ../.. && for f in scripts/build-lat2-nixos-closure-artifact scripts/deploy-lat2-closure-cache scripts/install-lat2-from-artifact; do bash -n "$f" || exit 1; done
+    cd ../.. && python3 -c 'import ast, sys; ast.parse(open(sys.argv[1]).read(), sys.argv[1])' infra/nixos/scripts/compare-activation-config
+    cd ../.. && python3 -m unittest scripts.tests.test_lat2_closure_artifact scripts.tests.test_deploy_lat2_service_exes scripts.tests.test_runner_host_deploy.Lat2FenceTests
 
 # Static manifest, install-input, build-host, dry-activation, Runner-fencing,
 # and rollback contract for finite-lat-4 closure rollouts.
 lat4-runner-rollout-contract:
-    cd ../.. && bash -n scripts/build-lat4-nixos-closure-artifact scripts/deploy-lat4-closure-cache scripts/install-lat4-from-artifact
-    cd ../.. && python3 -m unittest scripts.tests.test_lat4_closure_artifact
+    cd ../.. && for f in scripts/build-lat4-nixos-closure-artifact scripts/deploy-lat4-closure-cache scripts/install-lat4-from-artifact; do bash -n "$f" || exit 1; done
+    cd ../.. && python3 -c 'import ast, sys; ast.parse(open(sys.argv[1]).read(), sys.argv[1])' infra/nixos/scripts/compare-activation-config
+    cd ../.. && python3 -m unittest scripts.tests.test_lat4_closure_artifact scripts.tests.test_runner_host_deploy.Lat4RunnerDeployTests
 
 # Evaluated systemd ordering plus synthetic transient/persistent endpoint
 # behavior for the aggregate production healthcheck.
@@ -181,5 +184,6 @@ install-lat5-from-artifact artifact_dir target_host *args:
     exec scripts/install-lat5-from-artifact "$artifact_dir" "$target_host" "$@"
 
 lat5-runner-rollout-contract:
-    cd ../.. && bash -n scripts/build-lat5-nixos-closure-artifact scripts/deploy-lat5-closure-cache scripts/install-lat5-from-artifact infra/nixos/scripts/capture-lat5-host-evidence
-    cd ../.. && python3 -m unittest scripts.tests.test_lat5_closure_artifact scripts.tests.test_lat5_bootstrap
+    cd ../.. && for f in scripts/build-lat5-nixos-closure-artifact scripts/deploy-lat5-closure-cache scripts/install-lat5-from-artifact infra/nixos/scripts/capture-lat5-host-evidence; do bash -n "$f" || exit 1; done
+    cd ../.. && python3 -c 'import ast, sys; ast.parse(open(sys.argv[1]).read(), sys.argv[1])' infra/nixos/scripts/compare-activation-config
+    cd ../.. && python3 -m unittest scripts.tests.test_lat5_closure_artifact scripts.tests.test_lat5_bootstrap scripts.tests.test_runner_host_deploy.Lat5RunnerDeployTests

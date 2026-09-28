@@ -10,9 +10,10 @@ mode="prepare"
 mode_seen=0
 artifact_dir=""
 approved_extra_units=()
+keep_runner_paused=0
 
 usage() {
-  echo "usage: $0 [--validate-only|--prepare|--activate] [--allow-unit UNIT]... <lat4-closure-artifact-dir>" >&2
+  echo "usage: $0 [--validate-only|--prepare|--activate] [--allow-unit UNIT]... [--keep-runner-paused] <lat4-closure-artifact-dir>" >&2
 }
 
 while [[ $# -gt 0 ]]; do
@@ -38,6 +39,11 @@ while [[ $# -gt 0 ]]; do
         exit 64
       fi
       approved_extra_units+=("$1")
+      ;;
+    --keep-runner-paused)
+      # Maintenance route for a Runner timer an operator stopped on purpose:
+      # the Runner stays paused across the switch and afterwards.
+      keep_runner_paused=1
       ;;
     -*) usage; exit 64 ;;
     *)
@@ -69,7 +75,8 @@ fi
 
 manifest_values_file="$(mktemp "${TMPDIR:-/tmp}/lat4-closure-manifest.XXXXXX")"
 dry_output_file="$(mktemp "${TMPDIR:-/tmp}/lat4-dry-activate.XXXXXX")"
-trap 'rm -f "$manifest_values_file" "$dry_output_file"' EXIT
+config_output_file="$(mktemp "${TMPDIR:-/tmp}/lat4-config-compare.XXXXXX")"
+trap 'rm -f "$manifest_values_file" "$dry_output_file" "$config_output_file"' EXIT
 python3 - "$manifest" > "$manifest_values_file" <<'PY'
 import json
 import re
@@ -136,6 +143,9 @@ echo "    kexec=$KEXEC"
 if [[ ${#approved_extra_units[@]} -gt 0 ]]; then
   printf '    explicitly-approved-unit=%s\n' "${approved_extra_units[@]}"
 fi
+if [[ "$keep_runner_paused" == 1 ]]; then
+  echo "    keep-runner-paused=yes (the candidate Runner is not exercised)"
+fi
 if [[ "$mode" == "validate" ]]; then
   exit 0
 fi
@@ -156,6 +166,31 @@ ssh -o BatchMode=yes "$LAT4" \
   >"$dry_output_file" 2>&1
 cat "$dry_output_file"
 
+echo "==> comparing the tmpfiles and D-Bus configuration with the running system"
+config_status=0
+ssh -o BatchMode=yes "$LAT4" python3 - "$SYSTEM" \
+  < infra/nixos/scripts/compare-activation-config \
+  >"$config_output_file" 2>&1 || config_status=$?
+cat "$config_output_file"
+if [[ "$config_status" != 0 ]]; then
+  echo "configuration comparison exited $config_status; neither unit is admitted without --allow-unit" >&2
+fi
+
+# A package change makes dry activation reload dbus-broker and restart
+# systemd-tmpfiles-resetup. Admit either only when the comparison completed,
+# found store reference changes alone, and the broker is reloaded, never
+# restarted. An incomplete comparison needs --allow-unit.
+reference_only_unit() {
+  local unit="$1" verbs="$2" line
+  [[ "$config_status" == 0 ]] || return 1
+  grep -qxF "reference-only $unit" "$config_output_file" || return 1
+  ! grep -qxF "content-change $unit" "$config_output_file" || return 1
+  ! grep -qxF "incomplete $unit" "$config_output_file" || return 1
+  while IFS= read -r line; do
+    [[ "$line" =~ ^would\ ($verbs)\ the\ following\ units: ]] || return 1
+  done < <(grep -F -- "$unit" "$dry_output_file" || true)
+}
+
 # A Runner-only rollout may relink the one-shot worker and refresh its static
 # version metric. Every other named unit requires an explicit CLI approval for
 # this attempt; the default remains fail closed.
@@ -165,9 +200,17 @@ while IFS= read -r unit; do
     finite-saas-runner.service|finite-saas-runner.timer|finite-component-version-metrics.service)
       continue
       ;;
+    dbus-broker.service|systemd-tmpfiles-resetup.service)
+      verbs='stop|start|restart'
+      [[ "$unit" == systemd-tmpfiles-resetup.service ]] || verbs='reload'
+      if reference_only_unit "$unit" "$verbs"; then
+        echo "    admitted-reference-only-unit=$unit"
+        continue
+      fi
+      ;;
   esac
   approved=0
-  for approved_unit in "${approved_extra_units[@]}"; do
+  for approved_unit in ${approved_extra_units[@]+"${approved_extra_units[@]}"}; do
     if [[ "$unit" == "$approved_unit" ]]; then
       approved=1
       break
@@ -192,12 +235,52 @@ if [[ "$mode" == "prepare" ]]; then
 fi
 
 echo "==> activating the fenced Runner-only closure"
-ssh -o BatchMode=yes "$LAT4" bash -s -- "$SYSTEM" <<'LAT4'
+ssh -o BatchMode=yes "$LAT4" bash -s -- "$SYSTEM" "$keep_runner_paused" "${approved_extra_units[@]+"${approved_extra_units[@]}"}" <<'LAT4'
 set -euo pipefail
 system="$1"
+keep_runner_paused="$2"
+shift 2
+approved_units=("${@-}")
 [[ "$system" =~ ^/nix/store/[0-9a-z]{32}-nixos-system-finite-lat-4-[^/[:space:]]+$ ]] || exit 64
+[[ "$keep_runner_paused" == 0 || "$keep_runner_paused" == 1 ]] || exit 64
 test -x "$system/bin/switch-to-configuration"
 nix-store --check-validity "$system" >/dev/null
+
+runner=finite-saas-runner.service
+timer=finite-saas-runner.timer
+# Every file the --keep-runner-paused pause writes: the marker, then one
+# drop-in per unit whose start condition requires the marker to be absent.
+pause_files=(
+  /run/finite-deploy-runner-pause
+  /run/systemd/system/finite-saas-runner.timer.d/50-finite-deploy-runner-pause.conf
+  /run/systemd/system/finite-saas-runner.service.d/50-finite-deploy-runner-pause.conf
+)
+runner_pause_marker="${pause_files[0]}"
+runtime_unit_dir=/run/systemd/system
+pause_dropin=50-finite-deploy-runner-pause.conf
+pause_release_command="rm -f ${pause_files[*]} && systemctl daemon-reload"
+
+# An observation that fails is "unknown", and unknown never counts as stopped,
+# absent or safe.
+unit_state() {
+  local state
+  if state="$(systemctl show "$1" --property=ActiveState --value)" && [[ -n "$state" ]]; then
+    printf '%s\n' "$state"
+  else
+    echo unknown
+  fi
+}
+timer_state=""
+timer_is_stopped() {
+  timer_state="$(unit_state "$timer")"
+  [[ "$timer_state" == inactive || "$timer_state" == failed ]]
+}
+# Prints each pause file that exists. Fails when find cannot search the
+# directories, so a failed search is never read as "no pause".
+existing_pause_files() {
+  find "${runner_pause_marker%/*}" -maxdepth 1 -name "${runner_pause_marker##*/}" -print \
+    && find "$runtime_unit_dir" -mindepth 2 -maxdepth 2 -name "$pause_dropin" -print
+}
 
 previous_system="$(readlink -f /run/current-system)"
 previous_profile="$(readlink -f /nix/var/nix/profiles/system)"
@@ -205,66 +288,332 @@ if [[ "$previous_system" != "$previous_profile" ]]; then
   echo "refusing: current system and system profile already differ" >&2
   exit 73
 fi
-timer_was_active=0
-systemctl is-active --quiet finite-saas-runner.timer && timer_was_active=1 || true
+case "$(unit_state "$timer")" in
+  active) timer_was_active=1; previous_timer_state=active ;;
+  inactive|failed) timer_was_active=0; previous_timer_state=inactive ;;
+  *)
+    echo "refusing: cannot read the state of $timer (ActiveState $(unit_state "$timer"))." >&2
+    echo "An unreadable timer is not treated as stopped. Check 'systemctl status $timer' and rerun." >&2
+    exit 78
+    ;;
+esac
+# This script owns the Runner pause. A timer that is already stopped was
+# stopped for a reason this script cannot see, and the switch starts it again
+# through timers.target, so refuse before any service or profile change
+# unless the operator asked to keep the Runner paused.
+if [[ "$timer_was_active" == 0 && "$keep_runner_paused" != 1 ]]; then
+  echo "refusing: $timer is already stopped." >&2
+  echo "If an operator stopped it on purpose, rerun with --keep-runner-paused: the Runner then" >&2
+  echo "stays paused across the switch and afterwards, and the candidate Runner is not exercised." >&2
+  echo "If the pause was accidental and the current Runner is safe to run, start the timer and rerun." >&2
+  exit 78
+fi
+# An ordinary deploy must prove the candidate Runner with one successful
+# cycle, which needs a timer the candidate enables. A missing or unreadable
+# timers.target link is never an implicit exception.
+if [[ "$keep_runner_paused" != 1 && ! -e "$system/etc/systemd/system/timers.target.wants/$timer" ]]; then
+  echo "refusing: the candidate does not enable $timer (no readable timers.target.wants link)," >&2
+  echo "so no Runner cycle can prove it. To deploy it with the Runner paused and not exercised," >&2
+  echo "rerun with --keep-runner-paused." >&2
+  exit 78
+fi
+if ! leftover_pause="$(existing_pause_files)"; then
+  echo "refusing: cannot check for an earlier Runner pause under /run; its state is unknown." >&2
+  exit 78
+fi
+if [[ -n "$leftover_pause" ]]; then
+  echo "refusing: a Runner pause from an earlier run is still installed:" >&2
+  printf '  %s\n' "$leftover_pause" >&2
+  echo "Confirm no deploy is running on this host, then release it with: $pause_release_command" >&2
+  exit 78
+fi
 containerd_pid="$(systemctl show containerd.service --property=MainPID --value)"
 networkd_pid="$(systemctl show systemd-networkd.service --property=MainPID --value)"
 
-rollback() {
-  status=$?
-  trap - ERR
-  echo "activation failed; rolling back to $previous_system" >&2
-  nix-env --option builders '' --profile /nix/var/nix/profiles/system --set "$previous_system" || true
-  "$previous_system/bin/switch-to-configuration" switch || true
+# switch-to-configuration starts every timer timers.target wants, so stopping
+# the timer alone does not keep the Runner paused across the switch. With
+# --keep-runner-paused, runtime drop-ins make both units' start condition fail
+# while the marker exists. They live under /run, so a reboot clears them.
+# Cleanup is owned before the first write, so a partial installation is
+# removed too; a SIGKILL cannot be caught, hence the printed command.
+pause_owned=0
+keep_pause_on_exit=0
+install_runner_pause() {
+  local unit installed
+  echo "==> pausing the Runner across the switch. If this session is interrupted, check for leftover"
+  echo "    files (${pause_files[*]}) and release it by hand with: $pause_release_command"
+  pause_owned=1
+  for unit in "$timer" "$runner"; do
+    mkdir -p "$runtime_unit_dir/$unit.d" || return 1
+    printf '[Unit]\nConditionPathExists=!%s\n' "$runner_pause_marker" \
+      > "$runtime_unit_dir/$unit.d/$pause_dropin" || return 1
+  done
+  touch "$runner_pause_marker" || return 1
+  systemctl daemon-reload || return 1
+  installed="$(existing_pause_files)" || return 1
+  [[ "$(printf '%s\n' "$installed" | grep -c .)" == 3 ]] || return 1
+}
+# Releasing the pause starts nothing; callers stop or start the timer. It
+# succeeds only when every pause file is verifiably gone.
+release_runner_pause() {
+  local status=0 left
+  [[ "$pause_owned" == 1 ]] || return 0
+  rm -f "${pause_files[0]:?}" "${pause_files[1]:?}" "${pause_files[2]:?}" || status=1
+  systemctl daemon-reload || status=1
+  if ! left="$(existing_pause_files)" || [[ -n "$left" ]]; then
+    status=1
+  fi
+  [[ "$status" != 0 ]] || pause_owned=0
+  return "$status"
+}
+# Put the timer back in the state it had before this script.
+restore_runner_timer() {
+  local status=0
   if [[ "$timer_was_active" == 1 ]]; then
-    systemctl start finite-saas-runner.timer || true
+    release_runner_pause || status=1
+    systemctl start "$timer" || status=1
   else
-    systemctl stop finite-saas-runner.timer || true
+    systemctl stop "$timer" || status=1
+    release_runner_pause || status=1
+  fi
+  return "$status"
+}
+# Before the mutation boundary an exit puts the timer back; after it, only a
+# pause this script owns is released, and only when rollback did not leave it
+# in place on purpose.
+phase=checks
+on_exit() {
+  if [[ "$phase" == pausing ]]; then
+    restore_runner_timer || true
+  fi
+  if [[ "$pause_owned" == 1 && "$keep_pause_on_exit" == 1 ]]; then
+    echo "The Runner pause stays installed; release it with: $pause_release_command" >&2
+  elif ! release_runner_pause; then
+    echo "The Runner pause could not be released; release it with: $pause_release_command" >&2
+  fi
+}
+trap on_exit EXIT
+trap 'exit 129' HUP
+trap 'exit 130' INT
+trap 'exit 143' TERM
+
+# Wait for the Runner to finish its current cycle; never kill it. On today's
+# hosts hosted Hermes makes the unit Type=exec with ExitType=cgroup and
+# KillMode=control-group, so it reads "active" while any process in its cgroup
+# runs, and "inactive" or "failed" only once the cgroup is empty. Every other
+# state keeps the wait going, and an unreadable state ends it unsuccessfully.
+# A RemainAfterExit unit would read "active" with no process left; the wait
+# cannot tell that from a running cycle, so it times out and refuses. The
+# 600 s bounds this polling loop, not a systemctl call that hangs.
+runner_state=""
+wait_for_runner_quiescence() {
+  local deadline=$((SECONDS + 600))
+  while :; do
+    runner_state="$(unit_state "$runner")"
+    case "$runner_state" in
+      inactive|failed) return 0 ;;
+      unknown) return 1 ;;
+    esac
+    (( SECONDS < deadline )) || return 1
+    sleep 2
+  done
+}
+
+# A deploy succeeds only after one Runner cycle that started after the switch
+# finishes with Result=success. The Runner exits 0 when an operation it
+# attempts fails, so an ordinary cycle passes; any nonzero exit fails this
+# gate, and the script does not diagnose the cause. The 600 s bounds this
+# polling loop.
+cycle_detail=""
+wait_for_candidate_runner_cycle() {
+  local boundary="$1" deadline=$((SECONDS + 600)) id state result id_after
+  while :; do
+    id="$(systemctl show "$runner" --property=InvocationID --value)" || return 1
+    if [[ -n "$id" && "$id" != "$boundary" ]]; then
+      state="$(systemctl show "$runner" --property=ActiveState --value)" || return 1
+      result="$(systemctl show "$runner" --property=Result --value)" || return 1
+      id_after="$(systemctl show "$runner" --property=InvocationID --value)" || return 1
+      if [[ "$id_after" == "$id" ]]; then
+        cycle_detail="candidate Runner cycle $id finished with Result=$result"
+        case "$state" in
+          inactive) [[ "$result" == success ]] && return 0; return 1 ;;
+          failed) return 1 ;;
+        esac
+      fi
+    fi
+    if (( SECONDS >= deadline )); then
+      cycle_detail="no Runner cycle that started after the switch finished within 600 s"
+      return 1
+    fi
+    sleep 2
+  done
+}
+
+# Everything below prints measured values; a value that cannot be read is
+# printed as unknown.
+report_observed_state() {
+  local profile current
+  profile="$(readlink -f /nix/var/nix/profiles/system)" || profile=unknown
+  current="$(readlink -f /run/current-system)" || current=unknown
+  echo "observed: the system profile is $profile" >&2
+  echo "observed: /run/current-system is $current" >&2
+  echo "observed: $timer is $(unit_state "$timer")" >&2
+  echo "observed: $runner is $(unit_state "$runner")" >&2
+  if [[ "$pause_owned" == 1 ]]; then
+    echo "this run still owns the Runner pause files (${pause_files[*]}); check which exist with ls -l" >&2
+  fi
+}
+rollback_without_activation() {
+  local status="$1" reason="$2"
+  keep_pause_on_exit=1
+  echo "ROLLBACK INCOMPLETE: previous system not activated: $reason." >&2
+  report_observed_state
+  echo "Next: do not rerun this script. When 'systemctl show -p ActiveState $timer' reads inactive and" >&2
+  echo "'systemctl show -p ActiveState $runner' reads inactive or failed, run" >&2
+  echo "  nix-env --profile /nix/var/nix/profiles/system --set $previous_system" >&2
+  echo "  $previous_system/bin/switch-to-configuration switch" >&2
+  echo "then put $timer back to $previous_timer_state." >&2
+  exit "$status"
+}
+
+# Runs as the ERR trap, or directly with the status to exit with. It activates
+# the previous system only once the timer is verified stopped and the Runner
+# has finished its cycle, attempts that once, and reports what it observes.
+rollback() {
+  # shellcheck disable=SC2320  # as the ERR trap, $? is the failed command's status
+  local status=$?
+  [[ $# -eq 0 ]] || status="$1"
+  trap - ERR
+  phase=rollback
+  local problems=() now_profile now_current timer_now
+  echo "activation failed (exit $status); rolling back to $previous_system" >&2
+  systemctl stop "$timer" || echo "stopping $timer exited nonzero" >&2
+  if ! timer_is_stopped; then
+    rollback_without_activation "$status" "$timer is $timer_state after stop, so a new Runner cycle could start while the previous system activates"
+  fi
+  if ! wait_for_runner_quiescence; then
+    rollback_without_activation "$status" "$runner is $runner_state, and activating the previous system would stop it mid-cycle"
+  fi
+  nix-env --option builders '' --profile /nix/var/nix/profiles/system --set "$previous_system" \
+    || problems+=("resetting the system profile to $previous_system failed")
+  "$previous_system/bin/switch-to-configuration" switch \
+    || problems+=("activating $previous_system exited nonzero")
+  restore_runner_timer || problems+=("restoring $timer to $previous_timer_state failed")
+  now_profile="$(readlink -f /nix/var/nix/profiles/system)" || now_profile=unknown
+  now_current="$(readlink -f /run/current-system)" || now_current=unknown
+  timer_now="$(unit_state "$timer")"
+  [[ "$previous_timer_state" != inactive || "$timer_now" != failed ]] || timer_now=inactive
+  [[ "$now_profile" == "$previous_system" ]] || problems+=("the system profile is $now_profile; expected $previous_system")
+  [[ "$now_current" == "$previous_system" ]] || problems+=("/run/current-system is $now_current; expected $previous_system")
+  [[ "$timer_now" == "$previous_timer_state" ]] || problems+=("$timer is $timer_now; expected $previous_timer_state")
+  if [[ ${#problems[@]} -eq 0 ]]; then
+    echo "ROLLBACK VERIFIED: the system profile and /run/current-system are $previous_system; $timer is $timer_now." >&2
+  else
+    keep_pause_on_exit=1
+    echo "ROLLBACK INCOMPLETE:" >&2
+    printf '  - %s\n' "${problems[@]}" >&2
+    report_observed_state
+    echo "Next: do not rerun this script. Once $runner is inactive, set the profile and activate the" >&2
+    echo "generation you intend by hand, then put $timer back to $previous_timer_state." >&2
   fi
   exit "$status"
 }
-trap rollback ERR
 
-# Stop only new Runner invocations. Never kill an in-flight one-shot: wait for
-# it to finish its already-leased operation before crossing the boundary.
-systemctl stop finite-saas-runner.timer
-deadline=$((SECONDS + 600))
-while systemctl is-active --quiet finite-saas-runner.service; do
-  (( SECONDS < deadline )) || {
-    echo "Runner one-shot did not become inactive within 600s" >&2
-    exit 1
-  }
-  sleep 2
-done
+# Before the profile changes, a failure only puts the timer back.
+trap 'status=$?; trap - ERR; restore_runner_timer || echo "restoring $timer failed" >&2; exit "$status"' ERR
+phase=pausing
+if [[ "$keep_runner_paused" == 1 ]]; then
+  install_runner_pause
+fi
+systemctl stop "$timer"
+if ! timer_is_stopped; then
+  echo "$timer is $timer_state after stop; putting the timer back without switching" >&2
+  restore_runner_timer || echo "restoring $timer failed" >&2
+  exit 1
+fi
+if ! wait_for_runner_quiescence; then
+  echo "$runner is still $runner_state after waiting up to 600 s; putting the timer back without switching" >&2
+  restore_runner_timer || echo "restoring $timer failed" >&2
+  exit 1
+fi
+
+phase=switching
+trap rollback ERR
 
 echo "==> mutation boundary: switching finite-lat-4 to $system"
 nix-env --option builders '' --profile /nix/var/nix/profiles/system --set "$system"
-"$system/bin/switch-to-configuration" switch
+# Any nonzero switch is a failed deploy. The failed-unit list does not say why
+# the switch failed, so it is reported, never used to accept the result.
+switch_status=0
+"$system/bin/switch-to-configuration" switch || switch_status=$?
+if [[ "$switch_status" != 0 ]]; then
+  failed_units="$(systemctl --failed --plain --no-legend --no-pager | awk 'NF { print $1 }' | paste -sd ' ' -)" \
+    || failed_units=unknown
+  echo "switch-to-configuration exited $switch_status; failed units: ${failed_units:-none}" >&2
+  rollback "$switch_status"
+fi
+boundary_invocation="$(systemctl show "$runner" --property=InvocationID --value)"
 test "$(readlink -f /run/current-system)" = "$system"
 test "$(readlink -f /nix/var/nix/profiles/system)" = "$system"
 
-test "$(systemctl show containerd.service --property=MainPID --value)" = "$containerd_pid"
-test "$(systemctl show systemd-networkd.service --property=MainPID --value)" = "$networkd_pid"
+# Infra units whose PID must survive the switch unless the operator approved
+# restarting them with --allow-unit. The fence and this assertion agree.
+pid_unchanged_unless_approved() {
+  local unit="$1" before="$2" u now
+  for u in "${approved_units[@]-}"; do
+    [[ "$u" = "$unit" ]] && return 0
+  done
+  now="$(systemctl show "$unit" --property=MainPID --value)" || return 1
+  if [[ "$now" != "$before" ]]; then
+    echo "$unit restarted during activation (pid $before -> $now) without --allow-unit approval" >&2
+    return 1
+  fi
+}
+pid_unchanged_unless_approved containerd.service "$containerd_pid"
+pid_unchanged_unless_approved systemd-networkd.service "$networkd_pid"
 systemctl is-active --quiet containerd.service
 systemctl is-active --quiet systemd-networkd.service
 
 runner_exec="$(
-  systemctl cat finite-saas-runner.service \
+  systemctl cat "$runner" \
     | sed -n 's/^ExecStart=//p' \
     | sed '/^[[:space:]]*$/d' \
     | tail -n 1 \
     | awk '{print $1}'
 )"
 runner_store="$(printf '%s\n' "$runner_exec" | cut -d/ -f1-4)"
-nix-store -qR "$system" | grep -qxF "$runner_store"
+# Read the whole listing before matching. `grep -q` in a pipeline under
+# pipefail leaves nix-store on EPIPE after an early match.
+closure_paths="$(nix-store -qR "$system")"
+grep -qxF -- "$runner_store" <<<"$closure_paths"
 
-if [[ "$timer_was_active" == 1 ]]; then
-  systemctl start finite-saas-runner.timer
-  systemctl is-active --quiet finite-saas-runner.timer
+if [[ "$keep_runner_paused" == 1 ]]; then
+  systemctl stop "$timer"
+  if ! timer_is_stopped; then
+    echo "$timer is $timer_state after stop" >&2
+    false
+  fi
+  trap - ERR
+  phase=finished
+  if ! release_runner_pause; then
+    echo "$system is active, but the Runner pause could not be verifiably released. Release it by hand:" >&2
+    echo "  $pause_release_command" >&2
+    exit 1
+  fi
+  echo "==> $timer stays stopped; the candidate Runner was not exercised. Start the timer when the maintenance ends."
 else
-  systemctl stop finite-saas-runner.timer
-  ! systemctl is-active --quiet finite-saas-runner.timer
+  systemctl start "$timer"
+  if [[ "$(unit_state "$timer")" != active ]]; then
+    echo "$timer is $(unit_state "$timer") after start" >&2
+    false
+  fi
+  if ! wait_for_candidate_runner_cycle "$boundary_invocation"; then
+    echo "$cycle_detail" >&2
+    rollback 1
+  fi
+  echo "==> $cycle_detail"
 fi
 trap - ERR
+phase=finished
 echo "==> DEPLOYED system=$system runner=$runner_exec"
 LAT4

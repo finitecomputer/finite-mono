@@ -14,6 +14,71 @@ Run `scripts/finite-status` before and after activation. Do not build on a
 production host or use an operator's ambient builder for production closures.
 For destructive installation, use [host installation](../runbooks/install-host.md).
 
+The lat3, lat4 and lat5 scripts own the Runner pause: leave
+`finite-saas-runner.timer` running. `--activate` stops the timer, verifies it
+reads stopped, and polls the Runner unit until its `ActiveState` is `inactive`
+or `failed`, for up to 600 s of polling (a hung `systemctl` call is not
+bounded). It then switches, starts the timer, and succeeds only after one
+Runner cycle that started after the switch finishes with `Result=success`. Any
+nonzero exit from `switch-to-configuration`, whichever units it lists as
+failed, and any other outcome take the rollback path. A state that cannot be read counts as
+unknown, and unknown never counts as stopped, absent or safe.
+
+Rollback activates the previous system only after it has verified the timer
+stopped and the Runner finished its cycle, and it attempts that once. It
+prints `ROLLBACK VERIFIED` when the profile, `/run/current-system` and the
+timer all read as expected, and otherwise `ROLLBACK INCOMPLETE` with the
+observed values (or `unknown`) and the next operator action.
+
+The scripts refuse, before any service or profile change, a timer that is
+already stopped, a candidate that does not enable the timer, a timer whose
+state cannot be read, and a Runner pause left by an earlier run. For a Runner
+an operator paused on purpose (an incident, a Core rollback rescue, a cold
+relocation), or a candidate that disables the timer, pass
+`--keep-runner-paused`: runtime drop-ins keep the timer and the Runner from
+starting across the switch, the timer ends stopped, and the script reports
+that the candidate Runner was not exercised. Start the timer when the
+maintenance ends.
+
+The pause writes exactly three runtime files, all cleared by a reboot:
+
+- `/run/finite-deploy-runner-pause` (the marker; while it exists, neither unit starts)
+- `/run/systemd/system/finite-saas-runner.timer.d/50-finite-deploy-runner-pause.conf`
+- `/run/systemd/system/finite-saas-runner.service.d/50-finite-deploy-runner-pause.conf`
+
+The files can outlive the script in three ways. On a successful deploy and a
+verified rollback the script removes them. An incomplete rollback can retain any
+pause files this run still owns. It can also report incomplete after cleanup
+has removed them. Check the files and both unit states before assuming the
+Runner is paused. A failed removal, a SIGKILL or a lost host leaves
+them too. In every case check with
+`ls -l /run/finite-deploy-runner-pause /run/systemd/system/finite-saas-runner.*.d/`.
+Release the pause only once no deploy is running, the profile and
+`/run/current-system` agree, and the Runner state is what the maintenance
+calls for: `rm -f` the three files, run `systemctl daemon-reload`, then put the
+timer in the state the maintenance calls for. A leftover pause makes a later
+`systemctl start finite-saas-runner.timer` a skipped start rather than an
+error, so check for it before diagnosing a Runner that does not run.
+
+A caught signal (HUP, INT, TERM) after the profile change ends the script with
+a nonzero exit but without a rollback or a recovery report, so the profile and
+`/run/current-system` can be left out of step. After any interrupted
+`--activate`, compare `readlink -f /nix/var/nix/profiles/system` with
+`readlink -f /run/current-system`, check
+`systemctl show -p ActiveState finite-saas-runner.timer finite-saas-runner.service`
+and the pause files above, and make sure no `switch-to-configuration` process
+is still running before activating anything by hand.
+
+Dry activation names `dbus-broker.service` and
+`systemd-tmpfiles-resetup.service` for nearly every package change. These four
+host scripts (lat2 to lat5) admit them without `--allow-unit` only when
+`infra/nixos/scripts/compare-activation-config` fully inspects their
+configuration, unit files and the D-Bus include graph and finds differences in
+Nix store hashes alone, and the broker is reloaded rather than restarted. Any
+difference, any path it could not inspect, or any D-Bus form it does not
+resolve requires `--allow-unit`; the script prints the diff or the uninspected
+paths.
+
 Storage identities, disk geometry, dual-ESP guards, and quotas live in each
 host's configuration. RAID is availability protection, not an independent backup.
 See [recovery](../runbooks/hosted-web-chat-recovery.md) for custody and restore proof.
