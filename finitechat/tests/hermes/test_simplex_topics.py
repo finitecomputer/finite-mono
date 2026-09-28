@@ -4,6 +4,7 @@ import asyncio
 import copy
 import hashlib
 import importlib.util
+import json
 import os
 import subprocess
 import sys
@@ -406,6 +407,48 @@ class TopicTests(unittest.IsolatedAsyncioTestCase):
 
 
 class DiscoveryTests(unittest.TestCase):
+    def test_unconfigured_simplex_stays_lazy_when_finite_chat_loads(self):
+        script = r"""
+import json, os, shutil, tempfile
+from pathlib import Path
+with tempfile.TemporaryDirectory() as home:
+    os.environ["HERMES_HOME"] = home
+    os.environ["FINITE_HOME"] = home + "/agent"
+    os.environ["FINITECHAT_HOME"] = home + "/agent"
+    config = {"plugins": {"enabled": ["finitechat"]}}
+    simplex = json.loads(os.environ["TEST_SIMPLEX_CONFIG"])
+    if simplex is not None:
+        config["gateway"] = {"platforms": {"simplex": simplex}}
+    Path(home, "config.yaml").write_text(json.dumps(config))
+    shutil.copytree(os.environ["TEST_PLUGIN"], Path(home, "plugins/finitechat"))
+    from hermes_cli.plugins import get_plugin_manager
+    from gateway.platform_registry import platform_registry
+    manager = get_plugin_manager()
+    manager.discover_and_load()
+    assert platform_registry.get("finitechat") is not None
+    entry, deferred = platform_registry.snapshot_registration("simplex", scope=manager.scope_key)
+    assert entry is None and deferred is not None, "Finite Chat eagerly loaded unused SimpleX"
+"""
+        env = dict(os.environ, TEST_PLUGIN=str(PLUGIN))
+        env.setdefault(
+            "HERMES_BUNDLED_PLUGINS", str(Path(hermes_cli.__file__).parents[1] / "plugins")
+        )
+        for simplex in (
+            None,
+            {"enabled": False, "extra": {"finite_managed": True}},
+            {"enabled": True, "extra": {"finite_managed": False}},
+        ):
+            with self.subTest(simplex=simplex):
+                env["TEST_SIMPLEX_CONFIG"] = json.dumps(simplex)
+                result = subprocess.run(
+                    [sys.executable, "-c", script],
+                    env=env,
+                    capture_output=True,
+                    text=True,
+                    timeout=30,
+                )
+                self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
     def test_rediscovered_tool_uses_connected_gateway_adapter(self):
         script = r"""
 import asyncio, json, os, shutil, tempfile
@@ -414,7 +457,11 @@ from unittest.mock import AsyncMock, patch
 with tempfile.TemporaryDirectory() as home:
     os.environ["HERMES_HOME"] = home
     os.environ["FINITECHAT_HOME"] = home + "/agent"
-    Path(home, "config.yaml").write_text("plugins:\n  enabled: [finitechat]\n")
+    Path(home, "config.yaml").write_text(
+        "plugins:\n  enabled: [finitechat]\n"
+        "gateway:\n  platforms:\n    simplex:\n      enabled: true\n"
+        "      extra:\n        finite_managed: true\n"
+    )
     shutil.copytree(os.environ["TEST_PLUGIN"], Path(home, "plugins/finitechat"))
     from hermes_cli.plugins import get_plugin_manager
     from gateway.config import GatewayConfig, Platform, PlatformConfig
@@ -482,7 +529,11 @@ from pathlib import Path
 with tempfile.TemporaryDirectory() as home:
     os.environ["HERMES_HOME"] = home
     os.environ["FINITECHAT_HOME"] = home + "/agent"
-    Path(home, "config.yaml").write_text("plugins:\n  enabled: [finitechat]\n")
+    Path(home, "config.yaml").write_text(
+        "plugins:\n  enabled: [finitechat]\n"
+        "gateway:\n  platforms:\n    simplex:\n      enabled: true\n"
+        "      extra:\n        finite_managed: true\n"
+    )
     shutil.copytree(os.environ["TEST_PLUGIN"], Path(home, "plugins/finitechat"))
     from hermes_cli.plugins import get_plugin_manager
     from gateway.config import PlatformConfig

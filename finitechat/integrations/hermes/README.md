@@ -57,6 +57,24 @@ Hosted Web Device starts the room independently.
 
 ## Native Hermes capability profiles
 
+The managed Finite Private `glm-5-3-flash` profile declares
+`model.supports_vision: true`. Hermes cannot discover capabilities for the
+generic `custom` provider. With its default `agent.image_input_mode: auto`,
+the pinned Hermes sends attached images directly to the main model and uses
+the native image-loading path of `vision_analyze` when no explicit auxiliary
+vision backend is configured. An explicit `auxiliary.vision` backend still
+takes precedence in this Hermes version. Startup removes only the backend the
+deleted AEON specialization writer installed, keeping the replaced config as
+`config.yaml.pre-aeon-vision-retirement`; see the runtime-image runbook.
+The runtime reconciler
+backfills only a missing declaration on the known Finite-owned model/route/key
+shape; explicit capability and image-routing settings remain user-owned.
+Absence means the managed product default: deleting the declaration causes
+startup to restore it. Set an explicit capability or routing override to
+change that behavior.
+Selecting another inference profile replaces the model block, so the
+declaration does not carry over to an unrelated model.
+
 Finite Chat conveys authenticated attachments to Hermes without choosing a
 model, rewriting the channel prompt, or registering Finite-specific agent
 tools. Auxiliary capabilities are runtime configuration behind Hermes's
@@ -121,23 +139,39 @@ its own.
   `Leased`. The stream / `poll` / `inbound` deliver only deliverable entries and
   flip them to `Leased`, so a leased entry is not re-emitted on the next tick.
   The adapter settles the lease from the turn: the completion hook `ack`s on
-  success or failure, and a cancelled turn calls `release`, which returns the
-  entry to `Pending` for redelivery. A lease older than the TTL (config,
-  generous default) is swept back to `Pending`, so a crashed turn cannot strand
+  success or failure, and a turn cancelled by shutdown or recovery calls
+  `release`, which returns the entry to `Pending` for redelivery. A user
+  `/stop`, `/new` or `/reset` instead `ack`s the cancelled turn and its held
+  queued admissions; earlier undelivered entries are acked when delivered in that
+  process. A lease older than the TTL (config, generous default) is swept back
+  to `Pending`, so a crashed turn cannot strand
   an entry. The sidecar keeps a bounded recently-acked ring, so a post-restart
   duplicate ack is a no-op and an already-acked entry is never redelivered —
   idempotency the adapter no longer has to provide. Existing `hermes-inbox.json`
   entries load as `Pending` (`#[serde(default)]`), so the on-disk format is
   unchanged.
-- **Busy-session admission.** While a Hermes session is busy the adapter keeps
-  at most the first blocked ordinary text event per session in memory as an
-  admission head; every redelivered head and every later event is `release`d
-  back to the durable inbox, so ordering is preserved without buffering in
-  adapter memory. Slash commands, pending approval responses, and pending
+- **Busy-session admission.** While a Hermes session is busy the adapter holds
+  delivered ordinary events in arrival order per session, retaining their
+  leases in the Rust inbox. It admits them one at a time. Releasing later
+  events while holding only the head would let a partly consumed stream batch
+  overtake those released events when the session becomes idle. Renewed leases
+  for a queued or running event are coalesced without changing its position.
+  These in-memory holders grow with the delivered backlog; the Rust inbox
+  remains the only durable queue. Slash commands, pending approval responses, and pending
   clarification replies still reach the active turn immediately, and one busy
-  session does not pause another. Events consumed inline by a busy session never
-  pass through a background turn, so the adapter acks them directly (exactly
-  once; the sidecar's ack is idempotent).
+  session does not pause another. Text, photos, audio, video, and files each
+  enter their own background turn and retain their lease until its completion
+  hook settles it. Separate media messages are not merged into Hermes's pending
+  slot; multiple attachments on one message still travel together. Graceful
+  shutdown releases every queued lease for immediate redelivery; a crash
+  leaves the entire held backlog recoverable through the sidecar's normal
+  expiry path (45 minutes by default). Settlement uses one RPC per entry, so
+  an interrupted shutdown can leave remaining leases waiting for that expiry.
+  A failed handoff retries the head with exponential backoff (1–30 seconds)
+  before admitting later events. User interruption also clears held work in
+  the idle gap between turns. Events consumed inline by a busy
+  session never pass through a background turn, so the adapter acks them
+  directly (exactly once; the sidecar's ack is idempotent).
 - **Reply/edit routing (O2).** Every inbound event already carries its
   conversation and segment ids, and the sidecar mints `thread_id` from them. On
   send/edit/activity the adapter passes that `thread_id` back, and the sidecar

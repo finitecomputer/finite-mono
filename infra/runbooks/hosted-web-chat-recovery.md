@@ -50,6 +50,54 @@ component identities. `scripts/verify-hosted-snapshot` validates the exact
 manifest for health, archival and restore. Current snapshots allow no symlinks;
 historical v3 snapshots permit only inventoried links inside archived Sites.
 
+### Write fence
+
+The fence also covers the private Runner proxy sockets:
+`finite-core-private-proxy.socket` (`10.254.3.1:14200`) and
+`finite-identity-private-proxy.socket` (`10.254.3.1:18790`). `backups.nix`
+selects any socket whose same-named service `Requires=`, `Wants=` or
+`BindsTo=` a fenced writer. On 2026-09-18 (FIN-95) a Runner connection
+re-activated the Core proxy service, and its `Requires=` restarted Core 1.5 s
+after the fence had stopped it. The unit now stops each socket, then its
+service, then the writers. Cleanup starts the writers first and the sockets
+and proxy services last. For the length of the snapshot (about a minute),
+Runner lease and lifecycle calls from finite-lat-3/4/5 are refused and fail
+closed. The Runner timer tries a new lease every 5 s.
+
+After the copies and before sealing, the unit checks every unit it stopped.
+Each one must still be inactive, and its `InactiveExitTimestampMonotonic`
+must not have changed since the stop. If the fence held, the journal shows
+`Hosted Recovery Snapshot write fence held: <units>` and then
+`Hosted Recovery Snapshot sealed: <path>`. If a unit came back, the unit logs
+`write fence broken: <unit> started during the copies` and exits non-zero. It
+seals nothing, removes staging and restarts what it stopped. One known cause
+is `finite-identity-backup.timer` (00:37, 06:37, 12:37 and 18:37): its service
+`Requires=` Identity. Rerun the snapshot.
+
+To check a run independently in the journal:
+
+```sh
+journalctl -o short-iso-precise --since '-15min' \
+  -u finite-hosted-web-chat-snapshot -u finite-saas-core -u finite-identity \
+  -u finite-core-private-proxy.socket -u finite-core-private-proxy \
+  -u finite-identity-private-proxy.socket -u finite-identity-private-proxy
+```
+
+Between the `Stopping` lines for Core and Identity and the
+`Hosted Recovery Snapshot sealed` line, the journal must not contain
+`Starting Finite SaaS core` or `Starting Finite Identity Authority`. Starts
+after the sealed line come from the cleanup.
+
+Closures built before this fence never log `write fence held`. Until the fix
+is deployed, an operator who runs the snapshot by hand must stop the two
+sockets first and start them again afterwards:
+
+```sh
+sudo systemctl stop finite-core-private-proxy.socket finite-identity-private-proxy.socket
+sudo systemctl start finite-hosted-web-chat-snapshot.service
+sudo systemctl start finite-core-private-proxy.socket finite-identity-private-proxy.socket
+```
+
 ## Empty-target drill
 
 1. Use the dedicated synthetic account with multiple Topics and Chats in both

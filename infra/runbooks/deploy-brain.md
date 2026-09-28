@@ -63,6 +63,45 @@ authorized write/read proof against `https://brain.finite.computer`. Signed
 `/_admin/*` requests use Brain's own authorization and do not require a
 WorkOS browser session.
 
+## Restoring explicit Folder access after admin demotion
+
+Admin demotion can remove inherited restricted-Folder permission while leaving
+the recipient's encrypted key grant stored. Deploying the server fix does not
+restore anyone's permission automatically. Treat each human and agent npub as
+a separate principal; resolve the intended recipient before authorizing repair.
+
+Before approving an exact target set, collect read-only authoritative metadata:
+the Brain and Folder IDs, recipient npub, current key version, retained grant,
+explicit permission, and admin standing. Reproduce the demotion/regrant failure
+on synthetic state matching those facts and prove the candidate repair preserves
+the grant, adds only the requested permission, and permits fresh recipient
+decryption. Stop if the observed state differs or the retained wrap is unusable;
+corrupted-wrap recovery is a separate key-rotation operation.
+
+After an exact target set is approved, capture the consistent database backup
+and deployed revision described above. From an authorized admin's configured
+`fbrain` identity holding the Folder key, grant only the reviewed Folder:
+
+```sh
+fbrain admin folder-access grant --brain "$BRAIN_ID" --folder "$FOLDER_ID" --target "$TARGET_NPUB" --json
+```
+
+This preserves an existing current-version key grant, or supplies one when
+missing. It does not restore admin standing. Verify the recipient's explicit
+Folder permission and unchanged admin set in authoritative metadata. In the
+recipient's Working Tree for this Brain, run `fbrain sync now --summary` and
+`fbrain conflicts --json`. Prove restored decryption using a new remote revision
+written after demotion, or by bootstrapping a fresh Working Tree. Previously
+downloaded plaintext can survive access loss; neither those cached bytes nor
+stored grant presence proves restored access. Confirm unrelated Folders remain
+inaccessible.
+
+A mistaken grant requires the supported Folder-access revoke operation, which
+rotates keys and re-encrypts content; it is not undone by deleting an access
+row or rolling back the server binary. Do not restore an old database over
+subsequent accepted writes. Coordinate the explicit repair with any concurrent
+runtime recovery and run `scripts/finite-status` before and after rollout.
+
 ## Rollback
 
 1. Switch lat2 to the previous NixOS generation and record the resulting

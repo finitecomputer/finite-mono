@@ -888,3 +888,19 @@ fn rejects_an_audit_log_inside_the_work_dir() {
     );
     assert!(!audit_path.exists());
 }
+
+#[test]
+fn rejects_a_hardlinked_store_as_audit_log_before_rehearsal() {
+    let dir = tempfile::tempdir().unwrap();
+    let fixture = build_fixture(dir.path(), FixtureShape::Healthy);
+    let audit_path = dir.path().join("audit.jsonl");
+    std::fs::hard_link(&fixture.hosted_store_path, &audit_path).unwrap();
+    let before = std::fs::read(&fixture.hosted_store_path).unwrap();
+    let error = run_repair(&fixture, &dir.path().join("work"), &audit_path, &[])
+        .expect_err("audit hard link must be rejected");
+    assert!(
+        error.contains("--audit-log must not be the client store"),
+        "{error}"
+    );
+    assert_eq!(std::fs::read(&fixture.hosted_store_path).unwrap(), before);
+}

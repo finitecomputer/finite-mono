@@ -41,7 +41,7 @@ export async function POST(request: Request, context: RouteContext) {
     return machineRedirect(request, access.machineId, "failed");
   }
 
-  const destination = new URL("/dashboard", request.url);
+  const destination = new URL("/dashboard", configuredBaseUrl ?? request.url);
   destination.searchParams.set("new", "1");
   destination.searchParams.set("agentRemoval", "requested");
   return NextResponse.redirect(destination, { status: 303 });
@@ -55,7 +55,7 @@ export async function GET(request: Request, context: RouteContext) {
 function machineRedirect(request: Request, machineId: string, result: string) {
   const destination = new URL(
     `/dashboard/machines/${encodeURIComponent(machineId)}`,
-    request.url
+    workosBaseUrl() ?? request.url
   );
   destination.searchParams.set("removal", result);
   return NextResponse.redirect(destination, { status: 303 });

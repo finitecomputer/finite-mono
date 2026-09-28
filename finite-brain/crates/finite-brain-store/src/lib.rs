@@ -515,10 +515,10 @@ pub struct SubmitRecordOutcome {
     pub duplicate: bool,
 }
 
-/// Result of granting one identity the current Folder Key.
+/// Result of ensuring one identity has Folder access and its current key grant.
 #[derive(Debug, Clone, Copy, Eq, PartialEq)]
 pub enum GrantFolderAccessOutcome {
-    /// Access and its current-version key grant were added.
+    /// Access was granted, preserving an existing current-version key grant or adding one.
     Granted,
     /// The identity already had effective access and the current-version grant.
     AlreadyHasAccess,
@@ -7802,6 +7802,214 @@ mod tests {
         );
         assert!(stored.guest_user_ids().is_empty());
         assert!(store.list_visible_brains(&member).unwrap().is_empty());
+    }
+
+    #[test]
+    fn demoted_admin_keeps_wrap_but_needs_explicit_restricted_folder_access() {
+        let temp = TempDir::new().unwrap();
+        let db = temp.path().join("brain.sqlite3");
+        let mut store = BrainStore::open(&db).unwrap();
+        bootstrap_org_and_strategy_folder(&mut store);
+        let brain_id = BrainId::new("acme").unwrap();
+        let folder_id = FolderId::new("strategy").unwrap();
+        let member = UserId::new("npub-demoted").unwrap();
+        store.add_member(&brain_id, &member).unwrap();
+        store.add_admin(&brain_id, &member).unwrap();
+        let old_grant = grant(
+            "old-admin-wrap",
+            "strategy",
+            1,
+            "npub-admin",
+            member.as_str(),
+        );
+        store
+            .grant_folder_access(&brain_id, &folder_id, &member, &old_grant)
+            .unwrap();
+        store.remove_admin(&brain_id, &member).unwrap();
+        // Reopen persisted pre-repair state, as a server upgrade would.
+        drop(store);
+        let mut store = BrainStore::open(&db).unwrap();
+
+        let stored = store.load_brain(&brain_id).unwrap();
+        let retained_grants = stored.grants.clone();
+        let before_sequence = store.latest_sequence(&brain_id).unwrap();
+        assert!(
+            stored
+                .grants
+                .iter()
+                .any(|grant| grant.recipient_npub == member)
+        );
+        let folder = stored
+            .brain
+            .folders
+            .iter()
+            .find(|folder| folder.id == folder_id)
+            .unwrap();
+        let direct = stored
+            .folder_access
+            .get(&folder_id)
+            .cloned()
+            .unwrap_or_default();
+        assert!(
+            !required_recipients(&stored.brain, folder, &direct, None)
+                .unwrap()
+                .contains(&member)
+        );
+
+        let repair = grant(
+            "restored-member-wrap",
+            "strategy",
+            1,
+            "npub-admin",
+            member.as_str(),
+        );
+        assert_eq!(
+            store
+                .grant_folder_access(&brain_id, &folder_id, &member, &repair)
+                .unwrap(),
+            GrantFolderAccessOutcome::Granted
+        );
+        let stored = store.load_brain(&brain_id).unwrap();
+        assert_eq!(stored.grants, retained_grants);
+        assert!(!stored.brain.admins.contains(&member));
+        assert!(
+            stored
+                .folder_access
+                .get(&folder_id)
+                .unwrap()
+                .contains(&member)
+        );
+        let changes = store
+            .pull_sync_records(&brain_id, before_sequence, 100)
+            .unwrap();
+        assert_eq!(changes.records.len(), 1);
+        assert_eq!(
+            changes.records[0].record_type,
+            SyncRecordType::BrainAdminAccessChange
+        );
+        assert_eq!(
+            changes.records[0].record_event_id,
+            "restored-member-wrap-access-record"
+        );
+        let bootstrap = store.sync_bootstrap(&brain_id).unwrap();
+        assert!(
+            bootstrap
+                .control_records
+                .iter()
+                .any(|record| { record.record_event_id == "old-admin-wrap-key-record" })
+        );
+        assert!(
+            !bootstrap
+                .control_records
+                .iter()
+                .any(|record| { record.record_event_id == "restored-member-wrap-key-record" })
+        );
+        // The retained grant and direct authority survive restart; a newly
+        // prepared wrap on retry must still leave the original grant intact.
+        drop(store);
+        let mut store = BrainStore::open(&db).unwrap();
+        assert_eq!(
+            store
+                .grant_folder_access(&brain_id, &folder_id, &member, &repair)
+                .unwrap(),
+            GrantFolderAccessOutcome::AlreadyHasAccess
+        );
+        assert_eq!(
+            store.latest_sequence(&brain_id).unwrap(),
+            before_sequence + 1
+        );
+        let stored = store.load_brain(&brain_id).unwrap();
+        assert_eq!(stored.grants, retained_grants);
+        assert!(folder_visible_to_actor(&stored, &folder_id, &member));
+        assert!(!folder_visible_to_actor(
+            &stored,
+            &FolderId::new("private-project").unwrap(),
+            &member
+        ));
+    }
+
+    #[test]
+    fn retained_grant_access_repair_rolls_back_on_conflicting_access_record() {
+        let mut store = store_with_strategy_folder();
+        let brain_id = BrainId::new("acme").unwrap();
+        let folder_id = FolderId::new("strategy").unwrap();
+        let member = UserId::new("npub-demoted").unwrap();
+        store.add_member(&brain_id, &member).unwrap();
+        store.add_admin(&brain_id, &member).unwrap();
+        let retained = grant("retained", "strategy", 1, "npub-admin", member.as_str());
+        store
+            .grant_folder_access(&brain_id, &folder_id, &member, &retained)
+            .unwrap();
+        store.remove_admin(&brain_id, &member).unwrap();
+        let repair = grant("repair", "strategy", 1, "npub-admin", member.as_str());
+        let key_record = folder_key_grant_control_record(&repair, "repair-key-record");
+        let access_record = folder_access_control_record(
+            "conflicting-access-record",
+            SyncRecordType::BrainAdminAccessChange,
+            "strategy",
+            "npub-admin",
+        );
+        store.submit_sync_record(&brain_id, &access_record).unwrap();
+        let mut conflicting_body = access_record.clone();
+        let SyncRecordInput::Control(record) = &mut conflicting_body else {
+            panic!("access fixture must be a control record");
+        };
+        record.payload_json = "{\"different\":true}".to_owned();
+        let before = store.load_brain(&brain_id).unwrap();
+        let before_sequence = store.latest_sequence(&brain_id).unwrap();
+        for rejected in [access_record.clone(), access_record, conflicting_body] {
+            let error = store
+                .grant_folder_access_with_control_records(
+                    &brain_id,
+                    &folder_id,
+                    &member,
+                    &repair,
+                    &[key_record.clone(), rejected],
+                )
+                .unwrap_err();
+            assert!(matches!(error, StoreError::Database { .. }), "{error:?}");
+            let after = store.load_brain(&brain_id).unwrap();
+            assert_eq!(after.folder_access, before.folder_access);
+            assert_eq!(after.grants, before.grants);
+            assert_eq!(store.latest_sequence(&brain_id).unwrap(), before_sequence);
+            assert!(
+                !folder_access_has_source(
+                    &store.conn,
+                    &brain_id,
+                    &folder_id,
+                    &member,
+                    "direct",
+                    "folder-access"
+                )
+                .unwrap()
+            );
+        }
+        // A fresh access change can succeed after rejection, even if the
+        // discarded replacement key record reuses the retained wrap's event ID.
+        let retained_key_record = folder_key_grant_control_record(&retained, "retained-key-record");
+        let fresh_access_record = folder_access_control_record(
+            "repair-access-record",
+            SyncRecordType::BrainAdminAccessChange,
+            "strategy",
+            "npub-admin",
+        );
+        assert_eq!(
+            store
+                .grant_folder_access_with_control_records(
+                    &brain_id,
+                    &folder_id,
+                    &member,
+                    &repair,
+                    &[retained_key_record, fresh_access_record],
+                )
+                .unwrap(),
+            GrantFolderAccessOutcome::Granted
+        );
+        assert_eq!(store.load_brain(&brain_id).unwrap().grants, before.grants);
+        assert_eq!(
+            store.latest_sequence(&brain_id).unwrap(),
+            before_sequence + 1
+        );
     }
 
     #[test]

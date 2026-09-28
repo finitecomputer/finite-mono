@@ -21,6 +21,10 @@ from pathlib import Path
 from typing import Any
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
+RECONCILER = REPO_ROOT / "containers/agent/reconcile_hermes_config.py"
+AEON_BACKUP_NAME = "config.yaml.pre-aeon-vision-retirement"
+# Obviously fake; production blocks held a literal worker key here.
+FAKE_AEON_WORKER_KEY = "fake-retired-aeon-worker-key"
 
 
 class AgentRuntimeLauncherConfigTest(unittest.TestCase):
@@ -49,6 +53,60 @@ class AgentRuntimeLauncherConfigTest(unittest.TestCase):
             "FINITE_CONFIG_POLL_TIMEOUT_SECS": "30",
             "FINITE_CONFIG_POLL_LIMIT": "100",
         }
+
+    @staticmethod
+    def _retired_aeon_vision_blocks() -> list[dict[str, Any]]:
+        """The two AEON shapes found in production, with and without extra_body."""
+        blocks: list[dict[str, Any]] = []
+        for model in (
+            "nemotron-3-nano-omni-30b-a3b-reasoning-nvfp4-fast",
+            "aeon-gemma-4-12b-k4-nvfp4-unified-fast",
+        ):
+            block: dict[str, Any] = {
+                "provider": "custom",
+                "base_url": "https://specialization.finite.vip/v1",
+                "api_mode": "chat_completions",
+                "model": model,
+                "api_key": FAKE_AEON_WORKER_KEY,
+                "timeout": 120,
+                "download_timeout": 30,
+            }
+            blocks.append(block)
+            blocks.append(
+                {
+                    **block,
+                    "extra_body": {
+                        "finite_specialization": {
+                            "capabilities": {"audio": True, "image": True, "video": True},
+                            "normalization_limits": {"max_image_pixels": 1048576},
+                            "prompt_versions": {"image": "fake-prompt-v1"},
+                        }
+                    },
+                }
+            )
+        return blocks
+
+    @staticmethod
+    def _load_config_text(text: str) -> dict[str, Any]:
+        try:
+            return json.loads(text)
+        except json.JSONDecodeError:
+            import yaml
+
+            return yaml.safe_load(text)
+
+    @classmethod
+    def _run_reconciler(cls, config_path: Path) -> None:
+        result = subprocess.run(
+            [sys.executable, str(RECONCILER), "--config", str(config_path)],
+            env={**os.environ, **cls._reconciler_settings()},
+            capture_output=True,
+            text=True,
+            timeout=15,
+            check=False,
+        )
+        if result.returncode != 0:
+            raise AssertionError(result.stderr)
 
     @staticmethod
     def _gateway_model(*, model: str, base_url: str) -> tuple[str, str]:
@@ -153,8 +211,78 @@ class AgentRuntimeLauncherConfigTest(unittest.TestCase):
                 "context_length": 393216,
                 "api_mode": "chat_completions",
                 "api_key": "${FINITE_PRIVATE_API_KEY}",
+                "supports_vision": True,
             },
         )
+
+    def test_reconciler_restores_missing_managed_vision_default_without_replacing_preferences(
+        self,
+    ) -> None:
+        existing = self._reconcile_config(None, self._reconciler_settings())
+        # Absence means the product default, including deletion after adoption.
+        existing["model"].pop("supports_vision", None)
+        existing["model"]["temperature"] = 0.4
+        existing["auxiliary"]["vision"] = {
+            "provider": "custom",
+            "base_url": "https://old-vision.example/v1",
+            "model": "old-vision-model",
+        }
+        before = json.loads(json.dumps(existing))
+
+        reconciled = self._reconcile_config(existing, self._reconciler_settings())
+
+        expected = json.loads(json.dumps(before))
+        expected["model"]["supports_vision"] = True
+        self.assertEqual(reconciled, expected)
+        self.assertEqual(existing, before)
+        self.assertEqual(
+            self._reconcile_config(reconciled, self._reconciler_settings()), reconciled
+        )
+
+    def test_reconciler_preserves_explicit_vision_and_routing_overrides(self) -> None:
+        for capability in (False, True, "false", None):
+            with self.subTest(capability=capability):
+                existing = self._reconcile_config(None, self._reconciler_settings())
+                existing["model"]["supports_vision"] = capability
+                existing["agent"] = {"image_input_mode": "text"}
+                self.assertEqual(
+                    self._reconcile_config(existing, self._reconciler_settings()), existing
+                )
+
+    def test_reconciler_does_not_assume_vision_for_other_models_or_providers(self) -> None:
+        for key, value in (
+            ("default", "future-model"),
+            ("provider", "openrouter"),
+            ("base_url", "https://inference.example/v1"),
+            ("api_key", "${USER_INFERENCE_KEY}"),
+            ("api_mode", "anthropic_messages"),
+        ):
+            with self.subTest(key=key):
+                existing = self._reconcile_config(None, self._reconciler_settings())
+                existing["model"].pop("supports_vision", None)
+                existing["model"][key] = value
+                reconciled = self._reconcile_config(existing, self._reconciler_settings())
+                self.assertEqual(reconciled, existing)
+
+    def test_reconciler_preserves_provider_capability_overrides(self) -> None:
+        for field in ("supports_vision", "vision"):
+            for legacy in (False, True):
+                with self.subTest(field=field, legacy=legacy):
+                    existing = self._reconcile_config(None, self._reconciler_settings())
+                    existing["model"].pop("supports_vision")
+                    provider = {"models": {"glm-5-3-flash": {field: False}}}
+                    if legacy:
+                        existing["custom_providers"] = [{"name": "custom", **provider}]
+                    else:
+                        existing["providers"] = {"custom": provider}
+                    self.assertEqual(
+                        self._reconcile_config(existing, self._reconciler_settings()), existing
+                    )
+
+    def test_reconciler_does_not_seed_vision_for_another_model(self) -> None:
+        settings = self._reconciler_settings()
+        settings["FINITE_CONFIG_MODEL"] = "future-model"
+        self.assertNotIn("supports_vision", self._reconcile_config(None, settings)["model"])
 
     def test_reconciler_migrates_only_the_legacy_finite_private_default(self) -> None:
         existing = {
@@ -177,6 +305,7 @@ class AgentRuntimeLauncherConfigTest(unittest.TestCase):
         )
         self.assertEqual(reconciled["model"]["context_length"], 393216)
         self.assertEqual(reconciled["model"]["temperature"], 0.4)
+        self.assertIs(reconciled["model"]["supports_vision"], True)
 
     def test_reconciler_migrates_deepseek_image_owned_default(self) -> None:
         existing = {
@@ -239,6 +368,160 @@ class AgentRuntimeLauncherConfigTest(unittest.TestCase):
         reconciled = self._reconcile_config({"model": model.copy()}, self._reconciler_settings())
 
         self.assertEqual(reconciled["model"], model)
+
+    def test_reconciler_retires_deleted_aeon_vision_backend(self) -> None:
+        settings = self._reconciler_settings()
+        for block in self._retired_aeon_vision_blocks():
+            for other_auxiliary in (True, False):
+                with self.subTest(
+                    model=block["model"],
+                    extra_body="extra_body" in block,
+                    other_auxiliary=other_auxiliary,
+                ):
+                    existing = self._reconcile_config(None, settings)
+                    existing["model"].pop("supports_vision")
+                    if not other_auxiliary:
+                        existing.pop("auxiliary")
+                    existing.setdefault("auxiliary", {})["vision"] = json.loads(json.dumps(block))
+                    before = json.loads(json.dumps(existing))
+
+                    reconciled = self._reconcile_config(existing, settings)
+
+                    expected = json.loads(json.dumps(before))
+                    expected["model"]["supports_vision"] = True
+                    del expected["auxiliary"]["vision"]
+                    if not other_auxiliary:
+                        del expected["auxiliary"]
+                    self.assertEqual(reconciled, expected)
+                    self.assertNotIn(FAKE_AEON_WORKER_KEY, json.dumps(reconciled))
+                    self.assertEqual(existing, before)
+                    self.assertEqual(self._reconcile_config(reconciled, settings), reconciled)
+
+    def test_reconciler_preserves_non_aeon_auxiliary_vision_blocks(self) -> None:
+        for block in (
+            {
+                "provider": "openrouter",
+                "base_url": "https://openrouter.ai/api/v1",
+                "model": "anthropic/claude-opus-5.5",
+                "api_key": "${OPENROUTER_API_KEY}",
+                "timeout": 120,
+                "download_timeout": 30,
+            },
+            {"provider": "xai", "model": "grok-4.5"},
+            {"download_timeout": 30, "timeout": 120},
+        ):
+            with self.subTest(block=block):
+                existing = self._reconcile_config(None, self._reconciler_settings())
+                existing["model"].pop("supports_vision")
+                existing["auxiliary"]["vision"] = dict(block)
+
+                reconciled = self._reconcile_config(existing, self._reconciler_settings())
+
+                self.assertEqual(json.dumps(reconciled["auxiliary"]["vision"]), json.dumps(block))
+                self.assertIs(reconciled["model"]["supports_vision"], True)
+
+    def test_reconciler_leaves_aeon_near_matches_user_owned(self) -> None:
+        aeon = self._retired_aeon_vision_blocks()[1]
+        near_matches: dict[str, dict[str, Any]] = {
+            "unknown key": {**aeon, "temperature": 0.2},
+            "unknown extra_body key": {
+                **aeon,
+                "extra_body": {**aeon["extra_body"], "user_option": True},
+            },
+            "unknown specialization key": {
+                **aeon,
+                "extra_body": {
+                    "finite_specialization": {
+                        **aeon["extra_body"]["finite_specialization"],
+                        "user_option": True,
+                    }
+                },
+            },
+            "other model": {**aeon, "model": "user-vision-model"},
+            "other provider": {**aeon, "provider": "openrouter"},
+            "other host": {**aeon, "base_url": "https://specialization.finite.vip.example/v1"},
+            "other port": {**aeon, "base_url": "https://specialization.finite.vip:8443/v1"},
+            "plain http": {**aeon, "base_url": "http://specialization.finite.vip/v1"},
+        }
+        for label, block in near_matches.items():
+            with self.subTest(label):
+                existing = self._reconcile_config(None, self._reconciler_settings())
+                existing["model"].pop("supports_vision")
+                existing["auxiliary"]["vision"] = json.loads(json.dumps(block))
+
+                reconciled = self._reconcile_config(existing, self._reconciler_settings())
+
+                self.assertEqual(reconciled["auxiliary"]["vision"], block)
+
+    def test_reconciler_never_retires_aeon_backend_on_first_seed(self) -> None:
+        reconcile_config = runpy.run_path(str(RECONCILER))["reconcile_config"]
+
+        def forbidden(config: dict[str, Any]) -> None:
+            raise AssertionError("first seed must not run existing-config migrations")
+
+        # run_path returns a copy; patch the globals the function resolves.
+        reconcile_config.__globals__["_migrate_retired_aeon_vision_override"] = forbidden
+        settings = self._reconciler_settings()
+        seeded = reconcile_config(None, settings)
+        self.assertNotIn("vision", seeded["auxiliary"])
+        with self.assertRaisesRegex(AssertionError, "first seed"):
+            reconcile_config(seeded, settings)
+
+        with tempfile.TemporaryDirectory() as raw_tmp:
+            config_path = Path(raw_tmp) / "config.yaml"
+            self._run_reconciler(config_path)
+            self.assertTrue(config_path.exists())
+            self.assertFalse((config_path.parent / AEON_BACKUP_NAME).exists())
+
+    def test_reconciler_keeps_one_rollback_copy_of_the_retired_aeon_config(self) -> None:
+        nemotron, _, gemma, _ = self._retired_aeon_vision_blocks()
+        with tempfile.TemporaryDirectory() as raw_tmp:
+            config_path = Path(raw_tmp) / "config.yaml"
+            backup = config_path.parent / AEON_BACKUP_NAME
+            existing = self._reconcile_config(None, self._reconciler_settings())
+            existing["model"].pop("supports_vision")
+            existing["auxiliary"]["vision"] = nemotron
+            original = (json.dumps(existing, indent=2) + "\n").encode()
+            config_path.write_bytes(original)
+            config_path.chmod(0o640)
+
+            self._run_reconciler(config_path)
+
+            retired = self._load_config_text(config_path.read_text(encoding="utf-8"))
+            self.assertNotIn("vision", retired["auxiliary"])
+            self.assertIs(retired["model"]["supports_vision"], True)
+            self.assertEqual(config_path.stat().st_mode & 0o777, 0o640)
+            self.assertEqual(backup.read_bytes(), original)
+            self.assertEqual(backup.stat().st_mode & 0o777, 0o600)
+            self.assertEqual(
+                sorted(path.name for path in config_path.parent.iterdir()),
+                sorted(["config.yaml", AEON_BACKUP_NAME]),
+            )
+
+            # Second boot: nothing left to retire, so neither file is rewritten.
+            config_stat = config_path.stat()
+            retired_bytes = config_path.read_bytes()
+            backup_stat = backup.stat()
+            self._run_reconciler(config_path)
+            self.assertEqual(config_path.read_bytes(), retired_bytes)
+            self.assertEqual(
+                (config_path.stat().st_ino, config_path.stat().st_mtime_ns),
+                (config_stat.st_ino, config_stat.st_mtime_ns),
+            )
+            self.assertEqual(
+                (backup.stat().st_ino, backup.stat().st_mtime_ns),
+                (backup_stat.st_ino, backup_stat.st_mtime_ns),
+            )
+
+            # A reintroduced block (for example a whole-file restore) is retired
+            # again, but the first rollback copy is never overwritten.
+            existing["auxiliary"]["vision"] = gemma
+            config_path.write_text(json.dumps(existing, indent=2) + "\n", encoding="utf-8")
+            self._run_reconciler(config_path)
+            again = self._load_config_text(config_path.read_text(encoding="utf-8"))
+            self.assertNotIn("vision", again["auxiliary"])
+            self.assertEqual(backup.read_bytes(), original)
+            self.assertEqual(backup.stat().st_mode & 0o777, 0o600)
 
     def test_reconciler_seeds_finitechat_display_defaults_without_touching_other_platforms(
         self,

@@ -3470,7 +3470,7 @@ pub fn durable_state_manifest_sha256(root: &Path) -> Result<String, RunnerError>
             .map_err(|error| RunnerError::RuntimeLaunch(error.to_string()))?;
         let file_type = metadata.file_type();
         #[cfg(unix)]
-        if file_type.is_socket() && is_ephemeral_hermes_socket_path(relative) {
+        if file_type.is_socket() && crate::retirement::is_ephemeral_hermes_socket_path(relative) {
             continue;
         }
         #[cfg(unix)]
@@ -3518,25 +3518,6 @@ pub fn durable_state_manifest_sha256(root: &Path) -> Result<String, RunnerError>
         }
     }
     Ok(hex::encode(manifest.finalize()))
-}
-
-#[cfg(unix)]
-fn is_ephemeral_hermes_socket_path(path: &Path) -> bool {
-    if path == Path::new("agent/hermes-home/gateway.sock") {
-        return true;
-    }
-    if path.parent() != Some(Path::new("agent/hermes-home/state")) {
-        return false;
-    }
-    path.file_name()
-        .and_then(|name| name.to_str())
-        .and_then(|name| name.strip_prefix("gateway.loop-tick."))
-        .and_then(|name| name.strip_suffix(".sock"))
-        .is_some_and(|pid| {
-            !pid.is_empty()
-                && pid.bytes().all(|byte| byte.is_ascii_digit())
-                && pid.parse::<u32>().is_ok_and(|pid| pid > 0)
-        })
 }
 
 /// Derive the plan for a source machine. The durable state root is
@@ -5251,6 +5232,18 @@ esac
         std::fs::write(plan.state_root.join("workspace/note"), "preserved").unwrap();
         #[cfg(unix)]
         std::os::unix::fs::symlink("workspace/note", plan.state_root.join("latest-note")).unwrap();
+        // A stopped Hermes leaves its loop-liveness socket behind. Bind it at
+        // a short path and move it: the durable path can exceed SUN_LEN.
+        #[cfg(unix)]
+        let loop_tick = {
+            let state = plan.state_root.join("agent/hermes-home/state");
+            std::fs::create_dir_all(&state).unwrap();
+            let short = temp.path().join("loop-tick.sock");
+            drop(std::os::unix::net::UnixListener::bind(&short).unwrap());
+            let path = state.join("gateway.loop-tick.29.sock");
+            std::fs::rename(&short, &path).unwrap();
+            path
+        };
         let image = "registry.example/runtime@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
         let mut lease = recovery_lease("runtime_ctl_retirement", image, 41234);
         lease.request.kind = RuntimeControlKind::Destroy;
@@ -5273,6 +5266,26 @@ esac
             "preserved"
         );
         assert!(temp.path().join("borg-remote/archive.zip").is_file());
+        #[cfg(unix)]
+        {
+            assert!(
+                std::fs::symlink_metadata(&loop_tick)
+                    .unwrap()
+                    .file_type()
+                    .is_socket()
+            );
+            let remote =
+                verify_recovery_zip(&temp.path().join("borg-remote/archive.zip"), None).unwrap();
+            let paths = remote
+                .manifest
+                .entries
+                .iter()
+                .map(|entry| entry.path.as_str())
+                .collect::<Vec<_>>();
+            assert!(paths.contains(&"agent/hermes-home/state"));
+            assert!(paths.contains(&"workspace/note"));
+            assert!(!paths.iter().any(|path| path.contains("loop-tick")));
+        }
         assert!(
             !launcher
                 .retirement_staging_paths(&lease.request.id)

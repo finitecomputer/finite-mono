@@ -67,6 +67,24 @@ There is no central desired Hermes configuration and no continuous
 reconciliation loop. Offers are explicit and agents adopt them at their own
 pace.
 
+The runtime startup reconciler has one narrowly scoped model-capability
+default outside the offer journal: on the exact Finite-owned GLM-5.3-Flash
+model/route/key shape, a missing `model.supports_vision` declaration is restored
+to `true`. Absence, including later deletion, means the managed product
+default. Explicit model/provider capability, image-routing, and auxiliary
+backend settings remain user-owned. This is applied locally on startup of the
+adopted image; it does not add a central desired-config loop or authorize
+rewriting other model settings. Its rollback boundary is the previous runtime
+artifact plus a saved pre-change config, as specified in the runtime-image
+runbook. Explicit profile selection continues to use agentd's offer journal.
+
+The same reconciler also retires one Finite-installed auxiliary backend that
+has been deleted: the exact `auxiliary.vision` block written by the removed
+AEON specialization writer. It matches the AEON host, model names, and known
+keys; any other key or value leaves the block user-owned. Before its first
+rewrite, it keeps the replaced config beside it once as the rollback copy. No
+other auxiliary backend is rewritten.
+
 ## Boundary with lifecycle infrastructure
 
 `finite-agentd` may restart Hermes and other processes inside an Agent Runtime.

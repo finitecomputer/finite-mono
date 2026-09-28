@@ -2973,7 +2973,15 @@ fn cmd_rekey<W: Write>(
                 )
             },
         )
-        .map_err(CliError::Output)
+        .map_err(CliError::Output)?;
+        if report.healed_behind_server {
+            writeln!(
+                output,
+                "  behind-server evidence cleared (the epoch bump healed the rewind)"
+            )
+            .map_err(CliError::Output)?;
+        }
+        Ok(())
     }
 }
 

@@ -22,6 +22,28 @@ let
   # Values are copied host-to-host/off-host and never enter this public repo.
   borgStateRoot = "/var/lib/finitecomputer/backups";
   borgSecretRoot = "${borgStateRoot}/rsync-net";
+  # Recovery Set writers the snapshot's write fence stops.
+  fencedWriters = [
+    "finite-saas-core.service"
+    "finite-brain-app.service"
+    "finitechat-hosted-device.service"
+    "finite-identity.service"
+    "finitechat-server.service"
+  ];
+  # A listening socket whose same-named service Requires=/Wants=/BindsTo= a
+  # fenced writer starts that writer again on its next connection, so the fence
+  # stops such sockets (then their services) before the writers and starts
+  # them again after. Derived from this host's units; absent sockets add nothing.
+  # 2026-09-18 FIN-95 (lat2 journal): a runner lease connection to finite-core-private-proxy.socket restarted Core 1.5 s into the fence.
+  fenceSockets = builtins.filter (
+    name:
+    let
+      service = config.systemd.services.${name} or { };
+    in
+    lib.any (unit: builtins.elem unit fencedWriters) (
+      (service.requires or [ ]) ++ (service.wants or [ ]) ++ (service.bindsTo or [ ])
+    )
+  ) (builtins.attrNames config.systemd.sockets);
 in
 {
   options.finite.recoveryBackup = {
@@ -72,6 +94,19 @@ in
         kata_was_active=0
         kata_timer_was_active=0
         phala_was_active=0
+        # Activation sockets, and their services, that were running.
+        sockets_were_active=()
+        proxies_were_active=()
+        # Every unit this run stopped, with its InactiveExitTimestampMonotonic
+        # right after the stop. The fence proof below compares against it.
+        fenced_units=()
+        declare -A fence_marks=()
+
+        fence_stop() {
+          systemctl stop "$1"
+          fenced_units+=("$1")
+          fence_marks[$1]=$(systemctl show -P InactiveExitTimestampMonotonic "$1")
+        }
 
         remove_tree() {
           local tree=$1
@@ -88,6 +123,9 @@ in
           if [ "$core_was_active" = 1 ]; then systemctl start finite-saas-core.service || cleanup_status=1; fi
           if [ "$brain_was_active" = 1 ]; then systemctl start finite-brain-app.service || cleanup_status=1; fi
           if [ "$hosted_was_active" = 1 ]; then systemctl start finitechat-hosted-device.service || cleanup_status=1; fi
+          # Writers first, then the sockets that can activate them.
+          for socket in "''${sockets_were_active[@]}"; do systemctl start "$socket.socket" || cleanup_status=1; done
+          for proxy in "''${proxies_were_active[@]}"; do systemctl start "$proxy.service" || cleanup_status=1; done
           if [ "$kata_was_active" = 1 ]; then systemctl start finite-saas-runner.service || cleanup_status=1; fi
           if [ "$phala_was_active" = 1 ]; then systemctl start finite-saas-runner-phala.service || cleanup_status=1; fi
           if [ "$kata_timer_was_active" = 1 ]; then systemctl start finite-saas-runner.timer || cleanup_status=1; fi
@@ -110,15 +148,22 @@ in
         systemctl is-active --quiet finite-saas-runner.service && kata_was_active=1 || true
         systemctl is-active --quiet finite-saas-runner.timer && kata_timer_was_active=1 || true
         systemctl is-active --quiet finite-saas-runner-phala.service && phala_was_active=1 || true
+        for socket in ${lib.escapeShellArgs fenceSockets}; do
+          if systemctl is-active --quiet "$socket.socket"; then sockets_were_active+=("$socket"); fi
+          if systemctl is-active --quiet "$socket.service"; then proxies_were_active+=("$socket"); fi
+        done
 
-        if [ "$kata_timer_was_active" = 1 ]; then systemctl stop finite-saas-runner.timer; fi
-        if [ "$kata_was_active" = 1 ]; then systemctl stop finite-saas-runner.service; fi
-        if [ "$phala_was_active" = 1 ]; then systemctl stop finite-saas-runner-phala.service; fi
-        if [ "$core_was_active" = 1 ]; then systemctl stop finite-saas-core.service; fi
-        if [ "$brain_was_active" = 1 ]; then systemctl stop finite-brain-app.service; fi
-        if [ "$hosted_was_active" = 1 ]; then systemctl stop finitechat-hosted-device.service; fi
-        if [ "$identity_was_active" = 1 ]; then systemctl stop finite-identity.service; fi
-        if [ "$chat_was_active" = 1 ]; then systemctl stop finitechat-server.service; fi
+        if [ "$kata_timer_was_active" = 1 ]; then fence_stop finite-saas-runner.timer; fi
+        if [ "$kata_was_active" = 1 ]; then fence_stop finite-saas-runner.service; fi
+        if [ "$phala_was_active" = 1 ]; then fence_stop finite-saas-runner-phala.service; fi
+        # Sockets before their services, so no connection can start them again.
+        for socket in "''${sockets_were_active[@]}"; do fence_stop "$socket.socket"; done
+        for proxy in "''${proxies_were_active[@]}"; do fence_stop "$proxy.service"; done
+        if [ "$core_was_active" = 1 ]; then fence_stop finite-saas-core.service; fi
+        if [ "$brain_was_active" = 1 ]; then fence_stop finite-brain-app.service; fi
+        if [ "$hosted_was_active" = 1 ]; then fence_stop finitechat-hosted-device.service; fi
+        if [ "$identity_was_active" = 1 ]; then fence_stop finite-identity.service; fi
+        if [ "$chat_was_active" = 1 ]; then fence_stop finitechat-server.service; fi
 
         # The brief write fence makes account, Principal, product, and encrypted
         # binding state one composition. SQLite databases are copied through
@@ -141,6 +186,21 @@ in
         test "$(sqlite3 "$staging/finite-identity/identity.db" 'PRAGMA integrity_check;')" = ok
         runuser -u postgres -- pg_dump --exclude-table-data=public.finite_private_request_diagnostics --format=custom finite_core > "$staging/saas-core/finite_core.dump"
         pg_restore --list "$staging/saas-core/finite_core.dump" >/dev/null
+
+        # Fence proof: every unit stopped above is still stopped and never left
+        # the inactive state during the copies (a start that died again still
+        # moves InactiveExitTimestampMonotonic). A broken fence fails the run
+        # before sealing; the EXIT trap removes staging and restarts writers.
+        fence_broken=0
+        for unit in "''${fenced_units[@]}"; do
+          if systemctl is-active --quiet "$unit" \
+            || [ "$(systemctl show -P InactiveExitTimestampMonotonic "$unit")" != "''${fence_marks[$unit]}" ]; then
+            echo "Hosted Recovery Snapshot write fence broken: $unit started during the copies" >&2
+            fence_broken=1
+          fi
+        done
+        test "$fence_broken" = 0
+        echo "Hosted Recovery Snapshot write fence held: ''${fenced_units[*]}"
 
         printf '%s\n' 'finite.hosted-web-chat-recovery-snapshot.v4' > "$staging/format"
         printf '%s\n' \
@@ -169,6 +229,9 @@ in
         chmod -R a-w -- "$staging"
         mv "$staging" "$final"
         ln -sfn "$stamp" "$root/latest"
+        # Journal marker for the fence window: no fenced writer starts between
+        # the stops above and this line; the cleanup below starts them again.
+        echo "Hosted Recovery Snapshot sealed: $final"
         while IFS= read -r -d "" expired; do
           remove_tree "$expired"
         done < <(find "$root" -mindepth 1 -maxdepth 1 -type d -name '20*T*Z' -mtime +2 -print0)

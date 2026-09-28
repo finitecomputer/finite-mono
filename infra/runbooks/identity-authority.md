@@ -122,9 +122,10 @@ the existing daily off-host Borg job. Its latest backup must remain less than
 seven hours old and pass its recorded SHA-256 check.
 
 The deploy/manual-triggered coordinated
-`finite-hosted-web-chat-snapshot.service` also fences both Runner workers,
-Core, Brain, Hosted Device, Chat, and the Authority, then copies `identity.db`
-with SQLite's backup API into:
+`finite-hosted-web-chat-snapshot.service` also fences Core, Brain, Hosted
+Device, Chat, the Authority, and the private Runner proxy sockets (plus local
+Runner workers on hosts that have them), then copies `identity.db` with
+SQLite's backup API into:
 
 ```text
 /data/recovery-snapshots/hosted-web-chat/<stamp>/finite-identity/identity.db

@@ -15,6 +15,7 @@ finite-status-contract:
 # Synthetic empty-target proof for the complete hosted Recovery Set contract.
 hosted-recovery-contract:
     cd .. && python3 -m unittest discover -s scripts/tests -p 'test_snapshot_sqlite.py'
+    cd .. && python3 -m unittest discover -s scripts/tests -p 'test_hosted_snapshot_fence.py'
     cd .. && infra/scripts/test-hosted-web-chat-restore
 
 sites-backup-contract:

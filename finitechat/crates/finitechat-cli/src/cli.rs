@@ -674,6 +674,38 @@ pub(crate) enum RepairCommand {
     /// rejected entry: rehearse against byte copies, derive the skip list
     /// from the classification replay, then apply to the real store.
     SkipEntry(RepairSkipEntryArgs),
+
+    /// Clear durable behind-server rewind evidence whose room has already
+    /// healed: a Commit moved the group epoch above the epoch the
+    /// evidence was recorded at (a rekey did its job, but the running
+    /// image only checked the flag's presence). Refuses, changing
+    /// nothing, while any flagged room is not healed yet — rekey it
+    /// first (`finitechat hermes rekey`).
+    HealBehindServer(RepairHealBehindServerArgs),
+}
+
+#[derive(Debug, Args)]
+pub(crate) struct RepairHealBehindServerArgs {
+    /// The REAL client store sqlite file (the command writes it).
+    #[arg(long, allow_hyphen_values = true)]
+    pub(crate) store: String,
+
+    /// Device id to repair as.
+    #[arg(long, allow_hyphen_values = true)]
+    pub(crate) device_id: String,
+
+    /// 64-char lowercase hex account secret.
+    #[arg(long, allow_hyphen_values = true)]
+    pub(crate) account_secret_hex: String,
+
+    /// Heal only this room (default: every flagged room on the store).
+    #[arg(long, allow_hyphen_values = true)]
+    pub(crate) room: Option<String>,
+
+    /// Append-only JSONL audit trail (created mode 0600); must not be
+    /// the store itself.
+    #[arg(long, allow_hyphen_values = true)]
+    pub(crate) audit_log: String,
 }
 
 #[derive(Debug, Args)]
