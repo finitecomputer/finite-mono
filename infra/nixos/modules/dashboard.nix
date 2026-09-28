@@ -4,10 +4,10 @@
 { ... }:
 {
   virtualisation.oci-containers.containers.finite-saas-dashboard = {
-    # Viewer-timezone chat timestamps and the 200M Finite Private admin label.
-    # Source 72f708f20f0414d7bbf6388d697da6970514958c.
-    # https://github.com/finitecomputer/finite-mono/actions/runs/36277845091
-    image = "ghcr.io/finitecomputer/finite-saas-dashboard@sha256:68bcaa10c3688237a2fff3c845ecf6b1a4c14a07eedb7f2a8585a4a1fde569ef";
+    # Agent removal redirects to the public origin; 200M default friend-key label.
+    # Source f132d0b216ff55fecc7f46702c76f571c1a1e495.
+    # https://github.com/finitecomputer/finite-mono/actions/runs/36371636580
+    image = "ghcr.io/finitecomputer/finite-saas-dashboard@sha256:dc55dea6a2bf32d23d8bb8c0e0647601bfc99f5a207f2197e57ae7c4e678dfbb";
 
     # Host networking: the dashboard must reach core on the HOST loopback
     # (127.0.0.1:4200) and itself bind 127.0.0.1:3000 (HOSTNAME below). With
