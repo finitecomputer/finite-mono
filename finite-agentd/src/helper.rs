@@ -34,7 +34,11 @@ pub(crate) const HELPER_TEST_VARIABLES: [&str; 4] = [
 const PYTHON_OVERRIDE: &str = "FINITE_AGENTD_INFERENCE_HELPER_PYTHON";
 const MODULE_OVERRIDE: &str = "FINITE_AGENTD_INFERENCE_HELPER_MODULE";
 const HELPER_MODULE: &str = "hermes_cli.finite_inference_helper";
-const FACTS_DEADLINE: Duration = Duration::from_secs(10);
+/// A status read: its reply must fit the dashboard's wait (R15a).
+pub(crate) const STATUS_FACTS_DEADLINE: Duration = Duration::from_secs(10);
+/// An executor read: no reply waits on it, and a busy Agent Runtime can make
+/// the helper slow (R15a).
+pub(crate) const EXECUTOR_FACTS_DEADLINE: Duration = Duration::from_secs(30);
 /// Longer than Hermes's 15 s auth-store lock.
 const CLEAR_DEADLINE: Duration = Duration::from_secs(20);
 
@@ -76,16 +80,26 @@ impl HelperCommand {
     }
 }
 
-/// Read-only redacted facts (§8.2.1).
-pub(crate) async fn inference_facts(hermes_home: &Path) -> Result<InferenceFacts, AgentdError> {
-    let value = run_helper(
+/// Read-only redacted facts (§8.2.1), within `deadline`: status passes
+/// `STATUS_FACTS_DEADLINE`, the executor `EXECUTOR_FACTS_DEADLINE`.
+pub(crate) async fn inference_facts(
+    hermes_home: &Path,
+    deadline: Duration,
+) -> Result<InferenceFacts, AgentdError> {
+    read_facts(
         &HelperCommand::from_env(),
         helper_env(std::env::vars_os(), hermes_home, &finite_private_env()),
-        &["inference-facts"],
-        FACTS_DEADLINE,
+        deadline,
     )
-    .await?;
-    parse_facts(value)
+    .await
+}
+
+async fn read_facts(
+    command: &HelperCommand,
+    environment: BTreeMap<OsString, OsString>,
+    deadline: Duration,
+) -> Result<InferenceFacts, AgentdError> {
+    parse_facts(run_helper(command, environment, &["inference-facts"], deadline).await?)
 }
 
 /// Upstream `clear_provider_auth` for one provider. `true` if anything was cleared.
@@ -399,7 +413,7 @@ mod tests {
                 &missing,
                 BTreeMap::new(),
                 &["inference-facts"],
-                FACTS_DEADLINE
+                STATUS_FACTS_DEADLINE
             )
             .await
             .is_err()
@@ -467,15 +481,8 @@ mod tests {
         let cache = FactsCache::default();
         let failing = fake_helper(temp.path(), "exit 1");
         let facts = cache
-            .get_or_fetch(temp.path(), || async {
-                let value = run_helper(
-                    &failing,
-                    BTreeMap::new(),
-                    &["inference-facts"],
-                    FACTS_DEADLINE,
-                )
-                .await?;
-                parse_facts(value)
+            .get_or_fetch(temp.path(), || {
+                read_facts(&failing, BTreeMap::new(), STATUS_FACTS_DEADLINE)
             })
             .await;
         assert_eq!(facts, InferenceFacts::unknown());
@@ -502,16 +509,57 @@ mod tests {
             "alias_present": "no", "codex_home_neutral": "yes"
         });
         let working = fake_helper(temp.path(), &format!("echo '{reply}'"));
-        let value = run_helper(
-            &working,
-            BTreeMap::new(),
-            &["inference-facts"],
-            FACTS_DEADLINE,
-        )
-        .await
-        .unwrap();
-        let facts = parse_facts(value).unwrap();
+        let facts = read_facts(&working, BTreeMap::new(), STATUS_FACTS_DEADLINE)
+            .await
+            .unwrap();
         assert_eq!(facts.finite_private.fp_key, Tri::Present);
         assert_eq!(facts.session_overrides.openai_codex, Tri::Unknown);
+    }
+
+    #[tokio::test]
+    async fn r15a_a_helper_slower_than_status_still_answers_the_executor() {
+        assert_eq!(STATUS_FACTS_DEADLINE, Duration::from_secs(10));
+        assert_eq!(EXECUTOR_FACTS_DEADLINE, Duration::from_secs(30));
+        // Both helpers answer only once `release` exists. The test creates it
+        // when the status read has given up, so the executor's helper answers
+        // just after 10 s, well inside its 30 s.
+        let temp = tempfile::tempdir().unwrap();
+        let release = temp.path().join("release");
+        let reply = serde_json::json!({
+            "v": 1, "saved_route": "finite_private",
+            "fallback": {"fallback_providers": "absent", "fallback_model": "absent", "effective": []},
+            "finite_private": {"provider_entry": "canonical", "fp_key": "present"},
+            "openrouter": {"hermes_key": "absent", "hermes_key_fingerprint": null,
+                           "dotenv_key": "absent", "manual_pool_entries": "none"},
+            "codex": {"state": "not_signed_in", "quota_reset_at": null, "reported_quota_reset_at": null},
+            "session_overrides": {"openrouter": "absent", "openai_codex": "absent"},
+            "alias_present": "no", "codex_home_neutral": "yes"
+        });
+        let slow = format!(
+            "while [ ! -e '{}' ]; do sleep 0.05; done\necho '{reply}'",
+            release.display()
+        );
+        let path = || BTreeMap::from([("PATH".into(), "/usr/bin:/bin".into())]);
+        let executor_helper = fake_helper(temp.path(), &slow);
+        let status_helper = fake_helper(temp.path(), &slow);
+        let started = Instant::now();
+        let executor = tokio::spawn(async move {
+            read_facts(&executor_helper, path(), EXECUTOR_FACTS_DEADLINE).await
+        });
+        let status = FactsCache::default()
+            .get_or_fetch(temp.path(), || {
+                read_facts(&status_helper, path(), STATUS_FACTS_DEADLINE)
+            })
+            .await;
+        assert_eq!(status, InferenceFacts::unknown(), "status gave up");
+        assert!(started.elapsed() >= STATUS_FACTS_DEADLINE);
+        fs::write(&release, "").unwrap();
+        let facts = tokio::time::timeout(EXECUTOR_FACTS_DEADLINE, executor)
+            .await
+            .expect("the executor's read ends")
+            .unwrap()
+            .expect("the executor's read outlasted the status deadline");
+        assert_eq!(facts.session_overrides.openrouter, Tri::Absent);
+        assert!(started.elapsed() > STATUS_FACTS_DEADLINE);
     }
 }

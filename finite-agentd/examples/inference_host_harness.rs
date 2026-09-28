@@ -10,7 +10,7 @@
 //! `/key` and Core's hosted-Hermes desired state are local fakes on the same
 //! loopback port.
 //!
-//! `smoke` runs the seven E-0 proofs and exits non-zero if any fails. `serve`
+//! `smoke` runs the E-0 proofs (P1–P9) and exits non-zero if any fails. `serve`
 //! keeps the agent up for the dashboard until Ctrl-C.
 //!
 //! Run from the repository root, inside the Nix dev shell (the launcher step
@@ -58,6 +58,8 @@ const NATIVE_PORT: u16 = 8642;
 const GATEWAY_SLEEP: &str = "sleep 1000000";
 const QUIET_SLEEP: &str = "sleep 1000001";
 const SERVE_SLEEP: &str = "sleep 1000002";
+/// A facts read that hangs until agentd's deadline kills it.
+const FACTS_SLEEP: &str = "sleep 1000003";
 
 #[derive(Parser)]
 #[command(about = "E-0: the real finite-agentd behind a fake bridge")]
@@ -371,6 +373,8 @@ struct Run {
     agent_home: PathBuf,
     hermes_home: PathBuf,
     env: BTreeMap<String, String>,
+    /// The patched env's Python, for the harness's own helper runs.
+    python: PathBuf,
     agentd_bin: PathBuf,
     port: u16,
     fakes: Arc<Fakes>,
@@ -447,6 +451,32 @@ impl Run {
         write_executable(
             &bin.join("health"),
             &format!("#!/bin/sh\nexec {QUIET_SLEEP}\n"),
+        );
+        // agentd's helper interpreter. It logs each facts read's start and
+        // exit; a read agentd's deadline kills leaves no exit line. While the
+        // stub's cut-short step runs (`facts-slow` exists), a facts read hangs
+        // until that deadline, as the helper did at load 30.
+        let python = hermes_env.join("bin/python3");
+        write_executable(
+            &bin.join("helper-python"),
+            &format!(
+                r#"#!/usr/bin/env bash
+case "$*" in *inference-facts*) ;; *) exec '{python}' "$@" ;; esac
+now() {{ local t="${{EPOCHREALTIME/./}}"; echo "${{t:0:13}}"; }}
+if [[ -e '{slow}' ]]; then
+    echo "$(now) facts-read-slow pid=$$" >> '{events}'
+    exec {FACTS_SLEEP}
+fi
+echo "$(now) facts-read pid=$$" >> '{events}'
+status=0
+'{python}' "$@" || status=$?
+echo "$(now) facts-read-end pid=$$ exit=$status" >> '{events}'
+exit "$status"
+"#,
+                slow = dir.join("facts-slow").display(),
+                events = dir.join("events.log").display(),
+                python = python.display(),
+            ),
         );
         // `hermes config check` is real; `hermes serve` is a stand-in that
         // records its start and sleeps.
@@ -540,7 +570,7 @@ impl Run {
         );
         set(
             "FINITE_AGENTD_INFERENCE_HELPER_PYTHON",
-            hermes_env.join("bin/python3").display().to_string(),
+            bin.join("helper-python").display().to_string(),
         );
         if fakes.serve_enabled {
             set(
@@ -556,6 +586,7 @@ impl Run {
             agent_home,
             hermes_home,
             env,
+            python,
             agentd_bin,
             port: args.port,
             fakes,
@@ -626,11 +657,16 @@ impl Run {
             .unwrap_or_else(|| "no ready or stopped line".to_owned())
     }
 
-    /// Every stub line between two times, for the evidence of a race.
+    /// Every stub and slow facts read line between two times, for the
+    /// evidence of a race.
     fn stub_story(&self, since: u64, until: u64) -> Vec<String> {
         self.events()
             .into_iter()
-            .filter(|(ms, line)| *ms >= since && *ms <= until && line.starts_with("gateway-"))
+            .filter(|(ms, line)| {
+                *ms >= since
+                    && *ms <= until
+                    && (line.starts_with("gateway-") || line.starts_with("facts-read-slow"))
+            })
             .map(|(ms, line)| format!("+{}ms {line}", ms - since))
             .collect()
     }
@@ -738,7 +774,7 @@ impl Run {
                 continue;
             };
             let command = command.trim();
-            if [GATEWAY_SLEEP, QUIET_SLEEP, SERVE_SLEEP].contains(&command)
+            if [GATEWAY_SLEEP, QUIET_SLEEP, SERVE_SLEEP, FACTS_SLEEP].contains(&command)
                 && let Ok(pid) = pid.parse::<u32>()
                 && self.owns(pid)
             {
@@ -816,17 +852,42 @@ impl Run {
     }
 
     async fn disconnect(&self, route: &str) -> Value {
-        self.command(
-            "agent.inference.disconnect",
-            "finite.agent.inference.disconnect.v1",
-            json!({"route": route}),
-        )
-        .await
+        // F1 refuses to disconnect the saved route while the Finite Private
+        // key is not known present, and the command's facts read shares
+        // status's 10 s deadline and cache. On a loaded machine that read can
+        // time out, so warm the cache with known facts first.
+        self.known_status().await;
+        let reply = self
+            .command(
+                "agent.inference.disconnect",
+                "finite.agent.inference.disconnect.v1",
+                json!({"route": route}),
+            )
+            .await;
+        if reply["body"]["operation_id"].is_null() {
+            println!("e0: disconnect {route} started no operation: {reply}");
+        }
+        reply
+    }
+
+    /// Status once its helper facts are known. Status gives the helper 10 s
+    /// (R15a); on a loaded machine a read can time out and report `unknown`
+    /// (the fallback is `unknown` exactly then), so poll, bounded.
+    async fn known_status(&self) -> Value {
+        let deadline = Instant::now() + Duration::from_secs(120);
+        loop {
+            let status = self.status().await;
+            if status["inference"]["fallback"]["state"] != "unknown" || Instant::now() >= deadline {
+                return status;
+            }
+            tokio::time::sleep(Duration::from_millis(500)).await;
+        }
     }
 
     /// Polls status until the operation `id` is no longer running.
     async fn operation_end(&self, id: &str) -> Value {
-        let deadline = Instant::now() + Duration::from_secs(240);
+        // A disconnect that ends `verify_failed` waits out three 60 s windows.
+        let deadline = Instant::now() + Duration::from_secs(600);
         loop {
             let status = self.status().await;
             let operation = &status["inference"]["operation"];
@@ -841,7 +902,7 @@ impl Run {
     /// The real helper's facts on the scratch files, with the environment
     /// agentd gives it.
     fn helper_facts(&self) -> Value {
-        let output = std::process::Command::new(&self.env["FINITE_AGENTD_INFERENCE_HELPER_PYTHON"])
+        let output = std::process::Command::new(&self.python)
             .args([
                 "-m",
                 "hermes_cli.finite_inference_helper",
@@ -878,7 +939,7 @@ impl Run {
             source = gs.SessionSource(platform=gc.Platform.LOCAL, chat_id='e0-room', user_id='e0-user')\n\
             entry = store.get_or_create_session(source)\n\
             store.set_model_override(entry.session_key, {'provider': 'openrouter', 'model': 'e0/model', 'base_url': 'https://openrouter.ai/api/v1'})\n";
-        let status = std::process::Command::new(&self.env["FINITE_AGENTD_INFERENCE_HELPER_PYTHON"])
+        let status = std::process::Command::new(&self.python)
             .args(["-c", script])
             .env_clear()
             .envs(&self.env)
@@ -942,6 +1003,24 @@ impl Run {
     }
 }
 
+/// A failed assertion must not leave agentd or its children running: stop
+/// agentd (it drains its own children), then sweep this run's sleepers.
+impl Drop for Run {
+    fn drop(&mut self) {
+        if let Some((_, pid)) = self.agentd.take() {
+            signal(pid, rustix::process::Signal::TERM);
+            let deadline = Instant::now() + Duration::from_secs(40);
+            while alive(pid) && Instant::now() < deadline {
+                std::thread::sleep(Duration::from_millis(100));
+            }
+            if alive(pid) {
+                signal(pid, rustix::process::Signal::KILL);
+            }
+            self.sweep();
+        }
+    }
+}
+
 fn signal(pid: u32, signal: rustix::process::Signal) {
     if let Some(pid) = rustix::process::Pid::from_raw(pid as i32) {
         let _ = rustix::process::kill_process(pid, signal);
@@ -962,12 +1041,17 @@ struct Timeline {
     intent: Vec<(u64, String, u64)>,
     /// (ms, serve pid, alive) on each change.
     serve: Vec<(u64, u32, bool)>,
+    /// (pid, started ms, ended ms, hung) of each finished facts read. A read
+    /// with no `facts-read-end` line was killed by agentd's deadline: about
+    /// 10 s for status, 30 s for the executor.
+    facts_reads: Vec<(u32, u64, u64, bool)>,
 }
 
 fn observe(run_dir: PathBuf, intent_path: PathBuf, timeline: Arc<Mutex<Timeline>>) {
     tokio::spawn(async move {
         let mut last_intent = (String::new(), 0);
         let mut serve_alive: HashMap<u32, bool> = HashMap::new();
+        let mut reads_ended: HashSet<u32> = HashSet::new();
         loop {
             let intent = fs::read(&intent_path)
                 .ok()
@@ -1003,13 +1087,36 @@ fn observe(run_dir: PathBuf, intent_path: PathBuf, timeline: Arc<Mutex<Timeline>
                         timeline.lock().unwrap().serve.push((now_ms(), pid, now));
                     }
                 }
+                let read = line
+                    .split_once(" facts-read-slow pid=")
+                    .map(|(ms, pid)| (ms, pid, true))
+                    .or_else(|| {
+                        line.split_once(" facts-read pid=")
+                            .map(|(ms, pid)| (ms, pid, false))
+                    });
+                if let Some((started, pid, hung)) = read.and_then(|(ms, pid, hung)| {
+                    Some((
+                        ms.parse::<u64>().ok()?,
+                        pid.trim().parse::<u32>().ok()?,
+                        hung,
+                    ))
+                }) && !reads_ended.contains(&pid)
+                    && !alive(pid)
+                {
+                    reads_ended.insert(pid);
+                    timeline
+                        .lock()
+                        .unwrap()
+                        .facts_reads
+                        .push((pid, started, now_ms(), hung));
+                }
             }
             tokio::time::sleep(Duration::from_millis(25)).await;
         }
     });
 }
 
-// ---- The seven proofs ----
+// ---- The E-0 proofs (P1–P7 from §13.3, P8 for R14, P9 for R15) ----
 
 struct Proofs {
     results: Vec<(String, bool, Vec<String>)>,
@@ -1061,7 +1168,7 @@ async fn smoke(run: &mut Run, timeline: Arc<Mutex<Timeline>>) -> Proofs {
 
     // P7 (first half): facts on the files the real reconciler seeded.
     run.start_agentd().await;
-    let status = run.status().await;
+    let status = run.known_status().await;
     let facts = run.helper_facts();
     let inference = &status["inference"];
     let mut p7 = vec![
@@ -1109,7 +1216,7 @@ async fn smoke(run: &mut Run, timeline: Arc<Mutex<Timeline>>) -> Proofs {
 
     // v1 with a fake key: key facts through the real helper on the real .env.
     let reply = run.v1_openrouter(key_one, OR_MODEL).await;
-    let status = run.status().await;
+    let status = run.known_status().await;
     let openrouter = &status["inference"]["routes"]["openrouter"];
     p7.push(check(
         reply["status"] == "succeeded",
@@ -1206,10 +1313,14 @@ async fn smoke(run: &mut Run, timeline: Arc<Mutex<Timeline>>) -> Proofs {
             && ended["inference"]["operation"]["kind"] == "disconnect",
         format!("disconnect ended {}", ended["inference"]["operation"]),
     ));
+    let known = run.known_status().await;
     p1.push(check(
         !run.dotenv().contains("OPENROUTER_API_KEY")
-            && ended["inference"]["routes"]["openrouter"]["state"] == "no_key",
-        "the .env key is gone and status says no_key",
+            && known["inference"]["routes"]["openrouter"]["state"] == "no_key",
+        format!(
+            "the .env key is gone and status says {}",
+            known["inference"]["routes"]["openrouter"]["state"]
+        ),
     ));
     let reply = run.select("openrouter", Some(OR_MODEL)).await;
     p1.push(check(
@@ -1235,11 +1346,11 @@ async fn smoke(run: &mut Run, timeline: Arc<Mutex<Timeline>>) -> Proofs {
     let deadline = Instant::now() + Duration::from_secs(30);
     while !run
         .intent()
-        .is_some_and(|record| matches!(record["phase"].as_str(), Some("restarting" | "verifying")))
+        .is_some_and(|record| record["phase"] == "verifying")
     {
         assert!(
             Instant::now() < deadline,
-            "the select never reached restarting"
+            "the select never reached verifying"
         );
         tokio::time::sleep(Duration::from_millis(20)).await;
     }
@@ -1256,6 +1367,13 @@ async fn smoke(run: &mut Run, timeline: Arc<Mutex<Timeline>>) -> Proofs {
         .as_ref()
         .map(|(_, line)| run.outcome_of(line))
         .unwrap_or_default();
+    // The kernel's creation time of that process, logged by the stub.
+    let created = restart_start.as_ref().and_then(|(_, line)| {
+        line.split_whitespace()
+            .find_map(|part| part.strip_prefix("created="))
+            .and_then(|ms| ms.parse::<u64>().ok())
+            .filter(|ms| *ms > 0)
+    });
     // The new executor's first write carries its own timestamp.
     let resumed_at = timeline
         .lock()
@@ -1297,13 +1415,12 @@ async fn smoke(run: &mut Run, timeline: Arc<Mutex<Timeline>>) -> Proofs {
                 ),
             ),
             check(
-                match (&restart_start, resumed_at) {
-                    (Some((gateway, _)), Some(resumed)) => *gateway <= resumed,
+                match (created, resumed_at) {
+                    (Some(created), Some(resumed)) => created <= resumed,
                     _ => false,
                 },
                 format!(
-                    "gateway spawned at {:?} ≤ the resumed executor's first write at {resumed_at:?}",
-                    restart_start.as_ref().map(|(ms, _)| ms)
+                    "gateway process created at {created:?} (kernel clock) ≤ the resumed executor's first write at {resumed_at:?}"
                 ),
             ),
         ],
@@ -1490,6 +1607,188 @@ async fn smoke(run: &mut Run, timeline: Arc<Mutex<Timeline>>) -> Proofs {
     }
     proofs.record("P6 hermes serve gating", p6);
 
+    // P8 (R14): verification waits for a slow launcher step instead of
+    // restarting over it, and no launcher step was stopped mid-way in the
+    // disconnects above.
+    run.v1_openrouter("sk-or-v1-e0-fake-key-six", OR_MODEL)
+        .await;
+    run.seed_hermes_openrouter_state();
+    run.set_stub_mode("slow-step");
+    let before = now_ms();
+    let reply = run.disconnect("openrouter").await;
+    let id = reply["body"]["operation_id"]
+        .as_str()
+        .unwrap_or_default()
+        .to_owned();
+    let ended = run.operation_end(&id).await;
+    run.set_stub_mode("none");
+    let story = run.stub_story(before, now_ms());
+    let spawns = run.spawns_seeing(before, "intent=disconnect/");
+    let applied = run
+        .stub_lines_since(before, "gateway-ready")
+        .into_iter()
+        .any(|(_, line)| {
+            line.contains("intent=disconnect/") && line.contains("\"applied\":\"yes\"")
+        });
+    let mid_step_stops = proofs
+        .observations
+        .iter()
+        .filter(|(name, _)| !name.starts_with("P4b"))
+        .flat_map(|(name, lines)| {
+            lines
+                .iter()
+                .filter(|line| line.contains("gateway-stopped") && line.contains("stage=step"))
+                .map(move |line| format!("{name}: {line}"))
+        })
+        .collect::<Vec<_>>();
+    proofs.observe(
+        "P8 disconnect with a 15 s launcher step, gateway starts",
+        story.clone(),
+    );
+    let operation = &ended["inference"]["operation"];
+    proofs.record(
+        "P8 verification waits for the launcher (R14)",
+        vec![
+            check(
+                spawns.len() == 1,
+                format!(
+                    "{} gateway start(s) after cleanup (1 = no re-run)",
+                    spawns.len()
+                ),
+            ),
+            check(applied, "that start's launcher step reported applied: yes"),
+            check(
+                !story.iter().any(|line| line.contains("gateway-stopped")),
+                "the slow launcher was never stopped",
+            ),
+            check(
+                operation["state"] == "succeeded" && operation["attempts"] == 1,
+                format!("operation {operation}"),
+            ),
+            check(
+                mid_step_stops.is_empty(),
+                format!(
+                    "no launcher step stopped mid-way in the other disconnects: {mid_step_stops:?}"
+                ),
+            ),
+        ],
+    );
+
+    // P9 (R15): the first start's launcher step hits its 20 s limit after
+    // clearing the pool entry and before the override, and agentd's facts
+    // reads hang while it runs. A failed read is only "not yet"; the mismatch
+    // found at the end of the window re-runs the steps once, and the second
+    // start finishes the clears.
+    run.v1_openrouter("sk-or-v1-e0-fake-key-seven", OR_MODEL)
+        .await;
+    run.seed_hermes_openrouter_state();
+    run.set_stub_mode("cut-step-once");
+    let before = now_ms();
+    let reply = run.disconnect("openrouter").await;
+    let id = reply["body"]["operation_id"]
+        .as_str()
+        .unwrap_or_default()
+        .to_owned();
+    let ended = run.operation_end(&id).await;
+    run.set_stub_mode("none");
+    let story = run.stub_story(before, now_ms());
+    let after = run.helper_facts();
+    let spawns = run.spawns_seeing(before, "intent=disconnect/");
+    let outcomes = spawns
+        .iter()
+        .map(|(_, line)| run.outcome_of(line))
+        .collect::<Vec<_>>();
+    let created = spawns
+        .iter()
+        .filter_map(|(_, line)| {
+            line.split_whitespace()
+                .find_map(|part| part.strip_prefix("created="))
+                .and_then(|ms| ms.parse::<u64>().ok())
+        })
+        .collect::<Vec<_>>();
+    // A hung read that lasted the executor's 30 s: status gives up at 10 s.
+    let rerun_at = spawns.get(1).map(|(ms, _)| *ms).unwrap_or(u64::MAX);
+    let slow_reads = timeline
+        .lock()
+        .unwrap()
+        .facts_reads
+        .iter()
+        .filter(|(_, started, _, hung)| *hung && *started >= before && *started < rerun_at)
+        .map(|(pid, started, ended, _)| (*pid, ended - started))
+        .collect::<Vec<_>>();
+    let unavailable = fs::read_to_string(run.dir.join("agentd.log"))
+        .unwrap_or_default()
+        .lines()
+        .filter(|line| line.contains(&id) && line.contains("helper_unavailable"))
+        .map(str::to_owned)
+        .collect::<Vec<_>>();
+    proofs.observe(
+        "P9 disconnect with a cut-short step and slow facts reads, gateway starts",
+        story.clone(),
+    );
+    let operation = &ended["inference"]["operation"];
+    proofs.record(
+        "P9 a cut-short step and a slow helper end succeeded (R15)",
+        vec![
+            check(
+                spawns.len() == 2,
+                format!(
+                    "{} gateway start(s) after cleanup (2 = one re-run)",
+                    spawns.len()
+                ),
+            ),
+            check(
+                outcomes.first().is_some_and(|line| {
+                    line.contains("step=failed:124") && line.contains("hermes_state_changed=yes")
+                }),
+                format!(
+                    "the first start's step was cut short after a clear: {:?}",
+                    outcomes.first()
+                ),
+            ),
+            check(
+                slow_reads.iter().any(|(_, lasted)| *lasted >= 29_000),
+                format!(
+                    "an executor facts read hung until its 30 s deadline before the re-run \
+                     (pid, ms until killed): {slow_reads:?}"
+                ),
+            ),
+            check(
+                created.len() == 2 && created[1] >= created[0] + 60_000,
+                format!("the re-run start came a whole window later: created {created:?}"),
+            ),
+            check(
+                outcomes
+                    .get(1)
+                    .is_some_and(|line| line.contains("\"applied\":\"yes\"")),
+                format!("the second start's step: {:?}", outcomes.get(1)),
+            ),
+            check(
+                !story.iter().any(|line| line.contains("gateway-stopped")),
+                "no start was stopped",
+            ),
+            check(
+                operation["state"] == "succeeded" && operation["attempts"] == 1,
+                format!("operation {operation}"),
+            ),
+            check(
+                unavailable.is_empty(),
+                format!("no attempt ended helper_unavailable: {unavailable:?}"),
+            ),
+            check(
+                after["openrouter"]["manual_pool_entries"] == "none"
+                    && after["session_overrides"]["openrouter"] == "absent"
+                    && after["openrouter"]["dotenv_key"] == "absent",
+                format!(
+                    "after: pool {} override {} .env {}",
+                    after["openrouter"]["manual_pool_entries"],
+                    after["session_overrides"]["openrouter"],
+                    after["openrouter"]["dotenv_key"]
+                ),
+            ),
+        ],
+    );
+
     // P4b: a stale writer re-adds the .env key after every start.
     run.v1_openrouter("sk-or-v1-e0-fake-key-five", OR_MODEL)
         .await;
@@ -1535,7 +1834,7 @@ async fn smoke(run: &mut Run, timeline: Arc<Mutex<Timeline>>) -> Proofs {
     ));
     proofs.record("P4 value-based verification", p4);
 
-    let status = run.status().await;
+    let status = run.known_status().await;
     let facts = run.helper_facts();
     p7.push(check(
         status["inference"]["routes"]["openrouter"]["other_pool_keys"] == "none"
@@ -1554,6 +1853,49 @@ async fn smoke(run: &mut Run, timeline: Arc<Mutex<Timeline>>) -> Proofs {
         ),
     ));
     proofs.record("P7 helper facts on real files", p7);
+
+    // Every facts read agentd made and how it ended. A read with no exit
+    // line was killed by agentd's deadline.
+    let exits = run
+        .events()
+        .into_iter()
+        .filter_map(|(_, line)| {
+            let (pid, exit) = line
+                .strip_prefix("facts-read-end pid=")?
+                .split_once(" exit=")?;
+            Some((pid.parse::<u32>().ok()?, exit.to_owned()))
+        })
+        .collect::<HashMap<_, _>>();
+    let reads = timeline.lock().unwrap().facts_reads.clone();
+    let mut answered = Vec::new();
+    let mut others = Vec::new();
+    for (pid, started, ended, hung) in &reads {
+        let lasted = ended - started;
+        match exits.get(pid).map(String::as_str) {
+            Some("0") => answered.push(lasted),
+            Some(exit) => others.push(format!(
+                "pid {pid} at {started}: exit {exit} after {lasted} ms"
+            )),
+            None => others.push(format!(
+                "pid {pid} at {started}: killed after {lasted} ms{}",
+                if *hung { " (hung on purpose, P9)" } else { "" }
+            )),
+        }
+    }
+    answered.sort_unstable();
+    let mut lines = vec![format!(
+        "{} reads; {} answered (median {} ms, slowest {} ms); {} did not",
+        reads.len(),
+        answered.len(),
+        answered
+            .get(answered.len() / 2)
+            .copied()
+            .unwrap_or_default(),
+        answered.last().copied().unwrap_or_default(),
+        others.len()
+    )];
+    lines.extend(others);
+    proofs.observe("facts reads by agentd", lines);
     proofs
 }
 

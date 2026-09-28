@@ -741,8 +741,8 @@ impl ExecutorHost for AgentdHost {
         }
     }
 
-    async fn facts(&self) -> Result<InferenceFacts, AgentdError> {
-        crate::helper::inference_facts(&self.hermes_home).await
+    async fn facts(&self, deadline: Duration) -> Result<InferenceFacts, AgentdError> {
+        crate::helper::inference_facts(&self.hermes_home, deadline).await
     }
 
     async fn cancel_codex_login(&self) -> Result<(), AgentdError> {
@@ -920,7 +920,9 @@ impl<H: ExecutorHost + Clone> Inference<H> {
 
     async fn facts(&self) -> InferenceFacts {
         self.facts
-            .get_or_fetch(&self.hermes_home, || self.host.facts())
+            .get_or_fetch(&self.hermes_home, || {
+                self.host.facts(crate::helper::STATUS_FACTS_DEADLINE)
+            })
             .await
     }
 
@@ -1848,6 +1850,8 @@ mod inference_tests {
         events: Arc<Mutex<Vec<String>>>,
         facts: Arc<Mutex<InferenceFacts>>,
         facts_fail: Arc<Mutex<bool>>,
+        /// The deadline each facts read was given.
+        facts_deadlines: Arc<Mutex<Vec<Duration>>>,
         validate_fail: Arc<Mutex<bool>>,
         restarts: Arc<Mutex<usize>>,
         on_restart: Arc<Mutex<RestartHook>>,
@@ -1959,7 +1963,8 @@ mod inference_tests {
             self.event("serve");
         }
 
-        async fn facts(&self) -> Result<InferenceFacts, AgentdError> {
+        async fn facts(&self, deadline: Duration) -> Result<InferenceFacts, AgentdError> {
+            self.facts_deadlines.lock().unwrap().push(deadline);
             if *self.facts_fail.lock().unwrap() {
                 return Err(AgentdError::ProviderUnavailable("helper".to_owned()));
             }
@@ -2046,6 +2051,7 @@ mod inference_tests {
             events: Arc::default(),
             facts: Arc::new(Mutex::new(healthy_facts())),
             facts_fail: Arc::default(),
+            facts_deadlines: Arc::default(),
             validate_fail: Arc::default(),
             restarts: Arc::default(),
             on_restart: Arc::new(Mutex::new(Box::new(|_| Ok(())))),
@@ -2064,6 +2070,10 @@ mod inference_tests {
         );
         // Unreachable unless a test starts a fake OpenRouter.
         inference.openrouter_api_base = "http://127.0.0.1:9/api/v1".to_owned();
+        // A read every 50 ms and a 600 ms launcher window, in place of 5 s and 60 s.
+        Arc::get_mut(&mut inference.executor)
+            .expect("only Inference holds the executor yet")
+            .set_timing(Duration::from_millis(50), Duration::from_millis(600));
         Setup {
             _temp: temp,
             agent_home,
@@ -2457,6 +2467,34 @@ mod inference_tests {
         assert_eq!(status["inference"]["fallback"]["state"], "unknown");
         assert_eq!(status["inference"]["operation"]["id"], record.id.as_str());
         assert_eq!(status["inference"]["operation"]["state"], "failed");
+    }
+
+    #[tokio::test]
+    async fn r15a_a_command_reads_the_facts_with_10_s_and_the_executor_with_30_s() {
+        let setup = new_setup(
+            &openrouter_block(),
+            &format!("OPENROUTER_API_KEY={OR_KEY}\n"),
+        );
+        setup.disconnect("openrouter").await.unwrap();
+        assert!(setup.settled().await.is_none(), "succeeded");
+        let deadlines = setup.host.facts_deadlines.lock().unwrap().clone();
+        // The command's own read, whose reply the dashboard waits for, then
+        // the executor's verification reads.
+        assert_eq!(deadlines[0], crate::helper::STATUS_FACTS_DEADLINE);
+        assert!(deadlines.len() >= 3, "{deadlines:?}");
+        assert!(
+            deadlines[1..]
+                .iter()
+                .all(|deadline| *deadline == crate::helper::EXECUTOR_FACTS_DEADLINE),
+            "{deadlines:?}"
+        );
+
+        let setup = new_setup(&fp_block(), "");
+        setup.status().await;
+        assert_eq!(
+            *setup.host.facts_deadlines.lock().unwrap(),
+            [crate::helper::STATUS_FACTS_DEADLINE]
+        );
     }
 
     #[tokio::test]
@@ -3170,8 +3208,8 @@ mod inference_tests {
             result
         }
         async fn restart_serve(&self) {}
-        async fn facts(&self) -> Result<InferenceFacts, AgentdError> {
-            self.inner.facts().await
+        async fn facts(&self, deadline: Duration) -> Result<InferenceFacts, AgentdError> {
+            self.inner.facts(deadline).await
         }
         async fn cancel_codex_login(&self) -> Result<(), AgentdError> {
             Ok(())

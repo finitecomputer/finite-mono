@@ -19,6 +19,7 @@ use serde_json::Value;
 use crate::AgentdError;
 use crate::config::{ConfigManager, MODEL_CONFIG_PATH, ModelWrite, WrittenConfig};
 use crate::facts::{CodexStateFact, InferenceFacts, PoolEntries, Tri};
+use crate::helper::EXECUTOR_FACTS_DEADLINE;
 use crate::inference::{
     FinitePrivateEnv, OperationState, OperationStatus, SavedRoute, classify_saved_route,
     plan_model_block,
@@ -35,6 +36,11 @@ const BACKOFF: [Duration; 3] = [
 const VERIFY_DELAY: Duration = Duration::from_secs(5);
 /// How many times a mismatch found by verification is re-applied.
 const MAX_REAPPLIES: usize = 2;
+/// R14: after a disconnect's cleanup restart, how long verification waits for
+/// the launcher's pending-disconnect step before calling it a mismatch. It
+/// polls every `VERIFY_DELAY` within this window and restarts nothing; a read
+/// that fails in it is only "not yet" (R15b).
+const LAUNCHER_WAIT: Duration = Duration::from_secs(60);
 /// How long status shows a succeeded operation after its record is deleted.
 const RESULT_TTL: Duration = Duration::from_secs(10 * 60);
 
@@ -55,8 +61,11 @@ pub(crate) trait ExecutorHost: Send + Sync + 'static {
     /// Stop the agentd-launched `hermes serve`. It starts again when its gate
     /// allows: at once, or after the disconnect record is deleted.
     fn restart_serve(&self) -> impl Future<Output = ()> + Send;
-    /// Fresh helper facts, bypassing the status cache.
-    fn facts(&self) -> impl Future<Output = Result<InferenceFacts, AgentdError>> + Send;
+    /// Fresh helper facts, bypassing the status cache, within `deadline`.
+    fn facts(
+        &self,
+        deadline: Duration,
+    ) -> impl Future<Output = Result<InferenceFacts, AgentdError>> + Send;
     /// `codex::cancel_for_disconnect`.
     fn cancel_codex_login(&self) -> impl Future<Output = Result<(), AgentdError>> + Send;
 }
@@ -109,6 +118,7 @@ pub(crate) struct Executor<H> {
     fp: FinitePrivateEnv,
     backoff: [Duration; 3],
     verify_delay: Duration,
+    launcher_wait: Duration,
     last: std::sync::Mutex<Option<(OperationStatus, Instant)>>,
     running: tokio::sync::Mutex<()>,
 }
@@ -127,18 +137,31 @@ impl<H: ExecutorHost> Executor<H> {
             fp,
             backoff: BACKOFF,
             verify_delay: VERIFY_DELAY,
+            launcher_wait: LAUNCHER_WAIT,
             last: std::sync::Mutex::new(None),
             running: tokio::sync::Mutex::new(()),
         }
     }
 
-    /// At startup, after Hermes has started: re-arm a failed record with a
-    /// fresh budget, then run it.
+    /// Shorter waits for tests elsewhere in the crate.
+    #[cfg(test)]
+    pub(crate) fn set_timing(&mut self, verify_delay: Duration, launcher_wait: Duration) {
+        self.verify_delay = verify_delay;
+        self.launcher_wait = launcher_wait;
+    }
+
+    /// At startup, after Hermes has started: re-arm a failed disconnect with
+    /// a fresh budget, then run a running record. A failed select or activate
+    /// stays exactly as it is (R12): the user may have chosen another model
+    /// since, and only their next change replaces it.
     pub(crate) async fn resume_at_startup(&self) {
         {
             let _running = self.running.lock().await;
             match intent::load(&self.intent_path) {
-                Ok(Some(mut record)) if record.state == IntentState::Failed => {
+                Ok(Some(mut record))
+                    if record.state == IntentState::Failed
+                        && record.kind == IntentKind::Disconnect =>
+                {
                     record.state = IntentState::Running;
                     record.error_code = None;
                     record.attempts = 0;
@@ -388,30 +411,55 @@ impl<H: ExecutorHost> Executor<H> {
         Ok(())
     }
 
-    /// §3.7 step 5, from fresh helper facts. Any `unknown` is a mismatch.
+    /// §3.7 step 5 as ruled in R14 and R15b. The launcher's clears land some
+    /// seconds after the restart, so the facts are read every `verify_delay`
+    /// until `launcher_wait` has passed. Verified at the first read that shows
+    /// everything cleared and is confirmed by the next one. During the wait an
+    /// `unknown` fact or a failed read is only "not yet". Once the window has
+    /// passed, the last read decides: not cleared is the mismatch, and a
+    /// failed read is `helper_unavailable`. A cleared read inside the window
+    /// still gets its confirmation. No restart happens inside it.
     async fn disconnect_verified(&self, route: IntentRoute) -> Result<bool, Failure> {
-        for check in 0..2 {
-            if check > 0 {
-                tokio::time::sleep(self.verify_delay).await;
-            }
-            let facts = self.host.facts().await?;
-            let removed = match route {
-                IntentRoute::Openrouter => {
-                    facts.openrouter.dotenv_key == Tri::Absent
-                        && facts.openrouter.manual_pool_entries == PoolEntries::None
-                        && facts.session_overrides.openrouter == Tri::Absent
-                }
-                IntentRoute::OpenaiCodex => {
-                    facts.codex.state == CodexStateFact::NotSignedIn
-                        && facts.session_overrides.openai_codex == Tri::Absent
-                }
-                IntentRoute::FinitePrivate => false,
+        let deadline = tokio::time::Instant::now() + self.launcher_wait;
+        let mut cleared_before = false;
+        loop {
+            let read = self.host.facts(EXECUTOR_FACTS_DEADLINE).await;
+            let cleared = match &read {
+                Ok(facts) => self.disconnect_cleared(route, facts)?,
+                Err(_) => false,
             };
-            if !removed || self.saved_route()? == saved_route_of(route) {
+            if cleared && cleared_before {
+                return Ok(true);
+            }
+            if !cleared && tokio::time::Instant::now() >= deadline {
+                read?;
                 return Ok(false);
             }
+            cleared_before = cleared;
+            tokio::time::sleep(self.verify_delay).await;
         }
-        Ok(true)
+    }
+
+    /// Whether one read shows the route removed. Any `unknown` counts as not
+    /// cleared.
+    fn disconnect_cleared(
+        &self,
+        route: IntentRoute,
+        facts: &InferenceFacts,
+    ) -> Result<bool, Failure> {
+        let removed = match route {
+            IntentRoute::Openrouter => {
+                facts.openrouter.dotenv_key == Tri::Absent
+                    && facts.openrouter.manual_pool_entries == PoolEntries::None
+                    && facts.session_overrides.openrouter == Tri::Absent
+            }
+            IntentRoute::OpenaiCodex => {
+                facts.codex.state == CodexStateFact::NotSignedIn
+                    && facts.session_overrides.openai_codex == Tri::Absent
+            }
+            IntentRoute::FinitePrivate => false,
+        };
+        Ok(removed && self.saved_route()? != saved_route_of(route))
     }
 
     fn saved_route(&self) -> Result<SavedRoute, Failure> {
@@ -519,11 +567,47 @@ mod tests {
         /// Runs once, at the first `.env` key read during `verifying`: between
         /// the first check's model read and the second check.
         on_verify_key_read: Mutex<Option<ReadHook>>,
-        facts_fail: Mutex<bool>,
+        /// How many facts reads fail first: `usize::MAX` fails every one.
+        failed_reads: Mutex<usize>,
+        /// Every facts read: the attempt it belonged to, whether it failed,
+        /// and when it started.
+        reads: Mutex<Vec<(u32, bool, Instant)>>,
         hermes: Mutex<HermesSide>,
+        /// How many facts polls after a restart the launcher's clears take to
+        /// land: 0 lands them with the restart, `usize::MAX` never does.
+        launcher_polls: Mutex<usize>,
+        /// A started launcher step whose clears have not landed yet:
+        /// (route, polls left).
+        pending_clear: Mutex<Option<(IntentRoute, usize)>>,
+        /// How many facts polls report the override as `unknown` first.
+        unknown_polls: Mutex<usize>,
+        /// How many launcher steps hit their 20 s limit after clearing the
+        /// pool entry and before clearing the override.
+        cut_short_steps: Mutex<usize>,
+        restart_times: Mutex<Vec<Instant>>,
     }
 
     impl Fake {
+        fn apply_clears(&self, route: IntentRoute, overrides: bool) {
+            let mut hermes = self.hermes.lock().unwrap();
+            let overrides = overrides && hermes.launcher_clears_overrides;
+            match route {
+                IntentRoute::Openrouter => {
+                    hermes.pool = PoolEntries::None;
+                    if overrides {
+                        hermes.override_openrouter = Tri::Absent;
+                    }
+                }
+                IntentRoute::OpenaiCodex => {
+                    hermes.codex = CodexStateFact::NotSignedIn;
+                    if overrides {
+                        hermes.override_codex = Tri::Absent;
+                    }
+                }
+                IntentRoute::FinitePrivate => {}
+            }
+        }
+
         fn config_path(&self) -> PathBuf {
             self.home.join("config.yaml")
         }
@@ -608,6 +692,7 @@ mod tests {
         async fn restart_gateway(&self) -> Result<(), AgentdError> {
             let phase = self.phase();
             self.record(Event::RestartGateway(phase));
+            self.restart_times.lock().unwrap().push(Instant::now());
             // The launcher's pending-disconnect step (F1).
             if let Ok(Some(record)) = intent::load(&self.intent_path)
                 && record.kind == IntentKind::Disconnect
@@ -615,21 +700,18 @@ mod tests {
             {
                 let saved = classify_saved_route(&self.model(), Some(FP_URL));
                 if saved != saved_route_of(record.route) {
-                    let mut hermes = self.hermes.lock().unwrap();
-                    match record.route {
-                        IntentRoute::Openrouter => {
-                            hermes.pool = PoolEntries::None;
-                            if hermes.launcher_clears_overrides {
-                                hermes.override_openrouter = Tri::Absent;
-                            }
-                        }
-                        IntentRoute::OpenaiCodex => {
-                            hermes.codex = CodexStateFact::NotSignedIn;
-                            if hermes.launcher_clears_overrides {
-                                hermes.override_codex = Tri::Absent;
-                            }
-                        }
-                        IntentRoute::FinitePrivate => {}
+                    let polls = *self.launcher_polls.lock().unwrap();
+                    if polls == 0 {
+                        let cut_short = {
+                            let mut steps = self.cut_short_steps.lock().unwrap();
+                            let cut_short = *steps > 0;
+                            *steps = steps.saturating_sub(1);
+                            cut_short
+                        };
+                        self.apply_clears(record.route, !cut_short);
+                    } else {
+                        // A restart while a step is still running stops it.
+                        *self.pending_clear.lock().unwrap() = Some((record.route, polls));
                     }
                 }
             }
@@ -649,9 +731,42 @@ mod tests {
             });
         }
 
-        async fn facts(&self) -> Result<InferenceFacts, AgentdError> {
+        async fn facts(&self, deadline: Duration) -> Result<InferenceFacts, AgentdError> {
+            let at = Instant::now();
+            // R15a: every executor read gets the executor's deadline.
+            assert_eq!(deadline, EXECUTOR_FACTS_DEADLINE);
             self.record(Event::Facts(self.phase()));
-            if *self.facts_fail.lock().unwrap() {
+            // The slow launcher step lands its clears after its polls, whether
+            // or not the read that marks the time succeeds.
+            let landed = {
+                let mut pending = self.pending_clear.lock().unwrap();
+                match pending.as_mut() {
+                    Some((route, left)) if *left <= 1 => {
+                        let route = *route;
+                        *pending = None;
+                        Some(route)
+                    }
+                    Some((_, left)) => {
+                        *left = left.saturating_sub(1);
+                        None
+                    }
+                    None => None,
+                }
+            };
+            if let Some(route) = landed {
+                self.apply_clears(route, true);
+            }
+            let failed = {
+                let mut left = self.failed_reads.lock().unwrap();
+                let failed = *left > 0;
+                *left = left.saturating_sub(1);
+                failed
+            };
+            let attempt = intent::load(&self.intent_path)
+                .unwrap()
+                .map_or(0, |record| record.attempts);
+            self.reads.lock().unwrap().push((attempt, failed, at));
+            if failed {
                 return Err(AgentdError::ProviderUnavailable("helper".to_owned()));
             }
             let hermes = *self.hermes.lock().unwrap();
@@ -665,6 +780,12 @@ mod tests {
             facts.session_overrides.openrouter = hermes.override_openrouter;
             facts.session_overrides.openai_codex = hermes.override_codex;
             facts.codex.state = hermes.codex;
+            let mut unknown = self.unknown_polls.lock().unwrap();
+            if *unknown > 0 {
+                *unknown = unknown.saturating_sub(1);
+                facts.session_overrides.openrouter = Tri::Unknown;
+                facts.session_overrides.openai_codex = Tri::Unknown;
+            }
             Ok(facts)
         }
 
@@ -714,7 +835,13 @@ mod tests {
             restarts: Mutex::new(0),
             on_restart: Mutex::new(Box::new(|_, _| Ok(()))),
             on_verify_key_read: Mutex::new(None),
-            facts_fail: Mutex::new(false),
+            launcher_polls: Mutex::new(0),
+            pending_clear: Mutex::new(None),
+            unknown_polls: Mutex::new(0),
+            cut_short_steps: Mutex::new(0),
+            restart_times: Mutex::new(Vec::new()),
+            failed_reads: Mutex::new(0),
+            reads: Mutex::new(Vec::new()),
             hermes: Mutex::new(HermesSide {
                 pool: PoolEntries::Present,
                 override_openrouter: Tri::Present,
@@ -731,7 +858,9 @@ mod tests {
             fp(),
         );
         executor.backoff = [Duration::ZERO; 3];
+        // Production proportions: a read every tick, twelve ticks a window.
         executor.verify_delay = Duration::from_millis(50);
+        executor.launcher_wait = executor.verify_delay * 12;
         Setup {
             _temp: temp,
             fake,
@@ -780,6 +909,332 @@ mod tests {
             ]
         );
         assert_eq!(VERIFY_DELAY, Duration::from_secs(5));
+        assert_eq!(LAUNCHER_WAIT, Duration::from_secs(60));
+    }
+
+    fn gateway_restarts(events: &[Event]) -> usize {
+        events
+            .iter()
+            .filter(|event| matches!(event, Event::RestartGateway(_)))
+            .count()
+    }
+
+    fn facts_reads(events: &[Event]) -> usize {
+        events
+            .iter()
+            .filter(|event| matches!(event, Event::Facts(_)))
+            .count()
+    }
+
+    /// A setup whose launcher window is long enough that a scheduling delay
+    /// on a loaded machine never ends it before the reads a test counts.
+    fn roomy(route: IntentRoute) -> Setup {
+        let mut setup = disconnect_setup(route);
+        setup.executor.verify_delay = Duration::from_millis(20);
+        setup.executor.launcher_wait = Duration::from_secs(5);
+        setup
+    }
+
+    #[tokio::test]
+    async fn r14_a_launcher_that_clears_after_20_s_is_waited_for() {
+        // Reads are 5 s apart in production; this launcher's clears land at
+        // the fifth read, 20 s after the restart.
+        let setup = roomy(IntentRoute::Openrouter);
+        *setup.fake.launcher_polls.lock().unwrap() = 5;
+        arm(
+            &setup,
+            IntentKind::Disconnect,
+            IntentRoute::Openrouter,
+            None,
+        );
+        setup.executor.run().await;
+        assert!(record_now(&setup).is_none(), "succeeded");
+        let events = setup.fake.events();
+        // Exactly one restart after cleanup: the launcher was never stopped
+        // while its step ran.
+        assert_eq!(gateway_restarts(&events), 1, "{events:?}");
+        assert!(
+            setup.fake.pending_clear.lock().unwrap().is_none(),
+            "the step finished"
+        );
+        // Four reads before the clears, the clearing read, its confirmation.
+        assert_eq!(facts_reads(&events), 6);
+        let operation = setup.executor.operation(None).unwrap();
+        assert_eq!(operation.state, OperationState::Succeeded);
+        assert_eq!(operation.attempts, 1);
+    }
+
+    #[tokio::test]
+    async fn r14_a_launcher_that_never_clears_fails_after_full_windows() {
+        let setup = disconnect_setup(IntentRoute::Openrouter);
+        *setup.fake.launcher_polls.lock().unwrap() = usize::MAX;
+        arm(
+            &setup,
+            IntentKind::Disconnect,
+            IntentRoute::Openrouter,
+            None,
+        );
+        setup.executor.run().await;
+        let finished = Instant::now();
+        let failed = record_now(&setup).unwrap();
+        assert_eq!(failed.state, IntentState::Failed);
+        assert_eq!(failed.error_code.as_deref(), Some("verify_failed"));
+        let events = setup.fake.events();
+        assert_eq!(gateway_restarts(&events), 1 + MAX_REAPPLIES);
+        // No re-run, and no failure, before a whole window has passed.
+        let mut ends = setup.fake.restart_times.lock().unwrap().clone();
+        ends.push(finished);
+        for pair in ends.windows(2) {
+            assert!(
+                pair[1] - pair[0] >= setup.executor.launcher_wait,
+                "a window ended after {:?}",
+                pair[1] - pair[0]
+            );
+        }
+        // Each window read the facts more than once while it waited.
+        assert!(facts_reads(&events) >= (1 + MAX_REAPPLIES) * 2);
+    }
+
+    #[tokio::test]
+    async fn r14_unknown_during_the_wait_is_not_a_mismatch() {
+        let setup = roomy(IntentRoute::Openrouter);
+        *setup.fake.unknown_polls.lock().unwrap() = 6;
+        arm(
+            &setup,
+            IntentKind::Disconnect,
+            IntentRoute::Openrouter,
+            None,
+        );
+        setup.executor.run().await;
+        assert!(record_now(&setup).is_none(), "succeeded");
+        let events = setup.fake.events();
+        assert_eq!(gateway_restarts(&events), 1, "no re-run while unknown");
+        assert_eq!(
+            facts_reads(&events),
+            8,
+            "six unknown reads, then cleared and confirmed"
+        );
+    }
+
+    #[tokio::test]
+    async fn r14_unknown_at_the_deadline_is_a_mismatch() {
+        let setup = disconnect_setup(IntentRoute::Openrouter);
+        *setup.fake.unknown_polls.lock().unwrap() = usize::MAX;
+        arm(
+            &setup,
+            IntentKind::Disconnect,
+            IntentRoute::Openrouter,
+            None,
+        );
+        setup.executor.run().await;
+        let failed = record_now(&setup).unwrap();
+        assert_eq!(failed.error_code.as_deref(), Some("verify_failed"));
+        assert_eq!(gateway_restarts(&setup.fake.events()), 1 + MAX_REAPPLIES);
+    }
+
+    /// The start time of each facts read in `attempt`, and whether it failed.
+    fn reads_in(setup: &Setup, attempt: u32) -> Vec<(bool, Instant)> {
+        setup
+            .fake
+            .reads
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|(of, _, _)| *of == attempt)
+            .map(|(_, failed, at)| (*failed, *at))
+            .collect()
+    }
+
+    #[tokio::test]
+    async fn r15_a_cut_short_step_and_a_slow_helper_end_succeeded_after_one_more_start() {
+        // The E-0 run R15 comes from: the first start's launcher step hit its
+        // limit after clearing the pool entry and before the override, and
+        // the attempt's first facts reads failed.
+        let mut setup = disconnect_setup(IntentRoute::Openrouter);
+        setup.executor.verify_delay = Duration::from_millis(20);
+        setup.executor.launcher_wait = Duration::from_secs(1);
+        *setup.fake.cut_short_steps.lock().unwrap() = 1;
+        *setup.fake.failed_reads.lock().unwrap() = 5;
+        arm(
+            &setup,
+            IntentKind::Disconnect,
+            IntentRoute::Openrouter,
+            None,
+        );
+        setup.executor.run().await;
+        assert!(record_now(&setup).is_none(), "succeeded");
+        let operation = setup.executor.operation(None).unwrap();
+        assert_eq!(operation.state, OperationState::Succeeded);
+        assert_eq!(operation.attempts, 1, "never helper_unavailable");
+        let events = setup.fake.events();
+        assert_eq!(gateway_restarts(&events), 2, "one re-run: {events:?}");
+        // The re-run came once the window had passed, and a working read
+        // found the override still there.
+        let restarts = setup.fake.restart_times.lock().unwrap().clone();
+        assert!(restarts[1] - restarts[0] >= setup.executor.launcher_wait);
+        let before_rerun = reads_in(&setup, 1)
+            .into_iter()
+            .filter(|(_, at)| *at < restarts[1])
+            .collect::<Vec<_>>();
+        assert!(before_rerun[..5].iter().all(|(failed, _)| *failed));
+        assert!(!before_rerun.last().unwrap().0, "{before_rerun:?}");
+        // The second start finished the clears.
+        let hermes = *setup.fake.hermes.lock().unwrap();
+        assert_eq!(hermes.pool, PoolEntries::None);
+        assert_eq!(hermes.override_openrouter, Tri::Absent);
+        assert_eq!(setup.fake.env_lines(), ["KEEP=1"]);
+        assert_eq!(setup.fake.model(), fp_block());
+    }
+
+    #[tokio::test]
+    async fn r15_a_helper_that_fails_every_window_is_helper_unavailable_after_the_retries() {
+        let setup = disconnect_setup(IntentRoute::Openrouter);
+        *setup.fake.failed_reads.lock().unwrap() = usize::MAX;
+        arm(
+            &setup,
+            IntentKind::Disconnect,
+            IntentRoute::Openrouter,
+            None,
+        );
+        setup.executor.run().await;
+        let finished = Instant::now();
+        let failed = record_now(&setup).unwrap();
+        assert_eq!(failed.state, IntentState::Failed);
+        assert_eq!(failed.error_code.as_deref(), Some("helper_unavailable"));
+        assert_eq!(failed.attempts, 3);
+        // Only the cleanup restart: a failed read never restarts the gateway.
+        assert_eq!(gateway_restarts(&setup.fake.events()), 1);
+        // Each attempt read through its whole window before it counted.
+        let mut ends = (2..=3)
+            .map(|attempt| reads_in(&setup, attempt)[0].1)
+            .collect::<Vec<_>>();
+        ends.push(finished);
+        for (attempt, end) in (1..=3).zip(ends) {
+            let reads = reads_in(&setup, attempt);
+            assert!(reads.len() >= 2, "attempt {attempt}");
+            assert!(reads.iter().all(|(failed, _)| *failed));
+            assert!(
+                end - reads[0].1 >= setup.executor.launcher_wait,
+                "attempt {attempt} ended after {:?}",
+                end - reads[0].1
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn r15_a_failed_read_then_a_cleared_one_inside_the_window_succeeds() {
+        let setup = roomy(IntentRoute::Openrouter);
+        *setup.fake.failed_reads.lock().unwrap() = 2;
+        arm(
+            &setup,
+            IntentKind::Disconnect,
+            IntentRoute::Openrouter,
+            None,
+        );
+        setup.executor.run().await;
+        assert!(record_now(&setup).is_none(), "succeeded");
+        let operation = setup.executor.operation(None).unwrap();
+        assert_eq!(operation.state, OperationState::Succeeded);
+        assert_eq!(operation.attempts, 1);
+        let events = setup.fake.events();
+        assert_eq!(gateway_restarts(&events), 1, "{events:?}");
+        let reads = reads_in(&setup, 1)
+            .into_iter()
+            .map(|(failed, _)| failed)
+            .collect::<Vec<_>>();
+        assert_eq!(reads, [true, true, false, false], "cleared and confirmed");
+    }
+
+    fn failed_record(setup: &Setup, kind: IntentKind, phase: IntentPhase) -> Vec<u8> {
+        let mut record = IntentRecord::new(
+            kind,
+            IntentRoute::Openrouter,
+            Some(OPENROUTER_MODEL.to_owned()),
+        )
+        .unwrap();
+        record.phase = phase;
+        record.state = IntentState::Failed;
+        record.error_code = Some("config_conflict".to_owned());
+        record.attempts = 1;
+        intent::store(&setup.fake.intent_path, &record).unwrap();
+        fs::read(&setup.fake.intent_path).unwrap()
+    }
+
+    #[tokio::test]
+    async fn r12_a_failed_select_or_activate_is_left_alone_at_startup() {
+        for kind in [IntentKind::Select, IntentKind::Activate] {
+            // The user chose another model in chat after the operation failed.
+            let users_choice = json!({"default": "someone/else", "provider": "openrouter"});
+            let setup = new_setup(&users_choice, "OPENROUTER_API_KEY=sk-or-v1-synthetic\n");
+            let record = failed_record(&setup, kind, IntentPhase::Verifying);
+            let config = fs::read(setup.fake.config_path()).unwrap();
+            setup.executor.resume_at_startup().await;
+            assert_eq!(
+                fs::read(&setup.fake.intent_path).unwrap(),
+                record,
+                "{kind:?}"
+            );
+            assert!(setup.fake.events().is_empty(), "{kind:?}: no host call");
+            assert_eq!(
+                fs::read(setup.fake.config_path()).unwrap(),
+                config,
+                "{kind:?}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn r12_a_failed_disconnect_is_resumed_at_startup() {
+        let setup = disconnect_setup(IntentRoute::Openrouter);
+        let mut record =
+            IntentRecord::new(IntentKind::Disconnect, IntentRoute::Openrouter, None).unwrap();
+        record.state = IntentState::Failed;
+        record.error_code = Some("helper_unavailable".to_owned());
+        intent::store(&setup.fake.intent_path, &record).unwrap();
+        setup.executor.resume_at_startup().await;
+        assert!(record_now(&setup).is_none(), "completed");
+        assert_eq!(setup.fake.model(), fp_block());
+        assert_eq!(setup.fake.env_lines(), ["KEEP=1"]);
+        assert_eq!(
+            setup.executor.operation(None).unwrap().id,
+            record.id,
+            "the same operation"
+        );
+    }
+
+    #[tokio::test]
+    async fn r12_a_select_beaten_by_another_writer_does_not_come_back_after_a_restart() {
+        // Another writer (for example `/model ... --global`) keeps changing
+        // the model, so the select ends `config_conflict`.
+        let setup = new_setup(
+            &openrouter_block(),
+            "OPENROUTER_API_KEY=sk-or-v1-synthetic\n",
+        );
+        *setup.fake.on_restart.lock().unwrap() = Box::new(|_, path| {
+            let text = fs::read_to_string(path).unwrap();
+            fs::write(path, text.replace("glm-5-3-flash", "users-own-choice")).unwrap();
+            Ok(())
+        });
+        arm(&setup, IntentKind::Select, IntentRoute::FinitePrivate, None);
+        setup.executor.run().await;
+        let failed = fs::read(&setup.fake.intent_path).unwrap();
+        assert_eq!(
+            record_now(&setup).unwrap().error_code.as_deref(),
+            Some("config_conflict")
+        );
+        assert_eq!(setup.fake.model()["default"], "users-own-choice");
+        let restarts = *setup.fake.restarts.lock().unwrap();
+
+        // agentd restarts.
+        *setup.fake.on_restart.lock().unwrap() = Box::new(|_, _| Ok(()));
+        setup.executor.resume_at_startup().await;
+        assert_eq!(setup.fake.model()["default"], "users-own-choice");
+        assert_eq!(fs::read(&setup.fake.intent_path).unwrap(), failed);
+        assert_eq!(
+            *setup.fake.restarts.lock().unwrap(),
+            restarts,
+            "nothing re-applied"
+        );
     }
 
     #[tokio::test]
@@ -964,7 +1419,7 @@ mod tests {
             IntentRoute::OpenaiCodex,
             None,
         );
-        *setup.fake.facts_fail.lock().unwrap() = true;
+        *setup.fake.failed_reads.lock().unwrap() = usize::MAX;
         setup.executor.run().await;
         let failed = record_now(&setup).expect("a failed record is kept");
         assert_eq!(failed.id, record.id);
@@ -972,13 +1427,11 @@ mod tests {
         assert_eq!(failed.error_code.as_deref(), Some("helper_unavailable"));
         assert_eq!(failed.attempts, 3);
         assert_eq!(failed.phase, IntentPhase::Verifying);
-        let facts_calls = setup
-            .fake
-            .events()
-            .iter()
-            .filter(|event| matches!(event, Event::Facts(_)))
-            .count();
-        assert_eq!(facts_calls, 3);
+        // R15b: a failed read is only "not yet", so each attempt kept reading
+        // through its launcher window before it counted.
+        for attempt in 1..=3 {
+            assert!(reads_in(&setup, attempt).len() >= 2, "attempt {attempt}");
+        }
         // A failed disconnect keeps `hermes serve` stopped.
         assert!(
             serve_events(&setup.fake.events())
@@ -993,7 +1446,7 @@ mod tests {
         // A later run does not touch a failed record; startup re-arms it.
         setup.executor.run().await;
         assert_eq!(record_now(&setup).unwrap(), failed);
-        *setup.fake.facts_fail.lock().unwrap() = false;
+        *setup.fake.failed_reads.lock().unwrap() = 0;
         setup.executor.resume_at_startup().await;
         assert!(record_now(&setup).is_none());
     }
@@ -1013,7 +1466,7 @@ mod tests {
             None,
         );
         at_phase(&setup, record, IntentPhase::Verifying);
-        *setup.fake.facts_fail.lock().unwrap() = true;
+        *setup.fake.failed_reads.lock().unwrap() = usize::MAX;
         let started = Instant::now();
         setup.executor.run().await;
         assert!(started.elapsed() >= Duration::from_millis(450));
@@ -1291,8 +1744,8 @@ mod tests {
                 result
             }
             async fn restart_serve(&self) {}
-            async fn facts(&self) -> Result<InferenceFacts, AgentdError> {
-                self.fake.facts().await
+            async fn facts(&self, deadline: Duration) -> Result<InferenceFacts, AgentdError> {
+                self.fake.facts(deadline).await
             }
             async fn cancel_codex_login(&self) -> Result<(), AgentdError> {
                 Ok(())

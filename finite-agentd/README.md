@@ -85,7 +85,9 @@ the design is FIN-129/FIN-130.
   reports stored facts. None says a route works. Redacted Hermes facts come
   from `python -m hermes_cli.finite_inference_helper inference-facts`, cached
   on the stats of `config.yaml`, `.env`, and `auth.json` for at most 30 s. If
-  the helper fails, those fields are `unknown`.
+  the helper fails, or takes longer than 10 s, those fields are `unknown`.
+  The background executor's own reads allow the helper 30 s, since no reply
+  waits on them (ruling R15a).
 - v1 `agent.inference.apply` is synchronous and wire-compatible. It keeps its
   `.env` snapshot restore on a failed write or spawn. After the restart it
   reads the saved `model` and key once, with no delay: a mismatch replies
@@ -97,7 +99,17 @@ the design is FIN-129/FIN-130.
   restarts, and verifies. The intent is `agent/agentd/inference-intent.json`:
   one slot, mode 0600, no secret. Every command passes one admission check
   against it first. Hermes starts before a recorded intent resumes, and a bad
-  intent never delays chat.
+  intent never delays chat. At startup a `running` record resumes whatever its
+  kind, and a `failed` disconnect resumes with a fresh budget. A `failed`
+  select or activate stays as it is: the user may have chosen another model
+  since, and only their next change replaces it (ruling R12).
+- A disconnect's verification waits for the launcher's clears. After the
+  cleanup restart it reads the helper facts every 5 s for up to 60 s, and
+  restarts nothing in that time. It succeeds on two cleared reads in a row;
+  only a window that ends without them counts as a mismatch (ruling R14). A
+  read that fails or times out in the window is only "not yet". If the last
+  read of the window failed, the attempt ends `helper_unavailable` and the
+  bounded retry opens a new window without a restart (ruling R15b).
 - The Hermes process gets `FINITE_AGENTD_INTENT_PATH`, so the launcher can
   apply a pending disconnect's clears while no gateway runs. The native
   `hermes serve` never starts while a disconnect intent exists.
@@ -136,7 +148,7 @@ scripts/with-dev-env bash -c 'cargo build -p finite-agentd --bins --examples && 
   target/debug/examples/inference_host_harness smoke'
 ```
 
-`smoke` runs the seven E-0 proofs and exits non-zero if one fails. `serve
+`smoke` runs the E-0 proofs (P1–P9) and exits non-zero if one fails. `serve
 --port <port>` keeps the agent up for the dashboard:
 `FC_DESIGN_RUNTIME_COMMANDS_URL=http://127.0.0.1:<port> just dev web-design`.
 Ctrl-C stops agentd and everything it started. `--hermes-env` and `--agentd`

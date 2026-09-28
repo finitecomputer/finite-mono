@@ -12,7 +12,12 @@
 # directory). Each start appends to "$E0_RUN_DIR/events.log": a `gateway-spawn`
 # line on entry, then either `gateway-ready` just before the exec or
 # `gateway-stopped` with the stage it was in when a restart stopped it. The
-# optional "$E0_RUN_DIR/stub-mode" file selects a stale writer.
+# optional "$E0_RUN_DIR/stub-mode" file selects a behavior: `readd-env-key` (a
+# stale writer), `slow-step` (the pending-disconnect step starts 15 s late, as
+# a slow start would), or `cut-step-once` (the first start that runs the step
+# hits the launcher's 20 s limit after clearing the pool entry and before the
+# conversation override, and agentd's facts reads hang while it runs, as on a
+# machine at load 30; later starts run the step as usual).
 set -euo pipefail
 
 : "${E0_REPO:?E0_REPO is required}"
@@ -56,8 +61,12 @@ intent_state() {
 stage="start"
 if [[ "${1:-}" != "--prepare-only" ]]; then
     spawned="$(now_ms)"
-    echo "$spawned gateway-spawn pid=$$ intent=$(intent_state)" >> "$events"
-    trap 'echo "$(now_ms) gateway-stopped pid=$$ stage=$stage" >> "$events"; exit 143' TERM
+    trap 'rm -f "$E0_RUN_DIR/facts-slow"; echo "$(now_ms) gateway-stopped pid=$$ stage=$stage" >> "$events"; exit 143' TERM
+    # When agentd forked this process, by the kernel's clock: `exec` keeps the
+    # pid and its creation time, so this does not depend on how long the
+    # process took to get here.
+    created="$(python -c 'import psutil, sys; print(int(psutil.Process(int(sys.argv[1])).create_time() * 1000))' "$$" 2>/dev/null || echo 0)"
+    echo "$spawned gateway-spawn pid=$$ created=$created intent=$(intent_state)" >> "$events"
 fi
 
 # The finite-private default profile, as the launcher computes it.
@@ -144,13 +153,28 @@ phase="none"
 step="none"
 state_changed="no"
 intent_path="${FINITE_AGENTD_INTENT_PATH:-}"
+mode="$(cat "$E0_RUN_DIR/stub-mode" 2>/dev/null || echo none)"
 if [[ -n "$intent_path" && -f "$intent_path" ]]; then
+    if [[ "$mode" == "slow-step" ]]; then
+        sleep 15
+    fi
     phase="$(intent_state)"
     before="$(state_digest)"
+    step_command=(-m hermes_cli.finite_inference_helper)
+    if [[ "$mode" == "cut-step-once" && ! -e "$E0_RUN_DIR/cut-step-used" ]]; then
+        touch "$E0_RUN_DIR/cut-step-used" "$E0_RUN_DIR/facts-slow"
+        # The helper's own step, delayed between its two clears.
+        step_command=(-c 'import sys, time
+from hermes_cli import finite_inference_helper as helper
+clear = helper.clear_session_overrides
+helper.clear_session_overrides = lambda providers: (time.sleep(60), clear(providers))[1]
+sys.exit(helper.main(sys.argv[1:]))')
+    fi
     status=0
     step="$(run_with_config_environment \
-        timeout -k 5 20 python -m hermes_cli.finite_inference_helper \
+        timeout -k 5 20 python "${step_command[@]}" \
         apply-pending-disconnect --intent "$intent_path" </dev/null 2>/dev/null)" || status=$?
+    rm -f "$E0_RUN_DIR/facts-slow"
     if [[ "$status" -ne 0 ]]; then
         step="failed:$status"
     fi
@@ -161,7 +185,6 @@ fi
 
 # A stale writer (§13.3 E-0): puts the removed key back on every start.
 stage="stale-writer"
-mode="$(cat "$E0_RUN_DIR/stub-mode" 2>/dev/null || echo none)"
 if [[ "$mode" == "readd-env-key" ]]; then
     echo "OPENROUTER_API_KEY=sk-or-v1-e0-fake-stale-writer" >> "$hermes_home/.env"
 fi
