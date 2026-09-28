@@ -112,6 +112,37 @@ variables (`FINITE_CODEX_AUTH_ISSUER`, `FINITE_CODEX_LOGIN_DEADLINE_S`,
 `FINITE_HELPER_TEST_BARRIER`, `FINITE_HELPER_TEST_BARRIER_FILE`) from the
 helper's environment.
 
+## E-0 host harness
+
+`examples/inference_host_harness.rs` runs the real `finite-agentd serve` in a
+scratch home under `~/.finite-scratch/fin-129-130/e0/`. It sits behind a fake
+Finite Chat bridge and serves an HWD-compatible `/v1/app/runtime-commands`
+endpoint on one loopback port.
+
+- **Gateway.** `examples/harness-hermes-stub.sh` stands in for it: the real
+  reconciler and the real pending-disconnect step, then `exec sleep`.
+- **Helper facts.** They come from the packaged helper in the patched Hermes
+  env.
+- **Fakes.** OpenRouter's `/key` and Core's hosted-Hermes desired state are
+  fakes on the same port.
+- **What it never contacts.** No real gateway, provider, or production
+  service.
+
+Run it from the repository root, inside the Nix dev shell (the launcher step
+needs coreutils `timeout`):
+
+```sh
+scripts/with-dev-env bash -c 'cargo build -p finite-agentd --bins --examples && \
+  target/debug/examples/inference_host_harness smoke'
+```
+
+`smoke` runs the seven E-0 proofs and exits non-zero if one fails. `serve
+--port <port>` keeps the agent up for the dashboard:
+`FC_DESIGN_RUNTIME_COMMANDS_URL=http://127.0.0.1:<port> just dev web-design`.
+Ctrl-C stops agentd and everything it started. `--hermes-env` and `--agentd`
+override the patched env (`~/.finite-scratch/fin-129-130/hermes-env-patched`)
+and the agentd binary.
+
 ## Optional hosted Hermes process
 
 `finite-agentd hosted-hermes` validates trusted launch settings and replaces
