@@ -10,7 +10,7 @@
 //! `/key` and Core's hosted-Hermes desired state are local fakes on the same
 //! loopback port.
 //!
-//! `smoke` runs the E-0 proofs (P1–P9) and exits non-zero if any fails. `serve`
+//! `smoke` runs the E-0 proofs (P1–P10) and exits non-zero if any fails. `serve`
 //! keeps the agent up for the dashboard until Ctrl-C.
 //!
 //! Run from the repository root, inside the Nix dev shell (the launcher step
@@ -872,9 +872,11 @@ exit "$status"
 
     /// Status once its helper facts are known. Status gives the helper 10 s
     /// (R15a); on a loaded machine a read can time out and report `unknown`
-    /// (the fallback is `unknown` exactly then), so poll, bounded.
+    /// (the fallback is `unknown` exactly then), and after a failed read
+    /// status tries the helper again only 15 s later (R16). So poll, bounded
+    /// generously.
     async fn known_status(&self) -> Value {
-        let deadline = Instant::now() + Duration::from_secs(120);
+        let deadline = Instant::now() + Duration::from_secs(300);
         loop {
             let status = self.status().await;
             if status["inference"]["fallback"]["state"] != "unknown" || Instant::now() >= deadline {
@@ -1116,7 +1118,7 @@ fn observe(run_dir: PathBuf, intent_path: PathBuf, timeline: Arc<Mutex<Timeline>
     });
 }
 
-// ---- The E-0 proofs (P1–P7 from §13.3, P8 for R14, P9 for R15) ----
+// ---- The E-0 proofs (P1–P7 from §13.3, P8 for R14, P9 for R15, P10 for R16 and R17) ----
 
 struct Proofs {
     results: Vec<(String, bool, Vec<String>)>,
@@ -1722,9 +1724,26 @@ async fn smoke(run: &mut Run, timeline: Arc<Mutex<Timeline>>) -> Proofs {
         .filter(|line| line.contains(&id) && line.contains("helper_unavailable"))
         .map(str::to_owned)
         .collect::<Vec<_>>();
+    // Every facts read during the operation. Hung reads killed at about 10 s
+    // were status reads, at about 30 s the executor's; answered reads cannot
+    // be told apart from outside agentd.
+    let ended_at = now_ms();
+    let started_reads = run
+        .events()
+        .into_iter()
+        .filter(|(ms, line)| {
+            *ms >= before
+                && *ms <= ended_at
+                && (line.starts_with("facts-read pid=") || line.starts_with("facts-read-slow"))
+        })
+        .count();
+    let mut evidence = story.clone();
+    evidence.push(format!(
+        "{started_reads} facts reads started during the operation; hung ones (pid, ms until killed): {slow_reads:?}"
+    ));
     proofs.observe(
         "P9 disconnect with a cut-short step and slow facts reads, gateway starts",
-        story.clone(),
+        evidence,
     );
     let operation = &ended["inference"]["operation"];
     proofs.record(
@@ -1788,6 +1807,125 @@ async fn smoke(run: &mut Run, timeline: Arc<Mutex<Timeline>>) -> Proofs {
             ),
         ],
     );
+
+    // P10 (R16, R17): with the helper hanging, a disconnect of the saved
+    // default is refused as `facts_unavailable` (it could not check, not "not
+    // set up"), and a burst of status requests starts at most one helper per
+    // 15 s: a failed read is remembered.
+    run.v1_openrouter("sk-or-v1-e0-fake-key-eight", OR_MODEL)
+        .await;
+    let ready = run.known_status().await;
+    let files_before = (run.config_text(), run.dotenv());
+    fs::write(run.dir.join("facts-slow"), "").expect("facts-slow marker");
+    // A new stamp on `.env` (same content) so status cannot answer from the
+    // facts it cached a moment ago.
+    fs::File::options()
+        .write(true)
+        .open(run.hermes_home.join(".env"))
+        .and_then(|file| file.set_modified(SystemTime::now()))
+        .expect("touch .env");
+    let hang_at = now_ms();
+    let refused = run
+        .command(
+            "agent.inference.disconnect",
+            "finite.agent.inference.disconnect.v1",
+            json!({"route": "openrouter"}),
+        )
+        .await;
+    let refused_at = now_ms();
+    let mut answered = futures_util::future::join_all((0..10).map(|_| run.status())).await;
+    while now_ms() < refused_at + 30_000 {
+        answered.push(run.status().await);
+        tokio::time::sleep(Duration::from_millis(250)).await;
+    }
+    let burst_end = now_ms();
+    fs::remove_file(run.dir.join("facts-slow")).expect("remove facts-slow");
+    let hung = run
+        .stub_lines_since(hang_at, "facts-read-slow")
+        .into_iter()
+        .filter(|(ms, _)| *ms <= burst_end)
+        .map(|(ms, _)| ms)
+        .collect::<Vec<_>>();
+    // R16 counts from the failure: the next helper may start only 15 s after
+    // the previous hung read was killed.
+    let ended = timeline.lock().unwrap().facts_reads.clone();
+    let hung_ends = hung
+        .iter()
+        .map(|start| {
+            ended
+                .iter()
+                .find(|(_, started, _, is_hung)| *is_hung && started == start)
+                .map(|(_, _, end, _)| *end)
+        })
+        .collect::<Vec<_>>();
+    let gaps = hung
+        .iter()
+        .skip(1)
+        .zip(&hung_ends)
+        .map(|(next, end)| end.map(|end| next.saturating_sub(end)))
+        .collect::<Vec<_>>();
+    let other_reads = run
+        .stub_lines_since(hang_at, "facts-read pid=")
+        .into_iter()
+        .filter(|(ms, _)| *ms <= burst_end)
+        .count();
+    proofs.observe(
+        "P10 hung helper: disconnect, then a status burst",
+        vec![
+            format!(
+                "disconnect reply after {} ms: {refused}",
+                refused_at - hang_at
+            ),
+            format!(
+                "{} status replies in {} ms after it",
+                answered.len(),
+                burst_end - refused_at
+            ),
+            format!(
+                "helper reads started (ms after the hang began): {:?}",
+                hung.iter().map(|ms| ms - hang_at).collect::<Vec<_>>()
+            ),
+        ],
+    );
+    proofs.record(
+        "P10 a failed read is remembered, and could-not-check is its own refusal (R16, R17)",
+        vec![
+            check(
+                ready["inference"]["fallback"]["state"] != "unknown",
+                "before the hang, status had known facts (no failure remembered)",
+            ),
+            check(
+                refused["status"] == "failed"
+                    && refused["error"]["code"] == "facts_unavailable"
+                    && refused["error"]["message"]
+                        == "The agent couldn't check its setup right now. Try again in a moment.",
+                format!("disconnect of the saved default: {}", refused["error"]),
+            ),
+            check(
+                run.intent().is_none() && (run.config_text(), run.dotenv()) == files_before,
+                "nothing written and no intent recorded",
+            ),
+            check(
+                answered.len() >= 20
+                    && answered
+                        .iter()
+                        .all(|status| status["inference"]["fallback"]["state"] == "unknown"),
+                format!("{} status replies, every one with unknown facts", answered.len()),
+            ),
+            check(
+                !gaps.is_empty() && gaps.iter().all(|gap| gap.is_some_and(|gap| gap >= 14_500)),
+                format!(
+                    "{} helper(s) for the disconnect and the burst; ms from each hung read's end to the next start (≥ 15 s, less up to 500 ms of observation lag): {gaps:?}",
+                    hung.len()
+                ),
+            ),
+            check(
+                other_reads == 0,
+                format!("{other_reads} facts reads bypassed the hang"),
+            ),
+        ],
+    );
+    run.known_status().await;
 
     // P4b: a stale writer re-adds the .env key after every start.
     run.v1_openrouter("sk-or-v1-e0-fake-key-five", OR_MODEL)

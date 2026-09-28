@@ -1204,10 +1204,15 @@ impl<H: ExecutorHost + Clone> Inference<H> {
             classify_saved_route(&model, self.fp.base_url.as_deref()) == saved_route_of(route);
         let facts = self.facts().await;
         // F1: switching the agent to Finite Private needs its settings and its
-        // credential known present. No live probe.
-        if is_saved && (self.fp.settings().is_none() || facts.finite_private.fp_key != Tri::Present)
-        {
-            return Err(AgentdError::FinitePrivateUnavailable);
+        // credential known present. No live probe. A credential that could not
+        // be read is not a missing one (R17).
+        if is_saved {
+            if self.fp.settings().is_none() || facts.finite_private.fp_key == Tri::Absent {
+                return Err(AgentdError::FinitePrivateUnavailable);
+            }
+            if facts.finite_private.fp_key != Tri::Present {
+                return Err(AgentdError::FactsUnavailable);
+            }
         }
         if admission == Admission::ResumeFailed {
             let Some(mut record) = record else {
@@ -2498,6 +2503,87 @@ mod inference_tests {
     }
 
     #[tokio::test]
+    async fn r17_a_failed_facts_read_refuses_a_disconnect_as_facts_unavailable() {
+        let env = format!("OPENROUTER_API_KEY={OR_KEY}\n");
+        let setup = new_setup(&openrouter_block(), &env);
+        *setup.host.facts_fail.lock().unwrap() = true;
+        let before = (setup.config_bytes(), setup.env());
+        let request = request(
+            "agent.inference.disconnect",
+            INFERENCE_DISCONNECT_SCHEMA,
+            json!({"route": "openrouter"}),
+        );
+        let error = setup
+            .inference
+            .execute(&request)
+            .await
+            .unwrap()
+            .unwrap_err();
+        // At the wire: the result the bridge delivers.
+        let result = failure_result(&request, error);
+        let wire = result.error.unwrap();
+        assert_eq!(wire.code, "facts_unavailable");
+        assert_eq!(
+            wire.message,
+            "The agent couldn't check its setup right now. Try again in a moment."
+        );
+        // The dashboard accepts a code matching ^[a-z][a-z0-9_]{0,63}$.
+        assert!(wire.code.len() <= 64);
+        assert!(wire.code.starts_with(|c: char| c.is_ascii_lowercase()));
+        assert!(
+            wire.code
+                .chars()
+                .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_')
+        );
+        assert_eq!((setup.config_bytes(), setup.env()), before);
+        assert!(setup.record().is_none(), "no intent");
+
+        // R16: a retry within 15 s is answered from the remembered failure,
+        // with no second helper.
+        *setup.host.facts_fail.lock().unwrap() = false;
+        assert_eq!(
+            code(setup.disconnect("openrouter").await),
+            "facts_unavailable"
+        );
+        assert_eq!(setup.host.facts_deadlines.lock().unwrap().len(), 1);
+
+        // Missing settings stay "not set up", whatever the facts say.
+        let mut setup = new_setup(&openrouter_block(), &env);
+        setup.inference.fp = FinitePrivateEnv::default();
+        *setup.host.facts_fail.lock().unwrap() = true;
+        assert_eq!(
+            code(setup.disconnect("openrouter").await),
+            "finite_private_unavailable"
+        );
+    }
+
+    #[tokio::test]
+    async fn r16_the_executor_reads_the_helper_whatever_status_remembers() {
+        // OpenRouter stored but not the saved default: no F1 precondition.
+        let setup = new_setup(&fp_block(), &format!("OPENROUTER_API_KEY={OR_KEY}\n"));
+        *setup.host.facts_fail.lock().unwrap() = true;
+        let status = setup.status().await;
+        assert_eq!(status["inference"]["fallback"]["state"], "unknown");
+        *setup.host.facts_fail.lock().unwrap() = false;
+        // The admission read is answered from the remembered failure; the
+        // executor's reads each start a helper.
+        assert_eq!(
+            setup.disconnect("openrouter").await.unwrap()["accepted"],
+            true
+        );
+        assert!(setup.settled().await.is_none(), "succeeded");
+        let deadlines = setup.host.facts_deadlines.lock().unwrap().clone();
+        assert_eq!(deadlines[0], crate::helper::STATUS_FACTS_DEADLINE);
+        assert!(deadlines.len() >= 3, "{deadlines:?}");
+        assert!(
+            deadlines[1..]
+                .iter()
+                .all(|deadline| *deadline == crate::helper::EXECUTOR_FACTS_DEADLINE),
+            "one status read, then only executor reads: {deadlines:?}"
+        );
+    }
+
+    #[tokio::test]
     async fn an_unreadable_intent_never_blocks_status() {
         let setup = new_setup(&fp_block(), "");
         let dir = setup.agent_home.join("agentd");
@@ -3013,16 +3099,25 @@ mod inference_tests {
     #[tokio::test]
     async fn t_a40_disconnecting_the_saved_route_needs_finite_private_known_present() {
         let env = format!("OPENROUTER_API_KEY={OR_KEY}\n");
-        for fp_key in [Tri::Absent, Tri::Unknown] {
+        // R17: an absent key is "not set up"; an unknown one is "could not check".
+        for (fp_key, code, message) in [
+            (
+                Tri::Absent,
+                "finite_private_unavailable",
+                "Disconnecting would leave this agent without a model: Finite Private isn't fully set up here. Choose another model first.",
+            ),
+            (
+                Tri::Unknown,
+                "facts_unavailable",
+                "The agent couldn't check its setup right now. Try again in a moment.",
+            ),
+        ] {
             let setup = new_setup(&openrouter_block(), &env);
             setup.host.facts.lock().unwrap().finite_private.fp_key = fp_key;
             let before = (setup.config_bytes(), setup.env());
             let error = setup.disconnect("openrouter").await.unwrap_err();
-            assert_eq!(error.public_code(), "finite_private_unavailable");
-            assert_eq!(
-                error.public_message(),
-                "Disconnecting would leave this agent without a model: Finite Private isn't fully set up here. Choose another model first."
-            );
+            assert_eq!(error.public_code(), code, "{fp_key:?}");
+            assert_eq!(error.public_message(), message, "{fp_key:?}");
             assert_eq!((setup.config_bytes(), setup.env()), before);
             assert!(setup.record().is_none(), "no intent");
         }

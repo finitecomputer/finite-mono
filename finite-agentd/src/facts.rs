@@ -17,6 +17,9 @@ use crate::AgentdError;
 /// Facts are recomputed at least this often even when no file changed, so
 /// time-dependent facts such as Codex cooldowns are never staler than this.
 pub(crate) const FACTS_TTL: Duration = Duration::from_secs(30);
+/// R16: after a failed read, status answers `unknown` for this long without
+/// starting another helper, so a slow helper is not restarted back to back.
+pub(crate) const FAILED_READ_MEMORY: Duration = Duration::from_secs(15);
 
 #[derive(Debug, Clone, PartialEq, Deserialize)]
 pub(crate) struct InferenceFacts {
@@ -182,11 +185,13 @@ struct CachedFacts {
 }
 
 /// Caches helper facts keyed on the stats of the files they come from, with a
-/// TTL. A failed fetch is not cached: status serves `unknown` facts and the
-/// next call tries the helper again.
+/// TTL. A failed fetch serves `unknown` facts, and so does every call for
+/// `FAILED_READ_MEMORY` after it, without starting a helper (R16). The
+/// executor never reads through this cache.
 #[derive(Default)]
 pub(crate) struct FactsCache {
     entry: Mutex<Option<CachedFacts>>,
+    failed_at: Mutex<Option<Instant>>,
 }
 
 impl FactsCache {
@@ -195,41 +200,58 @@ impl FactsCache {
         F: FnOnce() -> Fut,
         Fut: Future<Output = Result<InferenceFacts, AgentdError>>,
     {
-        self.get_or_fetch_at(hermes_home, Instant::now(), fetch)
-            .await
+        self.get_or_fetch_at(hermes_home, Instant::now, fetch).await
     }
 
+    /// `clock` is read before the fetch and, for a failure, again after it:
+    /// a failed read is remembered from when it failed, not from when it
+    /// started, so a helper that hangs until its deadline is not restarted
+    /// as soon as it is killed.
     async fn get_or_fetch_at<F, Fut>(
         &self,
         hermes_home: &Path,
-        now: Instant,
+        clock: impl Fn() -> Instant,
         fetch: F,
     ) -> InferenceFacts
     where
         F: FnOnce() -> Fut,
         Fut: Future<Output = Result<InferenceFacts, AgentdError>>,
     {
+        let now = clock();
+        if lock(&self.failed_at)
+            .is_some_and(|failed_at| now.saturating_duration_since(failed_at) < FAILED_READ_MEMORY)
+        {
+            return InferenceFacts::unknown();
+        }
         let stamps = file_stamps(hermes_home);
         if let Some(facts) = self.lookup(&stamps, now) {
             return facts;
         }
-        match fetch().await {
+        let result = fetch().await;
+        let mut entry = lock(&self.entry);
+        let mut failed_at = lock(&self.failed_at);
+        match result {
             Ok(facts) => {
                 // Stamp with the stats taken before the fetch, so a write
                 // racing the helper leaves a stale key and the next call refetches.
-                *self.lock() = Some(CachedFacts {
+                *entry = Some(CachedFacts {
                     stamps,
                     fetched_at: now,
                     facts: facts.clone(),
                 });
+                *failed_at = None;
                 facts
             }
-            Err(_) => InferenceFacts::unknown(),
+            Err(_) => {
+                *entry = None;
+                *failed_at = Some(clock());
+                InferenceFacts::unknown()
+            }
         }
     }
 
     fn lookup(&self, stamps: &FileStamps, now: Instant) -> Option<InferenceFacts> {
-        self.lock()
+        lock(&self.entry)
             .as_ref()
             .filter(|entry| {
                 entry.stamps == *stamps
@@ -237,12 +259,12 @@ impl FactsCache {
             })
             .map(|entry| entry.facts.clone())
     }
+}
 
-    fn lock(&self) -> std::sync::MutexGuard<'_, Option<CachedFacts>> {
-        self.entry
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-    }
+fn lock<T>(mutex: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
+    mutex
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
 }
 
 fn file_stamps(hermes_home: &Path) -> FileStamps {
@@ -360,17 +382,17 @@ mod tests {
         };
         let start = Instant::now();
 
-        let first = cache.get_or_fetch_at(home, start, || fetch("one")).await;
+        let first = cache.get_or_fetch_at(home, || start, || fetch("one")).await;
         assert_eq!(label(&first), Some("one"));
         let hit = cache
-            .get_or_fetch_at(home, start + Duration::from_secs(29), || fetch("two"))
+            .get_or_fetch_at(home, || start + Duration::from_secs(29), || fetch("two"))
             .await;
         assert_eq!(label(&hit), Some("one"));
         assert_eq!(calls.get(), 1);
 
         // No file changed, but the TTL passed.
         let expired = cache
-            .get_or_fetch_at(home, start + FACTS_TTL, || fetch("three"))
+            .get_or_fetch_at(home, || start + FACTS_TTL, || fetch("three"))
             .await;
         assert_eq!(label(&expired), Some("three"));
         assert_eq!(calls.get(), 2);
@@ -378,7 +400,7 @@ mod tests {
         // A watched file appears.
         fs::write(home.join(".env"), "OPENROUTER_API_KEY=x\n").unwrap();
         let changed = cache
-            .get_or_fetch_at(home, start + FACTS_TTL, || fetch("four"))
+            .get_or_fetch_at(home, || start + FACTS_TTL, || fetch("four"))
             .await;
         assert_eq!(label(&changed), Some("four"));
         assert_eq!(calls.get(), 3);
@@ -386,26 +408,100 @@ mod tests {
         // A watched file changes size.
         fs::write(home.join("auth.json"), "{}").unwrap();
         let changed = cache
-            .get_or_fetch_at(home, start + FACTS_TTL, || fetch("five"))
+            .get_or_fetch_at(home, || start + FACTS_TTL, || fetch("five"))
             .await;
         assert_eq!(label(&changed), Some("five"));
         assert_eq!(calls.get(), 4);
     }
 
     #[tokio::test]
-    async fn a_failed_fetch_serves_unknown_facts_and_is_not_cached() {
+    async fn r16_a_failed_read_is_remembered_for_15_s_without_a_helper() {
+        assert_eq!(FAILED_READ_MEMORY, Duration::from_secs(15));
         let temp = tempfile::tempdir().unwrap();
+        let home = temp.path();
         let cache = FactsCache::default();
-        let now = Instant::now();
-        let failed = cache
-            .get_or_fetch_at(temp.path(), now, || async {
-                Err(AgentdError::ProviderUnavailable("helper failed".to_owned()))
-            })
-            .await;
+        let start = Instant::now();
+        let clock = Cell::new(start);
+        let calls = Cell::new(0);
+        // A helper that hangs until its 10 s deadline, then fails.
+        let hang = || {
+            calls.set(calls.get() + 1);
+            clock.set(clock.get() + Duration::from_secs(10));
+            async { Err(AgentdError::ProviderUnavailable("helper failed".to_owned())) }
+        };
+        let failed = cache.get_or_fetch_at(home, || clock.get(), hang).await;
         assert_eq!(failed, InferenceFacts::unknown());
-        let next = cache
-            .get_or_fetch(temp.path(), || async { Ok(fetched("fresh")) })
+        assert_eq!(calls.get(), 1);
+        let failed_at = start + Duration::from_secs(10);
+
+        // For 15 s from the failure, even after a watched file changed: no
+        // helper, `unknown`. 15 s after the read STARTED is still inside.
+        fs::write(home.join(".env"), "KEEP=1\n").unwrap();
+        for after in [
+            Duration::ZERO,
+            Duration::from_secs(5),
+            Duration::from_millis(14_999),
+        ] {
+            clock.set(failed_at + after);
+            let remembered = cache.get_or_fetch_at(home, || clock.get(), hang).await;
+            assert_eq!(remembered, InferenceFacts::unknown(), "{after:?}");
+        }
+        assert_eq!(
+            calls.get(),
+            1,
+            "no helper started within 15 s of the failure"
+        );
+
+        // 15 s after the failure the helper runs again; this one fails too,
+        // and is remembered from its own failure.
+        clock.set(failed_at + FAILED_READ_MEMORY);
+        cache.get_or_fetch_at(home, || clock.get(), hang).await;
+        assert_eq!(calls.get(), 2);
+        let second_failed_at = clock.get();
+        clock.set(second_failed_at + Duration::from_millis(14_999));
+        cache.get_or_fetch_at(home, || clock.get(), hang).await;
+        assert_eq!(calls.get(), 2);
+    }
+
+    #[tokio::test]
+    async fn r16_a_successful_read_after_15_s_replaces_the_failure_and_is_cached() {
+        let temp = tempfile::tempdir().unwrap();
+        let home = temp.path();
+        fs::write(home.join("config.yaml"), "model: {}\n").unwrap();
+        let cache = FactsCache::default();
+        let calls = Cell::new(0);
+        let fetch = |result: Result<&'static str, ()>| {
+            calls.set(calls.get() + 1);
+            async move {
+                result
+                    .map(fetched)
+                    .map_err(|()| AgentdError::ProviderUnavailable("helper failed".to_owned()))
+            }
+        };
+        let start = Instant::now();
+        cache
+            .get_or_fetch_at(home, || start, || fetch(Err(())))
             .await;
-        assert_eq!(label(&next), Some("fresh"));
+        let fresh = start + FAILED_READ_MEMORY;
+        let read = cache
+            .get_or_fetch_at(home, || fresh, || fetch(Ok("fresh")))
+            .await;
+        assert_eq!(label(&read), Some("fresh"));
+        assert_eq!(calls.get(), 2);
+        // Cached as today: the same facts, no helper, until the TTL.
+        let hit = cache
+            .get_or_fetch_at(
+                home,
+                || fresh + Duration::from_secs(29),
+                || fetch(Ok("later")),
+            )
+            .await;
+        assert_eq!(label(&hit), Some("fresh"));
+        assert_eq!(calls.get(), 2);
+        let expired = cache
+            .get_or_fetch_at(home, || fresh + FACTS_TTL, || fetch(Ok("later")))
+            .await;
+        assert_eq!(label(&expired), Some("later"));
+        assert_eq!(calls.get(), 3);
     }
 }

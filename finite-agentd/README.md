@@ -85,9 +85,17 @@ the design is FIN-129/FIN-130.
   reports stored facts. None says a route works. Redacted Hermes facts come
   from `python -m hermes_cli.finite_inference_helper inference-facts`, cached
   on the stats of `config.yaml`, `.env`, and `auth.json` for at most 30 s. If
-  the helper fails, or takes longer than 10 s, those fields are `unknown`.
-  The background executor's own reads allow the helper 30 s, since no reply
-  waits on them (ruling R15a).
+  the helper fails, or takes longer than 10 s, those fields are `unknown`, and
+  for the next 15 s status and the commands answer `unknown` without starting
+  another helper (ruling R16). The background executor's own reads never use
+  this cache and allow the helper 30 s, since no reply waits on them (ruling
+  R15a).
+- Disconnecting the saved default switches the agent to Finite Private, so it
+  needs the Finite Private settings and key. A missing setting or an absent
+  key is refused with `finite_private_unavailable`; a key the helper could not
+  read is refused with `facts_unavailable` ("The agent couldn't check its
+  setup right now. Try again in a moment."). Neither writes anything (ruling
+  R17).
 - v1 `agent.inference.apply` is synchronous and wire-compatible. It keeps its
   `.env` snapshot restore on a failed write or spawn. After the restart it
   reads the saved `model` and key once, with no delay: a mismatch replies
@@ -148,7 +156,7 @@ scripts/with-dev-env bash -c 'cargo build -p finite-agentd --bins --examples && 
   target/debug/examples/inference_host_harness smoke'
 ```
 
-`smoke` runs the E-0 proofs (P1–P9) and exits non-zero if one fails. `serve
+`smoke` runs the E-0 proofs (P1–P10) and exits non-zero if one fails. `serve
 --port <port>` keeps the agent up for the dashboard:
 `FC_DESIGN_RUNTIME_COMMANDS_URL=http://127.0.0.1:<port> just dev web-design`.
 Ctrl-C stops agentd and everything it started. `--hermes-env` and `--agentd`

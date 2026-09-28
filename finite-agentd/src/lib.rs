@@ -80,6 +80,8 @@ pub enum AgentdError {
     DisconnectInProgress,
     #[error("Finite Private is not fully set up")]
     FinitePrivateUnavailable,
+    #[error("the agent's inference facts could not be read")]
+    FactsUnavailable,
     #[error("OpenRouter key has no remaining allowance")]
     KeyAllowanceExhausted,
     #[error("validated key saved but activation not recorded")]
@@ -109,6 +111,7 @@ impl AgentdError {
             Self::OperationInProgress => "operation_in_progress",
             Self::DisconnectInProgress => "disconnect_in_progress",
             Self::FinitePrivateUnavailable => "finite_private_unavailable",
+            Self::FactsUnavailable => "facts_unavailable",
             Self::KeyAllowanceExhausted => "key_allowance_exhausted",
             Self::ActivationNotRecorded => "activation_not_recorded",
         }
@@ -153,6 +156,9 @@ impl AgentdError {
             }
             Self::DisconnectInProgress => "ChatGPT is being removed from this agent. Wait for that to finish, or try the removal again.".to_owned(),
             Self::FinitePrivateUnavailable => "Disconnecting would leave this agent without a model: Finite Private isn't fully set up here. Choose another model first.".to_owned(),
+            Self::FactsUnavailable => {
+                "The agent couldn't check its setup right now. Try again in a moment.".to_owned()
+            }
             Self::KeyAllowanceExhausted => "This key has no remaining allowance. Raise its limit at openrouter.ai/keys, or use another key.".to_owned(),
             Self::ActivationNotRecorded => "The key was saved, but the agent couldn't record the switch to OpenRouter. Try Use OpenRouter again.".to_owned(),
         }
