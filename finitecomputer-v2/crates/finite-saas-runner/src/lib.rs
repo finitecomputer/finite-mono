@@ -309,7 +309,7 @@ pub enum RunnerError {
     /// VM keeps writing through its bind mount long after containerd has
     /// forgotten the container.
     #[error(
-        "durable state root {} still has a live writer ({evidence}); a missing provider record (nerdctl \"no such object\", or an inspect that times out) is not proof the compute is absent — find and stop the orphaned VM (containerd-shim-kata, qemu, virtiofsd) before migrating or relocating this tree",
+        "durable state root {} still has a live writer ({evidence}); a missing provider record (nerdctl \"no such object\", or an inspect that times out) is not proof the compute is absent; find and stop the orphaned VM (containerd-shim-kata, qemu, virtiofsd) before migrating or relocating this tree",
         .state_root.display()
     )]
     DurableStateRootLive {
@@ -375,6 +375,24 @@ pub enum RunOnceOutcome {
     LaunchFailed {
         request_id: String,
         failure_message: String,
+    },
+    /// Core may have committed this relocation: it refused the failure record
+    /// or did not answer. The target was stopped and kept. An operator
+    /// reconciles from the exact request; a committed relocation comes back
+    /// through an ordinary typed restart, never through this Runner.
+    CompletionUnconfirmed {
+        request_id: String,
+        completion_error: String,
+        failure_record_error: String,
+    },
+    /// Target shutdown could not be proved, so no failure was recorded and the
+    /// relocation keeps refusing source controls. A launching request is
+    /// leased again after its lease expires; a cancelled or running one is
+    /// not, and needs an operator.
+    RelocationTargetShutdownUnproved {
+        request_id: String,
+        failure_message: String,
+        shutdown_error: String,
     },
     RuntimeRestarted {
         request_id: String,
@@ -631,6 +649,10 @@ where
             Err(error @ RunnerError::RuntimeBootstrapUnavailable) => return Err(error),
             Err(error) => {
                 let failure_message = error.to_string();
+                if let Some(outcome) = self.stop_earlier_relocation_target(&lease, &failure_message)
+                {
+                    return Ok(outcome);
+                }
                 self.queue.fail_agent_creation(
                     &request_id,
                     FailAgentCreationRequestInput {
@@ -686,6 +708,7 @@ where
                         now: None,
                     },
                 );
+                let mut completion_attempted = false;
                 let launch_result = match launch_result {
                     Ok(_) => match if let Some(relocation) = lease.request.relocation.as_ref() {
                         // The relocation launch already proved that the
@@ -699,30 +722,35 @@ where
                     } {
                         // The verified principal seeds Core's standing-health
                         // attribution pin for the new incarnation.
-                        Ok(launch_verified_npub) => self.queue.complete_agent_creation(
-                            &request_id,
-                            CompleteAgentCreationRequestInput {
-                                request_id: request_id.clone(),
-                                runner_id: self.runner_id.clone(),
-                                lease_token: lease_token.clone(),
-                                source_host_id: facts.source_host_id.clone(),
-                                source_machine_id: facts.source_machine_id.clone(),
-                                runtime_artifact_id: facts.runtime_artifact_id.clone(),
-                                state_schema_version: facts.state_schema_version.clone(),
-                                provider_runtime_handle: facts.provider_runtime_handle.clone(),
-                                contact_endpoint: facts.contact_endpoint.clone(),
-                                display_name: facts.display_name.clone(),
-                                hostname: facts.hostname.clone(),
-                                runtime_host: facts.runtime_host.clone(),
-                                runtime_status: Some(RuntimeSummaryStatus::Online),
-                                active_inference_profile: facts.active_inference_profile.clone(),
-                                hermes_available: facts.hermes_available,
-                                published_app_urls: facts.published_app_urls.clone(),
-                                runtime_capabilities: Some(runtime_capabilities),
-                                agent_npub: launch_verified_npub,
-                                now: None,
-                            },
-                        ),
+                        Ok(launch_verified_npub) => {
+                            completion_attempted = true;
+                            self.queue.complete_agent_creation(
+                                &request_id,
+                                CompleteAgentCreationRequestInput {
+                                    request_id: request_id.clone(),
+                                    runner_id: self.runner_id.clone(),
+                                    lease_token: lease_token.clone(),
+                                    source_host_id: facts.source_host_id.clone(),
+                                    source_machine_id: facts.source_machine_id.clone(),
+                                    runtime_artifact_id: facts.runtime_artifact_id.clone(),
+                                    state_schema_version: facts.state_schema_version.clone(),
+                                    provider_runtime_handle: facts.provider_runtime_handle.clone(),
+                                    contact_endpoint: facts.contact_endpoint.clone(),
+                                    display_name: facts.display_name.clone(),
+                                    hostname: facts.hostname.clone(),
+                                    runtime_host: facts.runtime_host.clone(),
+                                    runtime_status: Some(RuntimeSummaryStatus::Online),
+                                    active_inference_profile: facts
+                                        .active_inference_profile
+                                        .clone(),
+                                    hermes_available: facts.hermes_available,
+                                    published_app_urls: facts.published_app_urls.clone(),
+                                    runtime_capabilities: Some(runtime_capabilities),
+                                    agent_npub: launch_verified_npub,
+                                    now: None,
+                                },
+                            )
+                        }
                         Err(error) => Err(error),
                     },
                     Err(error) => Err(error),
@@ -732,6 +760,15 @@ where
                         request_id,
                         runtime_id: completed.request.agent_runtime_id,
                     }),
+                    Err(error) if lease.request.relocation.is_some() => self
+                        .end_launched_relocation(
+                            &lease,
+                            lease_token,
+                            &launch_options,
+                            &facts,
+                            error,
+                            completion_attempted,
+                        ),
                     Err(error) => {
                         let failure_message = error.to_string();
                         let cleanup_error = self.launcher.cleanup_failed_launch(&facts).err();
@@ -760,6 +797,10 @@ where
             }
             Err(error) => {
                 let failure_message = error.to_string();
+                if let Some(outcome) = self.stop_earlier_relocation_target(&lease, &failure_message)
+                {
+                    return Ok(outcome);
+                }
                 self.queue.fail_agent_creation(
                     &request_id,
                     FailAgentCreationRequestInput {
@@ -779,6 +820,95 @@ where
                 })
             }
         }
+    }
+
+    /// Ends a relocation attempt whose target compute this run launched. Core
+    /// admits source controls once it records the failure, so the target is
+    /// first removed or stopped and its shutdown proved. An ambiguous
+    /// completion may have committed and made the target the Agent, so it is
+    /// only stopped. This Runner never starts it again: a committed relocation
+    /// comes back through an ordinary typed restart.
+    fn end_launched_relocation(
+        &mut self,
+        lease: &AgentCreationLease,
+        lease_token: String,
+        launch_options: &RuntimeLaunchOptions,
+        facts: &RuntimeLaunchFacts,
+        error: RunnerError,
+        completion_attempted: bool,
+    ) -> Result<RunOnceOutcome, RunnerError> {
+        let request_id = lease.request.id.clone();
+        let failure_message = error.to_string();
+        let ambiguous = completion_attempted && completion_outcome_unknown(&error);
+        if !ambiguous && let Err(remove_error) = self.launcher.cleanup_failed_launch(facts) {
+            eprintln!(
+                "warning: failed to remove relocation target compute, stopping it: {remove_error}"
+            );
+        }
+        if let Err(shutdown_error) = self.launcher.stop_relocation_target(lease) {
+            // No failure record: the request keeps refusing source controls.
+            return Ok(RunOnceOutcome::RelocationTargetShutdownUnproved {
+                request_id,
+                failure_message,
+                shutdown_error: shutdown_error.to_string(),
+            });
+        }
+        let recorded = self.queue.fail_agent_creation(
+            &request_id,
+            FailAgentCreationRequestInput {
+                request_id: request_id.clone(),
+                runner_id: self.runner_id.clone(),
+                lease_token,
+                failure_message: failure_message.clone(),
+                provisioned_finite_private_api_key_id: provisioned_key_to_revoke(launch_options),
+                now: None,
+            },
+        );
+        match recorded {
+            Ok(_) => {
+                if ambiguous {
+                    self.remove_stopped_relocation_target(facts);
+                }
+                Ok(RunOnceOutcome::LaunchFailed {
+                    request_id,
+                    failure_message,
+                })
+            }
+            Err(failure_record_error) if !ambiguous => Err(failure_record_error),
+            Err(failure_record_error) => Ok(RunOnceOutcome::CompletionUnconfirmed {
+                request_id,
+                completion_error: failure_message,
+                failure_record_error: failure_record_error.to_string(),
+            }),
+        }
+    }
+
+    fn remove_stopped_relocation_target(&mut self, facts: &RuntimeLaunchFacts) {
+        if let Err(error) = self.launcher.cleanup_failed_launch(facts) {
+            eprintln!("warning: stopped relocation target compute was kept: {error}");
+        }
+    }
+
+    /// Before recording a relocation failure for a run that has no launched
+    /// facts, stop any target compute an earlier attempt of this request left
+    /// on this host and prove its shutdown. A same-host relocation has only
+    /// the Core-bound machine, which may be a live source, so it is left alone
+    /// and the failure is recorded as before.
+    fn stop_earlier_relocation_target(
+        &mut self,
+        lease: &AgentCreationLease,
+        failure_message: &str,
+    ) -> Option<RunOnceOutcome> {
+        let relocation = lease.request.relocation.as_ref()?.v1();
+        if relocation.source_host_id == relocation.target_source_host_id {
+            return None;
+        }
+        let shutdown_error = self.launcher.stop_relocation_target(lease).err()?;
+        Some(RunOnceOutcome::RelocationTargetShutdownUnproved {
+            request_id: lease.request.id.clone(),
+            failure_message: failure_message.to_string(),
+            shutdown_error: shutdown_error.to_string(),
+        })
     }
 
     /// Verify and bind the launched runtime's Agent Principal, returning the
@@ -1445,6 +1575,16 @@ pub trait RuntimeLauncher {
     fn cleanup_failed_launch(&mut self, _facts: &RuntimeLaunchFacts) -> Result<(), RunnerError> {
         Ok(())
     }
+    /// Stop a relocation's target compute, keeping its data, and prove that
+    /// nothing runs against its durable tree any more. A missing provider
+    /// record is never proof on its own. Launchers that never host relocations
+    /// refuse, so a Runner never records a relocation failure without proof.
+    fn stop_relocation_target(&mut self, _lease: &AgentCreationLease) -> Result<(), RunnerError> {
+        Err(RunnerError::RuntimeLaunch(
+            "relocation target shutdown is unproved: this launcher cannot stop relocation targets"
+                .to_string(),
+        ))
+    }
 }
 
 impl<L> RuntimeLauncher for Box<L>
@@ -1534,6 +1674,9 @@ where
 
     fn cleanup_failed_launch(&mut self, facts: &RuntimeLaunchFacts) -> Result<(), RunnerError> {
         (**self).cleanup_failed_launch(facts)
+    }
+    fn stop_relocation_target(&mut self, lease: &AgentCreationLease) -> Result<(), RunnerError> {
+        (**self).stop_relocation_target(lease)
     }
 }
 
@@ -2568,6 +2711,17 @@ impl AgentCreationQueue for CoreHttpAgentCreationQueue {
             Err(RunnerError::CoreStatus { status: 404, .. }) => Ok(None),
             Err(error) => Err(error),
         }
+    }
+}
+
+/// Transport failures, server errors and undecodable success bodies leave it
+/// unknown whether Core committed this call. A 4xx is treated as a definitive
+/// rejection of this call only; it says nothing about compute ownership.
+fn completion_outcome_unknown(error: &RunnerError) -> bool {
+    match error {
+        RunnerError::CoreRequest(_) | RunnerError::CoreJson(_) => true,
+        RunnerError::CoreStatus { status, .. } => *status >= 500,
+        _ => false,
     }
 }
 
@@ -4125,6 +4279,7 @@ mod tests {
         Project, RuntimeControlRequestStatus,
     };
     use std::collections::VecDeque;
+    mod relocation_completion;
 
     fn finite_private_defaults() -> FinitePrivateRuntimeDefaults {
         FinitePrivateRuntimeDefaults::default()
@@ -5605,6 +5760,139 @@ mod tests {
         }
     }
 
+    /// How the fake Core answers one Runner call; `None` closes the connection
+    /// after reading the request, so the Runner never receives a response.
+    type CoreReply = Option<(u16, String)>;
+
+    fn core_reply(status: u16, body: &str) -> CoreReply {
+        Some((status, body.to_string()))
+    }
+
+    struct LostCompletionRun {
+        outcome: Result<serde_json::Value, RunnerError>,
+        paths: Vec<String>,
+        stopped: Vec<String>,
+        cleaned_up: Vec<String>,
+    }
+
+    /// Drives the real HTTP queue against scripted replies. The replies only
+    /// shape what the Runner observes; this fake keeps no Core state.
+    fn run_relocation_with_replies(completion: CoreReply, failure: CoreReply) -> LostCompletionRun {
+        use std::sync::{
+            Arc,
+            atomic::{AtomicBool, Ordering},
+        };
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let lease = sample_relocation_lease("agent_request_lost_completion");
+        let done = Arc::new(AtomicBool::new(false));
+        let stopped = done.clone();
+        let server = std::thread::spawn(move || {
+            let mut paths = Vec::new();
+            while let Ok((mut stream, _)) = listener.accept() {
+                if stopped.load(Ordering::Relaxed) {
+                    break;
+                }
+                let request = read_http_request(&mut stream);
+                let path = request.split_whitespace().nth(1).unwrap().to_owned();
+                let reply = match path.as_str() {
+                    "/api/core/v1/runtime-control-requests/lease" => core_reply(200, "null"),
+                    "/api/core/v1/agent-creation-requests/lease" => {
+                        core_reply(200, &serde_json::to_string(&lease).unwrap())
+                    }
+                    path if path.ends_with("/relocation-credential") => core_reply(
+                        200,
+                        &serde_json::json!({ "secret": "c".repeat(64) }).to_string(),
+                    ),
+                    path if path.ends_with("/runtime") => {
+                        core_reply(200, &serde_json::to_string(&lease).unwrap())
+                    }
+                    path if path.ends_with("/complete") => completion.clone(),
+                    path if path.ends_with("/fail") => failure.clone(),
+                    _ => panic!("unexpected Core path in lost completion test: {path}"),
+                };
+                paths.push(path);
+                if let Some((status, body)) = reply {
+                    write_http_json(&mut stream, status, &body);
+                }
+            }
+            paths
+        });
+        let mut runner = AgentCreationRunner::new(
+            CoreHttpAgentCreationQueue::new(format!("http://{address}"), "test-runner").unwrap(),
+            FakeLauncher::ready(RuntimeLaunchFacts::sample()).for_kata(),
+            FixedLeaseTokens::new(["lease-lost-completion"]),
+            "runner-1",
+            300,
+        )
+        .unwrap()
+        .with_runtime_core_bootstrap("https://core.example.test".into())
+        .unwrap();
+        // The printed JSON is what an operator sees for this cycle.
+        let outcome = runner
+            .run_once()
+            .map(|outcome| serde_json::to_value(outcome).unwrap());
+        done.store(true, Ordering::Relaxed);
+        let _ = std::net::TcpStream::connect(address);
+        LostCompletionRun {
+            outcome,
+            paths: server.join().unwrap(),
+            stopped: runner.launcher.stopped_targets.clone(),
+            cleaned_up: runner.launcher.cleaned_up.clone(),
+        }
+    }
+
+    #[test]
+    fn ambiguous_relocation_completion_stops_the_target_before_the_failure_record() {
+        let not_launching = || core_reply(409, r#"{"error":"not launching"}"#);
+        let failure_recorded = || {
+            let mut request = sample_relocation_lease("agent_request_lost_completion").request;
+            request.status = AgentCreationRequestStatus::Failed;
+            request.lease_token = None;
+            core_reply(200, &serde_json::to_string(&request).unwrap())
+        };
+        // Transport loss, a 5xx and an undecodable 2xx are all ambiguous. The
+        // target is stopped before the failure record, and a refused record
+        // leaves it stopped: the Runner never starts compute on its own and
+        // never asks Core for a status to act on.
+        for completion in [None, core_reply(502, "bad gateway"), core_reply(200, "{")] {
+            let run = run_relocation_with_replies(completion.clone(), not_launching());
+            let outcome = run.outcome.unwrap_or_else(|error| {
+                panic!("completion reply {completion:?} must report an outcome: {error}")
+            });
+            assert_eq!(
+                outcome["status"], "completion_unconfirmed",
+                "{completion:?}: {outcome}"
+            );
+            assert_eq!(
+                (run.stopped.len(), run.cleaned_up.len()),
+                (1, 0),
+                "{completion:?}"
+            );
+            assert!(run.paths[4].ends_with("/complete") && run.paths[5].ends_with("/fail"));
+            assert_eq!(run.paths.len(), 6, "{completion:?}: {:?}", run.paths);
+        }
+
+        // No answer to the failure record: the target stays stopped.
+        let run = run_relocation_with_replies(None, None);
+        assert_eq!(run.outcome.unwrap()["status"], "completion_unconfirmed");
+        assert_eq!((run.stopped.len(), run.cleaned_up.len()), (1, 0));
+
+        // Core accepted the failure record: stop, then remove.
+        let run = run_relocation_with_replies(None, failure_recorded());
+        assert_eq!(run.outcome.unwrap()["status"], "launch_failed");
+        assert_eq!((run.stopped.len(), run.cleaned_up.len()), (1, 1));
+
+        // A clear rejection removes the target, then proves its shutdown
+        // before the failure record.
+        let run = run_relocation_with_replies(
+            core_reply(409, r#"{"error":"lease conflict"}"#),
+            failure_recorded(),
+        );
+        assert_eq!(run.outcome.unwrap()["status"], "launch_failed");
+        assert_eq!((run.stopped.len(), run.cleaned_up.len()), (1, 1));
+    }
+
     #[test]
     fn run_once_uses_only_the_core_bound_spec_and_resolves_every_secret_reference() {
         let lease = sample_spec_lease("agent_request_123");
@@ -6879,6 +7167,8 @@ mod tests {
         upgraded: Vec<String>,
         stopped: Vec<String>,
         destroyed: Vec<String>,
+        cleaned_up: Vec<String>,
+        stopped_targets: Vec<String>,
         retired: Vec<String>,
         retirement_result: Option<Result<RuntimeRetirementSnapshotReceipt, String>>,
         runner_capacity: RunnerLeaseCapacity,
@@ -6900,6 +7190,8 @@ mod tests {
                 upgraded: Vec::new(),
                 stopped: Vec::new(),
                 destroyed: Vec::new(),
+                cleaned_up: Vec::new(),
+                stopped_targets: Vec::new(),
                 retired: Vec::new(),
                 retirement_result: None,
                 runner_capacity: RunnerLeaseCapacity {
@@ -6927,6 +7219,8 @@ mod tests {
                 upgraded: Vec::new(),
                 stopped: Vec::new(),
                 destroyed: Vec::new(),
+                cleaned_up: Vec::new(),
+                stopped_targets: Vec::new(),
                 retired: Vec::new(),
                 retirement_result: None,
                 runner_capacity: RunnerLeaseCapacity {
@@ -6954,6 +7248,8 @@ mod tests {
                 upgraded: Vec::new(),
                 stopped: Vec::new(),
                 destroyed: Vec::new(),
+                cleaned_up: Vec::new(),
+                stopped_targets: Vec::new(),
                 retired: Vec::new(),
                 retirement_result: None,
                 runner_capacity: RunnerLeaseCapacity {
@@ -7108,6 +7404,19 @@ mod tests {
             self.launch_result
                 .clone()
                 .map_err(RunnerError::RuntimeLaunch)
+        }
+
+        fn cleanup_failed_launch(&mut self, facts: &RuntimeLaunchFacts) -> Result<(), RunnerError> {
+            self.cleaned_up.push(facts.source_machine_id.clone());
+            Ok(())
+        }
+
+        fn stop_relocation_target(
+            &mut self,
+            lease: &AgentCreationLease,
+        ) -> Result<(), RunnerError> {
+            self.stopped_targets.push(lease.request.id.clone());
+            Ok(())
         }
     }
 

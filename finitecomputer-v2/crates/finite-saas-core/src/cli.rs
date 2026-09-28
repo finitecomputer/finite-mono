@@ -1,6 +1,8 @@
 use super::*;
 mod credential_recovery;
 pub(super) use credential_recovery::*;
+mod relocation_cancel;
+pub(super) use relocation_cancel::*;
 mod arguments;
 pub(super) use arguments::*;
 mod lifecycle;

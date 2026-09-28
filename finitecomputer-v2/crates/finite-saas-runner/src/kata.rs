@@ -337,8 +337,8 @@ impl KataLauncher {
     /// Exactly one durable root exists per runtime, derived from its
     /// `durable_state_id`. A root still named by the container (the source
     /// machine id) is moved to the runtime-id path by a single
-    /// same-filesystem `rename` — never copied, never left beside a second
-    /// root — when and only when:
+    /// same-filesystem `rename` (never copied, never left beside a second
+    /// root) when and only when:
     ///
     /// - the runtime-id root does not exist,
     /// - the machine-named root for THIS plan's container exists, and
@@ -3078,6 +3078,15 @@ impl RuntimeLauncher for KataLauncher {
         }
         Ok(())
     }
+
+    fn stop_relocation_target(&mut self, lease: &AgentCreationLease) -> Result<(), RunnerError> {
+        self.stop_and_prove_relocation_target(lease)
+            .map_err(|error| {
+                RunnerError::RuntimeLaunch(format!(
+                    "relocation target shutdown is unproved: {error}"
+                ))
+            })
+    }
 }
 
 /// The container (source machine) name for a creation lease. It names the
@@ -3113,6 +3122,61 @@ pub(crate) fn kata_launch_plan(
 }
 
 impl KataLauncher {
+    /// Stops this Runner's relocation target if its record exists, then proves
+    /// from the durable tree that nothing runs against it: no running record
+    /// of any name binds the tree, nobody holds the chat store's writer lease,
+    /// and the tree is unchanged over the quiescence window. A missing record
+    /// is never proof on its own, because an orphaned VM keeps writing without
+    /// one. These signals cannot see a writer that holds no lease and stays
+    /// idle for the whole window.
+    fn stop_and_prove_relocation_target(
+        &self,
+        lease: &AgentCreationLease,
+    ) -> Result<(), RunnerError> {
+        if lease.request.relocation.is_none() {
+            return Err(RunnerError::RuntimeLaunch(
+                "relocation target control requires a relocation lease".to_string(),
+            ));
+        }
+        let launcher = KataLauncher::new(self.config_for_creation(lease)?);
+        let plan = launcher.plan_launch(lease)?;
+        let _lock = launcher.acquire_runtime_operation_lock(&plan)?;
+        if let Some(inspected) = launcher.inspect(&plan.container_name)? {
+            launcher.validate_owned(&plan, &lease.project.id, &inspected)?;
+            launcher.stop_compute(&plan.container_name)?;
+        }
+        for container_name in launcher.container_names()? {
+            let Some(inspected) = launcher.inspect(&container_name)? else {
+                continue;
+            };
+            let binds_tree = inspected.mounts.iter().any(|mount| {
+                mount.destination == Path::new("/data") && mount.source == plan.state_root
+            });
+            if binds_tree && inspected.state.status == "running" {
+                return Err(RunnerError::RuntimeLaunch(format!(
+                    "container {container_name} still runs against {}",
+                    plan.state_root.display()
+                )));
+            }
+        }
+        // A tree that was never staged has no writer to find.
+        if !plan.state_root.exists() {
+            return Ok(());
+        }
+        if let Some(evidence) = durable_tree_is_quiescent_within(
+            &plan.state_root,
+            launcher.config.durable_tree_quiescence_window,
+        )?
+        .evidence()
+        {
+            return Err(RunnerError::DurableStateRootLive {
+                state_root: plan.state_root.clone(),
+                evidence,
+            });
+        }
+        Ok(())
+    }
+
     fn verify_relocation_state(
         &self,
         plan: &KataLaunchPlan,
@@ -3183,7 +3247,7 @@ impl KataLauncher {
 /// either), so the writer itself is tested before the content proof. With
 /// the operator's `source_compute_absent` attestation the same rule applies:
 /// the attestation was made from records, and a live writer refutes it. The
-/// tree may be a staged copy or, on the same host, the original in place —
+/// tree may be a staged copy or, on the same host, the original in place;
 /// the content proof is over relative paths and does not care.
 fn verify_relocation_staged_tree(
     state_root: &Path,
@@ -3232,8 +3296,8 @@ pub enum Quiescence {
     /// No process holds the single-writer lease and the tree's change
     /// manifest was identical across the observation window.
     Quiet,
-    /// Some process — in a container, in a Kata VM sharing the bind mount, or
-    /// on the host — holds the chat store's single-writer lease.
+    /// Some process (in a container, in a Kata VM sharing the bind mount, or
+    /// on the host) holds the chat store's single-writer lease.
     LiveWriter { path: PathBuf },
     /// The tree's change manifest differed between the two samples; `path`
     /// is the first entry that changed.
@@ -3263,12 +3327,12 @@ impl Quiescence {
 /// 1. A non-blocking `flock(LOCK_EX | LOCK_NB)` on the chat store's writer
 ///    lease (released immediately). The lease file is opened read-only and
 ///    never created. flock is per open file description and shared across
-///    bind mounts, so a holder inside an orphaned VM shows as held — provided
+///    bind mounts, so a holder inside an orphaned VM shows as held, provided
 ///    the VM's shared filesystem forwards locks to the host.
 /// 2. A cheap change manifest (size and mtime of the store, its WAL/SHM, and
 ///    the agent home to a bounded depth) sampled twice, two seconds apart by
-///    default. Writers that do not take the lease — housekeeping in the agent
-///    home, a store opened by an older runtime — show up here. Neither signal
+///    default. Writers that do not take the lease (housekeeping in the agent
+///    home, a store opened by an older runtime) show up here. Neither signal
 ///    can prove absence of a writer that is idle for the whole window; both
 ///    are refusals, not a green light to skip the record checks.
 pub fn durable_tree_is_quiescent(state_root: &Path) -> Result<Quiescence, RunnerError> {
@@ -4858,7 +4922,7 @@ case "$cmd" in
     if [ -f "$root/$name.stop-delay" ]; then delay="$(cat "$root/$name.stop-delay")"; fi
     if [ "$delay" -gt "${time:-0}" ]; then
       # Grace expired mid-shutdown: containerd escalates and force-kills the
-      # shim. The VM still dies, but the control channel is severed — the
+      # shim. The VM still dies, but the control channel is severed: the
       # production false failure (force cleanup timed out + ttrpc: closed).
       write_field "$name" status exited
       echo "rpc error: code = Unavailable desc = ttrpc: closed" >&2
@@ -6990,7 +7054,7 @@ esac
         // Production replay (scaled): the guest's graceful stop takes longer
         // than the grace (fleet: ~60-90s under load vs the old 30s default;
         // here 3s vs 1s). containerd escalates and force-kills the shim
-        // mid-shutdown, so the stop CLI surfaces `ttrpc: closed` — but the
+        // mid-shutdown, so the stop CLI surfaces `ttrpc: closed`, but the
         // compute is verifiably down, so the upgrade must proceed, not be
         // recorded as a failure.
         let old_server = TestHttpServer::start("npub1sameagent");
@@ -7079,7 +7143,7 @@ esac
     #[test]
     fn kata_upgrade_stuck_stop_fails_closed_after_one_bounded_retry() {
         // A genuinely stuck stop (the compute never goes down) must still
-        // fail closed — after exactly one bounded retry — and restore the old
+        // fail closed, after exactly one bounded retry, and restore the old
         // canonical.
         let old_server = TestHttpServer::start("npub1sameagent");
         let temp = tempfile::tempdir().unwrap();
@@ -8361,6 +8425,105 @@ esac
             !kata_legacy_machine_named_root(&launcher.config, TEST_CONTAINER_NAME).exists(),
             "no machine-named root was created"
         );
+    }
+
+    fn cross_host_relocation_target(
+        temp: &tempfile::TempDir,
+        port: u16,
+    ) -> (KataLauncher, KataLaunchPlan, PathBuf, AgentCreationLease) {
+        let (mut launcher, plan, fake_state) = test_launcher(temp, port);
+        stage_relocation_tree(&plan.state_root);
+        let manifest = durable_state_manifest_sha256(&plan.state_root).unwrap();
+        let lease = relocation_creation_lease(
+            "agent_request_cross_host_target",
+            "finite-lat-0",
+            "finite-lat-1",
+            &manifest,
+            false,
+        );
+        launcher
+            .launch(&lease, &RuntimeLaunchOptions::default())
+            .unwrap();
+        (launcher, plan, fake_state, lease)
+    }
+
+    #[test]
+    fn relocation_target_stop_acts_only_on_the_owned_target() {
+        let server = TestHttpServer::start("npub1sameagent");
+        let temp = tempfile::tempdir().unwrap();
+        let (mut launcher, _plan, fake_state, lease) =
+            cross_host_relocation_target(&temp, server.port);
+        let status = || {
+            std::fs::read_to_string(fake_state.join(format!("{TEST_CONTAINER_NAME}.status")))
+                .unwrap()
+        };
+        assert_eq!(status(), "running");
+
+        // A stop that cannot be proven reports failure and leaves the
+        // container running, so the Runner records no failure.
+        std::fs::write(fake_state.join("stuck-stop"), "").unwrap();
+        assert!(launcher.stop_relocation_target(&lease).is_err());
+        assert_eq!(status(), "running");
+        std::fs::remove_file(fake_state.join("stuck-stop")).unwrap();
+
+        // A container under the target name that this Runner does not own is
+        // refused rather than stopped.
+        std::fs::write(
+            fake_state.join(format!("{TEST_CONTAINER_NAME}.project")),
+            "project-other",
+        )
+        .unwrap();
+        assert!(launcher.stop_relocation_target(&lease).is_err());
+        assert_eq!(status(), "running");
+        std::fs::write(
+            fake_state.join(format!("{TEST_CONTAINER_NAME}.project")),
+            "project-1",
+        )
+        .unwrap();
+
+        launcher.stop_relocation_target(&lease).unwrap();
+        assert_ne!(status(), "running");
+    }
+
+    #[test]
+    fn relocation_target_shutdown_needs_evidence_beyond_a_missing_record() {
+        let server = TestHttpServer::start("npub1sameagent");
+        let temp = tempfile::tempdir().unwrap();
+        let (mut launcher, plan, fake_state, lease) =
+            cross_host_relocation_target(&temp, server.port);
+
+        // The provider forgot the container, but an orphaned VM still holds
+        // the chat store's writer lease on the durable tree.
+        remove_fake_container(&fake_state, TEST_CONTAINER_NAME);
+        let holder = hold_writer_lease(&plan.state_root);
+        let error = launcher
+            .stop_relocation_target(&lease)
+            .expect_err("a missing record with a live writer is not a shutdown");
+        assert!(error.to_string().contains("unproved"), "{error}");
+        drop(holder);
+
+        // A writer that never takes the lease keeps changing the tree.
+        let writer = BackgroundWriter::start(plan.state_root.join("agent/client.sqlite3-wal"));
+        let error = launcher.stop_relocation_target(&lease).unwrap_err();
+        assert!(error.to_string().contains("unproved"), "{error}");
+        writer.stop();
+
+        // A running record under another name still binds the tree.
+        write_fake_container(
+            &fake_state,
+            "finite-kata-somebody-else",
+            RELOCATION_TEST_IMAGE,
+            "artifact-v1",
+            "",
+            server.port,
+            &plan.state_root,
+        );
+        let error = launcher.stop_relocation_target(&lease).unwrap_err();
+        assert!(error.to_string().contains("unproved"), "{error}");
+        remove_fake_container(&fake_state, "finite-kata-somebody-else");
+
+        // With no record, no lease holder and a quiet tree, shutdown is proved.
+        launcher.stop_relocation_target(&lease).unwrap();
     }
 
     #[test]

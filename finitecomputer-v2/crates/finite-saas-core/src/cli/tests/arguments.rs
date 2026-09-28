@@ -239,3 +239,34 @@ fn artifact_upsert_accepts_explicit_unpromoted_canary_without_changing_legacy_fl
     ])).unwrap().command,
         Some(Command::RuntimeArtifactUpsert { promoted: false, canary_runtime_id: Some(id), .. }) if id == "runtime-exact"));
 }
+
+#[test]
+fn relocation_cancel_cli_requires_the_exact_binding() {
+    let args = [
+        "finite-saas-core",
+        "runtime-relocation-cancel-exact",
+        "--relocation-request-id",
+        "agent_request_relocation",
+        "--expected-agent-runtime-id",
+        "runtime_relocating",
+        "--expected-target-source-host-id",
+        "lat3",
+    ];
+    let Some(Command::RuntimeRelocationCancelExact(parsed)) =
+        Args::try_parse_from(args).unwrap().command
+    else {
+        panic!("expected the exact relocation cancel command");
+    };
+    assert!(!parsed.confirm_target_compute_stopped && !parsed.dry_run);
+    let Some(Command::RuntimeRelocationCancelExact(parsed)) = Args::try_parse_from(
+        args.into_iter()
+            .chain(["--confirm-target-compute-stopped", "--dry-run"]),
+    )
+    .unwrap()
+    .command
+    else {
+        panic!("expected the exact relocation cancel command");
+    };
+    assert!(parsed.confirm_target_compute_stopped && parsed.dry_run);
+    assert!(Args::try_parse_from(&args[..args.len() - 2]).is_err());
+}

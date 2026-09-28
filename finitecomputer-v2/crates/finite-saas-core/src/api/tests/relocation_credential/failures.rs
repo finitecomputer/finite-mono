@@ -135,6 +135,41 @@ async fn relocation_failure_and_cancel_revoke_only_pending_credentials() {
             credential_state_for_creation(&db, &third_fixture.request_id).await,
             (true, false, None)
         );
+        // The cancelled attempt was launching, so its target Runner holds the
+        // lease until it has stopped or removed target compute.
+        let held = db
+            .admin_request_runtime_relocate_exact(crate::AdminRuntimeRelocateExactInput {
+                admin_verified_email: "failure-held-admin@finite.vip".into(),
+                admin_workos_user_id: "api-relocation-failure-held-admin".into(),
+                project_id: fixture.project_id.clone(),
+                expected_agent_runtime_id: fixture.runtime_id.clone(),
+                expected_source_host_id: fixture.source_host.clone(),
+                expected_source_machine_id: fixture.source_machine.clone(),
+                target_source_host_id: fixture.target_host.clone(),
+                expected_agent_npub: format!("npub1{}", "a".repeat(58)),
+                durable_state_manifest_sha256: "c".repeat(64),
+                operator_observed_compute_absent: true,
+                now: None,
+            })
+            .await
+            .err();
+        assert!(
+            matches!(
+                held,
+                Some(crate::CoreError::RuntimeControlOperationConflict)
+            ),
+            "{held:?}"
+        );
+        db.fail_agent_creation_request(FailAgentCreationRequestInput {
+            request_id: third_fixture.request_id.clone(),
+            runner_id: "runner-oslo-1".to_string(),
+            lease_token: third_lease.to_string(),
+            failure_message: "target compute removed after cancel".to_string(),
+            provisioned_finite_private_api_key_id: None,
+            now: None,
+        })
+        .await
+        .unwrap();
 
         let fourth_fixture = enqueue_relocation(&db, &fixture).await;
         let fourth_lease = "api-relocation-failure-complete-lease";
@@ -352,6 +387,196 @@ async fn relocation_completion_rolls_back_when_successor_is_missing_or_revoked()
                 .await
                 .unwrap()
                 .is_none()
+        );
+    })
+    .await;
+}
+
+#[tokio::test]
+async fn relocation_completion_rolls_back_when_lease_expires_before_activation() {
+    with_isolated_postgres(|db| async move {
+        let fixture = prepare_relocation(&db, "activation-expiry", true).await;
+        let predecessor = fixture.predecessor_secret.as_deref().unwrap();
+        let app = router(db.store.clone(), scoped_test_auth());
+        let lease = "api-relocation-activation-expiry-relocation-lease";
+        let (status, successor) =
+            provision_relocation_over_http(&app, &fixture.request_id, lease).await;
+        assert_eq!(status, StatusCode::OK);
+        let successor_secret = successor["secret"].as_str().unwrap().to_string();
+        register_relocation(&db, &fixture, lease).await;
+        let predecessor_state = current_credential_state(&db, &fixture.runtime_id).await;
+
+        // The lease expires inside the completion transaction, after the
+        // handoff passed its liveness check and bound the successor, and
+        // before activation reads the clock again.
+        execute_test_sql(
+            &db,
+            "CREATE FUNCTION expire_lease_when_successor_binds() RETURNS trigger
+             LANGUAGE plpgsql AS $$
+             BEGIN
+               UPDATE agent_creation_requests
+               SET lease_expires_at = clock_timestamp() - INTERVAL '1 second'
+               WHERE id = NEW.creation_request_id;
+               RETURN NEW;
+             END $$",
+            &[],
+        )
+        .await;
+        execute_test_sql(
+            &db,
+            "CREATE TRIGGER expire_lease_when_successor_binds
+             AFTER UPDATE OF agent_runtime_id ON runtime_core_credentials
+             FOR EACH ROW
+             WHEN (OLD.agent_runtime_id IS NULL AND NEW.agent_runtime_id IS NOT NULL)
+             EXECUTE FUNCTION expire_lease_when_successor_binds()",
+            &[],
+        )
+        .await;
+        let error = db
+            .complete_agent_creation_request(relocation_completion(&fixture, lease))
+            .await
+            .err();
+        assert!(
+            matches!(
+                error,
+                Some(crate::CoreError::AgentCreationRequestLeaseConflict)
+            ),
+            "completion must fail as a whole when the successor cannot activate: {error:?}"
+        );
+        // A Runner sees the same 409 that an expired lease already returns at
+        // the first clock read, so a Runner built from PR #1000 takes its
+        // existing failure path.
+        assert_eq!(
+            complete_relocation_over_http(&app, &fixture, lease).await,
+            StatusCode::CONFLICT
+        );
+        assert_eq!(creation_status(&db, &fixture.request_id).await, "launching");
+        assert_eq!(
+            current_credential_state(&db, &fixture.runtime_id).await,
+            predecessor_state
+        );
+        assert_eq!(
+            credential_state_for_creation(&db, &fixture.request_id).await,
+            (false, false, None)
+        );
+        assert!(
+            db.authenticate_runtime_credential(predecessor)
+                .await
+                .unwrap()
+                .is_some()
+        );
+        assert!(
+            db.authenticate_runtime_credential(&successor_secret)
+                .await
+                .unwrap()
+                .is_none()
+        );
+
+        // The request stays retryable: a later lease reuses the same pending
+        // successor and completes the handoff.
+        execute_test_sql(
+            &db,
+            "DROP TRIGGER expire_lease_when_successor_binds ON runtime_core_credentials",
+            &[],
+        )
+        .await;
+        expire_creation_lease(&db, &fixture.request_id).await;
+        let retry = "api-relocation-activation-expiry-retry-lease";
+        lease_relocation(&db, &fixture, retry).await;
+        let (status, again) =
+            provision_relocation_over_http(&app, &fixture.request_id, retry).await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(
+            again["secret"].as_str() == Some(successor_secret.as_str()),
+            "retry must reuse the pending successor"
+        );
+        register_relocation(&db, &fixture, retry).await;
+        complete_relocation(&db, &fixture, retry).await;
+        assert_eq!(creation_status(&db, &fixture.request_id).await, "running");
+        assert_eq!(
+            credential_state_for_creation(&db, &fixture.request_id).await,
+            (false, true, Some(fixture.runtime_id.clone()))
+        );
+        assert!(
+            db.authenticate_runtime_credential(&successor_secret)
+                .await
+                .unwrap()
+                .is_some()
+        );
+        assert!(
+            db.authenticate_runtime_credential(predecessor)
+                .await
+                .unwrap()
+                .is_none()
+        );
+    })
+    .await;
+}
+
+/// The Runner resolves an ambiguous completion by recording failure under the
+/// same lease before any cleanup. At most one of the two writes can commit;
+/// both can be rejected or roll back.
+#[tokio::test]
+async fn relocation_failure_record_and_completion_exclude_each_other() {
+    with_isolated_postgres(|db| async move {
+        let app = router(db.store.clone(), scoped_test_auth());
+
+        // Completion committed and its response was lost: the failure record
+        // is refused and the relocated Agent keeps its credential.
+        let committed = prepare_relocation(&db, "exclusive-committed", true).await;
+        let lease = "api-relocation-exclusive-committed-relocation-lease";
+        let (status, successor) =
+            provision_relocation_over_http(&app, &committed.request_id, lease).await;
+        assert_eq!(status, StatusCode::OK);
+        let successor_secret = successor["secret"].as_str().unwrap().to_string();
+        register_relocation(&db, &committed, lease).await;
+        assert_eq!(
+            complete_relocation_over_http(&app, &committed, lease).await,
+            StatusCode::OK
+        );
+        assert_eq!(
+            fail_relocation_over_http(&app, &committed, lease).await,
+            StatusCode::CONFLICT
+        );
+        assert_eq!(creation_status(&db, &committed.request_id).await, "running");
+        assert_eq!(
+            credential_state_for_creation(&db, &committed.request_id).await,
+            (false, true, Some(committed.runtime_id.clone()))
+        );
+        assert!(
+            db.authenticate_runtime_credential(&successor_secret)
+                .await
+                .unwrap()
+                .is_some()
+        );
+
+        // The failure record committed first: a delayed completion for the
+        // same lease is refused and the predecessor stays current.
+        let failed = prepare_relocation(&db, "exclusive-failed", true).await;
+        let predecessor = failed.predecessor_secret.as_deref().unwrap();
+        let lease = "api-relocation-exclusive-failed-relocation-lease";
+        let (status, _) = provision_relocation_over_http(&app, &failed.request_id, lease).await;
+        assert_eq!(status, StatusCode::OK);
+        register_relocation(&db, &failed, lease).await;
+        let predecessor_state = current_credential_state(&db, &failed.runtime_id).await;
+        assert_eq!(
+            fail_relocation_over_http(&app, &failed, lease).await,
+            StatusCode::OK
+        );
+        assert_eq!(
+            complete_relocation_over_http(&app, &failed, lease).await,
+            StatusCode::CONFLICT
+        );
+        assert_eq!(creation_status(&db, &failed.request_id).await, "failed");
+        assert_eq!(
+            current_credential_state(&db, &failed.runtime_id).await,
+            predecessor_state
+        );
+        assert!(
+            db.authenticate_runtime_credential(predecessor)
+                .await
+                .unwrap()
+                .is_some()
         );
     })
     .await;

@@ -47,6 +47,9 @@ async fn main() -> Result<()> {
         Command::RuntimeCredentialRecoverExact(args) => {
             print_json(&runtime_credential_recovery_command(args).await?)
         }
+        Command::RuntimeRelocationCancelExact(args) => {
+            print_json(&runtime_relocation_cancel_command(args).await?)
+        }
         Command::Serve => serve().await,
         Command::RuntimeArtifactUpsert {
             artifact_id,
