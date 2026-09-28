@@ -136,13 +136,15 @@ in
 
     # Fault data first so the root check passes, then fault root. Do not
     # repair or resync multi-terabyte synthetic arrays merely to test refusal.
+    # journald reads the unit's stderr stream asynchronously, so the refusal
+    # line can land in the journal shortly after systemctl returns. Poll for it.
     machine.succeed("mdadm /dev/md/data --fail /dev/disk/by-partuuid/${ids.partuuids.dataB}")
     machine.fail("systemctl start finite-storage-health.service")
-    machine.succeed("journalctl -u finite-storage-health.service --no-pager | grep -F '/dev/md/data is degraded'")
+    machine.wait_until_succeeds("journalctl -u finite-storage-health.service --no-pager | grep -F '/dev/md/data is degraded'", timeout=30)
     machine.succeed("mdadm /dev/md/root --fail /dev/disk/by-partuuid/${ids.partuuids.rootB}")
     machine.succeed("systemctl reset-failed finite-storage-health.service")
     machine.fail("systemctl start finite-storage-health.service")
-    machine.succeed("journalctl -u finite-storage-health.service --no-pager | grep -F '/dev/md/root is degraded'")
+    machine.wait_until_succeeds("journalctl -u finite-storage-health.service --no-pager | grep -F '/dev/md/root is degraded'", timeout=30)
   '';
 }).overrideTestDerivation
   (old: {
