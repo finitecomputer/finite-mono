@@ -24,7 +24,8 @@ import {
 
 export const STORAGE_ONLY_COPY =
   "Key saved. The agent default is unchanged. OpenRouter conversations may use it.";
-export const POLL_LIMIT_MS = 5 * 60_000;
+/** R10b: longer than a worst-case disconnect (5 to 7 minutes), so a normal operation finishes while watched. */
+export const POLL_LIMIT_MS = 8 * 60_000;
 
 export type InferenceOutcome =
   | { ok: true; result: AgentConnectionActionResult["result"] }
@@ -76,7 +77,7 @@ export function InferenceConnections({
   const [notice, setNotice] = useState<InferenceNotice | null>(null);
   const [acceptedId, setAcceptedId] = useState<string | null>(null);
   const [seenRunningId, setSeenRunningId] = useState<string | null>(null);
-  // The operation or sign-in whose 5-minute polling window ran out; polling resumes for anything else.
+  // The operation or sign-in whose polling window ran out; polling resumes for anything else.
   const [expiredPollKey, setExpiredPollKey] = useState<string | null>(null);
   const [visible, setVisible] = useState(true);
 
@@ -94,10 +95,8 @@ export function InferenceConnections({
     return () => document.removeEventListener("visibilitychange", update);
   }, []);
 
-  const delay = view ? pollDelayMs(view, visible) : null;
-  const pollKey = operation?.state === "running" ? operation.id : (view?.codex?.login?.attemptId ?? null);
-  const pollExpired = pollKey !== null && pollKey === expiredPollKey;
-  const lock: InferenceLock = { locked: controlsLocked(view, pollExpired), reasonId: operationLineId };
+  const { delay, pollKey, pollExpired, locked } = watchState(view, visible, expiredPollKey);
+  const lock: InferenceLock = { locked, reasonId: operationLineId };
   useEffect(() => {
     if (delay === null || pollExpired) return;
     const startedAt = Date.now();
@@ -156,10 +155,7 @@ export function InferenceConnections({
           pollExpired={pollExpired}
           busy={busy}
           onRetry={retry ? () => void run("summary", retry.action, retry.context) : null}
-          onCheckAgain={() => {
-            setExpiredPollKey(null);
-            void refresh();
-          }}
+          onCheckAgain={() => void checkAgain(refresh, () => setExpiredPollKey(null))}
         />
         {notice?.card === "summary" && view ? <NoticeLine notice={notice} view={view} testId="inference-summary-notice" /> : null}
       </section>
@@ -255,14 +251,41 @@ export function modelHintProviders(view: InferenceView | null) {
 }
 
 /**
- * R10 and R10a: locked while an operation runs and the page is still watching it (the 5-minute limit unlocks
- * it), and while a disconnect has failed, since agentd refuses every other change until it is retried. A failed
+ * R10, R10a, R10b: the lock follows the last status the page has. It is locked while that status shows an
+ * operation running, or a failed disconnect, because agentd refuses every other change until then. The polling
+ * limit unlocks nothing; "Check again" and "Try again" are never locked, so the panel can't be stuck. A failed
  * select or activate locks nothing: the next change replaces it.
  */
-export function controlsLocked(view: InferenceView | null, pollExpired: boolean) {
+export function controlsLocked(view: InferenceView | null) {
   const operation = view?.operation;
-  if (operation?.state === "running") return !pollExpired;
+  if (operation?.state === "running") return true;
   return operation?.kind === "disconnect" && operation.state === "failed";
+}
+
+/**
+ * What the page polls for, whether that polling window has run out, and whether controls are locked.
+ * `expiredPollKey` is the operation (or sign-in attempt) whose window ran out; polling runs again for anything
+ * else, or once "Check again" clears it. The lock comes from the last status alone (R10b): an expired window
+ * never unlocks it.
+ */
+export function watchState(view: InferenceView | null, visible: boolean, expiredPollKey: string | null) {
+  const operation = view?.operation ?? null;
+  const pollKey = operation?.state === "running" ? operation.id : (view?.codex?.login?.attemptId ?? null);
+  const pollExpired = pollKey !== null && pollKey === expiredPollKey;
+  const delay = view && !pollExpired ? pollDelayMs(view, visible) : null;
+  return { delay, pollKey, pollExpired, locked: controlsLocked(view) };
+}
+
+/**
+ * R10b: "Check again" reads status once, then clears the expired polling window. If that status still shows the
+ * operation running, the same poll key is live again and polling resumes; if it has ended, there is nothing to poll.
+ */
+export async function checkAgain(refresh: () => Promise<void>, resumePolling: () => void) {
+  try {
+    await refresh();
+  } finally {
+    resumePolling();
+  }
 }
 
 /** R11: the one line a route's card shows while that route is being removed, or null. */

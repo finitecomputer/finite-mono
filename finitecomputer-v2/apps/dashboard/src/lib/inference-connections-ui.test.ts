@@ -11,11 +11,14 @@ import {
   commandErrorText,
   FinitePrivateCard,
   finitePrivateAction,
+  checkAgain,
   controlsLocked,
   InferenceConnections,
   NoticeLine,
   OperationLine,
   operationText,
+  POLL_LIMIT_MS,
+  watchState,
   STORAGE_ONLY_COPY,
   type InferenceNotice,
   type InferenceRun,
@@ -582,7 +585,7 @@ test("R10: while an operation runs, every control that would start another chang
   assert.match(opener.match(/<button[^>]*inference-openrouter-open[^>]*>/u)?.[0] ?? "", / disabled=""/u);
 });
 
-test("R10: controls come back when the operation succeeds, fails, or the 5-minute watch ends", () => {
+test("R10: controls come back when the operation succeeds or fails", () => {
   for (const state of ["succeeded", "failed"]) {
     const markup = panel(v2({ saved: SAVED_OR, routes: { openrouter: KEY_SAVED }, operation: operation("select", "openrouter", state) }));
     for (const id of ["inference-finite-private-use", "inference-openrouter-use", "inference-openrouter-replace-key", "inference-openrouter-disconnect"]) {
@@ -590,12 +593,12 @@ test("R10: controls come back when the operation succeeds, fails, or the 5-minut
       assert.doesNotMatch(tag, / disabled=""|aria-describedby/u, `${id} after ${state}`);
     }
   }
+  // R10b changed this test: the polling limit no longer unlocks a running operation (see the R10b test).
   const running = view(v2({ operation: operation("select", "openrouter", "running") }));
-  assert.equal(controlsLocked(running, false), true);
-  assert.equal(controlsLocked(running, true), false, "after the 5-minute limit the page stops holding controls");
-  assert.equal(controlsLocked(view(v2({ operation: operation("select", "openrouter", "failed") })), false), false);
-  assert.equal(controlsLocked(view(legacy("openrouter", "openai/gpt-5")), false), false);
-  assert.equal(controlsLocked(null, false), false);
+  assert.equal(controlsLocked(running), true);
+  assert.equal(controlsLocked(view(v2({ operation: operation("select", "openrouter", "failed") }))), false);
+  assert.equal(controlsLocked(view(legacy("openrouter", "openai/gpt-5"))), false);
+  assert.equal(controlsLocked(null), false);
   // "Try again" and "Check again" stay as they were.
   assert.doesNotMatch(operationLine(operation("disconnect", "openrouter", "failed"), { retry: true }).match(/<button[^>]*inference-operation-retry[^>]*>/u)?.[0] ?? "", / disabled=""/u);
   assert.doesNotMatch(operationLine(operation("select", "openrouter", "running"), { pollExpired: true }).match(/<button[^>]*inference-operation-check-again[^>]*>/u)?.[0] ?? "", / disabled=""/u);
@@ -631,8 +634,7 @@ test("R10a: a failed disconnect locks every other change, and Try again stays th
     "inference-finite-private-use", "inference-openrouter-use", "inference-openrouter-replace-key", "inference-openrouter-disconnect",
   ], "openai_codex");
   const failed = view(v2({ operation: operation("disconnect", "openrouter", "failed") }));
-  assert.equal(controlsLocked(failed, false), true);
-  assert.equal(controlsLocked(failed, true), true, "the 5-minute polling limit does not unlock a failed disconnect");
+  assert.equal(controlsLocked(failed), true);
   // A failed select or activate locks nothing.
   for (const kind of ["select", "activate"]) {
     const markup = panel(v2({ saved: SAVED_OR, routes: { openrouter: KEY_SAVED }, operation: operation(kind, "openrouter", "failed") }));
@@ -646,6 +648,63 @@ test("R10a: a failed disconnect locks every other change, and Try again stays th
   assert.doesNotMatch(doneButton("inference-finite-private-use"), / disabled=""|aria-describedby/u);
   // Save and use waits only for a key now, not for the operation.
   assert.doesNotMatch(doneButton("inference-openrouter-save-and-use"), /aria-describedby/u);
+});
+
+test("R10b: the lock follows the last status, and Check again resumes the watch", async () => {
+  assert.equal(POLL_LIMIT_MS, 8 * 60_000, "longer than a worst-case disconnect (5 to 7 minutes)");
+  const running = view(v2({ saved: SAVED_OR, routes: { openrouter: KEY_SAVED }, operation: operation("disconnect", "openrouter", "running") }));
+  const id = running.operation!.id;
+
+  // Before the limit: polling, locked.
+  assert.deepStrictEqual(watchState(running, true, null), { delay: 3000, pollKey: id, pollExpired: false, locked: true });
+  assert.equal(controlsLocked(running), true);
+  // After the limit: no polling, still locked, and Check again offered and enabled.
+  assert.deepStrictEqual(watchState(running, true, id), { delay: null, pollKey: id, pollExpired: true, locked: true });
+  assert.equal(controlsLocked(running), true, "the polling limit unlocks nothing while the last status shows running");
+  const expired = html(createElement(OperationLine, {
+    view: running, showDone: false, pollExpired: true, busy: false, onRetry: null, onCheckAgain: () => {},
+  }));
+  const checkButton = expired.match(/<button[^>]*inference-operation-check-again[^>]*>/u)?.[0] ?? "";
+  assert.ok(checkButton, "Check again is offered after the limit");
+  assert.doesNotMatch(checkButton, / disabled=""/u);
+  // Even while the page's own request is in flight, Check again stays usable.
+  const busyLine = html(createElement(OperationLine, {
+    view: running, showDone: false, pollExpired: true, busy: true, onRetry: null, onCheckAgain: () => {},
+  }));
+  assert.doesNotMatch(busyLine.match(/<button[^>]*inference-operation-check-again[^>]*>/u)?.[0] ?? "", / disabled=""/u);
+
+  // Check again reads status once, then clears the expired window.
+  let expiredKey: string | null = id;
+  let status = running;
+  const events: string[] = [];
+  await checkAgain(async () => { events.push("read"); }, () => { events.push("resume"); expiredKey = null; });
+  assert.deepStrictEqual(events, ["read", "resume"]);
+  // Still running: polling resumes, and the page stays locked.
+  assert.deepStrictEqual(watchState(status, true, expiredKey), { delay: 3000, pollKey: id, pollExpired: false, locked: true });
+  assert.equal(controlsLocked(status), true);
+  // A read that fails still clears the window, so the page keeps watching the last status it has.
+  expiredKey = id;
+  await assert.rejects(checkAgain(async () => { throw new Error("offline"); }, () => { expiredKey = null; }));
+  assert.equal(expiredKey, null);
+
+  // Check again returns a status whose operation has ended: nothing to poll, and unlocked.
+  for (const state of ["succeeded", "failed"]) {
+    status = view(v2({ saved: SAVED_OR, routes: { openrouter: KEY_SAVED }, operation: operation("select", "openrouter", state) }));
+    assert.equal(watchState(status, true, id).delay, null, state);
+    assert.equal(watchState(status, true, id).locked, false, `a ${state} select unlocks, whatever the window`);
+    assert.equal(controlsLocked(status), false, `a ${state} select unlocks`);
+  }
+  // A failed disconnect stays locked (R10a); only Try again moves it on.
+  status = view(v2({ saved: SAVED_OR, routes: { openrouter: KEY_SAVED }, operation: operation("disconnect", "openrouter", "failed") }));
+  assert.equal(watchState(status, true, id).delay, null);
+  assert.equal(watchState(status, true, id).locked, true);
+  assert.equal(controlsLocked(status), true);
+  // An agent running today's agentd has no operation: never polled for one, never locked.
+  const legacyView = view(legacy("openrouter", "openai/gpt-5"));
+  assert.deepStrictEqual(watchState(legacyView, true, null), { delay: null, pollKey: null, pollExpired: false, locked: false });
+  assert.equal(controlsLocked(legacyView), false);
+  // A hidden tab never polls.
+  assert.equal(watchState(running, false, null).delay, null);
 });
 
 test("R11: while OpenRouter is being removed, its card agrees with the operation line", () => {
