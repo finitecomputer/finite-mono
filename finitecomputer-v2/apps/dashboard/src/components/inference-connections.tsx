@@ -141,7 +141,7 @@ export function InferenceConnections({
         <p data-testid="inference-summary">{view ? summaryText(view) : "Checking which model new conversations use…"}</p>
         <p className="ocean-inference-summary__hint" data-testid="inference-model-hint">
           In chat, <code>/model &lt;model&gt;</code> <code>--provider</code>{" "}
-          <code>&lt;finite-private|openrouter|openai-codex&gt;</code> switches only that conversation. Add{" "}
+          <code>&lt;{modelHintProviders(view)}&gt;</code> switches only that conversation. Add{" "}
           <code>--global</code> to change this default.
         </p>
         {view ? (
@@ -247,6 +247,11 @@ export function finitePrivateAction(view: InferenceView): AgentConnectionAction 
   return view.capabilities.has("inference.select.v1")
     ? { action: "inference_select", route: "finite_private" }
     : { action: "inference", profile: "finite_private" };
+}
+
+/** R9a: the `/model` hint names `openai-codex` only when the ChatGPT card is shown. */
+export function modelHintProviders(view: InferenceView | null) {
+  return view && showCodexCard(view) ? "finite-private|openrouter|openai-codex" : "finite-private|openrouter";
 }
 
 /**
@@ -431,6 +436,8 @@ export function commandErrorText(
       return "ChatGPT is being removed from this agent. Wait for that to finish, or try the removal again.";
     case "finite_private_unavailable":
       return "Disconnecting would leave this agent without a model: Finite Private isn't fully set up here. Choose another model first.";
+    case "facts_unavailable":
+      return "The agent couldn't check its setup right now. Try again in a moment.";
     case "activation_not_recorded":
       return "The key was saved, but the agent couldn't record the switch to OpenRouter.";
     case "agent_update_required":

@@ -625,6 +625,21 @@ test("T-W5: agentd error codes pass through with agentd's message", async (t) =>
   });
 });
 
+test("R17: a code the dashboard has no entry for, like facts_unavailable, passes through with agentd's message", async (t) => {
+  for (const [code, message] of [
+    ["facts_unavailable", "The agent couldn't check its setup right now. Try again in a moment."],
+    ["some_future_code", "A later agentd's own copy."],
+  ]) {
+    await t.test(code, async (t) => {
+      installWorld(t, { runtime: () => ({ status: "failed", error: { code, message } }) });
+      const response = await postAction(MY_MACHINE, { action: "inference_disconnect", route: "openrouter" });
+      assert.equal(response.status, 502, "the same status as every other agentd domain error");
+      assert.equal(response.headers.get("cache-control"), "no-store");
+      assert.deepStrictEqual(await response.json(), { error: message, code });
+    });
+  }
+});
+
 test("T-W8: every OpenRouter model save goes through the model policy, without an extra status read in PR1", async (t) => {
   const world = installWorld(t, { runtime: () => ({ status: "succeeded", body: { changed: false } }) });
   const select = await (await postAction(MY_MACHINE, { action: "inference_select", route: "openrouter", model: "new/model" })).json();

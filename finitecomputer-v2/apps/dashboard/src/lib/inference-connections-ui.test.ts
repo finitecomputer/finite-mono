@@ -425,6 +425,7 @@ test("T-W16: every row of the command error copy table", () => {
     ["operation_in_progress", "x", "openrouter", "Another connection change is still finishing."],
     ["disconnect_in_progress", "x", "openai_codex", "ChatGPT is being removed from this agent. Wait for that to finish, or try the removal again."],
     ["finite_private_unavailable", "x", "openrouter", "Disconnecting would leave this agent without a model: Finite Private isn't fully set up here. Choose another model first."],
+    ["facts_unavailable", "x", "openrouter", "The agent couldn't check its setup right now. Try again in a moment."],
     ["activation_not_recorded", "x", "openrouter", "The key was saved, but the agent couldn't record the switch to OpenRouter."],
     ["config_invalid", "Finite Private isn't available on this agent.", "finite_private", "Finite Private isn't available on this agent."],
     ["agent_update_required", "x", "openrouter", "This agent needs an update for this."],
@@ -683,10 +684,32 @@ test("layout: no empty footer, key-saved controls on their own row, and model ID
   assert.match(summary, /<span class="ocean-inference-id"><strong>glm-5-3-flash<\/strong>\.<\/span>/u);
   assert.deepEqual(
     [...summary.matchAll(/<code>(.*?)<\/code>/gu)].map(([, code]) => text(code)),
-    ["/model <model>", "--provider", "<finite-private|openrouter|openai-codex>", "--global"]
+    ["/model <model>", "--provider", "<finite-private|openrouter>", "--global"]
   );
-  assert.match(text(summary), /In chat, \/model <model> --provider <finite-private\|openrouter\|openai-codex> switches only that conversation\. Add --global to change this default\./u);
+  assert.match(text(summary), /In chat, \/model <model> --provider <finite-private\|openrouter> switches only that conversation\. Add --global to change this default\./u);
   assert.match(text(panel(v2({ saved: { route: "other", provider: "anthropic", model: "claude" } }))), /New conversations use Custom model · claude, set in Hermes\./u);
+});
+
+test("R9a: the /model hint names openai-codex only when the ChatGPT card is shown", () => {
+  const hint = (markup: string) => text(markup.match(/<p class="ocean-inference-summary__hint"[^>]*>(.*?)<\/p>/u)?.[1] ?? "");
+  const withCodex = "In chat, /model <model> --provider <finite-private|openrouter|openai-codex> switches only that conversation. Add --global to change this default.";
+  const withoutCodex = "In chat, /model <model> --provider <finite-private|openrouter> switches only that conversation. Add --global to change this default.";
+  const cases: Array<[string, ReturnType<typeof parseConnectionsStatus>, string]> = [
+    ["ChatGPT saved, no codex.login.v1", v2({ saved: SAVED_CODEX }), withCodex],
+    ["ChatGPT saved, codex.login.v1", v2({ saved: SAVED_CODEX, routes: { openai_codex: CODEX_ROUTE("signed_in") } }, ALL), withCodex],
+    ["not saved, no codex.login.v1", v2({ saved: SAVED_OR }), withoutCodex],
+    ["not saved, codex.login.v1", v2({ saved: SAVED_OR, routes: { openai_codex: CODEX_ROUTE("not_signed_in") } }, ALL), withCodex],
+    ["today's agentd, Finite Private saved", legacy("custom", "glm-5-3-flash"), withoutCodex],
+    ["today's agentd, OpenRouter saved", legacy("openrouter", "openai/gpt-5"), withoutCodex],
+    ["today's agentd, ChatGPT saved", legacy("openai-codex", "gpt-5.5"), withCodex],
+  ];
+  for (const [name, status, expected] of cases) {
+    const markup = panel(status);
+    assert.equal(hint(markup), expected, name);
+    // The hint and the ChatGPT card always agree.
+    assert.equal(hint(markup).includes("openai-codex"), markup.includes('data-testid="inference-codex"'), name);
+  }
+  assert.equal(hint(panel(null)), withoutCodex, "before status");
 });
 
 test("F3/F6: no rendered string claims a saved key or backup works, is ready, valid, or active, or isn't in use", () => {
