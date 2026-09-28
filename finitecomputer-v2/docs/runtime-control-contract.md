@@ -168,8 +168,9 @@ the old compute environment. For a Runtime enrolled in Core authentication,
 Core leases the relocation only to a Runner advertising
 `supportsRelocationCredentials`; that Runner fetches one successor credential
 for the exact lease before launch, and completion revokes the predecessor in
-the same transaction that switches the binding. A revoked current credential
-fails closed.
+the same transaction that switches the binding. If the successor cannot also be
+activated in that transaction, the whole completion rolls back. A revoked
+current credential fails closed.
 
 A failed pre-commit relocation removes target compute but preserves Core's
 existing Runtime/link and both durable trees. The stopped source remains the

@@ -356,3 +356,123 @@ async fn relocation_completion_rolls_back_when_successor_is_missing_or_revoked()
     })
     .await;
 }
+
+#[tokio::test]
+async fn relocation_completion_rolls_back_when_lease_expires_before_activation() {
+    with_isolated_postgres(|db| async move {
+        let fixture = prepare_relocation(&db, "activation-expiry", true).await;
+        let predecessor = fixture.predecessor_secret.as_deref().unwrap();
+        let app = router(db.store.clone(), scoped_test_auth());
+        let lease = "api-relocation-activation-expiry-relocation-lease";
+        let (status, successor) =
+            provision_relocation_over_http(&app, &fixture.request_id, lease).await;
+        assert_eq!(status, StatusCode::OK);
+        let successor_secret = successor["secret"].as_str().unwrap().to_string();
+        register_relocation(&db, &fixture, lease).await;
+        let predecessor_state = current_credential_state(&db, &fixture.runtime_id).await;
+
+        // The lease expires inside the completion transaction, after the
+        // handoff passed its liveness check and bound the successor, and
+        // before activation reads the clock again.
+        execute_test_sql(
+            &db,
+            "CREATE FUNCTION expire_lease_when_successor_binds() RETURNS trigger
+             LANGUAGE plpgsql AS $$
+             BEGIN
+               UPDATE agent_creation_requests
+               SET lease_expires_at = clock_timestamp() - INTERVAL '1 second'
+               WHERE id = NEW.creation_request_id;
+               RETURN NEW;
+             END $$",
+            &[],
+        )
+        .await;
+        execute_test_sql(
+            &db,
+            "CREATE TRIGGER expire_lease_when_successor_binds
+             AFTER UPDATE OF agent_runtime_id ON runtime_core_credentials
+             FOR EACH ROW
+             WHEN (OLD.agent_runtime_id IS NULL AND NEW.agent_runtime_id IS NOT NULL)
+             EXECUTE FUNCTION expire_lease_when_successor_binds()",
+            &[],
+        )
+        .await;
+        let error = db
+            .complete_agent_creation_request(relocation_completion(&fixture, lease))
+            .await
+            .err();
+        assert!(
+            matches!(
+                error,
+                Some(crate::CoreError::AgentCreationRequestLeaseConflict)
+            ),
+            "completion must fail as a whole when the successor cannot activate: {error:?}"
+        );
+        // A Runner sees the same 409 that an expired lease already returns at
+        // the first clock read, so it takes its existing failure path.
+        assert_eq!(
+            complete_relocation_over_http(&app, &fixture, lease).await,
+            StatusCode::CONFLICT
+        );
+        assert_eq!(creation_status(&db, &fixture.request_id).await, "launching");
+        assert_eq!(
+            current_credential_state(&db, &fixture.runtime_id).await,
+            predecessor_state
+        );
+        assert_eq!(
+            credential_state_for_creation(&db, &fixture.request_id).await,
+            (false, false, None)
+        );
+        assert!(
+            db.authenticate_runtime_credential(predecessor)
+                .await
+                .unwrap()
+                .is_some()
+        );
+        assert!(
+            db.authenticate_runtime_credential(&successor_secret)
+                .await
+                .unwrap()
+                .is_none()
+        );
+
+        // The request stays retryable: a later lease reuses the same pending
+        // successor and completes the handoff.
+        execute_test_sql(
+            &db,
+            "DROP TRIGGER expire_lease_when_successor_binds ON runtime_core_credentials",
+            &[],
+        )
+        .await;
+        expire_creation_lease(&db, &fixture.request_id).await;
+        let retry = "api-relocation-activation-expiry-retry-lease";
+        lease_relocation(&db, &fixture, retry).await;
+        let (status, again) =
+            provision_relocation_over_http(&app, &fixture.request_id, retry).await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(
+            again["secret"].as_str() == Some(successor_secret.as_str()),
+            "retry must reuse the pending successor"
+        );
+        register_relocation(&db, &fixture, retry).await;
+        complete_relocation(&db, &fixture, retry).await;
+        assert_eq!(creation_status(&db, &fixture.request_id).await, "running");
+        assert_eq!(
+            credential_state_for_creation(&db, &fixture.request_id).await,
+            (false, true, Some(fixture.runtime_id.clone()))
+        );
+        assert!(
+            db.authenticate_runtime_credential(&successor_secret)
+                .await
+                .unwrap()
+                .is_some()
+        );
+        assert!(
+            db.authenticate_runtime_credential(predecessor)
+                .await
+                .unwrap()
+                .is_none()
+        );
+    })
+    .await;
+}

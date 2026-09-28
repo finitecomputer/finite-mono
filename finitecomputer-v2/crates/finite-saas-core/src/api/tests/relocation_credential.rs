@@ -314,6 +314,26 @@ async fn credential_state_for_creation(
     state
 }
 
+async fn creation_status(db: &TestDb, request_id: &str) -> String {
+    let (client, connection) = tokio_postgres::connect(&db.url, tokio_postgres::NoTls)
+        .await
+        .unwrap();
+    let connection = tokio::spawn(async move {
+        let _ = connection.await;
+    });
+    let status = client
+        .query_one(
+            "SELECT status FROM agent_creation_requests WHERE id = $1",
+            &[&request_id],
+        )
+        .await
+        .unwrap()
+        .get(0);
+    drop(client);
+    connection.abort();
+    status
+}
+
 async fn current_credential_state(db: &TestDb, runtime_id: &str) -> (bool, bool, Option<String>) {
     let (client, connection) = tokio_postgres::connect(&db.url, tokio_postgres::NoTls)
         .await
@@ -386,6 +406,27 @@ fn relocation_completion(
         agent_npub: None,
         now: None,
     }
+}
+
+/// Posts the same body a Runner sends, so the status is what a Runner sees.
+async fn complete_relocation_over_http(
+    app: &Router,
+    fixture: &PreparedRelocation,
+    lease_token: &str,
+) -> StatusCode {
+    let body = serde_json::to_value(relocation_completion(fixture, lease_token)).unwrap();
+    send_json(
+        app,
+        "POST",
+        &format!(
+            "/api/core/v1/agent-creation-requests/{}/complete",
+            fixture.request_id
+        ),
+        &[("authorization".to_string(), runner_authorization())],
+        Some(body),
+    )
+    .await
+    .0
 }
 
 async fn complete_relocation(db: &TestDb, fixture: &PreparedRelocation, lease_token: &str) {
