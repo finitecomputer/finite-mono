@@ -14,6 +14,7 @@ from pathlib import Path
 import re
 import subprocess
 import tempfile
+import time
 import urllib.parse
 import urllib.request
 import uuid
@@ -86,6 +87,10 @@ def parsed(query):
 
 
 def push(streams):
+    # Loki rejects entries more than an hour behind a stream's newest entry, so
+    # each run gets its own stream for its hours-old synthetic events.
+    for entry in streams:
+        entry["stream"]["verify_run"] = suffix
     req = urllib.request.Request(
         LOKI + "/loki/api/v1/push",
         data=json.dumps({"streams": streams}).encode(),
@@ -106,6 +111,9 @@ try:
         )
     )
     sql("\n".join(p.read_text() for p in files), url(source_name))
+    # Events span 100 minutes: more than one hourly query split, yet inside
+    # Loki's default 2h max_chunk_age and 3h query_ingesters_within, so
+    # unflushed synthetic chunks stay visible to every query.
     seed = """
     INSERT INTO users (id,normalized_email,link_status,created_at,updated_at)
       VALUES ('verify-user','verify@example.invalid','pending',CURRENT_TIMESTAMP,CURRENT_TIMESTAMP);
@@ -122,8 +130,10 @@ try:
     INSERT INTO finite_private_request_diagnostics
       (reservation_id,request_id,api_key_id,endpoint,model,prompt_tokens,completion_tokens,first_output_ms,first_answer_ms,duration_ms,termination_reason,measurement_quality,observed_at)
       SELECT id,request_id,api_key_id,endpoint,model,11,19,240,300,900,'complete','observed_usage',
-      CASE WHEN id='verify-res-1002' THEN CURRENT_TIMESTAMP-INTERVAL '8 days' ELSE CURRENT_TIMESTAMP END
-      FROM finite_private_reservations;
+      CASE WHEN n=1002 THEN CURRENT_TIMESTAMP-INTERVAL '8 days'
+        WHEN n<=500 THEN CURRENT_TIMESTAMP-INTERVAL '100 minutes'+n*INTERVAL '1 second'
+        ELSE CURRENT_TIMESTAMP-INTERVAL '90 minutes'+(n-501)*INTERVAL '10 seconds' END
+      FROM finite_private_reservations, LATERAL (SELECT right(id,4)::int AS n) seq;
     """
     sql(seed.replace("verify-key", "verify-key-" + suffix), url(source_name))
     module_spec = importlib.util.spec_from_file_location(
@@ -157,30 +167,57 @@ try:
             ROOT / "infra/monitoring/grafana/dashboards/finite-private-requests.json"
         ).read_text()
     )
-    expressions = [
-        ("loki_count", "Measurement quality · retained requests", 0, 1001),
-        ("loki_output_tokens", "Input / output tokens by Project · retained events", 1, 19019),
-    ]
-    for label, title, target, expected in expressions:
-        panel = next(panel for panel in dashboard["panels"] if panel["title"] == title)
-        expression = panel["targets"][target]["expr"]
-        for variable, value in {
-            "$__range": "1h",
-            "$model": "synthetic-model",
-            "$endpoint": "/v1/chat/completions",
-            "${project:raw}": ".*",
-            "${runtime:raw}": ".*",
-            "${key:raw}": "verify-key-" + suffix,
-        }.items():
-            expression = expression.replace(variable, value)
-        endpoint = (
-            LOKI + "/loki/api/v1/query?" + urllib.parse.urlencode({"query": expression})
+    # Per-request value of every Loki instant panel. Loki splits instant
+    # queries longer than one hour, so each window must reconcile with Core.
+    per_request = {
+        ("Input / output tokens by Project · retained events", 0): 11,
+        ("Input / output tokens by Project · retained events", 1): 19,
+        ("Input / output tokens by key · retained events", 0): 11,
+        ("Input / output tokens by key · retained events", 1): 19,
+        ("Measurement quality · retained requests", 0): 1,
+        ("Termination reasons · retained requests", 0): 1,
+    }
+    instant = {
+        (panel["title"], index): target["expr"]
+        for panel in dashboard["panels"]
+        if panel.get("datasource", {}).get("uid") == "finite-loki"
+        for index, target in enumerate(panel.get("targets", []))
+        if target.get("queryType") == "instant"
+    }
+    assert instant.keys() == per_request.keys(), sorted(instant)
+    evaluated_at = int(time.time())
+    for window, seconds in (("1h", 3600), ("24h", 86400), ("168h", 604800)):
+        requests = int(
+            sql(
+                "SELECT COUNT(*) FROM finite_private_request_diagnostics "
+                f"WHERE observed_at > to_timestamp({evaluated_at - seconds}) "
+                f"AND observed_at <= to_timestamp({evaluated_at}) "
+                f"AND observed_at >= to_timestamp({evaluated_at}) - INTERVAL '7 days';",
+                url(source_name),
+            )
         )
-        with urllib.request.urlopen(endpoint, timeout=15) as response:
-            result = json.load(response)["data"]["result"]
-            value = sum(float(series["value"][1]) for series in result)
-        assert value == expected, (label, value, expected)
-        report[label] = value
+        report[window] = requests
+        for (title, index), expression in instant.items():
+            for variable, value in {
+                "$__range": window,
+                "$model": "synthetic-model",
+                "$endpoint": "/v1/chat/completions",
+                "${project:raw}": ".*",
+                "${runtime:raw}": ".*",
+                "${key:raw}": "verify-key-" + suffix,
+            }.items():
+                expression = expression.replace(variable, value)
+            endpoint = (
+                LOKI
+                + "/loki/api/v1/query?"
+                + urllib.parse.urlencode({"query": expression, "time": evaluated_at})
+            )
+            with urllib.request.urlopen(endpoint, timeout=30) as response:
+                result = json.load(response)["data"]["result"]
+                value = sum(float(series["value"][1]) for series in result)
+            expected = requests * per_request[(title, index)]
+            assert value == expected, (window, title, index, value, expected)
+    assert report["1h"] < report["24h"] == report["168h"] == 1001, report
     with tempfile.TemporaryDirectory(prefix="metrics-restore-") as directory:
         dump = Path(directory) / "core.dump"
         command(

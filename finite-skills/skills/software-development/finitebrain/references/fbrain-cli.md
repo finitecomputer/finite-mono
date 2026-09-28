@@ -279,12 +279,11 @@ fbrain collaborator ensure-admin \
   --json
 ```
 
-`--target` resolution is unified with `invite brain create`: an email bound
-to a Finite account resolves to that account's Member Identity npub through
-the server's account authorities, a NIP-05 name resolves through its domain,
-and a bare npub (or hex public key) is used directly. An email with neither
-a Finite account nor a serving NIP-05 domain fails with the resolver's error
-rather than falling back to a guess.
+`--target` resolution is unified with `invite brain create`: a bare npub (or
+hex public key) is used directly, and an email-shaped name resolves only
+through public NIP-05. Brain does not consult account authorities; a name
+without a matching NIP-05 record fails with the resolver's error rather than
+falling back to a guess.
 
 `collaborator ensure-admin` is the normal email-first Organization Brain
 sharing operation. Do not precede it with an ad hoc public NIP-05 probe. The
@@ -312,24 +311,16 @@ normal sharing workflow.
 
 ## Invitations And Sharing
 
-`invite brain create --target <email>` and
-`invite folder create --target <email>` are the blessed invite paths. For a
-Finite account email the CLI resolves the account's human and managed agents
-into one plan (Brain membership, or Guest access to exactly one Folder); a
-signer with Brain admin standing commits it directly, everyone else files an
-approval request that a Brain admin signs (`fbrain approvals approve` or the
-chat approval card; Folder plans additionally need the key-holding
-committer). Emails without a Finite account fall back to the one-time email
-invitation.
+`invite brain create --target <npub|NIP-05>` and
+`invite folder create --target <npub|NIP-05>` invite exactly the resolved key
+and require Brain admin standing. To invite an email address with no public
+NIP-05, use `invite-token create --brain <id> --email <email>`: the token link
+is the capability, and the email is only its delivery.
 
-Every invitation receipt carries a self-describing `deliveryStatus`:
-`sent` (a courtesy email with the public instructions URL reached the human
-account mailbox), `in_app` (the npub-bound invitee — managed agents, or
-humans when no mailer is configured — receives it in their authenticated
-client, not by email), `not_configured` (server has no invite mailer), and
-`failed` (the courtesy email errored after the invitations were already
-committed; they remain valid and visible in-app). `in_app` is the normal
-outcome for account-backed invitations, not a delivery failure.
+Key-addressed invitations report `deliveryStatus: in_app`; the invitee sees
+them in their authenticated client. Invite Tokens report `sent`,
+`not_configured`, or `failed` when an email was requested (the token stays
+valid if the email fails) and `manual` otherwise.
 
 `invite brain list` answers two different questions depending on the flag:
 with no `--brain` it lists invitations RECEIVED by the acting identity
@@ -341,11 +332,9 @@ anything?", run the no-flag form; `brain list --json` rows with
 (`invitation-...`); an invite code (`invite-...`) is resolved to its id by
 the code's public `llms.txt` instructions URL.
 
-When your invite files an approval request, tell the user: an approval card
-appears in their chat (they can also run `fbrain approvals list`). When the
-user asks whether anything is waiting for them, check both sides: your own
-`fbrain invite brain list` for invitations addressed to your principal, and
-their pending approval and invitation cards in chat.
+When the user asks whether anything is waiting for them, check both sides:
+your own `fbrain invite brain list` for invitations addressed to your
+principal, and their pending approval and invitation cards in chat.
 
 ```sh
 fbrain invite brain create --target <email|npub>
@@ -379,7 +368,6 @@ Invitations and Mount Offers default to seven days and accept `--expires-in`
 from `1h` through `30d`. Brain Invitations create Members. Folder Invitations
 create bounded Guest access. Mounts are source-backed and work between either
 Brain kind; the CLI opens and wraps required Folder grants in memory.
-Folder Invitations work for registered identities and unregistered email
-addresses. Unregistered recipients claim the bounded invitation after exact
-email verification using the delivered Invite Secret file. A Folder's native
-access mode remains unchanged; explicit Guest access is orthogonal to it.
+Folder Invitations target an exact key, supplied directly or resolved through
+public NIP-05; they do not invite an unregistered email address. A Folder's
+native access mode remains unchanged; explicit Guest access is orthogonal to it.

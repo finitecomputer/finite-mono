@@ -4,9 +4,6 @@ This document is for humans and agents working on the FiniteBrain codebase.
 The root `README.md` is intentionally agent-first and focuses on installing
 and using `fbrain`.
 
-Read `CONTEXT.md` before changing code. It defines the product vocabulary used
-by code, docs, tests, skills, and prompts.
-
 ## Product Shape
 
 FiniteBrain is an encrypted knowledge system where trusted clients and agent

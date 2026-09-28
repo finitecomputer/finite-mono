@@ -101,15 +101,20 @@ these controls before deploying the writer:
 Loki pushes are acknowledged in Postgres only after success. An ambiguous
 push may replay the same timestamp and canonical payload. Log queries suppress
 identical duplicates, but Loki 3.5.8 metric sums can still double-count them.
-Usage queries therefore take the per-reservation maximum before summing; counts
-unwrap a constant one and apply the same rule. IDs are temporary query fields,
-not persistent stream labels. Preserve this contract when changing queries.
+Usage queries therefore take one `last_over_time` value per reservation before
+summing; counts unwrap a constant one and apply the same rule. Do not use
+`max_over_time`: Loki splits instant queries longer than one hour and merges a
+pushed-down `sum` of `max_over_time` splits with `max`, reporting the busiest
+hour instead of the window total. Loki does not split `last_over_time`. IDs are
+temporary query fields, not persistent stream labels. Preserve this contract
+when changing queries.
 Grafana instant metric tables need the rows-to-fields transform to show every
 returned key/Project instead of reducing a result to one bar.
 
 Run `just monitoring private-request-integration http://127.0.0.1:3310` with a
 disposable Loki instance. It uses real scratch Postgres to prove batch replay,
-token totals, expiry, and restore with intact accounting and empty diagnostics.
+1h/24h/72h totals for every Loki instant panel, expiry, and restore with intact
+accounting and empty diagnostics.
 
 ## Separate production activation
 

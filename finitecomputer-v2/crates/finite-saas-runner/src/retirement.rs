@@ -10,7 +10,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::fs::{self, File, OpenOptions};
 use std::io::{Read, Write};
 #[cfg(unix)]
-use std::os::unix::fs::{OpenOptionsExt, PermissionsExt, symlink};
+use std::os::unix::fs::{FileTypeExt, OpenOptionsExt, PermissionsExt, symlink};
 use std::path::{Component, Path, PathBuf};
 use time::OffsetDateTime;
 use walkdir::WalkDir;
@@ -99,6 +99,10 @@ pub struct VerifiedRecoveryZip {
 
 /// Produce the content-bearing portion of the manifest used as the quiescence
 /// fence. Two consecutive results must be exactly equal before archival.
+///
+/// Known Hermes sockets ([`is_ephemeral_hermes_socket_path`]) are omitted, so
+/// the archive and its restore never contain them. Any other special file is
+/// a hard failure.
 pub fn source_manifest(data_root: &Path) -> RecoveryZipResult<Vec<RecoveryManifestEntry>> {
     let metadata = fs::symlink_metadata(data_root)?;
     if !metadata.file_type().is_dir() {
@@ -120,6 +124,10 @@ pub fn source_manifest(data_root: &Path) -> RecoveryZipResult<Vec<RecoveryManife
         reject_path_below_symlink(&path, &entries)?;
 
         let metadata = fs::symlink_metadata(item.path())?;
+        #[cfg(unix)]
+        if metadata.file_type().is_socket() && is_ephemeral_hermes_socket_path(relative) {
+            continue;
+        }
         let mode = unix_mode(&metadata);
         let entry = if metadata.file_type().is_dir() {
             RecoveryManifestEntry {
@@ -165,6 +173,29 @@ pub fn source_manifest(data_root: &Path) -> RecoveryZipResult<Vec<RecoveryManife
     }
     entries.sort_by(|a, b| a.path.cmp(&b.path));
     Ok(entries)
+}
+
+/// Hermes' control socket and per-process loop-liveness sockets. Hermes
+/// recreates them on startup and they carry no durable state, so both the
+/// retirement manifest and the cold-relocation state manifest omit them.
+/// Regular files or symlinks at these paths are still recorded.
+#[cfg(unix)]
+pub(crate) fn is_ephemeral_hermes_socket_path(path: &Path) -> bool {
+    if path == Path::new("agent/hermes-home/gateway.sock") {
+        return true;
+    }
+    if path.parent() != Some(Path::new("agent/hermes-home/state")) {
+        return false;
+    }
+    path.file_name()
+        .and_then(|name| name.to_str())
+        .and_then(|name| name.strip_prefix("gateway.loop-tick."))
+        .and_then(|name| name.strip_suffix(".sock"))
+        .is_some_and(|pid| {
+            !pid.is_empty()
+                && pid.bytes().all(|byte| byte.is_ascii_digit())
+                && pid.parse::<u32>().is_ok_and(|pid| pid > 0)
+        })
 }
 
 pub fn create_recovery_zip(
@@ -860,5 +891,63 @@ mod tests {
             let _listener = UnixListener::bind(source.join("socket")).unwrap();
             assert!(source_manifest(&source).is_err());
         }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn archive_omits_only_known_hermes_sockets() {
+        use std::os::unix::net::UnixListener;
+
+        let temp = tempdir().unwrap();
+        let source = temp.path().join("source");
+        let state = source.join("agent/hermes-home/state");
+        fs::create_dir_all(&state).unwrap();
+        fixture(&source);
+        fs::write(state.join("gateway.heartbeat"), b"retain heartbeat").unwrap();
+        let expected = source_manifest(&source).unwrap();
+
+        // A stopped Hermes leaves both sockets behind (finite-lat-5, 2026-09-28).
+        let control = source.join("agent/hermes-home/gateway.sock");
+        let loop_tick = state.join("gateway.loop-tick.29.sock");
+        drop(UnixListener::bind(&control).unwrap());
+        drop(UnixListener::bind(&loop_tick).unwrap());
+        assert_eq!(source_manifest(&source).unwrap(), expected);
+
+        let archive = temp.path().join("retirement.zip");
+        let created = create_recovery_zip(&source, &archive, &context()).unwrap();
+        assert_eq!(created.manifest.entries, expected);
+        let restored = temp.path().join("restored");
+        restore_recovery_zip(&archive, &restored, Some(&context())).unwrap();
+        assert_eq!(source_manifest(&restored).unwrap(), expected);
+        assert!(!restored.join("agent/hermes-home/gateway.sock").exists());
+        assert!(
+            !restored
+                .join("agent/hermes-home/state/gateway.loop-tick.29.sock")
+                .exists()
+        );
+        assert!(
+            fs::symlink_metadata(&loop_tick)
+                .unwrap()
+                .file_type()
+                .is_socket()
+        );
+
+        fs::remove_file(&loop_tick).unwrap();
+        fs::write(&loop_tick, b"retain regular file").unwrap();
+        assert!(
+            source_manifest(&source)
+                .unwrap()
+                .iter()
+                .any(|entry| entry.path == "agent/hermes-home/state/gateway.loop-tick.29.sock")
+        );
+        fs::remove_file(&loop_tick).unwrap();
+
+        let _unknown = UnixListener::bind(state.join("other.sock")).unwrap();
+        assert!(
+            source_manifest(&source)
+                .unwrap_err()
+                .to_string()
+                .contains("unsupported source file kind")
+        );
     }
 }

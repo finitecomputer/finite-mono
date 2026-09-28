@@ -188,8 +188,8 @@ in
   };
 
   # Identity's operator API is intentionally absent from its public Caddy
-  # route. Give only the authenticated lat3 WireGuard peer a private path to
-  # the same loopback Authority used by trusted same-host products.
+  # route. This retired lat1 proxy keeps only the legacy lat3 peer; active
+  # Runner peers use lat2's proxy (see finite-lat-2/default.nix).
   systemd.sockets.finite-identity-private-proxy = {
     description = "Private finite-lat Runner access to Identity Authority";
     wantedBy = [ "sockets.target" ];

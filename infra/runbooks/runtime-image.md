@@ -2,14 +2,14 @@
 
 `ghcr.io/finitecomputer/agent-runtime` (mono-owned; the legacy
 `finite-agent-runtime` package is frozen with the deployed pins) — the image
-the Kata runners on lat3 and lat4 launch into. Phala is
+the Kata runners on lat3, lat4, and lat5 launch into. Phala is
 a fast follow and must consume the same artifact contract and image digest.
 Image
 definitions map: `infra/images/README.md`. Rung-ladder discipline: see
 [README.md](README.md) — no Kata/Phala/Tinfoil promotion without a Docker proof.
 
 > **Runner status:** finite-saas-runner runs as a NixOS systemd timer on the
-> active Kata hosts lat3 and lat4 (`modules/finite-saas-runner.nix`) and
+> active Kata hosts lat3, lat4, and lat5 (`modules/finite-saas-runner.nix`) and
 > advertises the Kata adapter. lat1 is retired/leftover-inactive; its runner
 > cannot lease work. Phala is a fast follow and must consume the same
 > artifact contract and image digest.
@@ -51,6 +51,33 @@ rollback must retain the additive column/guard; do not drop recovery data or
 substitute an old data tree after newer writes. Relocation/new-launch recovery
 of an unpromoted image is intentionally unavailable; use the previous qualified
 release and the verified Recovery Set if recovery is needed.
+
+### Diagnosing a Principal mismatch before retrying
+
+An identity mismatch can be a published-port routing error even when the
+guest's durable identity is intact. On the exact runner, use the read-only
+canonical probe:
+
+```sh
+scripts/finite-status --json --runtime-route SOURCE_MACHINE_ID \
+  --expected-agent-principal-sha256 SHA256_OF_CORE_AGENT_NPUB
+```
+
+Establish the expected Principal independently from Core, never from the
+published endpoint under investigation. The probe compares `/contact` through
+the published address and the inspected guest IP, retains only Principal
+hashes, and reports the matching NAT chains and container port claims. It
+reads saved claims with `nerdctl port`, including stopped containers whose
+ordinary inspect output has no port bindings. The owner inventory is scoped
+to the `finite` namespace and is diagnostic, not an allocation authority.
+It does not inspect credentials or change networking. A green result proves only
+agreement of these identity routes at observation time, not Chat readiness.
+
+If the direct route matches Core but the published route differs, preserve
+both container owners and stop the rollout. Two running containers can claim
+the same host address and port; selecting a NAT rule by order does not resolve
+ownership. Do not rewrite an Agent identity or disable the upgrade guard to
+make that topology pass.
 
 ## PRECONDITIONS
 
@@ -111,9 +138,9 @@ Recovery Readiness.
 ### 3. Promote to the Kata hosts
 
 The runner does **not** read an image tag directly. On each active NixOS Kata
-host (lat3 and lat4) the env is `/etc/finite/runner.env` (secrets bootstrap —
+host (lat3, lat4, and lat5) the env is `/etc/finite/runner.env` (secrets bootstrap —
 `infra/nixos/README.md`; template:
-`infra/hosts/lat1/systemd/runner.env.example`). The pin is:
+`infra/nixos/hosts/finite-lat-{3,4,5}/runner.env.example`). The pin is:
 
 - **`FC_RUNNER_RUNTIME_ARTIFACT_ID`** (e.g.
   `finite-agent-runtime-canary-20260702-41b0c6d`) — product launches fetch
@@ -131,7 +158,7 @@ So promotion is two steps — **in this order**:
    additive field defaults to `false`, so older/N-1 artifacts and rollbacks do
    not inherit a control their image cannot execute.
 2. Edit `FC_RUNNER_RUNTIME_ARTIFACT_ID` in `/etc/finite/runner.env` on every
-   Kata host (lat3 and lat4; lat1 is leftover/inactive only). That operator
+   Kata host (lat3, lat4, and lat5; lat1 is leftover/inactive only). That operator
    file is the only place the pin exists: the Nix-rendered shared env
    deliberately carries no default, and the unit fails closed at start
    (`FC_RUNNER_RUNTIME_ARTIFACT_ID is required`) if it is missing. No restart
@@ -348,7 +375,7 @@ plan may differ only by entries Core already records on the target artifact,
 and each entry is reconciled before acting — already on target is verified and
 skipped, an identical in-flight upgrade request is awaited (Core never
 enqueues a duplicate), and anything else executes normally. The same wrapper
-covers lat3 and lat4 with `--host lat3` or `--host lat4` (default `lat1`
+covers lat3, lat4, and lat5 with `--host lat3`, `--host lat4`, or `--host lat5` (default `lat1`
 is leftover/inactive only). The plan is provably single-host and mixed-host
 plans are refused. Core CLI calls always run on lat2; only provider facts
 and Runner addressing follow `--host`.
