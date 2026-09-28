@@ -51,7 +51,6 @@ pub(crate) struct ServeGate {
 }
 
 impl ServeGate {
-    #[cfg_attr(not(test), expect(dead_code, reason = "wired in A1c"))]
     pub(crate) fn new(intent_path: PathBuf) -> Self {
         Self {
             intent_path: Some(intent_path),
@@ -83,10 +82,6 @@ pub(crate) struct HostedHermesHandle {
 }
 
 impl HostedHermesHandle {
-    pub(crate) fn start(home: &Path) -> Result<Option<Self>, AgentdError> {
-        Self::start_gated(home, ServeGate::default())
-    }
-
     pub(crate) fn start_gated(home: &Path, gate: ServeGate) -> Result<Option<Self>, AgentdError> {
         if std::env::var_os("FINITE_CORE_URL").is_some()
             || std::env::var_os("FINITE_CORE_CREDENTIAL").is_some()
@@ -102,7 +97,6 @@ impl HostedHermesHandle {
     /// Stops the running child and returns once it has exited. A new child
     /// starts as soon as the gate allows: at once for a credential change, or
     /// only after the disconnect record is deleted.
-    #[expect(dead_code, reason = "wired in A1c")]
     pub(crate) async fn restart(&self) {
         let Some(restart) = &self.restart else {
             return;

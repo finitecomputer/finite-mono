@@ -256,7 +256,6 @@ fn required_model(model: Option<&str>) -> Result<&str, AgentdError> {
 }
 
 /// The capabilities status advertises (§4.2).
-#[cfg_attr(not(test), expect(dead_code, reason = "wired in A1c"))]
 pub(crate) fn capabilities() -> Vec<&'static str> {
     BASE_CAPABILITIES
         .iter()
@@ -420,7 +419,6 @@ impl OperationStatus {
 /// `model` is the raw `config.yaml` `model` value, and `dotenv_key` the value
 /// of the last `OPENROUTER_API_KEY` line in `.env`. `routes.openai_codex` and
 /// `operation` are left for the caller to fill.
-#[cfg_attr(not(test), expect(dead_code, reason = "wired in A1c"))]
 pub(crate) fn derive_status(
     model: &Value,
     dotenv_key: Option<&str>,

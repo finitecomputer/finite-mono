@@ -81,7 +81,6 @@ pub(crate) enum CodexModelsUnavailable {
 }
 
 /// `None` unless `codex.login.v1` is advertised.
-#[expect(dead_code, reason = "wired in A1c")]
 pub(crate) fn route_status(
     _state: &CodexState,
     _facts: &InferenceFacts,
@@ -89,7 +88,6 @@ pub(crate) fn route_status(
     None
 }
 
-#[expect(dead_code, reason = "wired in A3")]
 pub(crate) async fn start(
     _state: &CodexState,
     _hermes_home: &Path,
@@ -99,7 +97,6 @@ pub(crate) async fn start(
     ))
 }
 
-#[expect(dead_code, reason = "wired in A3")]
 pub(crate) async fn cancel(
     _state: &CodexState,
     _attempt_id: &str,
@@ -113,12 +110,10 @@ pub(crate) async fn cancel(
 /// cancel leaves the attempt `interrupted`. Without a login manager there is
 /// no attempt to cancel, so a disconnect recorded by a newer image still
 /// completes here (§4.3 cell 6b).
-#[expect(dead_code, reason = "wired in A1c")]
 pub(crate) async fn cancel_for_disconnect(_state: &CodexState) -> Result<(), AgentdError> {
     Ok(())
 }
 
-#[expect(dead_code, reason = "wired in A3")]
 pub(crate) async fn models(_hermes_home: &Path) -> Result<CodexModels, AgentdError> {
     Err(AgentdError::UnsupportedCommand(
         "agent.codex.models".to_owned(),

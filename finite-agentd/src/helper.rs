@@ -40,7 +40,13 @@ const CLEAR_DEADLINE: Duration = Duration::from_secs(20);
 
 /// The providers `clear-auth` accepts.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[cfg_attr(not(test), expect(dead_code, reason = "wired in A1c"))]
+#[cfg_attr(
+    not(test),
+    expect(
+        dead_code,
+        reason = "only `clear_auth` takes it, and agentd has no caller"
+    )
+)]
 pub(crate) enum HelperProvider {
     Openrouter,
     OpenaiCodex,
@@ -71,7 +77,6 @@ impl HelperCommand {
 }
 
 /// Read-only redacted facts (§8.2.1).
-#[expect(dead_code, reason = "wired in A1c")]
 pub(crate) async fn inference_facts(hermes_home: &Path) -> Result<InferenceFacts, AgentdError> {
     let value = run_helper(
         &HelperCommand::from_env(),
@@ -84,7 +89,10 @@ pub(crate) async fn inference_facts(hermes_home: &Path) -> Result<InferenceFacts
 }
 
 /// Upstream `clear_provider_auth` for one provider. `true` if anything was cleared.
-#[expect(dead_code, reason = "wired in A1c")]
+#[expect(
+    dead_code,
+    reason = "no agentd caller: the launcher's pending-disconnect step clears (§3.7)"
+)]
 pub(crate) async fn clear_auth(
     hermes_home: &Path,
     provider: HelperProvider,
@@ -102,7 +110,10 @@ pub(crate) async fn clear_auth(
 /// Clears conversation overrides naming any of `providers`. Only safe with no
 /// gateway running (X7); the launcher's pending-disconnect step is the normal
 /// caller.
-#[expect(dead_code, reason = "wired in A1c")]
+#[expect(
+    dead_code,
+    reason = "no agentd caller: the launcher's pending-disconnect step clears (§3.7)"
+)]
 pub(crate) async fn clear_session_overrides(
     hermes_home: &Path,
     providers: &[&str],

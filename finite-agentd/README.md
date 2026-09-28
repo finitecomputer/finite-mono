@@ -32,7 +32,12 @@ Platform Channel:
 - `agent.status.inspect`
 - `agent.owner.claim`
 - `agent.connections.status`
-- `agent.inference.apply`
+- `agent.inference.apply` (v1), `agent.inference.select`, and
+  `agent.inference.disconnect`
+- `agent.openrouter.usage`, `agent.openrouter.connect`,
+  `agent.codex.login.start`, `agent.codex.login.cancel`, and
+  `agent.codex.models` (dispatched and admitted; they answer
+  `unsupported_command` until their PR2 and PR3 bodies land)
 - `agent.telegram.connect`, `agent.telegram.approve`, `agent.telegram.home`,
   and `agent.telegram.disconnect`
 - `agent.google.apply` and `agent.google.disconnect`
@@ -68,6 +73,41 @@ an empty target. Local Hermes CI runs the encrypted bridge flow, but its
 wrapper can still synthesize the passing report artifact when the richer
 in-test report hook is absent; that report is not independent live-runtime
 evidence.
+
+## Inference connections
+
+The inference contract is `finitecomputer-v2/docs/runtime-control-contract.md`;
+the design is FIN-129/FIN-130.
+
+- `agent.connections.status` keeps its legacy `inference.profile/provider/model`
+  fields unchanged and adds `inference.saved`, `routes`, `fallback`, and
+  `operation`, plus `capabilities` at the root of the reply. Every added field
+  reports stored facts. None says a route works. Redacted Hermes facts come
+  from `python -m hermes_cli.finite_inference_helper inference-facts`, cached
+  on the stats of `config.yaml`, `.env`, and `auth.json` for at most 30 s. If
+  the helper fails, those fields are `unknown`.
+- v1 `agent.inference.apply` is synchronous and wire-compatible. It keeps its
+  `.env` snapshot restore and verifies after the restart.
+- `agent.inference.select` and `agent.inference.disconnect` validate
+  synchronously, record an intent, and reply `{"accepted": true,
+  "operation_id": …}` or `{"changed": false}`. A background executor writes,
+  restarts, and verifies. The intent is `agent/agentd/inference-intent.json`:
+  one slot, mode 0600, no secret. Every command passes one admission check
+  against it first. Hermes starts before a recorded intent resumes, and a bad
+  intent never delays chat.
+- The Hermes process gets `FINITE_AGENTD_INTENT_PATH`, so the launcher can
+  apply a pending disconnect's clears while no gateway runs. The native
+  `hermes serve` never starts while a disconnect intent exists.
+- OpenRouter keys are checked with `GET /key` only. No completion request is
+  ever sent to test a key.
+
+Test-only environment, never set in production:
+`FINITE_AGENTD_OPENROUTER_API_BASE` (`https://…` or
+`http://127.0.0.1:<port>` only), and `FINITE_AGENTD_INFERENCE_HELPER_PYTHON` /
+`FINITE_AGENTD_INFERENCE_HELPER_MODULE`. agentd removes the helper's own test
+variables (`FINITE_CODEX_AUTH_ISSUER`, `FINITE_CODEX_LOGIN_DEADLINE_S`,
+`FINITE_HELPER_TEST_BARRIER`, `FINITE_HELPER_TEST_BARRIER_FILE`) from the
+helper's environment.
 
 ## Optional hosted Hermes process
 

@@ -114,7 +114,6 @@ pub(crate) struct Executor<H> {
 }
 
 impl<H: ExecutorHost> Executor<H> {
-    #[cfg_attr(not(test), expect(dead_code, reason = "wired in A1c"))]
     pub(crate) fn new(
         host: H,
         config: ConfigManager,
@@ -135,7 +134,6 @@ impl<H: ExecutorHost> Executor<H> {
 
     /// At startup, after Hermes has started: re-arm a failed record with a
     /// fresh budget, then run it.
-    #[cfg_attr(not(test), expect(dead_code, reason = "wired in A1c"))]
     pub(crate) async fn resume_at_startup(&self) {
         {
             let _running = self.running.lock().await;
@@ -200,7 +198,6 @@ impl<H: ExecutorHost> Executor<H> {
 
     /// `inference.operation` in status: the record, or the last success for
     /// ten minutes after its record was deleted.
-    #[cfg_attr(not(test), expect(dead_code, reason = "wired in A1c"))]
     pub(crate) fn operation(&self, record: Option<&IntentRecord>) -> Option<OperationStatus> {
         if let Some(record) = record {
             return Some(OperationStatus::from_record(record));

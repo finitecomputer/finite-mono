@@ -70,7 +70,6 @@ pub(crate) enum IntentState {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[cfg_attr(not(test), expect(dead_code, reason = "wired in A1c"))]
 pub(crate) enum AdmitCommand {
     Status,
     OpenRouterUsage,
@@ -118,7 +117,6 @@ impl IntentKind {
 
 impl IntentRecord {
     /// A fresh `running` record at phase `accepted` with a new `op_<32 hex>` id.
-    #[cfg_attr(not(test), expect(dead_code, reason = "wired in A1c"))]
     pub(crate) fn new(
         kind: IntentKind,
         route: IntentRoute,
@@ -155,7 +153,6 @@ impl IntentRecord {
 }
 
 /// The intent path for an agent home (`$FINITECHAT_HOME/agentd/inference-intent.json`).
-#[cfg_attr(not(test), expect(dead_code, reason = "wired in A1c"))]
 pub(crate) fn intent_path(agent_home: &Path) -> PathBuf {
     agent_home.join("agentd").join(INTENT_FILE_NAME)
 }
@@ -228,7 +225,6 @@ pub(crate) fn clear(path: &Path) -> Result<(), AgentdError> {
 
 /// The §3.11 admission table. Every command calls this after its schema check
 /// and before any other work.
-#[cfg_attr(not(test), expect(dead_code, reason = "wired in A1c"))]
 pub(crate) fn admit(
     record: Option<&IntentRecord>,
     command: AdmitCommand,

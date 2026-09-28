@@ -190,7 +190,6 @@ pub(crate) struct FactsCache {
 }
 
 impl FactsCache {
-    #[cfg_attr(not(test), expect(dead_code, reason = "wired in A1c"))]
     pub(crate) async fn get_or_fetch<F, Fut>(&self, hermes_home: &Path, fetch: F) -> InferenceFacts
     where
         F: FnOnce() -> Fut,
