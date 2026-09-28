@@ -1228,6 +1228,14 @@ button.ocean-pill-button {
   font-size: 0.85em;
 }
 
+/* A model ID or command wraps as one piece; it breaks inside only when it alone is wider than the card. */
+.ocean-inference-id,
+.ocean-inference-summary__hint code {
+  display: inline-block;
+  max-width: 100%;
+  overflow-wrap: anywhere;
+}
+
 .ocean-inference-summary__operation {
   display: flex;
   flex-wrap: wrap;

@@ -18,7 +18,7 @@ export function ConnectionCard({
   testId,
 }: {
   account?: string | null;
-  children: ReactNode;
+  children?: ReactNode;
   description: ReactNode;
   error?: string | null;
   footer?: ReactNode;
@@ -55,7 +55,7 @@ export function ConnectionCard({
             {error ? <p className="mt-2 text-sm text-destructive">{error}</p> : null}
           </div>
         </div>
-        <div className="ocean-connection-card__action">{children}</div>
+        {children ? <div className="ocean-connection-card__action">{children}</div> : null}
       </div>
       {footer ? <div className="ocean-connection-card__footer">{footer}</div> : null}
     </section>

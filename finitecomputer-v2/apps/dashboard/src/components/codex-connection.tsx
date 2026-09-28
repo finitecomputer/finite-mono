@@ -3,12 +3,21 @@
 import { MessageSquareIcon } from "lucide-react";
 
 import { ConnectionCard } from "@/components/connection-card";
+import { removalText } from "@/components/inference-connections";
 import { backupConfiguredFor, type InferenceView } from "@/lib/inference-status";
 
 const PERSONAL_PLAN_COPY = "Use your personal ChatGPT plan. Work accounts may work if your organization allows it.";
 
+/**
+ * R9: until the dashboard supports ChatGPT sign-in (PR3, W6), the card appears only when ChatGPT is the saved
+ * route or the agent advertises `codex.login.v1`. No agent can have that update yet, so no card asks for it.
+ */
+export function showCodexCard(view: InferenceView) {
+  return view.saved.route === "openai_codex" || view.codex !== null;
+}
+
 /** Read-only in PR1: what this agent reports about ChatGPT, and no actions. */
-export function CodexConnection({ view }: { view: InferenceView | null }) {
+export function CodexConnection({ view }: { view: InferenceView }) {
   const card = codexCardState(view);
   return (
     <ConnectionCard
@@ -18,40 +27,22 @@ export function CodexConnection({ view }: { view: InferenceView | null }) {
       description={<span data-testid="inference-codex-line">{card.lines.join(" ")}</span>}
       icon={<MessageSquareIcon className="size-5" />}
       testId="inference-codex"
-    >
-      {null}
-    </ConnectionCard>
+    />
   );
 }
 
-export function codexCardState(view: InferenceView | null): {
+export function codexCardState(view: InferenceView): {
   state: "connected" | "disconnected" | "attention" | "unavailable";
   label?: string;
   lines: string[];
 } {
-  if (!view) return { state: "unavailable", lines: [PERSONAL_PLAN_COPY] };
   const codex = view.codex;
   if (!codex) {
-    return {
-      state: "unavailable",
-      label: "Update needed",
-      lines: [
-        "This agent needs an update to connect ChatGPT here.",
-        ...(view.saved.route === "openai_codex" ? ["ChatGPT is this agent's default (set in chat)."] : []),
-      ],
-    };
+    // Only reached when ChatGPT is the saved route (showCodexCard).
+    return { state: "connected", label: "Agent default", lines: ["ChatGPT is this agent's default (set in chat)."] };
   }
-  const operation = view.operation;
-  if (operation?.kind === "disconnect" && operation.route === "openai_codex" && operation.state !== "succeeded") {
-    return {
-      state: "attention",
-      lines: [
-        operation.state === "running"
-          ? "Removing ChatGPT from this agent…"
-          : "Removing ChatGPT didn't finish. It may still be in use.",
-      ],
-    };
-  }
+  const removing = removalText(view, "openai_codex");
+  if (removing) return { state: "attention", lines: [removing] };
   const backup = backupConfiguredFor(view, "openai_codex") ? ["Meanwhile Finite Private may answer."] : [];
   switch (codex.state) {
     case "not_signed_in":

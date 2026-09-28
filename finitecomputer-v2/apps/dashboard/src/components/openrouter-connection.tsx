@@ -1,11 +1,13 @@
 "use client";
 
-import { useState, type FormEvent } from "react";
+import { useState, type FormEvent, type ReactNode } from "react";
 import { ExternalLinkIcon, KeyRoundIcon, UnplugIcon } from "lucide-react";
 
 import { ConnectionCard } from "@/components/connection-card";
 import {
   NoticeLine,
+  removalText,
+  type InferenceLock,
   type InferenceNotice,
   type InferenceRun,
 } from "@/components/inference-connections";
@@ -32,11 +34,13 @@ type Disconnect = { operationId: string | null; keyHash: string | null };
 export function OpenRouterConnection({
   view,
   busy,
+  lock,
   run,
   notice,
 }: {
   view: InferenceView | null;
   busy: boolean;
+  lock: InferenceLock;
   run: InferenceRun;
   notice: InferenceNotice | null;
 }) {
@@ -56,6 +60,11 @@ export function OpenRouterConnection({
     (disconnect.operationId === null ||
       (view?.operation?.id === disconnect.operationId && view.operation.state === "succeeded"));
   const card = openRouterCardState(view);
+  // R10: while another change runs, nothing here may start one; the operation line says why.
+  const disabled = busy || lock.locked;
+  const describedBy = lock.locked ? lock.reasonId : undefined;
+  // R11: while OpenRouter is being removed, the card says only that, in agreement with the operation line.
+  const removing = view ? removalText(view, "openrouter") : null;
 
   async function selectModel(nextModel: string) {
     if (!view) return;
@@ -80,92 +89,128 @@ export function OpenRouterConnection({
     setDisconnect({ operationId: result && "accepted" in result ? result.operation_id : null, keyHash });
   }
 
-  return (
-    <ConnectionCard
-      name="OpenRouter"
-      state={card.state}
-      statusLabel={card.label}
-      account={view ? openRouterAccountLine(view) : null}
-      description={openRouterDescription(view)}
-      icon={<KeyRoundIcon className="size-5" />}
-      testId="inference-openrouter"
-      footer={
-        view ? (
-          <>
-            {keyFormShown ? (
-              <OpenRouterKeyForm
-                keyRequired={Boolean(view.v2)}
-                keyPlaceholder={view.v2 ? "OpenRouter API key" : saved ? "New key (optional)" : "Your key (optional)"}
-                connect={canConnect}
-                model={model}
-                setModel={setModelDraft}
-                busy={busy}
-                onSubmit={submitKey}
-                onCancel={state === "no_key" ? null : () => setKeyFormOpen(false)}
-              />
-            ) : null}
-            {openRouterDetailLines(view).map((line) => (
-              <p key={line.testId} className="text-sm text-muted-foreground" data-testid={line.testId}>
-                {line.text}
-              </p>
-            ))}
-            {notice ? (
-              <NoticeLine
-                notice={notice}
-                view={view}
-                testId="inference-openrouter-notice"
-                busy={busy}
-                onRetryUse={(retryModel) => void selectModel(retryModel)}
-              />
-            ) : null}
-            {removed && disconnect ? <OpenRouterRemoved view={view} keyHash={disconnect.keyHash} /> : null}
-            {!canDisconnect && (saved || state === "key_saved") ? (
-              <p className="text-sm text-muted-foreground" data-testid="inference-openrouter-disconnect-update-needed">
-                This agent needs an update to disconnect here.
-              </p>
-            ) : null}
-            {view.openrouter.state === "key_saved" || saved ? (
-              <OpenRouterLinks keyHash={view.openrouter.keyHash} />
-            ) : null}
-          </>
-        ) : null
-      }
-    >
-      {view && view.v2 && state !== "no_key" ? (
-        <>
-          {keyFormOpen ? null : (
-            <Input
-              value={model}
-              onChange={(event) => setModelDraft(event.target.value)}
-              aria-label="OpenRouter model"
-              autoComplete="off"
-              className="w-60"
-              data-testid="inference-openrouter-model-input"
-            />
-          )}
-          {keyFormOpen ? null : (
-            <Button disabled={busy || !model.trim()} data-testid="inference-openrouter-use" onClick={() => void selectModel(model)}>
-              {saved ? "Save model" : "Use OpenRouter"}
-            </Button>
-          )}
-          {keyFormOpen ? null : (
-            <Button variant="outline" disabled={busy} data-testid="inference-openrouter-replace-key" onClick={() => setKeyFormOpen(true)}>
-              Replace key
-            </Button>
-          )}
+  const footer: ReactNode[] = [];
+  if (view && !removing) {
+    if (keyFormShown) {
+      footer.push(
+        <OpenRouterKeyForm
+          key="key-form"
+          keyRequired={Boolean(view.v2)}
+          keyPlaceholder={view.v2 ? "OpenRouter API key" : saved ? "New key (optional)" : "Your key (optional)"}
+          connect={canConnect}
+          model={model}
+          setModel={setModelDraft}
+          busy={disabled}
+          describedBy={describedBy}
+          onSubmit={submitKey}
+          onCancel={state === "no_key" ? null : () => setKeyFormOpen(false)}
+        />
+      );
+    } else if (view.v2) {
+      // With a key saved, the controls get their own row so the description keeps the card's width.
+      footer.push(
+        <div key="actions" className="flex min-w-0 flex-wrap items-center gap-2">
+          <Input
+            value={model}
+            onChange={(event) => setModelDraft(event.target.value)}
+            aria-label="OpenRouter model"
+            autoComplete="off"
+            className="w-60"
+            data-testid="inference-openrouter-model-input"
+          />
+          <Button
+            disabled={disabled || !model.trim()}
+            aria-describedby={describedBy}
+            data-testid="inference-openrouter-use"
+            onClick={() => void selectModel(model)}
+          >
+            {saved ? "Save model" : "Use OpenRouter"}
+          </Button>
+          <Button
+            variant="outline"
+            disabled={disabled}
+            aria-describedby={describedBy}
+            data-testid="inference-openrouter-replace-key"
+            onClick={() => setKeyFormOpen(true)}
+          >
+            Replace key
+          </Button>
           {canDisconnect ? (
-            <Button variant="outline" disabled={busy} data-testid="inference-openrouter-disconnect" onClick={() => setConfirmDisconnect(true)}>
+            <Button
+              variant="outline"
+              disabled={disabled}
+              aria-describedby={describedBy}
+              data-testid="inference-openrouter-disconnect"
+              onClick={() => setConfirmDisconnect(true)}
+            >
               <UnplugIcon />
               Disconnect
             </Button>
           ) : null}
-        </>
-      ) : null}
-      {!view || (!view.v2 && !keyFormOpen) ? (
-        <Button variant="outline" disabled={!view} data-testid="inference-openrouter-open" onClick={() => setKeyFormOpen(true)}>
-          Use OpenRouter
-        </Button>
-      ) : null}
+        </div>
+      );
+    }
+    for (const line of openRouterDetailLines(view)) {
+      footer.push(
+        <p key={line.testId} className="text-sm text-muted-foreground" data-testid={line.testId}>
+          {line.text}
+        </p>
+      );
+    }
+  }
+  if (view && notice) {
+    footer.push(
+      <NoticeLine
+        key="notice"
+        notice={notice}
+        view={view}
+        testId="inference-openrouter-notice"
+        busy={disabled}
+        describedBy={describedBy}
+        onRetryUse={(retryModel) => void selectModel(retryModel)}
+      />
+    );
+  }
+  if (view && !removing) {
+    if (removed && disconnect) {
+      footer.push(<OpenRouterRemoved key="removed" view={view} keyHash={disconnect.keyHash} />);
+    }
+    if (!canDisconnect && (saved || state === "key_saved")) {
+      footer.push(
+        <p key="update-needed" className="text-sm text-muted-foreground" data-testid="inference-openrouter-disconnect-update-needed">
+          This agent needs an update to disconnect here.
+        </p>
+      );
+    }
+    if (view.openrouter.state === "key_saved" || saved) {
+      footer.push(<OpenRouterLinks key="links" keyHash={view.openrouter.keyHash} />);
+    }
+  }
+
+  return (
+    <>
+      <ConnectionCard
+        name="OpenRouter"
+        state={card.state}
+        statusLabel={card.label}
+        account={view && !removing ? openRouterAccountLine(view) : null}
+        description={removing ? <span data-testid="inference-openrouter-removing">{removing}</span> : openRouterDescription(view)}
+        icon={<KeyRoundIcon className="size-5" />}
+        testId="inference-openrouter"
+        footer={footer.length ? footer : null}
+      >
+        {!view || (!view.v2 && !keyFormOpen) ? (
+          <Button
+            variant="outline"
+            disabled={!view || lock.locked}
+            aria-describedby={describedBy}
+            data-testid="inference-openrouter-open"
+            onClick={() => setKeyFormOpen(true)}
+          >
+            Use OpenRouter
+          </Button>
+        ) : null}
+      </ConnectionCard>
       <Dialog open={confirmDisconnect} onOpenChange={setConfirmDisconnect}>
         <DialogContent data-testid="inference-openrouter-disconnect-dialog">
           <DialogHeader>
@@ -176,13 +221,19 @@ export function OpenRouterConnection({
             <Button variant="outline" data-testid="inference-openrouter-disconnect-cancel" onClick={() => setConfirmDisconnect(false)}>
               Cancel
             </Button>
-            <Button variant="destructive" disabled={busy} data-testid="inference-openrouter-disconnect-confirm" onClick={() => void confirmRemoval()}>
+            <Button
+              variant="destructive"
+              disabled={disabled}
+              aria-describedby={describedBy}
+              data-testid="inference-openrouter-disconnect-confirm"
+              onClick={() => void confirmRemoval()}
+            >
               Disconnect
             </Button>
           </DialogFooter>
         </DialogContent>
       </Dialog>
-    </ConnectionCard>
+    </>
   );
 }
 
@@ -197,6 +248,7 @@ export function OpenRouterKeyForm({
   model,
   setModel,
   busy,
+  describedBy,
   onSubmit,
   onCancel,
 }: {
@@ -205,7 +257,10 @@ export function OpenRouterKeyForm({
   connect: boolean;
   model: string;
   setModel: (model: string) => void;
+  /** True while a request is in flight or another change is running (R10). */
   busy: boolean;
+  /** The operation line, for a screen reader that reaches a control disabled by R10. */
+  describedBy?: string;
   onSubmit: (apiKey: string, submit: KeySubmit) => Promise<void>;
   onCancel: (() => void) | null;
 }) {
@@ -243,13 +298,14 @@ export function OpenRouterKeyForm({
       />
       {connect ? (
         <>
-          <Button type="submit" disabled={busy || missing} data-testid="inference-openrouter-save-and-use">
+          <Button type="submit" disabled={busy || missing} aria-describedby={describedBy} data-testid="inference-openrouter-save-and-use">
             Save and use
           </Button>
           <Button
             type="button"
             variant="outline"
             disabled={busy || !apiKey.trim()}
+            aria-describedby={describedBy}
             data-testid="inference-openrouter-save-only"
             onClick={() => void submit("store")}
           >
@@ -257,7 +313,7 @@ export function OpenRouterKeyForm({
           </Button>
         </>
       ) : (
-        <Button type="submit" disabled={busy || missing} data-testid="inference-openrouter-save">
+        <Button type="submit" disabled={busy || missing} aria-describedby={describedBy} data-testid="inference-openrouter-save">
           Save
         </Button>
       )}
@@ -305,10 +361,11 @@ export function openRouterUseAction(view: InferenceView, model: string): AgentCo
 }
 
 export function openRouterCardState(view: InferenceView | null): {
-  state: "connected" | "disconnected" | "unavailable";
+  state: "connected" | "disconnected" | "attention" | "unavailable";
   label?: string;
 } {
   if (!view) return { state: "unavailable" };
+  if (removalText(view, "openrouter")) return { state: "attention" };
   if (!view.v2) {
     return view.saved.route === "openrouter"
       ? { state: "connected", label: "Agent default" }

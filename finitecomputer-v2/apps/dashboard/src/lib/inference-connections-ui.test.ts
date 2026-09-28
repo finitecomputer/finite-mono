@@ -11,6 +11,7 @@ import {
   commandErrorText,
   FinitePrivateCard,
   finitePrivateAction,
+  controlsLocked,
   InferenceConnections,
   NoticeLine,
   OperationLine,
@@ -111,6 +112,8 @@ const SAVED_OR = { route: "openrouter", provider: "openrouter", model: "openai/g
 const SAVED_CODEX = { route: "openai_codex", provider: "openai-codex", model: "gpt-5.3-codex" };
 const KEY_SAVED = { state: "key_saved", key_source: "agent", key_hash: KEY_HASH, hermes_key: "saved_key", other_pool_keys: "none" };
 const noRun: InferenceRun = async () => ({ ok: true, result: null });
+const UNLOCKED = { locked: false, reasonId: "operation-line" };
+const LOCKED = { locked: true, reasonId: "operation-line" };
 
 function operation(kind: string, route: string, state: string, extra: Inference = {}) {
   return {
@@ -158,7 +161,7 @@ test("T-W10: every backup line, and only a configured backup says Finite Private
 
 test("T-W11: the Finite Private card states", () => {
   const card = (status: ReturnType<typeof parseConnectionsStatus>) =>
-    text(html(createElement(FinitePrivateCard, { view: view(status), busy: false, run: noRun, notice: null })));
+    text(html(createElement(FinitePrivateCard, { view: view(status), busy: false, lock: UNLOCKED, run: noRun, notice: null })));
   const configured = card(v2());
   assert.match(configured, /Finite Private Configured glm-5-3-flash/u);
   assert.doesNotMatch(configured, /Use Finite Private/u);
@@ -178,18 +181,18 @@ test("T-W11: \"Use Finite Private\" appears whenever the saved route isn't Finit
     legacy("openai-codex", "gpt-5.5"),
     legacy("anthropic", "claude"),
   ]) {
-    const markup = html(createElement(FinitePrivateCard, { view: view(status), busy: false, run: noRun, notice: null }));
+    const markup = html(createElement(FinitePrivateCard, { view: view(status), busy: false, lock: UNLOCKED, run: noRun, notice: null }));
     assert.match(markup, /data-testid="inference-finite-private-use"/u);
     assert.doesNotMatch(markup.match(/<button[^>]*inference-finite-private-use[^>]*>/u)?.[0] ?? "", / disabled=""/u);
   }
-  const busy = html(createElement(FinitePrivateCard, { view: view(v2({ saved: SAVED_OR })), busy: true, run: noRun, notice: null }));
+  const busy = html(createElement(FinitePrivateCard, { view: view(v2({ saved: SAVED_OR })), busy: true, lock: UNLOCKED, run: noRun, notice: null }));
   assert.match(busy.match(/<button[^>]*inference-finite-private-use[^>]*>/u)?.[0] ?? "", / disabled=""/u);
   assert.deepEqual(finitePrivateAction(view(v2({ saved: SAVED_OR }))), { action: "inference_select", route: "finite_private" });
   assert.deepEqual(finitePrivateAction(view(legacy("openrouter", "openai/gpt-5"))), { action: "inference", profile: "finite_private" });
 });
 
 function openRouterCard(status: ReturnType<typeof parseConnectionsStatus>, notice: InferenceNotice | null = null) {
-  return html(createElement(OpenRouterConnection, { view: view(status), busy: false, run: noRun, notice }));
+  return html(createElement(OpenRouterConnection, { view: view(status), busy: false, lock: UNLOCKED, run: noRun, notice }));
 }
 
 test("T-W12: OpenRouter without a key: paste through connect when advertised, else the legacy one-call Save", () => {
@@ -291,14 +294,16 @@ test("T-W13: an agent running today's agentd keeps today's controls and nothing 
       assert.equal(markup.includes(hidden), false, hidden);
     }
     assert.match(markup, /data-testid="inference-openrouter-open"/u);
-    assert.match(text(markup), /This agent needs an update to connect ChatGPT here\./u);
+    // R9: no ChatGPT card unless ChatGPT is the saved route, and never an update request.
+    assert.equal(markup.includes('data-testid="inference-codex"'), status.inference.provider === "openai-codex");
+    assert.doesNotMatch(text(markup), /Update needed|needs an update to connect ChatGPT/u);
     assert.match(text(markup), /Backup details aren't available on this agent yet\./u);
     assert.equal(pollDelayMs(view(status), true), null);
     const legacyView = view(status);
     assert.equal(openRouterUseAction(legacyView, "openai/gpt-5").action, "inference");
     assert.equal(finitePrivateAction(legacyView).action, "inference");
   }
-  assert.match(text(panel(legacy("openai-codex", "gpt-5.5"))), /New conversations use ChatGPT · gpt-5\.5\. .*ChatGPT is this agent's default \(set in chat\)\./u);
+  assert.match(text(panel(legacy("openai-codex", "gpt-5.5"))), /New conversations use ChatGPT · gpt-5\.5\. .*ChatGPT Agent default ChatGPT is this agent's default \(set in chat\)\./u);
   assert.match(text(panel(legacy("custom", "glm-5-3-flash"))), /New conversations use Finite Private · glm-5-3-flash\./u);
   assert.match(text(panel(legacy("anthropic", "claude"))), /New conversations use Custom model · claude, set in Hermes\. Finite can't manage this provider here\./u);
   // The legacy key form keeps today's optional key and one Save.
@@ -466,11 +471,11 @@ test("T-W17: every control is disabled before the first status, and the stable t
   for (const id of [
     "inference-summary", "inference-model-hint", "inference-finite-private", "inference-finite-private-state",
     "inference-finite-private-use", "inference-openrouter", "inference-openrouter-state", "inference-openrouter-open",
-    "inference-codex", "inference-codex-state", "inference-codex-line",
   ]) {
     assert.match(markup, new RegExp(`data-testid="${id}"`, "u"), id);
   }
-  assert.doesNotMatch(markup, /inference-openrouter-key-input|inference-openrouter-links/u);
+  // R9: before status, nothing says whether ChatGPT is the saved route, so there is no ChatGPT card.
+  assert.doesNotMatch(markup, /inference-openrouter-key-input|inference-openrouter-links|inference-codex/u);
 });
 
 test("the pasted key: password input with autocomplete off, cleared at submit whether the call succeeds or fails", async () => {
@@ -503,10 +508,9 @@ test("the pasted key: password input with autocomplete off, cleared at submit wh
 });
 
 test("the Codex card is read-only in PR1 and says only what the agent reported", () => {
-  const unsupported = text(html(createElement(CodexConnection, { view: view(legacy("custom", "glm-5-3-flash")) })));
-  assert.equal(unsupported, "ChatGPT Update needed This agent needs an update to connect ChatGPT here.");
+  const savedOnly = text(html(createElement(CodexConnection, { view: view(legacy("openai-codex", "gpt-5.5")) })));
+  assert.equal(savedOnly, "ChatGPT Agent default ChatGPT is this agent's default (set in chat).");
   const lines = (status: ReturnType<typeof parseConnectionsStatus>) => codexCardState(view(status)).lines.map(copy).join(" ");
-  assert.equal(lines(legacy("openai-codex", "gpt-5.5")), "This agent needs an update to connect ChatGPT here. ChatGPT is this agent's default (set in chat).");
   const codex = (state: string, extra: Inference = {}) =>
     v2({ saved: SAVED_CODEX, routes: { openai_codex: { state, quota_reset_at_ms: null, reported_quota_reset_at_ms: null, login: null } }, ...extra }, ALL);
   assert.equal(lines(codex("not_signed_in")), "Use your personal ChatGPT plan. Work accounts may work if your organization allows it.");
@@ -526,6 +530,163 @@ test("the new components render text only as React text", () => {
     assert.doesNotMatch(source, /dangerouslySetInnerHTML/u, file);
     assert.doesNotMatch(source, /localStorage|sessionStorage|console\./u, file);
   }
+});
+
+const CODEX_ROUTE = (state: string) => ({ state, quota_reset_at_ms: null, reported_quota_reset_at_ms: null, login: null });
+
+test("R9: the ChatGPT card shows only for a saved ChatGPT route or an agent with codex.login.v1", () => {
+  const cases: Array<[string, ReturnType<typeof parseConnectionsStatus>, string | null, string]> = [
+    ["saved, no codex.login.v1", v2({ saved: SAVED_CODEX }), "ChatGPT Agent default ChatGPT is this agent's default (set in chat).", "ChatGPT · gpt-5.3-codex"],
+    ["saved, codex.login.v1", v2({ saved: SAVED_CODEX, routes: { openai_codex: CODEX_ROUTE("signed_in") } }, ALL), "ChatGPT Signed in Signed in to ChatGPT.", "ChatGPT · gpt-5.3-codex"],
+    ["not saved, no codex.login.v1", v2({ saved: SAVED_OR }), null, "OpenRouter · openai/gpt-5"],
+    ["not saved, codex.login.v1", v2({ saved: SAVED_OR, routes: { openai_codex: CODEX_ROUTE("not_signed_in") } }, ALL), "ChatGPT Not connected Use your personal ChatGPT plan. Work accounts may work if your organization allows it.", "OpenRouter · openai/gpt-5"],
+  ];
+  for (const [name, status, card, summary] of cases) {
+    const markup = panel(status);
+    assert.match(text(markup), new RegExp(`New conversations use ${summary.replace(/[.]/gu, "\\.")}\\.`, "u"), name);
+    const codexCard = markup.match(/<section class="ocean-connection-card" data-testid="inference-codex">.*?<\/section>/u)?.[0];
+    assert.equal(codexCard ? text(codexCard) : null, card, name);
+    assert.doesNotMatch(text(markup), /Update needed|needs an update to connect ChatGPT/u, name);
+  }
+});
+
+function lockedButtons(markup: string) {
+  const reasonId = markup.match(/<div id="([^"]+)" class="ocean-inference-summary__operation"/u)?.[1];
+  assert.ok(reasonId, "the operation line has an id for aria-describedby");
+  const button = (id: string) => markup.match(new RegExp(`<button[^>]*data-testid="${id}"[^>]*>`, "u"))?.[0] ?? "";
+  return { reasonId, button };
+}
+
+test("R10: while an operation runs, every control that would start another change is disabled and names the reason", () => {
+  const running = v2({ saved: SAVED_OR, routes: { openrouter: KEY_SAVED }, operation: operation("select", "openrouter", "running") });
+  const markup = panel(running);
+  const { reasonId, button } = lockedButtons(markup);
+  for (const id of ["inference-finite-private-use", "inference-openrouter-use", "inference-openrouter-replace-key", "inference-openrouter-disconnect"]) {
+    assert.match(button(id), / disabled=""/u, id);
+    assert.match(button(id), new RegExp(`aria-describedby="${reasonId}"`, "u"), id);
+  }
+  assert.match(text(markup), /Switching to OpenRouter · openai\/gpt-5…/u);
+
+  // The paste form and its Save buttons, on an agent with and without connect.
+  for (const capabilities of [PR1, ALL]) {
+    const form = panel(v2({ operation: operation("select", "finite_private", "running", { model: null }) }, capabilities));
+    const lockedForm = lockedButtons(form);
+    for (const id of capabilities === ALL ? ["inference-openrouter-save-and-use", "inference-openrouter-save-only"] : ["inference-openrouter-save"]) {
+      assert.match(lockedForm.button(id), / disabled=""/u, id);
+      assert.match(lockedForm.button(id), new RegExp(`aria-describedby="${lockedForm.reasonId}"`, "u"), id);
+    }
+  }
+  // A legacy agent's opener too, though today's agentd never reports an operation.
+  const opener = html(createElement(OpenRouterConnection, { view: view(legacy("custom", "glm-5-3-flash")), busy: false, lock: LOCKED, run: noRun, notice: null }));
+  assert.match(opener.match(/<button[^>]*inference-openrouter-open[^>]*>/u)?.[0] ?? "", / disabled=""/u);
+});
+
+test("R10: controls come back when the operation succeeds, fails, or the 5-minute watch ends", () => {
+  for (const state of ["succeeded", "failed"]) {
+    const markup = panel(v2({ saved: SAVED_OR, routes: { openrouter: KEY_SAVED }, operation: operation("select", "openrouter", state) }));
+    for (const id of ["inference-finite-private-use", "inference-openrouter-use", "inference-openrouter-replace-key", "inference-openrouter-disconnect"]) {
+      const tag = markup.match(new RegExp(`<button[^>]*data-testid="${id}"[^>]*>`, "u"))?.[0] ?? "";
+      assert.doesNotMatch(tag, / disabled=""|aria-describedby/u, `${id} after ${state}`);
+    }
+  }
+  const running = view(v2({ operation: operation("select", "openrouter", "running") }));
+  assert.equal(controlsLocked(running, false), true);
+  assert.equal(controlsLocked(running, true), false, "after the 5-minute limit the page stops holding controls");
+  assert.equal(controlsLocked(view(v2({ operation: operation("select", "openrouter", "failed") })), false), false);
+  assert.equal(controlsLocked(view(legacy("openrouter", "openai/gpt-5")), false), false);
+  assert.equal(controlsLocked(null, false), false);
+  // "Try again" and "Check again" stay as they were.
+  assert.doesNotMatch(operationLine(operation("disconnect", "openrouter", "failed"), { retry: true }).match(/<button[^>]*inference-operation-retry[^>]*>/u)?.[0] ?? "", / disabled=""/u);
+  assert.doesNotMatch(operationLine(operation("select", "openrouter", "running"), { pollExpired: true }).match(/<button[^>]*inference-operation-check-again[^>]*>/u)?.[0] ?? "", / disabled=""/u);
+});
+
+test("R10a: a failed disconnect locks every other change, and Try again stays the way forward", () => {
+  const assertLocked = (markup: string, ids: string[], name: string) => {
+    const { reasonId, button } = lockedButtons(markup);
+    for (const id of ids) {
+      assert.match(button(id), / disabled=""/u, `${name}: ${id}`);
+      assert.match(button(id), new RegExp(`aria-describedby="${reasonId}"`, "u"), `${name}: ${id}`);
+    }
+    const retry = button("inference-operation-retry");
+    assert.ok(retry, `${name}: Try again is offered`);
+    assert.doesNotMatch(retry, / disabled=""/u, `${name}: Try again stays enabled`);
+  };
+  // OpenRouter's disconnect failed on an agent whose default is ChatGPT: Finite Private's control is locked,
+  // and the OpenRouter card shows only its R11 line.
+  const openrouterFailed = panel(v2({
+    saved: SAVED_CODEX,
+    routes: { openrouter: KEY_SAVED, openai_codex: CODEX_ROUTE("signed_in") },
+    operation: operation("disconnect", "openrouter", "failed", { error_code: "verify_failed" }),
+  }, ALL));
+  assertLocked(openrouterFailed, ["inference-finite-private-use"], "openrouter");
+  assert.doesNotMatch(openrouterFailed, /inference-openrouter-use|inference-openrouter-key-input/u);
+  // ChatGPT's disconnect failed: Finite Private's and OpenRouter's controls are all locked.
+  const codexFailed = panel(v2({
+    saved: SAVED_OR,
+    routes: { openrouter: KEY_SAVED, openai_codex: CODEX_ROUTE("signed_in") },
+    operation: operation("disconnect", "openai_codex", "failed"),
+  }, ALL));
+  assertLocked(codexFailed, [
+    "inference-finite-private-use", "inference-openrouter-use", "inference-openrouter-replace-key", "inference-openrouter-disconnect",
+  ], "openai_codex");
+  const failed = view(v2({ operation: operation("disconnect", "openrouter", "failed") }));
+  assert.equal(controlsLocked(failed, false), true);
+  assert.equal(controlsLocked(failed, true), true, "the 5-minute polling limit does not unlock a failed disconnect");
+  // A failed select or activate locks nothing.
+  for (const kind of ["select", "activate"]) {
+    const markup = panel(v2({ saved: SAVED_OR, routes: { openrouter: KEY_SAVED }, operation: operation(kind, "openrouter", "failed") }));
+    for (const id of ["inference-finite-private-use", "inference-openrouter-use", "inference-openrouter-disconnect"]) {
+      assert.doesNotMatch(markup.match(new RegExp(`<button[^>]*data-testid="${id}"[^>]*>`, "u"))?.[0] ?? "", / disabled=""|aria-describedby/u, `${kind}: ${id}`);
+    }
+  }
+  // Once the disconnect succeeds, everything is enabled again.
+  const done = panel(v2({ saved: SAVED_CODEX, routes: { openai_codex: CODEX_ROUTE("signed_in") }, operation: operation("disconnect", "openrouter", "succeeded") }, ALL));
+  const doneButton = (id: string) => done.match(new RegExp(`<button[^>]*data-testid="${id}"[^>]*>`, "u"))?.[0] ?? "";
+  assert.doesNotMatch(doneButton("inference-finite-private-use"), / disabled=""|aria-describedby/u);
+  // Save and use waits only for a key now, not for the operation.
+  assert.doesNotMatch(doneButton("inference-openrouter-save-and-use"), /aria-describedby/u);
+});
+
+test("R11: while OpenRouter is being removed, its card agrees with the operation line", () => {
+  const card = (op: Inference, openrouter: Inference = { state: "no_key", key_source: null, key_hash: null, hermes_key: "none", other_pool_keys: "none" }) =>
+    openRouterCard(v2({ routes: { openrouter }, operation: op }));
+  for (const [state, line] of [
+    ["running", "Removing OpenRouter from this agent…"],
+    ["failed", "Removing OpenRouter didn't finish. It may still be in use."],
+  ]) {
+    for (const openrouter of [undefined, KEY_SAVED]) {
+      const markup = card(operation("disconnect", "openrouter", state), openrouter);
+      assert.equal(text(markup), `OpenRouter Needs attention ${line}`, `${state} ${openrouter ? "key_saved" : "no_key"}`);
+      assert.match(markup, /is-attention/u);
+      assert.doesNotMatch(markup, /inference-openrouter-key-input|inference-openrouter-model-input|ocean-connection-card__footer/u);
+    }
+  }
+  const done = card(operation("disconnect", "openrouter", "succeeded"));
+  assert.match(text(done), /^OpenRouter Not connected /u);
+  assert.match(done, /inference-openrouter-key-input/u);
+  // A disconnect of another route leaves this card alone.
+  assert.match(text(card(operation("disconnect", "openai_codex", "running"))), /^OpenRouter Not connected /u);
+  // A failed disconnect still shows agentd's refusal next to the card if the user acts.
+  const refused = openRouterCard(v2({ operation: operation("disconnect", "openrouter", "failed") }), {
+    card: "openrouter", kind: "error", code: "operation_in_progress", message: "x", route: "openrouter",
+  });
+  assert.match(refused, /inference-openrouter-notice/u);
+});
+
+test("layout: no empty footer, key-saved controls on their own row, and model IDs that wrap whole", () => {
+  const legacyCard = openRouterCard(legacy("custom", "glm-5-3-flash"));
+  assert.doesNotMatch(legacyCard, /ocean-connection-card__footer/u, "a legacy agent's card has no empty footer rule");
+  const savedCard = openRouterCard(v2({ saved: SAVED_OR, routes: { openrouter: KEY_SAVED } }));
+  assert.doesNotMatch(savedCard, /ocean-connection-card__action/u, "the description keeps the card's full width");
+  assert.match(savedCard, /ocean-connection-card__footer.*inference-openrouter-model-input/u);
+  const summary = panel(v2());
+  assert.match(summary, /<span class="ocean-inference-id"><strong>glm-5-3-flash<\/strong>\.<\/span>/u);
+  assert.deepEqual(
+    [...summary.matchAll(/<code>(.*?)<\/code>/gu)].map(([, code]) => text(code)),
+    ["/model <model>", "--provider", "<finite-private|openrouter|openai-codex>", "--global"]
+  );
+  assert.match(text(summary), /In chat, \/model <model> --provider <finite-private\|openrouter\|openai-codex> switches only that conversation\. Add --global to change this default\./u);
+  assert.match(text(panel(v2({ saved: { route: "other", provider: "anthropic", model: "claude" } }))), /New conversations use Custom model · claude, set in Hermes\./u);
 });
 
 test("F3/F6: no rendered string claims a saved key or backup works, is ready, valid, or active, or isn't in use", () => {

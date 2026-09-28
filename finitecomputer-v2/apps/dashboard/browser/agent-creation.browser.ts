@@ -2134,8 +2134,8 @@ test("Connections inference flows", { timeout: 300_000 }, async () => {
         "Finite Private backup is configured for conversations that use another model.");
       await expectTestIdText(page, "inference-finite-private-state", "Configured");
       await expectTestIdText(page, "inference-openrouter-state", "Not connected");
-      await expectTestIdText(page, "inference-codex-state", "Update needed");
-      await expectTestIdText(page, "inference-codex-line", "This agent needs an update to connect ChatGPT here.");
+      // R9: no ChatGPT card while ChatGPT isn't the saved route and the agent lacks codex.login.v1.
+      assert.equal(await testId("inference-codex").count(), 0);
       assert.equal(await testId("inference-finite-private-use").count(), 0);
       assert.equal(await testId("inference-operation-line").count(), 0);
       // A PR1 agent has no connect command, so a key is pasted with the one-call v1 Save (§10.4).
@@ -2224,7 +2224,7 @@ test("Connections inference flows", { timeout: 300_000 }, async () => {
       await expectTestIdText(page, "inference-backup-line", "Backup details aren't available on this agent yet.");
       await expectTestIdText(page, "inference-finite-private-state", "Agent default");
       await expectTestIdText(page, "inference-openrouter-state", "Not the agent default");
-      await expectTestIdText(page, "inference-codex-state", "Update needed");
+      assert.equal(await testId("inference-codex").count(), 0);
       const gatedControls = [
         "inference-openrouter-use",
         "inference-openrouter-model-input",
@@ -2258,8 +2258,9 @@ test("Connections inference flows", { timeout: 300_000 }, async () => {
       hostedDevice.setInferenceAgent("legacy", "openai_codex");
       await page.goto(connectionsUrl);
       await expectTestIdText(page, "inference-summary", "New conversations use ChatGPT · gpt-5.5.");
-      await expectTestIdText(page, "inference-codex-line",
-        "This agent needs an update to connect ChatGPT here. ChatGPT is this agent's default (set in chat).");
+      // R9: the saved ChatGPT route keeps its card, with no update request.
+      await expectTestIdText(page, "inference-codex-state", "Agent default");
+      await expectTestIdText(page, "inference-codex-line", "ChatGPT is this agent's default (set in chat).");
       await testId("inference-finite-private-use").waitFor();
     });
   } finally {

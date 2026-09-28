@@ -1,9 +1,9 @@
 "use client";
 
-import { useEffect, useState, type ReactNode } from "react";
+import { useEffect, useId, useState, type ReactNode } from "react";
 import { CpuIcon, RefreshCwIcon } from "lucide-react";
 
-import { CodexConnection } from "@/components/codex-connection";
+import { CodexConnection, showCodexCard } from "@/components/codex-connection";
 import { ConnectionCard } from "@/components/connection-card";
 import { OpenRouterConnection } from "@/components/openrouter-connection";
 import { Button } from "@/components/ui/button";
@@ -35,6 +35,11 @@ export type InferenceCard = "finite_private" | "openrouter" | "summary";
 export type InferenceNotice =
   | { card: InferenceCard; kind: "error"; code: string | null; message: string; route: InferenceRoute; retryModel?: string }
   | { card: InferenceCard; kind: "stored" };
+/**
+ * R10/R10a: while an operation runs or a disconnect has failed, every control that would start another change is
+ * disabled. `reasonId` is the operation line, which each such control names with `aria-describedby`.
+ */
+export type InferenceLock = { locked: boolean; reasonId: string };
 /** Runs an action for a card and records the notice it produces. */
 export type InferenceRun = (
   card: InferenceCard,
@@ -75,6 +80,7 @@ export function InferenceConnections({
   const [expiredPollKey, setExpiredPollKey] = useState<string | null>(null);
   const [visible, setVisible] = useState(true);
 
+  const operationLineId = useId();
   const operation = view?.operation ?? null;
   if (operation?.state === "running" && operation.id !== seenRunningId) {
     setSeenRunningId(operation.id);
@@ -91,6 +97,7 @@ export function InferenceConnections({
   const delay = view ? pollDelayMs(view, visible) : null;
   const pollKey = operation?.state === "running" ? operation.id : (view?.codex?.login?.attemptId ?? null);
   const pollExpired = pollKey !== null && pollKey === expiredPollKey;
+  const lock: InferenceLock = { locked: controlsLocked(view, pollExpired), reasonId: operationLineId };
   useEffect(() => {
     if (delay === null || pollExpired) return;
     const startedAt = Date.now();
@@ -133,8 +140,9 @@ export function InferenceConnections({
       <section className="ocean-inference-summary" data-testid="inference-summary-card">
         <p data-testid="inference-summary">{view ? summaryText(view) : "Checking which model new conversations use…"}</p>
         <p className="ocean-inference-summary__hint" data-testid="inference-model-hint">
-          In chat, <code>/model &lt;model&gt; --provider &lt;finite-private|openrouter|openai-codex&gt;</code> switches only
-          that conversation. Add <code>--global</code> to change this default.
+          In chat, <code>/model &lt;model&gt;</code> <code>--provider</code>{" "}
+          <code>&lt;finite-private|openrouter|openai-codex&gt;</code> switches only that conversation. Add{" "}
+          <code>--global</code> to change this default.
         </p>
         {view ? (
           <p className="ocean-inference-summary__line" data-testid="inference-backup-line">
@@ -142,6 +150,7 @@ export function InferenceConnections({
           </p>
         ) : null}
         <OperationLine
+          id={operationLineId}
           view={view}
           showDone={showDone}
           pollExpired={pollExpired}
@@ -155,14 +164,21 @@ export function InferenceConnections({
         {notice?.card === "summary" && view ? <NoticeLine notice={notice} view={view} testId="inference-summary-notice" /> : null}
       </section>
 
-      <FinitePrivateCard view={view} busy={busy} run={run} notice={notice?.card === "finite_private" ? notice : null} />
+      <FinitePrivateCard
+        view={view}
+        busy={busy}
+        lock={lock}
+        run={run}
+        notice={notice?.card === "finite_private" ? notice : null}
+      />
       <OpenRouterConnection
         view={view}
         busy={busy}
+        lock={lock}
         run={run}
         notice={notice?.card === "openrouter" ? notice : null}
       />
-      <CodexConnection view={view} />
+      {view && showCodexCard(view) ? <CodexConnection view={view} /> : null}
     </>
   );
 }
@@ -170,11 +186,13 @@ export function InferenceConnections({
 export function FinitePrivateCard({
   view,
   busy,
+  lock,
   run,
   notice,
 }: {
   view: InferenceView | null;
   busy: boolean;
+  lock: InferenceLock;
   run: InferenceRun;
   notice: InferenceNotice | null;
 }) {
@@ -194,7 +212,8 @@ export function FinitePrivateCard({
       {view?.saved.route !== "finite_private" ? (
         <Button
           variant="outline"
-          disabled={busy || !view}
+          disabled={busy || !view || lock.locked}
+          aria-describedby={lock.locked ? lock.reasonId : undefined}
           data-testid="inference-finite-private-use"
           onClick={() =>
             view && void run("finite_private", finitePrivateAction(view), { route: "finite_private" })
@@ -230,20 +249,50 @@ export function finitePrivateAction(view: InferenceView): AgentConnectionAction 
     : { action: "inference", profile: "finite_private" };
 }
 
+/**
+ * R10 and R10a: locked while an operation runs and the page is still watching it (the 5-minute limit unlocks
+ * it), and while a disconnect has failed, since agentd refuses every other change until it is retried. A failed
+ * select or activate locks nothing: the next change replaces it.
+ */
+export function controlsLocked(view: InferenceView | null, pollExpired: boolean) {
+  const operation = view?.operation;
+  if (operation?.state === "running") return !pollExpired;
+  return operation?.kind === "disconnect" && operation.state === "failed";
+}
+
+/** R11: the one line a route's card shows while that route is being removed, or null. */
+export function removalText(view: InferenceView, route: "openrouter" | "openai_codex") {
+  const operation = view.operation;
+  if (operation?.kind !== "disconnect" || operation.route !== route || operation.state === "succeeded") return null;
+  const label = routeLabel(route);
+  return operation.state === "running"
+    ? `Removing ${label} from this agent…`
+    : `Removing ${label} didn't finish. It may still be in use.`;
+}
+
 export function summaryText(view: InferenceView): ReactNode {
   const { route, model } = view.saved;
-  const choice = `${routeLabel(route)}${model ? ` · ${model}` : ""}`;
-  if (route === "other") {
-    return (
-      <>
-        New conversations use <strong>{choice}</strong>, set in Hermes. Finite can&apos;t manage this provider here.
-      </>
-    );
-  }
-  return (
+  const label = routeLabel(route);
+  const end = route === "other" ? "," : ".";
+  // A model ID wraps as one piece, with its punctuation, unless it alone is wider than the card.
+  const choice = model ? (
     <>
-      New conversations use <strong>{choice}</strong>.
+      <strong>{label} · </strong>
+      <span className="ocean-inference-id">
+        <strong>{model}</strong>
+        {end}
+      </span>
     </>
+  ) : (
+    <>
+      <strong>{label}</strong>
+      {end}
+    </>
+  );
+  return route === "other" ? (
+    <>New conversations use {choice} set in Hermes. Finite can&apos;t manage this provider here.</>
+  ) : (
+    <>New conversations use {choice}</>
   );
 }
 
@@ -290,6 +339,7 @@ export function operationText(operation: OperationView, showDone: boolean) {
 }
 
 export function OperationLine({
+  id,
   view,
   showDone,
   pollExpired,
@@ -297,6 +347,7 @@ export function OperationLine({
   onRetry,
   onCheckAgain,
 }: {
+  id?: string;
   view: InferenceView | null;
   showDone: boolean;
   pollExpired: boolean;
@@ -307,7 +358,7 @@ export function OperationLine({
   const operation = view?.operation ?? null;
   const text = operation ? operationText(operation, showDone) : null;
   return (
-    <div className="ocean-inference-summary__operation" role="status" aria-live="polite">
+    <div id={id} className="ocean-inference-summary__operation" role="status" aria-live="polite">
       {text ? <span data-testid="inference-operation-line">{text}</span> : null}
       {operation?.state === "failed" && onRetry ? (
         <Button size="sm" variant="outline" disabled={busy} data-testid="inference-operation-retry" onClick={onRetry}>
@@ -395,12 +446,14 @@ export function NoticeLine({
   testId,
   onRetryUse,
   busy = false,
+  describedBy,
 }: {
   notice: InferenceNotice;
   view: InferenceView;
   testId: string;
   onRetryUse?: (model: string) => void;
   busy?: boolean;
+  describedBy?: string;
 }) {
   if (notice.kind === "stored") {
     return (
@@ -418,6 +471,7 @@ export function NoticeLine({
           size="sm"
           variant="outline"
           disabled={busy}
+          aria-describedby={describedBy}
           data-testid="inference-openrouter-retry-use"
           onClick={() => onRetryUse(retryModel)}
         >
