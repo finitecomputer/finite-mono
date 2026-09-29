@@ -153,6 +153,17 @@ test("chat history stays scoped to each tab across freeze, reconnect, and old-se
       await a.getByRole("button", { name: "Remove retry-me.txt", exact: true }).click();
       await a.locator("textarea").fill("");
 
+      // The refusal belongs to the chat it was sent in. Another chat shows
+      // its own connection error, and returning shows the refusal again.
+      await a.getByRole("button", { name: "New chat", exact: true }).first().click();
+      await a.locator(".finite-chat__messages").getByText("History in the other tab", { exact: true }).waitFor();
+      await refusal.waitFor({ state: "hidden" });
+      await refreshAlert.waitFor();
+      assert(await a.getByRole("button", { name: "Retry load", exact: true }).isVisible());
+      await a.getByRole("button", { name: "Design review", exact: true }).click();
+      await otherTabMessage.waitFor();
+      await refusal.waitFor();
+
       // Dismissing the refusal reveals the connection error that is still active.
       await a.getByRole("button", { name: "Dismiss", exact: true }).click();
       await refreshAlert.waitFor();

@@ -178,11 +178,12 @@ export function HostedWebChat({
     uploadAttachments,
     attachmentUrl,
   } = useHostedChat();
-  // One composer error slot, as before. A send's own result is tagged so it
-  // alone can take the alert over connection and claim errors.
+  // One composer error slot, as before. A send's own result is tagged with
+  // the chat it went to, so it alone can take the alert over connection and
+  // claim errors, and only while that chat is selected.
   const [composerError, setComposerError] = useState<HostedChatComposerError | null>(null);
   const setActionError = (message: string | null) =>
-    setComposerError(message === null ? null : { message, fromSend: false });
+    setComposerError(message === null ? null : { message, sentTo: null });
   // Send feedback comes from this composer's action response. Stream and
   // view status/toast fields can describe another tab's action on the Device.
   const [sending, setSending] = useState(false);
@@ -612,6 +613,11 @@ export function HostedWebChat({
       || sending
       || audioRecordingState !== "idle"
     ) return;
+    const sentTo = {
+      room_id: selectedRoom.room_id,
+      topic_id: selectedTopic.topic_id,
+      chat_id: selectedChat.chat_id,
+    };
     setSending(true);
     setActionError(null);
     stopTyping(selectedRoom.room_id);
@@ -654,7 +660,7 @@ export function HostedWebChat({
         setPendingAgentTurns((turns) => turns.filter((turn) => turn !== pendingTurn));
       }
       if (reportSessionAuthFailure(caught)) return;
-      setComposerError({ message: hostedChatErrorMessage(caught), fromSend: true });
+      setComposerError({ message: hostedChatErrorMessage(caught), sentTo });
     } finally {
       setSending(false);
     }
@@ -905,7 +911,15 @@ export function HostedWebChat({
     }
   }
 
-  const chatAlert = hostedChatAlert({ sessionError, transportError, claimError, composerError });
+  const chatAlert = hostedChatAlert({
+    sessionError,
+    transportError,
+    claimError,
+    composerError,
+    selectedChat: selectedRoom && selectedTopic && selectedChat
+      ? { room_id: selectedRoom.room_id, topic_id: selectedTopic.topic_id, chat_id: selectedChat.chat_id }
+      : null,
+  });
   const connected = ownerClaimed
     && selectedRoom?.state === "Connected"
     && Boolean(selectedTopic && selectedChat);
