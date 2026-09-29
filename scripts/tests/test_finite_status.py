@@ -21,6 +21,24 @@ FIXTURE = ROOT / "scripts" / "tests" / "fixtures" / "finite_status_aug1.json"
 
 
 class FiniteStatusTests(unittest.TestCase):
+    def test_recovery_receipts_distinguish_absent_empty_and_used(self) -> None:
+        for state, count in [("absent", ""), ("present", "0"), ("present", "2")]:
+            with self.subTest(state=state, count=count):
+                output = f"__FINITE_STATUS_CREDENTIAL_RECOVERY_STATE__\n{state},{count}\n__FINITE_STATUS_RUNTIMES__\n"
+                completed = subprocess.CompletedProcess(["psql"], 0, output, "")
+                with mock.patch.object(finite_status, "run_read_only", return_value=completed) as run:
+                    core = finite_status.psql_query_sets({})
+                sql = run.call_args.kwargs["input_text"]
+                self.assertTrue(sql.startswith("BEGIN TRANSACTION READ ONLY;"))
+                self.assertIn("\\if :finite_has_credential_recoveries", sql)
+                self.assertIn("SELECT 'absent',NULL::bigint;", sql)
+                self.assertLess(sql.index("\\echo __FINITE_STATUS_CREDENTIAL_RECOVERY_STATE__"), sql.index("\\echo __FINITE_STATUS_RUNTIMES__"))
+                raw = finite_status.load_fixture(FIXTURE)
+                raw["core"]["credential_recovery_state"] = core["credential_recovery_state"]
+                report = finite_status.build_report(raw, finite_status.parse_time(raw["now"]))
+                observation = report["sections"]["fleet_convergence"]["credential_recovery_state"]
+                self.assertEqual(observation["observations"], [{"schema_state": state, "receipt_count": count}])
+
     def fixture_report(self) -> dict[str, object]:
         raw = finite_status.load_fixture(FIXTURE)
         now = finite_status.parse_time(raw["now"])
