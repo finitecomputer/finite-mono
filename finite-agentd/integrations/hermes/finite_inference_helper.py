@@ -80,7 +80,7 @@ def _hermes_home() -> Path:
 
 def _endpoint_identity(url: Any) -> tuple | None:
     """Scheme and host compare case-insensitively, a trailing path `/` is
-    ignored, and everything else compares exactly (§5.5)."""
+    ignored, and everything else compares exactly."""
     if not isinstance(url, str) or not url:
         return None
     try:
@@ -103,7 +103,7 @@ def _endpoint_identity(url: Any) -> tuple | None:
 
 
 def classify_saved_route(model: Any, fp_base_url: str | None = None) -> str:
-    """Port of agentd's §3.3 classifier over raw ``config.yaml`` ``model``."""
+    """Port of agentd's classifier over raw ``config.yaml`` ``model``."""
     if not isinstance(model, dict):
         return "other"
     provider = model.get("provider")
@@ -294,7 +294,7 @@ def _openrouter_facts(home: Path) -> dict:
 
 
 def _codex_facts(home: Path) -> dict:
-    """§8.6: Hermes' own read-only predicates, in resolver order."""
+    """Hermes' own read-only predicates, in resolver order."""
     from hermes_cli import auth
 
     store = _read_auth_store(home)
@@ -517,10 +517,10 @@ def _read_intent(path: Path) -> dict | None:
 
 
 def apply_pending_disconnect(intent_path: str) -> dict:
-    """Launcher step (F1). Clears only for a valid disconnect record in
+    """Launcher cleanup step. Clears only for a valid disconnect record in
     cleanup, and only when ``config.yaml`` names a provider for the saved
-    default that is not the record's route. Anything else changes nothing
-    (R24): a skip is safe, because agentd re-runs the step."""
+    default that is not the record's route. Anything else changes nothing:
+    a skip is safe, because agentd re-runs the step."""
 
     def result(applied: str, reason: str) -> dict:
         return {"applied": applied, "reason": reason}

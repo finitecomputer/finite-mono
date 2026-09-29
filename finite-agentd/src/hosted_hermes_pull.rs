@@ -211,7 +211,7 @@ fn valid_native_identity(identity: &serde_json::Value, username: Option<&str>, n
 
 #[derive(Default)]
 struct Applied {
-    /// Closed while a disconnect intent exists (§3.7).
+    /// Closed while a disconnect intent exists.
     gate: ServeGate,
     runtime_id: Option<String>,
     generation: Option<u64>,
@@ -354,7 +354,7 @@ pub(super) fn start(home: PathBuf, gate: ServeGate) -> HostedHermesHandle {
     start_with(home, gate, CoreConnection::from_env)
 }
 
-/// The worker answers every restart request in every state (R25): at once
+/// The worker answers every restart request in every state: at once
 /// when no child can run, after the stop otherwise. When it ends it drops the
 /// receiver, so a later request returns at once too.
 fn start_with(
@@ -695,7 +695,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn t_a43_core_pull_does_not_start_hermes_serve_during_a_disconnect() {
+    async fn core_pull_does_not_start_hermes_serve_during_a_disconnect() {
         let temp = tempfile::tempdir().unwrap();
         let intent_path = crate::intent::intent_path(temp.path());
         let record = crate::intent::IntentRecord::new(
@@ -781,7 +781,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn r25_restart_returns_while_core_configuration_is_invalid() {
+    async fn restart_returns_while_core_configuration_is_invalid() {
         // Review B's probe: only one of the two Core variables, or an invalid
         // one, leaves the worker with no child to stop.
         let temp = tempfile::tempdir().unwrap();
@@ -802,7 +802,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn r25_restart_returns_after_a_revoked_assignment() {
+    async fn restart_returns_after_a_revoked_assignment() {
         let (origin, requests) = server(1, |_, _| (401, "{}".into(), String::new())).await;
         let temp = tempfile::tempdir().unwrap();
         let handle = start_with(temp.path().to_path_buf(), ServeGate::default(), move || {

@@ -216,7 +216,7 @@ def two_route_auth():
 
 
 class PinnedUpstreamTests(HelperCase):
-    """T-P4a: the upstream symbols the helper relies on, and fixture shapes."""
+    """the upstream symbols the helper relies on, and fixture shapes."""
 
     def test_pinned_symbols(self):
         from agent.secret_scope import get_secret
@@ -263,7 +263,7 @@ class PinnedUpstreamTests(HelperCase):
 
 
 class SavedRouteTests(unittest.TestCase):
-    """T-P10: the Python classifier agrees with every shared fixture."""
+    """the Python classifier agrees with every shared fixture."""
 
     def test_shared_fixtures(self):
         fixtures = sorted((FIXTURES / "saved-route").glob("*.json"))
@@ -295,7 +295,7 @@ class SavedRouteTests(unittest.TestCase):
 
 
 class InferenceFactsTests(HelperCase):
-    """T-P6, T-P12, and section isolation."""
+    """Read-only facts, unavailable sources, and independent section failures."""
 
     def test_output_contract(self):
         self.write_config({"model": fp_model_block()})
@@ -615,7 +615,7 @@ class InferenceFactsTests(HelperCase):
 
 
 class CodexClassifierTests(HelperCase):
-    """T-P8: the classifier agrees with the pinned resolver on every fixture."""
+    """the classifier agrees with the pinned resolver on every fixture."""
 
     def resolve(self):
         from hermes_cli.runtime_provider import resolve_runtime_provider
@@ -671,7 +671,7 @@ class CodexClassifierTests(HelperCase):
 
 
 class ClearTests(HelperCase):
-    """T-P1, T-P7, T-P9."""
+    """Credential clearing preserves unrelated providers and session state."""
 
     def test_clear_auth_scope(self):
         self.write_auth(two_route_auth())
@@ -744,7 +744,7 @@ SAVED_ROUTE_MODELS = {
 
 
 class PendingDisconnectTests(HelperCase):
-    """T-P11: F1, the launcher's pending-disconnect step."""
+    """F1, The launcher's pending-disconnect step."""
 
     PHASES = (
         "accepted",
@@ -856,7 +856,7 @@ class PendingDisconnectTests(HelperCase):
         self.assertEqual(self.stores(), before)
 
     def test_shared_intent_fixtures(self):
-        """R24: agentd's reader runs the same files. With the saved default
+        """agentd's reader runs the same files. With the saved default
         switched away, a lenient reader would clear on any refused record."""
         self.prepare(fp_model_block())
         fixtures = sorted((FIXTURES / "intent").glob("*.json"))
@@ -919,7 +919,7 @@ class PendingDisconnectTests(HelperCase):
                 self.assertIsNotNone(helper._read_intent(intent))
 
     def test_ambiguous_saved_default_changes_nothing(self):
-        """R24, review finding B2: only a named provider shows that the
+        """only a named provider shows that the
         default moved away from the route."""
         self.prepare(fp_model_block())
         intent = self.intent()
@@ -1025,7 +1025,7 @@ class PackagedModuleTests(HelperCase):
 
 
 class SecretTests(HelperCase):
-    """T-P5: no key or token reaches stdout or stderr."""
+    """no key or token reaches stdout or stderr."""
 
     def test_no_secret_in_output(self):
         secrets = {

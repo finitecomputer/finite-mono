@@ -54,7 +54,7 @@ export function OpenRouterConnection({
   const state = view?.v2 ? view.openrouter.state : null;
   const canConnect = Boolean(view?.capabilities.has("openrouter.connect.v1"));
   const canDisconnect = Boolean(view?.capabilities.has("inference.disconnect.v1"));
-  // R38: with no key known, the card offers the key form; `unknown` is offered what `no_key` is.
+  // with no key known, the card offers the key form; `unknown` is offered what `no_key` is.
   const noKnownKey = state === "no_key" || state === "unknown";
   const keyFormShown = Boolean(view) && (keyFormOpen || noKnownKey);
   const removed =
@@ -62,10 +62,10 @@ export function OpenRouterConnection({
     (disconnect.operationId === null ||
       (view?.operation?.id === disconnect.operationId && view.operation.state === "succeeded"));
   const card = openRouterCardState(view);
-  // R10: while another change runs, nothing here may start one; the operation line says why.
+  // while another change runs, nothing here may start one; the operation line says why.
   const disabled = busy || lock.locked;
   const describedBy = lock.locked ? lock.reasonId : undefined;
-  // R11: while OpenRouter is being removed, the card says only that, in agreement with the operation line.
+  // while OpenRouter is being removed, the card says only that, in agreement with the operation line.
   const removing = view ? removalText(view, "openrouter") : null;
 
   async function selectModel(nextModel: string) {
@@ -260,11 +260,11 @@ export function OpenRouterKeyForm({
   keyRequired: boolean;
   keyPlaceholder: string;
   connect: boolean;
-  /** OpenRouter is the saved default already, so the button text alone says what Save does (R38). */
+  /** OpenRouter is the saved default already, so the button text alone says what Save does. */
   openRouterSaved: boolean;
   model: string;
   setModel: (model: string) => void;
-  /** True while a request is in flight or another change is running (R10). */
+  /** True while a request is in flight or another change is running. */
   busy: boolean;
   /** The operation line, for a screen reader that reaches a control disabled by R10. */
   describedBy?: string;
@@ -338,7 +338,7 @@ export function OpenRouterKeyForm({
         </Button>
       ) : null}
       {connect || openRouterSaved ? null : (
-        // R29: v1 apply always saves OpenRouter as the default, for a first key and for "Replace key" alike.
+        // v1 apply always saves OpenRouter as the default, for a first key and for "Replace key" alike.
         <p className="basis-full text-sm text-muted-foreground" data-testid="inference-openrouter-key-default-line">
           This also makes OpenRouter this agent&apos;s default.
         </p>
@@ -356,7 +356,7 @@ export async function submitOpenRouterKey(
   await send(apiKey);
 }
 
-/** §10.4 client orchestration: one call per intent, the legacy action for agents without the capability. */
+/** client orchestration: one call per intent, the legacy action for agents without the capability. */
 export function openRouterKeyAction(submit: KeySubmit, apiKey: string, model: string): AgentConnectionAction {
   const key = apiKey.trim();
   if (submit === "legacy") {
@@ -387,7 +387,7 @@ export function openRouterCardState(view: InferenceView | null): {
   }
   if (view.openrouter.state === "key_saved") return { state: "connected", label: "Key saved" };
   if (view.openrouter.state === "no_key") return { state: "disconnected" };
-  // R38: no saved key, and the agent couldn't check whether Hermes has one.
+  // no saved key, and the agent couldn't check whether Hermes has one.
   return { state: "unavailable", label: "Not confirmed", note: "The agent couldn't confirm its OpenRouter setup right now." };
 }
 

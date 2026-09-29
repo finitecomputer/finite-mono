@@ -20,7 +20,7 @@ import {
   type FakeInferenceRoute,
 } from "../../scripts/web-design-fixture";
 
-// The design fixture's Connections fakes (DESIGN §10.7), driven through the real dashboard route,
+// The design fixture's Connections fakes, driven through the real dashboard route,
 // action functions, and parser. A fake reply the parser rejects or degrades fails here.
 
 const MACHINE = "runtime-web-design-test";
@@ -225,7 +225,7 @@ test("set-agent names the agent, the saved route, and optionally that the agent 
 test("T-W21 (fake): FP ↔ OpenRouter through select runs the operation through its phases, then the saved route changes", async (t) => {
   const fixture = installFixture(t, { agent: "pr1" });
 
-  // A PR1 agent has no connect command, so a pasted key goes through v1 with the model (§10.4).
+  // A PR1 agent has no connect command, so a pasted key goes through v1 with the model.
   const paste = await post({ action: "inference", profile: "openrouter", apiKey: PASTED_KEY, model: "openai/gpt-5" });
   assert.equal(paste.status, 200);
   let view = inferenceView(paste.body);

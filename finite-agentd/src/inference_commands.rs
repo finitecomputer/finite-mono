@@ -1,5 +1,5 @@
-//! The inference contract's commands (§3): status, v1 apply, select,
-//! disconnect, and the PR2/PR3 hooks, with the production executor host.
+//! The inference contract's commands: status, v1 apply, select,
+//! disconnect, and capability-gated provider commands, with the production executor host.
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -38,7 +38,7 @@ const INFERENCE_DISCONNECT_SCHEMA: &str = "finite.agent.inference.disconnect.v1"
 const OPENROUTER_CONNECT_SCHEMA: &str = "finite.agent.openrouter.connect.v1";
 const CODEX_LOGIN_START_SCHEMA: &str = "finite.agent.codex.login.start.v1";
 const CODEX_LOGIN_CANCEL_SCHEMA: &str = "finite.agent.codex.login.cancel.v1";
-/// The nine commands of the inference contract (§3.12). Each dispatch arm
+/// The nine commands of the inference contract. Each dispatch arm
 /// calls `intent::admit` after its schema check and before any other work.
 const INFERENCE_COMMANDS: [&str; 9] = [
     "agent.connections.status",
@@ -73,14 +73,14 @@ struct DisconnectRequest {
 struct ConnectRequest {
     credential: ConnectCredential,
     #[serde(default)]
-    #[expect(dead_code, reason = "wired in A2")]
+    #[expect(dead_code, reason = "reserved for OpenRouter connection activation")]
     activate: Option<ConnectActivation>,
 }
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct ConnectActivation {
-    #[expect(dead_code, reason = "wired in A2")]
+    #[expect(dead_code, reason = "reserved for OpenRouter connection activation")]
     model: String,
 }
 
@@ -142,7 +142,7 @@ impl ExecutorHost for AgentdHost {
 }
 
 /// Resumes a recorded intent only once Hermes has been started, so a pending,
-/// failing, or unreadable intent never delays chat (§3.11 Startup). The
+/// failing, or unreadable intent never delays chat. The
 /// daemon detaches the task; tests await it.
 pub(crate) fn resume_intent_after_hermes_starts<H: ExecutorHost + Clone>(
     executor: Arc<Executor<H>>,
@@ -165,8 +165,8 @@ pub(crate) fn resume_intent_after_hermes_starts<H: ExecutorHost + Clone>(
     })
 }
 
-/// The inference contract's commands (§3): status, v1 apply, select,
-/// disconnect, and the PR2/PR3 hooks.
+/// The inference contract's commands: status, v1 apply, select,
+/// disconnect, and capability-gated provider commands.
 pub(crate) struct Inference<H> {
     host: H,
     pub(crate) executor: Arc<Executor<H>>,
@@ -180,16 +180,16 @@ pub(crate) struct Inference<H> {
     openrouter: OpenRouterState,
     openrouter_api_base: String,
     /// v1's reply must fit the dashboard's wait: its config check gets what is
-    /// left of this from the command's receipt (R18) ...
+    /// left of this from the command's receipt ...
     v1_reply_budget: Duration,
     /// ... and never less than this.
     v1_min_config_check: Duration,
     serve_restart_wait: Duration,
 }
 
-/// R18: v1's config check ends by this long after the command arrived.
+/// v1's config check ends by this long after the command arrived.
 const V1_REPLY_BUDGET: Duration = Duration::from_secs(40);
-/// R18: the shortest config check v1 ever allows.
+/// the shortest config check v1 ever allows.
 const V1_MIN_CONFIG_CHECK: Duration = Duration::from_secs(5);
 
 /// What is left of `budget` since `received`, and at least `minimum`.
@@ -306,7 +306,7 @@ impl<H: ExecutorHost + Clone> Inference<H> {
         }
     }
 
-    /// The one admission (§3.11, F2): the current record through
+    /// The shared admission check: the current record through
     /// `intent::admit`. A read failure fails a mutation closed; status and the
     /// read-only commands are still served.
     fn admit(
@@ -340,7 +340,7 @@ impl<H: ExecutorHost + Clone> Inference<H> {
     }
 
     /// The facts through the status cache, or `None` when the read failed or
-    /// timed out, including a failure remembered for 15 s (R16, R17a).
+    /// timed out, including a failure remembered for 15 s.
     async fn read_facts(&self) -> Option<InferenceFacts> {
         self.facts
             .get_or_fetch(&self.hermes_home, || {
@@ -349,7 +349,7 @@ impl<H: ExecutorHost + Clone> Inference<H> {
             .await
     }
 
-    /// §3.4: legacy fields unchanged, plus stored facts and the operation.
+    /// legacy fields unchanged, plus stored facts and the operation.
     async fn status(&self) -> Result<Value, AgentdError> {
         let facts = self.facts().await;
         // Re-read after the helper ran, so the operation is current.
@@ -395,7 +395,7 @@ impl<H: ExecutorHost + Clone> Inference<H> {
         }
     }
 
-    /// v1 (§3.5): today's order and failure behavior, including the `.env`
+    /// v1: today's order and failure behavior, including the `.env`
     /// snapshot restore, plus the no-op, the `hermes serve` restart for a
     /// replaced key, and verification after the restart.
     async fn v1_apply(
@@ -504,7 +504,7 @@ impl<H: ExecutorHost + Clone> Inference<H> {
         }
         if credential_replaced {
             // A replaced key: flush any copy the native `hermes serve` holds.
-            // Bounded (R25): the verification below decides the reply.
+            // Bounded: the verification below decides the reply.
             let wait = self.serve_restart_wait;
             if tokio::time::timeout(wait, self.host.restart_serve())
                 .await
@@ -519,7 +519,7 @@ impl<H: ExecutorHost + Clone> Inference<H> {
         Ok(serde_json::to_value(result)?)
     }
 
-    /// §3.10 for v1 as ruled in R8: one immediate read of the parsed values
+    /// For v1: one immediate read of the parsed values
     /// agentd owns, never bytes, so the reply is no later than before. A
     /// mismatch is `config_conflict` with the state as found: no re-apply, no
     /// second restart, and no restore, since the apply itself succeeded.
@@ -538,7 +538,7 @@ impl<H: ExecutorHost + Clone> Inference<H> {
         }
     }
 
-    /// §3.6: validate synchronously with no file touched, then record the
+    /// validate synchronously with no file touched, then record the
     /// intent and reply; the executor writes, restarts, and verifies.
     async fn select(
         &self,
@@ -586,7 +586,7 @@ impl<H: ExecutorHost + Clone> Inference<H> {
             }
             IntentRoute::Openrouter => {
                 // The key the route will use, in the order status shows it
-                // (R26): `.env`, a legacy-config key the executor migrates only
+                //: `.env`, a legacy-config key the executor migrates only
                 // after this check passes, else agentd's environment key.
                 let key = self
                     .connections
@@ -631,7 +631,7 @@ impl<H: ExecutorHost + Clone> Inference<H> {
         self.record_intent(IntentKind::Select, body.route, model)
     }
 
-    /// §3.7: the F1 precondition, then a new or resumed intent. Nothing is
+    /// the safe-default precondition, then a new or resumed intent. Nothing is
     /// removed synchronously.
     async fn disconnect(
         &self,
@@ -654,8 +654,8 @@ impl<H: ExecutorHost + Clone> Inference<H> {
         let read = self.read_facts().await;
         // F1: switching the agent to Finite Private needs its settings and its
         // credential known present. No live probe. A read that failed is "try
-        // again" (R17); a key the helper answered as absent or `unknown` (an
-        // external secret source it does not evaluate) is not (R17a).
+        // again"; a key the helper answered as absent or `unknown` (an
+        // external secret source it does not evaluate) is not.
         if is_saved {
             if self.fp.settings().is_none() {
                 return Err(AgentdError::FinitePrivateUnavailable);
@@ -728,7 +728,7 @@ fn saved_route_of(route: IntentRoute) -> SavedRoute {
     }
 }
 
-/// §3.6: 1..128 characters of `[A-Za-z0-9._:-]`.
+/// 1..128 characters of `[A-Za-z0-9._:-]`.
 fn valid_codex_model(model: &str) -> bool {
     (1..=128).contains(&model.len())
         && model
@@ -1150,7 +1150,7 @@ mod tests {
         }
     }
 
-    // ---- T-A41: every dispatch arm calls `admit` -------------------------
+    // ---- every dispatch arm calls `admit` -------------------------
 
     fn every_command() -> Vec<(&'static str, &'static str, Value)> {
         vec![
@@ -1200,7 +1200,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn t_a41_every_dispatch_arm_reads_the_intent_through_admit() {
+    async fn every_dispatch_arm_reads_the_intent_through_admit() {
         for (command, schema, body) in every_command() {
             let setup = new_setup(&fp_block(), "");
             // A corrupt record is quarantined by the only reader, `admit`.
@@ -1222,7 +1222,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn t_a41_admission_at_the_dispatch_level() {
+    async fn admission_at_the_dispatch_level() {
         for (command, schema, body) in every_command() {
             // A running operation refuses every mutation, and nothing else.
             let setup = new_setup(&fp_block(), "");
@@ -1323,7 +1323,7 @@ mod tests {
                 "inference.disconnect.v1"
             ])
         );
-        // Codex actions need codex.login.v1, which PR1 does not advertise.
+        // Codex actions need codex.login.v1, which is not advertised before login is implemented.
         assert_eq!(
             code(setup.disconnect("openai_codex").await),
             "invalid_payload"
@@ -1339,7 +1339,7 @@ mod tests {
         assert!(status["inference"]["routes"].get("openai_codex").is_none());
     }
 
-    // ---- Status (§3.4), T-A11 --------------------------------------------
+    // ---- Status ---------------------------------------------------
 
     #[tokio::test]
     async fn status_keeps_the_legacy_fields_and_adds_stored_facts_at_the_documented_places() {
@@ -1373,7 +1373,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn t_a11_status_never_contains_a_secret() {
+    async fn status_never_contains_a_secret() {
         let legacy = json!({"default": "a/b", "provider": "openrouter", "api_key": "sk-or-v1-synthetic-legacy"});
         let setup = new_setup(
             &legacy,
@@ -1420,7 +1420,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn r15a_a_command_reads_the_facts_with_10_s_and_the_executor_with_30_s() {
+    async fn a_command_reads_the_facts_with_10_s_and_the_executor_with_30_s() {
         let setup = new_setup(
             &openrouter_block(),
             &format!("OPENROUTER_API_KEY={OR_KEY}\n"),
@@ -1448,7 +1448,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn r17_a_failed_facts_read_refuses_a_disconnect_as_facts_unavailable() {
+    async fn a_failed_facts_read_refuses_a_disconnect_as_facts_unavailable() {
         let env = format!("OPENROUTER_API_KEY={OR_KEY}\n");
         let setup = new_setup(&openrouter_block(), &env);
         *setup.host.facts_fail.lock().unwrap() = true;
@@ -1483,7 +1483,7 @@ mod tests {
         assert_eq!((setup.config_bytes(), setup.env()), before);
         assert!(setup.record().is_none(), "no intent");
 
-        // R16: a retry within 15 s is answered from the remembered failure,
+        // a retry within 15 s is answered from the remembered failure,
         // with no second helper.
         *setup.host.facts_fail.lock().unwrap() = false;
         assert_eq!(
@@ -1503,7 +1503,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn r16_the_executor_reads_the_helper_whatever_status_remembers() {
+    async fn the_executor_reads_the_helper_whatever_status_remembers() {
         // OpenRouter stored but not the saved default: no F1 precondition.
         let setup = new_setup(&fp_block(), &format!("OPENROUTER_API_KEY={OR_KEY}\n"));
         *setup.host.facts_fail.lock().unwrap() = true;
@@ -1529,7 +1529,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn r18_a_hung_v1_config_check_replies_config_invalid_inside_its_budget() {
+    async fn a_hung_v1_config_check_replies_config_invalid_inside_its_budget() {
         use crate::executor::tests::{all_gone, hanging_config_check, recorded_pids};
         let mut setup = new_setup(&fp_block(), "OPENROUTER_API_KEY='sk-or-v1-synthetic-old'\n");
         let (script, pids) = hanging_config_check(&setup.hermes_home);
@@ -1558,7 +1558,7 @@ mod tests {
     }
 
     #[test]
-    fn r18_v1_gets_what_is_left_of_40_s_and_at_least_5_s() {
+    fn v1_gets_what_is_left_of_40_s_and_at_least_5_s() {
         assert_eq!(V1_REPLY_BUDGET, Duration::from_secs(40));
         assert_eq!(V1_MIN_CONFIG_CHECK, Duration::from_secs(5));
         let fresh = remaining_budget(Instant::now(), V1_REPLY_BUDGET, V1_MIN_CONFIG_CHECK);
@@ -1595,10 +1595,10 @@ mod tests {
         .unwrap();
     }
 
-    // ---- T-A10: v1 unchanged ---------------------------------------------
+    // ---- v1 unchanged ---------------------------------------------
 
     #[tokio::test]
-    async fn t_a10_v1_request_and_reply_bytes() {
+    async fn v1_request_and_reply_bytes() {
         let setup = new_setup(&fp_block(), "UNRELATED=kept\n");
         let reply = setup
             .v1(json!({"profile": "openrouter", "api_key": OR_KEY, "model": OR_MODEL}))
@@ -1634,7 +1634,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn t_a10_v1_no_op_and_changed_key() {
+    async fn v1_no_op_and_changed_key() {
         let setup = new_setup(
             &openrouter_block(),
             &format!("OPENROUTER_API_KEY='{OR_KEY}'\n"),
@@ -1674,7 +1674,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn t_a10_v1_restores_the_env_snapshot_on_check_and_restart_failure() {
+    async fn v1_restores_the_env_snapshot_on_check_and_restart_failure() {
         let original_env = "OPENROUTER_API_KEY='sk-or-v1-synthetic-old'\n";
         let setup = new_setup(&fp_block(), original_env);
         let before = setup.config_bytes();
@@ -1708,7 +1708,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn t_a10_v1_admission_and_failed_records() {
+    async fn v1_admission_and_failed_records() {
         let body = json!({"profile": "openrouter", "api_key": OR_KEY, "model": OR_MODEL});
         let setup = new_setup(&fp_block(), "");
         setup.store(
@@ -1799,7 +1799,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn r25_a_serve_restart_that_never_returns_does_not_hold_the_v1_reply() {
+    async fn a_serve_restart_that_never_returns_does_not_hold_the_v1_reply() {
         let mut setup = new_setup(&fp_block(), "");
         *setup.host.serve_hangs.lock().unwrap() = true;
         setup.inference.serve_restart_wait = Duration::from_millis(100);
@@ -1878,10 +1878,10 @@ mod tests {
         assert_eq!(mode & 0o777, 0o600);
     }
 
-    // ---- T-A21: select preflight -----------------------------------------
+    // ---- select preflight -----------------------------------------
 
     #[tokio::test]
-    async fn t_a21_select_preflight_matrix() {
+    async fn select_preflight_matrix() {
         let ok = key_data(json!({"limit": null, "limit_remaining": null}));
         let cases: Vec<(&str, Value, &str, Value, u16, String, &str)> = vec![
             (
@@ -2053,7 +2053,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn r26_an_environment_key_that_status_shows_can_be_selected() {
+    async fn an_environment_key_that_status_shows_can_be_selected() {
         // Review B's probe: no `.env` key and no legacy key, only agentd's
         // environment key, which status shows as `environment`.
         let environment = "sk-or-v1-synthetic-environment";
@@ -2109,10 +2109,10 @@ mod tests {
         );
     }
 
-    // ---- T-A20: async replies and the operation lifecycle ------------------
+    // ---- async replies and the operation lifecycle ------------------
 
     #[tokio::test]
-    async fn t_a20_select_replies_accepted_and_status_follows_the_operation() {
+    async fn select_replies_accepted_and_status_follows_the_operation() {
         let setup = new_setup(&fp_block(), &format!("OPENROUTER_API_KEY={OR_KEY}\n"));
         let fake = FakeOpenRouter::start(200, &key_data(json!({"limit": null}))).await;
         let mut setup = setup;
@@ -2140,13 +2140,13 @@ mod tests {
         assert_eq!(status["inference"]["saved"]["route"], "openrouter");
     }
 
-    // ---- T-A19, T-A40: the F1 precondition -------------------------------
+    // ---- the safe-default precondition -------------------------------
 
     #[tokio::test]
-    async fn t_a40_disconnecting_the_saved_route_needs_finite_private_known_present() {
+    async fn disconnecting_the_saved_route_needs_finite_private_known_present() {
         let env = format!("OPENROUTER_API_KEY={OR_KEY}\n");
-        // R17a: an answered absent or `unknown` key is "not set up"; only a
-        // failed read is "could not check" (the R17 test below).
+        // an answered absent or `unknown` key is "not set up"; only a
+        // failed read is "could not check" (the failed-read test below).
         for (fp_key, code, message) in [
             (
                 Tri::Absent,
@@ -2154,7 +2154,7 @@ mod tests {
                 "Disconnecting would leave this agent without a model: Finite Private isn't fully set up here. Choose another model first.",
             ),
             (
-                // R17a: the helper answered and could not evaluate the key.
+                // the helper answered and could not evaluate the key.
                 Tri::Unknown,
                 "finite_private_unavailable",
                 "Disconnecting would leave this agent without a model: Finite Private isn't fully set up here. Choose another model first.",
@@ -2187,7 +2187,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn t_a19_disconnect_with_finite_private_settings_missing_is_refused() {
+    async fn disconnect_with_finite_private_settings_missing_is_refused() {
         let mut setup = new_setup(
             &openrouter_block(),
             &format!("OPENROUTER_API_KEY={OR_KEY}\n"),
@@ -2243,10 +2243,10 @@ mod tests {
         assert!(matches!(resumed.state, IntentState::Running));
     }
 
-    // ---- T-A45: real failure paths ---------------------------------------
+    // ---- real failure paths ---------------------------------------
 
     #[tokio::test]
-    async fn t_a45_real_read_only_directories() {
+    async fn real_read_only_directories() {
         // v1 with the config directory read-only: the write really fails and
         // nothing changes.
         let setup = new_setup(
@@ -2390,7 +2390,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn t_a45_a_real_spawn_failure_rolls_v1_back() {
+    async fn a_real_spawn_failure_rolls_v1_back() {
         let base = new_setup(&fp_block(), "OPENROUTER_API_KEY='sk-or-v1-synthetic-old'\n");
         let program = base.hermes_home.join("gateway");
         write_sleeper(&program, None);
@@ -2570,7 +2570,7 @@ mod tests {
         started.supervisor.shutdown().await;
     }
 
-    // ---- T-A18: partial-state kill points (§3.10) --------------------------
+    // ---- partial-state kill points --------------------------
 
     /// Restart agentd over the state a crash left: Hermes starts first, the
     /// saved route is configured at that moment, and the operation converges
@@ -2600,7 +2600,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn t_a18_select_crashed_after_the_intent_was_recorded() {
+    async fn select_crashed_after_the_intent_was_recorded() {
         let setup = new_setup(&fp_block(), &format!("OPENROUTER_API_KEY={OR_KEY}\n"));
         crashed_at(
             &setup,
@@ -2613,7 +2613,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn t_a18_select_crashed_after_the_legacy_key_migration() {
+    async fn select_crashed_after_the_legacy_key_migration() {
         let legacy = json!({"default": OR_MODEL, "provider": "openrouter", "api_key": OR_KEY});
         let setup = new_setup(&legacy, &format!("OPENROUTER_API_KEY='{OR_KEY}'\n"));
         crashed_at(
@@ -2640,7 +2640,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn t_a18_select_crashed_after_the_model_write() {
+    async fn select_crashed_after_the_model_write() {
         let setup = new_setup(
             &openrouter_block(),
             &format!("OPENROUTER_API_KEY={OR_KEY}\n"),
@@ -2659,7 +2659,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn t_a18_select_spawn_failure_after_the_write_restores_the_previous_route() {
+    async fn select_spawn_failure_after_the_write_restores_the_previous_route() {
         let setup = new_setup(&fp_block(), &format!("OPENROUTER_API_KEY={OR_KEY}\n"));
         let before = setup.config_bytes();
         crashed_at(
@@ -2681,7 +2681,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn t_a18_disconnect_crashed_at_accepted_or_login_cancelled_skips_the_clears() {
+    async fn disconnect_crashed_at_accepted_or_login_cancelled_skips_the_clears() {
         for phase in [
             intent::IntentPhase::Accepted,
             intent::IntentPhase::LoginCancelled,
@@ -2725,7 +2725,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn t_a18_disconnect_crashed_after_each_later_step() {
+    async fn disconnect_crashed_after_each_later_step() {
         for phase in [
             intent::IntentPhase::RouteSwitched,
             intent::IntentPhase::CredentialRemoved,
@@ -2759,7 +2759,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn t_a18_partial_launcher_clears_end_verify_failed() {
+    async fn partial_launcher_clears_end_verify_failed() {
         let setup = new_setup(
             &openrouter_block(),
             &format!("OPENROUTER_API_KEY={OR_KEY}\n"),

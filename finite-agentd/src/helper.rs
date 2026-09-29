@@ -1,9 +1,9 @@
-//! agentd's side of the helper process contract (§8.2): runs
+//! agentd's side of the helper process contract: runs
 //! `python -m hermes_cli.finite_inference_helper <sub>` inside the Hermes
 //! environment and reads its one JSON result from stdout.
 //!
 //! The helper gets the environment a Hermes process gets from agentd after the
-//! §5.6 launch rule, plus `HERMES_HOME` and `FINITE_CONFIG_FP_*`. That
+//! credential isolation rule, plus `HERMES_HOME` and `FINITE_CONFIG_FP_*`. That
 //! environment is built explicitly and the child starts from an empty one, so
 //! the four helper test variables can never reach a production helper even
 //! when agentd's own environment carries them.
@@ -23,21 +23,21 @@ use crate::hosted_hermes::{CODEX_HOME_DISABLED, openai_key_is_finite_private_ali
 use crate::inference::{FinitePrivateEnv, finite_private_env};
 use crate::supervisor::signal_group;
 
-/// Test-only helper variables (§8.2). agentd never passes them on.
+/// Test-only helper variables. agentd never passes them on.
 pub(crate) const HELPER_TEST_VARIABLES: [&str; 4] = [
     "FINITE_CODEX_AUTH_ISSUER",
     "FINITE_CODEX_LOGIN_DEADLINE_S",
     "FINITE_HELPER_TEST_BARRIER",
     "FINITE_HELPER_TEST_BARRIER_FILE",
 ];
-/// Test-only agentd variables (§12.1) that point agentd at a fake helper.
+/// Test-only agentd variables that point agentd at a fake helper.
 const PYTHON_OVERRIDE: &str = "FINITE_AGENTD_INFERENCE_HELPER_PYTHON";
 const MODULE_OVERRIDE: &str = "FINITE_AGENTD_INFERENCE_HELPER_MODULE";
 const HELPER_MODULE: &str = "hermes_cli.finite_inference_helper";
-/// A status read: its reply must fit the dashboard's wait (R15a).
+/// A status read: its reply must fit the dashboard's wait.
 pub(crate) const STATUS_FACTS_DEADLINE: Duration = Duration::from_secs(10);
 /// An executor read: no reply waits on it, and a busy Agent Runtime can make
-/// the helper slow (R15a).
+/// the helper slow.
 pub(crate) const EXECUTOR_FACTS_DEADLINE: Duration = Duration::from_secs(30);
 /// The interpreter and module agentd runs.
 struct HelperCommand {
@@ -54,7 +54,7 @@ impl HelperCommand {
     }
 }
 
-/// Read-only redacted facts (§8.2.1), within `deadline`: status passes
+/// Read-only redacted facts, within `deadline`: status passes
 /// `STATUS_FACTS_DEADLINE`, the executor `EXECUTOR_FACTS_DEADLINE`.
 pub(crate) async fn inference_facts(
     hermes_home: &Path,
@@ -76,7 +76,7 @@ async fn read_facts(
     parse_facts(run_helper(command, environment, &["inference-facts"], deadline).await?)
 }
 
-/// agentd's environment after the §5.6 launch rule, without the helper test
+/// agentd's environment after the credential isolation rule, without the helper test
 /// variables, plus `HERMES_HOME` and `FINITE_CONFIG_FP_*`.
 fn helper_env(
     base: impl IntoIterator<Item = (OsString, OsString)>,
@@ -215,7 +215,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn t_a13_helper_env_is_the_launch_env_without_test_variables() {
+    async fn helper_env_is_the_launch_env_without_test_variables() {
         let temp = tempfile::tempdir().unwrap();
         let dump = temp.path().join("env");
         let args = temp.path().join("args");
@@ -398,7 +398,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn t_a17_helper_failure_serves_unknown_facts() {
+    async fn helper_failure_serves_unknown_facts() {
         let temp = tempfile::tempdir().unwrap();
         let cache = FactsCache::default();
         let failing = fake_helper(temp.path(), "exit 1");
@@ -440,7 +440,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn r15a_a_helper_slower_than_status_still_answers_the_executor() {
+    async fn a_helper_slower_than_status_still_answers_the_executor() {
         assert_eq!(STATUS_FACTS_DEADLINE, Duration::from_secs(10));
         assert_eq!(EXECUTOR_FACTS_DEADLINE, Duration::from_secs(30));
         // Both helpers answer only once `release` exists. The test creates it

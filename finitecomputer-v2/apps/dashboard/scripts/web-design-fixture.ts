@@ -782,7 +782,7 @@ function shutdown(signal: NodeJS.Signals) {
 }
 }
 
-// Connections runtime-command fakes (DESIGN §3, §4, §10.7). Replies go through the dashboard's real
+// Connections runtime-command fakes. Replies go through the dashboard's real
 // parser, so a reply that parser rejects or degrades is a bug here. Keys and codes are fake, only a
 // key's SHA-256 is kept, and nothing here logs.
 
@@ -807,7 +807,7 @@ export type InferenceFakeOptions = {
   saved?: FakeInferenceRoute;
   /**
    * Status as agentd reports it when its helper read was slow or failed: Finite Private, the backup, and what
-   * Hermes holds for OpenRouter are `unknown` (R34). A legacy agent reports no such facts, so it is unchanged.
+   * Hermes holds for OpenRouter are `unknown`. A legacy agent reports no such facts, so it is unchanged.
    */
   unconfirmed?: boolean;
   /** How long an operation, or a Codex sign-in, stays in each phase. */
@@ -855,7 +855,7 @@ const LAST_RESULT_MS = 10 * 60_000;
 const FAILED_ATTEMPTS = 3;
 
 type SavedModel = { route: FakeInferenceRoute; model: string };
-// A fake key containing one of these words fails the `/key` check the way agentd reports it (§3.9).
+// A fake key containing one of these words fails the `/key` check the way agentd reports it.
 type KeyVerdict = "ok" | "management" | "rejected" | "exhausted" | "unreachable";
 type StoredKey = { hash: string; verdict: KeyVerdict };
 type OperationKind = keyof typeof OPERATION_PHASES;
@@ -900,7 +900,7 @@ export function createInferenceFake(options: InferenceFakeOptions = {}): Inferen
   let openrouterKey = seeded === "openrouter" ? storedKey(FAKE_SEEDED_OPENROUTER_KEY) : null;
   let codexSignedIn = seeded === "openai_codex";
   let codexLogin: FakeCodexLogin | null = null;
-  // The intent record while running or failed (§3.11), then the last result.
+  // The intent record while running or failed, then the last result.
   let operation: FakeOperation | null = null;
   let failNext: OperationErrorCode | null = null;
   let replies = 0;
@@ -1023,11 +1023,11 @@ export function createInferenceFake(options: InferenceFakeOptions = {}): Inferen
     current.errorCode = current.failWith;
     current.attempts = FAILED_ATTEMPTS;
     current.failWith = null;
-    // A spawn failure after a select or activate restores the previous config (§3.10).
+    // A spawn failure after a select or activate restores the previous config.
     if (current.errorCode === "supervisor_unavailable" && current.kind !== "disconnect") saved = current.savedBefore;
   }
 
-  // The §3.11 admission table.
+  // The admission table.
   function admit(command: "mutation" | "codex_login_start" | { disconnect: FakeInferenceRoute }): Admission {
     const record = operation && operation.state !== "succeeded" ? operation : null;
     if (!record) return "proceed";
@@ -1160,7 +1160,7 @@ export function createInferenceFake(options: InferenceFakeOptions = {}): Inferen
     };
   }
 
-  // v1 stays synchronous and stores a key it has not validated, as today (§3.5).
+  // v1 stays synchronous and stores a key it has not validated, as today.
   function applyV1(body: unknown) {
     const request = bodyRecord(body, ["profile", "api_key", "model"]);
     const apiKey = optionalText(request.api_key, "api_key");
@@ -1454,7 +1454,7 @@ function readFailNextOperation() {
 const LOCAL_RUNTIME_COMMANDS_URL = /^http:\/\/(127\.0\.0\.1|localhost):([0-9]{1,5})\/?$/u;
 
 /**
- * `FC_DESIGN_RUNTIME_COMMANDS_URL` names a local harness (DESIGN §13.3 E-0) that answers
+ * `FC_DESIGN_RUNTIME_COMMANDS_URL` names a local harness (DESIGN E-0) that answers
  * `/v1/app/runtime-commands` in place of the fakes. Only a loopback origin is accepted, so the
  * fixture can never be pointed at a real service by accident.
  */

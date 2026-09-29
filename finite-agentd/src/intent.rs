@@ -223,7 +223,7 @@ pub(crate) fn clear(path: &Path) -> Result<(), AgentdError> {
     Ok(())
 }
 
-/// The §3.11 admission table. Every command calls this after its schema check
+/// The admission table. Every command calls this after its schema check
 /// and before any other work.
 pub(crate) fn admit(
     record: Option<&IntentRecord>,

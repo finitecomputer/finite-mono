@@ -1013,7 +1013,7 @@ def _helper_module_available() -> bool:
 
 
 class AgentRuntimeLauncherInferenceTest(unittest.TestCase):
-    """Finite Private settings, the §5.6 launch rule, and the pending-disconnect step.
+    """Finite Private settings, the credential isolation rule, and the pending-disconnect step.
 
     The launcher runs for real against the real reconciler; `python -m
     hermes_cli.finite_inference_helper`, `timeout`, `hermes`, and `finitechat`
@@ -1394,7 +1394,7 @@ class AgentRuntimeLauncherInferenceTest(unittest.TestCase):
         "hermes_cli.finite_inference_helper ships in slice P1; rebuild the Hermes env after it lands",
     )
     def test_real_helper_clears_only_after_cleanup_and_route_switch(self) -> None:
-        """F1 through the real launcher and the real helper (§3.7, §8.2)."""
+        """F1 through the real launcher and the real helper."""
         openrouter = {
             "default": "anthropic/claude-sonnet-4.6",
             "provider": "openrouter",

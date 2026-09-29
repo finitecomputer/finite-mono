@@ -277,7 +277,7 @@ class FinitePrivateFallbackReconcileTest(unittest.TestCase):
 
     def test_owned_entry_is_rewritten_with_discovery_off_except_on_recovery(self) -> None:
         # Without `discover_models: false`, patched Hermes would not validate
-        # `/model` against the declared models (R33).
+        # `/model` against the declared models.
         earlier_build = {
             key: value for key, value in CANONICAL_PROVIDER.items() if key != "discover_models"
         }

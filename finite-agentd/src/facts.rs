@@ -1,5 +1,5 @@
 //! Redacted Hermes facts from the helper's `inference-facts` subcommand
-//! (§8.2.1), and the status cache in front of it.
+//!, and the status cache in front of it.
 //!
 //! Every fact is a string enum that includes `unknown`; an unrecognized value
 //! deserializes as `unknown`. Nothing here holds a secret.
@@ -17,7 +17,7 @@ use crate::AgentdError;
 /// Facts are recomputed at least this often even when no file changed, so
 /// time-dependent facts such as Codex cooldowns are never staler than this.
 pub(crate) const FACTS_TTL: Duration = Duration::from_secs(30);
-/// R16: after a failed read, status answers `unknown` for this long without
+/// after a failed read, status answers `unknown` for this long without
 /// starting another helper, so a slow helper is not restarted back to back.
 pub(crate) const FAILED_READ_MEMORY: Duration = Duration::from_secs(15);
 
@@ -186,8 +186,8 @@ struct CachedFacts {
 
 /// Caches helper facts keyed on the stats of the files they come from, with a
 /// TTL. A failed fetch answers `None`, and so does every call for
-/// `FAILED_READ_MEMORY` after it, without starting a helper (R16). `None` is
-/// "could not read", which R17a keeps apart from facts the helper answered as
+/// `FAILED_READ_MEMORY` after it, without starting a helper. `None` is
+/// "could not read", which callers distinguish from facts the helper answered as
 /// `unknown`. The executor never reads through this cache.
 #[derive(Default)]
 pub(crate) struct FactsCache {
@@ -420,7 +420,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn r16_a_failed_read_is_remembered_for_15_s_without_a_helper() {
+    async fn a_failed_read_is_remembered_for_15_s_without_a_helper() {
         assert_eq!(FAILED_READ_MEMORY, Duration::from_secs(15));
         let temp = tempfile::tempdir().unwrap();
         let home = temp.path();
@@ -469,7 +469,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn r16_a_successful_read_after_15_s_replaces_the_failure_and_is_cached() {
+    async fn a_successful_read_after_15_s_replaces_the_failure_and_is_cached() {
         let temp = tempfile::tempdir().unwrap();
         let home = temp.path();
         fs::write(home.join("config.yaml"), "model: {}\n").unwrap();
@@ -511,7 +511,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn r17a_an_answered_unknown_is_not_a_failed_read() {
+    async fn an_answered_unknown_is_not_a_failed_read() {
         let temp = tempfile::tempdir().unwrap();
         let cache = FactsCache::default();
         // The helper answered, and could not evaluate the key (for example

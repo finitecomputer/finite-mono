@@ -134,7 +134,7 @@ function panel(status: ReturnType<typeof parseConnectionsStatus> | null) {
   return html(createElement(InferenceConnections, { status, busy: false, send: async () => ({ ok: true as const, result: null }), refresh: async () => {} }));
 }
 
-test("T-W10: every backup line, and only a configured backup says Finite Private answers", () => {
+test("every backup line, and only a configured backup says Finite Private answers", () => {
   const cases: Array<[Inference, string]> = [
     [{ saved: SAVED_OR }, "Finite Private backup is configured. If OpenRouter returns an error, Finite Private answers."],
     [{ saved: SAVED_CODEX }, "Finite Private backup is configured. If ChatGPT returns an error, Finite Private answers."],
@@ -164,7 +164,7 @@ test("T-W10: every backup line, and only a configured backup says Finite Private
   assert.equal(copy(backupLine(view(v2({ saved: SAVED_OR }, ["inference.select.v1"])))), "Backup details aren't available on this agent yet.");
 });
 
-test("T-W11: the Finite Private card states", () => {
+test("the Finite Private card states", () => {
   const card = (status: ReturnType<typeof parseConnectionsStatus>) =>
     text(html(createElement(FinitePrivateCard, { view: view(status), busy: false, lock: UNLOCKED, run: noRun, notice: null })));
   const configured = card(v2());
@@ -202,7 +202,7 @@ test("R34: a v2 agent that couldn't confirm Finite Private: \"Not confirmed\", i
   }
 });
 
-test("T-W11: \"Use Finite Private\" appears whenever the saved route isn't Finite Private", () => {
+test("\"Use Finite Private\" appears whenever the saved route isn't Finite Private", () => {
   for (const status of [
     v2({ saved: SAVED_OR }),
     v2({ saved: SAVED_CODEX }),
@@ -225,11 +225,11 @@ function openRouterCard(status: ReturnType<typeof parseConnectionsStatus>, notic
   return html(createElement(OpenRouterConnection, { view: view(status), busy: false, lock: UNLOCKED, run: noRun, notice }));
 }
 
-test("T-W12: OpenRouter without a key: paste through connect when advertised, else the legacy one-call Save", () => {
+test("OpenRouter without a key: paste through connect when advertised, else the legacy one-call Save", () => {
   const pr1 = openRouterCard(v2());
   assert.match(text(pr1), /OpenRouter Not connected Use your own OpenRouter account\. Finite Private is configured as a backup\./u);
   assert.match(pr1, /data-testid="inference-openrouter-key-input"/u);
-  // R29: without openrouter.connect.v1, Save goes through v1, which always makes OpenRouter the saved default.
+  // without openrouter.connect.v1, Save goes through v1, which always makes OpenRouter the saved default.
   assert.match(pr1, /data-testid="inference-openrouter-save"[^>]*>Save and use OpenRouter</u);
   assert.match(text(pr1), /Save and use OpenRouter This also makes OpenRouter this agent's default\./u);
   assert.doesNotMatch(pr1, /inference-openrouter-save-only|inference-openrouter-disconnect"|inference-openrouter-links/u);
@@ -271,7 +271,7 @@ test("R29: the key form without openrouter.connect.v1 says it also makes OpenRou
     assert.ok(text(markup).includes(line), name);
     assert.doesNotMatch(markup, /inference-openrouter-save-and-use|inference-openrouter-save-only/u, name);
   }
-  // R38: when OpenRouter is the saved default already, the button text alone says it; the line is absent.
+  // when OpenRouter is the saved default already, the button text alone says it; the line is absent.
   for (const [name, markup] of [
     ["PR1 Replace key, OpenRouter saved", form(false, true, () => {}, true)],
     ["today's agentd, OpenRouter saved", form(false, false, () => {}, true)],
@@ -279,7 +279,7 @@ test("R29: the key form without openrouter.connect.v1 says it also makes OpenRou
     assert.match(markup, /data-testid="inference-openrouter-save"[^>]*>Save and use OpenRouter</u, name);
     assert.doesNotMatch(markup, /inference-openrouter-key-default-line|This also makes OpenRouter/u, name);
   }
-  // With openrouter.connect.v1 the form is as §10.5 designs it: "Save and use" and "Save only", and no extra line.
+  // With openrouter.connect.v1 the form is as designs it: "Save and use" and "Save only", and no extra line.
   for (const onCancel of [null, () => {}]) {
     const markup = form(true, true, onCancel);
     assert.match(markup, /data-testid="inference-openrouter-save-and-use"[^>]*>Save and use</u);
@@ -347,7 +347,7 @@ test("R38: OpenRouter unknown on a v2 agent: \"Not confirmed\", neutral, a note,
   }
 });
 
-test("T-W12: OpenRouter with a saved key: account line by source, extra lines, actions, links", () => {
+test("OpenRouter with a saved key: account line by source, extra lines, actions, links", () => {
   const accounts: Array<[string, string]> = [
     ["agent", "Key saved in this agent"],
     ["legacy_config", "Key saved in an older format. Select Use OpenRouter to finish setting it up."],
@@ -380,7 +380,7 @@ test("T-W12: OpenRouter with a saved key: account line by source, extra lines, a
   });
 });
 
-test("T-W12: OpenRouter links use constants plus a validated key hash, and open safely", () => {
+test("OpenRouter links use constants plus a validated key hash, and open safely", () => {
   const markup = openRouterCard(v2({ saved: SAVED_OR, routes: { openrouter: KEY_SAVED } }));
   const links = [...markup.matchAll(/<a\b[^>]*>/gu)].map(([tag]) => tag);
   assert.deepEqual(
@@ -410,7 +410,7 @@ test("T-W12: OpenRouter links use constants plus a validated key hash, and open 
   assert.doesNotMatch(openRouterCard(legacy("custom", "glm-5-3-flash")), /inference-openrouter-links/u);
 });
 
-test("T-W13: an agent running today's agentd keeps today's controls and nothing that needs a capability", () => {
+test("an agent running today's agentd keeps today's controls and nothing that needs a capability", () => {
   for (const status of [legacy("custom", "glm-5-3-flash"), legacy("openrouter", "openai/gpt-5"), legacy("openai-codex", "gpt-5.5")]) {
     const markup = panel(status);
     for (const hidden of [
@@ -421,7 +421,7 @@ test("T-W13: an agent running today's agentd keeps today's controls and nothing 
       assert.equal(markup.includes(hidden), false, hidden);
     }
     assert.match(markup, /data-testid="inference-openrouter-open"/u);
-    // R9: no ChatGPT card unless ChatGPT is the saved route, and never an update request.
+    // no ChatGPT card unless ChatGPT is the saved route, and never an update request.
     assert.equal(markup.includes('data-testid="inference-codex"'), status.inference.provider === "openai-codex");
     assert.doesNotMatch(text(markup), /Update needed|needs an update to connect ChatGPT/u);
     assert.match(text(markup), /Backup details aren't available on this agent yet\./u);
@@ -444,7 +444,7 @@ test("T-W13: an agent running today's agentd keeps today's controls and nothing 
   assert.doesNotMatch(form.match(/<button[^>]*inference-openrouter-save"[^>]*>/u)?.[0] ?? "", / disabled=""/u);
 });
 
-test("T-W13: garbage or unknown inference facts never throw and never blank the other cards", () => {
+test("garbage or unknown inference facts never throw and never blank the other cards", () => {
   const garbage = parseConnectionsStatus({
     ...LEGACY_BASE,
     telegram: { connected: true, home_channel: "Owner", pending: [], approved: [] },
@@ -471,13 +471,13 @@ test("T-W13: garbage or unknown inference facts never throw and never blank the 
   const unknownPanel = panel(unknown);
   // R38 changed this line: it said "OpenRouter Status unavailable" and offered the controls of a saved key.
   assert.match(text(unknownPanel), /OpenRouter Not confirmed Use your own OpenRouter account\. The agent couldn't confirm its OpenRouter setup right now\./u);
-  // R34: the summary and the Finite Private card say the agent couldn't confirm, and nothing asks for a repair.
+  // the summary and the Finite Private card say the agent couldn't confirm, and nothing asks for a repair.
   assert.match(text(unknownPanel), /The agent couldn't confirm the Finite Private backup right now\./u);
   assert.match(text(unknownPanel), /Finite Private Not confirmed glm-5-3-flash Finite's own private model service\. The agent couldn't confirm its Finite Private setup right now\./u);
   assert.doesNotMatch(unknownPanel, /is-attention|Needs attention|Backup details aren't available/u);
 });
 
-test("T-W14: the OpenRouter disconnect dialog states what it does and doesn't guarantee", () => {
+test("the OpenRouter disconnect dialog states what it does and doesn't guarantee", () => {
   const base =
     "Finite deletes the key saved in this agent and the agent's other copies, and restarts the agent's model service. " +
     "Programs the agent started earlier may keep a copy until they stop. " +
@@ -491,7 +491,7 @@ test("T-W14: the OpenRouter disconnect dialog states what it does and doesn't gu
   assert.equal(copy(openRouterDisconnectCopy(view(v2({ routes: { openrouter: KEY_SAVED } })))), `${base}${modelClause}`);
 });
 
-test("T-W14: after a disconnect, the revoke link uses the captured key, and an environment key is called out", () => {
+test("after a disconnect, the revoke link uses the captured key, and an environment key is called out", () => {
   const removed = html(createElement(OpenRouterRemoved, { view: view(v2()), keyHash: KEY_HASH }));
   assert.match(text(removed), /^OpenRouter was removed from this agent\. Revoke the key in OpenRouter$/u);
   assert.match(removed, new RegExp(`href="https://openrouter.ai/keys/${KEY_HASH}"[^>]*target="_blank"[^>]*rel="noopener noreferrer"`, "u"));
@@ -515,7 +515,7 @@ function operationLine(op: Inference, options: { showDone?: boolean; pollExpired
   }));
 }
 
-test("T-W15: the operation line in every state", () => {
+test("the operation line in every state", () => {
   const paused = " The agent's Hermes web dashboard is paused until this finishes.";
   const cases: Array<[Inference, string]> = [
     [operation("select", "openrouter", "running"), "Switching to OpenRouter · openai/gpt-5…"],
@@ -546,7 +546,7 @@ test("T-W15: the operation line in every state", () => {
   assert.equal(operationText(running.operation!, false), "Switching to OpenRouter · openai/gpt-5…");
 });
 
-test("T-W16: every row of the command error copy table", () => {
+test("every row of the command error copy table", () => {
   const idle = view(v2({ saved: SAVED_OR }));
   const cases: Array<[string | null, string, string, string]> = [
     ["not_connected", "", "openrouter", "Connect OpenRouter first."],
@@ -577,7 +577,7 @@ test("T-W16: every row of the command error copy table", () => {
   );
 });
 
-test("T-W16: the storage-only result is exact, and activation_not_recorded offers Use OpenRouter", () => {
+test("the storage-only result is exact, and activation_not_recorded offers Use OpenRouter", () => {
   assert.equal(STORAGE_ONLY_COPY, "Key saved. The agent default is unchanged. OpenRouter conversations may use it.");
   const status = v2({ routes: { openrouter: KEY_SAVED } }, ALL);
   const stored = openRouterCard(status, { card: "openrouter", kind: "stored" });
@@ -596,7 +596,7 @@ test("T-W16: the storage-only result is exact, and activation_not_recorded offer
   assert.doesNotMatch(plain, /retry-use/u);
 });
 
-test("T-W17: every control is disabled before the first status, and the stable test ids are present", () => {
+test("every control is disabled before the first status, and the stable test ids are present", () => {
   const markup = html(createElement(ConnectionsPanel, { machineId: "agent-1", googleConfigured: true }));
   const buttons = [...markup.matchAll(/<button\b([^>]*)>(.*?)<\/button>/gu)];
   assert.ok(buttons.length > 3);
@@ -611,7 +611,7 @@ test("T-W17: every control is disabled before the first status, and the stable t
   ]) {
     assert.match(markup, new RegExp(`data-testid="${id}"`, "u"), id);
   }
-  // R9: before status, nothing says whether ChatGPT is the saved route, so there is no ChatGPT card.
+  // before status, nothing says whether ChatGPT is the saved route, so there is no ChatGPT card.
   assert.doesNotMatch(markup, /inference-openrouter-key-input|inference-openrouter-links|inference-codex/u);
 });
 
@@ -827,7 +827,7 @@ test("R10b: the lock follows the last status, and Check again resumes the watch"
     assert.equal(watchState(status, true, id).locked, false, `a ${state} select unlocks, whatever the window`);
     assert.equal(controlsLocked(status), false, `a ${state} select unlocks`);
   }
-  // A failed disconnect stays locked (R10a); only Try again moves it on.
+  // A failed disconnect stays locked; only Try again moves it on.
   status = view(v2({ saved: SAVED_OR, routes: { openrouter: KEY_SAVED }, operation: operation("disconnect", "openrouter", "failed") }));
   assert.equal(watchState(status, true, id).delay, null);
   assert.equal(watchState(status, true, id).locked, true);
@@ -925,7 +925,7 @@ test("F3/F6: no rendered string claims a saved key or backup works, is ready, va
   for (const entry of rendered) {
     const scrubbed = allowed.reduce((value, sentence) => value.replaceAll(sentence, ""), entry);
     assert.doesNotMatch(scrubbed, /\b(works|working|ready|valid|active)\b|isn't in use|is not in use|not in use/iu, entry);
-    // R13: under V18 and R4 the chat doesn't always send a notice. Slice V18-P removes this check when it
+    // under V18 and R4 the chat doesn't always send a notice. Slice V18-P removes this check when it
     // restores "and the chat says so" to the backup line.
     assert.doesNotMatch(entry, /the chat says so/iu, entry);
   }

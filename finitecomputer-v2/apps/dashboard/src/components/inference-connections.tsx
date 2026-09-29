@@ -32,7 +32,7 @@ export type InferenceOutcome =
   | { ok: false; code: string | null; message: string };
 export type InferenceSend = (action: AgentConnectionAction) => Promise<InferenceOutcome>;
 export type InferenceCard = "finite_private" | "openrouter" | "summary";
-/** A synchronous result shown next to the action that produced it (§10.5 command error copy). */
+/** A synchronous result shown next to the action that produced it (command error copy). */
 export type InferenceNotice =
   | { card: InferenceCard; kind: "error"; code: string | null; message: string; route: InferenceRoute; retryModel?: string }
   | { card: InferenceCard; kind: "stored" };
@@ -239,7 +239,7 @@ export function finitePrivateCardState(view: InferenceView | null): {
   if (view.finitePrivate.state === "configured") {
     return { state: "connected", label: "Configured", note: null, reason: null };
   }
-  // R34: `unknown` means the agent couldn't check (a slow or failed read); nothing is known to need repair.
+  // `unknown` means the agent couldn't check (a slow or failed read); nothing is known to need repair.
   if (view.finitePrivate.state === "unknown") {
     return {
       state: "unavailable",
@@ -278,7 +278,7 @@ export function controlsLocked(view: InferenceView | null) {
 /**
  * What the page polls for, whether that polling window has run out, and whether controls are locked.
  * `expiredPollKey` is the operation (or sign-in attempt) whose window ran out; polling runs again for anything
- * else, or once "Check again" clears it. The lock comes from the last status alone (R10b): an expired window
+ * else, or once "Check again" clears it. The lock comes from the last status alone: an expired window
  * never unlocks it.
  */
 export function watchState(view: InferenceView | null, visible: boolean, expiredPollKey: string | null) {
@@ -357,7 +357,7 @@ export function backupLine(view: InferenceView) {
     case "custom":
       return "Backup is customized in Hermes.";
     default:
-      // R34: an agent with the new status couldn't check just now; one without it reports no backup details.
+      // an agent with the new status couldn't check just now; one without it reports no backup details.
       return view.v2
         ? "The agent couldn't confirm the Finite Private backup right now."
         : "Backup details aren't available on this agent yet.";
@@ -419,7 +419,7 @@ export function OperationLine({
   );
 }
 
-/** Retrying a failed operation repeats it; a failed disconnect is resumed by agentd (§3.11). */
+/** Retrying a failed operation repeats it; a failed disconnect is resumed by agentd. */
 function retryAction(
   view: InferenceView,
   operation: OperationView

@@ -343,9 +343,18 @@ credential, then `model`, restarts, and verifies.
   an `unknown` fact or a slow or failed read as "not yet". Only a window that
   ends uncleared is a mismatch; mismatches are re-run a bounded number of
   times, then the operation fails.
-- **The only rollback** is restoring `config.yaml` after the gateway fails to
-  spawn, and only while the file still holds exactly the bytes agentd wrote.
-  Operations otherwise move forward, and a retry converges.
+- **Failed checks undo only agentd's model change.** Daemon configuration
+  writers share a lock. If an external writer changes unrelated settings while
+  the check runs, those settings survive the undo. If the model itself changed,
+  agentd leaves it alone and reports `config_conflict`. Hermes and terminal
+  writers do not take this lock; it is not a cross-process transaction.
+- **Spawn-failure rollback** restores `config.yaml` only while it still holds
+  exactly the bytes agentd wrote. A different file is left intact.
+- **Select verification preserves a later model choice.** A retry may replace
+  only the model value this attempt originally replaced, checked again under
+  the daemon's config lock. Any other value, or an unknown before-image after
+  daemon recovery, produces `config_conflict` without a write. It never repeats
+  credential migration just to retry the model write.
 
 In the worst case a background operation can take several minutes, longer
 than the dashboard polls. agentd keeps refusing other changes until it ends.

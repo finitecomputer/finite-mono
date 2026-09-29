@@ -373,7 +373,7 @@ def _model_switch_case(cfg):
 
 
 def _pinned_switch_case(spec, cfg):
-    """R33: /model as the gateway's handler calls it, against Finite Private's 404 listing."""
+    """/model as the gateway's handler calls it, against Finite Private's 404 listing."""
     import yaml
     from hermes_cli.config import (
         get_compatible_custom_providers,
@@ -425,7 +425,7 @@ def _registry_providers():
 
 
 def _sweep_case(provider, cfg):
-    """R27: switch to each listed model as /model does, then serve the persisted override."""
+    """switch to each listed model as /model does, then serve the persisted override."""
     import threading
     from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
@@ -572,7 +572,7 @@ def keyless_openrouter_env():
 
 class OpenRouterBorrowingTests(RouteSafetyCase):
     def test_openrouter_never_returns_openai_api_key(self):
-        """T-H1: neither the FP alias nor a personal key; plugins still see a personal key."""
+        """neither the FP alias nor a personal key; plugins still see a personal key."""
         results = self.run_cases(
             [
                 {
@@ -589,7 +589,7 @@ class OpenRouterBorrowingTests(RouteSafetyCase):
                 self.assertEqual(result["image_key"], value)
 
     def test_keyless_openrouter_goes_through_fallback_resolution(self):
-        """T-H10 (F4): saved default and session override by fallback fp / off / custom."""
+        """saved default and session override by fallback fp / off / custom."""
         specs = []
         for fallback in ("fp", "off", "custom"):
             specs.append({"config": config(OR_DEFAULT, fallback), "env": keyless_openrouter_env()})
@@ -624,7 +624,7 @@ class EndpointIdentityTests(RouteSafetyCase):
         }
 
     def test_endpoint_identity(self):
-        """T-H11 (F5): path case is exact; scheme/host case and a trailing slash are not."""
+        """path case is exact; scheme/host case and a trailing slash are not."""
         upper = "HTTPS://Tenant.Example.INVALID/TenantA/v1/"
         path_fp, path_off, host, port, unparsable, same, mirror = self.run_cases(
             [
@@ -664,7 +664,6 @@ class EndpointIdentityTests(RouteSafetyCase):
 
 class SessionBoundaryTests(RouteSafetyCase):
     def test_endpoint_without_provider_and_blank_resolved_endpoint(self):
-        """T-H6 (X8)."""
         stub = {"provider": "custom", "api_key": "fp-FAKE", "base_url": None}
         specs = []
         for fallback in ("fp", "off"):
@@ -697,7 +696,6 @@ class SessionBoundaryTests(RouteSafetyCase):
         )
 
     def test_model_only_override_inherits_the_default(self):
-        """T-H8."""
         for result in self.run_cases(
             [
                 {
@@ -711,7 +709,6 @@ class SessionBoundaryTests(RouteSafetyCase):
             self.assert_runtime(result, "glm-other", FP, "fp-FAKE")
 
     def test_keyless_named_custom_override(self):
-        """T-H4."""
         result = self.run_one(
             {
                 "config": config(FP_DEFAULT, "off"),
@@ -724,7 +721,7 @@ class SessionBoundaryTests(RouteSafetyCase):
         self.assertEqual(route_of_key(result["api_key"]), "none")
 
     def test_codex_failure_recovery_removal(self):
-        """T-H3 (X8): one conversation across a sign-in and a removal."""
+        """one conversation across a sign-in and a removal."""
         turns = self.run_one(
             {
                 "config": config(FP_DEFAULT),
@@ -740,7 +737,7 @@ class SessionBoundaryTests(RouteSafetyCase):
         self.assert_runtime(turns[2], "gpt-5.5", CODEX, CODEX_TOKEN)
 
     def test_codex_never_uses_openai_api_key(self):
-        """T-H7: at the resolver, the saved default, and a session override."""
+        """at the resolver, the saved default, and a session override."""
         env = {"FINITE_PRIVATE_API_KEY": "fp-FAKE", "OPENAI_API_KEY": "fp-FAKE"}
         codex_default = {"default": "gpt-5.5", "provider": "openai-codex"}
         specs = [{"kind": "codex", "config": config(FP_DEFAULT), "env": env}]
@@ -798,7 +795,7 @@ class NormalServingTests(RouteSafetyCase):
         )
 
     def test_canonical_fp_fallback_entry(self):
-        """T-H5 (E1): the FP entry resolves its own key and skips itself against the FP primary."""
+        """the FP entry resolves its own key and skips itself against the FP primary."""
         result = self.run_one(
             {
                 "kind": "fallback_entry",
@@ -818,7 +815,7 @@ class NormalServingTests(RouteSafetyCase):
         )
 
     def test_finite_private_model_switch_with_404_models(self):
-        """T-H9: the switch succeeds on FP's own endpoint; the models map supplies capabilities."""
+        """the switch succeeds on FP's own endpoint; the models map supplies capabilities."""
         providers = json.loads(json.dumps(PROVIDERS))
         providers["finite-private"]["base_url"] = "{FP_URL}"
         providers["finite-private"]["models"] = {
@@ -842,7 +839,7 @@ class NormalServingTests(RouteSafetyCase):
 
 
 def matrix_specs():
-    """T-H2: saved default, override, fallback, credentials, alias (120 cases)."""
+    """saved default, override, fallback, credentials, alias (120 cases)."""
     defaults = {
         "fp": dict(FP_DEFAULT, default="glm-5-3-flash"),
         "or": OR_DEFAULT,
@@ -890,7 +887,7 @@ def matrix_specs():
 
 class MatrixTests(RouteSafetyCase):
     def test_no_route_ever_carries_another_routes_key(self):
-        """T-H2: 0 of 120 mixed, 120 of 120 persisted overrides kept."""
+        """0 of 120 mixed, 120 of 120 persisted overrides kept."""
         specs = matrix_specs()
         self.assertEqual(len(specs), 120)
         labels = [spec.pop("label") for spec in specs]
@@ -910,7 +907,7 @@ OPENCODE_CLAUDE = {"provider": "opencode", "model": "claude-sonnet-4-5", "base_u
 
 
 class OverrideModelTests(RouteSafetyCase):
-    """R27 (A1): an override's own model decides a model-dependent endpoint."""
+    """an override's own model decides a model-dependent endpoint."""
 
     def test_opencode_claude_override_after_restart(self):
         specs = [
@@ -1011,7 +1008,7 @@ def refusal(requested, command=GENERAL_ADVICE):
 
 
 class PinnedProviderTests(RouteSafetyCase):
-    """R33: an entry with `discover_models: false` decides /model by its declared models."""
+    """an entry with `discover_models: false` decides /model by its declared models."""
 
     def switch(self, cfg, text, explicit_provider=""):
         return {
@@ -1082,7 +1079,7 @@ class PinnedProviderTests(RouteSafetyCase):
             self.assert_refused(result, refusal(CLAUDE))
 
     def test_saved_provider_is_read_trimmed_and_lowercased(self):
-        """R32: a hand-edited provider name still finds the entry."""
+        """a hand-edited provider name still finds the entry."""
         results = self.run_cases(
             [
                 self.switch(pinned_config(provider=provider, base_url=url), CLAUDE)
@@ -1131,7 +1128,7 @@ UNSWEPT = {
     "copilot-acp": "a local Copilot CLI subprocess with no HTTP credential; Hermes's profile "
     "isolation drops HERMES_COPILOT_ACP_COMMAND, so no stand-in command can be named",
     "custom": "the bare custom route takes the current endpoint, which here is Finite Private's, "
-    "and its entry declares only its own models (R33); Finite's routes have their own tests",
+    "and its entry declares only its own models; Finite's routes have their own tests",
     "vertex": "resolution mints a Google OAuth2 token over the network; its endpoint comes "
     "from the project and region, never from the model",
 }
@@ -1150,7 +1147,7 @@ class RegistrySweepTests(RouteSafetyCase):
     maxDiff = None
 
     def test_every_listed_model_is_served_where_model_switch_saved_it(self):
-        """R27: for every provider and listed model, /model's endpoint is the one the patch serves."""
+        """for every provider and listed model, /model's endpoint is the one the patch serves."""
         providers = self.run_one({"kind": "providers"})
         # The reconciler's configuration: Finite Private's entry declares its whole list.
         cfg = config(FP_DEFAULT, "off")

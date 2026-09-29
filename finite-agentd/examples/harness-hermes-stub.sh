@@ -5,8 +5,8 @@
 # (`python -m hermes_cli.finite_inference_helper apply-pending-disconnect`),
 # with the launcher's environment for both, then `exec sleep` in place of the
 # Hermes gateway. It never starts a gateway. The launcher itself cannot be
-# sourced (it runs at top level), so the variables below repeat its §5.4 and
-# §5.6 computations; keep them in step with it.
+# sourced (it runs at top level), so the variables below repeat its and
+# computations; keep them in step with it.
 #
 # Harness-only inputs: E0_REPO (repository root), E0_RUN_DIR (scratch run
 # directory). Each start appends to "$E0_RUN_DIR/events.log": a `gateway-spawn`
@@ -101,7 +101,7 @@ finite_private_key_present=0
 if [[ -n "${FINITE_PRIVATE_API_KEY:-}" ]]; then
     finite_private_key_present=1
 fi
-# §5.6 launch hygiene, before the reconciler and the step.
+# launch hygiene, before the reconciler and the step.
 if [[ -n "${FINITE_PRIVATE_API_KEY:-}" && "${OPENAI_API_KEY:-}" == "$FINITE_PRIVATE_API_KEY" ]]; then
     unset OPENAI_API_KEY
 fi
@@ -195,7 +195,7 @@ sys.exit(helper.main(sys.argv[1:]))')
     fi
 fi
 
-# A stale writer (§13.3 E-0): puts the removed key back on every start.
+# A stale writer (E-0): puts the removed key back on every start.
 stage="stale-writer"
 if [[ "$mode" == "readd-env-key" ]]; then
     echo "OPENROUTER_API_KEY=sk-or-v1-e0-fake-stale-writer" >> "$hermes_home/.env"

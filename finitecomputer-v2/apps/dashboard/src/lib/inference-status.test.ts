@@ -51,7 +51,7 @@ function v2Status(overrides: { inference?: Record<string, unknown>; capabilities
   });
 }
 
-test("T-W3: legacy providers classify by raw provider, and Codex is never Finite Private", () => {
+test("legacy providers classify by raw provider, and Codex is never Finite Private", () => {
   const table: Array<[string, string]> = [
     ["openrouter", "openrouter"],
     ["openai-codex", "openai_codex"],
@@ -75,7 +75,7 @@ test("T-W3: legacy providers classify by raw provider, and Codex is never Finite
   }
 });
 
-test("T-W2: a legacy agent's view uses legacy classification and claims nothing it didn't report", () => {
+test("a legacy agent's view uses legacy classification and claims nothing it didn't report", () => {
   const view = inferenceView(legacyStatus("custom", "glm-5-3-flash"));
   assert.deepEqual(view, {
     v2: false,
@@ -91,7 +91,7 @@ test("T-W2: a legacy agent's view uses legacy classification and claims nothing 
   assert.equal(inferenceView(legacyStatus("anthropic", "claude")).saved.route, "other");
 });
 
-test("T-W1: a v2 agent's view carries the stored facts it reported", () => {
+test("a v2 agent's view carries the stored facts it reported", () => {
   const view = inferenceView(v2Status());
   assert.equal(view.v2, true);
   assert.deepEqual(view.saved, { route: "openrouter", provider: "openrouter", model: "anthropic/claude-sonnet-4.6" });
@@ -103,7 +103,7 @@ test("T-W1: a v2 agent's view carries the stored facts it reported", () => {
   assert.deepEqual(view.fallback, { state: "configured", reason: null, model: "glm-5-3-flash", extraEntries: 0 });
 });
 
-test("T-W1: v2 fields are ignored without inference.status.v2, and Codex is null without codex.login.v1", () => {
+test("v2 fields are ignored without inference.status.v2, and Codex is null without codex.login.v1", () => {
   const withoutV2 = inferenceView(
     v2Status({ inference: { provider: "openai-codex", profile: "finite_private" }, capabilities: ["codex.login.v1"] })
   );
@@ -117,7 +117,7 @@ test("T-W1: v2 fields are ignored without inference.status.v2, and Codex is null
   assert.equal(noCodex.codex, null);
 });
 
-test("T-W1: a v2 agent whose saved block was invalid falls back to legacy classification", () => {
+test("a v2 agent whose saved block was invalid falls back to legacy classification", () => {
   const view = inferenceView(
     v2Status({ inference: { provider: "openai-codex", profile: "finite_private", saved: { route: "finite_private!" } } })
   );
@@ -125,7 +125,7 @@ test("T-W1: a v2 agent whose saved block was invalid falls back to legacy classi
   assert.equal(view.saved.route, "openai_codex");
 });
 
-test("T-W1: a Codex login and an operation map to camel-case views", () => {
+test("a Codex login and an operation map to camel-case views", () => {
   const view = inferenceView(
     v2Status({
       inference: {
@@ -162,14 +162,14 @@ test("T-W1: a Codex login and an operation map to camel-case views", () => {
   });
 });
 
-test("T-W4: hasCapability reads only the advertised list", () => {
+test("hasCapability reads only the advertised list", () => {
   const status: AgentConnectionsStatus = v2Status({ capabilities: ["inference.select.v1"] });
   assert.equal(hasCapability(status, "inference.select.v1"), true);
   assert.equal(hasCapability(status, "inference.disconnect.v1"), false);
   assert.equal(hasCapability(legacyStatus("custom", "glm-5-3-flash"), "inference.select.v1"), false);
 });
 
-test("T-W4: backupConfiguredFor needs a configured backup and that saved route", () => {
+test("backupConfiguredFor needs a configured backup and that saved route", () => {
   const configured = inferenceView(v2Status());
   assert.equal(backupConfiguredFor(configured, "openrouter"), true);
   assert.equal(backupConfiguredFor(configured, "openai_codex"), false);
@@ -180,7 +180,7 @@ test("T-W4: backupConfiguredFor needs a configured backup and that saved route",
   assert.equal(backupConfiguredFor(inferenceView(legacyStatus("openrouter", "openai/gpt-5")), "openrouter"), false);
 });
 
-test("T-W4: pollDelayMs polls every 3 s only while visible and something is in flight", () => {
+test("pollDelayMs polls every 3 s only while visible and something is in flight", () => {
   const operation = (state: string) => ({
     id: `op_${"c".repeat(32)}`, kind: "disconnect", route: "openrouter", model: null,
     state, phase: "cleanup", error_code: null, attempts: 0, updated_at_ms: 1_790_000_000_000,

@@ -101,7 +101,7 @@ export type AgentInferenceOperation = {
   updated_at_ms: number;
 };
 
-/** The agentd reply to select, disconnect, and connect (§3.6, §3.7, §3.9). */
+/** The agentd reply to select, disconnect, and connect. */
 export type InferenceCommandReply =
   | { changed: false }
   | { changed: true; activated: false }
@@ -119,7 +119,7 @@ export type AgentConnectionActionResult = {
 
 type UsageNumbers = { total?: number; daily?: number; weekly?: number; monthly?: number };
 
-/** `agent.openrouter.usage` (§3.8). A missing number stays undefined and is never shown as 0. */
+/** `agent.openrouter.usage`. A missing number stays undefined and is never shown as 0. */
 export type OpenRouterUsage = {
   state: "ok" | "no_key" | "key_rejected" | "rate_limited" | "unavailable";
   fetched_at_ms: number | null;
@@ -188,7 +188,7 @@ export class HostedAgentControlError extends Error {
   constructor(
     message: string,
     readonly status: number,
-    /** The agentd error code (§3.2), or a dashboard code such as `agent_update_required`. */
+    /** The agentd error code, or a dashboard code such as `agent_update_required`. */
     readonly code: string | null = null
   ) {
     super(message);
@@ -383,7 +383,7 @@ function codexModelName(value: unknown) {
 }
 
 /**
- * The one catalog policy for every OpenRouter model save (§10.4). A catalog member is accepted; with no
+ * The one catalog policy for every OpenRouter model save. A catalog member is accepted; with no
  * catalog, any syntax-valid ID is accepted and flagged unchecked; otherwise only the model the agent
  * already has saved, read from status on the server, is accepted. The saved model is read only when
  * it can change the outcome.
@@ -741,7 +741,7 @@ const OPERATION_PHASES = [
 ] as const;
 const OPERATION_ERRORS = ["config_invalid", "config_conflict", "supervisor_unavailable", "helper_unavailable", "verify_failed"] as const;
 
-// Everything below parses fields a newer agentd adds (§10.3). Runtime data is untrusted: an invalid
+// Everything below parses fields a newer agentd adds. Runtime data is untrusted: an invalid
 // optional value degrades to null or "unknown", an invalid required value drops its object, and
 // nothing here throws, so one bad field can't blank the rest of Connections.
 

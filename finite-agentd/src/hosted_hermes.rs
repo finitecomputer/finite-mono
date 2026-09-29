@@ -24,11 +24,11 @@ const PASSWORD: &str = "HERMES_DASHBOARD_BASIC_AUTH_PASSWORD";
 const SECRET: &str = "HERMES_DASHBOARD_BASIC_AUTH_SECRET";
 const GATE_POLL: Duration = Duration::from_millis(500);
 
-/// §5.6: every Finite launch point of Hermes code points `CODEX_HOME` here so
+/// every Finite launch point of Hermes code points `CODEX_HOME` here so
 /// no desktop Codex store is ever imported.
 pub(crate) const CODEX_HOME_DISABLED: &str = "/dev/null/finite-codex-home-disabled";
 
-/// §5.6: `OPENAI_API_KEY` is unset at a Finite launch point only when it is
+/// `OPENAI_API_KEY` is unset at a Finite launch point only when it is
 /// the Runner's alias of a non-empty `FINITE_PRIVATE_API_KEY`. A key the user
 /// set keeps working for Hermes's other OpenAI features.
 pub(crate) fn openai_key_is_finite_private_alias(
@@ -43,7 +43,7 @@ pub(crate) fn openai_key_is_finite_private_alias(
 }
 
 /// Decides whether `hermes serve` may start: never while a disconnect intent
-/// exists (§3.7), so it always starts after the launcher's pending-disconnect
+/// exists, so it always starts after the launcher's pending-disconnect
 /// clears and never holds a store from before them.
 #[derive(Debug, Clone, Default)]
 pub(crate) struct ServeGate {
@@ -494,7 +494,7 @@ mod tests {
     }
 
     #[test]
-    fn t_a12_hermes_serve_drops_only_the_finite_private_alias() {
+    fn hermes_serve_drops_only_the_finite_private_alias() {
         let values = settings();
         let config = HostedHermesConfig::read(|key| values.get(key).cloned()).unwrap();
         let launch = |openai: Option<&str>, finite_private: Option<&str>| {
@@ -543,7 +543,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn t_a43_hermes_serve_never_starts_while_a_disconnect_record_exists() {
+    async fn hermes_serve_never_starts_while_a_disconnect_record_exists() {
         let temp = tempfile::tempdir().unwrap();
         let path = disconnect_record(temp.path());
         let gate = ServeGate::new(path.clone());

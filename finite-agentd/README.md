@@ -37,7 +37,7 @@ Platform Channel:
 - `agent.openrouter.usage`, `agent.openrouter.connect`,
   `agent.codex.login.start`, `agent.codex.login.cancel`, and
   `agent.codex.models` (dispatched and admitted; they answer
-  `unsupported_command` until their PR2 and PR3 bodies land)
+  `unsupported_command` until the provider handlers are implemented)
 - `agent.telegram.connect`, `agent.telegram.approve`, `agent.telegram.home`,
   and `agent.telegram.disconnect`
 - `agent.google.apply` and `agent.google.disconnect`
@@ -76,70 +76,18 @@ evidence.
 
 ## Inference connections
 
-The inference contract is `finitecomputer-v2/docs/runtime-control-contract.md`;
-the design is FIN-129/FIN-130.
+The [runtime control contract](../finitecomputer-v2/docs/runtime-control-contract.md#inference-connections)
+owns command semantics, status facts, compatibility, and recovery guarantees.
+The inference handlers live in `src/inference_commands.rs`; the background
+executor lives in `src/executor.rs`.
 
-- `agent.connections.status` keeps its legacy `inference.profile/provider/model`
-  fields unchanged and adds `inference.saved`, `routes`, `fallback`, and
-  `operation`, plus `capabilities` at the root of the reply. Every added field
-  reports stored facts. None says a route works. Redacted Hermes facts come
-  from `python -m hermes_cli.finite_inference_helper inference-facts`, cached
-  on the stats of `config.yaml`, `.env`, and `auth.json` for at most 30 s. If
-  the helper fails, or takes longer than 10 s, those fields are `unknown`, and
-  for the next 15 s status and the commands answer `unknown` without starting
-  another helper (ruling R16). The background executor's own reads never use
-  this cache and allow the helper 30 s, since no reply waits on them (ruling
-  R15a).
-- Disconnecting the saved default switches the agent to Finite Private, so it
-  needs the Finite Private settings and key. A missing setting or an absent
-  key is refused with `finite_private_unavailable`; a key the helper could not
-  read is refused with `facts_unavailable` ("The agent couldn't check its
-  setup right now. Try again in a moment."). Neither writes anything (ruling
-  R17).
-- v1 `agent.inference.apply` is synchronous and wire-compatible. It keeps its
-  `.env` snapshot restore on a failed write or spawn. After the restart it
-  reads the saved `model` and key once, with no delay: a mismatch replies
-  `config_conflict` with the state as found, and nothing is re-applied or
-  restored (ruling R8).
-- `agent.inference.select` and `agent.inference.disconnect` validate
-  synchronously, record an intent, and reply `{"accepted": true,
-  "operation_id": …}` or `{"changed": false}`. A background executor writes,
-  restarts, and verifies. The intent is `agent/agentd/inference-intent.json`:
-  one slot, mode 0600, no secret. Every command passes one admission check
-  against it first. Hermes starts before a recorded intent resumes, and a bad
-  intent never delays chat. At startup a `running` record resumes whatever its
-  kind, and a `failed` disconnect resumes with a fresh budget. A `failed`
-  select or activate stays as it is: the user may have chosen another model
-  since, and only their next change replaces it (ruling R12).
-- A select verifies the saved `model` after its restart. It writes again only
-  over the value that this attempt replaced, which is what a stale write from
-  the old process leaves. Any other value, or a replaced value that agentd no
-  longer knows because it restarted, ends `config_conflict` with the state as
-  found and nothing written (ruling R28).
-- OpenRouter select validates the key that status shows, in its order: the
-  `.env` key, the legacy `model.api_key`, else `OPENROUTER_API_KEY` in
-  agentd's own environment. An environment key is never copied into `.env`
-  (ruling R26). A select that moved a legacy key into `.env` also restarts
-  `hermes serve` (ruling R30).
-- agentd's writers of `config.yaml` share one lock per path, held through the
-  config check. When the check fails, the select's write is undone only as far
-  as agentd owns it: the exact bytes if nobody else wrote, only the previous
-  `model` if another writer changed something else, and nothing
-  (`config_conflict`) if the `model` itself changed (ruling R23).
-- A disconnect's verification waits for the launcher's clears. After the
-  cleanup restart it reads the helper facts every 5 s for up to 60 s, and
-  restarts nothing in that time. It succeeds on two cleared reads in a row;
-  only a window that ends without them counts as a mismatch (ruling R14). A
-  read that fails or times out in the window is only "not yet". If the last
-  read of the window failed, the attempt ends `helper_unavailable` and the
-  bounded retry opens a new window without a restart (ruling R15b).
-- The Hermes process gets `FINITE_AGENTD_INTENT_PATH`, so the launcher can
-  apply a pending disconnect's clears while no gateway runs. The native
-  `hermes serve` never starts while a disconnect intent exists. A restart of
-  `hermes serve` is always answered, and its callers wait at most 30 s before
-  they go on (ruling R25).
-- OpenRouter keys are checked with `GET /key` only. No completion request is
-  ever sent to test a key.
+Agentd stores one secret-free inference intent alongside its command ledger.
+The launcher reads that same intent to clear disconnected credentials before
+Hermes starts, and refuses ambiguous state without changing user files.
+Status reads use the read-only Hermes helper; a failed read is unknown, never
+proof that a credential is absent. Configuration writers inside agentd share a
+lock, while Hermes remains an external writer: model verification and guarded
+rollback preserve changes made by that writer when they are observed.
 
 Test-only environment, never set in production:
 `FINITE_AGENTD_OPENROUTER_API_BASE` (`https://…` or

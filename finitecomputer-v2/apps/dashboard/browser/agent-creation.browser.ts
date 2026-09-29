@@ -224,7 +224,7 @@ type HostedDeviceState = {
     NonNullable<FakeHostedChatState["hosted_agent_binding"]>
   >;
   connections: OtherConnectionsStatus;
-  // The design fixture's fake agentd answers inference commands (DESIGN §10.7).
+  // The design fixture's fake agentd answers inference commands.
   inference: InferenceFake;
 };
 
@@ -2067,7 +2067,7 @@ test("dashboard agent creation browser states", { timeout: 300_000 }, async () =
   }
 });
 
-// Connections inference flows (DESIGN §13.1 T-W20–T-W23) against the design fixture's fake agentd. A
+// Connections inference flows (DESIGN T-W20–T-W23) against the design fixture's fake agentd. A
 // separate test, so these flows have their own time budget and a fresh dashboard.
 test("Connections inference flows", { timeout: 300_000 }, async () => {
   await resetDashboardDevDirs();
@@ -2130,7 +2130,7 @@ test("Connections inference flows", { timeout: 300_000 }, async () => {
           )).every((value) => value === ""), 5_000, () => "the key input kept the pasted key");
       };
 
-      // T-W20: a PR1 agent's stored facts.
+      // a PR1 agent's stored facts.
       hostedDevice.setInferenceAgent("pr1");
       await page.goto(connectionsUrl);
       await expectTestIdText(page, "inference-summary", "New conversations use Finite Private · glm-5-3-flash.");
@@ -2138,13 +2138,13 @@ test("Connections inference flows", { timeout: 300_000 }, async () => {
         "Finite Private backup is configured for conversations that use another model.");
       await expectTestIdText(page, "inference-finite-private-state", "Configured");
       await expectTestIdText(page, "inference-openrouter-state", "Not connected");
-      // R9: no ChatGPT card while ChatGPT isn't the saved route and the agent lacks codex.login.v1.
+      // no ChatGPT card while ChatGPT isn't the saved route and the agent lacks codex.login.v1.
       assert.equal(await testId("inference-codex").count(), 0);
       assert.equal(await testId("inference-finite-private-use").count(), 0);
       assert.equal(await testId("inference-operation-line").count(), 0);
-      // A PR1 agent has no connect command, so a key is pasted with the one-call v1 Save (§10.4).
+      // A PR1 agent has no connect command, so a key is pasted with the one-call v1 Save.
       assert.equal(await testId("inference-openrouter-save-and-use").count(), 0);
-      // R29: that Save also makes OpenRouter the default, and the form says so.
+      // that Save also makes OpenRouter the default, and the form says so.
       await expectTestIdText(page, "inference-openrouter-save", "Save and use OpenRouter");
       await expectTestIdText(page, "inference-openrouter-key-default-line", "This also makes OpenRouter this agent's default.");
       await expectNoPolling();
@@ -2159,7 +2159,7 @@ test("Connections inference flows", { timeout: 300_000 }, async () => {
       const keyHash = createHash("sha256").update(PASTED_OPENROUTER_KEY).digest("hex");
       assert.equal(hostedDevice.inferenceStatus().inference.routes?.openrouter?.key_hash, keyHash);
 
-      // T-W21: Finite Private and OpenRouter through select; the operation line runs while the page polls.
+      // Finite Private and OpenRouter through select; the operation line runs while the page polls.
       await testId("inference-finite-private-use").click();
       await expectTestIdText(page, "inference-operation-line", "Switching to Finite Private…");
       await expectPolling();
@@ -2180,7 +2180,7 @@ test("Connections inference flows", { timeout: 300_000 }, async () => {
         "Finite Private backup is configured. If OpenRouter returns an error, Finite Private answers.");
       assert.equal(commandCount("agent.inference.select"), 2);
 
-      // T-W23: disconnect through the dialog; it fails, and Try again resumes the same operation.
+      // disconnect through the dialog; it fails, and Try again resumes the same operation.
       const dialog = testId("inference-openrouter-disconnect-dialog");
       await testId("inference-openrouter-disconnect").click();
       await dialog.getByRole("heading", { name: "Remove OpenRouter from this agent?" }).waitFor();
@@ -2226,7 +2226,7 @@ test("Connections inference flows", { timeout: 300_000 }, async () => {
       await expectTestIdText(page, "inference-summary", "New conversations use Finite Private · glm-5-3-flash.");
       await expectTestIdText(page, "inference-openrouter-state", "Not connected");
 
-      // R34: a PR1 agent that couldn't confirm its facts says so, asks for no repair, and keeps its controls.
+      // a PR1 agent that couldn't confirm its facts says so, asks for no repair, and keeps its controls.
       hostedDevice.setInferenceAgent("pr1", "openrouter", { unconfirmed: true });
       await page.goto(connectionsUrl);
       await expectTestIdText(page, "inference-summary", "New conversations use OpenRouter · anthropic/claude-sonnet-4.6.");
@@ -2246,7 +2246,7 @@ test("Connections inference flows", { timeout: 300_000 }, async () => {
         "Finite Private backup is configured. If OpenRouter returns an error, Finite Private answers.");
       assert.equal(await testId("inference-finite-private-note").count(), 0);
 
-      // R38: with no saved key and nothing confirmed, OpenRouter offers the key form and no action of a saved key.
+      // with no saved key and nothing confirmed, OpenRouter offers the key form and no action of a saved key.
       hostedDevice.setInferenceAgent("pr1", "finite_private", { unconfirmed: true });
       await page.goto(connectionsUrl);
       await expectTestIdText(page, "inference-openrouter-state", "Not confirmed");
@@ -2263,7 +2263,7 @@ test("Connections inference flows", { timeout: 300_000 }, async () => {
       assert.deepStrictEqual(lastCommand("agent.inference.apply"), noKeyPaste, "the unknown state sends the no_key command");
       await assertSecretAbsent(page, PASTED_OPENROUTER_KEY);
 
-      // T-W22: an agent on today's agentd keeps the v1 path, shows no capability-gated control, and never polls.
+      // an agent on today's agentd keeps the v1 path, shows no capability-gated control, and never polls.
       hostedDevice.setInferenceAgent("legacy");
       await page.goto(connectionsUrl);
       await expectTestIdText(page, "inference-summary", "New conversations use Finite Private · glm-5-3-flash.");
@@ -2306,7 +2306,7 @@ test("Connections inference flows", { timeout: 300_000 }, async () => {
       hostedDevice.setInferenceAgent("legacy", "openai_codex");
       await page.goto(connectionsUrl);
       await expectTestIdText(page, "inference-summary", "New conversations use ChatGPT · gpt-5.5.");
-      // R9: the saved ChatGPT route keeps its card, with no update request.
+      // the saved ChatGPT route keeps its card, with no update request.
       await expectTestIdText(page, "inference-codex-state", "Agent default");
       await expectTestIdText(page, "inference-codex-line", "ChatGPT is this agent's default (set in chat).");
       await testId("inference-finite-private-use").waitFor();

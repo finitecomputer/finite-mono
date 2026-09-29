@@ -1,6 +1,6 @@
-//! The shared inference contract: saved-route classification (§3.3), the
-//! additive status fields derived from stored facts (§3.4), the `model` blocks
-//! agentd writes (§3.6), and the Finite Private settings agentd reads from its
+//! The shared inference contract: saved-route classification, the
+//! additive status fields derived from stored facts, the `model` blocks
+//! agentd writes, and the Finite Private settings agentd reads from its
 //! environment.
 
 use serde::Serialize;
@@ -21,7 +21,7 @@ const LEGACY_FINITE_PRIVATE_MODELS: &[&str] =
     &["glm-5-2", "deepseek-v4-flash-0731", "glm-5.3-flash"];
 const OPENROUTER_BASE_URL: &str = "https://openrouter.ai/api/v1";
 
-/// Capabilities this agentd always advertises; the PR2 and PR3 modules add theirs.
+/// Capabilities this agentd always advertises; provider modules add theirs when implemented.
 const BASE_CAPABILITIES: &[&str] = &[
     "inference.status.v2",
     "inference.select.v1",
@@ -37,7 +37,7 @@ pub(crate) enum SavedRoute {
     Other,
 }
 
-/// Classifies the raw `config.yaml` `model` value (§3.3). `fp_base_url` is the
+/// Classifies the raw `config.yaml` `model` value. `fp_base_url` is the
 /// configured Finite Private URL; the product and retired URLs are always
 /// recognized.
 pub(crate) fn classify_saved_route(model: &Value, fp_base_url: Option<&str>) -> SavedRoute {
@@ -78,7 +78,7 @@ pub(crate) fn model_provider(model: &Value) -> Option<String> {
         .map(|provider| provider.trim().to_lowercase())
 }
 
-/// Endpoint identity (§5.5): scheme and host case-insensitive, port, userinfo,
+/// Endpoint identity: scheme and host case-insensitive, port, userinfo,
 /// path, query, and fragment exact, and only trailing `/` on the path removed.
 /// `None` for an empty URL or one that can't be bound to an endpoint; neither
 /// matches anything. Mirrors Python's `urllib.parse.urlsplit`.
@@ -156,7 +156,7 @@ impl FinitePrivateEnv {
         Some((self.model.as_deref()?, self.base_url.as_deref()?))
     }
 
-    /// `FINITE_CONFIG_FP_*` for the helper; an unset value is an empty string (§8.2).
+    /// `FINITE_CONFIG_FP_*` for the helper; an unset value is an empty string.
     pub(crate) fn helper_env(&self) -> [(&'static str, String); 3] {
         [
             (
@@ -209,7 +209,7 @@ fn finite_private_env_from(lookup: impl Fn(&str) -> Option<String>) -> FinitePri
     }
 }
 
-/// The whole `model` value agentd writes for a route (§3.6). `model` is
+/// The whole `model` value agentd writes for a route. `model` is
 /// ignored for Finite Private, whose model comes from agentd's environment.
 /// Callers validate model names.
 pub(crate) fn plan_model_block(
@@ -261,7 +261,7 @@ fn required_model(model: Option<&str>) -> Result<&str, AgentdError> {
         .ok_or_else(|| AgentdError::InvalidPayload("A model is required".to_owned()))
 }
 
-/// The capabilities status advertises (§4.2).
+/// The capabilities status advertises.
 pub(crate) fn capabilities() -> Vec<&'static str> {
     BASE_CAPABILITIES
         .iter()
@@ -271,7 +271,7 @@ pub(crate) fn capabilities() -> Vec<&'static str> {
         .collect()
 }
 
-/// The additive fields of `inference` in `agent.connections.status` (§3.4).
+/// The additive fields of `inference` in `agent.connections.status`.
 /// The legacy `profile`/`provider`/`model` fields sit beside them unchanged.
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub(crate) struct InferenceStatusV2 {
@@ -421,7 +421,7 @@ impl OperationStatus {
     }
 }
 
-/// Derives the §3.4 fields from agentd's own reads and the helper facts.
+/// Derives the fields from agentd's own reads and the helper facts.
 /// `model` is the raw `config.yaml` `model` value, and `dotenv_key` the value
 /// of the last `OPENROUTER_API_KEY` line in `.env`. `routes.openai_codex` and
 /// `operation` are left for the caller to fill.
@@ -618,7 +618,7 @@ mod tests {
     }
 
     #[test]
-    fn t_a1_classifier_matches_every_shared_fixture() {
+    fn classifier_matches_every_shared_fixture() {
         let cases = fixtures();
         assert!(cases.len() >= 18, "saved-route fixtures are missing");
         for (name, case) in cases {
@@ -873,7 +873,7 @@ mod tests {
     }
 
     #[test]
-    fn t_a3_finite_private_state_covers_every_branch() {
+    fn finite_private_state_covers_every_branch() {
         let route = |fp: &FinitePrivateEnv, fp_key: Tri| {
             let mut facts = healthy_facts();
             facts.finite_private.fp_key = fp_key;
@@ -930,7 +930,7 @@ mod tests {
     type FactsChange = Box<dyn FnOnce(&mut InferenceFacts)>;
 
     #[test]
-    fn t_a4_fallback_states() {
+    fn fallback_states() {
         let fp = fp_env();
         let fp_model = json!("glm-5-3-flash");
         let cases: Vec<(&str, FactsChange, FinitePrivateEnv, Value)> = vec![
@@ -1225,7 +1225,7 @@ mod tests {
     }
 
     #[test]
-    fn t_a2_status_golden_per_saved_shape() {
+    fn status_golden_per_saved_shape() {
         let fp_block = plan_model_block(IntentRoute::FinitePrivate, None, &fp_env()).unwrap();
         let routes = json!({
             "finite_private": {"state": "configured", "reason": null},
@@ -1290,7 +1290,7 @@ mod tests {
     }
 
     #[test]
-    fn t_a2_operation_and_codex_fields_serialize_as_documented() {
+    fn operation_and_codex_fields_serialize_as_documented() {
         let mut record =
             IntentRecord::new(IntentKind::Disconnect, IntentRoute::Openrouter, None).unwrap();
         record.phase = IntentPhase::Cleanup;
@@ -1330,7 +1330,7 @@ mod tests {
     }
 
     #[test]
-    fn t_a5_legacy_profile_never_takes_a_new_value() {
+    fn legacy_profile_never_takes_a_new_value() {
         let mut models = fixtures()
             .into_iter()
             .map(|(_, case)| case["model"].clone())

@@ -166,7 +166,7 @@ const V2_INFERENCE = {
 };
 const V2_STATUS = { ...LEGACY_FINITE_PRIVATE, inference: V2_INFERENCE, capabilities: ALL_CAPABILITIES };
 
-test("T-W2: today's status payloads parse exactly as before v2", () => {
+test("today's status payloads parse exactly as before v2", () => {
   assert.deepStrictEqual(parseConnectionsStatus(LEGACY_FINITE_PRIVATE), {
     inference: { profile: "finite_private", provider: "custom", model: "glm-5-3-flash" },
     simplex: undefined,
@@ -191,7 +191,7 @@ test("T-W2: today's status payloads parse exactly as before v2", () => {
   assert.deepStrictEqual(parseConnectionsStatus(LEGACY_NO_MODEL).inference, LEGACY_NO_MODEL.inference);
 });
 
-test("T-W2: an unknown legacy profile no longer throws, and legacy bounds still apply", () => {
+test("an unknown legacy profile no longer throws, and legacy bounds still apply", () => {
   const status = { ...LEGACY_FINITE_PRIVATE, inference: { profile: "openai_codex", provider: "openai-codex", model: "gpt-5.5" } };
   assert.equal(parseConnectionsStatus(status).inference.profile, "openai_codex");
   for (const inference of [
@@ -205,14 +205,14 @@ test("T-W2: an unknown legacy profile no longer throws, and legacy bounds still 
   }
 });
 
-test("T-W1: a full v2 status parses into the allowlisted fields", () => {
+test("a full v2 status parses into the allowlisted fields", () => {
   const status = parseConnectionsStatus({ ...V2_STATUS, extra: "ignored", inference: { ...V2_INFERENCE, extra: "ignored" } });
   assert.deepStrictEqual(status.capabilities, ALL_CAPABILITIES);
   assert.deepStrictEqual(status.inference, V2_INFERENCE);
   assert.equal("extra" in status, false);
 });
 
-test("T-W1: an invalid new field is dropped or degraded, never thrown", () => {
+test("an invalid new field is dropped or degraded, never thrown", () => {
   const cases: Array<[string, unknown, (status: ReturnType<typeof parseConnectionsStatus>) => void]> = [
     ["capabilities not a list", { capabilities: "inference.status.v2" }, (s) => assert.equal(s.capabilities, undefined)],
     ["too many capabilities", { capabilities: Array.from({ length: 33 }, (_, i) => `cap.${i}`) }, (s) => assert.equal(s.capabilities, undefined)],
@@ -239,7 +239,7 @@ test("T-W1: an invalid new field is dropped or degraded, never thrown", () => {
   }
 });
 
-test("T-W1: Codex login bounds", () => {
+test("Codex login bounds", () => {
   const login = V2_INFERENCE.routes.openai_codex.login;
   const parse = (patch: Record<string, unknown>) =>
     parseConnectionsStatus({
@@ -261,7 +261,7 @@ test("T-W1: Codex login bounds", () => {
   });
 });
 
-test("T-W1: OpenRouter usage parses by allowlist and never turns a missing number into 0", () => {
+test("OpenRouter usage parses by allowlist and never turns a missing number into 0", () => {
   const ok = {
     state: "ok", fetched_at_ms: 1_790_000_000_000, retry_after_s: null, other_pool_keys: "none", hermes_key: "saved_key",
     key: {
@@ -291,7 +291,7 @@ test("T-W1: OpenRouter usage parses by allowlist and never turns a missing numbe
   assert.equal(parseOpenRouterUsage(null).state, "unavailable");
 });
 
-test("T-W1: the Codex model list is bounded", () => {
+test("the Codex model list is bounded", () => {
   assert.deepStrictEqual(parseCodexModels({ state: "live", models: ["gpt-5.3-codex", "gpt-5.3-codex", "bad id", 7, "x".repeat(129)] }), {
     state: "live", models: ["gpt-5.3-codex"], reason: null,
   });
@@ -302,7 +302,7 @@ test("T-W1: the Codex model list is bounded", () => {
   assert.deepStrictEqual(parseCodexModels({ state: "live" }), { state: "unavailable", models: [], reason: null });
 });
 
-test("T-W6: new actions parse with their bounds", () => {
+test("new actions parse with their bounds", () => {
   const cases: Array<[unknown, unknown]> = [
     [{ action: "inference_select", route: "finite_private" }, { action: "inference_select", route: "finite_private" }],
     [{ action: "inference_select", route: "finite_private", model: null }, { action: "inference_select", route: "finite_private" }],
@@ -341,7 +341,7 @@ test("T-W6: new actions parse with their bounds", () => {
   }
 });
 
-test("T-W6: a rejected action never repeats the key it carried", () => {
+test("a rejected action never repeats the key it carried", () => {
   const apiKey = "sk-or-v1-FAKE-W1-PARSE-CANARY";
   for (const payload of [
     { action: "openrouter_connect_key", apiKey, activate: { model: "two words" } },
@@ -355,7 +355,7 @@ test("T-W6: a rejected action never repeats the key it carried", () => {
   }
 });
 
-test("T-W8: the OpenRouter model policy reads the saved model only when it decides the outcome", async () => {
+test("the OpenRouter model policy reads the saved model only when it decides the outcome", async () => {
   let reads = 0;
   const saved = (model: string | null) => async () => {
     reads += 1;
@@ -376,7 +376,7 @@ test("T-W8: the OpenRouter model policy reads the saved model only when it decid
   assert.equal(reads, 0);
 });
 
-test("T-W8: the saved OpenRouter model comes from v2 saved, else the legacy profile", () => {
+test("the saved OpenRouter model comes from v2 saved, else the legacy profile", () => {
   assert.equal(savedOpenRouterModel(parseConnectionsStatus(V2_STATUS)), "anthropic/claude-sonnet-4.6");
   const fpSaved = { ...V2_STATUS, inference: { ...V2_INFERENCE, saved: { route: "finite_private", provider: "custom", model: "glm-5-3-flash" } } };
   assert.equal(savedOpenRouterModel(parseConnectionsStatus(fpSaved)), null);
@@ -524,7 +524,7 @@ test("new-action flow: claim, status gate, command, status; the reply comes back
   assert.deepStrictEqual(world.commands[2].body, { route: "finite_private", model: null });
 });
 
-test("new actions send the §10.4 command bodies", async (t) => {
+test("new actions send the command bodies", async (t) => {
   const cases: Array<[unknown, string, unknown, unknown]> = [
     [{ action: "inference_select", route: "openrouter", model: "openai/gpt-5" }, "agent.inference.select", { route: "openrouter", model: "openai/gpt-5" }, { changed: false }],
     [{ action: "inference_select", route: "openai_codex", model: "gpt-5.3-codex" }, "agent.inference.select", { route: "openai_codex", model: "gpt-5.3-codex" }, { changed: false }],
@@ -554,7 +554,7 @@ test("a storage-only connect reply is not confused with a select reply, and an u
   assert.equal(world.commands.filter((entry) => entry.command === "agent.openrouter.connect").length, 1);
 });
 
-test("T-W2: a legacy agent keeps today's flow and response for the legacy inference action", async (t) => {
+test("a legacy agent keeps today's flow and response for the legacy inference action", async (t) => {
   const world = installWorld(t, { status: LEGACY_OPENROUTER, runtime: () => ({ status: "succeeded", body: { applied: true } }) });
   const response = await postAction(MY_MACHINE, {
     action: "inference", profile: "openrouter", apiKey: "sk-or-v1-fake-legacy", model: "openai/gpt-5",
@@ -586,7 +586,7 @@ test("new actions are gated on advertised capabilities and never reach an agent 
   }
 });
 
-test("T-W5: unsupported_command maps to 409 agent_update_required", async (t) => {
+test("unsupported_command maps to 409 agent_update_required", async (t) => {
   installWorld(t, {
     runtime: () => ({ status: "failed", error: { code: "unsupported_command", message: 'Command "agent.inference.select" is not supported.' } }),
   });
@@ -598,7 +598,7 @@ test("T-W5: unsupported_command maps to 409 agent_update_required", async (t) =>
   assert.equal(legacy.status, 409);
 });
 
-test("T-W5: agentd error codes pass through with agentd's message", async (t) => {
+test("agentd error codes pass through with agentd's message", async (t) => {
   for (const code of [
     "credential_rejected", "key_allowance_exhausted", "activation_not_recorded", "disconnect_in_progress",
     "finite_private_unavailable", "operation_in_progress", "not_connected", "provider_unavailable", "config_invalid",
@@ -640,7 +640,7 @@ test("R17: a code the dashboard has no entry for, like facts_unavailable, passes
   }
 });
 
-test("T-W8: every OpenRouter model save goes through the model policy, without an extra status read in PR1", async (t) => {
+test("every OpenRouter model save goes through the model policy, without an extra status read in PR1", async (t) => {
   const world = installWorld(t, { runtime: () => ({ status: "succeeded", body: { changed: false } }) });
   const select = await (await postAction(MY_MACHINE, { action: "inference_select", route: "openrouter", model: "new/model" })).json();
   assert.equal(select.catalog_checked, false);
@@ -659,7 +659,7 @@ test("T-W8: every OpenRouter model save goes through the model policy, without a
   assert.deepStrictEqual(commandNames(world), []);
 });
 
-test("T-W7: the usage and models routes return parsed data with no-store", async (t) => {
+test("the usage and models routes return parsed data with no-store", async (t) => {
   const usage = {
     state: "no_key", fetched_at_ms: 1_790_000_000_000, retry_after_s: null, other_pool_keys: "none", hermes_key: "none", key: null,
   };
@@ -686,7 +686,7 @@ test("T-W7: the usage and models routes return parsed data with no-store", async
   }
 });
 
-test("T-W7: without the capability the usage and models routes return agent_update_required, not a 500", async (t) => {
+test("without the capability the usage and models routes return agent_update_required, not a 500", async (t) => {
   for (const status of [LEGACY_FINITE_PRIVATE, { ...V2_STATUS, capabilities: ["inference.status.v2", "inference.select.v1"] }]) {
     const world = installWorld(t, { status });
     for (const load of [getUsage, getCodexModels]) {
@@ -701,7 +701,7 @@ test("T-W7: without the capability the usage and models routes return agent_upda
   }
 });
 
-test("T-W7: runtime errors on the read routes use the {error, code} shape", async (t) => {
+test("runtime errors on the read routes use the {error, code} shape", async (t) => {
   installWorld(t, { runtime: () => ({ status: "failed", error: { code: "provider_unavailable", message: "Couldn't reach OpenRouter." } }) });
   for (const load of [getUsage, getCodexModels]) {
     const response = await load(MY_MACHINE);

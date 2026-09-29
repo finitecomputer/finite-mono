@@ -42,7 +42,7 @@ pub(crate) struct ConnectionsStatus {
     pub google: GoogleStatus,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub simplex: Option<crate::simplex::SimplexStatus>,
-    /// §4.2. At the root of the reply; absent only from the legacy status.
+    /// At the root of the reply; absent only from the legacy status.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub capabilities: Vec<&'static str>,
 }
@@ -54,7 +54,7 @@ pub(crate) struct InferenceStatus {
     pub profile: String,
     pub provider: String,
     pub model: String,
-    /// The additive §3.4 fields, beside the legacy ones.
+    /// The additive fields, beside the legacy ones.
     #[serde(flatten)]
     pub details: Option<InferenceStatusV2>,
 }
@@ -171,7 +171,7 @@ impl ConnectionManager {
         })
     }
 
-    /// `agent.connections.status` (§3.4): the legacy status plus the fields
+    /// `agent.connections.status`: the legacy status plus the fields
     /// derived from stored facts, the operation, and the capabilities.
     pub(crate) fn status_with_inference(
         &self,
@@ -209,7 +209,7 @@ impl ConnectionManager {
     }
 
     /// The key `inference.select` validates, in the order status shows it
-    /// (R26): the stored key, else `environment`, agentd's own
+    ///: the stored key, else `environment`, agentd's own
     /// `OPENROUTER_API_KEY`. An environment key is never copied into `.env`.
     pub(crate) fn selectable_openrouter_key(
         &self,
@@ -218,7 +218,7 @@ impl ConnectionManager {
         Ok(self.stored_openrouter_key()?.or(usable_key(environment)))
     }
 
-    /// §3.6 background step 1: a validated legacy `model.api_key` moves into
+    /// Before selecting OpenRouter: a validated legacy `model.api_key` moves into
     /// `.env` when `.env` has no key. The config copy is dropped by the model
     /// block write that follows. `true` when a key moved.
     pub(crate) fn migrate_legacy_openrouter_key(&self) -> Result<bool, AgentdError> {
@@ -237,7 +237,7 @@ impl ConnectionManager {
         Ok(true)
     }
 
-    /// §3.7 step 3: removes every `OPENROUTER_API_KEY` line from `.env`. Every
+    /// disconnect step 3: removes every `OPENROUTER_API_KEY` line from `.env`. Every
     /// other line keeps its exact bytes.
     pub(crate) fn remove_openrouter_key(&self) -> Result<(), AgentdError> {
         let path = self.openrouter_env_path();
@@ -269,7 +269,7 @@ impl ConnectionManager {
             .map(str::to_owned))
     }
 
-    /// §3.5 no-op: the model block is equal, and either no key is being
+    /// no-op: the model block is equal, and either no key is being
     /// written or it equals the stored one.
     pub(crate) fn inference_plan_is_noop(
         &self,
@@ -401,7 +401,7 @@ impl ConnectionManager {
         self.inference_plan_with(request_id, request, &crate::inference::finite_private_env())
     }
 
-    /// The v1 plan (§3.5), with the Finite Private block from the one planner.
+    /// The v1 plan, with the Finite Private block from the one planner.
     pub(crate) fn inference_plan_with(
         &self,
         request_id: &str,
@@ -1143,7 +1143,7 @@ mod tests {
     }
 
     #[test]
-    fn r26_select_takes_the_key_in_the_order_status_shows() {
+    fn select_takes_the_key_in_the_order_status_shows() {
         let (_temp, manager) = manager();
         let environment = || Some("sk-or-v1-synthetic-environment".to_owned());
         assert_eq!(

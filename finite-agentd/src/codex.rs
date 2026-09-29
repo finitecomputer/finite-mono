@@ -1,5 +1,5 @@
-//! Codex (ChatGPT subscription) sign-in and catalog. PR1 carries only the
-//! types and signatures; slice A3 (PR3) fills the bodies and `CAPABILITIES`.
+//! Codex (ChatGPT subscription) sign-in and catalog command contracts.
+//! These commands remain unsupported and unadvertised until implemented.
 
 use std::path::Path;
 
@@ -8,15 +8,15 @@ use serde::Serialize;
 use crate::AgentdError;
 use crate::facts::{CodexStateFact, InferenceFacts};
 
-/// `codex.login.v1` and `codex.models.v1` are advertised from PR3.
+/// Login and catalog capabilities stay absent until their handlers are implemented.
 pub(crate) const CAPABILITIES: &[&str] = &[];
 
-/// The in-memory login attempt (§8.3). `start`, `cancel`, and
+/// The in-memory login attempt. `start`, `cancel`, and
 /// `cancel_for_disconnect` serialize on it.
 #[derive(Debug, Default)]
 pub(crate) struct CodexState {}
 
-/// `inference.routes.openai_codex` in status (§3.4).
+/// `inference.routes.openai_codex` in status.
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub(crate) struct CodexRouteStatus {
     pub state: CodexStateFact,
@@ -39,7 +39,7 @@ pub(crate) struct CodexLoginView {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
-#[expect(dead_code, reason = "wired in A3")]
+#[expect(dead_code, reason = "reserved for Codex login and catalog support")]
 pub(crate) enum CodexLoginState {
     Pending,
     Committing,
@@ -52,7 +52,7 @@ pub(crate) enum CodexLoginState {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
-#[expect(dead_code, reason = "wired in A3")]
+#[expect(dead_code, reason = "reserved for Codex login and catalog support")]
 pub(crate) enum CodexLoginError {
     RateLimited,
     StartFailed,
@@ -62,10 +62,10 @@ pub(crate) enum CodexLoginError {
     SaveFailed,
 }
 
-/// The raw authenticated catalog, as the helper's `codex-models` reports it (§8.2).
+/// The raw authenticated catalog, as the helper's `codex-models` reports it.
 #[derive(Debug, Clone, PartialEq, Serialize)]
 #[serde(tag = "state", rename_all = "snake_case")]
-#[expect(dead_code, reason = "wired in A3")]
+#[expect(dead_code, reason = "reserved for Codex login and catalog support")]
 pub(crate) enum CodexModels {
     Live { models: Vec<String> },
     Unavailable { reason: CodexModelsUnavailable },
@@ -73,7 +73,7 @@ pub(crate) enum CodexModels {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
-#[expect(dead_code, reason = "wired in A3")]
+#[expect(dead_code, reason = "reserved for Codex login and catalog support")]
 pub(crate) enum CodexModelsUnavailable {
     NotSignedIn,
     FetchFailed,
@@ -109,7 +109,7 @@ pub(crate) async fn cancel(
 /// Cancels any login attempt before a Codex disconnect proceeds; a forced
 /// cancel leaves the attempt `interrupted`. Without a login manager there is
 /// no attempt to cancel, so a disconnect recorded by a newer image still
-/// completes here (§4.3 cell 6b).
+/// completes here (cell 6b).
 pub(crate) async fn cancel_for_disconnect(_state: &CodexState) -> Result<(), AgentdError> {
     Ok(())
 }

@@ -1,4 +1,4 @@
-//! The background executor for the inference intent record (§3.11).
+//! The background executor for the inference intent record.
 //!
 //! It never creates a record. It advances the existing one through its kind's
 //! phases, writing each phase before that phase's step, and deletes it on
@@ -36,15 +36,15 @@ const BACKOFF: [Duration; 3] = [
 const VERIFY_DELAY: Duration = Duration::from_secs(5);
 /// How many times a mismatch found by verification is re-applied.
 const MAX_REAPPLIES: usize = 2;
-/// R14: after a disconnect's cleanup restart, how long verification waits for
+/// after a disconnect's cleanup restart, how long verification waits for
 /// the launcher's pending-disconnect step before calling it a mismatch. It
 /// polls every `VERIFY_DELAY` within this window and restarts nothing; a read
-/// that fails in it is only "not yet" (R15b).
+/// that fails in it is only "not yet".
 const LAUNCHER_WAIT: Duration = Duration::from_secs(60);
-/// R18: how long `hermes config check` may take before it is killed and the
+/// how long `hermes config check` may take before it is killed and the
 /// attempt is `config_invalid`.
 pub(crate) const CONFIG_CHECK_DEADLINE: Duration = Duration::from_secs(60);
-/// R25: how long a `hermes serve` restart is awaited before the operation
+/// how long a `hermes serve` restart is awaited before the operation
 /// continues; its own verification decides the result.
 pub(crate) const SERVE_RESTART_WAIT: Duration = Duration::from_secs(30);
 /// How long status shows a succeeded operation after its record is deleted.
@@ -54,17 +54,17 @@ const RESULT_TTL: Duration = Duration::from_secs(10 * 60);
 /// `connections.rs`; restarts to the supervisor and `hosted_hermes.rs`.
 pub(crate) trait ExecutorHost: Clone + Send + Sync + 'static {
     /// `hermes config check` after a config write, killed with its process
-    /// group at `deadline` (R18). Blocking: callers run it off the async
+    /// group at `deadline`. Blocking: callers run it off the async
     /// workers.
     fn validate_config(&self, deadline: Duration) -> Result<(), AgentdError>;
     /// The value of the last `OPENROUTER_API_KEY` line in `.env`, if any.
     fn dotenv_openrouter_key(&self) -> Result<Option<String>, AgentdError>;
-    /// `OPENROUTER_API_KEY` in agentd's own process environment (R26).
+    /// `OPENROUTER_API_KEY` in agentd's own process environment.
     fn environment_openrouter_key(&self) -> Option<String>;
-    /// §3.6 background step 1: copy a legacy `model.api_key` into `.env` when
+    /// Before selecting OpenRouter: copy a legacy `model.api_key` into `.env` when
     /// `.env` has no key. `true` when a key moved.
     fn migrate_legacy_openrouter_key(&self) -> Result<bool, AgentdError>;
-    /// §3.7 step 3: remove every `OPENROUTER_API_KEY` line from `.env`.
+    /// disconnect step 3: remove every `OPENROUTER_API_KEY` line from `.env`.
     fn remove_openrouter_key(&self) -> Result<(), AgentdError>;
     /// Restart the gateway; `Ok` once it is `Running` again.
     fn restart_gateway(&self) -> impl Future<Output = Result<(), AgentdError>> + Send;
@@ -80,7 +80,7 @@ pub(crate) trait ExecutorHost: Clone + Send + Sync + 'static {
     fn cancel_codex_login(&self) -> impl Future<Output = Result<(), AgentdError>> + Send;
 }
 
-/// Why an attempt stopped. `code` is the §3.2 background code.
+/// Why an attempt stopped. `code` is the background code.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct Failure {
     code: &'static str,
@@ -166,7 +166,7 @@ impl<H: ExecutorHost> Executor<H> {
 
     /// At startup, after Hermes has started: re-arm a failed disconnect with
     /// a fresh budget, then run a running record. A failed select or activate
-    /// stays exactly as it is (R12): the user may have chosen another model
+    /// stays exactly as it is: the user may have chosen another model
     /// since, and only their next change replaces it.
     pub(crate) async fn resume_at_startup(&self) {
         {
@@ -287,12 +287,12 @@ impl<H: ExecutorHost> Executor<H> {
                     }
                     if record.kind == IntentKind::Activate || key_moved {
                         // A replaced key, or a legacy key moved into `.env`
-                        // (R30): flush the environment `hermes serve` holds.
+                        //: flush the environment `hermes serve` holds.
                         self.restart_serve().await;
                     }
                 }
                 IntentPhase::Verifying => {
-                    // R28: only the value this attempt replaced is a stale
+                    // only the value this attempt replaced is a stale
                     // write from the old process. Any other value is someone
                     // else's choice, and after an agentd restart the replaced
                     // value is unknown: both are left as found.
@@ -333,7 +333,7 @@ impl<H: ExecutorHost> Executor<H> {
     }
 
     /// Writes the `model` block, validated by `hermes config check` on a
-    /// blocking thread and within `config_check_deadline` (R18). A check that
+    /// blocking thread and within `config_check_deadline`. A check that
     /// fails or times out restores the previous bytes and is `config_invalid`.
     async fn write_model(&self, planned: &Value) -> Result<ModelWrite, Failure> {
         let config = self.config.clone();
@@ -363,7 +363,7 @@ impl<H: ExecutorHost> Executor<H> {
         Ok(())
     }
 
-    /// §3.10: after a spawn failure, restore the bytes this run wrote (only if
+    /// after a spawn failure, restore the bytes this run wrote (only if
     /// they are still intact) and bring the previous route back up.
     async fn restore_after_spawn_failure(&self, written: Option<&WrittenConfig>) -> Failure {
         let Some(written) = written.cloned() else {
@@ -381,7 +381,7 @@ impl<H: ExecutorHost> Executor<H> {
 
     /// Values, never bytes (G1): the parsed `model` mapping equals the planned
     /// block, and an OpenRouter route has a stored key or agentd's
-    /// environment key (R26). Checked after `Running` and again after
+    /// environment key. Checked after `Running` and again after
     /// `VERIFY_DELAY`.
     async fn select_verified(
         &self,
@@ -438,7 +438,7 @@ impl<H: ExecutorHost> Executor<H> {
         Ok(())
     }
 
-    /// §3.7 step 2: if the saved default is the route being removed, write the
+    /// disconnect step 2: if the saved default is the route being removed, write the
     /// Finite Private block and confirm the switch by re-reading.
     async fn switch_route_away(&self, route: IntentRoute) -> Result<(), Failure> {
         if self.saved_route()? != saved_route_of(route) {
@@ -463,7 +463,7 @@ impl<H: ExecutorHost> Executor<H> {
         Ok(())
     }
 
-    /// §3.7 step 4: stop `hermes serve` (it stays stopped while the record
+    /// disconnect step 4: stop `hermes serve` (it stays stopped while the record
     /// exists), then restart the gateway, whose launcher applies the clears.
     async fn cleanup_restart(&self) -> Result<(), Failure> {
         self.restart_serve().await;
@@ -471,7 +471,7 @@ impl<H: ExecutorHost> Executor<H> {
         Ok(())
     }
 
-    /// Restarts `hermes serve`, waiting at most `serve_restart_wait` (R25).
+    /// Restarts `hermes serve`, waiting at most `serve_restart_wait`.
     async fn restart_serve(&self) {
         let wait = self.serve_restart_wait;
         if tokio::time::timeout(wait, self.host.restart_serve())
@@ -484,7 +484,7 @@ impl<H: ExecutorHost> Executor<H> {
         }
     }
 
-    /// §3.7 step 5 as ruled in R14 and R15b. The launcher's clears land some
+    /// Verify cleanup after restart. The launcher's clears land some
     /// seconds after the restart, so the facts are read every `verify_delay`
     /// until `launcher_wait` has passed. Verified at the first read that shows
     /// everything cleared and is confirmed by the next one. During the wait an
@@ -829,7 +829,7 @@ pub(crate) mod tests {
 
         async fn facts(&self, deadline: Duration) -> Result<InferenceFacts, AgentdError> {
             let at = Instant::now();
-            // R15a: every executor read gets the executor's deadline.
+            // every executor read gets the executor's deadline.
             assert_eq!(deadline, EXECUTOR_FACTS_DEADLINE);
             self.record(Event::Facts(self.phase()));
             // The slow launcher step lands its clears after its polls, whether
@@ -1036,7 +1036,7 @@ pub(crate) mod tests {
     }
 
     #[tokio::test]
-    async fn r14_a_launcher_that_clears_after_20_s_is_waited_for() {
+    async fn a_launcher_that_clears_after_20_s_is_waited_for() {
         // Reads are 5 s apart in production; this launcher's clears land at
         // the fifth read, 20 s after the restart.
         let setup = roomy(IntentRoute::Openrouter);
@@ -1065,7 +1065,7 @@ pub(crate) mod tests {
     }
 
     #[tokio::test]
-    async fn r14_a_launcher_that_never_clears_fails_after_full_windows() {
+    async fn a_launcher_that_never_clears_fails_after_full_windows() {
         let setup = disconnect_setup(IntentRoute::Openrouter);
         *setup.fake.launcher_polls.lock().unwrap() = usize::MAX;
         arm(
@@ -1096,7 +1096,7 @@ pub(crate) mod tests {
     }
 
     #[tokio::test]
-    async fn r14_unknown_during_the_wait_is_not_a_mismatch() {
+    async fn unknown_during_the_wait_is_not_a_mismatch() {
         let setup = roomy(IntentRoute::Openrouter);
         *setup.fake.unknown_polls.lock().unwrap() = 6;
         arm(
@@ -1117,7 +1117,7 @@ pub(crate) mod tests {
     }
 
     #[tokio::test]
-    async fn r14_unknown_at_the_deadline_is_a_mismatch() {
+    async fn unknown_at_the_deadline_is_a_mismatch() {
         let setup = disconnect_setup(IntentRoute::Openrouter);
         *setup.fake.unknown_polls.lock().unwrap() = usize::MAX;
         arm(
@@ -1146,8 +1146,8 @@ pub(crate) mod tests {
     }
 
     #[tokio::test]
-    async fn r15_a_cut_short_step_and_a_slow_helper_end_succeeded_after_one_more_start() {
-        // The E-0 run R15 comes from: the first start's launcher step hit its
+    async fn a_cut_short_step_and_a_slow_helper_end_succeeded_after_one_more_start() {
+        // An interrupted launcher cleanup: the first start's launcher step hit its
         // limit after clearing the pool entry and before the override, and
         // the attempt's first facts reads failed.
         let mut setup = disconnect_setup(IntentRoute::Openrouter);
@@ -1187,7 +1187,7 @@ pub(crate) mod tests {
     }
 
     #[tokio::test]
-    async fn r15_a_helper_that_fails_every_window_is_helper_unavailable_after_the_retries() {
+    async fn a_helper_that_fails_every_window_is_helper_unavailable_after_the_retries() {
         let setup = disconnect_setup(IntentRoute::Openrouter);
         *setup.fake.failed_reads.lock().unwrap() = usize::MAX;
         arm(
@@ -1222,7 +1222,7 @@ pub(crate) mod tests {
     }
 
     #[tokio::test]
-    async fn r15_a_failed_read_then_a_cleared_one_inside_the_window_succeeds() {
+    async fn a_failed_read_then_a_cleared_one_inside_the_window_succeeds() {
         let setup = roomy(IntentRoute::Openrouter);
         *setup.fake.failed_reads.lock().unwrap() = 2;
         arm(
@@ -1288,7 +1288,7 @@ pub(crate) mod tests {
     }
 
     #[tokio::test]
-    async fn r18_a_hung_config_check_is_config_invalid_and_retried() {
+    async fn a_hung_config_check_is_config_invalid_and_retried() {
         let mut setup = new_setup(&fp_block(), "OPENROUTER_API_KEY=sk-or-v1-synthetic\n");
         let (script, pids) = hanging_config_check(&setup.fake.home);
         *setup.fake.config_check.lock().unwrap() = Some(script);
@@ -1346,7 +1346,7 @@ pub(crate) mod tests {
     }
 
     #[tokio::test]
-    async fn r12_a_failed_select_or_activate_is_left_alone_at_startup() {
+    async fn a_failed_select_or_activate_is_left_alone_at_startup() {
         for kind in [IntentKind::Select, IntentKind::Activate] {
             // The user chose another model in chat after the operation failed.
             let users_choice = json!({"default": "someone/else", "provider": "openrouter"});
@@ -1369,7 +1369,7 @@ pub(crate) mod tests {
     }
 
     #[tokio::test]
-    async fn r12_a_failed_disconnect_is_resumed_at_startup() {
+    async fn a_failed_disconnect_is_resumed_at_startup() {
         let setup = disconnect_setup(IntentRoute::Openrouter);
         let mut record =
             IntentRecord::new(IntentKind::Disconnect, IntentRoute::Openrouter, None).unwrap();
@@ -1388,7 +1388,7 @@ pub(crate) mod tests {
     }
 
     #[tokio::test]
-    async fn r12_a_select_beaten_by_another_writer_does_not_come_back_after_a_restart() {
+    async fn a_select_beaten_by_another_writer_does_not_come_back_after_a_restart() {
         // Another writer (for example `/model ... --global`) keeps changing
         // the model, so the select ends `config_conflict`.
         let setup = new_setup(
@@ -1433,7 +1433,7 @@ pub(crate) mod tests {
     }
 
     #[tokio::test]
-    async fn t_a7_select_writes_each_phase_before_its_step() {
+    async fn select_writes_each_phase_before_its_step() {
         let setup = new_setup(&fp_block(), "OPENROUTER_API_KEY=sk-or-v1-synthetic\n");
         let record = arm(
             &setup,
@@ -1459,7 +1459,7 @@ pub(crate) mod tests {
     }
 
     #[tokio::test]
-    async fn t_a7_select_resumes_from_each_phase() {
+    async fn select_resumes_from_each_phase() {
         for phase in IntentKind::Select.phases() {
             for kind in [IntentKind::Select, IntentKind::Activate] {
                 // Past `config_written` the block may already be on disk.
@@ -1514,7 +1514,7 @@ pub(crate) mod tests {
     }
 
     #[tokio::test]
-    async fn t_a7_disconnect_runs_every_step_in_its_phase() {
+    async fn disconnect_runs_every_step_in_its_phase() {
         let setup = disconnect_setup(IntentRoute::OpenaiCodex);
         arm(
             &setup,
@@ -1569,7 +1569,7 @@ pub(crate) mod tests {
     }
 
     #[tokio::test]
-    async fn t_a7_disconnect_resumes_from_each_phase() {
+    async fn disconnect_resumes_from_each_phase() {
         for route in [IntentRoute::Openrouter, IntentRoute::OpenaiCodex] {
             for phase in IntentKind::Disconnect.phases() {
                 let setup = disconnect_setup(route);
@@ -1596,7 +1596,7 @@ pub(crate) mod tests {
     }
 
     #[tokio::test]
-    async fn t_a7_bounded_retry_then_failed_and_kept() {
+    async fn bounded_retry_then_failed_and_kept() {
         let setup = disconnect_setup(IntentRoute::OpenaiCodex);
         let record = arm(
             &setup,
@@ -1612,7 +1612,7 @@ pub(crate) mod tests {
         assert_eq!(failed.error_code.as_deref(), Some("helper_unavailable"));
         assert_eq!(failed.attempts, 3);
         assert_eq!(failed.phase, IntentPhase::Verifying);
-        // R15b: a failed read is only "not yet", so each attempt kept reading
+        // a failed read is only "not yet", so each attempt kept reading
         // through its launcher window before it counted.
         for attempt in 1..=3 {
             assert!(reads_in(&setup, attempt).len() >= 2, "attempt {attempt}");
@@ -1659,7 +1659,7 @@ pub(crate) mod tests {
     }
 
     #[tokio::test]
-    async fn t_a15_serve_restarts_on_credential_changes_only() {
+    async fn serve_restarts_on_credential_changes_only() {
         let count = |events: Vec<Event>| serve_events(&events).len();
 
         let setup = new_setup(&fp_block(), "OPENROUTER_API_KEY=sk-or-v1-synthetic\n");
@@ -1698,7 +1698,7 @@ pub(crate) mod tests {
     }
 
     #[tokio::test]
-    async fn r25_a_serve_restart_that_never_returns_is_waited_for_a_bounded_time() {
+    async fn a_serve_restart_that_never_returns_is_waited_for_a_bounded_time() {
         assert_eq!(SERVE_RESTART_WAIT, Duration::from_secs(30));
         let mut setup = disconnect_setup(IntentRoute::Openrouter);
         setup.executor.serve_restart_wait = Duration::from_millis(100);
@@ -1723,7 +1723,7 @@ pub(crate) mod tests {
     }
 
     #[tokio::test]
-    async fn r30_a_select_that_moved_a_legacy_key_restarts_serve() {
+    async fn a_select_that_moved_a_legacy_key_restarts_serve() {
         let legacy = json!({"default": "old/model", "provider": "openrouter",
             "api_key": "sk-or-v1-synthetic-legacy"});
         let setup = new_setup(&legacy, "");
@@ -1747,7 +1747,7 @@ pub(crate) mod tests {
     }
 
     #[tokio::test]
-    async fn t_a43_serve_starts_only_after_the_restart_that_ran_the_launcher_step() {
+    async fn serve_starts_only_after_the_restart_that_ran_the_launcher_step() {
         let setup = disconnect_setup(IntentRoute::Openrouter);
         arm(
             &setup,
@@ -1829,7 +1829,7 @@ pub(crate) mod tests {
     }
 
     #[tokio::test]
-    async fn t_a42_a_first_turn_rewrite_is_not_a_mismatch() {
+    async fn a_first_turn_rewrite_is_not_a_mismatch() {
         let setup = new_setup(
             &openrouter_block(),
             "OPENROUTER_API_KEY=sk-or-v1-synthetic\n",
@@ -1850,7 +1850,7 @@ pub(crate) mod tests {
             "OPENROUTER_API_KEY=sk-or-v1-synthetic\n",
         );
         *setup.fake.on_restart.lock().unwrap() = Box::new(|count, path| {
-            // R28: the stale model is the one the select replaced.
+            // the stale model is the one the select replaced.
             first_turn_rewrite(path, (count == 1).then(openrouter_block));
             Ok(())
         });
@@ -1870,8 +1870,8 @@ pub(crate) mod tests {
     }
 
     #[tokio::test]
-    async fn t_a14_a_stale_writer_is_reapplied_then_reported_as_found() {
-        // R28: the old process flushed the value this select replaced, once,
+    async fn a_stale_writer_is_reapplied_then_reported_as_found() {
+        // the old process flushed the value this select replaced, once,
         // after the first check passed: the second read (5 s later in
         // production) catches it. Deterministic: the flush runs inside the
         // first check, after its model read.
@@ -1909,7 +1909,7 @@ pub(crate) mod tests {
     }
 
     #[tokio::test]
-    async fn r28_another_value_after_the_restart_is_left_as_found() {
+    async fn another_value_after_the_restart_is_left_as_found() {
         // For example the user's `/model ... --global` in chat while the
         // select verified. Found at the first check, or at the second.
         let users_choice = json!({"default": "glm-5-3-flash", "provider": "finite-private"});
@@ -1955,7 +1955,7 @@ pub(crate) mod tests {
     }
 
     #[tokio::test]
-    async fn r28_an_unknown_replaced_value_is_a_conflict() {
+    async fn an_unknown_replaced_value_is_a_conflict() {
         // agentd restarted after the write, so this process never knew what
         // the select replaced. Even the value it did replace is not re-written.
         for phase in [IntentPhase::Restarting, IntentPhase::Verifying] {

@@ -700,7 +700,7 @@ pub(crate) fn validate_hermes_config(
 }
 
 /// `<program> config check` for `hermes_home`, blocking. Past `deadline` the
-/// check is killed with its process group and counts as a rejection (R18).
+/// check is killed with its process group and counts as a rejection.
 pub(crate) fn run_config_check(
     program: &std::ffi::OsStr,
     hermes_home: &Path,

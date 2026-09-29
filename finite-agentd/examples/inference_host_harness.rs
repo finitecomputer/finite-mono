@@ -1,4 +1,4 @@
-//! E-0 host harness (DESIGN.md §13.3): the real `finite-agentd serve` in a
+//! E-0 host harness: the real `finite-agentd serve` in a
 //! scratch home, behind a fake Finite Chat bridge, with an HWD-compatible
 //! `/v1/app/runtime-commands` endpoint the real dashboard can drive
 //! (`FC_DESIGN_RUNTIME_COMMANDS_URL`).
@@ -882,9 +882,9 @@ exit "$status"
     }
 
     /// Status once its helper facts are known. Status gives the helper 10 s
-    /// (R15a); on a loaded machine a read can time out and report `unknown`
+    ///; on a loaded machine a read can time out and report `unknown`
     /// (the fallback is `unknown` exactly then), and after a failed read
-    /// status tries the helper again only 15 s later (R16). So poll, bounded
+    /// status tries the helper again only 15 s later. So poll, bounded
     /// generously.
     async fn known_status(&self) -> Value {
         let deadline = Instant::now() + Duration::from_secs(300);
@@ -1137,7 +1137,7 @@ fn observe(run_dir: PathBuf, intent_path: PathBuf, timeline: Arc<Mutex<Timeline>
     });
 }
 
-// ---- The E-0 proofs (P1–P7 from §13.3, P8 for R14, P9 for R15, P10 for R16 and R17) ----
+// ---- Daemon, launcher, and recovery proofs ----
 
 struct Proofs {
     results: Vec<(String, bool, Vec<String>)>,
@@ -1653,7 +1653,7 @@ async fn smoke(run: &mut Run, timeline: Arc<Mutex<Timeline>>) -> Proofs {
     }
     proofs.record("P6 hermes serve gating", p6);
 
-    // P8 (R14): verification waits for a slow launcher step instead of
+    // P8: verification waits for a slow launcher step instead of
     // restarting over it, and no launcher step was stopped mid-way in the
     // disconnects above.
     run.v1_openrouter("sk-or-v1-e0-fake-key-six", OR_MODEL)
@@ -1715,7 +1715,7 @@ async fn smoke(run: &mut Run, timeline: Arc<Mutex<Timeline>>) -> Proofs {
     );
     let operation = &ended["inference"]["operation"];
     proofs.record(
-        "P8 verification waits for the launcher (R14)",
+        "P8 verification waits for the launcher",
         vec![
             check(
                 (1..=2).contains(&spawns.len())
@@ -1757,7 +1757,7 @@ async fn smoke(run: &mut Run, timeline: Arc<Mutex<Timeline>>) -> Proofs {
         ],
     );
 
-    // P9 (R15, R21): the first two starts' launcher steps hit their 20 s
+    // P9: the first two starts' launcher steps hit their 20 s
     // limit after clearing the pool entry and before the override, and
     // agentd's facts reads hang while they run. A failed read is only "not
     // yet"; each mismatch found at the end of a window re-runs the steps, and
@@ -1838,7 +1838,7 @@ async fn smoke(run: &mut Run, timeline: Arc<Mutex<Timeline>>) -> Proofs {
     );
     let operation = &ended["inference"]["operation"];
     proofs.record(
-        "P9 cut-short steps and a slow helper end succeeded (R15, R21)",
+        "P9 cut-short steps and a slow helper end succeeded",
         vec![
             check(
                 outcomes.len() >= 2
@@ -1895,7 +1895,7 @@ async fn smoke(run: &mut Run, timeline: Arc<Mutex<Timeline>>) -> Proofs {
         ],
     );
 
-    // P10 (R16, R17): with the helper hanging, a disconnect of the saved
+    // P10: with the helper hanging, a disconnect of the saved
     // default is refused as `facts_unavailable` (it could not check, not "not
     // set up"), and a burst of status requests starts at most one helper per
     // 15 s: a failed read is remembered.
@@ -1933,7 +1933,7 @@ async fn smoke(run: &mut Run, timeline: Arc<Mutex<Timeline>>) -> Proofs {
         .filter(|(ms, _)| *ms <= burst_end)
         .map(|(ms, _)| ms)
         .collect::<Vec<_>>();
-    // R16 counts from the failure: the next helper may start only 15 s after
+    // Failed-read suppression counts from the failure: the next helper may start only 15 s after
     // the previous hung read was killed.
     let ended = timeline.lock().unwrap().facts_reads.clone();
     let hung_ends = hung
@@ -1975,7 +1975,7 @@ async fn smoke(run: &mut Run, timeline: Arc<Mutex<Timeline>>) -> Proofs {
         ],
     );
     proofs.record(
-        "P10 a failed read is remembered, and could-not-check is its own refusal (R16, R17)",
+        "P10 a failed read is remembered, and could-not-check is its own refusal",
         vec![
             check(
                 ready["inference"]["fallback"]["state"] != "unknown",

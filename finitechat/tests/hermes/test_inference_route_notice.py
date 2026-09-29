@@ -1,11 +1,11 @@
-"""Inference route notices at the Finite Chat adapter boundary (DESIGN §7.3).
+"""Inference route notices at the Finite Chat adapter boundary.
 
 The observer records, per Finite conversation and turn, which routes the main
 agent tried (`pre_api_request`), which failed and why (`api_request_error`),
 and which answered (`post_api_request`). `on_processing_complete` turns that
 record into at most one notice that states only what was observed. The
 adapter also swallows pinned Hermes's own route-switch status lines, whose
-wording is rendered here from the pinned Hermes source (T-F11).
+wording is rendered here from the pinned Hermes source.
 
 No test starts a Hermes gateway. Hermes modules are imported under a scratch
 HERMES_HOME because importing them creates files there.
@@ -225,7 +225,7 @@ class _NoticeTestCase(unittest.TestCase):
 
 
 class DecisionTableTests(_NoticeTestCase):
-    """T-F1: the §7.3 decision table."""
+    """Notice wording for observed primary and backup outcomes."""
 
     def test_finite_private_answering_after_a_primary_error_sends_one_notice(self):
         adapter = self.adapter()
@@ -425,7 +425,7 @@ class DecisionTableTests(_NoticeTestCase):
 
 
 class UpstreamStatusTests(_NoticeTestCase):
-    """T-F2: `send_or_update_status` drops only the upstream route-switch lines."""
+    """`send_or_update_status` drops only the upstream route-switch lines."""
 
     FALLBACK_LINE = (
         "⚠️ Model fallback: openai/gpt-4o-mini via openrouter unavailable "
@@ -473,7 +473,7 @@ class UpstreamStatusTests(_NoticeTestCase):
 
 
 class NoNoticeTests(_NoticeTestCase):
-    """T-F3: normal Finite Private serving and a primary that answers are silent."""
+    """normal Finite Private serving and a primary that answers are silent."""
 
     def test_finite_private_serving_alone_sends_nothing(self):
         routes = {
@@ -525,7 +525,7 @@ class NoNoticeTests(_NoticeTestCase):
 
 
 class AttributionTests(_NoticeTestCase):
-    """T-F4 to T-F7: records are per conversation and per turn."""
+    """records are per conversation and per turn."""
 
     def test_concurrent_conversations_in_one_room_are_not_cross_attributed(self):
         adapter = self.adapter()
@@ -754,7 +754,7 @@ def _hermes_pin() -> str:
 
 
 class PinnedUpstreamWordingTests(unittest.TestCase):
-    """T-F11: the upstream route-switch lines, rendered from pinned Hermes."""
+    """the upstream route-switch lines, rendered from pinned Hermes."""
 
     def setUp(self):
         self.original_gateway_modules = {

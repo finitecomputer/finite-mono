@@ -1,4 +1,4 @@
-//! T-F8: an inference route notice rides the ordinary `message` kind with
+//! an inference route notice rides the ordinary `message` kind with
 //! `metadata.finite_notice`. These tests push the adapter's exact send payload
 //! through the real sidecar request type and the room payload an old or new
 //! peer decodes, and pin that a message without metadata is unchanged.

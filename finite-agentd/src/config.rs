@@ -61,7 +61,7 @@ pub struct ConfigApplyResultV1 {
     pub restart_required: bool,
 }
 
-/// The result of writing the whole `model` block (§3.6, §3.10).
+/// The result of writing the whole `model` block.
 #[derive(Debug)]
 pub(crate) enum ModelWrite {
     /// The block already held exactly this value; nothing was written.
@@ -80,7 +80,7 @@ pub(crate) struct WrittenConfig {
 }
 
 /// agentd's writers of `config.yaml`. Every write holds the path's lock
-/// (R23) from its first read to its last write, including the config check,
+/// from its first read to its last write, including the config check,
 /// so it must run on a blocking thread, never on an async worker.
 #[derive(Debug, Clone)]
 pub struct ConfigManager {
@@ -273,7 +273,7 @@ impl ConfigManager {
         }))
     }
 
-    /// R23: after a failed check, undo only what agentd wrote. The lock keeps
+    /// after a failed check, undo only what agentd wrote. The lock keeps
     /// agentd's other writers out, but Hermes, its dashboard, and the user may
     /// have written during the check. The file as agentd wrote it gets its
     /// previous bytes back. A file whose `model` is still agentd's value gets
@@ -307,7 +307,7 @@ impl ConfigManager {
         self.atomic_write(serde_yaml::to_string(&document)?.as_bytes())
     }
 
-    /// Spawn-failure rollback (§3.10): restores the prior bytes only while the
+    /// Spawn-failure rollback: restores the prior bytes only while the
     /// file still holds exactly the bytes agentd wrote. Anything else means
     /// another writer changed it; the file is left alone and the caller
     /// reports `config_conflict`.
@@ -410,7 +410,7 @@ impl ConfigManager {
     }
 }
 
-/// R23: one lock for each `config.yaml` path, shared by every `ConfigManager`
+/// one lock for each `config.yaml` path, shared by every `ConfigManager`
 /// for that path in this process.
 fn path_lock(path: &Path) -> Arc<Mutex<()>> {
     static LOCKS: OnceLock<Mutex<HashMap<PathBuf, Arc<Mutex<()>>>>> = OnceLock::new();
@@ -851,7 +851,7 @@ mod tests {
     }
 
     #[test]
-    fn t_a6_model_block_with_context_length_is_written_once() {
+    fn model_block_with_context_length_is_written_once() {
         let (_directory, manager) = manager();
         let ModelWrite::Written(write) = manager
             .write_model(&finite_private_block(), || Ok(()))
@@ -918,7 +918,7 @@ mod tests {
     }
 
     #[test]
-    fn r23_a_failed_check_restores_only_the_model_beside_another_writers_edit() {
+    fn a_failed_check_restores_only_the_model_beside_another_writers_edit() {
         // Review B's probe: a setting saved while the check ran must survive.
         let (_directory, manager) = manager();
         let error = manager
@@ -959,7 +959,7 @@ mod tests {
     }
 
     #[test]
-    fn r23_a_model_that_changed_during_the_check_is_left_as_found() {
+    fn a_model_that_changed_during_the_check_is_left_as_found() {
         let (_directory, manager) = manager();
         let mut found = Vec::new();
         let error = manager
@@ -991,7 +991,7 @@ mod tests {
     }
 
     #[test]
-    fn r23_an_apply_that_starts_during_a_model_check_waits_and_sees_its_result() {
+    fn an_apply_that_starts_during_a_model_check_waits_and_sees_its_result() {
         // Review A's probe: the command loop applies Telegram while the
         // executor's check runs, through its own manager for the same path.
         for check_passes in [false, true] {
@@ -1108,7 +1108,7 @@ mod tests {
     }
 
     #[test]
-    fn t_a8_restore_happens_only_while_the_written_bytes_are_intact() {
+    fn restore_happens_only_while_the_written_bytes_are_intact() {
         let (_directory, manager) = manager();
         let ModelWrite::Written(write) = manager
             .write_model(&finite_private_block(), || Ok(()))

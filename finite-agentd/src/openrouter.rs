@@ -1,5 +1,5 @@
-//! OpenRouter key checks, usage, and connect. PR1 fills `check_key`; slice A2
-//! (PR2) fills the rest and `CAPABILITIES`.
+//! OpenRouter key validation and provider command contracts. Usage and
+//! connection commands remain unsupported and unadvertised until implemented.
 
 use std::time::Duration;
 
@@ -10,15 +10,15 @@ use crate::AgentdError;
 use crate::facts::InferenceFacts;
 
 const OPENROUTER_API_BASE: &str = "https://openrouter.ai/api/v1";
-/// Test-only (§12.1): points agentd at a fake OpenRouter.
+/// Test-only: points agentd at a fake OpenRouter.
 const API_BASE_OVERRIDE: &str = "FINITE_AGENTD_OPENROUTER_API_BASE";
 const KEY_CHECK_TIMEOUT: Duration = Duration::from_secs(8);
 const MAX_KEY_RESPONSE_BYTES: usize = 64 * 1024;
 
-/// `openrouter.connect.v1` and `openrouter.usage.v1` are advertised from PR2.
+/// Connection and usage capabilities stay absent until their handlers are implemented.
 pub(crate) const CAPABILITIES: &[&str] = &[];
 
-/// The `/key` limits a candidate key passed with (§3.9 step 3).
+/// The `/key` limits a candidate key passed with (step 3).
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub(crate) struct KeyInfo {
     pub limit_usd: Option<f64>,
@@ -28,7 +28,10 @@ pub(crate) struct KeyInfo {
 /// The Connections-managed key (`.env` `OPENROUTER_API_KEY`). No `Debug`: it
 /// holds the secret.
 pub(crate) struct SavedKey {
-    #[expect(dead_code, reason = "wired in A2")]
+    #[expect(
+        dead_code,
+        reason = "reserved for OpenRouter connection and usage support"
+    )]
     pub api_key: String,
 }
 
@@ -36,11 +39,14 @@ pub(crate) struct SavedKey {
 #[derive(Debug, Default)]
 pub(crate) struct OpenRouterState {}
 
-/// `credential` in `finite.agent.openrouter.connect.v1` (§3.9). No `Debug`:
+/// `credential` in `finite.agent.openrouter.connect.v1`. No `Debug`:
 /// it holds a key or an OAuth code.
 #[derive(Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
-#[expect(dead_code, reason = "wired in A2")]
+#[expect(
+    dead_code,
+    reason = "reserved for OpenRouter connection and usage support"
+)]
 pub(crate) enum ConnectCredential {
     ApiKey {
         api_key: String,
@@ -53,7 +59,10 @@ pub(crate) enum ConnectCredential {
 }
 
 /// A key obtained from paste or an OAuth exchange, not yet validated or stored.
-#[expect(dead_code, reason = "wired in A2")]
+#[expect(
+    dead_code,
+    reason = "reserved for OpenRouter connection and usage support"
+)]
 pub(crate) struct CandidateKey {
     pub api_key: String,
 }
@@ -78,9 +87,12 @@ fn valid_api_base(value: &str) -> bool {
     })
 }
 
-/// `GET /key` with the §3.9 step 3 rejections, in order. `Ok` only for a 200
+/// `GET /key` with the step 3 rejections, in order. `Ok` only for a 200
 /// with an object `data` that passes every rejection.
-#[expect(dead_code, reason = "wired in A2")]
+#[expect(
+    dead_code,
+    reason = "reserved for OpenRouter connection and usage support"
+)]
 pub(crate) async fn check_key(api_key: &str) -> Result<KeyInfo, AgentdError> {
     check_key_at(&api_base(), api_key).await
 }
@@ -251,7 +263,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn t_a44_check_key_rules_in_order() {
+    async fn check_key_rules_in_order() {
         let ordinary = json!({"limit": null, "limit_remaining": null, "usage": 0.5});
         let cases = [
             (401, key_data(ordinary.clone()), "credential_rejected"),
