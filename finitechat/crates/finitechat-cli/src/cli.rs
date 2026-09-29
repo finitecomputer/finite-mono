@@ -226,11 +226,6 @@ pub(crate) enum AppCommand {
 
     /// Refresh the room device lists and print the resulting state.
     RefreshDevices,
-
-    /// Print every stored room, topic, chat and message as one
-    /// `finitechat.history.v1` JSON document. Read-only: safe beside a
-    /// running service, never syncs, and never changes the saved selection.
-    ExportHistory,
 }
 
 impl AppCommand {
@@ -266,7 +261,6 @@ impl AppCommand {
             Self::Send { .. } => CommandClass::Writer,
             Self::MarkRead { .. } => CommandClass::Writer,
             Self::RefreshDevices => CommandClass::Writer,
-            Self::ExportHistory => CommandClass::ReadOnly,
         }
     }
 }

@@ -769,22 +769,6 @@ fn room_status_and_app_state_read_read_only_while_a_writer_holds_the_store() {
         "Status Room",
     ]);
     let room_id = created["selected_room_id"].as_str().unwrap().to_owned();
-    cli_json(&[
-        "app",
-        "--data-dir",
-        &agent_home,
-        "--server",
-        &server_url,
-        "--device-id",
-        "agent",
-        "--now",
-        &now_arg,
-        "send",
-        "--room-id",
-        &room_id,
-        "--text",
-        "exported history line",
-    ]);
 
     // A resident service sharing the agent home's identity holds the writer
     // lease for the rest of the test.
@@ -833,40 +817,7 @@ fn room_status_and_app_state_read_read_only_while_a_writer_holds_the_store() {
             .any(|room| room["room_id"] == room_id)
     );
 
-    let export = cli_json(&[
-        "app",
-        "--data-dir",
-        &agent_home,
-        "--server",
-        &server_url,
-        "--device-id",
-        "agent",
-        "--now",
-        &now_arg,
-        "export-history",
-    ]);
-    assert_eq!(export["format"], "finitechat.history.v1");
-    assert!(export.get("account_secret_hex").is_none());
-    let exported_room = export["rooms"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .find(|room| room["room_id"] == room_id)
-        .expect("export includes the room");
-    let exported_texts: Vec<&str> = exported_room["topics"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .flat_map(|topic| topic["chats"].as_array().unwrap())
-        .flat_map(|chat| chat["messages"].as_array().unwrap())
-        .map(|message| message["text"].as_str().unwrap())
-        .collect();
-    assert!(
-        exported_texts.contains(&"exported history line"),
-        "export carries stored messages: {exported_room}"
-    );
-
-    // All probes ran against the live store the resident writer holds; the
+    // Both probes ran against the live store the resident writer holds; the
     // durable content — device ratchets, rooms, the message/event op log —
     // must be byte-for-byte what the writer left behind.
     let after = snapshot_agent_store(&agent_home, "agent", now);
