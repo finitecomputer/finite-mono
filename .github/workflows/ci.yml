@@ -560,6 +560,8 @@ jobs:
         run: nix develop --command just lat1-secret-bootstrap-contract
       - name: Runbook facts contract
         run: nix develop --command just runbook-facts-contract
+      - name: Nix package source contract
+        run: nix develop --command just nixos package-source-contract
       - name: Evaluate production NixOS configuration
         run: nix eval .#nixosConfigurations.finite-lat-2.config.system.build.toplevel.drvPath
 
