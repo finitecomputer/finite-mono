@@ -2348,19 +2348,18 @@ fn validate_bounded_offer_expiry(expires_at: &str, created_at: &str) -> Result<(
         OffsetDateTime::parse(created_at, &Rfc3339).map_err(|_| StoreError::BrokenInvariant {
             reason: "createdAt must be an RFC3339 timestamp".to_owned(),
         })?;
-    // Callers choose one hour through thirty days (ADR 0042), measured from
-    // the server's `createdAt`. Clients compute `expiresAt` from their own
-    // clock before the request arrives, so request latency and clock offset
-    // shorten a requested one-hour lifetime. The floor only keeps offers
-    // usable, so it absorbs that drift: five minutes exceeds the server's
-    // 60 second request-auth skew plus the lookups made before `createdAt`
-    // is stamped. The ceiling bounds how long a capability stays live, so it
-    // gets no allowance. `expiresAt` itself is stored unchanged.
+    // The CLI offers one hour through thirty days (ADR 0042) and computes
+    // `expiresAt` from the client's clock before making the request. Accept
+    // at least 55 minutes remaining at the server's `createdAt`: five minutes
+    // is a conservative allowance for ordinary clock and processing drift,
+    // not a guarantee for arbitrary delays. The ceiling bounds how long a
+    // capability stays live and gets no allowance. Store `expiresAt` unchanged.
     let duration = expires - created;
     let floor = time::Duration::hours(1) - time::Duration::minutes(5);
     if duration < floor || duration > time::Duration::days(30) {
         return Err(StoreError::BrokenInvariant {
-            reason: "invitation expiry must be between one hour and thirty days".to_owned(),
+            reason: "invitation expiry must be between 55 minutes and thirty days from creation"
+                .to_owned(),
         });
     }
     Ok(())
@@ -5985,7 +5984,8 @@ mod tests {
                     (Ok(()), true) => {}
                     (Err(StoreError::BrokenInvariant { reason }), false)
                         if reason
-                            == "invitation expiry must be between one hour and thirty days" => {}
+                            == "invitation expiry must be between 55 minutes and thirty days from creation" =>
+                        {}
                     _ => mismatches.push(format!("{path}: {label} ({expires_at}): {result:?}")),
                 }
             }

@@ -1413,7 +1413,7 @@ fn built_fbrain_invite_brain_create_accepts_one_hour_from_a_lagging_client() {
     assert!(!too_long.status.success());
     assert!(
         String::from_utf8_lossy(&too_long.stderr)
-            .contains("invitation expiry must be between one hour and thirty days"),
+            .contains("invitation expiry must be between 55 minutes and thirty days from creation"),
         "unexpected rejection: {}",
         String::from_utf8_lossy(&too_long.stderr),
     );

@@ -7319,7 +7319,7 @@ mod tests {
         assert_error(
             too_long,
             StatusCode::BAD_REQUEST,
-            "invitation expiry must be between one hour and thirty days",
+            "invitation expiry must be between 55 minutes and thirty days from creation",
         )
         .await;
 
@@ -7342,7 +7342,7 @@ mod tests {
         assert_error(
             too_short,
             StatusCode::BAD_REQUEST,
-            "invitation expiry must be between one hour and thirty days",
+            "invitation expiry must be between 55 minutes and thirty days from creation",
         )
         .await;
     }
