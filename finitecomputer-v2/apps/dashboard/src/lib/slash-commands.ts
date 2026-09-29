@@ -11,11 +11,6 @@ export type SlashCommandTier =
   | "unlisted"
   | "restricted";
 
-// Hermes 0.21 busy-session policy (hermes_cli/commands.py). `reject` means
-// Hermes refuses the command while the agent is working; it does not wait.
-// `null` marks bare approval replies, which are not registry commands.
-export type SlashCommandBusy = "dispatch" | "interrupt_then_dispatch" | "reject";
-
 export type SlashCommand = {
   name: string;
   aliases: readonly string[];
@@ -23,7 +18,6 @@ export type SlashCommand = {
   description: string;
   tier: SlashCommandTier;
   reason?: string;
-  busy: SlashCommandBusy | null;
 };
 
 const SOFTWARE_REASON = "Finite manages your agent's software and restarts.";
@@ -41,7 +35,6 @@ export const SLASH_COMMANDS: readonly SlashCommand[] = [
     description:
       "Start a new session in this chat. Your agent starts fresh; earlier messages stay on screen.",
     tier: "suggested",
-    busy: "interrupt_then_dispatch",
   },
   {
     name: "stop",
@@ -49,7 +42,6 @@ export const SLASH_COMMANDS: readonly SlashCommand[] = [
     args: null,
     description: "Stop what your agent is doing in this conversation.",
     tier: "suggested",
-    busy: "interrupt_then_dispatch",
   },
   {
     name: "steer",
@@ -57,7 +49,6 @@ export const SLASH_COMMANDS: readonly SlashCommand[] = [
     args: "<prompt>",
     description: "Nudge your agent mid-task. Your note is added after its next tool call.",
     tier: "suggested",
-    busy: "dispatch",
   },
   {
     name: "btw",
@@ -65,7 +56,6 @@ export const SLASH_COMMANDS: readonly SlashCommand[] = [
     args: "<question>",
     description: "Ask a quick side question without interrupting the current task.",
     tier: "suggested",
-    busy: "dispatch",
   },
   {
     name: "status",
@@ -73,7 +63,6 @@ export const SLASH_COMMANDS: readonly SlashCommand[] = [
     args: null,
     description: "Show the model, token use, and context size for this conversation.",
     tier: "suggested",
-    busy: "dispatch",
   },
   {
     name: "queue",
@@ -81,7 +70,6 @@ export const SLASH_COMMANDS: readonly SlashCommand[] = [
     args: "<prompt>",
     description: "Line up a message to run after the current task.",
     tier: "available",
-    busy: "dispatch",
   },
   {
     name: "retry",
@@ -89,7 +77,6 @@ export const SLASH_COMMANDS: readonly SlashCommand[] = [
     args: null,
     description: "Send your last message again. Only works when your agent is idle.",
     tier: "available",
-    busy: "reject",
   },
   {
     name: "context",
@@ -97,7 +84,6 @@ export const SLASH_COMMANDS: readonly SlashCommand[] = [
     args: "[all]",
     description: "See what is filling your agent's context window.",
     tier: "available",
-    busy: "dispatch",
   },
   {
     name: "compress",
@@ -105,7 +91,6 @@ export const SLASH_COMMANDS: readonly SlashCommand[] = [
     args: null,
     description: "Summarize older messages to free up context.",
     tier: "available",
-    busy: "reject",
   },
   {
     name: "usage",
@@ -113,7 +98,6 @@ export const SLASH_COMMANDS: readonly SlashCommand[] = [
     args: null,
     description: "Show token usage for this conversation.",
     tier: "available",
-    busy: "reject",
   },
   {
     name: "plan",
@@ -121,7 +105,6 @@ export const SLASH_COMMANDS: readonly SlashCommand[] = [
     args: "[task]",
     description: "Have your agent write a plan without doing the work yet.",
     tier: "available",
-    busy: "reject",
   },
   {
     name: "learn",
@@ -129,7 +112,6 @@ export const SLASH_COMMANDS: readonly SlashCommand[] = [
     args: "<what to learn from>",
     description: "Teach your agent a reusable skill from a URL, notes, or this chat.",
     tier: "available",
-    busy: "reject",
   },
   {
     name: "bg",
@@ -138,7 +120,6 @@ export const SLASH_COMMANDS: readonly SlashCommand[] = [
     description:
       "Run a prompt as a separate background task. The result comes back to this chat.",
     tier: "available",
-    busy: "dispatch",
   },
   {
     name: "goal",
@@ -146,7 +127,6 @@ export const SLASH_COMMANDS: readonly SlashCommand[] = [
     args: "[text | show | pause | resume | clear]",
     description: "Give your agent a standing goal it keeps working toward across turns.",
     tier: "available",
-    busy: "dispatch",
   },
   {
     name: "reasoning",
@@ -154,7 +134,6 @@ export const SLASH_COMMANDS: readonly SlashCommand[] = [
     args: "[level]",
     description: "Change how hard your agent thinks before answering.",
     tier: "available",
-    busy: "reject",
   },
   {
     name: "personality",
@@ -163,7 +142,6 @@ export const SLASH_COMMANDS: readonly SlashCommand[] = [
     description:
       "Switch your agent's personality. Applies to every chat, including Telegram.",
     tier: "available",
-    busy: "reject",
   },
   {
     name: "reload-skills",
@@ -171,7 +149,6 @@ export const SLASH_COMMANDS: readonly SlashCommand[] = [
     args: null,
     description: "Refresh your agent's skill commands after adding or removing skills.",
     tier: "available",
-    busy: "reject",
   },
   {
     name: "version",
@@ -179,7 +156,6 @@ export const SLASH_COMMANDS: readonly SlashCommand[] = [
     args: null,
     description: "Show your agent's Hermes version.",
     tier: "available",
-    busy: "dispatch",
   },
   {
     name: "model",
@@ -189,7 +165,6 @@ export const SLASH_COMMANDS: readonly SlashCommand[] = [
     tier: "not_recommended",
     reason:
       "Applies to this conversation only and won't show in Connections. Change models in Connections instead.",
-    busy: "reject",
   },
   {
     name: "undo",
@@ -199,7 +174,6 @@ export const SLASH_COMMANDS: readonly SlashCommand[] = [
     tier: "not_recommended",
     reason:
       "The messages stay in this chat, so what you see and what your agent remembers will differ.",
-    busy: "reject",
   },
   {
     name: "pause",
@@ -209,7 +183,6 @@ export const SLASH_COMMANDS: readonly SlashCommand[] = [
     tier: "not_recommended",
     reason:
       "Pauses your agent everywhere, including Telegram and scheduled tasks, until you send /pause off.",
-    busy: "dispatch",
   },
   {
     name: "heartbeat",
@@ -218,123 +191,53 @@ export const SLASH_COMMANDS: readonly SlashCommand[] = [
     description: "Have your agent check back in on a schedule.",
     tier: "not_recommended",
     reason: "Stops whenever your agent restarts.",
-    busy: "dispatch",
   },
 
-  // Runnable but never shown. Descriptions are maintainer notes, not UI copy.
-  unlisted("approve", [], "dispatch", "Approve a pending dangerous command."),
-  unlisted("deny", [], "dispatch", "Deny a pending dangerous command."),
-  unlisted("always", [], null, "Approval reply: approve always."),
-  unlisted("cancel", [], null, "Approval reply: deny."),
-  unlisted("yes", [], null, "Approval reply: approve."),
-  unlisted("no", [], null, "Approval reply: deny."),
-  unlisted("resume", [], "reject", "Resume a previously named session."),
-  unlisted("sessions", [], "reject", "Browse and resume previous sessions."),
-  unlisted("branch", ["fork"], "reject", "Branch the current session."),
-  unlisted("subgoal", [], "dispatch", "Add or manage extra criteria on the active goal."),
-  unlisted("refine", [], "reject", "Save lessons from this conversation to memory or skills."),
-  unlisted("review", [], "reject", "Have a subagent review the work just discussed."),
-  unlisted("agents", ["tasks"], "dispatch", "Show active agents and running tasks."),
+  // Runnable but never shown. Hermes owns their execution behavior.
+  ...[
+    "approve", "deny", "always", "cancel", "yes", "no",
+    "resume", "sessions", "subgoal", "refine", "review",
+  ].map((name) => unlisted(name)),
+  unlisted("branch", ["fork"]),
+  unlisted("agents", ["tasks"]),
 
   // Refused in web chat; the reason is shown in the composer and the refusal.
-  restricted("update", [], "dispatch", "Update Hermes.", SOFTWARE_REASON),
-  restricted("restart", [], "dispatch", "Restart the gateway.", SOFTWARE_REASON),
+  restricted("update", SOFTWARE_REASON),
+  restricted("restart", SOFTWARE_REASON),
   restricted(
     "debug",
-    [],
-    "reject",
-    "Upload a debug report with logs.",
     "It uploads your agent's logs to a public paste service. Contact Finite support instead."
   ),
-  restricted("yolo", [], "dispatch", "Skip dangerous-command approvals.", APPROVALS_REASON),
-  restricted("approvals", [], "reject", "Set the approval mode.", APPROVALS_REASON),
-  restricted(
-    "topup",
-    [],
-    "reject",
-    "Manage Nous billing.",
-    "Billing is managed in your Finite account."
-  ),
-  restricted(
-    "save",
-    [],
-    "reject",
-    "Export the current conversation.",
-    "Exporting from chat isn't supported yet."
-  ),
-  restricted("title", [], "reject", "Set the session title.", "Rename chats from the sidebar."),
-  restricted("help", [], "dispatch", "Show available commands.", COMMANDS_REASON),
-  restricted("commands", [], "dispatch", "Browse commands and skills.", COMMANDS_REASON),
-  restricted(
-    "loop",
-    ["proactive"],
-    "dispatch",
-    "Re-run a prompt on an interval.",
-    "Recurring command loops aren't available in Finite chat."
-  ),
-  restricted("rollback", [], "reject", "Restore filesystem checkpoints.", UNAVAILABLE_REASON),
-  restricted("memory", [], "reject", "Review pending memory writes.", UNAVAILABLE_REASON),
-  restricted("skills", [], "reject", "Search, install, or manage skills.", UNAVAILABLE_REASON),
-  restricted("voice", [], "reject", "Toggle voice mode.", UNAVAILABLE_REASON),
-  restricted("fast", [], "reject", "Toggle fast mode.", UNAVAILABLE_REASON),
-  restricted("moa", [], "reject", "Run a Mixture of Agents prompt.", UNAVAILABLE_REASON),
-  restricted("init", [], "reject", "Generate AGENTS.md from a repo scan.", UNAVAILABLE_REASON),
-  restricted("bundles", [], "reject", "List skill bundles.", UNAVAILABLE_REASON),
-  restricted("diff", [], "reject", "Show git changes.", UNAVAILABLE_REASON),
-  restricted("whoami", [], "reject", "Show slash command access.", UNAVAILABLE_REASON),
-  restricted("profile", [], "dispatch", "Show the active profile.", UNAVAILABLE_REASON),
-  restricted("insights", [], "reject", "Show usage insights.", UNAVAILABLE_REASON),
-  restricted("kanban", [], "dispatch", "Multi-profile task board.", UNAVAILABLE_REASON),
-  restricted("curator", [], "reject", "Background skill maintenance.", UNAVAILABLE_REASON),
-  restricted("reload-mcp", ["reload_mcp"], "reject", "Reload MCP servers.", UNAVAILABLE_REASON),
-  restricted("busy", [], "dispatch", "Set busy-message behavior.", UNAVAILABLE_REASON),
-  restricted("footer", [], "dispatch", "Toggle the runtime footer.", UNAVAILABLE_REASON),
-  restricted("verbose", [], "dispatch", "Cycle tool progress display.", UNAVAILABLE_REASON),
-  restricted("topic", [], "reject", "Telegram DM topic sessions.", UNAVAILABLE_REASON),
-  restricted("start", [], "dispatch", "Acknowledge platform start pings.", UNAVAILABLE_REASON),
-  restricted("platform", [], "reject", "Pause or resume gateway platforms.", UNAVAILABLE_REASON),
-  restricted("sethome", ["set-home"], "reject", "Set the home channel.", UNAVAILABLE_REASON),
-  restricted("egress", [], "dispatch", "Show egress proxy status.", UNAVAILABLE_REASON),
-  restricted(
-    "codex-runtime",
-    ["codex_runtime"],
-    "reject",
-    "Toggle the Codex app-server runtime.",
-    UNAVAILABLE_REASON
-  ),
-  restricted(
-    "suggestions",
-    ["suggest"],
-    "reject",
-    "Review suggested automations.",
-    UNAVAILABLE_REASON
-  ),
-  restricted(
-    "blueprint",
-    ["bp"],
-    "reject",
-    "Set up an automation from a blueprint.",
-    UNAVAILABLE_REASON
-  ),
+  restricted("yolo", APPROVALS_REASON),
+  restricted("approvals", APPROVALS_REASON),
+  restricted("topup", "Billing is managed in your Finite account."),
+  restricted("save", "Exporting from chat isn't supported yet."),
+  restricted("title", "Rename chats from the sidebar."),
+  restricted("help", COMMANDS_REASON),
+  restricted("commands", COMMANDS_REASON),
+  restricted("loop", "Recurring command loops aren't available in Finite chat.", ["proactive"]),
+  ...[
+    "rollback", "memory", "skills", "voice", "fast", "moa", "init", "bundles",
+    "diff", "whoami", "profile", "insights", "kanban", "curator", "busy", "footer",
+    "verbose", "topic", "start", "platform", "egress",
+  ].map((name) => restricted(name)),
+  restricted("reload-mcp", UNAVAILABLE_REASON, ["reload_mcp"]),
+  restricted("sethome", UNAVAILABLE_REASON, ["set-home"]),
+  restricted("codex-runtime", UNAVAILABLE_REASON, ["codex_runtime"]),
+  restricted("suggestions", UNAVAILABLE_REASON, ["suggest"]),
+  restricted("blueprint", UNAVAILABLE_REASON, ["bp"]),
 ];
 
-function unlisted(
-  name: string,
-  aliases: string[],
-  busy: SlashCommandBusy | null,
-  description: string
-): SlashCommand {
-  return { name, aliases, args: null, description, tier: "unlisted", busy };
+function unlisted(name: string, aliases: string[] = []): SlashCommand {
+  return { name, aliases, args: null, description: "", tier: "unlisted" };
 }
 
 function restricted(
   name: string,
-  aliases: string[],
-  busy: SlashCommandBusy,
-  description: string,
-  reason: string
+  reason = UNAVAILABLE_REASON,
+  aliases: string[] = []
 ): SlashCommand {
-  return { name, aliases, args: null, description, tier: "restricted", reason, busy };
+  return { name, aliases, args: null, description: "", tier: "restricted", reason };
 }
 
 const TIER_RANK: Record<SlashCommandTier, number> = {

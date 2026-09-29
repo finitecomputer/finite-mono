@@ -163,19 +163,6 @@ test("user-facing catalog copy has no em dashes", () => {
   }
 });
 
-test("busy follows Hermes: reject means refused while the agent works", () => {
-  const busy = (name: string) => findSlashCommand(name)?.busy;
-  assert.equal(busy("new"), "interrupt_then_dispatch");
-  assert.equal(busy("stop"), "interrupt_then_dispatch");
-  for (const name of ["steer", "btw", "queue", "status", "context", "bg", "goal", "pause", "heartbeat"]) {
-    assert.equal(busy(name), "dispatch", name);
-  }
-  for (const name of ["retry", "compress", "usage", "plan", "learn", "reasoning", "personality", "model", "undo", "reload-skills"]) {
-    assert.equal(busy(name), "reject", name);
-  }
-  assert.equal(busy("yes"), null, "confirm replies are not registry commands");
-});
-
 test("restrictedSlashCommand recognizes restricted commands the way Hermes parses them", () => {
   for (const text of [
     "/update",

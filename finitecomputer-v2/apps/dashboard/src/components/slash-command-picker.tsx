@@ -42,43 +42,29 @@ export function SlashCommandPicker({
       ?.scrollIntoView({ block: "nearest" });
   }, [highlighted, listboxId, commands]);
 
-  if (blocked) {
+  if (blocked || commands.length === 0) {
+    const Icon = blocked ? BanIcon : SearchIcon;
     return (
       <div className="finite-chat__slash" aria-live="polite">
         <div className="finite-chat__slash-empty">
           <span className="finite-chat__slash-empty-icon" aria-hidden>
-            <BanIcon className="size-4" />
+            <Icon className="size-4" />
           </span>
           <div>
             <p className="finite-chat__slash-empty-title">
-              <code>/{blocked.name}</code>{" isn't available in Finite."}
+              {blocked ? (
+                <><code>/{blocked.name}</code>{" isn't available in Finite."}</>
+              ) : (
+                <>{"No listed commands match "}<code>/{query}</code></>
+              )}
             </p>
-            <p>{blocked.reason}</p>
+            <p>{blocked ? blocked.reason : "Enter sends it to your agent."}</p>
           </div>
         </div>
-        <SlashFooter closable={false}>
-          <span className="finite-chat__slash-count">Can&apos;t be sent from chat</span>
-        </SlashFooter>
-      </div>
-    );
-  }
-
-  if (commands.length === 0) {
-    return (
-      <div className="finite-chat__slash" aria-live="polite">
-        <div className="finite-chat__slash-empty">
-          <span className="finite-chat__slash-empty-icon" aria-hidden>
-            <SearchIcon className="size-4" />
+        <SlashFooter sendable={!blocked} persistent={!blocked} closable={!blocked}>
+          <span className="finite-chat__slash-count">
+            {blocked ? "Can't be sent from chat" : "0 matches"}
           </span>
-          <div>
-            <p className="finite-chat__slash-empty-title">
-              {"No listed commands match "}<code>/{query}</code>
-            </p>
-            <p>Enter sends it to your agent.</p>
-          </div>
-        </div>
-        <SlashFooter sendable persistent>
-          <span className="finite-chat__slash-count">0 matches</span>
         </SlashFooter>
       </div>
     );
