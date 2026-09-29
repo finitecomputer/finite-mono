@@ -11,5 +11,6 @@ Each file is one case:
 - `expected`: `finite_private`, `openrouter`, `openai_codex`, or `other`.
 - `description`: what the case covers.
 
-`model.provider` is matched exactly. `model.base_url` is compared with scheme and host
-case-insensitive, a trailing `/` on the path ignored, and everything else exact.
+`model.provider` is trimmed and lowercased before it is matched, as Hermes does before it resolves
+a provider. `model.base_url` is compared with scheme and host case-insensitive, a trailing `/` on
+the path ignored, and everything else exact.

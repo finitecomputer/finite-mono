@@ -289,7 +289,8 @@ class SavedRouteTests(unittest.TestCase):
         self.assertEqual(route("https://fp.example.invalid/TenantA/v1", None), "other")
         self.assertEqual(route(None), "other")
         self.assertEqual(
-            helper.classify_saved_route({"provider": "Custom", "base_url": FP_BASE_URL}), "other"
+            helper.classify_saved_route({"provider": "Custom", "base_url": FP_BASE_URL}),
+            "finite_private",
         )
 
 
@@ -948,6 +949,17 @@ class PendingDisconnectTests(HelperCase):
             with self.subTest(model=model):
                 self.write_config({} if model == "absent" else {"model": model})
                 self.assert_skipped(intent, "model_unclassifiable")
+
+    def test_provider_name_normalization_never_clears_the_saved_route(self):
+        self.prepare(fp_model_block())
+        for route, providers in (
+            ("openrouter", ("OpenRouter", "  OPENROUTER  ")),
+            ("openai_codex", ("OpenAI-Codex", " CODEX ", "OPENAI_CODEX")),
+        ):
+            for provider in providers:
+                with self.subTest(provider=provider):
+                    self.write_config({"model": {"provider": provider, "default": "m"}})
+                    self.assert_skipped(self.intent(route=route), "route_still_saved")
 
     def test_a_named_provider_elsewhere_allows_the_clear(self):
         for model in (

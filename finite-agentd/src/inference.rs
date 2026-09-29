@@ -41,10 +41,7 @@ pub(crate) enum SavedRoute {
 /// configured Finite Private URL; the product and retired URLs are always
 /// recognized.
 pub(crate) fn classify_saved_route(model: &Value, fp_base_url: Option<&str>) -> SavedRoute {
-    let Some(model) = model.as_object() else {
-        return SavedRoute::Other;
-    };
-    match model.get("provider").and_then(Value::as_str) {
+    match model_provider(model).as_deref() {
         Some("openrouter") => SavedRoute::Openrouter,
         Some("openai-codex" | "codex" | "openai_codex") => SavedRoute::OpenaiCodex,
         Some("finite-private" | "custom:finite-private") => SavedRoute::FinitePrivate,
@@ -70,6 +67,15 @@ pub(crate) fn classify_saved_route(model: &Value, fp_base_url: Option<&str>) -> 
         }
         _ => SavedRoute::Other,
     }
+}
+
+/// Hermes resolves provider names after trimming whitespace and lowercasing.
+/// Keep classification and legacy credential lookup consistent with that route.
+pub(crate) fn model_provider(model: &Value) -> Option<String> {
+    model
+        .get("provider")
+        .and_then(Value::as_str)
+        .map(|provider| provider.trim().to_lowercase())
 }
 
 /// Endpoint identity (§5.5): scheme and host case-insensitive, port, userinfo,
@@ -482,7 +488,7 @@ fn openrouter_route(
     let agent_key = stored_key(dotenv_key);
     let legacy_config_key = model
         .as_object()
-        .filter(|model| model.get("provider").and_then(Value::as_str) == Some("openrouter"))
+        .filter(|_| model_provider(model).as_deref() == Some("openrouter"))
         .and_then(|model| stored_key(model.get("api_key").and_then(Value::as_str)));
     let key_source = if agent_key.is_some() {
         Some(KeySource::Agent)
@@ -1333,7 +1339,7 @@ mod tests {
         models.push(json!({"default": "x", "provider": 7}));
         for model in models {
             let legacy = legacy_inference(&model);
-            let expected = if model.get("provider").and_then(Value::as_str) == Some("openrouter") {
+            let expected = if model_provider(&model).as_deref() == Some("openrouter") {
                 "openrouter"
             } else {
                 "finite_private"

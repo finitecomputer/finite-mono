@@ -18,7 +18,8 @@ use crate::config::{
 };
 use crate::facts::InferenceFacts;
 use crate::inference::{
-    FinitePrivateEnv, InferenceStatusV2, OperationStatus, derive_status, plan_model_block,
+    FinitePrivateEnv, InferenceStatusV2, OperationStatus, derive_status, model_provider,
+    plan_model_block,
 };
 use crate::intent::IntentRoute;
 
@@ -251,7 +252,7 @@ impl ConnectionManager {
         let current = self.config.current_value(MODEL_CONFIG_PATH)?;
         Ok(current
             .as_object()
-            .filter(|value| value.get("provider").and_then(Value::as_str) == Some("openrouter"))
+            .filter(|_| model_provider(&current).as_deref() == Some("openrouter"))
             .and_then(|value| value.get("api_key"))
             .and_then(Value::as_str)
             .map(str::to_owned))
@@ -413,9 +414,7 @@ impl ConnectionManager {
                 let current = self.config.current_value(MODEL_CONFIG_PATH)?;
                 let legacy_config_key = current
                     .as_object()
-                    .filter(|value| {
-                        value.get("provider").and_then(Value::as_str) == Some("openrouter")
-                    })
+                    .filter(|_| model_provider(&current).as_deref() == Some("openrouter"))
                     .and_then(|value| value.get("api_key"))
                     .and_then(Value::as_str)
                     .map(str::to_owned);
@@ -679,11 +678,7 @@ impl ConnectionManager {
     fn inference_status(&self) -> Result<InferenceStatus, AgentdError> {
         let value = self.config.current_value(MODEL_CONFIG_PATH)?;
         let object = value.as_object();
-        let provider = object
-            .and_then(|value| value.get("provider"))
-            .and_then(Value::as_str)
-            .unwrap_or("custom")
-            .to_owned();
+        let provider = model_provider(&value).unwrap_or_else(|| "custom".to_owned());
         let model = object
             .and_then(|value| value.get("default"))
             .and_then(Value::as_str)
@@ -1378,6 +1373,26 @@ mod tests {
             fs::read_to_string(env_path).unwrap(),
             "OPENAI_API_KEY='finite-private-key'\nOPENROUTER_API_KEY='sk-or-v1-durable'\n"
         );
+    }
+
+    #[test]
+    fn provider_spelling_keeps_legacy_openrouter_credentials_and_status_consistent() {
+        let (_temp, manager) = manager();
+        for provider in ["OpenRouter", "  OPENROUTER  "] {
+            let document = json!({"model": {
+                "provider": provider, "default": "old/model", "api_key": "synthetic-legacy-key"
+            }});
+            fs::write(
+                manager.config.path(),
+                serde_yaml::to_string(&document).unwrap(),
+            )
+            .unwrap();
+            assert_eq!(manager.inference_status().unwrap().profile, "openrouter");
+            assert_eq!(
+                manager.legacy_openrouter_key().unwrap().as_deref(),
+                Some("synthetic-legacy-key")
+            );
+        }
     }
 
     #[test]

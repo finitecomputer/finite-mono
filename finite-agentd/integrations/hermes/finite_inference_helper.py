@@ -107,6 +107,7 @@ def classify_saved_route(model: Any, fp_base_url: str | None = None) -> str:
     if not isinstance(model, dict):
         return "other"
     provider = model.get("provider")
+    provider = provider.strip().lower() if isinstance(provider, str) else None
     if provider == "openrouter":
         return "openrouter"
     if provider in CODEX_PROVIDERS:
