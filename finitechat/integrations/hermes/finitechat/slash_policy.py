@@ -41,9 +41,9 @@ PAUSE_RESUME_ARGS = frozenset({"off", "resume", "stop", "disengage"})
 # re-dispatched internally. These dispatch_loop_command verbs create and
 # resume nothing, so a loop made before this policy can still be turned off.
 LOOP_CONTROL_ARGS = frozenset({"", "status", "pause", "stop", "clear", "cancel"})
-# Hermes expands a quick-command alias before built-in dispatch and again in
-# its quick-command block, so a chain can resolve twice; follow a few hops.
-MAX_ALIAS_HOPS = 4
+# Hermes expands once before built-in dispatch and once in its quick-command
+# block. Following further aliases would refuse commands it never executes.
+MAX_ALIAS_HOPS = 2
 
 _warned: set[str] = set()
 

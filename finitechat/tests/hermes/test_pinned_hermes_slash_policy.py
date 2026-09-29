@@ -323,6 +323,14 @@ class EvaluateTests(unittest.TestCase):
         shadow = {"stop": {"type": "alias", "target": "/restart"}}
         self.assertIsNone(self.evaluate("/stop", quick=shadow))
 
+    def test_alias_traversal_stops_where_the_gateway_stops(self):
+        aliases = {
+            "a": {"type": "alias", "target": "/b"},
+            "b": {"type": "alias", "target": "/c"},
+            "c": {"type": "alias", "target": "/restart"},
+        }
+        self.assertIsNone(self.evaluate("/a", quick=aliases))
+
     def test_quick_commands_come_from_the_live_gateway_runner(self):
         with tempfile.TemporaryDirectory() as home:
             runner = GatewayRunner(
@@ -793,6 +801,22 @@ class AdapterRefusalTests(AdapterTestCase):
 
 
 class AdapterQuickCommandTests(AdapterTestCase):
+    def test_deep_alias_chain_preserves_the_gateway_unknown_command_reply(self):
+        aliases = {
+            "a": {"type": "alias", "target": "/b"},
+            "b": {"type": "alias", "target": "/c"},
+            "c": {"type": "alias", "target": "/restart"},
+        }
+
+        async def scenario(h: PolicyHarness):
+            await h.deliver(raw_event(1, "/a"))
+            await h.wait_for(lambda: h.state("msg-1") == "acked")
+            self.assertEqual(h.sentinel_hits, [])
+            self.assertEqual(h.refusals(), [])
+            self.assertTrue(any("Unknown command `/c`" in sent["text"] for sent in h.sent))
+
+        self.run_scenario(scenario, quick_commands=aliases, real_runner=True)
+
     def test_idle_aliases_to_restricted_commands_never_reach_their_handlers(self):
         cases = [
             ("/again", "restart"), ("/diag local", "debug"), ("/repeat", "loop"),
