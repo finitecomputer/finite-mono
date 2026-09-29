@@ -24,7 +24,7 @@ import {
 
 export const STORAGE_ONLY_COPY =
   "Key saved. The agent default is unchanged. OpenRouter conversations may use it.";
-/** R10b: longer than a worst-case disconnect (5 to 7 minutes), so a normal operation finishes while watched. */
+/** Longer than a worst-case disconnect (5 to 7 minutes), so a normal operation finishes while watched. */
 export const POLL_LIMIT_MS = 8 * 60_000;
 
 export type InferenceOutcome =
@@ -37,7 +37,7 @@ export type InferenceNotice =
   | { card: InferenceCard; kind: "error"; code: string | null; message: string; route: InferenceRoute; retryModel?: string }
   | { card: InferenceCard; kind: "stored" };
 /**
- * R10/R10a: while an operation runs or a disconnect has failed, every control that would start another change is
+ * While an operation runs or a disconnect has failed, every control that would start another change is
  * disabled. `reasonId` is the operation line, which each such control names with `aria-describedby`.
  */
 export type InferenceLock = { locked: boolean; reasonId: string };
@@ -258,13 +258,13 @@ export function finitePrivateAction(view: InferenceView): AgentConnectionAction 
     : { action: "inference", profile: "finite_private" };
 }
 
-/** R9a: the `/model` hint names `openai-codex` only when the ChatGPT card is shown. */
+/** The `/model` hint names `openai-codex` only when the ChatGPT card is shown. */
 export function modelHintProviders(view: InferenceView | null) {
   return view && showCodexCard(view) ? "finite-private|openrouter|openai-codex" : "finite-private|openrouter";
 }
 
 /**
- * R10, R10a, R10b: the lock follows the last status the page has. It is locked while that status shows an
+ * The lock follows the last status the page has. It is locked while that status shows an
  * operation running, or a failed disconnect, because agentd refuses every other change until then. The polling
  * limit unlocks nothing; "Check again" and "Try again" are never locked, so the panel can't be stuck. A failed
  * select or activate locks nothing: the next change replaces it.
@@ -290,7 +290,7 @@ export function watchState(view: InferenceView | null, visible: boolean, expired
 }
 
 /**
- * R10b: "Check again" reads status once, then clears the expired polling window. If that status still shows the
+ * "Check again" reads status once, then clears the expired polling window. If that status still shows the
  * operation running, the same poll key is live again and polling resumes; if it has ended, there is nothing to poll.
  */
 export async function checkAgain(refresh: () => Promise<void>, resumePolling: () => void) {
@@ -301,7 +301,7 @@ export async function checkAgain(refresh: () => Promise<void>, resumePolling: ()
   }
 }
 
-/** R11: the one line a route's card shows while that route is being removed, or null. */
+/** The one line a route's card shows while that route is being removed, or null. */
 export function removalText(view: InferenceView, route: "openrouter" | "openai_codex") {
   const operation = view.operation;
   if (operation?.kind !== "disconnect" || operation.route !== route || operation.state === "succeeded") return null;

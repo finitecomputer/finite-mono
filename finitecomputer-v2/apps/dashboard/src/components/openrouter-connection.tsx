@@ -266,7 +266,7 @@ export function OpenRouterKeyForm({
   setModel: (model: string) => void;
   /** True while a request is in flight or another change is running. */
   busy: boolean;
-  /** The operation line, for a screen reader that reaches a control disabled by R10. */
+  /** The operation line, for a screen reader that reaches a disabled control. */
   describedBy?: string;
   onSubmit: (apiKey: string, submit: KeySubmit) => Promise<void>;
   onCancel: (() => void) | null;

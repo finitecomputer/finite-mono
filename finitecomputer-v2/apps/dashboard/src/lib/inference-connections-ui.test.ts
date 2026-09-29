@@ -149,7 +149,7 @@ test("every backup line, and only a configured backup says Finite Private answer
     [{ fallback: fallback("not_configured", "credential_missing") }, "Finite Private backup isn't set up on this agent: this agent has no Finite Private credential."],
     [{ fallback: fallback("off") }, "Backup to Finite Private is turned off in Hermes."],
     [{ fallback: fallback("custom") }, "Backup is customized in Hermes."],
-    // R34 changed this case: a v2 agent that reports `unknown` couldn't confirm the backup; it isn't too old.
+    // A v2 agent that reports `unknown` couldn't confirm the backup; it isn't too old.
     [{ fallback: fallback("unknown") }, "The agent couldn't confirm the Finite Private backup right now."],
     [{ saved: SAVED_OR, fallback: fallback("unknown") }, "The agent couldn't confirm the Finite Private backup right now."],
   ];
@@ -176,8 +176,8 @@ test("the Finite Private card states", () => {
   assert.match(card(legacy("openrouter", "openai/gpt-5")), /Not the agent default/u);
 });
 
-test("R34: a v2 agent that couldn't confirm Finite Private: \"Not confirmed\", in the neutral style, with no change of controls", () => {
-  // R34 changed this case: it said "Needs attention", which asks the owner to repair something that may be fine.
+test("a v2 agent that couldn't confirm Finite Private: \"Not confirmed\", in the neutral style, with no change of controls", () => {
+  // Unknown facts do not establish that the owner needs to repair anything.
   const unknown = { finite_private: { state: "unknown", reason: null } };
   const cardMarkup = (status: ReturnType<typeof parseConnectionsStatus>) =>
     html(createElement(FinitePrivateCard, { view: view(status), busy: false, lock: UNLOCKED, run: noRun, notice: null }));
@@ -253,7 +253,7 @@ test("OpenRouter without a key: paste through connect when advertised, else the 
   assert.deepEqual(openRouterKeyAction("legacy", "", "openai/gpt-5"), { action: "inference", profile: "openrouter", model: "openai/gpt-5" });
 });
 
-test("R29: the key form without openrouter.connect.v1 says it also makes OpenRouter the default, for a first key and a replaced one", () => {
+test("the key form without openrouter.connect.v1 says it also makes OpenRouter the default, for a first key and a replaced one", () => {
   const form = (connect: boolean, keyRequired: boolean, onCancel: (() => void) | null, openRouterSaved = false) =>
     html(createElement(OpenRouterKeyForm, {
       keyRequired, keyPlaceholder: "OpenRouter API key", connect, openRouterSaved, model: "anthropic/claude-sonnet-4.6",
@@ -296,7 +296,7 @@ const OR_UNKNOWN = { state: "unknown", key_source: null, key_hash: null, hermes_
 const OR_NO_KEY = { state: "no_key", key_source: null, key_hash: null, hermes_key: "none", other_pool_keys: "none" };
 const formOf = (markup: string) => markup.match(/<form[\s\S]*<\/form>/u)?.[0] ?? "";
 
-test("R38: OpenRouter unknown on a v2 agent: \"Not confirmed\", neutral, a note, the key form, and no action of a saved key", () => {
+test("OpenRouter unknown on a v2 agent: \"Not confirmed\", neutral, a note, the key form, and no action of a saved key", () => {
   const unknown = openRouterCard(v2({ routes: { openrouter: OR_UNKNOWN } }));
   assert.match(
     text(unknown),
@@ -323,7 +323,7 @@ test("R38: OpenRouter unknown on a v2 agent: \"Not confirmed\", neutral, a note,
     assert.equal(unknownForm, noKeyForm, capabilities.join(","));
   }
 
-  // OpenRouter saved and unknown: the same form without the R29 line, the links, and still no saved-key action.
+  // OpenRouter saved and unknown: the same form without the default-change explanation, the links, and still no saved-key action.
   const saved = openRouterCard(v2({ saved: SAVED_OR, routes: { openrouter: OR_UNKNOWN } }));
   assert.match(text(saved), /^OpenRouter Not confirmed /u);
   assert.match(saved, /data-testid="inference-openrouter-save"[^>]*>Save and use OpenRouter</u);
@@ -458,7 +458,7 @@ test("garbage or unknown inference facts never throw and never blank the other c
   assert.equal(garbage.telegram.connected, true);
   const markup = text(panel(garbage));
   assert.match(markup, /New conversations use Finite Private · glm-5-3-flash\./u);
-  // R34 changed this line: a v2 agent's unreadable facts read as not confirmed, not as an agent too old to say.
+  // A v2 agent's unreadable facts read as not confirmed, not as an agent too old to say.
   assert.match(markup, /The agent couldn't confirm the Finite Private backup right now\./u);
   assert.match(markup, /Finite Private Not confirmed/u);
   const unknown = v2({
@@ -469,7 +469,7 @@ test("garbage or unknown inference facts never throw and never blank the other c
     fallback: fallback("unknown"),
   });
   const unknownPanel = panel(unknown);
-  // R38 changed this line: it said "OpenRouter Status unavailable" and offered the controls of a saved key.
+  // Unknown OpenRouter facts must not offer controls that assume a saved key.
   assert.match(text(unknownPanel), /OpenRouter Not confirmed Use your own OpenRouter account\. The agent couldn't confirm its OpenRouter setup right now\./u);
   // the summary and the Finite Private card say the agent couldn't confirm, and nothing asks for a repair.
   assert.match(text(unknownPanel), /The agent couldn't confirm the Finite Private backup right now\./u);
@@ -671,7 +671,7 @@ test("the new components render text only as React text", () => {
 
 const CODEX_ROUTE = (state: string) => ({ state, quota_reset_at_ms: null, reported_quota_reset_at_ms: null, login: null });
 
-test("R9: the ChatGPT card shows only for a saved ChatGPT route or an agent with codex.login.v1", () => {
+test("the ChatGPT card shows only for a saved ChatGPT route or an agent with codex.login.v1", () => {
   const cases: Array<[string, ReturnType<typeof parseConnectionsStatus>, string | null, string]> = [
     ["saved, no codex.login.v1", v2({ saved: SAVED_CODEX }), "ChatGPT Agent default ChatGPT is this agent's default (set in chat).", "ChatGPT · gpt-5.3-codex"],
     ["saved, codex.login.v1", v2({ saved: SAVED_CODEX, routes: { openai_codex: CODEX_ROUTE("signed_in") } }, ALL), "ChatGPT Signed in Signed in to ChatGPT.", "ChatGPT · gpt-5.3-codex"],
@@ -694,7 +694,7 @@ function lockedButtons(markup: string) {
   return { reasonId, button };
 }
 
-test("R10: while an operation runs, every control that would start another change is disabled and names the reason", () => {
+test("while an operation runs, every control that would start another change is disabled and names the reason", () => {
   const running = v2({ saved: SAVED_OR, routes: { openrouter: KEY_SAVED }, operation: operation("select", "openrouter", "running") });
   const markup = panel(running);
   const { reasonId, button } = lockedButtons(markup);
@@ -718,7 +718,7 @@ test("R10: while an operation runs, every control that would start another chang
   assert.match(opener.match(/<button[^>]*inference-openrouter-open[^>]*>/u)?.[0] ?? "", / disabled=""/u);
 });
 
-test("R10: controls come back when the operation succeeds or fails", () => {
+test("controls come back when the operation succeeds or fails", () => {
   for (const state of ["succeeded", "failed"]) {
     const markup = panel(v2({ saved: SAVED_OR, routes: { openrouter: KEY_SAVED }, operation: operation("select", "openrouter", state) }));
     for (const id of ["inference-finite-private-use", "inference-openrouter-use", "inference-openrouter-replace-key", "inference-openrouter-disconnect"]) {
@@ -726,7 +726,7 @@ test("R10: controls come back when the operation succeeds or fails", () => {
       assert.doesNotMatch(tag, / disabled=""|aria-describedby/u, `${id} after ${state}`);
     }
   }
-  // R10b changed this test: the polling limit no longer unlocks a running operation (see the R10b test).
+  // Reaching the polling limit must not unlock a running operation.
   const running = view(v2({ operation: operation("select", "openrouter", "running") }));
   assert.equal(controlsLocked(running), true);
   assert.equal(controlsLocked(view(v2({ operation: operation("select", "openrouter", "failed") }))), false);
@@ -737,7 +737,7 @@ test("R10: controls come back when the operation succeeds or fails", () => {
   assert.doesNotMatch(operationLine(operation("select", "openrouter", "running"), { pollExpired: true }).match(/<button[^>]*inference-operation-check-again[^>]*>/u)?.[0] ?? "", / disabled=""/u);
 });
 
-test("R10a: a failed disconnect locks every other change, and Try again stays the way forward", () => {
+test("a failed disconnect locks every other change, and Try again stays the way forward", () => {
   const assertLocked = (markup: string, ids: string[], name: string) => {
     const { reasonId, button } = lockedButtons(markup);
     for (const id of ids) {
@@ -749,7 +749,7 @@ test("R10a: a failed disconnect locks every other change, and Try again stays th
     assert.doesNotMatch(retry, / disabled=""/u, `${name}: Try again stays enabled`);
   };
   // OpenRouter's disconnect failed on an agent whose default is ChatGPT: Finite Private's control is locked,
-  // and the OpenRouter card shows only its R11 line.
+  // and the OpenRouter card shows only its removal-status line.
   const openrouterFailed = panel(v2({
     saved: SAVED_CODEX,
     routes: { openrouter: KEY_SAVED, openai_codex: CODEX_ROUTE("signed_in") },
@@ -783,7 +783,7 @@ test("R10a: a failed disconnect locks every other change, and Try again stays th
   assert.doesNotMatch(doneButton("inference-openrouter-save-and-use"), /aria-describedby/u);
 });
 
-test("R10b: the lock follows the last status, and Check again resumes the watch", async () => {
+test("the lock follows the last status, and Check again resumes the watch", async () => {
   assert.equal(POLL_LIMIT_MS, 8 * 60_000, "longer than a worst-case disconnect (5 to 7 minutes)");
   const running = view(v2({ saved: SAVED_OR, routes: { openrouter: KEY_SAVED }, operation: operation("disconnect", "openrouter", "running") }));
   const id = running.operation!.id;
@@ -840,7 +840,7 @@ test("R10b: the lock follows the last status, and Check again resumes the watch"
   assert.equal(watchState(running, false, null).delay, null);
 });
 
-test("R11: while OpenRouter is being removed, its card agrees with the operation line", () => {
+test("while OpenRouter is being removed, its card agrees with the operation line", () => {
   const card = (op: Inference, openrouter: Inference = { state: "no_key", key_source: null, key_hash: null, hermes_key: "none", other_pool_keys: "none" }) =>
     openRouterCard(v2({ routes: { openrouter }, operation: op }));
   for (const [state, line] of [
@@ -882,7 +882,7 @@ test("layout: no empty footer, key-saved controls on their own row, and model ID
   assert.match(text(panel(v2({ saved: { route: "other", provider: "anthropic", model: "claude" } }))), /New conversations use Custom model · claude, set in Hermes\./u);
 });
 
-test("R9a: the /model hint names openai-codex only when the ChatGPT card is shown", () => {
+test("the /model hint names openai-codex only when the ChatGPT card is shown", () => {
   const hint = (markup: string) => text(markup.match(/<p class="ocean-inference-summary__hint"[^>]*>(.*?)<\/p>/u)?.[1] ?? "");
   const withCodex = "In chat, /model <model> --provider <finite-private|openrouter|openai-codex> switches only that conversation. Add --global to change this default.";
   const withoutCodex = "In chat, /model <model> --provider <finite-private|openrouter> switches only that conversation. Add --global to change this default.";
@@ -904,7 +904,7 @@ test("R9a: the /model hint names openai-codex only when the ChatGPT card is show
   assert.equal(hint(panel(null)), withoutCodex, "before status");
 });
 
-test("F3/F6: no rendered string claims a saved key or backup works, is ready, valid, or active, or isn't in use", () => {
+test("no rendered string claims a saved key or backup works, is ready, valid, or active, or isn't in use", () => {
   // Also render the summary panel across the main states so its strings are scanned.
   for (const status of [
     v2({ saved: SAVED_OR, routes: { openrouter: KEY_SAVED }, operation: operation("activate", "openrouter", "running") }),
@@ -915,7 +915,7 @@ test("F3/F6: no rendered string claims a saved key or backup works, is ready, va
   ]) {
     panel(status);
   }
-  // Design copy that uses these words about something else, kept verbatim from §10.5.
+  // Copy that uses these words about provider accounts or errors, rather than route readiness.
   const allowed = [
     "The key keeps working in your OpenRouter account until you revoke it there.",
     "That sign-in is no longer active. Start again.",
@@ -925,8 +925,8 @@ test("F3/F6: no rendered string claims a saved key or backup works, is ready, va
   for (const entry of rendered) {
     const scrubbed = allowed.reduce((value, sentence) => value.replaceAll(sentence, ""), entry);
     assert.doesNotMatch(scrubbed, /\b(works|working|ready|valid|active)\b|isn't in use|is not in use|not in use/iu, entry);
-    // under V18 and R4 the chat doesn't always send a notice. Slice V18-P removes this check when it
-    // restores "and the chat says so" to the backup line.
+    // Pre-request fallback may be silent. Do not promise a chat notice until
+    // the runtime reports that fallback path as well.
     assert.doesNotMatch(entry, /the chat says so/iu, entry);
   }
 });

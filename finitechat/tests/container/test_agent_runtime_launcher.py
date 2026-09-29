@@ -1158,7 +1158,6 @@ class AgentRuntimeLauncherInferenceTest(unittest.TestCase):
             "updated_at_ms": 0,
         }
 
-    # T-C15
     def test_launch_rule_unsets_only_the_finite_private_alias(self) -> None:
         with tempfile.TemporaryDirectory() as raw_tmp:
             result, _, recorded = self._launch(
@@ -1216,7 +1215,6 @@ class AgentRuntimeLauncherInferenceTest(unittest.TestCase):
             script,
         )
 
-    # T-C12
     def _finite_private_settings(self, env: Mapping[str, str | None]) -> dict[str, str]:
         with tempfile.TemporaryDirectory() as raw_tmp:
             result, _, recorded = self._launch(Path(raw_tmp), env=env, args=("--prepare-only",))
@@ -1298,7 +1296,6 @@ class AgentRuntimeLauncherInferenceTest(unittest.TestCase):
                 settings = self._finite_private_settings(env)
                 self.assertEqual({key: settings[key] for key in expected}, expected)
 
-    # T-C16
     def test_pending_disconnect_step_runs_after_the_reconciler_and_before_exec(self) -> None:
         with tempfile.TemporaryDirectory() as raw_tmp:
             tmp = Path(raw_tmp)
@@ -1394,7 +1391,7 @@ class AgentRuntimeLauncherInferenceTest(unittest.TestCase):
         "hermes_cli.finite_inference_helper ships in slice P1; rebuild the Hermes env after it lands",
     )
     def test_real_helper_clears_only_after_cleanup_and_route_switch(self) -> None:
-        """F1 through the real launcher and the real helper."""
+        """Disconnect cleanup through the real launcher and helper."""
         openrouter = {
             "default": "anthropic/claude-sonnet-4.6",
             "provider": "openrouter",

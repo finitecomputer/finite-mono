@@ -9,7 +9,7 @@ import { backupConfiguredFor, type InferenceView } from "@/lib/inference-status"
 const PERSONAL_PLAN_COPY = "Use your personal ChatGPT plan. Work accounts may work if your organization allows it.";
 
 /**
- * R9: until the dashboard supports ChatGPT sign-in (PR3, W6), the card appears only when ChatGPT is the saved
+ * Until the dashboard supports ChatGPT sign-in, the card appears only when ChatGPT is the saved
  * route or the agent advertises `codex.login.v1`. No agent can have that update yet, so no card asks for it.
  */
 export function showCodexCard(view: InferenceView) {

@@ -515,7 +515,7 @@ class NoNoticeTests(_NoticeTestCase):
         self.assertEqual(self.complete(adapter, self.event()), [])
 
     def test_a_turn_with_no_observed_request_sends_nothing(self):
-        # V18: a fallback Hermes picks while resolving credentials makes no
+        # A fallback Hermes picks while resolving credentials makes no
         # request on the primary, so the observer sees only Finite Private.
         adapter = self.adapter()
         self.fire("pre_api_request", "custom", FP_URL)

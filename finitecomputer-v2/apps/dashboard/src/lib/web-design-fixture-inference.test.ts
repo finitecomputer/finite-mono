@@ -170,7 +170,7 @@ function fakeView(options: Parameters<typeof createInferenceFake>[0]) {
   return inferenceView(parseConnectionsStatus(reply.body));
 }
 
-test("T-W20 (fake): a PR1 agent's status parses unchanged and reads as stored facts", async (t) => {
+test("Fake agent: a PR1 agent's status parses unchanged and reads as stored facts", async (t) => {
   const fixture = installFixture(t, { agent: "pr1" });
   const { status, view } = await readStatus();
   assert.deepStrictEqual(status.capabilities, PR1_CAPABILITIES);
@@ -186,7 +186,7 @@ test("T-W20 (fake): a PR1 agent's status parses unchanged and reads as stored fa
   assert.deepStrictEqual(fixture.commands, ["agent.owner.claim", "agent.connections.status"]);
 });
 
-test("R34 (fake): a PR1 agent that couldn't confirm its facts reports them unknown, as agentd does after a failed helper read", async (t) => {
+test("Fake agent: a PR1 agent that couldn't confirm its facts reports them unknown, as agentd does after a failed helper read", async (t) => {
   const fixture = installFixture(t, { agent: "pr1", saved: "openrouter", unconfirmed: true });
   const { view } = await readStatus();
   assert.equal(view.v2, true);
@@ -222,7 +222,7 @@ test("set-agent names the agent, the saved route, and optionally that the agent 
   }
 });
 
-test("T-W21 (fake): FP ↔ OpenRouter through select runs the operation through its phases, then the saved route changes", async (t) => {
+test("Fake agent: FP ↔ OpenRouter through select runs the operation through its phases, then the saved route changes", async (t) => {
   const fixture = installFixture(t, { agent: "pr1" });
 
   // A PR1 agent has no connect command, so a pasted key goes through v1 with the model.
@@ -280,7 +280,7 @@ test("T-W21 (fake): FP ↔ OpenRouter through select runs the operation through 
   assert.ok(fixture.replies.every((reply) => !reply.includes(PASTED_KEY)));
 });
 
-test("T-W23 (fake): a failed disconnect shows failed, blocks other changes, and Try again resumes the same operation", async (t) => {
+test("Fake agent: a failed disconnect shows failed, blocks other changes, and Try again resumes the same operation", async (t) => {
   const fixture = installFixture(t, { agent: "pr1", saved: "openrouter" });
   fixture.fake.failNextOperation();
   const keyHash = (await readStatus()).view.openrouter.keyHash;
@@ -383,7 +383,7 @@ test("a PR1 agent: PR2 and PR3 actions are gated by the dashboard, and the fake 
   assert.equal(unknownField.error?.code, "invalid_payload");
 });
 
-test("T-W22 (fake): a legacy agent sends today's status, keeps the v1 path, and refuses new commands", async (t) => {
+test("Fake agent: a legacy agent sends today's status, keeps the v1 path, and refuses new commands", async (t) => {
   const fixture = installFixture(t, { agent: "legacy" });
   const raw = fixture.fake.runtimeCommand({ command: "agent.connections.status", schema: "finite.agent.empty.request.v1", body: {} });
   const body = raw.body as Record<string, Record<string, unknown>>;
@@ -417,7 +417,7 @@ test("T-W22 (fake): a legacy agent sends today's status, keeps the v1 path, and 
   }
 });
 
-test("T-W22 (fake): a legacy agent with Codex saved still says finite_private, and the view reads ChatGPT", async (t) => {
+test("Fake agent: a legacy agent with Codex saved still says finite_private, and the view reads ChatGPT", async (t) => {
   const fixture = installFixture(t, { agent: "legacy", saved: "openai_codex" });
   const raw = fixture.fake.runtimeCommand({ command: "agent.connections.status", schema: "finite.agent.empty.request.v1", body: {} });
   assert.deepStrictEqual((raw.body as { inference: unknown }).inference, {

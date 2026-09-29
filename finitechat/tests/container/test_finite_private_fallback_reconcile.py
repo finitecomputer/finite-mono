@@ -157,7 +157,6 @@ class FinitePrivateFallbackReconcileTest(unittest.TestCase):
             expected["fallback_providers"] = chain
         self.assertEqual(reconciled, expected)
 
-    # T-C1
     def test_first_seed_with_key_adds_provider_and_chain(self) -> None:
         reconciled = self.reconcile(None, fp_settings())
 
@@ -167,14 +166,12 @@ class FinitePrivateFallbackReconcileTest(unittest.TestCase):
         self.assertNotIn("fallback_model", reconciled)
         self.assertEqual(get_fallback_chain(reconciled), [CANONICAL_ENTRY])
 
-    # T-C2
     def test_first_seed_without_key_adds_provider_only(self) -> None:
         reconciled = self.reconcile(None, fp_settings(key_present=False))
 
         self.assertEqual(reconciled["providers"], {"finite-private": CANONICAL_PROVIDER})
         self.assertNotIn("fallback_providers", reconciled)
 
-    # T-C3
     def test_dotenv_key_follows_hermes_precedence(self) -> None:
         cases = (
             (
@@ -225,7 +222,7 @@ class FinitePrivateFallbackReconcileTest(unittest.TestCase):
                 )
             self.assertEqual(reconciled["fallback_providers"], [CANONICAL_ENTRY])
 
-    # T-C4, T-C5 and the other shapes an existing agent can have today.
+    # Existing agents can have any of these fallback configuration shapes.
     def test_existing_configs_gain_only_the_finite_private_leaves(self) -> None:
         for name, model in EXISTING_MODELS.items():
             with self.subTest(name):
@@ -297,7 +294,6 @@ class FinitePrivateFallbackReconcileTest(unittest.TestCase):
         reconciled = self.reconcile(existing, fp_settings())
         self.assertEqual(reconciled["providers"], {"finite-private": CANONICAL_PROVIDER})
 
-    # T-C6
     def test_user_chain_is_untouched_and_owned_entries_refresh_in_place(self) -> None:
         stale_owned = {
             "provider": "finite-private",
@@ -327,7 +323,6 @@ class FinitePrivateFallbackReconcileTest(unittest.TestCase):
                     reconciled = self.reconcile(existing, fp_settings(key_present=key_present))
                     self._assert_only_finite_private_leaves(existing, reconciled, chain=expected)
 
-    # T-C7
     def test_recover_known_good_adds_nothing(self) -> None:
         for name, model in EXISTING_MODELS.items():
             with self.subTest(name):
@@ -341,7 +336,6 @@ class FinitePrivateFallbackReconcileTest(unittest.TestCase):
         reconciled = self.reconcile(legacy_named, fp_settings(), recover_known_good=True)
         self.assertEqual(reconciled["model"], {"default": "glm-5-2", "provider": "finite-private"})
 
-    # T-C9
     def test_named_primary_legacy_model_is_migrated_without_new_fields(self) -> None:
         for provider in ("finite-private", "custom:finite-private"):
             for legacy in ("glm-5-2", "deepseek-v4-flash-0731", "glm-5.3-flash"):
@@ -363,7 +357,6 @@ class FinitePrivateFallbackReconcileTest(unittest.TestCase):
             {"default": "glm-5-2", "provider": "openrouter"},
         )
 
-    # T-C10
     def test_codex_model_with_bare_custom_chain_is_preserved(self) -> None:
         for key_present in (True, False):
             with self.subTest(key_present=key_present):
@@ -373,7 +366,6 @@ class FinitePrivateFallbackReconcileTest(unittest.TestCase):
                 self.assertEqual(reconciled["fallback_providers"], BARE_CUSTOM_CHAIN)
                 self._assert_only_finite_private_leaves(existing, reconciled, chain=None)
 
-    # T-C13
     def test_remove_mode_removes_only_owned_chain_entries(self) -> None:
         remove = fp_settings(FINITE_CONFIG_FP_FALLBACK_MODE="remove")
         cases = (
@@ -407,7 +399,6 @@ class FinitePrivateFallbackReconcileTest(unittest.TestCase):
         )
         self.assertNotIn("fallback_providers", self.reconcile(None, remove))
 
-    # T-C14
     def test_no_seed_when_the_user_configured_either_fallback_key(self) -> None:
         cases = (
             (
@@ -523,7 +514,6 @@ class FinitePrivateFallbackReconcilerProcessTest(unittest.TestCase):
             check=False,
         )
 
-    # T-C8
     def test_non_mapping_providers_warns_and_boots(self) -> None:
         with tempfile.TemporaryDirectory() as raw_home:
             hermes_home = Path(raw_home)
@@ -543,7 +533,6 @@ class FinitePrivateFallbackReconcilerProcessTest(unittest.TestCase):
             self.assertNotIn("fallback_providers", config)
             self.assertEqual(config["model"], OPENROUTER_MODEL)
 
-    # T-C11
     def test_second_run_makes_no_write(self) -> None:
         for name, model in (("first_seed", None), *EXISTING_MODELS.items()):
             with self.subTest(name), tempfile.TemporaryDirectory() as raw_home:

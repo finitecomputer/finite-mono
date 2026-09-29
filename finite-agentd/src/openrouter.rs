@@ -98,7 +98,7 @@ pub(crate) async fn check_key(api_key: &str) -> Result<KeyInfo, AgentdError> {
 }
 
 /// `check_key` against an explicit API base. This is metadata only: no
-/// completion request is ever sent to test a key (V20). The key never appears
+/// completion request is ever sent to test a key. The key never appears
 /// in an error.
 pub(crate) async fn check_key_at(api_base: &str, api_key: &str) -> Result<KeyInfo, AgentdError> {
     let client = reqwest::Client::builder()

@@ -625,7 +625,7 @@ test("agentd error codes pass through with agentd's message", async (t) => {
   });
 });
 
-test("R17: a code the dashboard has no entry for, like facts_unavailable, passes through with agentd's message", async (t) => {
+test("a code the dashboard has no entry for, like facts_unavailable, passes through with agentd's message", async (t) => {
   for (const [code, message] of [
     ["facts_unavailable", "The agent couldn't check its setup right now. Try again in a moment."],
     ["some_future_code", "A later agentd's own copy."],

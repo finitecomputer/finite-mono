@@ -2067,7 +2067,7 @@ test("dashboard agent creation browser states", { timeout: 300_000 }, async () =
   }
 });
 
-// Connections inference flows (DESIGN T-W20–T-W23) against the design fixture's fake agentd. A
+// Connections inference flows against the design fixture's fake agentd. A
 // separate test, so these flows have their own time budget and a fresh dashboard.
 test("Connections inference flows", { timeout: 300_000 }, async () => {
   await resetDashboardDevDirs();

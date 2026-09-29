@@ -652,7 +652,7 @@ impl<H: ExecutorHost + Clone> Inference<H> {
         let is_saved =
             classify_saved_route(&model, self.fp.base_url.as_deref()) == saved_route_of(route);
         let read = self.read_facts().await;
-        // F1: switching the agent to Finite Private needs its settings and its
+        // Switching the agent to Finite Private needs its settings and its
         // credential known present. No live probe. A read that failed is "try
         // again"; a key the helper answered as absent or `unknown` (an
         // external secret source it does not evaluate) is not.
@@ -815,7 +815,7 @@ mod tests {
             serde_yaml::from_str::<Value>(&text).unwrap()["model"].clone()
         }
 
-        /// The launcher's pending-disconnect step (C1, F1): clears only at
+        /// The launcher's pending-disconnect step: clears only at
         /// `cleanup`/`verifying` once the saved default is no longer the route.
         fn launcher_step(&self) -> &'static str {
             let Ok(Some(record)) = intent::load(&self.intent_path) else {
@@ -1245,7 +1245,7 @@ mod tests {
                 "{command} with a running select: {result}"
             );
 
-            // F2: a failed Codex disconnect refuses a new sign-in, first.
+            // A failed Codex disconnect refuses a new sign-in, first.
             let setup = new_setup(&fp_block(), "");
             setup.store(
                 IntentKind::Disconnect,
@@ -1504,7 +1504,7 @@ mod tests {
 
     #[tokio::test]
     async fn the_executor_reads_the_helper_whatever_status_remembers() {
-        // OpenRouter stored but not the saved default: no F1 precondition.
+        // OpenRouter stored but not the saved default: no safe-default precondition.
         let setup = new_setup(&fp_block(), &format!("OPENROUTER_API_KEY={OR_KEY}\n"));
         *setup.host.facts_fail.lock().unwrap() = true;
         let status = setup.status().await;
@@ -2577,7 +2577,7 @@ mod tests {
     /// or ends failed with a code.
     async fn restart_over(setup: &Setup) -> Option<IntentRecord> {
         assert!(route_configured(setup), "configured when Hermes starts");
-        // The launcher step on the start after the crash (F1).
+        // The launcher step on the start after the crash.
         setup.host.launcher_step();
         let started = start_like_run_daemon(setup);
         let settled = setup.settled().await;

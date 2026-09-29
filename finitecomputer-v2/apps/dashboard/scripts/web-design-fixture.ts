@@ -826,7 +826,7 @@ const FULL_CAPABILITIES = [
   "openrouter.connect.v1", "openrouter.usage.v1", "codex.login.v1", "codex.models.v1",
 ];
 const EMPTY_REQUEST_SCHEMA = "finite.agent.empty.request.v1";
-// The commands of §3.12, with their schema and the capability that gates them. A command the agent
+// The supported runtime commands, with their schema and the capability that gates them. A command the agent
 // doesn't advertise gets agentd's answer to an unknown command; any other command gets `{}`, as before.
 const INFERENCE_COMMANDS = new Map<string, { schema: string; capability: string | null }>([
   ["agent.connections.status", { schema: EMPTY_REQUEST_SCHEMA, capability: null }],
@@ -1232,7 +1232,7 @@ export function createInferenceFake(options: InferenceFakeOptions = {}): Inferen
       throw invalidPayload("ChatGPT isn't available on this agent.");
     }
     const admission = admit({ disconnect: route });
-    // The F1 precondition always holds: this fake's Finite Private is configured.
+    // The safe-default precondition always holds: this fake's Finite Private is configured.
     if (admission === "resume_failed" && operation) {
       const at = now();
       Object.assign(operation, {

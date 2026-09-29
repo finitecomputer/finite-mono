@@ -786,7 +786,7 @@ pub(crate) mod tests {
             let phase = self.phase();
             self.record(Event::RestartGateway(phase));
             self.restart_times.lock().unwrap().push(Instant::now());
-            // The launcher's pending-disconnect step (F1).
+            // The launcher's pending-disconnect step.
             if let Ok(Some(record)) = intent::load(&self.intent_path)
                 && record.kind == IntentKind::Disconnect
                 && matches!(record.phase, IntentPhase::Cleanup | IntentPhase::Verifying)
