@@ -1163,6 +1163,7 @@ dependencies = [
  "httpdate",
  "rand 0.8.5",
  "rusqlite",
+ "rustix",
  "secp256k1",
  "serde",
  "serde_json",

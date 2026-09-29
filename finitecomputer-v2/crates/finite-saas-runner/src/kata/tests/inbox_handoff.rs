@@ -106,11 +106,11 @@ fn capable_reader_and_drained_legacy_reader_can_take_over() {
     std::fs::write(&path, PROTECTED).unwrap();
     let mut inspected = launcher.inspect(&plan.container_name).unwrap().unwrap();
     assert!(launcher.check_container_chat_reader(&inspected).is_err());
-    use finitechat_hermes::inbox_compatibility::{READER_LABEL, REFUSAL_V1_READER};
+    use finitechat_hermes::inbox_compatibility::{READER_LABEL, REFUSAL_V2_READER};
     inspected
         .config
         .labels
-        .insert(READER_LABEL.into(), REFUSAL_V1_READER.into());
+        .insert(READER_LABEL.into(), REFUSAL_V2_READER.into());
     launcher.check_container_chat_reader(&inspected).unwrap();
     inspected.config.labels.remove(READER_LABEL);
     std::fs::write(&path, r#"{"events":[],"acked":[{"key":"settled","refusal_reply":{"seq":2,"message_id":"reply"}}]}"#).unwrap();

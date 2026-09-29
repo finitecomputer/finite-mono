@@ -4,7 +4,10 @@
 use serde_json::Value;
 
 pub const READER_LABEL: &str = "computer.finite.chat.inbox_reader";
-pub const REFUSAL_V1_READER: &str = "refusal-v1";
+/// Images whose sidecar reads prepared refusal replies at wrapper version 2,
+/// which carry the room's own-send watermark. The inbox lease tag stays
+/// `refusal_v1`; this label names the prepared wrapper the reader accepts.
+pub const REFUSAL_V2_READER: &str = "refusal-v2";
 
 pub fn check(raw: &[u8], reader: Option<&str>) -> Result<(), String> {
     let inbox: Value =
@@ -23,10 +26,15 @@ pub fn check(raw: &[u8], reader: Option<&str>) -> Result<(), String> {
             None => {}, // Legacy files predate leases.
             Some(lease) => match lease.get("state").and_then(Value::as_str) {
                 Some("pending" | "leased") => {},
-                Some("refusal_v1") if reader == Some(REFUSAL_V1_READER) => {
+                Some("refusal_v1") if reader == Some(REFUSAL_V2_READER) => {
                     if let Some(prepared) = lease.get("operation").and_then(|op| op.get("prepared"))
-                        && !prepared.is_null() && prepared.get("version").and_then(Value::as_u64) != Some(1) {
-                        return Err("unsupported prepared refusal version; runtime replacement blocked".into());
+                        && !prepared.is_null() {
+                        if prepared.get("version").and_then(Value::as_u64) != Some(2) {
+                            return Err("unsupported prepared refusal version; runtime replacement blocked".into());
+                        }
+                        if prepared.get("own_send_high_water_seq").and_then(Value::as_u64).is_none() {
+                            return Err("prepared refusal lacks its send watermark; runtime replacement blocked".into());
+                        }
                     }
                 },
                 Some("refusal_v1") => return Err("pending durable command refusals require a capable runtime; drain or repair forward before downgrade".into()),

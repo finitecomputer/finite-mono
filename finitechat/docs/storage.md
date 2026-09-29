@@ -29,10 +29,13 @@ remain visible locally.
 
 The resident sidecar owns command refusals through the versioned
 `refuse-command-v1` operation. It freezes the inbound route and explanation in
-a `refusal_v1` lease in `hermes-inbox.json`, saves the exact prepared encrypted
-request before submission, and retries that request after uncertain outcomes.
-The existing application-effect receipt recovers an accepted reply even after
-the room changes epoch. Core restores the sender's history from the saved
+a `refusal_v1` lease in `hermes-inbox.json`, and saves the exact prepared encrypted
+request before submission. A retry first looks for acceptance; an unaccepted
+request is replayed only while its group, epoch, saved own-send mark, and newest
+minted id prove it has not been overtaken by later sender traffic. Replay
+requires a successful sync through the observed server head; a bounded partial sync or a delivery error is insufficient. Missing replay evidence fails
+closed. The existing application-effect receipt recovers an accepted reply even
+after the room changes epoch. Core restores the sender's history from the saved
 plaintext. Only durable acceptance permits inbox settlement; the ack record
 and reply receipt are written together. Ordinary sends keep their existing path.
 
@@ -44,8 +47,11 @@ restore can forget accepted work and is not a supported recovery procedure.
 Pending refusals are not leased to Hermes, expired, or removed by ordinary
 ack/release calls. Up to 32 are retained; one recovery worker retries due work
 with capped backoff. Readiness reports the pending count and last errors.
-Unaccepted requests that become stale after an epoch change remain recoverable
-blocked work; they are never silently replaced or consumed.
+Unaccepted requests overtaken by sender traffic or an epoch change remain
+blocked work; ordinary sends are not held behind them. They are never silently
+replaced or consumed. The runtime has no discard or re-encryption operation to
+drain these entries; a future repair must preserve receiver decryptability and
+resolve uncertain acceptance before changing delivery identity.
 
 An old reader rejects `refusal_v1`. A downgrade to an incapable runtime must
 therefore drain all protected entries before replacing the capable runtime.
@@ -55,9 +61,18 @@ reader may safely ignore the optional accepted receipt on the ack ring.
 
 For hosted Kata upgrades, deploy the Runner containing the inbox compatibility
 guard before the refusal-capable Agent Runtime image. The image advertises its
-reader through `computer.finite.chat.inbox_reader=refusal-v1`. Runner checks the
+reader through `computer.finite.chat.inbox_reader=refusal-v2`. The prepared
+wrapper is version 2 with a required own-send watermark (zero is valid). Earlier
+unreleased version-1 wrappers are unsupported. Prepared-format changes must
+change the reader capability too; the unchanged `refusal_v1` lease tag identifies
+the operation, not its nested encrypted payload format. Runner checks the
 quiesced inbox before replacement and before rollback cleanup; blocked rollback
-preserves the capable handle. An older Runner does not provide this guard and
+preserves the capable handle. The host reads tenant-owned inbox children through
+anchored descriptors without following symlinks, rejects special files, and
+bounds input to 64 MiB. This is an operator limit, not a bound guaranteed by the
+sidecar: its ordinary inbox backlog is unbounded. Oversized or incompatible
+state refuses handoff and requires repair; this check does not establish that
+the existing fleet fits the limit. An older Runner does not provide this guard and
 is not a supported orchestrator for this rollout. Phala upgrades remain disabled.
 
 ## Server durability
