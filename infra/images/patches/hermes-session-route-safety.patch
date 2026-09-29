@@ -14,7 +14,26 @@
      model_cfg = _get_model_config()
      max_tokens = None
      _env_mt = os.environ.get("HERMES_MAX_TOKENS")
-@@ -3378,6 +3385,83 @@
+@@ -3355,14 +3362,16 @@
+     )
+ 
+ 
+-def _resolve_runtime_agent_kwargs_for_provider(provider: str) -> dict:
++def _resolve_runtime_agent_kwargs_for_provider(
++    provider: str, target_model: Optional[str] = None
++) -> dict:
+     """Resolve runtime credentials for a specific provider (e.g. from channel override)."""
+     from hermes_cli.runtime_provider import (
+         resolve_runtime_provider,
+         format_runtime_provider_error,
+     )
+     try:
+-        runtime = resolve_runtime_provider(requested=provider)
++        runtime = resolve_runtime_provider(requested=provider, target_model=target_model)
+     except Exception as exc:
+         raise RuntimeError(format_runtime_provider_error(exc)) from exc
+     return {
+@@ -3378,6 +3387,85 @@
          "capabilities": dict(runtime.get("capabilities") or {}),
          "max_tokens": runtime.get("max_output_tokens"),
      }
@@ -64,16 +83,18 @@
 +
 +
 +def _resolve_session_override_credentials(
-+    provider: str, persisted_base_url: Optional[str]
++    provider: str, persisted_base_url: Optional[str], model: Optional[str]
 +) -> dict:
 +    """Resolve credentials for a session override's own route.
 +
-+    Raises when the provider cannot be resolved, when an OpenRouter route has
-+    no key, or when the credentials cannot be proven to belong to the endpoint
-+    the override names, so a caller can never pair one route's endpoint with
-+    another route's key.
++    The provider is resolved for the override's own model, as /model resolved
++    it: some providers (the OpenCode family) derive the endpoint from the
++    model. Raises when the provider cannot be resolved, when an OpenRouter
++    route has no key, or when the credentials cannot be proven to belong to
++    the endpoint the override names, so a caller can never pair one route's
++    endpoint with another route's key.
 +    """
-+    runtime = _resolve_runtime_agent_kwargs_for_provider(provider)
++    runtime = _resolve_runtime_agent_kwargs_for_provider(provider, target_model=model)
 +    if _openrouter_credential_missing(runtime):
 +        raise RuntimeError(f"credentials for provider {provider!r} are not configured")
 +    wanted = _endpoint_identity(persisted_base_url)
@@ -98,7 +119,7 @@
  
  
  def _deep_merge_request_overrides(base: Optional[dict], override: Optional[dict]) -> dict:
-@@ -8703,8 +8787,15 @@
+@@ -8703,8 +8791,15 @@
                      override_runtime.get("provider"),
                  )
                  return override_model, override_runtime
@@ -116,18 +137,18 @@
              logger.debug(
                  "Session model override (no api_key, fallback): session=%s config_model=%s override_model=%s",
                  resolved_session_key or "", model, override_model,
-@@ -28329,7 +28420,9 @@
+@@ -28329,7 +28424,9 @@
              # credential-less override — _resolve_session_agent_runtime falls
              # back to env-based resolution and applies model/provider on top.
              try:
 -                runtime = _resolve_runtime_agent_kwargs_for_provider(provider)
 +                runtime = _resolve_session_override_credentials(
-+                    provider, persisted.get("base_url")
++                    provider, persisted.get("base_url"), persisted.get("model")
 +                )
                  override["api_key"] = runtime.get("api_key")
                  override["api_mode"] = runtime.get("api_mode")
                  override["credential_pool"] = runtime.get("credential_pool")
-@@ -28352,6 +28445,57 @@
+@@ -28352,6 +28449,57 @@
              "Rehydrated persisted /model override for session=%s: model=%s provider=%s",
              session_key, override.get("model"), provider or "",
          )
@@ -149,7 +170,7 @@
 +                    "session model override names an endpoint but no provider"
 +                )
 +            runtime = _resolve_session_override_credentials(
-+                provider, override.get("base_url")
++                provider, override.get("base_url"), override_model
 +            )
 +        except Exception as exc:
 +            logger.warning(
