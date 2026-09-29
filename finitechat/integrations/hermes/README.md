@@ -153,9 +153,14 @@ On every normal start, the startup reconciler
 The backup entry names its key with `key_env`, so it never borrows
 `OPENAI_API_KEY`, and carries a literal `base_url`, so Hermes skips it when the
 primary is already the bare Finite Private block. Finite Private serves no
-model list, so the named route declares its model in a `models` map. That map
-supplies context length and vision support; it does not validate:
-`/model <any-model> --provider finite-private` succeeds with a warning.
+model list, so the named route declares its complete model list in a `models`
+map with `discover_models: false`. That declaration supplies context length
+and vision support. The Hermes patch also uses it to validate model selection:
+a declared model is accepted without a discovery request or warning; an
+undeclared model is refused without changing the conversation or Saved Default.
+Use `/model <model> --provider finite-private` to select it. Hermes does not
+interpret `provider:model` as a provider switch; for that input the refusal
+explains the supported command form.
 `/model … --global` writes only `{default, provider}` and drops the rest of
 the block; the reconciler does not restore it, because the Saved Default is
 user-owned, and choosing Finite Private in Connections writes the full block
@@ -181,9 +186,10 @@ route could use another route's credential:
 2. **A session override ran on another route's key.** A `/model` override
    without a cached credential was laid over the Saved Default's runtime, so,
    for example, a ChatGPT override with no sign-in sent the Finite Private key
-   to the ChatGPT endpoint. The patch resolves the override's own provider,
-   and uses the fallback chain or fails the turn when that fails or the
-   endpoint cannot be proven to match. The override is never cleared and stays
+   to the ChatGPT endpoint. The patch resolves the override's own provider and
+   model together, including model-dependent endpoints. It uses the fallback
+   chain or fails the turn when resolution fails or the endpoint cannot be
+   proven to match. The override is never cleared and stays
    the conversation's choice.
 
 With no key and no usable fallback, the chat shows the gateway's generic
@@ -197,6 +203,13 @@ gateway log only.
 leak on unpatched Hermes. `infra/images/test_finite_inference_helper.py` and
 `finitechat/tests/hermes/test_inference_route_notice.py` likewise fail when a
 bump changes the Hermes symbols or status wording this integration relies on.
+
+The same patch makes `discover_models: false` authoritative during model
+validation for named providers and matching custom endpoints. Finite Private
+therefore needs no `/v1/models` deployment or Saved Default migration for this
+behavior. A future model-list endpoint must first be checked against older
+Runtime Images: the pinned unpatched Hermes can accept an unsupported model
+on an unnamed endpoint when discovery succeeds.
 
 ### Backup notices
 
