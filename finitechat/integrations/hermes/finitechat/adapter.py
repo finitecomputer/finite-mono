@@ -595,9 +595,8 @@ class FiniteChatAdapter(BasePlatformAdapter):
         self._user_interrupting_sessions: dict[str, list[MessageEvent]] = {}
         self._user_cancelled_tasks: weakref.WeakSet[asyncio.Task] = weakref.WeakSet()
         self._user_interrupt_boundaries: dict[str, tuple[str, int]] = {}
-        # A refused command whose reply failed retryably keeps its lease until
-        # a delayed release hands it back for redelivery; the delay doubles per
-        # event so a persistent failure cannot spin the inbound stream.
+        # Retry unconfirmed sidecar ownership with bounded backoff; the input
+        # stays leased until delayed release makes it available for redelivery.
         self._refusal_retry_delays: dict[str, float] = {}
         self._refusal_releases: dict[str, tuple[asyncio.Task, str, Any, str]] = {}
         # (session, command) pairs already told that a scheduled command was
@@ -1212,7 +1211,7 @@ class FiniteChatAdapter(BasePlatformAdapter):
             # Before any busy defer, interrupt or admission: a restricted
             # command never reaches Hermes on either path.
             await self._refuse_finitechat_command(
-                event, refusal, room_id, seq, message_id, event_key or message_id
+                refusal, room_id, seq, message_id, event_key or message_id
             )
             return
         if session_key in self._deferred_admissions and event.get_command() in {
@@ -1301,7 +1300,6 @@ class FiniteChatAdapter(BasePlatformAdapter):
 
     async def _refuse_finitechat_command(
         self,
-        event: MessageEvent,
         refusal: Any,
         room_id: str,
         seq: Any,
@@ -1315,7 +1313,6 @@ class FiniteChatAdapter(BasePlatformAdapter):
         its decision before reporting ownership and finishes independently of
         this task's cancellation or a changed policy after restart.
         """
-        del event
         logger.info("[finitechat] refused /%s in %s/%s", refusal.command, room_id, seq)
         try:
             result = await self._finitechat_json(
@@ -1330,38 +1327,13 @@ class FiniteChatAdapter(BasePlatformAdapter):
         if not owned:
             logger.warning(
                 "[finitechat] durable refusal for %s/%s not confirmed; retaining input: %s",
-                room_id, seq, error,
+                room_id,
+                seq,
+                error,
             )
             self._schedule_refusal_release(event_key, room_id, seq, message_id)
             return
         self._refusal_retry_delays.pop(event_key, None)
-
-    async def _send_refusal(
-        self, event: MessageEvent, text: str, *, reply_to: str | None
-    ) -> SendResult:
-        raw_event = event.raw_message if isinstance(event.raw_message, dict) else {}
-        # Same route as the Finite Private usage notice: the exact Topic/Chat
-        # from the inbound event. A bare thread id only when the event has
-        # neither, since the sidecar promotes a thread id to a chat id when a
-        # conversation is present.
-        route = self._route_metadata(
-            _string_or_none(raw_event.get("conversation_id")),
-            _string_or_none(raw_event.get("segment_id")),
-        )
-        thread_id = _string_or_none(getattr(event.source, "thread_id", None))
-        metadata: dict[str, Any] = dict(route or ({"thread_id": thread_id} if thread_id else {}))
-        metadata["_finitechat_kind"] = "message"
-        metadata["_finitechat_status"] = "complete"
-        try:
-            return await self.send(
-                chat_id=str(event.source.chat_id or raw_event.get("room_id") or self.room_id),
-                content=text,
-                reply_to=reply_to,
-                metadata=metadata,
-            )
-        except Exception as exc:
-            logger.exception("[finitechat] command refusal send raised")
-            return SendResult(success=False, error=str(exc), retryable=True)
 
     def _schedule_refusal_release(
         self, event_key: str, room_id: str, seq: Any, message_id: str
@@ -1428,7 +1400,28 @@ class FiniteChatAdapter(BasePlatformAdapter):
             f"A scheduled /{refusal.command} was skipped. {refusal.text} "
             "If a loop is running it, send /loop stop to turn the loop off."
         )
-        result = await self._send_refusal(event, text, reply_to=None)
+        raw_event = event.raw_message if isinstance(event.raw_message, dict) else {}
+        # Same route as the Finite Private usage notice: the exact Topic/Chat
+        # from the inbound event. A bare thread id only when the event has
+        # neither, since the sidecar promotes a thread id to a chat id when a
+        # conversation is present.
+        route = self._route_metadata(
+            _string_or_none(raw_event.get("conversation_id")),
+            _string_or_none(raw_event.get("segment_id")),
+        )
+        thread_id = _string_or_none(getattr(event.source, "thread_id", None))
+        metadata: dict[str, Any] = dict(route or ({"thread_id": thread_id} if thread_id else {}))
+        metadata["_finitechat_kind"] = "message"
+        metadata["_finitechat_status"] = "complete"
+        try:
+            result = await self.send(
+                chat_id=str(event.source.chat_id or raw_event.get("room_id") or self.room_id),
+                content=text,
+                metadata=metadata,
+            )
+        except Exception:
+            logger.exception("[finitechat] scheduled command refusal send raised")
+            return
         if result.success:
             self._internal_refusals_sent.add(notice_key)
         else:

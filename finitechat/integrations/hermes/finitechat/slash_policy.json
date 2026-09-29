@@ -13,8 +13,7 @@
     "tier": "available"
   },
   "blueprint": {
-    "tier": "restricted",
-    "reason": "This command isn't available in Finite chat."
+    "tier": "restricted"
   },
   "branch": {
     "tier": "unlisted"
@@ -23,16 +22,13 @@
     "tier": "suggested"
   },
   "bundles": {
-    "tier": "restricted",
-    "reason": "This command isn't available in Finite chat."
+    "tier": "restricted"
   },
   "busy": {
-    "tier": "restricted",
-    "reason": "This command isn't available in Finite chat."
+    "tier": "restricted"
   },
   "codex-runtime": {
-    "tier": "restricted",
-    "reason": "This command isn't available in Finite chat."
+    "tier": "restricted"
   },
   "commands": {
     "tier": "restricted",
@@ -45,8 +41,7 @@
     "tier": "available"
   },
   "curator": {
-    "tier": "restricted",
-    "reason": "This command isn't available in Finite chat."
+    "tier": "restricted"
   },
   "debug": {
     "tier": "restricted",
@@ -56,43 +51,35 @@
     "tier": "unlisted"
   },
   "diff": {
-    "tier": "restricted",
-    "reason": "This command isn't available in Finite chat."
+    "tier": "restricted"
   },
   "egress": {
-    "tier": "restricted",
-    "reason": "This command isn't available in Finite chat."
+    "tier": "restricted"
   },
   "fast": {
-    "tier": "restricted",
-    "reason": "This command isn't available in Finite chat."
+    "tier": "restricted"
   },
   "footer": {
-    "tier": "restricted",
-    "reason": "This command isn't available in Finite chat."
+    "tier": "restricted"
   },
   "goal": {
     "tier": "available"
   },
   "heartbeat": {
-    "tier": "not_recommended",
-    "reason": "Stops whenever your agent restarts."
+    "tier": "not_recommended"
   },
   "help": {
     "tier": "restricted",
     "reason": "Type / in the message box to see the commands you can use."
   },
   "init": {
-    "tier": "restricted",
-    "reason": "This command isn't available in Finite chat."
+    "tier": "restricted"
   },
   "insights": {
-    "tier": "restricted",
-    "reason": "This command isn't available in Finite chat."
+    "tier": "restricted"
   },
   "kanban": {
-    "tier": "restricted",
-    "reason": "This command isn't available in Finite chat."
+    "tier": "restricted"
   },
   "learn": {
     "tier": "available"
@@ -102,23 +89,19 @@
     "reason": "Recurring command loops aren't available in Finite chat."
   },
   "memory": {
-    "tier": "restricted",
-    "reason": "This command isn't available in Finite chat."
+    "tier": "restricted"
   },
   "moa": {
-    "tier": "restricted",
-    "reason": "This command isn't available in Finite chat."
+    "tier": "restricted"
   },
   "model": {
-    "tier": "not_recommended",
-    "reason": "Applies to this conversation only and won't show in Connections. Change models in Connections instead."
+    "tier": "not_recommended"
   },
   "new": {
     "tier": "suggested"
   },
   "pause": {
-    "tier": "not_recommended",
-    "reason": "Pauses your agent everywhere, including Telegram and scheduled tasks, until you send /pause off."
+    "tier": "not_recommended"
   },
   "personality": {
     "tier": "available"
@@ -127,12 +110,10 @@
     "tier": "available"
   },
   "platform": {
-    "tier": "restricted",
-    "reason": "This command isn't available in Finite chat."
+    "tier": "restricted"
   },
   "profile": {
-    "tier": "restricted",
-    "reason": "This command isn't available in Finite chat."
+    "tier": "restricted"
   },
   "queue": {
     "tier": "available"
@@ -144,8 +125,7 @@
     "tier": "unlisted"
   },
   "reload-mcp": {
-    "tier": "restricted",
-    "reason": "This command isn't available in Finite chat."
+    "tier": "restricted"
   },
   "reload-skills": {
     "tier": "available"
@@ -164,8 +144,7 @@
     "tier": "unlisted"
   },
   "rollback": {
-    "tier": "restricted",
-    "reason": "This command isn't available in Finite chat."
+    "tier": "restricted"
   },
   "save": {
     "tier": "restricted",
@@ -175,16 +154,13 @@
     "tier": "unlisted"
   },
   "sethome": {
-    "tier": "restricted",
-    "reason": "This command isn't available in Finite chat."
+    "tier": "restricted"
   },
   "skills": {
-    "tier": "restricted",
-    "reason": "This command isn't available in Finite chat."
+    "tier": "restricted"
   },
   "start": {
-    "tier": "restricted",
-    "reason": "This command isn't available in Finite chat."
+    "tier": "restricted"
   },
   "status": {
     "tier": "suggested"
@@ -199,24 +175,21 @@
     "tier": "unlisted"
   },
   "suggestions": {
-    "tier": "restricted",
-    "reason": "This command isn't available in Finite chat."
+    "tier": "restricted"
   },
   "title": {
     "tier": "restricted",
     "reason": "Rename chats from the sidebar."
   },
   "topic": {
-    "tier": "restricted",
-    "reason": "This command isn't available in Finite chat."
+    "tier": "restricted"
   },
   "topup": {
     "tier": "restricted",
     "reason": "Billing is managed in your Finite account."
   },
   "undo": {
-    "tier": "not_recommended",
-    "reason": "The messages stay in this chat, so what you see and what your agent remembers will differ."
+    "tier": "not_recommended"
   },
   "update": {
     "tier": "restricted",
@@ -226,19 +199,16 @@
     "tier": "available"
   },
   "verbose": {
-    "tier": "restricted",
-    "reason": "This command isn't available in Finite chat."
+    "tier": "restricted"
   },
   "version": {
     "tier": "available"
   },
   "voice": {
-    "tier": "restricted",
-    "reason": "This command isn't available in Finite chat."
+    "tier": "restricted"
   },
   "whoami": {
-    "tier": "restricted",
-    "reason": "This command isn't available in Finite chat."
+    "tier": "restricted"
   },
   "yolo": {
     "tier": "restricted",

@@ -237,8 +237,9 @@ class PolicyDataTests(unittest.TestCase):
             with self.subTest(name=name):
                 self.assertLessEqual(set(entry), {"tier", "reason"})
                 self.assertIn(entry["tier"], TIERS)
-                if entry["tier"] in {"restricted", "not_recommended"}:
-                    self.assertTrue(entry.get("reason", "").strip())
+                if "reason" in entry:
+                    self.assertEqual(entry["tier"], "restricted")
+                    self.assertTrue(entry["reason"].strip())
                 self.assertNotIn("—", entry.get("reason", ""))
 
     def test_restricted_set_matches_the_catalog(self):
@@ -526,8 +527,7 @@ class PolicyHarness:
         self.calls: list[tuple[str, dict[str, Any]]] = []
         self.sent: list[dict[str, Any]] = []
         self.owned: dict[str, dict[str, Any]] = {}
-        self.send_behaviors: list[str] = []
-        self.ack_failures = 0
+        self.ownership_behaviors: list[str] = []
         self.admitted: list[str] = []
         self.handled: list[str] = []
         self.sentinel_hits: list[tuple[str, str]] = []
@@ -568,9 +568,11 @@ class PolicyHarness:
         del timeout
         self.calls.append((action, payload))
         if action == "refuse-command-v1":
-            behavior = self.send_behaviors.pop(0) if self.send_behaviors else "ok"
+            behavior = self.ownership_behaviors.pop(0) if self.ownership_behaviors else "ok"
             if behavior in ("retryable", "permanent"):
-                return self.module._FiniteChatResult(False, {}, "rejected route", behavior == "retryable")
+                return self.module._FiniteChatResult(
+                    False, {}, "rejected route", behavior == "retryable"
+                )
             if behavior == "unsupported":
                 return self.module._FiniteChatResult(True, {}, None, False)
             if behavior == "raise":
@@ -578,27 +580,15 @@ class PolicyHarness:
             self.owned.setdefault(payload["message_id"], payload)
             raw, _ = self.inbox[payload["message_id"]]
             self.inbox[payload["message_id"]] = (raw, "owned")
-            if behavior == "cancel-after-send":
+            if behavior == "cancel-after-ownership":
                 raise asyncio.CancelledError
             return self.module._FiniteChatResult(True, {"durable": True}, None, False)
         if action == "send":
-            behavior = self.send_behaviors.pop(0) if self.send_behaviors else "ok"
-            if behavior == "retryable":
-                return self.module._FiniteChatResult(False, {}, "transient", True)
-            if behavior == "permanent":
-                return self.module._FiniteChatResult(False, {}, "rejected route", False)
-            if behavior == "raise":
-                raise RuntimeError("sidecar transport exploded")
             self.sent.append(payload)
-            if behavior == "cancel-after-send":
-                raise asyncio.CancelledError
             return self.module._FiniteChatResult(
                 True, {"message_id": f"reply-{len(self.sent)}"}, None, False
             )
         if action in ("ack", "release"):
-            if action == "ack" and self.ack_failures:
-                self.ack_failures -= 1
-                return self.module._FiniteChatResult(False, {}, "ack not committed", True)
             raw, state = self.inbox[payload["message_id"]]
             if state == "leased":
                 self.inbox[payload["message_id"]] = (
@@ -660,7 +650,11 @@ class PolicyHarness:
         ]
 
     def refusals(self) -> list[dict[str, Any]]:
-        return [send for send in [*self.sent, *self.owned.values()] if "isn't available in Finite" in send["text"]]
+        return [
+            send
+            for send in [*self.sent, *self.owned.values()]
+            if "isn't available in Finite" in send["text"]
+        ]
 
     async def close(self) -> None:
         await self.adapter._cancel_admission_tasks()
@@ -697,7 +691,6 @@ class AdapterTestCase(unittest.TestCase):
         self.assertEqual(refusal["seq"], seq)
         self.assertTrue(refusal["text"].startswith(f"/{command} isn't available"))
         self.assertFalse(any(action == "send" for action, _ in h.calls))
-
 
 
 class AdapterRefusalTests(AdapterTestCase):
@@ -834,8 +827,11 @@ class AdapterQuickCommandTests(AdapterTestCase):
 
     def test_idle_aliases_to_restricted_commands_never_reach_their_handlers(self):
         cases = [
-            ("/again", "restart"), ("/diag local", "debug"), ("/repeat", "loop"),
-            ("/double", "restart"), ("/triple local", "debug"),
+            ("/again", "restart"),
+            ("/diag local", "debug"),
+            ("/repeat", "loop"),
+            ("/double", "restart"),
+            ("/triple local", "debug"),
         ]
 
         async def scenario(h: PolicyHarness):
@@ -859,9 +855,9 @@ class AdapterQuickCommandTests(AdapterTestCase):
 
 
 class AdapterSettlementTests(AdapterTestCase):
-    def test_retryable_send_failure_releases_after_backoff_then_redelivery_refuses(self):
+    def test_unconfirmed_ownership_releases_after_backoff_then_redelivery_refuses(self):
         async def scenario(h: PolicyHarness):
-            h.send_behaviors = ["retryable"]
+            h.ownership_behaviors = ["retryable"]
             await h.deliver(raw_event(1, "/update"))
             await h.wait_for(lambda: h.state("msg-1") == "pending")
             self.assertEqual(h.settlements("msg-1"), ["release"])
@@ -881,7 +877,7 @@ class AdapterSettlementTests(AdapterTestCase):
             key = h.module._adapter_event_key(ROOM_ID, 1, "msg-1")
             delays = []
             for _ in range(4):
-                h.send_behaviors = ["retryable"]
+                h.ownership_behaviors = ["retryable"]
                 await h.deliver(raw_event(1, "/update"))
                 delays.append(h.adapter._refusal_retry_delays[key])
                 await h.wait_for(lambda: h.state("msg-1") == "pending")
@@ -890,9 +886,9 @@ class AdapterSettlementTests(AdapterTestCase):
 
         self.run_scenario(scenario)
 
-    def test_send_exception_is_retried_like_a_retryable_failure(self):
+    def test_ownership_exception_is_retried_like_a_retryable_failure(self):
         async def scenario(h: PolicyHarness):
-            h.send_behaviors = ["raise"]
+            h.ownership_behaviors = ["raise"]
             await h.deliver(raw_event(1, "/update"))
             await h.wait_for(lambda: h.state("msg-1") == "pending")
             self.assertEqual(h.settlements("msg-1"), ["release"])
@@ -903,7 +899,7 @@ class AdapterSettlementTests(AdapterTestCase):
     def test_non_retryable_or_unsupported_sidecar_keeps_input_recoverable(self):
         async def scenario(h: PolicyHarness):
             for behavior in ("permanent", "unsupported"):
-                h.send_behaviors = [behavior]
+                h.ownership_behaviors = [behavior]
                 await h.deliver(raw_event(1, "/update"))
                 await h.wait_for(lambda: h.state("msg-1") == "pending")
             self.assertEqual(h.settlements("msg-1"), ["release", "release"])
@@ -915,7 +911,7 @@ class AdapterSettlementTests(AdapterTestCase):
 
     def test_cancellation_after_ownership_retries_the_same_operation_without_send_or_ack(self):
         async def scenario(h: PolicyHarness):
-            h.send_behaviors = ["cancel-after-send"]
+            h.ownership_behaviors = ["cancel-after-ownership"]
             with self.assertRaises(asyncio.CancelledError):
                 await h.deliver(raw_event(1, "/update"))
             self.assertEqual(h.state("msg-1"), "owned")
@@ -929,7 +925,7 @@ class AdapterSettlementTests(AdapterTestCase):
     def test_shutdown_releases_a_refusal_waiting_to_retry(self):
         async def scenario(h: PolicyHarness):
             h.module.REFUSAL_RETRY_SECS = 60
-            h.send_behaviors = ["retryable"]
+            h.ownership_behaviors = ["retryable"]
             await h.deliver(raw_event(1, "/update"))
             self.assertEqual(h.settlements("msg-1"), [])
             await h.adapter._cancel_admission_tasks()
@@ -955,9 +951,9 @@ class AdapterSettlementTests(AdapterTestCase):
                 await original_release(*args)
 
             h.adapter._release_finitechat_event = stalled_release
-            h.send_behaviors = ["retryable"]
+            h.ownership_behaviors = ["retryable"]
             await h.deliver(raw_event(1, "/update"))
-            (release_task, *_), = h.adapter._refusal_releases.values()
+            ((release_task, *_),) = h.adapter._refusal_releases.values()
             await asyncio.wait_for(release_started.wait(), timeout=1)
             await h.adapter._cancel_admission_tasks()
             self.assertTrue(release_task.done(), "shutdown must join in-progress release tasks")
