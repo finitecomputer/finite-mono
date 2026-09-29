@@ -1,0 +1,247 @@
+{
+  "agents": {
+    "tier": "unlisted"
+  },
+  "approvals": {
+    "tier": "restricted",
+    "reason": "Approval settings can't be changed from chat."
+  },
+  "approve": {
+    "tier": "unlisted"
+  },
+  "bg": {
+    "tier": "available"
+  },
+  "blueprint": {
+    "tier": "restricted",
+    "reason": "This command isn't available in Finite chat."
+  },
+  "branch": {
+    "tier": "unlisted"
+  },
+  "btw": {
+    "tier": "suggested"
+  },
+  "bundles": {
+    "tier": "restricted",
+    "reason": "This command isn't available in Finite chat."
+  },
+  "busy": {
+    "tier": "restricted",
+    "reason": "This command isn't available in Finite chat."
+  },
+  "codex-runtime": {
+    "tier": "restricted",
+    "reason": "This command isn't available in Finite chat."
+  },
+  "commands": {
+    "tier": "restricted",
+    "reason": "Type / in the message box to see the commands you can use."
+  },
+  "compress": {
+    "tier": "available"
+  },
+  "context": {
+    "tier": "available"
+  },
+  "curator": {
+    "tier": "restricted",
+    "reason": "This command isn't available in Finite chat."
+  },
+  "debug": {
+    "tier": "restricted",
+    "reason": "It uploads your agent's logs to a public paste service. Contact Finite support instead."
+  },
+  "deny": {
+    "tier": "unlisted"
+  },
+  "diff": {
+    "tier": "restricted",
+    "reason": "This command isn't available in Finite chat."
+  },
+  "egress": {
+    "tier": "restricted",
+    "reason": "This command isn't available in Finite chat."
+  },
+  "fast": {
+    "tier": "restricted",
+    "reason": "This command isn't available in Finite chat."
+  },
+  "footer": {
+    "tier": "restricted",
+    "reason": "This command isn't available in Finite chat."
+  },
+  "goal": {
+    "tier": "available"
+  },
+  "heartbeat": {
+    "tier": "not_recommended",
+    "reason": "Stops whenever your agent restarts."
+  },
+  "help": {
+    "tier": "restricted",
+    "reason": "Type / in the message box to see the commands you can use."
+  },
+  "init": {
+    "tier": "restricted",
+    "reason": "This command isn't available in Finite chat."
+  },
+  "insights": {
+    "tier": "restricted",
+    "reason": "This command isn't available in Finite chat."
+  },
+  "kanban": {
+    "tier": "restricted",
+    "reason": "This command isn't available in Finite chat."
+  },
+  "learn": {
+    "tier": "available"
+  },
+  "loop": {
+    "tier": "restricted",
+    "reason": "Recurring command loops aren't available in Finite chat."
+  },
+  "memory": {
+    "tier": "restricted",
+    "reason": "This command isn't available in Finite chat."
+  },
+  "moa": {
+    "tier": "restricted",
+    "reason": "This command isn't available in Finite chat."
+  },
+  "model": {
+    "tier": "not_recommended",
+    "reason": "Applies to this conversation only and won't show in Connections. Change models in Connections instead."
+  },
+  "new": {
+    "tier": "suggested"
+  },
+  "pause": {
+    "tier": "not_recommended",
+    "reason": "Pauses your agent everywhere, including Telegram and scheduled tasks, until you send /pause off."
+  },
+  "personality": {
+    "tier": "available"
+  },
+  "plan": {
+    "tier": "available"
+  },
+  "platform": {
+    "tier": "restricted",
+    "reason": "This command isn't available in Finite chat."
+  },
+  "profile": {
+    "tier": "restricted",
+    "reason": "This command isn't available in Finite chat."
+  },
+  "queue": {
+    "tier": "available"
+  },
+  "reasoning": {
+    "tier": "available"
+  },
+  "refine": {
+    "tier": "unlisted"
+  },
+  "reload-mcp": {
+    "tier": "restricted",
+    "reason": "This command isn't available in Finite chat."
+  },
+  "reload-skills": {
+    "tier": "available"
+  },
+  "restart": {
+    "tier": "restricted",
+    "reason": "Finite manages your agent's software and restarts."
+  },
+  "resume": {
+    "tier": "unlisted"
+  },
+  "retry": {
+    "tier": "available"
+  },
+  "review": {
+    "tier": "unlisted"
+  },
+  "rollback": {
+    "tier": "restricted",
+    "reason": "This command isn't available in Finite chat."
+  },
+  "save": {
+    "tier": "restricted",
+    "reason": "Exporting from chat isn't supported yet."
+  },
+  "sessions": {
+    "tier": "unlisted"
+  },
+  "sethome": {
+    "tier": "restricted",
+    "reason": "This command isn't available in Finite chat."
+  },
+  "skills": {
+    "tier": "restricted",
+    "reason": "This command isn't available in Finite chat."
+  },
+  "start": {
+    "tier": "restricted",
+    "reason": "This command isn't available in Finite chat."
+  },
+  "status": {
+    "tier": "suggested"
+  },
+  "steer": {
+    "tier": "suggested"
+  },
+  "stop": {
+    "tier": "suggested"
+  },
+  "subgoal": {
+    "tier": "unlisted"
+  },
+  "suggestions": {
+    "tier": "restricted",
+    "reason": "This command isn't available in Finite chat."
+  },
+  "title": {
+    "tier": "restricted",
+    "reason": "Rename chats from the sidebar."
+  },
+  "topic": {
+    "tier": "restricted",
+    "reason": "This command isn't available in Finite chat."
+  },
+  "topup": {
+    "tier": "restricted",
+    "reason": "Billing is managed in your Finite account."
+  },
+  "undo": {
+    "tier": "not_recommended",
+    "reason": "The messages stay in this chat, so what you see and what your agent remembers will differ."
+  },
+  "update": {
+    "tier": "restricted",
+    "reason": "Finite manages your agent's software and restarts."
+  },
+  "usage": {
+    "tier": "available"
+  },
+  "verbose": {
+    "tier": "restricted",
+    "reason": "This command isn't available in Finite chat."
+  },
+  "version": {
+    "tier": "available"
+  },
+  "voice": {
+    "tier": "restricted",
+    "reason": "This command isn't available in Finite chat."
+  },
+  "whoami": {
+    "tier": "restricted",
+    "reason": "This command isn't available in Finite chat."
+  },
+  "yolo": {
+    "tier": "restricted",
+    "reason": "Approval settings can't be changed from chat."
+  }
+}

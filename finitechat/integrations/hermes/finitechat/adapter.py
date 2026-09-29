@@ -37,6 +37,33 @@ from gateway.platforms.base import (
 
 logger = logging.getLogger(__name__)
 
+
+def _load_slash_policy() -> Any:
+    """Import the sibling policy module, also when this file is loaded alone.
+
+    A missing or broken policy module must never stop Finite Chat loading;
+    commands then pass to Hermes exactly as they did before the policy.
+    """
+    try:
+        try:
+            from . import slash_policy
+        except ImportError:
+            import importlib.util
+
+            path = Path(__file__).with_name("slash_policy.py")
+            spec = importlib.util.spec_from_file_location(f"{__name__}_slash_policy", path)
+            if spec is None or spec.loader is None:
+                raise ImportError(f"cannot load {path}") from None
+            slash_policy = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(slash_policy)
+        return slash_policy
+    except Exception:
+        logger.exception("[finitechat] slash policy unavailable; commands pass to Hermes")
+        return None
+
+
+_SLASH_POLICY = _load_slash_policy()
+
 FINITE_PLATFORM_NAME = "finitechat"
 LOCAL_ENV_FILE = "finitechat.env"
 DEFAULT_POLL_LIMIT = 10
@@ -1170,6 +1197,12 @@ class FiniteChatAdapter(BasePlatformAdapter):
             logger.info("[finitechat] discarded %s/%s sent before a user interrupt", room_id, seq)
             await self._ack_finitechat_event(room_id, seq, message_id)
             return
+        refusal = _SLASH_POLICY.evaluate(event) if _SLASH_POLICY is not None else None
+        if refusal is not None:
+            # Before any busy defer, interrupt or admission: a restricted
+            # command never reaches Hermes on either path.
+            await self._refuse_finitechat_command(event, refusal.text, room_id, seq, message_id)
+            return
         if session_key in self._deferred_admissions and event.get_command() in {
             "stop",
             "new",
@@ -1253,6 +1286,54 @@ class FiniteChatAdapter(BasePlatformAdapter):
             # event is acked (or released) by the completion hook.
             self._inflight_admissions.discard(event_key)
             await self._ack_finitechat_event(room_id, seq, message_id)
+
+    async def _refuse_finitechat_command(
+        self,
+        event: MessageEvent,
+        text: str,
+        room_id: str,
+        seq: Any,
+        message_id: str,
+    ) -> None:
+        """Answer a restricted command on the event's route, then settle it.
+
+        The refusal is the command's whole outcome, so the lease is acked even
+        if the reply fails to send: releasing it would only redeliver the same
+        refusal. No session, activity, or admission state is touched.
+        """
+        raw_event = event.raw_message if isinstance(event.raw_message, dict) else {}
+        metadata: dict[str, Any] = {
+            "_finitechat_kind": "message",
+            "_finitechat_status": "complete",
+        }
+        if event.source.thread_id:
+            metadata["thread_id"] = event.source.thread_id
+        metadata.update(
+            self._route_metadata(
+                _string_or_none(raw_event.get("conversation_id")),
+                _string_or_none(raw_event.get("segment_id")),
+            )
+            or {}
+        )
+        try:
+            result = await self.send(
+                chat_id=str(event.source.chat_id or room_id),
+                content=text,
+                reply_to=message_id,
+                metadata=metadata,
+            )
+            if not result.success:
+                logger.warning(
+                    "[finitechat] could not deliver command refusal for %s/%s: %s",
+                    room_id,
+                    seq,
+                    result.error,
+                )
+        except Exception:
+            logger.exception(
+                "[finitechat] could not deliver command refusal for %s/%s", room_id, seq
+            )
+        await self._ack_finitechat_event(room_id, seq, message_id)
 
     async def _hydrate_hermes_home_channel_if_needed(self) -> None:
         if self._home_channel_hydrated:
@@ -2490,7 +2571,7 @@ def register(ctx) -> None:
         allow_all_env="FINITECHAT_ALLOW_ALL_USERS",
         cron_deliver_env_var=FINITECHAT_HOME_CHANNEL_ENV,
         max_message_length=FiniteChatAdapter.MAX_MESSAGE_LENGTH,
-        allow_update_command=True,
+        allow_update_command=False,
         platform_hint=(
             "You are chatting through Finite Chat. The room is the delivery "
             "boundary and the thread is the conversation/topic. Use normal markdown. "
