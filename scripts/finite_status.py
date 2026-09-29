@@ -2102,14 +2102,18 @@ def build_host_health(
     containers["not_applicable"] = [
         runtime for runtime, role in container_roles.items() if role not in roles
     ]
+    required_counts = [
+        f"{runtime}_{count}"
+        for runtime, role in container_roles.items()
+        if role in roles
+        for count in ("running", "total")
+    ]
+    # Roles that name no container tool leave nothing to score, and that
+    # reads unknown like any other missing evidence.
     containers["status"] = (
         "green"
-        if all(
-            raw_containers.get(f"{runtime}_{count}") is not None
-            for runtime, role in container_roles.items()
-            if role in roles
-            for count in ("running", "total")
-        )
+        if required_counts
+        and all(raw_containers.get(name) is not None for name in required_counts)
         else "unknown"
     )
     statuses.append(containers["status"])
