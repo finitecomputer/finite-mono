@@ -52,6 +52,102 @@ substitute an old data tree after newer writes. Relocation/new-launch recovery
 of an unpromoted image is intentionally unavailable; use the previous qualified
 release and the verified Recovery Set if recovery is needed.
 
+## Diagnostic canary image
+
+The Brain requester-lease diagnostic (FIN-117) makes the Finite Chat adapter
+record fixed reason codes (`[DEBUG-fbrain-requester] stage=... gate=...`). It
+never records requester, session, tool or credential values. Each record also
+carries a timestamp: the producer reads the clock and appends the record to a
+bounded ring. It is off in every normal image. Core has no per-Runtime environment override, so the
+diagnostic reaches one Runtime only as a separate image scoped to that Runtime.
+
+1. Build it. Prepare a reviewed candidate revision that contains the
+   diagnostic change and is based on the source revision of the fleet image
+   the Runtime runs, so the upgrade changes only the diagnostic. Record both
+   SHAs: the fleet image's source revision and the candidate's. Dispatch
+   **Agent Runtime Image** on the candidate with `requester_diagnostics=true`,
+   `publish_production=false`, and a version that contains `diagnostic`, for
+   example `2026-09-28.brain-requester-diagnostic.1`. The workflow and
+   `build_runtime_image.py` refuse two combinations before building:
+   `requester_diagnostics` together with `publish_production`, and
+   `requester_diagnostics` with a version that lacks `diagnostic`. The image
+   carries `FINITECHAT_REQUESTER_DIAGNOSTICS=1` and the label
+   `computer.finite.runtime.diagnostic=brain-requester-lease`. The workflow
+   asserts both and still runs the durable chat smoke. Use the pinned
+   `canary-<run>-<attempt>` digest from the job summary.
+2. Register it unpromoted and scoped to the one Runtime, as in "Qualifying one
+   existing canary" above: `--promoted false --canary-runtime-id <runtime-id>`.
+   Never promote this artifact, never register its digest under a
+   general-release id, and never point a host `FC_RUNNER_RUNTIME_ARTIFACT_ID`
+   pin at it.
+3. Confirm the scope from Core before upgrading. Core refuses an upgrade to an
+   unpromoted scoped artifact for any Runtime other than the one it names, at
+   request time and at lease time. A registration that names the wrong Runtime
+   is an operator error that only this read catches. Read the artifact row
+   read-only on lat2 and require `canary_runtime_id` to equal the exact Runtime
+   id, with `promoted_at` null:
+
+   ```sql
+   SELECT id, reference, promoted_at, canary_runtime_id
+   FROM runtime_artifacts WHERE id = '<diagnostic-artifact-id>';
+   ```
+4. Upgrade only that Runtime with the reviewed single-project rollout, on the
+   Runtime's own host. Prepare the plan:
+
+   ```sh
+   scripts/rollout-lat1-runtime-artifact --prepare \
+     --host <lat3|lat4|lat5> \
+     --roll-runtime-artifact <diagnostic-artifact-id> \
+     --roll-admin-email <operator-email> \
+     --roll-admin-workos-user-id <operator-workos-user-id> \
+     --roll-project-id <the-one-project-id>
+   ```
+
+   Review it, then run the `--execute-plan-hash` command that preparation
+   prints. Never use `--roll-all`. The generic
+   `POST /api/core/v1/admin/projects/<project-id>/runtime/upgrade` example
+   under "Upgrade an existing Kata Runtime explicitly" is for promoted
+   targets: it carries no expected Runtime binding, and Core refuses a scoped
+   artifact through it.
+5. Read the trace read-only. The records go to
+   `/tmp/finitechat-requester-diagnostics/trace.log` inside the Agent
+   container, outside the durable `/data` chat state. Read it with
+   `nerdctl --namespace finite exec <source-machine-id> cat /tmp/finitechat-requester-diagnostics/trace.log`
+   (no `-i`; never pipe a script into the Agent). Copy what you need before
+   step 6, because the file leaves with the container. Look for `turn`,
+   `pre_tool` and `post_tool` gates, and for `marker=` values that differ
+   between `turn` and `pre_tool`. What the adapter enforces:
+   - One worker per gateway process writes the file, however many times the
+     plugin is rediscovered. Records from an earlier module instance still
+     arrive, with that instance's own marker.
+   - The worker creates the directory with mode 0700. It writes only to a
+     regular file owned by the gateway user with no group or other access and
+     no second name. Each time it opens the sink, a symlink, a hard link,
+     another owner or a wider mode at the directory or the file makes it drop
+     records, and it changes no permissions on a path it did not create.
+     These checks run when the sink is opened. An open sink keeps its file:
+     a later change to the path or its permissions takes effect at the next
+     open. The Agent runs as root, so the checks guard against a misplaced
+     path, and root inside the container can still read or change the file.
+   - Before every write it reads the file's actual size and drops a line that
+     would take the file past 16 MiB. A full file from an earlier run
+     accepts nothing more. The bound holds for this one writer; another
+     process appending to the same file at the same time is outside it.
+   - Each producer ring holds the newest 256 records. A stalled or missing
+     worker drops records rather than delay chat, so a missing line is not
+     evidence.
+6. Exit with an ordinary upgrade of the Runtime back to the fleet's promoted
+   artifact. Replacement compute does not copy the old image's environment
+   defaults, so the flag leaves with the image. Verify that the Runtime's
+   `nerdctl inspect` shows neither the label nor the flag, that a Chat reply
+   arrives, and that `/contact` reports the same Agent Principal.
+
+**Enforcement boundary.** The workflow and `build_runtime_image.py` keep a
+diagnostic build out of production publication and promotion. Core does not
+read the image label. Registering the same digest under a general-release
+artifact id, or pinning a host to it, is prevented only by the rules in step 2
+and by review; this change does not enforce it.
+
 ## PRECONDITIONS
 
 - Depot-managed GitHub Actions runner access is available for the
@@ -406,7 +502,9 @@ mutate a real account toward a threshold merely to demonstrate it in production.
 Do not enqueue a roster wave until this evidence is recorded. Each later Runtime is upgraded once directly to the same digest;
 do not restart it separately for these batched adapter changes.
 
-Core accepts the request only when all of these are true:
+On this normal production path, Core accepts the request only when all of
+these are true (a canary-scoped artifact instead needs the expected Runtime
+binding that the rollout wrapper supplies; see "Diagnostic canary image"):
 
 - the Runtime was created by Core with the Kata runner class;
 - the target is a promoted, non-retired OCI artifact with an immutable
