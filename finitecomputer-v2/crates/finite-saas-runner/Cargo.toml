@@ -8,12 +8,10 @@ aes-gcm = "0.10"
 anyhow = "1.0"
 clap = { version = "4.5", features = ["derive"] }
 finite-saas-core = { path = "../finite-saas-core" }
-finitechat-hermes = { path = "../../../finitechat/crates/finitechat-hermes" }
 fs4.workspace = true
 hex = "0.4"
 httpdate = "1.0"
 rand = "0.8"
-rustix = { workspace = true, features = ["fs"] }
 secp256k1 = { workspace = true, features = ["recovery"] }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"

@@ -1,5 +1,3 @@
-pub mod inbox_compatibility;
-
 use finitechat_proto::{
     ActivityId, ActivityKind, AttachmentBlobReferenceV1, ConversationId, ConversationSegmentId,
     EphemeralActivityActionV1, FINITECHAT_ACTIVITY_KIND_WORKING, MAX_ATTACHMENT_BLOB_URL_BYTES,

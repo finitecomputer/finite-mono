@@ -230,8 +230,6 @@ let
     "finitecomputer-v2/crates/finite-saas-core"
   ];
   finiteSaasRunnerSourcePaths = [
-    "finitechat/crates/finitechat-hermes"
-    "finitechat/crates/finitechat-proto"
     "finitecomputer-v2/crates/finite-saas-core"
     "finitecomputer-v2/crates/finite-saas-runner"
   ];

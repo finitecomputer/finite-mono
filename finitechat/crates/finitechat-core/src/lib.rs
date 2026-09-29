@@ -1,6 +1,4 @@
-mod durable_bridge;
 mod view;
-pub use durable_bridge::PreparedBridgeReply;
 pub use view::AppView;
 
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
@@ -1356,15 +1354,6 @@ enum AppRuntimeCommand {
         preview: String,
         response: mpsc::SyncSender<Result<AppSentMessage, FiniteChatCoreError>>,
     },
-    PrepareBridgeReply {
-        room_id: String,
-        plaintext: Vec<u8>,
-        response: mpsc::SyncSender<Result<PreparedBridgeReply, FiniteChatCoreError>>,
-    },
-    SubmitBridgeReply {
-        prepared: Box<PreparedBridgeReply>,
-        response: mpsc::SyncSender<Result<AppSentMessage, FiniteChatCoreError>>,
-    },
     UploadBridgeAttachment {
         room_id: String,
         attachment: OutboundAttachment,
@@ -1473,10 +1462,9 @@ struct SendAttachmentInput {
 }
 
 /// One own chat send, ratcheted and signed but not yet accepted by the room
-/// server. Ordinary sends keep it on the stack and return acceptance or an
-/// error synchronously. The durable bridge API wraps it with an explicit
-/// version and server binding for sidecar-owned refusal recovery.
-#[derive(Clone, Debug, Serialize, Deserialize)]
+/// server. It lives only on the stack of the send that prepared it: a send
+/// either gets `EventAccepted` synchronously or fails to the caller, and
+/// nothing about the attempt is stored.
 struct PreparedOutboundMessage {
     room_id: String,
     message_id: String,
@@ -2647,21 +2635,6 @@ fn spawn_app_runtime_worker(
                         publish_app_update(&snapshot, &shared_state, &reconciler);
                         Ok(sent)
                     })();
-                    let _ = response.send(result);
-                }
-                AppRuntimeCommand::PrepareBridgeReply {
-                    room_id,
-                    plaintext,
-                    response,
-                } => {
-                    let _ = response.send(state.prepare_bridge_reply(room_id, plaintext));
-                }
-                AppRuntimeCommand::SubmitBridgeReply { prepared, response } => {
-                    let result = state.submit_bridge_reply(&prepared);
-                    if result.is_ok() {
-                        state.bump_rev();
-                        publish_app_update(&state.app, &shared_state, &reconciler);
-                    }
                     let _ = response.send(result);
                 }
                 AppRuntimeCommand::UploadBridgeAttachment {
@@ -8964,14 +8937,6 @@ impl CoreState {
             Ok(accepted) => accepted,
             Err(error) => return Err(send_delivery_error(error)),
         };
-        self.project_accepted_chat_message(message, accepted)
-    }
-
-    fn project_accepted_chat_message(
-        &mut self,
-        message: &PreparedOutboundMessage,
-        accepted: EventAccepted,
-    ) -> Result<(EventAccepted, CoreSyncProjection), FiniteChatCoreError> {
         if accepted.message_id != message.message_id {
             return Err(FiniteChatCoreError::Client {
                 reason: format!(
@@ -13210,7 +13175,6 @@ fn profile_error(error: impl std::fmt::Display) -> FiniteChatCoreError {
 
 #[cfg(test)]
 mod tests {
-    mod durable_bridge;
     use super::*;
     use finitechat_http::{
         ApplicationEffectRequest, GetNostrProfilesRequest, HttpApplicationDeliveryEffect,

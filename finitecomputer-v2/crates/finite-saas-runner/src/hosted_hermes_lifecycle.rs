@@ -148,11 +148,6 @@ impl HostedHermesLifecycle {
             return Err(refused("unexpected provider command shape"));
         }
         match verb {
-            Some("image")
-                if command.args.get(3).and_then(|arg| arg.to_str()) == Some("inspect") =>
-            {
-                return execute(command, timeout);
-            }
             Some("inspect" | "ps" | "port" | "info" | "pull") => return execute(command, timeout),
             Some("run" | "create" | "rm" | "start" | "stop" | "rename" | "restart") => {}
             _ => return Err(refused("unclassified provider operation")),

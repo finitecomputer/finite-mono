@@ -11,8 +11,6 @@
 //! `$FINITECHAT_HOME`: `config.json`, the encrypted client store
 //! `client.sqlite3`, and sidecar state files.
 
-mod refusal;
-
 use std::collections::{BTreeMap, BTreeSet};
 use std::convert::Infallible;
 use std::fs;
@@ -204,18 +202,8 @@ pub(crate) fn run<W: Write>(args: HermesArgs, output: &mut W) -> Result<(), CliE
         HermesCommand::RoomStatus(args) => cmd_room_status(&home_dir, args, json_mode, output),
         HermesCommand::Rekey(args) => cmd_rekey(&home_dir, args, json_mode, output),
         HermesCommand::Poll => cmd_poll(&home_dir, read_request(request_json)?, output),
-        HermesCommand::Ack | HermesCommand::Release => {
-            // One-shot inbox writers must respect the resident runtime's
-            // existing cross-process writer lease too.
-            let home = load_home(&home_dir)?;
-            let _store = open_store(&home.dir, &home.secret, &home.config.device_id)?;
-            let request = read_request(request_json)?;
-            if matches!(args.command, HermesCommand::Ack) {
-                cmd_ack(&home_dir, request, output)
-            } else {
-                cmd_release(&home_dir, request, output)
-            }
-        }
+        HermesCommand::Ack => cmd_ack(&home_dir, read_request(request_json)?, output),
+        HermesCommand::Release => cmd_release(&home_dir, read_request(request_json)?, output),
         HermesCommand::Send => cmd_send(&home_dir, read_request(request_json)?, output),
         HermesCommand::Edit => cmd_edit(&home_dir, read_request(request_json)?, output),
         HermesCommand::Recover => cmd_recover(&home_dir, read_request(request_json)?, output),
@@ -375,7 +363,6 @@ struct HermesServiceState {
     runtime: Arc<FiniteChatRuntime>,
     inbox_lock: Arc<Mutex<()>>,
     running_lock: Arc<Mutex<()>>,
-    refusal_lock: Arc<Mutex<()>>,
     bridge_updates: Arc<(Mutex<u64>, Condvar)>,
     joined_account_ids: Arc<Mutex<Vec<String>>>,
     server_stream: ServerStreamMonitor,
@@ -471,13 +458,11 @@ async fn prepare_hermes_service(
         runtime,
         inbox_lock: Arc::new(Mutex::new(())),
         running_lock: Arc::new(Mutex::new(())),
-        refusal_lock: Arc::new(Mutex::new(())),
         bridge_updates: Arc::new((Mutex::new(0), Condvar::new())),
         joined_account_ids: Arc::new(Mutex::new(Vec::new())),
         server_stream: ServerStreamMonitor::default(),
     };
     start_resident_bridge_sync(state.clone())?;
-    refusal::start_recovery(state.clone())?;
     let started = HermesServiceStarted {
         service: "finitechat-hermes",
         version: env!("CARGO_PKG_VERSION"),
@@ -777,7 +762,6 @@ async fn hermes_service_readyz(
             // quarantined room is visible in the readiness probe without a
             // new file or route.
             "runtime_status": app.status,
-            "durable_refusals": refusal::diagnostics(&state)?,
             // The sidecar's OUTBOUND link to the chat server, maintained by
             // the resident sync loop. Distinct from the local
             // hermes<->sidecar bridge that hermes-bridge-status.json
@@ -984,7 +968,6 @@ fn handle_hermes_service_action(
     payload: Value,
 ) -> Result<Value, CliError> {
     match action {
-        "refuse-command-v1" => refusal::begin(state, payload),
         "poll" => handle_hermes_service_poll(state, payload),
         "ack" => {
             let result = {
@@ -1806,8 +1789,6 @@ struct HermesInboxState {
 struct HermesInboxAckedKey {
     key: String,
     acked_at_ms: u64,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    refusal_reply: Option<finitechat_proto::EventAccepted>,
 }
 
 /// In-flight ownership of one inbox entry. The stream / `poll` / `inbound`
@@ -1816,7 +1797,7 @@ struct HermesInboxAckedKey {
 /// older than the TTL is swept back to `Pending` for redelivery. Serialized
 /// with `#[serde(default)]` so an entry written before leases existed loads as
 /// `Pending` — existing `hermes-inbox.json` files are unchanged on disk.
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq, Eq)]
 #[serde(tag = "state", rename_all = "snake_case")]
 enum HermesInboxLease {
     #[default]
@@ -1824,11 +1805,6 @@ enum HermesInboxLease {
     Leased {
         lease_id: String,
         leased_at_ms: u64,
-    },
-    // An old writer must reject, never discard, an unresolved operation.
-    // Downgrades require draining these entries with a capable runtime.
-    RefusalV1 {
-        operation: Box<refusal::Operation>,
     },
 }
 
@@ -1943,15 +1919,6 @@ fn cmd_ack<W: Write>(home_dir: &Path, request: Value, output: &mut W) -> Result<
         .map_err(|error| CliError::Hermes(error.to_string()))?;
     let mut inbox = load_hermes_inbox(home_dir)?;
     let key = hermes_inbox_key(&request.room_id, request.seq, &request.message_id);
-    if inbox
-        .events
-        .iter()
-        .any(|event| event.key == key && matches!(event.lease, HermesInboxLease::RefusalV1 { .. }))
-    {
-        return Err(CliError::Hermes(
-            "durable refusal owns this inbox entry".into(),
-        ));
-    }
     let before = inbox.events.len();
     inbox.events.retain(|event| event.key != key);
     let removed = inbox.events.len() != before;
@@ -2330,7 +2297,6 @@ impl HermesInboxLease {
     /// it and neither acked nor released it, e.g. crashed mid-turn).
     fn is_deliverable(&self, now_ms: u64, ttl_ms: u64) -> bool {
         match self {
-            HermesInboxLease::RefusalV1 { .. } => false,
             HermesInboxLease::Pending => true,
             HermesInboxLease::Leased { leased_at_ms, .. } => {
                 now_ms.saturating_sub(*leased_at_ms) >= ttl_ms
@@ -2386,7 +2352,6 @@ fn record_hermes_inbox_acked(inbox: &mut HermesInboxState, key: &str, now_ms: u6
     inbox.acked.push(HermesInboxAckedKey {
         key: key.to_owned(),
         acked_at_ms: now_ms,
-        refusal_reply: None,
     });
     let overflow = inbox
         .acked

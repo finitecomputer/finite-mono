@@ -595,10 +595,21 @@ class FiniteChatAdapter(BasePlatformAdapter):
         self._user_interrupting_sessions: dict[str, list[MessageEvent]] = {}
         self._user_cancelled_tasks: weakref.WeakSet[asyncio.Task] = weakref.WeakSet()
         self._user_interrupt_boundaries: dict[str, tuple[str, int]] = {}
-        # Retry unconfirmed sidecar ownership with bounded backoff; the input
-        # stays leased until delayed release makes it available for redelivery.
+        # One task owns a refused inbox entry from its reply send until it
+        # acks the entry or hands it back. A redelivery of an owned entry
+        # joins that owner, so one entry never has two replies in flight.
+        # Every live task keeps its entry so shutdown can join it, including a
+        # task that already gave up ownership to hand the entry back. Shutdown
+        # releases only the entries in ``_refusal_unsent``: not yet sent, or
+        # sent and reported failed. Cancelling a task does not stop a send
+        # already running in a worker thread or CLI process, so any other
+        # entry keeps its lease rather than be redelivered beside it.
+        # A reply that failed doubles the entry's next retry delay, bounded, so
+        # a persistent failure cannot spin the inbound stream.
+        self._refusal_owners: dict[str, asyncio.Task] = {}
+        self._refusal_tasks: dict[asyncio.Task, tuple[str, Any, str]] = {}
+        self._refusal_unsent: set[asyncio.Task] = set()
         self._refusal_retry_delays: dict[str, float] = {}
-        self._refusal_releases: dict[str, tuple[asyncio.Task, str, Any, str]] = {}
         # (session, command) pairs already told that a scheduled command was
         # refused, so a persisted loop does not post a reply on every tick.
         self._internal_refusals_sent: set[tuple[str, str]] = set()
@@ -1210,8 +1221,8 @@ class FiniteChatAdapter(BasePlatformAdapter):
         if refusal is not None:
             # Before any busy defer, interrupt or admission: a restricted
             # command never reaches Hermes on either path.
-            await self._refuse_finitechat_command(
-                refusal, room_id, seq, message_id, event_key or message_id
+            self._refuse_finitechat_command(
+                event, refusal, room_id, seq, message_id, event_key or message_id
             )
             return
         if session_key in self._deferred_admissions and event.get_command() in {
@@ -1298,74 +1309,127 @@ class FiniteChatAdapter(BasePlatformAdapter):
             self._inflight_admissions.discard(event_key)
             await self._ack_finitechat_event(room_id, seq, message_id)
 
-    async def _refuse_finitechat_command(
+    def _refuse_finitechat_command(
         self,
+        event: MessageEvent,
         refusal: Any,
         room_id: str,
         seq: Any,
         message_id: str,
-        event_key: str,
+        owner_key: str,
     ) -> None:
-        """Transfer refusal ownership to the capable resident sidecar.
+        """Answer a restricted command on the event's route, then settle it.
 
-        No send/ack fallback: an old or unreachable sidecar leaves the input
-        recoverable and the command stays out of Hermes. The sidecar persists
-        its decision before reporting ownership and finishes independently of
-        this task's cancellation or a changed policy after restart.
+        No session, activity, or admission state is touched. The reply is an
+        ordinary send in its own task, so a slow send never holds up inbound
+        delivery. A redelivered entry that already has an owner is left to it.
         """
         logger.info("[finitechat] refused /%s in %s/%s", refusal.command, room_id, seq)
+        if owner_key in self._refusal_owners:
+            return
+        task = asyncio.create_task(
+            self._deliver_refusal(event, refusal, room_id, seq, message_id, owner_key)
+        )
+        self._refusal_owners[owner_key] = task
+        self._refusal_tasks[task] = (room_id, seq, message_id)
+        self._refusal_unsent.add(task)
+
+    async def _deliver_refusal(
+        self,
+        event: MessageEvent,
+        refusal: Any,
+        room_id: str,
+        seq: Any,
+        message_id: str,
+        owner_key: str,
+    ) -> None:
+        """Ack the entry only after the sidecar reports the reply sent.
+
+        Any failed send, including a timeout whose outcome is unknown, keeps
+        the entry: it is handed back after a backoff and redelivery refuses it
+        again. Delivery is at least once. A reply sent before a failed ack, a
+        crash, a timeout, or a shutdown during the send is sent again when the
+        entry comes back, so the user can see the refusal twice. An unacked
+        entry that is not handed back waits for the sidecar's lease expiry.
+        """
+        current = asyncio.current_task()
         try:
-            result = await self._finitechat_json(
-                "refuse-command-v1",
-                {"room_id": room_id, "seq": seq, "message_id": message_id, "text": refusal.text},
-                timeout=15,
-            )
-            owned = result.ok and result.data.get("durable") is True
-            error = result.error
-        except Exception as exc:
-            owned, error = False, str(exc)
-        if not owned:
+            self._refusal_unsent.discard(current)
+            result = await self._send_refusal(event, refusal.text, reply_to=message_id)
+            if result.success:
+                self._refusal_retry_delays.pop(owner_key, None)
+                await self._ack_finitechat_event(room_id, seq, message_id)
+                return
             logger.warning(
-                "[finitechat] durable refusal for %s/%s not confirmed; retaining input: %s",
+                "[finitechat] command refusal for %s/%s not sent (retryable=%s), retrying: %s",
                 room_id,
                 seq,
-                error,
+                result.retryable,
+                result.error,
             )
-            self._schedule_refusal_release(event_key, room_id, seq, message_id)
-            return
-        self._refusal_retry_delays.pop(event_key, None)
-
-    def _schedule_refusal_release(
-        self, event_key: str, room_id: str, seq: Any, message_id: str
-    ) -> None:
-        delay = self._refusal_retry_delays.get(event_key, REFUSAL_RETRY_SECS)
-        self._refusal_retry_delays[event_key] = min(delay * 2, REFUSAL_MAX_RETRY_SECS)
-        task = asyncio.create_task(
-            self._release_refusal_after(delay, event_key, room_id, seq, message_id)
-        )
-        self._refusal_releases[event_key] = (task, room_id, seq, message_id)
-
-    async def _release_refusal_after(
-        self, delay: float, event_key: str, room_id: str, seq: Any, message_id: str
-    ) -> None:
-        try:
+            self._refusal_unsent.add(current)
+            delay = self._refusal_retry_delays.get(owner_key, REFUSAL_RETRY_SECS)
+            self._refusal_retry_delays[owner_key] = min(delay * 2, REFUSAL_MAX_RETRY_SECS)
             await asyncio.sleep(delay)
+            # Give up ownership before the release: the redelivery it causes
+            # must start a new attempt, not join this finishing task.
+            self._drop_refusal_owner(owner_key, current)
             await self._release_finitechat_event(room_id, seq, message_id)
         finally:
-            # Shutdown must still own and join a task blocked in the release
-            # request, not only one waiting for the backoff timer.
-            if self._refusal_releases.get(event_key, (None,))[0] is asyncio.current_task():
-                self._refusal_releases.pop(event_key, None)
+            self._drop_refusal_owner(owner_key, current)
+            self._refusal_tasks.pop(current, None)
+            self._refusal_unsent.discard(current)
 
-    async def _cancel_refusal_releases(self) -> None:
-        pending = list(self._refusal_releases.values())
-        self._refusal_releases.clear()
-        for task, _room_id, _seq, _message_id in pending:
+    def _drop_refusal_owner(self, owner_key: str, task: asyncio.Task | None) -> None:
+        if self._refusal_owners.get(owner_key) is task:
+            self._refusal_owners.pop(owner_key, None)
+
+    async def _send_refusal(
+        self, event: MessageEvent, text: str, *, reply_to: str | None
+    ) -> SendResult:
+        raw_event = event.raw_message if isinstance(event.raw_message, dict) else {}
+        # Same route as the Finite Private usage notice: the exact Topic/Chat
+        # from the inbound event. A bare thread id only when the event has
+        # neither, since the sidecar promotes a thread id to a chat id when a
+        # conversation is present.
+        route = self._route_metadata(
+            _string_or_none(raw_event.get("conversation_id")),
+            _string_or_none(raw_event.get("segment_id")),
+        )
+        thread_id = _string_or_none(getattr(event.source, "thread_id", None))
+        metadata: dict[str, Any] = dict(route or ({"thread_id": thread_id} if thread_id else {}))
+        metadata["_finitechat_kind"] = "message"
+        metadata["_finitechat_status"] = "complete"
+        try:
+            return await self.send(
+                chat_id=str(event.source.chat_id or raw_event.get("room_id") or self.room_id),
+                content=text,
+                reply_to=reply_to,
+                metadata=metadata,
+            )
+        except Exception as exc:
+            logger.exception("[finitechat] command refusal send raised")
+            return SendResult(success=False, error=str(exc), retryable=True)
+
+    async def _cancel_refusal_tasks(self) -> None:
+        pending = list(self._refusal_tasks.items())
+        unsent = {task for task, _entry in pending if task in self._refusal_unsent}
+        self._refusal_tasks.clear()
+        self._refusal_owners.clear()
+        self._refusal_unsent.clear()
+        for task, _entry in pending:
             task.cancel()
         if pending:
-            await asyncio.gather(*(task for task, *_ in pending), return_exceptions=True)
-        for _task, room_id, seq, message_id in pending:
-            await self._release_finitechat_event(room_id, seq, message_id)
+            await asyncio.gather(*(task for task, _entry in pending), return_exceptions=True)
+        for task, (room_id, seq, message_id) in pending:
+            if task in unsent:
+                await self._release_finitechat_event(room_id, seq, message_id)
+            else:
+                logger.info(
+                    "[finitechat] refusal for %s/%s may still be sending; keeping its lease",
+                    room_id,
+                    seq,
+                )
 
     async def handle_message(self, event: MessageEvent) -> None:
         """Hold internally dispatched commands to the same slash policy.
@@ -1400,28 +1464,7 @@ class FiniteChatAdapter(BasePlatformAdapter):
             f"A scheduled /{refusal.command} was skipped. {refusal.text} "
             "If a loop is running it, send /loop stop to turn the loop off."
         )
-        raw_event = event.raw_message if isinstance(event.raw_message, dict) else {}
-        # Same route as the Finite Private usage notice: the exact Topic/Chat
-        # from the inbound event. A bare thread id only when the event has
-        # neither, since the sidecar promotes a thread id to a chat id when a
-        # conversation is present.
-        route = self._route_metadata(
-            _string_or_none(raw_event.get("conversation_id")),
-            _string_or_none(raw_event.get("segment_id")),
-        )
-        thread_id = _string_or_none(getattr(event.source, "thread_id", None))
-        metadata: dict[str, Any] = dict(route or ({"thread_id": thread_id} if thread_id else {}))
-        metadata["_finitechat_kind"] = "message"
-        metadata["_finitechat_status"] = "complete"
-        try:
-            result = await self.send(
-                chat_id=str(event.source.chat_id or raw_event.get("room_id") or self.room_id),
-                content=text,
-                metadata=metadata,
-            )
-        except Exception:
-            logger.exception("[finitechat] scheduled command refusal send raised")
-            return
+        result = await self._send_refusal(event, text, reply_to=None)
         if result.success:
             self._internal_refusals_sent.add(notice_key)
         else:
@@ -1618,7 +1661,7 @@ class FiniteChatAdapter(BasePlatformAdapter):
         for queue in admissions:
             for _event, room_id, seq, message_id, _event_key in queue.values():
                 await self._release_finitechat_event(room_id, seq, message_id)
-        await self._cancel_refusal_releases()
+        await self._cancel_refusal_tasks()
 
     async def _set_processing_activity(
         self,

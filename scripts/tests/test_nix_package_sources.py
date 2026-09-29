@@ -129,12 +129,6 @@ class NixPackageSourceTests(unittest.TestCase):
             with self.subTest(package=name):
                 self.assertLessEqual(set(tracked), set(self.source_files[name]))
 
-    def test_runner_keeps_the_inbox_compatibility_dependency_closure(self) -> None:
-        self.assertLessEqual(
-            {"finitechat/crates/finitechat-hermes", "finitechat/crates/finitechat-proto"},
-            crate_roots(self.source_files["finite-saas-runner"]),
-        )
-
     def test_finitechat_cli_keeps_the_embedded_hermes_adapter(self) -> None:
         self.assertLessEqual(
             set(HERMES_ADAPTER_FILES), set(self.source_files["finitechat"])

@@ -2,9 +2,10 @@
 
 Finite Chat hands every inbound event to Hermes through
 ``_handle_finitechat_event``. A restricted command (``/update``, ``/restart``,
-``/loop`` and the rest of ``slash_policy.json``) must be answered there with a
-durable refusal on the event's own route and settled, before Hermes sees it on
-either the idle or the busy path. Owner ``quick_commands`` aliases resolve
+``/loop`` and the rest of ``slash_policy.json``) must be answered there with an
+ordinary reply on the event's own route, before Hermes sees it on either the
+idle or the busy path. The inbox entry is acked only after the reply is sent;
+anything else keeps it for redelivery, so a refusal can be seen twice. Owner ``quick_commands`` aliases resolve
 before the check, and internally dispatched commands (a persisted ``/loop``
 restored after a restart) meet the same policy. Everything else must reach
 Hermes unchanged.
@@ -28,6 +29,7 @@ import logging
 import runpy
 import shutil
 import sys
+import threading
 import unittest
 from pathlib import Path
 from typing import Any
@@ -526,8 +528,10 @@ class PolicyHarness:
         self.inbox: dict[str, tuple[dict[str, Any], str]] = {}
         self.calls: list[tuple[str, dict[str, Any]]] = []
         self.sent: list[dict[str, Any]] = []
-        self.owned: dict[str, dict[str, Any]] = {}
-        self.ownership_behaviors: list[str] = []
+        self.send_behaviors: list[str] = []
+        self.ack_failures = 0
+        self.send_started = asyncio.Event()
+        self.send_gate = threading.Event()
         self.admitted: list[str] = []
         self.handled: list[str] = []
         self.sentinel_hits: list[tuple[str, str]] = []
@@ -567,27 +571,32 @@ class PolicyHarness:
     async def _sidecar(self, action, payload, *, timeout):
         del timeout
         self.calls.append((action, payload))
-        if action == "refuse-command-v1":
-            behavior = self.ownership_behaviors.pop(0) if self.ownership_behaviors else "ok"
+        if action == "send":
+            refusal = "isn't available in Finite" in payload["text"]
+            behavior = self.send_behaviors.pop(0) if refusal and self.send_behaviors else "ok"
             if behavior in ("retryable", "permanent"):
                 return self.module._FiniteChatResult(
                     False, {}, "rejected route", behavior == "retryable"
                 )
-            if behavior == "unsupported":
-                return self.module._FiniteChatResult(True, {}, None, False)
             if behavior == "raise":
                 raise RuntimeError("sidecar transport exploded")
-            self.owned.setdefault(payload["message_id"], payload)
-            raw, _ = self.inbox[payload["message_id"]]
-            self.inbox[payload["message_id"]] = (raw, "owned")
-            if behavior == "cancel-after-ownership":
-                raise asyncio.CancelledError
-            return self.module._FiniteChatResult(True, {"durable": True}, None, False)
-        if action == "send":
-            self.sent.append(payload)
+            if behavior == "block":
+                # Like the real transport: the send runs in a worker thread
+                # that cancelling the awaiting task cannot stop.
+                def send_in_worker():
+                    self.send_gate.wait(5)
+                    self.sent.append(payload)
+
+                self.send_started.set()
+                await asyncio.to_thread(send_in_worker)
+            else:
+                self.sent.append(payload)
             return self.module._FiniteChatResult(
                 True, {"message_id": f"reply-{len(self.sent)}"}, None, False
             )
+        if action == "ack" and self.ack_failures:
+            self.ack_failures -= 1
+            return self.module._FiniteChatResult(False, {}, "ack not committed", True)
         if action in ("ack", "release"):
             raw, state = self.inbox[payload["message_id"]]
             if state == "leased":
@@ -617,11 +626,16 @@ class PolicyHarness:
             await asyncio.Event().wait()
         return "done"
 
-    async def deliver(self, raw: dict[str, Any]) -> None:
+    async def deliver(self, raw: dict[str, Any], *, settle: bool = True) -> None:
         self.inbox[raw["message_id"]] = (raw, "leased")
         await self.adapter._handle_finitechat_event(raw)
         for _ in range(20):
             await asyncio.sleep(0)
+        if settle:
+            await self.settle_refusals()
+
+    async def settle_refusals(self) -> None:
+        await self.wait_for(lambda: not self.adapter._refusal_tasks)
 
     async def start_long_turn(self) -> None:
         await self.deliver(raw_event(1, "long running work"))
@@ -650,11 +664,14 @@ class PolicyHarness:
         ]
 
     def refusals(self) -> list[dict[str, Any]]:
-        return [
-            send
-            for send in [*self.sent, *self.owned.values()]
-            if "isn't available in Finite" in send["text"]
-        ]
+        return [send for send in self.sent if "isn't available in Finite" in send["text"]]
+
+    def refusal_sends(self) -> int:
+        return sum(
+            1
+            for action, payload in self.calls
+            if action == "send" and "isn't available in Finite" in payload["text"]
+        )
 
     async def close(self) -> None:
         await self.adapter._cancel_admission_tasks()
@@ -683,14 +700,16 @@ class AdapterTestCase(unittest.TestCase):
 
     def assert_refused(self, h: PolicyHarness, seq: int, command: str) -> None:
         message_id = f"msg-{seq}"
-        self.assertEqual(h.settlements(message_id), [], "adapter never sends an independent ack")
-        self.assertEqual(h.state(message_id), "owned")
-        refusal = h.owned[message_id]
-        self.assertEqual(set(refusal), {"room_id", "seq", "message_id", "text"})
+        self.assertEqual(h.settlements(message_id), ["ack"], "settle the refusal exactly once")
+        self.assertEqual(h.state(message_id), "acked")
+        (refusal,) = [send for send in h.refusals() if send["reply_to_message_id"] == message_id]
         self.assertEqual(refusal["room_id"], ROOM_ID)
-        self.assertEqual(refusal["seq"], seq)
+        self.assertEqual(refusal["conversation_id"], "home")
+        self.assertEqual(refusal["segment_id"], "segment-1")
+        self.assertEqual(refusal["kind"], "message")
+        self.assertEqual(refusal["status"], "complete")
+        self.assertEqual(refusal["attachments"], [])
         self.assertTrue(refusal["text"].startswith(f"/{command} isn't available"))
-        self.assertFalse(any(action == "send" for action, _ in h.calls))
 
 
 class AdapterRefusalTests(AdapterTestCase):
@@ -855,17 +874,17 @@ class AdapterQuickCommandTests(AdapterTestCase):
 
 
 class AdapterSettlementTests(AdapterTestCase):
-    def test_unconfirmed_ownership_releases_after_backoff_then_redelivery_refuses(self):
+    def test_retryable_send_failure_releases_after_backoff_then_redelivery_refuses(self):
         async def scenario(h: PolicyHarness):
-            h.ownership_behaviors = ["retryable"]
+            h.send_behaviors = ["retryable"]
             await h.deliver(raw_event(1, "/update"))
-            await h.wait_for(lambda: h.state("msg-1") == "pending")
+            self.assertEqual(h.state("msg-1"), "pending")
             self.assertEqual(h.settlements("msg-1"), ["release"])
             self.assertEqual(h.refusals(), [])
 
             await h.deliver(raw_event(1, "/update"))
-            self.assertEqual(h.settlements("msg-1"), ["release"])
-            self.assertEqual(h.state("msg-1"), "owned")
+            self.assertEqual(h.settlements("msg-1"), ["release", "ack"])
+            self.assertEqual(h.state("msg-1"), "acked")
             self.assertEqual(len(h.refusals()), 1)
             self.assertEqual(h.admitted, [])
             self.assertEqual(h.adapter._refusal_retry_delays, {})
@@ -877,61 +896,114 @@ class AdapterSettlementTests(AdapterTestCase):
             key = h.module._adapter_event_key(ROOM_ID, 1, "msg-1")
             delays = []
             for _ in range(4):
-                h.ownership_behaviors = ["retryable"]
+                h.send_behaviors = ["retryable"]
                 await h.deliver(raw_event(1, "/update"))
                 delays.append(h.adapter._refusal_retry_delays[key])
-                await h.wait_for(lambda: h.state("msg-1") == "pending")
+                self.assertEqual(h.state("msg-1"), "pending")
             self.assertEqual(delays, [0.02, 0.04, 0.04, 0.04])
             self.assertEqual(h.settlements("msg-1"), ["release"] * 4)
 
         self.run_scenario(scenario)
 
-    def test_ownership_exception_is_retried_like_a_retryable_failure(self):
+    def test_send_exception_is_retried_like_a_retryable_failure(self):
         async def scenario(h: PolicyHarness):
-            h.ownership_behaviors = ["raise"]
+            h.send_behaviors = ["raise"]
             await h.deliver(raw_event(1, "/update"))
-            await h.wait_for(lambda: h.state("msg-1") == "pending")
+            self.assertEqual(h.state("msg-1"), "pending")
             self.assertEqual(h.settlements("msg-1"), ["release"])
             self.assertEqual(h.admitted, [])
 
         self.run_scenario(scenario)
 
-    def test_non_retryable_or_unsupported_sidecar_keeps_input_recoverable(self):
+    def test_non_retryable_send_failure_is_never_acked(self):
         async def scenario(h: PolicyHarness):
-            for behavior in ("permanent", "unsupported"):
-                h.ownership_behaviors = [behavior]
+            h.send_behaviors = ["permanent"]
+            with self.assertLogs(h.module.logger, logging.WARNING) as logs:
                 await h.deliver(raw_event(1, "/update"))
-                await h.wait_for(lambda: h.state("msg-1") == "pending")
-            self.assertEqual(h.settlements("msg-1"), ["release", "release"])
+            self.assertEqual(h.settlements("msg-1"), ["release"])
+            self.assertEqual(h.state("msg-1"), "pending")
             self.assertEqual(h.refusals(), [])
+            self.assertTrue(any("rejected route" in line for line in logs.output))
+
+            await h.deliver(raw_event(1, "/update"))
+            self.assertEqual(h.settlements("msg-1"), ["release", "ack"])
+            self.assertEqual(len(h.refusals()), 1)
             self.assertEqual(h.admitted, [])
-            self.assertFalse(any(action in ("send", "ack") for action, _ in h.calls))
 
         self.run_scenario(scenario)
 
-    def test_cancellation_after_ownership_retries_the_same_operation_without_send_or_ack(self):
+    def test_failed_ack_after_a_sent_refusal_redelivers_at_least_once(self):
         async def scenario(h: PolicyHarness):
-            h.ownership_behaviors = ["cancel-after-ownership"]
-            with self.assertRaises(asyncio.CancelledError):
-                await h.deliver(raw_event(1, "/update"))
-            self.assertEqual(h.state("msg-1"), "owned")
+            h.ack_failures = 1
             await h.deliver(raw_event(1, "/update"))
-            self.assertEqual(len(h.owned), 1)
-            self.assertEqual(h.settlements("msg-1"), [])
-            self.assertFalse(any(action == "send" for action, _ in h.calls))
+            self.assertEqual(h.state("msg-1"), "leased")
+            self.assertEqual(len(h.refusals()), 1)
+            self.assertEqual(h.adapter._refusal_owners, {})
+
+            # Lease expiry redelivers the entry: the refusal is sent again.
+            await h.deliver(raw_event(1, "/update"))
+            self.assertEqual(h.state("msg-1"), "acked")
+            self.assertEqual(len(h.refusals()), 2)
+            self.assertEqual(h.settlements("msg-1"), ["ack", "ack"])
+            self.assertEqual(h.admitted, [])
+
+        self.run_scenario(scenario)
+
+    def test_redelivery_while_the_reply_is_sending_joins_its_owner(self):
+        async def scenario(h: PolicyHarness):
+            h.send_behaviors = ["block"]
+            await h.deliver(raw_event(1, "/update"), settle=False)
+            await asyncio.wait_for(h.send_started.wait(), 1)
+            await h.deliver(raw_event(1, "/update"), settle=False)
+            await h.deliver(raw_event(1, "/UPDATE"), settle=False)
+            self.assertEqual(h.refusal_sends(), 1, "one entry never has two replies in flight")
+
+            h.send_gate.set()
+            await h.settle_refusals()
+            self.assertEqual(len(h.refusals()), 1)
+            self.assertEqual(h.settlements("msg-1"), ["ack"])
+            self.assertEqual(h.state("msg-1"), "acked")
+
+        self.run_scenario(scenario)
+
+    def test_redelivery_during_the_hand_back_starts_a_new_attempt(self):
+        async def scenario(h: PolicyHarness):
+            release_started = asyncio.Event()
+            release_blocked = asyncio.Event()
+            original_release = h.adapter._release_finitechat_event
+
+            async def stalled_release(*args):
+                release_started.set()
+                await release_blocked.wait()
+                await original_release(*args)
+
+            h.adapter._release_finitechat_event = stalled_release
+            h.send_behaviors = ["retryable"]
+            await h.deliver(raw_event(1, "/update"), settle=False)
+            await asyncio.wait_for(release_started.wait(), 1)
+            # The hand-back is in flight; a redelivery must not join it.
+            await h.deliver(raw_event(1, "/update"), settle=False)
+            await h.wait_for(lambda: h.settlements("msg-1") == ["ack"])
+            self.assertEqual(len(h.refusals()), 1)
+
+            release_blocked.set()
+            await h.settle_refusals()
+            self.assertEqual(h.settlements("msg-1"), ["ack", "release"])
+            self.assertEqual(h.state("msg-1"), "acked", "a late release never undoes the ack")
+            self.assertEqual(h.adapter._refusal_owners, {})
 
         self.run_scenario(scenario)
 
     def test_shutdown_releases_a_refusal_waiting_to_retry(self):
         async def scenario(h: PolicyHarness):
             h.module.REFUSAL_RETRY_SECS = 60
-            h.ownership_behaviors = ["retryable"]
-            await h.deliver(raw_event(1, "/update"))
+            h.send_behaviors = ["retryable"]
+            await h.deliver(raw_event(1, "/update"), settle=False)
             self.assertEqual(h.settlements("msg-1"), [])
             await h.adapter._cancel_admission_tasks()
             self.assertEqual(h.settlements("msg-1"), ["release"])
             self.assertEqual(h.state("msg-1"), "pending")
-            self.assertEqual(h.adapter._refusal_releases, {})
+            self.assertEqual(h.adapter._refusal_tasks, {})
 
         self.run_scenario(scenario)
 
@@ -951,29 +1023,163 @@ class AdapterSettlementTests(AdapterTestCase):
                 await original_release(*args)
 
             h.adapter._release_finitechat_event = stalled_release
-            h.ownership_behaviors = ["retryable"]
-            await h.deliver(raw_event(1, "/update"))
-            ((release_task, *_),) = h.adapter._refusal_releases.values()
+            h.send_behaviors = ["retryable"]
+            await h.deliver(raw_event(1, "/update"), settle=False)
+            (release_task,) = h.adapter._refusal_tasks
             await asyncio.wait_for(release_started.wait(), timeout=1)
             await h.adapter._cancel_admission_tasks()
             self.assertTrue(release_task.done(), "shutdown must join in-progress release tasks")
             self.assertEqual(h.state("msg-1"), "pending")
             self.assertEqual(h.settlements("msg-1"), ["release"])
-            self.assertEqual(h.adapter._refusal_releases, {})
+            self.assertEqual(h.adapter._refusal_tasks, {})
+
+        self.run_scenario(scenario)
+
+    def test_shutdown_before_the_send_starts_releases_the_entry(self):
+        async def scenario(h: PolicyHarness):
+            raw = raw_event(1, "/update")
+            h.inbox[raw["message_id"]] = (raw, "leased")
+            await h.adapter._handle_finitechat_event(raw)
+            await h.adapter._cancel_admission_tasks()
+            self.assertEqual(h.refusal_sends(), 0)
+            self.assertEqual(h.settlements("msg-1"), ["release"])
+            self.assertEqual(h.state("msg-1"), "pending")
+
+        self.run_scenario(scenario)
+
+    def test_disconnect_keeps_the_lease_of_a_send_still_running_in_its_worker(self):
+        async def scenario(h: PolicyHarness):
+            h.send_behaviors = ["block"]
+            await h.deliver(raw_event(1, "/update"), settle=False)
+            await asyncio.wait_for(h.send_started.wait(), 1)
+            (task,) = h.adapter._refusal_tasks
+            with self.assertLogs(h.module.logger, logging.INFO) as logs:
+                await h.adapter.disconnect()
+            self.assertTrue(task.done(), "disconnect joins the refusal task")
+            self.assertEqual(h.adapter._refusal_tasks, {})
+            self.assertEqual(h.adapter._refusal_owners, {})
+            self.assertEqual(h.settlements("msg-1"), [])
+            self.assertEqual(h.state("msg-1"), "leased")
+            self.assertTrue(any("keeping its lease" in line for line in logs.output))
+
+            # The worker still completes the send after disconnect. Nothing
+            # handed the entry back while it ran, and nothing acks it now: the
+            # lease expiry redelivers it, and the refusal can be seen twice.
+            h.send_gate.set()
+            await h.wait_for(lambda: h.refusals())
+            for _ in range(20):
+                await asyncio.sleep(0)
+            self.assertEqual(h.settlements("msg-1"), [])
+            self.assertEqual(h.state("msg-1"), "leased")
 
         self.run_scenario(scenario)
 
 
 class AdapterRouteTests(AdapterTestCase):
-    def test_only_inbound_identity_crosses_the_refusal_boundary(self):
+    def test_refusal_without_a_segment_stays_on_the_topic_route(self):
         async def scenario(h: PolicyHarness):
             raw = raw_event(1, "/help")
             raw["conversation_id"] = "topic-9"
             del raw["segment_id"]
             raw["source"]["thread_id"] = "topic-9"
             await h.deliver(raw)
-            self.assertEqual(set(h.owned["msg-1"]), {"room_id", "seq", "message_id", "text"})
-            self.assertEqual(h.settlements("msg-1"), [])
+            (refusal,) = h.refusals()
+            self.assertEqual(refusal["conversation_id"], "topic-9")
+            self.assertIsNone(refusal["segment_id"])
+            self.assertIsNone(refusal["thread_id"])
+            self.assertEqual(refusal["reply_to_message_id"], "msg-1")
+            self.assertEqual(h.settlements("msg-1"), ["ack"])
+
+        self.run_scenario(scenario)
+
+    def test_refusal_without_a_route_uses_the_source_thread(self):
+        async def scenario(h: PolicyHarness):
+            raw = raw_event(1, "/help")
+            del raw["conversation_id"]
+            del raw["segment_id"]
+            raw["source"]["thread_id"] = "legacy-thread"
+            await h.deliver(raw)
+            (refusal,) = h.refusals()
+            self.assertIsNone(refusal["conversation_id"])
+            self.assertIsNone(refusal["segment_id"])
+            self.assertEqual(refusal["thread_id"], "legacy-thread")
+            self.assertEqual(h.settlements("msg-1"), ["ack"])
+
+        self.run_scenario(scenario)
+
+
+FAKE_FINITECHAT_CLI = """
+import json
+import pathlib
+import sys
+
+state = pathlib.Path(sys.argv[1])
+action = sys.argv[-2]
+request = json.loads(sys.stdin.read() or "{}")
+with (state / "calls.jsonl").open("a", encoding="utf-8") as log:
+    log.write(json.dumps({"action": action, "request": request}) + "\\n")
+if action == "poll":
+    print((state / "poll.json").read_text(encoding="utf-8"))
+elif action == "send":
+    print(json.dumps({"message_id": "reply-1"}))
+else:
+    print("{}")
+"""
+
+
+class NonStreamTransportTests(AdapterTestCase):
+    """The poll loop and the ``finitechat`` CLI, without a resident service."""
+
+    def test_poll_refuses_through_the_cli_and_admits_the_ordinary_message(self):
+        async def scenario(h: PolicyHarness):
+            state = Path(h.adapter.home) / "fake-cli"
+            state.mkdir()
+            (state / "cli.py").write_text(FAKE_FINITECHAT_CLI, encoding="utf-8")
+            (state / "poll.json").write_text(
+                json.dumps({"events": [raw_event(1, "/update"), raw_photo(2, "hello there")]}),
+                encoding="utf-8",
+            )
+            del h.adapter._finitechat_json
+            h.adapter._finitechat_cmd = [sys.executable, str(state / "cli.py"), str(state)]
+            self.assertFalse(h.adapter.inbound_stream)
+            self.assertEqual(h.adapter.service_url, "")
+
+            def calls() -> list[dict[str, Any]]:
+                path = state / "calls.jsonl"
+                if not path.exists():
+                    return []
+                return [json.loads(line) for line in path.read_text().splitlines()]
+
+            def acked() -> set[str]:
+                return {c["request"]["message_id"] for c in calls() if c["action"] == "ack"}
+
+            self.assertTrue(await h.adapter._poll_once())
+            await h.wait_for(lambda: acked() == {"msg-1", "msg-2"}, timeout=20)
+            await h.settle_refusals()
+
+            self.assertEqual(h.handled, ["hello there"])
+            sends = [c["request"] for c in calls() if c["action"] == "send"]
+            (refusal,) = [send for send in sends if send["reply_to_message_id"] == "msg-1"]
+            self.assertTrue(refusal["text"].startswith("/update isn't available"))
+            self.assertEqual(
+                (refusal["room_id"], refusal["conversation_id"], refusal["segment_id"]),
+                (ROOM_ID, "home", "segment-1"),
+            )
+            self.assertEqual((refusal["kind"], refusal["status"]), ("message", "complete"))
+            settlements = [
+                (c["action"], c["request"]["message_id"])
+                for c in calls()
+                if c["action"] in ("ack", "release")
+            ]
+            self.assertEqual(sorted(settlements), [("ack", "msg-1"), ("ack", "msg-2")])
+            order = [(c["action"], c["request"].get("message_id")) for c in calls()]
+            refusal_index = next(
+                i
+                for i, c in enumerate(calls())
+                if c["action"] == "send" and c["request"]["reply_to_message_id"] == "msg-1"
+            )
+            ack_index = order.index(("ack", "msg-1"))
+            self.assertLess(refusal_index, ack_index, "ack only after the reply was sent")
 
         self.run_scenario(scenario)
 
