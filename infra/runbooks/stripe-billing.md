@@ -131,3 +131,29 @@ trial-aware webhook handler and access checks running for enrolled accounts.
 Reverting to a dashboard version without those checks after live enrollment
 would restore unpaid dashboard access. Retain the additive tables and campaign
 attribution through rollback and Core backup/restore.
+
+### Local Stripe trial rehearsal
+
+Store a sandbox API key in the dashboard's ignored `.env.stripe-test.local`
+as `STRIPE_SECRET_KEY`; never put its value in the command line or a report.
+Build the local binaries, then run from the monorepo root:
+
+```sh
+scripts/with-dev-env cargo build --locked -p finite-saas-core -p devfinity
+scripts/with-dev-env target/debug/devfinity run -- sh -c 'cd finitecomputer-v2/apps/dashboard && node --env-file=.env.stripe-test.local --import tsx scripts/stripe-trial-test-clock-e2e.ts'
+```
+
+The script refuses live keys, creates its own test product/price and isolated
+Postgres database, and prints a test Checkout URL. Complete that Checkout with
+Stripe's `4242` test card, a future expiry, and a synthetic US billing address.
+The return URL is the local Core health endpoint; no Runner or agent launches.
+It verifies reservation retry/expiry, seven-day conversion to USD 200, declined
+renewal, payment recovery, cancellation, and retained seat attribution. The
+selected test address must produce zero tax for the exact USD 200 assertion.
+
+Actual Stripe events are replayed through the application's webhook handler
+with a local signing secret. This tests event processing, not Stripe delivery
+to a deployed webhook destination. Check that destination separately before
+launch. Results remain under `.local-state/stripe-trial-e2e/<run-id>/`; test
+clocks and their customers/subscriptions are deleted, and the temporary price
+and product are archived. Live account settings are not changed.
