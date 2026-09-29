@@ -549,7 +549,8 @@ floor or a later image:
    - `state: failed`, `kind: select` or `activate`: no image re-runs it. It
      stays failed until the owner's next change replaces it.
 
-   Do not edit or delete the file by hand.
+   Leave the file as it is. The only exception is
+   [Moving aside a disconnect that cannot verify](#moving-aside-a-disconnect-that-cannot-verify).
 3. After the upgrade, verify chat as for any upgrade, and read the owner's
    Connections panel or `agent.connections.status` `inference.operation`.
 
@@ -561,6 +562,26 @@ A candidate image that changes the intent's schema (its version, fields,
 kinds, routes or phases) raises the floor: agentd renames aside a record it
 cannot parse (`inference-intent.json.corrupt-<unix ms>`), dropping that
 operation with only a log line. Record the new floor with that promotion.
+
+#### Moving aside a disconnect that cannot verify
+
+Only for a failed `kind: disconnect` record whose facts stay unknown for a
+lasting reason, so every resume fails again. This is a production mutation:
+get explicit authorization for this one Runtime, each time. Otherwise leave
+the file as it is. Paths are beneath the Runtime's durable state bind.
+
+1. Stop the Runtime with the typed `stop` request, not `nerdctl stop`. Wait
+   until Core reports it offline; this stops the Finite Agent Daemon.
+2. For route `openrouter`, run `grep -c OPENROUTER_API_KEY` on
+   `agent/hermes-home/.env`. It prints a count and no value. Above 0: stop
+   here.
+3. Run `grep -c '"openrouter"'` on `agent/hermes-home/auth.json` (for route
+   `openai_codex`: `'"openai-codex"'`). Above 0: stop here. A file that does
+   not exist holds no credential. Never print either file.
+4. Move `agent/agentd/inference-intent.json` aside to
+   `inference-intent.json.operator-aside-<unix ms>`. Never delete it.
+5. Start the Runtime with the typed `restart` request.
+6. Verify chat, then read `agent.connections.status` `inference.operation`.
 
 ### Rolling Core back across Runtime Upgrade first use
 
