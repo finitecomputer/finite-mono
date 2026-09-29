@@ -80,10 +80,32 @@ pub(crate) fn run_working_tree_sync(
     // sync records after the last known sequence, so the response scales with
     // new activity instead of total Brain size. The full export is fetched on
     // first open, before local writes (current Folder Key versions must be
-    // authoritative), and whenever the incremental path escalates below.
-    let use_cached_export = pending_local_changes.is_empty()
+    // authoritative), whenever the cached export is stale, and whenever the
+    // incremental path escalates below.
+    let cached_export_candidate = pending_local_changes.is_empty()
         && prior_tree_state.sync.latest_sequence > 0
         && prior_export.is_some();
+    // Routine sync fetches metadata anyway; fetching it first can identify a
+    // stale cached export before keys are opened. This path has no local
+    // pushes. Concurrent remote changes may be observed on the next sync.
+    let mut prefetched_metadata = if cached_export_candidate {
+        Some(fetch_sync_metadata(
+            env,
+            &server_url,
+            &agent_state.brain_id,
+        )?)
+    } else {
+        None
+    };
+    let use_cached_export = cached_export_candidate
+        && prior_export.as_ref().is_some_and(|cached| {
+            !cached_export_is_stale(
+                cached,
+                read_cached_sync_bootstrap(&root).ok().flatten().as_ref(),
+                prefetched_metadata.as_ref().and_then(Option::as_ref),
+                &auth.npub,
+            )
+        });
     let mut export = match (use_cached_export, prior_export.clone()) {
         (true, Some(cached)) => cached,
         _ => fetch_encrypted_export(env, &server_url, &agent_state.brain_id)?,
@@ -98,6 +120,7 @@ pub(crate) fn run_working_tree_sync(
             &server_url,
             &agent_state.brain_id,
             &export,
+            prefetched_metadata.take(),
         )?)
     } else {
         None
@@ -144,7 +167,9 @@ pub(crate) fn run_working_tree_sync(
     };
     let local_result = push_local_working_tree_changes(&push_context, &root, pending_local_changes)
         .map_err(|error| sync_stage_error("push local Working Tree changes", &root, error))?;
-    let force_bootstrap_reason = sync_bootstrap_reason(&local_result, newly_readable_keys);
+    let stale_cached_export = cached_export_candidate && !use_cached_export;
+    let force_bootstrap_reason =
+        sync_bootstrap_reason(&local_result, newly_readable_keys, stale_cached_export);
     let mut remote_result = if local_result.pushed_count > 0 {
         confirm_local_changes_from_preflight(
             env,
@@ -247,6 +272,7 @@ pub(crate) fn run_working_tree_sync(
             &server_url,
             &agent_state.brain_id,
             &export,
+            prefetched_metadata.take(),
         )?);
         mounted_exports = std::mem::take(&mut mounted_discovery.as_mut().unwrap().contexts);
         for mounted in &mounted_exports {
@@ -946,7 +972,11 @@ fn fetch_sync_records_page(
     serde_json::from_value(response).map_err(CliError::from)
 }
 
-fn sync_bootstrap_reason(local_result: &LocalSyncResult, opened_grants: usize) -> Option<String> {
+fn sync_bootstrap_reason(
+    local_result: &LocalSyncResult,
+    opened_grants: usize,
+    stale_cached_export: bool,
+) -> Option<String> {
     if local_result.pushed_count > 0 {
         Some(
             "local writes were accepted; fetched bootstrap to confirm server projection".to_owned(),
@@ -955,6 +985,10 @@ fn sync_bootstrap_reason(local_result: &LocalSyncResult, opened_grants: usize) -
         Some("local conflicts were recorded; fetched bootstrap before restoring edits".to_owned())
     } else if opened_grants > 0 {
         Some("new folder keys were opened; fetched bootstrap for newly readable content".to_owned())
+    } else if stale_cached_export {
+        // The cached bootstrap was built alongside the stale export, so it
+        // may still hold objects of Folders this signer can no longer read.
+        Some("cached export was stale; fetched export and bootstrap".to_owned())
     } else {
         None
     }
@@ -1239,19 +1273,84 @@ fn fetch_brain_metadata_for_sync(
     serde_json::from_value(response).map_err(CliError::from)
 }
 
+/// Role-bearing Working Tree context must come from authoritative metadata.
+/// A transient metadata failure may not invent a role: `None` preserves the
+/// prior generated root instructions by omitting their replacement.
+fn fetch_sync_metadata(
+    env: &CliEnvironment,
+    server_url: &str,
+    brain_id: &str,
+) -> Result<Option<CliBrainMetadata>, CliError> {
+    match fetch_brain_metadata_for_sync(env, server_url, brain_id) {
+        Ok(metadata) => Ok(Some(metadata)),
+        Err(CliError::Http(_)) | Err(CliError::HttpStatus { .. }) => Ok(None),
+        Err(error) => Err(error),
+    }
+}
+
+/// Whether the export cached at the last full fetch can no longer stand in
+/// for the server's. A plain member never receives the access records that
+/// escalate routine sync, so without this check its cached export is never
+/// refreshed: a grant delivered as a sync record would be opened once and
+/// then lost on every later sync (the Folder turns metadata-only over its
+/// old projection while the cursor moves past the grant), and a key rotation
+/// that removed the member's access would never reach it. Stale when the
+/// cached bootstrap holds a grant for this signer the export lacks, or when
+/// authoritative metadata omits a Folder the export lists or reports another
+/// current key version for it. Only Folders the export lists count, so grants
+/// for deleted Folders cannot force a refetch on every sync.
+fn cached_export_is_stale(
+    export: &CliEncryptedBrainExport,
+    cached_bootstrap: Option<&CliSyncBootstrap>,
+    metadata: Option<&CliBrainMetadata>,
+    signer_npub: &str,
+) -> bool {
+    let delivered_grant_missing = cached_bootstrap.is_some_and(|bootstrap| {
+        bootstrap
+            .control_records
+            .iter()
+            .filter(|record| record.record_type == "folder_key_grant")
+            .filter_map(|record| {
+                serde_json::from_str::<CliFolderKeyGrant>(&record.payload_json).ok()
+            })
+            .filter(|grant| grant.recipient_npub == signer_npub)
+            .filter(|grant| {
+                export
+                    .folders
+                    .iter()
+                    .any(|folder| folder.id == grant.folder_id)
+            })
+            .any(|grant| {
+                !export.key_grants.iter().any(|known| {
+                    known.folder_id == grant.folder_id
+                        && known.key_version == grant.key_version
+                        && known.recipient_npub == grant.recipient_npub
+                })
+            })
+    });
+    let folder_moved = metadata
+        .and_then(|metadata| metadata.folders.as_ref())
+        .is_some_and(|folders| {
+            export.folders.iter().any(|cached| {
+                !folders.iter().any(|current| {
+                    current.id == cached.id
+                        && current.current_key_version == cached.current_key_version
+                })
+            })
+        });
+    delivered_grant_missing || folder_moved
+}
+
 fn fetch_mounted_folder_sync_contexts(
     env: &CliEnvironment,
     server_url: &str,
     brain_id: &str,
     export: &CliEncryptedBrainExport,
+    prefetched_metadata: Option<Option<CliBrainMetadata>>,
 ) -> Result<MountedFolderSyncDiscovery, CliError> {
-    // Role-bearing Working Tree context must come from authoritative metadata.
-    // A transient metadata failure may not invent a role: preserve the prior
-    // generated root instructions by omitting their replacement in this pass.
-    let metadata = match fetch_brain_metadata_for_sync(env, server_url, brain_id) {
-        Ok(metadata) => Some(metadata),
-        Err(CliError::Http(_)) | Err(CliError::HttpStatus { .. }) => None,
-        Err(error) => return Err(error),
+    let metadata = match prefetched_metadata {
+        Some(metadata) => metadata,
+        None => fetch_sync_metadata(env, server_url, brain_id)?,
     };
     let mut used_paths = export
         .folders
@@ -3570,12 +3669,23 @@ struct CliSyncObject {
 struct CliBrainMetadata {
     #[serde(default)]
     personal_agent: Option<CliPersonalAgent>,
+    /// Current Folder topology and key versions. `None` when a response
+    /// omits the field, which then gives no staleness signal.
+    #[serde(default)]
+    folders: Option<Vec<CliMetadataFolder>>,
     #[serde(default)]
     mounted_folders: Vec<CliMountedFolder>,
     /// Pending grant wraps, present only for key-holding (admin-standing)
     /// requesters; older servers omit the field entirely.
     #[serde(default)]
     pending_wraps: Vec<CliPendingWrap>,
+}
+
+#[derive(Debug, Clone, Deserialize, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct CliMetadataFolder {
+    id: String,
+    current_key_version: u32,
 }
 
 #[derive(Debug, Clone, Deserialize, serde::Serialize)]
@@ -4234,6 +4344,7 @@ mod tests {
             personal_agent: Some(CliPersonalAgent {
                 agent_npub: "npub-agent".to_owned(),
             }),
+            folders: None,
             mounted_folders: Vec::new(),
             pending_wraps: Vec::new(),
         };
@@ -5202,6 +5313,143 @@ mod tests {
             Some(FolderId::new("shared-lab").unwrap())
         );
         assert_eq!(intents[0].base_revision, Some(3));
+    }
+
+    #[test]
+    fn cached_export_is_stale_only_when_the_sync_surface_proves_it() {
+        let grant = |folder_id: &str, key_version: u32, recipient: &str| CliFolderKeyGrant {
+            folder_id: folder_id.to_owned(),
+            key_version,
+            issuer_npub: "npub-admin".to_owned(),
+            recipient_npub: recipient.to_owned(),
+            wrapped_event_json: "{}".to_owned(),
+        };
+        let grant_record = |sequence: u64, grant: &CliFolderKeyGrant| CliSyncRecord {
+            sequence,
+            record_event_id: format!("evt-{sequence}"),
+            record_type: "folder_key_grant".to_owned(),
+            folder_id: Some(grant.folder_id.clone()),
+            object_id: None,
+            revision: None,
+            actor_npub: grant.issuer_npub.clone(),
+            client_created_at: "2026-09-28T23:28:28Z".to_owned(),
+            payload_json: serde_json::to_string(grant).unwrap(),
+            record_event_kind: APP_SPECIFIC_KIND,
+        };
+        let bootstrap = |grants: &[CliFolderKeyGrant]| CliSyncBootstrap {
+            latest_sequence: 13,
+            objects: Vec::new(),
+            control_records: grants
+                .iter()
+                .enumerate()
+                .map(|(index, grant)| grant_record(7 + index as u64, grant))
+                .collect(),
+        };
+        let metadata = |folders: Option<Vec<(&str, u32)>>| CliBrainMetadata {
+            folders: folders.map(|folders| {
+                folders
+                    .into_iter()
+                    .map(|(id, current_key_version)| CliMetadataFolder {
+                        id: id.to_owned(),
+                        current_key_version,
+                    })
+                    .collect()
+            }),
+            ..CliBrainMetadata::default()
+        };
+        let mut export = CliEncryptedBrainExport {
+            brain: CliExportBrain {
+                id: "brain".to_owned(),
+                kind: "organization".to_owned(),
+                name: "Brain".to_owned(),
+                owner_user_id: None,
+            },
+            folders: vec![CliExportFolder {
+                id: "team".to_owned(),
+                path: "Team".to_owned(),
+                access: "restricted".to_owned(),
+                current_key_version: 1,
+                accessible: true,
+            }],
+            objects: Vec::new(),
+            key_grants: Vec::new(),
+            access_state: CliExportAccessState {
+                members: Vec::new(),
+                admins: Vec::new(),
+            },
+            pending_wraps: Vec::new(),
+        };
+        let delivered = grant("team", 1, "npub-member");
+        let current = metadata(Some(vec![("team", 1)]));
+
+        // FIN-146: the grant reached the member as a sync record after the
+        // export was cached.
+        assert!(cached_export_is_stale(
+            &export,
+            Some(&bootstrap(std::slice::from_ref(&delivered))),
+            Some(&current),
+            "npub-member"
+        ));
+        // Grants for other recipients and for Folders the export no longer
+        // lists (deleted Folders keep old records) never force a refetch.
+        assert!(!cached_export_is_stale(
+            &export,
+            Some(&bootstrap(&[
+                grant("team", 1, "npub-other"),
+                grant("deleted", 1, "npub-member"),
+            ])),
+            Some(&current),
+            "npub-member"
+        ));
+        // A key rotation or a Folder that authoritative metadata no longer
+        // lists makes the cached export stale.
+        assert!(cached_export_is_stale(
+            &export,
+            None,
+            Some(&metadata(Some(vec![("team", 2)]))),
+            "npub-member"
+        ));
+        assert!(cached_export_is_stale(
+            &export,
+            None,
+            Some(&metadata(Some(Vec::new()))),
+            "npub-member"
+        ));
+        // Unavailable metadata, or a response without Folders, is no signal.
+        assert!(!cached_export_is_stale(&export, None, None, "npub-member"));
+        assert!(!cached_export_is_stale(
+            &export,
+            None,
+            Some(&metadata(None)),
+            "npub-member"
+        ));
+        // Once the export holds the delivered grant it is current again.
+        export.key_grants.push(delivered.clone());
+        assert!(!cached_export_is_stale(
+            &export,
+            Some(&bootstrap(&[delivered])),
+            Some(&current),
+            "npub-member"
+        ));
+        // Exports retain historical grants through rotation and regrant.
+        // Once refreshed, old bootstrap grants must not cause another fetch.
+        export.folders[0].current_key_version = 2;
+        let rotated = metadata(Some(vec![("team", 2)]));
+        let history = bootstrap(&[grant("team", 1, "npub-member")]);
+        assert!(!cached_export_is_stale(
+            &export,
+            Some(&history),
+            Some(&rotated),
+            "npub-member"
+        ));
+        let regranted = grant("team", 2, "npub-member");
+        export.key_grants.push(regranted.clone());
+        assert!(!cached_export_is_stale(
+            &export,
+            Some(&bootstrap(&[grant("team", 1, "npub-member"), regranted])),
+            Some(&rotated),
+            "npub-member"
+        ));
     }
 
     #[test]
