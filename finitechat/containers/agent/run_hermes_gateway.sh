@@ -216,8 +216,10 @@ if [[ "$recover_boot" -ne 1 ]]; then
     run_config_reconciler
     # One-time carry of Finite Chat titles and unseen chats into Hermes's
     # session store while neither the gateway nor `hermes serve` is running.
-    # Best effort: it never fails boot and retries until its marker exists.
-    if [[ -f "$history_importer" && -f "${agent_home}/config.json" ]]; then
+    # Opt-in per runtime until canaried. Best effort: it never fails boot and
+    # retries until its marker exists.
+    if [[ "${FINITE_HISTORY_IMPORT:-0}" == "1" \
+        && -f "$history_importer" && -f "${agent_home}/config.json" ]]; then
         python "$history_importer" \
             --agent-home "$agent_home" \
             --hermes-home "$hermes_home" \
