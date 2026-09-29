@@ -8,6 +8,7 @@ mod helper;
 mod hosted_hermes;
 mod hosted_hermes_pull;
 mod inference;
+mod inference_commands;
 mod intent;
 mod ledger;
 mod openrouter;
