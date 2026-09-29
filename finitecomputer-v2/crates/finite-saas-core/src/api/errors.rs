@@ -97,6 +97,7 @@ fn next_correlation_id() -> String {
 impl From<CoreError> for ApiError {
     fn from(error: CoreError) -> Self {
         match error {
+            CoreError::TrialUnavailable(message) => Self::conflict(message),
             CoreError::MissingSourceHostId
             | CoreError::InvalidSourceHostId
             | CoreError::MissingAgentDisplayName

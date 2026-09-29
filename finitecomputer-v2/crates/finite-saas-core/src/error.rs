@@ -27,6 +27,8 @@ pub struct StoreErrorDetail {
 
 #[derive(Debug, thiserror::Error)]
 pub enum CoreError {
+    #[error("{0}")]
+    TrialUnavailable(&'static str),
     #[error("verified email is required")]
     MissingVerifiedEmail,
     #[error("WorkOS user id is required")]

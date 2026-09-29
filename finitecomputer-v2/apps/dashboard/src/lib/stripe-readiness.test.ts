@@ -103,6 +103,7 @@ function readySnapshot(): StripeReadinessSnapshot {
       eventsFrom: ["@self"],
       enabledEvents: [
         "checkout.session.completed",
+        "checkout.session.expired",
         "customer.subscription.created",
         "customer.subscription.updated",
         "customer.subscription.deleted",

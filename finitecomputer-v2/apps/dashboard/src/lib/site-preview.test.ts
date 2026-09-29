@@ -32,6 +32,9 @@ test("authorized previews fall back to email when their exchange is unavailable"
           project: { id: "project-preview", display_name: "Preview" },
           runtime: { id: "runtime-preview" },
         }] }));
+      } else if (request.url === "/api/core/v1/me/billing") {
+        response.writeHead(200, { "content-type": "application/json" });
+        response.end(JSON.stringify({ customer_org: { id: "org-preview" }, trial_access: null }));
       } else if (request.url === "/internal/v1/viewer-sessions") {
         exchanges.push("sites");
         if (disconnect) request.socket.destroy();

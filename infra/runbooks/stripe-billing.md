@@ -92,3 +92,42 @@ normal events; it never authorizes compute or recovery-data deletion.
    secret, coordinate the endpoint change so one accepted secret covers every
    delivery; otherwise keep Checkout dark and redeliver failed original events
    after the application is ready.
+
+
+## Event trials (FIN-150)
+
+Core owns campaign seat limits and attribution separately from sponsored launch
+codes. Operators issue a code in Dashboard **Admin Ops → Invites → Event trials**.
+The code is shown once; event names and redemption attribution remain visible.
+A seat is reserved before exposing Checkout, consumed by subscription creation,
+and released only by a verified `checkout.session.expired` event. Completed
+trials continue to consume their campaign seat after cancellation or nonpayment.
+Each account can use one trial; a new event code does not reset that eligibility.
+
+Roll out Core's additive trial migration and API before enabling
+`FC_DASHBOARD_TRIALS_ENABLED=true` on the dashboard. Add
+`checkout.session.expired` to the Stripe webhook destination alongside the
+existing subscription and completed-checkout events. Run the readiness audit,
+then qualify the signup, last-seat race, abandonment, seven-day conversion,
+and failed-payment paths in a Stripe sandbox before enabling production trials.
+The trial checkout verifies that the configured price is USD 200/month and
+requires a card. Trial codes do not stack ordinary promotional discounts.
+
+Only accounts originating in this trial flow receive the new dashboard access
+restriction. Failed payment blocks dashboard agent requests; already-open trial
+chat streams reauthorize within 30 seconds. Existing external channels and native
+sessions outside the dashboard continue to run. Compute shutdown/hibernation and
+expired-token policy are tracked separately in FIN-151. Payment recovery restores
+dashboard access through the normal subscription event, preserving user data.
+
+If a reservation appears stuck, inspect the recorded Checkout Session in Stripe
+and its expiry/completion deliveries. Redeliver the original verified event;
+never free seats by changing the database or by assuming a local timeout means
+checkout did not complete. An unexposed session whose reservation failed can
+expire without consuming a seat.
+
+To stop new trial enrollment, disable `FC_DASHBOARD_TRIALS_ENABLED`. Keep the
+trial-aware webhook handler and access checks running for enrolled accounts.
+Reverting to a dashboard version without those checks after live enrollment
+would restore unpaid dashboard access. Retain the additive tables and campaign
+attribution through rollback and Core backup/restore.

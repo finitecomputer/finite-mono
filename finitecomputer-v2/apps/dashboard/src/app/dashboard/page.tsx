@@ -1,3 +1,4 @@
+import { TrialStatusPanel } from "@/components/trial-status-panel";
 import Link from "next/link";
 import { redirect } from "next/navigation";
 import { cookies } from "next/headers";
@@ -252,6 +253,7 @@ export default async function DashboardPage({
     // immersive new-agent flow hides them through their own guard.
     const renderAccountSections = () => (
       <>
+        {!isNewAgentFlow ? <TrialStatusPanel trial={billing.billing?.trial_access} /> : null}
         {!isNewAgentFlow && billing.billing ? (
           <AccountBillingPanel
             billingClass={billing.billing.customer_org.billing_class}
@@ -335,6 +337,7 @@ export default async function DashboardPage({
               <CoreProjectsPanel
                 projects={coreProjects}
                 agentCreationRequests={agentCreationRequests}
+                accessBlocked={Boolean(billing.billing?.trial_access?.blocked)}
               />
               {renderAccountSections()}
               {showPendingCreationPanel ? (
@@ -809,9 +812,11 @@ function StatusPill({ status }: { status: "active" | "revoked" }) {
 function CoreProjectsPanel({
   projects,
   agentCreationRequests,
+  accessBlocked,
 }: {
   projects: CoreVisibleProject[];
   agentCreationRequests: CoreAgentCreationRequestSummary[];
+  accessBlocked: boolean;
 }) {
   return (
     <section className="ocean-utility-card">
@@ -822,15 +827,15 @@ function CoreProjectsPanel({
         <div>
           <h1 className="ocean-utility-card__title">Your agents</h1>
           <p className="text-sm text-muted-foreground">
-            Open an agent workspace or jump straight into chat.
+            {accessBlocked ? "Update your payment details to resume dashboard access." : "Open an agent workspace or jump straight into chat."}
           </p>
         </div>
-        <Button asChild variant="outline" size="sm" className="ml-auto">
+        {!accessBlocked ? <Button asChild variant="outline" size="sm" className="ml-auto">
           <Link href="/dashboard?new=1">
             <PlusIcon />
             New agent
           </Link>
-        </Button>
+        </Button> : null}
       </div>
 
       <div className="grid gap-3">
@@ -838,6 +843,7 @@ function CoreProjectsPanel({
           <CoreProjectCard
             key={project.project.id}
             project={project}
+            accessBlocked={accessBlocked}
             request={coreAgentCreationRequestForProject(project, agentCreationRequests)}
           />
         ))}
@@ -849,9 +855,11 @@ function CoreProjectsPanel({
 function CoreProjectCard({
   project,
   request,
+  accessBlocked,
 }: {
   project: CoreVisibleProject;
   request: CoreAgentCreationRequestSummary | null;
+  accessBlocked: boolean;
 }) {
   const overviewHref = coreProjectOverviewHref(project);
   const chatHref = overviewHref ? `${overviewHref}/chat` : null;
@@ -876,10 +884,10 @@ function CoreProjectCard({
   return (
     <AgentHeroCard
       name={coreProjectLabel(project)}
-      description={description}
+      description={accessBlocked ? "Dashboard access is paused until payment is resolved." : description}
       state={heroState}
       actions={
-        <>
+        accessBlocked ? <form action={openBillingPortalAction}><Button>Manage billing</Button></form> : <>
           {chatHref ? (
             <Button asChild>
               <Link href={chatHref}>
@@ -1023,6 +1031,7 @@ function CoreAgentCreationPanel({
   const idempotencyKey = randomUUID();
   const form = (
     <CoreAgentCreationForm
+      trialsEnabled={process.env.FC_DASHBOARD_TRIALS_ENABLED === "true"}
       allowConfidentialHosting={allowConfidentialHosting}
       error={error}
       idempotencyKey={draft?.idempotencyKey ?? idempotencyKey}

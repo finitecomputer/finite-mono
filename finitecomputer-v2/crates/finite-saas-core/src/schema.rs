@@ -67,7 +67,9 @@ pub const CORE_SCHEMA_SQL: &str = concat!(
     "\n",
     include_str!("../migrations/0033_finite_private_200m_default.sql"),
     "\n",
-    include_str!("../migrations/0034_runtime_credential_recovery.sql")
+    include_str!("../migrations/0034_runtime_credential_recovery.sql"),
+    "\n",
+    include_str!("../migrations/0035_trial_campaigns.sql")
 );
 
 pub const RUNTIME_UPGRADE_ROLLBACK_RESCUE_SQL: &str =

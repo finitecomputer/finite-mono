@@ -10,6 +10,7 @@ import {
   coreProjectLabel,
   coreProjectPrimaryUrl,
   loadCoreMe,
+  loadCoreBillingOverview,
   loadCoreRequesterEmail,
   type CoreAgentCreationRequestSummary,
   type CoreVisibleProject,
@@ -179,6 +180,10 @@ export async function recoverHostedWebChatBinding(machineId: string) {
   if (!account.workosUserId || !account.emailVerified) {
     throw new HostedWebChatError("Sign in again to finish chat setup.", 401);
   }
+  const billing = await loadCoreBillingOverview({ cacheMode: "fresh" });
+  if (!billing.billing || billing.billing.trial_access?.blocked) {
+    throw new HostedWebChatError("Payment is required to access your agent. Manage billing from the dashboard.", 402);
+  }
   const core = await loadCoreMe();
   if (
     core.account.workosUserId !== account.workosUserId ||
@@ -340,7 +345,9 @@ export function isCanonicalNewChatTarget(
 
 export async function streamHostedWebChat(machineId: string, signal: AbortSignal, viewQuery = "") {
   const context = await hostedWebChatContext(machineId);
-  return hostedDeviceUpdates(context.config, context.account, signal, viewQuery);
+  // Bound trial streams so reconnect rechecks billing after a payment change.
+  const accessSignal = context.trialAccount ? AbortSignal.any([signal, AbortSignal.timeout(30_000)]) : signal;
+  return hostedDeviceUpdates(context.config, context.account, accessSignal, viewQuery);
 }
 
 export async function uploadHostedWebChatAttachments(machineId: string, formData: FormData) {
@@ -378,7 +385,7 @@ async function hostedWebChatContext(
   if (!access) {
     throw new HostedWebChatError("Agent not found.", 404);
   }
-  return hostedWebChatContextForProject(account, access.coreProject);
+  return { ...hostedWebChatContextForProject(account, access.coreProject), trialAccount: access.trialAccount };
 }
 
 function hostedWebChatContextForProject(
@@ -396,6 +403,7 @@ function hostedWebChatContextForProject(
   return {
     account,
     config,
+    trialAccount: false,
     primaryUrl: coreProjectPrimaryUrl(project),
     agentName: coreProjectLabel(project),
     projectId: project.project.id,

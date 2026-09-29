@@ -1,4 +1,5 @@
 "use server";
+import { trialCheckoutDestination } from "@/lib/trial-checkout";
 import { randomUUID } from "node:crypto";
 import { revalidatePath } from "next/cache";
 import { redirect } from "next/navigation";
@@ -175,7 +176,8 @@ export async function startBillingCheckoutAction() {
 
 export async function billingCheckoutDestination(
   attemptId: string = randomUUID(),
-  returnMachineId?: string | null
+  returnMachineId?: string | null,
+  trialCode?: string | null
 ) {
   if (!stripeCheckoutAvailable()) {
     throw new Error("Payment is unavailable right now.");
@@ -210,6 +212,14 @@ export async function billingCheckoutDestination(
   if (returnMachineId) {
     successParams.set("machine", returnMachineId);
     cancelParams.set("machine", returnMachineId);
+  }
+  if (trialCode?.trim()) {
+    if (process.env.FC_DASHBOARD_TRIALS_ENABLED !== "true") throw new Error("Event trials are not available yet.");
+    return trialCheckoutDestination(trialCode.trim(), {
+      stripeCustomerId, customerOrgId, priceId: standardAgentPriceId(),
+      successUrl: stripeDashboardReturnUrl(`/dashboard?${successParams.toString()}`),
+      cancelUrl: stripeDashboardReturnUrl(`/dashboard?${cancelParams.toString()}`),
+    });
   }
   const checkout = await stripe.checkout.sessions.create(
     standardAgentCheckoutParams({

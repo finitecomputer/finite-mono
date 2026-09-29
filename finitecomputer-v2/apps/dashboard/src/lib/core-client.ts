@@ -1,3 +1,4 @@
+import type { TrialCampaign, TrialAccess } from "@/lib/trial-types";
 import { createHash } from "node:crypto";
 
 import { getAccountAuthContext, type AccountAuthContext } from "@/lib/dashboard-auth";
@@ -392,6 +393,7 @@ export type CoreAgentCreationEntitlement = {
 };
 
 export type CoreBillingOverview = {
+  trial_access?: TrialAccess | null;
   customer_org: CoreCustomerOrganization;
   billing_account?: CoreCustomerBillingAccount | null;
   agent_creation_entitlement?: CoreAgentCreationEntitlement | null;
@@ -730,6 +732,7 @@ export async function linkCoreStripeCustomer(stripeCustomerId: string) {
 }
 
 export async function syncCoreStripeSubscription(input: {
+  trialAttemptId?: string | null;
   customerOrgId?: string | null;
   stripeCustomerId: string;
   stripeSubscriptionId: string;
@@ -745,6 +748,7 @@ export async function syncCoreStripeSubscription(input: {
     {
       method: "POST",
       body: JSON.stringify({
+        trialAttemptId: input.trialAttemptId ?? null,
         customerOrgId: optionalString(input.customerOrgId),
         stripeCustomerId: requiredString(input.stripeCustomerId, "Stripe customer id is required."),
         stripeSubscriptionId: requiredString(
@@ -1741,4 +1745,35 @@ export async function coreEmailChange(action: "preview" | "prepare" | "complete"
   );
   if (action === "complete") invalidateCoreReadCache();
   return result;
+}
+
+export async function loadCoreTrialOffer(code: string) {
+  const account = await getAccountAuthContext();
+  return coreFetch<{ campaignId: string; trialDays: number }>("/api/core/v1/me/billing/trial-offer", account, {
+    method: "POST", body: JSON.stringify({ code }),
+  });
+}
+export async function reserveCoreTrial(input: {
+  code: string; customerOrgId: string; stripeCustomerId: string; stripeSessionId: string;
+  attemptId: string; checkoutExpiresAt: number; trialDays: number;
+}) {
+  const account = await getAccountAuthContext();
+  if (!coreAccountReady(account)) throw new Error("Sign in to start a trial.");
+  return coreServiceFetch<{ stripeSessionId: string }>("/api/core/v1/billing/trial-reservation", {
+    method: "POST", body: JSON.stringify({ workosUserId: account.workosUserId, reservation: input }),
+  });
+}
+export async function expireCoreTrial(stripeSessionId: string, stripeCustomerId: string) {
+  await coreServiceFetch<void>("/api/core/v1/billing/trial-expired", {
+    method: "POST", body: JSON.stringify({ stripeSessionId, stripeCustomerId }),
+  });
+  invalidateCoreReadCache();
+}
+export async function loadCoreTrialCampaigns() {
+  return coreAdminFetch<TrialCampaign[]>("/api/core/v1/admin/trial-campaigns");
+}
+export async function createCoreTrialCampaign(input: { name: string; seatLimit: number; trialDays: number }) {
+  return coreAdminFetch<{ id: string; code: string }>("/api/core/v1/admin/trial-campaigns", {
+    method: "POST", body: JSON.stringify(input),
+  });
 }

@@ -1,6 +1,7 @@
 export const FINITE_STRIPE_WEBHOOK_URL = "https://finite.computer/api/stripe/webhook";
 export const FINITE_STRIPE_EVENTS = [
   "checkout.session.completed",
+  "checkout.session.expired",
   "customer.subscription.created",
   "customer.subscription.updated",
   "customer.subscription.deleted",

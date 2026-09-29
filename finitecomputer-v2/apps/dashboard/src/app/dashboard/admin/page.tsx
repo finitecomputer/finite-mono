@@ -1,3 +1,4 @@
+import { AdminTrialsPanel } from "@/components/admin-trials-panel";
 import { notFound } from "next/navigation";
 import {
   BanIcon,
@@ -72,6 +73,7 @@ export default async function AdminOpsPage() {
         </TabsContent>
         <TabsContent value="invites">
           <LaunchCodeBatchesPanel result={launchCodeBatches} />
+          {process.env.FC_DASHBOARD_TRIALS_ENABLED === "true" ? <AdminTrialsPanel /> : null}
         </TabsContent>
         <TabsContent value="finite-private">
           <FinitePrivateOpsPanel result={finitePrivate} />
