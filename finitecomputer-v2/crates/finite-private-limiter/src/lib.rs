@@ -144,7 +144,11 @@ impl Default for WatchdogConfig {
 #[derive(Clone)]
 struct AppState {
     config: Arc<LimiterConfig>,
+    /// Core, readiness, and diagnostics calls.
     client: Client,
+    /// Inference calls, with a connect timeout derived from the first-byte
+    /// timeout.
+    upstream_client: Client,
     metrics: LimiterMetrics,
     diagnostic_slots: Arc<Semaphore>,
 }
@@ -208,15 +212,19 @@ impl LimiterConfig {
 
 pub fn app(config: LimiterConfig) -> Result<Router, LimiterConfigError> {
     validate_config(&config)?;
-    let state = AppState {
-        config: Arc::new(config),
-        client: Client::builder()
-            .connect_timeout(HTTP_CONNECT_TIMEOUT)
+    let http_client = |connect_timeout| {
+        Client::builder()
+            .connect_timeout(connect_timeout)
             // Core does not redirect health, reserve, or settle. Following a
             // public outage origin 307 onto HTML 200 would look like success.
             .redirect(Policy::none())
             .build()
-            .map_err(|error| LimiterConfigError::HttpClient(error.to_string()))?,
+            .map_err(|error| LimiterConfigError::HttpClient(error.to_string()))
+    };
+    let state = AppState {
+        client: http_client(HTTP_CONNECT_TIMEOUT)?,
+        upstream_client: http_client(upstream_connect_timeout(config.upstream_first_byte_timeout))?,
+        config: Arc::new(config),
         metrics: LimiterMetrics::default(),
         diagnostic_slots: Arc::new(Semaphore::new(DIAGNOSTIC_WRITE_CONCURRENCY)),
     };
@@ -231,6 +239,17 @@ pub fn app(config: LimiterConfig) -> Result<Router, LimiterConfigError> {
         .route("/v1/chat/completions", post(proxy_openai))
         .route("/v1/responses", post(proxy_openai))
         .with_state(state))
+}
+
+/// Connect timeout for inference calls: the shared connect timeout, cut to
+/// half the first-byte timeout when that is shorter. Each connector attempt
+/// (DNS, TCP, and TLS) then has a budget shorter than the first-byte deadline,
+/// so a stalled attempt reports a connection failure when the connector
+/// deadline wins. The first-byte
+/// deadline still covers all of `send`, so its expiry alone does not show how
+/// much of the request was written.
+fn upstream_connect_timeout(first_byte_timeout: Duration) -> Duration {
+    HTTP_CONNECT_TIMEOUT.min(first_byte_timeout / 2)
 }
 
 fn validate_config(config: &LimiterConfig) -> Result<(), LimiterConfigError> {
@@ -745,13 +764,13 @@ async fn proxy_openai(
     if is_streaming {
         return match call_upstream_response(&state, &uri, upstream_body).await {
             Ok(upstream) => streaming_response(settlement_guard, upstream, degraded_admission),
-            Err(error) => upstream_unavailable(settlement_guard, &error).await,
+            Err(failure) => settle_upstream_failure(settlement_guard, failure).await,
         };
     }
 
     let upstream = match call_upstream(&state, &uri, upstream_body).await {
         Ok(response) => response,
-        Err(error) => return upstream_unavailable(settlement_guard, &error).await,
+        Err(failure) => return settle_upstream_failure(settlement_guard, failure).await,
     };
 
     let actual = actual_usage(&upstream.body, &state.config.default_model);
@@ -828,16 +847,25 @@ async fn proxy_openai(
         .unwrap()
 }
 
-/// Settles an upstream that never answered. The client received nothing.
-async fn upstream_unavailable(mut settlement_guard: SettlementGuard, error: &str) -> Response {
+/// Settles a request that ended with no upstream answer to forward, and
+/// returns a 502 to the client. The wire class stays `upstream_unavailable`
+/// for every phase; `usageUnits` carries the phase-dependent charge.
+async fn settle_upstream_failure(
+    mut settlement_guard: SettlementGuard,
+    failure: UpstreamFailure,
+) -> Response {
     settlement_guard
         .timer()
-        .finish(if error.contains("timed out") {
+        .finish(if failure.phase == UpstreamFailurePhase::TimedOut {
             TerminalOutcome::UpstreamTimeout
         } else {
             TerminalOutcome::UpstreamError
         });
-    eprintln!("finite-private-limiter upstream failed: {error}");
+    let usage_units = failure.settled_units(&settlement_guard.estimate);
+    eprintln!(
+        "finite-private-limiter upstream failed: {}",
+        failure.message
+    );
     settlement_guard.preserve_terminal_diagnostic("upstream_error");
     let _ = settlement_guard
         .settle(SettleRequest {
@@ -845,7 +873,7 @@ async fn upstream_unavailable(mut settlement_guard: SettlementGuard, error: &str
             settlement: "estimate".to_string(),
             prompt_tokens: None,
             completion_tokens: None,
-            usage_units: Some(0),
+            usage_units: Some(usage_units),
             usage_formula_version: USAGE_FORMULA_VERSION.to_string(),
             upstream_status: Some(502),
             upstream_error_class: Some("upstream_unavailable".to_string()),
@@ -1052,10 +1080,9 @@ async fn call_upstream(
     state: &AppState,
     uri: &Uri,
     body: Bytes,
-) -> Result<UpstreamResponse, String> {
+) -> Result<UpstreamResponse, UpstreamFailure> {
     let response = call_upstream_response(state, uri, body).await?;
-    let status =
-        StatusCode::from_u16(response.status().as_u16()).map_err(|error| error.to_string())?;
+    let status = response.status();
     let content_type = response
         .headers()
         .get("content-type")
@@ -1064,12 +1091,15 @@ async fn call_upstream(
     let body = timeout(state.config.upstream_body_timeout, response.bytes())
         .await
         .map_err(|_| {
-            format!(
-                "upstream body timed out after {}ms",
-                state.config.upstream_body_timeout.as_millis()
+            UpstreamFailure::timed_out(
+                Some(status),
+                format!(
+                    "upstream body timed out after {}ms",
+                    state.config.upstream_body_timeout.as_millis()
+                ),
             )
         })?
-        .map_err(|error| error.to_string())?;
+        .map_err(|error| UpstreamFailure::from_client_error(error, Some(status)))?;
     Ok(UpstreamResponse {
         status,
         content_type,
@@ -1081,7 +1111,7 @@ async fn call_upstream_response(
     state: &AppState,
     uri: &Uri,
     body: Bytes,
-) -> Result<reqwest::Response, String> {
+) -> Result<reqwest::Response, UpstreamFailure> {
     let path_and_query = uri
         .path_and_query()
         .map(|value| value.as_str())
@@ -1092,7 +1122,7 @@ async fn call_upstream_response(
         path_and_query
     );
     let response = state
-        .client
+        .upstream_client
         .post(url)
         .bearer_auth(&state.config.vllm_internal_api_key)
         .header("content-type", "application/json")
@@ -1101,12 +1131,15 @@ async fn call_upstream_response(
     timeout(state.config.upstream_first_byte_timeout, response)
         .await
         .map_err(|_| {
-            format!(
-                "upstream first byte timed out after {}ms",
-                state.config.upstream_first_byte_timeout.as_millis()
+            UpstreamFailure::timed_out(
+                None,
+                format!(
+                    "upstream first byte timed out after {}ms",
+                    state.config.upstream_first_byte_timeout.as_millis()
+                ),
             )
         })?
-        .map_err(|error| error.to_string())
+        .map_err(|error| UpstreamFailure::from_client_error(error, None))
 }
 
 fn streaming_response(
@@ -1739,8 +1772,9 @@ impl StreamingUsageAccumulator {
     }
 }
 
-/// Characters of generated answer, reasoning, and tool-call arguments in one
-/// chat-completion stream chunk, reading the same fields as `output_signals`.
+/// Characters of generated text in one chat-completion stream chunk: the
+/// answer, the reasoning, and each tool call's function name and arguments.
+/// The function name carries the model's tool choice, so it counts as output.
 fn delta_output_chars(value: &Value) -> i64 {
     let deltas = value
         .get("choices")
@@ -1753,16 +1787,18 @@ fn delta_output_chars(value: &Value) -> i64 {
         let reasoning = delta
             .get("reasoning_content")
             .or_else(|| delta.get("reasoning"));
-        let arguments = delta
+        let tool_calls = delta
             .get("tool_calls")
             .and_then(Value::as_array)
             .into_iter()
             .flatten()
-            .filter_map(|call| call.pointer("/function/arguments"));
+            .filter_map(|call| call.get("function"))
+            .flat_map(|function| [function.get("name"), function.get("arguments")])
+            .flatten();
         for text in [delta.get("content"), reasoning]
             .into_iter()
             .flatten()
-            .chain(arguments)
+            .chain(tool_calls)
             .filter_map(Value::as_str)
         {
             chars += text.chars().count() as i64;
@@ -1894,6 +1930,72 @@ struct UpstreamResponse {
     status: StatusCode,
     content_type: Option<HeaderValue>,
     body: Bytes,
+}
+
+/// What the limiter observed about an upstream call that left it with no
+/// answer to forward.
+struct UpstreamFailure {
+    phase: UpstreamFailurePhase,
+    /// The upstream response status, once its headers arrived.
+    status: Option<StatusCode>,
+    message: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum UpstreamFailurePhase {
+    /// The client reported a connection error, including a connect timeout,
+    /// or could not build the request.
+    ConnectFailed,
+    /// A limiter deadline or a client-reported timeout ended the call.
+    TimedOut,
+    /// The client reported another request or body error, for example a
+    /// reset or a response body that could not be read.
+    TransportFailed,
+}
+
+impl UpstreamFailure {
+    fn timed_out(status: Option<StatusCode>, message: String) -> Self {
+        Self {
+            phase: UpstreamFailurePhase::TimedOut,
+            status,
+            message,
+        }
+    }
+
+    /// Classifies by what the HTTP client error reports, whichever call
+    /// returned it. A connect timeout reports both a connection failure and a
+    /// timeout; the connection failure decides.
+    fn from_client_error(error: reqwest::Error, status: Option<StatusCode>) -> Self {
+        let phase = if error.is_connect() || error.is_builder() {
+            UpstreamFailurePhase::ConnectFailed
+        } else if error.is_timeout() {
+            UpstreamFailurePhase::TimedOut
+        } else {
+            UpstreamFailurePhase::TransportFailed
+        };
+        Self {
+            phase,
+            status,
+            message: error.to_string(),
+        }
+    }
+
+    /// Units to settle. A connection or request-build error, and an upstream
+    /// error status without usage, settle at zero units. Every other failure
+    /// settles at the estimated input, the same as a client cancel before any
+    /// output, so it stays visible to the Runaway Guard.
+    fn settled_units(&self, estimate: &EstimatedUsage) -> i64 {
+        let estimated_input = unreported_usage_units(estimate, 0, false);
+        match (self.phase, self.status) {
+            (UpstreamFailurePhase::ConnectFailed, _) => 0,
+            (_, Some(status)) if !status.is_success() => 0,
+            (UpstreamFailurePhase::TimedOut, _) => estimated_input,
+            // Owner confirmation pending: a reset or unreadable body with no
+            // status or a 2xx status. Covered by
+            // `transport_failure_without_error_status_settles_estimated_input`.
+            (UpstreamFailurePhase::TransportFailed, _) => estimated_input,
+        }
+    }
 }
 
 #[derive(Debug, Serialize)]
@@ -2086,6 +2188,24 @@ mod tests {
             // `reasoning_content` and is not counted twice.
             3
         );
+    }
+
+    #[test]
+    fn delivered_completion_tokens_count_generated_tool_names() {
+        let mut usage = StreamingUsageAccumulator::new(DEFAULT_MODEL.to_string());
+        let name_only = json!({"choices":[{"index":0,"delta":{
+            "role":"assistant",
+            "tool_calls":[{
+                "index":0,
+                "id":"call_0123456789abcdef0123456789",
+                "type":"function",
+                "function":{"name":"approve","arguments":""}
+            }]
+        }}]});
+        usage.push(format!("data: {name_only}\n\n").as_bytes());
+        // Only the 7-character name counts, which is two tokens at four
+        // characters per token.
+        assert_eq!(usage.delivered_completion_tokens(), 2);
     }
 
     #[test]
@@ -2738,25 +2858,27 @@ mod tests {
         assert_eq!(actual.usage_units, usage_units(4, 5, "glm-5-2"));
     }
 
-    #[tokio::test]
-    async fn upstream_first_byte_timeout_settles_nothing() {
-        let core = FakeCoreState::new("fpk_live_secret", 1_000_000);
-        let core_url = spawn(fake_core_router(core.clone())).await;
-        let upstream = FakeUpstreamState::new();
-        upstream.delay_first_byte_ms.store(200, Ordering::SeqCst);
-        let upstream_url = spawn(fake_upstream_router(upstream.clone())).await;
-        let mut config = test_config(core_url, upstream_url);
-        config.upstream_first_byte_timeout = Duration::from_millis(20);
+    /// Sends one request with a 100-token prompt through a limiter whose
+    /// upstream call fails. Returns the single settlement Core saw and the
+    /// limiter's metrics text, whose request outcome shows whether the call
+    /// ended in a timeout or another error.
+    async fn settlement_after_failed_upstream(
+        core: &FakeCoreState,
+        mut config: LimiterConfig,
+        stream: bool,
+    ) -> (Value, String) {
+        // Core has an independent 2 s budget.
+        config.usage_api_timeout = Duration::from_secs(2);
+        config.metrics_auth_token = Some("synthetic-metrics".into());
         let limiter_url = spawn(app(config).unwrap()).await;
-
         let client = reqwest::Client::new();
         let response = client
             .post(format!("{limiter_url}/v1/chat/completions"))
             .bearer_auth("fpk_live_secret")
-            .header("x-request-id", "req-timeout")
             .json(&json!({
                 "model": "glm-5-2",
-                "messages": [{ "role": "user", "content": "hello" }],
+                "stream": stream,
+                "messages": [{ "role": "user", "content": "a".repeat(400) }],
                 "max_tokens": 64
             }))
             .send()
@@ -2764,11 +2886,422 @@ mod tests {
             .unwrap();
         assert_eq!(response.status(), StatusCode::BAD_GATEWAY);
         assert_eq!(core.reserve_calls.load(Ordering::SeqCst), 1);
-        assert_eq!(core.settle_calls.load(Ordering::SeqCst), 1);
-        let settlements = core.settlements.lock().unwrap();
-        assert_eq!(settlements[0]["settlement"], "estimate");
-        assert_eq!(settlements[0]["usageUnits"], 0);
-        assert_eq!(settlements[0]["upstreamErrorClass"], "upstream_unavailable");
+        wait_for(|| core.settlements.lock().unwrap().len() == 1).await;
+        let settlement = core.settlements.lock().unwrap()[0].clone();
+        assert_eq!(settlement["settlement"], "estimate");
+        assert_eq!(settlement["upstreamStatus"], 502);
+        assert_eq!(settlement["upstreamErrorClass"], "upstream_unavailable");
+        let metrics = client
+            .get(format!("{limiter_url}/metrics"))
+            .bearer_auth("synthetic-metrics")
+            .send()
+            .await
+            .unwrap()
+            .text()
+            .await
+            .unwrap();
+        (settlement, metrics)
+    }
+
+    /// Asserts that exactly one request ended with `outcome`.
+    fn assert_one_outcome(metrics: &str, outcome: &str) {
+        let line = format!("finite_private_limiter_requests_total{{outcome=\"{outcome}\"}} 1");
+        assert!(
+            metrics.lines().any(|metric| metric == line),
+            "missing {line} in:\n{metrics}"
+        );
+    }
+
+    /// An HTTPS upstream address whose listener accepts TCP connections and
+    /// holds them without reading or writing a byte. A TLS client sends its
+    /// hello and then waits inside the connector for a reply that never comes.
+    fn silent_tls_upstream() -> String {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let url = format!("https://{}", listener.local_addr().unwrap());
+        std::thread::spawn(move || {
+            let mut held = Vec::new();
+            for socket in listener.incoming() {
+                let Ok(socket) = socket else { return };
+                held.push(socket);
+            }
+        });
+        url
+    }
+
+    #[derive(Clone, Copy)]
+    enum RawEnding {
+        /// Close the connection after reading the request, before any response.
+        CloseBeforeHead,
+        /// Write the status line, headers, and first body bytes, then hold the
+        /// connection open.
+        StallBody,
+        /// Write the status line, headers, and first body bytes, then close
+        /// the connection.
+        CloseInBody,
+    }
+
+    /// A raw HTTP/1.1 upstream. For each connection it reads the complete
+    /// request, counts it, and ends the response as `ending` says; a
+    /// connection whose request ends early is dropped uncounted. The response
+    /// declares a 64-byte body and sends 11 bytes of it. When the head is
+    /// written and the connection then closes normally, TCP delivers the
+    /// written bytes before the end of stream, so the client reads the status
+    /// line and headers before it reaches the body failure.
+    fn raw_upstream(status: u16, ending: RawEnding) -> (String, Arc<AtomicUsize>) {
+        use std::io::{Read, Write};
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let url = format!("http://{}", listener.local_addr().unwrap());
+        let requests = Arc::new(AtomicUsize::new(0));
+        let counted = requests.clone();
+        std::thread::spawn(move || {
+            let mut held = Vec::new();
+            for socket in listener.incoming() {
+                let Ok(mut socket) = socket else { return };
+                socket
+                    .set_read_timeout(Some(Duration::from_secs(10)))
+                    .unwrap();
+                // Read the head, then as many body bytes as it declares, so
+                // closing the socket sends a clean end of stream.
+                let mut request = Vec::new();
+                let mut buffer = [0_u8; 4096];
+                let complete = loop {
+                    if let Some(head_end) = request.windows(4).position(|w| w == b"\r\n\r\n") {
+                        let head =
+                            String::from_utf8_lossy(&request[..head_end]).to_ascii_lowercase();
+                        let body_len = head
+                            .lines()
+                            .find_map(|line| line.strip_prefix("content-length:"))
+                            .map_or(0, |value| value.trim().parse::<usize>().unwrap());
+                        if request.len() >= head_end + 4 + body_len {
+                            break true;
+                        }
+                    }
+                    match socket.read(&mut buffer) {
+                        Ok(0) | Err(_) => break false,
+                        Ok(read) => request.extend_from_slice(&buffer[..read]),
+                    }
+                };
+                if !complete {
+                    continue;
+                }
+                counted.fetch_add(1, Ordering::SeqCst);
+                if matches!(ending, RawEnding::CloseBeforeHead) {
+                    continue;
+                }
+                let response = format!(
+                    "HTTP/1.1 {status} Synthetic\r\ncontent-type: application/json\r\ncontent-length: 64\r\n\r\n{{\"choices\":"
+                );
+                socket.write_all(response.as_bytes()).unwrap();
+                if matches!(ending, RawEnding::StallBody) {
+                    held.push(socket);
+                }
+            }
+        });
+        (url, requests)
+    }
+
+    /// Sends one request to a raw upstream with a plain client and classifies
+    /// the client error, carrying the status when the response head arrived.
+    async fn classified_raw_failure(url: &str) -> UpstreamFailure {
+        let client = reqwest::Client::builder()
+            .timeout(Duration::from_secs(5))
+            .build()
+            .unwrap();
+        match client
+            .post(format!("{url}/v1/chat/completions"))
+            .json(&json!({}))
+            .send()
+            .await
+        {
+            Err(error) => UpstreamFailure::from_client_error(error, None),
+            Ok(response) => {
+                let status = response.status();
+                let error = response.bytes().await.unwrap_err();
+                UpstreamFailure::from_client_error(error, Some(status))
+            }
+        }
+    }
+
+    fn hundred_token_estimate() -> EstimatedUsage {
+        EstimatedUsage {
+            model: DEFAULT_MODEL.to_string(),
+            prompt_tokens: 100,
+            completion_tokens: 64,
+            usage_units: usage_units(100, 64, DEFAULT_MODEL),
+        }
+    }
+
+    #[test]
+    fn upstream_failure_units_follow_the_settlement_rules() {
+        use UpstreamFailurePhase::{ConnectFailed, TimedOut, TransportFailed};
+        let estimated_input = usage_units(100, 0, DEFAULT_MODEL);
+        let error_status = Some(StatusCode::INTERNAL_SERVER_ERROR);
+        for (phase, status, expected) in [
+            (ConnectFailed, None, 0),
+            (TimedOut, None, estimated_input),
+            (TimedOut, Some(StatusCode::OK), estimated_input),
+            // A known error status without usage settles at zero, even when
+            // its body stalls or fails to read.
+            (TimedOut, error_status, 0),
+            (TransportFailed, error_status, 0),
+        ] {
+            let failure = UpstreamFailure {
+                phase,
+                status,
+                message: String::new(),
+            };
+            assert_eq!(
+                failure.settled_units(&hundred_token_estimate()),
+                expected,
+                "{phase:?} with status {status:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn upstream_connect_timeout_is_shorter_than_first_byte_timeout() {
+        // Millisecond budgets; the production parser accepts whole seconds.
+        for first_byte_ms in [2, 100, 400, 9_999, 10_000, 10_001, 20_000, 120_000] {
+            let first_byte = Duration::from_millis(first_byte_ms);
+            let connect = upstream_connect_timeout(first_byte);
+            assert!(connect < first_byte, "{first_byte:?} gave {connect:?}");
+            assert!(!connect.is_zero(), "{first_byte:?} gave {connect:?}");
+            assert!(connect <= HTTP_CONNECT_TIMEOUT);
+        }
+        assert_eq!(
+            upstream_connect_timeout(Duration::from_secs(120)),
+            HTTP_CONNECT_TIMEOUT
+        );
+    }
+
+    #[tokio::test]
+    async fn client_reported_timeouts_after_connecting_settle_estimated_input() {
+        let estimated_input = usage_units(100, 0, DEFAULT_MODEL);
+        // A client with its own total timeout reports the timeout itself,
+        // rather than the limiter's outer deadline reporting it.
+        let client = reqwest::Client::builder()
+            .timeout(Duration::from_millis(500))
+            .build()
+            .unwrap();
+
+        let slow_headers = FakeUpstreamState::new();
+        slow_headers
+            .delay_first_byte_ms
+            .store(5_000, Ordering::SeqCst);
+        let url = spawn(fake_upstream_router(slow_headers.clone())).await;
+        let error = client
+            .post(format!("{url}/v1/chat/completions"))
+            .bearer_auth("vllm-secret")
+            .json(&json!({}))
+            .send()
+            .await
+            .unwrap_err();
+        assert!(error.is_timeout() && !error.is_connect(), "{error:?}");
+        assert_eq!(slow_headers.received.load(Ordering::SeqCst), 1);
+        let failure = UpstreamFailure::from_client_error(error, None);
+        assert_eq!(failure.phase, UpstreamFailurePhase::TimedOut);
+        assert_eq!(
+            failure.settled_units(&hundred_token_estimate()),
+            estimated_input
+        );
+
+        let (url, requests) = raw_upstream(200, RawEnding::StallBody);
+        let response = client
+            .post(format!("{url}/v1/chat/completions"))
+            .json(&json!({}))
+            .send()
+            .await
+            .unwrap();
+        let status = response.status();
+        assert_eq!(status, StatusCode::OK);
+        let error = response.bytes().await.unwrap_err();
+        assert!(error.is_timeout() && !error.is_connect(), "{error:?}");
+        assert_eq!(requests.load(Ordering::SeqCst), 1);
+        let failure = UpstreamFailure::from_client_error(error, Some(status));
+        assert_eq!(failure.phase, UpstreamFailurePhase::TimedOut);
+        assert_eq!(
+            failure.settled_units(&hundred_token_estimate()),
+            estimated_input
+        );
+    }
+
+    #[tokio::test]
+    async fn unreachable_upstream_settles_zero_units() {
+        let core = FakeCoreState::new("fpk_live_secret", 1_000_000);
+        let core_url = spawn(fake_core_router(core.clone())).await;
+        // A port that was just released refuses the connection. Another
+        // process can bind the released port before the limiter connects.
+        let closed = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let upstream_url = format!("http://{}", closed.local_addr().unwrap());
+        drop(closed);
+        let config = test_config(core_url, upstream_url);
+
+        let (settlement, metrics) = settlement_after_failed_upstream(&core, config, false).await;
+        assert_one_outcome(&metrics, "upstream_error");
+        assert_eq!(settlement["usageUnits"], 0);
+    }
+
+    #[tokio::test]
+    async fn upstream_connect_stall_settles_zero_units() {
+        // Bound both calls and the async test, so a broken fixture fails the
+        // test instead of hanging it.
+        timeout(Duration::from_secs(10), async {
+            let core = FakeCoreState::new("fpk_live_secret", 1_000_000);
+            let core_url = spawn(fake_core_router(core.clone())).await;
+            let upstream_url = silent_tls_upstream();
+
+            // The TLS handshake stalls inside the connector, so the connect
+            // timeout ends the attempt. That error reports both a connection
+            // failure and a timeout, and classifies as a connection failure.
+            let error = reqwest::Client::builder()
+                .connect_timeout(Duration::from_millis(100))
+                .timeout(Duration::from_secs(5))
+                .build()
+                .unwrap()
+                .post(format!("{upstream_url}/v1/chat/completions"))
+                .send()
+                .await
+                .unwrap_err();
+            assert!(error.is_connect() && error.is_timeout(), "{error:?}");
+            let failure = UpstreamFailure::from_client_error(error, None);
+            assert_eq!(failure.phase, UpstreamFailurePhase::ConnectFailed);
+
+            // A 400 ms first-byte budget is below the shared 10 s connect
+            // timeout. The limiter derives a 200 ms upstream connect timeout,
+            // which ends the stalled handshake before the first-byte deadline.
+            let mut config = test_config(core_url, upstream_url);
+            config.upstream_first_byte_timeout = Duration::from_millis(400);
+            let (settlement, metrics) =
+                settlement_after_failed_upstream(&core, config, false).await;
+            assert_one_outcome(&metrics, "upstream_error");
+            assert_eq!(settlement["usageUnits"], 0);
+        })
+        .await
+        .expect("the stalled-connect test finished within 10 s");
+    }
+
+    #[tokio::test]
+    async fn streaming_first_byte_timeout_settles_estimated_input() {
+        let core = FakeCoreState::new("fpk_live_secret", 1_000_000);
+        let core_url = spawn(fake_core_router(core.clone())).await;
+        let upstream = FakeUpstreamState::new();
+        upstream.delay_first_byte_ms.store(5_000, Ordering::SeqCst);
+        let upstream_url = spawn(fake_upstream_router(upstream.clone())).await;
+        let config = test_config(core_url, upstream_url);
+
+        let (settlement, metrics) = settlement_after_failed_upstream(&core, config, true).await;
+        // The upstream handler received the whole request, and its configured
+        // header delay is 5 s.
+        assert_eq!(upstream.received.load(Ordering::SeqCst), 1);
+        assert_eq!(upstream.calls.load(Ordering::SeqCst), 0);
+        assert_one_outcome(&metrics, "upstream_timeout");
+        // Only the estimated input is charged.
+        assert_eq!(settlement["usageUnits"], usage_units(100, 0, DEFAULT_MODEL));
+    }
+
+    #[tokio::test]
+    async fn non_streaming_first_byte_timeout_settles_estimated_input() {
+        let core = FakeCoreState::new("fpk_live_secret", 1_000_000);
+        let core_url = spawn(fake_core_router(core.clone())).await;
+        let upstream = FakeUpstreamState::new();
+        upstream.delay_first_byte_ms.store(5_000, Ordering::SeqCst);
+        let upstream_url = spawn(fake_upstream_router(upstream.clone())).await;
+        let config = test_config(core_url, upstream_url);
+
+        let (settlement, metrics) = settlement_after_failed_upstream(&core, config, false).await;
+        assert_eq!(upstream.received.load(Ordering::SeqCst), 1);
+        assert_eq!(upstream.calls.load(Ordering::SeqCst), 0);
+        assert_one_outcome(&metrics, "upstream_timeout");
+        assert_eq!(settlement["usageUnits"], usage_units(100, 0, DEFAULT_MODEL));
+    }
+
+    /// Config for raw-upstream tests. The first-byte deadline only bounds a
+    /// broken fixture; the response head arrives at once.
+    fn body_phase_config(core_url: String, upstream_url: String) -> LimiterConfig {
+        let mut config = test_config(core_url, upstream_url);
+        config.upstream_first_byte_timeout = Duration::from_secs(5);
+        config.upstream_body_timeout = Duration::from_millis(200);
+        config
+    }
+
+    #[tokio::test]
+    async fn non_streaming_body_timeout_settles_estimated_input() {
+        let core = FakeCoreState::new("fpk_live_secret", 1_000_000);
+        let core_url = spawn(fake_core_router(core.clone())).await;
+        let (upstream_url, requests) = raw_upstream(200, RawEnding::StallBody);
+        let config = body_phase_config(core_url, upstream_url);
+
+        let (settlement, metrics) = settlement_after_failed_upstream(&core, config, false).await;
+        assert_eq!(requests.load(Ordering::SeqCst), 1);
+        assert_one_outcome(&metrics, "upstream_timeout");
+        assert_eq!(settlement["usageUnits"], usage_units(100, 0, DEFAULT_MODEL));
+    }
+
+    #[tokio::test]
+    async fn error_status_with_stalled_or_failed_body_settles_zero_units() {
+        for (ending, phase, outcome) in [
+            (
+                RawEnding::StallBody,
+                UpstreamFailurePhase::TimedOut,
+                "upstream_timeout",
+            ),
+            (
+                RawEnding::CloseInBody,
+                UpstreamFailurePhase::TransportFailed,
+                "upstream_error",
+            ),
+        ] {
+            let core = FakeCoreState::new("fpk_live_secret", 1_000_000);
+            let core_url = spawn(fake_core_router(core.clone())).await;
+            let (upstream_url, requests) = raw_upstream(500, ending);
+            let mut config = body_phase_config(core_url, upstream_url.clone());
+            if matches!(ending, RawEnding::CloseInBody) {
+                // The body deadline only bounds a broken fixture here.
+                config.upstream_body_timeout = Duration::from_secs(5);
+            }
+
+            let (settlement, metrics) =
+                settlement_after_failed_upstream(&core, config, false).await;
+            assert_eq!(requests.load(Ordering::SeqCst), 1);
+            assert_one_outcome(&metrics, outcome);
+            assert_eq!(settlement["usageUnits"], 0, "{outcome}");
+
+            if matches!(ending, RawEnding::CloseInBody) {
+                // The same fixture's body error carries the 500 status.
+                let failure = classified_raw_failure(&upstream_url).await;
+                assert_eq!(failure.phase, phase);
+                assert_eq!(failure.status, Some(StatusCode::INTERNAL_SERVER_ERROR));
+            }
+        }
+    }
+
+    /// Owner confirmation pending. A transport failure with no status or a
+    /// 2xx status settles at estimated input, so these requests stay visible
+    /// to the Runaway Guard. Flipping this rule changes the `TransportFailed`
+    /// arm of `UpstreamFailure::settled_units` and this test.
+    #[tokio::test]
+    async fn transport_failure_without_error_status_settles_estimated_input() {
+        for (ending, status) in [
+            (RawEnding::CloseBeforeHead, None),
+            (RawEnding::CloseInBody, Some(StatusCode::OK)),
+        ] {
+            let core = FakeCoreState::new("fpk_live_secret", 1_000_000);
+            let core_url = spawn(fake_core_router(core.clone())).await;
+            let (upstream_url, requests) = raw_upstream(200, ending);
+            let mut config = body_phase_config(core_url, upstream_url.clone());
+            // Both deadlines only bound a broken fixture here.
+            config.upstream_body_timeout = Duration::from_secs(5);
+
+            let (settlement, metrics) =
+                settlement_after_failed_upstream(&core, config, false).await;
+            assert_eq!(requests.load(Ordering::SeqCst), 1);
+            assert_one_outcome(&metrics, "upstream_error");
+            assert_eq!(settlement["usageUnits"], usage_units(100, 0, DEFAULT_MODEL));
+
+            let failure = classified_raw_failure(&upstream_url).await;
+            assert_eq!(failure.phase, UpstreamFailurePhase::TransportFailed);
+            assert_eq!(failure.status, status);
+        }
     }
 
     #[tokio::test]
@@ -3004,6 +3537,69 @@ mod tests {
             settlements[0]["upstreamErrorClass"],
             "client_disconnected_or_stream_cancelled"
         );
+    }
+
+    #[tokio::test]
+    async fn stream_client_disconnect_after_tool_name_settles_generated_name() {
+        let core = FakeCoreState::new("fpk_live_secret", 1_000_000);
+        let core_url = spawn(fake_core_router(core.clone())).await;
+        // The fixture streams one name-only tool-call delta and then holds the
+        // stream open until the limiter drops it.
+        let upstream_url = spawn(Router::new().route(
+            "/v1/chat/completions",
+            post(|| async {
+                let stream = async_stream::stream! {
+                    yield Ok::<Bytes, std::io::Error>(Bytes::from_static(
+                        b"data: {\"id\":\"chatcmpl_tool\",\"model\":\"glm-5-2\",\"choices\":[{\"index\":0,\"delta\":{\"role\":\"assistant\",\"tool_calls\":[{\"index\":0,\"id\":\"call_0123456789abcdef\",\"type\":\"function\",\"function\":{\"name\":\"approve\",\"arguments\":\"\"}}]}}]}\n\n",
+                    ));
+                    std::future::pending::<()>().await;
+                };
+                ([("content-type", "text/event-stream")], Body::from_stream(stream))
+            }),
+        ))
+        .await;
+        let mut config = test_config(core_url, upstream_url);
+        config.usage_api_timeout = Duration::from_secs(2);
+        config.upstream_first_byte_timeout = Duration::from_secs(2);
+        config.upstream_stream_idle_timeout = Duration::from_secs(10);
+        let limiter_url = spawn(app(config).unwrap()).await;
+
+        let response = reqwest::Client::new()
+            .post(format!("{limiter_url}/v1/chat/completions"))
+            .bearer_auth("fpk_live_secret")
+            .json(&json!({
+                "model": "glm-5-2",
+                "stream": true,
+                "messages": [{ "role": "user", "content": "hello" }],
+                "max_tokens": 64
+            }))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        // Read until the whole name-only event has arrived, whatever the
+        // network chunking, then disconnect.
+        let mut stream = response.bytes_stream();
+        let mut received = String::new();
+        while !received.ends_with("}]}}]}\n\n") {
+            let chunk = stream.next().await.unwrap().unwrap();
+            received.push_str(&String::from_utf8_lossy(&chunk));
+        }
+        assert!(received.contains("\"name\":\"approve\""));
+        drop(stream);
+
+        wait_for(|| core.settlements.lock().unwrap().len() == 1).await;
+        let settlements = core.settlements.lock().unwrap();
+        assert_eq!(settlements[0]["settlement"], "estimate");
+        assert_eq!(
+            settlements[0]["upstreamErrorClass"],
+            "client_disconnected_or_stream_cancelled"
+        );
+        // The client received the model's decision, so the settlement carries
+        // an output charge above the input alone.
+        let units = settlements[0]["usageUnits"].as_i64().unwrap();
+        assert!(units > usage_units(1, 0, DEFAULT_MODEL));
+        assert_eq!(units, usage_units(1, 2, DEFAULT_MODEL));
     }
 
     #[tokio::test]
@@ -3521,6 +4117,9 @@ mod tests {
     #[derive(Clone)]
     struct FakeUpstreamState {
         health_ok: Arc<AtomicBool>,
+        /// Requests the handler received, counted before any delay.
+        received: Arc<AtomicUsize>,
+        /// Requests answered with headers, counted after the first-byte delay.
         calls: Arc<AtomicUsize>,
         bodies: Arc<Mutex<Vec<Bytes>>>,
         delay_first_byte_ms: Arc<AtomicUsize>,
@@ -3533,6 +4132,7 @@ mod tests {
         fn new() -> Self {
             Self {
                 health_ok: Arc::new(AtomicBool::new(true)),
+                received: Arc::new(AtomicUsize::new(0)),
                 calls: Arc::new(AtomicUsize::new(0)),
                 bodies: Arc::new(Mutex::new(Vec::new())),
                 delay_first_byte_ms: Arc::new(AtomicUsize::new(0)),
@@ -3570,6 +4170,7 @@ mod tests {
                 .and_then(|value| value.to_str().ok()),
             Some("Bearer vllm-secret")
         );
+        state.received.fetch_add(1, Ordering::SeqCst);
         let delay = state.delay_first_byte_ms.load(Ordering::SeqCst);
         if delay > 0 {
             sleep(Duration::from_millis(delay as u64)).await;
