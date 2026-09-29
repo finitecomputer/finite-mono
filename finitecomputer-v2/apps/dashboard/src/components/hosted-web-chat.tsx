@@ -162,6 +162,8 @@ type PreviewSite = {
   url: string;
 };
 
+const SLASH_HIGHLIGHT_RESET = { query: "", index: 0, moved: false };
+
 export function HostedWebChat({
   initialDraft,
   machineId,
@@ -223,7 +225,7 @@ export function HostedWebChat({
   );
   const [slashDismissed, setSlashDismissed] = useState(false);
   const [pastedDraft, setPastedDraft] = useState<string | null>(null);
-  const [slashHighlight, setSlashHighlight] = useState({ query: "", index: 0, moved: false });
+  const [slashHighlight, setSlashHighlight] = useState(SLASH_HIGHLIGHT_RESET);
   const slashHighlightCurrent = slashHighlight.query === slashText;
   const slashIndex = slashHighlightCurrent
     ? Math.min(slashHighlight.index, Math.max(0, slashMatches.length - 1))
@@ -641,6 +643,7 @@ export function HostedWebChat({
 
   function insertSlashCommand(command: SlashCommand) {
     const next = `/${command.name} `;
+    setSlashHighlight(SLASH_HIGHLIGHT_RESET);
     setDraft(next);
     noteTyping(next);
     requestAnimationFrame(() => {
@@ -693,6 +696,7 @@ export function HostedWebChat({
       }
       const refusal = sendError(next);
       if (refusal) throw new Error(refusal);
+      setSlashHighlight(SLASH_HIGHLIGHT_RESET);
       setDraft("");
       setAttachments((current) => {
         current.forEach(revokeAttachmentPreview);
@@ -1255,12 +1259,17 @@ export function HostedWebChat({
                       disabled={!connected || sending}
                       rows={1}
                       onBlur={() => stopTyping(selectedRoom?.room_id)}
-                      onChange={(event) => {
+                      onInput={(event) => {
                         const { inputType } = event.nativeEvent as InputEvent;
-                        setPastedDraft(isPastedInput(inputType) ? event.target.value : null);
-                        if (slashDismissed && !keepSlashDismissed(draft, event.target.value)) {
+                        setPastedDraft(isPastedInput(inputType) ? event.currentTarget.value : null);
+                        if (slashDismissed && !keepSlashDismissed(draft, event.currentTarget.value)) {
                           setSlashDismissed(false);
                         }
+                        // Input also fires when pasted text equals the selection;
+                        // React's change event skips that unchanged value.
+                        setSlashHighlight(SLASH_HIGHLIGHT_RESET);
+                      }}
+                      onChange={(event) => {
                         setDraft(event.target.value);
                         noteTyping(event.target.value);
                       }}

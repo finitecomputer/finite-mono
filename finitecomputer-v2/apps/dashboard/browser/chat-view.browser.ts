@@ -48,6 +48,54 @@ test("chat history stays scoped to each tab across freeze, reconnect, and old-se
     await a.goto(`${base}/dashboard/machines/runtime_web_design/chat`);
     const history = a.getByText("I kept this conversation after the local dashboard restarted.", { exact: true });
     await history.waitFor();
+    await t.test("a previous slash selection cannot capture the next exact command", async () => {
+      const composer = a.getByRole("textbox", { name: "Message your agent" });
+      const sent: string[] = [];
+      const recordSend = (request: import("playwright").Request) => {
+        if (!request.url().endsWith("/actions") || request.method() !== "POST") return;
+        const action = request.postDataJSON();
+        if (action?.SendChatMessage) sent.push(action.SendChatMessage.text);
+      };
+      a.on("request", recordSend);
+      try {
+        await composer.fill("");
+        await composer.pressSequentially("/stop");
+        await a.getByRole("listbox").waitFor();
+        await composer.press("ArrowDown");
+        await composer.press("Enter");
+        assert.equal(await composer.inputValue(), "/stop ");
+        assert.deepEqual(sent, [], "choosing a command must only insert it");
+        await composer.press("Enter");
+        await a.waitForFunction(() => document.querySelector("textarea")?.value === "");
+        assert.deepEqual(sent, ["/stop"]);
+
+        await composer.pressSequentially("/stop");
+        await composer.press("Enter");
+        await a.waitForFunction(() => document.querySelector("textarea")?.value === "", undefined, { timeout: 3_000 });
+        assert.deepEqual(sent, ["/stop", "/stop"], "retyping an exact command must send on the first Enter");
+
+        // Leaving and returning to the same query must also discard arrow intent.
+        await composer.pressSequentially("/stop");
+        await composer.press("ArrowDown");
+        await composer.press("Backspace");
+        await composer.pressSequentially("p");
+        await composer.press("Enter");
+        await a.waitForFunction(() => document.querySelector("textarea")?.value === "", undefined, { timeout: 3_000 });
+        assert.deepEqual(sent, ["/stop", "/stop", "/stop"]);
+
+        // Replacing selected text with identical clipboard text emits input,
+        // but React suppresses change because the value has not changed.
+        await composer.pressSequentially("/qu");
+        await composer.press("ArrowDown");
+        await composer.dispatchEvent("input", { inputType: "insertFromPaste", bubbles: true });
+        assert.equal(await a.getByRole("listbox").count(), 0);
+        await composer.press("Enter");
+        await a.waitForFunction(() => document.querySelector("textarea")?.value === "", undefined, { timeout: 3_000 });
+        assert.deepEqual(sent, ["/stop", "/stop", "/stop", "/qu"]);
+      } finally {
+        a.off("request", recordSend);
+      }
+    });
     const cdp = await context.newCDPSession(a);
     await cdp.send("Page.setWebLifecycleState", { state: "frozen" });
     const b = await context.newPage();

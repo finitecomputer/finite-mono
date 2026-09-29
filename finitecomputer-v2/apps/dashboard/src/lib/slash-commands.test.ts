@@ -247,6 +247,18 @@ test("restricted detection uses Python whitespace to strip and split", () => {
   assert.equal(restrictedSlashCommand("/debug\ufeffanything"), null);
 });
 
+test("existing loops can be inspected or stopped without allowing creation or resume", () => {
+  for (const space of PYTHON_WHITESPACE) {
+    for (const verb of ["status", "pause", "stop", "clear", "cancel"]) {
+      assert.equal(restrictedSlashCommand(`${space}/PROACTIVE@bot${space}${verb.toUpperCase()}${space}`), null);
+    }
+  }
+  for (const text of ["/loop resume", "/loop 5m /status", "/loop stop now", "/loop stop\ufeff"]) {
+    assert.equal(restrictedSlashCommand(text)?.name, "loop", JSON.stringify(text));
+  }
+  assert.equal(slashPickerVisible("/loop stop", { dismissed: false, pastedDraft: null }), false);
+});
+
 test("slashQuery ends the command token at Python whitespace", () => {
   for (const space of PYTHON_WHITESPACE) {
     assert.equal(slashQuery(`/qu${space}`), null, hex(space));

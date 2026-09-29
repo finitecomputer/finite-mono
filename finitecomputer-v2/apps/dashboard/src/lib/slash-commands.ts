@@ -352,6 +352,10 @@ const PY_SPACE =
   "\\t\\n\\v\\f\\r\\x1c-\\x1f \\x85\\xa0\\u1680\\u2000-\\u200a\\u2028\\u2029\\u202f\\u205f\\u3000";
 const SLASH_QUERY = new RegExp(`^/([^${PY_SPACE}/]*)$`);
 const COMMAND_TOKEN = new RegExp(`^[${PY_SPACE}]*/([^${PY_SPACE}]+)`);
+const LOOP_STOP_OR_STATUS = new RegExp(
+  `^[${PY_SPACE}]*(?:status|pause|stop|clear|cancel)[${PY_SPACE}]*$`,
+  "i"
+);
 const INSERTED_COMMAND = new RegExp(`^/([^${PY_SPACE}/]+) $`);
 
 const LISTED_COMMANDS = SLASH_COMMANDS
@@ -393,11 +397,17 @@ export function findSlashCommand(name: string): SlashCommand | null {
  * `@bot` suffix dropped, underscores equal to hyphens.
  */
 export function restrictedSlashCommand(text: string): SlashCommand | null {
-  const token = COMMAND_TOKEN.exec(text)?.[1];
-  if (!token) return null;
+  const match = COMMAND_TOKEN.exec(text);
+  if (!match) return null;
+  const token = match[1];
   const name = token.split("@", 1)[0];
   if (!name || name.includes("/")) return null;
   const command = findSlashCommand(name);
+  // Existing loops survive upgrades. Keep their inspection/shut-off controls
+  // reachable without allowing creation or resumption of recurring work.
+  if (command?.name === "loop" && LOOP_STOP_OR_STATUS.test(text.slice(match[0].length))) {
+    return null;
+  }
   return command?.tier === "restricted" ? command : null;
 }
 
