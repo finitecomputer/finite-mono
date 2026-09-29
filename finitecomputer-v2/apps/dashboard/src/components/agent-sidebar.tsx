@@ -35,12 +35,14 @@ import type {
   HostedChatSummary,
   HostedChatTopic,
 } from "@/lib/hosted-web-device";
+import { dashboardChatSurfaceFromPath } from "@/lib/dashboard-chat-route";
 import { canonicalNewChatTopic, HOME_TOPIC_ID } from "@/lib/hosted-web-chat-topics";
 
 const subscribeHydration = () => () => undefined;
 
 export function AgentSidebar({
   collapsed,
+  isAdmin = false,
   machineId,
   machineLabel,
   machineSwitcher,
@@ -50,6 +52,7 @@ export function AgentSidebar({
   viewerEmail,
 }: {
   collapsed: boolean;
+  isAdmin?: boolean;
   machineId: string;
   machineLabel: string;
   machineSwitcher: ReactNode;
@@ -64,6 +67,7 @@ export function AgentSidebar({
     state,
     transportError,
     sessionError,
+    supportsChatArchive: transportSupportsArchive = true,
     bindingRecoveryRequired,
     load,
     recoverBinding,
@@ -77,7 +81,7 @@ export function AgentSidebar({
     () => false
   );
   // The hosted web runtime always supports the durable chat archive.
-  const supportsChatArchive = hydrated;
+  const supportsChatArchive = hydrated && transportSupportsArchive;
   const [busy, setBusy] = useState(false);
   const [actionError, setActionError] = useState<string | null>(null);
   const [createTopicOpen, setCreateTopicOpen] = useState(false);
@@ -116,16 +120,21 @@ export function AgentSidebar({
       const navigatesAfterSuccess =
         "CreateTopic" in action || "StartTopicChatIntent" in action;
       const preservesMobileSidebar = "CreateTopic" in action;
+      // Stay on whichever chat surface is mounted (Finite Chat or Hermes).
+      const onChatSurface = dashboardChatSurfaceFromPath(pathname) !== null;
+      const chatPath = `/dashboard/machines/${encodeURIComponent(machineId)}/${
+        dashboardChatSurfaceFromPath(pathname) ?? "chat"
+      }`;
       const pending = dispatch(action);
-      if (canNavigateImmediately && !pathname.endsWith("/chat")) {
-        router.push(`/dashboard/machines/${encodeURIComponent(machineId)}/chat`);
+      if (canNavigateImmediately && !onChatSurface) {
+        router.push(chatPath);
       }
       if (canNavigateImmediately) onMobileOpenChange(false);
       const next = await pending;
       setActionError(null);
       if (navigatesAfterSuccess) {
-        if (!pathname.endsWith("/chat")) {
-          router.push(`/dashboard/machines/${encodeURIComponent(machineId)}/chat`);
+        if (!onChatSurface) {
+          router.push(chatPath);
         }
         if (!preservesMobileSidebar) onMobileOpenChange(false);
       }
@@ -275,6 +284,7 @@ export function AgentSidebar({
         <nav className="finite-chat__sidebar-nav" aria-label="Agent, topics, and chats">
           <AgentNavigation
             machineId={machineId}
+            showHermesChat={isAdmin}
             onNavigate={() => onMobileOpenChange(false)}
           />
           <div className="finite-chat__sidebar-section-row">

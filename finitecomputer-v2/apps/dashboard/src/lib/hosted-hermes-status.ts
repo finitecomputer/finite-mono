@@ -84,7 +84,12 @@ export async function changeHostedHermesAccess(access: HostedHermesAccess, enabl
 /** One operation, one account-authorized grant. Credentials live only in this
  * call. A caller changing accounts/agents aborts its signal; no shared browser
  * token cache can carry authorization across that switch. */
-export async function readHostedHermesJson(runtimeId: string, path: string, signal: AbortSignal): Promise<unknown> {
+export async function readHostedHermesJson(
+  runtimeId: string,
+  path: string,
+  signal: AbortSignal,
+  options: { query?: Record<string, string | number | boolean>; maxBytes?: number } = {},
+): Promise<unknown> {
   if (path !== "api/skills?inventory=true" && (!/^api\/[a-zA-Z0-9_/-]+$/.test(path) || path.includes("//"))) {
     throw new HostedHermesStatusError("Invalid agent API path.");
   }
@@ -94,7 +99,11 @@ export async function readHostedHermesJson(runtimeId: string, path: string, sign
         method: "POST", signal: requestSignal,
       }));
       requestSignal.throwIfAborted();
-      const response = await fetch(new URL(path, grant.baseUrl), {
+      const url = new URL(path, grant.baseUrl);
+      for (const [key, value] of Object.entries(options.query ?? {})) {
+        url.searchParams.set(key, String(value));
+      }
+      const response = await fetch(url, {
         credentials: "omit", cache: "no-store", redirect: "error",
         referrerPolicy: "no-referrer", signal: requestSignal,
         headers: { authorization: `Bearer ${grant.accessToken}` },
@@ -115,7 +124,7 @@ export async function readHostedHermesJson(runtimeId: string, path: string, sign
         }
         throw new HostedHermesStatusError("Agent access is unavailable. Try again.");
       }
-      const result = await boundedJson(response, "unsupported");
+      const result = await boundedJson(response, "unsupported", options.maxBytes);
       requestSignal.throwIfAborted();
       return result;
     }
@@ -123,11 +132,53 @@ export async function readHostedHermesJson(runtimeId: string, path: string, sign
   });
 }
 
+export type HostedHermesGatewaySocket = { url: string; protocols: string[] };
+
+/** One WebSocket connection, one account-authorized grant and one single-use
+ * native ticket. The ticket rides the subprotocol list so it never appears in
+ * a URL; reconnects must call this again. */
+export async function mintHostedHermesGatewaySocket(
+  runtimeId: string,
+  signal: AbortSignal,
+): Promise<HostedHermesGatewaySocket> {
+  return bounded(signal, async (requestSignal) => {
+    const grant = parseHostedHermesSession(await controlRequest(runtimeId, {
+      method: "POST", signal: requestSignal,
+    }));
+    requestSignal.throwIfAborted();
+    const response = await fetch(new URL("api/auth/ws-ticket", grant.baseUrl), {
+      method: "POST", credentials: "omit", cache: "no-store", redirect: "error",
+      referrerPolicy: "no-referrer", signal: requestSignal,
+      headers: { authorization: `Bearer ${grant.accessToken}` },
+    });
+    if (!response.ok) {
+      await response.body?.cancel();
+      throw new HostedHermesStatusError(
+        [401, 403].includes(response.status)
+          ? "Access to this agent is no longer available."
+          : "Agent chat is unavailable. Try again.",
+        [401, 403].includes(response.status) ? "access" : "request",
+      );
+    }
+    const ticket = record(await boundedJson(response)).ticket;
+    if (typeof ticket !== "string" || !/^[A-Za-z0-9_-]{16,512}$/.test(ticket)) {
+      throw new HostedHermesStatusError("Agent returned an incompatible chat ticket.", "unsupported");
+    }
+    const url = new URL("api/ws", grant.baseUrl);
+    url.protocol = "wss:";
+    return { url: url.href, protocols: ["hermes-gateway-v1", `hermes-gateway-ticket.${ticket}`] };
+  });
+}
+
 export async function readHostedHermesStatus(runtimeId: string, signal: AbortSignal): Promise<HostedHermesStatus> {
   return parseHostedHermesStatus(await readHostedHermesJson(runtimeId, "api/status", signal));
 }
 
-async function boundedJson(response: Response, invalidKind: "request" | "unsupported" = "request"): Promise<unknown> {
+async function boundedJson(
+  response: Response,
+  invalidKind: "request" | "unsupported" = "request",
+  maxBytes = 1024 * 1024,
+): Promise<unknown> {
   const reader = response.body?.getReader();
   if (!reader) throw new HostedHermesStatusError("Agent returned an empty response.", invalidKind);
   const chunks: Uint8Array[] = [];
@@ -137,7 +188,7 @@ async function boundedJson(response: Response, invalidKind: "request" | "unsuppo
       const { done, value } = await reader.read();
       if (done) break;
       size += value.length;
-      if (size > 1024 * 1024) throw new HostedHermesStatusError("Agent response is too large.", invalidKind);
+      if (size > maxBytes) throw new HostedHermesStatusError("Agent response is too large.", invalidKind);
       chunks.push(value);
     }
     const data = new Uint8Array(size);

@@ -9,6 +9,7 @@ import {
   CreditCardIcon,
   Globe2Icon,
   LogOutIcon,
+  MessagesSquareIcon,
   MoreHorizontalIcon,
   PlugIcon,
   WrenchIcon,
@@ -28,9 +29,12 @@ import { cn } from "@/lib/utils";
 export function AgentNavigation({
   machineId,
   onNavigate,
+  showHermesChat = false,
 }: {
   machineId: string;
   onNavigate?: () => void;
+  /** Admin preview of chat over the agent's native Hermes server. */
+  showHermesChat?: boolean;
 }) {
   const pathname = usePathname() ?? "";
   const root = `/dashboard/machines/${encodeURIComponent(machineId)}`;
@@ -66,6 +70,14 @@ export function AgentNavigation({
       icon: WrenchIcon,
       active: pathname === "/dashboard/skills",
     },
+    ...(showHermesChat
+      ? [{
+          label: "Hermes chat",
+          href: `${root}/hermes-chat`,
+          icon: MessagesSquareIcon,
+          active: pathname === `${root}/hermes-chat`,
+        }]
+      : []),
   ];
 
   return (
