@@ -78,7 +78,10 @@ export function OpenRouterConnection({
       route: "openrouter",
       retryModel: submit === "store" ? undefined : model,
     });
-    if (outcome.ok) setKeyFormOpen(false);
+    if (outcome.ok) {
+      setKeyFormOpen(false);
+      setDisconnect(null);
+    }
   }
 
   async function confirmRemoval() {
@@ -488,6 +491,9 @@ function OpenRouterLinks({ keyHash }: { keyHash: string | null }) {
 }
 
 export function OpenRouterRemoved({ view, keyHash }: { view: InferenceView; keyHash: string | null }) {
+  // A new stored key supersedes this page's earlier removal. Environment
+  // credentials can intentionally remain after disconnect and are explained below.
+  if (view.openrouter.state === "key_saved" && view.openrouter.keySource !== "environment") return null;
   return (
     <div className="grid gap-1 text-sm" role="status" aria-live="polite" data-testid="inference-openrouter-removed">
       <p>

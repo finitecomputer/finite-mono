@@ -2226,6 +2226,14 @@ test("Connections inference flows", { timeout: 300_000 }, async () => {
       await expectTestIdText(page, "inference-summary", "New conversations use Finite Private · glm-5-3-flash.");
       await expectTestIdText(page, "inference-openrouter-state", "Not connected");
 
+      // A synchronous reconnect leaves the last completed operation in status.
+      // Its old removal notice must not contradict the newly saved key.
+      await pasteKey();
+      await expectTestIdText(page, "inference-openrouter-state", "Key saved");
+      await expectTestIdText(page, "inference-summary", "New conversations use OpenRouter · openai/gpt-5-mini.");
+      assert.equal(operationId(), disconnectId, "v1 reconnect does not create another operation");
+      await testId("inference-openrouter-removed").waitFor({ state: "hidden" });
+
       // a PR1 agent that couldn't confirm its facts says so, asks for no repair, and keeps its controls.
       hostedDevice.setInferenceAgent("pr1", "openrouter", { unconfirmed: true });
       await page.goto(connectionsUrl);

@@ -504,6 +504,16 @@ test("after a disconnect, the revoke link uses the captured key, and an environm
   assert.match(text(environment), /This agent still gets an OpenRouter key from its environment, so OpenRouter can still be used\./u);
 });
 
+test("a newly stored OpenRouter key supersedes an earlier removal notice", () => {
+  for (const keySource of ["agent", "legacy_config"]) {
+    const markup = html(createElement(OpenRouterRemoved, {
+      view: view(v2({ routes: { openrouter: { ...KEY_SAVED, key_source: keySource } } })),
+      keyHash: KEY_HASH,
+    }));
+    assert.equal(markup, "", keySource);
+  }
+});
+
 function operationLine(op: Inference, options: { showDone?: boolean; pollExpired?: boolean; retry?: boolean } = {}) {
   return html(createElement(OperationLine, {
     view: view(v2({ saved: SAVED_OR, routes: { openrouter: KEY_SAVED }, operation: op })),
