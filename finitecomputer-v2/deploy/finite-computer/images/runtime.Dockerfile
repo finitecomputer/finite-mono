@@ -6,6 +6,9 @@
 # pin), parsed and passed as RUST_TOOLCHAIN by build_runtime_image.py; this
 # Dockerfile carries no version string of its own.
 ARG RUST_TOOLCHAIN
+# Selects the final stage below. Only build_runtime_image.py
+# --requester-diagnostics sets "on", for a non-production diagnostic canary.
+ARG REQUESTER_DIAGNOSTICS=off
 FROM rust:${RUST_TOOLCHAIN}-trixie AS finite-rust-builder
 WORKDIR /build
 RUN apt-get update \
@@ -27,7 +30,7 @@ RUN cargo build --locked --release \
       --package finitechat-cli \
       --package finite-brain-cli
 
-FROM python:3.13-slim-trixie
+FROM python:3.13-slim-trixie AS runtime
 # No default: build_runtime_image.py stamps this from the flake.lock pin.
 ARG HERMES_AGENT_VERSION
 ARG HERMES_AGENT_STORE_PATH
@@ -180,3 +183,13 @@ EXPOSE 8080
 HEALTHCHECK --interval=30s --timeout=5s --start-period=45s --retries=3 CMD ["/runtime/healthcheck.sh"]
 ENTRYPOINT ["/opt/agent-entrypoint.sh"]
 CMD ["/runtime/bin/finite-agentd", "serve"]
+
+# A normal build ends on the runtime stage unchanged. The diagnostic canary
+# adds the Brain requester-lease probe (FIN-117) and a label that names it.
+FROM runtime AS runtime-requester-diagnostics-off
+
+FROM runtime AS runtime-requester-diagnostics-on
+LABEL computer.finite.runtime.diagnostic="brain-requester-lease"
+ENV FINITECHAT_REQUESTER_DIAGNOSTICS=1
+
+FROM runtime-requester-diagnostics-${REQUESTER_DIAGNOSTICS}
