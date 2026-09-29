@@ -71,7 +71,7 @@ test("chat history stays scoped to each tab across freeze, reconnect, and old-se
 
         await composer.pressSequentially("/stop");
         await composer.press("Enter");
-        await a.waitForFunction(() => document.querySelector("textarea")?.value === "", undefined, { timeout: 3_000 });
+        await a.waitForFunction(() => document.querySelector("textarea")?.value === "");
         assert.deepEqual(sent, ["/stop", "/stop"], "retyping an exact command must send on the first Enter");
 
         // Leaving and returning to the same query must also discard arrow intent.
@@ -80,7 +80,7 @@ test("chat history stays scoped to each tab across freeze, reconnect, and old-se
         await composer.press("Backspace");
         await composer.pressSequentially("p");
         await composer.press("Enter");
-        await a.waitForFunction(() => document.querySelector("textarea")?.value === "", undefined, { timeout: 3_000 });
+        await a.waitForFunction(() => document.querySelector("textarea")?.value === "");
         assert.deepEqual(sent, ["/stop", "/stop", "/stop"]);
 
         // Replacing selected text with identical clipboard text emits input,
@@ -92,7 +92,7 @@ test("chat history stays scoped to each tab across freeze, reconnect, and old-se
         ));
         assert.equal(await a.getByRole("listbox").count(), 0);
         await composer.press("Enter");
-        await a.waitForFunction(() => document.querySelector("textarea")?.value === "", undefined, { timeout: 3_000 });
+        await a.waitForFunction(() => document.querySelector("textarea")?.value === "");
         assert.deepEqual(sent, ["/stop", "/stop", "/stop", "/qu"]);
       } finally {
         a.off("request", recordSend);
