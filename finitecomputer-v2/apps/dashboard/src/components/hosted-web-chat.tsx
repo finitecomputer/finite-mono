@@ -1141,6 +1141,26 @@ export function HostedWebChat({
                 ) : null}
               </div>
 
+              {/* Opens upward from above the chat alert, so it never covers it. */}
+              {slashPickerOpen ? (
+                <div className="finite-chat__slash-anchor">
+                  <SlashCommandPicker
+                    listboxId={slashListboxId}
+                    query={slashText ?? ""}
+                    commands={slashMatches}
+                    highlighted={slashIndex}
+                    enterInserts={slashEnterInsertsHighlight}
+                    blocked={slashBlocked}
+                    onHighlight={(index) => setSlashHighlight({
+                      query: slashText ?? "",
+                      index,
+                      moved: slashHighlightCurrent && slashHighlight.moved,
+                    })}
+                    onInsert={insertSlashCommand}
+                  />
+                </div>
+              ) : null}
+
               {showLatest ? (
                 <button
                   type="button"
@@ -1228,22 +1248,6 @@ export function HostedWebChat({
                         </div>
                       ))}
                     </div>
-                  ) : null}
-                  {slashPickerOpen ? (
-                    <SlashCommandPicker
-                      listboxId={slashListboxId}
-                      query={slashText ?? ""}
-                      commands={slashMatches}
-                      highlighted={slashIndex}
-                      enterInserts={slashEnterInsertsHighlight}
-                      blocked={slashBlocked}
-                      onHighlight={(index) => setSlashHighlight({
-                        query: slashText ?? "",
-                        index,
-                        moved: slashHighlightCurrent && slashHighlight.moved,
-                      })}
-                      onInsert={insertSlashCommand}
-                    />
                   ) : null}
                   <div className="finite-chat__composer-input">
                     <textarea

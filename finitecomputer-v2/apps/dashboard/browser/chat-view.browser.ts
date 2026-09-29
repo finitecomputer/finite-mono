@@ -94,6 +94,32 @@ test("chat history stays scoped to each tab across freeze, reconnect, and old-se
         await composer.press("Enter");
         await a.waitForFunction(() => document.querySelector("textarea")?.value === "");
         assert.deepEqual(sent, ["/stop", "/stop", "/stop", "/qu"]);
+
+        // A refused exact command keeps its draft, so the picker stays open
+        // and must sit above the refusal at desktop and phone widths.
+        const refuseSend = (route: import("playwright").Route) =>
+          route.request().postDataJSON()?.SendChatMessage
+            ? route.fulfill({ status: 400, json: { error: "Sending is paused." } })
+            : route.fallback();
+        await a.route("**/hosted-device/actions", refuseSend);
+        try {
+          for (const width of [1440, 390]) {
+            await a.setViewportSize({ width, height: width === 390 ? 844 : 1000 });
+            await composer.pressSequentially("/stop");
+            await composer.press("Enter");
+            const alert = a.locator(".finite-chat__send-error[role=alert]");
+            await alert.getByText("Sending is paused.").waitFor();
+            const pickerBox = await a.locator(".finite-chat__slash").boundingBox();
+            const alertBox = await alert.boundingBox();
+            assert(pickerBox && alertBox, `picker and alert render at ${width}px`);
+            assert(pickerBox.y + pickerBox.height <= alertBox.y, `the picker must not cover the alert at ${width}px`);
+            await alert.getByRole("button", { name: "Dismiss" }).click();
+            await composer.fill("");
+          }
+        } finally {
+          await a.unroute("**/hosted-device/actions", refuseSend);
+          await a.setViewportSize({ width: 1440, height: 1000 });
+        }
       } finally {
         a.off("request", recordSend);
       }
