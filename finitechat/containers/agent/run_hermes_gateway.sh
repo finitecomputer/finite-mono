@@ -60,6 +60,7 @@ managed_skills_dir="${agent_home}/managed-skills/finite/current"
 bundled_skills_dir="${FINITE_BUNDLED_SKILLS_DIR:-/runtime/finite-skills}"
 config_reconciler="${FINITE_HERMES_CONFIG_RECONCILER:-/opt/reconcile_hermes_config.py}"
 recover_chat_boot="${FINITE_RECOVER_CHAT_BOOT:-/opt/recover_chat_boot.py}"
+history_importer="${FINITE_HISTORY_IMPORTER:-/opt/import_finitechat_history.py}"
 
 export FINITECHAT_HOME="$agent_home"
 # Shared Finite identity on the durable mount (identity/identity.json).
@@ -213,6 +214,16 @@ if [[ "$recover_boot" -ne 1 ]]; then
         managed_skills_config_dir="$managed_skills_dir"
     fi
     run_config_reconciler
+    # One-time carry of Finite Chat titles and unseen chats into Hermes's
+    # session store while neither the gateway nor `hermes serve` is running.
+    # Best effort: it never fails boot and retries until its marker exists.
+    if [[ -f "$history_importer" && -f "${agent_home}/config.json" ]]; then
+        python "$history_importer" \
+            --agent-home "$agent_home" \
+            --hermes-home "$hermes_home" \
+            --finitechat-bin "$finitechat_bin" \
+            || echo "run_hermes_gateway: Finite Chat history import unavailable" >&2
+    fi
 fi
 
 if [[ "${1:-}" == "--prepare-only" ]]; then
