@@ -82,6 +82,8 @@ PROCESSING_ACTIVITY_TTL_MILLIS = 15 * 1000
 ADMISSION_RECHECK_SECS = 0.05
 ADMISSION_RETRY_SECS = 1.0
 ADMISSION_MAX_RETRY_SECS = 30.0
+REFUSAL_RETRY_SECS = 1.0
+REFUSAL_MAX_RETRY_SECS = 30.0
 DEFAULT_FINITE_PRIVATE_CONTROL_URL = "https://finite.computer/api/core/v1/finite-private"
 FINITE_PRIVATE_CONTROL_TIMEOUT_SECS = 5
 FINITECHAT_HOME_CHANNEL_ENV = "FINITECHAT_HOME_CHANNEL"
@@ -593,6 +595,14 @@ class FiniteChatAdapter(BasePlatformAdapter):
         self._user_interrupting_sessions: dict[str, list[MessageEvent]] = {}
         self._user_cancelled_tasks: weakref.WeakSet[asyncio.Task] = weakref.WeakSet()
         self._user_interrupt_boundaries: dict[str, tuple[str, int]] = {}
+        # A refused command whose reply failed retryably keeps its lease until
+        # a delayed release hands it back for redelivery; the delay doubles per
+        # event so a persistent failure cannot spin the inbound stream.
+        self._refusal_retry_delays: dict[str, float] = {}
+        self._refusal_releases: dict[str, tuple[asyncio.Task, str, Any, str]] = {}
+        # (session, command) pairs already told that a scheduled command was
+        # refused, so a persisted loop does not post a reply on every tick.
+        self._internal_refusals_sent: set[tuple[str, str]] = set()
 
     async def _process_message_background(
         self,
@@ -1201,7 +1211,9 @@ class FiniteChatAdapter(BasePlatformAdapter):
         if refusal is not None:
             # Before any busy defer, interrupt or admission: a restricted
             # command never reaches Hermes on either path.
-            await self._refuse_finitechat_command(event, refusal.text, room_id, seq, message_id)
+            await self._refuse_finitechat_command(
+                event, refusal, room_id, seq, message_id, event_key or message_id
+            )
             return
         if session_key in self._deferred_admissions and event.get_command() in {
             "stop",
@@ -1290,50 +1302,145 @@ class FiniteChatAdapter(BasePlatformAdapter):
     async def _refuse_finitechat_command(
         self,
         event: MessageEvent,
-        text: str,
+        refusal: Any,
         room_id: str,
         seq: Any,
         message_id: str,
+        event_key: str,
     ) -> None:
         """Answer a restricted command on the event's route, then settle it.
 
-        The refusal is the command's whole outcome, so the lease is acked even
-        if the reply fails to send: releasing it would only redeliver the same
-        refusal. No session, activity, or admission state is touched.
+        No session, activity, or admission state is touched. A retryable send
+        failure keeps the lease and releases it after a backoff so redelivery
+        retries the refusal; a non-retryable one is logged and acked, because
+        redelivery would fail the same way. Cancellation settles nothing and
+        the lease's expiry redelivers the command.
         """
-        raw_event = event.raw_message if isinstance(event.raw_message, dict) else {}
-        metadata: dict[str, Any] = {
-            "_finitechat_kind": "message",
-            "_finitechat_status": "complete",
-        }
-        if event.source.thread_id:
-            metadata["thread_id"] = event.source.thread_id
-        metadata.update(
-            self._route_metadata(
-                _string_or_none(raw_event.get("conversation_id")),
-                _string_or_none(raw_event.get("segment_id")),
+        logger.info("[finitechat] refused /%s in %s/%s", refusal.command, room_id, seq)
+        result = await self._send_refusal(event, refusal.text, reply_to=message_id)
+        if not result.success and result.retryable:
+            logger.warning(
+                "[finitechat] command refusal for %s/%s not delivered, retrying: %s",
+                room_id,
+                seq,
+                result.error,
             )
-            or {}
+            self._schedule_refusal_release(event_key, room_id, seq, message_id)
+            return
+        if not result.success:
+            logger.warning(
+                "[finitechat] command refusal for %s/%s not deliverable, settling: %s",
+                room_id,
+                seq,
+                result.error,
+            )
+        self._refusal_retry_delays.pop(event_key, None)
+        # Delivery is at least once: if this ack fails, or cancellation lands
+        # between the send and the ack, the lease expires and the redelivered
+        # command is refused again, so the user can see the refusal twice. A
+        # reply and an inbox ack are separate sidecar writes with no shared
+        # transaction; a duplicate refusal is preferred to a lost one.
+        await self._ack_finitechat_event(room_id, seq, message_id)
+
+    async def _send_refusal(
+        self, event: MessageEvent, text: str, *, reply_to: str | None
+    ) -> SendResult:
+        raw_event = event.raw_message if isinstance(event.raw_message, dict) else {}
+        # Same route as the Finite Private usage notice: the exact Topic/Chat
+        # from the inbound event. A bare thread id only when the event has
+        # neither, since the sidecar promotes a thread id to a chat id when a
+        # conversation is present.
+        route = self._route_metadata(
+            _string_or_none(raw_event.get("conversation_id")),
+            _string_or_none(raw_event.get("segment_id")),
         )
+        thread_id = _string_or_none(getattr(event.source, "thread_id", None))
+        metadata: dict[str, Any] = dict(route or ({"thread_id": thread_id} if thread_id else {}))
+        metadata["_finitechat_kind"] = "message"
+        metadata["_finitechat_status"] = "complete"
         try:
-            result = await self.send(
-                chat_id=str(event.source.chat_id or room_id),
+            return await self.send(
+                chat_id=str(event.source.chat_id or raw_event.get("room_id") or self.room_id),
                 content=text,
-                reply_to=message_id,
+                reply_to=reply_to,
                 metadata=metadata,
             )
-            if not result.success:
-                logger.warning(
-                    "[finitechat] could not deliver command refusal for %s/%s: %s",
-                    room_id,
-                    seq,
-                    result.error,
-                )
-        except Exception:
-            logger.exception(
-                "[finitechat] could not deliver command refusal for %s/%s", room_id, seq
+        except Exception as exc:
+            logger.exception("[finitechat] command refusal send raised")
+            return SendResult(success=False, error=str(exc), retryable=True)
+
+    def _schedule_refusal_release(
+        self, event_key: str, room_id: str, seq: Any, message_id: str
+    ) -> None:
+        delay = self._refusal_retry_delays.get(event_key, REFUSAL_RETRY_SECS)
+        self._refusal_retry_delays[event_key] = min(delay * 2, REFUSAL_MAX_RETRY_SECS)
+        task = asyncio.create_task(
+            self._release_refusal_after(delay, event_key, room_id, seq, message_id)
+        )
+        self._refusal_releases[event_key] = (task, room_id, seq, message_id)
+
+    async def _release_refusal_after(
+        self, delay: float, event_key: str, room_id: str, seq: Any, message_id: str
+    ) -> None:
+        try:
+            await asyncio.sleep(delay)
+            await self._release_finitechat_event(room_id, seq, message_id)
+        finally:
+            # Shutdown must still own and join a task blocked in the release
+            # request, not only one waiting for the backoff timer.
+            if self._refusal_releases.get(event_key, (None,))[0] is asyncio.current_task():
+                self._refusal_releases.pop(event_key, None)
+
+    async def _cancel_refusal_releases(self) -> None:
+        pending = list(self._refusal_releases.values())
+        self._refusal_releases.clear()
+        for task, _room_id, _seq, _message_id in pending:
+            task.cancel()
+        if pending:
+            await asyncio.gather(*(task for task, *_ in pending), return_exceptions=True)
+        for _task, room_id, seq, message_id in pending:
+            await self._release_finitechat_event(room_id, seq, message_id)
+
+    async def handle_message(self, event: MessageEvent) -> None:
+        """Hold internally dispatched commands to the same slash policy.
+
+        Hermes re-dispatches persisted work (a restored /loop tick, a watch
+        notification) straight into this method, never through the Finite
+        inbox, so ``_handle_finitechat_event`` cannot see it. A refused
+        internal command is logged on every attempt and answered at most once
+        per session and command, so a loop that fires every few minutes does
+        not flood the chat. The loop itself is left in place for its owner.
+        """
+        if event.internal and _SLASH_POLICY is not None:
+            refusal = _SLASH_POLICY.evaluate(event)
+            if refusal is not None:
+                await self._refuse_internal_command(event, refusal)
+                return
+        await super().handle_message(event)
+
+    async def _refuse_internal_command(self, event: MessageEvent, refusal: Any) -> None:
+        session_key = build_session_key(
+            event.source,
+            group_sessions_per_user=self.config.extra.get("group_sessions_per_user", True),
+            thread_sessions_per_user=self.config.extra.get("thread_sessions_per_user", False),
+        )
+        logger.info(
+            "[finitechat] refused scheduled /%s for session %s", refusal.command, session_key
+        )
+        notice_key = (session_key, refusal.command)
+        if notice_key in self._internal_refusals_sent:
+            return
+        text = (
+            f"A scheduled /{refusal.command} was skipped. {refusal.text} "
+            "If a loop is running it, send /loop stop to turn the loop off."
+        )
+        result = await self._send_refusal(event, text, reply_to=None)
+        if result.success:
+            self._internal_refusals_sent.add(notice_key)
+        else:
+            logger.warning(
+                "[finitechat] could not deliver scheduled command refusal: %s", result.error
             )
-        await self._ack_finitechat_event(room_id, seq, message_id)
 
     async def _hydrate_hermes_home_channel_if_needed(self) -> None:
         if self._home_channel_hydrated:
@@ -1524,6 +1631,7 @@ class FiniteChatAdapter(BasePlatformAdapter):
         for queue in admissions:
             for _event, room_id, seq, message_id, _event_key in queue.values():
                 await self._release_finitechat_event(room_id, seq, message_id)
+        await self._cancel_refusal_releases()
 
     async def _set_processing_activity(
         self,

@@ -4,20 +4,30 @@ Finite Chat hands every inbound event to Hermes through
 ``_handle_finitechat_event``. A restricted command (``/update``, ``/restart``,
 ``/loop`` and the rest of ``slash_policy.json``) must be answered there with a
 durable refusal on the event's own route and settled, before Hermes sees it on
-either the idle or the busy path. Everything else must reach Hermes unchanged.
+either the idle or the busy path. Owner ``quick_commands`` aliases resolve
+before the check, and internally dispatched commands (a persisted ``/loop``
+restored after a restart) meet the same policy. Everything else must reach
+Hermes unchanged.
 
 These tests drive the real pinned ``MessageEvent``, command registry, plaintext
-coercion, and ``BasePlatformAdapter`` dispatch. Only the sidecar and the turn
-handler are simulated.
+coercion, quick-command expansion, loop watcher, and ``BasePlatformAdapter``
+dispatch. Only the sidecar and, where noted, the turn handler are simulated.
 """
+
+import os
+import tempfile
+
+# Importing gateway modules reads HERMES_HOME. Never let a run load ~/.hermes.
+if not os.environ.get("HERMES_HOME"):
+    os.environ["HERMES_HOME"] = tempfile.mkdtemp(prefix="finite-slash-hermes-home-")
 
 import asyncio
 import importlib.util
 import json
 import logging
-import os
+import runpy
+import shutil
 import sys
-import tempfile
 import unittest
 from pathlib import Path
 from typing import Any
@@ -29,6 +39,7 @@ from gateway.platforms.base import MessageEvent, MessageType
 from gateway.run import GatewayRunner
 from gateway.session import SessionSource
 from hermes_cli import commands as hermes_commands
+from hermes_cli.loops import LoopManager, load_loop, save_loop
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 PLUGIN_DIR = REPO_ROOT / "integrations" / "hermes" / "finitechat"
@@ -85,6 +96,9 @@ REFUSED_TEXT = {
     "/reload_mcp": "reload-mcp",
     "/loop 30s /restart": "loop",
     "/proactive 5m check mail": "loop",
+    "/loop resume": "loop",
+    "/loop help": "loop",
+    "/loop stop now": "loop",
     "/restart": "restart",
     "restart hermes": "restart",
     "Please restart the gateway.": "restart",
@@ -111,7 +125,29 @@ PASSED_TEXT = (
     "/my-custom-skill do the thing",
     "/status",
     "/model",
+    "/loop",
+    "/loop stop",
+    "/LOOP Stop",
+    "/loop status",
+    "/loop pause",
+    "/loop clear",
+    "/loop cancel",
+    "/proactive stop",
 )
+QUICK_COMMANDS = {
+    "again": {"type": "alias", "target": "/restart"},
+    "diag": {"type": "alias", "target": "/debug"},
+    "double": {"type": "alias", "target": "//restart"},
+    "triple": {"type": "alias", "target": "///debug"},
+    "repeat": {"type": "alias", "target": "/loop 30s /restart"},
+    "up": {"type": "alias", "target": "update"},
+    "chain": {"type": "alias", "target": "/again"},
+    "stoploop": {"type": "alias", "target": "/loop stop"},
+    "fine": {"type": "alias", "target": "/status"},
+    "skill": {"type": "alias", "target": "/my-custom-skill"},
+    "uptime": {"type": "exec", "command": "uptime"},
+    "empty": {"type": "alias", "target": ""},
+}
 
 
 def load_module(name: str, path: Path) -> Any:
@@ -203,7 +239,7 @@ class PolicyDataTests(unittest.TestCase):
                 self.assertIn(entry["tier"], TIERS)
                 if entry["tier"] in {"restricted", "not_recommended"}:
                     self.assertTrue(entry.get("reason", "").strip())
-                self.assertNotIn("\u2014", entry.get("reason", ""))
+                self.assertNotIn("—", entry.get("reason", ""))
 
     def test_restricted_set_matches_the_catalog(self):
         restricted = {name for name, entry in self.policy.items() if entry["tier"] == "restricted"}
@@ -216,72 +252,120 @@ class EvaluateTests(unittest.TestCase):
     def setUp(self):
         self.policy = load_policy_module()
 
+    def evaluate(self, text: str, **kwargs: Any) -> Any:
+        return self.policy.evaluate(message_event(text), quick_commands=kwargs.get("quick", {}))
+
     def test_restricted_commands_are_refused_by_canonical_name(self):
         for text, expected in REFUSED_TEXT.items():
-            if expected is None:
-                continue
             with self.subTest(text=text):
-                refusal = self.policy.evaluate(message_event(text))
+                refusal = self.evaluate(text)
                 self.assertIsNotNone(refusal)
                 self.assertEqual(refusal.command, expected)
                 self.assertTrue(refusal.text.startswith(f"/{expected} isn't available"))
-                self.assertNotIn("\u2014", refusal.text)
+                self.assertNotIn("—", refusal.text)
 
     def test_refusal_text_carries_the_catalog_reason(self):
-        refusal = self.policy.evaluate(message_event("/update"))
+        refusal = self.evaluate("/update")
         self.assertEqual(
             refusal.text,
             "/update isn't available in Finite chat. "
             "Finite manages your agent's software and restarts.",
         )
-        generic = self.policy.evaluate(message_event("/rollback"))
+        generic = self.evaluate("/rollback")
         self.assertEqual(generic.text, "/rollback isn't available in Finite chat.")
 
     def test_evaluation_does_not_rewrite_the_event(self):
         event = message_event("restart hermes")
-        self.assertIsNotNone(self.policy.evaluate(event))
+        self.assertIsNotNone(self.policy.evaluate(event, quick_commands={}))
         self.assertEqual(event.text, "restart hermes")
+        alias = message_event("/again now")
+        self.assertIsNotNone(self.policy.evaluate(alias, quick_commands=QUICK_COMMANDS))
+        self.assertEqual(alias.text, "/again now")
 
     def test_everything_else_passes(self):
         for text in PASSED_TEXT:
             with self.subTest(text=text):
-                self.assertIsNone(self.policy.evaluate(message_event(text)))
+                self.assertIsNone(self.evaluate(text))
 
     def test_group_plaintext_restart_is_ordinary_conversation(self):
-        self.assertIsNone(self.policy.evaluate(message_event("restart hermes", chat_type="group")))
+        event = message_event("restart hermes", chat_type="group")
+        self.assertIsNone(self.policy.evaluate(event, quick_commands={}))
 
     def test_photo_caption_without_a_command_passes(self):
         event = message_event("what is in this picture?", message_type=MessageType.PHOTO)
-        self.assertIsNone(self.policy.evaluate(event))
+        self.assertIsNone(self.policy.evaluate(event, quick_commands={}))
 
     def test_events_without_gateway_control_pass(self):
         event = message_event("/update", allow_gateway_control=False)
-        self.assertIsNone(self.policy.evaluate(event))
+        self.assertIsNone(self.policy.evaluate(event, quick_commands={}))
+
+    def test_quick_command_aliases_resolve_before_the_policy(self):
+        refused = {
+            "/again": "restart",
+            "/diag local": "debug",
+            "/double": "restart",
+            "/triple local": "debug",
+            "/repeat": "loop",
+            "/up": "update",
+            "/chain": "restart",
+            "/AGAIN@finite_bot": "restart",
+        }
+        for text, expected in refused.items():
+            with self.subTest(text=text):
+                refusal = self.evaluate(text, quick=QUICK_COMMANDS)
+                self.assertIsNotNone(refusal)
+                self.assertEqual(refusal.command, expected)
+        for text in ("/stoploop", "/fine", "/skill go", "/uptime", "/empty", "/unknown"):
+            with self.subTest(text=text):
+                self.assertIsNone(self.evaluate(text, quick=QUICK_COMMANDS))
+
+    def test_registry_commands_are_never_shadowed_by_quick_commands(self):
+        shadow = {"stop": {"type": "alias", "target": "/restart"}}
+        self.assertIsNone(self.evaluate("/stop", quick=shadow))
+
+    def test_quick_commands_come_from_the_live_gateway_runner(self):
+        with tempfile.TemporaryDirectory() as home:
+            runner = GatewayRunner(
+                GatewayConfig(sessions_dir=Path(home) / "sessions", quick_commands=QUICK_COMMANDS)
+            )
+            try:
+                refusal = self.policy.evaluate(message_event("/again"))
+                self.assertIsNotNone(refusal)
+                self.assertEqual(refusal.command, "restart")
+            finally:
+                runner.close_all_session_db_handles()
+                runner.session_store.close_all_db_handles()
+                runner._shutdown_executor()
 
     def test_untiered_gateway_command_fails_closed(self):
         with patch.dict(self.policy._policy(), {}, clear=True):
-            refusal = self.policy.evaluate(message_event("/status"))
+            refusal = self.evaluate("/status")
         self.assertIsNotNone(refusal)
         self.assertEqual(refusal.command, "status")
 
-    def test_loop_is_refused_even_if_retiered(self):
+    def test_loop_creation_is_refused_even_if_retiered(self):
         with patch.dict(self.policy._policy(), {"loop": {"tier": "available"}}):
-            self.assertIsNotNone(self.policy.evaluate(message_event("/loop 5m /status")))
+            self.assertIsNotNone(self.evaluate("/loop 5m /status"))
+            self.assertIsNotNone(self.evaluate("/loop resume"))
+            self.assertIsNone(self.evaluate("/loop stop"))
 
-    def test_pause_off_passes_even_if_pause_is_restricted(self):
+    def test_pause_resume_verbs_pass_even_if_pause_is_restricted(self):
         restricted = {"tier": "restricted", "reason": "x"}
         with patch.dict(self.policy._policy(), {"pause": restricted}):
-            self.assertIsNone(self.policy.evaluate(message_event("/pause off")))
-            self.assertIsNotNone(self.policy.evaluate(message_event("/pause now")))
+            for verb in ("off", "resume", "stop", "disengage", "OFF", " Resume "):
+                with self.subTest(verb=verb):
+                    self.assertIsNone(self.evaluate(f"/pause {verb}"))
+            self.assertIsNotNone(self.evaluate("/pause now"))
+            self.assertIsNotNone(self.evaluate("/pause"))
 
     def test_missing_coercion_helper_degrades_and_logs_once(self):
         with (
             patch.object(hermes_base, "coerce_plaintext_gateway_command", None),
             self.assertLogs(self.policy.logger, logging.WARNING) as logs,
         ):
-            self.assertIsNone(self.policy.evaluate(message_event("restart hermes")))
-            self.assertIsNone(self.policy.evaluate(message_event("restart hermes")))
-            self.assertIsNotNone(self.policy.evaluate(message_event("/update")))
+            self.assertIsNone(self.evaluate("restart hermes"))
+            self.assertIsNone(self.evaluate("restart hermes"))
+            self.assertIsNotNone(self.evaluate("/update"))
         self.assertEqual(len(logs.records), 1)
 
     def test_missing_registry_resolver_allows_and_logs_once(self):
@@ -289,32 +373,142 @@ class EvaluateTests(unittest.TestCase):
             patch.object(hermes_commands, "resolve_command", None),
             self.assertLogs(self.policy.logger, logging.WARNING) as logs,
         ):
-            self.assertIsNone(self.policy.evaluate(message_event("/update")))
-            self.assertIsNone(self.policy.evaluate(message_event("/stop")))
+            self.assertIsNone(self.evaluate("/update"))
+            self.assertIsNone(self.evaluate("/stop"))
         self.assertEqual(len(logs.records), 1)
 
-    def test_unreadable_policy_allows_and_logs_once(self):
+    def assert_load_failure(self, content: str) -> None:
+        with (
+            tempfile.TemporaryDirectory() as scratch,
+            self.assertLogs(self.policy.logger, logging.ERROR) as logs,
+        ):
+            path = Path(scratch) / "slash_policy.json"
+            path.write_text(content, encoding="utf-8")
+            with patch.object(self.policy, "POLICY_PATH", path):
+                self.policy._policy.cache_clear()
+                self.assertIsNone(self.policy._policy())
+                self.assertIsNone(self.evaluate("/update"))
+                self.assertIsNone(self.evaluate("/stop"))
+                with self.assertRaises(RuntimeError):
+                    self.policy.self_check()
+            self.policy._policy.cache_clear()
+        self.assertEqual(len(logs.records), 1)
+
+    def test_unreadable_policy_is_a_load_failure(self):
         with (
             tempfile.TemporaryDirectory() as scratch,
             patch.object(self.policy, "POLICY_PATH", Path(scratch) / "missing.json"),
             self.assertLogs(self.policy.logger, logging.ERROR) as logs,
         ):
             self.policy._policy.cache_clear()
-            self.assertIsNone(self.policy.evaluate(message_event("/update")))
-            self.assertIsNone(self.policy.evaluate(message_event("/stop")))
+            self.assertIsNone(self.evaluate("/update"))
+            self.assertIsNone(self.evaluate("/stop"))
         self.assertEqual(len(logs.records), 1)
+
+    def test_empty_or_malformed_policy_is_a_load_failure(self):
+        shipped = json.loads(POLICY_DATA_PATH.read_text(encoding="utf-8"))
+        bad_tier = {**shipped, "status": {"tier": "sometimes"}}
+        bad_reason = {**shipped, "update": {"tier": "restricted", "reason": 7}}
+        extra_key = {**shipped, "status": {"tier": "suggested", "label": "x"}}
+        for content in (
+            "",
+            "{}",
+            "[]",
+            "not json",
+            json.dumps({"update": "restricted"}),
+            json.dumps(bad_tier),
+            json.dumps(bad_reason),
+            json.dumps(extra_key),
+        ):
+            with self.subTest(content=content[:40]):
+                self.assert_load_failure(content)
+
+    def test_policy_that_restricts_an_escape_hatch_is_a_load_failure(self):
+        shipped = json.loads(POLICY_DATA_PATH.read_text(encoding="utf-8"))
+        for name in ("stop", "new", "approve", "deny"):
+            with self.subTest(name=name, change="restricted"):
+                restricted = {**shipped, name: {"tier": "restricted", "reason": "x"}}
+                self.assert_load_failure(json.dumps(restricted))
+            with self.subTest(name=name, change="missing"):
+                missing = {key: value for key, value in shipped.items() if key != name}
+                self.assert_load_failure(json.dumps(missing))
+
+    def test_self_check_passes_for_the_shipped_policy(self):
+        summary = self.policy.self_check()
+        self.assertIn("68 commands", summary)
+        self.assertIn(f"{len(RESTRICTED)} restricted", summary)
+
+
+class RuntimeImageCheckTests(unittest.TestCase):
+    """The runtime image runs this exact check (runtime-image.yml).
+
+    ``runpy`` loads ``adapter.py`` outside its package, as the image check
+    does; a missing or failing policy must fail the check, never pass it.
+    """
+
+    def run_image_check(self, plugin_dir: Path) -> Any:
+        adapter = runpy.run_path(str(plugin_dir / "adapter.py"))
+        policy = adapter["_SLASH_POLICY"]
+        assert policy is not None, "slash policy did not load"
+        return policy.self_check()
+
+    def copy_plugin(self, scratch: str, *, skip: str) -> Path:
+        plugin_dir = Path(scratch) / "finitechat"
+        plugin_dir.mkdir()
+        for name in ("adapter.py", "slash_policy.py", "slash_policy.json"):
+            if name != skip:
+                shutil.copy(PLUGIN_DIR / name, plugin_dir / name)
+        return plugin_dir
+
+    def test_shipped_plugin_passes_the_image_check(self):
+        self.assertIn("68 commands", self.run_image_check(PLUGIN_DIR))
+
+    def test_missing_policy_data_fails_the_image_check(self):
+        with tempfile.TemporaryDirectory() as scratch:
+            plugin_dir = self.copy_plugin(scratch, skip="slash_policy.json")
+            with self.assertRaises(RuntimeError), self.assertLogs(level=logging.ERROR):
+                self.run_image_check(plugin_dir)
+
+    def test_missing_policy_module_fails_the_image_check(self):
+        with tempfile.TemporaryDirectory() as scratch:
+            plugin_dir = self.copy_plugin(scratch, skip="slash_policy.py")
+            with self.assertRaises(AssertionError), self.assertLogs(level=logging.ERROR):
+                self.run_image_check(plugin_dir)
+
+    def test_image_workflow_runs_the_check(self):
+        workflow = (REPO_ROOT.parent / ".github" / "workflows" / "runtime-image.yml").read_text(
+            encoding="utf-8"
+        )
+        self.assertIn('policy = adapter["_SLASH_POLICY"]', workflow)
+        self.assertIn("policy.self_check()", workflow)
 
 
 class PolicyHarness:
-    """Real pinned gateway + adapter; simulated sidecar and turn handler."""
+    """Real pinned gateway + adapter; simulated sidecar.
 
-    def __init__(self, home: str):
+    With ``real_runner`` the Hermes ``GatewayRunner._handle_message`` pipeline
+    handles admitted events (quick-command expansion, loop commands), with
+    the restricted handlers replaced by sentinels. Otherwise a stand-in turn
+    handler records what Hermes received.
+    """
+
+    def __init__(
+        self,
+        home: str,
+        *,
+        quick_commands: dict[str, Any] | None = None,
+        real_runner: bool = False,
+    ):
         self.module = load_module("finitechat_pinned_slash_adapter_under_test", ADAPTER_PATH)
+        self.module.REFUSAL_RETRY_SECS = 0.01
+        self.module.REFUSAL_MAX_RETRY_SECS = 0.04
         config = PlatformConfig(enabled=True, extra={"home": home, "room_id": ROOM_ID})
         config.typing_indicator = False
         self.adapter = self.module.FiniteChatAdapter(config)
         self.adapter._home_channel_hydrated = True
-        self.runner = GatewayRunner(GatewayConfig(sessions_dir=Path(home) / "sessions"))
+        self.runner = GatewayRunner(
+            GatewayConfig(sessions_dir=Path(home) / "sessions", quick_commands=quick_commands or {})
+        )
         self.runner._session_db = None
         self.runner._persist_active_agents = lambda: None
         self.runner.adapters[self.adapter.platform] = self.adapter
@@ -322,12 +516,19 @@ class PolicyHarness:
 
         self.inbox: dict[str, tuple[dict[str, Any], str]] = {}
         self.calls: list[tuple[str, dict[str, Any]]] = []
+        self.sent: list[dict[str, Any]] = []
+        self.send_behaviors: list[str] = []
+        self.ack_failures = 0
         self.admitted: list[str] = []
         self.handled: list[str] = []
+        self.sentinel_hits: list[tuple[str, str]] = []
         self.runs: list[str] = []
         self.started = asyncio.Event()
         self.adapter._finitechat_json = self._sidecar
-        self.adapter.set_message_handler(self._handle)
+        if real_runner:
+            self._install_real_runner()
+        else:
+            self.adapter.set_message_handler(self._handle)
         admit = self.adapter.handle_message
 
         async def recording_handle_message(event):
@@ -336,18 +537,52 @@ class PolicyHarness:
 
         self.adapter.handle_message = recording_handle_message
 
+    def _install_real_runner(self) -> None:
+        self.runner._is_user_authorized = lambda *_args, **_kwargs: True
+
+        def sentinel(name):
+            async def handler(event):
+                self.sentinel_hits.append((name, event.text))
+                return f"SENTINEL:{name}"
+
+            return handler
+
+        self.runner._handle_restart_command = sentinel("restart")
+        self.runner._handle_debug_command = sentinel("debug")
+        self.runner._handle_update_command = sentinel("update")
+        self.runner._handle_loop_command = sentinel("loop")
+        self.adapter.set_message_handler(self.runner._handle_message)
+        self.adapter.set_session_store(self.runner.session_store)
+        self.adapter.set_busy_session_handler(self.runner._handle_active_session_busy_message)
+
     async def _sidecar(self, action, payload, *, timeout):
         del timeout
         self.calls.append((action, payload))
+        if action == "send":
+            behavior = self.send_behaviors.pop(0) if self.send_behaviors else "ok"
+            if behavior == "retryable":
+                return self.module._FiniteChatResult(False, {}, "transient", True)
+            if behavior == "permanent":
+                return self.module._FiniteChatResult(False, {}, "rejected route", False)
+            if behavior == "raise":
+                raise RuntimeError("sidecar transport exploded")
+            self.sent.append(payload)
+            if behavior == "cancel-after-send":
+                raise asyncio.CancelledError
+            return self.module._FiniteChatResult(
+                True, {"message_id": f"reply-{len(self.sent)}"}, None, False
+            )
         if action in ("ack", "release"):
+            if action == "ack" and self.ack_failures:
+                self.ack_failures -= 1
+                return self.module._FiniteChatResult(False, {}, "ack not committed", True)
             raw, state = self.inbox[payload["message_id"]]
             if state == "leased":
                 self.inbox[payload["message_id"]] = (
                     raw,
                     "acked" if action == "ack" else "pending",
                 )
-        data = {"message_id": f"reply-{len(self.calls)}"} if action == "send" else {}
-        return self.module._FiniteChatResult(True, data, None, False)
+        return self.module._FiniteChatResult(True, {}, None, False)
 
     async def _handle(self, event):
         self.handled.append(event.text)
@@ -382,12 +617,17 @@ class PolicyHarness:
     def state(self, message_id: str) -> str:
         return self.inbox[message_id][1]
 
-    async def wait_all_settled(self) -> None:
-        async def settled():
-            while any(state == "leased" for _raw, state in self.inbox.values()):
+    async def wait_for(self, predicate, timeout: float = 5) -> None:
+        async def poll():
+            while not predicate():
                 await asyncio.sleep(0.01)
 
-        await asyncio.wait_for(settled(), 5)
+        await asyncio.wait_for(poll(), timeout)
+
+    async def wait_all_settled(self) -> None:
+        await self.wait_for(
+            lambda: not any(state == "leased" for _raw, state in self.inbox.values())
+        )
 
     def settlements(self, message_id: str) -> list[str]:
         return [
@@ -396,11 +636,8 @@ class PolicyHarness:
             if action in ("ack", "release") and payload.get("message_id") == message_id
         ]
 
-    def sends(self) -> list[dict[str, Any]]:
-        return [payload for action, payload in self.calls if action == "send"]
-
     def refusals(self) -> list[dict[str, Any]]:
-        return [send for send in self.sends() if "isn't available in Finite" in send["text"]]
+        return [send for send in self.sent if "isn't available in Finite" in send["text"]]
 
     async def close(self) -> None:
         await self.adapter._cancel_admission_tasks()
@@ -410,15 +647,16 @@ class PolicyHarness:
         self.runner._shutdown_executor()
 
 
-class AdapterRefusalTests(unittest.TestCase):
-    def run_scenario(self, scenario):
+class AdapterTestCase(unittest.TestCase):
+    def run_scenario(self, scenario, **harness_kwargs):
         with (
             tempfile.TemporaryDirectory(prefix="finite-slash-") as home,
             patch.dict(os.environ, {"HERMES_HOME": home}),
         ):
+            Path(home, "config.yaml").write_text("{}\n", encoding="utf-8")
 
             async def main():
-                harness = PolicyHarness(home)
+                harness = PolicyHarness(home, **harness_kwargs)
                 try:
                     await scenario(harness)
                 finally:
@@ -438,8 +676,10 @@ class AdapterRefusalTests(unittest.TestCase):
         self.assertEqual(refusal["status"], "complete")
         self.assertTrue(refusal["text"].startswith(f"/{command} isn't available"))
 
+
+class AdapterRefusalTests(AdapterTestCase):
     def test_idle_restricted_commands_are_refused_before_hermes(self):
-        cases = [(text, command) for text, command in REFUSED_TEXT.items() if command]
+        cases = list(REFUSED_TEXT.items())
 
         async def scenario(h: PolicyHarness):
             for seq, (text, command) in enumerate(cases, start=1):
@@ -461,6 +701,7 @@ class AdapterRefusalTests(unittest.TestCase):
             ("/codex_runtime auto", "codex-runtime"),
             ("/loop 30s /restart", "loop"),
             ("restart hermes", "restart"),
+            ("/again", "restart"),
         ]
 
         async def scenario(h: PolicyHarness):
@@ -479,7 +720,7 @@ class AdapterRefusalTests(unittest.TestCase):
             )
             self.assertEqual(h.adapter._deferred_admissions, {})
 
-        self.run_scenario(scenario)
+        self.run_scenario(scenario, quick_commands=QUICK_COMMANDS)
 
     def test_idle_ordinary_messages_and_allowed_commands_reach_hermes(self):
         texts = [
@@ -492,6 +733,7 @@ class AdapterRefusalTests(unittest.TestCase):
             "/pause off",
             "/always",
             "/cancel",
+            "/loop stop",
             "/my-custom-skill do the thing",
         ]
 
@@ -535,35 +777,287 @@ class AdapterRefusalTests(unittest.TestCase):
 
         self.run_scenario(scenario)
 
-    def test_busy_queue_and_pause_off_reach_hermes(self):
+    def test_busy_queue_pause_off_and_loop_stop_reach_hermes(self):
         async def scenario(h: PolicyHarness):
             await h.start_long_turn()
             await h.deliver(raw_event(2, "/queue then summarize it"))
-            await h.deliver(raw_event(3, "/pause off"))
+            await h.deliver(raw_event(3, "/pause resume"))
+            await h.deliver(raw_event(4, "/loop stop"))
             self.assertEqual(h.refusals(), [])
             self.assertEqual(
                 h.admitted,
-                ["long running work", "/queue then summarize it", "/pause off"],
+                ["long running work", "/queue then summarize it", "/pause resume", "/loop stop"],
             )
 
         self.run_scenario(scenario)
 
-    def test_failed_refusal_send_still_settles_once(self):
+
+class AdapterQuickCommandTests(AdapterTestCase):
+    def test_idle_aliases_to_restricted_commands_never_reach_their_handlers(self):
+        cases = [
+            ("/again", "restart"), ("/diag local", "debug"), ("/repeat", "loop"),
+            ("/double", "restart"), ("/triple local", "debug"),
+        ]
+
         async def scenario(h: PolicyHarness):
-            sidecar = h._sidecar
+            for seq, (text, command) in enumerate(cases, start=1):
+                await h.deliver(raw_event(seq, text))
+                with self.subTest(text=text):
+                    self.assert_refused(h, seq, command)
+            self.assertEqual(h.admitted, [])
+            self.assertEqual(h.sentinel_hits, [])
 
-            async def failing_send(action, payload, *, timeout):
-                if action == "send":
-                    h.calls.append((action, payload))
-                    return h.module._FiniteChatResult(False, {}, "unavailable", True)
-                return await sidecar(action, payload, timeout=timeout)
+        self.run_scenario(scenario, quick_commands=QUICK_COMMANDS, real_runner=True)
 
-            h.adapter._finitechat_json = failing_send
+    def test_alias_to_an_allowed_loop_verb_still_runs_through_hermes(self):
+        async def scenario(h: PolicyHarness):
+            await h.deliver(raw_event(1, "/stoploop"))
+            await h.wait_for(lambda: h.sentinel_hits)
+            self.assertEqual(h.sentinel_hits, [("loop", "/loop stop")])
+            self.assertEqual(h.refusals(), [])
+
+        self.run_scenario(scenario, quick_commands=QUICK_COMMANDS, real_runner=True)
+
+
+class AdapterSettlementTests(AdapterTestCase):
+    def test_retryable_send_failure_releases_after_backoff_then_redelivery_refuses(self):
+        async def scenario(h: PolicyHarness):
+            h.send_behaviors = ["retryable"]
             await h.deliver(raw_event(1, "/update"))
-            self.assertEqual(h.settlements("msg-1"), ["ack"])
+            await h.wait_for(lambda: h.state("msg-1") == "pending")
+            self.assertEqual(h.settlements("msg-1"), ["release"])
+            self.assertEqual(h.refusals(), [])
+
+            await h.deliver(raw_event(1, "/update"))
+            self.assertEqual(h.settlements("msg-1"), ["release", "ack"])
+            self.assertEqual(h.state("msg-1"), "acked")
+            self.assertEqual(len(h.refusals()), 1)
+            self.assertEqual(h.admitted, [])
+            self.assertEqual(h.adapter._refusal_retry_delays, {})
+
+        self.run_scenario(scenario)
+
+    def test_retry_backoff_doubles_and_is_bounded(self):
+        async def scenario(h: PolicyHarness):
+            key = h.module._adapter_event_key(ROOM_ID, 1, "msg-1")
+            delays = []
+            for _ in range(4):
+                h.send_behaviors = ["retryable"]
+                await h.deliver(raw_event(1, "/update"))
+                delays.append(h.adapter._refusal_retry_delays[key])
+                await h.wait_for(lambda: h.state("msg-1") == "pending")
+            self.assertEqual(delays, [0.02, 0.04, 0.04, 0.04])
+            self.assertEqual(h.settlements("msg-1"), ["release"] * 4)
+
+        self.run_scenario(scenario)
+
+    def test_send_exception_is_retried_like_a_retryable_failure(self):
+        async def scenario(h: PolicyHarness):
+            h.send_behaviors = ["raise"]
+            await h.deliver(raw_event(1, "/update"))
+            await h.wait_for(lambda: h.state("msg-1") == "pending")
+            self.assertEqual(h.settlements("msg-1"), ["release"])
             self.assertEqual(h.admitted, [])
 
         self.run_scenario(scenario)
+
+    def test_non_retryable_send_failure_is_logged_and_acked_once(self):
+        async def scenario(h: PolicyHarness):
+            h.send_behaviors = ["permanent"]
+            with self.assertLogs(h.module.logger, logging.WARNING) as logs:
+                await h.deliver(raw_event(1, "/update"))
+            self.assertEqual(h.settlements("msg-1"), ["ack"])
+            self.assertEqual(h.state("msg-1"), "acked")
+            self.assertTrue(any("rejected route" in line for line in logs.output))
+            self.assertEqual(h.admitted, [])
+
+        self.run_scenario(scenario)
+
+    def test_failed_ack_after_a_delivered_refusal_redelivers_at_least_once(self):
+        async def scenario(h: PolicyHarness):
+            h.ack_failures = 1
+            await h.deliver(raw_event(1, "/update"))
+            self.assertEqual(h.state("msg-1"), "leased")
+            self.assertEqual(len(h.refusals()), 1)
+
+            # Lease expiry redelivers the entry: the refusal is sent again.
+            await h.deliver(raw_event(1, "/update"))
+            self.assertEqual(h.state("msg-1"), "acked")
+            self.assertEqual(len(h.refusals()), 2)
+            self.assertEqual(h.settlements("msg-1"), ["ack", "ack"])
+
+        self.run_scenario(scenario)
+
+    def test_cancellation_during_send_leaves_the_lease_for_redelivery(self):
+        async def scenario(h: PolicyHarness):
+            h.send_behaviors = ["cancel-after-send"]
+            with self.assertRaises(asyncio.CancelledError):
+                await h.deliver(raw_event(1, "/update"))
+            self.assertEqual(h.settlements("msg-1"), [])
+            self.assertEqual(h.state("msg-1"), "leased")
+
+            await h.deliver(raw_event(1, "/update"))
+            self.assertEqual(h.settlements("msg-1"), ["ack"])
+            self.assertEqual(len(h.refusals()), 2)
+
+        self.run_scenario(scenario)
+
+    def test_shutdown_releases_a_refusal_waiting_to_retry(self):
+        async def scenario(h: PolicyHarness):
+            h.module.REFUSAL_RETRY_SECS = 60
+            h.send_behaviors = ["retryable"]
+            await h.deliver(raw_event(1, "/update"))
+            self.assertEqual(h.settlements("msg-1"), [])
+            await h.adapter._cancel_admission_tasks()
+            self.assertEqual(h.settlements("msg-1"), ["release"])
+            self.assertEqual(h.state("msg-1"), "pending")
+            self.assertEqual(h.adapter._refusal_releases, {})
+
+        self.run_scenario(scenario)
+
+    def test_shutdown_joins_a_refusal_release_already_in_progress(self):
+        async def scenario(h: PolicyHarness):
+            release_started = asyncio.Event()
+            release_blocked = asyncio.Event()
+            original_release = h.adapter._release_finitechat_event
+            calls = 0
+
+            async def stalled_release(*args):
+                nonlocal calls
+                calls += 1
+                if calls == 1:
+                    release_started.set()
+                    await release_blocked.wait()
+                await original_release(*args)
+
+            h.adapter._release_finitechat_event = stalled_release
+            h.send_behaviors = ["retryable"]
+            await h.deliver(raw_event(1, "/update"))
+            (release_task, *_), = h.adapter._refusal_releases.values()
+            await asyncio.wait_for(release_started.wait(), timeout=1)
+            await h.adapter._cancel_admission_tasks()
+            self.assertTrue(release_task.done(), "shutdown must join in-progress release tasks")
+            self.assertEqual(h.state("msg-1"), "pending")
+            self.assertEqual(h.settlements("msg-1"), ["release"])
+            self.assertEqual(h.adapter._refusal_releases, {})
+
+        self.run_scenario(scenario)
+
+
+class AdapterRouteTests(AdapterTestCase):
+    def test_refusal_without_a_segment_stays_on_the_topic_route(self):
+        async def scenario(h: PolicyHarness):
+            raw = raw_event(1, "/help")
+            raw["conversation_id"] = "topic-9"
+            del raw["segment_id"]
+            raw["source"]["thread_id"] = "topic-9"
+            await h.deliver(raw)
+            (refusal,) = h.refusals()
+            self.assertEqual(refusal["conversation_id"], "topic-9")
+            self.assertIsNone(refusal["segment_id"])
+            self.assertIsNone(refusal["thread_id"])
+            self.assertEqual(h.settlements("msg-1"), ["ack"])
+
+        self.run_scenario(scenario)
+
+    def test_refusal_without_a_route_uses_the_source_thread(self):
+        async def scenario(h: PolicyHarness):
+            raw = raw_event(1, "/help")
+            del raw["conversation_id"]
+            del raw["segment_id"]
+            raw["source"]["thread_id"] = "legacy-thread"
+            await h.deliver(raw)
+            (refusal,) = h.refusals()
+            self.assertIsNone(refusal["conversation_id"])
+            self.assertIsNone(refusal["segment_id"])
+            self.assertEqual(refusal["thread_id"], "legacy-thread")
+
+        self.run_scenario(scenario)
+
+
+class RestoredLoopTests(unittest.TestCase):
+    """A loop persisted before the upgrade re-fires through ``handle_message``."""
+
+    def test_restored_loop_ticks_are_refused_with_one_reply(self):
+        with (
+            tempfile.TemporaryDirectory(prefix="finite-slash-loop-") as home,
+            patch.dict(os.environ, {"HERMES_HOME": home}),
+        ):
+            Path(home, "config.yaml").write_text("{}\n", encoding="utf-8")
+            module = load_module("finitechat_pinned_slash_adapter_under_test", ADAPTER_PATH)
+            platform = module._finite_platform()
+            source = SessionSource(
+                platform=platform,
+                chat_id=ROOM_ID,
+                chat_type="dm",
+                user_id="alice",
+                thread_id="segment-1",
+            )
+            session_id = self.seed_loop(home, source)
+            asyncio.run(self.tick_twice(home, session_id))
+
+    @staticmethod
+    def seed_loop(home: str, source: SessionSource) -> str:
+        runner = GatewayRunner(GatewayConfig(sessions_dir=Path(home) / "sessions"))
+        try:
+            session_id = runner.session_store.get_or_create_session(source).session_id
+            LoopManager(session_id=session_id).set(
+                "/debug",
+                interval_seconds=30,
+                route={
+                    "platform": source.platform.value,
+                    "chat_id": source.chat_id,
+                    "chat_type": source.chat_type,
+                    "thread_id": source.thread_id or "",
+                    "user_id": source.user_id or "",
+                },
+            )
+        finally:
+            runner.close_all_session_db_handles()
+            runner.session_store.close_all_db_handles()
+            runner._shutdown_executor()
+        return session_id
+
+    async def tick_twice(self, home: str, session_id: str) -> None:
+        real_sleep = asyncio.sleep
+
+        async def fast_sleep(delay, *args, **kwargs):
+            return await real_sleep(min(delay, 0.01), *args, **kwargs)
+
+        h = PolicyHarness(home, real_runner=True)
+        h.runner._running = True
+        with (
+            patch("asyncio.sleep", fast_sleep),
+            self.assertLogs(h.module.logger, logging.INFO) as logs,
+        ):
+            watcher = asyncio.create_task(h.runner._loop_wakeup_watcher(interval=0.01))
+            try:
+
+                def ticks() -> int:
+                    state = load_loop(session_id)
+                    return state.ticks_fired if state else 0
+
+                await h.wait_for(lambda: ticks() >= 1 and h.sent)
+                state = load_loop(session_id)
+                assert state is not None
+                state.next_due_at = 0
+                save_loop(session_id, state)
+                await h.wait_for(lambda: ticks() >= 2)
+            finally:
+                h.runner._running = False
+                watcher.cancel()
+                await asyncio.gather(watcher, return_exceptions=True)
+                await h.close()
+
+        self.assertEqual(h.sentinel_hits, [])
+        (reply,) = h.sent
+        self.assertTrue(reply["text"].startswith("A scheduled /debug was skipped."), reply)
+        self.assertIn("/loop stop", reply["text"])
+        self.assertEqual(reply["thread_id"], "segment-1")
+        refused = [line for line in logs.output if "refused scheduled /debug" in line]
+        self.assertGreaterEqual(len(refused), 2)
+        restored = load_loop(session_id)
+        self.assertIsNotNone(restored, "refusing a tick never purges the owner's loop")
 
 
 if __name__ == "__main__":
