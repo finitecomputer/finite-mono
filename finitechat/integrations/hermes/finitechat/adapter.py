@@ -497,7 +497,11 @@ _REQUESTER_DIAGNOSTICS = _RequesterDiagnostics()
 
 
 def _requester_diagnostic(stage: str, gate: str = "") -> None:
-    _REQUESTER_DIAGNOSTICS.emit(stage, gate)
+    try:
+        _REQUESTER_DIAGNOSTICS.emit(stage, gate)
+    except Exception:
+        # This optional observation must never change turn or hook behavior.
+        pass
 
 
 class _RequesterContextBroker:

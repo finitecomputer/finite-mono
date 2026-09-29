@@ -941,19 +941,23 @@ class RequesterDiagnosticsTests(unittest.TestCase):
         assert match is not None
         self.assertLess(float(match.group(1)), STALL_SECS / 2)
 
-    def test_turn_resets_requester_context_even_if_emission_raises(self):
-        adapter = self.adapter()
-        event = self.authenticated_event()
+    def test_diagnostic_clock_failure_does_not_interrupt_the_turn(self):
+        self.enable()
+        with patch.object(self.module.time, "time", side_effect=OSError("clock unavailable")):
+            observed = self.run_turn(self.adapter(), self.authenticated_event())
+        self.assertEqual(observed, [(USER_ID, (EMAIL, ASSERTION)), (None, None)])
 
-        async def exercise():
-            with self.assertRaises(RuntimeError):
-                await adapter._process_message_background(event, SESSION_KEY)
-            return self.requester_binding()
-
-        with patch.object(
-            self.module, "_requester_diagnostic", side_effect=RuntimeError("probe bug")
-        ):
-            self.assertEqual(asyncio.run(exercise()), (None, None))
+    def test_emission_failure_leaves_turn_and_hooks_unchanged_when_on_or_off(self):
+        for enabled in (False, True):
+            with self.subTest(enabled=enabled):
+                if enabled:
+                    self.enable()
+                with patch.object(
+                    self.module._REQUESTER_DIAGNOSTICS,
+                    "emit",
+                    side_effect=RuntimeError("producer unavailable"),
+                ):
+                    self.assert_turn_and_leases_unaffected()
 
 
 if __name__ == "__main__":
