@@ -6,11 +6,12 @@ closure (Core, chat server, Hosted Web Device, Brain, Identity,
 Caddy), the dashboard digest, and an agent-runtime image pin through the fleet
 in one sitting. Component-level procedures remain the authority for their own
 mechanics — this page supplies the ORDER, the GATES between them, and the
-verification ritual. Record every completed wave in
-[`infra/deployment-changelog.md`](../deployment-changelog.md) (record, never
-authority), keep `scripts/finite-status` evidence before and after (standing
-rule). There is currently no protected production-branch CD record; record the
-actual deployed system path and verification evidence in the changelog.
+verification ritual. Record each completed wave in a private rollout evidence
+record with `scripts/finite-status` before and after, the immutable revision,
+actual deployed system paths, backup identities, and verification limits.
+[`infra/deployment-changelog.md`](../deployment-changelog.md) maps the current
+authorities; it does not retain per-wave narratives or private evidence.
+There is currently no protected production-branch CD record.
 Finite Sites runs on Fly; use [`deploy-sites.md`](deploy-sites.md) for its
 independent deployment and backup boundary.
 
@@ -32,8 +33,8 @@ this page commits the rules, not the incident narratives (public repo).
 | What runs where, roles | [`infra/README.md`](../README.md) |
 | Per-service deploy mechanics | [`deploy-core.md`](deploy-core.md), [`deploy-finitechat-server.md`](deploy-finitechat-server.md), [`deploy-brain.md`](deploy-brain.md), [`deploy-sites.md`](deploy-sites.md) |
 | Runtime image build/promotion + serial agent upgrade | [`runtime-image.md`](runtime-image.md) |
-| Rollback closure artifacts | The current app-plane closure artifact and the previous known-good closure named in the changelog |
-| Why-a-version-shipped record | [`infra/deployment-changelog.md`](../deployment-changelog.md) |
+| Rollback closure artifacts | The current app-plane closure artifact and the previous known-good closure named in the private rollout record |
+| Why a version shipped | Private rollout evidence record; [`infra/deployment-changelog.md`](../deployment-changelog.md) maps current authorities |
 | Fleet truth at any moment | `scripts/finite-status` (read-only; exits 0/1/2 per README standing rules) |
 | Control-plane preflight | `scripts/rollout_preflight.py` |
 | Emergency rollback surgery for the lifecycle vocabulary | `migrations/runtime_lifecycle_reverse_remap.sql`, `migrations/runtime_upgrade_rollback_rescue.sql` |

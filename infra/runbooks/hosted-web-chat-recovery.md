@@ -98,6 +98,30 @@ sudo systemctl start finite-hosted-web-chat-snapshot.service
 sudo systemctl start finite-core-private-proxy.socket finite-identity-private-proxy.socket
 ```
 
+## Verify a new offsite archive
+
+`borgbackup-job-finite-hosted-web-chat-offsite.service` is `Type=simple`.
+`systemctl start` returning successfully means the job started, not that the
+archive completed. Before triggering it, record the time and previous success
+stamp, and confirm that no prior invocation is running. Afterward, wait within
+a bounded observation window for that invocation to finish. Require inactive
+state, `Result=success`, `ExecMainStatus=0`, an exit timestamp from this run,
+and an advanced `/var/lib/finitecomputer/backups/hosted-web-chat-last-success`
+stamp. A timeout or failed observation leaves the backup gate unproven; do not
+accept the previous stamp or enqueue a duplicate job.
+
+Use `borg-job-finite-hosted-web-chat-offsite` to list and read the repository
+with its existing credential setup. Record the exact new archive name, then
+read back `data/recovery-snapshots/hosted-web-chat/<snapshot>/manifest.sha256`
+from that archive with `extract --stdout`. With shell `pipefail` enabled,
+compare its SHA256 with the sealed local manifest for the same immutable
+snapshot. Do not infer inclusion from the archive name or a `latest` link.
+
+The offsite Core dump belongs to the coordinated snapshot under `saas-core/`.
+This job does not archive the separate `/data/backups/postgres/` directory.
+Manifest readback and `pg_restore --list` prove limited integrity and access;
+neither replaces the empty-target product recovery drill below.
+
 ## Empty-target drill
 
 1. Use the dedicated synthetic account with multiple Topics and Chats in both
