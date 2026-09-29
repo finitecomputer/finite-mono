@@ -4,6 +4,7 @@ import { NextResponse } from "next/server";
 import {
   type CoreBillingSubscriptionStatus,
   syncCoreStripeSubscription,
+  expireCoreTrial,
 } from "@/lib/core-client";
 import {
   isoFromStripeUnix,
@@ -37,6 +38,14 @@ export async function POST(request: Request) {
 
   try {
     switch (event.type) {
+      case "checkout.session.expired": {
+        const session = event.data.object as Stripe.Checkout.Session;
+        const customer = idString(session.customer);
+        if (customer && session.metadata?.finite_trial_attempt_id) {
+          await expireCoreTrial(session.id, customer);
+        }
+        break;
+      }
       case "checkout.session.completed":
         await handleCheckoutCompleted(event);
         break;
@@ -104,12 +113,13 @@ async function syncSubscription(
     ...(subscription.metadata ?? {}),
   };
   await syncCoreStripeSubscription({
+    trialAttemptId: metadata.finite_trial_attempt_id ?? null,
     customerOrgId: metadata.finite_customer_org_id ?? null,
     stripeCustomerId,
     stripeSubscriptionId: subscription.id,
     stripePriceId: standardItem.price.id,
     subscriptionStatus: stripeStatus(subscription.status),
-    currentPeriodEnd: isoFromStripeUnix(standardItem.current_period_end),
+    currentPeriodEnd: isoFromStripeUnix(subscription.status === "trialing" ? subscription.trial_end : standardItem.current_period_end),
     cancelAtPeriodEnd: subscription.cancel_at_period_end,
     stripeEventId,
     stripeEventCreated,

@@ -45,19 +45,22 @@ pub(super) async fn sync_stripe_subscription(
     Ok(Json(
         state
             .store
-            .sync_stripe_subscription(SyncStripeSubscriptionInput {
-                customer_org_id: input.customer_org_id,
-                stripe_customer_id: input.stripe_customer_id,
-                stripe_subscription_id: input.stripe_subscription_id,
-                stripe_price_id: input.stripe_price_id,
-                expected_stripe_price_id: state.standard_stripe_price_id.clone(),
-                subscription_status: input.subscription_status,
-                current_period_end: input.current_period_end,
-                cancel_at_period_end: input.cancel_at_period_end,
-                stripe_event_id: input.stripe_event_id,
-                stripe_event_created: input.stripe_event_created,
-                now: input.now,
-            })
+            .sync_trial_stripe_subscription(
+                SyncStripeSubscriptionInput {
+                    customer_org_id: input.customer_org_id,
+                    stripe_customer_id: input.stripe_customer_id,
+                    stripe_subscription_id: input.stripe_subscription_id,
+                    stripe_price_id: input.stripe_price_id,
+                    expected_stripe_price_id: state.standard_stripe_price_id.clone(),
+                    subscription_status: input.subscription_status,
+                    current_period_end: input.current_period_end,
+                    cancel_at_period_end: input.cancel_at_period_end,
+                    stripe_event_id: input.stripe_event_id,
+                    stripe_event_created: input.stripe_event_created,
+                    now: input.now,
+                },
+                input.trial_attempt_id.as_deref(),
+            )
             .await?,
     ))
 }

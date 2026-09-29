@@ -131,7 +131,7 @@ export async function POST(request: Request) {
         throw new Error("Payment is unavailable right now.");
       }
       const response = NextResponse.redirect(
-        await billingCheckoutDestination(draft.idempotencyKey, draft.returnMachineId),
+        await billingCheckoutDestination(draft.idempotencyKey, draft.returnMachineId, String(formData.get("trialCode") ?? "")),
         { status: 303 }
       );
       setDraftCookie(

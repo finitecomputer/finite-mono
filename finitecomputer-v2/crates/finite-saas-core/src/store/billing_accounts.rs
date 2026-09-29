@@ -33,9 +33,23 @@ impl CoreStore {
         &self,
         input: SyncStripeSubscriptionInput,
     ) -> CoreResult<CustomerBillingAccount> {
+        self.sync_trial_stripe_subscription(input, None).await
+    }
+
+    pub async fn sync_trial_stripe_subscription(
+        &self,
+        input: SyncStripeSubscriptionInput,
+        trial_attempt: Option<&str>,
+    ) -> CoreResult<CustomerBillingAccount> {
         let mut client = self.connection().await?;
         let tx = client.transaction().await.map_err(store_error)?;
+        let subscription = input.stripe_subscription_id.clone();
         let account = billing::sync_stripe_subscription(&*tx, input).await?;
+        if account.stripe_subscription_id.as_deref() == Some(&subscription)
+            && let Some(attempt) = trial_attempt
+        {
+            trials::redeem(&*tx, attempt, &account).await?;
+        }
         self.finish(tx).await?;
         Ok(account)
     }
@@ -145,6 +159,7 @@ where
     let requires_billing = !has_active_billing && org.billing_class == BillingClass::Standard;
 
     Ok(BillingOverview {
+        trial_access: trials_access::trial_access(client, &org.id).await?,
         customer_org: org,
         billing_account,
         agent_creation_entitlement,

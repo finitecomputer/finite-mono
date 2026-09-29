@@ -54,6 +54,8 @@ pub struct CustomerOrganization {
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct BillingOverview {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub trial_access: Option<crate::trials::TrialAccess>,
     pub customer_org: CustomerOrganization,
     pub billing_account: Option<CustomerBillingAccount>,
     pub agent_creation_entitlement: Option<AgentCreationEntitlement>,

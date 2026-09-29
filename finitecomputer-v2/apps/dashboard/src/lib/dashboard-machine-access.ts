@@ -6,6 +6,7 @@ import {
   coreProjectSupportsRetirement,
   runtimeRetirementProductEnabled,
   loadCoreMe,
+  loadCoreBillingOverview,
   resolveCoreRuntimeRoute,
   type CoreReadCacheMode,
   type CoreVisibleProject,
@@ -17,6 +18,7 @@ type ViewerContext = Awaited<ReturnType<typeof import("@/lib/dashboard-auth").lo
 
 export type DashboardMachineAccess = {
   viewer: ViewerContext;
+  trialAccount: boolean;
   coreProject: CoreVisibleProject;
   mode: "core";
   /** Stable Agent Runtime id used by every browser route and navigation link. */
@@ -34,10 +36,12 @@ export async function loadDashboardMachineAccess(
   routeIdentifier: string,
   options: DashboardMachineAccessOptions = {}
 ): Promise<DashboardMachineAccess | null> {
-  const [viewer, initialCore] = await Promise.all([
+  const [viewer, initialCore, billing] = await Promise.all([
     loadOptionalViewerContext(),
     loadCoreMe({ cacheMode: options.coreCacheMode }),
+    loadCoreBillingOverview({ cacheMode: "fresh" }),
   ]);
+  if (!billing.billing || billing.billing.trial_access?.blocked) return null;
   let core = initialCore;
   let coreProject = dashboardMachineProjectFromSnapshot(core.me, routeIdentifier);
   if (!coreProject && options.coreCacheMode === "swr") {
@@ -52,6 +56,7 @@ export async function loadDashboardMachineAccess(
 
   return {
     viewer,
+    trialAccount: Boolean(billing.billing.trial_access),
     coreProject,
     mode: "core",
     machineId: runtime.id,

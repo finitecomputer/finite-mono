@@ -153,6 +153,8 @@ pub struct LinkStripeCustomerRequest {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct SyncStripeSubscriptionRequest {
+    #[serde(default)]
+    pub trial_attempt_id: Option<String>,
     pub customer_org_id: Option<String>,
     pub stripe_customer_id: String,
     pub stripe_subscription_id: String,

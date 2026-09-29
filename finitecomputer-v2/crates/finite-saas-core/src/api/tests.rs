@@ -24,6 +24,7 @@ mod runner_authorization;
 mod runner_leases;
 mod runtime_control;
 mod runtime_health;
+mod trials;
 
 const TOKEN: &str = "core-token";
 

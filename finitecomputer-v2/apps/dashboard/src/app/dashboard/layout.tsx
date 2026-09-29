@@ -1,3 +1,4 @@
+import { TrialAccessMonitor } from "@/components/trial-access-monitor";
 import { DashboardShell } from "@/components/dashboard-shell";
 import {
   coreProductProjects,
@@ -5,6 +6,7 @@ import {
   coreProjectPrimaryUrl,
   coreProjectRuntimeId,
   loadCoreMe,
+  loadCoreBillingOverview,
 } from "@/lib/core-client";
 import { loadOptionalViewerContext } from "@/lib/dashboard-auth";
 
@@ -13,9 +15,10 @@ export default async function DashboardLayout({
 }: {
   children: React.ReactNode;
 }) {
-  const [viewer, core] = await Promise.all([
+  const [viewer, core, billing] = await Promise.all([
     loadOptionalViewerContext(),
     loadCoreMe({ cacheMode: "swr" }),
+    loadCoreBillingOverview({ cacheMode: "fresh" }),
   ]);
   const machineIds = new Set<string>();
   const machines = [
@@ -44,6 +47,7 @@ export default async function DashboardLayout({
       saasMode={core.configured}
       viewerEmail={viewer.email}
     >
+      {billing.billing?.trial_access ? <TrialAccessMonitor /> : null}
       {children}
     </DashboardShell>
   );

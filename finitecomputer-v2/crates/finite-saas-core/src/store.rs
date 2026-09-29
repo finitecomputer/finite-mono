@@ -156,6 +156,10 @@ mod launch_code_rows;
 use launch_code_rows::*;
 mod launch_codes;
 mod offboarding;
+pub(crate) mod trials;
+mod trials_access;
+#[cfg(test)]
+mod trials_tests;
 use offboarding::*;
 mod private_admin;
 use private_admin::*;

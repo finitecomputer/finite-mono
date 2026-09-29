@@ -32,6 +32,7 @@ export function CoreAgentCreationForm({
   returnMachineId,
   requiresAccess,
   stripeConfigured,
+  trialsEnabled = false,
 }: {
   error: string | null;
   idempotencyKey: string;
@@ -42,10 +43,12 @@ export function CoreAgentCreationForm({
   returnMachineId?: string | null;
   requiresAccess: boolean;
   stripeConfigured: boolean;
+  trialsEnabled?: boolean;
 }) {
   const [step, setStep] = useState<Step>("code");
   const [access, setAccess] = useState<Access>("launch-code");
   const [code, setCode] = useState("");
+  const [trialCode, setTrialCode] = useState("");
   const [displayName, setDisplayName] = useState(initialName ?? "");
   const [picturePreview, setPicturePreview] = useState(initialPictureUrl ?? "");
   const [hostingTier, setHostingTier] = useState<"standard" | "confidential">(
@@ -147,6 +150,7 @@ export function CoreAgentCreationForm({
     >
       <input type="hidden" name="idempotencyKey" value={idempotencyKey} />
       <input type="hidden" name="access" value={access} />
+      <input type="hidden" name="trialCode" value={access === "stripe" ? trialCode.trim() : ""} />
       <input
         type="hidden"
         name="launchCode"
@@ -251,7 +255,7 @@ export function CoreAgentCreationForm({
               variant="outline"
               onClick={() => chooseAccess("stripe")}
             >
-              Continue without a code <ArrowRightIcon />
+              {trialsEnabled ? "Monthly plan or event trial" : "Continue without a code"} <ArrowRightIcon />
             </Button>
           ) : null}
         </>
@@ -316,6 +320,11 @@ export function CoreAgentCreationForm({
                         : "Your available agent allowance will be checked when you launch."}
                   </p>
                 </div>
+                {access === "stripe" && trialsEnabled ? <div className="grid gap-2">
+                  <Label htmlFor="event-trial-code">Event trial code (optional)</Label>
+                  <Input id="event-trial-code" value={trialCode} onChange={event => setTrialCode(event.target.value)} autoComplete="off" spellCheck={false} maxLength={128} placeholder="trial_…" />
+                  <p className="text-sm text-muted-foreground">A valid event code starts a free trial, normally seven days. Stripe will show your exact first billing date. A card is required; then $200/month plus applicable tax.</p>
+                </div> : null}
                 <Button
                   type="button"
                   size="xl"
@@ -335,7 +344,7 @@ export function CoreAgentCreationForm({
             {access === "stripe" ? (
               <p className="px-3 text-xs leading-relaxed text-muted-foreground">
                 Renews monthly until you cancel in the billing portal. Tax is
-                added at checkout where applicable, setup begins after payment,
+                added at checkout where applicable, setup begins after checkout,
                 and refunds are handled per our{" "}
                 <a
                   href="/privacy.txt"

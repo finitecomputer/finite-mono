@@ -68,6 +68,7 @@ use identity::*;
 mod runtime_routes;
 use runtime_routes::*;
 mod billing;
+mod trials;
 use billing::*;
 mod runtime_lifecycle;
 use runtime_lifecycle::*;
@@ -365,6 +366,16 @@ fn router_from_state(state: CoreApiState) -> Router {
             get(resolve_runtime_route),
         )
         .route("/api/core/v1/me/billing", get(billing_overview))
+        .route(
+            "/api/core/v1/admin/trial-campaigns",
+            get(trials::list).post(trials::create),
+        )
+        .route("/api/core/v1/me/billing/trial-offer", post(trials::offer))
+        .route(
+            "/api/core/v1/billing/trial-reservation",
+            post(trials::reserve),
+        )
+        .route("/api/core/v1/billing/trial-expired", post(trials::expire))
         .route(
             "/api/core/v1/me/billing/stripe-customer",
             post(link_stripe_customer),
