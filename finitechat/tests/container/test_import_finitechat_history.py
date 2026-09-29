@@ -228,6 +228,8 @@ class LauncherTests(unittest.TestCase):
         self.assertIn(
             '|| echo "run_hermes_gateway: Finite Chat history import unavailable"', script
         )
+        # Opt-in per runtime until canaried.
+        self.assertIn('"${FINITE_HISTORY_IMPORT:-0}" == "1"', script)
 
 
 def hermes_state_available() -> bool:
