@@ -35,9 +35,9 @@ Keep these instructions short. Move conditional detail into project skills.
 `just source-structure-check` enforces guide and cleaned Core source limits;
 see `docs/agents/source-structure.md`.
 
-## GitHub and Linear
+## Code and work tracking
 
-- **GitHub owns implementation:** code, tests, executable configuration, PRs and
+- **The repository owns implementation:** code, tests, executable configuration, PRs and
   releases. Keep engineering principles in `AGENTS.md`; retain only documentation
   needed to develop, operate or safely change the implementation. Explain rationale
   and constraints that code cannot express; avoid catalogs of facts code already owns.
@@ -53,7 +53,8 @@ see `docs/agents/source-structure.md`.
 - Humans own priorities, scope and acceptance. Agents investigate, propose, implement
   and keep the issue current within the requested scope. Distinguish proposals from
   accepted decisions; ask about unresolved choices that change the outcome.
-- PRs explain changes and validation; link the Linear issue when one exists. Read
-  historical GitHub issues when referenced. Resolve contract conflicts in Linear.
+- PRs explain changes and validation; link the Linear issue when one exists.
+  Historical GitHub issues are reference material, not active tickets. Resolve
+  contract conflicts in Linear.
 - Prune stale or duplicate docs; Git history is the archive. Preserve live contracts
   and human-authored guidance until consolidated or a linked replacement is verified.
