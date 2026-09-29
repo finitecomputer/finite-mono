@@ -8,6 +8,10 @@ sites_before="$(nix eval --raw .#finitesitesd.outPath)"
 started=$SECONDS
 case "$scenario" in
   identical) ;;
+  documentation)
+    printf '\nDocumentation-only cache qualification.\n' >> finite-sites/README.md
+    printf '\nDocumentation-only cache qualification.\n' >> finitecomputer-v2/README.md
+    ;;
   sites-source)
     printf '\n// Cache isolation check.\n' >> finite-sites/crates/finitesites-engine/src/lib.rs
     ;;
@@ -26,8 +30,12 @@ preparation=$((SECONDS - started))
 git diff --stat > "$output/change.txt"
 core_after="$(nix eval --raw .#finite-saas-core.outPath)"
 sites_after="$(nix eval --raw .#finitesitesd.outPath)"
-if [[ "$scenario" != identical && "$sites_before" == "$sites_after" ]]; then
+if [[ "$scenario" != identical && "$scenario" != documentation && "$sites_before" == "$sites_after" ]]; then
   echo "Changed Sites inputs did not invalidate Sites" >&2
+  exit 1
+fi
+if [[ "$scenario" == documentation && ( "$core_before" != "$core_after" || "$sites_before" != "$sites_after" ) ]]; then
+  echo "Documentation-only edit invalidated service packages" >&2
   exit 1
 fi
 if [[ "$scenario" == sites-* && "$core_before" != "$core_after" ]]; then
@@ -45,7 +53,7 @@ TIMEFORMAT=%R
 # Check actual compilation, not just whether Nix returned success.
 rg "^building .*rust_" "$output/build.log" > "$output/rebuilt.txt" || true
 case "$scenario" in
-  identical) test ! -s "$output/rebuilt.txt" ;;
+  identical|documentation) test ! -s "$output/rebuilt.txt" ;;
   sites-source|sites-dependency)
     if rg -v 'rust_(pulldown-cmark|finitesites-engine|finitesitesd)-' "$output/rebuilt.txt"; then
       echo "Unchanged crates were rebuilt instead of downloaded" >&2

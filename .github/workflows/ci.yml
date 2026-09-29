@@ -744,7 +744,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        scenario: [identical, sites-source, sites-dependency, shared-dependency]
+        scenario: [identical, documentation, sites-source, sites-dependency, shared-dependency]
     steps:
       - uses: actions/checkout@v4
       - uses: DeterminateSystems/nix-installer-action@v16

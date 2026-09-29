@@ -4,47 +4,99 @@
 let
   inherit (pkgs) lib;
 
-  # These CLIs embed files outside their crate directory. Keep their relative
-  # layout without making every crate depend on the entire repository.
-  embeddedSource = member: paths: {
-    src = lib.fileset.toSource {
-      root = sourceRoot;
-      fileset = lib.fileset.unions (map (path: sourceRoot + "/${path}") paths);
-    };
-    workspace_member = member;
+  workspaceManifest = builtins.fromTOML (builtins.readFile (sourceRoot + "/Cargo.toml"));
+  # Preserve the release-only source boundary: docs and test fixtures must not
+  # invalidate a service derivation and cause a NixOS restart. Cargo.nix owns
+  # dependency resolution; copying the root lockfile into each source would
+  # defeat per-crate caching on unrelated dependency changes.
+  compileInputs = {
+    "finite-saas-core" = [ "finitecomputer-v2/crates/finite-saas-core/migrations" ];
+    "finitechat-cli" = [
+      "finitechat/integrations/hermes/finitechat/__init__.py"
+      "finitechat/integrations/hermes/finitechat/adapter.py"
+      "finitechat/integrations/hermes/finitechat/plugin.yaml"
+      "finitechat/integrations/hermes/finitechat/simplex_topics.py"
+    ];
   };
+  localSources = builtins.listToAttrs (
+    map (
+      member:
+      let
+        root = sourceRoot + "/${member}";
+        manifest = builtins.fromTOML (builtins.readFile (root + "/Cargo.toml"));
+        name = manifest.package.name;
+        fileset = lib.fileset.unions (
+          [
+            (root + "/Cargo.toml")
+            (root + "/src")
+          ]
+          ++ lib.optional (builtins.pathExists (root + "/build.rs")) (root + "/build.rs")
+          ++ map (path: sourceRoot + "/${path}") (compileInputs.${name} or [ ])
+        );
+      in
+      {
+        inherit name;
+        value = {
+          src = lib.fileset.toSource {
+            inherit fileset;
+            root = sourceRoot;
+          };
+          workspace_member = member;
+          files = map (file: lib.path.removePrefix sourceRoot file) (lib.fileset.toList fileset);
+        };
+      }
+    ) workspaceManifest.workspace.members
+  );
+  localOverrides = lib.mapAttrs (
+    name: source: attrs:
+    (pkgs.defaultCrateOverrides.${name} or (_: { })) attrs // { inherit (source) src workspace_member; }
+  ) localSources;
+  crateClosure =
+    roots:
+    lib.genericClosure {
+      startSet = map (value: {
+        key = toString value;
+        inherit value;
+      }) roots;
+      operator =
+        item:
+        map (value: {
+          key = toString value;
+          inherit value;
+        }) ((item.value.dependencies or [ ]) ++ (item.value.buildDependencies or [ ]));
+    };
+  sourceFiles =
+    built:
+    lib.unique (
+      lib.concatMap (
+        item: (localSources.${item.value.crateName} or { files = [ ]; }).files
+      ) (crateClosure [ built ])
+    );
   workspace = import (sourceRoot + "/Cargo.nix") {
     inherit pkgs;
     # Match Cargo's default release codegen parallelism.
     buildRustCrateForPkgs = p: p.buildRustCrate.override { defaultCodegenUnits = 16; };
-    defaultCrateOverrides = pkgs.defaultCrateOverrides // {
-      fsite-cli =
-        _:
-        embeddedSource "finite-sites/crates/fsite-cli" [
-          "finite-sites/crates/fsite-cli"
-          "finite-sites/examples"
-        ];
-      finitechat-cli =
-        _:
-        embeddedSource "finitechat/crates/finitechat-cli" [
-          "finitechat/crates/finitechat-cli"
-          "finitechat/integrations/hermes/finitechat/__init__.py"
-          "finitechat/integrations/hermes/finitechat/adapter.py"
-          "finitechat/integrations/hermes/finitechat/plugin.yaml"
-        ];
-      finitechat-server = attrs: {
-        # Includes the resolved dependency graph as well as the server source.
-        # It changes when any compiled input changes, never with unrelated code.
-        FINITECHAT_BUILD_FINGERPRINT = "nix-${
-          builtins.substring 0 32 (
-            builtins.hashString "sha256" (
-              toString attrs.src + lib.concatMapStrings (dep: dep.drvPath) attrs.dependencies
-            )
-          )
-        }";
-        FINITECHAT_BUILD_DIRTY = "false";
+    defaultCrateOverrides =
+      pkgs.defaultCrateOverrides
+      // localOverrides
+      // {
+        finitechat-server =
+          attrs:
+          localOverrides.finitechat-server attrs
+          // {
+            # Includes the resolved dependency graph as well as the server source.
+            # It changes when any compiled input changes, never with unrelated code.
+            FINITECHAT_BUILD_FINGERPRINT = "nix-${
+              builtins.substring 0 32 (
+                builtins.hashString "sha256" (
+                  toString localSources.finitechat-server.src
+                  + lib.concatMapStrings (dep: dep.drvPath) attrs.dependencies
+                )
+              )
+            }";
+            FINITECHAT_BUILD_DIRTY = "false";
+          };
       };
-    };
   };
   package =
     crate: mainProgram:
@@ -57,6 +109,9 @@ let
       };
       passthru =
         (old.passthru or { })
+        // {
+          sourceFiles = sourceFiles built;
+        }
         // lib.optionalAttrs (crate == "finitechat-server") {
           sourceFingerprint = built.FINITECHAT_BUILD_FINGERPRINT;
         };
@@ -99,6 +154,7 @@ rec {
       passthru = {
         inherit runtimeInputs;
         unwrapped = devfinity-unwrapped;
+        sourceFiles = devfinity-unwrapped.sourceFiles;
       };
     };
 
@@ -119,29 +175,21 @@ rec {
   # Retain and publish them explicitly so a fresh runner can reuse each crate.
   rust-build-cache =
     let
-      node = value: {
-        key = toString value;
-        inherit value;
-      };
-      closure = lib.genericClosure {
-        startSet = map node [
-          devfinity-unwrapped
-          finite-saas-core
-          finite-saas-runner
-          finite-saas-local
-          finitechat-server
-          finitechat-hosted-device
-          finite-agentd
-          finitesitesd
-          finite-brain
-          finite-identity
-          fsite
-          fbrain
-          finitechat
-        ];
-        operator =
-          item: map node ((item.value.dependencies or [ ]) ++ (item.value.buildDependencies or [ ]));
-      };
+      closure = crateClosure [
+        devfinity-unwrapped
+        finite-saas-core
+        finite-saas-runner
+        finite-saas-local
+        finitechat-server
+        finitechat-hosted-device
+        finite-agentd
+        finitesitesd
+        finite-brain
+        finite-identity
+        fsite
+        fbrain
+        finitechat
+      ];
     in
     pkgs.linkFarm "rust-build-cache" (
       lib.imap0 (index: item: {

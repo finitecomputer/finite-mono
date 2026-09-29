@@ -4358,6 +4358,10 @@ rec {
             features = [ "blocking" "http2" "json" "rustls-tls-webpki-roots" ];
           }
           {
+            name = "same-file";
+            packageId = "same-file";
+          }
+          {
             name = "serde";
             packageId = "serde";
             features = [ "derive" ];
