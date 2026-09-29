@@ -370,11 +370,11 @@ fbrain mount revoke <mount-id>
 ```
 
 Invitations, Invite Tokens, and Mount Offers default to seven days. The CLI
-accepts `--expires-in` in whole hours or days from `1h` through `30d`. Servers
-before the FIN-147 fix can reject `1h` after request drift; report the error
-and preserve the requested expiry until the user chooses a longer duration
-or the server is fixed. A leading client clock can exceed the strict `30d`
-ceiling. Brain
+accepts `--expires-in` in whole hours or days from `1h` through `30d`. An
+older Brain server can reject `1h` when the request arrives a few seconds
+late; report the error and preserve the requested expiry until the user
+chooses a longer duration or the server is updated. A leading client clock
+can exceed the strict `30d` ceiling. Brain
 Invitations create Members. Folder Invitations create bounded Guest access.
 Mounts are source-backed and work between either Brain kind; the CLI opens and
 wraps required Folder grants in memory.

@@ -104,10 +104,10 @@ yourself), `failed` (the link still works; share it yourself or revoke it),
 or `manual` (no `--email`; share the link yourself).
 
 The CLI accepts `--expires-in` in whole hours or days from `1h` through `30d`;
-the default is `7d`. Servers before the FIN-147 fix can reject `1h` after
-request drift. Report the error and preserve the requested expiry; let the
-user choose a longer duration or wait for the server fix. A leading client
-clock can also make `30d` exceed the server's strict ceiling.
+the default is `7d`. An older Brain server can reject `1h` when the request
+arrives a few seconds late. Report the error and preserve the requested
+expiry; let the user choose a longer duration or wait for a server update. A
+leading client clock can also make `30d` exceed the server's strict ceiling.
 
 Membership and readable Folders are separate states. A Brain Invitation grants
 Membership and entitlement to every `all_members` Folder plus each selected
