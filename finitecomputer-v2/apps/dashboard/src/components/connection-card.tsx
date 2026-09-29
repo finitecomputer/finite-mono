@@ -13,6 +13,7 @@ export function ConnectionCard({
   footer,
   icon,
   name,
+  note,
   state,
   statusLabel,
   testId,
@@ -24,6 +25,8 @@ export function ConnectionCard({
   footer?: ReactNode;
   icon: ReactNode;
   name: string;
+  /** A neutral line about the state, for something that isn't an error the owner must repair. */
+  note?: string | null;
   state: ConnectionState;
   /** Replaces the default label for `state`, e.g. "Configured" instead of "Connected". */
   statusLabel?: string;
@@ -52,6 +55,11 @@ export function ConnectionCard({
             </div>
             {account ? <p className="ocean-connection-card__account">{account}</p> : null}
             <p className="mt-2 max-w-xl text-sm leading-6 text-muted-foreground">{description}</p>
+            {note ? (
+              <p className="mt-2 text-sm text-muted-foreground" data-testid={testId ? `${testId}-note` : undefined}>
+                {note}
+              </p>
+            ) : null}
             {error ? <p className="mt-2 text-sm text-destructive">{error}</p> : null}
           </div>
         </div>

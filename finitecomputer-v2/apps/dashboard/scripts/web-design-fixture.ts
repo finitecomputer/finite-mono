@@ -88,11 +88,11 @@ function writeScenario(scenario: Scenario) {
 
 function usage() {
   return "usage: web-design-fixture.ts [serve | set-scenario healthy|unavailable|recovering | reset"
-    + ` | set-agent ${FAKE_AGENTS.join("|")} [${FAKE_ROUTES.join("|")}]`
+    + ` | set-agent ${FAKE_AGENTS.join("|")} [${FAKE_ROUTES.join("|")} [unconfirmed]]`
     + ` | fail-next-operation [${OPERATION_ERROR_CODES.join("|")}]]`;
 }
 
-function runFixtureCommand(command: string | undefined, argument?: string, secondArgument?: string) {
+function runFixtureCommand(command: string | undefined, argument?: string, secondArgument?: string, thirdArgument?: string) {
   if (command === "set-scenario") {
     const scenario = parseScenario(argument);
     fs.mkdirSync(stateDir, { recursive: true });
@@ -111,11 +111,15 @@ function runFixtureCommand(command: string | undefined, argument?: string, secon
     process.exit(0);
   }
   if (command === "set-agent") {
-    const choice = parseInferenceChoice(`${argument ?? ""} ${secondArgument ?? ""}`);
+    const choice = parseInferenceChoice(`${argument ?? ""} ${secondArgument ?? ""} ${thirdArgument ?? ""}`);
     if (!choice) throw new Error(usage());
+    const unconfirmed = choice.unconfirmed ? " unconfirmed" : "";
     fs.mkdirSync(stateDir, { recursive: true });
-    fs.writeFileSync(inferenceAgentPath, `${choice.agent} ${choice.saved}\n`, { mode: 0o600 });
-    console.log(`Web design fixture agent: ${choice.agent}, saved route ${choice.saved}. A running fixture restarts its Connections state.`);
+    fs.writeFileSync(inferenceAgentPath, `${choice.agent} ${choice.saved}${unconfirmed}\n`, { mode: 0o600 });
+    console.log(
+      `Web design fixture agent: ${choice.agent}, saved route ${choice.saved}${choice.unconfirmed ? ", facts not confirmed" : ""}.`
+        + " A running fixture restarts its Connections state."
+    );
     process.exit(0);
   }
   if (command === "fail-next-operation") {
@@ -313,7 +317,7 @@ async function serve(runtimeCommandsUrl: string | null) {
   console.log(
     runtimeCommandsUrl
       ? `Connections runtime commands are forwarded to ${runtimeCommandsUrl}\n`
-      : "Connections agent: node --import tsx scripts/web-design-fixture.ts set-agent pr1|legacy|full [route]"
+      : "Connections agent: node --import tsx scripts/web-design-fixture.ts set-agent pr1|legacy|full [route [unconfirmed]]"
         + " (fail the next operation with fail-next-operation)\n"
   );
 
@@ -801,6 +805,11 @@ export type InferenceFakeOptions = {
   /** `pr1` advertises the PR1 capabilities, `legacy` is today's agentd, `full` adds PR2 and PR3's. */
   agent?: FakeAgentKind;
   saved?: FakeInferenceRoute;
+  /**
+   * Status as agentd reports it when its helper read was slow or failed: Finite Private, the backup, and what
+   * Hermes holds for OpenRouter are `unknown` (R34). A legacy agent reports no such facts, so it is unchanged.
+   */
+  unconfirmed?: boolean;
   /** How long an operation, or a Codex sign-in, stays in each phase. */
   phaseMs?: number;
   now?: () => number;
@@ -883,6 +892,7 @@ export function createInferenceFake(options: InferenceFakeOptions = {}): Inferen
   const now = options.now ?? Date.now;
   const capabilities = agent === "full" ? FULL_CAPABILITIES : agent === "pr1" ? PR1_CAPABILITIES : [];
   const seeded = options.saved ?? "finite_private";
+  const unconfirmed = options.unconfirmed ?? false;
   let saved: SavedModel = {
     route: seeded,
     model: seeded === "openrouter" ? FAKE_OPENROUTER_MODEL : seeded === "openai_codex" ? FAKE_CODEX_MODELS[0] : FAKE_FINITE_PRIVATE_MODEL,
@@ -1085,10 +1095,8 @@ export function createInferenceFake(options: InferenceFakeOptions = {}): Inferen
         ...legacy,
         saved: { route: saved.route, provider: savedProvider(saved.route), model: saved.model },
         routes: {
-          finite_private: { state: "configured", reason: null },
-          openrouter: openrouterKey
-            ? { state: "key_saved", key_source: "agent", key_hash: openrouterKey.hash, hermes_key: "saved_key", other_pool_keys: "none" }
-            : { state: "no_key", key_source: null, key_hash: null, hermes_key: "none", other_pool_keys: "none" },
+          finite_private: { state: unconfirmed ? "unknown" : "configured", reason: null },
+          openrouter: openrouterStatus(),
           ...(capabilities.includes("codex.login.v1")
             ? {
                 openai_codex: {
@@ -1100,12 +1108,24 @@ export function createInferenceFake(options: InferenceFakeOptions = {}): Inferen
               }
             : {}),
         },
-        fallback: { state: "configured", reason: null, model: FAKE_FINITE_PRIVATE_MODEL, extra_entries: 0 },
+        fallback: unconfirmed
+          ? { state: "unknown", reason: null, model: null, extra_entries: 0 }
+          : { state: "configured", reason: null, model: FAKE_FINITE_PRIVATE_MODEL, extra_entries: 0 },
         operation: operationStatus(),
       },
       ...others,
       capabilities,
     };
+  }
+
+  // agentd reads the saved key itself; what Hermes holds comes from the helper, so it is unknown when unconfirmed.
+  function openrouterStatus() {
+    const hermes = unconfirmed ? "unknown" : openrouterKey ? "saved_key" : "none";
+    const pool = unconfirmed ? "unknown" : "none";
+    if (openrouterKey) {
+      return { state: "key_saved", key_source: "agent", key_hash: openrouterKey.hash, hermes_key: hermes, other_pool_keys: pool };
+    }
+    return { state: unconfirmed ? "unknown" : "no_key", key_source: null, key_hash: null, hermes_key: hermes, other_pool_keys: pool };
   }
 
   function operationStatus() {
@@ -1404,11 +1424,14 @@ function isOperationErrorCode(value: string): value is OperationErrorCode {
   return (OPERATION_ERROR_CODES as readonly string[]).includes(value);
 }
 
-function parseInferenceChoice(text: string): { agent: FakeAgentKind; saved: FakeInferenceRoute } | null {
-  const [agentName, route = "finite_private"] = text.trim().split(/\s+/u);
+export function parseInferenceChoice(
+  text: string
+): { agent: FakeAgentKind; saved: FakeInferenceRoute; unconfirmed: boolean } | null {
+  const [agentName, route = "finite_private", facts, ...rest] = text.trim().split(/\s+/u);
   const agent = FAKE_AGENTS.find((value) => value === agentName);
   const saved = FAKE_ROUTES.find((value) => value === route);
-  return agent && saved ? { agent, saved } : null;
+  if (rest.length > 0 || (facts !== undefined && facts !== "unconfirmed")) return null;
+  return agent && saved ? { agent, saved, unconfirmed: facts === "unconfirmed" } : null;
 }
 
 function readInferenceChoice() {
@@ -1479,5 +1502,5 @@ function invokedDirectly() {
 
 // Last, so every constant above is initialized. Tests import this file for its fakes without starting it.
 if (invokedDirectly()) {
-  runFixtureCommand(process.argv[2], process.argv[3], process.argv[4]);
+  runFixtureCommand(process.argv[2], process.argv[3], process.argv[4], process.argv[5]);
 }

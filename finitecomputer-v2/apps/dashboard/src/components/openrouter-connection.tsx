@@ -54,7 +54,9 @@ export function OpenRouterConnection({
   const state = view?.v2 ? view.openrouter.state : null;
   const canConnect = Boolean(view?.capabilities.has("openrouter.connect.v1"));
   const canDisconnect = Boolean(view?.capabilities.has("inference.disconnect.v1"));
-  const keyFormShown = Boolean(view) && (keyFormOpen || state === "no_key");
+  // R38: with no key known, the card offers the key form; `unknown` is offered what `no_key` is.
+  const noKnownKey = state === "no_key" || state === "unknown";
+  const keyFormShown = Boolean(view) && (keyFormOpen || noKnownKey);
   const removed =
     disconnect &&
     (disconnect.operationId === null ||
@@ -98,12 +100,13 @@ export function OpenRouterConnection({
           keyRequired={Boolean(view.v2)}
           keyPlaceholder={view.v2 ? "OpenRouter API key" : saved ? "New key (optional)" : "Your key (optional)"}
           connect={canConnect}
+          openRouterSaved={saved}
           model={model}
           setModel={setModelDraft}
           busy={disabled}
           describedBy={describedBy}
           onSubmit={submitKey}
-          onCancel={state === "no_key" ? null : () => setKeyFormOpen(false)}
+          onCancel={noKnownKey ? null : () => setKeyFormOpen(false)}
         />
       );
     } else if (view.v2) {
@@ -193,6 +196,7 @@ export function OpenRouterConnection({
         name="OpenRouter"
         state={card.state}
         statusLabel={card.label}
+        note={card.note}
         account={view && !removing ? openRouterAccountLine(view) : null}
         description={removing ? <span data-testid="inference-openrouter-removing">{removing}</span> : openRouterDescription(view)}
         icon={<KeyRoundIcon className="size-5" />}
@@ -245,6 +249,7 @@ export function OpenRouterKeyForm({
   keyRequired,
   keyPlaceholder,
   connect,
+  openRouterSaved,
   model,
   setModel,
   busy,
@@ -255,6 +260,8 @@ export function OpenRouterKeyForm({
   keyRequired: boolean;
   keyPlaceholder: string;
   connect: boolean;
+  /** OpenRouter is the saved default already, so the button text alone says what Save does (R38). */
+  openRouterSaved: boolean;
   model: string;
   setModel: (model: string) => void;
   /** True while a request is in flight or another change is running (R10). */
@@ -314,7 +321,7 @@ export function OpenRouterKeyForm({
         </>
       ) : (
         <Button type="submit" disabled={busy || missing} aria-describedby={describedBy} data-testid="inference-openrouter-save">
-          Save
+          Save and use OpenRouter
         </Button>
       )}
       {onCancel ? (
@@ -330,6 +337,12 @@ export function OpenRouterKeyForm({
           Cancel
         </Button>
       ) : null}
+      {connect || openRouterSaved ? null : (
+        // R29: v1 apply always saves OpenRouter as the default, for a first key and for "Replace key" alike.
+        <p className="basis-full text-sm text-muted-foreground" data-testid="inference-openrouter-key-default-line">
+          This also makes OpenRouter this agent&apos;s default.
+        </p>
+      )}
     </form>
   );
 }
@@ -363,6 +376,7 @@ export function openRouterUseAction(view: InferenceView, model: string): AgentCo
 export function openRouterCardState(view: InferenceView | null): {
   state: "connected" | "disconnected" | "attention" | "unavailable";
   label?: string;
+  note?: string;
 } {
   if (!view) return { state: "unavailable" };
   if (removalText(view, "openrouter")) return { state: "attention" };
@@ -373,7 +387,8 @@ export function openRouterCardState(view: InferenceView | null): {
   }
   if (view.openrouter.state === "key_saved") return { state: "connected", label: "Key saved" };
   if (view.openrouter.state === "no_key") return { state: "disconnected" };
-  return { state: "unavailable" };
+  // R38: no saved key, and the agent couldn't check whether Hermes has one.
+  return { state: "unavailable", label: "Not confirmed", note: "The agent couldn't confirm its OpenRouter setup right now." };
 }
 
 export function openRouterDescription(view: InferenceView | null) {

@@ -2116,6 +2116,10 @@ test("Connections inference flows", { timeout: 300_000 }, async () => {
         assert.equal(statusReads(), before, "the page polled status with no operation running");
       };
       const operationId = () => hostedDevice.inferenceStatus().inference.operation?.id;
+      const lastCommand = (name: string) => {
+        const found = hostedDevice.state.runtimeCommands.filter((command) => command.command === name).at(-1);
+        return found ? { command: found.command, schema: found.schema, body: found.body } : null;
+      };
       const pasteKey = async () => {
         await testId("inference-openrouter-key-input").fill(PASTED_OPENROUTER_KEY);
         await testId("inference-openrouter-key-model-input").fill("openai/gpt-5-mini");
@@ -2140,6 +2144,9 @@ test("Connections inference flows", { timeout: 300_000 }, async () => {
       assert.equal(await testId("inference-operation-line").count(), 0);
       // A PR1 agent has no connect command, so a key is pasted with the one-call v1 Save (§10.4).
       assert.equal(await testId("inference-openrouter-save-and-use").count(), 0);
+      // R29: that Save also makes OpenRouter the default, and the form says so.
+      await expectTestIdText(page, "inference-openrouter-save", "Save and use OpenRouter");
+      await expectTestIdText(page, "inference-openrouter-key-default-line", "This also makes OpenRouter this agent's default.");
       await expectNoPolling();
 
       // The pasted key reaches the agent and stays out of the page, the URL, and browser storage.
@@ -2147,6 +2154,8 @@ test("Connections inference flows", { timeout: 300_000 }, async () => {
       await expectTestIdText(page, "inference-summary", "New conversations use OpenRouter · openai/gpt-5-mini.");
       await expectTestIdText(page, "inference-openrouter-state", "Key saved");
       await assertSecretAbsent(page, PASTED_OPENROUTER_KEY);
+      const noKeyPaste = lastCommand("agent.inference.apply");
+      assert.ok(noKeyPaste, "the pasted key reached the agent");
       const keyHash = createHash("sha256").update(PASTED_OPENROUTER_KEY).digest("hex");
       assert.equal(hostedDevice.inferenceStatus().inference.routes?.openrouter?.key_hash, keyHash);
 
@@ -2217,6 +2226,43 @@ test("Connections inference flows", { timeout: 300_000 }, async () => {
       await expectTestIdText(page, "inference-summary", "New conversations use Finite Private · glm-5-3-flash.");
       await expectTestIdText(page, "inference-openrouter-state", "Not connected");
 
+      // R34: a PR1 agent that couldn't confirm its facts says so, asks for no repair, and keeps its controls.
+      hostedDevice.setInferenceAgent("pr1", "openrouter", { unconfirmed: true });
+      await page.goto(connectionsUrl);
+      await expectTestIdText(page, "inference-summary", "New conversations use OpenRouter · anthropic/claude-sonnet-4.6.");
+      await expectTestIdText(page, "inference-backup-line", "The agent couldn't confirm the Finite Private backup right now.");
+      await expectTestIdText(page, "inference-finite-private-state", "Not confirmed");
+      await expectTestIdText(page, "inference-finite-private-note",
+        "The agent couldn't confirm its Finite Private setup right now.");
+      assert.equal(await testId("inference-finite-private-state").evaluate((node) => node.classList.contains("is-attention")), false);
+      assert.equal(await testId("inference-finite-private-use").isEnabled(), true);
+      await expectTestIdText(page, "inference-openrouter-state", "Key saved");
+      assert.equal(await testId("inference-openrouter-use").isEnabled(), true);
+      // Once the agent can check again, the page shows the facts it reports.
+      hostedDevice.setInferenceAgent("pr1", "openrouter");
+      await page.goto(connectionsUrl);
+      await expectTestIdText(page, "inference-finite-private-state", "Configured");
+      await expectTestIdText(page, "inference-backup-line",
+        "Finite Private backup is configured. If OpenRouter returns an error, Finite Private answers.");
+      assert.equal(await testId("inference-finite-private-note").count(), 0);
+
+      // R38: with no saved key and nothing confirmed, OpenRouter offers the key form and no action of a saved key.
+      hostedDevice.setInferenceAgent("pr1", "finite_private", { unconfirmed: true });
+      await page.goto(connectionsUrl);
+      await expectTestIdText(page, "inference-openrouter-state", "Not confirmed");
+      await expectTestIdText(page, "inference-openrouter-note", "The agent couldn't confirm its OpenRouter setup right now.");
+      assert.equal(await testId("inference-openrouter-state").evaluate((node) => node.classList.contains("is-attention")), false);
+      for (const id of ["inference-openrouter-use", "inference-openrouter-replace-key", "inference-openrouter-disconnect"]) {
+        assert.equal(await testId(id).count(), 0, `${id} needs a saved key`);
+      }
+      await expectTestIdText(page, "inference-openrouter-key-default-line", "This also makes OpenRouter this agent's default.");
+      const appliesBeforeUnknown = commandCount("agent.inference.apply");
+      await pasteKey();
+      await expectTestIdText(page, "inference-summary", "New conversations use OpenRouter · openai/gpt-5-mini.");
+      assert.equal(commandCount("agent.inference.apply"), appliesBeforeUnknown + 1);
+      assert.deepStrictEqual(lastCommand("agent.inference.apply"), noKeyPaste, "the unknown state sends the no_key command");
+      await assertSecretAbsent(page, PASTED_OPENROUTER_KEY);
+
       // T-W22: an agent on today's agentd keeps the v1 path, shows no capability-gated control, and never polls.
       hostedDevice.setInferenceAgent("legacy");
       await page.goto(connectionsUrl);
@@ -2244,6 +2290,8 @@ test("Connections inference flows", { timeout: 300_000 }, async () => {
       const selectsBefore = commandCount("agent.inference.select");
       const appliesBefore = commandCount("agent.inference.apply");
       await testId("inference-openrouter-open").click();
+      await expectTestIdText(page, "inference-openrouter-save", "Save and use OpenRouter");
+      await expectTestIdText(page, "inference-openrouter-key-default-line", "This also makes OpenRouter this agent's default.");
       await pasteKey();
       await expectTestIdText(page, "inference-summary", "New conversations use OpenRouter · openai/gpt-5-mini.");
       await expectTestIdText(page, "inference-openrouter-state", "Agent default");
@@ -2444,8 +2492,8 @@ async function startFakeHostedDevice() {
   const app = initialHostedChatState();
   // Operations advance only when a flow moves this clock, so every in-between state can be asserted.
   let inferenceNowMs = Date.now();
-  const inferenceFake = (agent: FakeAgentKind = "legacy", saved?: FakeInferenceRoute) =>
-    createInferenceFake({ agent, saved, phaseMs: INFERENCE_PHASE_MS, now: () => inferenceNowMs });
+  const inferenceFake = (agent: FakeAgentKind = "legacy", saved?: FakeInferenceRoute, unconfirmed = false) =>
+    createInferenceFake({ agent, saved, unconfirmed, phaseMs: INFERENCE_PHASE_MS, now: () => inferenceNowMs });
   const state: HostedDeviceState = {
     unavailable: false,
     updatesUnavailable: false,
@@ -2550,8 +2598,8 @@ async function startFakeHostedDevice() {
     failNextBindingAuthorization() {
       state.bindingAuthorizationFailuresRemaining += 1;
     },
-    setInferenceAgent(agent: FakeAgentKind, saved?: FakeInferenceRoute) {
-      state.inference = inferenceFake(agent, saved);
+    setInferenceAgent(agent: FakeAgentKind, saved?: FakeInferenceRoute, options: { unconfirmed?: boolean } = {}) {
+      state.inference = inferenceFake(agent, saved, options.unconfirmed);
     },
     advanceInferencePhases(phases: number) {
       inferenceNowMs += phases * INFERENCE_PHASE_MS;

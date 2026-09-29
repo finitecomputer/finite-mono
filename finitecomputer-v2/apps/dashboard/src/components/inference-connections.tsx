@@ -200,6 +200,7 @@ export function FinitePrivateCard({
       statusLabel={card.label}
       account={view?.saved.route === "finite_private" && view.saved.model ? view.saved.model : null}
       description="Finite's own private model service."
+      note={card.note}
       error={card.reason}
       icon={<CpuIcon className="size-5" />}
       testId="inference-finite-private"
@@ -225,18 +226,30 @@ export function FinitePrivateCard({
 export function finitePrivateCardState(view: InferenceView | null): {
   state: "connected" | "disconnected" | "attention" | "unavailable";
   label?: string;
+  note: string | null;
   reason: string | null;
 } {
-  if (!view) return { state: "unavailable", reason: null };
+  if (!view) return { state: "unavailable", note: null, reason: null };
   if (!view.v2) {
     // Today's agentd reports no Finite Private facts; say only what the saved route shows.
     return view.saved.route === "finite_private"
-      ? { state: "connected", label: "Agent default", reason: null }
-      : { state: "disconnected", label: "Not the agent default", reason: null };
+      ? { state: "connected", label: "Agent default", note: null, reason: null }
+      : { state: "disconnected", label: "Not the agent default", note: null, reason: null };
   }
-  if (view.finitePrivate.state === "configured") return { state: "connected", label: "Configured", reason: null };
+  if (view.finitePrivate.state === "configured") {
+    return { state: "connected", label: "Configured", note: null, reason: null };
+  }
+  // R34: `unknown` means the agent couldn't check (a slow or failed read); nothing is known to need repair.
+  if (view.finitePrivate.state === "unknown") {
+    return {
+      state: "unavailable",
+      label: "Not confirmed",
+      note: "The agent couldn't confirm its Finite Private setup right now.",
+      reason: null,
+    };
+  }
   const reason = view.finitePrivate.reason ? BACKUP_REASON_COPY[view.finitePrivate.reason] : undefined;
-  return { state: "attention", reason: reason ? `${reason[0].toUpperCase()}${reason.slice(1)}.` : null };
+  return { state: "attention", note: null, reason: reason ? `${reason[0].toUpperCase()}${reason.slice(1)}.` : null };
 }
 
 export function finitePrivateAction(view: InferenceView): AgentConnectionAction {
@@ -344,7 +357,10 @@ export function backupLine(view: InferenceView) {
     case "custom":
       return "Backup is customized in Hermes.";
     default:
-      return "Backup details aren't available on this agent yet.";
+      // R34: an agent with the new status couldn't check just now; one without it reports no backup details.
+      return view.v2
+        ? "The agent couldn't confirm the Finite Private backup right now."
+        : "Backup details aren't available on this agent yet.";
   }
 }
 

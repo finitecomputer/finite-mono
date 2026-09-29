@@ -14,6 +14,7 @@ import { inferenceView, pollDelayMs, routeLabel } from "@/lib/inference-status";
 import {
   createInferenceFake,
   forwardRuntimeCommand,
+  parseInferenceChoice,
   runtimeCommandsForwardUrl,
   type FakeAgentKind,
   type FakeInferenceRoute,
@@ -36,7 +37,10 @@ type Fixture = {
   logs: string[];
 };
 
-function installFixture(t: TestContext, options: { agent: FakeAgentKind; saved?: FakeInferenceRoute }): Fixture {
+function installFixture(
+  t: TestContext,
+  options: { agent: FakeAgentKind; saved?: FakeInferenceRoute; unconfirmed?: boolean }
+): Fixture {
   let clock = START_MS;
   const fake = createInferenceFake({ ...options, phaseMs: PHASE_MS, now: () => clock });
   const scratch = mkdtempSync(path.join(tmpdir(), "w4-fixture-"));
@@ -155,6 +159,17 @@ async function runOperation(fixture: Fixture) {
 
 const sha256 = (value: string) => createHash("sha256").update(value).digest("hex");
 
+/** The fake's status read without the dashboard route, through the real parser. */
+function fakeView(options: Parameters<typeof createInferenceFake>[0]) {
+  const reply = createInferenceFake(options).runtimeCommand({
+    command: "agent.connections.status",
+    schema: "finite.agent.empty.request.v1",
+    body: {},
+  });
+  assertParsesUnchanged(reply.body);
+  return inferenceView(parseConnectionsStatus(reply.body));
+}
+
 test("T-W20 (fake): a PR1 agent's status parses unchanged and reads as stored facts", async (t) => {
   const fixture = installFixture(t, { agent: "pr1" });
   const { status, view } = await readStatus();
@@ -169,6 +184,42 @@ test("T-W20 (fake): a PR1 agent's status parses unchanged and reads as stored fa
   assert.equal(pollDelayMs(view, true), null);
   assert.deepStrictEqual(status.inference.routes?.openai_codex, undefined);
   assert.deepStrictEqual(fixture.commands, ["agent.owner.claim", "agent.connections.status"]);
+});
+
+test("R34 (fake): a PR1 agent that couldn't confirm its facts reports them unknown, as agentd does after a failed helper read", async (t) => {
+  const fixture = installFixture(t, { agent: "pr1", saved: "openrouter", unconfirmed: true });
+  const { view } = await readStatus();
+  assert.equal(view.v2, true);
+  assert.deepStrictEqual(view.saved, { route: "openrouter", provider: "openrouter", model: "anthropic/claude-sonnet-4.6" });
+  assert.deepStrictEqual(view.finitePrivate, { state: "unknown", reason: null });
+  assert.deepStrictEqual(view.fallback, { state: "unknown", reason: null, model: null, extraEntries: 0 });
+  // agentd reads the saved key itself; only what Hermes holds needs the helper.
+  assert.equal(view.openrouter.state, "key_saved");
+  assert.equal(view.openrouter.keySource, "agent");
+  assert.equal(view.openrouter.keyHash, sha256("sk-or-v1-web-design-fixture-fake-key"));
+  assert.equal(view.openrouter.hermesKey, "unknown");
+  assert.equal(view.openrouter.otherPoolKeys, "unknown");
+
+  assert.deepStrictEqual(fixture.commands, ["agent.owner.claim", "agent.connections.status"]);
+
+  // With no saved key, agentd can't tell whether Hermes has one, so the route is unknown too.
+  const noKey = fakeView({ agent: "pr1", unconfirmed: true });
+  assert.equal(noKey.openrouter.state, "unknown");
+  assert.equal(noKey.openrouter.hermesKey, "unknown");
+  assert.deepStrictEqual(noKey.finitePrivate, { state: "unknown", reason: null });
+  assert.equal(noKey.fallback.state, "unknown");
+
+  // A legacy agent reports no facts at all, so the option changes nothing there.
+  assert.deepStrictEqual(fakeView({ agent: "legacy", unconfirmed: true }), fakeView({ agent: "legacy" }));
+});
+
+test("set-agent names the agent, the saved route, and optionally that the agent couldn't confirm its facts", () => {
+  assert.deepStrictEqual(parseInferenceChoice("pr1"), { agent: "pr1", saved: "finite_private", unconfirmed: false });
+  assert.deepStrictEqual(parseInferenceChoice("pr1 openrouter"), { agent: "pr1", saved: "openrouter", unconfirmed: false });
+  assert.deepStrictEqual(parseInferenceChoice("pr1 openrouter unconfirmed\n"), { agent: "pr1", saved: "openrouter", unconfirmed: true });
+  for (const text of ["", "pr2", "pr1 anthropic", "pr1 openrouter unknown", "pr1 openrouter unconfirmed extra"]) {
+    assert.equal(parseInferenceChoice(text), null, text);
+  }
 });
 
 test("T-W21 (fake): FP ↔ OpenRouter through select runs the operation through its phases, then the saved route changes", async (t) => {

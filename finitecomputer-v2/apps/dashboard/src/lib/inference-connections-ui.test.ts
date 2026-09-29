@@ -149,7 +149,9 @@ test("T-W10: every backup line, and only a configured backup says Finite Private
     [{ fallback: fallback("not_configured", "credential_missing") }, "Finite Private backup isn't set up on this agent: this agent has no Finite Private credential."],
     [{ fallback: fallback("off") }, "Backup to Finite Private is turned off in Hermes."],
     [{ fallback: fallback("custom") }, "Backup is customized in Hermes."],
-    [{ fallback: fallback("unknown") }, "Backup details aren't available on this agent yet."],
+    // R34 changed this case: a v2 agent that reports `unknown` couldn't confirm the backup; it isn't too old.
+    [{ fallback: fallback("unknown") }, "The agent couldn't confirm the Finite Private backup right now."],
+    [{ saved: SAVED_OR, fallback: fallback("unknown") }, "The agent couldn't confirm the Finite Private backup right now."],
   ];
   for (const [inference, expected] of cases) {
     const line = copy(backupLine(view(v2(inference))));
@@ -170,9 +172,34 @@ test("T-W11: the Finite Private card states", () => {
   assert.doesNotMatch(configured, /Use Finite Private/u);
   assert.match(card(v2({ routes: { finite_private: { state: "not_configured", reason: "settings_missing" } } })), /Needs attention .*Finite Private isn't set up on this agent\./u);
   assert.match(card(v2({ routes: { finite_private: { state: "not_configured", reason: "credential_missing" } } })), /Needs attention .*This agent has no Finite Private credential\./u);
-  assert.match(card(v2({ routes: { finite_private: { state: "unknown", reason: null } } })), /Needs attention/u);
   assert.match(card(legacy("custom", "glm-5-3-flash")), /Agent default glm-5-3-flash/u);
   assert.match(card(legacy("openrouter", "openai/gpt-5")), /Not the agent default/u);
+});
+
+test("R34: a v2 agent that couldn't confirm Finite Private: \"Not confirmed\", in the neutral style, with no change of controls", () => {
+  // R34 changed this case: it said "Needs attention", which asks the owner to repair something that may be fine.
+  const unknown = { finite_private: { state: "unknown", reason: null } };
+  const cardMarkup = (status: ReturnType<typeof parseConnectionsStatus>) =>
+    html(createElement(FinitePrivateCard, { view: view(status), busy: false, lock: UNLOCKED, run: noRun, notice: null }));
+  const saved = cardMarkup(v2({ routes: unknown }));
+  assert.equal(
+    text(saved),
+    "Finite Private Not confirmed glm-5-3-flash Finite's own private model service. The agent couldn't confirm its Finite Private setup right now."
+  );
+  assert.match(saved, /ocean-connection-card__status is-disconnected/u);
+  assert.doesNotMatch(saved, /is-attention|text-destructive|Needs attention/u);
+  assert.doesNotMatch(saved, /inference-finite-private-use/u);
+  // Another saved route keeps "Use Finite Private", enabled, as for any other state.
+  const other = cardMarkup(v2({ saved: SAVED_OR, routes: unknown }));
+  assert.match(text(other), /Finite Private Not confirmed Finite's own private model service\. The agent couldn't confirm its Finite Private setup right now\. Use Finite Private/u);
+  assert.doesNotMatch(other.match(/<button[^>]*inference-finite-private-use[^>]*>/u)?.[0] ?? "", / disabled=""/u);
+  // Known facts keep their states.
+  assert.match(cardMarkup(v2({ routes: { finite_private: { state: "not_configured", reason: null } } })), /is-attention/u);
+  assert.doesNotMatch(text(cardMarkup(v2())), /Not confirmed|couldn't confirm/u);
+  // Without inference.status.v2 the agent reports no facts, so there is nothing to confirm.
+  for (const status of [legacy("custom", "glm-5-3-flash"), legacy("openrouter", "openai/gpt-5")]) {
+    assert.doesNotMatch(text(cardMarkup(status)), /Not confirmed|couldn't confirm/u);
+  }
 });
 
 test("T-W11: \"Use Finite Private\" appears whenever the saved route isn't Finite Private", () => {
@@ -202,13 +229,16 @@ test("T-W12: OpenRouter without a key: paste through connect when advertised, el
   const pr1 = openRouterCard(v2());
   assert.match(text(pr1), /OpenRouter Not connected Use your own OpenRouter account\. Finite Private is configured as a backup\./u);
   assert.match(pr1, /data-testid="inference-openrouter-key-input"/u);
-  assert.match(pr1, /data-testid="inference-openrouter-save"/u);
+  // R29: without openrouter.connect.v1, Save goes through v1, which always makes OpenRouter the saved default.
+  assert.match(pr1, /data-testid="inference-openrouter-save"[^>]*>Save and use OpenRouter</u);
+  assert.match(text(pr1), /Save and use OpenRouter This also makes OpenRouter this agent's default\./u);
   assert.doesNotMatch(pr1, /inference-openrouter-save-only|inference-openrouter-disconnect"|inference-openrouter-links/u);
 
   const pr2 = openRouterCard(v2({}, ALL));
   assert.match(pr2, /data-testid="inference-openrouter-save-and-use"/u);
   assert.match(pr2, /data-testid="inference-openrouter-save-only"/u);
   assert.doesNotMatch(pr2, /data-testid="inference-openrouter-save"/u);
+  assert.doesNotMatch(text(pr2), /Save and use OpenRouter|This also makes OpenRouter/u);
 
   const noBackup = openRouterCard(v2({ fallback: fallback("off") }));
   assert.doesNotMatch(text(noBackup), /configured as a backup/u);
@@ -221,6 +251,100 @@ test("T-W12: OpenRouter without a key: paste through connect when advertised, el
     action: "inference", profile: "openrouter", apiKey: "sk-or-v1-fake", model: "openai/gpt-5",
   });
   assert.deepEqual(openRouterKeyAction("legacy", "", "openai/gpt-5"), { action: "inference", profile: "openrouter", model: "openai/gpt-5" });
+});
+
+test("R29: the key form without openrouter.connect.v1 says it also makes OpenRouter the default, for a first key and a replaced one", () => {
+  const form = (connect: boolean, keyRequired: boolean, onCancel: (() => void) | null, openRouterSaved = false) =>
+    html(createElement(OpenRouterKeyForm, {
+      keyRequired, keyPlaceholder: "OpenRouter API key", connect, openRouterSaved, model: "anthropic/claude-sonnet-4.6",
+      setModel: () => {}, busy: false, onSubmit: async () => {}, onCancel,
+    }));
+  const line = "This also makes OpenRouter this agent's default.";
+  // First key on a PR1 agent (no Cancel), "Replace key" on a PR1 agent (Cancel), and today's agentd (optional key).
+  for (const [name, markup] of [
+    ["PR1 first key", form(false, true, null)],
+    ["PR1 Replace key", form(false, true, () => {})],
+    ["today's agentd", form(false, false, () => {})],
+  ] as const) {
+    assert.match(markup, /data-testid="inference-openrouter-save"[^>]*>Save and use OpenRouter</u, name);
+    assert.match(markup, /data-testid="inference-openrouter-key-default-line"/u, name);
+    assert.ok(text(markup).includes(line), name);
+    assert.doesNotMatch(markup, /inference-openrouter-save-and-use|inference-openrouter-save-only/u, name);
+  }
+  // R38: when OpenRouter is the saved default already, the button text alone says it; the line is absent.
+  for (const [name, markup] of [
+    ["PR1 Replace key, OpenRouter saved", form(false, true, () => {}, true)],
+    ["today's agentd, OpenRouter saved", form(false, false, () => {}, true)],
+  ] as const) {
+    assert.match(markup, /data-testid="inference-openrouter-save"[^>]*>Save and use OpenRouter</u, name);
+    assert.doesNotMatch(markup, /inference-openrouter-key-default-line|This also makes OpenRouter/u, name);
+  }
+  // With openrouter.connect.v1 the form is as §10.5 designs it: "Save and use" and "Save only", and no extra line.
+  for (const onCancel of [null, () => {}]) {
+    const markup = form(true, true, onCancel);
+    assert.match(markup, /data-testid="inference-openrouter-save-and-use"[^>]*>Save and use</u);
+    assert.match(markup, /data-testid="inference-openrouter-save-only"[^>]*>Save only</u);
+    assert.doesNotMatch(markup, /inference-openrouter-key-default-line|Save and use OpenRouter/u);
+  }
+  // The command is unchanged: the one-call v1 apply with the key and the model.
+  assert.deepEqual(openRouterKeyAction("legacy", "sk-or-v1-fake", "openai/gpt-5"), {
+    action: "inference", profile: "openrouter", apiKey: "sk-or-v1-fake", model: "openai/gpt-5",
+  });
+});
+
+const OR_UNKNOWN = { state: "unknown", key_source: null, key_hash: null, hermes_key: "unknown", other_pool_keys: "unknown" };
+const OR_NO_KEY = { state: "no_key", key_source: null, key_hash: null, hermes_key: "none", other_pool_keys: "none" };
+const formOf = (markup: string) => markup.match(/<form[\s\S]*<\/form>/u)?.[0] ?? "";
+
+test("R38: OpenRouter unknown on a v2 agent: \"Not confirmed\", neutral, a note, the key form, and no action of a saved key", () => {
+  const unknown = openRouterCard(v2({ routes: { openrouter: OR_UNKNOWN } }));
+  assert.match(
+    text(unknown),
+    /^OpenRouter Not confirmed Use your own OpenRouter account\. Finite Private is configured as a backup\. The agent couldn't confirm its OpenRouter setup right now\./u
+  );
+  assert.match(unknown, /ocean-connection-card__status is-disconnected" data-testid="inference-openrouter-state"/u);
+  assert.match(unknown, /data-testid="inference-openrouter-note"/u);
+  assert.doesNotMatch(unknown, /is-attention|text-destructive|Status unavailable/u);
+  // The key form, as with no key saved: no Cancel, since there is nothing else to show.
+  assert.match(unknown, /data-testid="inference-openrouter-key-input"/u);
+  assert.match(unknown, /data-testid="inference-openrouter-save"[^>]*>Save and use OpenRouter</u);
+  assert.match(text(unknown), /This also makes OpenRouter this agent's default\./u);
+  assert.doesNotMatch(unknown, /inference-openrouter-cancel-key/u);
+  // Removed: the controls of a saved key, which the daemon refuses when there is no key.
+  for (const id of ["inference-openrouter-use", "inference-openrouter-replace-key", "inference-openrouter-disconnect", "inference-openrouter-model-input"]) {
+    assert.doesNotMatch(unknown, new RegExp(`data-testid="${id}"`, "u"), id);
+  }
+
+  // The form is the no_key form exactly, so it sends the same command: the v1 apply on PR1, connect on a later agent.
+  for (const capabilities of [PR1, ALL]) {
+    const unknownForm = formOf(openRouterCard(v2({ routes: { openrouter: OR_UNKNOWN } }, capabilities)));
+    const noKeyForm = formOf(openRouterCard(v2({ routes: { openrouter: OR_NO_KEY } }, capabilities)));
+    assert.ok(unknownForm.length > 0);
+    assert.equal(unknownForm, noKeyForm, capabilities.join(","));
+  }
+
+  // OpenRouter saved and unknown: the same form without the R29 line, the links, and still no saved-key action.
+  const saved = openRouterCard(v2({ saved: SAVED_OR, routes: { openrouter: OR_UNKNOWN } }));
+  assert.match(text(saved), /^OpenRouter Not confirmed /u);
+  assert.match(saved, /data-testid="inference-openrouter-save"[^>]*>Save and use OpenRouter</u);
+  assert.doesNotMatch(saved, /inference-openrouter-key-default-line/u);
+  assert.match(saved, /data-testid="inference-openrouter-links"/u);
+  for (const id of ["inference-openrouter-use", "inference-openrouter-replace-key", "inference-openrouter-disconnect"]) {
+    assert.doesNotMatch(saved, new RegExp(`data-testid="${id}"`, "u"), id);
+  }
+
+  // The lock rule is unchanged: a running operation disables this form's Save and names the reason.
+  const locked = panel(v2({ routes: { openrouter: OR_UNKNOWN }, operation: operation("select", "finite_private", "running", { model: null }) }));
+  const { reasonId, button } = lockedButtons(locked);
+  assert.match(button("inference-openrouter-save"), / disabled=""/u);
+  assert.match(button("inference-openrouter-save"), new RegExp(`aria-describedby="${reasonId}"`, "u"));
+
+  // Known states and agents without inference.status.v2 are unchanged.
+  assert.match(text(openRouterCard(v2())), /^OpenRouter Not connected /u);
+  assert.match(text(openRouterCard(v2({ routes: { openrouter: KEY_SAVED } }))), /^OpenRouter Key saved /u);
+  for (const status of [legacy("custom", "glm-5-3-flash"), legacy("openrouter", "openai/gpt-5")]) {
+    assert.doesNotMatch(text(openRouterCard(status)), /Not confirmed|couldn't confirm/u);
+  }
 });
 
 test("T-W12: OpenRouter with a saved key: account line by source, extra lines, actions, links", () => {
@@ -311,11 +435,12 @@ test("T-W13: an agent running today's agentd keeps today's controls and nothing 
   assert.match(text(panel(legacy("anthropic", "claude"))), /New conversations use Custom model · claude, set in Hermes\. Finite can't manage this provider here\./u);
   // The legacy key form keeps today's optional key and one Save.
   const form = html(createElement(OpenRouterKeyForm, {
-    keyRequired: false, keyPlaceholder: "Your key (optional)", connect: false, model: "anthropic/claude-sonnet-4.6",
+    keyRequired: false, keyPlaceholder: "Your key (optional)", connect: false, openRouterSaved: false, model: "anthropic/claude-sonnet-4.6",
     setModel: () => {}, busy: false, onSubmit: async () => {}, onCancel: () => {},
   }));
   assert.match(form, /placeholder="Your key \(optional\)"/u);
-  assert.match(form, /data-testid="inference-openrouter-save"/u);
+  assert.match(form, /data-testid="inference-openrouter-save"[^>]*>Save and use OpenRouter</u);
+  assert.match(text(form), /This also makes OpenRouter this agent's default\./u);
   assert.doesNotMatch(form.match(/<button[^>]*inference-openrouter-save"[^>]*>/u)?.[0] ?? "", / disabled=""/u);
 });
 
@@ -333,7 +458,9 @@ test("T-W13: garbage or unknown inference facts never throw and never blank the 
   assert.equal(garbage.telegram.connected, true);
   const markup = text(panel(garbage));
   assert.match(markup, /New conversations use Finite Private · glm-5-3-flash\./u);
-  assert.match(markup, /Backup details aren't available on this agent yet\./u);
+  // R34 changed this line: a v2 agent's unreadable facts read as not confirmed, not as an agent too old to say.
+  assert.match(markup, /The agent couldn't confirm the Finite Private backup right now\./u);
+  assert.match(markup, /Finite Private Not confirmed/u);
   const unknown = v2({
     routes: {
       finite_private: { state: "unknown", reason: null },
@@ -341,7 +468,13 @@ test("T-W13: garbage or unknown inference facts never throw and never blank the 
     },
     fallback: fallback("unknown"),
   });
-  assert.match(text(panel(unknown)), /OpenRouter Status unavailable/u);
+  const unknownPanel = panel(unknown);
+  // R38 changed this line: it said "OpenRouter Status unavailable" and offered the controls of a saved key.
+  assert.match(text(unknownPanel), /OpenRouter Not confirmed Use your own OpenRouter account\. The agent couldn't confirm its OpenRouter setup right now\./u);
+  // R34: the summary and the Finite Private card say the agent couldn't confirm, and nothing asks for a repair.
+  assert.match(text(unknownPanel), /The agent couldn't confirm the Finite Private backup right now\./u);
+  assert.match(text(unknownPanel), /Finite Private Not confirmed glm-5-3-flash Finite's own private model service\. The agent couldn't confirm its Finite Private setup right now\./u);
+  assert.doesNotMatch(unknownPanel, /is-attention|Needs attention|Backup details aren't available/u);
 });
 
 test("T-W14: the OpenRouter disconnect dialog states what it does and doesn't guarantee", () => {
@@ -484,7 +617,7 @@ test("T-W17: every control is disabled before the first status, and the stable t
 
 test("the pasted key: password input with autocomplete off, cleared at submit whether the call succeeds or fails", async () => {
   const form = html(createElement(OpenRouterKeyForm, {
-    keyRequired: true, keyPlaceholder: "OpenRouter API key", connect: true, model: "openai/gpt-5",
+    keyRequired: true, keyPlaceholder: "OpenRouter API key", connect: true, openRouterSaved: false, model: "openai/gpt-5",
     setModel: () => {}, busy: false, onSubmit: async () => {}, onCancel: null,
   }));
   const input = form.match(/<input[^>]*inference-openrouter-key-input[^>]*>/u)?.[0] ?? "";
