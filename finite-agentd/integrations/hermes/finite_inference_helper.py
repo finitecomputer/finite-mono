@@ -36,18 +36,38 @@ ROUTE_PROVIDERS = {
     "openrouter": ("openrouter", ("openrouter",)),
     "openai_codex": ("openai-codex", CODEX_PROVIDERS),
 }
-INTENT_KINDS = ("select", "activate", "disconnect")
-INTENT_ROUTES = ("finite_private", "openrouter", "openai_codex")
-INTENT_PHASES = (
-    "accepted",
-    "config_written",
-    "restarting",
-    "verifying",
-    "login_cancelled",
-    "route_switched",
-    "credential_removed",
-    "cleanup",
+# The version-1 intent record as agentd's reader (`intent.rs`) accepts it.
+INTENT_FIELDS = frozenset(
+    (
+        "v",
+        "id",
+        "kind",
+        "route",
+        "model",
+        "phase",
+        "state",
+        "error_code",
+        "attempts",
+        "created_at_ms",
+        "updated_at_ms",
+    )
 )
+INTENT_OPTIONAL_FIELDS = frozenset(("model", "error_code"))
+INTENT_ROUTES = ("finite_private", "openrouter", "openai_codex")
+INTENT_STATES = ("running", "failed")
+_SELECT_PHASES = ("accepted", "config_written", "restarting", "verifying")
+INTENT_KIND_PHASES = {
+    "select": _SELECT_PHASES,
+    "activate": _SELECT_PHASES,
+    "disconnect": (
+        "accepted",
+        "login_cancelled",
+        "route_switched",
+        "credential_removed",
+        "cleanup",
+        "verifying",
+    ),
+}
 # F1: clears run only once the disconnect has reached cleanup.
 CLEAR_PHASES = ("cleanup", "verifying")
 
@@ -413,25 +433,91 @@ def clear_session_overrides(providers: list[str]) -> dict:
     return {"cleared": cleared}
 
 
-def _read_intent(path: Path) -> dict | None:
+def _unique_fields(pairs: list[tuple[str, Any]]) -> dict:
+    record = dict(pairs)
+    if len(record) != len(pairs):
+        raise ValueError("duplicate field")
+    return record
+
+
+def _unsigned_literal(literal: str) -> int:
+    # Every number in the record is unsigned, and serde reads `-0` as a float.
+    if literal.startswith("-"):
+        raise ValueError("negative number")
+    return int(literal)
+
+
+def _no_constant(_literal: str) -> None:
+    raise ValueError("not a JSON number")
+
+
+def _unsigned(value: Any, bits: int) -> bool:
+    return type(value) is int and 0 <= value < 1 << bits
+
+
+def _optional_text(value: Any) -> bool:
+    if value is None:
+        return True
+    if type(value) is not str:
+        return False
     try:
-        record = json.loads(path.read_text(encoding="utf-8"))
+        value.encode("utf-8")  # rejects a lone surrogate escape, as serde does
+    except UnicodeEncodeError:
+        return False
+    return True
+
+
+def _is_operation_id(value: Any) -> bool:
+    return (
+        type(value) is str
+        and len(value) == 35
+        and value.startswith("op_")
+        and all(char in "0123456789abcdef" for char in value[3:])
+    )
+
+
+def _read_intent(path: Path) -> dict | None:
+    """The record, only when agentd's reader would accept it. The shared
+    fixtures in ``finite-agentd/tests/fixtures/intent`` state the rules. One
+    difference, on the safe side: serde also reads a positional array."""
+    try:
+        record = json.loads(
+            path.read_bytes().decode("utf-8"),
+            object_pairs_hook=_unique_fields,
+            parse_int=_unsigned_literal,
+            parse_constant=_no_constant,
+        )
     except Exception:
         return None
-    if (
-        not isinstance(record, dict)
-        or record.get("v") != 1
-        or record.get("kind") not in INTENT_KINDS
-        or record.get("route") not in INTENT_ROUTES
-        or record.get("phase") not in INTENT_PHASES
+    if not isinstance(record, dict) or not (
+        INTENT_FIELDS - INTENT_OPTIONAL_FIELDS <= record.keys() <= INTENT_FIELDS
+    ):
+        return None
+    kind = record["kind"]
+    if not (
+        _unsigned(record["v"], 32)
+        and record["v"] == 1
+        and _is_operation_id(record["id"])
+        and type(kind) is str
+        and kind in INTENT_KIND_PHASES
+        and record["phase"] in INTENT_KIND_PHASES[kind]
+        and record["route"] in INTENT_ROUTES
+        and record["state"] in INTENT_STATES
+        and _optional_text(record.get("model"))
+        and _optional_text(record.get("error_code"))
+        and _unsigned(record["attempts"], 32)
+        and _unsigned(record["created_at_ms"], 64)
+        and _unsigned(record["updated_at_ms"], 64)
     ):
         return None
     return record
 
 
 def apply_pending_disconnect(intent_path: str) -> dict:
-    """Launcher step (F1). Clears only a disconnect in cleanup whose route is
-    no longer the saved default on disk; anything else changes nothing."""
+    """Launcher step (F1). Clears only for a valid disconnect record in
+    cleanup, and only when ``config.yaml`` names a provider for the saved
+    default that is not the record's route. Anything else changes nothing
+    (R24): a skip is safe, because agentd re-runs the step."""
 
     def result(applied: str, reason: str) -> dict:
         return {"applied": applied, "reason": reason}
@@ -446,11 +532,21 @@ def apply_pending_disconnect(intent_path: str) -> dict:
     if record["route"] not in ROUTE_PROVIDERS:
         return result("skipped", "route_not_disconnectable")
     try:
-        config = _read_config(_hermes_home())
+        config = yaml.safe_load((_hermes_home() / "config.yaml").read_text(encoding="utf-8"))
+    except FileNotFoundError:
+        return result("skipped", "config_missing")
     except Exception:
         return result("skipped", "config_unreadable")
+    if not isinstance(config, dict):
+        return result("skipped", "config_unreadable")
+    # A missing, blank, or non-mapping default is no evidence that the route
+    # was switched away. Hermes itself reads a blank provider as none.
+    model = config.get("model")
+    provider = model.get("provider") if isinstance(model, dict) else None
+    if not isinstance(provider, str) or not provider.strip():
+        return result("skipped", "model_unclassifiable")
     fp_base_url = os.environ.get("FINITE_CONFIG_FP_BASE_URL")
-    if classify_saved_route(config.get("model"), fp_base_url) == record["route"]:
+    if classify_saved_route(model, fp_base_url) == record["route"]:
         return result("skipped", "route_still_saved")
     auth_provider, override_providers = ROUTE_PROVIDERS[record["route"]]
     try:

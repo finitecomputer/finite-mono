@@ -734,12 +734,21 @@ class PendingDisconnectTests(HelperCase):
     def prepare(self, saved_model):
         self.write_config({"model": saved_model})
         self.write_auth(two_route_auth())
+        (self.hermes / ".env").write_text("OPENROUTER_API_KEY=sk-or-v1-fake-dotenv\n")
         store, keys = self.seed_overrides(["openrouter", "openai-codex", "codex", None])
         store.close_all_db_handles()
         return keys
 
     def stores(self):
-        return (self.hermes / "auth.json").read_bytes(), (self.hermes / "state.db").read_bytes()
+        """The credential stores and the session store, byte for byte."""
+        names = ("auth.json", ".env", "state.db", "sessions/sessions.json")
+        return {name: (self.hermes / name).read_bytes() for name in names}
+
+    def assert_skipped(self, intent, reason):
+        before = self.stores()
+        result = helper.apply_pending_disconnect(str(intent))
+        self.assertEqual(result, {"applied": "skipped", "reason": reason})
+        self.assertEqual(self.stores(), before)
 
     def test_matrix(self):
         for route, (auth_provider, _) in helper.ROUTE_PROVIDERS.items():
@@ -802,6 +811,113 @@ class PendingDisconnectTests(HelperCase):
         result = helper.apply_pending_disconnect(str(self.intent()))
         self.assertEqual(result, {"applied": "skipped", "reason": "config_unreadable"})
         self.assertEqual(self.stores(), before)
+
+    def test_shared_intent_fixtures(self):
+        """R24: agentd's reader runs the same files. With the saved default
+        switched away, a lenient reader would clear on any refused record."""
+        self.prepare(fp_model_block())
+        fixtures = sorted((FIXTURES / "intent").glob("*.json"))
+        self.assertGreaterEqual(len(fixtures), 32)
+        intent = self.root / "inference-intent.json"
+        for path in fixtures:
+            case = json.loads(path.read_text(encoding="utf-8"))
+            with self.subTest(fixture=path.name):
+                intent.write_text(json.dumps(case["record"]))
+                if case["valid"]:
+                    self.assertEqual(helper._read_intent(intent), case["record"])
+                else:
+                    self.assert_skipped(intent, "intent_unparsable")
+
+    def test_encodings_agentd_refuses(self):
+        """Records that JSON fixtures cannot state. Each verdict was checked
+        against serde_json with agentd's `IntentRecord`."""
+        self.prepare(fp_model_block())
+        text = self.intent().read_text()
+        record = json.loads(text)
+        refused = {
+            "negative zero": text.replace('"attempts": 0', '"attempts": -0'),
+            "float version": text.replace('"v": 1', '"v": 1.0'),
+            "exponent": text.replace('"attempts": 0', '"attempts": 1e0'),
+            "boolean version": text.replace('"v": 1', '"v": true'),
+            "NaN": text.replace('"attempts": 0', '"attempts": NaN'),
+            "beyond 64 bits": text.replace(
+                '"updated_at_ms": 0', '"updated_at_ms": 18446744073709551616'
+            ),
+            "lone surrogate": text.replace('"model": null', '"model": "\\ud800"'),
+            "lone trailing surrogate": text.replace(
+                '"error_code": null', '"error_code": "\\udc00"'
+            ),
+            "duplicate field": text[:-1] + ', "attempts": 1}',
+            "duplicate optional field": text[:-1] + ', "model": "x"}',
+            "trailing data": text + "{}",
+            "BOM": "﻿" + text,
+            # serde reads a positional array too; the launcher refuses it.
+            "positional array": json.dumps(list(record.values())),
+        }
+        encoded = {name: value.encode("utf-8") for name, value in refused.items()}
+        encoded["UTF-16"] = text.encode("utf-16")
+        encoded["not UTF-8"] = text.replace('"model": null', '"model": "caf\xe9"').encode("latin-1")
+        intent = self.root / "raw-intent.json"
+        for name, raw in encoded.items():
+            with self.subTest(record=name):
+                intent.write_bytes(raw)
+                self.assert_skipped(intent, "intent_unparsable")
+        accepted = {
+            "surrogate pair": text.replace('"model": null', '"model": "\\ud83d\\ude00"'),
+            "escaped NUL": text.replace('"error_code": null', '"error_code": "a\\u0000b"'),
+            "largest values": text.replace('"attempts": 0', '"attempts": 4294967295').replace(
+                '"updated_at_ms": 0', '"updated_at_ms": 18446744073709551615'
+            ),
+            "trailing newlines": text + "\n\n",
+        }
+        for name, value in accepted.items():
+            with self.subTest(record=name):
+                intent.write_text(value)
+                self.assertIsNotNone(helper._read_intent(intent))
+
+    def test_ambiguous_saved_default_changes_nothing(self):
+        """R24, review finding B2: only a named provider shows that the
+        default moved away from the route."""
+        self.prepare(fp_model_block())
+        intent = self.intent()
+        config = self.hermes / "config.yaml"
+        config.unlink()
+        self.assert_skipped(intent, "config_missing")
+        config.mkdir()
+        self.assert_skipped(intent, "config_unreadable")
+        config.rmdir()
+        for text in ("", "null\n", "[]\n", "just text\n", "model: [unclosed\n"):
+            with self.subTest(config=text):
+                config.write_text(text)
+                self.assert_skipped(intent, "config_unreadable")
+        for model in (
+            "absent",
+            None,
+            "anthropic/claude-sonnet-4.6",
+            ["openrouter"],
+            {},
+            {"default": "anthropic/claude-sonnet-4.6"},
+            {"provider": None, "default": "x"},
+            {"provider": "", "default": "x"},
+            {"provider": "  ", "default": "x"},
+            {"provider": 7, "default": "x"},
+            {"provider": ["openrouter"], "default": "x"},
+        ):
+            with self.subTest(model=model):
+                self.write_config({} if model == "absent" else {"model": model})
+                self.assert_skipped(intent, "model_unclassifiable")
+
+    def test_a_named_provider_elsewhere_allows_the_clear(self):
+        for model in (
+            {"provider": "anthropic", "default": "claude-sonnet-4.6"},
+            {"provider": "custom", "base_url": "https://llm.example.invalid/v1", "default": "m"},
+        ):
+            with self.subTest(model=model):
+                self.setUp()
+                self.prepare(model)
+                result = helper.apply_pending_disconnect(str(self.intent()))
+                self.assertEqual(result, {"applied": "yes", "reason": "cleared"})
+                self.assertNotIn("openrouter", self.read_auth()["credential_pool"])
 
     def test_process_contract(self):
         self.prepare(fp_model_block())
