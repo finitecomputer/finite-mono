@@ -27,6 +27,10 @@ pub struct RunnerLeaseCapacity {
     /// all-false envelope supports no lifecycle leases.
     #[serde(default)]
     pub runtime_capabilities: Option<RuntimeCapabilitiesEnvelope>,
+    /// Can deliver a successor Core credential before cold-relocation launch.
+    /// N-1 workers omit this and must not claim enrolled relocations.
+    #[serde(default)]
+    pub supports_relocation_credentials: bool,
 }
 
 impl RunnerLeaseCapacity {

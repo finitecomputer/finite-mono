@@ -107,6 +107,10 @@ where
             .collect::<Vec<_>>()
     });
     let lease_expires_at = (now_time + Duration::seconds(lease_seconds)).format(&Rfc3339)?;
+    let supports_relocation_credentials = input
+        .runner_capacity
+        .as_ref()
+        .is_some_and(|capacity| capacity.supports_relocation_credentials);
     let Some(row) = client
         .query_opt(
             "WITH candidate AS (
@@ -135,6 +139,16 @@ where
                   AND (
                         relocation_spec IS NULL
                         OR ($5::text IS NOT NULL AND target_source_host_id = $5)
+                      )
+                  AND (
+                        relocation_spec IS NULL OR $8::bool
+                        OR NOT EXISTS (
+                            SELECT 1 FROM runtime_core_credentials c
+                            JOIN agent_creation_requests origin ON origin.id=c.creation_request_id
+                            WHERE c.agent_runtime_id = agent_creation_requests.agent_runtime_id
+                               OR c.creation_request_id = agent_creation_requests.id
+                               OR origin.agent_runtime_id = agent_creation_requests.agent_runtime_id
+                        )
                       )
                   AND (
                         $6::text[] IS NULL
@@ -171,6 +185,7 @@ where
                 &source_host_id,
                 &runner_classes,
                 &may_reserve_new,
+                &supports_relocation_credentials,
             ],
         )
         .await

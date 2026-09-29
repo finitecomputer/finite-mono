@@ -73,6 +73,9 @@ where
     if !is_relocation && let Some(runtime_id) = request.agent_runtime_id.as_deref() {
         delete_runtime_rows(client, runtime_id).await?;
     }
+    if is_relocation {
+        revoke_pending_relocation_credential(client, &request.id).await?;
+    }
     let agent_runtime_id = if is_relocation {
         request.agent_runtime_id.clone()
     } else {
@@ -150,6 +153,9 @@ where
     if !is_relocation && let Some(runtime_id) = request.agent_runtime_id.as_deref() {
         delete_runtime_rows(client, runtime_id).await?;
     }
+    if is_relocation {
+        revoke_pending_relocation_credential(client, &request.id).await?;
+    }
     let agent_runtime_id = if is_relocation {
         request.agent_runtime_id.clone()
     } else {
@@ -179,4 +185,21 @@ where
         .await
         .map_err(store_error)?;
     agent_creation_request_from_row(&row)
+}
+
+// Only the unbound successor belongs to a failed or cancelled attempt.
+// The predecessor stays current for an exact new attempt.
+async fn revoke_pending_relocation_credential<C: GenericClient + Sync>(
+    client: &C,
+    request_id: &str,
+) -> CoreResult<()> {
+    client
+        .execute(
+            "UPDATE runtime_core_credentials SET revoked=TRUE, activated=FALSE
+         WHERE creation_request_id=$1 AND agent_runtime_id IS NULL",
+            &[&request_id],
+        )
+        .await
+        .map_err(store_error)?;
+    Ok(())
 }

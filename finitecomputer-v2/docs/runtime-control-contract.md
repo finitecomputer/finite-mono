@@ -164,7 +164,13 @@ absent target compute handle, the complete durable-state manifest, and a
 regular identity file. After launch it requires the runtime to expose the same
 Agent Principal before Core changes the source binding. Normal Runner secret
 resolution supplies fresh target-host credentials; secrets are not copied from
-the old compute environment.
+the old compute environment. For a Runtime enrolled in Core authentication,
+Core leases the relocation only to a Runner advertising
+`supportsRelocationCredentials`; that Runner fetches one successor credential
+for the exact lease before launch, and completion revokes the predecessor in
+the same transaction that switches the binding. If the successor cannot also be
+activated in that transaction, the whole completion rolls back. A revoked
+current credential fails closed.
 
 A failed pre-commit relocation removes target compute but preserves Core's
 existing Runtime/link and both durable trees. The stopped source remains the

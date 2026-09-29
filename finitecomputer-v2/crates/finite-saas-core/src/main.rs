@@ -44,6 +44,9 @@ async fn main() -> Result<()> {
     init_tracing();
     let args = Args::parse();
     match args.command.unwrap_or(Command::Serve) {
+        Command::RuntimeCredentialRecoverExact(args) => {
+            print_json(&runtime_credential_recovery_command(args).await?)
+        }
         Command::Serve => serve().await,
         Command::RuntimeArtifactUpsert {
             artifact_id,

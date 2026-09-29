@@ -285,9 +285,11 @@ secret without changing native credentials or applied generation. Revoked,
 changed-owner, moved, inactive or ambiguous assignments fail closed without
 repair. Historical relocation records are not candidates for that primary reference.
 No date/ID ordering chooses an assignment. Missing or mismatched primary
-records fail closed. Relocation revokes the old credential;
-re-enrolling a revoked/reassigned identity requires the separate FIN-39
-relocation/recovery contract, not an automatic repair here.
+records fail closed. Cold relocation of an enrolled Runtime hands authority to
+a successor credential issued under the relocation lease and revokes the
+predecessor at completion; a later upgrade accepts that relocation creation as
+the credential's origin. Re-enrolling a revoked or reassigned identity is not an
+automatic repair here.
 
 The Kata adapter carries the reserved pair in the existing transient private
 environment file during the authorized image upgrade. Both absent means

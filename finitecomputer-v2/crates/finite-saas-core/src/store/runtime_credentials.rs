@@ -3,6 +3,9 @@
 use super::*;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
+mod recovery;
+mod relocation;
+pub use recovery::RecoverRelocatedCredential;
 
 // No Debug: launch credentials must not become diagnostic data.
 pub struct ProvisionRuntimeCredential {
@@ -30,6 +33,9 @@ pub struct ProvisionUpgradeCredential {
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct RuntimeBootstrapCredential {
     pub secret: String,
+    /// Exact installed predecessor authorized only for this recovery upgrade.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub expected_previous_credential_sha256: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -97,6 +103,7 @@ impl CoreStore {
              JOIN project_runtime_links l ON l.project_id=p.id AND l.agent_runtime_id=r.id
              WHERE r.id=$1 AND r.project_id=$2 AND r.source_host_id=$3
                AND r.source_machine_id=$4 AND l.active AND p.import_candidate_id IS NULL
+               AND r.offboarding_phase IS NULL
              FOR UPDATE OF r,p,l",
                 &[
                     &request.agent_runtime_id,
@@ -126,8 +133,8 @@ impl CoreStore {
         let creation: String = creations[0].get(0);
         let existing = tx.query_opt(
             "SELECT bootstrap_secret,creation_request_id,source_host_id,source_machine_id,owner_user_id,revoked,activated,agent_runtime_id
-             FROM runtime_core_credentials WHERE agent_runtime_id=$1 OR creation_request_id=$2 FOR UPDATE",
-            &[&request.agent_runtime_id, &creation],
+             FROM runtime_core_credentials WHERE agent_runtime_id=$1 FOR UPDATE",
+            &[&request.agent_runtime_id],
         ).await.map_err(store_error)?;
         // Validate wall-clock expiry after waiting for all state locks.
         let live: bool = tx.query_one(
@@ -138,7 +145,30 @@ impl CoreStore {
             return Err(CoreError::RuntimeControlRequestLeaseConflict);
         }
         let secret = if let Some(row) = existing {
-            if row.get::<_, String>(1) != creation
+            let credential_creation: String = row.get(1);
+            let current_origin: bool = tx
+                .query_one(
+                    "SELECT EXISTS(SELECT 1 FROM agent_creation_requests
+                 WHERE id=$1 AND agent_runtime_id=$2 AND project_id=$3 AND owner_user_id=$4
+                   AND status='running'
+                   AND (id=$5 OR (target_source_host_id=$6
+                     AND relocation_spec->>'schema'='runtime_relocation.v1'
+                     AND relocation_spec->'relocation'->>'targetSourceHostId'=$6
+                     AND relocation_spec->'relocation'->>'sourceMachineId'=$7)))",
+                    &[
+                        &credential_creation,
+                        &request.agent_runtime_id,
+                        &request.project_id,
+                        &owner,
+                        &creation,
+                        &input.source_host_id,
+                        &request.source_machine_id,
+                    ],
+                )
+                .await
+                .map_err(store_error)?
+                .get(0);
+            if !current_origin
                 || row.get::<_, String>(2) != input.source_host_id
                 || row.get::<_, Option<String>>(3).as_deref() != Some(&request.source_machine_id)
                 || row.get::<_, String>(4) != owner
@@ -150,6 +180,21 @@ impl CoreStore {
             }
             row.get(0)
         } else {
+            // An unbound predecessor is history, never authority to silently
+            // re-enroll a missing or revoked current incarnation.
+            let enrolled: bool = tx
+                .query_one(
+                    "SELECT EXISTS(SELECT 1 FROM runtime_core_credentials c
+                 JOIN agent_creation_requests q ON q.id=c.creation_request_id
+                 WHERE q.agent_runtime_id=$1)",
+                    &[&request.agent_runtime_id],
+                )
+                .await
+                .map_err(store_error)?
+                .get(0);
+            if enrolled {
+                return Err(CoreError::ProviderOperationTransitionConflict);
+            }
             let secret = new_secret()?;
             tx.execute(
                 "INSERT INTO runtime_core_credentials
@@ -164,8 +209,13 @@ impl CoreStore {
             }
             secret
         };
+        let expected_previous_credential_sha256 =
+            recovery::replacement_authorization(&tx, &request, &owner).await?;
         self.finish(tx).await?;
-        Ok(RuntimeBootstrapCredential { secret })
+        Ok(RuntimeBootstrapCredential {
+            secret,
+            expected_previous_credential_sha256,
+        })
     }
 
     /// Core returns the same secret for retries of this creation, including a
@@ -233,7 +283,10 @@ impl CoreStore {
         // If provisioning is retried after runtime registration, bind it now.
         bind_bootstrap(&*tx, &request.id).await?;
         self.finish(tx).await?;
-        Ok(RuntimeBootstrapCredential { secret })
+        Ok(RuntimeBootstrapCredential {
+            secret,
+            expected_previous_credential_sha256: None,
+        })
     }
 
     /// Observational reader. Mutation consumers use the transactional method below.
@@ -305,10 +358,15 @@ pub(super) async fn validate_bootstrap_source<C: GenericClient + Sync>(
 
 /// Called by the actual runtime-registration and completion transactions.
 /// Old launchers have no bootstrap row; those paths remain unchanged.
+/// Returns whether a relocation handed authority to its successor.
 pub(super) async fn bind_bootstrap<C: GenericClient + Sync>(
     client: &C,
     request_id: &str,
-) -> CoreResult<()> {
+) -> CoreResult<bool> {
+    let request = locked_agent_creation_request(client, request_id).await?;
+    if request.relocation.is_some() {
+        return relocation::complete(client, &request).await;
+    }
     let row = client
         .query_opt(
             "SELECT r.id,r.project_id,r.source_host_id,r.source_machine_id,q.lease_token
@@ -319,7 +377,7 @@ pub(super) async fn bind_bootstrap<C: GenericClient + Sync>(
         .await
         .map_err(store_error)?;
     let Some(row) = row else {
-        return Ok(());
+        return Ok(false);
     };
     let runtime: String = row.get(0);
     client
@@ -331,7 +389,7 @@ pub(super) async fn bind_bootstrap<C: GenericClient + Sync>(
         .map_err(store_error)?;
     let origin = client.query_opt("SELECT source_host_id,lease_sha256,revoked,agent_runtime_id,source_machine_id FROM runtime_core_credentials WHERE creation_request_id=$1 FOR UPDATE", &[&request_id]).await.map_err(store_error)?;
     let Some(origin) = origin else {
-        return Ok(());
+        return Ok(false);
     };
     if origin
         .get::<_, Option<String>>(3)
@@ -352,7 +410,7 @@ pub(super) async fn bind_bootstrap<C: GenericClient + Sync>(
     check_initial_runtime(client, &row.get::<_, String>(1), &runtime).await?;
     ensure_live_now(client, request_id).await?;
     client.execute("UPDATE runtime_core_credentials SET agent_runtime_id=$2,source_machine_id=$3 WHERE creation_request_id=$1", &[&request_id,&runtime,&row.get::<_, String>(3)]).await.map_err(store_error)?;
-    Ok(())
+    Ok(false)
 }
 pub(super) async fn authenticated<C: GenericClient + Sync>(
     client: &C,

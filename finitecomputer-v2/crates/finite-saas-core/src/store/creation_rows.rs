@@ -247,7 +247,7 @@ where
         )
         .await
         .map_err(store_error)?;
-    runtime_credentials::bind_bootstrap(client, request_id).await?;
+    let handed_off = runtime_credentials::bind_bootstrap(client, request_id).await?;
     // The creation lease is cleared below. Preserve proof that the credential
     // belongs to the exact completing lease in the same transaction.
     let lease: Option<String> = client
@@ -280,17 +280,29 @@ where
         )
         .await
         .map_err(store_error)?;
-    client
-        .execute(
+    let activated: Option<bool> = client
+        .query_opt(
             "UPDATE runtime_core_credentials
          SET activated = COALESCE(lease_sha256 = $3, FALSE)
              AND EXISTS (SELECT 1 FROM agent_creation_requests
                          WHERE id=$2 AND lease_expires_at > clock_timestamp())
-         WHERE agent_runtime_id=$1 AND creation_request_id=$2 AND NOT revoked",
+         WHERE agent_runtime_id=$1 AND creation_request_id=$2 AND NOT revoked
+         RETURNING activated",
             &[&runtime_id, &request_id, &lease_hash],
         )
         .await
-        .map_err(store_error)?;
+        .map_err(store_error)?
+        .map(|row| row.get(0));
+    // A relocation revoked its predecessor above. Committing an inactive
+    // successor would leave the Agent with no working Core credential, so the
+    // whole completion rolls back and the request stays retryable.
+    if handed_off && activated != Some(true) {
+        tracing::warn!(
+            creation_request_id = request_id,
+            "relocation completion rolled back: successor lease expired before activation"
+        );
+        return Err(CoreError::AgentCreationRequestLeaseConflict);
+    }
     let row = client
         .query_one(
             "UPDATE agent_creation_requests
