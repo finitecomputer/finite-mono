@@ -506,9 +506,7 @@ export function HermesChatProvider({
       return currentState();
     }
     if ("StartTopicChatIntent" in action) {
-      if (action.StartTopicChatIntent.topic_id !== HOME_TOPIC_ID) {
-        throw new Error(READ_ONLY_REASON);
-      }
+      // Platform topics are read-only history; every new web chat is native.
       await createDraft();
       publish();
       return currentState();

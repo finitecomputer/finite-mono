@@ -241,6 +241,9 @@ async function serve() {
         FC_HOSTED_WEB_DEVICE_URL: `http://127.0.0.1:${hostedPort}`,
         FC_DASHBOARD_ALLOW_DEV_ACCOUNT_AUTH: "1",
         FC_DASHBOARD_DEV_EMAIL: FIXTURE_EMAIL,
+        ...(process.env.FC_WEB_DESIGN_ADMIN === "1"
+          ? { FC_DASHBOARD_DEV_ADMIN_EMAILS: FIXTURE_EMAIL }
+          : {}),
         FC_DASHBOARD_DEV_WORKOS_USER_ID: WORKOS_USER_ID,
         FC_DASHBOARD_DEV_WORKOS_ACCESS_TOKEN: "web-design-access-token",
         FC_DASHBOARD_RUNTIME_MODE: "canary",
