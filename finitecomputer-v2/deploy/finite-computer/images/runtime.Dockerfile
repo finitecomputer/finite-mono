@@ -120,6 +120,7 @@ COPY --from=finite-rust-builder /build/target/release/fbrain /runtime/bin/fbrain
 COPY finitechat/containers/agent/finite.py /runtime/bin/finite
 
 COPY finitechat/integrations/hermes/finitechat /runtime/hermes-plugin/finitechat
+LABEL computer.finite.chat.inbox_reader="refusal-v1"
 COPY finite-skills/skills /runtime/finite-skills
 COPY finitechat/containers/agent/entrypoint.sh /opt/agent-entrypoint.sh
 COPY finitechat/containers/agent/health_server.py /opt/health_server.py

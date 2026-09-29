@@ -1,4 +1,5 @@
 use super::*;
+mod inbox_handoff;
 use crate::retirement::{
     RecoveryArtifactContext, VerifiedRecoveryZip, create_recovery_zip, source_manifest,
     verify_recovery_zip,
@@ -1062,6 +1063,9 @@ impl KataLauncher {
     }
 
     fn start_compute(&self, container_name: &str) -> Result<(), RunnerError> {
+        if let Some(inspected) = self.inspect(container_name)? {
+            self.check_container_chat_reader(&inspected)?;
+        }
         self.run_checked(
             self.command(vec![
                 OsString::from("start"),
@@ -1269,6 +1273,13 @@ impl KataLauncher {
         old_npub: &str,
     ) -> Result<(), RunnerError> {
         if self.inspect(candidate_name)?.is_some() {
+            self.stop_compute(candidate_name)?;
+            let previous = self
+                .inspect(&canonical_plan.container_name)?
+                .ok_or_else(|| {
+                    RunnerError::RuntimeLaunch("rollback container disappeared".into())
+                })?;
+            self.check_container_chat_reader(&previous)?;
             // `rm --force` must complete before the old Runtime is started;
             // two live containers must never write the same /data bind.
             self.remove_compute(candidate_name)?;
@@ -1284,6 +1295,11 @@ impl KataLauncher {
     ) -> Result<(), RunnerError> {
         // The target canonical must be removed before the old handle is made
         // canonical and started: both bind the same durable /data read-write.
+        self.stop_compute(&canonical_plan.container_name)?;
+        let previous = self
+            .inspect(rollback_name)?
+            .ok_or_else(|| RunnerError::RuntimeLaunch("rollback container disappeared".into()))?;
+        self.check_container_chat_reader(&previous)?;
         self.remove_compute(&canonical_plan.container_name)?;
         self.rename_compute(rollback_name, &canonical_plan.container_name)?;
         match expected_old_npub {
@@ -1393,6 +1409,7 @@ impl KataLauncher {
                 "warning: removing stale Kata upgrade candidate {} ({}) left by operation {}",
                 candidate.container_name, candidate.inspected.state.status, candidate.request_id
             );
+            self.check_retained_chat_reader(canonical_plan)?;
             self.remove_compute(&candidate.container_name)?;
         }
         Ok(running)
@@ -1464,16 +1481,19 @@ impl KataLauncher {
 
         match canonical {
             None => {
-                let Some(_rollback) = rollback else {
+                let Some(rollback) = rollback else {
                     return Err(RunnerError::RuntimeLaunch(format!(
                         "Kata canonical handle {canonical_name} is missing and no owned rollback handle exists"
                     )));
                 };
                 if candidate.is_some() {
+                    self.stop_compute(&candidate_name)?;
+                    self.check_container_chat_reader(&rollback)?;
                     // Candidate must be gone before the old compute can be
                     // restored: never permit two writers on the same /data.
                     self.remove_compute(&candidate_name)?;
                 }
+                self.check_container_chat_reader(&rollback)?;
                 self.rename_compute(&rollback_name, canonical_name)?;
             }
             Some(canonical) => {
@@ -2096,6 +2116,17 @@ impl RuntimeLauncher for KataLauncher {
         let _operation_lock = self.acquire_runtime_operation_lock(&operation_plan)?;
         let (plan, inspected) = self.validate_control(lease)?;
         self.guard_canonical_start_against_recovery(&plan, &lease.runtime.project_id, &inspected)?;
+        if self
+            .upgrade_candidates(&plan, &lease.runtime.project_id)?
+            .iter()
+            .any(|candidate| candidate.inspected.state.status == "running")
+        {
+            return Err(RunnerError::RuntimeLaunch(
+                "runtime restart is blocked while an upgrade candidate is writing the same data"
+                    .into(),
+            ));
+        }
+        self.check_container_chat_reader(&inspected)?;
         self.run_checked(
             self.command(vec![
                 OsString::from("restart"),
@@ -2561,7 +2592,9 @@ impl RuntimeLauncher for KataLauncher {
                             .and_then(|result| result.as_ref().ok())
                             .map(String::as_str),
                     );
-                    remove_kata_upgrade_expected_npub(&canonical_plan, &lease.request.id);
+                    if restore.is_ok() {
+                        remove_kata_upgrade_expected_npub(&canonical_plan, &lease.request.id);
+                    }
                     return Err(runtime_upgrade_failure(error, restore.err()));
                 }
                 Err(error) => return Err(error),
@@ -2623,6 +2656,8 @@ impl RuntimeLauncher for KataLauncher {
                         .to_string(),
                 ));
             }
+            self.stop_compute(&candidate_name)?;
+            self.check_container_chat_reader(&inspected)?;
             self.remove_compute(&candidate_name)?;
         }
 
@@ -2641,6 +2676,7 @@ impl RuntimeLauncher for KataLauncher {
         // the pre-upgrade Agent Principal before deleting the old handle.
         write_kata_upgrade_expected_npub(&canonical_plan, &lease.request.id, &old_npub)?;
         let replacement_environment = kata_upgrade_environment(&inspected.config, options)?;
+        inbox_handoff::check_chat_home(&inspected)?;
 
         // Pull before user-visible downtime. The candidate run below uses
         // --pull=never, proving it starts the exact Core-bound artifact already
@@ -2668,6 +2704,13 @@ impl RuntimeLauncher for KataLauncher {
             return Err(runtime_upgrade_failure(error, restore.err()));
         }
 
+        if let Err(error) =
+            self.check_target_chat_reader(&canonical_plan.state_root, &target.reference)
+        {
+            let _ = std::fs::remove_file(&candidate_plan.env_file);
+            let restore = self.restore_previous_compute(&canonical_plan, &old_npub);
+            return Err(runtime_upgrade_failure(error, restore.err()));
+        }
         let candidate_launch = self.run_checked(
             kata_upgrade_run_command(
                 &self.config,
@@ -4561,6 +4604,7 @@ struct KataRecoveryHelper {
 
 #[cfg(test)]
 mod tests {
+    mod inbox_handoff;
     use super::*;
     use finite_saas_core::{
         AgentRuntime, HostOwnedRuntimeFacts, RuntimeControlRequest, RuntimeControlRequestStatus,
@@ -4900,6 +4944,10 @@ case "$cmd" in
     write_field "$name" secret "$secret"; cp "$env_file" "$root/$name.env-file"
     cp "$env_file" "$root/last-run.env-file"
     write_field "$name" port "$(cat "$root/candidate-port")"
+    if [ -f "$root/protected-inbox-on-run" ]; then
+      mkdir -p "$volume/agent"
+      cp "$root/protected-inbox-on-run" "$volume/agent/hermes-inbox.json"
+    fi
     if [ -f "$root/also-create" ]; then
       # A second create that never started: the same image and /data bind,
       # labelled for the request named in also-create.request.

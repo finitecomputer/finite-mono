@@ -17,13 +17,48 @@ remain visible locally.
   resumes the same operation rather than regenerating cryptographic state.
 - Encrypted room, message, profile, and selected-room projections support local
   reopening before network sync; an offline server must not erase saved history.
-- There is no durable outbox. Own sends become delivered only after server
+- Ordinary chat has no durable outbox. Own sends become delivered only after server
   acceptance; rejected sends create no accepted message row or later retry work.
 - Attachments upload encrypted bytes before sending the blob reference. SQLite
   never stores plaintext attachment bytes. A later cache miss does not undo
   delivery or change room membership.
 - Malformed or unsupported client state fails closed. Do not repair durable MLS
   state by skipping cursors, inventing Devices, or editing individual rows.
+
+### Hermes command refusals
+
+The resident sidecar owns command refusals through the versioned
+`refuse-command-v1` operation. It freezes the inbound route and explanation in
+a `refusal_v1` lease in `hermes-inbox.json`, saves the exact prepared encrypted
+request before submission, and retries that request after uncertain outcomes.
+The existing application-effect receipt recovers an accepted reply even after
+the room changes epoch. Core restores the sender's history from the saved
+plaintext. Only durable acceptance permits inbox settlement; the ack record
+and reply receipt are written together. Ordinary sends keep their existing path.
+
+The private inbox contains plaintext, including the saved refusal, and retains
+its existing mode-0600 atomic replacement boundary. The inbox and client crypto
+store must be restored as one coherent Recovery Set. An isolated older inbox
+restore can forget accepted work and is not a supported recovery procedure.
+
+Pending refusals are not leased to Hermes, expired, or removed by ordinary
+ack/release calls. Up to 32 are retained; one recovery worker retries due work
+with capped backoff. Readiness reports the pending count and last errors.
+Unaccepted requests that become stale after an epoch change remain recoverable
+blocked work; they are never silently replaced or consumed.
+
+An old reader rejects `refusal_v1`. A downgrade to an incapable runtime must
+therefore drain all protected entries before replacing the capable runtime.
+If delivery cannot finish, repair forward; do not clear the inbox to permit a
+downgrade. Once drained, the pending leases are legacy-readable and the old
+reader may safely ignore the optional accepted receipt on the ack ring.
+
+For hosted Kata upgrades, deploy the Runner containing the inbox compatibility
+guard before the refusal-capable Agent Runtime image. The image advertises its
+reader through `computer.finite.chat.inbox_reader=refusal-v1`. Runner checks the
+quiesced inbox before replacement and before rollback cleanup; blocked rollback
+preserves the capable handle. An older Runner does not provide this guard and
+is not a supported orchestrator for this rollout. Phala upgrades remain disabled.
 
 ## Server durability
 

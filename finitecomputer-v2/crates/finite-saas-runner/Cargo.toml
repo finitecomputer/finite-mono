@@ -8,6 +8,7 @@ aes-gcm = "0.10"
 anyhow = "1.0"
 clap = { version = "4.5", features = ["derive"] }
 finite-saas-core = { path = "../finite-saas-core" }
+finitechat-hermes = { path = "../../../finitechat/crates/finitechat-hermes" }
 fs4.workspace = true
 hex = "0.4"
 httpdate = "1.0"

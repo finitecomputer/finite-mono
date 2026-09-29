@@ -1308,39 +1308,33 @@ class FiniteChatAdapter(BasePlatformAdapter):
         message_id: str,
         event_key: str,
     ) -> None:
-        """Answer a restricted command on the event's route, then settle it.
+        """Transfer refusal ownership to the capable resident sidecar.
 
-        No session, activity, or admission state is touched. A retryable send
-        failure keeps the lease and releases it after a backoff so redelivery
-        retries the refusal; a non-retryable one is logged and acked, because
-        redelivery would fail the same way. Cancellation settles nothing and
-        the lease's expiry redelivers the command.
+        No send/ack fallback: an old or unreachable sidecar leaves the input
+        recoverable and the command stays out of Hermes. The sidecar persists
+        its decision before reporting ownership and finishes independently of
+        this task's cancellation or a changed policy after restart.
         """
+        del event
         logger.info("[finitechat] refused /%s in %s/%s", refusal.command, room_id, seq)
-        result = await self._send_refusal(event, refusal.text, reply_to=message_id)
-        if not result.success and result.retryable:
+        try:
+            result = await self._finitechat_json(
+                "refuse-command-v1",
+                {"room_id": room_id, "seq": seq, "message_id": message_id, "text": refusal.text},
+                timeout=15,
+            )
+            owned = result.ok and result.data.get("durable") is True
+            error = result.error
+        except Exception as exc:
+            owned, error = False, str(exc)
+        if not owned:
             logger.warning(
-                "[finitechat] command refusal for %s/%s not delivered, retrying: %s",
-                room_id,
-                seq,
-                result.error,
+                "[finitechat] durable refusal for %s/%s not confirmed; retaining input: %s",
+                room_id, seq, error,
             )
             self._schedule_refusal_release(event_key, room_id, seq, message_id)
             return
-        if not result.success:
-            logger.warning(
-                "[finitechat] command refusal for %s/%s not deliverable, settling: %s",
-                room_id,
-                seq,
-                result.error,
-            )
         self._refusal_retry_delays.pop(event_key, None)
-        # Delivery is at least once: if this ack fails, or cancellation lands
-        # between the send and the ack, the lease expires and the redelivered
-        # command is refused again, so the user can see the refusal twice. A
-        # reply and an inbox ack are separate sidecar writes with no shared
-        # transaction; a duplicate refusal is preferred to a lost one.
-        await self._ack_finitechat_event(room_id, seq, message_id)
 
     async def _send_refusal(
         self, event: MessageEvent, text: str, *, reply_to: str | None

@@ -1157,6 +1157,7 @@ dependencies = [
  "anyhow",
  "clap",
  "finite-saas-core",
+ "finitechat-hermes",
  "fs4",
  "hex",
  "httpdate",
