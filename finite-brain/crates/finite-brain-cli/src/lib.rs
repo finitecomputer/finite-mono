@@ -4964,6 +4964,14 @@ mod tests {
         .filter(|marker| normalized.contains(marker))
         .map(str::to_owned)
         .collect::<Vec<_>>();
+        if normalized.split_whitespace().any(|token| {
+            token.contains('|')
+                && token.split('|').any(|alternative| {
+                    alternative.trim_matches(|c: char| "`.,;:()[]{}".contains(c)) == "claim"
+                })
+        }) {
+            retired.push("claim command alternative".to_owned());
+        }
         for tail in normalized.split('<').skip(1) {
             let Some((placeholder, _)) = tail.split_once('>') else {
                 continue;
@@ -4987,6 +4995,8 @@ mod tests {
             "fbrain invite brain create --target <EMAIL|NPUB>",
             "fbrain invite folder \\\n  claim <invite-code> --email <address>",
             "admin ensure-access --target < email >",
+            "fbrain invite folder create|list|inspect|accept|revoke|claim",
+            "fbrain invite folder claim|create|list",
         ] {
             assert!(
                 !retired_invite_syntax(example).is_empty(),

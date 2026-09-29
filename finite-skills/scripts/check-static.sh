@@ -294,6 +294,14 @@ else:
                 "--target <email>", "preflight/commit", "is a symlink to",
             ) if marker in normalized
         ]
+        if any(
+            "|" in token and any(
+                alternative.strip("`.,;:()[]{}") == "claim"
+                for alternative in token.split("|")
+            )
+            for token in normalized.split()
+        ):
+            retired.append("claim command alternative")
         for placeholder in re.findall(r"<([^<>]*)>", normalized):
             alternatives = set(placeholder.split("|"))
             if "email" in alternatives and alternatives & {"npub", "hex", "nip05", "nip-05"}:
@@ -307,6 +315,8 @@ else:
         "fbrain invite brain create --target <EMAIL|NPUB>",
         "fbrain invite folder \\\n  claim <invite-code> --email <address>",
         "admin ensure-access --target < email >",
+        "fbrain invite folder create|list|inspect|accept|revoke|claim",
+        "fbrain invite folder claim|create|list",
     ):
         if not retired_invite_syntax(example):
             errors.append(f"invitation syntax checker missed {example!r}")
