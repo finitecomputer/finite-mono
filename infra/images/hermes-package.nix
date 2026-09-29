@@ -36,7 +36,8 @@ upstream.override {
             ${pkgs.patch}/bin/patch --fuzz=0 -d "$site" -p1 < ${./patches/hermes-stop-generation.patch}
             rm -f "$site/gateway/__pycache__/run."*.pyc
             ${pkgs.patch}/bin/patch --fuzz=0 -d "$site" -p1 < ${./patches/hermes-session-route-safety.patch}
-            rm -f "$site/gateway/__pycache__/run."*.pyc "$site/hermes_cli/__pycache__/runtime_provider."*.pyc
+            rm -f "$site/gateway/__pycache__/run."*.pyc "$site/hermes_cli/__pycache__/runtime_provider."*.pyc \
+              "$site/hermes_cli/__pycache__/model_switch."*.pyc
           '';
         });
       }

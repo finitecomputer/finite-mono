@@ -206,6 +206,8 @@ def _case_main(spec):
         return _fallback_entry_case(cfg)
     if kind == "model_switch":
         return _model_switch_case(cfg)
+    if kind == "pinned_switch":
+        return _pinned_switch_case(spec, cfg)
     if kind == "providers":
         return _registry_providers()
     if kind == "sweep":
@@ -315,15 +317,10 @@ def _fallback_entry_case(cfg):
     }
 
 
-def _model_switch_case(cfg):
+def _serve_not_found():
+    """A local endpoint that answers every GET with 404, as Finite Private's /v1/models does."""
     import threading
     from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
-
-    from hermes_cli.config import (
-        get_custom_provider_context_length,
-        get_custom_provider_model_capability,
-    )
-    from hermes_cli.model_switch import switch_model
 
     requests = []
 
@@ -338,6 +335,17 @@ def _model_switch_case(cfg):
 
     server = ThreadingHTTPServer(("127.0.0.1", 0), NotFound)
     threading.Thread(target=server.serve_forever, daemon=True).start()
+    return server, requests
+
+
+def _model_switch_case(cfg):
+    from hermes_cli.config import (
+        get_custom_provider_context_length,
+        get_custom_provider_model_capability,
+    )
+    from hermes_cli.model_switch import switch_model
+
+    server, requests = _serve_not_found()
     base_url = f"http://127.0.0.1:{server.server_port}/v1"
     providers = json.loads(json.dumps(cfg["providers"]).replace("{FP_URL}", base_url))
     cfg = dict(cfg, providers=providers)
@@ -361,6 +369,49 @@ def _model_switch_case(cfg):
         "supports_vision": get_custom_provider_model_capability(
             "glm-5-3-flash", base_url, "supports_vision", config=cfg
         ),
+    }
+
+
+def _pinned_switch_case(spec, cfg):
+    """R33: /model as the gateway's handler calls it, against Finite Private's 404 listing."""
+    import yaml
+    from hermes_cli.config import (
+        get_compatible_custom_providers,
+        get_custom_provider_context_length,
+    )
+    from hermes_cli.model_switch import switch_model
+
+    server, _ = _serve_not_found()
+    host = f"127.0.0.1:{server.server_port}"
+    cfg = json.loads(json.dumps(cfg).replace("{FP_HOST}", host))
+    config_path = Path(os.environ["HERMES_HOME"]) / "config.yaml"
+    config_path.write_text(yaml.safe_dump(cfg))
+    before = config_path.read_bytes()
+    model_cfg = cfg["model"]
+    result = switch_model(
+        spec["input"],
+        current_provider=model_cfg["provider"],
+        current_model=model_cfg["default"],
+        current_base_url=model_cfg.get("base_url", ""),
+        current_api_key="fp-FAKE",
+        explicit_provider=spec.get("explicit_provider", ""),
+        user_providers=cfg.get("providers"),
+        custom_providers=get_compatible_custom_providers(cfg),
+    )
+    server.shutdown()
+    return {
+        "success": result.success,
+        "provider": result.target_provider,
+        "model": result.new_model,
+        "base_url": result.base_url.replace(host, "{FP_HOST}"),
+        "error": result.error_message,
+        "warning": result.warning_message,
+        "config_unchanged": config_path.read_bytes() == before,
+        "context_length": get_custom_provider_context_length(
+            result.new_model, result.base_url, config=cfg
+        )
+        if result.success
+        else None,
     }
 
 
@@ -921,12 +972,166 @@ class OverrideModelTests(RouteSafetyCase):
         self.assertEqual(result["api_mode"], "anthropic_messages")
 
 
+FP_STUB = "http://{FP_HOST}/v1"
+PINNED_FP = {
+    "name": "Finite Private",
+    "base_url": FP_STUB,
+    "key_env": "FINITE_PRIVATE_API_KEY",
+    "api_mode": "chat_completions",
+    "models": {"glm-5-3-flash": {"context_length": 393216, "supports_vision": True}},
+    "discover_models": False,
+}
+CLAUDE = "anthropic/claude-opus-5.5"
+GENERAL_ADVICE = "/model <model> --provider <provider>"
+
+
+def pinned_config(provider="custom", base_url=FP_STUB, entry=PINNED_FP):
+    """The reconciler's configuration: the bare saved default, its entry, and the backup."""
+    default = {
+        "default": "glm-5-3-flash",
+        "provider": provider,
+        "api_key": "${FINITE_PRIVATE_API_KEY}",
+        "api_mode": "chat_completions",
+        "context_length": 393216,
+    }
+    if base_url:
+        default["base_url"] = base_url
+    return {
+        "model": default,
+        "providers": {"finite-private": entry},
+        "fallback_providers": [dict(FP_ENTRY, model="glm-5-3-flash", base_url=FP_STUB)],
+    }
+
+
+def refusal(requested, command=GENERAL_ADVICE):
+    return (
+        f"Finite Private does not serve `{requested}`. It serves `glm-5-3-flash`. "
+        f"To use another provider's model, name it: `{command}`."
+    )
+
+
+class PinnedProviderTests(RouteSafetyCase):
+    """R33: an entry with `discover_models: false` decides /model by its declared models."""
+
+    def switch(self, cfg, text, explicit_provider=""):
+        return {
+            "kind": "pinned_switch",
+            "config": cfg,
+            "input": text,
+            "explicit_provider": explicit_provider,
+            "env": {"FINITE_PRIVATE_API_KEY": "fp-FAKE"},
+            "process_env": {"NO_PROXY": "127.0.0.1"},
+        }
+
+    def assert_refused(self, result, message):
+        self.assertEqual((result["success"], result["error"]), (False, message), result)
+        self.assertTrue(result["config_unchanged"], result)
+
+    def test_declared_model_is_accepted_without_a_warning(self):
+        result = self.run_one(self.switch(pinned_config(), "glm-5-3-flash", "finite-private"))
+        self.assertTrue(result["success"], result)
+        self.assertEqual(
+            (result["provider"], result["base_url"].rstrip("/"), result["warning"]),
+            ("finite-private", FP_STUB, ""),
+        )
+        self.assertEqual(result["context_length"], 393216)
+
+    def test_another_providers_model_is_refused_with_the_command_to_use(self):
+        """The screenshot input names a provider Hermes knows: the text gives that command."""
+        exact = f"/model {CLAUDE} --provider openrouter"
+        cases = [
+            (pinned_config(), f"openrouter:{CLAUDE}", "", exact),
+            (pinned_config(), f" OpenRouter:{CLAUDE}", "", exact),
+            (
+                pinned_config(provider="finite-private", base_url=None),
+                f"openrouter:{CLAUDE}",
+                "",
+                exact,
+            ),
+            (
+                pinned_config(),
+                "finite-private:glm-5-3-flash",
+                "",
+                "/model glm-5-3-flash --provider finite-private",
+            ),
+            (pinned_config(), CLAUDE, "", GENERAL_ADVICE),
+            (pinned_config(), CLAUDE, "finite-private", GENERAL_ADVICE),
+            (pinned_config(), "nosuchprovider:some-model", "", GENERAL_ADVICE),
+        ]
+        results = self.run_cases([self.switch(cfg, text, flag) for cfg, text, flag, _ in cases])
+        for (_, text, _, command), result in zip(cases, results, strict=True):
+            with self.subTest(text=text):
+                self.assert_refused(result, refusal(text.strip(), command))
+
+    def test_bare_custom_route_on_the_entrys_endpoint(self):
+        """The same endpoint, compared as Hermes compares routes, under each custom spelling."""
+        variants = [FP_STUB + "/", "HTTP://{FP_HOST}/v1"]
+        results = self.run_cases(
+            [self.switch(pinned_config(base_url=url), f"openrouter:{CLAUDE}") for url in variants]
+            + [
+                # Hermes resolves `--provider custom` to `custom:finite-private` here.
+                self.switch(pinned_config(), CLAUDE, "custom"),
+                self.switch(pinned_config(provider="custom:finite-private"), CLAUDE),
+            ]
+        )
+        for result in results[: len(variants)]:
+            self.assert_refused(
+                result, refusal(f"openrouter:{CLAUDE}", f"/model {CLAUDE} --provider openrouter")
+            )
+        for result in results[len(variants) :]:
+            self.assert_refused(result, refusal(CLAUDE))
+
+    def test_saved_provider_is_read_trimmed_and_lowercased(self):
+        """R32: a hand-edited provider name still finds the entry."""
+        results = self.run_cases(
+            [
+                self.switch(pinned_config(provider=provider, base_url=url), CLAUDE)
+                for provider, url in (
+                    ("Custom", FP_STUB),
+                    (" custom ", FP_STUB),
+                    ("Finite-Private", None),
+                )
+            ]
+        )
+        for result in results:
+            self.assert_refused(result, refusal(CLAUDE))
+
+    def test_other_entries_and_endpoints_behave_as_before(self):
+        """No `discover_models: false`, an empty declaration, or another endpoint: unpatched text."""
+        unpinned = {key: value for key, value in PINNED_FP.items() if key != "discover_models"}
+        empty = dict(PINNED_FP, models={})
+        other = "http://{FP_HOST}/other/v1"
+        screenshot = [
+            self.switch(pinned_config(entry=unpinned), f"openrouter:{CLAUDE}"),
+            self.switch(pinned_config(entry=empty), f"openrouter:{CLAUDE}"),
+            self.switch(pinned_config(base_url=other), f"openrouter:{CLAUDE}"),
+            self.switch(pinned_config(entry=unpinned), CLAUDE, "custom"),
+        ]
+        declared = [
+            self.switch(pinned_config(entry=unpinned), "glm-5-3-flash", "finite-private"),
+            self.switch(pinned_config(entry=empty), "glm-5-3-flash", "finite-private"),
+        ]
+        results = self.run_cases(screenshot + declared)
+        for result in results[: len(screenshot)]:
+            self.assertFalse(result["success"], result)
+            self.assertTrue(
+                result["error"].startswith(
+                    "Note: could not reach this custom endpoint's model listing"
+                ),
+                result,
+            )
+            self.assertTrue(result["config_unchanged"], result)
+        for result in results[len(screenshot) :]:
+            self.assertTrue(result["success"], result)
+            self.assertIn("could not reach the finite-private API to validate", result["warning"])
+
+
 # Providers that /model cannot switch to in a scratch process, and why.
 UNSWEPT = {
     "copilot-acp": "a local Copilot CLI subprocess with no HTTP credential; Hermes's profile "
     "isolation drops HERMES_COPILOT_ACP_COMMAND, so no stand-in command can be named",
-    "custom": "the bare custom route takes the current endpoint, and /model checks it against "
-    "that endpoint's /models; Finite's own custom routes are T-H9 and the T-H2 matrix",
+    "custom": "the bare custom route takes the current endpoint, which here is Finite Private's, "
+    "and its entry declares only its own models (R33); Finite's routes have their own tests",
     "vertex": "resolution mints a Google OAuth2 token over the network; its endpoint comes "
     "from the project and region, never from the model",
 }
@@ -947,6 +1152,12 @@ class RegistrySweepTests(RouteSafetyCase):
     def test_every_listed_model_is_served_where_model_switch_saved_it(self):
         """R27: for every provider and listed model, /model's endpoint is the one the patch serves."""
         providers = self.run_one({"kind": "providers"})
+        # The reconciler's configuration: Finite Private's entry declares its whole list.
+        cfg = config(FP_DEFAULT, "off")
+        cfg["providers"] = dict(
+            PROVIDERS,
+            **{"finite-private": dict(PROVIDERS["finite-private"], discover_models=False)},
+        )
         self.assertLessEqual(
             {"opencode-zen", "opencode-go", "bedrock", "openrouter"}, set(providers)
         )
@@ -954,7 +1165,7 @@ class RegistrySweepTests(RouteSafetyCase):
             {
                 "kind": "sweep",
                 "provider": provider,
-                "config": config(FP_DEFAULT, "off"),
+                "config": cfg,
                 "env": {"FINITE_PRIVATE_API_KEY": "fp-FAKE", "OPENROUTER_API_KEY": "sk-or-FAKE"},
                 "process_env": {"NO_PROXY": "127.0.0.1"} if provider == "lmstudio" else {},
             }

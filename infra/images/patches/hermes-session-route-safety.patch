@@ -216,3 +216,56 @@
          ]
      else:
          # Custom endpoint: use api_key from config when using config base_url (#1760).
+--- a/hermes_cli/model_switch.py
++++ b/hermes_cli/model_switch.py
+@@ -2281,6 +2281,50 @@
+             "recognized": False,
+             "message": f"Could not validate `{new_model}`: {e}",
+         }
++
++    # Finite: a providers entry with `discover_models: false` declares the only
++    # models it serves, so its declaration decides, listing or no listing. A bare
++    # custom route on that entry's endpoint (`custom` or `custom:<name>`) is the
++    # same provider.
++    _providers = user_providers if isinstance(user_providers, dict) else {}
++    _pin_target = str(target_provider or "").strip().lower()
++    _pinned = _providers.get(_pin_target)
++    if _pin_target.partition(":")[0] == "custom" and base_url:
++        from hermes_cli.route_identity import normalize_route_base_url
++
++        _pinned = next(
++            (
++                p
++                for p in _providers.values()
++                if isinstance(p, dict)
++                and p.get("discover_models") is False
++                and normalize_route_base_url(p.get("base_url"))
++                == normalize_route_base_url(base_url)
++            ),
++            None,
++        )
++    if isinstance(_pinned, dict) and _pinned.get("discover_models") is False:
++        _pinned_models = _declared_model_ids(_pinned.get("models"))
++        if new_model in _pinned_models:
++            validation = {"accepted": True, "persist": True, "recognized": True, "message": None}
++        elif _pinned_models:
++            # `/model <provider>:<model>` is not Hermes syntax; give the command it meant.
++            _named, _, _named_model = new_model.partition(":")
++            _named, _named_model = _named.strip().lower(), _named_model.strip()
++            _command = "/model <model> --provider <provider>"
++            if _named_model and resolve_provider_full(_named, user_providers, custom_providers):
++                _command = f"/model {_named_model} --provider {_named}"
++            validation = {
++                "accepted": False,
++                "persist": False,
++                "recognized": False,
++                "message": (
++                    f"{_pinned.get('name') or provider_label} does not serve `{new_model}`. "
++                    "It serves "
++                    + ", ".join(f"`{m}`" for m in _pinned_models)
++                    + f". To use another provider's model, name it: `{_command}`."
++                ),
++            }
+ 
+     # Override rejection if model is in the user's saved provider config.
+     # API /v1/models may not list cloud/aliased models even though the server supports them.
