@@ -461,6 +461,23 @@ class NoNoticeTests(_NoticeTestCase):
         self.fire("post_api_request", "openrouter", OPENROUTER_URL)
         self.assertEqual(self.complete(adapter, self.event()), [])
 
+    def test_finite_private_only_turns_send_nothing(self):
+        # Every agent without a connection: Finite Private errors, then its
+        # retry or its own backup entry answers, or the turn fails.
+        for outcome, answered_by in (
+            ("success", ("custom", FP_URL)),
+            ("success", ("finite-private", FP_URL)),
+            ("failure", None),
+        ):
+            with self.subTest(outcome=outcome, answered_by=answered_by):
+                adapter = self.adapter()
+                self.fire("pre_api_request", "custom", FP_URL)
+                self.fire("api_request_error", "custom", FP_URL, reason="server_error")
+                if answered_by is not None:
+                    self.fire("pre_api_request", *answered_by)
+                    self.fire("post_api_request", *answered_by)
+                self.assertEqual(self.complete(adapter, self.event(), outcome), [])
+
     def test_pre_request_fallback_to_finite_private_sends_nothing(self):
         # A fallback Hermes picks while resolving credentials makes no
         # request on the primary, so the observer sees only Finite Private.
