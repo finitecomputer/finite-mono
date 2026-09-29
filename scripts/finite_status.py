@@ -528,6 +528,16 @@ def psql_query_sets(environment: dict[str, str]) -> dict[str, list[dict[str, Any
             ["id", "project_id", "display_name", "status", "target_source_host_id", "runner_id", "agent_runtime_id"],
         ),
         (
+            "credential_recovery_state",
+            "SELECT to_regclass('runtime_credential_recoveries') IS NOT NULL AS finite_has_credential_recoveries \\gset\n"
+            "\\if :finite_has_credential_recoveries\n"
+            "SELECT 'present',count(*) FROM runtime_credential_recoveries;\n"
+            "\\else\n"
+            "SELECT 'absent',NULL::bigint;\n"
+            "\\endif",
+            ["schema_state", "receipt_count"],
+        ),
+        (
             "runtimes",
             RUNTIME_DETAILS_QUERY,
             [
@@ -548,6 +558,7 @@ def psql_query_sets(environment: dict[str, str]) -> dict[str, list[dict[str, Any
                 "health_report_interval_seconds",
             ],
         ),
+
     ]
     markers = {
         f"__FINITE_STATUS_{name.upper()}__": (name, columns)
@@ -1942,6 +1953,10 @@ def build_fleet(
         "unused_single_code_batches": core.get("unused_single_code_batches", []),
         "launch_code_batches": core.get("launch_code_batches", []),
         "agent_creation_requests": core.get("agent_creation_requests", []),
+        "credential_recovery_state": {
+            "evidence": "Core recovery receipt metadata only; absence is not an empty table, and an empty table does not exclude relocation handoff",
+            "observations": core.get("credential_recovery_state", []),
+        },
         "unroutable_completed_creations": core.get("unroutable_completed_creations", []),
         "hosted_enrollment": {
             "evidence": "Core assignment metadata only; no credentials read or guest configuration inspected",
