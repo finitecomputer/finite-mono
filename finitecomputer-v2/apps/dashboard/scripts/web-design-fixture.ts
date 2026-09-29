@@ -816,6 +816,12 @@ const INFERENCE_COMMANDS = new Map<string, { schema: string; capability: string 
   ["agent.inference.apply", { schema: "finite.agent.inference.apply.v1", capability: null }],
   ["agent.inference.select", { schema: "finite.agent.inference.select.v1", capability: "inference.select.v1" }],
   ["agent.inference.disconnect", { schema: "finite.agent.inference.disconnect.v1", capability: "inference.disconnect.v1" }],
+  // No fixture agent advertises these capabilities, so each command is refused as the daemon refuses it.
+  ["agent.openrouter.usage", { schema: EMPTY_REQUEST_SCHEMA, capability: "openrouter.usage.v1" }],
+  ["agent.openrouter.connect", { schema: "finite.agent.openrouter.connect.v1", capability: "openrouter.connect.v1" }],
+  ["agent.codex.login.start", { schema: "finite.agent.codex.login.start.v1", capability: "codex.login.v1" }],
+  ["agent.codex.login.cancel", { schema: "finite.agent.codex.login.cancel.v1", capability: "codex.login.v1" }],
+  ["agent.codex.models", { schema: EMPTY_REQUEST_SCHEMA, capability: "codex.models.v1" }],
 ]);
 const OPERATION_PHASES = {
   select: ["accepted", "config_written", "restarting", "verifying"],
@@ -931,10 +937,14 @@ export function createInferenceFake(options: InferenceFakeOptions = {}): Inferen
     }
   }
 
-  function prepareMutation() {
+  function admitMutation() {
     if (!operation || operation.state === "succeeded") return;
     if (operation.state === "running" || operation.kind === "disconnect") throw operationInProgress();
-    operation = null;
+  }
+
+  /** As in the daemon, a failed select stays in status until a later change is applied or is a no-op. */
+  function clearFailedOperation() {
+    if (operation?.state === "failed") operation = null;
   }
 
   function startOperation(kind: OperationKind, route: FakeInferenceRoute, model: string | null) {
@@ -1015,7 +1025,7 @@ export function createInferenceFake(options: InferenceFakeOptions = {}): Inferen
     const request = bodyRecord(body, ["profile", "api_key", "model"]);
     const apiKey = optionalText(request.api_key, "api_key");
     const model = optionalText(request.model, "model");
-    prepareMutation();
+    admitMutation();
     let planned: SavedModel;
     let keyHash = openrouterKeyHash;
     if (request.profile === "finite_private") {
@@ -1032,6 +1042,7 @@ export function createInferenceFake(options: InferenceFakeOptions = {}): Inferen
       openrouterKeyHash = keyHash;
       saved = planned;
     }
+    clearFailedOperation();
     return {
       proposal_id: `web-design-proposal-${replies}`,
       path: "model",
@@ -1052,11 +1063,12 @@ export function createInferenceFake(options: InferenceFakeOptions = {}): Inferen
       route === "finite_private"
         ? { route, model: FAKE_FINITE_PRIVATE_MODEL }
         : { route, model: modelName(request.model) };
-    prepareMutation();
+    admitMutation();
     if (route === "openrouter" && !openrouterKeyHash) {
       throw new FakeCommandError("not_connected", "Connect OpenRouter first.");
     }
     if (sameModel(planned, saved)) {
+      clearFailedOperation();
       return { changed: false };
     }
     return startOperation("select", route, route === "finite_private" ? null : planned.model);
@@ -1078,8 +1090,9 @@ export function createInferenceFake(options: InferenceFakeOptions = {}): Inferen
       failNext = false;
       return { accepted: true, operation_id: operation.id };
     }
-    prepareMutation();
+    admitMutation();
     if (!openrouterKeyHash && saved.route !== "openrouter") {
+      clearFailedOperation();
       return { changed: false };
     }
     return startOperation("disconnect", "openrouter", null);

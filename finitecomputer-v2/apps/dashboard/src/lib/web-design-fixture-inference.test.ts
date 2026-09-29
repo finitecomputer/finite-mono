@@ -153,6 +153,21 @@ test("fixture exposes the legacy, PR1, and unconfirmed browser states", () => {
   }
 });
 
+test("fixture agents answer provider commands as the daemon does: unsupported_command", () => {
+  for (const agent of ["pr1", "legacy"] as const) {
+    for (const [command, schema] of [
+      ["agent.openrouter.usage", "finite.agent.empty.request.v1"],
+      ["agent.openrouter.connect", "finite.agent.openrouter.connect.v1"],
+      ["agent.codex.login.start", "finite.agent.codex.login.start.v1"],
+      ["agent.codex.login.cancel", "finite.agent.codex.login.cancel.v1"],
+      ["agent.codex.models", "finite.agent.empty.request.v1"],
+    ]) {
+      const reply = createInferenceFake({ agent }).runtimeCommand({ command, schema, body: {} });
+      assert.deepStrictEqual([agent, command, reply.status, reply.error?.code], [agent, command, "failed", "unsupported_command"]);
+    }
+  }
+});
+
 test("fixture drives the browser's legacy apply and PR1 operation retry through real routes", async (t) => {
   const fixture = installFixture(t, { agent: "pr1" });
   let response = await post({ action: "inference", profile: "openrouter", apiKey: PASTED_KEY, model: "openai/gpt-5-mini" });
@@ -163,6 +178,13 @@ test("fixture drives the browser's legacy apply and PR1 operation retry through 
   response = await post({ action: "inference_select", route: "finite_private" });
   assert.equal(response.body.result.accepted, true);
   assert.equal((await finishOperation(fixture)).state, "failed");
+  const refused = fixture.fake.runtimeCommand({
+    command: "agent.inference.apply",
+    schema: "finite.agent.inference.apply.v1",
+    body: { profile: "invalid" },
+  });
+  assert.equal(refused.error?.code, "invalid_payload");
+  assert.equal((await readStatus()).view.operation?.state, "failed");
   response = await post({ action: "inference_select", route: "finite_private" });
   assert.deepStrictEqual(response.body.result, { changed: false });
   assert.equal((await readStatus()).view.operation, null);
