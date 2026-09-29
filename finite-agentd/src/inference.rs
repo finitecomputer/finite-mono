@@ -21,7 +21,7 @@ const LEGACY_FINITE_PRIVATE_MODELS: &[&str] =
     &["glm-5-2", "deepseek-v4-flash-0731", "glm-5.3-flash"];
 const OPENROUTER_BASE_URL: &str = "https://openrouter.ai/api/v1";
 
-/// Capabilities this agentd always advertises; provider modules add theirs when implemented.
+/// Capabilities implemented by this agentd.
 const BASE_CAPABILITIES: &[&str] = &[
     "inference.status.v2",
     "inference.select.v1",
@@ -263,12 +263,7 @@ fn required_model(model: Option<&str>) -> Result<&str, AgentdError> {
 
 /// The capabilities status advertises.
 pub(crate) fn capabilities() -> Vec<&'static str> {
-    BASE_CAPABILITIES
-        .iter()
-        .chain(crate::openrouter::CAPABILITIES)
-        .chain(crate::codex::CAPABILITIES)
-        .copied()
-        .collect()
+    BASE_CAPABILITIES.to_vec()
 }
 
 /// The additive fields of `inference` in `agent.connections.status`.

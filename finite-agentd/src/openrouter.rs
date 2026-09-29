@@ -7,7 +7,6 @@ use serde::Deserialize;
 use serde_json::Value;
 
 use crate::AgentdError;
-use crate::facts::InferenceFacts;
 
 const OPENROUTER_API_BASE: &str = "https://openrouter.ai/api/v1";
 /// Test-only: points agentd at a fake OpenRouter.
@@ -15,29 +14,12 @@ const API_BASE_OVERRIDE: &str = "FINITE_AGENTD_OPENROUTER_API_BASE";
 const KEY_CHECK_TIMEOUT: Duration = Duration::from_secs(8);
 const MAX_KEY_RESPONSE_BYTES: usize = 64 * 1024;
 
-/// Connection and usage capabilities stay absent until their handlers are implemented.
-pub(crate) const CAPABILITIES: &[&str] = &[];
-
-/// The `/key` limits a candidate key passed with (step 3).
+/// Allowance metadata returned by a successful `/key` validation.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub(crate) struct KeyInfo {
     pub limit_usd: Option<f64>,
     pub limit_remaining_usd: Option<f64>,
 }
-
-/// The Connections-managed key (`.env` `OPENROUTER_API_KEY`). No `Debug`: it
-/// holds the secret.
-pub(crate) struct SavedKey {
-    #[expect(
-        dead_code,
-        reason = "reserved for OpenRouter connection and usage support"
-    )]
-    pub api_key: String,
-}
-
-/// The consumed-attempt cache for OAuth codes, in memory for this process.
-#[derive(Debug, Default)]
-pub(crate) struct OpenRouterState {}
 
 /// `credential` in `finite.agent.openrouter.connect.v1`. No `Debug`:
 /// it holds a key or an OAuth code.
@@ -56,15 +38,6 @@ pub(crate) enum ConnectCredential {
         code_verifier: String,
         attempt_id: String,
     },
-}
-
-/// A key obtained from paste or an OAuth exchange, not yet validated or stored.
-#[expect(
-    dead_code,
-    reason = "reserved for OpenRouter connection and usage support"
-)]
-pub(crate) struct CandidateKey {
-    pub api_key: String,
 }
 
 /// The OpenRouter API base. The test override is honored only for
@@ -87,17 +60,7 @@ fn valid_api_base(value: &str) -> bool {
     })
 }
 
-/// `GET /key` with the step 3 rejections, in order. `Ok` only for a 200
-/// with an object `data` that passes every rejection.
-#[expect(
-    dead_code,
-    reason = "reserved for OpenRouter connection and usage support"
-)]
-pub(crate) async fn check_key(api_key: &str) -> Result<KeyInfo, AgentdError> {
-    check_key_at(&api_base(), api_key).await
-}
-
-/// `check_key` against an explicit API base. This is metadata only: no
+/// Validate a key against an explicit API base. This is metadata only: no
 /// completion request is ever sent to test a key. The key never appears
 /// in an error.
 pub(crate) async fn check_key_at(api_base: &str, api_key: &str) -> Result<KeyInfo, AgentdError> {
@@ -155,24 +118,6 @@ pub(crate) async fn check_key_at(api_base: &str, api_key: &str) -> Result<KeyInf
 
 fn unreachable_provider() -> AgentdError {
     AgentdError::ProviderUnavailable("Couldn't reach OpenRouter to check the key.".to_owned())
-}
-
-pub(crate) async fn usage(
-    _saved_key: Option<SavedKey>,
-    _facts: &InferenceFacts,
-) -> Result<Value, AgentdError> {
-    Err(AgentdError::UnsupportedCommand(
-        "agent.openrouter.usage".to_owned(),
-    ))
-}
-
-pub(crate) async fn obtain_candidate(
-    _state: &OpenRouterState,
-    _credential: ConnectCredential,
-) -> Result<CandidateKey, AgentdError> {
-    Err(AgentdError::UnsupportedCommand(
-        "agent.openrouter.connect".to_owned(),
-    ))
 }
 
 /// A loopback fake of OpenRouter's `/key` for tests. It records every request

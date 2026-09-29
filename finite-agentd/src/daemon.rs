@@ -20,7 +20,6 @@ use tempfile::NamedTempFile;
 use tokio::sync::mpsc;
 
 use crate::AgentdError;
-use crate::codex::CodexState;
 use crate::config::{ConfigManager, HermesConfigOfferV1};
 use crate::connections::{
     ConnectionManager, GoogleApplyRequest, PairingApproveRequest, TelegramConnectRequest,
@@ -226,21 +225,18 @@ pub async fn run_daemon(config: DaemonConfig) -> Result<(), AgentdError> {
     );
     let hosted_hermes =
         HostedHermesHandle::start_gated(&config.hermes_home, ServeGate::new(intent_path.clone()))?;
-    let codex = Arc::new(CodexState::default());
     let inference = Arc::new(Inference::new(
         AgentdHost {
             hermes_home: config.hermes_home.clone(),
             connections: connection_manager.clone(),
             supervisor: supervisor.clone(),
             hosted_hermes: hosted_hermes.clone(),
-            codex: Arc::clone(&codex),
         },
         connection_manager.clone(),
         config_manager.clone(),
         config.hermes_home.clone(),
         intent_path,
         finite_private_env(),
-        codex,
     ));
     // Only after Hermes has started; a bad intent never delays chat. Detached.
     drop(resume_intent_after_hermes_starts(

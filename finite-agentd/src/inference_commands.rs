@@ -10,7 +10,6 @@ use serde::Deserialize;
 use serde_json::{Value, json};
 
 use crate::AgentdError;
-use crate::codex::CodexState;
 use crate::config::{
     ConfigApplyResultV1, ConfigManager, HermesConfigRollbackV1, MODEL_CONFIG_PATH,
 };
@@ -29,7 +28,7 @@ use crate::inference::{
 use crate::intent::{
     self, Admission, AdmitCommand, IntentKind, IntentRecord, IntentRoute, IntentState,
 };
-use crate::openrouter::{ConnectCredential, OpenRouterState, SavedKey};
+use crate::openrouter::ConnectCredential;
 use crate::supervisor::SupervisorHandle;
 
 const INFERENCE_APPLY_SCHEMA: &str = "finite.agent.inference.apply.v1";
@@ -71,7 +70,8 @@ struct DisconnectRequest {
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct ConnectRequest {
-    credential: ConnectCredential,
+    #[serde(rename = "credential")]
+    _credential: ConnectCredential,
     #[serde(default)]
     #[expect(dead_code, reason = "reserved for OpenRouter connection activation")]
     activate: Option<ConnectActivation>,
@@ -87,7 +87,8 @@ struct ConnectActivation {
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct CodexLoginCancelRequest {
-    attempt_id: String,
+    #[serde(rename = "attempt_id")]
+    _attempt_id: String,
 }
 
 /// The production executor host: the supervisor, the optional `hermes serve`,
@@ -98,7 +99,6 @@ pub(crate) struct AgentdHost {
     pub(crate) connections: ConnectionManager,
     pub(crate) supervisor: SupervisorHandle,
     pub(crate) hosted_hermes: Option<HostedHermesHandle>,
-    pub(crate) codex: Arc<CodexState>,
 }
 
 impl ExecutorHost for AgentdHost {
@@ -137,7 +137,8 @@ impl ExecutorHost for AgentdHost {
     }
 
     async fn cancel_codex_login(&self) -> Result<(), AgentdError> {
-        crate::codex::cancel_for_disconnect(&self.codex).await
+        // No login manager exists yet; recovery of a saved disconnect still proceeds.
+        Ok(())
     }
 }
 
@@ -176,8 +177,6 @@ pub(crate) struct Inference<H> {
     intent_path: PathBuf,
     fp: FinitePrivateEnv,
     facts: FactsCache,
-    codex: Arc<CodexState>,
-    openrouter: OpenRouterState,
     openrouter_api_base: String,
     /// v1's reply must fit the dashboard's wait: its config check gets what is
     /// left of this from the command's receipt ...
@@ -205,7 +204,6 @@ impl<H: ExecutorHost + Clone> Inference<H> {
         hermes_home: PathBuf,
         intent_path: PathBuf,
         fp: FinitePrivateEnv,
-        codex: Arc<CodexState>,
     ) -> Self {
         Self {
             executor: Arc::new(Executor::new(
@@ -221,8 +219,6 @@ impl<H: ExecutorHost + Clone> Inference<H> {
             intent_path,
             fp,
             facts: FactsCache::default(),
-            codex,
-            openrouter: OpenRouterState::default(),
             openrouter_api_base: crate::openrouter::api_base(),
             v1_reply_budget: V1_REPLY_BUDGET,
             v1_min_config_check: V1_MIN_CONFIG_CHECK,
@@ -274,33 +270,24 @@ impl<H: ExecutorHost + Clone> Inference<H> {
                 self.openrouter_usage().await
             }
             "agent.openrouter.connect" => {
-                let body = parse_body::<ConnectRequest>(request, OPENROUTER_CONNECT_SCHEMA)?;
+                parse_body::<ConnectRequest>(request, OPENROUTER_CONNECT_SCHEMA)?;
                 self.admit(AdmitCommand::Connect)?;
-                crate::openrouter::obtain_candidate(&self.openrouter, body.credential)
-                    .await
-                    .map(|_| Value::Null)
+                Err(AgentdError::UnsupportedCommand(request.command.clone()))
             }
             "agent.codex.login.start" => {
                 parse_body::<EmptyRequest>(request, CODEX_LOGIN_START_SCHEMA)?;
                 self.admit(AdmitCommand::CodexLoginStart)?;
-                crate::codex::start(&self.codex, &self.hermes_home)
-                    .await
-                    .and_then(|view| Ok(serde_json::to_value(view)?))
+                Err(AgentdError::UnsupportedCommand(request.command.clone()))
             }
             "agent.codex.login.cancel" => {
-                let body =
-                    parse_body::<CodexLoginCancelRequest>(request, CODEX_LOGIN_CANCEL_SCHEMA)?;
+                parse_body::<CodexLoginCancelRequest>(request, CODEX_LOGIN_CANCEL_SCHEMA)?;
                 self.admit(AdmitCommand::CodexLoginCancel)?;
-                crate::codex::cancel(&self.codex, &body.attempt_id)
-                    .await
-                    .and_then(|view| Ok(serde_json::to_value(view)?))
+                Err(AgentdError::UnsupportedCommand(request.command.clone()))
             }
             "agent.codex.models" => {
                 parse_body::<EmptyRequest>(request, EMPTY_REQUEST_SCHEMA)?;
                 self.admit(AdmitCommand::CodexModels)?;
-                crate::codex::models(&self.hermes_home)
-                    .await
-                    .and_then(|models| Ok(serde_json::to_value(models)?))
+                Err(AgentdError::UnsupportedCommand(request.command.clone()))
             }
             command => Err(AgentdError::UnsupportedCommand(command.to_owned())),
         }
@@ -355,11 +342,10 @@ impl<H: ExecutorHost + Clone> Inference<H> {
         // Re-read after the helper ran, so the operation is current.
         let record = intent::load(&self.intent_path).unwrap_or(None);
         let operation = self.executor.operation(record.as_ref());
-        let codex = crate::codex::route_status(&self.codex, &facts);
         let manager = self.connections.clone();
         let fp = self.fp.clone();
         let status = tokio::task::spawn_blocking(move || {
-            manager.status_with_inference(&facts, &fp, operation, codex, capabilities())
+            manager.status_with_inference(&facts, &fp, operation, None, capabilities())
         })
         .await
         .map_err(|error| AgentdError::Config(error.to_string()))??;
@@ -552,6 +538,11 @@ impl<H: ExecutorHost + Clone> Inference<H> {
                         "Finite Private takes its model from the agent".to_owned(),
                     ));
                 }
+                if self.fp.settings().is_none() {
+                    return Err(AgentdError::Config(
+                        "Finite Private isn't available on this agent.".to_owned(),
+                    ));
+                }
                 None
             }
             IntentRoute::Openrouter => {
@@ -559,35 +550,8 @@ impl<H: ExecutorHost + Clone> Inference<H> {
                     AgentdError::InvalidPayload("OpenRouter model is invalid".to_owned())
                 })?;
                 validate_model_name(&model)?;
-                Some(model)
-            }
-            IntentRoute::OpenaiCodex => {
-                if !capabilities().contains(&"codex.login.v1") {
-                    return Err(AgentdError::InvalidPayload(
-                        "This agent can't use ChatGPT yet".to_owned(),
-                    ));
-                }
-                let model = body
-                    .model
-                    .filter(|model| valid_codex_model(model))
-                    .ok_or_else(|| {
-                        AgentdError::InvalidPayload("ChatGPT model is invalid".to_owned())
-                    })?;
-                Some(model)
-            }
-        };
-        match body.route {
-            IntentRoute::FinitePrivate => {
-                if self.fp.settings().is_none() {
-                    return Err(AgentdError::Config(
-                        "Finite Private isn't available on this agent.".to_owned(),
-                    ));
-                }
-            }
-            IntentRoute::Openrouter => {
-                // The key the route will use, in the order status shows it
-                //: `.env`, a legacy-config key the executor migrates only
-                // after this check passes, else agentd's environment key.
+                // Match status priority: .env, legacy config, then process environment.
+                // The executor migrates a legacy key only after validation succeeds.
                 let key = self
                     .connections
                     .selectable_openrouter_key(self.host.environment_openrouter_key())?
@@ -595,34 +559,14 @@ impl<H: ExecutorHost + Clone> Inference<H> {
                         AgentdError::NotConnected("Connect OpenRouter first.".to_owned())
                     })?;
                 crate::openrouter::check_key_at(&self.openrouter_api_base, &key).await?;
+                Some(model)
             }
             IntentRoute::OpenaiCodex => {
-                match self.facts().await.codex.state {
-                    CodexStateFact::SignedIn | CodexStateFact::QuotaLimited => {}
-                    CodexStateFact::NotSignedIn => {
-                        return Err(AgentdError::NotConnected(
-                            "Connect ChatGPT first.".to_owned(),
-                        ));
-                    }
-                    CodexStateFact::SignInRequired => return Err(AgentdError::SignInRequired),
-                    CodexStateFact::Unknown => {
-                        return Err(AgentdError::ProviderUnavailable(
-                            "Couldn't read the ChatGPT sign-in on this agent.".to_owned(),
-                        ));
-                    }
-                }
-                match crate::codex::models(&self.hermes_home).await? {
-                    crate::codex::CodexModels::Live { models } => {
-                        if !models.iter().any(|listed| Some(listed) == model.as_ref()) {
-                            return Err(AgentdError::ModelUnavailable);
-                        }
-                    }
-                    crate::codex::CodexModels::Unavailable { .. } => {
-                        return Err(AgentdError::CatalogUnavailable);
-                    }
-                }
+                return Err(AgentdError::InvalidPayload(
+                    "This agent can't use ChatGPT yet".to_owned(),
+                ));
             }
-        }
+        };
         let planned = plan_model_block(body.route, model.as_deref(), &self.fp)?;
         if self.config.current_value(MODEL_CONFIG_PATH)? == planned {
             self.clear_failed_record(admission);
@@ -710,13 +654,11 @@ impl<H: ExecutorHost + Clone> Inference<H> {
     }
 
     async fn openrouter_usage(&self) -> Result<Value, AgentdError> {
-        let saved_key = self
-            .connections
-            .openrouter_dotenv_key()?
-            .filter(|key| !key.is_empty() && !key.starts_with("${"))
-            .map(|api_key| SavedKey { api_key });
-        let facts = self.facts().await;
-        crate::openrouter::usage(saved_key, &facts).await
+        self.connections.openrouter_dotenv_key()?;
+        self.facts().await;
+        Err(AgentdError::UnsupportedCommand(
+            "agent.openrouter.usage".to_owned(),
+        ))
     }
 }
 
@@ -726,14 +668,6 @@ fn saved_route_of(route: IntentRoute) -> SavedRoute {
         IntentRoute::Openrouter => SavedRoute::Openrouter,
         IntentRoute::OpenaiCodex => SavedRoute::OpenaiCodex,
     }
-}
-
-/// 1..128 characters of `[A-Za-z0-9._:-]`.
-fn valid_codex_model(model: &str) -> bool {
-    (1..=128).contains(&model.len())
-        && model
-            .bytes()
-            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b':' | b'-'))
 }
 
 #[cfg(test)]
@@ -1016,7 +950,6 @@ mod tests {
             hermes_home.clone(),
             intent_path,
             fp(),
-            Arc::new(CodexState::default()),
         );
         // Unreachable unless a test starts a fake OpenRouter.
         inference.openrouter_api_base = "http://127.0.0.1:9/api/v1".to_owned();
@@ -1880,17 +1813,57 @@ mod tests {
 
     // ---- select preflight -----------------------------------------
 
+    async fn assert_select_preflight(
+        name: &str,
+        model: &Value,
+        env: &str,
+        body: Value,
+        status: u16,
+        reply: &str,
+        expected: &str,
+    ) {
+        let mut setup = new_setup(model, env);
+        let fake = FakeOpenRouter::start(status, reply).await;
+        setup.inference.openrouter_api_base = fake.base.clone();
+        // Hold the executor so the synchronous part is all that runs.
+        *setup.host.hold_restart.lock().unwrap() = Some(Arc::new(Notify::new()));
+        let before = (setup.config_bytes(), setup.env());
+        let got = match setup.select(body).await {
+            Ok(value) if value.get("accepted").is_some() => "accepted".to_owned(),
+            Ok(value) if value == json!({"changed": false}) => "changed".to_owned(),
+            Ok(value) => format!("unexpected {value}"),
+            Err(error) => error.public_code().to_owned(),
+        };
+        assert_eq!(got, expected, "{name}");
+        if expected != "accepted" {
+            assert!(setup.record().is_none(), "{name}: no intent");
+            assert_eq!(
+                (setup.config_bytes(), setup.env()),
+                before,
+                "{name}: nothing written"
+            );
+        }
+        // Metadata only; never a completion request.
+        assert!(
+            fake.requests()
+                .iter()
+                .all(|line| line == "GET /api/v1/key HTTP/1.1"),
+            "{name}"
+        );
+    }
+
     #[tokio::test]
     async fn select_preflight_matrix() {
         let ok = key_data(json!({"limit": null, "limit_remaining": null}));
-        let cases: Vec<(&str, Value, &str, Value, u16, String, &str)> = vec![
+        let key = "OPENROUTER_API_KEY=k1234567\n";
+        let or_request = json!({"route": "openrouter", "model": OR_MODEL});
+        // Payload and saved-state cases all receive the same healthy provider reply.
+        let cases = [
             (
                 "fp",
                 fp_block(),
                 "",
                 json!({"route": "finite_private"}),
-                200,
-                ok.clone(),
                 "changed",
             ),
             (
@@ -1898,8 +1871,6 @@ mod tests {
                 openrouter_block(),
                 "",
                 json!({"route": "finite_private", "model": null}),
-                200,
-                ok.clone(),
                 "accepted",
             ),
             (
@@ -1907,8 +1878,6 @@ mod tests {
                 openrouter_block(),
                 "",
                 json!({"route": "finite_private", "model": "x"}),
-                200,
-                ok.clone(),
                 "invalid_payload",
             ),
             (
@@ -1916,139 +1885,90 @@ mod tests {
                 fp_block(),
                 "",
                 json!({"route": "finite_private", "extra": 1}),
-                200,
-                ok.clone(),
                 "invalid_payload",
             ),
             (
                 "no key",
                 fp_block(),
                 "",
-                json!({"route": "openrouter", "model": OR_MODEL}),
-                200,
-                ok.clone(),
+                or_request.clone(),
                 "not_connected",
             ),
             (
                 "bad model",
                 fp_block(),
-                "OPENROUTER_API_KEY=k1234567\n",
+                key,
                 json!({"route": "openrouter", "model": "has space"}),
-                200,
-                ok.clone(),
                 "invalid_payload",
             ),
             (
                 "missing model",
                 fp_block(),
-                "OPENROUTER_API_KEY=k1234567\n",
+                key,
                 json!({"route": "openrouter"}),
-                200,
-                ok.clone(),
                 "invalid_payload",
             ),
             (
-                "key ok",
-                fp_block(),
-                "OPENROUTER_API_KEY=k1234567\n",
-                json!({"route": "openrouter", "model": OR_MODEL}),
-                200,
-                ok.clone(),
-                "accepted",
+                "already saved",
+                openrouter_block(),
+                key,
+                or_request.clone(),
+                "changed",
             ),
-            (
-                "key rejected",
-                fp_block(),
-                "OPENROUTER_API_KEY=k1234567\n",
-                json!({"route": "openrouter", "model": OR_MODEL}),
-                401,
-                ok.clone(),
-                "credential_rejected",
-            ),
-            (
-                "provider down",
-                fp_block(),
-                "OPENROUTER_API_KEY=k1234567\n",
-                json!({"route": "openrouter", "model": OR_MODEL}),
-                500,
-                ok.clone(),
-                "provider_unavailable",
-            ),
+        ];
+        for (name, model, env, body, expected) in cases {
+            assert_select_preflight(name, &model, env, body, 200, &ok, expected).await;
+        }
+        // Provider errors must not write config, credentials, or an intent.
+        let exhausted = key_data(json!({"limit": 5, "limit_remaining": 0}));
+        for (name, status, reply, expected) in [
+            ("key ok", 200, ok.clone(), "accepted"),
+            ("key rejected", 401, ok.clone(), "credential_rejected"),
+            ("provider down", 500, ok.clone(), "provider_unavailable"),
             (
                 "management key",
-                fp_block(),
-                "OPENROUTER_API_KEY=k1234567\n",
-                json!({"route": "openrouter", "model": OR_MODEL}),
                 200,
                 key_data(json!({"is_management_key": true})),
                 "credential_rejected",
             ),
             (
                 "exhausted",
-                fp_block(),
-                "OPENROUTER_API_KEY=k1234567\n",
-                json!({"route": "openrouter", "model": OR_MODEL}),
                 200,
-                key_data(json!({"limit": 5, "limit_remaining": 0})),
+                exhausted.clone(),
                 "key_allowance_exhausted",
             ),
-            (
-                "legacy key rejected",
-                json!({"default": OR_MODEL, "provider": "openrouter", "api_key": "sk-or-v1-synthetic-legacy"}),
-                "",
-                json!({"route": "openrouter", "model": OR_MODEL}),
-                401,
-                ok.clone(),
-                "credential_rejected",
-            ),
+        ] {
+            assert_select_preflight(
+                name,
+                &fp_block(),
+                key,
+                or_request.clone(),
+                status,
+                &reply,
+                expected,
+            )
+            .await;
+        }
+        let legacy = json!({"default": OR_MODEL, "provider": "openrouter", "api_key": "sk-or-v1-synthetic-legacy"});
+        for (name, status, reply, expected) in [
+            ("legacy key rejected", 401, ok, "credential_rejected"),
             (
                 "legacy key exhausted",
-                json!({"default": OR_MODEL, "provider": "openrouter", "api_key": "sk-or-v1-synthetic-legacy"}),
-                "",
-                json!({"route": "openrouter", "model": OR_MODEL}),
                 200,
-                key_data(json!({"limit": 5, "limit_remaining": 0})),
+                exhausted,
                 "key_allowance_exhausted",
             ),
-            (
-                "already saved",
-                openrouter_block(),
-                "OPENROUTER_API_KEY=k1234567\n",
-                json!({"route": "openrouter", "model": OR_MODEL}),
-                200,
-                ok.clone(),
-                "changed",
-            ),
-        ];
-        for (name, model, env, body, status, reply, expected) in cases {
-            let mut setup = new_setup(&model, env);
-            let fake = FakeOpenRouter::start(status, &reply).await;
-            setup.inference.openrouter_api_base = fake.base.clone();
-            // Hold the executor so the synchronous part is all that runs.
-            *setup.host.hold_restart.lock().unwrap() = Some(Arc::new(Notify::new()));
-            let before = (setup.config_bytes(), setup.env());
-            let got = match setup.select(body).await {
-                Ok(value) if value.get("accepted").is_some() => "accepted".to_owned(),
-                Ok(value) if value == json!({"changed": false}) => "changed".to_owned(),
-                Ok(value) => format!("unexpected {value}"),
-                Err(error) => error.public_code().to_owned(),
-            };
-            assert_eq!(got, expected, "{name}");
-            if expected != "accepted" {
-                assert!(setup.record().is_none(), "{name}: no intent");
-                assert_eq!(
-                    (setup.config_bytes(), setup.env()),
-                    before,
-                    "{name}: nothing written"
-                );
-            }
-            // Metadata only; never a completion request.
-            assert!(
-                fake.requests()
-                    .iter()
-                    .all(|line| line == "GET /api/v1/key HTTP/1.1"),
-                "{name}"
-            );
+        ] {
+            assert_select_preflight(
+                name,
+                &legacy,
+                "",
+                or_request.clone(),
+                status,
+                &reply,
+                expected,
+            )
+            .await;
         }
     }
 
@@ -2413,7 +2333,6 @@ mod tests {
             base.hermes_home.clone(),
             base.inference.intent_path.clone(),
             fp(),
-            Arc::new(CodexState::default()),
         );
         let before = (base.config_bytes(), base.env());
         fs::remove_file(&program).unwrap();
