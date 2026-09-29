@@ -1209,6 +1209,28 @@ class AgentRuntimeLauncherInferenceTest(unittest.TestCase):
     def test_launcher_finite_private_settings_rewrites_and_absence(self) -> None:
         cases = (
             (
+                "historical_route_and_legacy_model",
+                {
+                    "FINITE_PRIVATE_MODEL": "glm-5-2",
+                    "FINITE_PRIVATE_BASE_URL": "https://kimi-k2-6.finite.containers.tinfoil.dev/v1",
+                },
+                {
+                    "FINITE_CONFIG_FP_MODEL": "glm-5-3-flash",
+                    "FINITE_CONFIG_FP_BASE_URL": FP_PRODUCT_URL,
+                },
+            ),
+            (
+                "legacy_name_on_another_endpoint",
+                {
+                    "FINITE_PRIVATE_MODEL": "glm-5-2",
+                    "FINITE_PRIVATE_BASE_URL": "http://127.0.0.1:8787/v1",
+                },
+                {
+                    "FINITE_CONFIG_FP_MODEL": "glm-5-2",
+                    "FINITE_CONFIG_FP_BASE_URL": "http://127.0.0.1:8787/v1",
+                },
+            ),
+            (
                 "no_runner_settings",
                 {
                     "FINITE_DEFAULT_INFERENCE_PROFILE": "openrouter",

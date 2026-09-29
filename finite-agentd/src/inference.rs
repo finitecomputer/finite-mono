@@ -1002,6 +1002,14 @@ mod tests {
                 fallback("unavailable", json!("stale_config"), fp_model.clone(), 0),
             ),
             (
+                "unknown provider entry",
+                Box::new(|facts| {
+                    facts.finite_private.provider_entry = ProviderEntryFact::Unknown;
+                }),
+                fp.clone(),
+                fallback("unknown", Value::Null, fp_model.clone(), 0),
+            ),
+            (
                 "FP credential missing",
                 Box::new(|facts| facts.finite_private.fp_key = Tri::Absent),
                 fp.clone(),

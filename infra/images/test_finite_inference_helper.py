@@ -816,6 +816,19 @@ class PendingDisconnectTests(HelperCase):
                     self.write_config({"model": {"provider": provider, "default": "m"}})
                     self.assert_skipped(self.intent(route=route), "route_still_saved")
 
+    def test_only_a_disconnect_of_an_external_route_clears(self):
+        """A select also reaches verifying, and the saved default can differ
+        from its route while the executor restarts the gateway."""
+        self.prepare(fp_model_block())
+        self.assertIn("openrouter", self.read_auth()["credential_pool"])
+        self.assertIn("openrouter", self.persisted_overrides().values())
+        for fields, reason in (
+            ({"kind": "select", "phase": "verifying"}, "not_a_disconnect"),
+            ({"route": "finite_private"}, "route_not_disconnectable"),
+        ):
+            with self.subTest(reason):
+                self.assert_skipped(self.intent(**fields), reason)
+
     def test_process_contract(self):
         self.prepare(fp_model_block())
         completed = self.run_helper(

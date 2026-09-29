@@ -705,16 +705,19 @@ test("secrets: a pasted key reaches only the runtime command, on success and eve
     }],
     ["reply echoing the key", () => ({ status: "succeeded", body: { changed: true, activated: false, api_key: apiKey } })],
   ];
+  // every action, the legacy one included: it is how a key reaches an agent without openrouter.connect.v1.
   for (const [name, runtime] of failures) {
-    await t.test(name, async (t) => {
-      const world = installWorld(t, { runtime });
-      const response = await postAction(MY_MACHINE, actions[0]);
-      assert.equal((await response.text()).includes(apiKey), false, "response body");
-      assertSecretAbsent(world, response);
-      const carriers = world.fetches.filter((entry) => entry.url.includes(apiKey) || entry.body.includes(apiKey));
-      assert.equal(carriers.length, 1);
-      assert.equal(carriers[0].url, "https://hwd.test/v1/app/runtime-commands");
-    });
+    for (const payload of actions) {
+      await t.test(`${name}: ${payload.action}${"activate" in payload ? " + activate" : ""}`, async (t) => {
+        const world = installWorld(t, { runtime });
+        const response = await postAction(MY_MACHINE, payload);
+        assert.equal((await response.text()).includes(apiKey), false, "response body");
+        assertSecretAbsent(world, response);
+        const carriers = world.fetches.filter((entry) => entry.url.includes(apiKey) || entry.body.includes(apiKey));
+        assert.equal(carriers.length, 1);
+        assert.equal(carriers[0].url, "https://hwd.test/v1/app/runtime-commands");
+      });
+    }
   }
   await t.test("rejected before dispatch", async (t) => {
     const world = installWorld(t, { status: LEGACY_FINITE_PRIVATE });

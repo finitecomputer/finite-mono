@@ -801,6 +801,21 @@ mod tests {
             .expect("restart of an ended worker returns");
     }
 
+    #[tokio::test]
+    async fn restart_returns_after_a_revoked_assignment() {
+        let (origin, requests) = server(1, |_, _| (401, "{}".into(), String::new())).await;
+        let temp = tempfile::tempdir().unwrap();
+        let handle = start_with(temp.path().to_path_buf(), ServeGate::default(), move || {
+            CoreConnection::new(origin, "a".repeat(64))
+        });
+        unavailable_with(&handle, "Core assignment authorization was revoked").await;
+        tokio::time::timeout(Duration::from_secs(30), handle.restart())
+            .await
+            .expect("restart after a revoked assignment returns");
+        handle.shutdown().await;
+        assert_eq!(requests.await.unwrap().len(), 1);
+    }
+
     #[test]
     fn native_spec_keeps_secrets_out_of_argv_and_debug() {
         let config = desired();

@@ -199,6 +199,14 @@ test("advertised capabilities alone reveal connect, select, and disconnect contr
   }
 });
 
+test("the key form leaves out the default line when OpenRouter is already the saved default", () => {
+  // with no key known, the card shows the form "Replace key" opens, without a click.
+  const markup = panel(v2({ saved: SAVED_OPENROUTER }));
+  assert.match(markup, /data-testid="inference-openrouter-save"[^>]*>Save and use OpenRouter</u);
+  assert.doesNotMatch(markup, /inference-openrouter-key-default-line|This also makes OpenRouter/u);
+  assert.match(text(panel(v2())), /This also makes OpenRouter this agent's default\./u);
+});
+
 test("unknown facts stay neutral and never imply a repair or a confirmed key", () => {
   const markup = panel(
     v2({
@@ -371,20 +379,32 @@ test("agent error codes render bounded, actionable copy", () => {
 });
 
 test("OpenRouter key fields stay password-only and account links use only valid hashes", () => {
-  const valid = render(
-    createElement(OpenRouterConnection, {
-      view: inferenceView(
-        v2({ saved: SAVED_OPENROUTER, routes: { openrouter: KEY_SAVED } }, ALL_CAPABILITIES)
-      ),
-      busy: false,
-      lock: { locked: false, reasonId: "operation" },
-      run: async () => ({ ok: true as const, result: null }),
-      notice: null,
-    })
+  const view = inferenceView(
+    v2({ saved: SAVED_OPENROUTER, routes: { openrouter: KEY_SAVED } }, ALL_CAPABILITIES)
   );
+  const card = (keyHash: string) =>
+    render(
+      createElement(OpenRouterConnection, {
+        view: { ...view, openrouter: { ...view.openrouter, keyHash } },
+        busy: false,
+        lock: { locked: false, reasonId: "operation" },
+        run: async () => ({ ok: true as const, result: null }),
+        notice: null,
+      })
+    );
+  const valid = card(KEY_HASH);
   assert.match(valid, new RegExp(`https://openrouter.ai/keys/${KEY_HASH}`, "u"));
   assert.match(valid, new RegExp(`api_key_hash=${KEY_HASH}`, "u"));
   assert.match(valid, /target="_blank" rel="noopener noreferrer"/u);
+  // a hash that is not 64 lowercase hex characters gets the generic OpenRouter pages.
+  for (const keyHash of ["ABC", KEY_HASH.toUpperCase(), `${KEY_HASH}/../x`]) {
+    const links = card(keyHash);
+    assert.match(links, /href="https:\/\/openrouter\.ai\/settings\/keys"/u, keyHash);
+    assert.match(links, /href="https:\/\/openrouter\.ai\/activity"/u, keyHash);
+    const revoke = render(createElement(OpenRouterRemoved, { view: inferenceView(v2()), keyHash }));
+    assert.match(revoke, /href="https:\/\/openrouter\.ai\/settings\/keys"/u, keyHash);
+    assert.doesNotMatch(links + revoke, /openrouter\.ai\/keys\/|api_key_hash=/u, keyHash);
+  }
 
   const form = panel(v2());
   const keyInput = form.match(/<input[^>]*data-testid="inference-openrouter-key-input"[^>]*>/u)?.[0];
