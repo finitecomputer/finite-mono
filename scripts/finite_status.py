@@ -1002,19 +1002,29 @@ def collect_host_health(hostname: str) -> dict[str, Any]:
 
     namespace = CONTRACT["runner"]["namespace"]
     raw["containers"] = {}
-    container_commands = {
-        "podman_running": ["podman", "ps", "--quiet"],
-        "podman_total": ["podman", "ps", "--all", "--quiet"],
-        "kata_running": ["nerdctl", "--namespace", namespace, "ps", "--quiet"],
-        "kata_total": [
+    # Role-scoped like the units above: podman runs the app-plane containers
+    # and nerdctl runs the Runner's Kata sandboxes. A split host installs only
+    # its own tool, so probing the other one can only fail.
+    container_commands: dict[str, list[str]] = {}
+    if "app" in raw["roles"]:
+        container_commands["podman_running"] = ["podman", "ps", "--quiet"]
+        container_commands["podman_total"] = ["podman", "ps", "--all", "--quiet"]
+    if "runner" in raw["roles"]:
+        container_commands["kata_running"] = [
+            "nerdctl",
+            "--namespace",
+            namespace,
+            "ps",
+            "--quiet",
+        ]
+        container_commands["kata_total"] = [
             "nerdctl",
             "--namespace",
             namespace,
             "ps",
             "--all",
             "--quiet",
-        ],
-    }
+        ]
     for name, command in container_commands.items():
         try:
             raw["containers"][name] = line_count(command)
@@ -2085,10 +2095,25 @@ def build_host_health(
     raw_containers = raw.get("containers", {})
     containers = dict(raw_containers)
     containers["kata_vm_count"] = containers.get("kata_running")
+    # Scored by role, not by which counts the evidence holds: captures from
+    # before the role-scoped collector record the other role's counts as
+    # failed reads, and those must not drag a split host to unknown.
+    container_roles = {"podman": "app", "kata": "runner"}
+    containers["not_applicable"] = [
+        runtime for runtime, role in container_roles.items() if role not in roles
+    ]
+    required_counts = [
+        f"{runtime}_{count}"
+        for runtime, role in container_roles.items()
+        if role in roles
+        for count in ("running", "total")
+    ]
+    # Roles that name no container tool leave nothing to score, and that
+    # reads unknown like any other missing evidence.
     containers["status"] = (
         "green"
-        if raw_containers
-        and all(value is not None for value in raw_containers.values())
+        if required_counts
+        and all(raw_containers.get(name) is not None for name in required_counts)
         else "unknown"
     )
     statuses.append(containers["status"])
@@ -2843,9 +2868,17 @@ def render_human(report: dict[str, Any]) -> str:
                 f"{badge(storage['status'])}"
             )
         containers = health["containers"]
+        container_counts = {
+            runtime: (
+                "not applicable on this host"
+                if runtime in containers.get("not_applicable", [])
+                else f"{containers.get(f'{runtime}_running')}/{containers.get(f'{runtime}_total')} running"
+            )
+            for runtime in ("podman", "kata")
+        }
         lines.append(
-            f"  containers: podman {containers.get('podman_running')}/{containers.get('podman_total')} running; "
-            f"Kata VMs {containers.get('kata_running')}/{containers.get('kata_total')} running"
+            f"  containers: podman {container_counts['podman']}; "
+            f"Kata VMs {container_counts['kata']}"
         )
         runner = health["runner"]
         if runner.get("applicable") is False:
